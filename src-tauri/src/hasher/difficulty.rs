@@ -96,11 +96,12 @@ mod tests {
 
     #[test]
     fn test_difficulty_decreases() {
-        let d1 = calculate_difficulty(10, 100);
-        let d2 = calculate_difficulty(100, 100);
-        let d3 = calculate_difficulty(1000, 100);
-        assert!(d1 > d2);
-        assert!(d2 > d3);
+        // Use a high target so difficulty doesn't bottom out at 1
+        let d1 = calculate_difficulty(10, 14000);
+        let d2 = calculate_difficulty(100, 14000);
+        let d3 = calculate_difficulty(1000, 14000);
+        assert!(d1 > d2, "d1={} should be > d2={}", d1, d2);
+        assert!(d2 > d3, "d2={} should be > d3={}", d2, d3);
     }
 
     #[test]
