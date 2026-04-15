@@ -13,7 +13,6 @@ src-tauri/target/
 
 # Node
 node_modules/
-package-lock.json
 
 # Reference repos (cloned for local study only)
 reference/
