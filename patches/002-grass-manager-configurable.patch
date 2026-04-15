@@ -1,0 +1,15 @@
+--- a/src/js/index.js
++++ b/src/js/index.js
+@@ -50,12 +50,12 @@ global.walletManager = walletManager;
+
+ const grassManager = new GrassManager(
+-  `ws://${window.location.hostname}:1443`,
++  window.__STRUCTS_CONFIG__?.grassNatsWs || `ws://${window.location.hostname}:1443`,
+   "structs.>"
+ );
+
+ const blockGrassManager = new GrassManager(
+-  `ws://${window.location.hostname}:1443`,
++  window.__STRUCTS_CONFIG__?.grassNatsWs || `ws://${window.location.hostname}:1443`,
+   "consensus"
+ );

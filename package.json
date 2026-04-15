@@ -1,0 +1,14 @@
+{
+  "name": "structs-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "sync": "bash scripts/sync.sh",
+    "build-frontend": "bash scripts/build-frontend.sh",
+    "tauri:dev": "cargo tauri dev",
+    "tauri:build": "cargo tauri build && bash scripts/sign.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/plugin-notification": "^2.3.3"
+  }
+}

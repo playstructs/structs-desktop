@@ -1,0 +1,155 @@
+<!doctype html>
+<html class="no-js" lang="en-us">
+
+    <head>
+        <meta charset="utf-8">
+        <title>Structs</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1">
+
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Inter&display=swap" rel="stylesheet">
+        <link rel="stylesheet" href="css/normalize.css">
+        <link rel="stylesheet" href="css/structicons.css">
+        <link rel="stylesheet" href="css/sui/sui.css">
+        <link rel="stylesheet" href="css/main.css">
+    </head>
+    <body>
+
+<div id="menu-page-layout">
+
+    <div id="menu-page-panel" class="sui-panel sui-theme-player">
+        <div class="sui-panel-top-fill-background"></div>
+        <div class="sui-panel-bottom-fill-background"></div>
+        <div class="sui-panel-edge-left"></div>
+        <div id="menu-page-panel-chunk" class="sui-panel-chunk sui-mod-grow sui-mod-shrink">
+            <div id="menu-page-nav" class="sui-screen sui-screen-full-width">
+                <div class="sui-screen-nav">
+                    <div id="menu-page-nav-items" class="sui-screen-nav-items">
+                        <a class="sui-screen-nav-item sui-mod-active" href="javascript:void(0)">Structs</a>
+                    </div>
+                    <a id="menu-page-nav-close" class="sui-screen-nav-close" href="javascript: void(0)">
+                        <i class="sui-icon-sm icon-close"></i>
+                    </a>
+                </div>
+            </div>
+            <div class="height-100 sui-screen sui-screen-full-width sui-screen-shrink">
+                <div id="menu-page-screen-body" class="height-100 sui-page-body-screen">
+
+                    <div id="menu-page-body-content"></div>
+
+                </div>
+            </div>
+        </div>
+        <div class="sui-panel-edge-right"></div>
+    </div>
+
+    <!-- Dialogue Panel Start -->
+
+    <div id="menu-page-dialogue" class="sui-panel sui-theme-enemy">
+        <div class="sui-panel-edge-left"></div>
+        <div class="sui-panel-chunk">
+            <div class="sui-screen sui-theme-player">
+                <div id="menu-page-dialogue-indicator" class="sui-screen-indicator">
+                    <div id="menu-page-dialogue-indicator-content"></div>
+                </div>
+            </div>
+
+            <div class="sui-panel-chunk-spacer-indicator"></div>
+        </div>
+        <div class="sui-panel-connector"></div>
+        <div class="sui-panel-chunk sui-mod-grow">
+            <div class="sui-screen sui-screen-full-width">
+                <div id="menu-page-dialogue-screen" class="sui-screen-dialogue sui-theme-neutral">
+                    <div id="menu-page-dialogue-screen-content"></div>
+                </div>
+            </div>
+        </div>
+        <div class="sui-panel-connector sui-panel-style-medium-to-default"></div>
+        <div class="sui-panel-chunk sui-theme-player">
+            <div class="sui-dialogue-btn-chunk">
+                <div id="menu-page-dialogue-btn-chunk-b" class="sui-dialogue-btn-chunk-col">
+                    <div class="sui-panel-chunk-spacer-btn-b"></div>
+
+                    <a id="menu-page-dialogue-btn-b" href="javascript: void(0)" class="sui-panel-btn sui-mod-default">
+                        <i class="sui-icon-md icon-arrow sui-flip-horizontal"></i>
+                    </a>
+                </div>
+                <div class="sui-dialogue-btn-chunk-col">
+                    <div class="sui-panel-chunk-spacer-btn-a"></div>
+
+                    <a id="menu-page-dialogue-btn-a" href="javascript: void(0)" class="sui-panel-btn sui-mod-default">
+                        <i class="sui-icon-md icon-okay"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+        <div class="sui-panel-edge-right sui-theme-player"></div>
+    </div>
+
+    <!-- Dialogue Panel END -->
+
+</div>
+
+<div id="notification-dialogue" class="sui-panel sui-theme-enemy hidden">
+    <div class="sui-panel-edge-left"></div>
+    <div class="sui-panel-chunk">
+        <div class="sui-screen sui-theme-player">
+            <div id="notification-dialogue-indicator" class="sui-screen-indicator">
+                <div id="notification-dialogue-indicator-content"></div>
+            </div>
+        </div>
+
+        <div class="sui-panel-chunk-spacer-indicator"></div>
+    </div>
+    <div class="sui-panel-connector"></div>
+    <div class="sui-panel-chunk sui-mod-grow">
+        <div class="sui-screen sui-screen-full-width">
+            <div id="notification-dialogue-screen" class="sui-screen-dialogue sui-theme-neutral">
+                <div id="notification-dialogue-screen-content"></div>
+            </div>
+        </div>
+    </div>
+    <div class="sui-panel-connector sui-panel-style-medium-to-default"></div>
+    <div class="sui-panel-chunk sui-theme-player">
+        <div class="sui-dialogue-btn-chunk">
+            <div class="sui-dialogue-btn-chunk-col">
+                <div class="sui-panel-chunk-spacer-btn-a"></div>
+
+                <a id="notification-dialogue-btn-a" href="javascript: void(0)" class="sui-panel-btn sui-mod-default">
+                    <i class="sui-icon-md icon-okay"></i>
+                </a>
+            </div>
+        </div>
+    </div>
+    <div class="sui-panel-edge-right sui-theme-player"></div>
+</div>
+
+<div id="banner-layer" class="hidden"></div>
+
+<div id="hud-container"></div>
+
+<div id="alpha-base-map-container" class="map-container"></div>
+
+<div id="raid-map-container" class="map-container"></div>
+
+<div id="preview-map-container" class="map-container"></div>
+
+<div id="loading-screen">
+    <img class="loading-assets" src="img/loading-assets.gif" alt="Structs logo with animated progress bar">
+    <h1>Loading Assets</h1>
+</div>
+
+    <script src="js/vendor/lottie-5.12.2.min.js"></script>
+    <script src="structs-config.js"></script>
+    <script src="js/plugins.js"></script>
+    <script src="js/vendor/liga.js"></script>
+    <script src="js/main.js"></script>
+    <script src="js/index.js"></script>
+    <script>
+    // Fallback: ensure gameState is on window for Tauri sync
+    // (Primary fix is the apply-patches.sh sed that adds window.gameState = gameState)
+    if (typeof gameState !== 'undefined' && !window.gameState) window.gameState = gameState;
+    </script>
+    </body>
+</html>

@@ -1,0 +1,6 @@
+[submodule "structs-webapp"]
+	path = structs-webapp
+	url = https://github.com/playstructs/structs-webapp.git
+[submodule "structs-ai"]
+	path = structs-ai
+	url = https://github.com/playstructs/structs-ai.git

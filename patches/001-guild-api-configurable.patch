@@ -1,0 +1,10 @@
+--- a/src/js/api/GuildAPI.js
++++ b/src/js/api/GuildAPI.js
+@@ -30,7 +30,7 @@ export class GuildAPI {
+
+   constructor() {
+-    this.apiUrl = '/api';
++    this.apiUrl = window.__STRUCTS_CONFIG__?.guildApi || '/api';
+     this.ajax = new JsonAjaxer();
+     this.guildAPIResponseFactory = new GuildAPIResponseFactory();
+     this.guildFactory = new GuildFactory();

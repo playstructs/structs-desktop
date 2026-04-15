@@ -1,0 +1,13 @@
+--- a/src/js/managers/SigningClientManager.js
++++ b/src/js/managers/SigningClientManager.js
+@@ -96,9 +96,7 @@ export class SigningClientManager {
+     // TODO Make this value more dynamic
+     // Possibly a database setting or env, provided via server
+     //this.wsUrl = `ws://${window.location.hostname}:26657`;
+     this.debug = debug;
+-    this.wsUrl = debug
+-        ? `ws://reactor.oh.energy:26657`
+-        : `ws://${window.location.hostname}:26657`;
++    this.wsUrl = window.__STRUCTS_CONFIG__?.clientWs || (debug ? `ws://reactor.oh.energy:26657` : `ws://${window.location.hostname}:26657`);
+
+     this.registry = new Registry([...defaultRegistryTypes, ...msgTypes]);

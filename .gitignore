@@ -1,0 +1,42 @@
+# Build artifacts (rebuilt by `make sync`)
+frontend/css/
+frontend/fonts/
+frontend/img/
+frontend/lottie/
+frontend/structicons/
+frontend/js/
+frontend/js/workers/
+.build-tmp/
+
+# Rust build
+src-tauri/target/
+
+# Node
+node_modules/
+package-lock.json
+
+# Reference repos (cloned for local study only)
+reference/
+
+# Claude Code session data
+.claude/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tauri generated schemas (rebuilt on build)
+src-tauri/gen/
+
+# MCP config contains bearer token — don't commit
+# Users generate their own .mcp.json from the Debug tab
+.mcp.json
+
+# Icon source (keep generated sizes, not the 1024px source)
+src-tauri/icons/Structs Icon.png

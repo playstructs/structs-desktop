@@ -1,0 +1,44 @@
+[package]
+name = "structs-app"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools", "macos-private-api"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+anyhow = "1"
+reqwest = { version = "0.12", features = ["json", "cookies"] }
+tokio = { version = "1", features = ["full"] }
+# Hasher: multi-threaded SHA256 proof-of-work
+sha2 = "0.10"
+rayon = "1.10"
+num_cpus = "1.16"
+dashmap = "6"
+hex = "0.4"
+# GPU compute for SHA256 hashing
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+# MCP server
+rmcp = { version = "0.15", features = ["server", "macros", "transport-streamable-http-server"] }
+axum08 = { package = "axum", version = "0.8" }
+schemars = "1"
+uuid = { version = "1", features = ["v4"] }
+tower = "0.5"
+# Native notifications (macOS uses UNUserNotificationCenter via objc2)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-user-notifications = "0.3"
+block2 = "0.6"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify-rust = "4"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
