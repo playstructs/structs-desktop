@@ -7,9 +7,19 @@ WEBAPP_DIR="$PROJECT_DIR/structs-webapp"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 BUILD_DIR="$PROJECT_DIR/.build-tmp"
 
-echo "==> Updating structs-webapp submodule..."
+echo "==> Updating submodules..."
 cd "$PROJECT_DIR"
-git submodule update --init --recursive
+git submodule update --init --recursive 2>/dev/null || true
+
+# Verify webapp source exists
+if [ ! -d "$WEBAPP_DIR/src/js" ]; then
+  echo "ERROR: structs-webapp/src/js not found."
+  echo "  WEBAPP_DIR=$WEBAPP_DIR"
+  echo "  Contents of structs-webapp/:"
+  ls -la "$WEBAPP_DIR/" 2>/dev/null || echo "  (directory does not exist)"
+  ls -la "$WEBAPP_DIR/src/" 2>/dev/null || echo "  (src/ does not exist)"
+  exit 1
+fi
 
 echo "==> Preparing build directory..."
 rm -rf "$BUILD_DIR"
