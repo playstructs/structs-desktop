@@ -72,7 +72,7 @@ if [ -d "$COMPENDIUM_SRC" ]; then
   rm -rf "$COMPENDIUM_DST"
   mkdir -p "$COMPENDIUM_DST"
   for dir in knowledge playbooks patterns awareness protocols schemas api skills; do
-    [ -d "$COMPENDIUM_SRC/$dir" ] && cp -r "$COMPENDIUM_SRC/$dir" "$COMPENDIUM_DST/"
+    [ -d "$COMPENDIUM_SRC/$dir" ] && cp -rL "$COMPENDIUM_SRC/$dir" "$COMPENDIUM_DST/" 2>/dev/null || true
   done
   for f in QUICKSTART.md AGENTS.md TOOLS.md COMMANDER.md CHANGELOG.md; do
     cp "$COMPENDIUM_SRC/$f" "$COMPENDIUM_DST/" 2>/dev/null || true
