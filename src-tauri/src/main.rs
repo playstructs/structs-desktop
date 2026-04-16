@@ -48,22 +48,21 @@ fn main() {
 window.__STRUCTS_CONFIG__ = {config_json};
 
 // Disable canvas image smoothing globally for pixel-perfect Lottie rendering.
-// Lock imageSmoothingEnabled to false — Lottie resets it before each frame draw.
+// Wrap the native setter so any write — including Lottie's per-frame reset — always lands as false
+// on WebKit's internal slot. A no-op setter would just make reads lie while leaving smoothing on.
 (function() {{
-    var proto = CanvasRenderingContext2D.prototype;
-    Object.defineProperty(proto, 'imageSmoothingEnabled', {{
-        get: function() {{ return false; }},
-        set: function() {{ /* locked to false */ }},
-        configurable: true
-    }});
-    // Also lock webkit prefix variant
-    if ('webkitImageSmoothingEnabled' in proto) {{
-        Object.defineProperty(proto, 'webkitImageSmoothingEnabled', {{
+    function lockOff(proto, name) {{
+        var orig = Object.getOwnPropertyDescriptor(proto, name);
+        if (!orig || !orig.set) return;
+        Object.defineProperty(proto, name, {{
             get: function() {{ return false; }},
-            set: function() {{ /* locked to false */ }},
+            set: function() {{ orig.set.call(this, false); }},
             configurable: true
         }});
     }}
+    var proto = CanvasRenderingContext2D.prototype;
+    lockOff(proto, 'imageSmoothingEnabled');
+    lockOff(proto, 'webkitImageSmoothingEnabled');
 }})();
 
 // SVG image-rendering fix for Lottie animations (defeat/victory banners)
