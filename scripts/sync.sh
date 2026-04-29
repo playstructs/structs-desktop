@@ -9,7 +9,7 @@ BUILD_DIR="$PROJECT_DIR/.build-tmp"
 
 echo "==> Updating submodules..."
 cd "$PROJECT_DIR"
-git submodule update --init --recursive 2>/dev/null || true
+git submodule update --init --remote --recursive 2>/dev/null || true
 
 # Verify webapp source exists
 if [ ! -d "$WEBAPP_DIR/src/js" ]; then

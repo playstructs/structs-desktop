@@ -23,7 +23,9 @@ sync: ## Pull latest structs-webapp + structs-ai and rebuild frontend
 	npm run sync
 
 build: ## Production build + code sign
-	npm run tauri:build
+	rm -f src-tauri/target/release/bundle/macos/rw.*.dmg
+	-npm run tauri:build
+	bash scripts/sign.sh
 
 clean: ## Remove build artifacts
 	cd src-tauri && cargo clean
