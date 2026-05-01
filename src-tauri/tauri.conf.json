@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nickel-org/nickel.rs/master/tauri.schema.json",
   "productName": "Structs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "app.structs.desktop",
   "build": {
     "beforeBuildCommand": "npm run build-frontend",
@@ -10,7 +10,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "nsis", "deb"],
+    "targets": [
+      "app",
+      "dmg",
+      "nsis",
+      "deb"
+    ],
     "createUpdaterArtifacts": false,
     "icon": [
       "icons/32x32.png",

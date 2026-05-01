@@ -6,10 +6,12 @@ mod guild_config;
 mod hasher;
 mod http_proxy;
 mod mcp;
+mod menu;
 mod notifications;
 
 fn main() {
     tauri::Builder::default()
+        .menu(menu::build)
         .invoke_handler(tauri::generate_handler![
             guild_config::get_active_guild_config,
             guild_config::get_guild_configs,
