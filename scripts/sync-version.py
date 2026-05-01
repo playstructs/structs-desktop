@@ -59,7 +59,7 @@ def main() -> int:
     patch_json(root / "package.json", version)
     patch_cargo_toml(root / "src-tauri" / "Cargo.toml", version)
     patch_cargo_lock(root / "src-tauri" / "Cargo.lock", "structs-app", version)
-    print(f"synced version → {version}")
+    print(f"synced version -> {version}")
     return 0
 
 
