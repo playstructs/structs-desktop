@@ -20,17 +20,18 @@ def patch_json(path: Path, version: str) -> None:
 
 
 def patch_cargo_toml(path: Path, version: str) -> None:
-    text = path.read_text()
-    new = re.sub(
-        r'(\[package\][^\[]*?\nversion = ")[^"]*(")',
-        rf'\g<1>{version}\g<2>',
-        text,
-        count=1,
-        flags=re.DOTALL,
-    )
-    if new == text:
-        raise RuntimeError(f"no [package] version found in {path}")
-    path.write_text(new)
+    lines = path.read_text().splitlines(keepends=True)
+    in_package = False
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("["):
+            in_package = stripped.split("#", 1)[0].strip() == "[package]"
+            continue
+        if in_package and re.match(r'\s*version\s*=', line):
+            lines[i] = re.sub(r'"[^"]*"', f'"{version}"', line, count=1)
+            path.write_text("".join(lines))
+            return
+    raise RuntimeError(f"no [package] version found in {path}")
 
 
 def patch_cargo_lock(path: Path, package: str, version: str) -> None:
