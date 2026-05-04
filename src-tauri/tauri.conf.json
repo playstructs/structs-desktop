@@ -27,6 +27,9 @@
     "macOS": {
       "entitlements": null,
       "minimumSystemVersion": "10.13"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "embedBootstrapper" }
     }
   },
   "app": {

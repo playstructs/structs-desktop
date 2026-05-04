@@ -40,7 +40,13 @@ cd "$BUILD_DIR"
 npm install
 
 echo "==> Building with webpack..."
-npx webpack --mode=production
+npx webpack --mode=production --no-devtool
+
+echo "==> Stripping source maps (defense in depth)..."
+find "$BUILD_DIR/public/js" -name '*.map' -delete 2>/dev/null || true
+find "$BUILD_DIR/public/js" -name '*.js' -exec \
+  sed -i.bak -E 's|^[[:space:]]*//[#@] sourceMappingURL=.*$||' {} \;
+find "$BUILD_DIR/public/js" -name '*.bak' -delete 2>/dev/null || true
 
 echo "==> Assembling frontend directory..."
 # Keep index.html and structs-config.js (they're maintained in the repo)
