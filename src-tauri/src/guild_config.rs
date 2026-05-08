@@ -48,20 +48,55 @@ fn default_configs() -> Vec<GuildConfig> {
         name: "Orbital Hydro".into(),
         guild_tag: "OH".into(),
         guild_api: "http://crew.oh.energy/api".into(),
-        reactor_api: "http://reactor.oh.energy:1317".into(),
-        client_ws: "ws://reactor.oh.energy:26657".into(),
+        reactor_api: "http://public.testnet.structs.network:1317".into(),
+        client_ws: "wss://public.testnet.structs.network:26657".into(),
         grass_nats_ws: "ws://crew.oh.energy:1443".into(),
         is_active: true,
     }]
 }
 
+/// Replace URLs that match a previous bad default with the current default.
+/// Each field is checked independently so user customizations on one URL
+/// aren't trampled when only the other was on a stale default.
+fn migrate_stale_urls(configs: &mut [GuildConfig]) -> bool {
+    const STALE_URLS: &[(&str, &str)] = &[
+        (
+            "ws://reactor.oh.energy:26657",
+            "wss://public.testnet.structs.network:26657",
+        ),
+        (
+            "http://reactor.oh.energy:1317",
+            "http://public.testnet.structs.network:1317",
+        ),
+    ];
+
+    let mut changed = false;
+    for c in configs.iter_mut() {
+        for (old, new) in STALE_URLS {
+            if c.client_ws == *old {
+                c.client_ws = (*new).into();
+                changed = true;
+            }
+            if c.reactor_api == *old {
+                c.reactor_api = (*new).into();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 pub fn load_configs() -> Vec<GuildConfig> {
     let path = config_path();
     if path.exists() {
-        fs::read_to_string(&path)
+        let mut configs = fs::read_to_string(&path)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(default_configs)
+            .and_then(|s| serde_json::from_str::<Vec<GuildConfig>>(&s).ok())
+            .unwrap_or_else(default_configs);
+        if migrate_stale_urls(&mut configs) {
+            save_configs(&configs).ok();
+        }
+        configs
     } else {
         let configs = default_configs();
         save_configs(&configs).ok();

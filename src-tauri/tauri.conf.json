@@ -36,8 +36,7 @@
     "withGlobalTauri": true,
     "macOSPrivateApi": true,
     "security": {
-      "csp": "default-src 'self' tauri: ipc:; connect-src 'self' tauri: ipc: ws: wss: http: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-eval' 'unsafe-inline' 'unsafe-hashes'; worker-src 'self' blob:; img-src 'self' data: blob:",
-      "dangerousUseHttpScheme": true
+      "csp": "default-src 'self' tauri: ipc:; connect-src 'self' tauri: ipc: ws: wss: http: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-eval' 'unsafe-inline' 'unsafe-hashes'; worker-src 'self' blob:; img-src 'self' data: blob:"
     },
     "windows": []
   }
