@@ -137,6 +137,7 @@ window.__STRUCTS_CONFIG__ = {config_json};
                 #preview-map-container,
                 #loading-screen,
                 #sui-offcanvas,
+                #sui-cheatsheet-container,
                 #notification-dialogue {{
                     transform: none !important;
                     transform-origin: unset !important;
@@ -170,6 +171,7 @@ window.__STRUCTS_CONFIG__ = {config_json};
                 #preview-map-container,
                 #loading-screen,
                 #sui-offcanvas,
+                #sui-cheatsheet-container,
                 #notification-dialogue {{
                     transform: none !important;
                     transform-origin: unset !important;
