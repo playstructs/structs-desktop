@@ -30,6 +30,7 @@ axum08 = { package = "axum", version = "0.8" }
 schemars = "1"
 uuid = { version = "1", features = ["v4"] }
 tower = "0.5"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Native notifications (macOS uses UNUserNotificationCenter via objc2)
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

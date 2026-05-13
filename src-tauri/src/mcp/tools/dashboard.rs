@@ -1,6 +1,7 @@
 use rmcp::model::Content;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::game_state::GAME_STATE;
 use crate::hasher::types::TaskRegistry;
@@ -12,23 +13,126 @@ pub struct DashboardParams {
     pub player_id: Option<String>,
 }
 
+struct SyncOutput {
+    out: String,
+    me: Option<String>,
+    owned_planets: Vec<String>,
+    local_task_count: usize,
+}
+
 pub async fn execute(
-    _client: &CosmosClient,
+    client: &CosmosClient,
     registry: &Arc<TaskRegistry>,
     params: DashboardParams,
 ) -> Vec<Content> {
+    // All synchronous dashboard rendering happens inside `build_sync`, which
+    // owns the RwLockReadGuard and releases it on return. We then await the
+    // Guild API enrichments outside any lock — required for Send.
+    let SyncOutput {
+        mut out,
+        me,
+        owned_planets,
+        local_task_count,
+    } = match build_sync(registry, &params) {
+        Ok(s) => s,
+        Err(content) => return content,
+    };
+
+    if let Some(my_id) = me {
+        // 1. Active work line (work_by_player) — flag chain/local desync.
+        let work_fut = client.guild.work_by_player(&my_id);
+        if let Ok(Ok(work)) =
+            tokio::time::timeout(Duration::from_millis(500), work_fut).await
+        {
+            let active_count = match &work {
+                serde_json::Value::Array(a) => a.len(),
+                serde_json::Value::Object(_) => 1,
+                _ => 0,
+            };
+            if active_count > 0 || local_task_count > 0 {
+                let desync = if active_count != local_task_count {
+                    format!(" (local says {}, chain says {})", local_task_count, active_count)
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!("\nMining: {} active tasks{}\n", active_count, desync));
+            }
+        }
+
+        // 2. Activity warning — scan owned planets for hostile events in last 5 min.
+        let now = chrono::Utc::now().timestamp();
+        let cutoff = now - 300;
+        for planet_id in owned_planets.iter().take(5) {
+            let fut = client.guild.planet_activity_by_planet(planet_id, 1);
+            if let Ok(Ok(page)) =
+                tokio::time::timeout(Duration::from_millis(500), fut).await
+            {
+                for ev in page.items.iter().take(20) {
+                    let ts = ev
+                        .get("created_at")
+                        .or(ev.get("timestamp"))
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_pg_timestamp);
+                    let category = ev.get("category").and_then(|v| v.as_str()).unwrap_or("");
+                    let is_hostile = matches!(category, "raid" | "attack" | "conquer");
+                    if let Some(t) = ts {
+                        if t >= cutoff && is_hostile {
+                            let actor = ev
+                                .get("actor_player_id")
+                                .or(ev.get("creator"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
+                            out.push_str(&format!(
+                                "⚠ Planet {} {} {}s ago by {}\n",
+                                planet_id,
+                                category,
+                                now - t,
+                                actor
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    vec![Content::text(out)]
+}
+
+fn parse_pg_timestamp(s: &str) -> Option<i64> {
+    // RFC3339 first
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp());
+    }
+    // Postgres "2026-05-07 14:35:21.226052+00"
+    let normalized = s.replace(' ', "T");
+    if let Ok(dt) = chrono::DateTime::parse_from_str(&normalized, "%Y-%m-%dT%H:%M:%S%.f%#z") {
+        return Some(dt.timestamp());
+    }
+    None
+}
+
+/// Builds the synchronous portion of the dashboard. Owns the GAME_STATE read
+/// guard for its entire scope and releases it on return — the guard is not
+/// `Send`, so this MUST stay non-async and not hold the lock across awaits.
+fn build_sync(
+    registry: &Arc<TaskRegistry>,
+    params: &DashboardParams,
+) -> Result<SyncOutput, Vec<Content>> {
     let gs = GAME_STATE.read().unwrap();
 
     let player_id = params
         .player_id
+        .clone()
         .or_else(|| gs.player_id.clone())
         .unwrap_or_default();
 
     if player_id.is_empty() {
-        return vec![Content::text(
+        return Err(vec![Content::text(
             "Error: Player ID not available yet. The Structs app may still be loading.\n\
             Try again in a few seconds, or provide player_id explicitly (e.g., '1-18').",
-        )];
+        )]);
     }
 
     let mut out = String::new();
@@ -125,7 +229,6 @@ pub async fn execute(
                 let status = decode_status_short(s.status);
                 let ambit = s.operating_ambit.as_deref().unwrap_or("?");
 
-                // Check if there's a hash task for this struct
                 let hash_info = registry
                     .tasks
                     .get(*sid)
@@ -223,7 +326,26 @@ pub async fn execute(
 
     out.push_str(&format!("\nBlock height: {}\n", gs.current_block_height));
 
-    vec![Content::text(out)]
+    // Capture the bits the async section needs, then drop `gs` (implicit at
+    // return). Owned planet IDs are derived from struct location_ids that
+    // look like planet entity refs ("2-…").
+    let owned_planets: Vec<String> = gs
+        .structs
+        .values()
+        .filter_map(|s| s.location_id.clone())
+        .filter(|id| id.starts_with("2-"))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let me = gs.player_id.clone();
+    let local_task_count = registry.tasks.len();
+
+    Ok(SyncOutput {
+        out,
+        me,
+        owned_planets,
+        local_task_count,
+    })
 }
 
 fn decode_status_short(status: u64) -> String {

@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::guild_config;
+use crate::mcp::guild_api::GuildApiClient;
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
@@ -16,10 +17,14 @@ fn client() -> &'static Client {
 
 /// Typed Cosmos REST API client for querying game state.
 /// URLs come from the active guild config.
+///
+/// `reactor_api` is the Cosmos LCD (canonical chain reads).
+/// `guild` is the Symfony backend exposing extended catalog/stat/work endpoints.
 #[derive(Clone)]
 pub struct CosmosClient {
     reactor_api: Arc<RwLock<String>>,
     guild_api: Arc<RwLock<String>>,
+    pub guild: GuildApiClient,
 }
 
 impl CosmosClient {
@@ -34,9 +39,14 @@ impl CosmosClient {
             .map(|c| c.guild_api.clone())
             .unwrap_or_else(|| "http://localhost/api".to_string());
 
+        let reactor_api = Arc::new(RwLock::new(reactor_api));
+        let guild_api = Arc::new(RwLock::new(guild_api));
+        let guild = GuildApiClient::new(Arc::clone(&guild_api));
+
         Self {
-            reactor_api: Arc::new(RwLock::new(reactor_api)),
-            guild_api: Arc::new(RwLock::new(guild_api)),
+            reactor_api,
+            guild_api,
+            guild,
         }
     }
 
@@ -127,24 +137,4 @@ impl CosmosClient {
         serde_json::from_str(&body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
-    /// Query the guild API (e.g., /api/player/{id}, /api/setting)
-    pub async fn query_guild_api(&self, path: &str) -> Result<Value, String> {
-        let base = self.guild_api.read().unwrap().clone();
-        let url = format!("{}/{}", base, path.trim_start_matches('/'));
-
-        let resp = client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP error: {}", e))?;
-
-        let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("Read error: {}", e))?;
-
-        if !status.is_success() {
-            return Err(format!("Guild API returned {}: {}", status, body));
-        }
-
-        serde_json::from_str(&body).map_err(|e| format!("JSON parse error: {}", e))
-    }
 }

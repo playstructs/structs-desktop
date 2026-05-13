@@ -55,6 +55,28 @@ pub fn translate_error(error: &str) -> String {
         return format!("Resource not found. It may not exist yet or was destroyed. Original: {}", error);
     }
 
+    // ── Guild API error shapes (Symfony backend) ──
+
+    // Auth required (recognized in guild_api.rs but may also flow through here).
+    if lower.contains("guild api requires login") || lower.contains("authentication_error")
+        || lower.contains("login required")
+    {
+        return "Guild API requires login. Sign in to the Structs app, then retry — the MCP shares the webview's session.".to_string();
+    }
+
+    // Connection/network failures to Guild API.
+    if lower.contains("guild api http error") || lower.contains("guild api read error") {
+        return "Guild API unreachable. Check your network or the configured guild_api URL in settings.".to_string();
+    }
+
+    // 404 / 500 envelope from Guild API.
+    if lower.contains("guild api 404") {
+        return "Guild API: resource not found (the ID may not exist or the index isn't built yet).".to_string();
+    }
+    if lower.contains("guild api 5") {
+        return format!("Guild API server error. The backend may be overloaded. Original: {}", error);
+    }
+
     // No translation needed
     error.to_string()
 }

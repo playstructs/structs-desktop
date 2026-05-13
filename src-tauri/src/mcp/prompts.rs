@@ -25,6 +25,16 @@ pub fn list() -> Vec<Prompt> {
             Some("Plan a combat operation: scout, simulate, recommend attack/wait/abort."),
             None,
         ),
+        Prompt::new(
+            "structs_threat_check",
+            Some("Threat assessment using Guild API history: planet_history + valid_targets."),
+            None,
+        ),
+        Prompt::new(
+            "structs_market_check",
+            Some("Power market summary: providers, agreements, capacity-rental recommendation."),
+            None,
+        ),
     ]
 }
 
@@ -93,6 +103,30 @@ pub fn get(name: &str, _arguments: Option<HashMap<String, String>>) -> Result<Ge
             Combat decisions have asymmetric consequences. Counter-attacks can be baited. \
             Raiding while leaving your planet undefended is risky. Be conservative unless \
             the opportunity is clear."
+        }
+        "structs_threat_check" => {
+            "Assess hostile activity around my position:\n\
+            \n\
+            1. Call structs_dashboard to identify owned planets.\n\
+            2. For each owned planet, call structs_intel with query='planet_history' and {planet_id, window_minutes:60}.\n\
+            3. Call structs_intel with query='valid_targets' to see if there are exploitable enemy positions nearby.\n\
+            4. Conclude:\n\
+               - Threat level per planet (quiet / active / contested)\n\
+               - Top hostile actor seen\n\
+               - One recommended defensive or offensive action\n\
+            \n\
+            If the Guild API isn't reachable or you're not signed in, say so clearly and \
+            fall back to local-only intel (structs_intel economy_status, what_can_i_build)."
+        }
+        "structs_market_check" => {
+            "Survey the power-rental market:\n\
+            \n\
+            1. Call structs_intel with query='market' (optionally pass denom).\n\
+            2. Cross-reference with structs_dashboard power margin.\n\
+            3. If margin < 20% or trending negative (use structs_intel metric_trend on capacity), recommend renting.\n\
+            4. Identify the best provider by rate, owner reputation, and substation locality.\n\
+            \n\
+            Output: rent / don't rent, target provider, expected cost."
         }
         _ => return Err(format!("Unknown prompt: {}", name)),
     };

@@ -5,13 +5,23 @@ use std::sync::OnceLock;
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
-fn client() -> &'static Client {
+/// Shared reqwest client used by both the JS `fetch` proxy and the MCP Guild
+/// API client. `cookie_store(true)` means any session cookie set by a webapp
+/// login (`/api/auth/login`) is reused by subsequent MCP-side calls — so the
+/// MCP inherits the user's auth automatically once they're signed in.
+pub fn shared_client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {
         Client::builder()
             .cookie_store(true)
+            .timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("failed to build HTTP client")
     })
+}
+
+#[inline]
+fn client() -> &'static Client {
+    shared_client()
 }
 
 #[derive(Debug, Deserialize)]

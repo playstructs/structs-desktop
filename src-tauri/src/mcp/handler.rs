@@ -59,18 +59,33 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_query",
-                "Query or list any game entity (player, planet, struct, fleet, guild, etc.). Provide 'id' to query one, omit to list all with pagination.",
+                "Query or list any game entity. Three modes: (1) provide 'id' to read one entity by ID via Cosmos LCD. (2) Omit 'id' and 'filter' to list all of a type via LCD with pagination_key. (3) Provide 'filter' for filtered queries via the Guild API (e.g., {type:'planet_activity', filter:{by:'planet', value:'2-5'}}). Filtered responses include _next_page when more pages exist.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "type": {
                             "type": "string",
-                            "description": "Entity type",
-                            "enum": ["player", "planet", "struct", "struct_type", "fleet", "guild", "reactor", "substation", "provider", "agreement", "allocation"]
+                            "description": "Entity type. Core (LCD): player, planet, struct, struct_type, fleet, guild, reactor, substation, provider, agreement, allocation. Extended (Guild API, requires filter): planet_activity, struct_defender, work, grid, infusion, planet_attribute, struct_attribute, permission.",
+                            "enum": [
+                                "player", "planet", "struct", "struct_type", "fleet", "guild",
+                                "reactor", "substation", "provider", "agreement", "allocation",
+                                "planet_activity", "struct_defender", "work", "grid",
+                                "infusion", "planet_attribute", "struct_attribute", "permission"
+                            ]
                         },
-                        "id": { "type": "string", "description": "Entity ID (e.g., '1-18'). Omit to list all." },
-                        "pagination_key": { "type": "string" },
-                        "limit": { "type": "integer" }
+                        "id": { "type": "string", "description": "Entity ID (e.g., '1-18'). Omit to list all or use filter." },
+                        "pagination_key": { "type": "string", "description": "LCD opaque pagination key (list mode only)." },
+                        "limit": { "type": "integer", "description": "LCD page size (default 100)." },
+                        "filter": {
+                            "type": "object",
+                            "description": "Filtered query via Guild API. Valid (type, by) pairs: planet_activity+(planet|category|all); struct_defender+(defending|protected); struct+(location|owner); grid+(object|attribute_type); work+(player|guild); infusion+(player|destination|address); agreement+(provider|allocation|creator|owner|all); provider+(owner|denom|substation|all); planet_attribute+(object|type); struct_attribute+(object|type); permission+(object|player).",
+                            "properties": {
+                                "by": { "type": "string" },
+                                "value": { "type": "string" }
+                            },
+                            "required": ["by", "value"]
+                        },
+                        "page": { "type": "integer", "description": "1-indexed page for filtered queries (default 1)." }
                     },
                     "required": ["type"]
                 })),
@@ -104,15 +119,21 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_intel",
-                "Strategic intelligence for game decisions. Queries: 'what_can_i_build' (buildable types with power/limit analysis), 'power_forecast' (simulate load changes — args: {struct_type, count}), 'economy_status' (ore pipeline, mining, refining, Alpha flow), 'plan_timeline' (ETA for all active operations).",
+                "Strategic intelligence. Local-only queries (no API): 'what_can_i_build', 'economy_status', 'plan_timeline'. Guild-API-backed (degrade gracefully if offline / not signed in): 'power_forecast' (snapshot + trend), 'planet_history', 'valid_targets', 'scout', 'market', 'metric_trend'.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "enum": ["what_can_i_build", "power_forecast", "economy_status", "plan_timeline"]
+                            "enum": [
+                                "what_can_i_build", "power_forecast", "economy_status", "plan_timeline",
+                                "planet_history", "valid_targets", "scout", "market", "metric_trend"
+                            ]
                         },
-                        "args": { "type": "object", "description": "Query-specific args. power_forecast: {struct_type, count}." }
+                        "args": {
+                            "type": "object",
+                            "description": "Query-specific args. power_forecast: {struct_type, count}. planet_history: {planet_id, window_minutes?=60}. valid_targets: {near?, limit?=10}. scout: {location_id}. market: {denom?}. metric_trend: {metric, object, window_blocks?=100}."
+                        }
                     },
                     "required": ["query"]
                 })),
@@ -296,7 +317,7 @@ impl ServerHandler for StructsMcpHandler {
                         serde_json::from_value(args).map_err(|e| {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
-                    tools::intel::execute(&self.task_registry, params).await
+                    tools::intel::execute(&self.cosmos_client, &self.task_registry, params).await
                 }
                 "structs_policy" => {
                     let params: tools::policy::PolicyParams =

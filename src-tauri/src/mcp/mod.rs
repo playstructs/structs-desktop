@@ -1,6 +1,7 @@
 pub mod config;
 pub mod cosmos_client;
 pub mod error_translator;
+pub mod guild_api;
 pub mod event_buffer;
 pub mod handler;
 pub mod policy;
