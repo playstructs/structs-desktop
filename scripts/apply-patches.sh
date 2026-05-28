@@ -39,6 +39,20 @@ echo "    Patching index.js (expose gameState to window for Tauri sync)..."
 sed -i.bak 's|global.gameState = gameState;|global.gameState = gameState; window.gameState = gameState;|' \
   "$BUILD_DIR/js/index.js"
 
+echo "    Patching GrassManager.js (resume-check reconnect + heartbeat)..."
+GM="$BUILD_DIR/js/framework/GrassManager.js"
+# 1. Constructor: install a window-level resume-check listener. When the app
+#    foregrounds (visibilitychange → visible, dispatched from main.rs init
+#    script), if we haven't seen a message in >60s, force-reconnect.
+sed -i.bak "s|this.listeners = new Map();|this.listeners = new Map(); this._lastMessageAt = 0; this._reconnecting = false; var __self = this; window.addEventListener('structs:grass-resume-check', function() { try { var stale = (Date.now() - __self._lastMessageAt) > 60000; if (stale \&\& !__self._reconnecting) { __self._reconnecting = true; console.info('[GrassManager] resume-check: stale, reconnecting', __self.subject); if (__self._nc) { try { __self._nc.close(); } catch(e) {} } setTimeout(function() { __self._reconnecting = false; __self.init(); }, 500); } } catch(e) { console.warn('[GrassManager] resume-check error', e); } });|" "$GM"
+
+# 2. After subscription created: stash nc + subscription on `this` so the
+#    resume listener can close the dead connection. Seed lastMessageAt.
+sed -i.bak "s|const subscription = nc.subscribe(this.subject);|const subscription = nc.subscribe(this.subject); this._nc = nc; this._subscription = subscription; this._lastMessageAt = Date.now();|" "$GM"
+
+# 3. In the message loop: update heartbeat.
+sed -i.bak "s|const messageData = this.getMessageData(message);|const messageData = this.getMessageData(message); this._lastMessageAt = Date.now();|" "$GM"
+
 # Clean up .bak files
 find "$BUILD_DIR" -name "*.bak" -delete
 

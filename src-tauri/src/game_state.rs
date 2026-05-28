@@ -216,6 +216,12 @@ pub fn set_sync_interval(ms: u64) {
     SYNC_INTERVAL_MS.store(clamped, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Snapshot of the current sync interval for non-async callers (e.g. the
+/// Rust-driven sync-tick loop). Returns the same value as `get_sync_interval`.
+pub fn current_sync_interval_ms() -> u64 {
+    SYNC_INTERVAL_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ── Hash Completion Notification ──
 
 #[tauri::command]

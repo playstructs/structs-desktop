@@ -825,11 +825,31 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       }
     }
 
-    // Dynamic sync interval — Rust controls the interval (combat mode = 3s, normal = 10s)
+    // Dynamic sync interval — Rust controls the interval (combat mode = 3s, normal = 10s).
+    //
+    // Two sync triggers run in parallel:
+    //   1. Rust emits a `structs://sync-tick` event at SYNC_INTERVAL_MS cadence
+    //      (see src-tauri/src/main.rs setup hook). This is immune to WKWebView
+    //      throttling because the scheduler lives in tokio.
+    //   2. JS setTimeout fallback at the same cadence, in case the Tauri
+    //      event channel hiccups.
+    //
+    // Both paths funnel through `triggerSync()` which debounces back-to-back
+    // calls to < 1s apart, so the double-fire is harmless.
     var _currentSyncInterval = 10000;
+    var _lastSyncAt = 0;
+    function triggerSync() {
+      var now = Date.now();
+      if (now - _lastSyncAt < 1000) return;  // debounce
+      _lastSyncAt = now;
+      syncGameState();
+    }
+    // Listen for Rust-driven ticks (the reliable path under backgrounding).
+    window.addEventListener('structs:sync-tick', triggerSync);
+
     function scheduleSyncLoop() {
       setTimeout(function() {
-        syncGameState();
+        triggerSync();
         // Check if interval changed (combat mode)
         if (window.__TAURI__) {
           window.__TAURI__.core.invoke('get_sync_interval').then(function(ms) {
@@ -845,13 +865,14 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     // Initial sync quickly, then dynamic loop
     setTimeout(function() {
       syncGameState();
+      _lastSyncAt = Date.now();
       // Rapid syncs for the first 10 seconds to get data to Rust ASAP
       setTimeout(syncGameState, 2000);
       setTimeout(syncGameState, 4000);
       scheduleSyncLoop();
     }, 1000);
 
-    console.info('[Structs Sync] GameState sync to Rust enabled (10s interval)');
+    console.info('[Structs Sync] GameState sync to Rust enabled (Rust tick + JS fallback)');
   })();
 
   // ── MCP Transaction Bridge ──

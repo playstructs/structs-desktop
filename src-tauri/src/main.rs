@@ -5,6 +5,7 @@ mod game_state;
 mod guild_config;
 mod hasher;
 mod http_proxy;
+mod macos_keepalive;
 mod mcp;
 mod menu;
 mod notifications;
@@ -41,6 +42,14 @@ fn main() {
 
             // Request notification permission at startup
             notifications::request_permission();
+
+            // Hold an NSProcessInfo activity for the lifetime of the app to
+            // prevent macOS App Nap from suspending the process when the
+            // window backgrounds. Stored in app state so it's dropped on quit.
+            // No-op on non-macOS platforms.
+            app.manage(macos_keepalive::begin_keepalive(
+                "Structs live game state sync",
+            ));
 
             let config = guild_config::get_active_guild_config();
             let config_json = serde_json::to_string(&config).unwrap_or_else(|_| "null".into());
@@ -247,6 +256,35 @@ window.__STRUCTS_CONFIG__ = {config_json};
         return originalFetch.call(this, input, init);
     }};
 }})();
+
+// Rust-driven sync tick — see main.rs setup hook. WKWebView can throttle
+// setTimeout under occlusion even with App Nap suppressed, so we also let
+// Rust trigger sync. The JS handler just re-dispatches as a CustomEvent so
+// structs-config.js can subscribe without holding a Tauri import.
+(function() {{
+    function attach() {{
+        if (!window.__TAURI__ || !window.__TAURI__.event) {{
+            return setTimeout(attach, 100);
+        }}
+        window.__TAURI__.event.listen('structs://sync-tick', function() {{
+            window.dispatchEvent(new CustomEvent('structs:sync-tick'));
+        }});
+    }}
+    attach();
+}})();
+
+// Visibility-change bridge — when the window comes back to the foreground,
+// fire a custom event the GrassManager patch listens for to verify its
+// NATS subscription is still alive (Layer 3 reconnect).
+(function() {{
+    document.addEventListener('visibilitychange', function() {{
+        if (document.visibilityState === 'visible') {{
+            window.dispatchEvent(new CustomEvent('structs:grass-resume-check'));
+            // Also kick the sync — first-message-on-resume should be fresh.
+            window.dispatchEvent(new CustomEvent('structs:sync-tick'));
+        }}
+    }});
+}})();
 "#,
                 config_json = config_json
             );
@@ -260,6 +298,22 @@ window.__STRUCTS_CONFIG__ = {config_json};
                 .build()?;
 
             let _ = window;
+
+            // Rust-driven sync tick. The JS-side setTimeout loop can stall
+            // under WKWebView occlusion even with App Nap suppressed, so we
+            // also emit a tick from Rust at the same cadence. The frontend's
+            // syncGameState is debounced, so a double-fire is harmless.
+            {
+                let app_handle_tick = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tauri::Emitter;
+                    loop {
+                        let interval_ms = game_state::current_sync_interval_ms();
+                        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+                        let _ = app_handle_tick.emit("structs://sync-tick", ());
+                    }
+                });
+            }
 
             // Start MCP server (auto-enable on first run)
             let mut mcp_config = mcp::config::McpConfig::load();
