@@ -285,6 +285,61 @@ window.__STRUCTS_CONFIG__ = {config_json};
         }}
     }});
 }})();
+
+// Lottie renderer override — every animation in this app is pixel-art, so
+// force the canvas renderer (with imageSmoothingEnabled=false applied via
+// the global setter wrapper above). Catches every loadAnimation call site,
+// existing or future, without per-file build patches.
+(function() {{
+    function tryPatch() {{
+        var lib = window.lottie || window.bodymovin;
+        if (!lib || typeof lib.loadAnimation !== 'function' || lib.loadAnimation.__structsPatched) {{
+            if (!lib || typeof lib.loadAnimation !== 'function') return setTimeout(tryPatch, 100);
+            return;
+        }}
+        var original = lib.loadAnimation.bind(lib);
+        var wrapped = function(params) {{
+            try {{
+                var p = Object.assign({{}}, params || {{}});
+                if (!p.renderer || p.renderer === 'svg') p.renderer = 'canvas';
+                if (p.renderer === 'canvas') {{
+                    p.rendererSettings = Object.assign(
+                        {{ clearCanvas: true, preserveAspectRatio: 'xMidYMid meet' }},
+                        p.rendererSettings || {{}}
+                    );
+                }}
+                var anim = original(p);
+                // Belt-and-suspenders: when Lottie's canvas exists, lock
+                // imageSmoothingEnabled=false on the 2D context. The global
+                // wrapper handles future writes; this covers any initial
+                // value Lottie may have set in its own context creation.
+                var disable = function() {{
+                    try {{
+                        var container = (typeof p.container === 'string')
+                            ? document.querySelector(p.container)
+                            : p.container;
+                        var c = container && container.querySelector ? container.querySelector('canvas') : null;
+                        if (c) {{
+                            var ctx = c.getContext('2d');
+                            if (ctx) ctx.imageSmoothingEnabled = false;
+                        }}
+                    }} catch (e) {{ /* ignore */ }}
+                }};
+                if (anim && typeof anim.addEventListener === 'function') {{
+                    anim.addEventListener('DOMLoaded', disable);
+                }}
+                setTimeout(disable, 0);
+                return anim;
+            }} catch (e) {{
+                console.warn('[Structs Lottie] interceptor error, falling back:', e);
+                return original(params);
+            }}
+        }};
+        wrapped.__structsPatched = true;
+        lib.loadAnimation = wrapped;
+    }}
+    tryPatch();
+}})();
 "#,
                 config_json = config_json
             );
