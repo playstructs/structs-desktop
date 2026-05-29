@@ -54,6 +54,157 @@ fn main() {
             let config = guild_config::get_active_guild_config();
             let config_json = serde_json::to_string(&config).unwrap_or_else(|_| "null".into());
 
+            // macOS WKWebView pixel-art workarounds. These are HARMFUL on Windows/Linux,
+            // where the WebView is Chromium (WebView2): `html { zoom }` makes the compositor
+            // re-rasterize full-screen layers at 2x/4x, exhausting the renderer's memory budget
+            // ("Out of Memory" crash at launch on high-res displays). Chromium gets crisp
+            // pixel-art from the global `image-rendering: pixelated` rules + the webapp's own
+            // `transform: scale()` path (structs-webapp main.css), so on non-macOS we omit
+            // these and fall back to the webapp's native, browser-tested rendering.
+            let macos_zoom_css = if cfg!(target_os = "macos") {
+                r#"
+            /* Replace per-element transform: scale() with html-level zoom.
+               This preserves all internal layout relationships since the entire
+               page is zoomed uniformly. The webapp's media queries still fire
+               at the correct breakpoints because zoom affects CSS pixel size. */
+            @media only screen and (min-width: 1152px),
+            only screen and (min-height: 1024px) {
+                html {
+                    zoom: 2 !important;
+                }
+                /* Remove the per-element transforms since html zoom handles it */
+                #menu-page-layout,
+                #banner-layer,
+                #hud-container,
+                #alpha-base-map-container,
+                #raid-map-container,
+                #preview-map-container,
+                #loading-screen,
+                #sui-offcanvas,
+                #sui-cheatsheet-container,
+                #notification-dialogue {
+                    transform: none !important;
+                    transform-origin: unset !important;
+                }
+                /* Restore dimensions to 100% since zoom is on html now */
+                #menu-page-layout,
+                #banner-layer,
+                #hud-container,
+                #loading-screen {
+                    width: 100vw !important;
+                    height: 100vh !important;
+                }
+                #notification-dialogue {
+                    width: 100vw !important;
+                }
+                #sui-offcanvas {
+                    height: 100vh !important;
+                }
+            }
+
+            @media only screen and (min-width: 2304px),
+            only screen and (min-height: 2048px) {
+                html {
+                    zoom: 4 !important;
+                }
+                #menu-page-layout,
+                #banner-layer,
+                #hud-container,
+                #alpha-base-map-container,
+                #raid-map-container,
+                #preview-map-container,
+                #loading-screen,
+                #sui-offcanvas,
+                #sui-cheatsheet-container,
+                #notification-dialogue {
+                    transform: none !important;
+                    transform-origin: unset !important;
+                }
+                #menu-page-layout,
+                #banner-layer,
+                #hud-container,
+                #loading-screen {
+                    width: 100vw !important;
+                    height: 100vh !important;
+                }
+                #notification-dialogue {
+                    width: 100vw !important;
+                }
+                #sui-offcanvas {
+                    height: 100vh !important;
+                }
+            }
+"#
+            } else {
+                ""
+            };
+
+            // macOS WKWebView forces all Lottie animations to the canvas renderer for crisp
+            // pixel-art. On Chromium (Windows/Linux) this creates a per-animation canvas
+            // backing store for every animation — a second memory multiplier — and is
+            // unnecessary: the webapp's native `renderer: 'svg'` Lottie + the SVG
+            // `image-rendering: pixelated` observer already render crisply and cheaply.
+            let macos_lottie_canvas = if cfg!(target_os = "macos") {
+                r#"
+// Lottie renderer override — every animation in this app is pixel-art, so
+// force the canvas renderer (with imageSmoothingEnabled=false applied via
+// the global setter wrapper above). Catches every loadAnimation call site,
+// existing or future, without per-file build patches.
+(function() {
+    function tryPatch() {
+        var lib = window.lottie || window.bodymovin;
+        if (!lib || typeof lib.loadAnimation !== 'function' || lib.loadAnimation.__structsPatched) {
+            if (!lib || typeof lib.loadAnimation !== 'function') return setTimeout(tryPatch, 100);
+            return;
+        }
+        var original = lib.loadAnimation.bind(lib);
+        var wrapped = function(params) {
+            try {
+                var p = Object.assign({}, params || {});
+                if (!p.renderer || p.renderer === 'svg') p.renderer = 'canvas';
+                if (p.renderer === 'canvas') {
+                    p.rendererSettings = Object.assign(
+                        { clearCanvas: true, preserveAspectRatio: 'xMidYMid meet' },
+                        p.rendererSettings || {}
+                    );
+                }
+                var anim = original(p);
+                // Belt-and-suspenders: when Lottie's canvas exists, lock
+                // imageSmoothingEnabled=false on the 2D context. The global
+                // wrapper handles future writes; this covers any initial
+                // value Lottie may have set in its own context creation.
+                var disable = function() {
+                    try {
+                        var container = (typeof p.container === 'string')
+                            ? document.querySelector(p.container)
+                            : p.container;
+                        var c = container && container.querySelector ? container.querySelector('canvas') : null;
+                        if (c) {
+                            var ctx = c.getContext('2d');
+                            if (ctx) ctx.imageSmoothingEnabled = false;
+                        }
+                    } catch (e) { /* ignore */ }
+                };
+                if (anim && typeof anim.addEventListener === 'function') {
+                    anim.addEventListener('DOMLoaded', disable);
+                }
+                setTimeout(disable, 0);
+                return anim;
+            } catch (e) {
+                console.warn('[Structs Lottie] interceptor error, falling back:', e);
+                return original(params);
+            }
+        };
+        wrapped.__structsPatched = true;
+        lib.loadAnimation = wrapped;
+    }
+    tryPatch();
+})();
+"#
+            } else {
+                ""
+            };
+
             let init_script = format!(
                 r#"
 window.__STRUCTS_CONFIG__ = {config_json};
@@ -105,9 +256,10 @@ window.__STRUCTS_CONFIG__ = {config_json};
     }}
 }})();
 
-// Pixel art rendering for WKWebView — replace transform: scale() with zoom:
-// to get nearest-neighbor scaling on text, border-images, and all assets.
-// zoom: changes layout flow so we also fix width/height from 50vw→100vw etc.
+// Pixel art rendering. The global image-rendering rules below apply on every
+// platform. On macOS WKWebView only, the cfg-gated CSS injected here also swaps
+// the webapp's transform: scale() for html-level zoom (see main.rs); on
+// Chromium/WebView2 we keep the webapp's native transform path to avoid OOM.
 (function() {{
     function injectPixelStyle() {{
         var style = document.createElement('style');
@@ -127,78 +279,7 @@ window.__STRUCTS_CONFIG__ = {config_json};
                 image-rendering: pixelated !important;
                 image-rendering: -webkit-optimize-contrast !important;
             }}
-
-            /* Replace per-element transform: scale() with html-level zoom.
-               This preserves all internal layout relationships since the entire
-               page is zoomed uniformly. The webapp's media queries still fire
-               at the correct breakpoints because zoom affects CSS pixel size. */
-            @media only screen and (min-width: 1152px),
-            only screen and (min-height: 1024px) {{
-                html {{
-                    zoom: 2 !important;
-                }}
-                /* Remove the per-element transforms since html zoom handles it */
-                #menu-page-layout,
-                #banner-layer,
-                #hud-container,
-                #alpha-base-map-container,
-                #raid-map-container,
-                #preview-map-container,
-                #loading-screen,
-                #sui-offcanvas,
-                #sui-cheatsheet-container,
-                #notification-dialogue {{
-                    transform: none !important;
-                    transform-origin: unset !important;
-                }}
-                /* Restore dimensions to 100% since zoom is on html now */
-                #menu-page-layout,
-                #banner-layer,
-                #hud-container,
-                #loading-screen {{
-                    width: 100vw !important;
-                    height: 100vh !important;
-                }}
-                #notification-dialogue {{
-                    width: 100vw !important;
-                }}
-                #sui-offcanvas {{
-                    height: 100vh !important;
-                }}
-            }}
-
-            @media only screen and (min-width: 2304px),
-            only screen and (min-height: 2048px) {{
-                html {{
-                    zoom: 4 !important;
-                }}
-                #menu-page-layout,
-                #banner-layer,
-                #hud-container,
-                #alpha-base-map-container,
-                #raid-map-container,
-                #preview-map-container,
-                #loading-screen,
-                #sui-offcanvas,
-                #sui-cheatsheet-container,
-                #notification-dialogue {{
-                    transform: none !important;
-                    transform-origin: unset !important;
-                }}
-                #menu-page-layout,
-                #banner-layer,
-                #hud-container,
-                #loading-screen {{
-                    width: 100vw !important;
-                    height: 100vh !important;
-                }}
-                #notification-dialogue {{
-                    width: 100vw !important;
-                }}
-                #sui-offcanvas {{
-                    height: 100vh !important;
-                }}
-            }}
+{macos_zoom_css}
         `;
         document.head.appendChild(style);
     }}
@@ -286,62 +367,11 @@ window.__STRUCTS_CONFIG__ = {config_json};
     }});
 }})();
 
-// Lottie renderer override — every animation in this app is pixel-art, so
-// force the canvas renderer (with imageSmoothingEnabled=false applied via
-// the global setter wrapper above). Catches every loadAnimation call site,
-// existing or future, without per-file build patches.
-(function() {{
-    function tryPatch() {{
-        var lib = window.lottie || window.bodymovin;
-        if (!lib || typeof lib.loadAnimation !== 'function' || lib.loadAnimation.__structsPatched) {{
-            if (!lib || typeof lib.loadAnimation !== 'function') return setTimeout(tryPatch, 100);
-            return;
-        }}
-        var original = lib.loadAnimation.bind(lib);
-        var wrapped = function(params) {{
-            try {{
-                var p = Object.assign({{}}, params || {{}});
-                if (!p.renderer || p.renderer === 'svg') p.renderer = 'canvas';
-                if (p.renderer === 'canvas') {{
-                    p.rendererSettings = Object.assign(
-                        {{ clearCanvas: true, preserveAspectRatio: 'xMidYMid meet' }},
-                        p.rendererSettings || {{}}
-                    );
-                }}
-                var anim = original(p);
-                // Belt-and-suspenders: when Lottie's canvas exists, lock
-                // imageSmoothingEnabled=false on the 2D context. The global
-                // wrapper handles future writes; this covers any initial
-                // value Lottie may have set in its own context creation.
-                var disable = function() {{
-                    try {{
-                        var container = (typeof p.container === 'string')
-                            ? document.querySelector(p.container)
-                            : p.container;
-                        var c = container && container.querySelector ? container.querySelector('canvas') : null;
-                        if (c) {{
-                            var ctx = c.getContext('2d');
-                            if (ctx) ctx.imageSmoothingEnabled = false;
-                        }}
-                    }} catch (e) {{ /* ignore */ }}
-                }};
-                if (anim && typeof anim.addEventListener === 'function') {{
-                    anim.addEventListener('DOMLoaded', disable);
-                }}
-                setTimeout(disable, 0);
-                return anim;
-            }} catch (e) {{
-                console.warn('[Structs Lottie] interceptor error, falling back:', e);
-                return original(params);
-            }}
-        }};
-        wrapped.__structsPatched = true;
-        lib.loadAnimation = wrapped;
-    }}
-    tryPatch();
-}})();
+{macos_lottie_canvas}
 "#,
-                config_json = config_json
+                config_json = config_json,
+                macos_zoom_css = macos_zoom_css,
+                macos_lottie_canvas = macos_lottie_canvas,
             );
 
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
