@@ -11,6 +11,19 @@ mod menu;
 mod notifications;
 
 fn main() {
+    // Windows WebView2 (Chromium) can crash the renderer with an "Out of Memory"
+    // error page at launch when its GPU process / driver over-allocates. Disabling
+    // the WebView's GPU compositor forces UI painting onto the CPU (cheap at the
+    // app's 1280x760 window) and sidesteps that path. This is a Chromium flag
+    // scoped to the WebView2 renderer only — it does NOT touch the native wgpu
+    // GPU hasher (src-tauri/src/hasher/gpu.rs), so GPU hashing is unaffected.
+    // Must be set before WebView2 initializes. macOS/Linux are unaffected.
+    #[cfg(target_os = "windows")]
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--disable-gpu --disable-gpu-compositing",
+    );
+
     tauri::Builder::default()
         .menu(menu::build)
         .invoke_handler(tauri::generate_handler![
