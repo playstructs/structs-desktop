@@ -60,6 +60,58 @@ mod imp {
             }
         }
     }
+
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSNumber;
+
+    /// Disable WKWebView's hidden-page DOM-timer throttling.
+    ///
+    /// When the window is occluded/minimized, `document.visibilityState`
+    /// becomes `hidden` and WebKit clamps every `setTimeout`/`setInterval` in
+    /// the page to ~once per 2s. That stalls the grass/NATS heartbeat and the
+    /// JS listener loop. `background_throttling: Disabled` does **not** touch
+    /// this path — it only sets `inactiveSchedulingPolicy` (inactive-but-visible).
+    ///
+    /// `hiddenPageDOMTimerThrottlingEnabled` is a private `WKPreferences` flag
+    /// reached through KVC. Unknown KVC keys raise `NSUnknownKeyException`, so
+    /// every write is wrapped in `objc2::exception::catch` — a missing key on a
+    /// future macOS becomes a no-op instead of a crash.
+    ///
+    /// SAFETY: `webview_ptr` must be the `*mut WKWebView` handed back by Tauri's
+    /// `PlatformWebview::inner()`. Called once, on the main thread, right after
+    /// the window is built.
+    pub unsafe fn disable_hidden_page_throttling(webview_ptr: *mut std::ffi::c_void) {
+        if webview_ptr.is_null() {
+            return;
+        }
+        let webview: *mut AnyObject = webview_ptr.cast();
+        let configuration: *mut AnyObject = msg_send![webview, configuration];
+        if configuration.is_null() {
+            return;
+        }
+        let preferences: *mut AnyObject = msg_send![configuration, preferences];
+        if preferences.is_null() {
+            return;
+        }
+
+        let off = NSNumber::numberWithBool(false);
+        for key in [
+            "hiddenPageDOMTimerThrottlingEnabled",
+            "hiddenPageDOMTimerThrottlingAutoIncreases",
+        ] {
+            let ns_key = objc2_foundation::NSString::from_str(key);
+            let result = objc2::exception::catch(core::panic::AssertUnwindSafe(|| {
+                let _: () = msg_send![preferences, setValue: &*off, forKey: &*ns_key];
+            }));
+            if result.is_err() {
+                eprintln!(
+                    "[Structs Keepalive] WKPreferences key '{}' not settable (ignored)",
+                    key
+                );
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -69,7 +121,9 @@ mod imp {
     pub fn begin_keepalive(_reason: &str) -> ActivityToken {
         ActivityToken
     }
+    /// No-op on non-macOS — hidden-page timer throttling is a WebKit concern.
+    pub unsafe fn disable_hidden_page_throttling(_webview_ptr: *mut std::ffi::c_void) {}
 }
 
 #[allow(unused_imports)]
-pub use imp::{begin_keepalive, ActivityToken};
+pub use imp::{begin_keepalive, disable_hidden_page_throttling, ActivityToken};

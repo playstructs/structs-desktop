@@ -395,6 +395,17 @@ window.__STRUCTS_CONFIG__ = {config_json};
                 .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
                 .build()?;
 
+            // Disable WKWebView hidden-page DOM-timer throttling so the grass/NATS
+            // heartbeat and JS listeners keep ticking at full rate while the window
+            // is occluded/minimized. `background_throttling: Disabled` above only
+            // covers the inactive-but-visible path; this covers visibilityState=hidden.
+            #[cfg(target_os = "macos")]
+            {
+                let _ = window.with_webview(|platform_webview| unsafe {
+                    macos_keepalive::disable_hidden_page_throttling(platform_webview.inner());
+                });
+            }
+
             let _ = window;
 
             // Rust-driven sync tick. The JS-side setTimeout loop can stall
