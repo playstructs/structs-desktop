@@ -241,3 +241,13 @@ pub async fn notify_hash_complete(struct_id: String, task_type: String) -> Resul
     }
     Ok(())
 }
+
+// ── Connection Health Logging ──
+
+/// Mirror a connection-monitor status/remedy message to the terminal, so dropped
+/// grass/signing connections and auto-reloads are visible even with DevTools closed.
+#[tauri::command]
+pub async fn conn_log(msg: String) -> Result<(), String> {
+    eprintln!("[Structs Conn] {}", msg);
+    Ok(())
+}

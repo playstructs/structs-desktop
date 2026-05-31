@@ -46,6 +46,7 @@ fn main() {
             mcp::event_buffer::push_game_event,
             game_state::get_sync_interval,
             game_state::notify_hash_complete,
+            game_state::conn_log,
             hasher::list_hash_tasks,
             mcp::policy::list_policies,
         ])

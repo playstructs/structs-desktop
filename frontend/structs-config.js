@@ -20,6 +20,17 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   }
   console.info('Guild config loaded:', window.__STRUCTS_CONFIG__);
 
+  // ── Connection-health shared state ──
+  // Populated by the WebSocket proxy (grass) and the sync path (signing),
+  // consumed by setupConnectionMonitor. Declared early so the proxy below
+  // can stamp it on the first grass connection.
+  window.__STRUCTS_CONN__ = window.__STRUCTS_CONN__ || {
+    grass: { lastMessageAt: 0, lastOpenAt: 0, lastCloseAt: 0, closeCount: 0, readyState: -1, ws: null },
+    signing: { present: false, lastSeenAt: 0 },
+    lastReloadAt: 0,
+    reloadCount: 0
+  };
+
   // ── Desktop Notifications for NATS events ──
   // Intercepts NATS WebSocket messages and fires native desktop notifications
   // for game events relevant to the current player. Uses gameState context to
@@ -510,6 +521,32 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         var grassUrl = (window.__STRUCTS_CONFIG__ && window.__STRUCTS_CONFIG__.grassNatsWs) || ':1443';
         if (url.indexOf('1443') !== -1 || url.indexOf(grassUrl) !== -1) {
           console.info('[Structs Notify] Hooked NATS WebSocket:', url);
+
+          // Connection-health stamps (consumed by setupConnectionMonitor).
+          // lastMessageAt is the most reliable liveness signal — grass streams
+          // block events continuously, so a long silence = degraded/dead even
+          // when readyState lies.
+          var conn = window.__STRUCTS_CONN__.grass;
+          conn.ws = ws;
+          conn.lastOpenAt = Date.now();
+          conn.readyState = ws.readyState;
+          ws.addEventListener('open', function() {
+            conn.lastOpenAt = Date.now();
+            conn.readyState = ws.readyState;
+          });
+          ws.addEventListener('close', function() {
+            conn.lastCloseAt = Date.now();
+            conn.closeCount++;
+            conn.readyState = ws.readyState;
+          });
+          ws.addEventListener('error', function() {
+            conn.readyState = ws.readyState;
+          });
+          ws.addEventListener('message', function() {
+            conn.lastMessageAt = Date.now();
+            conn.readyState = ws.readyState;
+          });
+
           ws.addEventListener('message', function(event) {
             try {
               if (!window.__STRUCTS_NOTIFICATIONS__.enabled) return;
@@ -1004,6 +1041,169 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     }
 
     console.info('[Structs TX Bridge] Transaction bridge installed');
+  })();
+
+  // ── Connection Health Monitor ──
+  // Detects and remedies genuinely-dropped long-running connections that the
+  // Phase-1 throttle fix does NOT cover:
+  //   • grass/NATS WebSocket — NATS gives up after its reconnect budget and
+  //     GrassManager throws from an unhandled async generator (its `nc` handle
+  //     is never exposed, so nothing can re-subscribe).
+  //   • CosmJS SigningStargateClient WS (SigningClientManager, ws://…:26657) —
+  //     can die silently; queued messages are spliced out and lost on broadcast.
+  // Remedy ladder ends in a full webview reload, but ONLY when the window is
+  // hidden/minimized or the user is idle, behind a cooldown + reload-loop cap.
+  (function setupConnectionMonitor() {
+    try {
+      var GRASS_DEGRADED_MS = 30000;
+      var GRASS_DEAD_MS = 90000;
+      var WATCHDOG_MS = 10000;          // JS fallback; Rust tick is primary
+      var IDLE_MS = 60000;
+      var RELOAD_COOLDOWN_MS = 300000;  // 5 min between auto-reloads
+      var MAX_RELOADS_PER_SESSION = 3;
+      var SIGNING_STALE_TICKS = 3;      // ticks of stale height before signing is suspect
+
+      var conn = window.__STRUCTS_CONN__;
+
+      // Rehydrate reload guard across reloads so a loop can't reset its own cap.
+      try {
+        conn.reloadCount = parseInt(sessionStorage.getItem('structsReloadCount') || '0', 10) || 0;
+        conn.lastReloadAt = parseInt(sessionStorage.getItem('structsLastReloadAt') || '0', 10) || 0;
+      } catch (e) {}
+
+      // Track last user input for the idle gate.
+      var lastUserInputAt = Date.now();
+      function markInput() { lastUserInputAt = Date.now(); }
+      window.addEventListener('pointermove', markInput, { passive: true });
+      window.addEventListener('pointerdown', markInput, { passive: true });
+      window.addEventListener('keydown', markInput, { passive: true });
+
+      // Height-staleness tracking for the signing path.
+      var lastHeight = 0;
+      var lastHeightAt = Date.now();
+      var staleHeightTicks = 0;
+
+      function classifyGrass(now) {
+        var g = conn.grass;
+        if (!g.lastMessageAt && !g.lastOpenAt) return 'unknown';  // never connected yet
+        var silentMs = now - Math.max(g.lastMessageAt, g.lastOpenAt);
+        if (g.readyState === 3 /* CLOSED */ && (now - g.lastOpenAt) > 5000) return 'dead';
+        if (silentMs > GRASS_DEAD_MS) return 'dead';
+        if (silentMs > GRASS_DEGRADED_MS) return 'degraded';
+        return 'healthy';
+      }
+
+      function readHeight() {
+        var gs = window.gameState;
+        var h = gs && gs.currentBlockHeight != null ? Number(gs.currentBlockHeight) : 0;
+        return isFinite(h) ? h : 0;
+      }
+
+      function canAutoReload(now) {
+        var hidden = document.visibilityState === 'hidden';
+        var idle = (now - lastUserInputAt) > IDLE_MS;
+        if (!hidden && !idle) return false;  // never reload an active foreground user
+        if (now - conn.lastReloadAt < RELOAD_COOLDOWN_MS) return false;
+        if (conn.reloadCount >= MAX_RELOADS_PER_SESSION) return false;
+        return true;
+      }
+
+      function logRust(msg) {
+        if (window.__TAURI__) {
+          window.__TAURI__.core.invoke('conn_log', { msg: msg }).catch(function() {});
+        }
+      }
+
+      function doGuardedReload(now, why) {
+        conn.lastReloadAt = now;
+        conn.reloadCount++;
+        try {
+          sessionStorage.setItem('structsReloadCount', String(conn.reloadCount));
+          sessionStorage.setItem('structsLastReloadAt', String(now));
+        } catch (e) {}
+        console.warn('[Structs Conn] Auto-reloading webview, reason=' + why);
+        logRust('auto-reload: ' + why);
+        window.location.reload();
+      }
+
+      function tick() {
+        try {
+          var now = Date.now();
+
+          // Signing-client presence.
+          var sc = window.gameState && window.gameState.signingClient;
+          conn.signing.present = !!sc;
+          if (sc) conn.signing.lastSeenAt = now;
+
+          // Height-staleness: only meaningful alongside grass silence.
+          var h = readHeight();
+          if (h > lastHeight) {
+            lastHeight = h;
+            lastHeightAt = now;
+            staleHeightTicks = 0;
+          } else {
+            staleHeightTicks++;
+          }
+
+          var grassState = classifyGrass(now);
+          var signingMissing = (window.signingClientManager && !sc);
+
+          window.dispatchEvent(new CustomEvent('structs:connection-status', {
+            detail: {
+              grass: grassState,
+              signingPresent: conn.signing.present,
+              signingMissing: !!signingMissing,
+              silentMs: now - Math.max(conn.grass.lastMessageAt, conn.grass.lastOpenAt),
+              staleHeightTicks: staleHeightTicks
+            }
+          }));
+
+          // ── Remedy ladder ──
+          if (grassState === 'degraded') {
+            // Soft nudge: reuse the existing resume signal main.rs fires on
+            // visibilitychange. Re-stamp open so we wait one more cycle.
+            window.dispatchEvent(new CustomEvent('structs:grass-resume-check'));
+            conn.grass.lastOpenAt = now;
+            return;
+          }
+
+          var grassDead = (grassState === 'dead');
+          // Signing is only "dead" when its height is also stale (chain quiet
+          // alone shouldn't trigger a reload).
+          var signingDead = signingMissing && staleHeightTicks >= SIGNING_STALE_TICKS;
+
+          if (grassDead || signingDead) {
+            // (a) future-safe: use an exposed reconnect() if one ever exists.
+            var reconnected = false;
+            try {
+              var gm = window.grassManager;
+              if (grassDead && gm && typeof gm.reconnect === 'function') {
+                gm.reconnect();
+                conn.grass.lastOpenAt = now;
+                reconnected = true;
+                logRust('grass reconnect() invoked');
+              }
+            } catch (e) {}
+
+            // (b) last resort: guarded reload.
+            if (!reconnected && canAutoReload(now)) {
+              doGuardedReload(now, grassDead ? 'grass-dead' : 'signing-dead');
+            }
+          }
+        } catch (e) {
+          // Never let the monitor break the app.
+        }
+      }
+
+      // Primary clock: the Rust sync-tick (throttle-immune). JS interval is a
+      // fallback in case the Tauri event channel hiccups.
+      window.addEventListener('structs:sync-tick', tick);
+      setInterval(tick, WATCHDOG_MS);
+
+      console.info('[Structs Conn] Connection health monitor enabled');
+    } catch (e) {
+      console.warn('[Structs Conn] Failed to install:', e);
+    }
   })();
 
   // ── Debug Tab ──
