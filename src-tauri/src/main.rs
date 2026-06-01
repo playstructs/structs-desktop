@@ -96,7 +96,8 @@ fn main() {
                 #loading-screen,
                 #sui-offcanvas,
                 #sui-cheatsheet-container,
-                #notification-dialogue {
+                #notification-dialogue,
+                .map-pip {
                     transform: none !important;
                     transform-origin: unset !important;
                 }
@@ -130,7 +131,8 @@ fn main() {
                 #loading-screen,
                 #sui-offcanvas,
                 #sui-cheatsheet-container,
-                #notification-dialogue {
+                #notification-dialogue,
+                .map-pip {
                     transform: none !important;
                     transform-origin: unset !important;
                 }
