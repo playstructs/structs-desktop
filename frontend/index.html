@@ -13,6 +13,21 @@
         <link rel="stylesheet" href="css/structicons.css">
         <link rel="stylesheet" href="css/sui/sui.css">
         <link rel="stylesheet" href="css/main.css">
+
+        <!-- Google Analytics (GA4) — same property as playstructs.com (property id 357291324, web stream G-C5QXN9TH5M).
+             `app_name` and `app_version` tag the stream as desktop traffic so it can be filtered separately in GA. -->
+        <script async src="https://www.googletagmanager.com/gtag/js?id=G-C5QXN9TH5M"></script>
+        <script>
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag('js', new Date());
+            gtag('config', 'G-C5QXN9TH5M', {
+                app_name: 'Structs Desktop',
+                app_version: '0.1.1',
+                anonymize_ip: true,
+                transport_type: 'beacon'
+            });
+        </script>
     </head>
     <body>
 
