@@ -1435,27 +1435,161 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           }
         }).catch(function() {});
 
-        // Load hash engine status
-        window.__TAURI__.core.invoke('list_hash_tasks').then(function(data) {
-          var engineEl = document.getElementById('debug-engine');
-          if (!engineEl) return;
-          var html = '';
-          html += row('GPU', data.gpu_available ? 'Available' : 'Not available');
-          html += row('Active Tasks', String(data.active_tasks || 0));
-          if (data.tasks && data.tasks.length > 0) {
-            for (var i = 0; i < data.tasks.length; i++) {
-              var t = data.tasks[i];
-              var hr = t.hashrate > 1000 ? Math.round(t.hashrate / 1000) + 'M h/s' : Math.round(t.hashrate) + 'K h/s';
-              html += row(t.task_id + ' ' + (t.task_type || ''), t.status + ' — ' + hr);
+        // Load hash engine status (also refreshes on a 2s tick below)
+        function refreshHashEngine() {
+          if (!debugActive) return;
+          window.__TAURI__.core.invoke('list_hash_tasks').then(function(data) {
+            var engineEl = document.getElementById('debug-engine');
+            if (!engineEl) return;
+
+            // ── Engine summary ──
+            var html = '';
+            var engineLabel;
+            if (data.engine === 'gpu' && data.gpu_info) {
+              engineLabel = 'GPU — ' + data.gpu_info.name +
+                ' (' + data.gpu_info.backend + ', ' + data.gpu_info.device_type + ')';
+            } else if (data.engine === 'gpu') {
+              engineLabel = 'GPU';
+            } else {
+              engineLabel = 'CPU — ' + (data.cpu_threads || '?') + ' threads of ' +
+                (data.cpu_total_cores || '?') + ' cores';
             }
-          } else {
-            html += row('Queue', 'No active tasks');
+            html += row('Engine', engineLabel);
+
+            // ── Task Manager toggle ──
+            // The JS-side TaskManager listens for TASK_CMD_MANAGER_PAUSE /
+            // TASK_CMD_MANAGER_RESUME events; we just dispatch them. State
+            // is read from window.taskManager (exposed via `global.taskManager`
+            // in webapp/index.js) so the button label flips correctly even
+            // when pause/resume was triggered elsewhere.
+            var mgr = window.taskManager;
+            var isOnline = (mgr && typeof mgr.isOnline === 'function') ? mgr.isOnline() : null;
+            var mgrStatusText, mgrStatusColor, btnLabel;
+            if (isOnline === true) {
+              mgrStatusText = 'ONLINE';
+              mgrStatusColor = 'var(--accent-primary)';
+              btnLabel = 'Pause';
+            } else if (isOnline === false) {
+              mgrStatusText = 'PAUSED';
+              mgrStatusColor = 'var(--text-hint)';
+              btnLabel = 'Resume';
+            } else {
+              mgrStatusText = 'Unknown';
+              mgrStatusColor = 'var(--text-hint)';
+              btnLabel = 'Toggle';
+            }
+            var btnHtml = '<a id="debug-engine-toggle" href="javascript:void(0)" ' +
+              'style="padding:2px 12px; margin-left:8px; border:1px solid var(--accent-primary); ' +
+              'color:var(--accent-primary); text-decoration:none; border-radius:2px; font-size:0.9em;">' +
+              btnLabel + '</a>';
+            html += row('Task Manager',
+              '<span style="color:' + mgrStatusColor + '; font-weight:bold;">' + mgrStatusText + '</span>' + btnHtml);
+
+            html += row('Active Tasks', String(data.active_tasks || 0));
+
+            // ── Per-task detail ──
+            if (data.tasks && data.tasks.length > 0) {
+              // Format helpers
+              var fmtHashrate = function(hashesPerMs) {
+                // estimated_hashrate is in hashes/millisecond. Convert to h/s.
+                var hps = (hashesPerMs || 0) * 1000;
+                if (hps >= 1e9) return (hps / 1e9).toFixed(2) + ' Gh/s';
+                if (hps >= 1e6) return (hps / 1e6).toFixed(1) + ' Mh/s';
+                if (hps >= 1e3) return (hps / 1e3).toFixed(1) + ' Kh/s';
+                return Math.round(hps) + ' h/s';
+              };
+              var fmtElapsed = function(startMs) {
+                if (!startMs) return '?';
+                var s = Math.max(0, (Date.now() - startMs) / 1000);
+                if (s < 60) return s.toFixed(0) + 's';
+                if (s < 3600) return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
+                return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+              };
+              var fmtNum = function(n) {
+                if (n == null) return '—';
+                if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+                if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+                if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+                return String(n);
+              };
+
+              for (var i = 0; i < data.tasks.length; i++) {
+                var t = data.tasks[i];
+
+                // Per-task sub-card with a header row + detail rows
+                var headerLabel = (t.task_type || '?') + ' ' + t.task_id +
+                  (t.target_id ? ' → ' + t.target_id : '');
+                var statusColor = t.status === 'completed' ? 'var(--accent-primary)'
+                  : (t.status === 'waiting' ? 'var(--text-hint)' : 'var(--text-body)');
+
+                html += '<div style="margin-top:8px; padding:6px 8px; border-left:2px solid var(--accent-primary); background:rgba(0,0,0,0.15);">';
+                html += '<div style="display:flex; justify-content:space-between; align-items:center; padding-bottom:4px;">';
+                html += '<div style="color:var(--text-body); font-weight:bold;">' + headerLabel + '</div>';
+                html += '<div style="color:' + statusColor + ';">' + (t.status || '?') + '</div>';
+                html += '</div>';
+
+                html += row('Hashrate', fmtHashrate(t.hashrate));
+                html += row('Iterations', fmtNum(t.iterations) +
+                  (t.iterations_since_last_start ? ' (this session: ' + fmtNum(t.iterations_since_last_start) + ')' : ''));
+                html += row('Difficulty', 'target ' + t.difficulty_target +
+                  (t.result_difficulty ? ', best found ' + t.result_difficulty : ''));
+                html += row('Block range', 'started ' + t.block_start +
+                  (t.block_current_estimated && t.block_current_estimated !== t.block_start
+                    ? ' → est ' + t.block_current_estimated + ' (' + (t.block_current_estimated - t.block_start) + ' blocks)'
+                    : ''));
+                html += row('Elapsed', fmtElapsed(t.process_start_time));
+                if (t.object_type) html += row('Object', t.object_type);
+                if (t.result_exists) {
+                  html += row('Result', 'found! nonce=' + (t.result_nonce || '?') +
+                    ' difficulty=' + t.result_difficulty);
+                }
+
+                html += '</div>';
+              }
+            } else {
+              html += row('Queue', 'No active tasks');
+            }
+            engineEl.innerHTML = html;
+
+            // Re-attach the toggle handler each render (innerHTML wiped it).
+            var toggleBtn = document.getElementById('debug-engine-toggle');
+            if (toggleBtn) {
+              toggleBtn.addEventListener('click', function() {
+                var mgrNow = window.taskManager;
+                var onlineNow = (mgrNow && typeof mgrNow.isOnline === 'function') ? mgrNow.isOnline() : true;
+                var evtName = onlineNow ? 'TASK_CMD_MANAGER_PAUSE' : 'TASK_CMD_MANAGER_RESUME';
+                window.dispatchEvent(new CustomEvent(evtName));
+                console.info('[Structs Debug] Dispatched ' + evtName);
+                // Optimistic refresh — state-change event also forces one but
+                // this gives instant feedback if the listener races.
+                setTimeout(refreshHashEngine, 50);
+              });
+            }
+          }).catch(function(e) {
+            var engineEl = document.getElementById('debug-engine');
+            if (engineEl) engineEl.innerHTML = row('Error', String(e));
+          });
+        }
+        refreshHashEngine();
+
+        // Force an immediate refresh whenever the TaskManager flips state,
+        // so the button label updates without waiting up to 2s for the tick.
+        // Stored on window so re-opens of the debug tab can detach the old one.
+        if (window.__debugMgrStatusHandler) {
+          window.removeEventListener('TASK_MANAGER_STATUS_CHANGED', window.__debugMgrStatusHandler);
+        }
+        window.__debugMgrStatusHandler = refreshHashEngine;
+        window.addEventListener('TASK_MANAGER_STATUS_CHANGED', refreshHashEngine);
+
+        // Live-refresh while the debug tab is active. The `debugActive` flag
+        // gates execution so we stop polling when the user navigates away.
+        var hashTick = setInterval(function() {
+          if (!debugActive || !document.getElementById('debug-engine')) {
+            clearInterval(hashTick);
+            return;
           }
-          engineEl.innerHTML = html;
-        }).catch(function(e) {
-          var engineEl = document.getElementById('debug-engine');
-          if (engineEl) engineEl.innerHTML = row('Error', String(e));
-        });
+          refreshHashEngine();
+        }, 2000);
 
         // Load policies
         window.__TAURI__.core.invoke('list_policies').then(function(data) {

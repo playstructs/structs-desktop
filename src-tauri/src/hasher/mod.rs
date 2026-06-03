@@ -12,6 +12,7 @@ use types::{TaskHandle, TaskParams, TaskRegistry, TaskStateSnapshot};
 static GPU_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static GPU_DEVICE: OnceLock<Arc<wgpu::Device>> = OnceLock::new();
 static GPU_QUEUE: OnceLock<Arc<wgpu::Queue>> = OnceLock::new();
+static GPU_INFO: OnceLock<gpu::GpuInfo> = OnceLock::new();
 static GPU_INIT_DONE: AtomicBool = AtomicBool::new(false);
 
 pub fn ensure_gpu_init() -> bool {
@@ -30,9 +31,10 @@ pub fn ensure_gpu_init() -> bool {
         .is_ok()
     {
         match gpu::try_init_gpu() {
-            Some((device, queue)) => {
+            Some((device, queue, info)) => {
                 let _ = GPU_DEVICE.set(Arc::new(device));
                 let _ = GPU_QUEUE.set(Arc::new(queue));
+                let _ = GPU_INFO.set(info);
                 GPU_AVAILABLE.store(true, std::sync::atomic::Ordering::SeqCst);
                 eprintln!("[Structs Hasher] GPU available — will use GPU for hashing");
             }
@@ -143,21 +145,61 @@ pub async fn list_hash_tasks(
 ) -> Result<serde_json::Value, String> {
     let mut tasks = vec![];
     for entry in registry.tasks.iter() {
-        let snapshot = entry.value().snapshot();
+        let s = entry.value().snapshot();
         tasks.push(serde_json::json!({
-            "task_id": snapshot.object_id,
-            "task_type": snapshot.task_type,
-            "status": snapshot.status,
-            "hashrate": snapshot.estimated_hashrate,
-            "difficulty_target": snapshot.difficulty_target,
-            "result_exists": snapshot.result_exists,
+            "task_id": s.object_id,
+            "task_type": s.task_type,
+            "object_type": s.object_type,
+            "target_id": s.target_id,
+            "status": s.status,
+            "hashrate": s.estimated_hashrate,
+            "difficulty_target": s.difficulty_target,
+            "difficulty_start": s.difficulty_start,
+            "result_exists": s.result_exists,
+            "result_difficulty": s.result_difficulty,
+            "result_nonce": s.result_nonce,
+            "iterations": s.iterations,
+            "iterations_since_last_start": s.iterations_since_last_start,
+            "nonce_start": s.nonce_start,
+            "nonce_current": s.nonce_current,
+            "block_start": s.block_start,
+            "block_checkpoint": s.block_checkpoint,
+            "block_current_estimated": s.block_current_estimated,
+            "process_start_time": s.process_start_time,
+            "last_status_change_time": s.last_status_change_time,
+            "process_end_time": s.process_end_time,
+            "prefix": s.prefix,
         }));
     }
-    Ok(serde_json::json!({
-        "gpu_available": ensure_gpu_init(),
+
+    // Engine — global since the GPU/CPU decision is shared across all tasks.
+    let gpu_available = ensure_gpu_init();
+    let engine = if gpu_available { "gpu" } else { "cpu" };
+
+    let mut payload = serde_json::json!({
+        "engine": engine,
+        "gpu_available": gpu_available,
         "active_tasks": tasks.len(),
         "tasks": tasks,
-    }))
+    });
+
+    if gpu_available {
+        if let Some(info) = GPU_INFO.get() {
+            payload["gpu_info"] = serde_json::json!({
+                "name": info.name,
+                "backend": info.backend,
+                "device_type": info.device_type,
+            });
+        }
+    } else {
+        // For CPU mode, report the thread count we'd actually use (matches
+        // the eprintln in start_hash_task_core: cpus - 1, min 1).
+        let threads = num_cpus::get().saturating_sub(1).max(1);
+        payload["cpu_threads"] = serde_json::json!(threads);
+        payload["cpu_total_cores"] = serde_json::json!(num_cpus::get());
+    }
+
+    Ok(payload)
 }
 
 #[tauri::command]

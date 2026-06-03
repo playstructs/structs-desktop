@@ -41,8 +41,16 @@ fn pack_bytes_be(data: &[u8]) -> Vec<u32> {
     packed
 }
 
+/// Adapter info captured at init time, surfaced via the debug panel.
+#[derive(Debug, Clone)]
+pub struct GpuInfo {
+    pub name: String,
+    pub backend: String,
+    pub device_type: String,
+}
+
 /// Try to initialize the GPU. Returns None if no suitable adapter.
-pub fn try_init_gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+pub fn try_init_gpu() -> Option<(wgpu::Device, wgpu::Queue, GpuInfo)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         ..Default::default()
@@ -54,9 +62,16 @@ pub fn try_init_gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
         force_fallback_adapter: false,
     }))?;
 
+    let info = adapter.get_info();
+    let gpu_info = GpuInfo {
+        name: info.name.clone(),
+        backend: format!("{:?}", info.backend),
+        device_type: format!("{:?}", info.device_type),
+    };
+
     eprintln!(
-        "[Structs Hasher GPU] Found adapter: {}",
-        adapter.get_info().name
+        "[Structs Hasher GPU] Found adapter: {} ({}, {})",
+        gpu_info.name, gpu_info.backend, gpu_info.device_type
     );
 
     let (device, queue) = pollster::block_on(adapter.request_device(
@@ -70,7 +85,7 @@ pub fn try_init_gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
     ))
     .ok()?;
 
-    Some((device, queue))
+    Some((device, queue, gpu_info))
 }
 
 /// Run the GPU hasher.
