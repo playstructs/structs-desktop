@@ -51,7 +51,7 @@ impl StructsMcpHandler {
                         },
                         "args": {
                             "type": "object",
-                            "description": "Action-specific args. build: {struct_type, ambit, slot}. mine/refine: {struct_id}. attack: {attacker_id, target_id}. etc."
+                            "description": "Action-specific args. explore: {name?}. build: {struct_type, ambit, slot}. mine/refine: {struct_id}. attack: {attacker_id, target_id, weapon?}. defend: {defender_id, protected_id}. move_fleet: {destination}. transfer: {to, amount}. deploy: {struct_id, ambit, slot}."
                         }
                     },
                     "required": ["action"]
@@ -147,7 +147,7 @@ impl StructsMcpHandler {
                         "command": { "type": "string", "enum": ["list", "set", "remove", "log"] },
                         "policy": { "type": "string", "description": "Policy name (for set/remove)." },
                         "enabled": { "type": "boolean", "description": "Enable/disable (for set)." },
-                        "config": { "type": "object", "description": "Policy-specific config (for set). e.g., {threshold_pct: 85} for power_alert." }
+                        "config": { "type": "object", "description": "Policy-specific config (for set). e.g., {threshold_pct: 80} for power_alert." }
                     },
                     "required": ["command"]
                 })),

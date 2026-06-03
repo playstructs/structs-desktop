@@ -226,7 +226,7 @@ fn build_sync(
                     .get(&s.struct_type_id.to_string())
                     .map(|t| t.name.as_str())
                     .unwrap_or("Unknown");
-                let status = decode_status_short(s.status);
+                let status = crate::mcp::tools::format::decode_status(s.status);
                 let ambit = s.operating_ambit.as_deref().unwrap_or("?");
 
                 let hash_info = registry
@@ -346,32 +346,6 @@ fn build_sync(
         owned_planets,
         local_task_count,
     })
-}
-
-fn decode_status_short(status: u64) -> String {
-    let mut flags = vec![];
-    if status & 32 != 0 {
-        return "Destroyed".to_string();
-    }
-    if status & 4 != 0 {
-        flags.push("Online");
-    } else if status & 2 != 0 {
-        flags.push("Offline");
-    } else if status & 1 != 0 {
-        flags.push("Building");
-    } else {
-        flags.push("Inactive");
-    }
-    if status & 8 != 0 {
-        flags.push("Stored");
-    }
-    if status & 16 != 0 {
-        flags.push("Hidden");
-    }
-    if status & 64 != 0 {
-        flags.push("Locked");
-    }
-    flags.join(", ")
 }
 
 fn format_alpha(ualpha: f64) -> String {

@@ -86,12 +86,12 @@ impl PolicyEngine {
     }
 
     fn ensure_defaults(&mut self) {
+        // Only policies the engine actually evaluates are seeded as defaults.
+        // (never_build_unsafe / auto_defend / sequence_retry were advertised but
+        // never wired up — removed to keep `structs_policy list` honest.)
         let defaults = vec![
             ("auto_refine", true, serde_json::json!({})),
             ("power_alert", true, serde_json::json!({"threshold_pct": 80})),
-            ("never_build_unsafe", true, serde_json::json!({})),
-            ("auto_defend", false, serde_json::json!({"mode": "ask", "charge_budget": 10})),
-            ("sequence_retry", true, serde_json::json!({"max_retries": 3})),
         ];
 
         for (name, default_enabled, default_config) in defaults {
@@ -201,15 +201,6 @@ impl PolicyEngine {
             }
         }
 
-        // Store events in log
-        for event in &events {
-            self.event_log.push(event.clone());
-            // Keep log bounded
-            if self.event_log.len() > 500 {
-                self.event_log.remove(0);
-            }
-        }
-
         // ── Combat Mode ──
         // Check event buffer for recent combat events
         {
@@ -248,7 +239,7 @@ impl PolicyEngine {
             }
         }
 
-        // Store events in log
+        // Store events in log (single pass — logged exactly once)
         for event in &events {
             self.event_log.push(event.clone());
             if self.event_log.len() > 500 {

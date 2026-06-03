@@ -312,6 +312,23 @@ window.__STRUCTS_CONFIG__ = {config_json};
     window.fetch = async function(input, init) {{
         const url = (typeof input === 'string') ? input : input.url;
 
+        // Skip Tauri's own IPC transport. On Windows WebView2, Tauri 2 implements
+        // tauri.core.invoke() on top of `fetch('http://ipc.localhost/...')`. If we
+        // route that through our proxy, calling invoke('proxy_fetch') triggers a
+        // fetch to http://ipc.localhost/proxy_fetch — which our proxy re-catches,
+        // calls invoke('proxy_fetch') again with the previous IPC body embedded in
+        // the new one, and the payload doubles per recursion until JSON.stringify
+        // throws "Invalid string length" (V8's ~512 MB string cap). The renderer
+        // burns several hundred MB on the way there → "Out of Memory" crash page.
+        // macOS WKWebView uses a different IPC transport so the bug is invisible
+        // there. Filter these URLs before the proxy fast-path.
+        if (url.startsWith('http://ipc.localhost')
+            || url.startsWith('https://ipc.localhost')
+            || url.startsWith('ipc://')
+            || url.startsWith('tauri://')) {{
+            return originalFetch.call(this, input, init);
+        }}
+
         // Only proxy absolute HTTP URLs (not relative, not ws://, not blob:, etc.)
         if (url.startsWith('http://') || url.startsWith('https://')) {{
             try {{

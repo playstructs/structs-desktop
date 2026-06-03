@@ -7,9 +7,24 @@ pub fn translate_error(error: &str) -> String {
         return "Transaction sequence mismatch — another transaction is pending. Wait ~6 seconds and retry.".to_string();
     }
 
-    // Insufficient funds
-    if lower.contains("insufficient funds") {
+    // Insufficient funds (code 2)
+    if lower.contains("insufficient funds") || lower.contains("code 2:") {
         return format!("Insufficient funds. Check your Alpha Matter balance. Original: {}", error);
+    }
+
+    // Invalid signature (code 3)
+    if lower.contains("invalid signature") || lower.contains("code 3:") {
+        return "Invalid signature — the transaction signature was rejected. Retry; if it persists the signing key or account sequence may be wrong.".to_string();
+    }
+
+    // Insufficient gas (code 4)
+    if lower.contains("code 4:") {
+        return "Insufficient gas — raise the gas limit (use --gas auto with a higher --gas-adjustment).".to_string();
+    }
+
+    // Invalid message (code 5)
+    if lower.contains("invalid message") || lower.contains("code 5:") {
+        return format!("Invalid message — the transaction was malformed or not permitted in this state. Original: {}", error);
     }
 
     // Player halted (offline)
@@ -53,6 +68,11 @@ pub fn translate_error(error: &str) -> String {
     // Generic not found
     if lower.contains("not found") {
         return format!("Resource not found. It may not exist yet or was destroyed. Original: {}", error);
+    }
+
+    // General chain error (code 1) — checked after the specific codes above.
+    if lower.contains("code 1:") {
+        return format!("Chain rejected the transaction (general error). Original: {}", error);
     }
 
     // ── Guild API error shapes (Symfony backend) ──

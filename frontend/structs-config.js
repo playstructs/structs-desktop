@@ -844,7 +844,21 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               ore_mining_difficulty: numOrZero(t.ore_mining_difficulty),
               ore_refining_difficulty: numOrZero(t.ore_refining_difficulty),
               passive_draw: num(t.passive_draw),
-              max_health: num(t.max_health)
+              max_health: num(t.max_health),
+              // Per-action charge costs + combat targeting bitmasks. gameState
+              // casing varies by source, so read snake_case or camelCase.
+              build_charge: pickNum(t, 'build_charge', 'buildCharge'),
+              activate_charge: pickNum(t, 'activate_charge', 'activateCharge'),
+              move_charge: pickNum(t, 'move_charge', 'moveCharge'),
+              defend_change_charge: pickNum(t, 'defend_change_charge', 'defendChangeCharge'),
+              stealth_activate_charge: pickNum(t, 'stealth_activate_charge', 'stealthActivateCharge'),
+              ore_mining_charge: pickNum(t, 'ore_mining_charge', 'oreMiningCharge'),
+              ore_refining_charge: pickNum(t, 'ore_refining_charge', 'oreRefiningCharge'),
+              primary_weapon_charge: pickNum(t, 'primary_weapon_charge', 'primaryWeaponCharge'),
+              secondary_weapon_charge: pickNum(t, 'secondary_weapon_charge', 'secondaryWeaponCharge'),
+              possible_ambit: pickNum(t, 'possible_ambit', 'possibleAmbit'),
+              primary_weapon_ambits: pickNum(t, 'primary_weapon_ambits', 'primaryWeaponAmbits'),
+              secondary_weapon_ambits: pickNum(t, 'secondary_weapon_ambits', 'secondaryWeaponAmbits')
             };
           }
         }
@@ -852,6 +866,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         // Ensure numeric values are actually numbers (some gameState fields may be strings)
         function num(v) { return v != null ? Number(v) : null; }
         function numOrZero(v) { return v != null ? Number(v) : 0; }
+        // Read a field that may be snake_case or camelCase, coerced to number or null.
+        function pickNum(obj, snake, camel) {
+          var v = obj[snake] != null ? obj[snake] : obj[camel];
+          return v != null ? Number(v) : null;
+        }
 
         var syncData = {
           current_block_height: numOrZero(gs.currentBlockHeight),

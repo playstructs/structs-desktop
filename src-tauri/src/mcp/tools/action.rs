@@ -2,7 +2,7 @@ use rmcp::model::Content;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::game_state::GAME_STATE;
+use crate::game_state::{StructTypeInfo, GAME_STATE};
 use crate::hasher;
 use crate::hasher::types::{TaskParams, TaskRegistry};
 use crate::mcp::error_translator::translate_error;
@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 pub struct ActionParams {
-    /// Action to perform: build, mine, refine, mine_and_refine, raid, deploy, move_fleet,
-    /// attack, defend, activate, deactivate, transfer, explore, infuse, etc.
+    /// Action to perform: explore, build, mine, refine, attack, defend, activate,
+    /// deactivate, move_fleet, transfer, deploy.
     pub action: String,
     /// Action-specific arguments
     #[serde(default)]
@@ -36,7 +36,7 @@ pub async fn execute(
     }
 
     match params.action.as_str() {
-        "explore" => action_explore(app_handle, &player_id).await,
+        "explore" => action_explore(app_handle, &player_id, &params.args).await,
         "mine" => action_mine(app_handle, registry, &params.args).await,
         "refine" => action_refine(app_handle, registry, &params.args).await,
         "build" => action_build(app_handle, &player_id, &params.args).await,
@@ -54,7 +54,7 @@ pub async fn execute(
     }
 }
 
-async fn action_explore(app_handle: &tauri::AppHandle, player_id: &str) -> Vec<Content> {
+async fn action_explore(app_handle: &tauri::AppHandle, player_id: &str, args: &Value) -> Vec<Content> {
     let fleet_id = {
         let gs = GAME_STATE.read().unwrap();
         gs.fleet_id.clone().unwrap_or_default()
@@ -64,16 +64,24 @@ async fn action_explore(app_handle: &tauri::AppHandle, player_id: &str) -> Vec<C
         return vec![Content::text("Error: No fleet found for this player.")];
     }
 
-    let args = json!({
+    // Optional planet name (v1.11.0). Validated chain-side; passed through only when set.
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut tx_args = json!({
         "action_type": "planet_explore",
         "player_id": player_id,
     });
+    if !name.is_empty() {
+        tx_args["name"] = json!(name);
+    }
 
-    match tx_queue::submit_tx(app_handle, "planet_explore".to_string(), args).await {
+    match tx_queue::submit_tx(app_handle, "planet_explore".to_string(), tx_args).await {
         Ok(resp) if resp.success => {
+            let named = if name.is_empty() { String::new() } else { format!(" (name: {})", name) };
             vec![Content::text(format!(
-                "Planet exploration initiated for player {}.\nTx hash: {}",
+                "Planet exploration initiated for player {}{}.\nTx hash: {}",
                 player_id,
+                named,
                 resp.tx_hash.unwrap_or_else(|| "pending".to_string())
             ))]
         }
@@ -117,6 +125,16 @@ async fn action_mine(
                 return vec![Content::text(format!(
                     "Error: {} is not online. Activate it first.",
                     struct_id
+                ))];
+            }
+            // Preflight: charge (mining completion costs ore_mining_charge, default 20)
+            let cost = charge_cost_for_type(type_info, "mine", "");
+            let charge = gs.get_charge();
+            if charge < cost {
+                let blocks_needed = gs.blocks_until_charge(cost);
+                return vec![Content::text(format!(
+                    "BLOCKED: Need {} charge to mine, you have {}. Ready in ~{}s (~{} blocks).",
+                    cost, charge, blocks_needed * 6, blocks_needed
                 ))];
             }
             let difficulty = type_info.map(|t| t.ore_mining_difficulty).unwrap_or(14000);
@@ -168,8 +186,8 @@ async fn action_mine(
             let gpu = hasher::ensure_gpu_init();
             let engine = if gpu { "GPU" } else { "CPU" };
             vec![Content::text(format!(
-                "Mining started on {} ({}) using {}.\nDifficulty: {}, block: {}\nHash task running — when proof is found, submit with:\n  structs_action {{ action: \"submit_mine\", args: {{ struct_id: \"{}\" }} }}",
-                struct_id, type_name, engine, difficulty_target, block_height, struct_id
+                "Mining started on {} ({}) using {}.\nDifficulty: {}, block: {}\nHash task running in the background — the completion tx is submitted automatically when the proof is found. Track it with structs_hash {{ command: \"list\" }}.",
+                struct_id, type_name, engine, difficulty_target, block_height
             ))]
         }
         Err(e) => vec![Content::text(format!("Error starting mine hash: {}", e))],
@@ -201,6 +219,28 @@ async fn action_refine(
                 return vec![Content::text(format!(
                     "Error: {} is a {}, not an Ore Refinery.",
                     struct_id, type_name
+                ))];
+            }
+            if s.status & 4 == 0 {
+                return vec![Content::text(format!(
+                    "Error: {} is not online. Activate it first.",
+                    struct_id
+                ))];
+            }
+            if gs.stored_ore.unwrap_or(0.0) <= 0.0 {
+                return vec![Content::text(format!(
+                    "Error: No stored ore to refine. Mine ore first (refinery {} has nothing to process).",
+                    struct_id
+                ))];
+            }
+            // Preflight: charge (refining completion costs ore_refining_charge, default 20)
+            let cost = charge_cost_for_type(type_info, "refine", "");
+            let charge = gs.get_charge();
+            if charge < cost {
+                let blocks_needed = gs.blocks_until_charge(cost);
+                return vec![Content::text(format!(
+                    "BLOCKED: Need {} charge to refine, you have {}. Ready in ~{}s (~{} blocks).",
+                    cost, charge, blocks_needed * 6, blocks_needed
                 ))];
             }
             let difficulty = type_info.map(|t| t.ore_refining_difficulty).unwrap_or(28000);
@@ -310,13 +350,14 @@ async fn action_build(
             }
         }
 
-        // Preflight: charge (builds cost 8)
+        // Preflight: charge (data-driven build cost, genesis default 8)
+        let build_charge_cost = charge_cost_for_type(type_info, "build", "");
         let charge = gs.get_charge();
-        if charge < 8 {
-            let blocks_needed = gs.blocks_until_charge(8);
+        if charge < build_charge_cost {
+            let blocks_needed = gs.blocks_until_charge(build_charge_cost);
             return vec![Content::text(format!(
-                "BLOCKED: Need 8 charge to build, you have {}. Ready in ~{}s (~{} blocks).",
-                charge, blocks_needed * 6, blocks_needed
+                "BLOCKED: Need {} charge to build, you have {}. Ready in ~{}s (~{} blocks).",
+                build_charge_cost, charge, blocks_needed * 6, blocks_needed
             ))];
         }
 
@@ -388,6 +429,44 @@ async fn action_attack(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         )];
     }
 
+    // Preflight: charge + weapon-ambit reachability.
+    {
+        use crate::mcp::tools::format::{ambit_bit, decode_ambits};
+        let gs = GAME_STATE.read().unwrap();
+        if let Some(att) = gs.structs.get(attacker_id) {
+            let t = gs.struct_types.get(&att.struct_type_id.to_string());
+            // Charge
+            let cost = charge_cost_for_type(t, "attack", weapon);
+            let charge = gs.get_charge();
+            if charge < cost {
+                let blocks_needed = gs.blocks_until_charge(cost);
+                return vec![Content::text(format!(
+                    "BLOCKED: Need {} charge to attack ({} weapon), you have {}. Ready in ~{}s (~{} blocks).",
+                    cost, weapon, charge, blocks_needed * 6, blocks_needed
+                ))];
+            }
+            // Ambit reachability (only when we know both masks)
+            let weapon_mask = if weapon.eq_ignore_ascii_case("secondary") {
+                t.and_then(|t| t.secondary_weapon_ambits)
+            } else {
+                t.and_then(|t| t.primary_weapon_ambits)
+            };
+            let target_bit = gs
+                .structs
+                .get(target_id)
+                .and_then(|s| s.operating_ambit.as_deref())
+                .map(ambit_bit);
+            if let (Some(mask), Some(bit)) = (weapon_mask, target_bit) {
+                if bit != 0 && mask & bit == 0 {
+                    return vec![Content::text(format!(
+                        "BLOCKED: {}'s {} weapon reaches [{}] but target {} is in a different ambit. Pick a target this weapon can hit (or use intel valid_targets with attacker={}).",
+                        attacker_id, weapon, decode_ambits(mask), target_id, attacker_id
+                    ))];
+                }
+            }
+        }
+    }
+
     let tx_args = json!({
         "action_type": "struct_attack",
         "operating_struct_id": attacker_id,
@@ -425,6 +504,10 @@ async fn action_defend(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         return vec![Content::text(
             "Error: defender_id and protected_id required.",
         )];
+    }
+
+    if let Some(blocked) = struct_charge_preflight(defender_id, "defend", "") {
+        return vec![blocked];
     }
 
     let tx_args = json!({
@@ -548,6 +631,10 @@ async fn action_deploy(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         return vec![Content::text("Error: struct_id required.")];
     }
 
+    if let Some(blocked) = struct_charge_preflight(struct_id, "deploy", "") {
+        return vec![blocked];
+    }
+
     let tx_args = json!({
         "action_type": "struct_move",
         "struct_id": struct_id,
@@ -585,6 +672,11 @@ async fn action_simple(
         return vec![Content::text("Error: struct_id required.")];
     }
 
+    // activate/deactivate both cost activateCharge (genesis default 1)
+    if let Some(blocked) = struct_charge_preflight(struct_id, "activate", "") {
+        return vec![blocked];
+    }
+
     let tx_args = json!({
         "action_type": action_type,
         "struct_id": struct_id,
@@ -606,6 +698,53 @@ async fn action_simple(
     }
 }
 
+/// Required charge for an action against a given struct type. Reads the cost
+/// from the synced StructType record, falling back to genesis defaults when the
+/// field is absent (e.g. a sync that predates the widened struct-type fields).
+fn charge_cost_for_type(t: Option<&StructTypeInfo>, action: &str, weapon: &str) -> u64 {
+    match action {
+        "build" => t.and_then(|t| t.build_charge).unwrap_or(8),
+        "deploy" => t.and_then(|t| t.move_charge).unwrap_or(8),
+        "activate" | "deactivate" => t.and_then(|t| t.activate_charge).unwrap_or(1),
+        "defend" => t.and_then(|t| t.defend_change_charge).unwrap_or(1),
+        "mine" => t.and_then(|t| t.ore_mining_charge).unwrap_or(20),
+        "refine" => t.and_then(|t| t.ore_refining_charge).unwrap_or(20),
+        "attack" => {
+            if weapon.eq_ignore_ascii_case("secondary") {
+                t.and_then(|t| t.secondary_weapon_charge).unwrap_or(1)
+            } else {
+                t.and_then(|t| t.primary_weapon_charge).unwrap_or(1)
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Charge preflight for an action performed by a specific struct. Compares the
+/// action's required charge against the player's built-up charge bar
+/// (`get_charge`). Returns the BLOCKED message on shortfall, else None.
+/// Returns None when the struct is unknown so the caller's own not-found path
+/// handles it.
+fn struct_charge_preflight(struct_id: &str, action: &str, weapon: &str) -> Option<Content> {
+    let gs = GAME_STATE.read().unwrap();
+    let s = gs.structs.get(struct_id)?;
+    let cost = charge_cost_for_type(
+        gs.struct_types.get(&s.struct_type_id.to_string()),
+        action,
+        weapon,
+    );
+    let charge = gs.get_charge();
+    if charge < cost {
+        let blocks_needed = gs.blocks_until_charge(cost);
+        Some(Content::text(format!(
+            "BLOCKED: Need {} charge to {}, you have {}. Ready in ~{}s (~{} blocks).",
+            cost, action, charge, blocks_needed * 6, blocks_needed
+        )))
+    } else {
+        None
+    }
+}
+
 fn format_power(milliwatts: f64) -> String {
     let abs = milliwatts.abs();
     if abs >= 1e6 {
@@ -614,5 +753,65 @@ fn format_power(milliwatts: f64) -> String {
         format!("{:.1}W", milliwatts / 1e3)
     } else {
         format!("{:.0}mW", milliwatts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_type() -> StructTypeInfo {
+        StructTypeInfo {
+            id: 1,
+            name: "Test".to_string(),
+            category: None,
+            build_difficulty: 0,
+            ore_mining_difficulty: 0,
+            ore_refining_difficulty: 0,
+            passive_draw: None,
+            max_health: None,
+            build_charge: None,
+            activate_charge: None,
+            move_charge: None,
+            defend_change_charge: None,
+            stealth_activate_charge: None,
+            ore_mining_charge: None,
+            ore_refining_charge: None,
+            primary_weapon_charge: None,
+            secondary_weapon_charge: None,
+            possible_ambit: None,
+            primary_weapon_ambits: None,
+            secondary_weapon_ambits: None,
+        }
+    }
+
+    #[test]
+    fn charge_falls_back_to_genesis_defaults_when_unknown() {
+        // No struct-type data at all.
+        assert_eq!(charge_cost_for_type(None, "build", ""), 8);
+        assert_eq!(charge_cost_for_type(None, "deploy", ""), 8);
+        assert_eq!(charge_cost_for_type(None, "activate", ""), 1);
+        assert_eq!(charge_cost_for_type(None, "deactivate", ""), 1);
+        assert_eq!(charge_cost_for_type(None, "defend", ""), 1);
+        assert_eq!(charge_cost_for_type(None, "mine", ""), 20);
+        assert_eq!(charge_cost_for_type(None, "refine", ""), 20);
+        assert_eq!(charge_cost_for_type(None, "attack", "primary"), 1);
+        assert_eq!(charge_cost_for_type(None, "attack", "secondary"), 1);
+        // A type record present but missing the field also falls back.
+        let t = empty_type();
+        assert_eq!(charge_cost_for_type(Some(&t), "build", ""), 8);
+    }
+
+    #[test]
+    fn charge_reads_from_struct_type_when_present() {
+        let mut t = empty_type();
+        t.build_charge = Some(12);
+        t.primary_weapon_charge = Some(20);
+        t.secondary_weapon_charge = Some(8);
+        t.ore_mining_charge = Some(20);
+        assert_eq!(charge_cost_for_type(Some(&t), "build", ""), 12);
+        assert_eq!(charge_cost_for_type(Some(&t), "attack", "primary"), 20);
+        assert_eq!(charge_cost_for_type(Some(&t), "attack", "secondary"), 8);
+        assert_eq!(charge_cost_for_type(Some(&t), "mine", ""), 20);
     }
 }

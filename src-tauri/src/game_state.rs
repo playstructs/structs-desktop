@@ -137,6 +137,33 @@ pub struct StructTypeInfo {
     pub ore_refining_difficulty: u64,
     pub passive_draw: Option<f64>,
     pub max_health: Option<f64>,
+    // Per-action charge costs (from the chain's StructType record). All optional
+    // so a sync that predates these fields degrades gracefully to fallbacks.
+    #[serde(default)]
+    pub build_charge: Option<u64>,
+    #[serde(default)]
+    pub activate_charge: Option<u64>,
+    #[serde(default)]
+    pub move_charge: Option<u64>,
+    #[serde(default)]
+    pub defend_change_charge: Option<u64>,
+    #[serde(default)]
+    pub stealth_activate_charge: Option<u64>,
+    #[serde(default)]
+    pub ore_mining_charge: Option<u64>,
+    #[serde(default)]
+    pub ore_refining_charge: Option<u64>,
+    #[serde(default)]
+    pub primary_weapon_charge: Option<u64>,
+    #[serde(default)]
+    pub secondary_weapon_charge: Option<u64>,
+    // Combat targeting bitmasks (Water=2, Land=4, Air=8, Space=16).
+    #[serde(default)]
+    pub possible_ambit: Option<u64>,
+    #[serde(default)]
+    pub primary_weapon_ambits: Option<u64>,
+    #[serde(default)]
+    pub secondary_weapon_ambits: Option<u64>,
 }
 
 /// Global synced game state, protected by RwLock for concurrent access

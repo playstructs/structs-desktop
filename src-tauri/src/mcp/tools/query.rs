@@ -158,6 +158,21 @@ fn enrich_response(value: &mut Value) {
                 }
             }
 
+            // Decode permission bitmask (25-bit) on permission-specific fields
+            for field in &["permissions", "perms", "permission_flags", "val"] {
+                let mask = match map.get(*field) {
+                    Some(Value::String(s)) => s.parse::<u64>().ok(),
+                    Some(Value::Number(n)) => n.as_u64(),
+                    _ => None,
+                };
+                if let Some(mask) = mask {
+                    additions.push((
+                        format!("{}_decoded", field),
+                        Value::String(format::decode_permissions(mask)),
+                    ));
+                }
+            }
+
             // Resolve struct type ID to name
             if let Some(type_val) = map.get("type").or(map.get("structType")) {
                 let type_id_str = match type_val {

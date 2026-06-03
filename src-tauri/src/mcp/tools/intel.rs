@@ -394,7 +394,7 @@ fn query_timeline(registry: &Arc<TaskRegistry>, args: &Value) -> Vec<Content> {
             snap.difficulty_target,
             snap.estimated_hashrate,
         );
-        let eta_seconds = blocks_remaining * 5;
+        let eta_seconds = blocks_remaining * 6; // ~6s/block
 
         let eta_str = if eta_seconds < 60 {
             format!("~{}s", eta_seconds)
@@ -415,7 +415,7 @@ fn query_timeline(registry: &Arc<TaskRegistry>, args: &Value) -> Vec<Content> {
 
 fn estimate_blocks_remaining_simple(current_age: u64, difficulty_target: u64, hashrate: f64) -> u64 {
     use crate::hasher::difficulty::calculate_difficulty;
-    let block_time_ms = 5000.0;
+    let block_time_ms = 6000.0; // ~6s/block
     let hr = if hashrate > 0.0 { hashrate } else { 20000.0 };
     let mut cumulative = 0.0f64;
     let mut blocks = 0u64;
@@ -568,39 +568,65 @@ async fn query_planet_history(client: &CosmosClient, args: &Value) -> Vec<Conten
 
 /// 3b — `intel.valid_targets`
 ///
-/// Args: `{ near?: string, limit?: number = 10 }`.
-/// Combines GAME_STATE struct list with `struct-defender/protected` lookups
-/// to produce a ranked target list with defender chains and reachability hints.
+/// Args: `{ near?: string, limit?: number = 10, attacker?: string, weapon?: "primary"|"secondary" }`.
+/// Combines GAME_STATE struct list with `struct-defender/protected` lookups to
+/// produce a ranked target list with defender chains. When `attacker` is given,
+/// filters/flags by whether the attacker's weapon ambits can actually reach each
+/// target's operating ambit (Water=2, Land=4, Air=8, Space=16).
 async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content> {
+    use crate::mcp::tools::format::{ambit_bit, decode_ambits};
+
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let near = args.get("near").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let attacker = args.get("attacker").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let weapon = args.get("weapon").and_then(|v| v.as_str()).unwrap_or("primary");
 
-    // Pull candidate target IDs. If `near` is given, use Guild API location list;
-    // otherwise use the current view's enemy structs from GAME_STATE.
-    let (candidates, my_player_id, my_charge): (Vec<String>, Option<String>, u64) = {
+    // Pull candidate (id, ambit_bit) pairs and the attacker's weapon-ambit mask.
+    // If `near` is given, candidate ids come from the Guild API location list;
+    // otherwise from the current view's enemy structs in GAME_STATE.
+    let (candidates, my_player_id, my_charge, weapon_mask): (Vec<(String, u64)>, Option<String>, u64, Option<u64>) = {
         let gs = GAME_STATE.read().unwrap();
         let my_id = gs.player_id.clone();
         let charge = gs.get_charge();
+        let weapon_mask = attacker.as_deref().and_then(|aid| {
+            let s = gs.structs.get(aid)?;
+            let t = gs.struct_types.get(&s.struct_type_id.to_string())?;
+            if weapon.eq_ignore_ascii_case("secondary") {
+                t.secondary_weapon_ambits
+            } else {
+                t.primary_weapon_ambits
+            }
+        });
         let ids = if near.is_some() {
-            // Fetched separately below.
-            vec![]
+            vec![] // Fetched separately below.
         } else {
             gs.structs
                 .iter()
                 .filter(|(_, s)| my_id.as_ref().map(|m| &s.owner != m).unwrap_or(false))
                 .filter(|(_, s)| s.status & 32 == 0) // not destroyed
-                .map(|(id, _)| id.clone())
+                .map(|(id, s)| {
+                    let bit = s.operating_ambit.as_deref().map(ambit_bit).unwrap_or(0);
+                    (id.clone(), bit)
+                })
                 .collect::<Vec<_>>()
         };
-        (ids, my_id, charge)
+        (ids, my_id, charge, weapon_mask)
     };
 
-    let candidates: Vec<String> = if let Some(loc) = near.as_deref() {
+    let candidates: Vec<(String, u64)> = if let Some(loc) = near.as_deref() {
         match client.guild.struct_list_by_location(loc, 1).await {
             Ok(page) => page
                 .items
                 .iter()
-                .filter_map(|v| v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                .filter_map(|v| {
+                    let id = v.get("id").and_then(|x| x.as_str())?.to_string();
+                    let bit = v
+                        .get("operating_ambit")
+                        .and_then(|x| x.as_str())
+                        .map(ambit_bit)
+                        .unwrap_or(0);
+                    Some((id, bit))
+                })
                 .collect(),
             Err(e) => return vec![Content::text(format!("valid_targets: {} (location lookup failed)", e))],
         }
@@ -614,37 +640,61 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
         )];
     }
 
-    let mut targets: Vec<(String, usize, String)> = Vec::new();
-    for id in candidates.iter().take(20) {
+    // (id, defender_count, reachable, note)
+    let mut targets: Vec<(String, usize, bool, String)> = Vec::new();
+    for (id, ambit) in candidates.iter().take(20) {
         let defenders = match client.guild.struct_defender_by_protected(id, 1).await {
             Ok(page) => page.items,
             Err(_) => vec![],
         };
         let defender_count = defenders.len();
-        let summary = if defender_count == 0 {
+        let def_note = if defender_count == 0 {
             "undefended".to_string()
         } else if defender_count == 1 {
             "1 defender".to_string()
         } else {
             format!("{} defenders", defender_count)
         };
-        targets.push((id.clone(), defender_count, summary));
+        // Reachable unless we know the weapon mask and it doesn't cover the ambit.
+        let reachable = match weapon_mask {
+            Some(mask) if *ambit != 0 => (mask & *ambit) != 0,
+            _ => true,
+        };
+        let note = if weapon_mask.is_some() && !reachable {
+            format!("{} — OUT OF WEAPON AMBIT (cannot reach)", def_note)
+        } else {
+            def_note
+        };
+        targets.push((id.clone(), defender_count, reachable, note));
     }
 
-    // Rank: undefended first, then by lowest defender count.
-    targets.sort_by_key(|(_, n, _)| *n);
+    // Rank: reachable first, then undefended first, then lowest defender count.
+    targets.sort_by(|a, b| {
+        b.2.cmp(&a.2).then(a.1.cmp(&b.1))
+    });
     targets.truncate(limit);
 
     let mut out = String::new();
     out.push_str(&format!(
-        "Valid targets (you: charge {}, player {})\n\n",
+        "Valid targets (you: charge {}, player {})\n",
         my_charge,
         my_player_id.as_deref().unwrap_or("?")
     ));
-    for (id, _, note) in &targets {
+    match weapon_mask {
+        Some(mask) => out.push_str(&format!(
+            "Attacker {} {} weapon reaches: {}\n\n",
+            attacker.as_deref().unwrap_or("?"),
+            weapon,
+            decode_ambits(mask)
+        )),
+        None => out.push_str(
+            "\nNote: pass 'attacker' (your struct id) + 'weapon' to filter by ambit reachability.\n\n",
+        ),
+    }
+    for (id, _, _, note) in &targets {
         out.push_str(&format!("  {}  — {}\n", id, note));
     }
-    out.push_str("\nNote: defender chains are read live from the Guild API. Verify reachability before attacking.\n");
+    out.push_str("\nNote: defender chains are read live from the Guild API.\n");
 
     vec![Content::text(out)]
 }
