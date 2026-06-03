@@ -12,10 +12,27 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       if (url.startsWith('/')) {
         url = apiBase + url;
       }
-      if (typeof input === 'string') {
-        return proxiedFetch.call(this, url, init);
+      var p = (typeof input === 'string')
+        ? proxiedFetch.call(this, url, init)
+        : proxiedFetch.call(this, new Request(url, input), init);
+      // Tap Guild API auth state. A 401/403 means the server session expired;
+      // the connection monitor watches this to drive session keepalive/recovery.
+      // Cheap (status only — no body read), guild-API requests only.
+      if (url.indexOf('/api') !== -1) {
+        p.then(function(res) {
+          try {
+            var s = window.__STRUCTS_CONN__ && window.__STRUCTS_CONN__.guildAuth;
+            if (!s) return;
+            if (res.status === 401 || res.status === 403) {
+              s.failedAt = Date.now();
+              s.failCount++;
+            } else if (res.status >= 200 && res.status < 300) {
+              s.lastOkAt = Date.now();
+            }
+          } catch (e) {}
+        }, function() {});
       }
-      return proxiedFetch.call(this, new Request(url, input), init);
+      return p;
     };
   }
   console.info('Guild config loaded:', window.__STRUCTS_CONFIG__);
@@ -27,6 +44,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   window.__STRUCTS_CONN__ = window.__STRUCTS_CONN__ || {
     grass: { lastMessageAt: 0, lastOpenAt: 0, lastCloseAt: 0, closeCount: 0, readyState: -1, ws: null },
     signing: { present: false, lastSeenAt: 0 },
+    // Guild REST session liveness. The webapp's /api/* surface is session-gated;
+    // after a long idle (no REST traffic — steady-state data comes over grass)
+    // the server session times out and every /api call returns 401, which breaks
+    // raid rendering (enemy data can't be fetched). Stamped by the fetch tap below.
+    guildAuth: { lastOkAt: 0, failedAt: 0, failCount: 0 },
     lastReloadAt: 0,
     reloadCount: 0
   };
@@ -1062,6 +1084,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       var RELOAD_COOLDOWN_MS = 300000;  // 5 min between auto-reloads
       var MAX_RELOADS_PER_SESSION = 3;
       var SIGNING_STALE_TICKS = 3;      // ticks of stale height before signing is suspect
+      var KEEPALIVE_MS = 120000;        // ping /api every 2 min to keep the server session warm
 
       var conn = window.__STRUCTS_CONN__;
 
@@ -1099,6 +1122,31 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         return isFinite(h) ? h : 0;
       }
 
+      // ── Guild REST session keepalive (prevention) ──
+      // The /api/* surface is session-gated. In steady state, game data streams
+      // over grass (WS), so when the user is away NO REST traffic touches the
+      // session and it times out server-side. The next /api call — e.g. the raid
+      // handler fetching the enemy planet/structs — then 401s, the unhandled
+      // rejection aborts the raid render, and the enemy never appears.
+      // A periodic authenticated ping simulates the activity that normally keeps
+      // the session warm, so /api stays authorized through a long idle.
+      var lastKeepaliveAt = 0;
+      function sessionKeepalive(now) {
+        if (now - lastKeepaliveAt < KEEPALIVE_MS) return;
+        var kp = window.gameState && window.gameState.keyPlayers && window.gameState.keyPlayers.player;
+        var pid = kp && kp.id;
+        if (!pid) return;  // not authenticated yet — nothing to keep alive
+        lastKeepaliveAt = now;
+        // Routes through the Tauri fetch proxy → shared reqwest cookie jar →
+        // refreshes the PHP session. Throttle-immune: this runs off the same
+        // sync-tick/interval clock the monitor uses, which survives minimize.
+        try {
+          window.fetch('/api/player/' + pid, { method: 'GET', headers: { 'Content-Type': 'application/json' } })
+            .then(function(r) { if (!r.ok) logRust('session keepalive non-OK: ' + r.status); })
+            .catch(function() {});
+        } catch (e) {}
+      }
+
       function canAutoReload(now) {
         var hidden = document.visibilityState === 'hidden';
         var idle = (now - lastUserInputAt) > IDLE_MS;
@@ -1129,6 +1177,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       function tick() {
         try {
           var now = Date.now();
+
+          // Keep the Guild REST session warm so /api stays authorized while idle.
+          sessionKeepalive(now);
 
           // Signing-client presence.
           var sc = window.gameState && window.gameState.signingClient;
@@ -1172,7 +1223,17 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           // alone shouldn't trigger a reload).
           var signingDead = signingMissing && staleHeightTicks >= SIGNING_STALE_TICKS;
 
-          if (grassDead || signingDead) {
+          // Guild session is "dead" when the most recent /api result was a 401/403
+          // and the keepalive couldn't revive it. Only a re-auth fixes it — the
+          // app re-authenticates automatically on load, so a guarded reload (which
+          // only fires when hidden/idle) restores the session. Active foreground
+          // use keeps the session warm, so this should essentially never fire there.
+          var ga = conn.guildAuth;
+          var guildAuthDead = ga.failedAt > 0 &&
+            ga.failedAt > ga.lastOkAt &&
+            (now - ga.failedAt) < 60000;
+
+          if (grassDead || signingDead || guildAuthDead) {
             // (a) future-safe: use an exposed reconnect() if one ever exists.
             var reconnected = false;
             try {
@@ -1185,9 +1246,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               }
             } catch (e) {}
 
-            // (b) last resort: guarded reload.
+            // (b) last resort: guarded reload (re-auths the Guild session on load).
             if (!reconnected && canAutoReload(now)) {
-              doGuardedReload(now, grassDead ? 'grass-dead' : 'signing-dead');
+              doGuardedReload(now, grassDead ? 'grass-dead' : (signingDead ? 'signing-dead' : 'guild-auth-dead'));
             }
           }
         } catch (e) {
