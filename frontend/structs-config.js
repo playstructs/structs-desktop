@@ -1522,7 +1522,10 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 var statusColor = t.status === 'completed' ? 'var(--accent-primary)'
                   : (t.status === 'waiting' ? 'var(--text-hint)' : 'var(--text-body)');
 
-                html += '<div style="margin-top:8px; padding:6px 8px; border-left:2px solid var(--accent-primary); background:rgba(0,0,0,0.15);">';
+                // Box padding: left-only so labels visually indent under the
+                // task header (groups them) while values stay flush-right with
+                // the rest of the card's rows.
+                html += '<div style="margin-top:8px; padding:4px 0 4px 10px; border-left:2px solid var(--accent-primary); background:rgba(0,0,0,0.15);">';
                 html += '<div style="display:flex; justify-content:space-between; align-items:center; padding-bottom:4px;">';
                 html += '<div style="color:var(--text-body); font-weight:bold;">' + headerLabel + '</div>';
                 html += '<div style="color:' + statusColor + ';">' + (t.status || '?') + '</div>';
