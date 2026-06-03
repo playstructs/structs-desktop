@@ -252,20 +252,49 @@ pub fn current_sync_interval_ms() -> u64 {
 // ── Hash Completion Notification ──
 
 #[tauri::command]
-pub async fn notify_hash_complete(struct_id: String, task_type: String) -> Result<(), String> {
+pub async fn notify_hash_complete(
+    struct_id: String,
+    task_type: String,
+    app_handle: tauri::AppHandle,
+    registry: tauri::State<'_, std::sync::Arc<crate::hasher::types::TaskRegistry>>,
+) -> Result<(), String> {
     use crate::mcp::policy::POLICY_ENGINE;
 
     eprintln!("[Structs Auto] Hash complete: {} {}", task_type, struct_id);
 
-    if let Ok(mut engine) = POLICY_ENGINE.write() {
-        let events = engine.evaluate_hash_completion(&task_type, &struct_id);
-        for event in &events {
-            eprintln!(
-                "[Structs Policy] {} — {} — {}",
-                event.policy, event.action, event.detail
-            );
+    // Evaluate inside a tight lock scope, then release before launching any task.
+    let auto_refine = {
+        if let Ok(mut engine) = POLICY_ENGINE.write() {
+            let outcome = engine.evaluate_hash_completion(&task_type, &struct_id);
+            for event in &outcome.events {
+                eprintln!(
+                    "[Structs Policy] {} — {} — {}",
+                    event.policy, event.action, event.detail
+                );
+            }
+            outcome.auto_refine
+        } else {
+            None
+        }
+    };
+
+    // auto_refine: start the REFINE hash task now that we hold AppHandle + registry.
+    if let Some(req) = auto_refine {
+        let params = crate::hasher::types::TaskParams::for_ore(
+            &req.struct_id,
+            "REFINE",
+            req.block_height,
+            req.difficulty_target,
+        );
+        match crate::hasher::start_hash_task_core(params, app_handle.clone(), registry.inner()) {
+            Ok(()) => eprintln!(
+                "[Structs Auto] auto_refine started REFINE on {} (difficulty {}, block {})",
+                req.struct_id, req.difficulty_target, req.block_height
+            ),
+            Err(e) => eprintln!("[Structs Auto] auto_refine failed to start: {}", e),
         }
     }
+
     Ok(())
 }
 

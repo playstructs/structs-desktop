@@ -38,6 +38,66 @@ pub struct TaskParams {
     pub status: String,
 }
 
+impl TaskParams {
+    /// Build params for an ore compute task (MINE/REFINE) on a struct.
+    /// Prefix convention: `{struct_id}{TASK_TYPE}{block_height}NONCE`.
+    pub fn for_ore(
+        struct_id: &str,
+        task_type: &str,
+        block_height: u64,
+        difficulty_target: u64,
+    ) -> Self {
+        let nonce_start = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            % 10_000_000_000) as u64;
+        TaskParams {
+            object_id: struct_id.to_string(),
+            target_id: None,
+            object_type: Some("struct".to_string()),
+            task_type: Some(task_type.to_string()),
+            identity: None,
+            prefix: format!("{}{}{}NONCE", struct_id, task_type, block_height),
+            postfix: String::new(),
+            nonce_start,
+            nonce_current: nonce_start,
+            iterations: 0,
+            iterations_since_last_start: 0,
+            difficulty_start: None,
+            difficulty_target,
+            block_start: block_height,
+            block_checkpoint: block_height,
+            block_checkpoint_time: now_millis(),
+            block_current_estimated: Some(block_height),
+            result_exists: false,
+            result_message: None,
+            result_nonce: None,
+            result_hash: None,
+            result_difficulty: 0,
+            estimated_hashrate: 300.0,
+            estimated_block_start_offset: 0,
+            status: "starting".to_string(),
+        }
+    }
+
+    /// Build params for a planet RAID compute task.
+    /// Prefix convention: `{fleet_id}@{planet_id}RAID{block_height}NONCE`,
+    /// object type `fleet` (matches the structs_hash RAID path).
+    pub fn for_raid(
+        fleet_id: &str,
+        planet_id: &str,
+        block_height: u64,
+        difficulty_target: u64,
+    ) -> Self {
+        let mut p = Self::for_ore(fleet_id, "RAID", block_height, difficulty_target);
+        p.target_id = Some(planet_id.to_string());
+        p.object_type = Some("fleet".to_string());
+        p.prefix = format!("{}@{}RAID{}NONCE", fleet_id, planet_id, block_height);
+        p
+    }
+}
+
 /// Mutable progress state updated by the hash worker threads.
 #[derive(Debug, Clone)]
 pub struct TaskProgress {

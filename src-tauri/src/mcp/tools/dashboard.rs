@@ -195,6 +195,11 @@ fn build_sync(
             out.push_str(&format!(" | Stored Ore: {} (RAIDABLE!)", format_ore(stored_ore)));
         }
         out.push('\n');
+        if stored_ore > 0.0 {
+            out.push_str(
+                "  ⚠ Stored ore is vulnerable for the whole refining window (~34h at D=3). A successful raid takes ALL of it — refine promptly.\n",
+            );
+        }
 
         // ── Planet & Fleet ──
         out.push('\n');

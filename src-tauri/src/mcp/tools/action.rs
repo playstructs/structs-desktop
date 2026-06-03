@@ -47,8 +47,10 @@ pub async fn execute(
         "move_fleet" => action_move_fleet(app_handle, &params.args).await,
         "transfer" => action_transfer(app_handle, &params.args).await,
         "deploy" => action_deploy(app_handle, &params.args).await,
+        "raid" => action_raid(app_handle, registry, &params.args).await,
+        "update_primary_reactor" => action_update_primary_reactor(app_handle, &params.args).await,
         other => vec![Content::text(format!(
-            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy",
+            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor",
             other
         ))],
     }
@@ -145,41 +147,7 @@ async fn action_mine(
     };
 
     // Start hash task directly — no initiation tx needed for mining
-    let prefix = format!("{}MINE{}NONCE", struct_id, block_height);
-    let nonce_start = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        % 10_000_000_000) as u64;
-    let now_ms = crate::hasher::types::now_millis();
-
-    let task_params = TaskParams {
-        object_id: struct_id.to_string(),
-        target_id: None,
-        object_type: Some("struct".to_string()),
-        task_type: Some("MINE".to_string()),
-        identity: None,
-        prefix,
-        postfix: String::new(),
-        nonce_start,
-        nonce_current: nonce_start,
-        iterations: 0,
-        iterations_since_last_start: 0,
-        difficulty_start: None,
-        difficulty_target,
-        block_start: block_height,
-        block_checkpoint: block_height,
-        block_checkpoint_time: now_ms,
-        block_current_estimated: Some(block_height),
-        result_exists: false,
-        result_message: None,
-        result_nonce: None,
-        result_hash: None,
-        result_difficulty: 0,
-        estimated_hashrate: 300.0,
-        estimated_block_start_offset: 0,
-        status: "starting".to_string(),
-    };
+    let task_params = TaskParams::for_ore(struct_id, "MINE", block_height, difficulty_target);
 
     match hasher::start_hash_task_core(task_params, app_handle.clone(), registry) {
         Ok(()) => {
@@ -250,41 +218,7 @@ async fn action_refine(
         }
     };
 
-    let prefix = format!("{}REFINE{}NONCE", struct_id, block_height);
-    let nonce_start = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        % 10_000_000_000) as u64;
-    let now_ms = crate::hasher::types::now_millis();
-
-    let task_params = TaskParams {
-        object_id: struct_id.to_string(),
-        target_id: None,
-        object_type: Some("struct".to_string()),
-        task_type: Some("REFINE".to_string()),
-        identity: None,
-        prefix,
-        postfix: String::new(),
-        nonce_start,
-        nonce_current: nonce_start,
-        iterations: 0,
-        iterations_since_last_start: 0,
-        difficulty_start: None,
-        difficulty_target,
-        block_start: block_height,
-        block_checkpoint: block_height,
-        block_checkpoint_time: now_ms,
-        block_current_estimated: Some(block_height),
-        result_exists: false,
-        result_message: None,
-        result_nonce: None,
-        result_hash: None,
-        result_difficulty: 0,
-        estimated_hashrate: 300.0,
-        estimated_block_start_offset: 0,
-        status: "starting".to_string(),
-    };
+    let task_params = TaskParams::for_ore(struct_id, "REFINE", block_height, difficulty_target);
 
     match hasher::start_hash_task_core(task_params, app_handle.clone(), registry) {
         Ok(()) => {
@@ -476,11 +410,12 @@ async fn action_attack(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
 
     match tx_queue::submit_tx(app_handle, "struct_attack".to_string(), tx_args).await {
         Ok(resp) if resp.success => vec![Content::text(format!(
-            "Attack executed: {} → {} (weapon: {})\nTx hash: {}",
+            "Attack executed: {} → {} (weapon: {})\nTx hash: {}{}",
             attacker_id,
             target_id,
             weapon,
-            resp.tx_hash.unwrap_or_else(|| "pending".to_string())
+            resp.tx_hash.unwrap_or_else(|| "pending".to_string()),
+            approval_surface("attack", 1, target_id, "irreversible (damage/destruction)", "target struct + counter-attack risk to attacker")
         ))],
         Ok(resp) => vec![Content::text(format!(
             "Attack failed: {}",
@@ -599,10 +534,11 @@ async fn action_transfer(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Con
 
     match tx_queue::submit_tx(app_handle, "bank_send".to_string(), tx_args).await {
         Ok(resp) if resp.success => vec![Content::text(format!(
-            "Transfer sent: {} to {}\nTx hash: {}",
+            "Transfer sent: {} to {}\nTx hash: {}{}",
             amount,
             to_address,
-            resp.tx_hash.unwrap_or_else(|| "pending".to_string())
+            resp.tx_hash.unwrap_or_else(|| "pending".to_string()),
+            approval_surface("transfer", 1, to_address, "irreversible (funds leave wallet)", amount)
         ))],
         Ok(resp) => vec![Content::text(format!(
             "Transfer failed: {}",
@@ -659,6 +595,96 @@ async fn action_deploy(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
     }
 }
 
+async fn action_raid(
+    app_handle: &tauri::AppHandle,
+    registry: &Arc<TaskRegistry>,
+    args: &Value,
+) -> Vec<Content> {
+    let target_id = args
+        .get("target_id")
+        .or_else(|| args.get("planet_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if target_id.is_empty() {
+        return vec![Content::text(
+            "Error: target_id (the planet to raid, e.g. '2-7') required.",
+        )];
+    }
+
+    let (fleet_id, block_height, difficulty_target) = {
+        let gs = GAME_STATE.read().unwrap();
+        let fleet_id = gs.fleet_id.clone().unwrap_or_default();
+        let difficulty = gs.get_difficulty_for_struct(&fleet_id, "RAID").unwrap_or(700);
+        (fleet_id, gs.current_block_height, difficulty)
+    };
+    if fleet_id.is_empty() {
+        return vec![Content::text("Error: No fleet found for this player.")];
+    }
+    if block_height == 0 {
+        return vec![Content::text(
+            "Error: gameState not synced yet (block height 0). Wait a few seconds and retry.",
+        )];
+    }
+
+    // Start the RAID hash task. The completion tx (planet-raid-complete) is
+    // submitted automatically when the proof is found, like mine/refine.
+    let task_params = TaskParams::for_raid(&fleet_id, target_id, block_height, difficulty_target);
+    match hasher::start_hash_task_core(task_params, app_handle.clone(), registry) {
+        Ok(()) => {
+            let gpu = hasher::ensure_gpu_init();
+            let engine = if gpu { "GPU" } else { "CPU" };
+            vec![Content::text(format!(
+                "Raid started: fleet {} → planet {} using {} (difficulty {}, block {}).\nReminder: a raid requires your fleet to be AWAY from its home planet with the Command Ship online. A successful raid seizes ALL of the target's stored ore.\nTrack progress with structs_hash {{ command: \"list\" }}.{}",
+                fleet_id, target_id, engine, difficulty_target, block_height,
+                approval_surface("raid", 1, target_id, "irreversible (seizes ore, provokes defense)", "target's entire stored ore + combat with defenders")
+            ))]
+        }
+        Err(e) => vec![Content::text(format!("Error starting raid hash: {}", e))],
+    }
+}
+
+async fn action_update_primary_reactor(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
+    let reactor_id = args
+        .get("reactor_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if reactor_id.is_empty() {
+        return vec![Content::text(
+            "Error: reactor_id required (the reactor to set as the guild's primary, e.g. '3-2').",
+        )];
+    }
+
+    let guild_id = {
+        let gs = GAME_STATE.read().unwrap();
+        gs.guild_id.clone().unwrap_or_default()
+    };
+    if guild_id.is_empty() {
+        return vec![Content::text(
+            "Error: you are not in a guild (no guild_id in gameState). This action requires guild admin permission.",
+        )];
+    }
+
+    let tx_args = json!({
+        "action_type": "guild_update_primary_reactor",
+        "guild_id": guild_id,
+        "reactor_id": reactor_id,
+    });
+
+    match tx_queue::submit_tx(app_handle, "guild_update_primary_reactor".to_string(), tx_args).await {
+        Ok(resp) if resp.success => vec![Content::text(format!(
+            "Guild {} primary reactor updated to {}.\nTx hash: {}",
+            guild_id,
+            reactor_id,
+            resp.tx_hash.unwrap_or_else(|| "pending".to_string())
+        ))],
+        Ok(resp) => vec![Content::text(format!(
+            "Update primary reactor failed: {}",
+            translate_error(&resp.error.unwrap_or_else(|| "unknown error".to_string()))
+        ))],
+        Err(e) => vec![Content::text(format!("Error: {}", e))],
+    }
+}
+
 async fn action_simple(
     app_handle: &tauri::AppHandle,
     action_type: &str,
@@ -696,6 +722,16 @@ async fn action_simple(
         ))],
         Err(e) => vec![Content::text(format!("Error: {}", e))],
     }
+}
+
+/// A compact consent surface for higher-impact (Tier 1+) actions. Returned in
+/// the response so the agent/desktop app can present the v1.10 "Approval Block"
+/// (action, tier, target, reversibility, blast radius) at the point of action.
+fn approval_surface(action: &str, tier: u8, target: &str, reversibility: &str, blast_radius: &str) -> String {
+    format!(
+        "\n[Approval surface] action={} · tier={} · target={} · reversibility={} · blast_radius={}\n",
+        action, tier, target, reversibility, blast_radius
+    )
 }
 
 /// Required charge for an action against a given struct type. Reads the cost

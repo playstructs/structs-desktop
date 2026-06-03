@@ -30,6 +30,21 @@ pub struct PolicyEvent {
     pub timestamp: f64,
 }
 
+/// A refinery the auto_refine policy wants to start a REFINE task on.
+#[derive(Debug, Clone)]
+pub struct AutoRefine {
+    pub struct_id: String,
+    pub difficulty_target: u64,
+    pub block_height: u64,
+}
+
+/// Result of evaluating hash-completion policies: events to log plus an optional
+/// auto-refine request for the caller to launch.
+pub struct HashCompletionOutcome {
+    pub events: Vec<PolicyEvent>,
+    pub auto_refine: Option<AutoRefine>,
+}
+
 /// Snapshot of state for delta tracking.
 #[derive(Debug, Clone, Default)]
 pub struct StateSnapshot {
@@ -255,51 +270,73 @@ impl PolicyEngine {
 
     /// Evaluate policies triggered by hash task completion.
     /// Called from game_state::notify_hash_complete.
+    ///
+    /// Returns the events plus, when `auto_refine` should fire, the refinery to
+    /// start a REFINE task on. The caller (a Tauri command) performs the actual
+    /// task launch since it holds the AppHandle + TaskRegistry — keeping the lock
+    /// scope here minimal and the engine free of UI dependencies.
     pub fn evaluate_hash_completion(
         &mut self,
         task_type: &str,
         struct_id: &str,
-    ) -> Vec<PolicyEvent> {
+    ) -> HashCompletionOutcome {
         let mut events = vec![];
+        let mut auto_refine: Option<AutoRefine> = None;
         let now = crate::hasher::types::now_millis();
 
         // Auto-refine: when MINE completes, auto-start REFINE
         if task_type == "MINE" && self.is_enabled("auto_refine") {
             let gs = GAME_STATE.read().unwrap();
 
-            // Find the player's Ore Refinery
-            let refinery = gs.structs.iter().find(|(_, s)| {
-                gs.struct_types
-                    .get(&s.struct_type_id.to_string())
-                    .map(|t| t.name.contains("Refinery"))
-                    .unwrap_or(false)
-                    && s.status & 4 != 0 // online
+            // Find an online Ore Refinery owned by the player.
+            let refinery = gs.structs.iter().find_map(|(id, s)| {
+                let t = gs.struct_types.get(&s.struct_type_id.to_string())?;
+                if t.name.contains("Refinery") && s.status & 4 != 0 {
+                    Some((id.clone(), t.ore_refining_difficulty))
+                } else {
+                    None
+                }
             });
 
-            if let Some((refinery_id, _)) = refinery {
-                events.push(PolicyEvent {
-                    policy: "auto_refine".to_string(),
-                    action: "triggered".to_string(),
-                    detail: format!(
-                        "Mining complete on {}. Auto-refine queued for refinery {}.",
-                        struct_id, refinery_id
-                    ),
-                    timestamp: now,
-                });
-                // Note: Actually starting the REFINE hash task requires AppHandle
-                // which we don't have here. The JS side will pick up the completion
-                // via the existing NATS listener and start the refine task.
-                // This log entry confirms the policy would trigger.
-            } else {
-                events.push(PolicyEvent {
-                    policy: "auto_refine".to_string(),
-                    action: "skipped".to_string(),
-                    detail: format!(
-                        "Mining complete on {} but no online Ore Refinery found.",
-                        struct_id
-                    ),
-                    timestamp: now,
-                });
+            match refinery {
+                Some((refinery_id, difficulty)) if gs.stored_ore.unwrap_or(0.0) > 0.0 => {
+                    events.push(PolicyEvent {
+                        policy: "auto_refine".to_string(),
+                        action: "triggered".to_string(),
+                        detail: format!(
+                            "Mining complete on {}. Auto-starting refine on {}.",
+                            struct_id, refinery_id
+                        ),
+                        timestamp: now,
+                    });
+                    auto_refine = Some(AutoRefine {
+                        struct_id: refinery_id,
+                        difficulty_target: difficulty,
+                        block_height: gs.current_block_height,
+                    });
+                }
+                Some((refinery_id, _)) => {
+                    events.push(PolicyEvent {
+                        policy: "auto_refine".to_string(),
+                        action: "skipped".to_string(),
+                        detail: format!(
+                            "Refinery {} is online but there is no stored ore to refine yet.",
+                            refinery_id
+                        ),
+                        timestamp: now,
+                    });
+                }
+                None => {
+                    events.push(PolicyEvent {
+                        policy: "auto_refine".to_string(),
+                        action: "skipped".to_string(),
+                        detail: format!(
+                            "Mining complete on {} but no online Ore Refinery found.",
+                            struct_id
+                        ),
+                        timestamp: now,
+                    });
+                }
             }
         }
 
@@ -311,7 +348,7 @@ impl PolicyEngine {
             }
         }
 
-        events
+        HashCompletionOutcome { events, auto_refine }
     }
 
     pub fn is_enabled(&self, name: &str) -> bool {

@@ -695,6 +695,9 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
         out.push_str(&format!("  {}  — {}\n", id, note));
     }
     out.push_str("\nNote: defender chains are read live from the Guild API.\n");
+    out.push_str(
+        "Combat rules (v0.17.0): the target's defenders fire a counter-attack but take no counter-damage themselves — only the attacker and the original target can be hit by counters. A fleet that is AWAY from its home planet cannot defend planetary structs there, so on-station targets are better protected than they look.\n",
+    );
 
     vec![Content::text(out)]
 }
