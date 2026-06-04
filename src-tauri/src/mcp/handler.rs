@@ -140,7 +140,7 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_policy",
-                "Manage standing orders (automation policies). Commands: 'list' (show all policies + recent events), 'set' (enable/configure a policy), 'remove' (delete a policy), 'log' (view event history). Built-in policies: auto_refine, power_alert, never_build_unsafe, auto_defend, sequence_retry.",
+                "Manage standing orders (automation policies). Commands: 'list' (show all policies + recent events), 'set' (enable/configure a policy), 'remove' (delete a policy), 'log' (view event history). Built-in policies: auto_refine, power_alert, agent_ui (master toggle for agent-driven UI).",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -150,6 +150,19 @@ impl StructsMcpHandler {
                         "config": { "type": "object", "description": "Policy-specific config (for set). e.g., {threshold_pct: 80} for power_alert." }
                     },
                     "required": ["command"]
+                })),
+            ),
+            Tool::new(
+                "structs_ui",
+                "Drive the human player's screen for co-op play (the human and you share one session). mode 'notify' shows a surface and returns immediately; mode 'prompt' shows an interactive surface and BLOCKS until the human chooses, returning their selection. Provide `component` = a spec with a `kind`: open_menu {controller,page,options?} (jump to an existing screen); menu {title,items:[{label,value,hint?}]} (a pick-list — prompt returns the chosen value); dialogue {title,message,buttons:[{label,value}]}; panel {title,placement?,theme?,body:[...]} (custom side panel); info {title,rows:[{key,value}]}; map_preview {planet_id,defender_id?,attacker_id?} (show another player's map); hud_badge {id,label,value,theme?} (add/update a HUD badge; same id updates, dismiss removes); toast {title,body,level?}; raw_html {title,html} (escape hatch); dismiss {target_id}. UI is display/elicitation only — it cannot sign; act on the human's choice via structs_action. Respects the agent_ui master toggle.",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": { "type": "string", "enum": ["notify", "prompt"], "description": "notify = show-and-return; prompt = block for the human's choice." },
+                        "component": { "type": "object", "description": "Declarative component spec with a `kind` field (see tool description)." },
+                        "timeout_secs": { "type": "number", "description": "prompt only: seconds to wait for the human (default 180, clamped 10–600)." }
+                    },
+                    "required": ["component"]
                 })),
             ),
         ]
@@ -325,6 +338,13 @@ impl ServerHandler for StructsMcpHandler {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
                     tools::policy::execute(params).await
+                }
+                "structs_ui" => {
+                    let params: tools::ui::UiParams =
+                        serde_json::from_value(args).map_err(|e| {
+                            McpError::invalid_params(format!("Invalid params: {}", e), None)
+                        })?;
+                    tools::ui::execute(&self.app_handle, params).await
                 }
                 _ => vec![Content::text(format!("Unknown tool: {}", name))],
             };

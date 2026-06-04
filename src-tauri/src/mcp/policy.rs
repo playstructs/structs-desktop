@@ -107,6 +107,9 @@ impl PolicyEngine {
         let defaults = vec![
             ("auto_refine", true, serde_json::json!({})),
             ("power_alert", true, serde_json::json!({"threshold_pct": 80})),
+            // Master toggle for agent-driven UI. Enabled by default; the human can
+            // turn it off via `structs_policy set agent_ui false`.
+            ("agent_ui", true, serde_json::json!({})),
         ];
 
         for (name, default_enabled, default_config) in defaults {

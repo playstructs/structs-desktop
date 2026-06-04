@@ -43,6 +43,7 @@ fn main() {
             mcp::config::get_mcp_token,
             mcp::config::set_mcp_port,
             mcp::tx_queue::mcp_transaction_response,
+            mcp::ui_bridge::mcp_ui_response,
             mcp::event_buffer::push_game_event,
             game_state::get_sync_interval,
             game_state::notify_hash_complete,

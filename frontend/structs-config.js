@@ -1659,6 +1659,237 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     console.info('[Structs Debug] Debug tab injection enabled');
   })();
 
+  // ── Agent-driven UI directives (co-op play) ─────────────────────────────
+  // Receives 'mcp_ui_directive' events from the MCP/policy engine and renders
+  // them on the human's screen, reusing the SUI house style. Interactive
+  // ('prompt') surfaces send the human's choice back via 'mcp_ui_response',
+  // mirroring the transaction bridge. UI is display/elicitation only — it never
+  // signs; any chosen action flows back through the agent + tx bridge.
+  (function setupAgentUiDirectives() {
+    if (!window.__TAURI__ || !window.__TAURI__.event) return;
+
+    var TAURI = window.__TAURI__;
+    var panels = new Map();      // directive_id -> { root, mode }
+    var queue = [];              // pending interactive directives (no focus-hijack)
+    var activeId = null;         // currently-open interactive surface
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
+    function respond(directiveId, value, cancelled) {
+      TAURI.core.invoke('mcp_ui_response', {
+        response: { directive_id: directiveId, value: value == null ? null : value, cancelled: !!cancelled }
+      }).catch(function (e) { console.warn('[Agent UI] response failed:', e); });
+    }
+
+    // One-time CSS: the "⚡ Agent" marker + overlay positioning. Visual styling
+    // leans on the global SUI classes; this only adds layout + attribution.
+    (function injectCss() {
+      if (document.getElementById('agent-ui-style')) return;
+      var css =
+        '.agent-ui-mark{display:inline-block;font-size:11px;font-weight:700;opacity:.85;margin-left:6px;padding:1px 6px;border-radius:8px;background:rgba(120,180,255,.18);color:#9ecbff;vertical-align:middle}' +
+        '.agent-ui-overlay{position:fixed;inset:0;z-index:99999;display:flex;justify-content:flex-end;background:rgba(0,0,0,.35)}' +
+        '.agent-ui-overlay.agent-ui-center{align-items:center;justify-content:center}' +
+        '.agent-ui-surface{max-width:420px;width:90%;max-height:90vh;overflow:auto;margin:0;box-shadow:0 0 40px rgba(0,0,0,.5)}' +
+        '.agent-ui-row{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.07)}' +
+        '.agent-ui-row .k{opacity:.7}' +
+        '.agent-ui-item{display:block;width:100%;text-align:left;margin:6px 0}' +
+        '.agent-ui-item small{display:block;opacity:.65;font-weight:400}' +
+        '.agent-ui-toaststack{position:fixed;right:16px;bottom:16px;z-index:100000;display:flex;flex-direction:column;gap:8px;max-width:360px}' +
+        '.agent-ui-toast{padding:10px 12px;border-radius:8px;background:#1b2233;color:#dfe7f5;border-left:4px solid #5b8def;box-shadow:0 4px 16px rgba(0,0,0,.4);font-size:13px}' +
+        '.agent-ui-toast.level-warning{border-left-color:#e0a93b}' +
+        '.agent-ui-toast.level-error{border-left-color:#e05b5b}' +
+        '.agent-ui-badge{margin:2px;padding:3px 8px;border-radius:8px;font-size:12px;background:rgba(120,180,255,.15);color:#9ecbff;display:inline-flex;gap:6px;align-items:center}' +
+        '.agent-ui-badge.theme-enemy{background:rgba(224,91,91,.18);color:#ffb3b3}' +
+        '.agent-ui-badge.theme-player{background:rgba(94,200,140,.18);color:#9ff0bf}';
+      var st = document.createElement('style');
+      st.id = 'agent-ui-style';
+      st.textContent = css;
+      document.head.appendChild(st);
+    })();
+
+    // ── Toasts (notify) ──
+    function toastStack() {
+      var s = document.getElementById('agent-ui-toaststack');
+      if (!s) { s = document.createElement('div'); s.id = 'agent-ui-toaststack'; document.body.appendChild(s); }
+      return s;
+    }
+    function showToast(c) {
+      var el = document.createElement('div');
+      el.className = 'agent-ui-toast level-' + (c.level || 'info');
+      el.innerHTML = '<strong>' + esc(c.title || 'Agent') + '</strong> <span class="agent-ui-mark">⚡ Agent</span><br>' + esc(c.body || '');
+      toastStack().appendChild(el);
+      setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 6000);
+    }
+
+    // ── HUD badges (notify; keyed by id, updatable, removable) ──
+    function hudContainer() { return document.getElementById('hud-container') || document.body; }
+    function showHudBadge(c) {
+      if (!c.id) return;
+      var domId = 'agent-badge-' + c.id;
+      var el = document.getElementById(domId);
+      if (!el) {
+        el = document.createElement('span');
+        el.id = domId;
+        hudContainer().appendChild(el);
+      }
+      el.className = 'agent-ui-badge' + (c.theme ? ' theme-' + c.theme : '');
+      el.innerHTML = '<span class="agent-ui-mark">⚡</span>' + esc(c.label || '') + ': ' + esc(c.value || '');
+    }
+    function removeHudBadge(id) {
+      var el = document.getElementById('agent-badge-' + id);
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    }
+
+    // ── Interactive / panel surfaces (notify or prompt) ──
+    function bodyHtml(c, variant) {
+      if (variant === 'raw_html') return c.html || '';
+      if (variant === 'info') {
+        return (c.rows || []).map(function (r) {
+          return '<div class="agent-ui-row"><span class="k">' + esc(r.key) + '</span><span>' + esc(r.value) + '</span></div>';
+        }).join('');
+      }
+      if (variant === 'menu') {
+        return (c.items || []).map(function (it, i) {
+          return '<button class="sui-panel-btn agent-ui-item" data-idx="' + i + '">' + esc(it.label) +
+            (it.hint ? '<small>' + esc(it.hint) + '</small>' : '') + '</button>';
+        }).join('');
+      }
+      // generic panel: render the small element vocabulary
+      return (c.body || []).map(function (el) {
+        switch (el.type) {
+          case 'text': return '<p>' + esc(el.text) + '</p>';
+          case 'divider': return '<hr>';
+          case 'rows': return (el.rows || []).map(function (r) {
+            return '<div class="agent-ui-row"><span class="k">' + esc(r.key) + '</span><span>' + esc(r.value) + '</span></div>';
+          }).join('');
+          case 'list': return '<ul>' + (el.items || []).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>';
+          case 'button': return '<button class="sui-panel-btn agent-ui-item" data-value="' + esc(el.value) + '">' + esc(el.label) + '</button>';
+          default: return '';
+        }
+      }).join('');
+    }
+
+    function closePanel(directiveId, value, cancelled) {
+      var p = panels.get(directiveId);
+      if (!p) return;
+      if (p.root && p.root.parentNode) p.root.parentNode.removeChild(p.root);
+      panels.delete(directiveId);
+      if (p.mode === 'prompt') respond(directiveId, value, cancelled);
+      if (activeId === directiveId) {
+        activeId = null;
+        if (queue.length) renderDirective(queue.shift()); // serialize prompts — no focus-hijack
+      }
+    }
+
+    function showSurface(d, variant) {
+      var c = d.component || {};
+      var isPrompt = d.mode === 'prompt';
+      var centered = (variant === 'dialogue');
+
+      // No focus-hijack: queue interactive surfaces while one is open.
+      if (isPrompt && activeId && activeId !== d.directive_id) { queue.push(d); return; }
+
+      var overlay = document.createElement('div');
+      overlay.className = 'agent-ui-overlay' + (centered ? ' agent-ui-center' : '');
+      var title = esc(c.title || (variant === 'dialogue' ? 'Agent' : 'Agent'));
+      var inner = variant === 'dialogue'
+        ? '<p>' + esc(c.message || '') + '</p>' +
+          '<div class="agent-ui-btns">' + (c.buttons || []).map(function (b, i) {
+            return '<button class="sui-panel-btn agent-ui-item" data-idx="' + i + '">' + esc(b.label) + '</button>';
+          }).join('') + '</div>'
+        : bodyHtml(c, variant);
+
+      overlay.innerHTML =
+        '<div class="sui-panel sui-offcanvas sui-theme-' + esc(c.theme || 'neutral') + ' agent-ui-surface">' +
+          '<div class="sui-offcanvas-header sui-screen-nav-item">' + title + ' <span class="agent-ui-mark">⚡ Agent</span>' +
+            '<a class="sui-screen-nav-close agent-ui-close" href="javascript:void(0)">✕</a></div>' +
+          '<div class="sui-offcanvas-body">' + inner + '</div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+      panels.set(d.directive_id, { root: overlay, mode: d.mode });
+      if (isPrompt) activeId = d.directive_id;
+
+      // Close affordances
+      overlay.querySelector('.agent-ui-close').addEventListener('click', function () {
+        closePanel(d.directive_id, null, true);
+      });
+      overlay.addEventListener('click', function (ev) {
+        if (ev.target === overlay) closePanel(d.directive_id, null, true);
+      });
+
+      // Wire interactive elements → resolve with their value
+      if (variant === 'menu') {
+        overlay.querySelectorAll('.agent-ui-item').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var it = (c.items || [])[parseInt(btn.getAttribute('data-idx'), 10)];
+            closePanel(d.directive_id, it ? it.value : null, false);
+          });
+        });
+      } else if (variant === 'dialogue') {
+        overlay.querySelectorAll('.agent-ui-item').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var b = (c.buttons || [])[parseInt(btn.getAttribute('data-idx'), 10)];
+            closePanel(d.directive_id, b ? b.value : null, false);
+          });
+        });
+      } else {
+        overlay.querySelectorAll('.agent-ui-item[data-value]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            closePanel(d.directive_id, btn.getAttribute('data-value'), false);
+          });
+        });
+      }
+    }
+
+    // ── Façade-backed kinds (need webapp module-scoped singletons) ──
+    function facade() { return window.__STRUCTS_AGENT_UI__ || null; }
+    function facadeKind(d, fnName, arg) {
+      var f = facade();
+      if (f && typeof f[fnName] === 'function') {
+        try { f[fnName](arg); }
+        catch (e) { console.warn('[Agent UI] facade.' + fnName + ' failed:', e); }
+        if (d.mode === 'prompt') respond(d.directive_id, { ok: true }, false);
+      } else {
+        console.warn('[Agent UI] ' + d.component.kind + ' requires the webapp façade (window.__STRUCTS_AGENT_UI__).');
+        if (d.mode === 'prompt') respond(d.directive_id, null, true);
+      }
+    }
+
+    function renderDirective(d) {
+      var c = (d && d.component) || {};
+      switch (c.kind) {
+        case 'toast': return showToast(c);
+        case 'hud_badge': return showHudBadge(c);
+        case 'dismiss':
+          if (c.target_id) { removeHudBadge(c.target_id); closePanel(c.target_id, null, true); }
+          return;
+        case 'menu': return showSurface(d, 'menu');
+        case 'dialogue': return showSurface(d, 'dialogue');
+        case 'info': return showSurface(d, 'info');
+        case 'panel': return showSurface(d, 'panel');
+        case 'raw_html': return showSurface(d, 'raw_html');
+        case 'open_menu': return facadeKind(d, 'openMenu', c);
+        case 'map_preview': return facadeKind(d, 'showPreview', c);
+        default: console.warn('[Agent UI] unknown directive kind:', c.kind);
+      }
+    }
+
+    TAURI.event.listen('mcp_ui_directive', function (event) {
+      var d = event.payload;
+      try { renderDirective(d); }
+      catch (e) {
+        console.error('[Agent UI] render error:', e);
+        if (d && d.mode === 'prompt') respond(d.directive_id, null, true);
+      }
+    });
+
+    console.info('[Agent UI] directive renderer enabled');
+  })();
+
 } else if (!window.__STRUCTS_CONFIG__) {
   console.info('No guild config injected (running outside Tauri)');
 }

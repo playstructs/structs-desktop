@@ -190,7 +190,10 @@ pub static GAME_STATE: std::sync::LazyLock<RwLock<GameStateSync>> =
 static SYNC_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[tauri::command]
-pub async fn sync_game_state(state: GameStateSync) -> Result<(), String> {
+pub async fn sync_game_state(
+    state: GameStateSync,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
     if !SYNC_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
             "[Structs Sync] Connected: player={:?}, block={}, structs={}, types={}",
@@ -209,24 +212,68 @@ pub async fn sync_game_state(state: GameStateSync) -> Result<(), String> {
         }
     }
 
-    // Evaluate policies on state transition
-    {
+    // Evaluate policies on state transition. Collect events outside the lock so
+    // we can push autonomous UI directives without holding the engine write lock
+    // across an await.
+    let events = {
         use crate::mcp::policy::{StateSnapshot, POLICY_ENGINE};
         let snapshot = StateSnapshot::from_game_state(&state, |_struct_id| false);
-        if let Ok(mut engine) = POLICY_ENGINE.write() {
-            let events = engine.evaluate(snapshot);
-            for event in &events {
-                eprintln!(
-                    "[Structs Policy] {} — {} — {}",
-                    event.policy, event.action, event.detail
-                );
-            }
+        match POLICY_ENGINE.write() {
+            Ok(mut engine) => engine.evaluate(snapshot),
+            Err(_) => Vec::new(),
         }
+    };
+    for event in &events {
+        eprintln!(
+            "[Structs Policy] {} — {} — {}",
+            event.policy, event.action, event.detail
+        );
     }
 
-    let mut gs = GAME_STATE.write().map_err(|e| e.to_string())?;
-    *gs = state;
+    {
+        let mut gs = GAME_STATE.write().map_err(|e| e.to_string())?;
+        *gs = state;
+    }
+
+    // Event-driven (autonomous) UI: surface high-signal policy events on the
+    // human's screen the instant they're detected, without waiting for the
+    // agent's next turn. notify-only; respects the agent_ui master toggle and
+    // rate limiter inside show_ui.
+    push_event_driven_ui(&app_handle, &events).await;
+
     Ok(())
+}
+
+/// Push autonomous `notify` directives for high-signal policy events.
+async fn push_event_driven_ui(
+    app_handle: &tauri::AppHandle,
+    events: &[crate::mcp::policy::PolicyEvent],
+) {
+    use crate::mcp::ui_bridge::show_ui;
+    use serde_json::json;
+    for e in events {
+        let component = match (e.policy.as_str(), e.action.as_str()) {
+            ("combat_mode", "activated") => json!({
+                "kind": "hud_badge",
+                "id": "agent-threat",
+                "label": "⚡ Threat",
+                "value": "Combat active",
+                "theme": "enemy"
+            }),
+            ("combat_mode", "deactivated") => json!({
+                "kind": "dismiss",
+                "target_id": "agent-threat"
+            }),
+            ("info", "struct_destroyed") => json!({
+                "kind": "toast",
+                "title": "⚡ Agent alert",
+                "body": e.detail,
+                "level": "error"
+            }),
+            _ => continue,
+        };
+        let _ = show_ui(app_handle, "notify", component, None).await;
+    }
 }
 
 // ── Sync Interval Control ──
