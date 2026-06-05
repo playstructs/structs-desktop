@@ -1370,6 +1370,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div id="debug-engine">' + row('Status', 'Loading...') + '</div>';
       html += '</div></div>';
 
+      // Analytics
+      html += '<div class="sui-data-card">';
+      html += '<div class="sui-data-card-header sui-text-header">Analytics</div>';
+      html += '<div class="sui-data-card-body">';
+      html += '<div id="debug-analytics">' + row('Status', 'Loading...') + '</div>';
+      html += '</div></div>';
+
       // Policies
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-header sui-text-header">Policies</div>';
@@ -1592,6 +1599,71 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             return;
           }
           refreshHashEngine();
+        }, 2000);
+
+        // ── Analytics diagnostic ──
+        // Verifies the GA snippet loaded and lets the user fire a test event
+        // they can then look for in GA Admin → Realtime → DebugView.
+        function refreshAnalytics() {
+          var el = document.getElementById('debug-analytics');
+          if (!el) return;
+          var gtagFn = typeof window.gtag === 'function';
+          var libLoaded = !!window.google_tag_manager;
+          var dlSize = (window.dataLayer && window.dataLayer.length) || 0;
+          var sentCount = window.__gaSentCount || 0;
+
+          var loadedLabel = libLoaded
+            ? '<span style="color:var(--accent-primary);">Loaded</span>'
+            : (gtagFn
+                ? '<span style="color:var(--text-hint);">Loading…</span>'
+                : '<span style="color:var(--accent-warning, #d66);">Not loaded (script blocked?)</span>');
+
+          var html = '';
+          html += row('Measurement ID', 'G-C5QXN9TH5M');
+          html += row('gtag.js', loadedLabel);
+          html += row('dataLayer entries', String(dlSize));
+          html += row('Test events sent', String(sentCount));
+          html += row('Action',
+            '<a id="debug-ga-test" href="javascript:void(0)" ' +
+            'style="padding:2px 12px; border:1px solid var(--accent-primary); ' +
+            'color:var(--accent-primary); text-decoration:none; border-radius:2px; font-size:0.9em;">' +
+            'Send test event</a>');
+          html += row('View in GA',
+            '<span style="color:var(--text-hint); font-size:0.85em;">' +
+            'Reports → Realtime (30-60s delay) — filter by app_name=Structs Desktop ' +
+            'or page_location=/desktop/' +
+            '</span>');
+          el.innerHTML = html;
+
+          var btn = document.getElementById('debug-ga-test');
+          if (btn) {
+            btn.addEventListener('click', function() {
+              if (typeof window.gtag !== 'function') {
+                console.warn('[Structs Debug] gtag not loaded — test event NOT sent');
+                btn.textContent = 'gtag missing';
+                return;
+              }
+              window.gtag('event', 'debug_panel_test', {
+                source: 'debug_panel',
+                ts: Date.now()
+              });
+              window.__gaSentCount = (window.__gaSentCount || 0) + 1;
+              console.info('[Structs GA] sent debug_panel_test event (#' +
+                window.__gaSentCount + ')');
+              btn.textContent = 'Sent!';
+              setTimeout(function() { btn.textContent = 'Send test event'; refreshAnalytics(); }, 1200);
+            });
+          }
+        }
+        refreshAnalytics();
+        // Refresh on the same 2s cadence so dataLayer / library-loaded status
+        // updates live as the page warms up.
+        var gaTick = setInterval(function() {
+          if (!debugActive || !document.getElementById('debug-analytics')) {
+            clearInterval(gaTick);
+            return;
+          }
+          refreshAnalytics();
         }, 2000);
 
         // Load policies

@@ -15,18 +15,36 @@
         <link rel="stylesheet" href="css/main.css">
 
         <!-- Google Analytics (GA4) — same property as playstructs.com (property id 357291324, web stream G-C5QXN9TH5M).
-             `app_name` and `app_version` tag the stream as desktop traffic so it can be filtered separately in GA. -->
+             `app_name` + `app_version` tag the stream as desktop traffic so it can be filtered from website traffic.
+             `page_location` + `page_title` override the noisy `tauri://localhost/index.html` URL the webview would
+             otherwise report, so sessions appear in reports under a clean canonical identifier. -->
         <script async src="https://www.googletagmanager.com/gtag/js?id=G-C5QXN9TH5M"></script>
         <script>
             window.dataLayer = window.dataLayer || [];
             function gtag(){dataLayer.push(arguments);}
+            window.gtag = gtag;
             gtag('js', new Date());
             gtag('config', 'G-C5QXN9TH5M', {
                 app_name: 'Structs Desktop',
                 app_version: '0.1.1',
                 anonymize_ip: true,
-                transport_type: 'beacon'
+                page_location: 'https://playstructs.com/desktop/',
+                page_title: 'Structs Desktop',
+                send_page_view: true
             });
+            // Diagnostic marker the debug panel reads to confirm the script loaded
+            // and to display sent-event counters.
+            window.__gaSentCount = 0;
+            (function() {
+                var ping = function() {
+                    if (window.google_tag_manager) {
+                        console.info('[Structs GA] gtag library loaded, measurement_id=G-C5QXN9TH5M');
+                    } else {
+                        setTimeout(ping, 500);
+                    }
+                };
+                ping();
+            })();
         </script>
     </head>
     <body>
