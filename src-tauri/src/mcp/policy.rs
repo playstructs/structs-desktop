@@ -220,15 +220,48 @@ impl PolicyEngine {
         }
 
         // ── Combat Mode ──
-        // Check event buffer for recent combat events
+        // Check event buffer for recent combat events that actually involve
+        // the logged-in player. NATS streams events for the whole guild (and
+        // sometimes beyond), so a raid on someone else's planet used to flip
+        // combat_mode too — fixed here by filtering on the event subject.
+        //
+        // Subject pattern produced by webapp listeners is `structs.<entity>.<id>`,
+        // e.g. `structs.planet.2-5` for a raid on planet 2-5. We accept the event
+        // only when that id matches one of our owned entities (planet, fleet, or
+        // any struct).
         {
             use crate::mcp::event_buffer;
+            use crate::game_state::GAME_STATE;
+
+            // Snapshot the player's owned-entity IDs once, drop the lock before
+            // the iter below — avoids holding it across get_recent's own lock.
+            let owned: std::collections::HashSet<String> = {
+                let gs = GAME_STATE.read().unwrap();
+                let mut s = std::collections::HashSet::new();
+                if let Some(p) = &gs.planet_id { s.insert(p.clone()); }
+                if let Some(f) = &gs.fleet_id { s.insert(f.clone()); }
+                for sid in gs.structs.keys() { s.insert(sid.clone()); }
+                s
+            };
+
+            let involves_me = |subject: &str| -> bool {
+                // Pattern is "structs.<entity>.<id>" — take whatever is after the
+                // last dot and compare. Defensive against future subject shapes:
+                // also check substring containment as a fallback.
+                if let Some(id) = subject.rsplit('.').next() {
+                    if owned.contains(id) {
+                        return true;
+                    }
+                }
+                owned.iter().any(|id| !id.is_empty() && subject.contains(id))
+            };
+
             let combat_events = event_buffer::get_recent(20, None, None);
             let has_combat = combat_events.iter().any(|e| {
                 matches!(
                     e.category.as_str(),
                     "raid_status" | "struct_attack" | "fleet_arrive"
-                )
+                ) && involves_me(&e.subject)
             });
 
             if has_combat {

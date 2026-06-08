@@ -192,7 +192,9 @@ static SYNC_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 #[tauri::command]
 pub async fn sync_game_state(
     state: GameStateSync,
-    app_handle: tauri::AppHandle,
+    // Kept in the signature for forward-compat; the autonomous push that used
+    // it (see VCS history: push_event_driven_ui) has been removed.
+    _app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     if !SYNC_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
@@ -235,45 +237,13 @@ pub async fn sync_game_state(
         *gs = state;
     }
 
-    // Event-driven (autonomous) UI: surface high-signal policy events on the
-    // human's screen the instant they're detected, without waiting for the
-    // agent's next turn. notify-only; respects the agent_ui master toggle and
-    // rate limiter inside show_ui.
-    push_event_driven_ui(&app_handle, &events).await;
+    // The MCP `show_ui` bridge stays available for agents to call via the
+    // `structs_ui` tool when they want to surface something on the human's
+    // screen. We don't push anything autonomously from policy events — the
+    // webapp already shows combat / struct-destroyed indicators through its
+    // own UI, so duplicating that here is noise.
 
     Ok(())
-}
-
-/// Push autonomous `notify` directives for high-signal policy events.
-async fn push_event_driven_ui(
-    app_handle: &tauri::AppHandle,
-    events: &[crate::mcp::policy::PolicyEvent],
-) {
-    use crate::mcp::ui_bridge::show_ui;
-    use serde_json::json;
-    for e in events {
-        let component = match (e.policy.as_str(), e.action.as_str()) {
-            ("combat_mode", "activated") => json!({
-                "kind": "hud_badge",
-                "id": "agent-threat",
-                "label": "⚡ Threat",
-                "value": "Combat active",
-                "theme": "enemy"
-            }),
-            ("combat_mode", "deactivated") => json!({
-                "kind": "dismiss",
-                "target_id": "agent-threat"
-            }),
-            ("info", "struct_destroyed") => json!({
-                "kind": "toast",
-                "title": "⚡ Agent alert",
-                "body": e.detail,
-                "level": "error"
-            }),
-            _ => continue,
-        };
-        let _ = show_ui(app_handle, "notify", component, None).await;
-    }
 }
 
 // ── Sync Interval Control ──
