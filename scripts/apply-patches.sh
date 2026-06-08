@@ -53,6 +53,22 @@ sed -i.bak "s|const subscription = nc.subscribe(this.subject);|const subscriptio
 # 3. In the message loop: update heartbeat.
 sed -i.bak "s|const messageData = this.getMessageData(message);|const messageData = this.getMessageData(message); this._lastMessageAt = Date.now();|" "$GM"
 
+echo "    Patching SigningClientManager.js (GA transaction events)..."
+# Every queueMsg* helper funnels through queue(msg); each msg carries a typeUrl
+# like '/structs.structs.MsgPlayerSend'. Fire one GA event per queued transaction,
+# named after the transaction (snake_cased, GA4's 40-char cap applied), and carry
+# the exact Msg type + full typeUrl as params. window.gtag is defined in index.html
+# before the bundle loads. Wrapped so analytics can never break a transaction.
+sed -i.bak 's#  async queue(msg) {#  async queue(msg) { try { if (window.gtag \&\& msg \&\& msg.typeUrl) { var __t = msg.typeUrl.split(".").pop(); var __e = __t.replace(/^Msg/, "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().slice(0, 40); window.gtag("event", __e, { tx_type: __t, type_url: msg.typeUrl, event_category: "transaction" }); window.__gaSentCount = (window.__gaSentCount || 0) + 1; } } catch (__gaErr) {}#' \
+  "$BUILD_DIR/js/managers/SigningClientManager.js"
+
+echo "    Patching MenuPageRouter.js (GA menu navigation events)..."
+# Every menu page change funnels through goto(); navigationId++ runs once per
+# navigation. Fire a GA event with the destination controller/page. Skip PREVIEW
+# mode (planet previews aren't user menu navigations). Wrapped defensively.
+sed -i.bak 's#    this.navigationId++;#    this.navigationId++; try { if (window.gtag \&\& this.mode !== MENU_PAGE_ROUTER_MODES.PREVIEW) { window.gtag("event", "menu_page_view", { menu_controller: controllerName, menu_page: pageName, screen_name: controllerName + "/" + pageName, event_category: "navigation" }); window.__gaSentCount = (window.__gaSentCount || 0) + 1; } } catch (__gaErr) {}#' \
+  "$BUILD_DIR/js/framework/MenuPageRouter.js"
+
 # Clean up .bak files
 find "$BUILD_DIR" -name "*.bak" -delete
 
