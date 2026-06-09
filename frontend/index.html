@@ -13,64 +13,6 @@
         <link rel="stylesheet" href="css/structicons.css">
         <link rel="stylesheet" href="css/sui/sui.css">
         <link rel="stylesheet" href="css/main.css">
-
-        <!-- Google Analytics (GA4) — same property as playstructs.com (property id 357291324, web stream G-C5QXN9TH5M).
-             `app_name` + `app_version` tag the stream as desktop traffic so it can be filtered from website traffic.
-             `page_location` + `page_title` override the noisy `tauri://localhost/index.html` URL the webview would
-             otherwise report, so sessions appear in reports under a clean canonical identifier. -->
-        <script async src="https://www.googletagmanager.com/gtag/js?id=G-C5QXN9TH5M"></script>
-        <script>
-            window.dataLayer = window.dataLayer || [];
-            function gtag(){dataLayer.push(arguments);}
-            window.gtag = gtag;
-            gtag('js', new Date());
-            gtag('config', 'G-C5QXN9TH5M', {
-                app_name: 'Structs Desktop',
-                app_version: '0.1.1',
-                anonymize_ip: true,
-                page_location: 'https://playstructs.com/desktop/',
-                page_title: 'Structs Desktop',
-                send_page_view: true
-            });
-
-            // gtag.js can't reliably deliver hits from the tauri://localhost origin
-            // (no cookie/client_id persistence; sendBeacon/fetch dropped or reshaped by
-            // the native fetch proxy). So forward every event to the Rust backend, which
-            // POSTs it via the GA4 Measurement Protocol — see src-tauri/src/analytics.rs.
-            // gtag is still called (dataLayer/diagnostics); MP is the real delivery path.
-            window.__gaMpSent = 0;
-            (function () {
-                var realGtag = window.gtag;
-                window.gtag = function () {
-                    realGtag.apply(this, arguments);
-                    try {
-                        if (arguments[0] === 'event' && window.__TAURI__) {
-                            window.__TAURI__.core.invoke('track_event', {
-                                name: arguments[1],
-                                params: arguments[2] || {}
-                            }).then(function () {
-                                window.__gaMpSent = (window.__gaMpSent || 0) + 1;
-                            }).catch(function (e) {
-                                window.__gaMpLastError = String(e);
-                            });
-                        }
-                    } catch (e) { window.__gaMpLastError = String(e); }
-                };
-            })();
-            // Diagnostic marker the debug panel reads to confirm the script loaded
-            // and to display sent-event counters.
-            window.__gaSentCount = 0;
-            (function() {
-                var ping = function() {
-                    if (window.google_tag_manager) {
-                        console.info('[Structs GA] gtag library loaded, measurement_id=G-C5QXN9TH5M');
-                    } else {
-                        setTimeout(ping, 500);
-                    }
-                };
-                ping();
-            })();
-        </script>
     </head>
     <body>
 

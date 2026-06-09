@@ -1370,11 +1370,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div id="debug-engine">' + row('Status', 'Loading...') + '</div>';
       html += '</div></div>';
 
-      // Analytics
+      // Energy
       html += '<div class="sui-data-card">';
-      html += '<div class="sui-data-card-header sui-text-header">Analytics</div>';
+      html += '<div class="sui-data-card-header sui-text-header">Energy</div>';
       html += '<div class="sui-data-card-body">';
-      html += '<div id="debug-analytics">' + row('Status', 'Loading...') + '</div>';
+      html += '<div id="debug-energy">' + row('Status', 'Loading...') + '</div>';
       html += '</div></div>';
 
       // Policies
@@ -1601,124 +1601,157 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           refreshHashEngine();
         }, 2000);
 
-        // ── Analytics diagnostic ──
-        // Verifies the GA snippet loaded and lets the user fire a test event
-        // they can then look for in GA Admin → Realtime → DebugView.
-        function refreshAnalytics() {
-          var el = document.getElementById('debug-analytics');
-          if (!el) return;
-          var gtagFn = typeof window.gtag === 'function';
-          var libLoaded = !!window.google_tag_manager;
-          var dlSize = (window.dataLayer && window.dataLayer.length) || 0;
-          var sentCount = window.__gaSentCount || 0;
-          var mpSent = window.__gaMpSent || 0;
-          var mpErr = window.__gaMpLastError;
-
-          // Real delivery now happens server-side via the GA4 Measurement Protocol
-          // (src-tauri/src/analytics.rs). Whether it can deliver depends on an API
-          // secret being configured; ask the backend (cached on window between ticks).
-          try {
-            if (window.__TAURI__) {
-              window.__TAURI__.core.invoke('ga_status')
-                .then(function (ok) { window.__gaSecretOk = ok; })
-                .catch(function () { window.__gaSecretOk = undefined; });
+        // ── Energy diagnostic ──
+        // Shows the player's load/capacity from gameState + recent infusions
+        // and allocations fetched from the Guild API. Infusions/allocations
+        // are paginated server-side; we pull page 1 (up to 100 entries each)
+        // which is plenty for a debug surface.
+        function fmtPower(milliwatts) {
+          if (milliwatts == null || isNaN(milliwatts)) return '—';
+          var abs = Math.abs(milliwatts);
+          if (abs >= 1e6) return (milliwatts / 1e6).toFixed(1) + ' KW';
+          if (abs >= 1e3) return (milliwatts / 1e3).toFixed(1) + ' W';
+          return Math.round(milliwatts) + ' mW';
+        }
+        function fmtTimestamp(ts) {
+          if (!ts) return '—';
+          // Postgres "2026-05-07 14:35:21.226052+00" → epoch seconds
+          var d = new Date(typeof ts === 'string' ? ts.replace(' ', 'T') : ts);
+          if (isNaN(d.getTime())) return String(ts);
+          var s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+          if (s < 60) return Math.floor(s) + 's ago';
+          if (s < 3600) return Math.floor(s / 60) + 'm ago';
+          if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+          return Math.floor(s / 86400) + 'd ago';
+        }
+        function listBlock(title, items, formatter, emptyMsg) {
+          var out = '<div style="margin-top:8px; padding:4px 0 4px 10px; border-left:2px solid var(--accent-primary); background:rgba(0,0,0,0.15);">';
+          out += '<div style="color:var(--text-body); font-weight:bold; padding-bottom:4px;">' + title +
+                 (items && items.length ? ' (' + items.length + ')' : '') + '</div>';
+          if (!items || !items.length) {
+            out += row('—', emptyMsg || 'none');
+          } else {
+            for (var i = 0; i < items.length; i++) {
+              out += formatter(items[i]);
             }
-          } catch (e) {}
-          var secretOk = window.__gaSecretOk;
-          var mpLabel = secretOk === true
-            ? '<span style="color:var(--accent-primary);">Configured</span>'
-            : (secretOk === false
-                ? '<span style="color:var(--accent-warning, #d66);">No API secret — telemetry disabled</span>'
-                : '<span style="color:var(--text-hint);">Checking…</span>');
+          }
+          out += '</div>';
+          return out;
+        }
 
-          var loadedLabel = libLoaded
-            ? '<span style="color:var(--accent-primary);">Loaded</span>'
-            : (gtagFn
-                ? '<span style="color:var(--text-hint);">Loading…</span>'
-                : '<span style="color:var(--accent-warning, #d66);">Not loaded (script blocked?)</span>');
+        function refreshEnergy() {
+          var el = document.getElementById('debug-energy');
+          if (!el) return;
+          var gs = window.gameState || {};
+          var kp = gs.keyPlayers && gs.keyPlayers.player;
+          var p = kp && kp.player;
+          var num = function(x) {
+            if (x == null) return null;
+            var n = (typeof x === 'string') ? Number(x) : x;
+            return isFinite(n) ? n : null;
+          };
+
+          // ── Energy stats (sync, from gameState) ──
+          var loadP = p ? num(p.load) : null;
+          var structLoadP = p ? num(p.structs_load) : null;
+          var capacityP = p ? num(p.capacity) : null;
+          var connCapP = p ? num(p.connection_capacity) : null;
+          var totalLoad = (loadP || 0) + (structLoadP || 0);
+          var totalCap = (capacityP || 0) + (connCapP || 0);
+          var margin = totalCap > 0 ? Math.round((totalCap - totalLoad) / totalCap * 100) : 0;
+          var online = totalLoad <= totalCap || totalCap === 0;
 
           var html = '';
-          html += row('Measurement ID', 'G-C5QXN9TH5M');
-          html += row('Delivery (MP)', mpLabel);
-          html += row('MP events delivered', String(mpSent));
-          if (mpErr) {
-            html += row('Last MP error',
-              '<span style="color:var(--accent-warning, #d66); font-size:0.85em;">' +
-              String(mpErr).slice(0, 120) + '</span>');
+          html += row('Status',
+            online ? '<span style="color:var(--accent-primary);">ONLINE</span>'
+                   : '<span style="color:var(--accent-warning, #d66);">OFFLINE</span>',
+            null);
+          html += row('Load (total)', fmtPower(totalLoad) + ' / ' + fmtPower(totalCap) +
+            (totalCap > 0 ? ' (' + margin + '% margin)' : ''));
+          html += row('struct_load_p', fmtPower(structLoadP));
+          html += row('load_p (allocated)', fmtPower(loadP));
+          html += row('capacity_p (personal)', fmtPower(capacityP));
+          html += row('connection_capacity_p (substation)', fmtPower(connCapP));
+          if (p && p.substation_id) {
+            html += row('Substation', String(p.substation_id));
           }
-          html += row('gtag.js', loadedLabel);
-          html += row('dataLayer entries', String(dlSize));
-          html += row('Events fired', String(sentCount));
-          html += row('Action',
-            '<a id="debug-ga-test" href="javascript:void(0)" ' +
-            'style="padding:2px 12px; border:1px solid var(--accent-primary); ' +
-            'color:var(--accent-primary); text-decoration:none; border-radius:2px; font-size:0.9em;">' +
-            'Send test event</a>' +
-            ' <a id="debug-ga-validate" href="javascript:void(0)" ' +
-            'style="padding:2px 12px; margin-left:6px; border:1px solid var(--text-hint); ' +
-            'color:var(--text-hint); text-decoration:none; border-radius:2px; font-size:0.9em;">' +
-            'Validate MP</a>');
-          html += row('View in GA',
-            '<span style="color:var(--text-hint); font-size:0.85em;">' +
-            'Reports → Realtime (30-60s delay) — filter by app_name=Structs Desktop ' +
-            'or page_location=/desktop/' +
-            '</span>');
+
+          // Placeholders that get filled in by the async fetches below.
+          html += '<div id="debug-energy-infusions">' + listBlock('Infusions', null, null, 'loading…') + '</div>';
+          html += '<div id="debug-energy-allocations">' + listBlock('Allocations', null, null, 'loading…') + '</div>';
+
           el.innerHTML = html;
 
-          var btn = document.getElementById('debug-ga-test');
-          if (btn) {
-            btn.addEventListener('click', function() {
-              if (typeof window.gtag !== 'function') {
-                console.warn('[Structs Debug] gtag not loaded — test event NOT sent');
-                btn.textContent = 'gtag missing';
-                return;
-              }
-              window.gtag('event', 'debug_panel_test', {
-                source: 'debug_panel',
-                ts: Date.now()
-              });
-              window.__gaSentCount = (window.__gaSentCount || 0) + 1;
-              console.info('[Structs GA] sent debug_panel_test event (#' +
-                window.__gaSentCount + ')');
-              btn.textContent = 'Sent!';
-              setTimeout(function() { btn.textContent = 'Send test event'; refreshAnalytics(); }, 1200);
-            });
-          }
+          // ── Async fetches: infusions + allocations ──
+          var pid = p && p.id;
+          var addr = gs.signingAccount && gs.signingAccount.address;
+          var guildApi = (window.__STRUCTS_CONFIG__ || {}).guildApi;
+          if (!guildApi || !pid) return;
 
-          // Validate MP: POSTs to GA's /debug/mp/collect and surfaces any
-          // validationMessages, so you can confirm the payload is accepted
-          // without waiting on Realtime/DebugView.
-          var vbtn = document.getElementById('debug-ga-validate');
-          if (vbtn) {
-            vbtn.addEventListener('click', function() {
-              if (!window.__TAURI__) { vbtn.textContent = 'No backend'; return; }
-              vbtn.textContent = 'Validating…';
-              window.__TAURI__.core.invoke('track_event_validate', {
-                name: 'debug_panel_test',
-                params: { source: 'debug_panel_validate' }
-              }).then(function(res) {
-                var msgs = [];
-                try { msgs = (JSON.parse(res) || {}).validationMessages || []; } catch (e) {}
-                var ok = msgs.length === 0;
-                console.info('[Structs GA] MP validation:', res);
-                vbtn.textContent = ok ? 'Valid ✓' : ('Invalid: ' + (msgs[0] && msgs[0].description || '?'));
-              }).catch(function(e) {
-                console.warn('[Structs GA] MP validation failed:', e);
-                vbtn.textContent = 'Error: ' + String(e).slice(0, 40);
-              });
-              setTimeout(function() { vbtn.textContent = 'Validate MP'; }, 4000);
+          // Infusions (by player)
+          fetch(guildApi + '/infusion/list/player/' + pid + '/page/1')
+            .then(function(r) { return r.json(); })
+            .then(function(j) {
+              var iEl = document.getElementById('debug-energy-infusions');
+              if (!iEl) return;
+              var rows = (j && j.success && Array.isArray(j.data)) ? j.data : [];
+              iEl.innerHTML = listBlock('Infusions', rows, function(inf) {
+                var amount = inf.amount != null ? fmtPower(num(inf.amount)) : '?';
+                var dest = inf.destination_id || '?';
+                var when = fmtTimestamp(inf.created_at || inf.timestamp);
+                return row(dest, amount + ' · ' + when);
+              }, 'no infusions found');
+            })
+            .catch(function(e) {
+              var iEl = document.getElementById('debug-energy-infusions');
+              if (iEl) iEl.innerHTML = listBlock('Infusions', null, null, 'error: ' + e.message);
             });
+
+          // Allocations (by creator + controller — both reference the wallet
+          // address; merge + dedupe by id since some entries match both).
+          if (addr) {
+            Promise.all([
+              fetch(guildApi + '/allocation/creator/' + addr + '/page/1').then(function(r){ return r.json(); }).catch(function(){ return null; }),
+              fetch(guildApi + '/allocation/controller/' + addr + '/page/1').then(function(r){ return r.json(); }).catch(function(){ return null; })
+            ]).then(function(parts) {
+              var aEl = document.getElementById('debug-energy-allocations');
+              if (!aEl) return;
+              var byId = {};
+              for (var k = 0; k < parts.length; k++) {
+                var part = parts[k];
+                if (part && part.success && Array.isArray(part.data)) {
+                  for (var j = 0; j < part.data.length; j++) {
+                    var a = part.data[j];
+                    var key = a.id != null ? String(a.id) : JSON.stringify(a);
+                    if (!byId[key]) byId[key] = a;
+                  }
+                }
+              }
+              var rows = Object.keys(byId).map(function(k){ return byId[k]; });
+              aEl.innerHTML = listBlock('Allocations', rows, function(al) {
+                var pow = al.power != null ? fmtPower(num(al.power)) : '?';
+                var src = al.source_id || '?';
+                var dst = al.destination_id || '?';
+                var role = (addr && al.creator === addr && al.controller === addr) ? 'own'
+                  : (addr && al.creator === addr) ? 'creator'
+                  : (addr && al.controller === addr) ? 'controller'
+                  : '';
+                return row(src + ' → ' + dst, pow + (role ? ' · ' + role : ''));
+              }, 'no allocations found');
+            });
+          } else {
+            var aEl = document.getElementById('debug-energy-allocations');
+            if (aEl) aEl.innerHTML = listBlock('Allocations', null, null, 'no wallet address');
           }
         }
-        refreshAnalytics();
-        // Refresh on the same 2s cadence so dataLayer / library-loaded status
-        // updates live as the page warms up.
-        var gaTick = setInterval(function() {
-          if (!debugActive || !document.getElementById('debug-analytics')) {
-            clearInterval(gaTick);
+        refreshEnergy();
+        // Refresh on the same 2s cadence as the other live cards.
+        var energyTick = setInterval(function() {
+          if (!debugActive || !document.getElementById('debug-energy')) {
+            clearInterval(energyTick);
             return;
           }
-          refreshAnalytics();
+          refreshEnergy();
         }, 2000);
 
         // Load policies

@@ -1,7 +1,6 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod analytics;
 mod game_state;
 mod guild_config;
 mod hasher;
@@ -54,10 +53,6 @@ fn main() {
             game_state::conn_log,
             hasher::list_hash_tasks,
             mcp::policy::list_policies,
-            analytics::track_event,
-            analytics::track_event_validate,
-            analytics::set_ga_api_secret,
-            analytics::ga_status,
             updater::check_for_update,
             updater::open_url,
             updater::updater_supported,
