@@ -10,7 +10,36 @@ permissions:
   contents: write
 
 jobs:
+  # Create ONE draft release up front so every matrix job uploads into the same
+  # release. Previously each matrix job ran tauri-action with `tagName`, so all
+  # four jobs independently created/looked-up the release for the tag and raced
+  # — producing duplicate drafts and splitting the per-arch artifacts +
+  # latest.json across them (e.g. v0.1.42 shipped x86_64-only, which broke
+  # auto-update for Apple Silicon). A single shared release removes the race.
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.result }}
+    steps:
+      - name: Create draft release
+        id: create-release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = process.env.GITHUB_REF_NAME;
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Structs Desktop ${tag}`,
+              body: 'See the changelog for details.',
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
   build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -109,30 +138,32 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Updater signing — tauri-action builds the updater artifacts and a
-          # signed latest.json (uploaded to the release) when these are set.
+          # Updater signing — tauri-action builds the updater artifacts and
+          # merges this platform's entry into the shared release's latest.json
+          # when these are set.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Structs ${{ github.ref_name }}'
-          releaseBody: 'See the changelog for details.'
-          releaseDraft: true
-          prerelease: false
+          # Upload into the single pre-created release instead of creating one
+          # per job (which is what caused the race).
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
 
-  # Universal macOS binary (combines arm64 + x64)
-  universal-macos:
-    needs: build
-    runs-on: macos-latest
-    name: Universal macOS Binary
-    if: startsWith(github.ref, 'refs/tags/')
+  # Publish (un-draft) the release only after ALL four matrix legs succeed. A
+  # job's `needs` requires every dependency to succeed, and the matrix runs with
+  # fail-fast: false, so if any platform fails to build the release stays a draft
+  # and never reaches users half-complete.
+  publish-release:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
     steps:
-      - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
+      - name: Publish release
+        uses: actions/github-script@v7
         with:
-          pattern: '*-apple-darwin*'
-          merge-multiple: true
-
-      - name: Note
-        run: echo "Universal binary creation would go here — requires lipo to merge arm64 + x64 binaries"
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }},
+              draft: false,
+            });

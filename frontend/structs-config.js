@@ -2130,14 +2130,15 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           };
         }).catch(function (err) {
           cleanup();
-          // No signed artifact yet, signature mismatch, or download failure —
-          // fall back to the manual download page.
-          console.warn('[Structs Update] in-app update failed, opening page:', err);
+          // No signed artifact yet, signature mismatch, unbundled/dev run, or a
+          // download failure. Surface the reason instead of silently bouncing to
+          // the browser, and offer a manual download as the next step.
+          console.error('[Structs Update] in-app update failed:', err);
+          msg.textContent = 'Auto-update failed: ' + (err && err.message ? err.message : err);
           dl.disabled = false;
           dl.style.cursor = 'pointer';
-          dl.textContent = 'Download update';
+          dl.textContent = 'Download from page';
           dl.onclick = openReleasePage;
-          openReleasePage();
         });
       }
 
