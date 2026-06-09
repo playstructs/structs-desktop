@@ -10,6 +10,7 @@ mod macos_keepalive;
 mod mcp;
 mod menu;
 mod notifications;
+mod updater;
 
 fn main() {
     // Windows WebView2 (Chromium) can crash the renderer with an "Out of Memory"
@@ -26,6 +27,8 @@ fn main() {
     );
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .menu(menu::build)
         .invoke_handler(tauri::generate_handler![
             guild_config::get_active_guild_config,
@@ -55,6 +58,11 @@ fn main() {
             analytics::track_event_validate,
             analytics::set_ga_api_secret,
             analytics::ga_status,
+            updater::check_for_update,
+            updater::open_url,
+            updater::updater_supported,
+            updater::download_and_install_update,
+            updater::relaunch_app,
         ])
         .manage(std::sync::Arc::new(hasher::types::TaskRegistry::new()))
         .setup(|app| {

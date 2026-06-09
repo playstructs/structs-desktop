@@ -2017,6 +2017,148 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     console.info('[Agent UI] directive renderer enabled');
   })();
 
+  // ── Update awareness ──
+  // On startup, ask Rust whether a newer GitHub release exists (works on every
+  // platform, no signed artifact required). If so, show a dismissible banner +
+  // a one-time desktop notification. The "Update now" button does an in-app
+  // download with progress, then prompts "Restart to update" so a live session
+  // is never interrupted under the user. Where the self-updater can't install
+  // (Linux .deb), or if no signed artifact is reachable yet, it falls back to
+  // opening the releases page in the browser.
+  (function () {
+    var DISMISS_KEY = 'structs:update-dismissed-version';
+    var TAURI = window.__TAURI__;
+    if (!TAURI) return;
+
+    function alreadyDismissed(version) {
+      try { return window.localStorage.getItem(DISMISS_KEY) === version; }
+      catch (e) { return false; }
+    }
+    function rememberDismissed(version) {
+      try { window.localStorage.setItem(DISMISS_KEY, version); } catch (e) {}
+    }
+
+    function showBanner(info) {
+      if (document.getElementById('structs-update-banner')) return;
+
+      var bar = document.createElement('div');
+      bar.id = 'structs-update-banner';
+      bar.style.cssText = [
+        'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:2147483647',
+        'display:flex', 'align-items:center', 'gap:12px',
+        'padding:8px 14px', 'box-sizing:border-box',
+        'background:#133546', 'color:#fff',
+        'font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+        'box-shadow:0 2px 8px rgba(0,0,0,0.35)'
+      ].join(';');
+
+      var msg = document.createElement('span');
+      msg.style.flex = '1';
+      msg.textContent = 'A new version of Structs (' + info.latest_version +
+        ') is available. You’re on ' + info.current_version + '.';
+
+      var dl = document.createElement('button');
+      dl.textContent = 'Update now';
+      dl.style.cssText = [
+        'cursor:pointer', 'border:none', 'border-radius:4px',
+        'padding:6px 12px', 'font-weight:600',
+        'background:#43CDB6', 'color:#133546'
+      ].join(';');
+
+      function openReleasePage() {
+        TAURI.core.invoke('open_url', { url: info.url })
+          .catch(function (e) { console.warn('[Structs Update] open_url failed:', e); });
+      }
+
+      function startInAppUpdate() {
+        dl.disabled = true;
+        dl.style.cursor = 'default';
+        dl.textContent = 'Downloading… 0%';
+
+        var unlistenProgress = TAURI.event.listen('structs://update-progress', function (e) {
+          var pct = Math.max(0, Math.min(100, Math.round(e.payload || 0)));
+          dl.textContent = 'Downloading… ' + pct + '%';
+        });
+
+        function cleanup() {
+          unlistenProgress.then(function (un) { un(); }).catch(function () {});
+        }
+
+        TAURI.core.invoke('download_and_install_update').then(function () {
+          cleanup();
+          // Staged successfully — let the user choose when to relaunch.
+          dl.disabled = false;
+          dl.style.cursor = 'pointer';
+          dl.textContent = 'Restart to update';
+          dl.onclick = function () {
+            TAURI.core.invoke('relaunch_app').catch(function (err) {
+              console.warn('[Structs Update] relaunch failed:', err);
+            });
+          };
+        }).catch(function (err) {
+          cleanup();
+          // No signed artifact yet, signature mismatch, or download failure —
+          // fall back to the manual download page.
+          console.warn('[Structs Update] in-app update failed, opening page:', err);
+          dl.disabled = false;
+          dl.style.cursor = 'pointer';
+          dl.textContent = 'Download update';
+          dl.onclick = openReleasePage;
+          openReleasePage();
+        });
+      }
+
+      dl.addEventListener('click', function handler() {
+        // Only the first click drives a flow; subsequent behavior is rebound
+        // via dl.onclick above (Restart / open page).
+        dl.removeEventListener('click', handler);
+        TAURI.core.invoke('updater_supported').then(function (supported) {
+          if (supported) startInAppUpdate();
+          else openReleasePage(); // Linux .deb etc.
+        }).catch(function () { openReleasePage(); });
+      });
+
+      var close = document.createElement('button');
+      close.textContent = '✕';
+      close.setAttribute('aria-label', 'Dismiss');
+      close.style.cssText = [
+        'cursor:pointer', 'border:none', 'background:transparent',
+        'color:#fff', 'font-size:15px', 'line-height:1', 'padding:4px 6px'
+      ].join(';');
+      close.addEventListener('click', function () {
+        rememberDismissed(info.latest_version);
+        bar.remove();
+      });
+
+      bar.appendChild(msg);
+      bar.appendChild(dl);
+      bar.appendChild(close);
+      (document.body || document.documentElement).appendChild(bar);
+    }
+
+    function runCheck() {
+      TAURI.core.invoke('check_for_update').then(function (info) {
+        if (!info || !info.available) return;
+        if (alreadyDismissed(info.latest_version)) return;
+        showBanner(info);
+        // One desktop notification per launch, reusing the existing command.
+        TAURI.core.invoke('send_notification', {
+          title: 'Structs update available',
+          body: 'Version ' + info.latest_version + ' is ready to download.'
+        }).catch(function () {});
+      }).catch(function (e) {
+        console.warn('[Structs Update] check failed:', e);
+      });
+    }
+
+    // Defer slightly so the UI and Tauri IPC are settled before we nag.
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      setTimeout(runCheck, 3000);
+    } else {
+      document.addEventListener('DOMContentLoaded', function () { setTimeout(runCheck, 3000); });
+    }
+  })();
+
 } else if (!window.__STRUCTS_CONFIG__) {
   console.info('No guild config injected (running outside Tauri)');
 }
