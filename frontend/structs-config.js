@@ -1662,16 +1662,20 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           var online = totalLoad <= totalCap || totalCap === 0;
 
           var html = '';
+          // Status + refresh button on one row
+          var refreshBtn = '<a id="debug-energy-refresh" href="javascript:void(0)" ' +
+            'style="padding:2px 12px; margin-left:8px; border:1px solid var(--accent-primary); ' +
+            'color:var(--accent-primary); text-decoration:none; border-radius:2px; font-size:0.9em;">' +
+            'Refresh</a>';
           html += row('Status',
-            online ? '<span style="color:var(--accent-primary);">ONLINE</span>'
-                   : '<span style="color:var(--accent-warning, #d66);">OFFLINE</span>',
-            null);
-          html += row('Load (total)', fmtPower(totalLoad) + ' / ' + fmtPower(totalCap) +
+            (online ? '<span style="color:var(--accent-primary);">ONLINE</span>'
+                    : '<span style="color:var(--accent-warning, #d66);">OFFLINE</span>') + refreshBtn);
+          html += row('Total Load', fmtPower(totalLoad) + ' / ' + fmtPower(totalCap) +
             (totalCap > 0 ? ' (' + margin + '% margin)' : ''));
-          html += row('struct_load_p', fmtPower(structLoadP));
-          html += row('load_p (allocated)', fmtPower(loadP));
-          html += row('capacity_p (personal)', fmtPower(capacityP));
-          html += row('connection_capacity_p (substation)', fmtPower(connCapP));
+          html += row('Structs Load', fmtPower(structLoadP));
+          html += row('Allocated Load', fmtPower(loadP));
+          html += row('Personal Capacity', fmtPower(capacityP));
+          html += row('Substation Capacity', fmtPower(connCapP));
           if (p && p.substation_id) {
             html += row('Substation', String(p.substation_id));
           }
@@ -1743,16 +1747,31 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             var aEl = document.getElementById('debug-energy-allocations');
             if (aEl) aEl.innerHTML = listBlock('Allocations', null, null, 'no wallet address');
           }
+
+          // Re-attach the refresh button handler after innerHTML wipe.
+          var rBtn = document.getElementById('debug-energy-refresh');
+          if (rBtn) {
+            rBtn.addEventListener('click', function() {
+              rBtn.textContent = 'Refreshing…';
+              refreshEnergy();
+              setTimeout(function() {
+                var b = document.getElementById('debug-energy-refresh');
+                if (b) b.textContent = 'Refresh';
+              }, 600);
+            });
+          }
         }
         refreshEnergy();
-        // Refresh on the same 2s cadence as the other live cards.
+        // Energy data (especially infusions + allocations via Guild API) doesn't
+        // change quickly — refresh every 5 minutes. Use the in-card Refresh
+        // button for on-demand updates.
         var energyTick = setInterval(function() {
           if (!debugActive || !document.getElementById('debug-energy')) {
             clearInterval(energyTick);
             return;
           }
           refreshEnergy();
-        }, 2000);
+        }, 5 * 60 * 1000);
 
         // Load policies
         window.__TAURI__.core.invoke('list_policies').then(function(data) {
