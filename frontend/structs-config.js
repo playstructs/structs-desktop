@@ -1611,6 +1611,25 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           var libLoaded = !!window.google_tag_manager;
           var dlSize = (window.dataLayer && window.dataLayer.length) || 0;
           var sentCount = window.__gaSentCount || 0;
+          var mpSent = window.__gaMpSent || 0;
+          var mpErr = window.__gaMpLastError;
+
+          // Real delivery now happens server-side via the GA4 Measurement Protocol
+          // (src-tauri/src/analytics.rs). Whether it can deliver depends on an API
+          // secret being configured; ask the backend (cached on window between ticks).
+          try {
+            if (window.__TAURI__) {
+              window.__TAURI__.core.invoke('ga_status')
+                .then(function (ok) { window.__gaSecretOk = ok; })
+                .catch(function () { window.__gaSecretOk = undefined; });
+            }
+          } catch (e) {}
+          var secretOk = window.__gaSecretOk;
+          var mpLabel = secretOk === true
+            ? '<span style="color:var(--accent-primary);">Configured</span>'
+            : (secretOk === false
+                ? '<span style="color:var(--accent-warning, #d66);">No API secret — telemetry disabled</span>'
+                : '<span style="color:var(--text-hint);">Checking…</span>');
 
           var loadedLabel = libLoaded
             ? '<span style="color:var(--accent-primary);">Loaded</span>'
@@ -1620,14 +1639,25 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
           var html = '';
           html += row('Measurement ID', 'G-C5QXN9TH5M');
+          html += row('Delivery (MP)', mpLabel);
+          html += row('MP events delivered', String(mpSent));
+          if (mpErr) {
+            html += row('Last MP error',
+              '<span style="color:var(--accent-warning, #d66); font-size:0.85em;">' +
+              String(mpErr).slice(0, 120) + '</span>');
+          }
           html += row('gtag.js', loadedLabel);
           html += row('dataLayer entries', String(dlSize));
-          html += row('Test events sent', String(sentCount));
+          html += row('Events fired', String(sentCount));
           html += row('Action',
             '<a id="debug-ga-test" href="javascript:void(0)" ' +
             'style="padding:2px 12px; border:1px solid var(--accent-primary); ' +
             'color:var(--accent-primary); text-decoration:none; border-radius:2px; font-size:0.9em;">' +
-            'Send test event</a>');
+            'Send test event</a>' +
+            ' <a id="debug-ga-validate" href="javascript:void(0)" ' +
+            'style="padding:2px 12px; margin-left:6px; border:1px solid var(--text-hint); ' +
+            'color:var(--text-hint); text-decoration:none; border-radius:2px; font-size:0.9em;">' +
+            'Validate MP</a>');
           html += row('View in GA',
             '<span style="color:var(--text-hint); font-size:0.85em;">' +
             'Reports → Realtime (30-60s delay) — filter by app_name=Structs Desktop ' +
@@ -1652,6 +1682,31 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 window.__gaSentCount + ')');
               btn.textContent = 'Sent!';
               setTimeout(function() { btn.textContent = 'Send test event'; refreshAnalytics(); }, 1200);
+            });
+          }
+
+          // Validate MP: POSTs to GA's /debug/mp/collect and surfaces any
+          // validationMessages, so you can confirm the payload is accepted
+          // without waiting on Realtime/DebugView.
+          var vbtn = document.getElementById('debug-ga-validate');
+          if (vbtn) {
+            vbtn.addEventListener('click', function() {
+              if (!window.__TAURI__) { vbtn.textContent = 'No backend'; return; }
+              vbtn.textContent = 'Validating…';
+              window.__TAURI__.core.invoke('track_event_validate', {
+                name: 'debug_panel_test',
+                params: { source: 'debug_panel_validate' }
+              }).then(function(res) {
+                var msgs = [];
+                try { msgs = (JSON.parse(res) || {}).validationMessages || []; } catch (e) {}
+                var ok = msgs.length === 0;
+                console.info('[Structs GA] MP validation:', res);
+                vbtn.textContent = ok ? 'Valid ✓' : ('Invalid: ' + (msgs[0] && msgs[0].description || '?'));
+              }).catch(function(e) {
+                console.warn('[Structs GA] MP validation failed:', e);
+                vbtn.textContent = 'Error: ' + String(e).slice(0, 40);
+              });
+              setTimeout(function() { vbtn.textContent = 'Validate MP'; }, 4000);
             });
           }
         }

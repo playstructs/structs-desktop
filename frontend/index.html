@@ -32,6 +32,31 @@
                 page_title: 'Structs Desktop',
                 send_page_view: true
             });
+
+            // gtag.js can't reliably deliver hits from the tauri://localhost origin
+            // (no cookie/client_id persistence; sendBeacon/fetch dropped or reshaped by
+            // the native fetch proxy). So forward every event to the Rust backend, which
+            // POSTs it via the GA4 Measurement Protocol — see src-tauri/src/analytics.rs.
+            // gtag is still called (dataLayer/diagnostics); MP is the real delivery path.
+            window.__gaMpSent = 0;
+            (function () {
+                var realGtag = window.gtag;
+                window.gtag = function () {
+                    realGtag.apply(this, arguments);
+                    try {
+                        if (arguments[0] === 'event' && window.__TAURI__) {
+                            window.__TAURI__.core.invoke('track_event', {
+                                name: arguments[1],
+                                params: arguments[2] || {}
+                            }).then(function () {
+                                window.__gaMpSent = (window.__gaMpSent || 0) + 1;
+                            }).catch(function (e) {
+                                window.__gaMpLastError = String(e);
+                            });
+                        }
+                    } catch (e) { window.__gaMpLastError = String(e); }
+                };
+            })();
             // Diagnostic marker the debug panel reads to confirm the script loaded
             // and to display sent-event counters.
             window.__gaSentCount = 0;
