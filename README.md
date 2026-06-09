@@ -13,9 +13,12 @@ In the distant future the species of the galaxy are embroiled in a race for Alph
 ## Features
 
 - **GPU Hashing** — Multi-threaded CPU + GPU SHA256 proof-of-work at ~200M hashes/sec via wgpu
-- **MCP Server** — AI agents can play Structs through the Model Context Protocol (7 tools, 4 prompts, compendium resources)
+- **MCP Server** — AI agents can play Structs through the Model Context Protocol (9 tools, 6 prompts, compendium resources)
+- **Perception Layer** — Recon, combat results, a weapon-matrix ruleset, and a damage simulator so agents can see the battlefield and plan attacks without raw DB access
+- **Agent-Driven UI** — Agents can drive the human's screen (menus, map previews, HUD badges, prompts) for human+agent co-op play
+- **Event Feed** — Long-poll stream of game events (raids, attacks, completions) so agents react instead of polling
 - **Native Notifications** — Desktop alerts for raids, fleet movements, mining completion, etc.
-- **Policy Engine** — Standing orders with delta tracking (auto-refine, power alerts, combat mode)
+- **Policy Engine** — Standing orders with delta tracking (auto-refine, power alerts, combat mode, agent-driven UI toggle)
 - **Guild Configuration** — Connect to any guild's infrastructure with stored configs
 - **CORS Proxy** — All API calls routed through Rust to bypass browser CORS restrictions
 - **Pixel-Perfect Rendering** — CSS `zoom` replaces `transform: scale()` for crisp pixel art in WKWebView
@@ -78,7 +81,7 @@ structs-universe/
 │   └── sign.sh               # macOS code signing
 ├── frontend/                 # Built output served by Tauri
 │   ├── index.html            # Static HTML (converted from Twig)
-│   └── structs-config.js     # Config injection, notifications, Worker shim, sync, debug tab
+│   └── structs-config.js     # Config injection, notifications, Worker shim, sync, debug tab, agent-UI renderer, force-resync
 ├── src-tauri/
 │   ├── tauri.conf.json
 │   ├── Cargo.toml
@@ -101,18 +104,24 @@ structs-universe/
 │           ├── handler.rs    # Tool/resource/prompt routing + ServerHandler impl
 │           ├── config.rs     # MCP config persistence (port, token)
 │           ├── cosmos_client.rs  # Typed Cosmos REST API client
+│           ├── guild_api.rs  # Guild REST API client (recon, activity, defenders, stats)
 │           ├── event_buffer.rs   # NATS event ring buffer (1000 events)
 │           ├── policy.rs     # Standing orders / automation engine with delta tracking
 │           ├── tx_queue.rs   # Transaction signing bridge (Rust ↔ JS CosmJS)
+│           ├── ui_bridge.rs  # Agent-driven UI directive bridge (Rust → JS, prompt round-trip)
+│           ├── combat.rs     # Pure combat math for the attack simulator
 │           ├── error_translator.rs  # Chain error → human message
-│           ├── prompts.rs    # 4 built-in agent workflow prompts
+│           ├── prompts.rs    # 6 built-in agent workflow prompts
 │           ├── resources.rs  # Compendium file serving (structs-ai docs)
 │           └── tools/
-│               ├── dashboard.rs  # Player situational awareness
+│               ├── dashboard.rs  # Player situational awareness (charge, HP, slots)
 │               ├── query.rs      # Entity lookup with enrichment
 │               ├── hasher.rs     # Hash task management with ETAs
 │               ├── action.rs     # Game actions with preflight checks
-│               ├── intel.rs      # Strategic intelligence
+│               ├── intel.rs      # Strategic intelligence + recon/ruleset/simulate
+│               ├── events.rs     # Event feed (long-poll over the NATS buffer)
+│               ├── sequence.rs   # Guarded autonomous action chains
+│               ├── ui.rs         # structs_ui tool (drive the human's screen)
 │               ├── policy.rs     # Standing order management
 │               └── format.rs     # Shared formatting utilities
 ├── .mcp.json                 # Claude Code MCP server config
@@ -124,18 +133,21 @@ structs-universe/
 
 ## MCP Server
 
-The app runs an MCP server on `localhost:8420` with bearer token authentication. AI agents interact with the game through 7 tools, 4 prompts, and compendium resources.
+The app runs an MCP server on `localhost:8420` with bearer token authentication. AI agents interact with the game through 9 tools, 6 prompts, and compendium resources.
 
 ### Tools
 
 | Tool | Purpose |
 |------|---------|
-| `structs_dashboard` | Full player overview: power, charge, resources, structs, hash tasks, recent events |
-| `structs_query` | Query any game entity with enriched output (resolved names, decoded flags, formatted units) |
+| `structs_dashboard` | Full player overview: power, charge (with per-action readiness), resources, structs + HP, hash tasks, recent events |
+| `structs_query` | Query any game entity with enriched output (resolved names, decoded flags, 25-bit permission decode, formatted units) |
 | `structs_hash` | Manage proof-of-work tasks with ETAs (list, start, stop, progress) |
-| `structs_action` | Execute game actions with preflight checks (explore, build, mine, attack, defend, etc.) |
-| `structs_intel` | Strategic intelligence (what can I build, power forecast, economy status, timeline) |
-| `structs_policy` | Standing orders (auto_refine, power_alert, never_build_unsafe, auto_defend) |
+| `structs_action` | Execute game actions with preflight checks (explore, build, mine, attack, defend, raid, resync, etc.) |
+| `structs_intel` | Strategic intelligence + perception: `whoami`, `scout`, `valid_targets`, `battle_log`, `ruleset`, `simulate`, `slot_map`, `is_active`, `intents`, power forecast, economy, timeline |
+| `structs_policy` | Standing orders (auto_refine, power_alert, agent_ui, combat orders) |
+| `structs_ui` | Drive the human's screen for co-op play (menus, map previews, HUD badges, prompts) — display/elicitation only, never signs |
+| `structs_events` | Long-poll event feed (raids, attacks, fleet moves, completions) so agents react instead of polling |
+| `structs_sequence` | Guarded autonomous action chains, paced to the charge cooldown, with abort predicates (e.g. CMD-ship HP floor) |
 
 ### Prompts
 
@@ -145,6 +157,8 @@ The app runs an MCP server on `localhost:8420` with bearer token authentication.
 | `structs_game_loop` | One tick: dashboard → assess → plan → execute → verify |
 | `structs_state_assessment` | Deep analysis with risk ratings: power, threats, economy, operations |
 | `structs_combat_planning` | Scout, simulate, recommend attack/wait/abort |
+| `structs_threat_check` | Assess hostile activity using planet history + valid targets |
+| `structs_market_check` | Survey the power-rental market |
 
 ### Resources
 
@@ -227,13 +241,13 @@ Native OS notifications fire for game events via NATS WebSocket interception. Ev
 
 1. Updates `structs-webapp` git submodule to latest
 2. Copies source to temp build directory
-3. Applies 6 sed patches via `apply-patches.sh`:
+3. Applies endpoint/renderer patches via `apply-patches.sh`:
    - GuildAPI.js → configurable API URL
    - index.js (GrassManager) → configurable NATS WebSocket URL
    - SigningClientManager.js → configurable RPC WebSocket URL
+   - Defeat/Victory banner ViewModels → canvas renderer for crisp pixel art
    - index.js → expose gameState to window for Tauri sync
-   - DefeatBannerViewModel.js → canvas renderer for crisp pixel art
-   - VictoryBannerViewModel.js → canvas renderer for crisp pixel art
+   - GrassManager.js → resume-check reconnect + heartbeat (auto-reconnect a stale NATS stream on foreground)
 4. Runs `npm install` + `webpack --mode=production`
 5. Copies webpack output + static assets to `frontend/`
 6. Syncs structs-ai compendium to `~/.config/structs-app/compendium/`
@@ -254,11 +268,13 @@ Standing orders that run automatically on game state transitions:
 |--------|---------|----------|
 | `auto_refine` | ON | Auto-start refine when mining completes |
 | `power_alert` | ON (80%) | Warn when power utilization crosses threshold |
-| `never_build_unsafe` | ON | Block builds that would cause offline |
-| `auto_defend` | OFF | Counter-attack when attacked (ask mode — combat is the exception) |
-| `sequence_retry` | ON (3) | Silent retry for sequence mismatch errors |
+| `agent_ui` | ON | Master toggle for agent-driven UI (`structs_ui`); off = directives dropped |
+| `auto_counterattack` | OFF | Standing order: counter an incoming attacker |
+| `auto_retreat_if_cmd_below` | OFF (HP 4) | Standing order: retreat when Command Ship HP drops below threshold |
+| `auto_rebuild_losses` | OFF | Standing order: rebuild destroyed structs |
+| `rules_of_engagement` | OFF | Human→agent posture / pinned target, read via `structs_intel {query:"intents"}` |
 
-Policies use delta tracking — they compare previous vs current state snapshots to detect transitions (not just current conditions). This prevents double-triggers and missed events.
+`auto_refine` / `power_alert` use delta tracking — they compare previous vs current state snapshots to detect transitions (not just current conditions), preventing double-triggers and missed events. The combat orders and `rules_of_engagement` are **agent-honored standing orders**: the agent reads them via `intents` and acts through `structs_action`/`structs_sequence` — the engine never auto-signs on the player's behalf.
 
 ### Combat Mode
 
@@ -274,6 +290,16 @@ Game actions submitted through MCP flow through a Rust ↔ JS bridge:
 4. CosmJS signs and broadcasts the transaction
 5. JS responds back via `mcp_transaction_response` Tauri command
 6. MCP tool returns the result to the agent
+
+## Agent-Driven UI
+
+For human+agent co-op play, the `structs_ui` tool lets an agent render on the human's screen, mirroring the transaction bridge:
+
+1. Agent calls `structs_ui` with a declarative component spec (`menu`, `dialogue`, `panel`, `info`, `map_preview`, `hud_badge`, `toast`, `open_menu`, `raw_html`)
+2. Rust emits `mcp_ui_directive` to the webview; the renderer in `structs-config.js` builds the surface using the game's own SUI styles
+3. **notify** mode shows-and-returns; **prompt** mode blocks until the human chooses, returning the selection via `mcp_ui_response` (same oneshot pattern as the tx bridge)
+
+Guardrails: every agent-drawn surface carries an "⚡ Agent" marker, the `agent_ui` policy is a master off-switch, and UI directives are **display/elicitation only — they cannot sign**. Any action the human picks still flows through the approval-gated transaction bridge. A `structs_action {action:"resync"}` emits `structs:force-resync` to refresh a stale game state or reconnect the event stream.
 
 ## Debug Tab
 
