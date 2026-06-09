@@ -49,8 +49,9 @@ pub async fn execute(
         "deploy" => action_deploy(app_handle, &params.args).await,
         "raid" => action_raid(app_handle, registry, &params.args).await,
         "update_primary_reactor" => action_update_primary_reactor(app_handle, &params.args).await,
+        "resync" => action_resync(app_handle, &params.args),
         other => vec![Content::text(format!(
-            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor",
+            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, resync",
             other
         ))],
     }
@@ -135,7 +136,7 @@ async fn action_mine(
             if charge < cost {
                 let blocks_needed = gs.blocks_until_charge(cost);
                 return vec![Content::text(format!(
-                    "BLOCKED: Need {} charge to mine, you have {}. Ready in ~{}s (~{} blocks).",
+                    "BLOCKED: Need {} charge to mine, you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
                     cost, charge, blocks_needed * 6, blocks_needed
                 ))];
             }
@@ -207,7 +208,7 @@ async fn action_refine(
             if charge < cost {
                 let blocks_needed = gs.blocks_until_charge(cost);
                 return vec![Content::text(format!(
-                    "BLOCKED: Need {} charge to refine, you have {}. Ready in ~{}s (~{} blocks).",
+                    "BLOCKED: Need {} charge to refine, you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
                     cost, charge, blocks_needed * 6, blocks_needed
                 ))];
             }
@@ -290,7 +291,7 @@ async fn action_build(
         if charge < build_charge_cost {
             let blocks_needed = gs.blocks_until_charge(build_charge_cost);
             return vec![Content::text(format!(
-                "BLOCKED: Need {} charge to build, you have {}. Ready in ~{}s (~{} blocks).",
+                "BLOCKED: Need {} charge to build, you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
                 build_charge_cost, charge, blocks_needed * 6, blocks_needed
             ))];
         }
@@ -375,7 +376,7 @@ async fn action_attack(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
             if charge < cost {
                 let blocks_needed = gs.blocks_until_charge(cost);
                 return vec![Content::text(format!(
-                    "BLOCKED: Need {} charge to attack ({} weapon), you have {}. Ready in ~{}s (~{} blocks).",
+                    "BLOCKED: Need {} charge to attack ({} weapon), you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
                     cost, weapon, charge, blocks_needed * 6, blocks_needed
                 ))];
             }
@@ -410,7 +411,7 @@ async fn action_attack(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
 
     match tx_queue::submit_tx(app_handle, "struct_attack".to_string(), tx_args).await {
         Ok(resp) if resp.success => vec![Content::text(format!(
-            "Attack executed: {} → {} (weapon: {})\nTx hash: {}{}",
+            "Attack submitted: {} → {} (weapon: {})\nTx: {}\nResolves on-chain in a block or two — read the outcome with structs_intel {{query:\"battle_log\"}} or watch it live on structs_events.{}",
             attacker_id,
             target_id,
             weapon,
@@ -685,6 +686,23 @@ async fn action_update_primary_reactor(app_handle: &tauri::AppHandle, args: &Val
     }
 }
 
+/// Force the webview to refresh its game state / reconnect its stream. `hard:true`
+/// triggers a full page reload (nuclear option for a badly stale map); otherwise
+/// it re-runs the sync + grass-resume path. Helps when the app's data layer looks
+/// stale after a slow load.
+fn action_resync(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
+    use tauri::Emitter;
+    let hard = args.get("hard").and_then(|v| v.as_bool()).unwrap_or(false);
+    match app_handle.emit("structs:force-resync", serde_json::json!({ "hard": hard })) {
+        Ok(()) => vec![Content::text(format!(
+            "Resync requested ({}). The app will {}.",
+            if hard { "hard" } else { "soft" },
+            if hard { "reload the page" } else { "re-sync game state and reconnect its event stream" }
+        ))],
+        Err(e) => vec![Content::text(format!("Resync failed to dispatch: {}", e))],
+    }
+}
+
 async fn action_simple(
     app_handle: &tauri::AppHandle,
     action_type: &str,
@@ -773,7 +791,7 @@ fn struct_charge_preflight(struct_id: &str, action: &str, weapon: &str) -> Optio
     if charge < cost {
         let blocks_needed = gs.blocks_until_charge(cost);
         Some(Content::text(format!(
-            "BLOCKED: Need {} charge to {}, you have {}. Ready in ~{}s (~{} blocks).",
+            "BLOCKED: Need {} charge to {}, you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
             cost, action, charge, blocks_needed * 6, blocks_needed
         )))
     } else {
@@ -800,24 +818,7 @@ mod tests {
         StructTypeInfo {
             id: 1,
             name: "Test".to_string(),
-            category: None,
-            build_difficulty: 0,
-            ore_mining_difficulty: 0,
-            ore_refining_difficulty: 0,
-            passive_draw: None,
-            max_health: None,
-            build_charge: None,
-            activate_charge: None,
-            move_charge: None,
-            defend_change_charge: None,
-            stealth_activate_charge: None,
-            ore_mining_charge: None,
-            ore_refining_charge: None,
-            primary_weapon_charge: None,
-            secondary_weapon_charge: None,
-            possible_ambit: None,
-            primary_weapon_ambits: None,
-            secondary_weapon_ambits: None,
+            ..Default::default()
         }
     }
 

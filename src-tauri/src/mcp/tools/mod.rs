@@ -1,8 +1,10 @@
 pub mod action;
 pub mod dashboard;
+pub mod events;
 pub mod format;
 pub mod hasher;
 pub mod intel;
 pub mod policy;
 pub mod query;
+pub mod sequence;
 pub mod ui;

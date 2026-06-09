@@ -1,3 +1,4 @@
+pub mod combat;
 pub mod config;
 pub mod cosmos_client;
 pub mod error_translator;

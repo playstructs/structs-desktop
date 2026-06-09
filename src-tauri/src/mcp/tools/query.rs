@@ -187,6 +187,14 @@ fn enrich_response(value: &mut Value) {
                             "type_name".to_string(),
                             Value::String(st.name.clone()),
                         ));
+                        // Surface max HP alongside the (already-present) health field
+                        // so a struct query shows current/max at a glance.
+                        if let Some(max) = st.max_health {
+                            additions.push((
+                                "health_max".to_string(),
+                                Value::Number(serde_json::Number::from(max as u64)),
+                            ));
+                        }
                     }
                 }
             }

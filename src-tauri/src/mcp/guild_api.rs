@@ -248,6 +248,15 @@ impl GuildApiClient {
         .await
     }
 
+    // -- player activity (is-online / last-action recency) --
+    pub async fn player_last_action_block(&self, player_id: &str) -> Result<Value, String> {
+        self.get(&format!(
+            "/api/player/{}/action/last/block/height",
+            player_id
+        ))
+        .await
+    }
+
     // -- grid --
     pub async fn grid_by_object(
         &self,

@@ -47,11 +47,11 @@ impl StructsMcpHandler {
                         "action": {
                             "type": "string",
                             "description": "Action to perform",
-                            "enum": ["explore", "build", "mine", "refine", "attack", "defend", "activate", "deactivate", "move_fleet", "transfer", "deploy", "raid", "update_primary_reactor"]
+                            "enum": ["explore", "build", "mine", "refine", "attack", "defend", "activate", "deactivate", "move_fleet", "transfer", "deploy", "raid", "update_primary_reactor", "resync"]
                         },
                         "args": {
                             "type": "object",
-                            "description": "Action-specific args. explore: {name?}. build: {struct_type, ambit, slot}. mine/refine: {struct_id}. attack: {attacker_id, target_id, weapon?}. defend: {defender_id, protected_id}. move_fleet: {destination}. transfer: {to, amount}. deploy: {struct_id, ambit, slot}. raid: {target_id}. update_primary_reactor: {reactor_id}."
+                            "description": "Action-specific args. explore: {name?}. build: {struct_type, ambit, slot}. mine/refine: {struct_id}. attack: {attacker_id, target_id, weapon?}. defend: {defender_id, protected_id}. move_fleet: {destination}. transfer: {to, amount}. deploy: {struct_id, ambit, slot}. raid: {target_id}. update_primary_reactor: {reactor_id}. resync: {hard?} (refresh stale game state / reconnect stream)."
                         }
                     },
                     "required": ["action"]
@@ -119,20 +119,20 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_intel",
-                "Strategic intelligence. Local-only queries (no API): 'what_can_i_build', 'economy_status', 'plan_timeline'. Guild-API-backed (degrade gracefully if offline / not signed in): 'power_forecast' (snapshot + trend), 'planet_history', 'valid_targets', 'scout', 'market', 'metric_trend'.",
+                "Strategic intelligence. Local-only queries (no API): 'whoami' (your player id + sync status), 'what_can_i_build', 'economy_status', 'plan_timeline'. Guild-API-backed (degrade gracefully if offline / not signed in): 'power_forecast' (snapshot + trend), 'planet_history', 'valid_targets', 'scout', 'market', 'metric_trend'.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
                             "enum": [
-                                "what_can_i_build", "power_forecast", "economy_status", "plan_timeline",
-                                "planet_history", "valid_targets", "scout", "market", "metric_trend"
+                                "whoami", "intents", "ruleset", "simulate", "what_can_i_build", "power_forecast", "economy_status", "plan_timeline",
+                                "planet_history", "valid_targets", "scout", "battle_log", "slot_map", "is_active", "market", "metric_trend"
                             ]
                         },
                         "args": {
                             "type": "object",
-                            "description": "Query-specific args. power_forecast: {struct_type, count}. planet_history: {planet_id, window_minutes?=60}. valid_targets: {near?, limit?=10}. scout: {location_id}. market: {denom?}. metric_trend: {metric, object, window_blocks?=100}."
+                            "description": "Query-specific args. whoami: none. intents: none. ruleset: {struct_type?}. simulate: {attacker, target, weapon?} or {attacker, target_type, target_hp?, target_ambit?, weapon?}. power_forecast: {struct_type, count}. planet_history: {planet_id, window_minutes?=60}. valid_targets: {near?, limit?=10, attacker?, weapon?}. scout: {location_id}. battle_log: {planet_id?, category?=struct_attack, struct_id?, limit?=15}. slot_map: {location_id}. is_active: {player_id}. market: {denom?}. metric_trend: {metric, object, window_blocks?=100}."
                         }
                     },
                     "required": ["query"]
@@ -163,6 +163,40 @@ impl StructsMcpHandler {
                         "timeout_secs": { "type": "number", "description": "prompt only: seconds to wait for the human (default 180, clamped 10–600)." }
                     },
                     "required": ["component"]
+                })),
+            ),
+            Tool::new(
+                "structs_events",
+                "Live event feed (raids, attacks, fleet moves, build/mine/refine completions) from the NATS stream — react to incoming attacks instead of polling on a timer. Pass 'wait_secs' to long-poll: the call blocks until a new event arrives (after the 'since' cursor) or the wait elapses. Use 'mine_only' to filter to your own entities, 'category' to filter type. Page forward with the returned 'next_cursor' as 'since'.",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "since": { "type": "number", "description": "Only events newer than this timestamp (ms). Use the prior call's next_cursor." },
+                        "category": { "type": "string", "description": "Filter to one category, e.g. 'struct_attack', 'raid_status', 'fleet_arrive'." },
+                        "mine_only": { "type": "boolean", "description": "Only events referencing your player/planet/fleet." },
+                        "limit": { "type": "number", "description": "Max events to return (default 30)." },
+                        "wait_secs": { "type": "number", "description": "Long-poll: wait up to N seconds (0–55) for a new event. 0 = return immediately." }
+                    }
+                })),
+            ),
+            Tool::new(
+                "structs_sequence",
+                "Run a guarded autonomous action chain (e.g. strip blockers → kill the Command Ship), paced to the charge cooldown, aborting if a safety predicate trips. Each step is a normal structs_action, so this adds no new signing authority — it's manual play with rails. Provide 'steps' (ordered {action,args}) and optional 'abort_if' ({cmd_hp_below, stop_if_offline}). It waits out charge cooldowns up to 'max_wait_secs' then pauses so you can resume.",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "description": "Ordered actions: [{action, args}]. Same shape as structs_action.",
+                            "items": { "type": "object" }
+                        },
+                        "abort_if": {
+                            "type": "object",
+                            "description": "Safety predicates checked before/while each step. {cmd_hp_below: number, stop_if_offline: bool}."
+                        },
+                        "max_wait_secs": { "type": "number", "description": "Total charge-wait budget across the sequence (0–300, default 180)." }
+                    },
+                    "required": ["steps"]
                 })),
             ),
         ]
@@ -345,6 +379,20 @@ impl ServerHandler for StructsMcpHandler {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
                     tools::ui::execute(&self.app_handle, params).await
+                }
+                "structs_events" => {
+                    let params: tools::events::EventParams =
+                        serde_json::from_value(args).map_err(|e| {
+                            McpError::invalid_params(format!("Invalid params: {}", e), None)
+                        })?;
+                    tools::events::execute(params).await
+                }
+                "structs_sequence" => {
+                    let params: tools::sequence::SequenceParams =
+                        serde_json::from_value(args).map_err(|e| {
+                            McpError::invalid_params(format!("Invalid params: {}", e), None)
+                        })?;
+                    tools::sequence::execute(&self.app_handle, &self.task_registry, params).await
                 }
                 _ => vec![Content::text(format!("Unknown tool: {}", name))],
             };

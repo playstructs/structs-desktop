@@ -127,7 +127,7 @@ pub struct StructInfo {
     pub health: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StructTypeInfo {
     pub id: u64,
     pub name: String,
@@ -164,6 +164,57 @@ pub struct StructTypeInfo {
     pub primary_weapon_ambits: Option<u64>,
     #[serde(default)]
     pub secondary_weapon_ambits: Option<u64>,
+    // Combat math fields (for the ruleset matrix + damage simulator). All optional.
+    #[serde(default)]
+    pub primary_weapon: Option<String>,
+    #[serde(default)]
+    pub primary_weapon_control: Option<String>,
+    #[serde(default)]
+    pub primary_weapon_shots: Option<u64>,
+    #[serde(default)]
+    pub primary_weapon_damage: Option<u64>,
+    #[serde(default)]
+    pub primary_weapon_recoil_damage: Option<u64>,
+    #[serde(default)]
+    pub primary_weapon_shot_success_numerator: Option<u64>,
+    #[serde(default)]
+    pub primary_weapon_shot_success_denominator: Option<u64>,
+    #[serde(default)]
+    pub primary_weapon_guaranteed_shots: Option<u64>,
+    #[serde(default)]
+    pub primary_weapon_blockable: Option<bool>,
+    #[serde(default)]
+    pub primary_weapon_counterable: Option<bool>,
+    #[serde(default)]
+    pub secondary_weapon: Option<String>,
+    #[serde(default)]
+    pub secondary_weapon_control: Option<String>,
+    #[serde(default)]
+    pub secondary_weapon_shots: Option<u64>,
+    #[serde(default)]
+    pub secondary_weapon_damage: Option<u64>,
+    #[serde(default)]
+    pub secondary_weapon_recoil_damage: Option<u64>,
+    #[serde(default)]
+    pub secondary_weapon_shot_success_numerator: Option<u64>,
+    #[serde(default)]
+    pub secondary_weapon_shot_success_denominator: Option<u64>,
+    #[serde(default)]
+    pub secondary_weapon_guaranteed_shots: Option<u64>,
+    #[serde(default)]
+    pub secondary_weapon_blockable: Option<bool>,
+    #[serde(default)]
+    pub secondary_weapon_counterable: Option<bool>,
+    #[serde(default)]
+    pub counter_attack: Option<u64>,
+    #[serde(default)]
+    pub counter_attack_same_ambit: Option<u64>,
+    #[serde(default)]
+    pub attack_reduction: Option<u64>,
+    #[serde(default)]
+    pub post_destruction_damage: Option<u64>,
+    #[serde(default)]
+    pub has_stealth_system: Option<bool>,
 }
 
 /// Global synced game state, protected by RwLock for concurrent access

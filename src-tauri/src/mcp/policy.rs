@@ -110,6 +110,14 @@ impl PolicyEngine {
             // Master toggle for agent-driven UI. Enabled by default; the human can
             // turn it off via `structs_policy set agent_ui false`.
             ("agent_ui", true, serde_json::json!({})),
+            // Standing combat orders — DISABLED by default (they surface advisory
+            // alerts when triggered; enable per-policy to opt in). Safety-sensitive.
+            ("auto_counterattack", false, serde_json::json!({})),
+            ("auto_retreat_if_cmd_below", false, serde_json::json!({"hp": 4})),
+            ("auto_rebuild_losses", false, serde_json::json!({})),
+            // Rules of engagement — human→agent standing intents the agent reads
+            // via structs_intel {query:"intents"}. e.g. {posture, pinned_target}.
+            ("rules_of_engagement", false, serde_json::json!({"posture": "defensive"})),
         ];
 
         for (name, default_enabled, default_config) in defaults {
@@ -393,6 +401,14 @@ impl PolicyEngine {
             .get(name)
             .map(|p| p.enabled)
             .unwrap_or(false)
+    }
+
+    /// (enabled, config) for a policy, if present.
+    pub fn policy_state(&self, name: &str) -> Option<(bool, serde_json::Value)> {
+        self.store
+            .policies
+            .get(name)
+            .map(|p| (p.enabled, p.config.clone()))
     }
 
     pub fn set_policy(&mut self, name: &str, enabled: bool, config: Option<serde_json::Value>) {

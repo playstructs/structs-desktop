@@ -130,8 +130,9 @@ fn build_sync(
 
     if player_id.is_empty() {
         return Err(vec![Content::text(
-            "Error: Player ID not available yet. The Structs app may still be loading.\n\
-            Try again in a few seconds, or provide player_id explicitly (e.g., '1-18').",
+            "Player ID not available yet — the Structs app is still loading game state.\n\
+            Call structs_intel {query:\"whoami\"} to check sync status, retry in a few seconds, \
+            or pass player_id explicitly (e.g., '1-18').",
         )]);
     }
 
@@ -173,14 +174,43 @@ fn build_sync(
         ));
 
         // ── Charge ──
+        // Charge is a single player-level value = blocks since your last action.
+        // ANY charged action resets it to 0, and "cost" is a minimum threshold,
+        // not a subtracted pool — so banking beyond one action's cost does nothing.
+        // Surface that honestly + per-action readiness, so nobody idles to
+        // "stockpile a burst" that doesn't exist.
         let charge = gs.get_charge();
-        let charge_str = if charge >= 8 {
-            format!("{} (ready for builds/moves)", charge)
-        } else {
-            let blocks_to_8 = gs.blocks_until_charge(8);
-            format!("{} (need 8 for builds — ready in ~{}s)", charge, blocks_to_8 * 6)
+        let ready = |cost: u64| -> String {
+            if charge >= cost {
+                "ready".to_string()
+            } else {
+                format!("~{}s", gs.blocks_until_charge(cost) * 6)
+            }
         };
-        out.push_str(&format!("Charge: {}\n", charge_str));
+        // Cheapest attack = lowest primary-weapon charge among your online combat structs.
+        let cheapest_attack = gs
+            .structs
+            .values()
+            .filter(|s| s.status & 4 != 0 && s.status & 32 == 0)
+            .filter_map(|s| gs.struct_types.get(&s.struct_type_id.to_string()))
+            .filter_map(|t| t.primary_weapon_charge)
+            .filter(|c| *c > 0)
+            .min();
+        out.push_str(&format!("Charge: {} (blocks since your last action)\n", charge));
+        out.push_str(
+            "  ⚠ Any action resets charge to 0 — you can't bank or burst. One action, then wait.\n",
+        );
+        out.push_str(&format!(
+            "  Ready → build {} · move {} · mine/refine {} · activate/defend {}",
+            ready(8),
+            ready(8),
+            ready(20),
+            ready(1)
+        ));
+        match cheapest_attack {
+            Some(c) => out.push_str(&format!(" · attack(min {}) {}\n", c, ready(c))),
+            None => out.push('\n'),
+        }
 
         // ── Resources ──
         let alpha = gs.alpha.unwrap_or(0.0);
@@ -233,6 +263,18 @@ fn build_sync(
                     .unwrap_or("Unknown");
                 let status = crate::mcp::tools::format::decode_status(s.status);
                 let ambit = s.operating_ambit.as_deref().unwrap_or("?");
+                // HP cur/max — health is already synced; max from the struct type.
+                let hp = {
+                    let max = gs
+                        .struct_types
+                        .get(&s.struct_type_id.to_string())
+                        .and_then(|t| t.max_health);
+                    match (s.health, max) {
+                        (Some(h), Some(m)) => format!(" HP {:.0}/{:.0}", h, m),
+                        (Some(h), None) => format!(" HP {:.0}", h),
+                        _ => String::new(),
+                    }
+                };
 
                 let hash_info = registry
                     .tasks
@@ -256,8 +298,8 @@ fn build_sync(
                     .unwrap_or_default();
 
                 out.push_str(&format!(
-                    "  {} {:<20} [{}] {}{}\n",
-                    sid, type_name, status, ambit, hash_info
+                    "  {} {:<20} [{}] {}{}{}\n",
+                    sid, type_name, status, ambit, hp, hash_info
                 ));
             }
         }

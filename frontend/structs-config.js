@@ -858,7 +858,33 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               secondary_weapon_charge: pickNum(t, 'secondary_weapon_charge', 'secondaryWeaponCharge'),
               possible_ambit: pickNum(t, 'possible_ambit', 'possibleAmbit'),
               primary_weapon_ambits: pickNum(t, 'primary_weapon_ambits', 'primaryWeaponAmbits'),
-              secondary_weapon_ambits: pickNum(t, 'secondary_weapon_ambits', 'secondaryWeaponAmbits')
+              secondary_weapon_ambits: pickNum(t, 'secondary_weapon_ambits', 'secondaryWeaponAmbits'),
+              // Combat math fields (ruleset matrix + damage simulator).
+              primary_weapon: pickStr(t, 'primary_weapon', 'primaryWeapon'),
+              primary_weapon_control: pickStr(t, 'primary_weapon_control', 'primaryWeaponControl'),
+              primary_weapon_shots: pickNum(t, 'primary_weapon_shots', 'primaryWeaponShots'),
+              primary_weapon_damage: pickNum(t, 'primary_weapon_damage', 'primaryWeaponDamage'),
+              primary_weapon_recoil_damage: pickNum(t, 'primary_weapon_recoil_damage', 'primaryWeaponRecoilDamage'),
+              primary_weapon_shot_success_numerator: pickNum(t, 'primary_weapon_shot_success_numerator', 'primaryWeaponShotSuccessRateNumerator'),
+              primary_weapon_shot_success_denominator: pickNum(t, 'primary_weapon_shot_success_denominator', 'primaryWeaponShotSuccessRateDenominator'),
+              primary_weapon_guaranteed_shots: pickNum(t, 'primary_weapon_guaranteed_shots', 'primaryWeaponGuaranteedShots'),
+              primary_weapon_blockable: pickBool(t, 'primary_weapon_blockable', 'primaryWeaponBlockable'),
+              primary_weapon_counterable: pickBool(t, 'primary_weapon_counterable', 'primaryWeaponCounterable'),
+              secondary_weapon: pickStr(t, 'secondary_weapon', 'secondaryWeapon'),
+              secondary_weapon_control: pickStr(t, 'secondary_weapon_control', 'secondaryWeaponControl'),
+              secondary_weapon_shots: pickNum(t, 'secondary_weapon_shots', 'secondaryWeaponShots'),
+              secondary_weapon_damage: pickNum(t, 'secondary_weapon_damage', 'secondaryWeaponDamage'),
+              secondary_weapon_recoil_damage: pickNum(t, 'secondary_weapon_recoil_damage', 'secondaryWeaponRecoilDamage'),
+              secondary_weapon_shot_success_numerator: pickNum(t, 'secondary_weapon_shot_success_numerator', 'secondaryWeaponShotSuccessRateNumerator'),
+              secondary_weapon_shot_success_denominator: pickNum(t, 'secondary_weapon_shot_success_denominator', 'secondaryWeaponShotSuccessRateDenominator'),
+              secondary_weapon_guaranteed_shots: pickNum(t, 'secondary_weapon_guaranteed_shots', 'secondaryWeaponGuaranteedShots'),
+              secondary_weapon_blockable: pickBool(t, 'secondary_weapon_blockable', 'secondaryWeaponBlockable'),
+              secondary_weapon_counterable: pickBool(t, 'secondary_weapon_counterable', 'secondaryWeaponCounterable'),
+              counter_attack: pickNum(t, 'counter_attack', 'counterAttack'),
+              counter_attack_same_ambit: pickNum(t, 'counter_attack_same_ambit', 'counterAttackSameAmbit'),
+              attack_reduction: pickNum(t, 'attack_reduction', 'attackReduction'),
+              post_destruction_damage: pickNum(t, 'post_destruction_damage', 'postDestructionDamage'),
+              has_stealth_system: pickBool(t, 'has_stealth_system', 'hasStealthSystem')
             };
           }
         }
@@ -870,6 +896,19 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         function pickNum(obj, snake, camel) {
           var v = obj[snake] != null ? obj[snake] : obj[camel];
           return v != null ? Number(v) : null;
+        }
+        // String variant.
+        function pickStr(obj, snake, camel) {
+          var v = obj[snake] != null ? obj[snake] : obj[camel];
+          return v != null ? String(v) : null;
+        }
+        // Boolean variant (accepts true/false, "true"/"false", 1/0).
+        function pickBool(obj, snake, camel) {
+          var v = obj[snake] != null ? obj[snake] : obj[camel];
+          if (v == null) return null;
+          if (typeof v === 'boolean') return v;
+          if (typeof v === 'number') return v !== 0;
+          return String(v).toLowerCase() === 'true';
         }
 
         var syncData = {
@@ -1055,8 +1094,12 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
         promise.then(function(result) {
           console.info('[Structs TX Bridge] Success:', action, requestId);
-          // The SigningClientManager queues the message — it broadcasts on the next block
-          respondTx(requestId, true, 'queued', null);
+          // The SigningClientManager queues the message — it broadcasts on the next block.
+          // If the resolved result already carries a real tx hash, pass it through;
+          // otherwise report 'queued' (the action resolves async — read effects via
+          // battle_log / structs_events).
+          var hash = (result && (result.transactionHash || result.hash || result.txhash)) || 'queued';
+          respondTx(requestId, true, hash, null);
         }).catch(function(err) {
           console.error('[Structs TX Bridge] Failed:', action, err);
           respondTx(requestId, false, null, String(err));
@@ -1082,6 +1125,24 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     }
 
     console.info('[Structs TX Bridge] Transaction bridge installed');
+  })();
+
+  // ── Force-resync bridge ──
+  // The MCP's structs_action {action:"resync"} emits 'structs:force-resync'.
+  // Soft: re-run the sync + grass-resume path (re-fetches state, re-subscribes).
+  // Hard: full page reload — the nuclear option for a badly stale map.
+  (function setupForceResync() {
+    if (!window.__TAURI__ || !window.__TAURI__.event) return;
+    window.__TAURI__.event.listen('structs:force-resync', function(event) {
+      var hard = event && event.payload && event.payload.hard;
+      console.info('[Structs] force-resync (' + (hard ? 'hard' : 'soft') + ')');
+      if (hard) {
+        try { window.location.reload(); } catch (e) {}
+        return;
+      }
+      window.dispatchEvent(new CustomEvent('structs:grass-resume-check'));
+      window.dispatchEvent(new CustomEvent('structs:sync-tick'));
+    });
   })();
 
   // ── Connection Health Monitor ──
