@@ -16,11 +16,16 @@ sed -i.bak "s|\`ws://\${window.location.hostname}:1443\`|window.__STRUCTS_CONFIG
   "$BUILD_DIR/js/index.js"
 
 echo "    Patching SigningClientManager.js (RPC URL)..."
-# Replace the multi-line ternary with a single line that checks config first
-sed -i.bak '/this.wsUrl = debug/,/: `ws:\/\/${window.location.hostname}:26657`;/{
-  s|this.wsUrl = debug|this.wsUrl = window.__STRUCTS_CONFIG__?.clientWs \|\| (debug|
+# Wrap the existing ternary so window.__STRUCTS_CONFIG__?.clientWs takes priority
+# when set, falling back to whatever the webapp picked. The flag name on the
+# ternary changed (PR #64 renamed `debug` → `this.publicEndpoint`), so this
+# pattern tracks the current source; verify_patched below catches future drift.
+sed -i.bak '/this.wsUrl = this.publicEndpoint/,/: `ws:\/\/${window.location.hostname}:26657`;/{
+  s|this.wsUrl = this.publicEndpoint|this.wsUrl = window.__STRUCTS_CONFIG__?.clientWs \|\| (this.publicEndpoint|
   s|: `ws://${window.location.hostname}:26657`;|: `ws://${window.location.hostname}:26657`);|
 }' "$BUILD_DIR/js/managers/SigningClientManager.js"
+grep -q "window.__STRUCTS_CONFIG__?.clientWs" "$BUILD_DIR/js/managers/SigningClientManager.js" \
+  || { echo "ERROR: SigningClientManager.js patch did not apply (webapp source may have changed shape)"; exit 1; }
 
 echo "    Patching banner ViewModels (canvas renderer for crisp pixel art)..."
 # 1) swap SVG renderer for canvas + add rendererSettings
