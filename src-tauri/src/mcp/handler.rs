@@ -167,7 +167,7 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_events",
-                "Live event feed (raids, attacks, fleet moves, build/mine/refine completions) from the NATS stream — react to incoming attacks instead of polling on a timer. Pass 'wait_secs' to long-poll: the call blocks until a new event arrives (after the 'since' cursor) or the wait elapses. Use 'mine_only' to filter to your own entities, 'category' to filter type. Page forward with the returned 'next_cursor' as 'since'.",
+                "Live event feed (raids, attacks, fleet moves, build/mine/refine completions) from the NATS stream, PLUS `tx_settled` receipts for actions you submitted (real tx hash, chain code, status succeeded/dropped) — react to incoming attacks and confirm your own transactions instead of polling on a timer. Pass 'wait_secs' to long-poll: the call blocks until a new event arrives (after the 'since' cursor) or the wait elapses. Use 'mine_only' to filter to your own entities, 'category' (e.g. 'tx_settled', 'struct_attack') to filter type. Page forward with the returned 'next_cursor' as 'since'.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {

@@ -1022,7 +1022,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           // ── Struct Build ──
           case 'struct_build_initiate':
             promise = scm.queueMsgStructBuildInitiate(
-              args.player_id, args.struct_type_id, args.operating_ambit, args.slot || 0
+              args.player_id, args.struct_type_id, args.operating_ambit, args.slot || 0, args.charge_cost
             );
             break;
           case 'struct_build_cancel':
@@ -1039,10 +1039,10 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
           // ── Struct Actions ──
           case 'struct_activate':
-            promise = scm.queueMsgStructActivate(args.struct_id);
+            promise = scm.queueMsgStructActivate(args.struct_id, args.charge_cost);
             break;
           case 'struct_deactivate':
-            promise = scm.queueMsgStructDeactivate(args.struct_id);
+            promise = scm.queueMsgStructDeactivate(args.struct_id, args.charge_cost);
             break;
           case 'struct_attack':
             // targetStructId must be an array; weaponSystem must be 'primaryWeapon' or 'secondaryWeapon'
@@ -1050,16 +1050,16 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             var weapon = args.weapon_system || 'primaryWeapon';
             if (weapon === 'primary') weapon = 'primaryWeapon';
             if (weapon === 'secondary') weapon = 'secondaryWeapon';
-            promise = scm.queueMsgStructAttack(args.operating_struct_id, targets, weapon);
+            promise = scm.queueMsgStructAttack(args.operating_struct_id, targets, weapon, args.charge_cost);
             break;
           case 'struct_defense_set':
-            promise = scm.queueMsgStructDefenseSet(args.defender_struct_id, args.protected_struct_id);
+            promise = scm.queueMsgStructDefenseSet(args.defender_struct_id, args.protected_struct_id, args.charge_cost);
             break;
           case 'struct_defense_clear':
-            promise = scm.queueMsgStructDefenseClear(args.defender_struct_id);
+            promise = scm.queueMsgStructDefenseClear(args.defender_struct_id, args.charge_cost);
             break;
           case 'struct_move':
-            promise = scm.queueMsgStructMove(args.struct_id, args.location_type || 'planet', args.ambit || 'space', args.slot || 0);
+            promise = scm.queueMsgStructMove(args.struct_id, args.location_type || 'planet', args.ambit || 'space', args.slot || 0, args.charge_cost);
             break;
 
           // ── Fleet ──
@@ -1092,17 +1092,38 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             return;
         }
 
-        promise.then(function(result) {
-          console.info('[Structs TX Bridge] Success:', action, requestId);
-          // The SigningClientManager queues the message — it broadcasts on the next block.
-          // If the resolved result already carries a real tx hash, pass it through;
-          // otherwise report 'queued' (the action resolves async — read effects via
-          // battle_log / structs_events).
-          var hash = (result && (result.transactionHash || result.hash || result.txhash)) || 'queued';
-          respondTx(requestId, true, hash, null);
+        // Respond to the MCP IMMEDIATELY. The new signing queue resolves the
+        // queueMsg* promise only on SETTLEMENT (terminal state) — which for a
+        // charge-gated message can be minutes away while it waits for charge.
+        // Blocking the bridge on that would trip the MCP's 30s timeout, so we
+        // ack "queued" now and deliver the real receipt asynchronously below.
+        respondTx(requestId, true, 'queued', null);
+
+        // When the tx settles, push the real result into the event buffer as a
+        // `tx_settled` event so the agent reads receipts via structs_events.
+        function reportSettled(tx) {
+          var resp = (tx && tx.response) || {};
+          window.__TAURI__.core.invoke('push_game_event', { event: {
+            category: 'tx_settled',
+            subject: action + (args.struct_id ? (' ' + args.struct_id) : (args.operating_struct_id ? (' ' + args.operating_struct_id) : '')),
+            detail: {
+              action: action,
+              status: (tx && tx.status) || 'unknown',
+              code: (resp.code !== undefined ? resp.code : null),
+              transactionHash: resp.transactionHash || null,
+              height: resp.height || null,
+              error: (tx && tx.error) || null,
+              rawLog: resp.rawLog || null
+            },
+            timestamp: Date.now()
+          }}).catch(function() {});
+        }
+        promise.then(function(tx) {
+          console.info('[Structs TX Bridge] Settled:', action, tx && tx.status);
+          reportSettled(tx);
         }).catch(function(err) {
-          console.error('[Structs TX Bridge] Failed:', action, err);
-          respondTx(requestId, false, null, String(err));
+          console.error('[Structs TX Bridge] Settle error:', action, err);
+          reportSettled({ status: 'dropped', error: String(err), response: {} });
         });
 
       } catch (e) {

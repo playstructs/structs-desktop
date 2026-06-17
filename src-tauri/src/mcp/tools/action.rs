@@ -130,16 +130,10 @@ async fn action_mine(
                     struct_id
                 ))];
             }
-            // Preflight: charge (mining completion costs ore_mining_charge, default 20)
-            let cost = charge_cost_for_type(type_info, "mine", "");
-            let charge = gs.get_charge();
-            if charge < cost {
-                let blocks_needed = gs.blocks_until_charge(cost);
-                return vec![Content::text(format!(
-                    "BLOCKED: Need {} charge to mine, you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
-                    cost, charge, blocks_needed * 6, blocks_needed
-                ))];
-            }
+            // No charge preflight here: charge is consumed at the COMPLETE tx (auto-
+            // submitted ~17h later when the proof lands), not at hash start — and the
+            // signing queue schedules that itself. Gating the hash start on current
+            // charge was premature.
             let difficulty = type_info.map(|t| t.ore_mining_difficulty).unwrap_or(14000);
             (type_name, difficulty, block_height)
         } else {
@@ -202,16 +196,8 @@ async fn action_refine(
                     struct_id
                 ))];
             }
-            // Preflight: charge (refining completion costs ore_refining_charge, default 20)
-            let cost = charge_cost_for_type(type_info, "refine", "");
-            let charge = gs.get_charge();
-            if charge < cost {
-                let blocks_needed = gs.blocks_until_charge(cost);
-                return vec![Content::text(format!(
-                    "BLOCKED: Need {} charge to refine, you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
-                    cost, charge, blocks_needed * 6, blocks_needed
-                ))];
-            }
+            // No charge preflight: charge is consumed at the COMPLETE tx (~34h later),
+            // scheduled by the signing queue — not at hash start.
             let difficulty = type_info.map(|t| t.ore_refining_difficulty).unwrap_or(28000);
             (type_name, difficulty, block_height)
         } else {
@@ -256,7 +242,7 @@ async fn action_build(
     }
 
     // Look up struct type ID and run preflights
-    let (type_id, build_difficulty, utilization, power_warning) = {
+    let (type_id, build_difficulty, utilization, power_warning, build_charge_cost, charge_note) = {
         let gs = GAME_STATE.read().unwrap();
         let type_info = gs
             .struct_types
@@ -285,18 +271,13 @@ async fn action_build(
             }
         }
 
-        // Preflight: charge (data-driven build cost, genesis default 8)
+        // Charge: data-driven cost, no block — the signing queue schedules the
+        // build initiate in its charge lane and broadcasts when charge is ready.
         let build_charge_cost = charge_cost_for_type(type_info, "build", "");
-        let charge = gs.get_charge();
-        if charge < build_charge_cost {
-            let blocks_needed = gs.blocks_until_charge(build_charge_cost);
-            return vec![Content::text(format!(
-                "BLOCKED: Need {} charge to build, you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
-                build_charge_cost, charge, blocks_needed * 6, blocks_needed
-            ))];
-        }
+        let charge_note = charge_status_note(&gs, build_charge_cost);
 
-        // Preflight: power budget
+        // Preflight: power budget (this DOES still block — building while it would
+        // push you offline is a real error, not a charge-schedulable one).
         let load = gs.total_load();
         let capacity = gs.total_capacity();
         let new_load = load + passive_draw;
@@ -309,7 +290,7 @@ async fn action_build(
             ))];
         }
         let util = if capacity > 0.0 { new_load / capacity * 100.0 } else { 0.0 };
-        (type_id, build_difficulty, util, util > 80.0)
+        (type_id, build_difficulty, util, util > 80.0, build_charge_cost, charge_note)
     };
 
     let warning = if power_warning {
@@ -324,17 +305,18 @@ async fn action_build(
         "struct_type_id": type_id,
         "operating_ambit": ambit,
         "slot": slot,
+        "charge_cost": build_charge_cost,
     });
 
     match tx_queue::submit_tx(app_handle, "struct_build_initiate".to_string(), tx_args).await {
         Ok(resp) if resp.success => vec![Content::text(format!(
-            "{} build initiated in {} (slot {}). Build difficulty: {}.\nHash will start automatically when chain confirms.{}\nTx hash: {}",
+            "{} build submitted in {} (slot {}). Build difficulty: {}.\nCharge: {}\nHash starts automatically once the initiate lands; the receipt appears in structs_events (tx_settled).{}",
             struct_type,
             ambit,
             slot,
             build_difficulty,
-            warning,
-            resp.tx_hash.unwrap_or_else(|| "pending".to_string())
+            charge_note,
+            warning
         ))],
         Ok(resp) => vec![Content::text(format!(
             "Build failed: {}",
@@ -364,58 +346,55 @@ async fn action_attack(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         )];
     }
 
-    // Preflight: charge + weapon-ambit reachability.
-    {
+    // Preflight: weapon-ambit reachability (still blocks — an out-of-ambit attack
+    // is a real mistake, not charge-schedulable). Charge is NOT blocked: the
+    // signing queue holds the attack in its charge lane until charge is ready.
+    let (charge_cost, charge_note) = {
         use crate::mcp::tools::format::{ambit_bit, decode_ambits};
         let gs = GAME_STATE.read().unwrap();
-        if let Some(att) = gs.structs.get(attacker_id) {
-            let t = gs.struct_types.get(&att.struct_type_id.to_string());
-            // Charge
-            let cost = charge_cost_for_type(t, "attack", weapon);
-            let charge = gs.get_charge();
-            if charge < cost {
-                let blocks_needed = gs.blocks_until_charge(cost);
-                return vec![Content::text(format!(
-                    "BLOCKED: Need {} charge to attack ({} weapon), you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
-                    cost, weapon, charge, blocks_needed * 6, blocks_needed
-                ))];
-            }
-            // Ambit reachability (only when we know both masks)
-            let weapon_mask = if weapon.eq_ignore_ascii_case("secondary") {
-                t.and_then(|t| t.secondary_weapon_ambits)
-            } else {
-                t.and_then(|t| t.primary_weapon_ambits)
-            };
-            let target_bit = gs
-                .structs
-                .get(target_id)
-                .and_then(|s| s.operating_ambit.as_deref())
-                .map(ambit_bit);
-            if let (Some(mask), Some(bit)) = (weapon_mask, target_bit) {
-                if bit != 0 && mask & bit == 0 {
-                    return vec![Content::text(format!(
-                        "BLOCKED: {}'s {} weapon reaches [{}] but target {} is in a different ambit. Pick a target this weapon can hit (or use intel valid_targets with attacker={}).",
-                        attacker_id, weapon, decode_ambits(mask), target_id, attacker_id
-                    ))];
+        match gs.structs.get(attacker_id) {
+            Some(att) => {
+                let t = gs.struct_types.get(&att.struct_type_id.to_string());
+                let cost = charge_cost_for_type(t, "attack", weapon);
+                let weapon_mask = if weapon.eq_ignore_ascii_case("secondary") {
+                    t.and_then(|t| t.secondary_weapon_ambits)
+                } else {
+                    t.and_then(|t| t.primary_weapon_ambits)
+                };
+                let target_bit = gs
+                    .structs
+                    .get(target_id)
+                    .and_then(|s| s.operating_ambit.as_deref())
+                    .map(ambit_bit);
+                if let (Some(mask), Some(bit)) = (weapon_mask, target_bit) {
+                    if bit != 0 && mask & bit == 0 {
+                        return vec![Content::text(format!(
+                            "BLOCKED: {}'s {} weapon reaches [{}] but target {} is in a different ambit. Pick a target this weapon can hit (or use intel valid_targets with attacker={}).",
+                            attacker_id, weapon, decode_ambits(mask), target_id, attacker_id
+                        ))];
+                    }
                 }
+                (cost, charge_status_note(&gs, cost))
             }
+            None => (0, String::new()),
         }
-    }
+    };
 
     let tx_args = json!({
         "action_type": "struct_attack",
         "operating_struct_id": attacker_id,
         "target_struct_id": target_id,
         "weapon_system": weapon,
+        "charge_cost": charge_cost,
     });
 
     match tx_queue::submit_tx(app_handle, "struct_attack".to_string(), tx_args).await {
         Ok(resp) if resp.success => vec![Content::text(format!(
-            "Attack submitted: {} → {} (weapon: {})\nTx: {}\nResolves on-chain in a block or two — read the outcome with structs_intel {{query:\"battle_log\"}} or watch it live on structs_events.{}",
+            "Attack submitted: {} → {} (weapon: {})\nCharge: {}\nResult resolves on-chain — read it with structs_intel {{query:\"battle_log\"}} or watch structs_events (tx_settled + struct_attack).{}",
             attacker_id,
             target_id,
             weapon,
-            resp.tx_hash.unwrap_or_else(|| "pending".to_string()),
+            charge_note,
             approval_surface("attack", 1, target_id, "irreversible (damage/destruction)", "target struct + counter-attack risk to attacker")
         ))],
         Ok(resp) => vec![Content::text(format!(
@@ -442,22 +421,21 @@ async fn action_defend(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         )];
     }
 
-    if let Some(blocked) = struct_charge_preflight(defender_id, "defend", "") {
-        return vec![blocked];
-    }
+    let (charge_cost, charge_note) = struct_charge_info(defender_id, "defend", "");
 
     let tx_args = json!({
         "action_type": "struct_defense_set",
         "defender_struct_id": defender_id,
         "protected_struct_id": protected_id,
+        "charge_cost": charge_cost,
     });
 
     match tx_queue::submit_tx(app_handle, "struct_defense_set".to_string(), tx_args).await {
         Ok(resp) if resp.success => vec![Content::text(format!(
-            "Defense set: {} now defending {}\nTx hash: {}",
+            "Defense set: {} now defending {}\nCharge: {}",
             defender_id,
             protected_id,
-            resp.tx_hash.unwrap_or_else(|| "pending".to_string())
+            charge_note
         ))],
         Ok(resp) => vec![Content::text(format!(
             "Defense failed: {}",
@@ -568,9 +546,7 @@ async fn action_deploy(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         return vec![Content::text("Error: struct_id required.")];
     }
 
-    if let Some(blocked) = struct_charge_preflight(struct_id, "deploy", "") {
-        return vec![blocked];
-    }
+    let (charge_cost, charge_note) = struct_charge_info(struct_id, "deploy", "");
 
     let tx_args = json!({
         "action_type": "struct_move",
@@ -578,15 +554,16 @@ async fn action_deploy(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         "location_type": "planet",
         "ambit": ambit,
         "slot": slot,
+        "charge_cost": charge_cost,
     });
 
     match tx_queue::submit_tx(app_handle, "struct_move".to_string(), tx_args).await {
         Ok(resp) if resp.success => vec![Content::text(format!(
-            "Struct {} deployed to {} slot {}\nTx hash: {}",
+            "Struct {} deploy submitted to {} slot {}\nCharge: {}",
             struct_id,
             ambit,
             slot,
-            resp.tx_hash.unwrap_or_else(|| "pending".to_string())
+            charge_note
         ))],
         Ok(resp) => vec![Content::text(format!(
             "Deploy failed: {}",
@@ -716,22 +693,22 @@ async fn action_simple(
         return vec![Content::text("Error: struct_id required.")];
     }
 
-    // activate/deactivate both cost activateCharge (genesis default 1)
-    if let Some(blocked) = struct_charge_preflight(struct_id, "activate", "") {
-        return vec![blocked];
-    }
+    // activate/deactivate both cost activateCharge (genesis default 1). Not blocked —
+    // the signing queue schedules it; we just report charge status.
+    let (charge_cost, charge_note) = struct_charge_info(struct_id, "activate", "");
 
     let tx_args = json!({
         "action_type": action_type,
         "struct_id": struct_id,
+        "charge_cost": charge_cost,
     });
 
     match tx_queue::submit_tx(app_handle, action_type.to_string(), tx_args).await {
         Ok(resp) if resp.success => vec![Content::text(format!(
-            "{} on {} succeeded.\nTx hash: {}",
+            "{} on {} submitted.\nCharge: {}",
             action_type,
             struct_id,
-            resp.tx_hash.unwrap_or_else(|| "pending".to_string())
+            charge_note
         ))],
         Ok(resp) => vec![Content::text(format!(
             "{} failed: {}",
@@ -774,29 +751,40 @@ fn charge_cost_for_type(t: Option<&StructTypeInfo>, action: &str, weapon: &str) 
     }
 }
 
-/// Charge preflight for an action performed by a specific struct. Compares the
-/// action's required charge against the player's built-up charge bar
-/// (`get_charge`). Returns the BLOCKED message on shortfall, else None.
-/// Returns None when the struct is unknown so the caller's own not-found path
-/// handles it.
-fn struct_charge_preflight(struct_id: &str, action: &str, weapon: &str) -> Option<Content> {
+/// Non-blocking charge status note. The webapp signing queue now schedules
+/// charge-gated messages itself — it holds them in a charge lane and broadcasts
+/// when the on-chain charge bar is sufficient — so the MCP no longer BLOCKS on
+/// charge. We just tell the agent whether it broadcasts this block or queues.
+fn charge_status_note(gs: &crate::game_state::GameStateSync, cost: u64) -> String {
+    let charge = gs.get_charge();
+    if cost == 0 || charge >= cost {
+        format!("charge OK ({}/{}) — broadcasts this block", charge, cost)
+    } else {
+        let blocks = gs.blocks_until_charge(cost);
+        format!(
+            "queued — broadcasts in ~{}s (~{} blocks) once charge reaches {} (have {})",
+            blocks * 6,
+            blocks,
+            cost,
+            charge
+        )
+    }
+}
+
+/// Charge cost + non-blocking status note for an action by a specific struct.
+/// Returns (0, "") when the struct is unknown (caller's own not-found path handles it).
+fn struct_charge_info(struct_id: &str, action: &str, weapon: &str) -> (u64, String) {
     let gs = GAME_STATE.read().unwrap();
-    let s = gs.structs.get(struct_id)?;
+    let Some(s) = gs.structs.get(struct_id) else {
+        return (0, String::new());
+    };
     let cost = charge_cost_for_type(
         gs.struct_types.get(&s.struct_type_id.to_string()),
         action,
         weapon,
     );
-    let charge = gs.get_charge();
-    if charge < cost {
-        let blocks_needed = gs.blocks_until_charge(cost);
-        Some(Content::text(format!(
-            "BLOCKED: Need {} charge to {}, you have {}. Ready in ~{}s (~{} blocks). Note: any action resets charge to 0 — no banking.",
-            cost, action, charge, blocks_needed * 6, blocks_needed
-        )))
-    } else {
-        None
-    }
+    let note = charge_status_note(&gs, cost);
+    (cost, note)
 }
 
 fn format_power(milliwatts: f64) -> String {

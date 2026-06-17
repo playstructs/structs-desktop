@@ -200,6 +200,9 @@ fn build_sync(
         out.push_str(
             "  ⚠ Any action resets charge to 0 — you can't bank or burst. One action, then wait.\n",
         );
+        out.push_str(
+            "  Charge-gated actions auto-queue: just submit and they broadcast when charge is ready (no need to hand-time).\n",
+        );
         out.push_str(&format!(
             "  Ready → build {} · move {} · mine/refine {} · activate/defend {}",
             ready(8),
