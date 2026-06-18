@@ -611,6 +611,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 }).catch(function() {});
               }
 
+              // Nudge the reactivity driver so the open menu page reflects the change.
+              if (window.__STRUCTS_REACTIVITY__) {
+                window.__STRUCTS_REACTIVITY__.onGrassFrame(data.category);
+              }
+
               var eventDef = NOTIFICATION_EVENTS[data.category];
               if (!eventDef) {
                 console.debug('[Structs Notify] Unhandled category:', data.category);
@@ -1099,9 +1104,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         // ack "queued" now and deliver the real receipt asynchronously below.
         respondTx(requestId, true, 'queued', null);
 
+        // An MCP action just went out: arm the staleness watchdog so that if no
+        // grass frame follows shortly, we force a grass resume-check/reconnect.
+        if (window.__STRUCTS_REACTIVITY__) {
+          window.__STRUCTS_REACTIVITY__.onTxSubmitted();
+        }
+
         // When the tx settles, push the real result into the event buffer as a
         // `tx_settled` event so the agent reads receipts via structs_events.
         function reportSettled(tx) {
+          if (window.__STRUCTS_REACTIVITY__) {
+            window.__STRUCTS_REACTIVITY__.onTxSettled();
+          }
           var resp = (tx && tx.response) || {};
           window.__TAURI__.core.invoke('push_game_event', { event: {
             category: 'tx_settled',
@@ -1164,6 +1178,86 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       window.dispatchEvent(new CustomEvent('structs:grass-resume-check'));
       window.dispatchEvent(new CustomEvent('structs:sync-tick'));
     });
+  })();
+
+  // ── UI Reactivity Driver ──
+  // The webapp's HUD + own-planet map already live-update via grass listeners,
+  // but OPEN MENU CONTENT pages are static snapshots (rendered once on navigation).
+  // This driver re-renders the open menu when relevant state changes — debounced,
+  // and suppressed while the human is mid-interaction so it never yanks the view.
+  // It also force-reconnects grass if an MCP action lands but no grass frame
+  // follows (a sign the NATS stream went stale). Drives window.__STRUCTS_REACTOR__
+  // (exposed by an apply-patches.sh patch on the webapp); no-ops if absent.
+  (function setupReactivityDriver() {
+    // Grass categories that change visible state worth re-rendering the menu for.
+    var RELEVANT = {
+      struct_health: 1, struct_status: 1, struct_attack: 1, struct_move: 1,
+      struct_defense_add: 1, struct_defense_remove: 1,
+      struct_block_build_start: 1, struct_block_ore_mine_start: 1, struct_block_ore_refine_start: 1,
+      raid_status: 1, fleet_arrive: 1, fleet_depart: 1,
+      shield_change: 1, ore: 1, alpha: 1, structsLoad: 1, capacity: 1,
+      player_consensus: 1
+    };
+    var DEBOUNCE_MS = 750;
+    var timer = null;
+    var dirty = false;
+
+    // Don't refresh out from under an active interaction.
+    function interacting() {
+      try {
+        var ae = document.activeElement;
+        if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return true;
+        if (ae && ae.isContentEditable) return true;
+        var oc = document.querySelector('.sui-offcanvas');
+        if (oc && oc.offsetParent !== null) return true;
+        var dlg = document.getElementById('menu-page-dialogue');
+        if (dlg && !dlg.classList.contains('hidden')) return true;
+      } catch (e) {}
+      return false;
+    }
+
+    function doRefresh() {
+      timer = null;
+      var reactor = window.__STRUCTS_REACTOR__;
+      if (!reactor) { dirty = false; return; }
+      if (interacting()) {
+        // Defer until the user is done, then try again.
+        dirty = true;
+        setTimeout(function () { if (dirty) doRefresh(); }, 1500);
+        return;
+      }
+      dirty = false;
+      try { reactor.refreshMenu(); } catch (e) {}
+    }
+
+    // Throttle: at most one refresh per DEBOUNCE_MS window, even under event bursts.
+    function schedule() {
+      dirty = true;
+      if (timer) return;
+      timer = setTimeout(doRefresh, DEBOUNCE_MS);
+    }
+
+    // Staleness watchdog: after an MCP action, if grass stays silent, reconnect.
+    function armWatchdog() {
+      function grassAt() {
+        return (window.__STRUCTS_CONN__ && window.__STRUCTS_CONN__.grass
+          && window.__STRUCTS_CONN__.grass.lastMessageAt) || 0;
+      }
+      var before = grassAt();
+      setTimeout(function () {
+        if (grassAt() <= before) {
+          console.info('[Structs Reactivity] MCP action with no grass frame — firing resume-check');
+          window.dispatchEvent(new CustomEvent('structs:grass-resume-check'));
+        }
+      }, 5000);
+    }
+
+    window.__STRUCTS_REACTIVITY__ = {
+      onGrassFrame: function (category) { if (RELEVANT[category]) schedule(); },
+      onTxSettled: function () { schedule(); },
+      onTxSubmitted: function () { armWatchdog(); }
+    };
+    console.info('[Structs Reactivity] driver enabled');
   })();
 
   // ── Connection Health Monitor ──
