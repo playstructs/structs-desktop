@@ -119,7 +119,7 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_intel",
-                "Strategic intelligence. Local-only queries (no API): 'whoami' (your player id + sync status), 'what_can_i_build', 'economy_status', 'plan_timeline'. Guild-API-backed (degrade gracefully if offline / not signed in): 'power_forecast' (snapshot + trend), 'planet_history', 'valid_targets', 'scout', 'market', 'metric_trend'.",
+                "Strategic intelligence — covers what you'd otherwise query the DB for. COMBAT/RECON (use these before fighting): 'scout' {location_id} = enemy roster with HP/ambit/slot/weapon-reach + defender ids; 'valid_targets' {attacker,weapon} = reachable targets ranked, with HP + defenders; 'battle_log' {planet_id} = combat RESULTS (damage/blocked/counters/destroyed) — your own attack outcomes; 'ruleset' = weapon+defense matrix (guided/unguided, jam/evade, armour, counter rules); 'simulate' {attacker,target} = expected damage/kill/counter before committing; 'is_active' {player_id} = enemy last-action recency (online?). IDENTITY/PLANNING: 'whoami', 'what_can_i_build', 'economy_status', 'plan_timeline', 'slot_map', 'intents'. ECONOMY/TREND: 'power_forecast', 'planet_history', 'market', 'metric_trend'.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -167,7 +167,7 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_events",
-                "Live event feed (raids, attacks, fleet moves, build/mine/refine completions) from the NATS stream, PLUS `tx_settled` receipts for actions you submitted (real tx hash, chain code, status succeeded/dropped) — react to incoming attacks and confirm your own transactions instead of polling on a timer. Pass 'wait_secs' to long-poll: the call blocks until a new event arrives (after the 'since' cursor) or the wait elapses. Use 'mine_only' to filter to your own entities, 'category' (e.g. 'tx_settled', 'struct_attack') to filter type. Page forward with the returned 'next_cursor' as 'since'.",
+                "Live event feed from the NATS stream, PLUS `tx_settled` receipts for actions you submitted (real tx hash, chain code, status succeeded/dropped). Real combat surfaces as `struct_health` (health/health_old + struct_id) and `struct_status`, with `shield_change`, `struct_block_build_start`, `fleet_arrive`/`fleet_depart`, `raid_status`, `player_consensus`, `lastAction`, etc. — there is NO `struct_attack` category here (use structs_intel battle_log for your own attack outcomes). React to events instead of polling. Pass 'wait_secs' to long-poll (blocks until a new event after 'since', or the wait elapses). 'mine_only' matches your player/planet/fleet/struct ids in the subject OR detail (so your structs taking damage show even when the event is keyed to an enemy planet). 'category' filters by type (e.g. 'struct_health', 'tx_settled', 'raid_status'). Page forward with the returned 'next_cursor' as 'since'.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {

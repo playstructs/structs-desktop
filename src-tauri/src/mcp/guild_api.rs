@@ -94,6 +94,13 @@ impl GuildApiClient {
 
     fn build_url(&self, path: &str) -> String {
         let base = self.base.read().unwrap().clone();
+        // The configured base may already include the `/api` segment
+        // (e.g. `http://crew.oh.energy/api`), and every endpoint path here is
+        // written with a leading `/api/...`. Strip one trailing `/api` from the
+        // base so we never emit the `/api/api/...` URL that 404s the whole
+        // Guild-API perception layer (scout, battle_log, valid_targets, …).
+        let base = base.trim_end_matches('/');
+        let base = base.strip_suffix("/api").unwrap_or(base);
         format!(
             "{}/{}",
             base.trim_end_matches('/'),
@@ -557,11 +564,20 @@ mod tests {
     }
 
     #[test]
-    fn build_url_handles_slash_combinations() {
-        let g = GuildApiClient::new(Arc::new(RwLock::new("http://example.com/api".into())));
-        assert_eq!(g.build_url("/foo"), "http://example.com/api/foo");
-        assert_eq!(g.build_url("foo"), "http://example.com/api/foo");
-        let g2 = GuildApiClient::new(Arc::new(RwLock::new("http://example.com/api/".into())));
-        assert_eq!(g2.build_url("/foo"), "http://example.com/api/foo");
+    fn build_url_avoids_double_api_prefix() {
+        // Every endpoint path is written with a leading `/api/...`. The configured
+        // base may or may not already include `/api` — either way we want exactly
+        // one `/api`, never the `/api/api/...` that 404s the live API.
+        let with = GuildApiClient::new(Arc::new(RwLock::new("http://crew.oh.energy/api".into())));
+        assert_eq!(
+            with.build_url("/api/struct/list/location/2-1/page/1"),
+            "http://crew.oh.energy/api/struct/list/location/2-1/page/1"
+        );
+        let with_slash = GuildApiClient::new(Arc::new(RwLock::new("http://crew.oh.energy/api/".into())));
+        assert_eq!(with_slash.build_url("/api/foo"), "http://crew.oh.energy/api/foo");
+        let without = GuildApiClient::new(Arc::new(RwLock::new("http://crew.oh.energy".into())));
+        assert_eq!(without.build_url("/api/foo"), "http://crew.oh.energy/api/foo");
+        let localhost = GuildApiClient::new(Arc::new(RwLock::new("http://localhost/api".into())));
+        assert_eq!(localhost.build_url("/api/foo"), "http://localhost/api/foo");
     }
 }

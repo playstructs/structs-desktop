@@ -37,13 +37,18 @@ pub async fn execute(params: EventParams) -> Vec<Content> {
     let limit = params.limit.unwrap_or(30);
     let wait = params.wait_secs.unwrap_or(0).min(55);
 
-    // My entity ids for mine_only filtering.
+    // My entity ids for mine_only filtering: player/planet/fleet AND my struct ids
+    // (combat surfaces as `struct_health`/`struct_status` keyed by struct_id in the
+    // detail, often on another player's planet subject — so subject-only matching
+    // misses my structs taking damage).
     let mine: Vec<String> = if params.mine_only {
         let gs = GAME_STATE.read().unwrap();
-        [gs.player_id.clone(), gs.planet_id.clone(), gs.fleet_id.clone()]
+        let mut ids: Vec<String> = [gs.player_id.clone(), gs.planet_id.clone(), gs.fleet_id.clone()]
             .into_iter()
             .flatten()
-            .collect()
+            .collect();
+        ids.extend(gs.structs.keys().cloned());
+        ids
     } else {
         vec![]
     };
@@ -58,10 +63,13 @@ pub async fn execute(params: EventParams) -> Vec<Content> {
             .filter(|e| e.timestamp > since)
             .filter(|e| {
                 if mine.is_empty() {
-                    true
-                } else {
-                    mine.iter().any(|id| e.subject.contains(id.as_str()))
+                    return true;
                 }
+                // Match my ids in the subject OR the detail (combat events carry
+                // the struct_id in detail, with the planet — often enemy — as subject).
+                let detail_str = e.detail.to_string();
+                mine.iter()
+                    .any(|id| e.subject.contains(id.as_str()) || detail_str.contains(id.as_str()))
             })
             .collect();
         if !fresh.is_empty() || polled >= deadline_polls {
