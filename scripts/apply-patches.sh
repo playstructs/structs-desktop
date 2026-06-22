@@ -7,13 +7,24 @@ set -euo pipefail
 
 BUILD_DIR="$1"
 
+# Helper: every sed below MUST leave a known marker in the file. If a future
+# webapp refactor changes the match shape, sed silently no-ops — this guard
+# turns that into a build failure instead of a broken runtime config.
+verify_patched() {
+  local file="$1" needle="$2" desc="$3"
+  grep -qF "$needle" "$file" \
+    || { echo "ERROR: $desc — sed did not apply (webapp source shape changed?)"; exit 1; }
+}
+
 echo "    Patching GuildAPI.js..."
 sed -i.bak "s|this.apiUrl = '/api';|this.apiUrl = window.__STRUCTS_CONFIG__?.guildApi \|\| '/api';|" \
   "$BUILD_DIR/js/api/GuildAPI.js"
+verify_patched "$BUILD_DIR/js/api/GuildAPI.js" '__STRUCTS_CONFIG__?.guildApi' "GuildAPI.js apiUrl override"
 
 echo "    Patching index.js (GrassManager URLs)..."
 sed -i.bak "s|\`ws://\${window.location.hostname}:1443\`|window.__STRUCTS_CONFIG__?.grassNatsWs \|\| \`ws://\${window.location.hostname}:1443\`|g" \
   "$BUILD_DIR/js/index.js"
+verify_patched "$BUILD_DIR/js/index.js" '__STRUCTS_CONFIG__?.grassNatsWs' "index.js GrassManager URL override"
 
 echo "    Patching SigningClientManager.js (RPC URL)..."
 # Wrap the existing ternary so window.__STRUCTS_CONFIG__?.clientWs takes priority
@@ -24,8 +35,7 @@ sed -i.bak '/this.wsUrl = this.publicEndpoint/,/: `ws:\/\/${window.location.host
   s|this.wsUrl = this.publicEndpoint|this.wsUrl = window.__STRUCTS_CONFIG__?.clientWs \|\| (this.publicEndpoint|
   s|: `ws://${window.location.hostname}:26657`;|: `ws://${window.location.hostname}:26657`);|
 }' "$BUILD_DIR/js/managers/SigningClientManager.js"
-grep -q "window.__STRUCTS_CONFIG__?.clientWs" "$BUILD_DIR/js/managers/SigningClientManager.js" \
-  || { echo "ERROR: SigningClientManager.js patch did not apply (webapp source may have changed shape)"; exit 1; }
+verify_patched "$BUILD_DIR/js/managers/SigningClientManager.js" '__STRUCTS_CONFIG__?.clientWs' "SigningClientManager.js clientWs override"
 
 echo "    Patching banner ViewModels (canvas renderer for crisp pixel art)..."
 # 1) swap SVG renderer for canvas + add rendererSettings
@@ -38,25 +48,37 @@ for f in DefeatBannerViewModel.js VictoryBannerViewModel.js; do
     -e "s|renderer: 'svg',|renderer: 'canvas', rendererSettings: { clearCanvas: true, preserveAspectRatio: 'xMidYMid meet' },|" \
     -e "s|this.isLoaded = true;|this.isLoaded = true; var __c = document.getElementById(this.id).querySelector('canvas'); if (__c) { var __x = __c.getContext('2d'); if (__x) __x.imageSmoothingEnabled = false; }|" \
     "$target"
+  verify_patched "$target" "renderer: 'canvas'" "$f canvas renderer swap"
 done
 
 echo "    Patching index.js (expose gameState to window for Tauri sync)..."
 sed -i.bak 's|global.gameState = gameState;|global.gameState = gameState; window.gameState = gameState;|' \
   "$BUILD_DIR/js/index.js"
+verify_patched "$BUILD_DIR/js/index.js" 'window.gameState = gameState' "index.js window.gameState exposure"
 
-echo "    Patching GrassManager.js (resume-check reconnect + heartbeat)..."
+echo "    Patching GrassManager.js (background-stall resume-check)..."
+# The webapp already does its own self-healing — supervised connect/subscribe
+# loop, exponential backoff up to 30s, NATS-level reconnect attempts (see
+# `_supervise` in GrassManager.js). What it CAN'T detect is a silent stall:
+# WebView backgrounding can leave the WebSocket TCP socket alive while no
+# data flows. We layer two minimal pieces on top:
+#   1) heartbeat: stamp `_lastMessageAt` whenever a frame arrives
+#   2) resume-check listener: on the visibility-change foreground event
+#      dispatched by main.rs, if the heartbeat is >60s stale, force-close
+#      the NATS connection. The existing `_supervise` loop sees the close,
+#      backs off briefly, and reconnects — no manual `init()` call needed.
 GM="$BUILD_DIR/js/framework/GrassManager.js"
-# 1. Constructor: install a window-level resume-check listener. When the app
-#    foregrounds (visibilitychange → visible, dispatched from main.rs init
-#    script), if we haven't seen a message in >60s, force-reconnect.
-sed -i.bak "s|this.listeners = new Map();|this.listeners = new Map(); this._lastMessageAt = 0; this._reconnecting = false; var __self = this; window.addEventListener('structs:grass-resume-check', function() { try { var stale = (Date.now() - __self._lastMessageAt) > 60000; if (stale \&\& !__self._reconnecting) { __self._reconnecting = true; console.info('[GrassManager] resume-check: stale, reconnecting', __self.subject); if (__self._nc) { try { __self._nc.close(); } catch(e) {} } setTimeout(function() { __self._reconnecting = false; __self.init(); }, 500); } } catch(e) { console.warn('[GrassManager] resume-check error', e); } });|" "$GM"
 
-# 2. After subscription created: stash nc + subscription on `this` so the
-#    resume listener can close the dead connection. Seed lastMessageAt.
-sed -i.bak "s|const subscription = nc.subscribe(this.subject);|const subscription = nc.subscribe(this.subject); this._nc = nc; this._subscription = subscription; this._lastMessageAt = Date.now();|" "$GM"
+# 1. Constructor: install a window-level resume-check listener. Anchor:
+#    `this.listeners = new Map();` (still present in current webapp source).
+sed -i.bak "s|this.listeners = new Map();|this.listeners = new Map(); this._lastMessageAt = Date.now(); var __self = this; window.addEventListener('structs:grass-resume-check', function() { try { var stale = (Date.now() - __self._lastMessageAt) > 60000; if (stale \&\& __self.nc) { console.info('[GrassManager] resume-check: stale, forcing reconnect on', __self.subject); try { __self.nc.close(); } catch(e) {} } } catch(e) { console.warn('[GrassManager] resume-check error', e); } });|" "$GM"
+verify_patched "$GM" 'structs:grass-resume-check' "GrassManager.js resume-check listener"
 
-# 3. In the message loop: update heartbeat.
-sed -i.bak "s|const messageData = this.getMessageData(message);|const messageData = this.getMessageData(message); this._lastMessageAt = Date.now();|" "$GM"
+# 2. Heartbeat: update `_lastMessageAt` in the consume loop right after the
+#    frame is parsed. Anchor: `messageData = this.getMessageData(message);`
+#    (note: webapp now declares `messageData` on a prior line — no `const`).
+sed -i.bak "s|messageData = this.getMessageData(message);|messageData = this.getMessageData(message); this._lastMessageAt = Date.now();|" "$GM"
+verify_patched "$GM" 'this._lastMessageAt = Date.now()' "GrassManager.js heartbeat update"
 
 echo "    Patching index.js (expose UI reactor for external re-render)..."
 # index.js uses top-level await (it's an ES module), so gameState / grassManager /
