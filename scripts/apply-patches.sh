@@ -122,7 +122,7 @@ echo "    Patching TaskManager.js (runtime MAX_CONCURRENT_PROCESSES override)...
 # structs_hash {command:"config", max_concurrent} sets window.__STRUCTS_TASK_OVERRIDES__
 # (via structs-config.js); fall back to the compile-time TASK.MAX_CONCURRENT_PROCESSES.
 TM="$BUILD_DIR/js/managers/TaskManager.js"
-sed -i.bak "s|TASK.MAX_CONCURRENT_PROCESSES|((window.__STRUCTS_TASK_OVERRIDES__ \&\& window.__STRUCTS_TASK_OVERRIDES__.maxConcurrent) || TASK.MAX_CONCURRENT_PROCESSES)|g" "$TM"
+sed -i.bak "s|TASK.MAX_CONCURRENT_PROCESSES|((window.__STRUCTS_TASK_OVERRIDES__ \&\& window.__STRUCTS_TASK_OVERRIDES__.maxConcurrent) \|\| TASK.MAX_CONCURRENT_PROCESSES)|g" "$TM"
 grep -q "__STRUCTS_TASK_OVERRIDES__" "$TM" \
   || { echo "ERROR: TaskManager MAX_CONCURRENT patch did not apply (source may have changed)"; exit 1; }
 
