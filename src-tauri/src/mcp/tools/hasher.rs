@@ -9,7 +9,7 @@ use crate::hasher::types::{now_millis, TaskParams, TaskRegistry};
 
 #[derive(Debug, Deserialize)]
 pub struct HashParams {
-    /// Command: list, start, progress, stop
+    /// Command: list, start, progress, stop, config
     pub command: String,
     /// Task ID (object_id, e.g., "5-1386"). Required for start/progress/stop.
     pub task_id: Option<String>,
@@ -21,6 +21,15 @@ pub struct HashParams {
     pub difficulty_target: Option<u64>,
     /// Planet ID for RAID tasks (e.g., "2-156"). Only for RAID start.
     pub target_id: Option<String>,
+    // ── config command ──
+    /// Master on/off for the whole hashing system.
+    pub enabled: Option<bool>,
+    /// Engine preference: "auto" | "cpu" | "gpu".
+    pub engine: Option<String>,
+    /// DIFFICULTY_START — the difficulty a worker waits for before grinding.
+    pub difficulty_start: Option<u64>,
+    /// MAX_CONCURRENT_PROCESSES — the webapp TaskManager's concurrent-job cap.
+    pub max_concurrent: Option<u64>,
 }
 
 pub async fn execute(
@@ -38,7 +47,7 @@ pub async fn execute(
             vec![Content::text(
                 serde_json::to_string_pretty(&json!({
                     "active_tasks": tasks.len(),
-                    "gpu_available": hasher::ensure_gpu_init(),
+                    "config": hash_config_json(),
                     "tasks": tasks,
                 }))
                 .unwrap(),
@@ -178,11 +187,93 @@ pub async fn execute(
             }
         }
 
+        "config" => {
+            use tauri::Emitter;
+            let mut changes: Vec<String> = vec![];
+            let mut errors: Vec<String> = vec![];
+
+            // Master enable/disable. On disable: stop the Rust gate, cancel running
+            // tasks, and pause the webapp TaskManager so it stops spawning. On
+            // enable: lift the gate and resume the manager.
+            if let Some(enabled) = params.enabled {
+                hasher::set_hash_enabled(enabled);
+                if !enabled {
+                    let n = registry.tasks.len();
+                    for entry in registry.tasks.iter() {
+                        entry.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    registry.tasks.clear();
+                    changes.push(format!("hashing → DISABLED (cancelled {} running task(s))", n));
+                } else {
+                    changes.push("hashing → enabled".into());
+                }
+                let _ = app_handle.emit("structs:hash-enabled", json!({ "enabled": enabled }));
+            }
+
+            // Engine: auto | cpu | gpu
+            if let Some(engine) = params.engine.as_deref() {
+                match engine.to_ascii_lowercase().as_str() {
+                    "auto" => { hasher::set_engine_pref(0); changes.push("engine → auto".into()); }
+                    "cpu" => { hasher::set_engine_pref(1); changes.push("engine → cpu".into()); }
+                    "gpu" => { hasher::set_engine_pref(2); changes.push("engine → gpu (used only if a GPU is present)".into()); }
+                    other => errors.push(format!("engine '{}' invalid (use auto|cpu|gpu)", other)),
+                }
+            }
+
+            // DIFFICULTY_START — sane range 1..=64 (difficulty is a 0..64-ish scale).
+            if let Some(ds) = params.difficulty_start {
+                if (1..=64).contains(&ds) {
+                    hasher::set_difficulty_start(ds);
+                    changes.push(format!("difficulty_start → {}", ds));
+                } else {
+                    errors.push(format!("difficulty_start {} out of range (1..=64)", ds));
+                }
+            }
+
+            // MAX_CONCURRENT_PROCESSES — the webapp TaskManager is the authoritative
+            // spawner, so push the value to it via the glue; track it here for reporting.
+            if let Some(mc) = params.max_concurrent {
+                if (1..=64).contains(&mc) {
+                    hasher::set_max_concurrent(mc);
+                    let _ = app_handle.emit("structs:task-overrides", json!({ "maxConcurrent": mc }));
+                    changes.push(format!("max_concurrent → {}", mc));
+                } else {
+                    errors.push(format!("max_concurrent {} out of range (1..=64)", mc));
+                }
+            }
+
+            let mut out = serde_json::to_string_pretty(&hash_config_json()).unwrap();
+            if !changes.is_empty() {
+                out.push_str(&format!("\n\nApplied: {}", changes.join(", ")));
+            }
+            if !errors.is_empty() {
+                out.push_str(&format!("\n\n⚠ Ignored: {}", errors.join("; ")));
+            }
+            vec![Content::text(out)]
+        }
+
         other => vec![Content::text(format!(
-            "Unknown hash command '{}'. Use: list, start, progress, stop",
+            "Unknown hash command '{}'. Use: list, start, progress, stop, config",
             other
         ))],
     }
+}
+
+/// Current hashing configuration (engine pref, effective DIFFICULTY_START,
+/// concurrency cap, GPU availability) — shared by `config` and `list`.
+fn hash_config_json() -> serde_json::Value {
+    let gpu_available = hasher::ensure_gpu_init();
+    let pref = hasher::engine_pref_label();
+    // What a NEW task would actually run on, given the preference + hardware.
+    let effective = if pref == "cpu" || !gpu_available { "cpu" } else { "gpu" };
+    json!({
+        "enabled": hasher::hash_enabled(),
+        "engine_pref": pref,
+        "effective_engine": effective,
+        "gpu_available": gpu_available,
+        "difficulty_start": hasher::difficulty_start(),
+        "max_concurrent": hasher::max_concurrent(),
+    })
 }
 
 /// Estimate blocks remaining until proof is found.

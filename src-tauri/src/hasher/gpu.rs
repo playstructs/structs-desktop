@@ -3,8 +3,7 @@ use tauri::Emitter;
 use wgpu::util::DeviceExt;
 
 use crate::hasher::difficulty::{
-    calculate_difficulty, estimate_age, CHECKPOINT_COMMIT, DIFFICULTY_START,
-    DIFFICULTY_START_SLEEP_MS,
+    calculate_difficulty, estimate_age, CHECKPOINT_COMMIT, DIFFICULTY_START_SLEEP_MS,
 };
 use crate::hasher::types::{now_millis, TaskHandle};
 
@@ -131,12 +130,13 @@ pub fn run_gpu_hash(
             let mut progress = handle.progress.lock().unwrap();
             progress.block_current_estimated = block_est;
         }
-        if difficulty <= DIFFICULTY_START {
+        let difficulty_start = crate::hasher::difficulty_start();
+        if difficulty <= difficulty_start {
             break;
         }
         eprintln!(
             "[Structs Hasher GPU] {} waiting: difficulty {} > {}",
-            pid, difficulty, DIFFICULTY_START
+            pid, difficulty, difficulty_start
         );
         emit_event(&app_handle, "hash_progress", &handle);
         std::thread::sleep(std::time::Duration::from_millis(DIFFICULTY_START_SLEEP_MS));

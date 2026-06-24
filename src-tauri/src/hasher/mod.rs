@@ -3,7 +3,7 @@ pub mod difficulty;
 pub mod gpu;
 pub mod types;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, State};
 use types::{TaskHandle, TaskParams, TaskRegistry, TaskStateSnapshot};
@@ -14,6 +14,63 @@ static GPU_DEVICE: OnceLock<Arc<wgpu::Device>> = OnceLock::new();
 static GPU_QUEUE: OnceLock<Arc<wgpu::Queue>> = OnceLock::new();
 static GPU_INFO: OnceLock<gpu::GpuInfo> = OnceLock::new();
 static GPU_INIT_DONE: AtomicBool = AtomicBool::new(false);
+
+// ── Runtime hashing config (agent-controllable via the structs_hash tool) ──
+/// Master on/off for the hashing system. When false, no new tasks start.
+static HASH_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Engine preference for new tasks: 0 = auto, 1 = force CPU, 2 = prefer GPU.
+static ENGINE_PREF: AtomicU8 = AtomicU8::new(0);
+/// DIFFICULTY_START override; 0 = use the compile-time default in `difficulty`.
+static DIFFICULTY_START_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+/// Last max-concurrent value (mirrors the webapp `TASK.MAX_CONCURRENT_PROCESSES`,
+/// which is the authoritative spawner cap — tracked here only for reporting).
+static MAX_CONCURRENT: AtomicU64 = AtomicU64::new(5);
+
+pub fn set_hash_enabled(v: bool) {
+    HASH_ENABLED.store(v, Ordering::Relaxed);
+}
+pub fn hash_enabled() -> bool {
+    HASH_ENABLED.load(Ordering::Relaxed)
+}
+pub fn set_engine_pref(p: u8) {
+    ENGINE_PREF.store(p, Ordering::Relaxed);
+}
+pub fn engine_pref_label() -> &'static str {
+    match ENGINE_PREF.load(Ordering::Relaxed) {
+        1 => "cpu",
+        2 => "gpu",
+        _ => "auto",
+    }
+}
+pub fn set_difficulty_start(v: u64) {
+    DIFFICULTY_START_OVERRIDE.store(v, Ordering::Relaxed);
+}
+/// Effective DIFFICULTY_START — the difficulty a worker waits for before it
+/// starts grinding. Read live by the CPU/GPU workers each loop.
+pub fn difficulty_start() -> u64 {
+    let o = DIFFICULTY_START_OVERRIDE.load(Ordering::Relaxed);
+    if o == 0 {
+        difficulty::DIFFICULTY_START
+    } else {
+        o
+    }
+}
+pub fn set_max_concurrent(v: u64) {
+    MAX_CONCURRENT.store(v, Ordering::Relaxed);
+}
+pub fn max_concurrent() -> u64 {
+    MAX_CONCURRENT.load(Ordering::Relaxed)
+}
+
+/// Whether a NEW task should run on the GPU, honoring the engine preference.
+/// Force-CPU never touches the GPU; auto/prefer-GPU use it only when present.
+pub fn resolve_use_gpu() -> bool {
+    if ENGINE_PREF.load(Ordering::Relaxed) == 1 {
+        false
+    } else {
+        ensure_gpu_init()
+    }
+}
 
 pub fn ensure_gpu_init() -> bool {
     if GPU_INIT_DONE.load(std::sync::atomic::Ordering::Relaxed) {
@@ -54,6 +111,9 @@ pub fn start_hash_task_core(
     app: AppHandle,
     registry: &Arc<TaskRegistry>,
 ) -> Result<(), String> {
+    if !hash_enabled() {
+        return Err("Hashing is disabled. Re-enable with structs_hash config { enabled: true }.".to_string());
+    }
     let pid = params.object_id.clone();
 
     // Cancel any existing task with the same PID
@@ -67,7 +127,7 @@ pub fn start_hash_task_core(
     let app_clone = app.clone();
     let handle_clone = handle.clone();
 
-    let use_gpu = ensure_gpu_init();
+    let use_gpu = resolve_use_gpu();
 
     let join = std::thread::spawn(move || {
         if use_gpu {
@@ -92,6 +152,9 @@ pub async fn start_hash_task(
     app: AppHandle,
     registry: State<'_, Arc<TaskRegistry>>,
 ) -> Result<(), String> {
+    if !hash_enabled() {
+        return Err("Hashing is disabled. Re-enable with structs_hash config { enabled: true }.".to_string());
+    }
     let pid = params.object_id.clone();
 
     // Cancel any existing task with the same PID
@@ -106,7 +169,7 @@ pub async fn start_hash_task(
     let handle_clone = handle.clone();
 
     // Check GPU availability
-    let use_gpu = ensure_gpu_init();
+    let use_gpu = resolve_use_gpu();
 
     let join = std::thread::spawn(move || {
         if use_gpu {

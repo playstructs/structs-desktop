@@ -1180,6 +1180,28 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     });
   })();
 
+  // ── Task-manager overrides bridge ──
+  // The MCP's structs_hash {command:"config", max_concurrent} emits
+  // 'structs:task-overrides'; stash it where the patched TaskManager reads it.
+  (function setupTaskOverrides() {
+    if (!window.__TAURI__ || !window.__TAURI__.event) return;
+    window.__STRUCTS_TASK_OVERRIDES__ = window.__STRUCTS_TASK_OVERRIDES__ || {};
+    window.__TAURI__.event.listen('structs:task-overrides', function (event) {
+      var p = (event && event.payload) || {};
+      Object.keys(p).forEach(function (k) { window.__STRUCTS_TASK_OVERRIDES__[k] = p[k]; });
+      console.info('[Structs] task overrides updated:', JSON.stringify(window.__STRUCTS_TASK_OVERRIDES__));
+    });
+
+    // Master hashing on/off: pause/resume the webapp TaskManager so it stops (or
+    // resumes) spawning workers. These are plain window events the manager already
+    // listens for — no webapp patch needed. (The Rust gate stops MCP-started tasks.)
+    window.__TAURI__.event.listen('structs:hash-enabled', function (event) {
+      var on = !!(event && event.payload && event.payload.enabled === true);
+      window.dispatchEvent(new CustomEvent(on ? 'TASK_CMD_MANAGER_RESUME' : 'TASK_CMD_MANAGER_PAUSE'));
+      console.info('[Structs] hashing ' + (on ? 'enabled — TaskManager resume' : 'disabled — TaskManager pause'));
+    });
+  })();
+
   // ── UI Reactivity Driver ──
   // The webapp's HUD + own-planet map already live-update via grass listeners,
   // but OPEN MENU CONTENT pages are static snapshots (rendered once on navigation).

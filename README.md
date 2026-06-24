@@ -141,7 +141,7 @@ The app runs an MCP server on `localhost:8420` with bearer token authentication.
 |------|---------|
 | `structs_dashboard` | Full player overview: power, charge (with per-action readiness), resources, structs + HP, hash tasks, recent events |
 | `structs_query` | Query any game entity with enriched output (resolved names, decoded flags, 25-bit permission decode, formatted units) |
-| `structs_hash` | Manage proof-of-work tasks with ETAs (list, start, stop, progress) |
+| `structs_hash` | Manage proof-of-work tasks with ETAs (list, start, stop, progress) + tune the engine (`config`: enable/disable, GPU/CPU, `DIFFICULTY_START`, `MAX_CONCURRENT_PROCESSES`) |
 | `structs_action` | Execute game actions with preflight checks (explore, build, mine, attack, defend, raid, resync, etc.) |
 | `structs_intel` | Strategic intelligence + perception: `whoami`, `scout`, `valid_targets`, `battle_log`, `ruleset`, `simulate`, `slot_map`, `is_active`, `intents`, power forecast, economy, timeline |
 | `structs_policy` | Standing orders (auto_refine, power_alert, agent_ui, combat orders) |
@@ -199,7 +199,7 @@ The app replaces the webapp's JavaScript WebWorker hasher with a Rust-native imp
 
 - **CPU**: Multi-threaded via rayon with hardware SHA256 instructions (~3M h/s)
 - **GPU**: wgpu compute shader dispatching 1M nonces per batch (~200M h/s)
-- **Auto-selection**: GPU used when available, falls back to CPU
+- **Auto-selection**: GPU used when available, falls back to CPU. Agents can override at runtime via `structs_hash {command:"config", engine:"cpu"|"gpu"|"auto"}`, and tune `difficulty_start` (when a worker starts grinding) and `max_concurrent` (the task manager's concurrent-job cap)
 - **Worker shim**: Transparently intercepts `new Worker()` calls for TaskWorker.js, routing to Rust while maintaining the existing TaskManager.js interface
 - **ETA estimates**: Each task shows percent complete, current difficulty, hashrate, and estimated time remaining
 

@@ -103,16 +103,20 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_hash",
-                "Manage SHA256 proof-of-work hash tasks (~200M h/s on GPU). Commands: 'list' (all tasks), 'start' (begin hashing for a struct), 'progress' (single task detail), 'stop' (cancel). For 'start': provide struct_id, task_type (MINE/REFINE/BUILD), block_start (block height when task initiated), and difficulty_target.",
+                "Manage SHA256 proof-of-work hash tasks (~200M h/s on GPU). Commands: 'list' (all tasks + current config), 'start' (begin hashing for a struct), 'progress' (single task detail), 'stop' (cancel), 'config' (tune the hashing engine). For 'start': provide struct_id, task_type (MINE/REFINE/BUILD), block_start, and difficulty_target. For 'config' (omit args to just read current values): 'enabled' (master on/off — false stops all hashing, cancels running tasks, and pauses the task manager), 'engine' (auto|cpu|gpu — force CPU or prefer GPU), 'difficulty_start' (the difficulty a worker waits for before it starts grinding; lower = waits longer for an easier proof), 'max_concurrent' (the task manager's concurrent-job cap).",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "enum": ["list", "start", "progress", "stop"] },
+                        "command": { "type": "string", "enum": ["list", "start", "progress", "stop", "config"] },
+                        "enabled": { "type": "boolean", "description": "config: master on/off for the hashing system." },
                         "task_id": { "type": "string", "description": "Task/struct ID (e.g., '5-1386'). Required for start/progress/stop." },
                         "task_type": { "type": "string", "enum": ["MINE", "REFINE", "BUILD", "RAID"], "description": "For start command." },
                         "block_start": { "type": "integer", "description": "Block height when task was initiated. For start command." },
                         "difficulty_target": { "type": "integer", "description": "Difficulty target from struct type. For start command." },
-                        "target_id": { "type": "string", "description": "Planet ID for RAID tasks (e.g., '2-156'). Only for RAID start." }
+                        "target_id": { "type": "string", "description": "Planet ID for RAID tasks (e.g., '2-156'). Only for RAID start." },
+                        "engine": { "type": "string", "enum": ["auto", "cpu", "gpu"], "description": "config: hashing engine preference." },
+                        "difficulty_start": { "type": "integer", "description": "config: DIFFICULTY_START (1–64) — when a worker begins grinding." },
+                        "max_concurrent": { "type": "integer", "description": "config: MAX_CONCURRENT_PROCESSES (1–64) — concurrent hash-job cap." }
                     },
                     "required": ["command"]
                 })),

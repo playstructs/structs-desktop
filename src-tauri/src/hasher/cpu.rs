@@ -5,7 +5,7 @@ use tauri::Emitter;
 
 use crate::hasher::difficulty::{
     calculate_difficulty, check_difficulty, estimate_age, CHECKPOINT_COMMIT,
-    DIFFICULTY_RECALCULATE, DIFFICULTY_START, DIFFICULTY_START_SLEEP_MS,
+    DIFFICULTY_RECALCULATE, DIFFICULTY_START_SLEEP_MS,
 };
 use crate::hasher::types::{now_millis, TaskHandle};
 
@@ -53,7 +53,8 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
             progress.block_current_estimated = block_est;
         }
 
-        if difficulty <= DIFFICULTY_START {
+        let difficulty_start = crate::hasher::difficulty_start();
+        if difficulty <= difficulty_start {
             break;
         }
 
@@ -61,7 +62,7 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
             let progress = handle.progress.lock().unwrap();
             eprintln!(
                 "[Structs Hasher] {} waiting: difficulty {} > {} (age={}, block_start={}, checkpoint={}, checkpoint_time={:.0}, now={:.0})",
-                pid, difficulty, DIFFICULTY_START, age, block_start,
+                pid, difficulty, difficulty_start, age, block_start,
                 progress.block_checkpoint, progress.block_checkpoint_time_ms, now_ms
             );
         }
