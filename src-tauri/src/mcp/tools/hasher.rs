@@ -173,11 +173,7 @@ pub async fn execute(
             let Some(task_id) = &params.task_id else {
                 return vec![Content::text("Error: task_id required for stop command")];
             };
-            if let Some(entry) = registry.tasks.get(task_id) {
-                entry
-                    .cancel
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                registry.tasks.remove(task_id);
+            if stop_task(registry, task_id) {
                 vec![Content::text(format!("Task {} stopped", task_id))]
             } else {
                 vec![Content::text(format!(
@@ -202,6 +198,9 @@ pub async fn execute(
                     for entry in registry.tasks.iter() {
                         entry.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
+                    // clear() AFTER the loop — the iter() RefMulti guards are dropped
+                    // at the loop's end. Calling clear() (or remove) *inside* the loop
+                    // would deadlock the shard (same footgun as the old `stop` bug).
                     registry.tasks.clear();
                     changes.push(format!("hashing → DISABLED (cancelled {} running task(s))", n));
                 } else {
@@ -256,6 +255,24 @@ pub async fn execute(
             "Unknown hash command '{}'. Use: list, start, progress, stop, config",
             other
         ))],
+    }
+}
+
+/// Stop a hash task: remove it from the registry and signal cancel to its worker.
+///
+/// IMPORTANT: uses `remove` (which returns the value) rather than `get`-then-
+/// `remove`. The latter DEADLOCKS DashMap — the `get` Ref holds a read lock on the
+/// task's shard while `remove` waits for that shard's write lock on the same
+/// thread, hanging forever (this was the reported "stop hangs the agent" bug).
+/// The worker thread holds its own `Arc<TaskHandle>` clone, so setting `cancel`
+/// on the removed handle still signals it to exit. Returns true if a task was found.
+fn stop_task(registry: &Arc<TaskRegistry>, task_id: &str) -> bool {
+    match registry.tasks.remove(task_id) {
+        Some((_, handle)) => {
+            handle.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        }
+        None => false,
     }
 }
 
@@ -385,4 +402,31 @@ fn task_summary(snapshot: &crate::hasher::types::TaskStateSnapshot) -> serde_jso
         "result_nonce": snapshot.result_nonce,
         "result_difficulty": snapshot.result_difficulty,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hasher::types::TaskHandle;
+    use std::sync::atomic::Ordering;
+
+    // Regression guard for the "stop hangs the agent" DashMap deadlock: stop_task
+    // must not get-then-remove the same key. If reintroduced, this test deadlocks
+    // (CI timeout) instead of passing.
+    #[test]
+    fn stop_task_removes_and_cancels_without_deadlock() {
+        let registry = Arc::new(TaskRegistry::new());
+        let handle = Arc::new(TaskHandle::new(TaskParams::for_ore("5-2188", "MINE", 100, 14000)));
+        registry.tasks.insert("5-2188".to_string(), handle.clone());
+
+        assert!(stop_task(&registry, "5-2188"));
+        assert!(handle.cancel.load(Ordering::SeqCst), "worker should be signalled to cancel");
+        assert!(registry.tasks.get("5-2188").is_none(), "task should be removed");
+    }
+
+    #[test]
+    fn stop_task_missing_returns_false() {
+        let registry = Arc::new(TaskRegistry::new());
+        assert!(!stop_task(&registry, "5-9999"));
+    }
 }

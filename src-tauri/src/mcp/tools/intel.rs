@@ -889,7 +889,12 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
             gs.structs
                 .iter()
                 .filter(|(_, s)| my_id.as_ref().map(|m| &s.owner != m).unwrap_or(false))
-                .filter(|(_, s)| s.status & 32 == 0) // not destroyed
+                // Status bit semantics (struct_cache.go StructState):
+                //   1=Materialized, 2=Built, 4=Online, 8=Stored, 16=Hidden,
+                //   32=Destroyed, 64=Locked.
+                // v0.19.1 CanAttack rejects both unbuilt (no Built bit) and
+                // destroyed (Destroyed bit) — see knowledge/mechanics/combat.md.
+                .filter(|(_, s)| s.status & 2 != 0 && s.status & 32 == 0)
                 .map(|(id, s)| {
                     let bit = s.operating_ambit.as_deref().map(ambit_bit).unwrap_or(0);
                     let max = gs.struct_types.get(&s.struct_type_id.to_string()).and_then(|t| t.max_health);
@@ -911,6 +916,17 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
                 let gs = GAME_STATE.read().unwrap();
                 page.items
                     .iter()
+                    .filter(|v| {
+                        // Same v0.19.1 CanAttack filter as the GAME_STATE branch:
+                        // require Built bit, reject Destroyed bit. Guild API may
+                        // return status as a string ("3") or number (3).
+                        let status = v.get("status").and_then(|x| match x {
+                            Value::Number(n) => n.as_u64(),
+                            Value::String(s) => s.parse().ok(),
+                            _ => None,
+                        }).unwrap_or(0);
+                        status & 2 != 0 && status & 32 == 0
+                    })
                     .filter_map(|v| {
                         let id = v.get("id").and_then(|x| x.as_str())?.to_string();
                         let bit = v

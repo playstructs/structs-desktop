@@ -247,6 +247,13 @@ fn build_sync(
         if let Some(fleet_id) = &gs.fleet_id {
             let fleet_status = gs.fleet_status.as_deref().unwrap_or("unknown");
             out.push_str(&format!("Fleet: {} ({})\n", fleet_id, fleet_status));
+            // v0.19.1: a defender's command struct is vulnerable whenever the
+            // fleet is off-station OR the Command Ship is offline/destroyed
+            // (planet_cache.go IsDefenderCommandStructVulnerable). Sending the
+            // fleet away leaves the home planet raidable until it returns.
+            if fleet_status.eq_ignore_ascii_case("away") {
+                out.push_str("  ⚠ Home base shields raidable while fleet is away (v0.19.1 rule)\n");
+            }
         }
 
         // ── Structs ──

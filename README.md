@@ -1,4 +1,4 @@
-# Structs Universe
+# Structs Desktop
 
 A native desktop app for [Structs](https://structs.ai) — wraps the [structs-webapp](https://github.com/playstructs/structs-webapp) game client in a Tauri shell with GPU-accelerated proof-of-work hashing, native OS notifications, an embedded MCP server for AI agents, and CORS-free API access.
 
