@@ -13,7 +13,7 @@ In the distant future the species of the galaxy are embroiled in a race for Alph
 ## Features
 
 - **GPU Hashing** — Multi-threaded CPU + GPU SHA256 proof-of-work at ~200M hashes/sec via wgpu
-- **MCP Server** — AI agents can play Structs through the Model Context Protocol (9 tools, 6 prompts, compendium resources)
+- **MCP Server** — AI agents can play Structs through the Model Context Protocol (10 tools, 6 prompts, compendium resources)
 - **Perception Layer** — Recon, combat results, a weapon-matrix ruleset, and a damage simulator so agents can see the battlefield and plan attacks without raw DB access
 - **Agent-Driven UI** — Agents can drive the human's screen (menus, map previews, HUD badges, prompts) for human+agent co-op play
 - **Event Feed** — Long-poll stream of game events (raids, attacks, completions) so agents react instead of polling
@@ -109,6 +109,8 @@ structs-universe/
 │           ├── policy.rs     # Standing orders / automation engine with delta tracking
 │           ├── tx_queue.rs   # Transaction signing bridge (Rust ↔ JS CosmJS)
 │           ├── ui_bridge.rs  # Agent-driven UI directive bridge (Rust → JS, prompt round-trip)
+│           ├── vplayer_bridge.rs # Virtual-player bridge (Rust → JS signing/derivation round-trip)
+│           ├── virtual_players.rs # Virtual-player registry (public ids only; no keys)
 │           ├── combat.rs     # Pure combat math for the attack simulator
 │           ├── error_translator.rs  # Chain error → human message
 │           ├── prompts.rs    # 6 built-in agent workflow prompts
@@ -122,6 +124,7 @@ structs-universe/
 │               ├── events.rs     # Event feed (long-poll over the NATS buffer)
 │               ├── sequence.rs   # Guarded autonomous action chains
 │               ├── ui.rs         # structs_ui tool (drive the human's screen)
+│               ├── players.rs    # structs_players tool (virtual players: create/state/act)
 │               ├── policy.rs     # Standing order management
 │               └── format.rs     # Shared formatting utilities
 ├── .mcp.json                 # Claude Code MCP server config
@@ -133,7 +136,7 @@ structs-universe/
 
 ## MCP Server
 
-The app runs an MCP server on `localhost:8420` with bearer token authentication. AI agents interact with the game through 9 tools, 6 prompts, and compendium resources.
+The app runs an MCP server on `localhost:8420` with bearer token authentication. AI agents interact with the game through 10 tools, 6 prompts, and compendium resources.
 
 ### Tools
 
@@ -148,6 +151,7 @@ The app runs an MCP server on `localhost:8420` with bearer token authentication.
 | `structs_ui` | Drive the human's screen for co-op play (menus, map previews, HUD badges, prompts) — display/elicitation only, never signs |
 | `structs_events` | Long-poll event feed (raids, attacks, fleet moves, completions) so agents react instead of polling |
 | `structs_sequence` | Guarded autonomous action chains, paced to the charge cooldown, with abort predicates (e.g. CMD-ship HP floor) |
+| `structs_players` | Manage virtual players — extra players off the same mnemonic (different HD indices) joined to your guild; create / list / state / act-as. Keys stay in the webapp |
 
 ### Prompts
 

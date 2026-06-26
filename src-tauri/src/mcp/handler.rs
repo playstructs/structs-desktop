@@ -203,6 +203,22 @@ impl StructsMcpHandler {
                     "required": ["steps"]
                 })),
             ),
+            Tool::new(
+                "structs_players",
+                "Manage agent-controlled virtual players — extra Structs players derived from the SAME mnemonic at different HD indices, joined to your guild (the guild fronts the join fee; no alpha needed). Keys never leave the app. Commands: 'list' (registry + status); 'create' {name, index?} (derive a new address, guild-signup, register; defaults to next free HD index ≥ 1); 'state' {player} (a virtual player's on-chain state — structs/HP/charge/resources — from LCD + grass); 'act' {player, action, args} (perform a game action AS that virtual player, signed by its own key). Direct actions: explore/build/activate/deactivate/deploy/defend/attack. PoW actions (mine/refine/raid) start a hash and auto-sign the completion as the player.",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "enum": ["list", "create", "state", "act"] },
+                        "name": { "type": "string", "description": "create: display name (3–20 chars: letters/digits/-/_)." },
+                        "index": { "type": "integer", "description": "create: HD index to use (>= 1); defaults to next free." },
+                        "player": { "type": "string", "description": "state/act: which virtual player — index, address, or player id." },
+                        "action": { "type": "string", "description": "act: explore|build|activate|deactivate|deploy|defend|attack (direct) | mine|refine|raid (PoW, auto-completes)." },
+                        "args": { "type": "object", "description": "act: action args (same shapes as structs_action; e.g. attack {attacker_id,target_id,weapon}, build {struct_type,ambit,slot})." }
+                    },
+                    "required": ["command"]
+                })),
+            ),
         ]
     }
 }
@@ -397,6 +413,13 @@ impl ServerHandler for StructsMcpHandler {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
                     tools::sequence::execute(&self.app_handle, &self.task_registry, params).await
+                }
+                "structs_players" => {
+                    let params: tools::players::PlayerParams =
+                        serde_json::from_value(args).map_err(|e| {
+                            McpError::invalid_params(format!("Invalid params: {}", e), None)
+                        })?;
+                    tools::players::execute(&self.app_handle, &self.cosmos_client, &self.task_registry, params).await
                 }
                 _ => vec![Content::text(format!("Unknown tool: {}", name))],
             };

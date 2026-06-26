@@ -126,6 +126,127 @@ sed -i.bak "s|TASK.MAX_CONCURRENT_PROCESSES|((window.__STRUCTS_TASK_OVERRIDES__ 
 grep -q "__STRUCTS_TASK_OVERRIDES__" "$TM" \
   || { echo "ERROR: TaskManager MAX_CONCURRENT patch did not apply (source may have changed)"; exit 1; }
 
+echo "    Patching SigningClientManager.js (sign+broadcast as an arbitrary account)..."
+SCM="$BUILD_DIR/js/managers/SigningClientManager.js"
+# Add the FEE import (reuse the constant the queue uses).
+sed -i.bak 's|import {SigningQueueManager} from "./SigningQueueManager";|import {SigningQueueManager} from "./SigningQueueManager";\nimport {FEE} from "../constants/Fee";|' "$SCM"
+# Append a one-shot signer: connect a client with the GIVEN wallet (which holds
+# the virtual player's HD account), build the msg the same way the queue does
+# (registry.lookupType + fromPartial + creator), broadcast, disconnect. Isolated
+# from the primary single-account client/queue.
+cat >> "$SCM" <<'SCM_EOF'
+
+// [structs-universe patch] Sign+broadcast a single msg from an arbitrary account
+// (a virtual player). `wallet` must contain `signerAddress`. Used by the
+// virtual-players façade; the primary client/queue are untouched.
+SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, signerAddress, typeUrl, payload) {
+  const client = await SigningStargateClient.connectWithSigner(this.wsUrl, wallet, { registry: this.registry });
+  try {
+    const type = this.registry.lookupType(typeUrl);
+    if (!type) throw new Error('unknown typeUrl: ' + typeUrl);
+    const value = type.fromPartial({ ...(payload || {}), creator: signerAddress });
+    const res = await client.signAndBroadcast(signerAddress, [{ typeUrl, value }], FEE);
+    return { code: res.code, transactionHash: res.transactionHash, height: res.height, rawLog: res.rawLog || null };
+  } finally {
+    try { client.disconnect(); } catch (e) { /* ignore */ }
+  }
+};
+SCM_EOF
+grep -q "signAndBroadcastAs" "$SCM" \
+  || { echo "ERROR: SigningClientManager signAndBroadcastAs patch did not apply"; exit 1; }
+
+echo "    Patching WalletManager.js (multi-index HD derivation for virtual players)..."
+WM="$BUILD_DIR/js/managers/WalletManager.js"
+# 1. Add Slip10RawIndex to the existing @cosmjs/crypto import.
+sed -i.bak 's|import {Bip39, Random, Secp256k1, sha256} from "@cosmjs/crypto";|import {Bip39, Random, Secp256k1, sha256, Slip10RawIndex} from "@cosmjs/crypto";|' "$WM"
+# 2. Add a derive-by-index helper (prototype assignment appended after the class —
+#    DirectSecp256k1HdWallet + Slip10RawIndex are top-level imports, in scope).
+cat >> "$WM" <<'WM_EOF'
+
+// [structs-universe patch] Derive a wallet whose account[0] is HD index N off the
+// SAME mnemonic (m/44'/118'/0'/0/N). Used by the virtual-players façade.
+WalletManager.prototype.createWalletForIndex = async function (mnemonic, index) {
+  return await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
+    prefix: "structs",
+    hdPaths: [[
+      Slip10RawIndex.hardened(44),
+      Slip10RawIndex.hardened(118),
+      Slip10RawIndex.hardened(0),
+      Slip10RawIndex.normal(0),
+      Slip10RawIndex.normal(index),
+    ]],
+  });
+};
+WM_EOF
+grep -q "createWalletForIndex" "$WM" \
+  || { echo "ERROR: WalletManager multi-index patch did not apply"; exit 1; }
+
+echo "    Patching index.js (expose __STRUCTS_VPLAYERS__ virtual-players façade)..."
+# index.js is an ES module (top-level await); walletManager/guildAPI/gameState are
+# in scope at EOF. Reuse them to derive/sign/sign-up virtual players. Keys never
+# leave JS — Rust only ever receives addresses + player ids via the bridge.
+cat >> "$BUILD_DIR/js/index.js" <<'VP_EOF'
+
+// [structs-universe patch] Virtual-players façade (multi-account off one mnemonic).
+try {
+  const __vpAccounts = {}; // index -> {index, address, pubkey, player_id?}
+  const __vpDerive = async (index) => {
+    const w = await walletManager.createWalletForIndex(gameState.mnemonic, index);
+    const accs = await w.getAccountsWithPrivkeys();
+    return accs[0]; // {address, pubkey: Uint8Array, privkey: Uint8Array}
+  };
+  window.__STRUCTS_VPLAYERS__ = {
+    async deriveAccount(index) {
+      const a = await __vpDerive(index);
+      const info = { index, address: a.address, pubkey: walletManager.bytesToHex(a.pubkey) };
+      __vpAccounts[index] = info;
+      return info;
+    },
+    // Derive index N → sign the guild-join proxy message → POST /auth/signup →
+    // poll the address until the chain assigns a player id.
+    async signup(index, name) {
+      const a = await __vpDerive(index);
+      const address = a.address;
+      const pubkeyHex = walletManager.bytesToHex(a.pubkey);
+      const guildId = gameState.thisGuild && gameState.thisGuild.id;
+      if (!guildId) throw new Error('guild not loaded yet');
+      const message = guildAPI.buildGuildMembershipJoinProxyMessage(guildId, address, 0);
+      const signature = await walletManager.createSignatureForProxyMessage(message, a.privkey);
+      const resp = await guildAPI.signup({
+        primary_address: address, signature, pubkey: pubkeyHex, guild_id: guildId, username: name,
+      });
+      if (resp && resp.success === false) {
+        throw new Error('signup rejected: ' + JSON.stringify(resp.errors || resp));
+      }
+      const reactorApi = (window.__STRUCTS_CONFIG__ && window.__STRUCTS_CONFIG__.reactorApi) || '';
+      let playerId = null;
+      for (let i = 0; i < 18; i++) { // ~18 × 8s ≈ 2.4 min
+        await new Promise((r) => setTimeout(r, 8000));
+        try {
+          const rr = await fetch(reactorApi + '/structs/address/' + address);
+          const j = await rr.json();
+          const pid = (j && ((j.Address && j.Address.playerId) || (j.address && j.address.player_id) || j.player_id)) || null;
+          if (pid && pid !== '1-0' && pid !== '0-0') { playerId = pid; break; }
+        } catch (e) { /* keep polling */ }
+      }
+      __vpAccounts[index] = { index, address, pubkey: pubkeyHex, player_id: playerId };
+      return { index, address, pubkey: pubkeyHex, player_id: playerId };
+    },
+    // Sign+broadcast a msg AS virtual player `index` (its own address = creator).
+    async signAndBroadcast(index, typeUrl, payload) {
+      const wallet = await walletManager.createWalletForIndex(gameState.mnemonic, index);
+      const accs = await wallet.getAccountsWithPrivkeys();
+      const address = accs[0].address;
+      return await signingClientManager.signAndBroadcastAs(wallet, address, typeUrl, payload);
+    },
+    list() { return Object.values(__vpAccounts); },
+  };
+  console.info('[structs-universe] __STRUCTS_VPLAYERS__ ready');
+} catch (e) { console.warn('[structs-universe] vplayers façade failed', e); }
+VP_EOF
+grep -q "__STRUCTS_VPLAYERS__" "$BUILD_DIR/js/index.js" \
+  || { echo "ERROR: vplayers façade patch did not apply"; exit 1; }
+
 # Clean up .bak files
 find "$BUILD_DIR" -name "*.bak" -delete
 

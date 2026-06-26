@@ -482,4 +482,8 @@ pub fn run_gpu_hash(
 fn emit_event(app_handle: &tauri::AppHandle, event: &str, handle: &TaskHandle) {
     let snapshot = handle.snapshot();
     let _ = app_handle.emit(event, &snapshot);
+    // If this hash belongs to a virtual player, sign its completion tx.
+    if event == "hash_complete" {
+        crate::hasher::maybe_complete_virtual(app_handle, &snapshot);
+    }
 }

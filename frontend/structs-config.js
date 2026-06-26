@@ -1202,6 +1202,41 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     });
   })();
 
+  // ── Virtual-players bridge ──
+  // Rust (structs_players / acting "as" a virtual player) emits
+  // 'structs:vplayer-request'; dispatch to the webapp's __STRUCTS_VPLAYERS__
+  // façade (which holds the keys) and reply via the vplayer_response command.
+  (function setupVPlayerBridge() {
+    if (!window.__TAURI__ || !window.__TAURI__.event) return;
+    window.__TAURI__.event.listen('structs:vplayer-request', async function (event) {
+      var req = event.payload || {};
+      var reqId = req.req_id;
+      var op = req.op;
+      var args = req.args || {};
+      function respond(success, data, error) {
+        window.__TAURI__.core.invoke('vplayer_response', {
+          response: { req_id: reqId, success: success, data: data || {}, error: error || null }
+        }).catch(function (e) { console.warn('[VPlayer] response failed', e); });
+      }
+      try {
+        var vp = window.__STRUCTS_VPLAYERS__;
+        if (!vp) { respond(false, {}, 'virtual-players façade unavailable (patch not built / not signed in)'); return; }
+        var data;
+        switch (op) {
+          case 'derive': data = await vp.deriveAccount(args.index); break;
+          case 'signup': data = await vp.signup(args.index, args.name); break;
+          case 'sign':   data = await vp.signAndBroadcast(args.index, args.type_url, args.payload); break;
+          case 'list':   data = vp.list(); break;
+          default: respond(false, {}, 'unknown vplayer op: ' + op); return;
+        }
+        respond(true, data, null);
+      } catch (e) {
+        respond(false, {}, String((e && e.message) || e));
+      }
+    });
+    console.info('[Structs] virtual-players bridge enabled');
+  })();
+
   // ── UI Reactivity Driver ──
   // The webapp's HUD + own-planet map already live-update via grass listeners,
   // but OPEN MENU CONTENT pages are static snapshots (rendered once on navigation).

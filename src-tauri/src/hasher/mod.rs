@@ -72,6 +72,70 @@ pub fn resolve_use_gpu() -> bool {
     }
 }
 
+// ── Virtual-player PoW completion ──
+// Hashes started for a virtual player (object_id → (HD index, task_type)). On
+// completion the worker calls `maybe_complete_virtual`, which signs the
+// completion tx AS that virtual player via the façade (the webapp TaskManager
+// only ever signs as the primary, so virtual PoW can't go through it).
+static VPLAYER_HASHES: std::sync::LazyLock<dashmap::DashMap<String, (u32, String)>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+pub fn register_vplayer_hash(object_id: String, index: u32, task_type: String) {
+    VPLAYER_HASHES.insert(object_id, (index, task_type));
+}
+
+/// If the completed task belongs to a virtual player, sign+broadcast its
+/// completion tx (mine/refine/build/raid) as that player. No-op otherwise.
+pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) {
+    if !snap.result_exists {
+        return;
+    }
+    let Some((_k, (index, task_type))) = VPLAYER_HASHES.remove(&snap.object_id) else {
+        return;
+    };
+    let nonce = snap.result_nonce.clone().unwrap_or_default();
+    let proof = snap.result_hash.clone().unwrap_or_default();
+    // Completion msg by task type. `creator` is injected by the façade signer.
+    let (type_url, payload) = match task_type.as_str() {
+        "MINE" => (
+            "/structs.structs.MsgStructOreMinerComplete",
+            serde_json::json!({ "structId": snap.object_id, "proof": proof, "nonce": nonce }),
+        ),
+        "REFINE" => (
+            "/structs.structs.MsgStructOreRefineryComplete",
+            serde_json::json!({ "structId": snap.object_id, "proof": proof, "nonce": nonce }),
+        ),
+        "BUILD" => (
+            "/structs.structs.MsgStructBuildComplete",
+            serde_json::json!({ "structId": snap.object_id, "proof": proof, "nonce": nonce }),
+        ),
+        "RAID" => (
+            "/structs.structs.MsgPlanetRaidComplete",
+            // For RAID the hash object_id is the fleet id.
+            serde_json::json!({ "fleetId": snap.object_id, "proof": proof, "nonce": nonce }),
+        ),
+        _ => return,
+    };
+    eprintln!(
+        "[Structs VPlayer] {} complete for vplayer {} ({}) — signing completion",
+        task_type, index, snap.object_id
+    );
+    let app = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        match crate::mcp::vplayer_bridge::call(
+            &app,
+            "sign",
+            serde_json::json!({ "index": index, "type_url": type_url, "payload": payload }),
+            60,
+        )
+        .await
+        {
+            Ok(_) => eprintln!("[Structs VPlayer] completion signed for vplayer {}", index),
+            Err(e) => eprintln!("[Structs VPlayer] completion sign failed for vplayer {}: {}", index, e),
+        }
+    });
+}
+
 pub fn ensure_gpu_init() -> bool {
     if GPU_INIT_DONE.load(std::sync::atomic::Ordering::Relaxed) {
         return GPU_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed);

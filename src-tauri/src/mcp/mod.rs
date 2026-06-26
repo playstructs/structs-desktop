@@ -12,3 +12,5 @@ pub mod server;
 pub mod tools;
 pub mod tx_queue;
 pub mod ui_bridge;
+pub mod virtual_players;
+pub mod vplayer_bridge;
