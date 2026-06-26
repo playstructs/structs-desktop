@@ -216,18 +216,25 @@ try {
         primary_address: address, signature, pubkey: pubkeyHex, guild_id: guildId, username: name,
       });
       if (resp && resp.success === false) {
-        throw new Error('signup rejected: ' + JSON.stringify(resp.errors || resp));
+        const errs = JSON.stringify(resp.errors || resp);
+        // Idempotent: if this address already joined (e.g. a prior create timed out
+        // on the player-id poll), adopt the existing player rather than failing.
+        if (!/resource_already_exists|already[ _]?exists|already[ _]?member/i.test(errs)) {
+          throw new Error('signup rejected: ' + errs);
+        }
       }
       const reactorApi = (window.__STRUCTS_CONFIG__ && window.__STRUCTS_CONFIG__.reactorApi) || '';
       let playerId = null;
       for (let i = 0; i < 18; i++) { // ~18 × 8s ≈ 2.4 min
-        await new Promise((r) => setTimeout(r, 8000));
         try {
           const rr = await fetch(reactorApi + '/structs/address/' + address);
           const j = await rr.json();
-          const pid = (j && ((j.Address && j.Address.playerId) || (j.address && j.address.player_id) || j.player_id)) || null;
+          // LCD shape is {address, playerId, permissions} (top-level camelCase);
+          // keep the other spellings as fallbacks for safety.
+          const pid = (j && (j.playerId || (j.Address && j.Address.playerId) || (j.address && j.address.player_id) || j.player_id)) || null;
           if (pid && pid !== '1-0' && pid !== '0-0') { playerId = pid; break; }
         } catch (e) { /* keep polling */ }
+        await new Promise((r) => setTimeout(r, 8000));
       }
       __vpAccounts[index] = { index, address, pubkey: pubkeyHex, player_id: playerId };
       return { index, address, pubkey: pubkeyHex, player_id: playerId };
