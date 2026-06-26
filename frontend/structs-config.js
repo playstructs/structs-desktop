@@ -870,8 +870,12 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               primary_weapon_shots: pickNum(t, 'primary_weapon_shots', 'primaryWeaponShots'),
               primary_weapon_damage: pickNum(t, 'primary_weapon_damage', 'primaryWeaponDamage'),
               primary_weapon_recoil_damage: pickNum(t, 'primary_weapon_recoil_damage', 'primaryWeaponRecoilDamage'),
-              primary_weapon_shot_success_numerator: pickNum(t, 'primary_weapon_shot_success_numerator', 'primaryWeaponShotSuccessRateNumerator'),
-              primary_weapon_shot_success_denominator: pickNum(t, 'primary_weapon_shot_success_denominator', 'primaryWeaponShotSuccessRateDenominator'),
+              // NOTE: the chain field is shot_success_RATE_numerator (snake from
+              // proto primaryWeaponShotSuccessRateNumerator). The earlier snake key
+              // omitted "rate" so these synced as null → simulate computed 0 damage.
+              primary_weapon_shot_success_numerator: pickNum(t, 'primary_weapon_shot_success_rate_numerator', 'primaryWeaponShotSuccessRateNumerator'),
+              primary_weapon_shot_success_denominator: pickNum(t, 'primary_weapon_shot_success_rate_denominator', 'primaryWeaponShotSuccessRateDenominator'),
+              // No guaranteed-shots field exists in this proto version; success rate governs all shots.
               primary_weapon_guaranteed_shots: pickNum(t, 'primary_weapon_guaranteed_shots', 'primaryWeaponGuaranteedShots'),
               primary_weapon_blockable: pickBool(t, 'primary_weapon_blockable', 'primaryWeaponBlockable'),
               primary_weapon_counterable: pickBool(t, 'primary_weapon_counterable', 'primaryWeaponCounterable'),
@@ -880,8 +884,8 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               secondary_weapon_shots: pickNum(t, 'secondary_weapon_shots', 'secondaryWeaponShots'),
               secondary_weapon_damage: pickNum(t, 'secondary_weapon_damage', 'secondaryWeaponDamage'),
               secondary_weapon_recoil_damage: pickNum(t, 'secondary_weapon_recoil_damage', 'secondaryWeaponRecoilDamage'),
-              secondary_weapon_shot_success_numerator: pickNum(t, 'secondary_weapon_shot_success_numerator', 'secondaryWeaponShotSuccessRateNumerator'),
-              secondary_weapon_shot_success_denominator: pickNum(t, 'secondary_weapon_shot_success_denominator', 'secondaryWeaponShotSuccessRateDenominator'),
+              secondary_weapon_shot_success_numerator: pickNum(t, 'secondary_weapon_shot_success_rate_numerator', 'secondaryWeaponShotSuccessRateNumerator'),
+              secondary_weapon_shot_success_denominator: pickNum(t, 'secondary_weapon_shot_success_rate_denominator', 'secondaryWeaponShotSuccessRateDenominator'),
               secondary_weapon_guaranteed_shots: pickNum(t, 'secondary_weapon_guaranteed_shots', 'secondaryWeaponGuaranteedShots'),
               secondary_weapon_blockable: pickBool(t, 'secondary_weapon_blockable', 'secondaryWeaponBlockable'),
               secondary_weapon_counterable: pickBool(t, 'secondary_weapon_counterable', 'secondaryWeaponCounterable'),

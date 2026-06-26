@@ -8,6 +8,29 @@ use crate::hasher::types::TaskRegistry;
 use crate::mcp::cosmos_client::CosmosClient;
 use crate::mcp::guild_api::fetch_all_pages;
 
+/// Parse a JSON value that may be a number OR a string-encoded number into u64.
+/// The guild API frequently returns numeric fields as strings (e.g.
+/// `"last_action_block_height":"1337217"`), so naive `as_u64()` returns None.
+fn json_to_u64(v: &Value) -> Option<u64> {
+    v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// Float counterpart of [`json_to_u64`] — the Guild API returns `health` and
+/// other numerics as strings, so `as_f64()` alone misses them.
+fn json_to_f64(v: &Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// Guild-API event `detail` fields arrive as a JSON-encoded STRING (NATS events
+/// are pre-parsed objects; the Guild API is not). Return the detail as a parsed
+/// object regardless of which form it came in as.
+fn coerce_detail(detail: &Value) -> Value {
+    match detail {
+        Value::String(s) => serde_json::from_str(s).unwrap_or_else(|_| detail.clone()),
+        other => other.clone(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct IntelParams {
     /// Query type. Local-only: what_can_i_build, economy_status, plan_timeline.
@@ -917,15 +940,21 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
                 page.items
                     .iter()
                     .filter(|v| {
-                        // Same v0.19.1 CanAttack filter as the GAME_STATE branch:
-                        // require Built bit, reject Destroyed bit. Guild API may
-                        // return status as a string ("3") or number (3).
+                        // v0.19.1 CanAttack rejects unbuilt + destroyed structs. The
+                        // Guild API struct list exposes `is_destroyed` (a bool — what
+                        // scout uses) and may omit the numeric `status` bitmask. So:
+                        // reject destroyed; only enforce the Built bit when status is
+                        // actually present (otherwise a live, listed struct is built).
                         let status = v.get("status").and_then(|x| match x {
                             Value::Number(n) => n.as_u64(),
                             Value::String(s) => s.parse().ok(),
                             _ => None,
-                        }).unwrap_or(0);
-                        status & 2 != 0 && status & 32 == 0
+                        });
+                        let destroyed = v.get("is_destroyed").and_then(|x| x.as_bool()).unwrap_or(false);
+                        match status {
+                            Some(s) => s & 2 != 0 && s & 32 == 0,
+                            None => !destroyed,
+                        }
                     })
                     .filter_map(|v| {
                         let id = v.get("id").and_then(|x| x.as_str())?.to_string();
@@ -940,7 +969,7 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
                             _ => String::new(),
                         });
                         let max = type_id.and_then(|t| gs.struct_types.get(&t)).and_then(|t| t.max_health);
-                        let hp = match (v.get("health").and_then(|x| x.as_f64()), max) {
+                        let hp = match (v.get("health").and_then(json_to_f64), max) {
                             (Some(h), Some(m)) => format!("{:.0}/{:.0}", h, m),
                             (Some(h), None) => format!("{:.0}", h),
                             _ => "?".to_string(),
@@ -1079,7 +1108,7 @@ async fn query_scout(client: &CosmosClient, args: &Value) -> Vec<Content> {
             let slot = v.get("slot").map(|x| x.to_string()).unwrap_or_else(|| "?".to_string());
             let destroyed = v.get("is_destroyed").and_then(|x| x.as_bool()).unwrap_or(false);
             let hp = {
-                let h = v.get("health").and_then(|x| x.as_f64());
+                let h = v.get("health").and_then(json_to_f64);
                 let m = st.and_then(|t| t.max_health);
                 match (h, m) {
                     (Some(h), Some(m)) => format!("{:.0}/{:.0}", h, m),
@@ -1137,7 +1166,7 @@ async fn query_battle_log(client: &CosmosClient, args: &Value) -> Vec<Content> {
         if cat != category {
             continue;
         }
-        let detail = ev.get("detail").cloned().unwrap_or(Value::Null);
+        let detail = coerce_detail(&ev.get("detail").cloned().unwrap_or(Value::Null));
         let attacker = detail.get("attackerStructId").and_then(|x| x.as_str());
         let target = detail.get("targetStructId").and_then(|x| x.as_str());
         if let Some(sf) = &struct_filter {
@@ -1147,8 +1176,15 @@ async fn query_battle_log(client: &CosmosClient, args: &Value) -> Vec<Content> {
             }
         }
         let when = ev.get("time").and_then(|x| x.as_str()).unwrap_or("");
-        let block = ev.get("block_height").map(|x| x.to_string()).unwrap_or_default();
-        out.push_str(&format!("\n• [{}] blk {}", when, block));
+        // Block height isn't on the planet-activity envelope; pull it from the
+        // detail if present, otherwise omit (don't print a bare "blk ").
+        let block = ["block_height", "blockHeight", "block"]
+            .iter()
+            .find_map(|k| ev.get(*k).or_else(|| detail.get(*k)).and_then(json_to_u64));
+        match block {
+            Some(b) => out.push_str(&format!("\n• [{}] blk {}", when, b)),
+            None => out.push_str(&format!("\n• [{}]", when)),
+        }
         match (attacker, target) {
             (Some(a), Some(t)) => out.push_str(&format!("  {} → {}\n", a, t)),
             _ => out.push('\n'),
@@ -1165,38 +1201,66 @@ async fn query_battle_log(client: &CosmosClient, args: &Value) -> Vec<Content> {
     vec![Content::text(out)]
 }
 
-/// Pull the human-relevant numbers out of a combat `detail` JSON defensively
-/// (field names vary), falling back to a compact dump so nothing is hidden.
+/// Pull the human-relevant numbers out of a combat `detail` JSON. The Guild API
+/// `planet-activity` feed flattens each shot into one row carrying both the
+/// attacker context and the per-shot result (`EventAttackShotDetail`):
+/// `weaponSystem`, `attackerStructType`, `targetStructId/targetPlayerId`,
+/// `damageDealt`, `evaded`, `blocked`, `recoilDamage`. A boolean that's true
+/// reads as true whether it arrives as a JSON bool or the string "true".
 fn summarize_combat_detail(detail: &Value) -> String {
-    let mut parts = vec![];
-    for (label, keys) in [
-        ("damage", ["damage", "totalDamage", "damageDealt"].as_slice()),
-        ("reduction", ["damageReduction", "reduction"].as_slice()),
-    ] {
-        for k in keys {
-            if let Some(n) = detail.get(*k).and_then(|x| x.as_f64()) {
-                parts.push(format!("{} {}", label, n));
-                break;
-            }
+    let str_field = |keys: &[&str]| -> Option<String> {
+        keys.iter()
+            .find_map(|k| detail.get(*k).and_then(|x| x.as_str()).map(|s| s.to_string()))
+    };
+    let bool_field = |k: &str| -> bool {
+        match detail.get(k) {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
+            _ => false,
         }
+    };
+
+    let mut parts = vec![];
+    if let Some(w) = str_field(&["weaponSystem", "weaponType", "weapon"]) {
+        parts.push(w);
     }
-    if let Some(b) = detail.get("blockedBy").and_then(|x| x.as_str()) {
-        parts.push(format!("blocked-by {}", b));
+    if let Some(t) = str_field(&["attackerStructType"]) {
+        parts.push(format!("({})", t));
     }
-    for k in ["destroyed", "isDestroyed", "targetDestroyed"] {
-        if detail.get(k).and_then(|x| x.as_bool()) == Some(true) {
+    // Outcome: evasion/block short-circuit damage; otherwise show damage dealt.
+    if bool_field("evaded") {
+        parts.push("EVADED (0 dmg)".to_string());
+    } else if bool_field("blocked") {
+        let by = str_field(&["blockedBy", "blockerStructId"]);
+        parts.push(match by {
+            Some(b) => format!("BLOCKED by {}", b),
+            None => "BLOCKED".to_string(),
+        });
+    } else if let Some(dmg) = detail.get("damageDealt").and_then(json_to_u64) {
+        parts.push(format!("{} dmg", dmg));
+    }
+    if let Some(hp) = detail.get("targetHealthRemaining").and_then(json_to_u64) {
+        parts.push(format!("target HP→{}", hp));
+    }
+    for k in ["targetDestroyed", "destroyed", "isDestroyed"] {
+        if bool_field(k) {
             parts.push("DESTROYED".to_string());
             break;
         }
     }
-    if let Some(shots) = detail.get("eventAttackShotDetail").and_then(|x| x.as_array()) {
-        parts.push(format!("{} shot(s)", shots.len()));
+    if let Some(r) = detail.get("recoilDamage").and_then(json_to_u64) {
+        if r > 0 {
+            parts.push(format!("recoil {}", r));
+        }
     }
+
     if parts.is_empty() {
         // Unknown shape — compact, truncated dump so the agent still sees it.
-        let dump = serde_json::to_string(detail).unwrap_or_default();
-        let truncated: String = dump.chars().take(300).collect();
-        truncated
+        serde_json::to_string(detail)
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect()
     } else {
         parts.join(" · ")
     }
@@ -1249,10 +1313,12 @@ async fn query_is_active(client: &CosmosClient, args: &Value) -> Vec<Content> {
     let current_block = GAME_STATE.read().unwrap().current_block_height;
     match client.guild.player_last_action_block(&player_id).await {
         Ok(v) => {
-            let last = v
-                .get("height")
-                .and_then(|x| x.as_u64())
-                .or_else(|| v.as_u64());
+            // The guild API returns `{"last_action_block_height":"1337217"}` — note the
+            // value is a STRING. Accept several key spellings and string-or-number values.
+            let last = ["last_action_block_height", "lastActionBlockHeight", "height", "block_height"]
+                .iter()
+                .find_map(|k| v.get(*k).and_then(json_to_u64))
+                .or_else(|| json_to_u64(&v));
             match last {
                 Some(last) if current_block > 0 => {
                     let ago = current_block.saturating_sub(last);

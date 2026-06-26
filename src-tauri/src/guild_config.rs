@@ -48,7 +48,8 @@ fn default_configs() -> Vec<GuildConfig> {
         name: "Orbital Hydro".into(),
         guild_tag: "OH".into(),
         guild_api: "http://crew.oh.energy/api".into(),
-        reactor_api: "http://public.testnet.structs.network:1317".into(),
+        // LCD/REST is served over standard HTTPS now; the old :1317 host is dead.
+        reactor_api: "https://public.testnet.structs.network".into(),
         client_ws: "wss://public.testnet.structs.network:26657".into(),
         grass_nats_ws: "ws://crew.oh.energy:1443".into(),
         is_active: true,
@@ -66,7 +67,13 @@ fn migrate_stale_urls(configs: &mut [GuildConfig]) -> bool {
         ),
         (
             "http://reactor.oh.energy:1317",
+            "https://public.testnet.structs.network",
+        ),
+        // The :1317 LCD host stopped responding; REST is now on standard HTTPS.
+        // Existing installs persisted the old URL, so migrate it on next load.
+        (
             "http://public.testnet.structs.network:1317",
+            "https://public.testnet.structs.network",
         ),
     ];
 
