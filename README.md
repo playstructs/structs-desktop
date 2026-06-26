@@ -124,7 +124,7 @@ structs-universe/
 │               ├── events.rs     # Event feed (long-poll over the NATS buffer)
 │               ├── sequence.rs   # Guarded autonomous action chains
 │               ├── ui.rs         # structs_ui tool (drive the human's screen)
-│               ├── players.rs    # structs_players tool (virtual players: create/state/act)
+│               ├── players.rs    # structs_players tool (virtual players: create/list/roster/state/act)
 │               ├── policy.rs     # Standing order management
 │               └── format.rs     # Shared formatting utilities
 ├── .mcp.json                 # Claude Code MCP server config
@@ -146,12 +146,12 @@ The app runs an MCP server on `localhost:8420` with bearer token authentication.
 | `structs_query` | Query any game entity with enriched output (resolved names, decoded flags, 25-bit permission decode, formatted units) |
 | `structs_hash` | Manage proof-of-work tasks with ETAs (list, start, stop, progress) + tune the engine (`config`: enable/disable, GPU/CPU, `DIFFICULTY_START`, `MAX_CONCURRENT_PROCESSES`) |
 | `structs_action` | Execute game actions with preflight checks (explore, build, mine, attack, defend, raid, resync, etc.) |
-| `structs_intel` | Strategic intelligence + perception: `whoami`, `scout`, `valid_targets`, `battle_log`, `ruleset`, `simulate`, `slot_map`, `is_active`, `intents`, power forecast, economy, timeline |
+| `structs_intel` | Strategic intelligence + perception: `whoami`, `scout`, `valid_targets`, `simulate`, `strike_options` (team-wide "who can hit this target"), `battle_log`, `ruleset`, `slot_map`, `is_active`, `intents`, power forecast, economy, timeline |
 | `structs_policy` | Standing orders (auto_refine, power_alert, agent_ui, combat orders) |
 | `structs_ui` | Drive the human's screen for co-op play (menus, map previews, HUD badges, prompts) — display/elicitation only, never signs |
 | `structs_events` | Long-poll event feed (raids, attacks, fleet moves, completions) so agents react instead of polling |
-| `structs_sequence` | Guarded autonomous action chains, paced to the charge cooldown, with abort predicates (e.g. CMD-ship HP floor) |
-| `structs_players` | Manage virtual players — extra players off the same mnemonic (different HD indices) joined to your guild; create / list / state / act-as. Keys stay in the webapp |
+| `structs_sequence` | Guarded autonomous action chains, paced to the charge cooldown, with abort predicates (e.g. CMD-ship HP floor); pass `as` to run the chain as a virtual player |
+| `structs_players` | Manage virtual players — extra players off the same mnemonic (different HD indices) joined to your guild; create / list / `roster` (team overview) / state / act-as. Keys stay in the webapp |
 
 ### Prompts
 

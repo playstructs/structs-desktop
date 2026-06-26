@@ -74,6 +74,79 @@ pub async fn execute(
             )]
         }
 
+        // Team overview: the primary player + every virtual player in one view,
+        // so an agent commanding a team sees everyone's planet/fleet/structs/
+        // resources at a glance (otherwise it's dashboard + N separate states).
+        "roster" => {
+            let mut out = String::new();
+            {
+                let gs = crate::game_state::GAME_STATE.read().unwrap();
+                let charge = gs.get_charge();
+                out.push_str(&format!(
+                    "Team roster\n  ★ {} {} (you) — planet {} · fleet {} · {} structs · charge {} · alpha {} ore {}\n",
+                    gs.player_id.clone().unwrap_or_else(|| "?".to_string()),
+                    gs.player_name.clone().unwrap_or_default(),
+                    gs.planet_id.clone().unwrap_or_else(|| "none".to_string()),
+                    gs.fleet_id.clone().unwrap_or_else(|| "none".to_string()),
+                    gs.structs.len(),
+                    charge,
+                    gs.alpha.map(|a| format!("{:.0}", a)).unwrap_or_else(|| "?".to_string()),
+                    gs.ore.map(|o| format!("{:.0}", o)).unwrap_or_else(|| "?".to_string()),
+                ));
+            }
+            let vplayers: Vec<(u32, String, Option<String>)> = {
+                let reg = REGISTRY.read().unwrap();
+                reg.players
+                    .iter()
+                    .map(|p| (p.index, p.name.clone(), p.player_id.clone()))
+                    .collect()
+            };
+            if vplayers.is_empty() {
+                out.push_str("  (no virtual players — create with structs_players create {name})\n");
+            }
+            for (index, name, player_id) in vplayers {
+                let Some(pid) = player_id else {
+                    out.push_str(&format!("    [idx {}] {} — signup pending\n", index, name));
+                    continue;
+                };
+                let (planet, fleet, alpha, ore) = match client.query_entity("player", &pid).await {
+                    Ok(v) => {
+                        let player = v.get("Player");
+                        let grid = v.get("gridAttributes");
+                        let inv = v.get("playerInventory");
+                        let id_or = |val: Option<&Value>| {
+                            val.and_then(|x| x.as_str())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("none")
+                                .to_string()
+                        };
+                        let num = |val: Option<&Value>| match val {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(Value::Number(n)) => n.to_string(),
+                            _ => "0".to_string(),
+                        };
+                        (
+                            id_or(player.and_then(|p| p.get("planetId"))),
+                            id_or(player.and_then(|p| p.get("fleetId"))),
+                            num(inv.and_then(|i| i.get("rocks")).and_then(|r| r.get("amount"))),
+                            num(grid.and_then(|g| g.get("ore"))),
+                        )
+                    }
+                    Err(_) => ("?".to_string(), "?".to_string(), "?".to_string(), "?".to_string()),
+                };
+                let nstructs = match client.guild.struct_list_by_owner(&pid, 1).await {
+                    Ok(page) => page.items.len().to_string(),
+                    Err(_) => "?".to_string(),
+                };
+                out.push_str(&format!(
+                    "    [idx {}] {} {} — planet {} · fleet {} · {} structs · alpha {} ore {}\n",
+                    index, pid, name, planet, fleet, nstructs, alpha, ore
+                ));
+            }
+            out.push_str("\nAct as any player: structs_players act {player, …} or structs_sequence {as, steps}.\n");
+            vec![Content::text(out)]
+        }
+
         "create" => {
             let Some(name) = params.name.as_deref().filter(|n| !n.is_empty()) else {
                 return vec![Content::text(
@@ -270,7 +343,7 @@ pub async fn execute(
                     out.push_str(&format!("    [{}] {} — {}\n", e.timestamp, e.category, e.subject));
                 }
             }
-            out.push_str("\nAct as this player with structs_action / structs_sequence + `as`.\n");
+            out.push_str("\nAct as this player: structs_players act {player, action, args} for one action, or structs_sequence {as, steps} for a guarded chain.\n");
             vec![Content::text(out)]
         }
 

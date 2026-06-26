@@ -221,9 +221,11 @@ impl GuildApiClient {
         start: i64,
         end: i64,
     ) -> Result<GuildPage<Value>, String> {
+        // The API requires the params named `start_time`/`end_time` (unix
+        // seconds); `start`/`end` are rejected with a 400.
         self.get_page(
             &format!(
-                "/api/stat/{}/object/{}/range/page/{}?start={}&end={}",
+                "/api/stat/{}/object/{}/range/page/{}?start_time={}&end_time={}",
                 metric, object_key, page, start, end
             ),
             page,

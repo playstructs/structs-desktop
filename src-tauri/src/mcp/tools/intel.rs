@@ -74,7 +74,7 @@ pub async fn execute(
         "whoami" => query_whoami(),
         "intents" => query_intents(),
         "ruleset" => query_ruleset(&params.args),
-        "simulate" => query_simulate(&params.args),
+        "simulate" => query_simulate(client, &params.args).await,
         "what_can_i_build" => query_buildable(),
         "economy_status" => query_economy(registry),
         "plan_timeline" => query_timeline(registry, &params.args),
@@ -83,6 +83,7 @@ pub async fn execute(
         // Guild-API-backed analytical queries
         "planet_history" => query_planet_history(client, &params.args).await,
         "valid_targets" => query_valid_targets(client, &params.args).await,
+        "strike_options" => query_strike_options(client, &params.args).await,
         "scout" => query_scout(client, &params.args).await,
         "battle_log" => query_battle_log(client, &params.args).await,
         "slot_map" => query_slot_map(client, &params.args).await,
@@ -90,7 +91,7 @@ pub async fn execute(
         "market" => query_market(client, &params.args).await,
         "metric_trend" => query_metric_trend(client, &params.args).await,
         other => vec![Content::text(format!(
-            "Unknown intel query '{}'. Available: whoami, intents, ruleset, simulate, what_can_i_build, power_forecast, economy_status, plan_timeline, planet_history, valid_targets, scout, battle_log, slot_map, is_active, market, metric_trend",
+            "Unknown intel query '{}'. Available: whoami, intents, ruleset, simulate, strike_options, what_can_i_build, power_forecast, economy_status, plan_timeline, planet_history, valid_targets, scout, battle_log, slot_map, is_active, market, metric_trend",
             other
         ))],
     }
@@ -222,28 +223,67 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
 /// `intel.simulate` — preview an attack before committing.
 /// Args: `{ attacker, target, weapon?="primary" }` (structs resolved from game
 /// state); or override the target with `{ target_type, target_hp?, target_ambit? }`.
-fn query_simulate(args: &Value) -> Vec<Content> {
+async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
     use crate::mcp::combat::{simulate, WeaponStats};
     use crate::mcp::tools::format::{ambit_bit, decode_ambits};
 
-    let gs = GAME_STATE.read().unwrap();
     let weapon = args.get("weapon").and_then(|v| v.as_str()).unwrap_or("primary");
     let secondary = weapon.eq_ignore_ascii_case("secondary");
 
-    // Resolve attacker struct → type.
     let attacker_id = match args.get("attacker").and_then(|v| v.as_str()) {
         Some(s) => s,
-        None => return vec![Content::text("simulate: missing required arg 'attacker' (your struct id).".to_string())],
+        None => return vec![Content::text("simulate: missing required arg 'attacker' (a struct id — yours or a virtual player's).".to_string())],
     };
-    let att_struct = match gs.structs.get(attacker_id) {
-        Some(s) => s,
-        None => return vec![Content::text(format!("simulate: attacker {} not in current game state.", attacker_id))],
+
+    // Resolve the attacker's (struct type id, operating ambit). Prefer the synced
+    // primary-player state; fall back to an LCD lookup so the agent can also plan
+    // attacks for a virtual player's (or any visible) struct — not just its own.
+    let resolved = {
+        let gs = GAME_STATE.read().unwrap();
+        gs.structs
+            .get(attacker_id)
+            .map(|s| (s.struct_type_id.to_string(), s.operating_ambit.clone()))
     };
-    let att_type = match gs.struct_types.get(&att_struct.struct_type_id.to_string()) {
+    let (att_type_id, att_ambit) = match resolved {
+        Some(v) => v,
+        None => match client.query_entity("struct", attacker_id).await {
+            Ok(v) => {
+                let st = v.get("Struct");
+                let tid = st.and_then(|s| s.get("type")).and_then(|x| match x {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                });
+                let amb = st
+                    .and_then(|s| s.get("operatingAmbit"))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                match tid {
+                    Some(tid) => (tid, amb),
+                    None => {
+                        return vec![Content::text(format!(
+                            "simulate: couldn't resolve attacker {}'s struct type from the chain.",
+                            attacker_id
+                        ))]
+                    }
+                }
+            }
+            Err(e) => {
+                return vec![Content::text(format!(
+                    "simulate: attacker {} not in your game state and the chain lookup failed: {}",
+                    attacker_id, e
+                ))]
+            }
+        },
+    };
+    let att_ambit_bit = att_ambit.as_deref().map(ambit_bit).unwrap_or(0);
+
+    // No await past here — safe to hold the GAME_STATE lock for the rest.
+    let gs = GAME_STATE.read().unwrap();
+    let att_type = match gs.struct_types.get(&att_type_id) {
         Some(t) => t,
         None => return vec![Content::text("simulate: attacker struct type unknown (combat fields not synced?).".to_string())],
     };
-    let att_ambit_bit = att_struct.operating_ambit.as_deref().map(ambit_bit).unwrap_or(0);
 
     let w = if secondary {
         WeaponStats {
@@ -340,6 +380,182 @@ fn query_simulate(args: &Value) -> Vec<Content> {
         ));
     }
     out.push_str("  (Estimate from synced struct stats; defender blocks/counters and evasion rolls can shift the result.)\n");
+    vec![Content::text(out)]
+}
+
+/// `intel.strike_options` — team-wide strike planner. Given an enemy target,
+/// report which of YOUR structs — across the primary player AND every virtual
+/// player — can reach it and the expected damage, so an agent commanding a team
+/// knows who should fire. Args: `{ target }` (enemy struct id) or
+/// `{ target_type, target_ambit, target_hp? }`.
+async fn query_strike_options(client: &CosmosClient, args: &Value) -> Vec<Content> {
+    use crate::mcp::combat::{simulate, WeaponStats};
+    use crate::mcp::tools::format::{ambit_bit, decode_ambits};
+
+    let num_or_str = |x: &Value| match x {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+
+    // ── Resolve the target: ambit, HP, armour, counter values. ──
+    let (target_label, tgt_ambit_bit, tgt_hp, reduction, counter_same, counter_cross) =
+        if let Some(tid) = args.get("target").and_then(|v| v.as_str()) {
+            match client.query_entity("struct", tid).await {
+                Ok(v) => {
+                    let st = v.get("Struct");
+                    let type_id = st.and_then(|s| s.get("type")).and_then(&num_or_str);
+                    let ambit = st
+                        .and_then(|s| s.get("operatingAmbit"))
+                        .and_then(|x| x.as_str())
+                        .map(ambit_bit)
+                        .unwrap_or(0);
+                    let hp = v
+                        .get("structAttributes")
+                        .and_then(|sa| sa.get("health"))
+                        .and_then(json_to_f64)
+                        .or_else(|| st.and_then(|s| s.get("health_max")).and_then(json_to_f64))
+                        .unwrap_or(0.0);
+                    let gs = GAME_STATE.read().unwrap();
+                    let t = type_id.as_ref().and_then(|t| gs.struct_types.get(t));
+                    (
+                        format!("{}{}", tid, t.map(|t| format!(" ({})", t.name)).unwrap_or_default()),
+                        ambit,
+                        hp,
+                        t.and_then(|t| t.attack_reduction).unwrap_or(0),
+                        t.and_then(|t| t.counter_attack_same_ambit).unwrap_or(0),
+                        t.and_then(|t| t.counter_attack).unwrap_or(0),
+                    )
+                }
+                Err(e) => {
+                    return vec![Content::text(format!("strike_options: target {} lookup failed: {}", tid, e))]
+                }
+            }
+        } else if let Some(tt) = args.get("target_type").and_then(|v| v.as_str()) {
+            let gs = GAME_STATE.read().unwrap();
+            let t = gs.struct_types.values().find(|t| t.name.eq_ignore_ascii_case(tt));
+            let ambit = args.get("target_ambit").and_then(|v| v.as_str()).map(ambit_bit).unwrap_or(0);
+            let hp = args
+                .get("target_hp")
+                .and_then(|v| v.as_f64())
+                .or_else(|| t.and_then(|t| t.max_health))
+                .unwrap_or(0.0);
+            (
+                tt.to_string(),
+                ambit,
+                hp,
+                t.and_then(|t| t.attack_reduction).unwrap_or(0),
+                t.and_then(|t| t.counter_attack_same_ambit).unwrap_or(0),
+                t.and_then(|t| t.counter_attack).unwrap_or(0),
+            )
+        } else {
+            return vec![Content::text(
+                "strike_options: provide 'target' (enemy struct id) or 'target_type' (+ target_ambit, target_hp?).".to_string(),
+            )];
+        };
+
+    // ── Gather attackers: (player_label, struct_id, type_id, ambit_bit). ──
+    // Primary from GAME_STATE; each virtual player from the Guild API.
+    let mut attackers: Vec<(String, String, String, u64)> = Vec::new();
+    {
+        let gs = GAME_STATE.read().unwrap();
+        if let Some(me) = gs.player_id.clone() {
+            for (id, s) in gs.structs.iter() {
+                if s.owner != me || s.status & 2 == 0 || s.status & 32 != 0 {
+                    continue;
+                }
+                let bit = s.operating_ambit.as_deref().map(ambit_bit).unwrap_or(0);
+                attackers.push(("you".to_string(), id.clone(), s.struct_type_id.to_string(), bit));
+            }
+        }
+    }
+    let vplayers: Vec<(String, Option<String>)> = {
+        let reg = crate::mcp::virtual_players::REGISTRY.read().unwrap();
+        reg.players.iter().map(|p| (p.name.clone(), p.player_id.clone())).collect()
+    };
+    for (name, pid) in vplayers {
+        let Some(pid) = pid else { continue };
+        if let Ok(page) = client.guild.struct_list_by_owner(&pid, 1).await {
+            for v in page.items.iter() {
+                if v.get("is_destroyed").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    continue;
+                }
+                let Some(id) = v.get("id").and_then(|x| x.as_str()) else { continue };
+                let type_id = v
+                    .get("type")
+                    .or_else(|| v.get("struct_type"))
+                    .and_then(&num_or_str)
+                    .unwrap_or_default();
+                let bit = v.get("operating_ambit").and_then(|x| x.as_str()).map(ambit_bit).unwrap_or(0);
+                attackers.push((name.clone(), id.to_string(), type_id, bit));
+            }
+        }
+    }
+
+    // ── Simulate each attacker's best reaching weapon against the target. ──
+    let mut rows: Vec<(String, String, String, f64, bool)> = Vec::new();
+    {
+        let gs = GAME_STATE.read().unwrap();
+        let build = |t: &crate::game_state::StructTypeInfo, secondary: bool| WeaponStats {
+            shots: if secondary { t.secondary_weapon_shots } else { t.primary_weapon_shots }.unwrap_or(0),
+            guaranteed: 0,
+            success_num: if secondary { t.secondary_weapon_shot_success_numerator } else { t.primary_weapon_shot_success_numerator }.unwrap_or(0),
+            success_den: if secondary { t.secondary_weapon_shot_success_denominator } else { t.primary_weapon_shot_success_denominator }.unwrap_or(1),
+            damage: if secondary { t.secondary_weapon_damage } else { t.primary_weapon_damage }.unwrap_or(0),
+            recoil: 0,
+            ambits: if secondary { t.secondary_weapon_ambits } else { t.primary_weapon_ambits }.unwrap_or(0),
+            blockable: false,
+            counterable: false,
+        };
+        for (player, id, type_id, att_ambit) in &attackers {
+            let Some(t) = gs.struct_types.get(type_id) else { continue };
+            let prim = build(t, false);
+            let sec = build(t, true);
+            if prim.ambits == 0 && sec.ambits == 0 {
+                continue; // non-combat struct
+            }
+            // Prefer the weapon that reaches the target's ambit.
+            let (w, wlabel) = if tgt_ambit_bit != 0 && (prim.ambits & tgt_ambit_bit) != 0 {
+                (prim, "primary")
+            } else if tgt_ambit_bit != 0 && (sec.ambits & tgt_ambit_bit) != 0 {
+                (sec, "secondary")
+            } else if prim.ambits != 0 {
+                (prim, "primary")
+            } else {
+                (sec, "secondary")
+            };
+            let same = *att_ambit != 0 && *att_ambit == tgt_ambit_bit;
+            let r = simulate(&w, tgt_ambit_bit, tgt_hp, reduction, counter_same, counter_cross, same);
+            rows.push((player.clone(), id.clone(), wlabel.to_string(), r.expected_damage, r.reachable));
+        }
+    }
+
+    rows.sort_by(|a, b| {
+        b.4.cmp(&a.4)
+            .then(b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Strike options vs {} (HP {:.0}, ambit [{}], armour −{})\n",
+        target_label,
+        tgt_hp,
+        if tgt_ambit_bit == 0 { "?".to_string() } else { decode_ambits(tgt_ambit_bit) },
+        reduction
+    ));
+    let reachable: Vec<_> = rows.iter().filter(|r| r.4).collect();
+    if reachable.is_empty() {
+        out.push_str("  No combat struct on your team can reach this target's ambit.\n");
+    } else {
+        for (player, id, wlabel, exp, _) in &reachable {
+            out.push_str(&format!("  {} · {} [{}] → ~{:.1} expected dmg\n", player, id, wlabel, exp));
+        }
+    }
+    let unreachable = rows.len() - reachable.len();
+    if unreachable > 0 {
+        out.push_str(&format!("  ({} other combat struct(s) can't reach this ambit.)\n", unreachable));
+    }
+    out.push_str("\nFire with structs_action attack (you) or structs_players act {player, action:\"attack\"} (virtual players).\n");
     vec![Content::text(out)]
 }
 
@@ -953,6 +1169,33 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
                 .collect::<Vec<_>>()
         };
         (ids, my_id, charge, weapon_mask)
+    };
+
+    // Fallback: if the attacker isn't in the primary GAME_STATE (e.g. a virtual
+    // player's struct), resolve its weapon-ambit mask from the chain so we still
+    // rank by reachability instead of silently ignoring the attacker.
+    let weapon_mask = match (weapon_mask, attacker.as_deref()) {
+        (None, Some(aid)) => match client.query_entity("struct", aid).await {
+            Ok(v) => {
+                let type_id = v.get("Struct").and_then(|s| s.get("type")).and_then(|x| match x {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                });
+                type_id.and_then(|tid| {
+                    let gs = GAME_STATE.read().unwrap();
+                    gs.struct_types.get(&tid).and_then(|t| {
+                        if weapon.eq_ignore_ascii_case("secondary") {
+                            t.secondary_weapon_ambits
+                        } else {
+                            t.primary_weapon_ambits
+                        }
+                    })
+                })
+            }
+            Err(_) => None,
+        },
+        (mask, _) => mask,
     };
 
     let candidates: Vec<(String, u64, String)> = if let Some(loc) = near.as_deref() {

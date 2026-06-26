@@ -376,9 +376,19 @@ fn build_sync(
         }
     } else {
         out.push_str(&format!(
-            "Player {} is not the logged-in player. Only local player data is available.\n",
+            "Player {} is not the logged-in player, so the dashboard (which renders local game state) can't show it.\n",
             player_id
         ));
+        let is_vplayer = crate::mcp::virtual_players::REGISTRY
+            .read()
+            .unwrap()
+            .find(&player_id)
+            .is_some();
+        if is_vplayer {
+            out.push_str("→ It's one of your virtual players: use structs_players state {player} for its full state, or structs_players roster for the whole team.\n");
+        } else {
+            out.push_str("→ For another player use structs_intel scout / structs_query player; for your own virtual players use structs_players state.\n");
+        }
     }
 
     out.push_str(&format!("\nBlock height: {}\n", gs.current_block_height));

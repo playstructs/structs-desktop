@@ -123,20 +123,20 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_intel",
-                "Strategic intelligence — covers what you'd otherwise query the DB for. COMBAT/RECON (use these before fighting): 'scout' {location_id} = enemy roster with HP/ambit/slot/weapon-reach + defender ids; 'valid_targets' {attacker,weapon} = reachable targets ranked, with HP + defenders; 'battle_log' {planet_id} = combat RESULTS (damage/blocked/counters/destroyed) — your own attack outcomes; 'ruleset' = weapon+defense matrix (guided/unguided, jam/evade, armour, counter rules); 'simulate' {attacker,target} = expected damage/kill/counter before committing; 'is_active' {player_id} = enemy last-action recency (online?). IDENTITY/PLANNING: 'whoami', 'what_can_i_build', 'economy_status', 'plan_timeline', 'slot_map', 'intents'. ECONOMY/TREND: 'power_forecast', 'planet_history', 'market', 'metric_trend'.",
+                "Strategic intelligence — covers what you'd otherwise query the DB for. COMBAT/RECON (use these before fighting): 'scout' {location_id} = enemy roster with HP/ambit/slot/weapon-reach + defender ids; 'valid_targets' {attacker,weapon} = reachable targets ranked, with HP + defenders; 'battle_log' {planet_id} = combat RESULTS (damage/blocked/counters/destroyed) — your own attack outcomes; 'ruleset' = weapon+defense matrix (guided/unguided, jam/evade, armour, counter rules); 'simulate' {attacker,target} = expected damage/kill/counter before committing; 'strike_options' {target} = TEAM strike planner — which of your structs (primary + all virtual players) can reach a target and for how much; 'is_active' {player_id} = enemy last-action recency (online?). IDENTITY/PLANNING: 'whoami', 'what_can_i_build', 'economy_status', 'plan_timeline', 'slot_map', 'intents'. ECONOMY/TREND: 'power_forecast', 'planet_history', 'market', 'metric_trend'.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
                             "enum": [
-                                "whoami", "intents", "ruleset", "simulate", "what_can_i_build", "power_forecast", "economy_status", "plan_timeline",
+                                "whoami", "intents", "ruleset", "simulate", "strike_options", "what_can_i_build", "power_forecast", "economy_status", "plan_timeline",
                                 "planet_history", "valid_targets", "scout", "battle_log", "slot_map", "is_active", "market", "metric_trend"
                             ]
                         },
                         "args": {
                             "type": "object",
-                            "description": "Query-specific args. whoami: none. intents: none. ruleset: {struct_type?}. simulate: {attacker, target, weapon?} or {attacker, target_type, target_hp?, target_ambit?, weapon?}. power_forecast: {struct_type, count}. planet_history: {planet_id, window_minutes?=60}. valid_targets: {near?, limit?=10, attacker?, weapon?}. scout: {location_id}. battle_log: {planet_id?, category?=struct_attack, struct_id?, limit?=15}. slot_map: {location_id}. is_active: {player_id}. market: {denom?}. metric_trend: {metric, object, window_blocks?=100}."
+                            "description": "Query-specific args. whoami: none. intents: none. ruleset: {struct_type?}. simulate: {attacker, target, weapon?} or {attacker, target_type, target_hp?, target_ambit?, weapon?}. strike_options: {target} (enemy struct id) or {target_type, target_ambit, target_hp?}. power_forecast: {struct_type, count}. planet_history: {planet_id, window_minutes?=60}. valid_targets: {near?, limit?=10, attacker?, weapon?}. scout: {location_id}. battle_log: {planet_id?, category?=struct_attack, struct_id?, limit?=15}. slot_map: {location_id}. is_active: {player_id}. market: {denom?}. metric_trend: {metric, object, window_blocks?=100}."
                         }
                     },
                     "required": ["query"]
@@ -185,7 +185,7 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_sequence",
-                "Run a guarded autonomous action chain (e.g. strip blockers → kill the Command Ship), paced to the charge cooldown, aborting if a safety predicate trips. Each step is a normal structs_action, so this adds no new signing authority — it's manual play with rails. Provide 'steps' (ordered {action,args}) and optional 'abort_if' ({cmd_hp_below, stop_if_offline}). It waits out charge cooldowns up to 'max_wait_secs' then pauses so you can resume.",
+                "Run a guarded autonomous action chain (e.g. strip blockers → kill the Command Ship), paced to the charge cooldown, aborting if a safety predicate trips. Each step is a normal structs_action, so this adds no new signing authority — it's manual play with rails. Provide 'steps' (ordered {action,args}) and optional 'abort_if' ({cmd_hp_below, stop_if_offline}). Pass 'as' (a virtual player index/address/id) to run the whole chain AS that player, signed by its own key. It waits out charge cooldowns up to 'max_wait_secs' then pauses so you can resume.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -196,20 +196,21 @@ impl StructsMcpHandler {
                         },
                         "abort_if": {
                             "type": "object",
-                            "description": "Safety predicates checked before/while each step. {cmd_hp_below: number, stop_if_offline: bool}."
+                            "description": "Safety predicates checked before/while each step (primary player only). {cmd_hp_below: number, stop_if_offline: bool}."
                         },
-                        "max_wait_secs": { "type": "number", "description": "Total charge-wait budget across the sequence (0–300, default 180)." }
+                        "max_wait_secs": { "type": "number", "description": "Total charge-wait budget across the sequence (0–300, default 180)." },
+                        "as": { "type": "string", "description": "Optional: run the chain as a virtual player (index, address, or player id). abort_if is not yet evaluated for virtual-player sequences." }
                     },
                     "required": ["steps"]
                 })),
             ),
             Tool::new(
                 "structs_players",
-                "Manage agent-controlled virtual players — extra Structs players derived from the SAME mnemonic at different HD indices, joined to your guild (the guild fronts the join fee; no alpha needed). Keys never leave the app. Commands: 'list' (registry + status); 'create' {name, index?} (derive a new address, guild-signup, register; defaults to next free HD index ≥ 1); 'state' {player} (a virtual player's on-chain state — structs/HP/charge/resources — from LCD + grass); 'act' {player, action, args} (perform a game action AS that virtual player, signed by its own key). Direct actions: explore/build/activate/deactivate/deploy/defend/attack. PoW actions (mine/refine/raid) start a hash and auto-sign the completion as the player.",
+                "Manage agent-controlled virtual players — extra Structs players derived from the SAME mnemonic at different HD indices, joined to your guild (the guild fronts the join fee; no alpha needed). Keys never leave the app. Commands: 'list' (registry + status); 'roster' (TEAM overview — the primary player + every virtual player in one view: planet/fleet/struct count/resources); 'create' {name, index?} (derive a new address, guild-signup, register; defaults to next free HD index ≥ 1); 'state' {player} (a virtual player's on-chain state — structs/HP/charge/resources — from LCD + grass); 'act' {player, action, args} (perform a game action AS that virtual player, signed by its own key). Direct actions: explore/build/activate/deactivate/deploy/defend/attack. PoW actions (mine/refine/raid) start a hash and auto-sign the completion as the player.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "enum": ["list", "create", "state", "act"] },
+                        "command": { "type": "string", "enum": ["list", "roster", "create", "state", "act"] },
                         "name": { "type": "string", "description": "create: display name (3–20 chars: letters/digits/-/_)." },
                         "index": { "type": "integer", "description": "create: HD index to use (>= 1); defaults to next free." },
                         "player": { "type": "string", "description": "state/act: which virtual player — index, address, or player id." },
@@ -412,7 +413,7 @@ impl ServerHandler for StructsMcpHandler {
                         serde_json::from_value(args).map_err(|e| {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
-                    tools::sequence::execute(&self.app_handle, &self.task_registry, params).await
+                    tools::sequence::execute(&self.app_handle, &self.cosmos_client, &self.task_registry, params).await
                 }
                 "structs_players" => {
                     let params: tools::players::PlayerParams =
