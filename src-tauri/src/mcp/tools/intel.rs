@@ -21,6 +21,28 @@ fn json_to_f64(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
+/// Enemy struct HP isn't in the Guild API `struct/list/location` response — it
+/// lives on the full LCD struct entity (`structAttributes.health` cur, string;
+/// `Struct.health_max` max, number). Fetch it per struct. Returns "cur/max" (or
+/// "cur") or None if the entity/health is unavailable.
+async fn fetch_struct_hp(client: &CosmosClient, id: &str) -> Option<String> {
+    let v = client.query_entity("struct", id).await.ok()?;
+    let cur = v
+        .get("structAttributes")
+        .and_then(|sa| sa.get("health"))
+        .and_then(json_to_f64);
+    let max = v
+        .get("Struct")
+        .and_then(|s| s.get("health_max"))
+        .and_then(json_to_f64)
+        .or_else(|| v.get("health_max").and_then(json_to_f64));
+    match (cur, max) {
+        (Some(c), Some(m)) => Some(format!("{:.0}/{:.0}", c, m)),
+        (Some(c), None) => Some(format!("{:.0}", c)),
+        _ => None,
+    }
+}
+
 /// Guild-API event `detail` fields arrive as a JSON-encoded STRING (NATS events
 /// are pre-parsed objects; the Guild API is not). Return the detail as a parsed
 /// object regardless of which form it came in as.
@@ -1017,7 +1039,13 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
             Some(mask) if *ambit != 0 => (mask & *ambit) != 0,
             _ => true,
         };
-        let mut note = format!("HP {} · {}", hp, def_note);
+        // The struct list omits health; enrich from the LCD struct entity.
+        let hp_str = if hp == "?" {
+            fetch_struct_hp(client, id).await.unwrap_or_else(|| "?".to_string())
+        } else {
+            hp.clone()
+        };
+        let mut note = format!("HP {} · {}", hp_str, def_note);
         if weapon_mask.is_some() && !reachable {
             note.push_str(" — OUT OF WEAPON AMBIT (cannot reach)");
         }
@@ -1078,6 +1106,20 @@ async fn query_scout(client: &CosmosClient, args: &Value) -> Vec<Content> {
         Err(e) => return vec![Content::text(format!("Scout {}: structs unavailable ({})", location_id, e))],
     };
 
+    // Enemy HP isn't in the struct list — prefetch it from the LCD per struct
+    // (skip destroyed). Done before the GAME_STATE lock since fetch is async.
+    let mut hp_by_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for v in page.items.iter().take(30) {
+        if v.get("is_destroyed").and_then(|x| x.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+            if let Some(hp) = fetch_struct_hp(client, id).await {
+                hp_by_id.insert(id.to_string(), hp);
+            }
+        }
+    }
+
     let mut out = String::new();
     out.push_str(&format!("Scout: {} — {} struct(s)\n", location_id, page.items.len()));
 
@@ -1107,7 +1149,8 @@ async fn query_scout(client: &CosmosClient, args: &Value) -> Vec<Content> {
             let ambit = v.get("operating_ambit").and_then(|x| x.as_str()).unwrap_or("?");
             let slot = v.get("slot").map(|x| x.to_string()).unwrap_or_else(|| "?".to_string());
             let destroyed = v.get("is_destroyed").and_then(|x| x.as_bool()).unwrap_or(false);
-            let hp = {
+            let hp = hp_by_id.get(id).cloned().unwrap_or_else(|| {
+                // Fallback to any health on the list row (usually absent → "?").
                 let h = v.get("health").and_then(json_to_f64);
                 let m = st.and_then(|t| t.max_health);
                 match (h, m) {
@@ -1115,7 +1158,7 @@ async fn query_scout(client: &CosmosClient, args: &Value) -> Vec<Content> {
                     (Some(h), None) => format!("{:.0}", h),
                     _ => "?".to_string(),
                 }
-            };
+            });
             let defends = v
                 .get("defending_struct_ids")
                 .and_then(|x| x.as_array())
@@ -1168,28 +1211,47 @@ async fn query_battle_log(client: &CosmosClient, args: &Value) -> Vec<Content> {
         }
         let detail = coerce_detail(&ev.get("detail").cloned().unwrap_or(Value::Null));
         let attacker = detail.get("attackerStructId").and_then(|x| x.as_str());
-        let target = detail.get("targetStructId").and_then(|x| x.as_str());
+        let attacker_type = detail.get("attackerStructType").and_then(|x| x.as_str()).unwrap_or("?");
+        let weapon = detail.get("weaponSystem").and_then(|x| x.as_str()).unwrap_or("");
+        // The resolved outcome (damage, target, destroyed) is per-shot in the
+        // eventAttackShotDetail array — NOT flat on the detail.
+        let shots = detail.get("eventAttackShotDetail").and_then(|x| x.as_array());
         if let Some(sf) = &struct_filter {
-            let matches = attacker == Some(sf.as_str()) || target == Some(sf.as_str());
-            if !matches {
+            let hits_attacker = attacker == Some(sf.as_str());
+            let hits_target = shots
+                .map(|ss| {
+                    ss.iter().any(|s| {
+                        s.get("targetStructId").and_then(|x| x.as_str()) == Some(sf.as_str())
+                    })
+                })
+                .unwrap_or(false);
+            if !hits_attacker && !hits_target {
                 continue;
             }
         }
         let when = ev.get("time").and_then(|x| x.as_str()).unwrap_or("");
-        // Block height isn't on the planet-activity envelope; pull it from the
-        // detail if present, otherwise omit (don't print a bare "blk ").
-        let block = ["block_height", "blockHeight", "block"]
-            .iter()
-            .find_map(|k| ev.get(*k).or_else(|| detail.get(*k)).and_then(json_to_u64));
-        match block {
-            Some(b) => out.push_str(&format!("\n• [{}] blk {}", when, b)),
-            None => out.push_str(&format!("\n• [{}]", when)),
+        out.push_str(&format!(
+            "\n• [{}] {} ({}) {}\n",
+            when,
+            attacker.unwrap_or("?"),
+            attacker_type,
+            weapon
+        ));
+        match shots {
+            Some(ss) if !ss.is_empty() => {
+                for s in ss {
+                    out.push_str(&format!("    → {}\n", summarize_shot(s)));
+                }
+            }
+            // No shot detail (e.g. a recoil-only or self-destruct row).
+            _ => {
+                if let Some(r) = detail.get("recoilDamage").and_then(json_to_u64) {
+                    if r > 0 {
+                        out.push_str(&format!("    (recoil {} to attacker)\n", r));
+                    }
+                }
+            }
         }
-        match (attacker, target) {
-            (Some(a), Some(t)) => out.push_str(&format!("  {} → {}\n", a, t)),
-            _ => out.push('\n'),
-        }
-        out.push_str(&format!("    {}\n", summarize_combat_detail(&detail)));
         shown += 1;
         if shown >= limit {
             break;
@@ -1201,69 +1263,52 @@ async fn query_battle_log(client: &CosmosClient, args: &Value) -> Vec<Content> {
     vec![Content::text(out)]
 }
 
-/// Pull the human-relevant numbers out of a combat `detail` JSON. The Guild API
-/// `planet-activity` feed flattens each shot into one row carrying both the
-/// attacker context and the per-shot result (`EventAttackShotDetail`):
-/// `weaponSystem`, `attackerStructType`, `targetStructId/targetPlayerId`,
-/// `damageDealt`, `evaded`, `blocked`, `recoilDamage`. A boolean that's true
-/// reads as true whether it arrives as a JSON bool or the string "true".
-fn summarize_combat_detail(detail: &Value) -> String {
-    let str_field = |keys: &[&str]| -> Option<String> {
-        keys.iter()
-            .find_map(|k| detail.get(*k).and_then(|x| x.as_str()).map(|s| s.to_string()))
-    };
-    let bool_field = |k: &str| -> bool {
-        match detail.get(k) {
-            Some(Value::Bool(b)) => *b,
-            Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
-            _ => false,
-        }
+/// Summarize one `EventAttackShotDetail` row into a readable combat line:
+/// target, damage, HP before→after, and evade/block/destroy/counter flags.
+/// Booleans read true whether they arrive as JSON bools or the string "true".
+fn summarize_shot(s: &Value) -> String {
+    let sval = |k: &str| s.get(k).and_then(|x| x.as_str()).map(|v| v.to_string());
+    let bval = |k: &str| match s.get(k) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(x)) => x.eq_ignore_ascii_case("true"),
+        _ => false,
     };
 
-    let mut parts = vec![];
-    if let Some(w) = str_field(&["weaponSystem", "weaponType", "weapon"]) {
-        parts.push(w);
-    }
-    if let Some(t) = str_field(&["attackerStructType"]) {
-        parts.push(format!("({})", t));
-    }
-    // Outcome: evasion/block short-circuit damage; otherwise show damage dealt.
-    if bool_field("evaded") {
-        parts.push("EVADED (0 dmg)".to_string());
-    } else if bool_field("blocked") {
-        let by = str_field(&["blockedBy", "blockerStructId"]);
-        parts.push(match by {
-            Some(b) => format!("BLOCKED by {}", b),
-            None => "BLOCKED".to_string(),
-        });
-    } else if let Some(dmg) = detail.get("damageDealt").and_then(json_to_u64) {
-        parts.push(format!("{} dmg", dmg));
-    }
-    if let Some(hp) = detail.get("targetHealthRemaining").and_then(json_to_u64) {
-        parts.push(format!("target HP→{}", hp));
-    }
-    for k in ["targetDestroyed", "destroyed", "isDestroyed"] {
-        if bool_field(k) {
-            parts.push("DESTROYED".to_string());
-            break;
-        }
-    }
-    if let Some(r) = detail.get("recoilDamage").and_then(json_to_u64) {
-        if r > 0 {
-            parts.push(format!("recoil {}", r));
-        }
-    }
-
-    if parts.is_empty() {
-        // Unknown shape — compact, truncated dump so the agent still sees it.
-        serde_json::to_string(detail)
-            .unwrap_or_default()
-            .chars()
-            .take(300)
-            .collect()
+    let target = sval("targetStructId").unwrap_or_else(|| "?".to_string());
+    let ttype = sval("targetStructType").unwrap_or_default();
+    let mut out = if ttype.is_empty() {
+        target
     } else {
-        parts.join(" · ")
+        format!("{} ({})", target, ttype)
+    };
+
+    if bval("evaded") {
+        out.push_str(": EVADED (0 dmg)");
+    } else if bval("blocked") {
+        match sval("blockedByStructId").filter(|b| !b.is_empty()) {
+            Some(b) => out.push_str(&format!(": BLOCKED by {}", b)),
+            None => out.push_str(": BLOCKED"),
+        }
+    } else {
+        let dmg = s.get("damageDealt").and_then(json_to_u64).unwrap_or(0);
+        out.push_str(&format!(": {} dmg", dmg));
+        if let (Some(b), Some(a)) = (
+            s.get("targetHealthBefore").and_then(json_to_u64),
+            s.get("targetHealthAfter").and_then(json_to_u64),
+        ) {
+            out.push_str(&format!(", HP {}→{}", b, a));
+        }
     }
+    if bval("targetDestroyed") {
+        out.push_str(" · DESTROYED");
+    }
+    if bval("targetCountered") {
+        match s.get("targetCounteredDamage").and_then(json_to_u64) {
+            Some(cd) if cd > 0 => out.push_str(&format!(" · countered {}", cd)),
+            _ => out.push_str(" · countered"),
+        }
+    }
+    out
 }
 
 /// `intel.slot_map` — occupied/free build slots per ambit at a location.

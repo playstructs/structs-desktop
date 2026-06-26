@@ -184,14 +184,45 @@ pub async fn execute(
             // session cookie jar). Best-effort; degrade to a note on failure.
             match client.query_entity("player", &player_id).await {
                 Ok(v) => {
-                    let p = v.get("Player").or_else(|| v.get("player")).unwrap_or(&v);
-                    let g = |k: &str| p.get(k).map(|x| x.to_string()).unwrap_or_default();
+                    // The LCD player entity nests data: identity under `Player`,
+                    // resources under `gridAttributes`, alpha under
+                    // `playerInventory.rocks.amount`. Values are JSON strings.
+                    let player = v.get("Player").or_else(|| v.get("player"));
+                    let grid = v.get("gridAttributes");
+                    let inv = v.get("playerInventory");
+                    // string-or-number → bare string (no JSON quotes); default "0".
+                    let s = |val: Option<&Value>| -> String {
+                        match val {
+                            Some(Value::String(x)) => x.clone(),
+                            Some(Value::Number(n)) => n.to_string(),
+                            _ => "0".to_string(),
+                        }
+                    };
+                    let id_str = |val: Option<&Value>| -> String {
+                        val.and_then(|x| x.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("none")
+                            .to_string()
+                    };
                     out.push_str(&format!(
-                        "  Guild: {} | Alpha: {} | Ore: {} | Load/Cap: {}/{} | lastAction: {}\n",
-                        g("guildId"), g("alpha"), g("ore"), g("load"), g("capacity"), g("lastActionBlockHeight")
+                        "  Guild: {} | Alpha: {} | Ore: {} | Load/Cap: {}/{}\n",
+                        id_str(player.and_then(|p| p.get("guildId"))),
+                        s(inv.and_then(|i| i.get("rocks")).and_then(|r| r.get("amount"))),
+                        s(grid.and_then(|g| g.get("ore"))),
+                        s(grid.and_then(|g| g.get("load"))),
+                        s(grid.and_then(|g| g.get("capacity"))),
+                    ));
+                    out.push_str(&format!(
+                        "  Planet: {} | Fleet: {}\n",
+                        id_str(player.and_then(|p| p.get("planetId"))),
+                        id_str(player.and_then(|p| p.get("fleetId"))),
                     ));
                     // Charge ≈ blocks since lastAction (shared chain height).
-                    if let Some(last) = p.get("lastActionBlockHeight").and_then(|x| x.as_str()).and_then(|s| s.parse::<u64>().ok()) {
+                    let last = grid
+                        .and_then(|g| g.get("lastAction"))
+                        .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                        .unwrap_or(0);
+                    if last > 0 {
                         let h = crate::game_state::GAME_STATE.read().unwrap().current_block_height;
                         out.push_str(&format!("  Charge: ~{} (blocks since last action)\n", h.saturating_sub(last)));
                     }
