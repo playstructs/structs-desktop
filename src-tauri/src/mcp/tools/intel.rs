@@ -142,7 +142,7 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
     out.push_str("Combat rules\n");
     out.push_str("  • Ambits: Water=2, Land=4, Air=8, Space=16. A weapon can only hit ambits in its reach mask.\n");
     out.push_str("  • Damage = Σ(landed shots) − target armour (attack_reduction), floored at 1 if any shot lands, capped at HP.\n");
-    out.push_str("  • First `guaranteed_shots` always land; the rest roll success = numerator/denominator.\n");
+    out.push_str("  • Each shot lands with probability numerator/denominator; total damage = Σ(landed shots × damage).\n");
     out.push_str("  • Counter: a counter-attack fires same-ambit at full value, cross-ambit at half. Defenders counter but take no counter-damage.\n");
     out.push_str("  • Block: a defender must share the target's ambit and the weapon must be blockable.\n");
     out.push_str("  • A fleet AWAY from its home planet cannot defend planetary structs there.\n\n");
@@ -180,14 +180,21 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
                            num: Option<u64>, den: Option<u64>, blockable: Option<bool>, counterable: Option<bool>| -> Option<String> {
             let a = ambits.unwrap_or(0);
             if a == 0 { return None; }
+            // This chain version has no guaranteed-shots field (always 0); only
+            // show it if some future type actually carries one.
+            let g = gtd.unwrap_or(0);
+            let hit = if g > 0 {
+                format!("{} guaranteed + {}/{} per-shot", g, num.unwrap_or(0), den.unwrap_or(1))
+            } else {
+                format!("{}/{} per-shot hit", num.unwrap_or(0), den.unwrap_or(1))
+            };
             Some(format!(
-                "  {}: reach [{}] · {}×{} dmg (guaranteed {}, {}/{}) · {}{} · {}{}\n",
+                "  {}: reach [{}] · {}×{} dmg · {} · {}{} · {}{}\n",
                 label,
                 decode_ambits(a),
                 shots.unwrap_or(0),
                 dmg.unwrap_or(0),
-                gtd.unwrap_or(0),
-                num.unwrap_or(0), den.unwrap_or(1),
+                hit,
                 wtype.clone().unwrap_or_default(),
                 ctrl.clone().map(|c| format!("/{}", c)).unwrap_or_default(),
                 if blockable == Some(true) { "blockable" } else { "unblockable" },
