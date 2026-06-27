@@ -269,24 +269,31 @@ try {
         guildAPI.getStructsByPlayerId(playerId),
         guildAPI.getFleetByPlayerId(playerId),
       ]);
+      const prevActive = gameState.activeMapContainerId; // restored after capture
       mapManager.configurePreviewMap(planet, defender, null, defenderFleet, null);
       gameState.setPreviewDefenderStructs(defenderStructs);
       gameState.setPreviewAttackerStructs([]);
+      // showMap gives the container its real CSS dimensions. (Rendering it purely
+      // off-screen collapses to 0×0 — the map's layers are absolutely positioned —
+      // which yields a blank "data:," canvas.) We restore the prior map afterward,
+      // so this is at most a brief flash during a deliberate render call.
+      mapManager.showMap(MAP_CONTAINER_IDS.PREVIEW);
+      gameState.previewMap.render();
       const el = document.getElementById(MAP_CONTAINER_IDS.PREVIEW);
       if (!el) throw new Error('preview-map-container not found');
-      el.dataset.__prevCss = el.style.cssText;
-      // Laid out (so html-to-image sees real dimensions) but off the visible area.
-      el.style.cssText = 'position:fixed;left:-99999px;top:0;display:block;visibility:visible;z-index:-1;';
-      gameState.previewMap.render();
+      el.dataset.__prevActive = prevActive || '';
       return el;
+    },
+    __restorePreview(el) {
+      try { if (el && el.dataset.__prevActive) mapManager.showMap(el.dataset.__prevActive); } catch (e) {}
     },
     // Single-frame PNG of a planet's map (terrain + struct sprites + HP bars).
     async renderMapPng(planetId, playerId) {
       const el = await this.__preparePreview(planetId, playerId);
       try {
-        await new Promise((r) => setTimeout(r, 700)); // SVG/Lottie/terrain settle
+        await new Promise((r) => setTimeout(r, 800)); // SVG/Lottie/terrain settle
         return { planetId, dataUrl: await window.htmlToImage.toPng(el, { pixelRatio: 2, cacheBust: true }) };
-      } finally { el.style.cssText = el.dataset.__prevCss || ''; }
+      } finally { this.__restorePreview(el); }
     },
     // N frames `intervalMs` apart → an animated GIF (Lottie struct sprites move;
     // re-render each frame so live state/animation advances).
@@ -295,7 +302,7 @@ try {
       const el = await this.__preparePreview(planetId, playerId);
       const frames = [];
       try {
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 700));
         for (let i = 0; i < n; i++) {
           frames.push(await window.htmlToImage.toPng(el, { pixelRatio: 1, cacheBust: true }));
           if (i < n - 1) {
@@ -304,7 +311,7 @@ try {
           }
         }
         return { planetId, frames };
-      } finally { el.style.cssText = el.dataset.__prevCss || ''; }
+      } finally { this.__restorePreview(el); }
     },
   };
   console.info('[structs-universe] __STRUCTS_VPLAYERS__ ready');

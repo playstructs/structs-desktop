@@ -33,12 +33,18 @@ pub struct MapParams {
     pub interval_ms: Option<u32>,
 }
 
-/// Strip a `data:*;base64,` prefix and decode to bytes.
+/// Strip a `data:*;base64,` prefix and decode to bytes. Returns a clear error if
+/// the renderer produced an empty (0-size) canvas (`data:,` with no base64).
 fn decode_data_url(s: &str) -> Result<Vec<u8>, String> {
-    let b64 = s.rsplit("base64,").next().unwrap_or(s);
-    base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| format!("bad image data: {}", e))
+    match s.split_once("base64,") {
+        Some((_, b64)) if !b64.is_empty() => base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("bad image data: {}", e)),
+        _ => Err(format!(
+            "renderer produced no image (likely a 0-size map container); data-url prefix: {:?}",
+            s.chars().take(32).collect::<String>()
+        )),
+    }
 }
 
 pub async fn execute(
