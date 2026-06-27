@@ -220,6 +220,20 @@ impl StructsMcpHandler {
                     "required": ["command"]
                 })),
             ),
+            Tool::new(
+                "structs_map",
+                "Render a planet's map to a PNG (or animated GIF) using the game's OWN renderer (off-screen preview map → html-to-image): real terrain, struct sprites, and HP bars — no screen capture. Provide 'planet_id' (e.g. \"2-239\") or 'player' (index/address/player id, incl. virtual players). format 'gif' captures the animated Lottie struct sprites over several frames. Writes to the app data dir and returns the file path.",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "planet_id": { "type": "string", "description": "Planet id, e.g. \"2-239\"." },
+                        "player": { "type": "string", "description": "Player whose planet to render (index/address/player id) — used when planet_id is omitted." },
+                        "format": { "type": "string", "enum": ["png", "gif"], "description": "png (default) or gif (animated)." },
+                        "frames": { "type": "integer", "description": "gif: frame count (2–60, default 12)." },
+                        "interval_ms": { "type": "integer", "description": "gif: ms per frame (default 120)." }
+                    }
+                })),
+            ),
         ]
     }
 }
@@ -421,6 +435,13 @@ impl ServerHandler for StructsMcpHandler {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
                     tools::players::execute(&self.app_handle, &self.cosmos_client, &self.task_registry, params).await
+                }
+                "structs_map" => {
+                    let params: tools::map::MapParams =
+                        serde_json::from_value(args).map_err(|e| {
+                            McpError::invalid_params(format!("Invalid params: {}", e), None)
+                        })?;
+                    tools::map::execute(&self.app_handle, &self.cosmos_client, params).await
                 }
                 _ => vec![Content::text(format!("Unknown tool: {}", name))],
             };

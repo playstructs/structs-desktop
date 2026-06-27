@@ -4,6 +4,7 @@ pub mod events;
 pub mod format;
 pub mod hasher;
 pub mod intel;
+pub mod map;
 pub mod players;
 pub mod policy;
 pub mod query;

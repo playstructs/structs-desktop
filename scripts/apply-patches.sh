@@ -253,6 +253,59 @@ try {
       return await signingClientManager.signAndBroadcastAs(wallet, address, typeUrl, payload);
     },
     list() { return Object.values(__vpAccounts); },
+    // Prepare the OFF-SCREEN preview map for a planet, mirroring the webapp's
+    // own PreviewViewModel.render(): fetch planet + owner player + structs +
+    // fleet, configure the map, and set the preview struct list (structs are
+    // applied SEPARATELY from configurePreviewMap — without this the map renders
+    // terrain with no structs). Lays the container out off-screen (never showMap,
+    // so nothing appears on the human's screen) and renders. Returns the element;
+    // caller restores el.style afterward.
+    async __preparePreview(planetId, playerId) {
+      if (!window.htmlToImage) throw new Error('html-to-image not loaded');
+      if (typeof mapManager === 'undefined' || !gameState.previewMap) throw new Error('map renderer not ready');
+      const [planet, defender, defenderStructs, defenderFleet] = await Promise.all([
+        guildAPI.getPlanet(planetId),
+        guildAPI.getPlayer(playerId),
+        guildAPI.getStructsByPlayerId(playerId),
+        guildAPI.getFleetByPlayerId(playerId),
+      ]);
+      mapManager.configurePreviewMap(planet, defender, null, defenderFleet, null);
+      gameState.setPreviewDefenderStructs(defenderStructs);
+      gameState.setPreviewAttackerStructs([]);
+      const el = document.getElementById(MAP_CONTAINER_IDS.PREVIEW);
+      if (!el) throw new Error('preview-map-container not found');
+      el.dataset.__prevCss = el.style.cssText;
+      // Laid out (so html-to-image sees real dimensions) but off the visible area.
+      el.style.cssText = 'position:fixed;left:-99999px;top:0;display:block;visibility:visible;z-index:-1;';
+      gameState.previewMap.render();
+      return el;
+    },
+    // Single-frame PNG of a planet's map (terrain + struct sprites + HP bars).
+    async renderMapPng(planetId, playerId) {
+      const el = await this.__preparePreview(planetId, playerId);
+      try {
+        await new Promise((r) => setTimeout(r, 700)); // SVG/Lottie/terrain settle
+        return { planetId, dataUrl: await window.htmlToImage.toPng(el, { pixelRatio: 2, cacheBust: true }) };
+      } finally { el.style.cssText = el.dataset.__prevCss || ''; }
+    },
+    // N frames `intervalMs` apart → an animated GIF (Lottie struct sprites move;
+    // re-render each frame so live state/animation advances).
+    async renderMapFrames(planetId, playerId, count, intervalMs) {
+      const n = Math.max(2, Math.min(count || 12, 60));
+      const el = await this.__preparePreview(planetId, playerId);
+      const frames = [];
+      try {
+        await new Promise((r) => setTimeout(r, 600));
+        for (let i = 0; i < n; i++) {
+          frames.push(await window.htmlToImage.toPng(el, { pixelRatio: 1, cacheBust: true }));
+          if (i < n - 1) {
+            await new Promise((r) => setTimeout(r, intervalMs || 120));
+            try { gameState.previewMap.render(); } catch (e) { /* keep frames */ }
+          }
+        }
+        return { planetId, frames };
+      } finally { el.style.cssText = el.dataset.__prevCss || ''; }
+    },
   };
   console.info('[structs-universe] __STRUCTS_VPLAYERS__ ready');
 } catch (e) { console.warn('[structs-universe] vplayers façade failed', e); }
