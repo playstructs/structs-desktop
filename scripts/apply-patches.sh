@@ -144,7 +144,13 @@ SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, sign
   try {
     const type = this.registry.lookupType(typeUrl);
     if (!type) throw new Error('unknown typeUrl: ' + typeUrl);
-    const value = type.fromPartial({ ...(payload || {}), creator: signerAddress });
+    // Prefer fromJSON: it applies each message's own schema (enum NAMES → ints,
+    // string-numbers, field defaults), so friendly payloads encode correctly for
+    // ANY message type. Fall back to fromPartial if a type lacks fromJSON.
+    const merged = { ...(payload || {}), creator: signerAddress };
+    const value = (typeof type.fromJSON === 'function')
+      ? type.fromJSON(merged)
+      : type.fromPartial(merged);
     const res = await client.signAndBroadcast(signerAddress, [{ typeUrl, value }], FEE);
     return { code: res.code, transactionHash: res.transactionHash, height: res.height, rawLog: res.rawLog || null };
   } finally {

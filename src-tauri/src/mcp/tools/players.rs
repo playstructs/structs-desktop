@@ -365,6 +365,60 @@ pub async fn execute(
                 return vec![Content::text("Virtual player has no on-chain id yet (signup pending).".to_string())];
             };
 
+            // Build PoW completion: a struct initiated via `build` sits in a
+            // building state. Compute its build proof and auto-sign
+            // MsgStructBuildComplete. We read blockStartBuild + the type's build
+            // difficulty from the chain so the proof prefix
+            // ({structId}BUILD{blockStartBuild}NONCE) matches what the chain verifies.
+            if action == "complete_build" {
+                let Some(sid) = params.args.get("struct_id").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+                    return vec![Content::text("complete_build: struct_id (the building struct from `build`) required.".to_string())];
+                };
+                let entity = match client.query_entity("struct", &sid).await {
+                    Ok(v) => v,
+                    Err(e) => return vec![Content::text(format!("complete_build: struct {} lookup failed: {}", sid, e))],
+                };
+                let sa = entity.get("structAttributes");
+                let truthy = |b: Option<&Value>| match b {
+                    Some(Value::Bool(v)) => *v,
+                    Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
+                    _ => false,
+                };
+                if truthy(sa.and_then(|x| x.get("isBuilt"))) {
+                    return vec![Content::text(format!("[vplayer {}] {} is already built — nothing to complete.", index, sid))];
+                }
+                let block_start = sa
+                    .and_then(|x| x.get("blockStartBuild"))
+                    .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                    .unwrap_or(0);
+                if block_start == 0 {
+                    return vec![Content::text(format!("complete_build: {} has no blockStartBuild — is it actually building?", sid))];
+                }
+                let type_id = entity.get("Struct").and_then(|s| s.get("type")).and_then(|x| match x {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                });
+                let difficulty = {
+                    let gs = crate::game_state::GAME_STATE.read().unwrap();
+                    type_id.as_ref().and_then(|t| gs.struct_types.get(t)).map(|t| t.build_difficulty).unwrap_or(0)
+                };
+                if difficulty == 0 {
+                    return vec![Content::text(format!("complete_build: couldn't resolve build difficulty for {}.", sid))];
+                }
+                let task_params = TaskParams::for_ore(&sid, "BUILD", block_start, difficulty);
+                match hasher::start_hash_task_core(task_params, app_handle.clone(), registry) {
+                    Ok(()) => {
+                        hasher::register_vplayer_hash(sid.clone(), index, "BUILD".to_string());
+                        return vec![Content::text(format!(
+                            "[vplayer {}] build PoW started on {} (blockStartBuild {}, difficulty {}). MsgStructBuildComplete auto-signs when the proof lands. Track with structs_hash list.",
+                            index, sid, block_start, difficulty
+                        ))];
+                    }
+                    Err(e) => return vec![Content::text(format!("[vplayer {}] complete_build failed to start: {}", index, e))],
+                }
+            }
+
             // PoW actions (mine/refine/raid): start a Rust hash for this virtual
             // player's struct/fleet and register it — `maybe_complete_virtual`
             // signs the completion tx as this player when the proof lands.
@@ -408,9 +462,22 @@ pub async fn execute(
                 }
             }
 
-            let (type_url, payload) = match build_virtual_msg(action, &params.args, &player_id) {
-                Ok(v) => v,
-                Err(e) => return vec![Content::text(format!("Error: {}", e))],
+            // Raw passthrough: sign ANY chain message directly. The agent supplies
+            // {type_url, msg}; the façade injects `creator` and encodes via the
+            // proto's fromJSON (enum names, string-numbers, defaults all handled).
+            // This gives full coverage of every direct (non-PoW) message type.
+            let (type_url, payload) = if action == "tx" || action == "raw" {
+                let Some(tu) = params.args.get("type_url").and_then(|v| v.as_str()) else {
+                    return vec![Content::text(
+                        "tx: type_url required (e.g. \"/structs.structs.MsgFleetMove\"), plus msg{...}.".to_string(),
+                    )];
+                };
+                (tu.to_string(), params.args.get("msg").cloned().unwrap_or_else(|| json!({})))
+            } else {
+                match build_virtual_msg(action, &params.args, &player_id) {
+                    Ok(v) => v,
+                    Err(e) => return vec![Content::text(format!("Error: {}", e))],
+                }
             };
 
             // Sign+broadcast as the virtual player via the façade (its key, never Rust's).
@@ -450,6 +517,20 @@ pub async fn execute(
     }
 }
 
+/// Map an ambit name to its chain `ambit` enum int (proto keys.ts):
+/// none=0, water=1, land=2, air=3, space=4, local=5. Build/Move messages take
+/// this enum, NOT the combat reach BITMASK (Water=2/Land=4/…) and NOT a string.
+fn ambit_to_enum(name: &str) -> i64 {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "water" => 1,
+        "land" => 2,
+        "air" => 3,
+        "space" => 4,
+        "local" => 5,
+        _ => 0,
+    }
+}
+
 /// Build the proto (typeUrl, payload) for a virtual-player action. `creator` is
 /// injected by the façade from the signer address, so it's omitted here. Player-
 /// level fields use the virtual player's id; entity ids come from the agent's args.
@@ -477,7 +558,10 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
                 json!({
                     "playerId": player_id,
                     "structTypeId": type_id,
-                    "operatingAmbit": s("ambit").unwrap_or_else(|| "space".into()),
+                    // operatingAmbit is the `ambit` ENUM (none0 water1 land2 air3
+                    // space4 local5), not a string — sending a string encodes as
+                    // "invalid int32: NaN".
+                    "operatingAmbit": ambit_to_enum(s("ambit").as_deref().unwrap_or("space")),
                     "slot": u("slot").unwrap_or(0),
                 }),
             ))
@@ -494,8 +578,10 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
             "/structs.structs.MsgStructMove".into(),
             json!({
                 "structId": s("struct_id").ok_or("deploy: struct_id required")?,
-                "locationType": "planet",
-                "ambit": s("ambit").unwrap_or_else(|| "space".into()),
+                // locationType is the `objectType` enum (planet = 2); ambit is the
+                // `ambit` enum — both int32, not strings.
+                "locationType": 2,
+                "ambit": ambit_to_enum(s("ambit").as_deref().unwrap_or("space")),
                 "slot": u("slot").unwrap_or(0),
             }),
         )),
@@ -520,8 +606,76 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
                 }),
             ))
         }
+        // ── Fleet / planet ──
+        "fleet_move" => Ok((
+            "/structs.structs.MsgFleetMove".into(),
+            json!({
+                "fleetId": s("fleet_id").ok_or("fleet_move: fleet_id required")?,
+                "destinationLocationId": s("destination_id").or_else(|| s("destination"))
+                    .ok_or("fleet_move: destination_id (a planet id) required")?,
+            }),
+        )),
+        "planet_update_name" => Ok((
+            "/structs.structs.MsgPlanetUpdateName".into(),
+            json!({
+                "planetId": s("planet_id").ok_or("planet_update_name: planet_id required")?,
+                "name": s("name").unwrap_or_default(),
+            }),
+        )),
+        // ── Struct lifecycle extras ──
+        "build_cancel" => Ok((
+            "/structs.structs.MsgStructBuildCancel".into(),
+            json!({ "structId": s("struct_id").ok_or("build_cancel: struct_id required")? }),
+        )),
+        "defense_clear" => Ok((
+            "/structs.structs.MsgStructDefenseClear".into(),
+            json!({ "defenderStructId": s("defender_id").ok_or("defense_clear: defender_id required")? }),
+        )),
+        "stealth_activate" => Ok((
+            "/structs.structs.MsgStructStealthActivate".into(),
+            json!({ "structId": s("struct_id").ok_or("stealth_activate: struct_id required")? }),
+        )),
+        "stealth_deactivate" => Ok((
+            "/structs.structs.MsgStructStealthDeactivate".into(),
+            json!({ "structId": s("struct_id").ok_or("stealth_deactivate: struct_id required")? }),
+        )),
+        "storage_stash" => Ok((
+            "/structs.structs.MsgStructStorageStash".into(),
+            json!({
+                "structId": s("struct_id").ok_or("storage_stash: struct_id required")?,
+                "locationId": s("location_id").ok_or("storage_stash: location_id required")?,
+                "ambit": ambit_to_enum(s("ambit").as_deref().unwrap_or("space")),
+                "slot": u("slot").unwrap_or(0),
+            }),
+        )),
+        "storage_recall" => Ok((
+            "/structs.structs.MsgStructStorageRecall".into(),
+            json!({
+                "structId": s("struct_id").ok_or("storage_recall: struct_id required")?,
+                "locationId": s("location_id").ok_or("storage_recall: location_id required")?,
+                "ambit": ambit_to_enum(s("ambit").as_deref().unwrap_or("space")),
+                "slot": u("slot").unwrap_or(0),
+                "activate": args.get("activate").and_then(|v| v.as_bool()).unwrap_or(true),
+            }),
+        )),
+        "generator_infuse" => Ok((
+            "/structs.structs.MsgStructGeneratorInfuse".into(),
+            json!({
+                "structId": s("struct_id").ok_or("generator_infuse: struct_id required")?,
+                "infuseAmount": s("amount").ok_or("generator_infuse: amount required")?,
+            }),
+        )),
+        // ── Player self-management ──
+        "player_resume" => Ok((
+            "/structs.structs.MsgPlayerResume".into(),
+            json!({ "playerId": player_id }),
+        )),
+        "player_update_name" => Ok((
+            "/structs.structs.MsgPlayerUpdateName".into(),
+            json!({ "playerId": player_id, "name": s("name").unwrap_or_default() }),
+        )),
         other => Err(format!(
-            "action '{}' not supported for virtual players. Direct: explore, build, activate, deactivate, deploy, defend, attack. PoW (auto-completes): mine, refine, raid.",
+            "action '{}' not supported as a named action. Direct: explore, build, activate, deactivate, deploy, defend, attack, fleet_move, planet_update_name, build_cancel, defense_clear, stealth_activate, stealth_deactivate, storage_stash, storage_recall, generator_infuse, player_resume, player_update_name. PoW: mine, refine, raid, complete_build. For ANY other message use action \"tx\" {{type_url, msg}}.",
             other
         )),
     }
