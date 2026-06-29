@@ -238,11 +238,12 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_board",
-                "Team operations board — one at-a-glance command view shared by the human and the agent: primary status (charge readiness, power margin, structs online, ore/alpha), virtual-player count, the team-wide PoW queue (running/waiting/done), active threats across the whole team (last ~2 min), and recommended next moves. Returns the board as text and (by default) pushes a compact version to the human's screen via structs_ui. Run it on a loop for a live shared picture.",
+                "Team operations board — one at-a-glance command view shared by the human and the agent: primary status (charge readiness, power margin, structs online, ore/alpha), virtual-player count, the team-wide PoW queue (running/waiting/done), active threats across the whole team (last ~2 min), and recommended next moves. Returns the board as text and writes a self-contained, auto-refreshing HTML file. Pass 'open':true ONCE to pop it out as a separate OS window (it auto-refreshes every 8s as later calls rewrite the file — so loop the board without 'open' to keep a live window beside the game). 'push':true re-enables the older in-app overlay (off by default — it can crowd the game view).",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "push": { "type": "boolean", "description": "Also push the board to the human's screen via structs_ui (default true)." }
+                        "open": { "type": "boolean", "description": "Pop the board out as a separate OS window (default browser). Do this once; later calls just refresh the open window." },
+                        "push": { "type": "boolean", "description": "Also render an in-app overlay via structs_ui (default false; can crowd the game view)." }
                     }
                 })),
             ),
@@ -487,7 +488,7 @@ impl ServerHandler for StructsMcpHandler {
                 }
                 "structs_board" => {
                     let params: tools::board::BoardParams =
-                        serde_json::from_value(args).unwrap_or(tools::board::BoardParams { push: true });
+                        serde_json::from_value(args).unwrap_or(tools::board::BoardParams { open: false, push: false });
                     tools::board::execute(&self.app_handle, &self.task_registry, params).await
                 }
                 "structs_doctrine" => {
