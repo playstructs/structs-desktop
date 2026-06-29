@@ -112,9 +112,8 @@ async fn action_mine(
     }
 
     // Preflight and get difficulty
-    let (type_name, difficulty_target, block_height) = {
+    let (type_name, difficulty_target) = {
         let gs = GAME_STATE.read().unwrap();
-        let block_height = gs.current_block_height;
         if let Some(s) = gs.structs.get(struct_id) {
             let type_info = gs.struct_types.get(&s.struct_type_id.to_string());
             let type_name = type_info.map(|t| t.name.clone()).unwrap_or_else(|| "Unknown".to_string());
@@ -135,14 +134,38 @@ async fn action_mine(
             // signing queue schedules that itself. Gating the hash start on current
             // charge was premature.
             let difficulty = type_info.map(|t| t.ore_mining_difficulty).unwrap_or(14000);
-            (type_name, difficulty, block_height)
+            (type_name, difficulty)
         } else {
             return vec![Content::text(format!("Error: Struct {} not found in gameState.", struct_id))];
         }
     };
 
-    // Start hash task directly — no initiation tx needed for mining
-    let task_params = TaskParams::for_ore(struct_id, "MINE", block_height, difficulty_target);
+    // The mine proof anchors on the extractor's blockStartOreMine (set when it
+    // went online, reset after each successful mine) — NOT the current block.
+    // Read it from the chain; current_block_height yields a proof the chain
+    // rejects ({structId}MINE{blockStartOreMine}NONCE — see docs hashing.md).
+    let block_start = {
+        let client = crate::mcp::cosmos_client::CosmosClient::new();
+        match client.query_entity("struct", struct_id).await {
+            Ok(v) => v
+                .get("structAttributes")
+                .and_then(|x| x.get("blockStartOreMine"))
+                .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0),
+            Err(e) => return vec![Content::text(format!("mine: struct {} lookup failed: {}", struct_id, e))],
+        }
+    };
+    if block_start == 0 {
+        return vec![Content::text(format!(
+            "mine: {} has blockStartOreMine=0 — the extractor isn't in a mining cycle (it starts on going online; re-activate it to begin one).",
+            struct_id
+        ))];
+    }
+
+    // Start hash task — proof anchored at blockStartOreMine. No initiation tx:
+    // going online already started the cycle; we only compute + submit the proof.
+    let block_height = block_start;
+    let task_params = TaskParams::for_ore(struct_id, "MINE", block_start, difficulty_target);
 
     match hasher::start_hash_task_core(task_params, app_handle.clone(), registry) {
         Ok(()) => {
@@ -172,9 +195,8 @@ async fn action_refine(
         )];
     }
 
-    let (type_name, difficulty_target, block_height) = {
+    let (type_name, difficulty_target) = {
         let gs = GAME_STATE.read().unwrap();
-        let block_height = gs.current_block_height;
         if let Some(s) = gs.structs.get(struct_id) {
             let type_info = gs.struct_types.get(&s.struct_type_id.to_string());
             let type_name = type_info.map(|t| t.name.clone()).unwrap_or_else(|| "Unknown".to_string());
@@ -199,11 +221,31 @@ async fn action_refine(
             // No charge preflight: charge is consumed at the COMPLETE tx (~34h later),
             // scheduled by the signing queue — not at hash start.
             let difficulty = type_info.map(|t| t.ore_refining_difficulty).unwrap_or(28000);
-            (type_name, difficulty, block_height)
+            (type_name, difficulty)
         } else {
             return vec![Content::text(format!("Error: Struct {} not found.", struct_id))];
         }
     };
+
+    // Anchor the refine proof on blockStartOreRefine (set when refining began,
+    // reset after each cycle), read from the chain — not the current block.
+    let block_height = {
+        let client = crate::mcp::cosmos_client::CosmosClient::new();
+        match client.query_entity("struct", struct_id).await {
+            Ok(v) => v
+                .get("structAttributes")
+                .and_then(|x| x.get("blockStartOreRefine"))
+                .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0),
+            Err(e) => return vec![Content::text(format!("refine: struct {} lookup failed: {}", struct_id, e))],
+        }
+    };
+    if block_height == 0 {
+        return vec![Content::text(format!(
+            "refine: {} has blockStartOreRefine=0 — the refinery isn't in a refining cycle yet.",
+            struct_id
+        ))];
+    }
 
     let task_params = TaskParams::for_ore(struct_id, "REFINE", block_height, difficulty_target);
 

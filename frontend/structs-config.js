@@ -571,7 +571,12 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
           ws.addEventListener('message', function(event) {
             try {
-              if (!window.__STRUCTS_NOTIFICATIONS__.enabled) return;
+              // NB: do NOT gate on __STRUCTS_NOTIFICATIONS__.enabled here. The
+              // MCP event buffer + reactivity driver are independent consumers
+              // of the grass stream; gating them on the desktop-notification
+              // toggle silently kills structs_events (and live UI refresh) when
+              // a user turns notifications off. Only the notification DISPATCH
+              // below is gated on `enabled`.
 
               // Handle both string and binary NATS frames
               var raw;
@@ -615,6 +620,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               if (window.__STRUCTS_REACTIVITY__) {
                 window.__STRUCTS_REACTIVITY__.onGrassFrame(data.category);
               }
+
+              // Desktop notifications are independently gated (the feed + reactivity above always run).
+              if (!window.__STRUCTS_NOTIFICATIONS__.enabled) return;
 
               var eventDef = NOTIFICATION_EVENTS[data.category];
               if (!eventDef) {

@@ -287,14 +287,64 @@ try {
     __restorePreview(el) {
       try { if (el && el.dataset.__prevActive) mapManager.showMap(el.dataset.__prevActive); } catch (e) {}
     },
+    // Pre-inline every CSS background-image (the terrain tiles) as data: URLs.
+    // WHY: html-to-image rasterizes the DOM through a sandboxed data-URL SVG
+    // <foreignObject>; external url(/img/tiles/…) refs inside it are NEVER
+    // fetched by the browser, and html-to-image's own fetch-embed fails on the
+    // tauri:// asset protocol — so terrain tiles drop to blank (flat color +
+    // white edge/horizon gaps). We load each tile via Image→canvas→toDataURL
+    // (direct Image loads DO work in this webview — that's how the live map
+    // displays) and rewrite the element's inline backgroundImage, leaving
+    // html-to-image nothing to fetch. Same-origin (tauri://localhost serves
+    // page + assets) so the canvas isn't tainted; if any toDataURL throws it's
+    // caught and that one tile degrades to its color fallback (no regression).
+    async __inlineBackgrounds(el, cache) {
+      cache = cache || new Map();
+      const toData = (url) => new Promise((resolve) => {
+        if (cache.has(url)) return resolve(cache.get(url));
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const c = document.createElement('canvas');
+            c.width = img.naturalWidth || img.width;
+            c.height = img.naturalHeight || img.height;
+            c.getContext('2d').drawImage(img, 0, 0);
+            const d = c.toDataURL('image/png');
+            cache.set(url, d); resolve(d);
+          } catch (e) { cache.set(url, null); resolve(null); }
+        };
+        img.onerror = () => { cache.set(url, null); resolve(null); };
+        img.src = url;
+      });
+      const nodes = [el].concat(Array.prototype.slice.call(el.querySelectorAll('*')));
+      const jobs = [];
+      for (const node of nodes) {
+        const bg = getComputedStyle(node).backgroundImage;
+        if (!bg || bg === 'none' || bg.indexOf('url(') === -1) continue;
+        const matches = Array.from(bg.matchAll(/url\((['"]?)([^'")]+)\1\)/g));
+        if (!matches.length) continue;
+        jobs.push((async () => {
+          let rewritten = bg;
+          for (const m of matches) {
+            const raw = m[2];
+            if (raw.indexOf('data:') === 0) continue;
+            const d = await toData(raw);
+            if (d) rewritten = rewritten.split(m[0]).join('url("' + d + '")');
+          }
+          node.style.backgroundImage = rewritten;
+        })());
+      }
+      await Promise.all(jobs);
+    },
     // Single-frame PNG of a planet's map (terrain + struct sprites + HP bars).
     async renderMapPng(planetId, playerId) {
       const el = await this.__preparePreview(planetId, playerId);
       try {
         await new Promise((r) => setTimeout(r, 1400)); // SVG/Lottie/terrain settle
+        await this.__inlineBackgrounds(el); // embed terrain tiles as data: URLs
         // NB: no cacheBust — it appends ?t=… to image URLs, which the tauri://
-        // asset protocol 404s, dropping the terrain background PNGs (flat color +
-        // white transition gaps). Letting it use the already-loaded images embeds them.
+        // asset protocol 404s. Tiles are already inlined above, so toPng has
+        // nothing external left to fetch.
         return { planetId, dataUrl: await window.htmlToImage.toPng(el, { pixelRatio: 2 }) };
       } finally { this.__restorePreview(el); }
     },
@@ -304,9 +354,11 @@ try {
       const n = Math.max(2, Math.min(count || 12, 60));
       const el = await this.__preparePreview(planetId, playerId);
       const frames = [];
+      const bgCache = new Map(); // share inlined tiles across frames (render() rebuilds DOM)
       try {
         await new Promise((r) => setTimeout(r, 1400));
         for (let i = 0; i < n; i++) {
+          await this.__inlineBackgrounds(el, bgCache); // re-inline (render() wipes inline styles)
           frames.push(await window.htmlToImage.toPng(el, { pixelRatio: 1 }));
           if (i < n - 1) {
             await new Promise((r) => setTimeout(r, intervalMs || 120));

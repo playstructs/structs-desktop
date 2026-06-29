@@ -423,26 +423,54 @@ pub async fn execute(
             // player's struct/fleet and register it — `maybe_complete_virtual`
             // signs the completion tx as this player when the proof lands.
             if matches!(action, "mine" | "refine" | "raid") {
-                let block = crate::game_state::GAME_STATE.read().unwrap().current_block_height;
-                if block == 0 {
-                    return vec![Content::text("gameState not synced yet (block 0). Retry shortly.".to_string())];
-                }
                 let s = |k: &str| params.args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
                 let dt = |k: &str, d: u64| params.args.get(k).and_then(|v| v.as_u64()).unwrap_or(d);
+                // mine/refine proofs anchor on the struct's blockStart*, set when the
+                // miner/refinery went online and reset after each successful cycle —
+                // NOT the current block (docs hashing.md: input {structId}MINE{blockStart}NONCE).
+                // Read it from the chain like complete_build reads blockStartBuild;
+                // using current_block_height yields a proof the chain rejects (→ 0 ore).
+                let read_anchor = |entity: &Value, field: &str| -> u64 {
+                    entity
+                        .get("structAttributes")
+                        .and_then(|x| x.get(field))
+                        .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                        .unwrap_or(0)
+                };
                 let (object_id, task_type, task_params) = match action {
                     "mine" => {
                         let Some(sid) = s("struct_id") else {
                             return vec![Content::text("mine: struct_id (the player's Ore Extractor) required.".to_string())];
                         };
+                        let entity = match client.query_entity("struct", &sid).await {
+                            Ok(v) => v,
+                            Err(e) => return vec![Content::text(format!("mine: struct {} lookup failed: {}", sid, e))],
+                        };
+                        let block = read_anchor(&entity, "blockStartOreMine");
+                        if block == 0 {
+                            return vec![Content::text(format!("mine: {} has blockStartOreMine=0 — the extractor isn't mining (bring it online/activate first; mining starts on going online).", sid))];
+                        }
                         (sid.clone(), "MINE", TaskParams::for_ore(&sid, "MINE", block, dt("difficulty_target", 14000)))
                     }
                     "refine" => {
                         let Some(sid) = s("struct_id") else {
                             return vec![Content::text("refine: struct_id (the player's Ore Refinery) required.".to_string())];
                         };
+                        let entity = match client.query_entity("struct", &sid).await {
+                            Ok(v) => v,
+                            Err(e) => return vec![Content::text(format!("refine: struct {} lookup failed: {}", sid, e))],
+                        };
+                        let block = read_anchor(&entity, "blockStartOreRefine");
+                        if block == 0 {
+                            return vec![Content::text(format!("refine: {} has blockStartOreRefine=0 — the refinery isn't refining (needs stored ore + online).", sid))];
+                        }
                         (sid.clone(), "REFINE", TaskParams::for_ore(&sid, "REFINE", block, dt("difficulty_target", 28000)))
                     }
                     "raid" => {
+                        let block = crate::game_state::GAME_STATE.read().unwrap().current_block_height;
+                        if block == 0 {
+                            return vec![Content::text("gameState not synced yet (block 0). Retry shortly.".to_string())];
+                        }
                         let (Some(fleet), Some(target)) = (s("fleet_id"), s("target_id")) else {
                             return vec![Content::text("raid: fleet_id (this player's fleet) and target_id (planet) required.".to_string())];
                         };
@@ -454,8 +482,8 @@ pub async fn execute(
                     Ok(()) => {
                         hasher::register_vplayer_hash(object_id.clone(), index, task_type.to_string());
                         return vec![Content::text(format!(
-                            "[vplayer {}] {} hashing started on {} (block {}). The completion tx will be auto-signed as this player when the proof is found. Track with structs_hash list.",
-                            index, action, object_id, block
+                            "[vplayer {}] {} hashing started on {} (proof anchored at the struct's blockStart*). The completion tx will be auto-signed as this player when the proof is found. Track with structs_hash list.",
+                            index, action, object_id
                         ))];
                     }
                     Err(e) => return vec![Content::text(format!("[vplayer {}] {} failed to start: {}", index, action, e))],
