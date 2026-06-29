@@ -49,6 +49,7 @@ fn main() {
             mcp::ui_bridge::mcp_ui_response,
             mcp::vplayer_bridge::vplayer_response,
             mcp::event_buffer::push_game_event,
+            mcp::tools::board::mcp_board_html,
             game_state::get_sync_interval,
             game_state::notify_hash_complete,
             game_state::conn_log,

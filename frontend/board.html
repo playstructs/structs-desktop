@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Structs — Team Ops</title>
+  <!-- The real SUI stylesheets, exactly as index.html loads them, so this
+       window matches the game's look (fonts, palette, card chrome, icons). -->
+  <link rel="stylesheet" href="css/normalize.css" />
+  <link rel="stylesheet" href="css/structicons.css" />
+  <link rel="stylesheet" href="css/sui/sui.css" />
+  <link rel="stylesheet" href="css/main.css" />
+  <style>
+    html, body { height: 100%; }
+    body { margin: 0; padding: 14px; background: var(--background, #0d0f15);
+           overflow-y: auto; }
+    .ops-title { font-size: 13px; letter-spacing: 2px; opacity: .8; margin: 2px 0 12px; }
+    /* The SUI data-card rows are flex; split label ↔ value. */
+    .sui-data-card { width: 100%; margin-bottom: 12px; }
+    .sui-data-card-body { width: 100%; flex-direction: column; }
+    .sui-data-card-row { width: 100%; justify-content: space-between; gap: 16px; }
+    .ops-val { color: #fff; font-weight: 600; }
+    .ops-list { margin: 4px 0 0; padding-left: 16px; }
+    .ops-list li { margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <div class="sui-screen sui-theme-player">
+    <div class="ops-title">STRUCTS · TEAM OPS</div>
+    <div id="root"><div class="sui-data-card-row">Connecting…</div></div>
+  </div>
+  <script>
+    (function boot() {
+      var T = window.__TAURI__;
+      if (!T || !T.event || !T.core) { setTimeout(boot, 150); return; }
+      var root = document.getElementById('root');
+      function render(html) { if (typeof html === 'string') root.innerHTML = html; }
+      T.core.invoke('mcp_board_html').then(render).catch(function () {});
+      T.event.listen('board-update', function (e) {
+        render(e && e.payload && e.payload.html);
+      });
+    })();
+  </script>
+</body>
+</html>

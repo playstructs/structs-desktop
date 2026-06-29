@@ -2,30 +2,39 @@
 //! the whole force for the human AND the agent to share: primary status, the
 //! team-wide PoW queue, active threats, and recommended next moves.
 //!
-//! Returns the board as text (the agent's situational awareness) and writes a
-//! self-contained, auto-refreshing HTML file to the app data dir. Pass
-//! `open:true` once to pop it out as a real separate OS window (default browser)
-//! — it then auto-refreshes every few seconds as later calls rewrite the file,
-//! so a loop keeps a live board visible alongside the game without overlapping
-//! it. (`push:true` re-enables the older in-app overlay; off by default.)
+//! Returns the board as text (the agent's situational awareness) and drives a
+//! native, app-owned **second window** ("Team Ops"). Pass `open:true` once to
+//! spawn that window; every call (looped) pushes a live `board-update` event so
+//! it refreshes in place — no browser, no file polling. The window's page
+//! (`frontend/board.html`) pulls the latest via the `mcp_board_html` command on
+//! load, so it paints immediately too.
 
 use rmcp::model::Content;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tauri_plugin_opener::OpenerExt;
+use std::sync::{Arc, LazyLock, Mutex};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::game_state::GAME_STATE;
 use crate::hasher::types::TaskRegistry;
 
+/// Last-rendered board inner-HTML, so the board window can paint on load (before
+/// the next push) via the `mcp_board_html` command.
+pub static LAST_BOARD: LazyLock<Mutex<String>> =
+    LazyLock::new(|| Mutex::new("<div class='k'>Waiting for the first board update…</div>".to_string()));
+
+/// Tauri command the board window invokes on load to fetch the current board.
+#[tauri::command]
+pub fn mcp_board_html() -> String {
+    LAST_BOARD.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BoardParams {
-    /// Pop the board out as a separate OS window (default browser). Do this once;
-    /// later calls just rewrite the file and the window auto-refreshes.
+    /// Spawn the native "Team Ops" window (do this once; later calls refresh it live).
     #[serde(default)]
     pub open: bool,
-    /// Also render the board as an in-app overlay via structs_ui (off by default —
-    /// it can crowd the game view; the separate window is the recommended surface).
+    /// Also render the older in-app overlay via structs_ui (off by default).
     #[serde(default)]
     pub push: bool,
 }
@@ -91,13 +100,13 @@ pub async fn execute(
     // ── Recommendations ──
     let mut recs: Vec<String> = Vec::new();
     if !threats.is_empty() {
-        recs.push("⚔ Under attack — battle_log to ID the attacker, then structs_strike to counter (or structs_action defend).".into());
+        recs.push("Under attack — battle_log to ID the attacker, then structs_strike to counter (or structs_action defend).".into());
     }
     if cap > 0.0 && margin < 15.0 {
-        recs.push("⚡ Power margin low — avoid new online structs or free power.".into());
+        recs.push("Power margin low — avoid new online structs or free power.".into());
     }
     if waiting > running && waiting > 5 {
-        recs.push(format!("⏳ {} PoW tasks waiting on difficulty decay — they complete as they age (PDCs are the long tail).", waiting));
+        recs.push(format!("{} PoW tasks waiting on difficulty decay — they complete as they age (PDCs are the long tail).", waiting));
     }
     if charge_ready && threats.is_empty() {
         recs.push("Charge ready & quiet — mine/build/refine, or advance a kill-chain (structs_strike).".into());
@@ -132,59 +141,111 @@ pub async fn execute(
         out.push_str(&format!("   • {}\n", r));
     }
 
-    // ── Self-contained HTML board → file (auto-refreshing separate window) ──
+    // ── Inner HTML for the window, using genuine SUI components so it matches
+    //    the game (board.html links the real sui.css + a sui-theme-player wrapper).
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let threat_block = if threats.is_empty() {
-        "<div class='ok'>✓ no threats (last 2m)</div>".to_string()
-    } else {
-        let items: String = threats.iter().take(10).map(|t| format!("<li>{}</li>", esc(t))).collect();
-        format!("<div class='warn'>⚠ {} active</div><ul>{}</ul>", threats.len(), items)
+    // Drop any leading non-ASCII (emoji prefix from threat labels) — the board
+    // uses real SUI icons instead, never emoji.
+    let strip_emoji = |s: &str| -> String {
+        s.trim_start().trim_start_matches(|c: char| !c.is_ascii()).trim_start().to_string()
     };
-    let rec_items: String = recs.iter().map(|r| format!("<li>{}</li>", esc(r))).collect();
-    let type_line = if type_summary.is_empty() { String::new() } else { format!(" &nbsp;[{}]", esc(&type_summary.join(", "))) };
-    let html = format!(
-        "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='8'>\
-<title>Structs — Team Ops</title><style>\
-body{{background:#11131a;color:#cfe3ff;font-family:ui-monospace,Menlo,monospace;font-size:14px;margin:0;padding:20px}}\
-h1{{font-size:16px;letter-spacing:2px;color:#8fb6ff;margin:0 0 14px}}\
-.card{{background:#1a1e28;border:1px solid #2a3142;border-radius:8px;padding:12px 14px;margin:0 0 12px}}\
-.k{{color:#7f8aa3}} .big{{font-size:22px;color:#fff}} .ok{{color:#5fd35f}} .warn{{color:#ff6b6b;font-weight:bold}}\
-ul{{margin:6px 0 0;padding-left:18px}} li{{margin:3px 0}} .row{{display:flex;gap:24px;flex-wrap:wrap}}\
-.foot{{color:#566;font-size:11px;margin-top:8px}}</style></head><body>\
-<h1>⚡ STRUCTS · TEAM OPS</h1>\
-<div class='card'><div class='row'>\
-<div><div class='k'>charge</div><div class='big'>{} {}</div></div>\
-<div><div class='k'>power</div><div class='big'>{:.1}/{:.1}W</div><div class='k'>{:.0}% free</div></div>\
-<div><div class='k'>structs online</div><div class='big'>{}/{}</div></div>\
-<div><div class='k'>ore / alpha</div><div class='big'>{:.0} / {:.0}</div></div>\
-<div><div class='k'>virtual players</div><div class='big'>{}</div></div>\
-</div></div>\
-<div class='card'><div class='k'>PoW queue</div><div class='big'>{}r · {}w · {}d</div>{}</div>\
-<div class='card'><div class='k'>threats</div>{}</div>\
-<div class='card'><div class='k'>recommended</div><ul>{}</ul></div>\
-<div class='foot'>auto-refreshes every 8s · {} {}</div>\
-</body></html>",
-        charge, if charge_ready { "READY" } else { "…" },
-        load, cap, margin, nonline, nstructs, ore, alpha, nvp,
-        running, waiting, completed, type_line,
-        threat_block, rec_items, esc(&pid), esc(&name)
+    // A label↔value row inside a sui-data-card, with an optional real SUI icon.
+    // `icon` is a sui-icon-* or icon-* class from sui.css (empty = no icon).
+    let irow = |icon: &str, label: &str, value: String| {
+        let ic = if icon.is_empty() {
+            String::new()
+        } else {
+            format!("<i class='sui-icon {} sui-icon-sm'></i> ", icon)
+        };
+        format!(
+            "<div class='sui-data-card-row'><span>{}{}</span><span class='ops-val'>{}</span></div>",
+            ic, label, value
+        )
+    };
+    let card = |title: &str, body: String| {
+        format!(
+            "<div class='sui-data-card sui-theme-player'><div class='sui-data-card-header'>{}</div>\
+<div class='sui-data-card-body sui-mod-spacing-xl'>{}</div></div>",
+            title, body
+        )
+    };
+
+    let charge_badge = format!(
+        "<span class='sui-badge'>{} {}</span>",
+        charge,
+        if charge_ready { "READY" } else { "charging" }
+    );
+    let status_card = card(
+        "PRIMARY",
+        format!(
+            "{}{}{}{}{}{}",
+            irow("", "Charge", charge_badge),
+            irow("sui-icon-energy", "Power", format!("{:.1} / {:.1}W &nbsp;({:.0}% free)", load, cap, margin)),
+            irow("sui-icon-deployed-structs", "Structs online", format!("{} / {}", nonline, nstructs)),
+            irow("sui-icon-alpha-ore", "Ore", format!("{:.0}", ore)),
+            irow("sui-icon-alpha-matter", "Alpha", format!("{:.0}", alpha)),
+            irow("sui-icon-players", "Virtual players", format!("{}", nvp)),
+        ),
     );
 
-    let mut opened_note = String::new();
-    if let Some(dir) = dirs::data_dir() {
-        let path = dir.join("structs-app").join("team-board.html");
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
-        if std::fs::write(&path, &html).is_ok() {
-            if params.open {
-                let url = format!("file://{}", path.display());
-                match app.opener().open_url(url, None::<&str>) {
-                    Ok(_) => opened_note = format!("\nOpened the board in a separate window ({}). It auto-refreshes every 8s — keep calling structs_board (without open) to update it.\n", path.display()),
-                    Err(e) => opened_note = format!("\n(couldn't open the window: {} — file is at {})\n", e, path.display()),
-                }
-            }
+    let pow_extra = if type_summary.is_empty() {
+        String::new()
+    } else {
+        irow("", "Types", esc(&type_summary.join(", ")))
+    };
+    let pow_card = card(
+        "PoW QUEUE",
+        format!(
+            "{}{}",
+            irow("icon-in-progress", "Running / Waiting / Done", format!("{} / {} / {}", running, waiting, completed)),
+            pow_extra
+        ),
+    );
+
+    let threats_body = if threats.is_empty() {
+        "<div class='sui-data-card-row'><span><i class='sui-icon icon-success sui-icon-sm sui-text-primary'></i> no threats (last 2m)</span></div>".to_string()
+    } else {
+        let items: String = threats
+            .iter()
+            .take(10)
+            .map(|t| format!(
+                "<div class='sui-message-inline-alert'><i class='sui-icon sui-icon-attacker sui-icon-sm sui-text-destructive'></i> <span class='sui-message-inline-alert-text'>{}</span></div>",
+                esc(&strip_emoji(t))
+            ))
+            .collect();
+        format!(
+            "<div class='sui-data-card-row'><span><i class='sui-icon icon-alert sui-icon-sm sui-text-destructive'></i> {} active</span></div>{}",
+            threats.len(),
+            items
+        )
+    };
+    let threats_card = card("THREATS", threats_body);
+
+    let rec_items: String = recs.iter().map(|r| format!("<li>{}</li>", esc(r))).collect();
+    let rec_card = card("RECOMMENDED", format!("<ul class='ops-list'>{}</ul>", rec_items));
+
+    let inner = format!(
+        "{}{}{}{}<div class='ops-title'>{} {} · updates live</div>",
+        status_card, pow_card, threats_card, rec_card, esc(&pid), esc(&name)
+    );
+
+    // Cache for first-paint, spawn the window on demand, and push a live update.
+    if let Ok(mut g) = LAST_BOARD.lock() {
+        *g = inner.clone();
+    }
+    if params.open && app.get_webview_window("board").is_none() {
+        match WebviewWindowBuilder::new(app, "board", WebviewUrl::App("board.html".into()))
+            .title("Structs — Team Ops")
+            .inner_size(460.0, 740.0)
+            .build()
+        {
+            Ok(_) => out.push_str("\nOpened the native Team Ops window — it refreshes live as you loop structs_board.\n"),
+            Err(e) => out.push_str(&format!("\n(couldn't open the Team Ops window: {})\n", e)),
         }
     }
-    out.push_str(&opened_note);
+    if let Some(w) = app.get_webview_window("board") {
+        let _ = w.emit("board-update", serde_json::json!({ "html": inner }));
+    }
 
     // ── Optional in-app overlay (off by default) ──
     if params.push {
