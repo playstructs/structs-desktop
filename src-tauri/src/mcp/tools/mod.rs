@@ -9,4 +9,5 @@ pub mod players;
 pub mod policy;
 pub mod query;
 pub mod sequence;
+pub mod strike;
 pub mod ui;

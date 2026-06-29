@@ -441,20 +441,41 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
     vec![Content::text(out)]
 }
 
-/// `intel.strike_options` — team-wide strike planner. Given an enemy target,
-/// report which of YOUR structs — across the primary player AND every virtual
-/// player — can reach it and the expected damage, so an agent commanding a team
-/// knows who should fire. Args: `{ target }` (enemy struct id) or
-/// `{ target_type, target_ambit, target_hp? }`.
-async fn query_strike_options(client: &CosmosClient, args: &Value) -> Vec<Content> {
+/// One team struct's option against a target.
+#[derive(Debug, Clone)]
+pub struct StrikeRow {
+    pub player: String,
+    pub struct_id: String,
+    pub weapon: String,
+    pub expected_dmg: f64,
+    pub reachable: bool,
+}
+
+/// A computed team strike plan against a resolved target.
+#[derive(Debug, Clone)]
+pub struct StrikePlan {
+    pub target_id: Option<String>,
+    pub target_label: String,
+    pub tgt_ambit_bit: u64,
+    pub tgt_hp: f64,
+    pub reduction: u64,
+    pub rows: Vec<StrikeRow>,
+}
+
+/// Plan a team-wide strike: resolve the target, gather every team combat struct
+/// (primary + each virtual player), and simulate each one's best reaching weapon.
+/// Shared by `strike_options` (display) and `structs_strike` (execute).
+pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePlan, String> {
     use crate::mcp::combat::{simulate, WeaponStats};
-    use crate::mcp::tools::format::{ambit_bit, decode_ambits};
+    use crate::mcp::tools::format::ambit_bit;
 
     let num_or_str = |x: &Value| match x {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
         _ => None,
     };
+
+    let target_id_arg = args.get("target").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // ── Resolve the target: ambit, HP, armour, counter values. ──
     let (target_label, tgt_ambit_bit, tgt_hp, reduction, counter_same, counter_cross) =
@@ -486,7 +507,7 @@ async fn query_strike_options(client: &CosmosClient, args: &Value) -> Vec<Conten
                     )
                 }
                 Err(e) => {
-                    return vec![Content::text(format!("strike_options: target {} lookup failed: {}", tid, e))]
+                    return Err(format!("target {} lookup failed: {}", tid, e))
                 }
             }
         } else if let Some(tt) = args.get("target_type").and_then(|v| v.as_str()) {
@@ -507,9 +528,9 @@ async fn query_strike_options(client: &CosmosClient, args: &Value) -> Vec<Conten
                 t.and_then(|t| t.counter_attack).unwrap_or(0),
             )
         } else {
-            return vec![Content::text(
-                "strike_options: provide 'target' (enemy struct id) or 'target_type' (+ target_ambit, target_hp?).".to_string(),
-            )];
+            return Err(
+                "provide 'target' (enemy struct id) or 'target_type' (+ target_ambit, target_hp?).".to_string(),
+            );
         };
 
     // ── Gather attackers: (player_label, struct_id, type_id, ambit_bit). ──
@@ -593,27 +614,55 @@ async fn query_strike_options(client: &CosmosClient, args: &Value) -> Vec<Conten
             .then(b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
     });
 
+    Ok(StrikePlan {
+        target_id: target_id_arg,
+        target_label,
+        tgt_ambit_bit,
+        tgt_hp,
+        reduction,
+        rows: rows
+            .into_iter()
+            .map(|(player, struct_id, weapon, expected_dmg, reachable)| StrikeRow {
+                player,
+                struct_id,
+                weapon,
+                expected_dmg,
+                reachable,
+            })
+            .collect(),
+    })
+}
+
+/// `intel.strike_options` — team-wide strike planner (display). Reports which of
+/// YOUR structs across the primary player AND every virtual player can reach a
+/// target and for how much, so the commander knows who should fire.
+async fn query_strike_options(client: &CosmosClient, args: &Value) -> Vec<Content> {
+    use crate::mcp::tools::format::decode_ambits;
+    let plan = match plan_strike(client, args).await {
+        Ok(p) => p,
+        Err(e) => return vec![Content::text(format!("strike_options: {}", e))],
+    };
     let mut out = String::new();
     out.push_str(&format!(
         "Strike options vs {} (HP {:.0}, ambit [{}], armour −{})\n",
-        target_label,
-        tgt_hp,
-        if tgt_ambit_bit == 0 { "?".to_string() } else { decode_ambits(tgt_ambit_bit) },
-        reduction
+        plan.target_label,
+        plan.tgt_hp,
+        if plan.tgt_ambit_bit == 0 { "?".to_string() } else { decode_ambits(plan.tgt_ambit_bit) },
+        plan.reduction
     ));
-    let reachable: Vec<_> = rows.iter().filter(|r| r.4).collect();
+    let reachable: Vec<_> = plan.rows.iter().filter(|r| r.reachable).collect();
     if reachable.is_empty() {
         out.push_str("  No combat struct on your team can reach this target's ambit.\n");
     } else {
-        for (player, id, wlabel, exp, _) in &reachable {
-            out.push_str(&format!("  {} · {} [{}] → ~{:.1} expected dmg\n", player, id, wlabel, exp));
+        for r in &reachable {
+            out.push_str(&format!("  {} · {} [{}] → ~{:.1} expected dmg\n", r.player, r.struct_id, r.weapon, r.expected_dmg));
         }
     }
-    let unreachable = rows.len() - reachable.len();
+    let unreachable = plan.rows.len() - reachable.len();
     if unreachable > 0 {
         out.push_str(&format!("  ({} other combat struct(s) can't reach this ambit.)\n", unreachable));
     }
-    out.push_str("\nFire with structs_action attack (you) or structs_players act {player, action:\"attack\"} (virtual players).\n");
+    out.push_str("\nFire individually with structs_action attack / structs_players act, or fire the whole team at once with structs_strike {target}.\n");
     vec![Content::text(out)]
 }
 

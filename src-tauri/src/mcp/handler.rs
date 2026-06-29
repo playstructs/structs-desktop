@@ -171,13 +171,15 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_events",
-                "Live event feed from the NATS stream, PLUS `tx_settled` receipts for actions you submitted (real tx hash, chain code, status succeeded/dropped). Real combat surfaces as `struct_health` (health/health_old + struct_id) and `struct_status`, with `shield_change`, `struct_block_build_start`, `fleet_arrive`/`fleet_depart`, `raid_status`, `player_consensus`, `lastAction`, etc. — there is NO `struct_attack` category here (use structs_intel battle_log for your own attack outcomes). React to events instead of polling. Pass 'wait_secs' to long-poll (blocks until a new event after 'since', or the wait elapses). 'mine_only' matches your player/planet/fleet/struct ids in the subject OR detail (so your structs taking damage show even when the event is keyed to an enemy planet). 'category' filters by type (e.g. 'struct_health', 'tx_settled', 'raid_status'). Page forward with the returned 'next_cursor' as 'since'.",
+                "Live event feed from the NATS stream, PLUS `tx_settled` receipts for actions you submitted (real tx hash, chain code, status succeeded/dropped). Real combat surfaces as `struct_health` (health/health_old + struct_id) and `struct_status`, with `shield_change`, `struct_block_build_start`, `fleet_arrive`/`fleet_depart`, `raid_status`, `player_consensus`, `lastAction`, etc. — there is NO `struct_attack` category here (use structs_intel battle_log for your own attack outcomes). React to events instead of polling. Pass 'wait_secs' to long-poll (blocks until a new event after 'since', or the wait elapses). 'mine_only' matches your player/planet/fleet/struct ids in the subject OR detail (so your structs taking damage show even when the event is keyed to an enemy planet). 'category' filters by type (e.g. 'struct_health', 'tx_settled', 'raid_status'). 'threats_only' is a SENTINEL: it server-side classifies your events into threats (raid armed / struct lost / taking damage / hostile inbound / shield drop) and returns only those, highest-priority first — with 'wait_secs' it blocks until you're actually attacked, so a thin loop on it is a real-time under-attack detector. Page forward with the returned 'next_cursor' as 'since'.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "since": { "type": "number", "description": "Only events newer than this timestamp (ms). Use the prior call's next_cursor." },
                         "category": { "type": "string", "description": "Filter to one category, e.g. 'struct_attack', 'raid_status', 'fleet_arrive'." },
                         "mine_only": { "type": "boolean", "description": "Only events referencing your player/planet/fleet." },
+                        "threats_only": { "type": "boolean", "description": "SENTINEL mode: classify your events as threats (raid_armed/struct_lost/taking_damage/hostile_inbound/shield_drop) and return only those, highest-priority first. With wait_secs, blocks until a real threat lands — a ready-made under-attack detector." },
+                        "team": { "type": "boolean", "description": "Widen mine_only/threats_only from just the primary player to the WHOLE team (primary + every virtual player's planet/fleet), so one sentinel watches the bait fleet. Threats are tagged with which player was hit." },
                         "limit": { "type": "number", "description": "Max events to return (default 30)." },
                         "wait_secs": { "type": "number", "description": "Long-poll: wait up to N seconds (0–55) for a new event. 0 = return immediately." }
                     }
@@ -232,6 +234,20 @@ impl StructsMcpHandler {
                         "frames": { "type": "integer", "description": "gif: frame count (2–60, default 12)." },
                         "interval_ms": { "type": "integer", "description": "gif: ms per frame (default 120)." }
                     }
+                })),
+            ),
+            Tool::new(
+                "structs_strike",
+                "Coordinated TEAM attack + kill-chain. Counters are passive and weak (≤1 dmg); a real attack does 1–3, and the primary + every virtual player each has its OWN charge bar — so this concentrates the whole team's firepower on ONE target in a single command. It picks each player's single BEST reaching weapon (one shot per charge bar) and fires — primary via the signing queue, virtual players via their own keys. KILL-CHAIN (strip_blockers, default on): you can't damage a struct through its same-ambit blockers, so it redirects fire to the current blocker; re-invoking each charge cycle walks strip→kill→(raid window). Use 'dry_run' to preview the barrage + projected damage and whether it's a KILL.",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "target": { "type": "string", "description": "Enemy struct id to kill (e.g. their Command Ship \"5-2217\"). Fire auto-redirects to same-ambit blockers first." },
+                        "max": { "type": "integer", "description": "Cap the number of attackers (default: all reachable, one per player)." },
+                        "dry_run": { "type": "boolean", "description": "Plan only — show who would fire, the phase (STRIP/KILL), and projected damage, without attacking." },
+                        "strip_blockers": { "type": "boolean", "description": "Kill-chain mode (default true): redirect fire to the target's same-ambit blockers until it's exposed. Set false to fire directly at the target regardless." }
+                    },
+                    "required": ["target"]
                 })),
             ),
         ]
@@ -442,6 +458,13 @@ impl ServerHandler for StructsMcpHandler {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
                     tools::map::execute(&self.app_handle, &self.cosmos_client, params).await
+                }
+                "structs_strike" => {
+                    let params: tools::strike::StrikeParams =
+                        serde_json::from_value(args).map_err(|e| {
+                            McpError::invalid_params(format!("Invalid params: {}", e), None)
+                        })?;
+                    tools::strike::execute(&self.app_handle, &self.cosmos_client, params).await
                 }
                 _ => vec![Content::text(format!("Unknown tool: {}", name))],
             };

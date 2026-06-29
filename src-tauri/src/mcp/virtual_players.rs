@@ -78,6 +78,71 @@ impl VirtualPlayerStore {
     }
 }
 
+/// The team's owned on-chain entities (for threat detection across all virtual
+/// players, not just the primary). Planet-subject matching covers each vplayer's
+/// structs too (their struct events are keyed to the planet subject), so we only
+/// need each vplayer's planet + fleet — resolved once from the chain and cached.
+#[derive(Debug, Clone, Default)]
+pub struct TeamOwned {
+    pub players: std::collections::HashSet<String>,
+    pub planets: std::collections::HashSet<String>,
+    pub fleets: std::collections::HashSet<String>,
+    /// planet id -> vplayer display name, for tagging which player was hit.
+    pub label_by_planet: std::collections::HashMap<String, String>,
+}
+
+/// player_id -> (planet_id, fleet_id), resolved lazily; planet/fleet never change
+/// for a player, so a permanent cache is safe and avoids per-poll LCD storms.
+static OWNED_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<String, (String, String)>>> =
+    std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+
+/// Resolve the planet/fleet ids of every registered virtual player (cached),
+/// for team-wide threat detection.
+pub async fn team_owned(client: &crate::mcp::cosmos_client::CosmosClient) -> TeamOwned {
+    let entries: Vec<(String, String)> = {
+        let reg = REGISTRY.read().unwrap();
+        reg.players
+            .iter()
+            .filter_map(|vp| vp.player_id.clone().map(|p| (p, vp.name.clone())))
+            .collect()
+    };
+    let mut out = TeamOwned::default();
+    for (pid, name) in entries {
+        out.players.insert(pid.clone());
+        let cached = OWNED_CACHE.read().unwrap().get(&pid).cloned();
+        let (planet, fleet) = match cached {
+            Some(pf) => pf,
+            None => {
+                let pf = match client.query_entity("player", &pid).await {
+                    Ok(v) => {
+                        let g = |k: &str| {
+                            v.get("Player")
+                                .and_then(|x| x.get(k))
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string()
+                        };
+                        (g("planetId"), g("fleetId"))
+                    }
+                    Err(_) => (String::new(), String::new()),
+                };
+                if !pf.0.is_empty() {
+                    OWNED_CACHE.write().unwrap().insert(pid.clone(), pf.clone());
+                }
+                pf
+            }
+        };
+        if !planet.is_empty() {
+            out.planets.insert(planet.clone());
+            out.label_by_planet.insert(planet, name.clone());
+        }
+        if !fleet.is_empty() {
+            out.fleets.insert(fleet);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

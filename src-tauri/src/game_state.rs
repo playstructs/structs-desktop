@@ -243,9 +243,8 @@ static SYNC_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 #[tauri::command]
 pub async fn sync_game_state(
     state: GameStateSync,
-    // Kept in the signature for forward-compat; the autonomous push that used
-    // it (see VCS history: push_event_driven_ui) has been removed.
-    _app_handle: tauri::AppHandle,
+    // Used by the Tier-1/2 autonomous threat responder below (notify / prompt / tx).
+    app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     if !SYNC_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
@@ -283,16 +282,141 @@ pub async fn sync_game_state(
         );
     }
 
+    // ── Tier 1/2 autonomous threat response ──
+    // When this tick's events signal combat/destruction involving us, assess the
+    // threat against the enabled combat policies (lock-free), then act with the
+    // AppHandle: Tier 2 = fire a real-time native notification + UI toast; Tier 1
+    // = per-policy response — "auto" submits the tx within budget, "ask" pops a
+    // structs_ui approval prompt and submits only on approval, "notify" just alerts.
+    // (Discrete event triggers — combat_mode/activated, struct_destroyed — are
+    // emitted once, so this is naturally debounced and won't spam each sync tick.)
+    let assessment = {
+        use crate::mcp::policy::POLICY_ENGINE;
+        POLICY_ENGINE
+            .read()
+            .ok()
+            .and_then(|engine| engine.assess_threats(&events, &state))
+    };
+
     {
         let mut gs = GAME_STATE.write().map_err(|e| e.to_string())?;
         *gs = state;
     }
 
-    // The MCP `show_ui` bridge stays available for agents to call via the
-    // `structs_ui` tool when they want to surface something on the human's
-    // screen. We don't push anything autonomously from policy events — the
-    // webapp already shows combat / struct-destroyed indicators through its
-    // own UI, so duplicating that here is noise.
+    if let Some(assess) = assessment {
+        let combat_alert_on = {
+            use crate::mcp::policy::POLICY_ENGINE;
+            POLICY_ENGINE.read().map(|e| e.is_enabled("combat_alert")).unwrap_or(false)
+        };
+        // Tier 2 — real-time alert (native notification + in-app toast).
+        if combat_alert_on {
+            let title = format!("⚠ Structs: {}", assess.headline);
+            let body = if assess.detail.is_empty() {
+                "Open Structs to respond.".to_string()
+            } else {
+                assess.detail.clone()
+            };
+            tokio::spawn(async move {
+                let _ = crate::notifications::send_notification(title, body).await;
+            });
+            let comp = serde_json::json!({
+                "kind": "toast",
+                "title": format!("⚡ {}", assess.headline),
+                "body": assess.detail,
+                "level": "warn"
+            });
+            let app_t = app_handle.clone();
+            tokio::spawn(async move {
+                let _ = crate::mcp::ui_bridge::show_ui(&app_t, "notify", comp, None).await;
+            });
+        }
+        // Tier 1 — per-policy response.
+        for r in assess.responses {
+            match r.mode.as_str() {
+                "auto" => {
+                    if let Some((action, args)) = r.action.clone() {
+                        let app_a = app_handle.clone();
+                        let pol = r.policy.clone();
+                        tokio::spawn(async move {
+                            match crate::mcp::tx_queue::submit_tx(&app_a, action, args).await {
+                                Ok(_) => eprintln!("[Structs Auto] {} auto-response submitted", pol),
+                                Err(e) => eprintln!("[Structs Auto] {} auto-response failed: {}", pol, e),
+                            }
+                        });
+                    }
+                }
+                "ask" => {
+                    let app_p = app_handle.clone();
+                    let pol = r.policy.clone();
+                    let rec = r.recommendation.clone();
+                    let act = r.action.clone();
+                    tokio::spawn(async move {
+                        let comp = serde_json::json!({
+                            "kind": "dialogue",
+                            "title": format!("⚡ Agent: {}", pol),
+                            "message": rec,
+                            "buttons": [
+                                {"label": "Approve", "value": "approve"},
+                                {"label": "Dismiss", "value": "dismiss"}
+                            ]
+                        });
+                        match crate::mcp::ui_bridge::show_ui(&app_p, "prompt", comp, Some(120)).await {
+                            Ok(crate::mcp::ui_bridge::UiOutcome::Answered(v))
+                                if v.as_str() == Some("approve") =>
+                            {
+                                if let Some((action, args)) = act {
+                                    let _ = crate::mcp::tx_queue::submit_tx(&app_p, action, args).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    });
+                }
+                _ => { /* "notify" — covered by the Tier-2 alert above */ }
+            }
+        }
+    }
+
+    // ── Tier 2, team coverage ──
+    // The assessment above only sees the PRIMARY player (GAME_STATE). The bait
+    // fleet — every virtual player — is the most likely attack target, so scan
+    // the grass buffer against the whole team's planets/fleets each tick and fire
+    // a native notification + toast when a vplayer is hit. Cheap: team ownership
+    // is cached after the first resolve; the buffer scan is in-memory. A persistent
+    // high-water mark debounces (first tick only baselines; alerts only on new hits).
+    {
+        use crate::mcp::policy::POLICY_ENGINE;
+        static TEAM_HW: std::sync::LazyLock<std::sync::Mutex<f64>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(0.0));
+        let combat_alert_on = POLICY_ENGINE
+            .read()
+            .map(|e| e.is_enabled("combat_alert"))
+            .unwrap_or(false);
+        if combat_alert_on {
+            let since = *TEAM_HW.lock().unwrap();
+            let (hw, lines) = crate::mcp::tools::events::poll_team_threats(since).await;
+            *TEAM_HW.lock().unwrap() = hw;
+            if !lines.is_empty() {
+                let n = lines.len();
+                let body = lines.into_iter().take(6).collect::<Vec<_>>().join("; ");
+                let title = format!("⚠ Structs: {} team threat(s) detected", n);
+                let body_n = body.clone();
+                tokio::spawn(async move {
+                    let _ = crate::notifications::send_notification(title, body_n).await;
+                });
+                let comp = serde_json::json!({
+                    "kind": "toast",
+                    "title": "⚡ Bait fleet under attack",
+                    "body": body,
+                    "level": "warn"
+                });
+                let app_t = app_handle.clone();
+                tokio::spawn(async move {
+                    let _ = crate::mcp::ui_bridge::show_ui(&app_t, "notify", comp, None).await;
+                });
+            }
+        }
+    }
 
     Ok(())
 }

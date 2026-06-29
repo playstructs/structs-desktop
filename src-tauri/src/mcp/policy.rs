@@ -45,6 +45,28 @@ pub struct HashCompletionOutcome {
     pub auto_refine: Option<AutoRefine>,
 }
 
+/// A combat policy's recommended response to a detected threat. `mode` is the
+/// policy's configured posture: "notify" (alert only), "ask" (a structs_ui
+/// prompt the human approves before it executes), or "auto" (execute within a
+/// charge budget, no prompt). `action` is a concrete (action, args) for the tx
+/// path when the engine can compute one; `None` means recommendation-only.
+#[derive(Debug, Clone)]
+pub struct ThreatResponse {
+    pub policy: String,
+    pub mode: String,
+    pub recommendation: String,
+    pub action: Option<(String, serde_json::Value)>,
+}
+
+/// Outcome of `assess_threats`: a headline/detail for the real-time alert plus
+/// the per-policy recommended responses.
+#[derive(Debug, Clone)]
+pub struct ThreatAssessment {
+    pub headline: String,
+    pub detail: String,
+    pub responses: Vec<ThreatResponse>,
+}
+
 /// Snapshot of state for delta tracking.
 #[derive(Debug, Clone, Default)]
 pub struct StateSnapshot {
@@ -115,6 +137,9 @@ impl PolicyEngine {
         let defaults = vec![
             ("auto_refine", true, serde_json::json!({})),
             ("power_alert", true, serde_json::json!({"threshold_pct": 80})),
+            // Tier-2 real-time threat alert: fire a native notification + UI toast
+            // the instant combat/destruction involving you is detected. On by default.
+            ("combat_alert", true, serde_json::json!({})),
             // Master toggle for agent-driven UI. Enabled by default; the human can
             // turn it off via `structs_policy set agent_ui false`.
             ("agent_ui", true, serde_json::json!({})),
@@ -318,6 +343,121 @@ impl PolicyEngine {
         self.previous_state = Some(current);
 
         events
+    }
+
+    /// Tier 1/2 threat assessment. Given the events JUST produced by `evaluate`
+    /// plus the fresh game state, decide whether the player is under threat and
+    /// what (if anything) each enabled combat policy recommends. Pure + lock-free
+    /// of async — the caller (which holds the AppHandle) performs the actual
+    /// notification / UI prompt / tx, mirroring the `auto_refine` split.
+    pub fn assess_threats(
+        &self,
+        events: &[PolicyEvent],
+        state: &GameStateSync,
+    ) -> Option<ThreatAssessment> {
+        let combat_started = events
+            .iter()
+            .any(|e| e.policy == "combat_mode" && e.action == "activated");
+        let destroyed: Vec<String> = events
+            .iter()
+            .filter(|e| e.action == "struct_destroyed")
+            .map(|e| e.detail.clone())
+            .collect();
+        if !combat_started && destroyed.is_empty() {
+            return None;
+        }
+
+        let mode_of = |name: &str| -> String {
+            self.store
+                .policies
+                .get(name)
+                .and_then(|p| p.config.get("mode"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("ask")
+                .to_string()
+        };
+
+        let headline = if !destroyed.is_empty() {
+            "Struct lost in combat".to_string()
+        } else {
+            "Combat detected at your position".to_string()
+        };
+        let mut detail = String::new();
+        if combat_started {
+            detail.push_str("Hostile activity involves your planet/fleet. ");
+        }
+        if !destroyed.is_empty() {
+            detail.push_str(&destroyed.join("; "));
+        }
+
+        let mut responses = vec![];
+
+        // auto_retreat_if_cmd_below — when the Command Ship drops below the HP
+        // threshold, recommend pulling the fleet back to the home planet. This is
+        // the one concrete, reversible action we can compute from state alone.
+        if self.is_enabled("auto_retreat_if_cmd_below") {
+            let thr = self
+                .store
+                .policies
+                .get("auto_retreat_if_cmd_below")
+                .and_then(|p| p.config.get("hp"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(4.0);
+            if let Some(cmd) = state.structs.values().find(|s| {
+                s.struct_type_name
+                    .as_deref()
+                    .map(|n| n.contains("Command"))
+                    .unwrap_or(false)
+            }) {
+                if let Some(hp) = cmd.health {
+                    if hp < thr {
+                        let action = match (&state.fleet_id, &state.planet_id) {
+                            (Some(f), Some(p)) => Some((
+                                "move_fleet".to_string(),
+                                serde_json::json!({ "fleet_id": f, "destination_id": p }),
+                            )),
+                            _ => None,
+                        };
+                        responses.push(ThreatResponse {
+                            policy: "auto_retreat_if_cmd_below".into(),
+                            mode: mode_of("auto_retreat_if_cmd_below"),
+                            recommendation: format!(
+                                "Command Ship HP {:.0} < {:.0} — retreat the fleet to your home planet.",
+                                hp, thr
+                            ),
+                            action,
+                        });
+                    }
+                }
+            }
+        }
+
+        // auto_counterattack — recommendation only: the attacker id isn't in the
+        // grass stream (no struct_attack), so a counter needs a battle_log/scout
+        // lookup the agent performs. We surface the prompt, not an auto-tx.
+        if self.is_enabled("auto_counterattack") && combat_started {
+            responses.push(ThreatResponse {
+                policy: "auto_counterattack".into(),
+                mode: mode_of("auto_counterattack"),
+                recommendation:
+                    "Identify the attacker (structs_intel battle_log / valid_targets) and counter if reachable with charge ready."
+                        .into(),
+                action: None,
+            });
+        }
+
+        // auto_rebuild_losses — on a destruction, recommend rebuilding. Concrete
+        // type/slot recovery needs the pre-destruction record; surfaced as a prompt.
+        if self.is_enabled("auto_rebuild_losses") && !destroyed.is_empty() {
+            responses.push(ThreatResponse {
+                policy: "auto_rebuild_losses".into(),
+                mode: mode_of("auto_rebuild_losses"),
+                recommendation: format!("Rebuild what you lost: {}.", destroyed.join("; ")),
+                action: None,
+            });
+        }
+
+        Some(ThreatAssessment { headline, detail, responses })
     }
 
     /// Evaluate policies triggered by hash task completion.
