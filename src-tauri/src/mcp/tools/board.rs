@@ -236,7 +236,7 @@ pub async fn execute(
     if params.open && app.get_webview_window("board").is_none() {
         match WebviewWindowBuilder::new(app, "board", WebviewUrl::App("board.html".into()))
             .title("Structs — Team Ops")
-            .inner_size(460.0, 740.0)
+            .inner_size(520.0, 740.0)
             .build()
         {
             Ok(_) => out.push_str("\nOpened the native Team Ops window — it refreshes live as you loop structs_board.\n"),
