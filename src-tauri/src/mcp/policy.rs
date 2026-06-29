@@ -101,6 +101,14 @@ impl PolicyEngine {
     }
 
     fn ensure_defaults(&mut self) {
+        // Prune dead policies that an older binary may have PERSISTED to the
+        // config store. They were advertised but never wired to engine logic;
+        // ensure_defaults only adds missing defaults, so without this prune they
+        // linger in the saved store and `structs_policy list` keeps showing them.
+        for dead in ["never_build_unsafe", "auto_defend", "sequence_retry"] {
+            self.store.policies.remove(dead);
+        }
+
         // Only policies the engine actually evaluates are seeded as defaults.
         // (never_build_unsafe / auto_defend / sequence_retry were advertised but
         // never wired up — removed to keep `structs_policy list` honest.)

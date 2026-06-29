@@ -285,6 +285,58 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
     };
     let att_ambit_bit = att_ambit.as_deref().map(ambit_bit).unwrap_or(0);
 
+    // Pre-resolve a target given by id BEFORE taking the lock (chain fetch needs
+    // an await). Enemy structs live on foreign planets and are NOT in local
+    // gs.structs, so an id-only lookup against gameState always missed — fetch
+    // from the chain (type/ambit/HP) when it isn't local. Mirrors strike_options.
+    let target_resolved: Option<(String, String, f64)> = match args.get("target").and_then(|v| v.as_str()) {
+        Some(tid) => {
+            let local = {
+                let gs = GAME_STATE.read().unwrap();
+                gs.structs.get(tid).map(|ts| {
+                    let tt = gs.struct_types.get(&ts.struct_type_id.to_string());
+                    (
+                        ts.struct_type_id.to_string(),
+                        ts.operating_ambit.clone().unwrap_or_default(),
+                        ts.health.unwrap_or_else(|| tt.and_then(|t| t.max_health).unwrap_or(0.0)),
+                    )
+                })
+            };
+            match local {
+                Some(v) => Some(v),
+                None => match client.query_entity("struct", tid).await {
+                    Ok(v) => {
+                        let st = v.get("Struct");
+                        let type_id = st.and_then(|s| s.get("type")).and_then(|x| match x {
+                            Value::String(s) => Some(s.clone()),
+                            Value::Number(n) => Some(n.to_string()),
+                            _ => None,
+                        });
+                        let ambit = st
+                            .and_then(|s| s.get("operatingAmbit"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let hp = v
+                            .get("structAttributes")
+                            .and_then(|sa| sa.get("health"))
+                            .and_then(json_to_f64)
+                            .or_else(|| st.and_then(|s| s.get("health_max")).and_then(json_to_f64))
+                            .unwrap_or(0.0);
+                        match type_id {
+                            Some(t) => Some((t, ambit, hp)),
+                            None => return vec![Content::text(format!(
+                                "simulate: couldn't resolve target {}'s struct type from the chain.", tid
+                            ))],
+                        }
+                    }
+                    Err(e) => return vec![Content::text(format!("simulate: target {} lookup failed: {}", tid, e))],
+                },
+            }
+        }
+        None => None,
+    };
+
     // No await past here — safe to hold the GAME_STATE lock for the rest.
     let gs = GAME_STATE.read().unwrap();
     let att_type = match gs.struct_types.get(&att_type_id) {
@@ -324,14 +376,13 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
         ))];
     }
 
-    // Resolve target: a visible struct, or explicit overrides.
-    let tgt_struct = args.get("target").and_then(|v| v.as_str()).and_then(|id| gs.structs.get(id));
-    let (tgt_name, tgt_hp, tgt_ambit_bit, reduction, counter_same, counter_cross) = if let Some(ts) = tgt_struct {
-        let tt = gs.struct_types.get(&ts.struct_type_id.to_string());
+    // Resolve target: the pre-fetched struct (local or chain), or explicit overrides.
+    let (tgt_name, tgt_hp, tgt_ambit_bit, reduction, counter_same, counter_cross) = if let Some((tgt_type_id, tgt_ambit, tgt_hp)) = &target_resolved {
+        let tt = gs.struct_types.get(tgt_type_id);
         (
             tt.map(|t| t.name.clone()).unwrap_or_else(|| "target".to_string()),
-            ts.health.unwrap_or_else(|| tt.and_then(|t| t.max_health).unwrap_or(0.0)),
-            ts.operating_ambit.as_deref().map(ambit_bit).unwrap_or(0),
+            *tgt_hp,
+            ambit_bit(tgt_ambit),
             tt.and_then(|t| t.attack_reduction).unwrap_or(0),
             tt.and_then(|t| t.counter_attack_same_ambit).unwrap_or(0),
             tt.and_then(|t| t.counter_attack).unwrap_or(0),

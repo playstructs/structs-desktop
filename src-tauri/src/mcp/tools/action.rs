@@ -631,19 +631,37 @@ async fn action_raid(
         )];
     }
 
-    let (fleet_id, block_height, difficulty_target) = {
+    let (fleet_id, difficulty_target) = {
         let gs = GAME_STATE.read().unwrap();
         let fleet_id = gs.fleet_id.clone().unwrap_or_default();
         let difficulty = gs.get_difficulty_for_struct(&fleet_id, "RAID").unwrap_or(700);
-        (fleet_id, gs.current_block_height, difficulty)
+        (fleet_id, difficulty)
     };
     if fleet_id.is_empty() {
         return vec![Content::text("Error: No fleet found for this player.")];
     }
+
+    // The raid proof anchors on the TARGET planet's blockStartRaid — the
+    // defender's vulnerability clock, armed only when their Command Ship is
+    // down/absent — NOT the current block (docs: {fleetId}@{planetId}RAID{blockStart}NONCE).
+    // 0 ⇒ the planet isn't raidable (chain error "raid_clock_unset"); grinding
+    // at any other block is wasted (rejected, or trivial-difficulty-collapse guard).
+    let block_height = {
+        let client = crate::mcp::cosmos_client::CosmosClient::new();
+        match client.query_entity("planet", target_id).await {
+            Ok(v) => v
+                .get("planetAttributes")
+                .and_then(|x| x.get("blockStartRaid"))
+                .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0),
+            Err(e) => return vec![Content::text(format!("raid: planet {} lookup failed: {}", target_id, e))],
+        }
+    };
     if block_height == 0 {
-        return vec![Content::text(
-            "Error: gameState not synced yet (block height 0). Wait a few seconds and retry.",
-        )];
+        return vec![Content::text(format!(
+            "raid: planet {} isn't raidable (blockStartRaid=0). The clock arms only when the defender's Command Ship is offline/destroyed/absent (their planetary shield is up otherwise). Strip blockers → drop the CMD ship → then raid.",
+            target_id
+        ))];
     }
 
     // Start the RAID hash task. The completion tx (planet-raid-complete) is

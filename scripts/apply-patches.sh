@@ -348,25 +348,49 @@ try {
         return { planetId, dataUrl: await window.htmlToImage.toPng(el, { pixelRatio: 2 }) };
       } finally { this.__restorePreview(el); }
     },
-    // N frames `intervalMs` apart → an animated GIF (Lottie struct sprites move;
-    // re-render each frame so live state/animation advances).
+    // N frames → an animated GIF of the planet's Lottie struct sprites.
+    // We DRIVE the animation by seeking each sprite's lottie playhead per frame
+    // (goToAndStop) rather than calling previewMap.render() between frames —
+    // render() rebuilds the DOM and recreates the lottie instances at their
+    // initial pose, so every post-render frame was byte-identical (only frame 0,
+    // captured after the settle, differed → a "frozen" GIF). Seeking the global
+    // lottie AnimationItems in this preview container gives genuine motion, and
+    // because the DOM isn't rebuilt the inlined terrain tiles persist across frames.
     async renderMapFrames(planetId, playerId, count, intervalMs) {
       const n = Math.max(2, Math.min(count || 12, 60));
       const el = await this.__preparePreview(planetId, playerId);
       const frames = [];
-      const bgCache = new Map(); // share inlined tiles across frames (render() rebuilds DOM)
+      const bgCache = new Map();
+      // Lottie AnimationItems living inside this preview map (global registry).
+      let anims = [];
       try {
-        await new Promise((r) => setTimeout(r, 1400));
+        anims = (window.lottie && window.lottie.getRegisteredAnimations)
+          ? window.lottie.getRegisteredAnimations().filter(function (a) {
+              try { return a && a.wrapper && el.contains(a.wrapper); } catch (e) { return false; }
+            })
+          : [];
+      } catch (e) { anims = []; }
+      try {
+        await new Promise((r) => setTimeout(r, 1400)); // terrain + lottie load/settle
+        await this.__inlineBackgrounds(el, bgCache);   // embed tiles once (DOM is stable now)
         for (let i = 0; i < n; i++) {
-          await this.__inlineBackgrounds(el, bgCache); // re-inline (render() wipes inline styles)
+          // Seek every sprite to a distinct phase of its own loop for this frame.
+          const t = n > 1 ? i / n : 0; // 0 .. <1 across the GIF
+          anims.forEach(function (a) {
+            try {
+              const tf = a.totalFrames || (a.firstFrame != null && a.getDuration ? a.getDuration(true) : 0);
+              if (tf > 0) a.goToAndStop(t * tf, true); // isFrame=true; SVG updates synchronously
+            } catch (e) { /* skip this sprite */ }
+          });
+          await new Promise((r) => setTimeout(r, 30)); // let the SVG repaint
           frames.push(await window.htmlToImage.toPng(el, { pixelRatio: 1 }));
-          if (i < n - 1) {
-            await new Promise((r) => setTimeout(r, intervalMs || 120));
-            try { gameState.previewMap.render(); } catch (e) { /* keep frames */ }
-          }
         }
         return { planetId, frames };
-      } finally { this.__restorePreview(el); }
+      } finally {
+        // Resume live playback so the preview isn't left paused, then restore.
+        try { anims.forEach(function (a) { try { a.play(); } catch (e) {} }); } catch (e) {}
+        this.__restorePreview(el);
+      }
     },
   };
   console.info('[structs-universe] __STRUCTS_VPLAYERS__ ready');

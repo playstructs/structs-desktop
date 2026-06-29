@@ -430,13 +430,15 @@ pub async fn execute(
                 // NOT the current block (docs hashing.md: input {structId}MINE{blockStart}NONCE).
                 // Read it from the chain like complete_build reads blockStartBuild;
                 // using current_block_height yields a proof the chain rejects (→ 0 ore).
-                let read_anchor = |entity: &Value, field: &str| -> u64 {
+                let read_anchor_in = |entity: &Value, container: &str, field: &str| -> u64 {
                     entity
-                        .get("structAttributes")
+                        .get(container)
                         .and_then(|x| x.get(field))
                         .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
                         .unwrap_or(0)
                 };
+                let read_anchor = |entity: &Value, field: &str| read_anchor_in(entity, "structAttributes", field);
+                let read_anchor_planet = |entity: &Value, field: &str| read_anchor_in(entity, "planetAttributes", field);
                 let (object_id, task_type, task_params) = match action {
                     "mine" => {
                         let Some(sid) = s("struct_id") else {
@@ -467,13 +469,19 @@ pub async fn execute(
                         (sid.clone(), "REFINE", TaskParams::for_ore(&sid, "REFINE", block, dt("difficulty_target", 28000)))
                     }
                     "raid" => {
-                        let block = crate::game_state::GAME_STATE.read().unwrap().current_block_height;
-                        if block == 0 {
-                            return vec![Content::text("gameState not synced yet (block 0). Retry shortly.".to_string())];
-                        }
                         let (Some(fleet), Some(target)) = (s("fleet_id"), s("target_id")) else {
                             return vec![Content::text("raid: fleet_id (this player's fleet) and target_id (planet) required.".to_string())];
                         };
+                        // Raid proof anchors on the TARGET planet's blockStartRaid (the
+                        // defender's vulnerability clock), not the current block.
+                        let entity = match client.query_entity("planet", &target).await {
+                            Ok(v) => v,
+                            Err(e) => return vec![Content::text(format!("raid: planet {} lookup failed: {}", target, e))],
+                        };
+                        let block = read_anchor_planet(&entity, "blockStartRaid");
+                        if block == 0 {
+                            return vec![Content::text(format!("raid: planet {} isn't raidable (blockStartRaid=0) — the defender's CMD ship must be down/absent first.", target))];
+                        }
                         (fleet.clone(), "RAID", TaskParams::for_raid(&fleet, &target, block, dt("difficulty_target", 700)))
                     }
                     _ => unreachable!(),
