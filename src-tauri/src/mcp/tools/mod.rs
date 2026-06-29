@@ -1,5 +1,7 @@
 pub mod action;
+pub mod board;
 pub mod dashboard;
+pub mod doctrine;
 pub mod events;
 pub mod format;
 pub mod hasher;

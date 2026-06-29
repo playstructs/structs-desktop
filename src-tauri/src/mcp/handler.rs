@@ -237,6 +237,32 @@ impl StructsMcpHandler {
                 })),
             ),
             Tool::new(
+                "structs_board",
+                "Team operations board — one at-a-glance command view shared by the human and the agent: primary status (charge readiness, power margin, structs online, ore/alpha), virtual-player count, the team-wide PoW queue (running/waiting/done), active threats across the whole team (last ~2 min), and recommended next moves. Returns the board as text and (by default) pushes a compact version to the human's screen via structs_ui. Run it on a loop for a live shared picture.",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "push": { "type": "boolean", "description": "Also push the board to the human's screen via structs_ui (default true)." }
+                    }
+                })),
+            ),
+            Tool::new(
+                "structs_doctrine",
+                "Standing rules of engagement + a per-tick executor — the co-op autonomy loop. 'set' stores the doctrine once (posture: defensive|aggressive|raid; pinned_target; auto_counter; retreat_cmd_below; autonomy: advise|auto) and flips the matching combat policies. 'show' displays it. 'tick' reads the doctrine against live state (threats, charge, Command-Ship HP) and returns the prioritized next move WITHIN the mandate (retreat > defend > attack > hold). Run 'tick' on a loop and the agent holds the watch — executing via the action/strike tools and escalating to a human prompt for anything beyond the standing orders. Persists in the rules_of_engagement policy (visible via structs_intel intents).",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "enum": ["set", "show", "tick"], "description": "set | show | tick" },
+                        "posture": { "type": "string", "enum": ["defensive", "aggressive", "raid"], "description": "set: overall stance." },
+                        "pinned_target": { "type": "string", "description": "set: enemy struct id to focus offense on (kill-chain target)." },
+                        "auto_counter": { "type": "boolean", "description": "set: counter when attacked (drives auto_counterattack)." },
+                        "retreat_cmd_below": { "type": "integer", "description": "set: retreat the fleet when Command Ship HP drops below this." },
+                        "autonomy": { "type": "string", "enum": ["advise", "auto"], "description": "set: advise (tick recommends; agent executes) or auto (defensive responses fire without confirmation; offense still prompts)." }
+                    },
+                    "required": ["command"]
+                })),
+            ),
+            Tool::new(
                 "structs_strike",
                 "Coordinated TEAM attack + kill-chain. Counters are passive and weak (≤1 dmg); a real attack does 1–3, and the primary + every virtual player each has its OWN charge bar — so this concentrates the whole team's firepower on ONE target in a single command. It picks each player's single BEST reaching weapon (one shot per charge bar) and fires — primary via the signing queue, virtual players via their own keys. KILL-CHAIN (strip_blockers, default on): you can't damage a struct through its same-ambit blockers, so it redirects fire to the current blocker; re-invoking each charge cycle walks strip→kill→(raid window). Use 'dry_run' to preview the barrage + projected damage and whether it's a KILL.",
                 schema(serde_json::json!({
@@ -458,6 +484,18 @@ impl ServerHandler for StructsMcpHandler {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
                     tools::map::execute(&self.app_handle, &self.cosmos_client, params).await
+                }
+                "structs_board" => {
+                    let params: tools::board::BoardParams =
+                        serde_json::from_value(args).unwrap_or(tools::board::BoardParams { push: true });
+                    tools::board::execute(&self.app_handle, &self.task_registry, params).await
+                }
+                "structs_doctrine" => {
+                    let params: tools::doctrine::DoctrineParams =
+                        serde_json::from_value(args).map_err(|e| {
+                            McpError::invalid_params(format!("Invalid params: {}", e), None)
+                        })?;
+                    tools::doctrine::execute(params).await
                 }
                 "structs_strike" => {
                     let params: tools::strike::StrikeParams =
