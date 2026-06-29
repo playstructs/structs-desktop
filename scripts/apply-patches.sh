@@ -291,8 +291,11 @@ try {
     async renderMapPng(planetId, playerId) {
       const el = await this.__preparePreview(planetId, playerId);
       try {
-        await new Promise((r) => setTimeout(r, 800)); // SVG/Lottie/terrain settle
-        return { planetId, dataUrl: await window.htmlToImage.toPng(el, { pixelRatio: 2, cacheBust: true }) };
+        await new Promise((r) => setTimeout(r, 1400)); // SVG/Lottie/terrain settle
+        // NB: no cacheBust — it appends ?t=… to image URLs, which the tauri://
+        // asset protocol 404s, dropping the terrain background PNGs (flat color +
+        // white transition gaps). Letting it use the already-loaded images embeds them.
+        return { planetId, dataUrl: await window.htmlToImage.toPng(el, { pixelRatio: 2 }) };
       } finally { this.__restorePreview(el); }
     },
     // N frames `intervalMs` apart → an animated GIF (Lottie struct sprites move;
@@ -302,9 +305,9 @@ try {
       const el = await this.__preparePreview(planetId, playerId);
       const frames = [];
       try {
-        await new Promise((r) => setTimeout(r, 700));
+        await new Promise((r) => setTimeout(r, 1400));
         for (let i = 0; i < n; i++) {
-          frames.push(await window.htmlToImage.toPng(el, { pixelRatio: 1, cacheBust: true }));
+          frames.push(await window.htmlToImage.toPng(el, { pixelRatio: 1 }));
           if (i < n - 1) {
             await new Promise((r) => setTimeout(r, intervalMs || 120));
             try { gameState.previewMap.render(); } catch (e) { /* keep frames */ }
