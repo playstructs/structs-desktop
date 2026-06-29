@@ -64,13 +64,19 @@ pub async fn execute(
 
             // Auto-fill from synced gameState if not provided
             let gs = crate::game_state::GAME_STATE.read().unwrap();
-            let block_start = params.block_start.unwrap_or(gs.current_block_height);
+            let current_block = gs.current_block_height;
+            let block_start = params.block_start.unwrap_or(current_block);
             let difficulty_target = params.difficulty_target.unwrap_or_else(|| {
                 gs.get_difficulty_for_struct(task_id, task_type)
                     .unwrap_or(700) // fallback default
             });
             let struct_type_name = gs.get_struct_type_name(task_id);
             drop(gs);
+            // Difficulty checkpoint = CURRENT block, distinct from block_start (the
+            // proof anchor). If the anchor is old, age = current − anchor is large →
+            // difficulty already low; seeding checkpoint=block_start would make the
+            // worker wait hours for its fake age to grow. (Same fix as TaskParams::for_ore.)
+            let block_checkpoint = if current_block > block_start { current_block } else { block_start };
 
             if block_start == 0 {
                 return vec![Content::text("Error: block_start is 0 — gameState may not be synced yet. Wait a few seconds or provide block_start manually.")];
@@ -111,9 +117,9 @@ pub async fn execute(
                 difficulty_start: None,
                 difficulty_target,
                 block_start,
-                block_checkpoint: block_start,
+                block_checkpoint,
                 block_checkpoint_time: now_ms,
-                block_current_estimated: Some(block_start),
+                block_current_estimated: Some(block_checkpoint),
                 result_exists: false,
                 result_message: None,
                 result_nonce: None,
