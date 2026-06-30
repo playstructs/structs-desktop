@@ -524,7 +524,7 @@ pub async fn execute(
                 out.push_str("3. Connect that allocation to the guild substation (NO guild-owner permission needed):\n");
                 out.push_str(&wrap(
                     "/structs.structs.MsgSubstationAllocationConnect",
-                    format!("{{\"allocationId\":\"<id from step 2>\",\"substationId\":\"{}\"}}", gp.substation_id),
+                    format!("{{\"allocationId\":\"<id from step 2>\",\"destinationId\":\"{}\"}}", gp.substation_id),
                     "primary: NOT on the tx bridge — do in-app",
                 ));
             } else {
@@ -550,7 +550,7 @@ pub async fn execute(
                 out.push_str("5. Connect S's allocation to the guild substation (NO guild-owner permission needed):\n");
                 out.push_str(&wrap(
                     "/structs.structs.MsgSubstationAllocationConnect",
-                    format!("{{\"allocationId\":\"<id from step 4>\",\"substationId\":\"{}\"}}", gp.substation_id),
+                    format!("{{\"allocationId\":\"<id from step 4>\",\"destinationId\":\"{}\"}}", gp.substation_id),
                     "primary: NOT on the tx bridge — do in-app",
                 ));
                 out.push_str("(later) Sell surplus: MsgProviderCreate {substationId:S, rate, accessPolicy, capacity/duration min/max} — a Provider attaches to a substation you own.\n");

@@ -1084,9 +1084,14 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             promise = scm.queueMsgFleetMove(args.fleet_id, args.destination_id);
             break;
 
-          // ── Transfer ──
+          // ── Transfer ── (alpha send via MsgPlayerSend; queueMsgBankSend never
+          //    existed — amount is a Coin[] in ualpha, matching AlphaManager.)
           case 'bank_send':
-            promise = scm.queueMsgBankSend(args.from_address, args.to_address, args.amount);
+            promise = scm.queueMsgPlayerSend(
+              args.from_address,
+              args.to_address,
+              [{ denom: 'ualpha', amount: String(args.amount).replace(/[^0-9]/g, '') }]
+            );
             break;
 
           // ── Generator ──

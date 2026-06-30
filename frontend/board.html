@@ -8,14 +8,17 @@
   <link rel="stylesheet" href="css/sui/sui.css" />
   <link rel="stylesheet" href="css/main.css" />
   <style>
-    html, body { height: 100%; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { height: 100%; overflow-x: hidden; }
     body { margin: 0; background: var(--background, #0d0f15); }
     .height-100 { height: 100%; }
     /* Fill the window with the panel; position:relative anchors the panel's
-       absolutely-positioned fill-backgrounds (the game uses #menu-page-layout). */
-    #board-layout { height: 100%; display: flex; position: relative; }
-    #board-layout .sui-panel { flex: 1; min-height: 0; }
-    .ops-scroll { overflow-y: auto; padding: 14px 22px; }
+       absolutely-positioned fill-backgrounds (the game uses #menu-page-layout).
+       overflow-x:hidden + border-box guarantee no sideways scrollbar from
+       sub-pixel rounding or the panel edge chrome. */
+    #board-layout { height: 100%; display: flex; position: relative; overflow-x: hidden; max-width: 100%; }
+    #board-layout .sui-panel { flex: 1; min-height: 0; min-width: 0; }
+    .ops-scroll { overflow-y: auto; overflow-x: hidden; padding: 14px 18px; }
     .sui-data-card { width: 100%; margin-bottom: 12px; }
     .sui-data-card-body { width: 100%; flex-direction: column; }
     .sui-data-card-row { width: 100%; justify-content: space-between; gap: 16px; }
