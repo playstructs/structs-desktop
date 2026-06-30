@@ -142,6 +142,7 @@ pub async fn execute(
                             args: step.args.clone(),
                             name: None,
                             index: None,
+                            role: None,
                         },
                     )
                     .await

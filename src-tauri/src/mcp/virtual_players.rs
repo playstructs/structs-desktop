@@ -11,6 +11,34 @@ const FILENAME: &str = "virtual_players.json";
 /// Safety cap on how many virtual players the agent may spin up.
 pub const MAX_VIRTUAL_PLAYERS: usize = 16;
 
+/// What a virtual player is FOR. `Bait` (default) just mines so ore — which is
+/// non-transferable — piles up on its planet as a raid lure. `Productive` runs
+/// the self-funding flywheel: mine → refine → send alpha to the primary, which
+/// infuses the guild reactor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VPlayerRole {
+    #[default]
+    Bait,
+    Productive,
+}
+
+impl VPlayerRole {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "bait" => Some(Self::Bait),
+            "productive" | "miner" | "worker" => Some(Self::Productive),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bait => "bait",
+            Self::Productive => "productive",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualPlayer {
     /// HD index off the shared mnemonic (`m/44'/118'/0'/0/index`). 0 is the
@@ -24,6 +52,10 @@ pub struct VirtualPlayer {
     /// Epoch ms, stamped by the caller (Rust can't call Date::now in some paths).
     #[serde(default)]
     pub created_at: f64,
+    /// bait (default) vs productive — drives the flywheel. Existing registry
+    /// JSON without this field loads as `Bait`.
+    #[serde(default)]
+    pub role: VPlayerRole,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -151,18 +183,36 @@ mod tests {
     fn next_free_index_skips_used() {
         let mut s = VirtualPlayerStore::default();
         assert_eq!(s.next_free_index(), 1);
-        s.players.push(VirtualPlayer { index: 1, address: "a".into(), player_id: None, name: "x".into(), created_at: 0.0 });
-        s.players.push(VirtualPlayer { index: 3, address: "c".into(), player_id: None, name: "z".into(), created_at: 0.0 });
+        s.players.push(VirtualPlayer { index: 1, address: "a".into(), player_id: None, name: "x".into(), created_at: 0.0, role: VPlayerRole::Bait });
+        s.players.push(VirtualPlayer { index: 3, address: "c".into(), player_id: None, name: "z".into(), created_at: 0.0, role: VPlayerRole::Bait });
         assert_eq!(s.next_free_index(), 2);
     }
 
     #[test]
     fn find_by_index_address_or_player_id() {
         let mut s = VirtualPlayerStore::default();
-        s.players.push(VirtualPlayer { index: 2, address: "structs1abc".into(), player_id: Some("1-5".into()), name: "scout".into(), created_at: 0.0 });
+        s.players.push(VirtualPlayer { index: 2, address: "structs1abc".into(), player_id: Some("1-5".into()), name: "scout".into(), created_at: 0.0, role: VPlayerRole::Bait });
         assert!(s.find("2").is_some());
         assert!(s.find("structs1abc").is_some());
         assert!(s.find("1-5").is_some());
         assert!(s.find("nope").is_none());
+    }
+
+    #[test]
+    fn role_parse_roundtrip_and_default() {
+        assert_eq!(VPlayerRole::default(), VPlayerRole::Bait);
+        assert_eq!(VPlayerRole::parse("bait"), Some(VPlayerRole::Bait));
+        assert_eq!(VPlayerRole::parse("PRODUCTIVE"), Some(VPlayerRole::Productive));
+        assert_eq!(VPlayerRole::parse("miner"), Some(VPlayerRole::Productive));
+        assert_eq!(VPlayerRole::parse("nonsense"), None);
+        assert_eq!(VPlayerRole::Productive.as_str(), "productive");
+    }
+
+    #[test]
+    fn role_missing_in_json_defaults_to_bait() {
+        // Back-compat: an existing registry entry written before `role` existed.
+        let json = r#"{"players":[{"index":1,"address":"a","player_id":"1-9","name":"old","created_at":0.0}]}"#;
+        let store: VirtualPlayerStore = serde_json::from_str(json).unwrap();
+        assert_eq!(store.players[0].role, VPlayerRole::Bait);
     }
 }

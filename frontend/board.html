@@ -3,7 +3,6 @@
 <head>
   <meta charset="utf-8" />
   <title>Structs — Team Ops</title>
-  <!-- The real SUI stylesheets, exactly as index.html loads them. -->
   <link rel="stylesheet" href="css/normalize.css" />
   <link rel="stylesheet" href="css/structicons.css" />
   <link rel="stylesheet" href="css/sui/sui.css" />
@@ -12,21 +11,23 @@
     html, body { height: 100%; }
     body { margin: 0; background: var(--background, #0d0f15); }
     .height-100 { height: 100%; }
-    /* fill the window with the panel (the game sizes this via #menu-page-layout) */
-    #board-layout { height: 100%; display: flex; }
+    /* Fill the window with the panel; position:relative anchors the panel's
+       absolutely-positioned fill-backgrounds (the game uses #menu-page-layout). */
+    #board-layout { height: 100%; display: flex; position: relative; }
     #board-layout .sui-panel { flex: 1; min-height: 0; }
     .ops-scroll { overflow-y: auto; padding: 14px 22px; }
-    /* SUI data-card rows are flex; split label ↔ value. */
     .sui-data-card { width: 100%; margin-bottom: 12px; }
     .sui-data-card-body { width: 100%; flex-direction: column; }
     .sui-data-card-row { width: 100%; justify-content: space-between; gap: 16px; }
     .ops-val { font-weight: 600; }
     .ops-list { margin: 4px 0 0; padding-left: 16px; }
     .ops-list li { margin: 4px 0; }
+    #vp-select { width: 100%; }
+    #vp-map img { width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }
+    .ops-muted { opacity: .7; }
   </style>
 </head>
 <body>
-  <!-- Mirror the webapp's menu panel frame: edges + fill backgrounds + screen. -->
   <div id="board-layout">
     <div class="sui-panel sui-theme-player">
       <div class="sui-panel-top-fill-background"></div>
@@ -42,7 +43,18 @@
         </div>
         <div class="height-100 sui-screen sui-screen-full-width sui-screen-shrink">
           <div class="height-100 sui-page-body-screen ops-scroll">
+            <!-- Live region: replaced wholesale on each board-update. -->
             <div id="root"><div class="sui-data-card-row">Connecting…</div></div>
+            <!-- Persistent region: NOT touched by board-update. -->
+            <div class="sui-data-card sui-theme-player">
+              <div class="sui-data-card-header">VPLAYER MAP</div>
+              <div class="sui-data-card-body sui-mod-spacing-xl">
+                <select id="vp-select" class="sui-input-text">
+                  <option value="">— select a planet —</option>
+                </select>
+                <div id="vp-map"></div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -58,6 +70,33 @@
       T.core.invoke('mcp_board_html').then(render).catch(function () {});
       T.event.listen('board-update', function (e) {
         render(e && e.payload && e.payload.html);
+      });
+
+      // VPLAYER MAP dropdown — populate once; render the chosen player's map.
+      var sel = document.getElementById('vp-select');
+      var box = document.getElementById('vp-map');
+      T.core.invoke('mcp_vplayer_list').then(function (list) {
+        (list || []).forEach(function (p) {
+          if (!p.player_id) return;
+          var o = document.createElement('option');
+          o.value = p.player_id;
+          o.textContent = p.name + ' (' + p.player_id + ')';
+          sel.appendChild(o);
+        });
+      }).catch(function () {});
+      sel.addEventListener('change', function () {
+        var v = sel.value;
+        if (!v) { box.innerHTML = ''; return; }
+        box.innerHTML = '<div class="ops-muted">rendering map…</div>';
+        T.core.invoke('mcp_render_map', { player: v }).then(function (durl) {
+          var img = new Image();
+          img.alt = 'map';
+          img.onload = function () { box.innerHTML = ''; box.appendChild(img); };
+          img.onerror = function () { box.innerHTML = '<div style="color:#ff6b6b">image failed to load</div>'; };
+          img.src = durl;
+        }).catch(function (err) {
+          box.innerHTML = '<div style="color:#ff6b6b">render failed: ' + err + '</div>';
+        });
       });
     })();
   </script>

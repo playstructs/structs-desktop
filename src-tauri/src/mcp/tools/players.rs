@@ -11,7 +11,7 @@ use crate::hasher;
 use crate::hasher::types::{TaskParams, TaskRegistry};
 use crate::mcp::cosmos_client::CosmosClient;
 use crate::mcp::vplayer_bridge;
-use crate::mcp::virtual_players::{VirtualPlayer, MAX_VIRTUAL_PLAYERS, REGISTRY};
+use crate::mcp::virtual_players::{VPlayerRole, VirtualPlayer, MAX_VIRTUAL_PLAYERS, REGISTRY};
 
 #[derive(Debug, Deserialize)]
 pub struct PlayerParams {
@@ -32,6 +32,9 @@ pub struct PlayerParams {
     /// create: HD index to use; defaults to the next free index (>= 1).
     #[serde(default)]
     pub index: Option<u32>,
+    /// role: "bait" | "productive" — sets a virtual player's purpose.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 fn now_ms() -> f64 {
@@ -59,6 +62,7 @@ pub async fn execute(
                             "address": p.address,
                             "player_id": p.player_id,
                             "name": p.name,
+                            "role": p.role.as_str(),
                             "status": if p.player_id.is_some() { "active" } else { "pending" },
                         })
                     })
@@ -94,19 +98,19 @@ pub async fn execute(
                     gs.ore.map(|o| format!("{:.0}", o)).unwrap_or_else(|| "?".to_string()),
                 ));
             }
-            let vplayers: Vec<(u32, String, Option<String>)> = {
+            let vplayers: Vec<(u32, String, Option<String>, VPlayerRole)> = {
                 let reg = REGISTRY.read().unwrap();
                 reg.players
                     .iter()
-                    .map(|p| (p.index, p.name.clone(), p.player_id.clone()))
+                    .map(|p| (p.index, p.name.clone(), p.player_id.clone(), p.role))
                     .collect()
             };
             if vplayers.is_empty() {
                 out.push_str("  (no virtual players — create with structs_players create {name})\n");
             }
-            for (index, name, player_id) in vplayers {
+            for (index, name, player_id, role) in vplayers {
                 let Some(pid) = player_id else {
-                    out.push_str(&format!("    [idx {}] {} — signup pending\n", index, name));
+                    out.push_str(&format!("    [idx {}] {} ({}) — signup pending\n", index, name, role.as_str()));
                     continue;
                 };
                 let (planet, fleet, alpha, ore) = match client.query_entity("player", &pid).await {
@@ -139,12 +143,481 @@ pub async fn execute(
                     Err(_) => "?".to_string(),
                 };
                 out.push_str(&format!(
-                    "    [idx {}] {} {} — planet {} · fleet {} · {} structs · alpha {} ore {}\n",
-                    index, pid, name, planet, fleet, nstructs, alpha, ore
+                    "    [idx {}] {} {} ({}) — planet {} · fleet {} · {} structs · alpha {} ore {}\n",
+                    index, pid, name, role.as_str(), planet, fleet, nstructs, alpha, ore
                 ));
             }
             out.push_str("\nAct as any player: structs_players act {player, …} or structs_sequence {as, steps}.\n");
             vec![Content::text(out)]
+        }
+
+        // Read-only power-budget view: how much the guild substation can still
+        // power, salvaged from the bash bot's capacity/(connections+1) heuristic.
+        "capacity" => {
+            let guild_id_opt = { crate::game_state::GAME_STATE.read().unwrap().guild_id.clone() };
+            let Some(gid) = guild_id_opt.as_deref().filter(|s| !s.is_empty()) else {
+                return vec![Content::text(
+                    "No guild id synced yet — open the app and log in first.".to_string(),
+                )];
+            };
+            match crate::mcp::guild_power::resolve_guild_power(client, gid).await {
+                Ok(gp) => {
+                    let (nvp, ours) = {
+                        let reg = REGISTRY.read().unwrap();
+                        let ours: std::collections::HashSet<String> =
+                            reg.players.iter().filter_map(|p| p.player_id.clone()).collect();
+                        (reg.players.len(), ours)
+                    };
+                    let primary_pid = { crate::game_state::GAME_STATE.read().unwrap().player_id.clone().unwrap_or_default() };
+                    let mine = |owner: &str| -> &'static str {
+                        if owner.is_empty() { "" }
+                        else if owner == primary_pid { " (you)" }
+                        else if ours.contains(owner) { " (your vplayer)" }
+                        else { " (external)" }
+                    };
+                    let mut out = format!(
+                        "Guild power — guild {} · substation {} (owner {}{}) · reactor {} (owner {}{})\n\
+                         Substation: capacity {:.1}M · {} connections · {:.2}M per connection · load {:.2}M\n\
+                         Reactor: fuel {:.1}M · capacity {:.1}M · {}% commission\n\
+                         One more connection → {:.2}M each.\n\
+                         Headroom at ~{:.1}M/player: ~{} more players (guild-wide).\n\
+                         Local virtual players: {}/{} (hard cap).\n",
+                        gp.guild_id,
+                        gp.substation_id, if gp.substation_owner.is_empty() { "?" } else { &gp.substation_owner }, mine(&gp.substation_owner),
+                        gp.reactor_id, if gp.reactor_owner.is_empty() { "?" } else { &gp.reactor_owner }, mine(&gp.reactor_owner),
+                        gp.sub_capacity / 1e6, gp.sub_connection_count, gp.sub_connection_capacity / 1e6, gp.sub_load / 1e6,
+                        gp.reactor_fuel / 1e6, gp.reactor_capacity / 1e6, (gp.reactor_commission * 100.0) as i64,
+                        gp.share_if_one_more / 1e6,
+                        crate::mcp::guild_power::MIN_PLAYER_DRAW_W / 1e6, gp.supportable_more,
+                        nvp, MAX_VIRTUAL_PLAYERS,
+                    );
+
+                    // ── Self-host break-even (1 ualpha → 1 W, minus commission) ──
+                    // Should the operator build their OWN substation for the vplayers
+                    // instead of using the guild's free connection? Only if they can
+                    // infuse enough to beat the free per-connection power.
+                    let my_ualpha = match client.query_entity("player", &primary_pid).await {
+                        Ok(v) => v
+                            .get("playerInventory").and_then(|i| i.get("rocks")).and_then(|r| r.get("amount"))
+                            .and_then(|a| a.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
+                        Err(_) => 0.0,
+                    };
+                    let infusable_w = my_ualpha * (1.0 - gp.reactor_commission); // watts to personal capacity
+                    let free = gp.sub_connection_capacity.max(1.0);
+                    let conns = (nvp.max(1)) as f64; // self-host the vplayers
+                    let self_each = infusable_w / conns;
+                    // ualpha needed to MATCH free power for `conns` connections.
+                    let breakeven = free * conns / (1.0 - gp.reactor_commission);
+                    out.push_str(&format!(
+                        "\nSelf-host break-even (build your own substation for the {} vplayers):\n\
+                         Your infusable alpha: {:.0} ualpha → ~{:.2}M W personal capacity.\n\
+                         Split across {} vplayers = {:.2}M each vs {:.2}M FREE from the guild → self-host {}.\n\
+                         To MATCH the free power you'd need ~{:.0} ualpha (you have {:.0}).\n\
+                         {}",
+                        nvp,
+                        my_ualpha, infusable_w / 1e6,
+                        nvp, self_each / 1e6, free / 1e6,
+                        if self_each >= free { "WINS" } else { "LOSES (guild free power is better)" },
+                        breakeven, my_ualpha,
+                        if self_each >= free {
+                            "→ Worth considering for independence/scale; sequence: infuse → MsgAllocationCreate(source=you) → MsgSubstationCreate → MsgSubstationPlayerMigrate the vplayers.\n"
+                        } else {
+                            "→ Keep the vplayers on the free guild substation. Better use of alpha: infuse to grow the PRIMARY's own capacity (it's near its free-connection cap) or sell surplus on the energy market.\n"
+                        }
+                    ));
+                    vec![Content::text(out)]
+                }
+                Err(e) => vec![Content::text(format!("Couldn't resolve guild power: {}", e))],
+            }
+        }
+
+        // Set a virtual player's purpose: bait (mine-only, ore piles up) vs
+        // productive (runs the flywheel via `economy`).
+        "role" => {
+            let Some(key) = params.player.as_deref().filter(|s| !s.is_empty()) else {
+                return vec![Content::text(
+                    "Error: player required (index, address, or player id).".to_string(),
+                )];
+            };
+            let Some(role_str) = params.role.as_deref().filter(|s| !s.is_empty()) else {
+                return vec![Content::text("Error: role required — \"bait\" or \"productive\".".to_string())];
+            };
+            let Some(role) = VPlayerRole::parse(role_str) else {
+                return vec![Content::text(format!(
+                    "Error: unknown role '{}'. Use \"bait\" or \"productive\".",
+                    role_str
+                ))];
+            };
+            let mut reg = REGISTRY.write().unwrap();
+            let Some(p) = reg.players.iter_mut().find(|p| {
+                p.address == key || p.player_id.as_deref() == Some(key) || p.index.to_string() == key
+            }) else {
+                return vec![Content::text(format!(
+                    "No virtual player matches '{}'. Use structs_players list.",
+                    key
+                ))];
+            };
+            p.role = role;
+            let (name, idx) = (p.name.clone(), p.index);
+            let _ = reg.save();
+            let note = match role {
+                VPlayerRole::Bait => "mines only; ore accumulates on its planet as raid bait (no refinery, no transfers).",
+                VPlayerRole::Productive => "runs the flywheel: mine → refine → send alpha to the primary (drive it with structs_players economy).",
+            };
+            vec![Content::text(format!(
+                "Virtual player {} (idx {}) → role {} — {}",
+                name, idx, role.as_str(), note
+            ))]
+        }
+
+        // Flywheel planner: for each PRODUCTIVE virtual player, name the next
+        // step (mine → refine → send alpha to primary). Advises — execution stays
+        // on the audited `act` path so nothing signs implicitly. Drive it in a loop.
+        "economy" => {
+            let (primary_addr, primary_alpha, primary_pid, guild_id) = {
+                let gs = crate::game_state::GAME_STATE.read().unwrap();
+                (
+                    gs.wallet_address.clone().unwrap_or_default(),
+                    gs.alpha.unwrap_or(0.0),
+                    gs.player_id.clone().unwrap_or_default(),
+                    gs.guild_id.clone().unwrap_or_default(),
+                )
+            };
+            let productive: Vec<(u32, String, Option<String>)> = {
+                let reg = REGISTRY.read().unwrap();
+                reg.players
+                    .iter()
+                    .filter(|p| p.role == VPlayerRole::Productive)
+                    .map(|p| (p.index, p.name.clone(), p.player_id.clone()))
+                    .collect()
+            };
+            let mut out = String::new();
+            out.push_str("⚙ Flywheel plan — productive players → primary → reactor\n");
+            if productive.is_empty() {
+                out.push_str(
+                    "No productive players. Set one: structs_players role {player:<idx>, role:\"productive\"}.\n\
+                     (Bait players just mine; their ore stays on-planet as raid bait.)\n",
+                );
+                return vec![Content::text(out)];
+            }
+            const MIN_SEND_UALPHA: f64 = 1_000_000.0; // ~1 alpha
+            for (index, name, player_id) in productive {
+                let Some(pid) = player_id else {
+                    out.push_str(&format!("  [idx {}] {} — signup pending\n", index, name));
+                    continue;
+                };
+                let (ore, alpha_raw) = match client.query_entity("player", &pid).await {
+                    Ok(v) => {
+                        let numf = |val: Option<&Value>| -> f64 {
+                            match val {
+                                Some(Value::String(s)) => s.parse().unwrap_or(0.0),
+                                Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+                                _ => 0.0,
+                            }
+                        };
+                        (
+                            numf(v.get("gridAttributes").and_then(|g| g.get("ore"))),
+                            numf(v.get("playerInventory").and_then(|i| i.get("rocks")).and_then(|r| r.get("amount"))),
+                        )
+                    }
+                    Err(_) => (0.0, 0.0),
+                };
+                let step = if alpha_raw >= MIN_SEND_UALPHA && !primary_addr.is_empty() {
+                    format!(
+                        "send {:.0} ualpha → primary: structs_players act {{player:{}, action:\"player_send\", args:{{to:\"{}\", amount:\"{:.0}\"}}}}",
+                        alpha_raw, index, primary_addr, alpha_raw
+                    )
+                } else if ore > 0.0 {
+                    format!(
+                        "refine ore→alpha: structs_players act {{player:{}, action:\"refine\", args:{{struct_id:<refinery>}}}} (build a refinery first if it has none)",
+                        index
+                    )
+                } else {
+                    format!(
+                        "mine: structs_players act {{player:{}, action:\"mine\", args:{{struct_id:<extractor>}}}}",
+                        index
+                    )
+                };
+                out.push_str(&format!(
+                    "  [idx {}] {} {} — ore {:.0} · alpha {:.0} ualpha → {}\n",
+                    index, pid, name, ore, alpha_raw, step
+                ));
+            }
+            // Ownership-aware infuse guidance. Infusing a reactor grows the
+            // INFUSER's personal capacity (96%) + the reactor's capacity (4%
+            // commission) — it does NOT grow any substation. Whether that helps
+            // the vplayers depends on who owns the entry substation they draw
+            // from (resolved live — no hardcoded assumption; works for any guild).
+            let gp = if guild_id.is_empty() {
+                None
+            } else {
+                crate::mcp::guild_power::resolve_guild_power(client, &guild_id).await.ok()
+            };
+            const PRIMARY_INFUSE_MIN_UALPHA: f64 = 10_000_000.0;
+            let infuse_lead = if primary_alpha >= PRIMARY_INFUSE_MIN_UALPHA {
+                format!("\nPrimary alpha {:.0} → ready to infuse the guild reactor", primary_alpha)
+            } else {
+                format!("\nPrimary alpha {:.0} ualpha (infuse the reactor once it builds up)", primary_alpha)
+            };
+            out.push_str(&infuse_lead);
+            match &gp {
+                Some(gp) => {
+                    // "Ours" = the primary + every registered vplayer player id.
+                    let mut ours: std::collections::HashSet<String> = {
+                        let reg = REGISTRY.read().unwrap();
+                        reg.players.iter().filter_map(|p| p.player_id.clone()).collect()
+                    };
+                    if !primary_pid.is_empty() {
+                        ours.insert(primary_pid.clone());
+                    }
+                    let we_own_sub = !gp.substation_owner.is_empty() && ours.contains(&gp.substation_owner);
+                    out.push_str(&format!(
+                        " — infusing grows the infuser's PERSONAL capacity (96%; 4% commission to the reactor). It does NOT auto-grow substation {} (owner {}), which is what powers the vplayers.\n",
+                        gp.substation_id,
+                        if gp.substation_owner.is_empty() { "?" } else { &gp.substation_owner }
+                    ));
+                    if we_own_sub {
+                        out.push_str(&format!(
+                            "✓ You own substation {} — to close the loop, after infusing, connect/grow an Allocation INTO it (MsgSubstationAllocationConnect / MsgAllocationUpdate). That raises connectionCapacity ({:.2}M now) for ALL {} connected players.\n",
+                            gp.substation_id, gp.sub_connection_capacity / 1e6, gp.sub_connection_count
+                        ));
+                    } else {
+                        out.push_str(
+                            "↳ You do NOT own that substation, so this flywheel makes the PRIMARY stronger (more personal capacity to build/power its own structs) — it can't grow the vplayers' shared pool. The vplayers already have ample headroom anyway.\n",
+                        );
+                    }
+                }
+                None => {
+                    out.push_str(" (couldn't resolve guild power to assess substation ownership).\n");
+                }
+            }
+            vec![Content::text(out)]
+        }
+
+        // Guided "owned hub" infrastructure planner — emits the exact, authorized
+        // tx sequence to infuse → route capacity to a substation → feed the guild
+        // pool (and the springboard to sell energy later). ADVISORY: it spends
+        // real alpha and creates standing/outward infrastructure, so it only
+        // PLANS — you execute the steps deliberately. See [[structs_power_model]].
+        "infra" => {
+            let mode = params
+                .args
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("hub")
+                .to_lowercase();
+            let infuse_arg = params.args.get("infuse_ualpha").and_then(|v| v.as_f64());
+            let keep_arg = params.args.get("keep_w").and_then(|v| v.as_f64());
+            // Who owns the hub / runs the steps: default the primary; a vplayer
+            // host means every step is runnable now via `act {tx}` (raw signing).
+            let host = params.player.clone();
+
+            let (primary_pid, primary_addr, guild_id) = {
+                let gs = crate::game_state::GAME_STATE.read().unwrap();
+                (
+                    gs.player_id.clone().unwrap_or_default(),
+                    gs.wallet_address.clone().unwrap_or_default(),
+                    gs.guild_id.clone().unwrap_or_default(),
+                )
+            };
+            if guild_id.is_empty() {
+                return vec![Content::text("No guild id synced yet — open the app and log in.".to_string())];
+            }
+            let gp = match crate::mcp::guild_power::resolve_guild_power(client, &guild_id).await {
+                Ok(g) => g,
+                Err(e) => return vec![Content::text(format!("Couldn't resolve guild power: {}", e))],
+            };
+
+            // Resolve the HOST player's alpha + struct draw + address (defaults to primary).
+            let (host_pid, host_addr, host_label) = match host.as_deref() {
+                Some(key) => {
+                    let reg = REGISTRY.read().unwrap();
+                    match reg.find(key) {
+                        Some(p) => (
+                            p.player_id.clone().unwrap_or_default(),
+                            p.address.clone(),
+                            format!("vplayer {} ({})", p.name, p.player_id.clone().unwrap_or_default()),
+                        ),
+                        None => return vec![Content::text(format!("No virtual player matches '{}'.", key))],
+                    }
+                }
+                None => (primary_pid.clone(), primary_addr.clone(), format!("primary {}", primary_pid)),
+            };
+            if host_pid.is_empty() {
+                return vec![Content::text("Host player has no on-chain id yet.".to_string())];
+            }
+
+            let (alpha_ualpha, structs_load) = match client.query_entity("player", &host_pid).await {
+                Ok(v) => {
+                    let numf = |val: Option<&Value>| -> f64 {
+                        match val {
+                            Some(Value::String(s)) => s.parse().unwrap_or(0.0),
+                            Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+                            _ => 0.0,
+                        }
+                    };
+                    (
+                        numf(v.get("playerInventory").and_then(|i| i.get("rocks")).and_then(|r| r.get("amount"))),
+                        numf(v.get("gridAttributes").and_then(|g| g.get("structsLoad"))),
+                    )
+                }
+                Err(e) => return vec![Content::text(format!("Couldn't read host {} state: {}", host_pid, e))],
+            };
+
+            let plan = crate::mcp::guild_power::plan_infra(
+                alpha_ualpha,
+                structs_load,
+                gp.reactor_commission,
+                gp.sub_connection_count,
+                infuse_arg,
+                keep_arg,
+            );
+
+            let is_vplayer_host = host.is_some();
+            let m = |w: f64| format!("{:.2}M", w / 1e6);
+            let mut out = String::new();
+            out.push_str(&format!(
+                "⚙ INFRASTRUCTURE PLAN ({} mode) — host {}\n\
+                 Host alpha {:.0} ualpha · struct draw {} · guild sub {} ({} conns, {} free/conn) · reactor {} (validator {}, {}% commission)\n\n\
+                 Amounts: infuse {:.0} ualpha → +{} personal capacity ({} lost to commission).\n\
+                 Keep {} for your own expansion · donate {} into the shared pool.\n\
+                 ⚠ Dilution: donating into a {}-connection substation returns only {} to YOUR connection (you subsidize the others). Self-expansion comes free from the kept capacity; donating is guild-support/positioning.\n\n",
+                mode, host_label,
+                alpha_ualpha, m(structs_load), gp.substation_id, gp.sub_connection_count, m(gp.sub_connection_capacity),
+                gp.reactor_id, if gp.reactor_validator.is_empty() { "?" } else { &gp.reactor_validator }, (gp.reactor_commission * 100.0) as i64,
+                plan.infuse_ualpha, m(plan.gained_capacity_w), m(plan.commission_w),
+                m(plan.keep_w), m(plan.donate_w),
+                gp.sub_connection_count, m(plan.own_share_gain_w),
+            ));
+
+            // Build the ordered tx sequence. For a vplayer host, emit ready-to-run
+            // `act {tx}` calls (raw signing handles every msg today). For the
+            // primary, emit the msgs + the honest execution route.
+            let donate_s = format!("{:.0}", plan.donate_w);
+            let infuse_s = format!("{:.0}", plan.infuse_ualpha);
+            let wrap = |type_url: &str, msg: String, route: &str| -> String {
+                if is_vplayer_host {
+                    format!(
+                        "   structs_players act {{player:\"{}\", action:\"tx\", args:{{type_url:\"{}\", msg:{}}}}}\n",
+                        host.as_deref().unwrap_or(""), type_url, msg
+                    )
+                } else {
+                    format!("   {} {}   [{}]\n", type_url, msg, route)
+                }
+            };
+            out.push_str("Sequence:\n");
+            // 1) Infuse (delegate to the reactor's validator).
+            out.push_str("1. Infuse alpha → personal capacity:\n");
+            out.push_str(&wrap(
+                "/structs.structs.MsgReactorInfuse",
+                format!("{{\"delegatorAddress\":\"{}\",\"validatorAddress\":\"{}\",\"amount\":{{\"denom\":\"ualpha\",\"amount\":\"{}\"}}}}", host_addr, gp.reactor_validator, infuse_s),
+                "primary: do in-app (reactor infuse/staking isn't on the primary tx bridge)",
+            ));
+            if mode == "direct" {
+                // 2) Allocate host → guild substation directly, 3) connect it.
+                out.push_str("2. Allocate your capacity toward the guild pool (dynamic, so you can adjust):\n");
+                out.push_str(&wrap(
+                    "/structs.structs.MsgAllocationCreate",
+                    format!("{{\"controller\":\"{}\",\"sourceObjectId\":\"{}\",\"allocationType\":\"dynamic\",\"power\":\"{}\",\"destinationId\":\"\"}}", host_pid, host_pid, donate_s),
+                    "primary: allocation_create IS on the tx bridge (needs a primary tool arm) — or do in-app",
+                ));
+                out.push_str("3. Connect that allocation to the guild substation (NO guild-owner permission needed):\n");
+                out.push_str(&wrap(
+                    "/structs.structs.MsgSubstationAllocationConnect",
+                    format!("{{\"allocationId\":\"<id from step 2>\",\"substationId\":\"{}\"}}", gp.substation_id),
+                    "primary: NOT on the tx bridge — do in-app",
+                ));
+            } else {
+                // HUB: build an owned substation S, then feed the guild from it.
+                out.push_str("2. Allocate capacity from yourself (dynamic — NOT automated, which would route 100%):\n");
+                out.push_str(&wrap(
+                    "/structs.structs.MsgAllocationCreate",
+                    format!("{{\"controller\":\"{}\",\"sourceObjectId\":\"{}\",\"allocationType\":\"dynamic\",\"power\":\"{}\",\"destinationId\":\"\"}}", host_pid, host_pid, donate_s),
+                    "primary: allocation_create on bridge (needs tool arm) / in-app",
+                ));
+                out.push_str("3. Create YOUR substation S from that allocation (this is the hub you own → can host a Provider to SELL later):\n");
+                out.push_str(&wrap(
+                    "/structs.structs.MsgSubstationCreate",
+                    "{\"allocationId\":\"<id from step 2>\"}".to_string(),
+                    "primary: NOT on the tx bridge — do in-app",
+                ));
+                out.push_str("4. Allocate from S toward the guild pool (dynamic, adjustable / re-pointable):\n");
+                out.push_str(&wrap(
+                    "/structs.structs.MsgAllocationCreate",
+                    format!("{{\"controller\":\"{}\",\"sourceObjectId\":\"<S id from step 3>\",\"allocationType\":\"dynamic\",\"power\":\"{}\",\"destinationId\":\"\"}}", host_pid, donate_s),
+                    "primary: bridge / in-app",
+                ));
+                out.push_str("5. Connect S's allocation to the guild substation (NO guild-owner permission needed):\n");
+                out.push_str(&wrap(
+                    "/structs.structs.MsgSubstationAllocationConnect",
+                    format!("{{\"allocationId\":\"<id from step 4>\",\"substationId\":\"{}\"}}", gp.substation_id),
+                    "primary: NOT on the tx bridge — do in-app",
+                ));
+                out.push_str("(later) Sell surplus: MsgProviderCreate {substationId:S, rate, accessPolicy, capacity/duration min/max} — a Provider attaches to a substation you own.\n");
+            }
+            out.push_str(&format!(
+                "\nExecutable now? {}\nNothing here auto-signs — run the steps yourself. Verify after each: structs_players capacity (watch substation {} connectionCapacity rise).\n",
+                if is_vplayer_host {
+                    "YES — host is a vplayer, so each step runs via the raw `act {tx}` calls above (fund it first via structs_action transfer if it has no alpha)."
+                } else {
+                    "PARTIALLY — the primary tx bridge wires allocation_create + substation_player_connect, but reactor infuse / substation_create / substation_allocation_connect are not, so do those in-app. To test fully via MCP, re-run with player:<vplayer idx> as the host."
+                },
+                gp.substation_id,
+            ));
+            vec![Content::text(out)]
+        }
+
+        // Configure / inspect the native auto-harvest loop (mine + refine when a
+        // struct's PoW difficulty decays to ≤ the threshold). Args: enabled,
+        // difficulty, interval_secs, refine, include_primary, now (force a scan).
+        "harvest" => {
+            let mut cfg = crate::mcp::auto_harvest::get();
+            let a = &params.args;
+            let mut changed = false;
+            if let Some(v) = a.get("enabled").and_then(|v| v.as_bool()) {
+                cfg.enabled = v;
+                changed = true;
+            }
+            if let Some(v) = a.get("difficulty").and_then(|v| v.as_u64()) {
+                cfg.difficulty_threshold = v.clamp(1, 64);
+                changed = true;
+            }
+            if let Some(v) = a.get("interval_secs").and_then(|v| v.as_u64()) {
+                cfg.interval_secs = v.max(60);
+                changed = true;
+            }
+            if let Some(v) = a.get("refine").and_then(|v| v.as_bool()) {
+                cfg.refine = v;
+                changed = true;
+            }
+            if let Some(v) = a.get("include_primary").and_then(|v| v.as_bool()) {
+                cfg.include_primary = v;
+                changed = true;
+            }
+            if changed {
+                crate::mcp::auto_harvest::set(cfg.clone());
+            }
+            let force_now = a.get("now").and_then(|v| v.as_bool()).unwrap_or(false);
+            if force_now && cfg.enabled {
+                let app = app_handle.clone();
+                tokio::spawn(async move {
+                    crate::mcp::auto_harvest::tick(&app, true).await;
+                });
+            }
+            vec![Content::text(format!(
+                "Auto-harvest {} — mine/refine each owned struct once its difficulty decays to ≤ {} · scans every {}s · refine {} · include_primary {}.{}\n{}",
+                if cfg.enabled { "ON" } else { "OFF" },
+                cfg.difficulty_threshold,
+                cfg.interval_secs,
+                cfg.refine,
+                cfg.include_primary,
+                if changed { " (updated)" } else { "" },
+                if force_now && cfg.enabled {
+                    "Triggered an immediate scan — ripe extractors/refineries will start hashing now.".to_string()
+                } else {
+                    "Higher difficulty = more aggressive (harvest sooner, pricier proof); ~10 ≈ every ~6h, ~1 ≈ near-instant ~23h. Set {enabled:true} to run it, {now:true} to scan immediately.".to_string()
+                }
+            ))]
         }
 
         "create" => {
@@ -177,6 +650,30 @@ pub async fn execute(
                 }
             };
 
+            // Soft power gate: the entry substation pool is shared, and every new
+            // connection dilutes each player's share (connectionCapacity ==
+            // capacity / connectionCount). Block if we can't sustain another at
+            // the minimum draw — separate from the hard MAX cap above.
+            let guild_id_opt = { crate::game_state::GAME_STATE.read().unwrap().guild_id.clone() };
+            if let Some(gid) = guild_id_opt.as_deref().filter(|s| !s.is_empty()) {
+                if let Ok(gp) = crate::mcp::guild_power::resolve_guild_power(client, gid).await {
+                    if gp.sub_capacity > 0.0
+                        && gp.share_if_one_more < crate::mcp::guild_power::MIN_PLAYER_DRAW_W
+                    {
+                        return vec![Content::text(format!(
+                            "BLOCKED: guild substation {} can't power another player. \
+                             capacity {:.1}M / {} connections → {:.2}M each if one more joins, \
+                             below the ~{:.1}M minimum draw. Free capacity or grow the reactor first.",
+                            gp.substation_id,
+                            gp.sub_capacity / 1e6,
+                            gp.sub_connection_count,
+                            gp.share_if_one_more / 1e6,
+                            crate::mcp::guild_power::MIN_PLAYER_DRAW_W / 1e6,
+                        ))];
+                    }
+                }
+            }
+
             // Façade does the whole flow: derive index N → sign guild-join →
             // POST /auth/signup → poll the address for its player id. ~180s budget.
             let result = vplayer_bridge::call(
@@ -208,6 +705,11 @@ pub async fn execute(
                             player_id: player_id.clone(),
                             name: name.to_string(),
                             created_at: now_ms(),
+                            role: params
+                                .role
+                                .as_deref()
+                                .and_then(VPlayerRole::parse)
+                                .unwrap_or_default(),
                         });
                         let _ = reg.save();
                     }
@@ -701,6 +1203,29 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
                 "infuseAmount": s("amount").ok_or("generator_infuse: amount required")?,
             }),
         )),
+        // Send alpha to another player (the flywheel's funnel-to-primary step).
+        // fromAddress is this virtual player's own address, resolved from the
+        // registry by its player id; amount is ualpha (e.g. "1000000").
+        "player_send" => {
+            let from = REGISTRY
+                .read()
+                .unwrap()
+                .players
+                .iter()
+                .find(|p| p.player_id.as_deref() == Some(player_id))
+                .map(|p| p.address.clone())
+                .ok_or("player_send: couldn't resolve this player's address")?;
+            let to = s("to").ok_or("player_send: 'to' (recipient address) required")?;
+            let amount = s("amount").ok_or("player_send: 'amount' in ualpha (e.g. \"1000000\") required")?;
+            Ok((
+                "/structs.structs.MsgPlayerSend".into(),
+                json!({
+                    "fromAddress": from,
+                    "toAddress": to,
+                    "amount": [{ "denom": "ualpha", "amount": amount }],
+                }),
+            ))
+        }
         // ── Player self-management ──
         "player_resume" => Ok((
             "/structs.structs.MsgPlayerResume".into(),
@@ -711,7 +1236,7 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
             json!({ "playerId": player_id, "name": s("name").unwrap_or_default() }),
         )),
         other => Err(format!(
-            "action '{}' not supported as a named action. Direct: explore, build, activate, deactivate, deploy, defend, attack, fleet_move, planet_update_name, build_cancel, defense_clear, stealth_activate, stealth_deactivate, storage_stash, storage_recall, generator_infuse, player_resume, player_update_name. PoW: mine, refine, raid, complete_build. For ANY other message use action \"tx\" {{type_url, msg}}.",
+            "action '{}' not supported as a named action. Direct: explore, build, activate, deactivate, deploy, defend, attack, fleet_move, planet_update_name, build_cancel, defense_clear, stealth_activate, stealth_deactivate, storage_stash, storage_recall, generator_infuse, player_send, player_resume, player_update_name. PoW: mine, refine, raid, complete_build. For ANY other message use action \"tx\" {{type_url, msg}}.",
             other
         )),
     }

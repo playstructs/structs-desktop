@@ -199,3 +199,42 @@ fn encode_gif(path: &std::path::Path, frame_urls: &[String], interval_ms: u32) -
     }
     Ok(n)
 }
+
+/// Tauri command for the Team Ops window's vplayer-map dropdown: render a
+/// player's planet and return it as a `data:` URL (the same façade render path
+/// as `structs_map`, but returned directly — no file write — so the board
+/// window can show it in an `<img>`).
+#[tauri::command]
+pub async fn mcp_render_map(app: tauri::AppHandle, player: String) -> Result<String, String> {
+    let client = CosmosClient::new();
+    let pid = {
+        let reg = crate::mcp::virtual_players::REGISTRY.read().unwrap();
+        reg.find(&player)
+            .and_then(|vp| vp.player_id.clone())
+            .unwrap_or_else(|| player.clone())
+    };
+    let planet = match client.query_entity("player", &pid).await {
+        Ok(v) => v
+            .get("Player")
+            .and_then(|x| x.get("planetId"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Err(e) => return Err(format!("resolve {} failed: {}", player, e)),
+    };
+    if planet.is_empty() {
+        return Err(format!("{} has no planet yet", player));
+    }
+    let res = vplayer_bridge::call(
+        &app,
+        "render_map",
+        serde_json::json!({ "planet_id": planet, "player_id": pid }),
+        90,
+    )
+    .await?;
+    let data_url = res.get("dataUrl").and_then(|x| x.as_str()).unwrap_or("");
+    if data_url.is_empty() {
+        return Err("renderer returned no image".to_string());
+    }
+    Ok(data_url.to_string())
+}

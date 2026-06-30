@@ -29,6 +29,16 @@ pub fn mcp_board_html() -> String {
     LAST_BOARD.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
+/// Tauri command: the registered virtual players, for the board's map dropdown.
+#[tauri::command]
+pub fn mcp_vplayer_list() -> Vec<serde_json::Value> {
+    let reg = crate::mcp::virtual_players::REGISTRY.read().unwrap();
+    reg.players
+        .iter()
+        .map(|p| serde_json::json!({ "index": p.index, "name": p.name, "player_id": p.player_id }))
+        .collect()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BoardParams {
     /// Spawn the native "Team Ops" window (do this once; later calls refresh it live).
@@ -95,6 +105,19 @@ pub async fn execute(
         reg.players.len()
     };
 
+    // ── Guild power infrastructure (reactor + entry substation) ──
+    let guild_id_opt = { GAME_STATE.read().unwrap().guild_id.clone() };
+    let gpower = if let Some(gid) = guild_id_opt.as_deref().filter(|s| !s.is_empty()) {
+        crate::mcp::guild_power::resolve_guild_power(
+            &crate::mcp::cosmos_client::CosmosClient::new(),
+            gid,
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
+
     let margin = if cap > 0.0 { (1.0 - load / cap) * 100.0 } else { 0.0 };
 
     // ── Recommendations ──
@@ -123,6 +146,17 @@ pub async fn execute(
         pid, name, charge, if charge_ready { "READY" } else { "charging" }, load, cap, margin, nonline, nstructs, ore, alpha
     ));
     out.push_str(&format!("Virtual players: {}\n", nvp));
+    if let Some(gp) = &gpower {
+        out.push_str(&format!(
+            "Guild power: reactor fuel {:.1}M ({}% comm) · substation {:.0}M cap / {} conns / {:.2}M each · headroom ~{} more\n",
+            gp.reactor_fuel / 1e6,
+            (gp.reactor_commission * 100.0) as i64,
+            gp.sub_capacity / 1e6,
+            gp.sub_connection_count,
+            gp.sub_connection_capacity / 1e6,
+            gp.supportable_more
+        ));
+    }
     out.push_str(&format!(
         "PoW queue: {} running · {} waiting · {} done{}\n",
         running, waiting, completed,
@@ -224,9 +258,34 @@ pub async fn execute(
     let rec_items: String = recs.iter().map(|r| format!("<li>{}</li>", esc(r))).collect();
     let rec_card = card("RECOMMENDED", format!("<ul class='ops-list'>{}</ul>", rec_items));
 
+    let guild_card = if let Some(gp) = &gpower {
+        let m = |w: f64| format!("{:.2}M", w / 1_000_000.0);
+        card(
+            "GUILD POWER",
+            format!(
+                "{}{}{}{}{}",
+                irow(
+                    "sui-icon-energy",
+                    "Reactor fuel",
+                    format!("{} &nbsp;({}% commission)", m(gp.reactor_fuel), (gp.reactor_commission * 100.0) as i64)
+                ),
+                irow("", "Substation capacity", format!("{} &nbsp;· {} connections", m(gp.sub_capacity), gp.sub_connection_count)),
+                irow("", "Per-connection", format!("{} &nbsp;(&rarr; {} with 1 more)", m(gp.sub_connection_capacity), m(gp.share_if_one_more))),
+                irow("", "Substation load", m(gp.sub_load)),
+                irow(
+                    if gp.supportable_more > 0 { "icon-success" } else { "icon-alert" },
+                    "Growth headroom",
+                    format!("~{} more players", gp.supportable_more)
+                ),
+            ),
+        )
+    } else {
+        String::new()
+    };
+
     let inner = format!(
-        "{}{}{}{}<div class='ops-title'>{} {} · updates live</div>",
-        status_card, pow_card, threats_card, rec_card, esc(&pid), esc(&name)
+        "{}{}{}{}{}<div class='ops-title'>{} {} · updates live</div>",
+        status_card, guild_card, pow_card, threats_card, rec_card, esc(&pid), esc(&name)
     );
 
     // Cache for first-paint, spawn the window on demand, and push a live update.
