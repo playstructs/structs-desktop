@@ -177,10 +177,10 @@ pub async fn execute(
                     };
                     let mut out = format!(
                         "Guild power — guild {} · substation {} (owner {}{}) · reactor {} (owner {}{})\n\
-                         Substation: capacity {:.1}M · {} connections · {:.2}M per connection · load {:.2}M\n\
-                         Reactor: fuel {:.1}M · capacity {:.1}M · {}% commission\n\
-                         One more connection → {:.2}M each.\n\
-                         Headroom at ~{:.1}M/player: ~{} more players (guild-wide).\n\
+                         Substation: capacity {:.1} kW · {} connections · {:.2} kW per connection · load {:.2} kW\n\
+                         Reactor: fuel {:.1} kW · capacity {:.1} kW · {}% commission\n\
+                         One more connection → {:.2} kW each.\n\
+                         Headroom at ~{:.1} kW/player: ~{} more players (guild-wide).\n\
                          Local virtual players: {}/{} (hard cap).\n",
                         gp.guild_id,
                         gp.substation_id, if gp.substation_owner.is_empty() { "?" } else { &gp.substation_owner }, mine(&gp.substation_owner),
@@ -188,7 +188,7 @@ pub async fn execute(
                         gp.sub_capacity / 1e6, gp.sub_connection_count, gp.sub_connection_capacity / 1e6, gp.sub_load / 1e6,
                         gp.reactor_fuel / 1e6, gp.reactor_capacity / 1e6, (gp.reactor_commission * 100.0) as i64,
                         gp.share_if_one_more / 1e6,
-                        crate::mcp::guild_power::MIN_PLAYER_DRAW_W / 1e6, gp.supportable_more,
+                        crate::mcp::guild_power::MIN_PLAYER_DRAW_MW / 1e6, gp.supportable_more,
                         nvp, MAX_VIRTUAL_PLAYERS,
                     );
 
@@ -202,7 +202,7 @@ pub async fn execute(
                             .and_then(|a| a.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
                         Err(_) => 0.0,
                     };
-                    let infusable_w = my_ualpha * (1.0 - gp.reactor_commission); // watts to personal capacity
+                    let infusable_w = my_ualpha * (1.0 - gp.reactor_commission); // mW to personal capacity (1 ualpha = 1 mW)
                     let free = gp.sub_connection_capacity.max(1.0);
                     let conns = (nvp.max(1)) as f64; // self-host the vplayers
                     let self_each = infusable_w / conns;
@@ -210,8 +210,8 @@ pub async fn execute(
                     let breakeven = free * conns / (1.0 - gp.reactor_commission);
                     out.push_str(&format!(
                         "\nSelf-host break-even (build your own substation for the {} vplayers):\n\
-                         Your infusable alpha: {:.0} ualpha → ~{:.2}M W personal capacity.\n\
-                         Split across {} vplayers = {:.2}M each vs {:.2}M FREE from the guild → self-host {}.\n\
+                         Your infusable alpha: {:.0} ualpha → ~{:.2} kW personal capacity.\n\
+                         Split across {} vplayers = {:.2} kW each vs {:.2} kW FREE from the guild → self-host {}.\n\
                          To MATCH the free power you'd need ~{:.0} ualpha (you have {:.0}).\n\
                          {}",
                         nvp,
@@ -378,7 +378,7 @@ pub async fn execute(
                     ));
                     if we_own_sub {
                         out.push_str(&format!(
-                            "✓ You own substation {} — to close the loop, after infusing, connect/grow an Allocation INTO it (MsgSubstationAllocationConnect / MsgAllocationUpdate). That raises connectionCapacity ({:.2}M now) for ALL {} connected players.\n",
+                            "✓ You own substation {} — to close the loop, after infusing, connect/grow an Allocation INTO it (MsgSubstationAllocationConnect / MsgAllocationUpdate). That raises connectionCapacity ({:.2} kW now) for ALL {} connected players.\n",
                             gp.substation_id, gp.sub_connection_capacity / 1e6, gp.sub_connection_count
                         ));
                     } else {
@@ -474,7 +474,7 @@ pub async fn execute(
             );
 
             let is_vplayer_host = host.is_some();
-            let m = |w: f64| format!("{:.2}M", w / 1e6);
+            let m = |w: f64| format!("{:.2} kW", w / 1e6);
             let mut out = String::new();
             out.push_str(&format!(
                 "⚙ INFRASTRUCTURE PLAN ({} mode) — host {}\n\
@@ -485,15 +485,15 @@ pub async fn execute(
                 mode, host_label,
                 alpha_ualpha, m(structs_load), gp.substation_id, gp.sub_connection_count, m(gp.sub_connection_capacity),
                 gp.reactor_id, if gp.reactor_validator.is_empty() { "?" } else { &gp.reactor_validator }, (gp.reactor_commission * 100.0) as i64,
-                plan.infuse_ualpha, m(plan.gained_capacity_w), m(plan.commission_w),
-                m(plan.keep_w), m(plan.donate_w),
-                gp.sub_connection_count, m(plan.own_share_gain_w),
+                plan.infuse_ualpha, m(plan.gained_capacity_mw), m(plan.commission_mw),
+                m(plan.keep_mw), m(plan.donate_mw),
+                gp.sub_connection_count, m(plan.own_share_gain_mw),
             ));
 
             // Build the ordered tx sequence. For a vplayer host, emit ready-to-run
             // `act {tx}` calls (raw signing handles every msg today). For the
             // primary, emit the msgs + the honest execution route.
-            let donate_s = format!("{:.0}", plan.donate_w);
+            let donate_s = format!("{:.0}", plan.donate_mw);
             let infuse_s = format!("{:.0}", plan.infuse_ualpha);
             let wrap = |type_url: &str, msg: String, route: &str| -> String {
                 if is_vplayer_host {
@@ -706,17 +706,17 @@ pub async fn execute(
             if let Some(gid) = guild_id_opt.as_deref().filter(|s| !s.is_empty()) {
                 if let Ok(gp) = crate::mcp::guild_power::resolve_guild_power(client, gid).await {
                     if gp.sub_capacity > 0.0
-                        && gp.share_if_one_more < crate::mcp::guild_power::MIN_PLAYER_DRAW_W
+                        && gp.share_if_one_more < crate::mcp::guild_power::MIN_PLAYER_DRAW_MW
                     {
                         return vec![Content::text(format!(
                             "BLOCKED: guild substation {} can't power another player. \
-                             capacity {:.1}M / {} connections → {:.2}M each if one more joins, \
-                             below the ~{:.1}M minimum draw. Free capacity or grow the reactor first.",
+                             capacity {:.1} kW / {} connections → {:.2} kW each if one more joins, \
+                             below the ~{:.1} kW minimum draw. Free capacity or grow the reactor first.",
                             gp.substation_id,
                             gp.sub_capacity / 1e6,
                             gp.sub_connection_count,
                             gp.share_if_one_more / 1e6,
-                            crate::mcp::guild_power::MIN_PLAYER_DRAW_W / 1e6,
+                            crate::mcp::guild_power::MIN_PLAYER_DRAW_MW / 1e6,
                         ))];
                     }
                 }
@@ -977,7 +977,7 @@ pub async fn execute(
                 let dt = |k: &str, d: u64| params.args.get(k).and_then(|v| v.as_u64()).unwrap_or(d);
                 // mine/refine proofs anchor on the struct's blockStart*, set when the
                 // miner/refinery went online and reset after each successful cycle —
-                // NOT the current block (docs hashing.md: input {structId}MINE{blockStart}NONCE).
+                // NOT the current block (docs hashing.md: input {structId} kWINE{blockStart}NONCE).
                 // Read it from the chain like complete_build reads blockStartBuild;
                 // using current_block_height yields a proof the chain rejects (→ 0 ore).
                 let read_anchor_in = |entity: &Value, container: &str, field: &str| -> u64 {

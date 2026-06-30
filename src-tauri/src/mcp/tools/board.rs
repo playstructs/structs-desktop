@@ -148,7 +148,7 @@ pub async fn execute(
     out.push_str(&format!("Virtual players: {}\n", nvp));
     if let Some(gp) = &gpower {
         out.push_str(&format!(
-            "Guild power: reactor fuel {:.1}M ({}% comm) · substation {:.0}M cap / {} conns / {:.2}M each · headroom ~{} more\n",
+            "Guild power: reactor fuel {:.1} kW ({}% comm) · substation {:.0} kW cap / {} conns / {:.2} kW each · headroom ~{} more\n",
             gp.reactor_fuel / 1e6,
             (gp.reactor_commission * 100.0) as i64,
             gp.sub_capacity / 1e6,
@@ -259,7 +259,7 @@ pub async fn execute(
     let rec_card = card("RECOMMENDED", format!("<ul class='ops-list'>{}</ul>", rec_items));
 
     let guild_card = if let Some(gp) = &gpower {
-        let m = |w: f64| format!("{:.2}M", w / 1_000_000.0);
+        let m = |w: f64| format!("{:.2} kW", w / 1_000_000.0);
         card(
             "GUILD POWER",
             format!(
