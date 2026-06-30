@@ -2,6 +2,7 @@ pub mod combat;
 pub mod config;
 pub mod cosmos_client;
 pub mod error_translator;
+pub mod auto_build;
 pub mod auto_harvest;
 pub mod guild_api;
 pub mod guild_power;

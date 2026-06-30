@@ -620,6 +620,54 @@ pub async fn execute(
             ))]
         }
 
+        // Configure / inspect the native auto-FILL loop (auto-initiate builds in
+        // free slots + auto-complete them as PoW ripens). Args: enabled,
+        // complete_difficulty, interval_secs, include_primary, now (force a scan).
+        "autobuild" => {
+            let mut cfg = crate::mcp::auto_build::get();
+            let a = &params.args;
+            let mut changed = false;
+            if let Some(v) = a.get("enabled").and_then(|v| v.as_bool()) {
+                cfg.enabled = v;
+                changed = true;
+            }
+            if let Some(v) = a.get("complete_difficulty").and_then(|v| v.as_u64()) {
+                cfg.complete_difficulty = v.clamp(1, 64);
+                changed = true;
+            }
+            if let Some(v) = a.get("interval_secs").and_then(|v| v.as_u64()) {
+                cfg.interval_secs = v.max(60);
+                changed = true;
+            }
+            if let Some(v) = a.get("include_primary").and_then(|v| v.as_bool()) {
+                cfg.include_primary = v;
+                changed = true;
+            }
+            if changed {
+                crate::mcp::auto_build::set(cfg.clone());
+            }
+            let force_now = a.get("now").and_then(|v| v.as_bool()).unwrap_or(false);
+            if force_now && cfg.enabled {
+                let app = app_handle.clone();
+                tokio::spawn(async move {
+                    crate::mcp::auto_build::tick(&app, true).await;
+                });
+            }
+            vec![Content::text(format!(
+                "Auto-fill (build-out) {} — fills each vplayer's free slots one build/scan (charge + power gated: OSG/shields → fleet defenders → Ore Bunkers), and auto-completes builds at difficulty ≤ {} · scans every {}s · include_primary {}.{}\n{}",
+                if cfg.enabled { "ON" } else { "OFF" },
+                cfg.complete_difficulty,
+                cfg.interval_secs,
+                cfg.include_primary,
+                if changed { " (updated)" } else { "" },
+                if force_now && cfg.enabled {
+                    "Triggered an immediate scan.".to_string()
+                } else {
+                    "Set {enabled:true} to run it, {now:true} to scan immediately. It idles once every slot is full.".to_string()
+                }
+            ))]
+        }
+
         "create" => {
             let Some(name) = params.name.as_deref().filter(|n| !n.is_empty()) else {
                 return vec![Content::text(

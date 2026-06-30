@@ -418,12 +418,16 @@ pub async fn sync_game_state(
         }
     }
 
-    // ── Native auto-harvest ── (throttled internally; off unless configured)
-    // Spawned so a periodic scan never blocks the sync cycle.
+    // ── Native auto-harvest + auto-build ── (throttled internally; off unless
+    // configured) Spawned so a periodic scan never blocks the sync cycle.
     {
         let app_h = app_handle.clone();
         tokio::spawn(async move {
             crate::mcp::auto_harvest::tick(&app_h, false).await;
+        });
+        let app_b = app_handle.clone();
+        tokio::spawn(async move {
+            crate::mcp::auto_build::tick(&app_b, false).await;
         });
     }
 
