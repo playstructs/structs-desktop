@@ -591,6 +591,10 @@ pub async fn execute(
                 cfg.refine = v;
                 changed = true;
             }
+            if let Some(v) = a.get("auto_explore").and_then(|v| v.as_bool()) {
+                cfg.auto_explore = v;
+                changed = true;
+            }
             if let Some(v) = a.get("include_primary").and_then(|v| v.as_bool()) {
                 cfg.include_primary = v;
                 changed = true;
@@ -606,11 +610,12 @@ pub async fn execute(
                 });
             }
             vec![Content::text(format!(
-                "Auto-harvest {} — mine/refine each owned struct once its difficulty decays to ≤ {} · scans every {}s · refine {} · include_primary {}.{}\n{}",
+                "Auto-harvest {} — mine/refine each owned struct once its difficulty decays to ≤ {} · scans every {}s · refine {} · auto_explore {} · include_primary {}.{}\n{}",
                 if cfg.enabled { "ON" } else { "OFF" },
                 cfg.difficulty_threshold,
                 cfg.interval_secs,
                 cfg.refine,
+                cfg.auto_explore,
                 cfg.include_primary,
                 if changed { " (updated)" } else { "" },
                 if force_now && cfg.enabled {

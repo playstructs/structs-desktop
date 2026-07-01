@@ -45,6 +45,12 @@ pub struct AutoHarvestConfig {
     pub refine: bool,
     /// Also harvest the PRIMARY player's structs (default just the vplayers).
     pub include_primary: bool,
+    /// When a vplayer's planet is mined out (planet ore = 0), auto-explore a fresh
+    /// planet so mining/production can continue. The old planet's structs are
+    /// destroyed on explore (chain), and auto-build rebuilds the extractor (+
+    /// refinery for productive) on the new planet. Off by default — it destroys
+    /// the old planetary build-out each cycle.
+    pub auto_explore: bool,
 }
 
 impl Default for AutoHarvestConfig {
@@ -55,6 +61,7 @@ impl Default for AutoHarvestConfig {
             interval_secs: 1800,
             refine: true,
             include_primary: false,
+            auto_explore: false,
         }
     }
 }
@@ -187,6 +194,7 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
             Ok(p) => p,
             Err(_) => continue,
         };
+        let mut extractor_planet: Option<String> = None;
         for s in page.items.iter() {
             let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else {
                 continue;
@@ -201,6 +209,12 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                 })
                 .unwrap_or_default();
             let is_extractor = type_id == EXTRACTOR_TYPE;
+            // A planetary extractor's location_id IS the player's planet id.
+            if is_extractor && !truthy(s.get("is_destroyed")) {
+                if let Some(loc) = s.get("location_id").and_then(|x| x.as_str()) {
+                    extractor_planet = Some(loc.to_string());
+                }
+            }
             let is_refinery = type_id == REFINERY_TYPE;
             // Refine only for productive players (and if the config allows it);
             // bait players mine only.
@@ -254,6 +268,44 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                     calculate_difficulty(age, target),
                     cfg.difficulty_threshold
                 );
+            }
+        }
+
+        // ── Auto-explore when the planet is mined out (ore reserve = 0) ──
+        // Explore a fresh planet so mining can continue. The chain only allows
+        // explore when the planet is empty of ore, destroys the old planetary
+        // structs (freeing 1-per-player), and migrates the fleet; auto-build then
+        // rebuilds the extractor (+ refinery for productive) on the new planet.
+        // VPLAYERS ONLY — never the primary/main player (its base must never be
+        // auto-abandoned). Enforced by requiring a vplayer HD index below; the
+        // primary has idx_opt == None and is always skipped here.
+        if cfg.auto_explore {
+            if let (Some(planet_id), Some(idx)) = (extractor_planet, idx_opt) {
+                let planet_ore = match client.query_entity("planet", &planet_id).await {
+                    Ok(p) => num(p.get("gridAttributes").and_then(|g| g.get("ore"))),
+                    Err(_) => 1.0, // unknown → don't explore
+                };
+                if planet_ore <= 0.0 {
+                    let res = crate::mcp::vplayer_bridge::call(
+                        app_handle,
+                        "sign",
+                        serde_json::json!({
+                            "index": idx,
+                            "type_url": "/structs.structs.MsgPlanetExplore",
+                            "payload": { "playerId": pid }
+                        }),
+                        60,
+                    )
+                    .await;
+                    if let Ok(v) = res {
+                        if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 {
+                            // Planet changed → bust the owned-cache so threat
+                            // detection re-resolves this player's new planet.
+                            crate::mcp::virtual_players::invalidate_owned(&pid);
+                            eprintln!("[Auto-Harvest] explored (planet {} mined out) for {}", planet_id, pid);
+                        }
+                    }
+                }
             }
         }
     }

@@ -32,6 +32,11 @@ const BUILD_CHARGE: u64 = 8;
 /// fills up to SLOTS_PER_AMBIT. Planet air/water are left to 1-per-player types
 /// (PDC etc.) already placed, so they're not in the fill.
 const LOADOUT: &[(&str, &str, &str)] = &[
+    // Miner + core planetary defense first — these are 1-per-player, so they're
+    // skipped when already present, but get rebuilt after an explore (the old
+    // planet's structs are destroyed on completion, freeing the limit).
+    ("planet", "land", "Ore Extractor"),
+    ("planet", "water", "Planetary Defense Cannon"),
     ("planet", "space", "Orbital Shield Generator"),
     ("fleet", "air", "Pursuit Fighter"),
     ("fleet", "land", "Tank"),
@@ -378,8 +383,10 @@ mod tests {
         let c = AutoBuildConfig::default();
         assert!(!c.enabled);
         assert_eq!(c.complete_difficulty, 12);
-        assert_eq!(LOADOUT[0].2, "Orbital Shield Generator"); // shields first
+        assert_eq!(LOADOUT[0].2, "Ore Extractor"); // miner first (rebuilt after explore)
         assert_eq!(LOADOUT.last().unwrap().2, "Ore Bunker"); // heavy last
+        assert_eq!(PRODUCTIVE_LOADOUT[0].2, "Ore Extractor");
+        assert_eq!(PRODUCTIVE_LOADOUT[1].2, "Ore Refinery");
     }
 
     #[test]

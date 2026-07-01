@@ -135,6 +135,14 @@ pub struct TeamOwned {
 static OWNED_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<String, (String, String)>>> =
     std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
 
+/// Drop a player's cached (planet, fleet) — call after it EXPLORES, since its
+/// planet id changes (the cache otherwise assumes planet/fleet are permanent).
+pub fn invalidate_owned(player_id: &str) {
+    if let Ok(mut c) = OWNED_CACHE.write() {
+        c.remove(player_id);
+    }
+}
+
 /// Resolve the planet/fleet ids of every registered virtual player (cached),
 /// for team-wide threat detection.
 pub async fn team_owned(client: &crate::mcp::cosmos_client::CosmosClient) -> TeamOwned {
