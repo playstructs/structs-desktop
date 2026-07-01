@@ -8,8 +8,10 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 
 const FILENAME: &str = "virtual_players.json";
-/// Safety cap on how many virtual players the agent may spin up.
-pub const MAX_VIRTUAL_PLAYERS: usize = 16;
+/// Safety cap on how many virtual players the agent may spin up. Raised to 32 to
+/// host a second cohort (idx 17–32) of PRODUCTIVE players (miners+refineries)
+/// alongside the original 16 bait. Guild-power still gates actual creation.
+pub const MAX_VIRTUAL_PLAYERS: usize = 32;
 
 /// What a virtual player is FOR. `Bait` (default) just mines so ore — which is
 /// non-transferable — piles up on its planet as a raid lure. `Productive` runs

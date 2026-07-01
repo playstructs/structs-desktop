@@ -158,24 +158,31 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
     }
     let client = CosmosClient::new();
 
-    // (player_id, Some(vplayer index) | None for primary).
-    let mut targets: Vec<(String, Option<u32>)> = {
+    // (player_id, Some(vplayer index) | None for primary, may_refine).
+    // Refining is PRODUCTIVE-only — bait players mine but never refine (their ore
+    // stays as raid bait). The primary may refine.
+    use crate::mcp::virtual_players::VPlayerRole;
+    let mut targets: Vec<(String, Option<u32>, bool)> = {
         let reg = crate::mcp::virtual_players::REGISTRY.read().unwrap();
         reg.players
             .iter()
-            .filter_map(|p| p.player_id.clone().map(|pid| (pid, Some(p.index))))
+            .filter_map(|p| {
+                p.player_id
+                    .clone()
+                    .map(|pid| (pid, Some(p.index), p.role == VPlayerRole::Productive))
+            })
             .collect()
     };
     if cfg.include_primary {
         if let Some(pid) = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone()) {
             if !pid.is_empty() {
-                targets.push((pid, None));
+                targets.push((pid, None, true)); // primary may refine
             }
         }
     }
 
     let mut started = 0u32;
-    for (pid, idx_opt) in targets {
+    for (pid, idx_opt, may_refine) in targets {
         let page = match client.guild.struct_list_by_owner(&pid, 1).await {
             Ok(p) => p,
             Err(_) => continue,
@@ -195,7 +202,9 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                 .unwrap_or_default();
             let is_extractor = type_id == EXTRACTOR_TYPE;
             let is_refinery = type_id == REFINERY_TYPE;
-            if !is_extractor && !(is_refinery && cfg.refine) {
+            // Refine only for productive players (and if the config allows it);
+            // bait players mine only.
+            if !is_extractor && !(is_refinery && cfg.refine && may_refine) {
                 continue;
             }
             // Skip if a task for this struct is already in flight (completed ones

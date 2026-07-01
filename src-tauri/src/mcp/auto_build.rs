@@ -40,6 +40,29 @@ const LOADOUT: &[(&str, &str, &str)] = &[
     ("planet", "land", "Ore Bunker"),
 ];
 
+/// Production-first loadout for PRODUCTIVE players: extractor + refinery (the
+/// alpha pipeline) + a command ship (raid gate) + light defense. The 1-per-player
+/// types build only if absent (see ONE_PER_PLAYER); the rest fill by slot count.
+const PRODUCTIVE_LOADOUT: &[(&str, &str, &str)] = &[
+    ("planet", "land", "Ore Extractor"),
+    ("planet", "land", "Ore Refinery"),
+    ("fleet", "land", "Command Ship"),
+    ("planet", "space", "Orbital Shield Generator"),
+    ("fleet", "land", "Tank"),
+    ("fleet", "space", "Starfighter"),
+];
+
+/// Struct types limited to one per player (buildLimit 1) — a loadout entry for
+/// one of these is skipped when the player already has it, instead of trying
+/// (and having the chain reject) a duplicate.
+const ONE_PER_PLAYER: &[&str] = &[
+    "Ore Extractor",
+    "Ore Refinery",
+    "Command Ship",
+    "Field Generator",
+    "Planetary Defense Cannon",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoBuildConfig {
     /// Master on/off. Off by default — it auto-signs build txs.
@@ -170,23 +193,24 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
         }
     };
 
-    // (player_id, vplayer index | None for primary).
-    let mut targets: Vec<(String, Option<u32>)> = {
+    // (player_id, vplayer index | None for primary, role | None for primary).
+    use crate::mcp::virtual_players::VPlayerRole;
+    let mut targets: Vec<(String, Option<u32>, Option<VPlayerRole>)> = {
         let reg = crate::mcp::virtual_players::REGISTRY.read().unwrap();
         reg.players
             .iter()
-            .filter_map(|p| p.player_id.clone().map(|pid| (pid, Some(p.index))))
+            .filter_map(|p| p.player_id.clone().map(|pid| (pid, Some(p.index), Some(p.role))))
             .collect()
     };
     if cfg.include_primary {
         if let Some(pid) = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone()) {
             if !pid.is_empty() {
-                targets.push((pid, None));
+                targets.push((pid, None, None));
             }
         }
     }
 
-    for (pid, idx_opt) in targets {
+    for (pid, idx_opt, role) in targets {
         let structs = match client.guild.struct_list_by_owner(&pid, 1).await {
             Ok(p) => p.items,
             Err(_) => continue,
@@ -282,8 +306,25 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
             occ.entry((lt, amb)).or_default().insert(slot);
         }
 
+        // Productive players build a production-first loadout (extractor +
+        // refinery + light defense); bait players (and the primary) get the
+        // defensive fill. Bait never gets a refinery — that stays productive-only.
+        let loadout: &[(&str, &str, &str)] = match role {
+            Some(VPlayerRole::Productive) => PRODUCTIVE_LOADOUT,
+            _ => LOADOUT,
+        };
+        // Type names the player already has (to skip 1-per-player duplicates).
+        let present: HashSet<String> = structs
+            .iter()
+            .filter(|s| !truthy(s.get("is_destroyed")))
+            .filter_map(|s| s.get("type_name").and_then(|x| x.as_str()).map(String::from))
+            .collect();
+
         // Walk the loadout; build the first ripe (free slot + power + known type).
-        for (target, ambit, type_name) in LOADOUT {
+        for (target, ambit, type_name) in loadout {
+            if ONE_PER_PLAYER.contains(type_name) && present.contains(*type_name) {
+                continue; // already have this 1-per-player struct
+            }
             let key = (target.to_string(), ambit.to_string());
             let used = occ.get(&key).map(|s| s.len()).unwrap_or(0);
             if used >= SLOTS_PER_AMBIT {
