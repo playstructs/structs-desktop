@@ -668,6 +668,54 @@ pub async fn execute(
             ))]
         }
 
+        // Configurable "keep N grams, infuse the rest" rule for the PRIMARY.
+        // Grows the primary's own capacity via MsgReactorInfuse signed at HD
+        // index 0 (the primary's key). Args: keep_grams, enabled (auto-run), now.
+        "infuse" => {
+            let mut cfg = crate::mcp::auto_infuse::get();
+            let a = &params.args;
+            let mut changed = false;
+            if let Some(v) = a.get("keep_grams").and_then(|v| v.as_u64()) {
+                cfg.keep_grams = v;
+                changed = true;
+            }
+            if let Some(v) = a.get("enabled").and_then(|v| v.as_bool()) {
+                cfg.enabled = v;
+                changed = true;
+            }
+            if let Some(v) = a.get("interval_secs").and_then(|v| v.as_u64()) {
+                cfg.interval_secs = v.max(60);
+                changed = true;
+            }
+            if changed {
+                crate::mcp::auto_infuse::set(cfg.clone());
+            }
+            let run_now = a.get("now").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut out = format!(
+                "Primary infuse rule {} — keep {} g in reserve, infuse the rest · auto every {}s.{}\n",
+                if cfg.enabled { "ON (auto)" } else { "OFF (manual)" },
+                cfg.keep_grams,
+                cfg.interval_secs,
+                if changed { " (updated)" } else { "" }
+            );
+            if run_now {
+                match crate::mcp::auto_infuse::infuse_primary_excess(app_handle, cfg.keep_grams).await {
+                    Ok(r) => out.push_str(&format!(
+                        "Infused {} ualpha (~{:.2} g → ~{:.2} kW personal capacity), kept {} g. tx {}\nVerify: structs_players capacity (primary capacity should rise).",
+                        r.infused_ualpha,
+                        r.infused_ualpha as f64 / crate::mcp::auto_infuse::UALPHA_PER_GRAM as f64,
+                        (r.infused_ualpha as f64 * 0.96) / 1e6,
+                        cfg.keep_grams,
+                        r.tx
+                    )),
+                    Err(e) => out.push_str(&format!("Did not infuse: {}", e)),
+                }
+            } else {
+                out.push_str("Pass {now:true} to infuse the excess immediately, or {enabled:true} to auto-run.");
+            }
+            vec![Content::text(out)]
+        }
+
         "create" => {
             let Some(name) = params.name.as_deref().filter(|n| !n.is_empty()) else {
                 return vec![Content::text(
