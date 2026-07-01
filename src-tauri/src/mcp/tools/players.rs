@@ -71,7 +71,7 @@ pub async fn execute(
             vec![Content::text(
                 serde_json::to_string_pretty(&json!({
                     "count": players.len(),
-                    "max": MAX_VIRTUAL_PLAYERS,
+                    "max": if MAX_VIRTUAL_PLAYERS == 0 { json!("unlimited") } else { json!(MAX_VIRTUAL_PLAYERS) },
                     "virtual_players": players,
                 }))
                 .unwrap(),
@@ -181,7 +181,7 @@ pub async fn execute(
                          Reactor: fuel {:.1} kW · capacity {:.1} kW · {}% commission\n\
                          One more connection → {:.2} kW each.\n\
                          Headroom at ~{:.1} kW/player: ~{} more players (guild-wide).\n\
-                         Local virtual players: {}/{} (hard cap).\n",
+                         Local virtual players: {} (hard cap: {}).\n",
                         gp.guild_id,
                         gp.substation_id, if gp.substation_owner.is_empty() { "?" } else { &gp.substation_owner }, mine(&gp.substation_owner),
                         gp.reactor_id, if gp.reactor_owner.is_empty() { "?" } else { &gp.reactor_owner }, mine(&gp.reactor_owner),
@@ -189,7 +189,8 @@ pub async fn execute(
                         gp.reactor_fuel / 1e6, gp.reactor_capacity / 1e6, (gp.reactor_commission * 100.0) as i64,
                         gp.share_if_one_more / 1e6,
                         crate::mcp::guild_power::MIN_PLAYER_DRAW_MW / 1e6, gp.supportable_more,
-                        nvp, MAX_VIRTUAL_PLAYERS,
+                        nvp,
+                        if MAX_VIRTUAL_PLAYERS == 0 { "unlimited".to_string() } else { MAX_VIRTUAL_PLAYERS.to_string() },
                     );
 
                     // ── Self-host break-even (1 ualpha → 1 W, minus commission) ──
@@ -723,10 +724,11 @@ pub async fn execute(
                 )];
             };
 
-            // Pick the index + enforce the cap, under a short read lock.
+            // Pick the index + enforce the hard count cap (0 = unlimited), under a
+            // short read lock. The guild-power soft gate below is the real limit.
             let index = {
                 let reg = REGISTRY.read().unwrap();
-                if reg.players.len() >= MAX_VIRTUAL_PLAYERS {
+                if !crate::mcp::virtual_players::under_cap(reg.players.len()) {
                     return vec![Content::text(format!(
                         "BLOCKED: virtual-player cap reached ({}). Remove one before creating more.",
                         MAX_VIRTUAL_PLAYERS

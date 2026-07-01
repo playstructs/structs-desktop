@@ -8,10 +8,15 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 
 const FILENAME: &str = "virtual_players.json";
-/// Safety cap on how many virtual players the agent may spin up. Raised to 32 to
-/// host a second cohort (idx 17–32) of PRODUCTIVE players (miners+refineries)
-/// alongside the original 16 bait. Guild-power still gates actual creation.
-pub const MAX_VIRTUAL_PLAYERS: usize = 32;
+/// Hard count cap on virtual players. **0 = unlimited** — the real limit is the
+/// guild-power soft gate in `create` (won't spin up a player the substation can't
+/// power). Set to 0 for now; raise to a positive number to re-impose a hard cap.
+pub const MAX_VIRTUAL_PLAYERS: usize = 0;
+
+/// True when another virtual player is allowed by the hard count cap (0 = unlimited).
+pub fn under_cap(current: usize) -> bool {
+    MAX_VIRTUAL_PLAYERS == 0 || current < MAX_VIRTUAL_PLAYERS
+}
 
 /// What a virtual player is FOR. `Bait` (default) just mines so ore — which is
 /// non-transferable — piles up on its planet as a raid lure. `Productive` runs
