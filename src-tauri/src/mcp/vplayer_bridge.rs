@@ -15,15 +15,17 @@ use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::{oneshot, Semaphore};
 
-/// Cap concurrent WS-opening ops. Each `sign`/`signup` makes the JS façade open a
-/// FRESH `SigningStargateClient` WebSocket (`signAndBroadcastAs`). The auto-loops
-/// fan out per-player reads wide (`loop_util::MAX_CONCURRENT_PLAYERS`), but if that
-/// width reached the signer too, dozens of simultaneous WS connects would exhaust
-/// the webview's WebSocket pool ("Insufficient resources") and take down the app's
-/// own block/NATS feeds. Reads are safe to parallelize; SIGNS are the scarce
-/// resource, so they funnel through here — a permit is held for the whole
-/// round-trip. 3 keeps throughput without saturating.
-static SIGN_GATE: Semaphore = Semaphore::const_new(3);
+/// Serialize WS-opening ops. Each `sign`/`signup` makes the JS façade open a FRESH
+/// `SigningStargateClient` WebSocket (`signAndBroadcastAs`) and close it when done.
+/// The auto-loops fan out per-player READS wide (`loop_util::MAX_CONCURRENT_PLAYERS`)
+/// — that's the slow part and the real starvation fix — but SIGNS must not overlap:
+/// connect-per-call churn is fragile, and even a few concurrent connects degrade the
+/// webview's WebSocket pool ("Insufficient resources"), which cascades into the app's
+/// own block/NATS feeds and leaves the signer wedged for ~a minute afterward. 1 permit
+/// = strictly one signing socket open at a time (the proven-reliable serial path);
+/// held for the whole round-trip. Reads stay parallel, so throughput is still fine
+/// (signs are ~2-3s each; a ~16-worker wave clears well within the 180s scan interval).
+static SIGN_GATE: Semaphore = Semaphore::const_new(1);
 
 /// A request sent to the webapp façade.
 #[derive(Debug, Clone, Serialize)]
