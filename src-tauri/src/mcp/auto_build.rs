@@ -292,11 +292,30 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
                     _ => LOADOUT,
                 };
                 // Type names the player already has (to skip 1-per-player duplicates).
-                let present: HashSet<String> = structs
-                    .iter()
-                    .filter(|s| !parse_bool(s.get("is_destroyed")))
-                    .filter_map(|s| s.get("type_name").and_then(|x| x.as_str()).map(String::from))
-                    .collect();
+                // The guild list response can omit `type_name` (occ works off
+                // `location_type`, but `type_name` came back absent → `present` was
+                // empty → the loop kept trying to rebuild the 1-per-player Ore
+                // Extractor, which the chain rejects with "cannot handle new load",
+                // and never advanced to the refinery). So fall back to resolving the
+                // numeric `type` id through the catalog, which is always present.
+                let present: HashSet<String> = {
+                    let gs = crate::game_state::GAME_STATE.read().unwrap();
+                    structs
+                        .iter()
+                        .filter(|s| !parse_bool(s.get("is_destroyed")))
+                        .filter_map(|s| {
+                            if let Some(n) = s.get("type_name").and_then(|x| x.as_str()) {
+                                return Some(n.to_string());
+                            }
+                            let tid = s.get("type").map(|t| match t {
+                                Value::Number(n) => n.to_string(),
+                                Value::String(s) => s.clone(),
+                                _ => String::new(),
+                            })?;
+                            gs.struct_types.get(&tid).map(|st| st.name.clone())
+                        })
+                        .collect()
+                };
 
                 // ── TEMP DIAGNOSTIC: record entry into the initiate walk + what the loop sees.
                 if idx_opt.is_some() {

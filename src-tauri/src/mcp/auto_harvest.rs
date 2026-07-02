@@ -25,7 +25,10 @@ const FILENAME: &str = "auto_harvest.json";
 const MINE_TARGET: u64 = 14_000;
 const REFINE_TARGET: u64 = 28_000;
 const EXTRACTOR_TYPE: &str = "14";
-const REFINERY_TYPE: &str = "16";
+// Ore Refinery is struct type 15 (verified live: worker refinery entities report
+// `"type": 15, "type_name": "Ore Refinery"`). Was "16", so auto-refine never matched
+// a refinery and the refine step of the flywheel never fired.
+const REFINERY_TYPE: &str = "15";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoHarvestConfig {
