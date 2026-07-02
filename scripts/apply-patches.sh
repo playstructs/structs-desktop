@@ -137,10 +137,20 @@ sed -i.bak 's|import {SigningQueueManager} from "./SigningQueueManager";|import 
 cat >> "$SCM" <<'SCM_EOF'
 
 // [structs-universe patch] Sign+broadcast a single msg from an arbitrary account
-// (a virtual player). `wallet` must contain `signerAddress`. Used by the
-// virtual-players façade; the primary client/queue are untouched.
+// (a virtual player). POOLS one SigningStargateClient per signer address and
+// REUSES it across calls. Connecting a fresh client per call churned WebSockets:
+// slow (reconnect + block-inclusion wait every sign) and, under the auto-loop
+// fan-out, it exhausted the webview WS pool ("Insufficient resources"), which also
+// killed the app's own block/NATS feeds. Reuse => at most ~one persistent socket
+// per vplayer, no churn, fast repeat signs. The primary client/queue are untouched.
+SigningClientManager.prototype._vpClients = SigningClientManager.prototype._vpClients || new Map();
 SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, signerAddress, typeUrl, payload) {
-  const client = await SigningStargateClient.connectWithSigner(this.wsUrl, wallet, { registry: this.registry });
+  const cache = SigningClientManager.prototype._vpClients;
+  let client = cache.get(signerAddress);
+  if (!client) {
+    client = await SigningStargateClient.connectWithSigner(this.wsUrl, wallet, { registry: this.registry });
+    cache.set(signerAddress, client);
+  }
   try {
     const type = this.registry.lookupType(typeUrl);
     if (!type) throw new Error('unknown typeUrl: ' + typeUrl);
@@ -151,13 +161,8 @@ SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, sign
     const value = (typeof type.fromJSON === 'function')
       ? type.fromJSON(merged)
       : type.fromPartial(merged);
-    // Race the broadcast against a hard timeout so the promise ALWAYS settles.
-    // A dead/slow WebSocket can make signAndBroadcast hang forever; if it never
-    // settles, the `finally` below never runs, the socket never closes, and
-    // leaked sockets accumulate until the webview WS pool is exhausted
-    // ("Insufficient resources") — which also kills the app's own block/NATS
-    // feeds. 55s stays under the Rust bridge's 60s bound so the caller still
-    // gets an answer.
+    // Race a hard timeout so a hung WS can't wedge the caller forever (55s stays
+    // under the Rust bridge's 60s bound so the caller still gets an answer).
     const res = await Promise.race([
       client.signAndBroadcast(signerAddress, [{ typeUrl, value }], FEE),
       new Promise(function (_, reject) {
@@ -165,9 +170,12 @@ SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, sign
       }),
     ]);
     return { code: res.code, transactionHash: res.transactionHash, height: res.height, rawLog: res.rawLog || null };
-  } finally {
-    // Always release the socket — on success, error, or the timeout above.
-    try { client.disconnect(); } catch (e) { /* ignore */ }
+  } catch (e) {
+    // A failed/hung client is suspect — evict + close it so the next call for this
+    // address reconnects fresh (successful signs keep the pooled client open).
+    cache.delete(signerAddress);
+    try { client.disconnect(); } catch (_) { /* ignore */ }
+    throw e;
   }
 };
 SCM_EOF
