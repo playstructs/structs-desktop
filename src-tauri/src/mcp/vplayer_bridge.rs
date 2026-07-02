@@ -13,7 +13,17 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 use tauri::Emitter;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Semaphore};
+
+/// Cap concurrent WS-opening ops. Each `sign`/`signup` makes the JS façade open a
+/// FRESH `SigningStargateClient` WebSocket (`signAndBroadcastAs`). The auto-loops
+/// fan out per-player reads wide (`loop_util::MAX_CONCURRENT_PLAYERS`), but if that
+/// width reached the signer too, dozens of simultaneous WS connects would exhaust
+/// the webview's WebSocket pool ("Insufficient resources") and take down the app's
+/// own block/NATS feeds. Reads are safe to parallelize; SIGNS are the scarce
+/// resource, so they funnel through here — a permit is held for the whole
+/// round-trip. 3 keeps throughput without saturating.
+static SIGN_GATE: Semaphore = Semaphore::const_new(3);
 
 /// A request sent to the webapp façade.
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +56,18 @@ pub async fn call(
     args: Value,
     timeout_secs: u64,
 ) -> Result<Value, String> {
+    // Throttle the WS-opening ops so a wide loop fan-out can't exhaust the webview
+    // WebSocket pool. Held for the whole round-trip (dropped on return). Read-only
+    // ops ("derive"/"list") don't open a socket, so they skip the gate.
+    let _sign_permit = if matches!(op, "sign" | "signup") {
+        match SIGN_GATE.acquire().await {
+            Ok(p) => Some(p),
+            Err(_) => return Err("signing gate closed".to_string()),
+        }
+    } else {
+        None
+    };
+
     let req_id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     INFLIGHT.lock().await.insert(req_id.clone(), tx);

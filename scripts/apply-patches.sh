@@ -151,9 +151,22 @@ SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, sign
     const value = (typeof type.fromJSON === 'function')
       ? type.fromJSON(merged)
       : type.fromPartial(merged);
-    const res = await client.signAndBroadcast(signerAddress, [{ typeUrl, value }], FEE);
+    // Race the broadcast against a hard timeout so the promise ALWAYS settles.
+    // A dead/slow WebSocket can make signAndBroadcast hang forever; if it never
+    // settles, the `finally` below never runs, the socket never closes, and
+    // leaked sockets accumulate until the webview WS pool is exhausted
+    // ("Insufficient resources") — which also kills the app's own block/NATS
+    // feeds. 55s stays under the Rust bridge's 60s bound so the caller still
+    // gets an answer.
+    const res = await Promise.race([
+      client.signAndBroadcast(signerAddress, [{ typeUrl, value }], FEE),
+      new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error('signAndBroadcast timed out (WS)')); }, 55000);
+      }),
+    ]);
     return { code: res.code, transactionHash: res.transactionHash, height: res.height, rawLog: res.rawLog || null };
   } finally {
+    // Always release the socket — on success, error, or the timeout above.
     try { client.disconnect(); } catch (e) { /* ignore */ }
   }
 };
