@@ -82,6 +82,25 @@ pub async fn call(
     }
 }
 
+/// Convenience wrapper for the common "sign & broadcast as HD index N" op —
+/// builds the `{index, type_url, payload}` args the façade's `sign` handler
+/// expects. `index` 0 is the primary's key; >= 1 are the virtual players.
+pub async fn sign_action(
+    app_handle: &tauri::AppHandle,
+    index: u32,
+    type_url: &str,
+    payload: Value,
+    timeout_secs: u64,
+) -> Result<Value, String> {
+    call(
+        app_handle,
+        "sign",
+        serde_json::json!({ "index": index, "type_url": type_url, "payload": payload }),
+        timeout_secs,
+    )
+    .await
+}
+
 async fn cleanup(req_id: &str) {
     INFLIGHT.lock().await.remove(req_id);
 }

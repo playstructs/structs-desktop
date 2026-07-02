@@ -119,14 +119,7 @@ pub fn plan_infra(
     }
 }
 
-/// Parse a JSON value that may be a string ("6877090") or a number into f64.
-fn num(v: Option<&Value>) -> f64 {
-    match v {
-        Some(Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
-        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
-        _ => 0.0,
-    }
-}
+use crate::mcp::loop_util::parse_f64 as num;
 
 /// Resolve the guild's reactor + entry substation into one power picture.
 pub async fn resolve_guild_power(

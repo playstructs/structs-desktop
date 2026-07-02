@@ -11,12 +11,10 @@
 //! only when they hold stored ore) — refining is dormant until productive
 //! players build refineries, but supported.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tauri::Manager;
 
 use crate::hasher::difficulty::calculate_difficulty;
@@ -70,15 +68,8 @@ static CONFIG: LazyLock<RwLock<AutoHarvestConfig>> = LazyLock::new(|| RwLock::ne
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 static HARVESTING: AtomicBool = AtomicBool::new(false);
 
-fn path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("structs-app").join(FILENAME))
-}
-
 fn load() -> AutoHarvestConfig {
-    path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    crate::mcp::config_store::load_config(FILENAME)
 }
 
 pub fn get() -> AutoHarvestConfig {
@@ -89,12 +80,7 @@ pub fn set(cfg: AutoHarvestConfig) {
     if let Ok(mut c) = CONFIG.write() {
         *c = cfg.clone();
     }
-    if let (Some(p), Ok(json)) = (path(), serde_json::to_string_pretty(&cfg)) {
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(p, json);
-    }
+    crate::mcp::config_store::save_config(FILENAME, &cfg);
 }
 
 /// The decision: is a struct ripe to harvest at the given threshold?
@@ -102,27 +88,7 @@ pub fn is_ripe(age: u64, difficulty_target: u64, threshold: u64) -> bool {
     calculate_difficulty(age, difficulty_target) <= threshold
 }
 
-fn num(v: Option<&Value>) -> f64 {
-    match v {
-        Some(Value::String(s)) => s.parse().unwrap_or(0.0),
-        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
-        _ => 0.0,
-    }
-}
-
-fn truthy(v: Option<&Value>) -> bool {
-    match v {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
-        _ => false,
-    }
-}
-
-fn read_anchor(sa: Option<&Value>, field: &str) -> u64 {
-    sa.and_then(|x| x.get(field))
-        .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
-        .unwrap_or(0)
-}
+use crate::mcp::loop_util::{extract_type_id, parse_bool, parse_f64, read_u64_field};
 
 /// Invoked each sync tick (cheap when throttled). Scans owned extractors (and
 /// refineries if enabled) and kicks off a PoW task for each ripe struct that
@@ -169,146 +135,143 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
     // Refining is PRODUCTIVE-only — bait players mine but never refine (their ore
     // stays as raid bait). The primary may refine.
     use crate::mcp::virtual_players::VPlayerRole;
-    let mut targets: Vec<(String, Option<u32>, bool)> = {
-        let reg = crate::mcp::virtual_players::REGISTRY.read().unwrap();
-        reg.players
-            .iter()
-            .filter_map(|p| {
-                p.player_id
-                    .clone()
-                    .map(|pid| (pid, Some(p.index), p.role == VPlayerRole::Productive))
-            })
-            .collect()
-    };
-    if cfg.include_primary {
-        if let Some(pid) = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone()) {
-            if !pid.is_empty() {
-                targets.push((pid, None, true)); // primary may refine
-            }
-        }
-    }
+    let targets: Vec<(String, Option<u32>, bool)> =
+        crate::mcp::virtual_players::collect_targets(cfg.include_primary)
+            .into_iter()
+            // may_refine: productive vplayers and the primary refine; bait never does.
+            .map(|(pid, idx, role)| (pid, idx, !matches!(role, Some(VPlayerRole::Bait))))
+            .collect();
 
-    let mut started = 0u32;
-    for (pid, idx_opt, may_refine) in targets {
-        let page = match client.guild.struct_list_by_owner(&pid, 1).await {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let mut extractor_planet: Option<String> = None;
-        for s in page.items.iter() {
-            let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else {
-                continue;
-            };
-            let type_id = s
-                .get("type")
-                .or_else(|| s.get("struct_type"))
-                .map(|x| match x {
-                    Value::Number(n) => n.to_string(),
-                    Value::String(t) => t.clone(),
-                    _ => String::new(),
-                })
-                .unwrap_or_default();
-            let is_extractor = type_id == EXTRACTOR_TYPE;
-            // A planetary extractor's location_id IS the player's planet id.
-            if is_extractor && !truthy(s.get("is_destroyed")) {
-                if let Some(loc) = s.get("location_id").and_then(|x| x.as_str()) {
-                    extractor_planet = Some(loc.to_string());
-                }
-            }
-            let is_refinery = type_id == REFINERY_TYPE;
-            // Refine only for productive players (and if the config allows it);
-            // bait players mine only.
-            if !is_extractor && !(is_refinery && cfg.refine && may_refine) {
-                continue;
-            }
-            // Skip if a task for this struct is already in flight (completed ones
-            // linger in the registry — those we DO allow to re-issue).
-            if let Some(t) = registry.tasks.get(&sid) {
-                if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
-                    continue;
-                }
-            }
-            let entity = match client.query_entity("struct", &sid).await {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let sa = entity.get("structAttributes");
-            if !truthy(sa.and_then(|x| x.get("isOnline"))) {
-                continue;
-            }
-            let (task_type, target, anchor) = if is_extractor {
-                ("MINE", MINE_TARGET, read_anchor(sa, "blockStartOreMine"))
-            } else {
-                ("REFINE", REFINE_TARGET, read_anchor(sa, "blockStartOreRefine"))
-            };
-            if anchor == 0 {
-                continue; // not in a cycle (extractor offline-cycle / refinery has no stored ore)
-            }
-            if is_refinery {
-                // Refining needs stored ore.
-                if num(entity.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0 {
-                    continue;
-                }
-            }
-            let age = current_block.saturating_sub(anchor);
-            if !is_ripe(age, target, cfg.difficulty_threshold) {
-                continue;
-            }
-            let params = TaskParams::for_ore(&sid, task_type, anchor, target);
-            if crate::hasher::start_hash_task_core(params, app_handle.clone(), &registry).is_ok() {
-                if let Some(idx) = idx_opt {
-                    crate::hasher::register_vplayer_hash(sid.clone(), idx, task_type.to_string());
-                }
-                started += 1;
-                eprintln!(
-                    "[Auto-Harvest] {} {} (age {}, difficulty {} ≤ {})",
-                    task_type,
-                    sid,
-                    age,
-                    calculate_difficulty(age, target),
-                    cfg.difficulty_threshold
-                );
-            }
-        }
-
-        // ── Auto-explore when the planet is mined out (ore reserve = 0) ──
-        // Explore a fresh planet so mining can continue. The chain only allows
-        // explore when the planet is empty of ore, destroys the old planetary
-        // structs (freeing 1-per-player), and migrates the fleet; auto-build then
-        // rebuilds the extractor (+ refinery for productive) on the new planet.
-        // VPLAYERS ONLY — never the primary/main player (its base must never be
-        // auto-abandoned). Enforced by requiring a vplayer HD index below; the
-        // primary has idx_opt == None and is always skipped here.
-        if cfg.auto_explore {
-            if let (Some(planet_id), Some(idx)) = (extractor_planet, idx_opt) {
-                let planet_ore = match client.query_entity("planet", &planet_id).await {
-                    Ok(p) => num(p.get("gridAttributes").and_then(|g| g.get("ore"))),
-                    Err(_) => 1.0, // unknown → don't explore
+    // Fan out the per-player body with bounded concurrency so every player is
+    // scanned in the same wave (≤ MAX_CONCURRENT_PLAYERS in flight) instead of
+    // serially — the serial walk reached the tail cohort minutes late.
+    let started = Arc::new(AtomicU32::new(0));
+    let started_body = started.clone();
+    let difficulty_threshold = cfg.difficulty_threshold;
+    let refine = cfg.refine;
+    let auto_explore = cfg.auto_explore;
+    let app = app_handle.clone();
+    crate::mcp::loop_util::for_each_player_concurrent(
+        targets,
+        crate::mcp::loop_util::MAX_CONCURRENT_PLAYERS,
+        move |(pid, idx_opt, may_refine)| {
+            let app = app.clone();
+            let client = client.clone();
+            let registry = registry.clone();
+            let started = started_body.clone();
+            async move {
+                let page = match client.guild.struct_list_by_owner(&pid, 1).await {
+                    Ok(p) => p,
+                    Err(_) => return,
                 };
-                if planet_ore <= 0.0 {
-                    let res = crate::mcp::vplayer_bridge::call(
-                        app_handle,
-                        "sign",
-                        serde_json::json!({
-                            "index": idx,
-                            "type_url": "/structs.structs.MsgPlanetExplore",
-                            "payload": { "playerId": pid }
-                        }),
-                        60,
-                    )
-                    .await;
-                    if let Ok(v) = res {
-                        if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 {
-                            // Planet changed → bust the owned-cache so threat
-                            // detection re-resolves this player's new planet.
-                            crate::mcp::virtual_players::invalidate_owned(&pid);
-                            eprintln!("[Auto-Harvest] explored (planet {} mined out) for {}", planet_id, pid);
+                let mut extractor_planet: Option<String> = None;
+                for s in page.items.iter() {
+                    let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else {
+                        continue;
+                    };
+                    let type_id = extract_type_id(s);
+                    let is_extractor = type_id == EXTRACTOR_TYPE;
+                    // A planetary extractor's location_id IS the player's planet id.
+                    if is_extractor && !parse_bool(s.get("is_destroyed")) {
+                        if let Some(loc) = s.get("location_id").and_then(|x| x.as_str()) {
+                            extractor_planet = Some(loc.to_string());
+                        }
+                    }
+                    let is_refinery = type_id == REFINERY_TYPE;
+                    // Refine only for productive players (and if the config allows it);
+                    // bait players mine only.
+                    if !is_extractor && !(is_refinery && refine && may_refine) {
+                        continue;
+                    }
+                    // Skip if a task for this struct is already in flight (completed ones
+                    // linger in the registry — those we DO allow to re-issue).
+                    if let Some(t) = registry.tasks.get(&sid) {
+                        if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
+                            continue;
+                        }
+                    }
+                    let entity = match client.query_entity("struct", &sid).await {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    let sa = entity.get("structAttributes");
+                    if !parse_bool(sa.and_then(|x| x.get("isOnline"))) {
+                        continue;
+                    }
+                    let (task_type, target, anchor) = if is_extractor {
+                        ("MINE", MINE_TARGET, read_u64_field(sa, "blockStartOreMine"))
+                    } else {
+                        ("REFINE", REFINE_TARGET, read_u64_field(sa, "blockStartOreRefine"))
+                    };
+                    if anchor == 0 {
+                        continue; // not in a cycle (extractor offline-cycle / refinery has no stored ore)
+                    }
+                    if is_refinery {
+                        // Refining needs stored ore.
+                        if parse_f64(entity.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0 {
+                            continue;
+                        }
+                    }
+                    let age = current_block.saturating_sub(anchor);
+                    if !is_ripe(age, target, difficulty_threshold) {
+                        continue;
+                    }
+                    let params = TaskParams::for_ore(&sid, task_type, anchor, target);
+                    if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
+                        if let Some(idx) = idx_opt {
+                            crate::hasher::register_vplayer_hash(sid.clone(), idx, task_type.to_string());
+                        }
+                        started.fetch_add(1, Ordering::Relaxed);
+                        eprintln!(
+                            "[Auto-Harvest] {} {} (age {}, difficulty {} ≤ {})",
+                            task_type,
+                            sid,
+                            age,
+                            calculate_difficulty(age, target),
+                            difficulty_threshold
+                        );
+                    }
+                }
+
+                // ── Auto-explore when the planet is mined out (ore reserve = 0) ──
+                // Explore a fresh planet so mining can continue. The chain only allows
+                // explore when the planet is empty of ore, destroys the old planetary
+                // structs (freeing 1-per-player), and migrates the fleet; auto-build then
+                // rebuilds the extractor (+ refinery for productive) on the new planet.
+                // VPLAYERS ONLY — never the primary/main player (its base must never be
+                // auto-abandoned). Enforced by requiring a vplayer HD index below; the
+                // primary has idx_opt == None and is always skipped here.
+                if auto_explore {
+                    if let (Some(planet_id), Some(idx)) = (extractor_planet, idx_opt) {
+                        let planet_ore = match client.query_entity("planet", &planet_id).await {
+                            Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
+                            Err(_) => 1.0, // unknown → don't explore
+                        };
+                        if planet_ore <= 0.0 {
+                            let res = crate::mcp::vplayer_bridge::sign_action(
+                                &app,
+                                idx,
+                                "/structs.structs.MsgPlanetExplore",
+                                serde_json::json!({ "playerId": pid }),
+                                60,
+                            )
+                            .await;
+                            if let Ok(v) = res {
+                                if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 {
+                                    // Planet changed → bust the owned-cache so threat
+                                    // detection re-resolves this player's new planet.
+                                    crate::mcp::virtual_players::invalidate_owned(&pid);
+                                    eprintln!("[Auto-Harvest] explored (planet {} mined out) for {}", planet_id, pid);
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
-    }
+        },
+    )
+    .await;
+    let started = started.load(Ordering::Relaxed);
     if started > 0 {
         eprintln!("[Auto-Harvest] started {} task(s)", started);
     }

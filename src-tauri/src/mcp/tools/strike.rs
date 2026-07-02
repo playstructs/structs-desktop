@@ -233,13 +233,7 @@ pub async fn execute(
                 "targetStructId": [target.clone()],
                 "weaponSystem": wsys,
             });
-            match vplayer_bridge::call(
-                app,
-                "sign",
-                json!({ "index": index, "type_url": "/structs.structs.MsgStructAttack", "payload": payload }),
-                60,
-            )
-            .await
+            match vplayer_bridge::sign_action(app, index, "/structs.structs.MsgStructAttack", payload, 60).await
             {
                 Ok(res) => {
                     let code = res.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);

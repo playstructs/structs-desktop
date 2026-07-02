@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::hasher::types::now_millis;
 use crate::mcp::cosmos_client::CosmosClient;
@@ -45,14 +45,8 @@ static CONFIG: LazyLock<RwLock<AutoInfuseConfig>> = LazyLock::new(|| RwLock::new
 static LAST_RUN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
-fn path() -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|d| d.join("structs-app").join(FILENAME))
-}
 fn load() -> AutoInfuseConfig {
-    path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    crate::mcp::config_store::load_config(FILENAME)
 }
 pub fn get() -> AutoInfuseConfig {
     CONFIG.read().map(|c| c.clone()).unwrap_or_default()
@@ -61,20 +55,7 @@ pub fn set(cfg: AutoInfuseConfig) {
     if let Ok(mut c) = CONFIG.write() {
         *c = cfg.clone();
     }
-    if let (Some(p), Ok(j)) = (path(), serde_json::to_string_pretty(&cfg)) {
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(p, j);
-    }
-}
-
-fn num(v: Option<&Value>) -> f64 {
-    match v {
-        Some(Value::String(s)) => s.parse().unwrap_or(0.0),
-        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
-        _ => 0.0,
-    }
+    crate::mcp::config_store::save_config(FILENAME, &cfg);
 }
 
 /// Outcome of an infuse attempt, for reporting.
@@ -112,7 +93,7 @@ pub async fn infuse_primary_excess(
 
     // Current liquid Alpha (ualpha).
     let balance = match client.query_entity("player", &primary_pid).await {
-        Ok(v) => num(v
+        Ok(v) => crate::mcp::loop_util::parse_f64(v
             .get("playerInventory")
             .and_then(|i| i.get("rocks"))
             .and_then(|r| r.get("amount"))) as u64,
@@ -133,10 +114,11 @@ pub async fn infuse_primary_excess(
         "amount": { "denom": "ualpha", "amount": infuse.to_string() },
     });
     // HD index 0 = the primary's own key off the shared mnemonic.
-    let res = crate::mcp::vplayer_bridge::call(
+    let res = crate::mcp::vplayer_bridge::sign_action(
         app_handle,
-        "sign",
-        json!({ "index": 0, "type_url": "/structs.structs.MsgReactorInfuse", "payload": payload }),
+        0,
+        "/structs.structs.MsgReactorInfuse",
+        payload,
         60,
     )
     .await?;

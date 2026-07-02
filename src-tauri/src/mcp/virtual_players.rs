@@ -117,6 +117,27 @@ impl VirtualPlayerStore {
     }
 }
 
+/// Registered vplayers that have an on-chain player id, as
+/// `(player_id, HD index, role)`. When `include_primary`, the primary player is
+/// appended as `(pid, None, None)`. Shared target list for the auto-loops.
+pub fn collect_targets(include_primary: bool) -> Vec<(String, Option<u32>, Option<VPlayerRole>)> {
+    let mut targets: Vec<(String, Option<u32>, Option<VPlayerRole>)> = {
+        let reg = REGISTRY.read().unwrap();
+        reg.players
+            .iter()
+            .filter_map(|p| p.player_id.clone().map(|pid| (pid, Some(p.index), Some(p.role))))
+            .collect()
+    };
+    if include_primary {
+        if let Some(pid) = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone()) {
+            if !pid.is_empty() {
+                targets.push((pid, None, None));
+            }
+        }
+    }
+    targets
+}
+
 /// The team's owned on-chain entities (for threat detection across all virtual
 /// players, not just the primary). Planet-subject matching covers each vplayer's
 /// structs too (their struct events are keyed to the planet subject), so we only

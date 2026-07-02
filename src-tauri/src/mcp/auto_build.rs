@@ -99,14 +99,8 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// completion reads → ~0 once the fleet is built out).
 static BUILT_CACHE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-fn path() -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|d| d.join("structs-app").join(FILENAME))
-}
 fn load() -> AutoBuildConfig {
-    path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    crate::mcp::config_store::load_config(FILENAME)
 }
 pub fn get() -> AutoBuildConfig {
     CONFIG.read().map(|c| c.clone()).unwrap_or_default()
@@ -115,12 +109,7 @@ pub fn set(cfg: AutoBuildConfig) {
     if let Ok(mut c) = CONFIG.write() {
         *c = cfg.clone();
     }
-    if let (Some(p), Ok(j)) = (path(), serde_json::to_string_pretty(&cfg)) {
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(p, j);
-    }
+    crate::mcp::config_store::save_config(FILENAME, &cfg);
 }
 
 fn ambit_to_enum(a: &str) -> i64 {
@@ -134,16 +123,7 @@ fn ambit_to_enum(a: &str) -> i64 {
     }
 }
 
-fn num(v: Option<&Value>) -> f64 {
-    match v {
-        Some(Value::String(s)) => s.parse().unwrap_or(0.0),
-        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
-        _ => 0.0,
-    }
-}
-fn truthy(v: Option<&Value>) -> bool {
-    matches!(v, Some(Value::Bool(true))) || matches!(v, Some(Value::String(s)) if s.eq_ignore_ascii_case("true"))
-}
+use crate::mcp::loop_util::{parse_bool, parse_f64, read_u64_field};
 
 /// Lowest free slot index in 0..SLOTS_PER_AMBIT not present in `occupied`.
 fn first_free(occupied: &HashSet<u64>) -> Option<u64> {
@@ -200,178 +180,175 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
 
     // (player_id, vplayer index | None for primary, role | None for primary).
     use crate::mcp::virtual_players::VPlayerRole;
-    let mut targets: Vec<(String, Option<u32>, Option<VPlayerRole>)> = {
-        let reg = crate::mcp::virtual_players::REGISTRY.read().unwrap();
-        reg.players
-            .iter()
-            .filter_map(|p| p.player_id.clone().map(|pid| (pid, Some(p.index), Some(p.role))))
-            .collect()
-    };
-    if cfg.include_primary {
-        if let Some(pid) = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone()) {
-            if !pid.is_empty() {
-                targets.push((pid, None, None));
-            }
-        }
-    }
+    let targets = crate::mcp::virtual_players::collect_targets(cfg.include_primary);
 
-    for (pid, idx_opt, role) in targets {
-        let structs = match client.guild.struct_list_by_owner(&pid, 1).await {
-            Ok(p) => p.items,
-            Err(_) => continue,
-        };
+    // Fan out the per-player body with bounded concurrency so every player is
+    // scanned in the same wave (≤ MAX_CONCURRENT_PLAYERS in flight) instead of
+    // serially — the serial walk reached the tail cohort minutes late.
+    let complete_difficulty = cfg.complete_difficulty;
+    let app = app_handle.clone();
+    crate::mcp::loop_util::for_each_player_concurrent(
+        targets,
+        crate::mcp::loop_util::MAX_CONCURRENT_PLAYERS,
+        move |(pid, idx_opt, role)| {
+            let app = app.clone();
+            let client = client.clone();
+            let registry = registry.clone();
+            async move {
+                let structs = match client.guild.struct_list_by_owner(&pid, 1).await {
+                    Ok(p) => p.items,
+                    Err(_) => return,
+                };
 
-        // ── 1. Complete ripe building structs ──
-        for s in &structs {
-            if truthy(s.get("is_destroyed")) {
-                continue;
-            }
-            let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else { continue };
-            if BUILT_CACHE.lock().unwrap().contains(&sid) {
-                continue;
-            }
-            if let Some(t) = registry.tasks.get(&sid) {
-                if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
-                    continue;
+                // ── 1. Complete ripe building structs ──
+                for s in &structs {
+                    if parse_bool(s.get("is_destroyed")) {
+                        continue;
+                    }
+                    let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else { continue };
+                    if BUILT_CACHE.lock().unwrap().contains(&sid) {
+                        continue;
+                    }
+                    if let Some(t) = registry.tasks.get(&sid) {
+                        if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
+                            continue;
+                        }
+                    }
+                    let entity = match client.query_entity("struct", &sid).await {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    let sa = entity.get("structAttributes");
+                    if parse_bool(sa.and_then(|x| x.get("isBuilt"))) {
+                        BUILT_CACHE.lock().unwrap().insert(sid);
+                        continue;
+                    }
+                    let anchor = read_u64_field(sa, "blockStartBuild");
+                    if anchor == 0 {
+                        continue;
+                    }
+                    let type_id = s.get("type").map(|x| match x {
+                        Value::Number(n) => n.to_string(),
+                        Value::String(t) => t.clone(),
+                        _ => String::new(),
+                    });
+                    let difficulty_target = type_id
+                        .as_ref()
+                        .and_then(|t| {
+                            crate::game_state::GAME_STATE.read().ok().and_then(|g| g.struct_types.get(t).map(|st| st.build_difficulty))
+                        })
+                        .unwrap_or(0);
+                    if difficulty_target == 0 {
+                        continue;
+                    }
+                    let age = current_block.saturating_sub(anchor);
+                    if calculate_difficulty(age, difficulty_target) > complete_difficulty {
+                        continue;
+                    }
+                    let params = TaskParams::for_ore(&sid, "BUILD", anchor, difficulty_target);
+                    if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
+                        if let Some(idx) = idx_opt {
+                            crate::hasher::register_vplayer_hash(sid.clone(), idx, "BUILD".to_string());
+                        }
+                        eprintln!("[Auto-Build] complete {} (age {}, build-difficulty ≤ {})", sid, age, complete_difficulty);
+                    }
+                }
+
+                // ── 2. Initiate one build in the next free slot (charge + power gated) ──
+                // Read the player's grid (charge from lastAction, structsLoad, personal cap).
+                let player = match client.query_entity("player", &pid).await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let ga = player.get("gridAttributes");
+                let last_action = read_u64_field(ga, "lastAction");
+                let charge = current_block.saturating_sub(last_action);
+                if charge < BUILD_CHARGE {
+                    return; // not enough charge to build this scan
+                }
+                let structs_load = parse_f64(ga.and_then(|x| x.get("structsLoad")));
+                let personal_cap = parse_f64(ga.and_then(|x| x.get("capacity")));
+                let personal_load = parse_f64(ga.and_then(|x| x.get("load")));
+                let total_cap = personal_cap + conn_cap;
+                let available = total_cap - structs_load - personal_load;
+
+                // Occupied slots per (location_type, ambit).
+                let mut occ: HashMap<(String, String), HashSet<u64>> = HashMap::new();
+                for s in &structs {
+                    if parse_bool(s.get("is_destroyed")) {
+                        continue;
+                    }
+                    let lt = s.get("location_type").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let amb = s.get("operating_ambit").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let slot = s.get("slot").and_then(|x| x.as_u64()).unwrap_or(0);
+                    occ.entry((lt, amb)).or_default().insert(slot);
+                }
+
+                // Productive players build a production-first loadout (extractor +
+                // refinery + light defense); bait players (and the primary) get the
+                // defensive fill. Bait never gets a refinery — that stays productive-only.
+                let loadout: &[(&str, &str, &str)] = match role {
+                    Some(VPlayerRole::Productive) => PRODUCTIVE_LOADOUT,
+                    _ => LOADOUT,
+                };
+                // Type names the player already has (to skip 1-per-player duplicates).
+                let present: HashSet<String> = structs
+                    .iter()
+                    .filter(|s| !parse_bool(s.get("is_destroyed")))
+                    .filter_map(|s| s.get("type_name").and_then(|x| x.as_str()).map(String::from))
+                    .collect();
+
+                // Walk the loadout; build the first ripe (free slot + power + known type).
+                for (target, ambit, type_name) in loadout {
+                    if ONE_PER_PLAYER.contains(type_name) && present.contains(*type_name) {
+                        continue; // already have this 1-per-player struct
+                    }
+                    let key = (target.to_string(), ambit.to_string());
+                    let used = occ.get(&key).map(|s| s.len()).unwrap_or(0);
+                    if used >= SLOTS_PER_AMBIT {
+                        continue;
+                    }
+                    let Some(slot) = first_free(occ.get(&key).unwrap_or(&HashSet::new())) else { continue };
+                    // Resolve type id + draw from the catalog.
+                    let (type_id, draw) = {
+                        let gs = crate::game_state::GAME_STATE.read().unwrap();
+                        match gs.struct_types.values().find(|t| t.name.eq_ignore_ascii_case(type_name)) {
+                            Some(t) => (t.id, t.passive_draw.unwrap_or(0.0)),
+                            None => continue,
+                        }
+                    };
+                    if conn_cap > 0.0 && available < draw {
+                        continue; // would push offline — skip this (heavier) type, try a cheaper one
+                    }
+                    let payload = json!({
+                        "playerId": pid,
+                        "structTypeId": type_id,
+                        "operatingAmbit": ambit_to_enum(ambit),
+                        "slot": slot,
+                    });
+                    // Only vplayers route through the façade signer; primary needs its own
+                    // path (not wired here), so skip primary initiates for now.
+                    let Some(idx) = idx_opt else { break };
+                    let res = crate::mcp::vplayer_bridge::sign_action(
+                        &app,
+                        idx,
+                        "/structs.structs.MsgStructBuildInitiate",
+                        payload,
+                        60,
+                    )
+                    .await;
+                    match res {
+                        Ok(v) if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 => {
+                            eprintln!("[Auto-Build] {} {} {} slot {} (player {})", target, ambit, type_name, slot, pid);
+                        }
+                        _ => {}
+                    }
+                    break; // one initiate per player per scan (charge resets to 0)
                 }
             }
-            let entity = match client.query_entity("struct", &sid).await {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let sa = entity.get("structAttributes");
-            if truthy(sa.and_then(|x| x.get("isBuilt"))) {
-                BUILT_CACHE.lock().unwrap().insert(sid);
-                continue;
-            }
-            let anchor = sa
-                .and_then(|x| x.get("blockStartBuild"))
-                .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|v| v.parse().ok())))
-                .unwrap_or(0);
-            if anchor == 0 {
-                continue;
-            }
-            let type_id = s.get("type").map(|x| match x {
-                Value::Number(n) => n.to_string(),
-                Value::String(t) => t.clone(),
-                _ => String::new(),
-            });
-            let difficulty_target = type_id
-                .as_ref()
-                .and_then(|t| {
-                    crate::game_state::GAME_STATE.read().ok().and_then(|g| g.struct_types.get(t).map(|st| st.build_difficulty))
-                })
-                .unwrap_or(0);
-            if difficulty_target == 0 {
-                continue;
-            }
-            let age = current_block.saturating_sub(anchor);
-            if calculate_difficulty(age, difficulty_target) > cfg.complete_difficulty {
-                continue;
-            }
-            let params = TaskParams::for_ore(&sid, "BUILD", anchor, difficulty_target);
-            if crate::hasher::start_hash_task_core(params, app_handle.clone(), &registry).is_ok() {
-                if let Some(idx) = idx_opt {
-                    crate::hasher::register_vplayer_hash(sid.clone(), idx, "BUILD".to_string());
-                }
-                eprintln!("[Auto-Build] complete {} (age {}, build-difficulty ≤ {})", sid, age, cfg.complete_difficulty);
-            }
-        }
-
-        // ── 2. Initiate one build in the next free slot (charge + power gated) ──
-        // Read the player's grid (charge from lastAction, structsLoad, personal cap).
-        let player = match client.query_entity("player", &pid).await {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let ga = player.get("gridAttributes");
-        let last_action = ga
-            .and_then(|x| x.get("lastAction"))
-            .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|v| v.parse().ok())))
-            .unwrap_or(0);
-        let charge = current_block.saturating_sub(last_action);
-        if charge < BUILD_CHARGE {
-            continue; // not enough charge to build this scan
-        }
-        let structs_load = num(ga.and_then(|x| x.get("structsLoad")));
-        let personal_cap = num(ga.and_then(|x| x.get("capacity")));
-        let personal_load = num(ga.and_then(|x| x.get("load")));
-        let total_cap = personal_cap + conn_cap;
-        let available = total_cap - structs_load - personal_load;
-
-        // Occupied slots per (location_type, ambit).
-        let mut occ: HashMap<(String, String), HashSet<u64>> = HashMap::new();
-        for s in &structs {
-            if truthy(s.get("is_destroyed")) {
-                continue;
-            }
-            let lt = s.get("location_type").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let amb = s.get("operating_ambit").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let slot = s.get("slot").and_then(|x| x.as_u64()).unwrap_or(0);
-            occ.entry((lt, amb)).or_default().insert(slot);
-        }
-
-        // Productive players build a production-first loadout (extractor +
-        // refinery + light defense); bait players (and the primary) get the
-        // defensive fill. Bait never gets a refinery — that stays productive-only.
-        let loadout: &[(&str, &str, &str)] = match role {
-            Some(VPlayerRole::Productive) => PRODUCTIVE_LOADOUT,
-            _ => LOADOUT,
-        };
-        // Type names the player already has (to skip 1-per-player duplicates).
-        let present: HashSet<String> = structs
-            .iter()
-            .filter(|s| !truthy(s.get("is_destroyed")))
-            .filter_map(|s| s.get("type_name").and_then(|x| x.as_str()).map(String::from))
-            .collect();
-
-        // Walk the loadout; build the first ripe (free slot + power + known type).
-        for (target, ambit, type_name) in loadout {
-            if ONE_PER_PLAYER.contains(type_name) && present.contains(*type_name) {
-                continue; // already have this 1-per-player struct
-            }
-            let key = (target.to_string(), ambit.to_string());
-            let used = occ.get(&key).map(|s| s.len()).unwrap_or(0);
-            if used >= SLOTS_PER_AMBIT {
-                continue;
-            }
-            let Some(slot) = first_free(occ.get(&key).unwrap_or(&HashSet::new())) else { continue };
-            // Resolve type id + draw from the catalog.
-            let (type_id, draw) = {
-                let gs = crate::game_state::GAME_STATE.read().unwrap();
-                match gs.struct_types.values().find(|t| t.name.eq_ignore_ascii_case(type_name)) {
-                    Some(t) => (t.id, t.passive_draw.unwrap_or(0.0)),
-                    None => continue,
-                }
-            };
-            if conn_cap > 0.0 && available < draw {
-                continue; // would push offline — skip this (heavier) type, try a cheaper one
-            }
-            let payload = json!({
-                "playerId": pid,
-                "structTypeId": type_id,
-                "operatingAmbit": ambit_to_enum(ambit),
-                "slot": slot,
-            });
-            // Only vplayers route through the façade signer; primary needs its own
-            // path (not wired here), so skip primary initiates for now.
-            let Some(idx) = idx_opt else { break };
-            let res = crate::mcp::vplayer_bridge::call(
-                app_handle,
-                "sign",
-                json!({ "index": idx, "type_url": "/structs.structs.MsgStructBuildInitiate", "payload": payload }),
-                60,
-            )
-            .await;
-            match res {
-                Ok(v) if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 => {
-                    eprintln!("[Auto-Build] {} {} {} slot {} (player {})", target, ambit, type_name, slot, pid);
-                }
-                _ => {}
-            }
-            break; // one initiate per player per scan (charge resets to 0)
-        }
-    }
+        },
+    )
+    .await;
 }
 
 #[cfg(test)]

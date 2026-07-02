@@ -1122,13 +1122,7 @@ pub async fn execute(
             };
 
             // Sign+broadcast as the virtual player via the façade (its key, never Rust's).
-            match vplayer_bridge::call(
-                app_handle,
-                "sign",
-                json!({ "index": index, "type_url": type_url, "payload": payload }),
-                60,
-            )
-            .await
+            match vplayer_bridge::sign_action(app_handle, index, &type_url, payload, 60).await
             {
                 Ok(res) => {
                     let code = res.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);

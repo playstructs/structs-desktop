@@ -122,13 +122,7 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
     );
     let app = app_handle.clone();
     tauri::async_runtime::spawn(async move {
-        match crate::mcp::vplayer_bridge::call(
-            &app,
-            "sign",
-            serde_json::json!({ "index": index, "type_url": type_url, "payload": payload }),
-            60,
-        )
-        .await
+        match crate::mcp::vplayer_bridge::sign_action(&app, index, type_url, payload, 60).await
         {
             Ok(_) => eprintln!("[Structs VPlayer] completion signed for vplayer {}", index),
             Err(e) => eprintln!("[Structs VPlayer] completion sign failed for vplayer {}: {}", index, e),
