@@ -298,6 +298,23 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
                     .filter_map(|s| s.get("type_name").and_then(|x| x.as_str()).map(String::from))
                     .collect();
 
+                // ── TEMP DIAGNOSTIC: record entry into the initiate walk + what the loop sees.
+                if idx_opt.is_some() {
+                    if let Some(mut dp) = dirs::config_dir() {
+                        dp.push("structs-app");
+                        let _ = std::fs::create_dir_all(&dp);
+                        dp.push("auto_build_debug.log");
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&dp) {
+                            use std::io::Write;
+                            let occ_keys: Vec<_> = occ.keys().cloned().collect();
+                            let _ = writeln!(
+                                f,
+                                "WALK player {} charge {} structs {} present {:?} occ_keys {:?} loadout_len {}",
+                                pid, charge, structs.len(), present, occ_keys, loadout.len()
+                            );
+                        }
+                    }
+                }
                 // Walk the loadout; build the first ripe (free slot + power + known type).
                 for (target, ambit, type_name) in loadout {
                     if ONE_PER_PLAYER.contains(type_name) && present.contains(*type_name) {
@@ -329,6 +346,11 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
                     // Only vplayers route through the façade signer; primary needs its own
                     // path (not wired here), so skip primary initiates for now.
                     let Some(idx) = idx_opt else { break };
+                    // ── TEMP DIAGNOSTIC: capture the exact decision before signing.
+                    let dbg_pre = format!(
+                        "player {} idx {} :: {} {}/{} slot {} typeId {} occ{:?}={:?} avail {} draw {} conn_cap {}",
+                        pid, idx, type_name, target, ambit, slot, type_id, key, occ.get(&key), available, draw, conn_cap
+                    );
                     let res = crate::mcp::vplayer_bridge::sign_action(
                         &app,
                         idx,
@@ -337,6 +359,25 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
                         60,
                     )
                     .await;
+                    // ── TEMP DIAGNOSTIC: append decision + chain result to a readable log file.
+                    {
+                        let dbg_post = match &res {
+                            Ok(v) => format!(
+                                "OK code={:?} rawLog={:?} tx={:?}",
+                                v.get("code"), v.get("rawLog"), v.get("transactionHash")
+                            ),
+                            Err(e) => format!("ERR {}", e),
+                        };
+                        if let Some(mut dp) = dirs::config_dir() {
+                            dp.push("structs-app");
+                            let _ = std::fs::create_dir_all(&dp);
+                            dp.push("auto_build_debug.log");
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&dp) {
+                                use std::io::Write;
+                                let _ = writeln!(f, "{} => {}", dbg_pre, dbg_post);
+                            }
+                        }
+                    }
                     match res {
                         Ok(v) if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 => {
                             eprintln!("[Auto-Build] {} {} {} slot {} (player {})", target, ambit, type_name, slot, pid);
