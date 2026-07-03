@@ -26,6 +26,23 @@ use tokio::sync::{oneshot, Semaphore};
 /// actively signing. Reads still fan out wider (`loop_util::MAX_CONCURRENT_PLAYERS`).
 static SIGN_GATE: Semaphore = Semaphore::const_new(4);
 
+/// Per-account (HD index) serialization. Two txs from the SAME vplayer must never be
+/// in flight together: the pooled `SigningStargateClient` caches the account sequence,
+/// so concurrent broadcasts from one account race it and fail with
+/// "account sequence mismatch expected N got N-1". That wedged the mass build-out —
+/// a worker with N structs completing at once collides N ways and NONE land. Serialize
+/// per index (held for the whole round-trip); different vplayers still sign
+/// concurrently up to SIGN_GATE.
+static ACCOUNT_LOCKS: std::sync::LazyLock<std::sync::Mutex<HashMap<i64, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn account_lock(index: i64) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut m = ACCOUNT_LOCKS.lock().unwrap();
+    m.entry(index)
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 /// A request sent to the webapp façade.
 #[derive(Debug, Clone, Serialize)]
 pub struct VPlayerRequest {
@@ -57,6 +74,16 @@ pub async fn call(
     args: Value,
     timeout_secs: u64,
 ) -> Result<Value, String> {
+    // Serialize per account FIRST (before the global gate, so a same-account tx waiting
+    // its turn doesn't hold a scarce SIGN_GATE permit). Held for the whole round-trip so
+    // one vplayer's txs never race their cached sequence.
+    let _acct_guard = if matches!(op, "sign" | "signup") {
+        let idx = args.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
+        Some(account_lock(idx).lock_owned().await)
+    } else {
+        None
+    };
+
     // Throttle the WS-opening ops so a wide loop fan-out can't exhaust the webview
     // WebSocket pool. Held for the whole round-trip (dropped on return). Read-only
     // ops ("derive"/"list") don't open a socket, so they skip the gate.
