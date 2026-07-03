@@ -206,14 +206,14 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                     } else {
                         ("REFINE", REFINE_TARGET, read_u64_field(sa, "blockStartOreRefine"))
                     };
+                    // A non-zero anchor already means an ACTIVE cycle: for a refinery,
+                    // `blockStartOreRefine` is only set once a refine has begun (i.e. the
+                    // player's stored ore is committed), so the anchor IS the "has ore"
+                    // signal. (Do NOT re-check the refinery struct's own `gridAttributes.ore`
+                    // — mined ore lives in the PLAYER's storedOre, so the struct's ore is
+                    // always 0, and gating on it made auto-refine never fire.)
                     if anchor == 0 {
-                        continue; // not in a cycle (extractor offline-cycle / refinery has no stored ore)
-                    }
-                    if is_refinery {
-                        // Refining needs stored ore.
-                        if parse_f64(entity.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0 {
-                            continue;
-                        }
+                        continue; // not in a cycle (extractor between mines / refinery idle)
                     }
                     let age = current_block.saturating_sub(anchor);
                     if !is_ripe(age, target, difficulty_threshold) {
