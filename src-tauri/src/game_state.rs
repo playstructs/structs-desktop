@@ -433,6 +433,10 @@ pub async fn sync_game_state(
         tokio::spawn(async move {
             crate::mcp::auto_infuse::tick(&app_i, false).await;
         });
+        let app_d = app_handle.clone();
+        tokio::spawn(async move {
+            crate::mcp::auto_defend::tick(&app_d, false).await;
+        });
     }
 
     Ok(())

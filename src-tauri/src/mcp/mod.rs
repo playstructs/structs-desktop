@@ -4,6 +4,7 @@ pub mod config_store;
 pub mod cosmos_client;
 pub mod error_translator;
 pub mod auto_build;
+pub mod auto_defend;
 pub mod auto_harvest;
 pub mod auto_infuse;
 pub mod guild_api;

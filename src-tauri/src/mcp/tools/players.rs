@@ -674,6 +674,49 @@ pub async fn execute(
             ))]
         }
 
+        // Native auto-defense: assign each productive vplayer's idle combat structs
+        // to defend its refinery (MsgStructDefenseSet), continuously as new structs
+        // come online. One assignment per player per scan (1 charge). Off by default.
+        "autodefend" => {
+            let mut cfg = crate::mcp::auto_defend::get();
+            let a = &params.args;
+            let mut changed = false;
+            if let Some(v) = a.get("enabled").and_then(|v| v.as_bool()) {
+                cfg.enabled = v;
+                changed = true;
+            }
+            if let Some(v) = a.get("interval_secs").and_then(|v| v.as_u64()) {
+                cfg.interval_secs = v.max(60);
+                changed = true;
+            }
+            if let Some(v) = a.get("include_bait").and_then(|v| v.as_bool()) {
+                cfg.include_bait = v;
+                changed = true;
+            }
+            if changed {
+                crate::mcp::auto_defend::set(cfg.clone());
+            }
+            let force_now = a.get("now").and_then(|v| v.as_bool()).unwrap_or(false);
+            if force_now && cfg.enabled {
+                let app = app_handle.clone();
+                tokio::spawn(async move {
+                    crate::mcp::auto_defend::tick(&app, true).await;
+                });
+            }
+            vec![Content::text(format!(
+                "Auto-defense {} — assigns each productive vplayer's idle combat structs to defend its refinery (one defender/scan, charge-paced) · scans every {}s · include_bait {}.{}\n{}",
+                if cfg.enabled { "ON" } else { "OFF" },
+                cfg.interval_secs,
+                cfg.include_bait,
+                if changed { " (updated)" } else { "" },
+                if force_now && cfg.enabled {
+                    "Triggered an immediate scan.".to_string()
+                } else {
+                    "Set {enabled:true} to run it, {now:true} to scan immediately. It idles once all defenders are assigned.".to_string()
+                }
+            ))]
+        }
+
         // Configurable "keep N grams, infuse the rest" rule for the PRIMARY.
         // Grows the primary's own capacity via MsgReactorInfuse signed at HD
         // index 0 (the primary's key). Args: keep_grams, enabled (auto-run), now.
@@ -959,7 +1002,16 @@ pub async fn execute(
             let Some(action) = params.action.as_deref().filter(|s| !s.is_empty()) else {
                 return vec![Content::text("Error: action required (explore|build|attack|defend|activate|deactivate|deploy).".to_string())];
             };
-            let (index, player_id) = {
+            // `player:"primary"` (or "0") targets the PRIMARY player at HD index 0 —
+            // signed via the same façade path auto_infuse uses. This is the opt-in
+            // hook for MCP-managed infrastructure: primary-only txs like
+            // MsgAllocationCreate / MsgSubstationAllocationConnect (allocate the
+            // primary's infused capacity into the guild substation). Manual only —
+            // nothing auto-signs primary txs, so it's off unless deliberately invoked.
+            let (index, player_id) = if matches!(key, "primary" | "0") {
+                let pid = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone());
+                (0u32, pid)
+            } else {
                 let reg = REGISTRY.read().unwrap();
                 match reg.find(key) {
                     Some(p) => (p.index, p.player_id.clone()),

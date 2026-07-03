@@ -212,7 +212,7 @@ impl StructsMcpHandler {
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "enum": ["list", "roster", "create", "state", "act", "capacity", "role", "economy", "infra", "harvest", "autobuild", "infuse"] },
+                        "command": { "type": "string", "enum": ["list", "roster", "create", "state", "act", "capacity", "role", "economy", "infra", "harvest", "autobuild", "autodefend", "infuse"] },
                         "name": { "type": "string", "description": "create: display name (3–20 chars: letters/digits/-/_)." },
                         "index": { "type": "integer", "description": "create: HD index to use (>= 1); defaults to next free." },
                         "player": { "type": "string", "description": "state/act/role: which virtual player — index, address, or player id." },
