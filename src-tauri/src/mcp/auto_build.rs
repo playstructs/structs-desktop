@@ -72,7 +72,9 @@ const ONE_PER_PLAYER: &[&str] = &[
 pub struct AutoBuildConfig {
     /// Master on/off. Off by default — it auto-signs build txs.
     pub enabled: bool,
-    /// Complete a building struct once its build difficulty is ≤ this.
+    /// Complete a building struct once its build difficulty is ≤ this. Lower =
+    /// more patient (waits for the proof to decay cheaper); default 4 lets one
+    /// GPU complete builds for a much larger vplayer fleet.
     pub complete_difficulty: u64,
     /// Min seconds between scans. Charge regenerates ~1/block (~6s), so a build
     /// becomes affordable again ~48s after the last; 120s leaves comfortable margin.
@@ -85,7 +87,7 @@ impl Default for AutoBuildConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            complete_difficulty: 12,
+            complete_difficulty: 4,
             interval_secs: 120,
             include_primary: false,
         }
@@ -378,7 +380,7 @@ mod tests {
     fn default_off_and_loadout_shape() {
         let c = AutoBuildConfig::default();
         assert!(!c.enabled);
-        assert_eq!(c.complete_difficulty, 12);
+        assert_eq!(c.complete_difficulty, 4);
         assert_eq!(LOADOUT[0].2, "Ore Extractor"); // miner first (rebuilt after explore)
         assert_eq!(LOADOUT.last().unwrap().2, "Ore Bunker"); // heavy last
         assert_eq!(PRODUCTIVE_LOADOUT[0].2, "Ore Extractor");

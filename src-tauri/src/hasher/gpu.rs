@@ -110,8 +110,9 @@ pub fn run_gpu_hash(
     }
     emit_event(&app_handle, "hash_progress", &handle);
 
-    // Wait for difficulty
-    loop {
+    // Wait for difficulty. `break`s with the current difficulty once ripe — used
+    // as the admission priority below (easiest tasks grind first).
+    let admit_difficulty = loop {
         if handle.is_cancelled() {
             return;
         }
@@ -132,7 +133,7 @@ pub fn run_gpu_hash(
         }
         let difficulty_start = crate::hasher::difficulty_start();
         if difficulty <= difficulty_start {
-            break;
+            break difficulty;
         }
         eprintln!(
             "[Structs Hasher GPU] {} waiting: difficulty {} > {}",
@@ -140,7 +141,16 @@ pub fn run_gpu_hash(
         );
         emit_event(&app_handle, "hash_progress", &handle);
         std::thread::sleep(std::time::Duration::from_millis(DIFFICULTY_START_SLEEP_MS));
-    }
+    };
+
+    // Priority admission: cap concurrent grinders at max_concurrent and admit the
+    // easiest-difficulty task first, so a cheap build never waits behind an
+    // expensive refine. Held for the whole grind; freed on drop. `None` = the
+    // task was cancelled while queued for a slot.
+    let _permit = match crate::hasher::scheduler::admit(admit_difficulty, &|| handle.is_cancelled()) {
+        Some(p) => p,
+        None => return,
+    };
 
     // Transition to RUNNING
     {

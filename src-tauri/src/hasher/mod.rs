@@ -1,6 +1,7 @@
 pub mod cpu;
 pub mod difficulty;
 pub mod gpu;
+pub mod scheduler;
 pub mod types;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};

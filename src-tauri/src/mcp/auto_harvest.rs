@@ -36,7 +36,9 @@ pub struct AutoHarvestConfig {
     pub enabled: bool,
     /// Kick off a task once the struct's current difficulty is ≤ this. Higher =
     /// more aggressive (mine sooner, pricier proof); lower = wait for cheaper.
-    /// ~10 ≈ harvest ~6h after the last cycle; ~1 ≈ near-instant (~23h).
+    /// ~10 ≈ harvest ~6h after the last cycle; ~1 ≈ near-instant (~23h). Default
+    /// 4 is deliberately patient: each proof is far cheaper (difficulty is
+    /// exponential work), so one GPU can carry a much larger vplayer fleet.
     pub difficulty_threshold: u64,
     /// Minimum seconds between scans (the loop is invoked far more often but
     /// throttles to this). 1800 = every 30 min — frequent enough to catch
@@ -58,7 +60,7 @@ impl Default for AutoHarvestConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            difficulty_threshold: 10,
+            difficulty_threshold: 4,
             interval_secs: 1800,
             refine: true,
             include_primary: false,
@@ -168,6 +170,11 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                     Err(_) => return,
                 };
                 let mut extractor_planet: Option<String> = None;
+                // For PRODUCTIVE workers: is the refinery mid-refine (an active cycle OR a
+                // REFINE proof already in flight)? We must NOT explore while refining —
+                // exploring destroys the planetary refinery and would strand the committed
+                // ore. Bait have no refinery, so this stays false for them.
+                let mut refining_active = false;
                 for s in page.items.iter() {
                     let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else {
                         continue;
@@ -190,6 +197,9 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                     // linger in the registry — those we DO allow to re-issue).
                     if let Some(t) = registry.tasks.get(&sid) {
                         if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
+                            if is_refinery {
+                                refining_active = true; // a REFINE proof is in flight
+                            }
                             continue;
                         }
                     }
@@ -206,6 +216,9 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                     } else {
                         ("REFINE", REFINE_TARGET, read_u64_field(sa, "blockStartOreRefine"))
                     };
+                    if is_refinery && anchor != 0 {
+                        refining_active = true; // an active refine cycle is committed
+                    }
                     // A non-zero anchor already means an ACTIVE cycle: for a refinery,
                     // `blockStartOreRefine` is only set once a refine has begun (i.e. the
                     // player's stored ore is committed), so the anchor IS the "has ore"
@@ -244,19 +257,32 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                 // VPLAYERS ONLY — never the primary/main player (its base must never be
                 // auto-abandoned). Enforced by requiring a vplayer HD index below; the
                 // primary has idx_opt == None and is always skipped here.
-                // BAIT ONLY (`!may_refine`): exploring destroys ALL of the old planet's
-                // structs, which for a PRODUCTIVE worker includes its planetary Ore
-                // Refinery — nuking that would break the flywheel. Bait have no refinery,
-                // so cycling to a fresh planet just resets the extractor + planetary
-                // defenses (auto-build + auto-defend rebuild them) while the mined ore
-                // (storedOre) carries over — so the bait's ore pile keeps growing.
-                if auto_explore && !may_refine {
+                // Exploring destroys ALL of the old planet's structs (incl. a PRODUCTIVE
+                // worker's planetary Ore Refinery) and migrates the fleet; storedOre
+                // carries over, and auto-build + auto-defend rebuild the new planet.
+                //   • BAIT (`!may_refine`): explore as soon as the planet is mined out.
+                //   • WORKERS (`may_refine`): explore only once FULLY drained — planet out
+                //     AND not mid-refine AND storedOre refined to ~0 — so we never destroy
+                //     the refinery mid-cycle or strand un-refined ore (refine-it-all-first;
+                //     Alpha survives explore, the refinery rebuilds on the new planet).
+                if auto_explore {
                     if let (Some(planet_id), Some(idx)) = (extractor_planet, idx_opt) {
                         let planet_ore = match client.query_entity("planet", &planet_id).await {
                             Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
                             Err(_) => 1.0, // unknown → don't explore
                         };
-                        if planet_ore <= 0.0 {
+                        // Workers must also be fully drained: no refine in flight AND no
+                        // stored ore left (all converted to Alpha, which survives explore).
+                        let role_ready = if may_refine {
+                            !refining_active
+                                && match client.query_entity("player", &pid).await {
+                                    Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0,
+                                    Err(_) => false, // unknown → don't explore
+                                }
+                        } else {
+                            true // bait: no refinery to protect
+                        };
+                        if planet_ore <= 0.0 && role_ready {
                             let res = crate::mcp::vplayer_bridge::sign_action(
                                 &app,
                                 idx,
@@ -294,7 +320,7 @@ mod tests {
     fn default_is_off_and_aggressive_threshold() {
         let c = AutoHarvestConfig::default();
         assert!(!c.enabled);
-        assert_eq!(c.difficulty_threshold, 10);
+        assert_eq!(c.difficulty_threshold, 4);
         assert!(c.refine);
         assert!(!c.include_primary);
     }
