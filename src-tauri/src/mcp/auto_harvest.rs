@@ -244,7 +244,13 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                 // VPLAYERS ONLY — never the primary/main player (its base must never be
                 // auto-abandoned). Enforced by requiring a vplayer HD index below; the
                 // primary has idx_opt == None and is always skipped here.
-                if auto_explore {
+                // BAIT ONLY (`!may_refine`): exploring destroys ALL of the old planet's
+                // structs, which for a PRODUCTIVE worker includes its planetary Ore
+                // Refinery — nuking that would break the flywheel. Bait have no refinery,
+                // so cycling to a fresh planet just resets the extractor + planetary
+                // defenses (auto-build + auto-defend rebuild them) while the mined ore
+                // (storedOre) carries over — so the bait's ore pile keeps growing.
+                if auto_explore && !may_refine {
                     if let (Some(planet_id), Some(idx)) = (extractor_planet, idx_opt) {
                         let planet_ore = match client.query_entity("planet", &planet_id).await {
                             Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
