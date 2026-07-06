@@ -44,16 +44,31 @@ fn config_path() -> PathBuf {
 }
 
 fn default_configs() -> Vec<GuildConfig> {
-    vec![GuildConfig {
-        name: "Orbital Hydro".into(),
-        guild_tag: "OH".into(),
-        guild_api: "http://crew.oh.energy/api".into(),
-        // LCD/REST is served over standard HTTPS now; the old :1317 host is dead.
-        reactor_api: "https://public.testnet.structs.network".into(),
-        client_ws: "wss://public.testnet.structs.network:26657".into(),
-        grass_nats_ws: "ws://crew.oh.energy:1443".into(),
-        is_active: true,
-    }]
+    vec![
+        // Default/onboarding guild. reactor_api + client_ws are the shared testnet
+        // chain (same for every guild); guild_api + grass_nats_ws are SN Corp's own.
+        GuildConfig {
+            name: "SN Corp".into(),
+            guild_tag: "SN".into(),
+            guild_api: "https://beta.playstructs.com/api/".into(),
+            reactor_api: "https://public.testnet.structs.network/".into(),
+            client_ws: "wss://public.testnet.structs.network:26657".into(),
+            grass_nats_ws: "wss://beta.playstructs.com:1443".into(),
+            is_active: true,
+        },
+        // Kept (inactive) so players on Orbital Hydro can switch back and still
+        // reach their own guild_api — only the active guild's config is exposed.
+        GuildConfig {
+            name: "Orbital Hydro".into(),
+            guild_tag: "OH".into(),
+            guild_api: "http://crew.oh.energy/api".into(),
+            // LCD/REST is served over standard HTTPS now; the old :1317 host is dead.
+            reactor_api: "https://public.testnet.structs.network".into(),
+            client_ws: "wss://public.testnet.structs.network:26657".into(),
+            grass_nats_ws: "ws://crew.oh.energy:1443".into(),
+            is_active: false,
+        },
+    ]
 }
 
 /// Replace URLs that match a previous bad default with the current default.
