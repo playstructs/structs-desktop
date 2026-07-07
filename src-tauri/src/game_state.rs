@@ -264,6 +264,16 @@ pub async fn sync_game_state(
         }
     }
 
+    // Player-follows-guild reconciler: if the player's guild (chain-verified)
+    // differs from the active infrastructure config, silently switch and
+    // reload. Cheap fast path — spawns async LCD verification only on
+    // mismatch or slow backstop cadence.
+    crate::guild_directory::note_player_guild(
+        app_handle.clone(),
+        state.guild_id.clone(),
+        state.player_id.clone(),
+    );
+
     // Evaluate policies on state transition. Collect events outside the lock so
     // we can push autonomous UI directives without holding the engine write lock
     // across an await.

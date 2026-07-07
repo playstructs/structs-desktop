@@ -231,12 +231,18 @@ try {
     },
     // Derive index N → sign the guild-join proxy message → POST /auth/signup →
     // poll the address until the chain assigns a player id.
-    async signup(index, name) {
+    // Optional requestedGuildId: signup always goes through the ACTIVE guild's
+    // API (a guild API only serves its own guild), so a mismatch is an error,
+    // not a redirect — switch the active guild first for cross-guild signup.
+    async signup(index, name, requestedGuildId) {
       const a = await __vpDerive(index);
       const address = a.address;
       const pubkeyHex = walletManager.bytesToHex(a.pubkey);
       const guildId = gameState.thisGuild && gameState.thisGuild.id;
       if (!guildId) throw new Error('guild not loaded yet');
+      if (requestedGuildId && requestedGuildId !== guildId) {
+        throw new Error('signup targets guild ' + requestedGuildId + ' but active infrastructure serves guild ' + guildId + '; switch the active guild first');
+      }
       const message = guildAPI.buildGuildMembershipJoinProxyMessage(guildId, address, 0);
       const signature = await walletManager.createSignatureForProxyMessage(message, a.privkey);
       const resp = await guildAPI.signup({

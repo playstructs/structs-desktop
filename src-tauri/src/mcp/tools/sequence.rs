@@ -143,6 +143,7 @@ pub async fn execute(
                             name: None,
                             index: None,
                             role: None,
+                            guild_id: None,
                         },
                     )
                     .await

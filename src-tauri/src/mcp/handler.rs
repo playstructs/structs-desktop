@@ -215,6 +215,7 @@ impl StructsMcpHandler {
                         "command": { "type": "string", "enum": ["list", "roster", "create", "state", "act", "capacity", "role", "economy", "infra", "harvest", "autobuild", "autodefend", "infuse"] },
                         "name": { "type": "string", "description": "create: display name (3–20 chars: letters/digits/-/_)." },
                         "index": { "type": "integer", "description": "create: HD index to use (>= 1); defaults to next free." },
+                        "guild_id": { "type": "string", "description": "create: guild the new player must join (e.g. \"0-5\"). Errors if it differs from the active infrastructure guild — switch guilds first for cross-guild signup. Defaults to the active guild." },
                         "player": { "type": "string", "description": "state/act/role: which virtual player — index, address, or player id." },
                         "role": { "type": "string", "enum": ["bait", "productive"], "description": "role: a vplayer's purpose — bait (mine-only, ore piles up as raid bait) or productive (runs the flywheel via economy). Also accepted by create." },
                         "action": { "type": "string", "description": "act: explore|build|activate|deactivate|deploy|defend|attack|player_send (direct) | mine|refine|raid (PoW, auto-completes)." },

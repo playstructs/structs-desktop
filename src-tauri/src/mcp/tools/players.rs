@@ -35,6 +35,11 @@ pub struct PlayerParams {
     /// role: "bait" | "productive" — sets a virtual player's purpose.
     #[serde(default)]
     pub role: Option<String>,
+    /// create: guild the new player must join. Signup always goes through the
+    /// ACTIVE guild's API, so a mismatch errors rather than redirecting —
+    /// switch the active guild first (apply_guild_switch) for cross-guild signup.
+    #[serde(default)]
+    pub guild_id: Option<String>,
 }
 
 fn now_ms() -> f64 {
@@ -825,7 +830,7 @@ pub async fn execute(
             let result = vplayer_bridge::call(
                 app_handle,
                 "signup",
-                json!({ "index": index, "name": name }),
+                json!({ "index": index, "name": name, "guild_id": params.guild_id }),
                 180,
             )
             .await;

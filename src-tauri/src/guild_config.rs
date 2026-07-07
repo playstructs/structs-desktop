@@ -3,8 +3,28 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+/// SN Corp — the default/onboarding guild for fresh installs.
+pub const DEFAULT_GUILD_ID: &str = "0-5";
+
+/// Where a config entry came from. Discovery (chain crawl) may overwrite URL
+/// fields only when the entry is NOT user-managed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigSource {
+    /// Shipped seed default (upgradable by discovery).
+    #[default]
+    Seed,
+    /// Discovered from the guild's on-chain endpoint document.
+    Chain,
+    /// Manually created/edited by the user — discovery must not touch URLs.
+    User,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuildConfig {
+    /// On-chain guild id, e.g. "0-5". Empty on legacy entries until backfilled.
+    #[serde(default)]
+    pub guild_id: String,
     pub name: String,
     pub guild_tag: String,
     pub guild_api: String,
@@ -12,12 +32,23 @@ pub struct GuildConfig {
     pub client_ws: String,
     pub grass_nats_ws: String,
     pub is_active: bool,
+    /// The guild's on-chain endpoint URL (its guild.json definition).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub source: ConfigSource,
+    /// Unix seconds of the last successful discovery refresh for this entry.
+    #[serde(default)]
+    pub last_refreshed: Option<u64>,
 }
 
 /// The shape exposed to the frontend as window.__STRUCTS_CONFIG__
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrontendConfig {
+    pub guild_id: String,
+    pub name: String,
+    pub guild_tag: String,
     pub guild_api: String,
     pub reactor_api: String,
     pub client_ws: String,
@@ -27,6 +58,9 @@ pub struct FrontendConfig {
 impl From<&GuildConfig> for FrontendConfig {
     fn from(gc: &GuildConfig) -> Self {
         FrontendConfig {
+            guild_id: gc.guild_id.clone(),
+            name: gc.name.clone(),
+            guild_tag: gc.guild_tag.clone(),
             guild_api: gc.guild_api.clone(),
             reactor_api: gc.reactor_api.clone(),
             client_ws: gc.client_ws.clone(),
@@ -34,6 +68,16 @@ impl From<&GuildConfig> for FrontendConfig {
         }
     }
 }
+
+/// Versioned on-disk envelope. v1 was a bare `Vec<GuildConfig>`; the version
+/// field marks one-time migrations so they don't re-run on every load.
+#[derive(Debug, Serialize, Deserialize)]
+struct ConfigFile {
+    version: u32,
+    guilds: Vec<GuildConfig>,
+}
+
+const CONFIG_VERSION: u32 = 2;
 
 fn config_path() -> PathBuf {
     let data_dir = dirs::data_dir()
@@ -43,22 +87,37 @@ fn config_path() -> PathBuf {
     data_dir.join("guild_configs.json")
 }
 
+/// Written by game_state.rs on first player sync — its existence means a
+/// player has logged in on this install at least once.
+fn player_has_logged_in() -> bool {
+    dirs::config_dir()
+        .map(|d| d.join("structs-app").join("last_player.txt").exists())
+        .unwrap_or(false)
+}
+
 fn default_configs() -> Vec<GuildConfig> {
     vec![
         // Default/onboarding guild. reactor_api + client_ws are the shared testnet
         // chain (same for every guild); guild_api + grass_nats_ws are SN Corp's own.
+        // Values seeded from https://beta.playstructs.com/guild.json; discovery
+        // (guild_directory.rs) keeps them fresh from the chain.
         GuildConfig {
+            guild_id: DEFAULT_GUILD_ID.into(),
             name: "SN Corp".into(),
             guild_tag: "SN".into(),
             guild_api: "https://beta.playstructs.com/api/".into(),
             reactor_api: "https://public.testnet.structs.network/".into(),
-            client_ws: "wss://public.testnet.structs.network:26657".into(),
+            client_ws: "wss://public.testnet.structs.network:26657/websocket".into(),
             grass_nats_ws: "wss://beta.playstructs.com:1443".into(),
             is_active: true,
+            endpoint: Some("https://beta.playstructs.com/guild.json".into()),
+            source: ConfigSource::Seed,
+            last_refreshed: None,
         },
         // Kept (inactive) so players on Orbital Hydro can switch back and still
         // reach their own guild_api — only the active guild's config is exposed.
         GuildConfig {
+            guild_id: "0-1".into(),
             name: "Orbital Hydro".into(),
             guild_tag: "OH".into(),
             guild_api: "http://crew.oh.energy/api".into(),
@@ -67,8 +126,58 @@ fn default_configs() -> Vec<GuildConfig> {
             client_ws: "wss://public.testnet.structs.network:26657".into(),
             grass_nats_ws: "ws://crew.oh.energy:1443".into(),
             is_active: false,
+            endpoint: None,
+            source: ConfigSource::Seed,
+            last_refreshed: None,
         },
     ]
+}
+
+/// Backfill guild ids on legacy entries by known infrastructure host.
+/// Unknown hosts are treated as user-managed so discovery leaves them alone.
+fn backfill_guild_id(c: &mut GuildConfig) {
+    if !c.guild_id.is_empty() {
+        return;
+    }
+    if c.guild_api.contains("beta.playstructs.com") {
+        c.guild_id = DEFAULT_GUILD_ID.into();
+    } else if c.guild_api.contains("crew.oh.energy") {
+        c.guild_id = "0-1".into();
+    } else {
+        c.source = ConfigSource::User;
+    }
+}
+
+/// One-time v1 → v2 migration:
+/// 1. Backfill `guild_id` on legacy entries (known hosts).
+/// 2. Seed-insert SN Corp if missing (existing installs never saw it).
+/// 3. If the active guild is not SN Corp AND no player has ever logged in on
+///    this install (`player_logged_in`), make SN Corp active — a
+///    fresh-but-persisted install should onboard to the default guild.
+///    Installs with sessions keep their active guild; the player-follows-guild
+///    reconciler corrects it after login.
+fn migrate_v1_to_v2(configs: &mut Vec<GuildConfig>, player_logged_in: bool) {
+    for c in configs.iter_mut() {
+        backfill_guild_id(c);
+    }
+
+    if !configs.iter().any(|c| c.guild_id == DEFAULT_GUILD_ID) {
+        let mut sn = default_configs()
+            .into_iter()
+            .find(|c| c.guild_id == DEFAULT_GUILD_ID)
+            .expect("defaults include SN Corp");
+        sn.is_active = false;
+        configs.push(sn);
+    }
+
+    let active_is_default = configs
+        .iter()
+        .any(|c| c.is_active && c.guild_id == DEFAULT_GUILD_ID);
+    if !active_is_default && !player_logged_in {
+        for c in configs.iter_mut() {
+            c.is_active = c.guild_id == DEFAULT_GUILD_ID;
+        }
+    }
 }
 
 /// Replace URLs that match a previous bad default with the current default.
@@ -110,35 +219,66 @@ fn migrate_stale_urls(configs: &mut [GuildConfig]) -> bool {
 
 pub fn load_configs() -> Vec<GuildConfig> {
     let path = config_path();
-    if path.exists() {
-        let mut configs = fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Vec<GuildConfig>>(&s).ok())
-            .unwrap_or_else(default_configs);
+    if !path.exists() {
+        let configs = default_configs();
+        save_configs(&configs).ok();
+        return configs;
+    }
+
+    let raw = fs::read_to_string(&path).ok();
+
+    // v2 envelope first, then legacy bare array.
+    if let Some(file) = raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<ConfigFile>(s).ok())
+    {
+        let mut configs = file.guilds;
         if migrate_stale_urls(&mut configs) {
             save_configs(&configs).ok();
         }
-        configs
-    } else {
-        let configs = default_configs();
-        save_configs(&configs).ok();
-        configs
+        return configs;
     }
+
+    let mut configs = raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<GuildConfig>>(s).ok())
+        .unwrap_or_else(default_configs);
+    migrate_v1_to_v2(&mut configs, player_has_logged_in());
+    migrate_stale_urls(&mut configs);
+    save_configs(&configs).ok();
+    configs
 }
 
 pub fn save_configs(configs: &[GuildConfig]) -> Result<()> {
     let path = config_path();
-    let json = serde_json::to_string_pretty(configs)?;
+    let file = ConfigFile {
+        version: CONFIG_VERSION,
+        guilds: configs.to_vec(),
+    };
+    let json = serde_json::to_string_pretty(&file)?;
     fs::write(path, json)?;
     Ok(())
 }
 
+/// Match an entry by guild_id, falling back to name for legacy callers /
+/// entries without an id.
+fn find_mut<'a>(configs: &'a mut [GuildConfig], key: &str) -> Option<&'a mut GuildConfig> {
+    if let Some(i) = configs
+        .iter()
+        .position(|c| !c.guild_id.is_empty() && c.guild_id == key)
+    {
+        return configs.get_mut(i);
+    }
+    configs.iter_mut().find(|c| c.name == key)
+}
+
+pub fn get_active() -> Option<GuildConfig> {
+    load_configs().into_iter().find(|c| c.is_active)
+}
+
 #[tauri::command]
 pub fn get_active_guild_config() -> Option<FrontendConfig> {
-    load_configs()
-        .iter()
-        .find(|c| c.is_active)
-        .map(FrontendConfig::from)
+    get_active().map(|c| FrontendConfig::from(&c))
 }
 
 #[tauri::command]
@@ -147,9 +287,16 @@ pub fn get_guild_configs() -> Vec<GuildConfig> {
 }
 
 #[tauri::command]
-pub fn set_guild_config(config: GuildConfig) -> Result<(), String> {
+pub fn set_guild_config(mut config: GuildConfig) -> Result<(), String> {
+    // Manual edits are user-managed: discovery must not overwrite them.
+    config.source = ConfigSource::User;
     let mut configs = load_configs();
-    if let Some(existing) = configs.iter_mut().find(|c| c.name == config.name) {
+    let key = if config.guild_id.is_empty() {
+        config.name.clone()
+    } else {
+        config.guild_id.clone()
+    };
+    if let Some(existing) = find_mut(&mut configs, &key) {
         *existing = config;
     } else {
         configs.push(config);
@@ -158,17 +305,91 @@ pub fn set_guild_config(config: GuildConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn set_active_guild(name: String) -> Result<(), String> {
+pub fn set_active_guild(key: String) -> Result<(), String> {
     let mut configs = load_configs();
-    for c in configs.iter_mut() {
-        c.is_active = c.name == name;
+    if find_mut(&mut configs, &key).is_none() {
+        return Err(format!("no guild config matching '{}'", key));
     }
-    save_configs(&configs).map_err(|e| e.to_string())
+    for c in configs.iter_mut() {
+        c.is_active = (!c.guild_id.is_empty() && c.guild_id == key) || c.name == key;
+    }
+    save_configs(&configs).map_err(|e| e.to_string())?;
+    crate::mcp::cosmos_client::reload_all();
+    Ok(())
 }
 
 #[tauri::command]
-pub fn delete_guild_config(name: String) -> Result<(), String> {
+pub fn delete_guild_config(key: String) -> Result<(), String> {
     let mut configs = load_configs();
-    configs.retain(|c| c.name != name);
+    configs.retain(|c| !((!c.guild_id.is_empty() && c.guild_id == key) || c.name == key));
     save_configs(&configs).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_oh_active() -> Vec<GuildConfig> {
+        // Shape of a real v1 file: only Orbital Hydro, active, no new fields.
+        serde_json::from_str::<Vec<GuildConfig>>(
+            r#"[{
+                "name": "Orbital Hydro",
+                "guild_tag": "OH",
+                "guild_api": "http://crew.oh.energy/api",
+                "reactor_api": "https://public.testnet.structs.network",
+                "client_ws": "wss://public.testnet.structs.network:26657",
+                "grass_nats_ws": "ws://crew.oh.energy:1443",
+                "is_active": true
+            }]"#,
+        )
+        .expect("legacy shape parses via serde defaults")
+    }
+
+    #[test]
+    fn legacy_parse_backfills_and_seeds_sn_corp() {
+        let mut configs = legacy_oh_active();
+        migrate_v1_to_v2(&mut configs, true);
+        let oh = configs.iter().find(|c| c.name == "Orbital Hydro").unwrap();
+        assert_eq!(oh.guild_id, "0-1");
+        assert!(configs.iter().any(|c| c.guild_id == DEFAULT_GUILD_ID));
+    }
+
+    #[test]
+    fn session_install_keeps_active_guild() {
+        let mut configs = legacy_oh_active();
+        migrate_v1_to_v2(&mut configs, true); // player has logged in
+        let active = configs.iter().find(|c| c.is_active).unwrap();
+        assert_eq!(active.guild_id, "0-1", "OH stays active with a session");
+    }
+
+    #[test]
+    fn sessionless_install_switches_to_default() {
+        let mut configs = legacy_oh_active();
+        migrate_v1_to_v2(&mut configs, false); // never logged in
+        let active = configs.iter().find(|c| c.is_active).unwrap();
+        assert_eq!(active.guild_id, DEFAULT_GUILD_ID);
+        assert_eq!(configs.iter().filter(|c| c.is_active).count(), 1);
+    }
+
+    #[test]
+    fn unknown_host_becomes_user_managed() {
+        let mut c = legacy_oh_active().remove(0);
+        c.guild_api = "https://my-custom-guild.example/api".into();
+        backfill_guild_id(&mut c);
+        assert!(c.guild_id.is_empty());
+        assert_eq!(c.source, ConfigSource::User);
+    }
+
+    #[test]
+    fn v2_envelope_round_trips() {
+        let file = ConfigFile {
+            version: CONFIG_VERSION,
+            guilds: default_configs(),
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let back: ConfigFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, CONFIG_VERSION);
+        assert_eq!(back.guilds.len(), 2);
+        assert_eq!(back.guilds[0].guild_id, DEFAULT_GUILD_ID);
+    }
 }

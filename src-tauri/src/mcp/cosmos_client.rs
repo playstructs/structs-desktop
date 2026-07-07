@@ -15,6 +15,40 @@ fn client() -> &'static Client {
     })
 }
 
+/// Process-global URL cells shared by every CosmosClient (and the
+/// GuildApiClient, which clones the guild_api Arc). A guild switch calls
+/// `reload_all()` once and every client — including the long-lived MCP
+/// handler instance — sees the new URLs immediately.
+static REACTOR_API_CELL: OnceLock<Arc<RwLock<String>>> = OnceLock::new();
+static GUILD_API_CELL: OnceLock<Arc<RwLock<String>>> = OnceLock::new();
+
+fn reactor_api_cell() -> &'static Arc<RwLock<String>> {
+    REACTOR_API_CELL.get_or_init(|| {
+        let url = guild_config::get_active_guild_config()
+            .map(|c| c.reactor_api)
+            .unwrap_or_else(|| "http://localhost:1317".to_string());
+        Arc::new(RwLock::new(url))
+    })
+}
+
+fn guild_api_cell() -> &'static Arc<RwLock<String>> {
+    GUILD_API_CELL.get_or_init(|| {
+        let url = guild_config::get_active_guild_config()
+            .map(|c| c.guild_api)
+            .unwrap_or_else(|| "http://localhost/api".to_string());
+        Arc::new(RwLock::new(url))
+    })
+}
+
+/// Re-read the active guild config into the global URL cells.
+/// Call after any change to the active guild.
+pub fn reload_all() {
+    if let Some(c) = guild_config::get_active_guild_config() {
+        *reactor_api_cell().write().unwrap() = c.reactor_api;
+        *guild_api_cell().write().unwrap() = c.guild_api;
+    }
+}
+
 /// Typed Cosmos REST API client for querying game state.
 /// URLs come from the active guild config.
 ///
@@ -29,18 +63,8 @@ pub struct CosmosClient {
 
 impl CosmosClient {
     pub fn new() -> Self {
-        let config = guild_config::get_active_guild_config();
-        let reactor_api = config
-            .as_ref()
-            .map(|c| c.reactor_api.clone())
-            .unwrap_or_else(|| "http://localhost:1317".to_string());
-        let guild_api = config
-            .as_ref()
-            .map(|c| c.guild_api.clone())
-            .unwrap_or_else(|| "http://localhost/api".to_string());
-
-        let reactor_api = Arc::new(RwLock::new(reactor_api));
-        let guild_api = Arc::new(RwLock::new(guild_api));
+        let reactor_api = Arc::clone(reactor_api_cell());
+        let guild_api = Arc::clone(guild_api_cell());
         let guild = GuildApiClient::new(Arc::clone(&guild_api));
 
         Self {
@@ -52,11 +76,7 @@ impl CosmosClient {
 
     /// Reload URLs from the active guild config (e.g., after switching guilds)
     pub fn reload_config(&self) {
-        let config = guild_config::get_active_guild_config();
-        if let Some(c) = config {
-            *self.reactor_api.write().unwrap() = c.reactor_api;
-            *self.guild_api.write().unwrap() = c.guild_api;
-        }
+        reload_all();
     }
 
     /// Map entity type name to Cosmos REST API path segment

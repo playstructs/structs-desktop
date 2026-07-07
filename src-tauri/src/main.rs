@@ -3,6 +3,7 @@
 
 mod game_state;
 mod guild_config;
+mod guild_directory;
 mod hasher;
 mod http_proxy;
 mod macos_keepalive;
@@ -35,6 +36,8 @@ fn main() {
             guild_config::set_guild_config,
             guild_config::set_active_guild,
             guild_config::delete_guild_config,
+            guild_directory::refresh_guild_directory,
+            guild_directory::apply_guild_switch,
             http_proxy::proxy_fetch,
             notifications::send_notification,
             hasher::start_hash_task,
@@ -238,6 +241,16 @@ fn main() {
                 r#"
 window.__STRUCTS_CONFIG__ = {config_json};
 
+// Guild-switch handoff: the config above is frozen at app start, but a live
+// guild switch (guild_directory::apply_guild_switch) stores the new config in
+// sessionStorage and reloads. sessionStorage reads are synchronous at
+// document-start, so the override wins before any webapp JS parses. Cleared
+// on app exit; the next cold start bakes the already-updated persisted config.
+try {{
+    var __cfgOverride = sessionStorage.getItem('structs_config_override');
+    if (__cfgOverride) window.__STRUCTS_CONFIG__ = JSON.parse(__cfgOverride);
+}} catch (e) {{}}
+
 // Disable canvas image smoothing globally for pixel-perfect Lottie rendering.
 // Wrap the native setter so any write — including Lottie's per-frame reset — always lands as false
 // on WebKit's internal slot. A no-op setter would just make reads lie while leaving smoothing on.
@@ -440,6 +453,11 @@ window.__STRUCTS_CONFIG__ = {config_json};
             }
 
             let _ = window;
+
+            // On-chain guild directory refresh (non-blocking; persisted config
+            // is authoritative at boot). Keeps guild infra URLs fresh and
+            // re-applies the active config if its URLs changed on-chain.
+            guild_directory::startup_refresh(app.handle().clone());
 
             // Rust-driven sync tick. The JS-side setTimeout loop can stall
             // under WKWebView occlusion even with App Nap suppressed, so we

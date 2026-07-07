@@ -1241,7 +1241,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         var data;
         switch (op) {
           case 'derive': data = await vp.deriveAccount(args.index); break;
-          case 'signup': data = await vp.signup(args.index, args.name); break;
+          case 'signup': data = await vp.signup(args.index, args.name, args.guild_id); break;
           case 'sign':   data = await vp.signAndBroadcast(args.index, args.type_url, args.payload); break;
           case 'list':   data = vp.list(); break;
           case 'render_map': data = await vp.renderMapPng(args.planet_id, args.player_id); break;
