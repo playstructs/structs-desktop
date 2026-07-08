@@ -183,7 +183,13 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                     let is_extractor = type_id == EXTRACTOR_TYPE;
                     // A planetary extractor's location_id IS the player's planet id.
                     if is_extractor && !parse_bool(s.get("is_destroyed")) {
-                        if let Some(loc) = s.get("location_id").and_then(|x| x.as_str()) {
+                        // struct-list items are camelCase: the field is `locationId`
+                        // (an extractor's location IS the player's planet id). Reading the
+                        // snake_case `location_id` returned None, so `extractor_planet` was
+                        // NEVER set → the auto-explore block below never ran for ANY vplayer
+                        // (workers sat idle on mined-out planets; bait never cycled). Mining
+                        // was unaffected because it reads the struct ENTITY, not this field.
+                        if let Some(loc) = s.get("locationId").and_then(|x| x.as_str()) {
                             extractor_planet = Some(loc.to_string());
                         }
                     }

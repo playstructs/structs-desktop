@@ -1,3 +1,62 @@
+// [structs-universe] Fix invisible planetary-struct idle (active-loop) animations.
+// The webapp renders these struct animations with Lottie's CANVAS renderer. A
+// canvas Lottie initialized while its map container is display:none gets a 0x0
+// drawing buffer and never recovers, because the canvas renderer sizes its
+// buffer once from the container and does NOT auto-resize when the container
+// later gains size. All maps (alpha-base, raid, preview) are built at load but
+// only one is shown, so every animation on an initially-hidden map is stuck at
+// 0x0 — most visibly, the DEFENDING planet's structs when you open a raid.
+// Fix: when a map container becomes visible, ask Lottie to resize its 0-size
+// canvas animations so the buffer grows to the container. SVG animations are
+// unaffected (they scale via the DOM), so this is a no-op for them.
+(function () {
+  try {
+    function resizeZeroCanvasAnimations(rootEl) {
+      var L = window.lottie;
+      if (!L || !L.getRegisteredAnimations) return 0;
+      var fixed = 0;
+      L.getRegisteredAnimations().forEach(function (a) {
+        try {
+          var w = a && a.wrapper;
+          if (!w || (rootEl && !rootEl.contains(w))) return;
+          var cv = w.querySelector && w.querySelector('canvas');
+          if (cv && (cv.width === 0 || cv.height === 0) && w.offsetWidth > 0) {
+            a.resize();
+            if (cv.width > 0 && cv.height > 0) fixed++;
+          }
+        } catch (e) {}
+      });
+      return fixed;
+    }
+    // Resize a few times to catch animations that finish loading right around
+    // the moment their map is shown (Lottie load is async).
+    function scheduleResize(rootEl) {
+      requestAnimationFrame(function () { resizeZeroCanvasAnimations(rootEl); });
+      setTimeout(function () { resizeZeroCanvasAnimations(rootEl); }, 300);
+      setTimeout(function () { resizeZeroCanvasAnimations(rootEl); }, 1200);
+    }
+    function isVisible(el) {
+      return !el.classList.contains('hidden') && el.offsetWidth > 0;
+    }
+    function watch() {
+      var maps = document.querySelectorAll('.map-container');
+      if (!maps.length) { setTimeout(watch, 500); return; }
+      maps.forEach(function (m) {
+        var wasVisible = isVisible(m);
+        var obs = new MutationObserver(function () {
+          var vis = isVisible(m);
+          if (vis && !wasVisible) scheduleResize(m);
+          wasVisible = vis;
+        });
+        obs.observe(m, { attributes: true, attributeFilter: ['class', 'style'] });
+        if (wasVisible) scheduleResize(m);
+      });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watch);
+    else watch();
+  } catch (e) {}
+})();
+
 // Config and fetch proxy are injected by Tauri initialization script before this runs.
 // This file handles relative URL resolution for the proxied fetch.
 if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
