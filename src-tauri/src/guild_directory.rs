@@ -159,10 +159,14 @@ fn validate_guild_doc(chain: &ChainGuild, body: &[u8]) -> Result<GuildConfig, St
         ));
     }
 
+    // Only guild_api + grass_nats_ws are genuinely per-guild; validate those.
+    // reactor_api + client_ws are shared chain infra and get pinned to the
+    // public node below, so we ignore the guild's self-declared values for them
+    // (guilds declare inconsistent/insecure/private reactor+RPC URLs — adopting
+    // them caused a reload loop when the built-in stale-URL migration kept
+    // rewriting client_ws back to the public node).
     let s = &doc.guild.services;
     validate_service_url(&s.guild_api, &["http", "https"], "guild_api")?;
-    validate_service_url(&s.reactor_api, &["http", "https"], "reactor_api")?;
-    validate_service_url(&s.client_websocket, &["ws", "wss"], "client_websocket")?;
     validate_service_url(
         &s.grass_nats_websocket,
         &["ws", "wss"],
@@ -173,9 +177,12 @@ fn validate_guild_doc(chain: &ChainGuild, body: &[u8]) -> Result<GuildConfig, St
         guild_id: chain.id.clone(),
         name: sanitize_label(&doc.guild.name, 64),
         guild_tag: sanitize_label(&doc.guild.tag, 8),
-        guild_api: s.guild_api.clone(),
-        reactor_api: s.reactor_api.clone(),
-        client_ws: s.client_websocket.clone(),
+        // Strip a trailing slash: the webapp's GuildAPI appends "/auth/..."
+        // style paths to this base, so "http://host/api/" would yield a
+        // double slash ("http://host/api//auth/...").
+        guild_api: s.guild_api.trim_end_matches('/').to_string(),
+        reactor_api: guild_config::PUBLIC_REACTOR_API.to_string(),
+        client_ws: guild_config::PUBLIC_CLIENT_WS.to_string(),
         grass_nats_ws: s.grass_nats_websocket.clone(),
         is_active: false,
         endpoint: Some(chain.endpoint.clone()),
@@ -565,6 +572,22 @@ mod tests {
         let cfg = validate_guild_doc(&chain("0-5"), &body).unwrap();
         assert_eq!(cfg.guild_id, "0-5");
         assert_eq!(cfg.source, ConfigSource::Chain);
+        // Per-guild services adopted; guild_api trailing slash stripped.
+        assert_eq!(cfg.guild_api, "https://beta.playstructs.com/api");
+        assert_eq!(cfg.grass_nats_ws, "wss://beta.playstructs.com:1443");
+    }
+
+    #[test]
+    fn shared_endpoints_pinned_ignoring_declared() {
+        // doc_json declares reactor_api "https://.../" and client_websocket
+        // ".../websocket" — both must be ignored in favor of the public pins,
+        // no matter what the guild self-declares (incl. a dead OH-style node).
+        let body = doc_json("0-1", "http://crew.oh.energy/api/", "ws://crew.oh.energy:1443");
+        let cfg = validate_guild_doc(&chain("0-1"), &body).unwrap();
+        assert_eq!(cfg.reactor_api, guild_config::PUBLIC_REACTOR_API);
+        assert_eq!(cfg.client_ws, guild_config::PUBLIC_CLIENT_WS);
+        // No stray /websocket suffix that would double-append in CosmJS.
+        assert!(!cfg.client_ws.ends_with("/websocket"));
     }
 
     #[test]
@@ -631,32 +654,33 @@ mod tests {
         let body = doc_json("0-5", "https://beta.playstructs.com/api/", "wss://beta.playstructs.com:1443");
         let found = validate_guild_doc(&chain("0-5"), &body).unwrap();
         upsert_discovered(&mut existing, vec![found]);
-        assert_eq!(existing[0].guild_api, "https://beta.playstructs.com/api/");
+        assert_eq!(existing[0].guild_api, "https://beta.playstructs.com/api");
         assert!(existing[0].is_active, "discovery never flips is_active");
     }
 }
 
 /// Non-blocking startup refresh. The persisted config is authoritative at
-/// boot; this keeps it fresh and (if the active guild's URLs changed) pushes
-/// the update into the webview via the same switch path.
-pub fn startup_refresh(app: tauri::AppHandle) {
+/// boot, so this only updates the persisted file + Rust clients (refresh_directory
+/// already calls reload_all on change). It deliberately does NOT reload the
+/// webview: the baked config is already correct at boot, and reloading mid-init
+/// aborts in-flight connection promises. A guild that changed its guild_api /
+/// grass URL on-chain takes effect on the next natural launch; a player who
+/// switched guilds is handled live by the player-follows-guild reconciler
+/// (note_player_guild), which is the only case that warrants a reload.
+pub fn startup_refresh(_app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         match refresh_directory().await {
             Ok(report) => {
                 eprintln!(
-                    "[Guild Directory] startup refresh: {} guilds discovered, {} skipped",
+                    "[Guild Directory] startup refresh: {} guilds discovered, {} skipped{}",
                     report.discovered,
-                    report.skipped.len()
-                );
-                if report.active_changed {
-                    if let Some(active) = guild_config::get_active() {
-                        eprintln!("[Guild Directory] active guild URLs changed on-chain, re-applying");
-                        LAST_SWITCH_AT.store(now_secs(), Ordering::Relaxed);
-                        if let Err(e) = apply_guild_switch(app.clone(), active.guild_id).await {
-                            eprintln!("[Guild Directory] startup re-apply failed: {}", e);
-                        }
+                    report.skipped.len(),
+                    if report.active_changed {
+                        " (active guild URLs refreshed; effective next launch)"
+                    } else {
+                        ""
                     }
-                }
+                );
             }
             Err(e) => eprintln!("[Guild Directory] startup refresh failed: {}", e),
         }

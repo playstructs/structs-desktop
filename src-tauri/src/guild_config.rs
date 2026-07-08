@@ -6,6 +6,16 @@ use std::path::PathBuf;
 /// SN Corp — the default/onboarding guild for fresh installs.
 pub const DEFAULT_GUILD_ID: &str = "0-5";
 
+/// Shared chain endpoints. Every guild runs on the SAME testnet chain, so the
+/// LCD (reactor_api) and RPC websocket (client_ws) are NOT per-guild — the
+/// reliable public node serves all of them. Guilds' self-declared reactor/RPC
+/// URLs are inconsistent and sometimes point at their own (private, insecure,
+/// or intermittent) nodes, so discovery pins these two fields to the public
+/// node rather than adopting guild-declared values. Only `guild_api` and
+/// `grass_nats_ws` are genuinely per-guild. See guild_directory::normalize_shared.
+pub const PUBLIC_REACTOR_API: &str = "https://public.testnet.structs.network";
+pub const PUBLIC_CLIENT_WS: &str = "wss://public.testnet.structs.network:26657";
+
 /// Where a config entry came from. Discovery (chain crawl) may overwrite URL
 /// fields only when the entry is NOT user-managed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -106,8 +116,8 @@ fn default_configs() -> Vec<GuildConfig> {
             name: "SN Corp".into(),
             guild_tag: "SN".into(),
             guild_api: "https://beta.playstructs.com/api/".into(),
-            reactor_api: "https://public.testnet.structs.network/".into(),
-            client_ws: "wss://public.testnet.structs.network:26657/websocket".into(),
+            reactor_api: PUBLIC_REACTOR_API.into(),
+            client_ws: PUBLIC_CLIENT_WS.into(),
             grass_nats_ws: "wss://beta.playstructs.com:1443".into(),
             is_active: true,
             endpoint: Some("https://beta.playstructs.com/guild.json".into()),
@@ -121,9 +131,8 @@ fn default_configs() -> Vec<GuildConfig> {
             name: "Orbital Hydro".into(),
             guild_tag: "OH".into(),
             guild_api: "http://crew.oh.energy/api".into(),
-            // LCD/REST is served over standard HTTPS now; the old :1317 host is dead.
-            reactor_api: "https://public.testnet.structs.network".into(),
-            client_ws: "wss://public.testnet.structs.network:26657".into(),
+            reactor_api: PUBLIC_REACTOR_API.into(),
+            client_ws: PUBLIC_CLIENT_WS.into(),
             grass_nats_ws: "ws://crew.oh.energy:1443".into(),
             is_active: false,
             endpoint: None,
