@@ -11,6 +11,21 @@
 // unaffected (they scale via the DOM), so this is a no-op for them.
 (function () {
   try {
+    // Disable image smoothing so Lottie's canvas renderer draws the struct
+    // sprites crisp (pixel art) instead of bilinear-blurred. Lottie leaves the
+    // context default (smoothing ON) for these, so — like the victory/defeat
+    // banner patch does — we force it off. Set the prefixed variants too for
+    // older WebKit. Cheap and idempotent; safe to re-apply on every resize.
+    function crispCanvas(cv) {
+      try {
+        var ctx = cv.getContext && cv.getContext('2d');
+        if (!ctx) return;
+        ctx.imageSmoothingEnabled = false;
+        ctx.webkitImageSmoothingEnabled = false;
+        ctx.mozImageSmoothingEnabled = false;
+        ctx.msImageSmoothingEnabled = false;
+      } catch (e) {}
+    }
     function resizeZeroCanvasAnimations(rootEl) {
       var L = window.lottie;
       if (!L || !L.getRegisteredAnimations) return 0;
@@ -20,10 +35,14 @@
           var w = a && a.wrapper;
           if (!w || (rootEl && !rootEl.contains(w))) return;
           var cv = w.querySelector && w.querySelector('canvas');
-          if (cv && (cv.width === 0 || cv.height === 0) && w.offsetWidth > 0) {
+          if (!cv) return;
+          if ((cv.width === 0 || cv.height === 0) && w.offsetWidth > 0) {
             a.resize();
             if (cv.width > 0 && cv.height > 0) fixed++;
           }
+          // Crisp-ify every canvas animation on the shown map, not just the
+          // ones we resized — the already-sized ones render blurry too.
+          if (cv.width > 0 && cv.height > 0) crispCanvas(cv);
         } catch (e) {}
       });
       return fixed;
