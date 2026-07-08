@@ -137,18 +137,25 @@ sed -i.bak 's|import {SigningQueueManager} from "./SigningQueueManager";|import 
 cat >> "$SCM" <<'SCM_EOF'
 
 // [structs-universe patch] Sign+broadcast a single msg from an arbitrary account
-// (a virtual player). POOLS one SigningStargateClient per signer address and
-// REUSES it across calls. Connecting a fresh client per call churned WebSockets:
-// slow (reconnect + block-inclusion wait every sign) and, under the auto-loop
-// fan-out, it exhausted the webview WS pool ("Insufficient resources"), which also
-// killed the app's own block/NATS feeds. Reuse => at most ~one persistent socket
-// per vplayer, no churn, fast repeat signs. The primary client/queue are untouched.
+// (a virtual player). Signs over the node's HTTP RPC endpoint, NOT the WebSocket:
+// CosmJS selects a STATELESS HttpClient for http(s):// URLs (a persistent
+// WebSocketClient only for ws(s)://). The old WS transport held one open socket per
+// vplayer; at 100+ vplayers a batched sweep opened 100+ concurrent WebSockets and
+// exhausted the webview socket pool ("Insufficient resources"), which wedged every
+// later sign AND the app's own block/NATS feeds until a full app restart. HTTP has
+// no persistent socket, so no amount of vplayers or batch size can exhaust the pool
+// (broadcast + tx-poll are plain HTTP requests). Clients are still cached per
+// address to skip re-deriving chain params, but a cached client holds no socket.
+// Primary client/queue untouched. Port 26657 (CometBFT RPC) serves both schemes.
 SigningClientManager.prototype._vpClients = SigningClientManager.prototype._vpClients || new Map();
 SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, signerAddress, typeUrl, payload) {
   const cache = SigningClientManager.prototype._vpClients;
+  // Derive the HTTP RPC URL once from the WS URL (same host:26657, stateless scheme).
+  const rpcUrl = this._vpRpcUrl || (this._vpRpcUrl =
+    this.wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://'));
   let client = cache.get(signerAddress);
   if (!client) {
-    client = await SigningStargateClient.connectWithSigner(this.wsUrl, wallet, { registry: this.registry });
+    client = await SigningStargateClient.connectWithSigner(rpcUrl, wallet, { registry: this.registry });
     cache.set(signerAddress, client);
   }
   try {

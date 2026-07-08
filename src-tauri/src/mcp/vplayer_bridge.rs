@@ -21,10 +21,13 @@ use tokio::sync::{oneshot, Semaphore};
 /// wedged the app's own feeds). With pooling the sockets are stable, so a few
 /// concurrent signs are safe again — and necessary: each `signAndBroadcast` waits for
 /// block inclusion (~6s), so strictly-serial signing (1 permit) starved the tail of a
-/// 16-worker wave past the 60s per-call bound. 4 concurrent absorbs the inclusion wait
-/// (~16 workers ÷ 4 × ~6s ≈ 24s, each well under 60s) while keeping at most 4 sockets
-/// actively signing. Reads still fan out wider (`loop_util::MAX_CONCURRENT_PLAYERS`).
-static SIGN_GATE: Semaphore = Semaphore::const_new(4);
+/// wave past the 60s per-call bound. Since the façade now signs over HTTP RPC (stateless,
+/// no persistent socket per vplayer — see apply-patches.sh signAndBroadcastAs), the old
+/// "keep few sockets open" ceiling is gone: the WS-pool exhaustion that used to wedge the
+/// whole app on large sweeps can no longer happen. 8 concurrent halves the drain time of a
+/// big batch (e.g. 116 workers ÷ 8 × ~6s ≈ 87s vs ~174s at 4) while staying gentle on the
+/// node. Reads still fan out wider (`loop_util::MAX_CONCURRENT_PLAYERS`).
+static SIGN_GATE: Semaphore = Semaphore::const_new(8);
 
 /// Per-account (HD index) serialization. Two txs from the SAME vplayer must never be
 /// in flight together: the pooled `SigningStargateClient` caches the account sequence,
