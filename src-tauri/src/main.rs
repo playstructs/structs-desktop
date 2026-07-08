@@ -459,6 +459,12 @@ try {{
             // re-applies the active config if its URLs changed on-chain.
             guild_directory::startup_refresh(app.handle().clone());
 
+            // Rust-side update check — webview-independent, so a build that
+            // breaks its own frontend can still download + stage its replacement
+            // and notify the user natively. Applies on next restart (never
+            // interrupts a live session).
+            updater::check_and_stage_on_startup(app.handle().clone());
+
             // Rust-driven sync tick. The JS-side setTimeout loop can stall
             // under WKWebView occlusion even with App Nap suppressed, so we
             // also emit a tick from Rust at the same cadence. The frontend's

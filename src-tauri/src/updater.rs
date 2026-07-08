@@ -3,11 +3,16 @@
 //! that's Phase 2 (tauri-plugin-updater). See plan for the phased rollout.
 
 use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::Emitter;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
+
+/// Guards against two concurrent downloads (the Rust startup stager and the
+/// frontend "Download" button both call the tauri updater).
+static STAGING: AtomicBool = AtomicBool::new(false);
 
 /// GitHub "latest published release" for the desktop app. `/releases/latest`
 /// already excludes drafts and prereleases, so this is exactly the build a
@@ -123,9 +128,28 @@ pub async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), St
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "No update available".to_string())?;
+    stage_update(&app, update, true).await
+}
 
-    // on_chunk reports this chunk's length + the total content length; accumulate
-    // to a percentage. Arc<AtomicU64> because the progress callback is `Fn`.
+/// Shared download+install path. `emit_progress` drives the frontend banner's
+/// progress UI; the startup stager passes false (no webview listening). Serialized
+/// by `STAGING` so the auto-stager and the manual button can't double-download.
+async fn stage_update(
+    app: &tauri::AppHandle,
+    update: tauri_plugin_updater::Update,
+    emit_progress: bool,
+) -> Result<(), String> {
+    if STAGING.swap(true, Ordering::SeqCst) {
+        return Err("An update download is already in progress".to_string());
+    }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            STAGING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = Guard;
+
     let downloaded = Arc::new(AtomicU64::new(0));
     let progress_app = app.clone();
     let finish_app = app.clone();
@@ -134,6 +158,9 @@ pub async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), St
     update
         .download_and_install(
             move |chunk_len, content_len| {
+                if !emit_progress {
+                    return;
+                }
                 let total = downloaded_cb.fetch_add(chunk_len as u64, Ordering::Relaxed)
                     + chunk_len as u64;
                 let pct = content_len
@@ -149,6 +176,84 @@ pub async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), St
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+// ── Rust-side startup updater (webview-independent) ──
+//
+// The frontend banner is the nice in-app path, but it only runs if the webview
+// is healthy. A build broken badly enough to crash/loop its own frontend could
+// never replace itself. This startup task checks the signed updater manifest
+// directly from Rust and, if a newer build exists, downloads + stages it and
+// fires a NATIVE notification — no webview required. It never auto-restarts, so
+// a live game / PoW session is untouched; the update applies on the next launch.
+
+fn staged_marker_path() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("structs-app")
+        .join("staged_update.txt")
+}
+
+fn already_staged(version: &str) -> bool {
+    std::fs::read_to_string(staged_marker_path())
+        .map(|s| s.trim() == version)
+        .unwrap_or(false)
+}
+
+fn mark_staged(version: &str) {
+    let path = staged_marker_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, version);
+}
+
+/// Spawn the startup update check. Runs once, shortly after launch, off the main
+/// thread. Safe to call unconditionally — it no-ops when already up to date.
+pub fn check_and_stage_on_startup(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Let the app settle (window, IPC, notification permission, initial PoW)
+        // before competing for network/CPU.
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        match run_startup_update(&app).await {
+            Ok(Some(v)) => eprintln!("[Structs Update] v{v} staged — restart to apply"),
+            Ok(None) => {}
+            Err(e) => eprintln!("[Structs Update] startup check: {e}"),
+        }
+    });
+}
+
+async fn run_startup_update(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = match updater.check().await.map_err(|e| e.to_string())? {
+        Some(u) => u,
+        None => return Ok(None), // already on the latest signed build
+    };
+    let version = update.version.clone();
+
+    // Already downloaded on a previous run and the user hasn't restarted yet —
+    // don't re-download, just re-remind.
+    if already_staged(&version) {
+        crate::notifications::notify(
+            "Structs update ready",
+            &format!("Version {version} is downloaded — restart Structs to finish updating."),
+        );
+        return Ok(Some(version));
+    }
+
+    crate::notifications::notify(
+        "Structs update available",
+        &format!("Downloading version {version} in the background…"),
+    );
+
+    stage_update(app, update, false).await?;
+    mark_staged(&version);
+
+    crate::notifications::notify(
+        "Structs update ready",
+        &format!("Version {version} is downloaded — restart Structs to finish updating."),
+    );
+    Ok(Some(version))
 }
 
 /// Relaunch the app to run on the freshly-staged update. Invoked when the user

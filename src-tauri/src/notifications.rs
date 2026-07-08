@@ -10,6 +10,19 @@ pub async fn send_notification(title: String, body: String) -> Result<(), String
     platform_send(&title, &body).map_err(|e| e.to_string())
 }
 
+/// Fire a native notification from Rust (no webview involved). Best-effort:
+/// logs and returns if permission isn't granted or delivery fails. Used by the
+/// startup updater so a broken frontend can't suppress the "update ready" nudge.
+pub fn notify(title: &str, body: &str) {
+    if !PERMISSION_GRANTED.load(Ordering::Relaxed) {
+        eprintln!("[Structs] notify skipped (no permission): {title} — {body}");
+        return;
+    }
+    if let Err(e) = platform_send(title, body) {
+        eprintln!("[Structs] notify failed: {e}");
+    }
+}
+
 pub fn request_permission() {
     platform_request_permission();
 }
