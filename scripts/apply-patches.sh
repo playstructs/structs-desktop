@@ -370,11 +370,47 @@ try {
       }
       await Promise.all(jobs);
     },
+    // Make every CANVAS Lottie sprite inside the preview actually hold pixels
+    // before capture. On macOS the Tauri init script forces ALL Lottie to the
+    // canvas renderer; ONLINE planetary structs hide their still image and show
+    // a looping "active_loop" canvas animation instead — and a canvas animation
+    // created/loaded while its container was hidden (the preview is hidden
+    // until showMap) has a 0x0 buffer, and one that loaded but never rendered
+    // has a sized-but-BLANK buffer. Either way html-to-image captures nothing:
+    // HP bars + slot platforms (DOM/CSS) showed, planetary sprites didn't.
+    // Fix: resize any 0x0 canvas whose wrapper has layout, then force-draw the
+    // current pose (goToAndStop) so the buffer holds the sprite; poll briefly
+    // for animations still async-loading their JSON. SVG sprites are untouched.
+    async __fixCanvasSprites(el, timeoutMs) {
+      const L = window.lottie || window.bodymovin;
+      if (!L || !L.getRegisteredAnimations) return;
+      const deadline = Date.now() + (timeoutMs || 2500);
+      for (;;) {
+        let pending = 0;
+        L.getRegisteredAnimations().forEach(function (a) {
+          try {
+            const w = a && a.wrapper;
+            if (!w || !el.contains(w)) return;
+            const cv = w.querySelector && w.querySelector('canvas');
+            if (!cv) return; // SVG sprite — captures fine as-is
+            if (!a.isLoaded) { pending++; return; } // JSON still loading
+            if ((cv.width === 0 || cv.height === 0) && w.offsetWidth > 0) a.resize();
+            if (cv.width === 0 || cv.height === 0) { pending++; return; }
+            const ctx = cv.getContext('2d');
+            if (ctx) ctx.imageSmoothingEnabled = false; // crisp pixel art
+            a.goToAndStop(a.currentFrame || 0, true);   // force-draw the pose
+          } catch (e) { /* skip this sprite */ }
+        });
+        if (!pending || Date.now() > deadline) break;
+        await new Promise(function (r) { setTimeout(r, 120); });
+      }
+    },
     // Single-frame PNG of a planet's map (terrain + struct sprites + HP bars).
     async renderMapPng(planetId, playerId) {
       const el = await this.__preparePreview(planetId, playerId);
       try {
         await new Promise((r) => setTimeout(r, 1400)); // SVG/Lottie/terrain settle
+        await this.__fixCanvasSprites(el); // planetary canvas sprites: size + draw
         await this.__inlineBackgrounds(el); // embed terrain tiles as data: URLs
         // NB: no cacheBust — it appends ?t=… to image URLs, which the tauri://
         // asset protocol 404s. Tiles are already inlined above, so toPng has
@@ -406,6 +442,7 @@ try {
       } catch (e) { anims = []; }
       try {
         await new Promise((r) => setTimeout(r, 1400)); // terrain + lottie load/settle
+        await this.__fixCanvasSprites(el);             // size 0x0 canvas sprites first
         await this.__inlineBackgrounds(el, bgCache);   // embed tiles once (DOM is stable now)
         for (let i = 0; i < n; i++) {
           // Seek every sprite to a distinct phase of its own loop for this frame.
