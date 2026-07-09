@@ -240,7 +240,7 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_board",
-                "Team operations board — one at-a-glance command view shared by the human and the agent: primary status (charge readiness, power margin, structs online, ore/alpha), virtual-player count, the team-wide PoW queue (running/waiting/done), active threats across the whole team (last ~2 min), and recommended next moves. The window also hosts the EVENT FEED — the single sink for vplayer/automation activity (auto-loops, policy events, threats pipe in automatically; important entries auto-open the window). Pass 'open':true ONCE to pop the native window (later calls just refresh it live). 'push':true adds a one-line summary entry to the event feed (it no longer overlays the main game window).",
+                "Team operations board — one at-a-glance command view shared by the human and the agent: primary status (charge readiness, power margin, structs online, ore/alpha), virtual-player count, the team-wide PoW queue (running/waiting/done), active threats across the whole team (last ~2 min), and recommended next moves. The window also hosts the EVENT FEED — the single sink for vplayer/automation activity (auto-loops, policy events, threats pipe in automatically). Important entries auto-open the window ONLY if the player opted in via `structs_policy set board_auto_open true` (default off — never auto-open without consent). Pass 'open':true ONCE to pop the native window (later calls just refresh it live). 'push':true adds a one-line summary entry to the event feed (it no longer overlays the main game window).",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {

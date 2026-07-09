@@ -157,6 +157,11 @@ impl PolicyEngine {
             // happened with the fleet away). ON by default: it only blocks
             // primary fleet-move/raid, it never signs anything.
             ("primary_home_guard", true, serde_json::json!({"max_stored_ore": 10.0, "min_headroom_pct": 15.0})),
+            // Opt-in: let IMPORTANT event-feed entries auto-open the Team Ops
+            // window. OFF by default — the window stays closed unless the player
+            // opted in via `structs_policy set board_auto_open true`, no matter
+            // how important the event; entries still land in the feed either way.
+            ("board_auto_open", false, serde_json::json!({})),
         ];
 
         for (name, default_enabled, default_config) in defaults {

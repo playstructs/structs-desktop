@@ -57,7 +57,7 @@ pub async fn execute(params: PolicyParams) -> Vec<Content> {
         "set" => {
             let Some(name) = &params.policy else {
                 return vec![Content::text(
-                    "Error: policy name required. Available: auto_refine, power_alert, combat_alert, agent_ui, auto_counterattack, auto_retreat_if_cmd_below, auto_rebuild_losses, rules_of_engagement, primary_home_guard",
+                    "Error: policy name required. Available: auto_refine, power_alert, combat_alert, agent_ui, auto_counterattack, auto_retreat_if_cmd_below, auto_rebuild_losses, rules_of_engagement, primary_home_guard, board_auto_open",
                 )];
             };
             let enabled = params.enabled.unwrap_or(true);

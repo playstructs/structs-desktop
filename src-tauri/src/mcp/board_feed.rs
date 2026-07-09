@@ -3,8 +3,10 @@
 //! window: entries render only in the board window's EVENT FEED card. Any
 //! backend source (auto-loops, policy engine, threat scans, vplayer bridge)
 //! pipes entries in via `push()`. A ring buffer back-fills the card whenever
-//! the window (re)opens, and IMPORTANT entries auto-open the board window —
-//! debounced — because the player sees nothing while it's closed.
+//! the window (re)opens. IMPORTANT entries auto-open the board window
+//! (debounced) — but ONLY if the player opted in via the `board_auto_open`
+//! policy; otherwise the window stays closed no matter what, because the
+//! player, not the agent, decides when their screen changes.
 
 use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
@@ -17,8 +19,8 @@ use crate::hasher::types::now_millis;
 /// How loudly an entry should be surfaced. `Info` = routine automation chatter
 /// (a mine started, a defender assigned). `Notice` = worth a glance (economy
 /// milestone, policy state change). `Important` = the player should know NOW
-/// (combat involving us, power critical, home-guard blocks) — auto-opens the
-/// board window.
+/// (combat involving us, power critical) — auto-opens the board window when
+/// the player has opted in via the `board_auto_open` policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Info,
@@ -57,7 +59,8 @@ static LAST_AUTO_OPEN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 
 /// Pipe an entry into the board feed. Safe to call from any thread/context
 /// (sync, no awaits). Emits live to the board window when it's open;
-/// `Important` entries also auto-open the window (debounced).
+/// `Important` entries also auto-open the window (debounced, and only if the
+/// player enabled the `board_auto_open` policy).
 pub fn push(app: &tauri::AppHandle, severity: Severity, source: &str, message: impl Into<String>) {
     let entry = FeedEntry {
         ts_ms: now_millis(),
@@ -80,11 +83,21 @@ pub fn push(app: &tauri::AppHandle, severity: Severity, source: &str, message: i
     }
 }
 
-/// Open the Team Ops window if it isn't open, debounced so a burst of
-/// important events doesn't repeatedly grab the player's attention. Focus is
-/// only taken when the window is actually created.
+/// Open the Team Ops window if it isn't open — ONLY when the player opted in
+/// via the `board_auto_open` policy (`structs_policy set board_auto_open true`).
+/// Without that consent the window stays closed no matter how important the
+/// event; the entry still lands in the feed for whenever they open it. Opening
+/// is debounced so a burst of important events doesn't repeatedly grab the
+/// player's attention, and focus is only taken when the window is created.
 fn ensure_board_open(app: &tauri::AppHandle) {
     if app.get_webview_window("board").is_some() {
+        return;
+    }
+    let opted_in = crate::mcp::policy::POLICY_ENGINE
+        .read()
+        .map(|e| e.is_enabled("board_auto_open"))
+        .unwrap_or(false);
+    if !opted_in {
         return;
     }
     {
