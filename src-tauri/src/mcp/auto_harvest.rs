@@ -303,6 +303,12 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                                     // detection re-resolves this player's new planet.
                                     crate::mcp::virtual_players::invalidate_owned(&pid);
                                     eprintln!("[Auto-Harvest] explored (planet {} mined out) for {}", planet_id, pid);
+                                    crate::mcp::board_feed::push(
+                                        &app,
+                                        crate::mcp::board_feed::Severity::Notice,
+                                        "auto_harvest",
+                                        format!("{} explored to a fresh planet ({} mined out)", pid, planet_id),
+                                    );
                                 }
                             }
                         }
@@ -315,6 +321,12 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
     let started = started.load(Ordering::Relaxed);
     if started > 0 {
         eprintln!("[Auto-Harvest] started {} task(s)", started);
+        crate::mcp::board_feed::push(
+            app_handle,
+            crate::mcp::board_feed::Severity::Info,
+            "auto_harvest",
+            format!("started {} mine/refine task(s)", started),
+        );
     }
 }
 

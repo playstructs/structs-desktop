@@ -151,6 +151,12 @@ impl PolicyEngine {
             // Rules of engagement — human→agent standing intents the agent reads
             // via structs_intel {query:"intents"}. e.g. {posture, pinned_target}.
             ("rules_of_engagement", false, serde_json::json!({"posture": "defensive"})),
+            // Home guard — the primary fleet stays home while the stored-ore pile
+            // is worth raiding or power headroom is thin. Leaving home arms OUR
+            // raid clock and exposes the Command Ship (every CMD loss on record
+            // happened with the fleet away). ON by default: it only blocks
+            // primary fleet-move/raid, it never signs anything.
+            ("primary_home_guard", true, serde_json::json!({"max_stored_ore": 10.0, "min_headroom_pct": 15.0})),
         ];
 
         for (name, default_enabled, default_config) in defaults {
@@ -585,6 +591,60 @@ impl PolicyEngine {
     }
 }
 
+// ── Home guard ──
+
+/// Pure rule for `primary_home_guard`: given the primary's stored ore and power
+/// numbers plus the policy thresholds, return why the fleet must stay home
+/// (None = free to leave). Fleet-away arms our own raid clock; a raid seizes
+/// ALL stored ore, so the pile size is the stake we'd be gambling.
+pub fn home_guard_reason_from(
+    stored_ore: f64,
+    total_load: f64,
+    total_capacity: f64,
+    max_stored_ore: f64,
+    min_headroom_pct: f64,
+) -> Option<String> {
+    if stored_ore > max_stored_ore {
+        return Some(format!(
+            "stored ore {:.0} exceeds the home-guard limit of {:.0} — a raid seizes ALL stored ore, and sending the fleet out arms our own raid clock. Refine the pile down first (or raise max_stored_ore).",
+            stored_ore, max_stored_ore
+        ));
+    }
+    if total_capacity > 0.0 {
+        let headroom_pct = (total_capacity - total_load) / total_capacity * 100.0;
+        if headroom_pct < min_headroom_pct {
+            return Some(format!(
+                "power headroom {:.1}% is below the home-guard floor of {:.0}% — dropping offline takes the Command Ship offline and makes the planet raidable.",
+                headroom_pct, min_headroom_pct
+            ));
+        }
+    }
+    None
+}
+
+/// If the `primary_home_guard` policy is enabled and currently binding, returns
+/// the human-readable reason the PRIMARY fleet must not leave home (raid or
+/// fleet-move away). Vplayer actions are unaffected — expendable raiders are
+/// the intended offense. Returns None when the policy is off or satisfied.
+pub fn home_guard_block_reason() -> Option<String> {
+    let (max_ore, min_headroom) = {
+        let engine = POLICY_ENGINE.read().ok()?;
+        match engine.policy_state("primary_home_guard") {
+            Some((true, cfg)) => (
+                cfg.get("max_stored_ore").and_then(|v| v.as_f64()).unwrap_or(10.0),
+                cfg.get("min_headroom_pct").and_then(|v| v.as_f64()).unwrap_or(15.0),
+            ),
+            _ => return None,
+        }
+    };
+    let (stored_ore, load, capacity) = {
+        let gs = GAME_STATE.read().ok()?;
+        (gs.stored_ore.unwrap_or(0.0), gs.total_load(), gs.total_capacity())
+    };
+    home_guard_reason_from(stored_ore, load, capacity, max_ore, min_headroom)
+        .map(|r| format!("primary_home_guard: {}", r))
+}
+
 // ── Tauri Command ──
 
 #[tauri::command]
@@ -625,5 +685,32 @@ impl PolicyStore {
         }
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(&path, json).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_guard_blocks_on_big_pile() {
+        let r = home_guard_reason_from(134.0, 100.0, 400.0, 10.0, 15.0);
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("stored ore 134"));
+    }
+
+    #[test]
+    fn home_guard_blocks_on_thin_headroom() {
+        // 96% utilization → 4% headroom < 15% floor
+        let r = home_guard_reason_from(0.0, 384.0, 400.0, 10.0, 15.0);
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("power headroom"));
+    }
+
+    #[test]
+    fn home_guard_clear_when_lean_and_powered() {
+        assert!(home_guard_reason_from(5.0, 100.0, 400.0, 10.0, 15.0).is_none());
+        // zero capacity (state not synced yet) must not false-positive on headroom
+        assert!(home_guard_reason_from(0.0, 0.0, 0.0, 10.0, 15.0).is_none());
     }
 }

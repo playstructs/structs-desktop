@@ -499,10 +499,27 @@ async fn action_move_fleet(app_handle: &tauri::AppHandle, args: &Value) -> Vec<C
         )];
     }
 
-    let fleet_id = {
+    let (fleet_id, home_planet) = {
         let gs = GAME_STATE.read().unwrap();
-        gs.fleet_id.clone().unwrap_or_default()
+        (gs.fleet_id.clone().unwrap_or_default(), gs.planet_id.clone().unwrap_or_default())
     };
+
+    // Home guard: leaving home arms our own raid clock and exposes the Command
+    // Ship. Moving BACK home (retreat) is always allowed.
+    if destination != home_planet {
+        if let Some(reason) = crate::mcp::policy::home_guard_block_reason() {
+            crate::mcp::board_feed::push(
+                app_handle,
+                crate::mcp::board_feed::Severity::Notice,
+                "home_guard",
+                format!("blocked fleet move to {} — {}", destination, reason),
+            );
+            return vec![Content::text(format!(
+                "BLOCKED — {}\nRaid with an expendable vplayer instead (structs_players act), or adjust via structs_policy set primary_home_guard.",
+                reason
+            ))];
+        }
+    }
 
     let tx_args = json!({
         "action_type": "fleet_move",
@@ -629,6 +646,22 @@ async fn action_raid(
         return vec![Content::text(
             "Error: target_id (the planet to raid, e.g. '2-7') required.",
         )];
+    }
+
+    // Home guard: a raid keeps the primary fleet away (our own shield window
+    // open) for the whole PoW wait — the exact pattern behind every historical
+    // Command Ship loss. Blocked while the pile/power make that a bad gamble.
+    if let Some(reason) = crate::mcp::policy::home_guard_block_reason() {
+        crate::mcp::board_feed::push(
+            app_handle,
+            crate::mcp::board_feed::Severity::Notice,
+            "home_guard",
+            format!("blocked primary raid on {} — {}", target_id, reason),
+        );
+        return vec![Content::text(format!(
+            "BLOCKED — {}\nRaid with an expendable vplayer instead (structs_players act {{action:raid}}), or adjust via structs_policy set primary_home_guard.",
+            reason
+        ))];
     }
 
     let (fleet_id, difficulty_target) = {

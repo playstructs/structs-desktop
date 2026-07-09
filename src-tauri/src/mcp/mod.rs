@@ -6,6 +6,7 @@ pub mod error_translator;
 pub mod auto_build;
 pub mod auto_defend;
 pub mod auto_harvest;
+pub mod board_feed;
 pub mod auto_infuse;
 pub mod guild_api;
 pub mod guild_power;

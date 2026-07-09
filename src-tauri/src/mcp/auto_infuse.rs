@@ -154,10 +154,22 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
         return;
     }
     match infuse_primary_excess(app_handle, cfg.keep_grams).await {
-        Ok(r) => eprintln!(
-            "[Auto-Infuse] infused {} ualpha (kept {} g), tx {}",
-            r.infused_ualpha, cfg.keep_grams, r.tx
-        ),
+        Ok(r) => {
+            eprintln!(
+                "[Auto-Infuse] infused {} ualpha (kept {} g), tx {}",
+                r.infused_ualpha, cfg.keep_grams, r.tx
+            );
+            crate::mcp::board_feed::push(
+                app_handle,
+                crate::mcp::board_feed::Severity::Notice,
+                "auto_infuse",
+                format!(
+                    "infused {:.1} g alpha into the reactor (kept {} g)",
+                    r.infused_ualpha as f64 / 1_000_000.0,
+                    cfg.keep_grams
+                ),
+            );
+        }
         Err(e) => {
             // "nothing to infuse" is normal/quiet; only note real failures.
             if !e.starts_with("nothing to infuse") {

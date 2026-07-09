@@ -1,3 +1,39 @@
+// [structs-universe DIAGNOSTIC — remove later] Identify the "dark square"
+// render artifact. Hover the square and press Ctrl+Shift+D (or Cmd+Shift+D):
+// logs the element stack under the cursor (id/class/rect/bg/visibility/
+// content-visibility/canvas buffer) to Rust stderr (make launch-debug) and the
+// console. Also flags any visible map-pip and any large dark-background element.
+(function () {
+  try {
+    var lastX = 0, lastY = 0;
+    window.addEventListener('mousemove', function (e) { lastX = e.clientX; lastY = e.clientY; }, true);
+    function desc(el) {
+      var cls = (el.className && el.className.baseVal !== undefined) ? el.className.baseVal : el.className;
+      return el.tagName + (el.id ? '#' + el.id : '') + (cls ? '.' + String(cls).trim().replace(/\s+/g, '.').slice(0, 50) : '');
+    }
+    function line(el) {
+      var r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+      var extra = el.tagName === 'CANVAS' ? (' buf=' + el.width + 'x' + el.height) : '';
+      return '  ' + desc(el) + ' @' + Math.round(r.left) + ',' + Math.round(r.top) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height) +
+             ' bg=' + cs.backgroundColor + ' vis=' + cs.visibility + ' op=' + cs.opacity + ' cv=' + cs.contentVisibility + ' z=' + cs.zIndex + extra;
+    }
+    function log(msg) { try { console.log(msg); if (window.__TAURI__) window.__TAURI__.core.invoke('conn_log', { msg: msg }).catch(function () {}); } catch (e) {} }
+    window.addEventListener('keydown', function (e) {
+      if (!((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'd' || e.key === 'D'))) return;
+      try {
+        var out = ['[PROBE] cursor (' + lastX + ',' + lastY + '):'];
+        (document.elementsFromPoint(lastX, lastY) || []).slice(0, 7).forEach(function (el) { out.push(line(el)); });
+        // Any PiP bubble currently on-screen?
+        document.querySelectorAll('.map-pip').forEach(function (p) {
+          var r = p.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0 && getComputedStyle(p).visibility !== 'hidden') out.push('  [pip-visible] ' + line(p));
+        });
+        log(out.join('\n'));
+      } catch (e2) {}
+    }, true);
+  } catch (e) {}
+})();
+
 // [structs-universe] Fix invisible planetary-struct idle (active-loop) animations.
 // The webapp renders these struct animations with Lottie's CANVAS renderer. A
 // canvas Lottie initialized while its map container is display:none gets a 0x0

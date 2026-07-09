@@ -306,16 +306,20 @@ pub async fn execute(
         let _ = w.emit("board-update", serde_json::json!({ "html": inner }));
     }
 
-    // ── Optional in-app overlay (off by default) ──
+    // ── Optional summary push ──
+    // Team/vplayer info never renders in the MAIN game window; `push` now pipes
+    // a summary into the Team Ops EVENT FEED instead of a main-window overlay.
     if params.push {
-        let comp = serde_json::json!({
-            "kind": "raw_html",
-            "title": "⚡ Team Ops Board",
-            "html": format!("<div style='font-family:monospace;font-size:12px'>charge {} · {:.1}/{:.1}W · {}/{} online · {} vp · PoW {}r/{}w · {}</div>",
+        crate::mcp::board_feed::push(
+            app,
+            crate::mcp::board_feed::Severity::Notice,
+            "board",
+            format!(
+                "charge {} · {:.1}/{:.1}W · {}/{} online · {} vp · PoW {}r/{}w · {}",
                 charge, load, cap, nonline, nstructs, nvp, running, waiting,
-                if threats.is_empty() { "no threats".to_string() } else { format!("⚠ {} threats", threats.len()) })
-        });
-        let _ = crate::mcp::ui_bridge::show_ui(app, "notify", comp, None).await;
+                if threats.is_empty() { "no threats".to_string() } else { format!("⚠ {} threats", threats.len()) }
+            ),
+        );
     }
 
     vec![Content::text(out)]

@@ -290,6 +290,19 @@ pub async fn sync_game_state(
             "[Structs Policy] {} — {} — {}",
             event.policy, event.action, event.detail
         );
+        // Pipe into the Team Ops feed. Power problems are the silent
+        // planet-opener (offline CMD ⇒ raidable), so they rate Important.
+        let sev = if event.policy == "power_alert" && event.action.contains("critical") {
+            crate::mcp::board_feed::Severity::Important
+        } else {
+            crate::mcp::board_feed::Severity::Notice
+        };
+        crate::mcp::board_feed::push(
+            &app_handle,
+            sev,
+            &event.policy,
+            format!("{} — {}", event.action, event.detail),
+        );
     }
 
     // ── Tier 1/2 autonomous threat response ──
@@ -318,7 +331,9 @@ pub async fn sync_game_state(
             use crate::mcp::policy::POLICY_ENGINE;
             POLICY_ENGINE.read().map(|e| e.is_enabled("combat_alert")).unwrap_or(false)
         };
-        // Tier 2 — real-time alert (native notification + in-app toast).
+        // Tier 2 — real-time alert (native notification + in-app toast), plus an
+        // IMPORTANT feed entry (auto-opens the Team Ops window so the player
+        // actually sees it — the feed is invisible while that window is closed).
         if combat_alert_on {
             let title = format!("⚠ Structs: {}", assess.headline);
             let body = if assess.detail.is_empty() {
@@ -329,6 +344,12 @@ pub async fn sync_game_state(
             tokio::spawn(async move {
                 let _ = crate::notifications::send_notification(title, body).await;
             });
+            crate::mcp::board_feed::push(
+                &app_handle,
+                crate::mcp::board_feed::Severity::Important,
+                "combat",
+                format!("{} — {}", assess.headline, assess.detail),
+            );
             let comp = serde_json::json!({
                 "kind": "toast",
                 "title": format!("⚡ {}", assess.headline),
@@ -414,16 +435,14 @@ pub async fn sync_game_state(
                 tokio::spawn(async move {
                     let _ = crate::notifications::send_notification(title, body_n).await;
                 });
-                let comp = serde_json::json!({
-                    "kind": "toast",
-                    "title": "⚡ Bait fleet under attack",
-                    "body": body,
-                    "level": "warn"
-                });
-                let app_t = app_handle.clone();
-                tokio::spawn(async move {
-                    let _ = crate::mcp::ui_bridge::show_ui(&app_t, "notify", comp, None).await;
-                });
+                // Vplayer info stays OUT of the main game window: pipe it into
+                // the Team Ops feed instead (Important ⇒ the window auto-opens).
+                crate::mcp::board_feed::push(
+                    &app_handle,
+                    crate::mcp::board_feed::Severity::Important,
+                    "team",
+                    format!("{} team threat(s): {}", n, body),
+                );
             }
         }
     }

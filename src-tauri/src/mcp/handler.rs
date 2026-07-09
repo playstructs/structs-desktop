@@ -158,7 +158,7 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_ui",
-                "Drive the human player's screen for co-op play (the human and you share one session). mode 'notify' shows a surface and returns immediately; mode 'prompt' shows an interactive surface and BLOCKS until the human chooses, returning their selection. Provide `component` = a spec with a `kind`: open_menu {controller,page,options?} (jump to an existing screen); menu {title,items:[{label,value,hint?}]} (a pick-list — prompt returns the chosen value); dialogue {title,message,buttons:[{label,value}]}; panel {title,placement?,theme?,body:[...]} (custom side panel); info {title,rows:[{key,value}]}; map_preview {planet_id,defender_id?,attacker_id?} (show another player's map); hud_badge {id,label,value,theme?} (add/update a HUD badge; same id updates, dismiss removes); toast {title,body,level?}; raw_html {title,html} (escape hatch); dismiss {target_id}. UI is display/elicitation only — it cannot sign; act on the human's choice via structs_action. Respects the agent_ui master toggle.",
+                "Drive the human player's screen for co-op play (the human and you share one session). MAIN-WINDOW SURFACES ARE FOR THE PRIMARY PLAYER'S OWN GAME ONLY — never display virtual-player/team info here; that belongs in the Team Ops window's event feed (the auto-loops and threat scans pipe it there automatically; use structs_board for team views). mode 'notify' shows a surface and returns immediately; mode 'prompt' shows an interactive surface and BLOCKS until the human chooses, returning their selection. Provide `component` = a spec with a `kind`: open_menu {controller,page,options?} (jump to an existing screen); menu {title,items:[{label,value,hint?}]} (a pick-list — prompt returns the chosen value); dialogue {title,message,buttons:[{label,value}]}; panel {title,placement?,theme?,body:[...]} (custom side panel); info {title,rows:[{key,value}]}; map_preview {planet_id,defender_id?,attacker_id?} (show another player's map); hud_badge {id,label,value,theme?} (add/update a HUD badge; same id updates, dismiss removes); toast {title,body,level?}; raw_html {title,html} (escape hatch); dismiss {target_id}. UI is display/elicitation only — it cannot sign; act on the human's choice via structs_action. Respects the agent_ui master toggle.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -240,12 +240,12 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_board",
-                "Team operations board — one at-a-glance command view shared by the human and the agent: primary status (charge readiness, power margin, structs online, ore/alpha), virtual-player count, the team-wide PoW queue (running/waiting/done), active threats across the whole team (last ~2 min), and recommended next moves. Returns the board as text and writes a self-contained, auto-refreshing HTML file. Pass 'open':true ONCE to pop it out as a separate OS window (it auto-refreshes every 8s as later calls rewrite the file — so loop the board without 'open' to keep a live window beside the game). 'push':true re-enables the older in-app overlay (off by default — it can crowd the game view).",
+                "Team operations board — one at-a-glance command view shared by the human and the agent: primary status (charge readiness, power margin, structs online, ore/alpha), virtual-player count, the team-wide PoW queue (running/waiting/done), active threats across the whole team (last ~2 min), and recommended next moves. The window also hosts the EVENT FEED — the single sink for vplayer/automation activity (auto-loops, policy events, threats pipe in automatically; important entries auto-open the window). Pass 'open':true ONCE to pop the native window (later calls just refresh it live). 'push':true adds a one-line summary entry to the event feed (it no longer overlays the main game window).",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "open": { "type": "boolean", "description": "Pop the board out as a separate OS window (default browser). Do this once; later calls just refresh the open window." },
-                        "push": { "type": "boolean", "description": "Also render an in-app overlay via structs_ui (default false; can crowd the game view)." }
+                        "push": { "type": "boolean", "description": "Pipe a one-line board summary into the Team Ops event feed (default false; never renders in the main game window)." }
                     }
                 })),
             ),

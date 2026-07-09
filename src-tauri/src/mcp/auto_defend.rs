@@ -1,16 +1,20 @@
 //! Native auto-defense loop — assigns each productive vplayer's idle combat structs
-//! to DEFEND its highest-value production struct (the Ore Refinery, else the Ore
-//! Extractor) via `MsgStructDefenseSet`, so newly-built defenders actually intercept
-//! raids instead of sitting unassigned. One assignment per player per scan (defend
-//! costs 1 charge). Idempotent: a defender whose on-chain `protectedStructIndex` is
-//! already non-zero is cached and never re-queried. Off by default (it auto-signs).
+//! to DEFEND its key structs via `MsgStructDefenseSet`, so newly-built defenders
+//! actually intercept raids instead of sitting unassigned. Priority: the Command
+//! Ship first (it is the planetary-shield gate — if it dies the raid clock arms —
+//! and its 2/2 counter is the best attacker-killer), then the Ore Refinery and Ore
+//! Extractor, spreading defenders across targets instead of piling on one. A
+//! same-ambit defender is preferred (only same-ambit defenders can BLOCK; cross-ambit
+//! ones only counter). One assignment per player per scan (defend costs 1 charge).
+//! Idempotent: a defender whose on-chain `protectedStructIndex` is already non-zero
+//! is cached (with its target) and never re-queried. Off by default (it auto-signs).
 //!
 //! This is the "configure defensive relationships as new structs come online" piece:
 //! it runs every scan, so a freshly-built OSG/Tank/Starfighter gets a defender
 //! assignment on the next pass. Bait players are skipped by default (they're raid
 //! fodder — armor makes raids costly, but we don't shield their structs).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, RwLock};
 
@@ -21,10 +25,14 @@ use crate::hasher::types::now_millis;
 use crate::mcp::cosmos_client::CosmosClient;
 
 const FILENAME: &str = "auto_defend.json";
+const COMMAND_SHIP_TYPE: &str = "1";
 const REFINERY_TYPE: &str = "15";
 const EXTRACTOR_TYPE: &str = "14";
 /// Production / command types — PROTECTED targets, never used as defenders.
 const PROTECTED_TYPES: &[&str] = &["14", "15", "1"]; // extractor, refinery, command ship
+/// The Command Ship gets defenders before anything else, up to this many
+/// (ideally one blocker per ambit), before assignments spread to production.
+const CMD_MIN_DEFENDERS: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoDefendConfig {
@@ -45,8 +53,9 @@ impl Default for AutoDefendConfig {
 static CONFIG: LazyLock<RwLock<AutoDefendConfig>> = LazyLock::new(|| RwLock::new(load()));
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 static RUNNING: AtomicBool = AtomicBool::new(false);
-/// Defender struct ids already assigned (protectedStructIndex != 0) — skip re-querying.
-static ASSIGNED_CACHE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// Defender struct id -> protected struct id it already defends (protectedStructIndex
+/// != 0 on chain) — skip re-querying, and count toward spread balancing.
+static ASSIGNED_CACHE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join("structs-app").join(FILENAME))
@@ -132,19 +141,37 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoDefendConfig) {
                     Err(_) => return,
                 };
 
-                // Protected target = the Refinery (highest value), else the Extractor.
-                let find_type = |t: &str| -> Option<String> {
+                // Protected targets in priority order: Command Ship (the shield
+                // gate) first, then Refinery, then Extractor. (id, ambit) pairs.
+                let find_type = |t: &str| -> Option<(String, String)> {
                     structs
                         .iter()
                         .filter(|s| !truthy(s.get("is_destroyed")))
                         .find(|s| type_id_of(s) == t)
-                        .and_then(|s| s.get("id").and_then(|x| x.as_str()).map(String::from))
+                        .and_then(|s| {
+                            s.get("id").and_then(|x| x.as_str()).map(|id| {
+                                let ambit = s
+                                    .get("operating_ambit")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                (id.to_string(), ambit)
+                            })
+                        })
                 };
-                let Some(protected_id) = find_type(REFINERY_TYPE).or_else(|| find_type(EXTRACTOR_TYPE)) else {
+                // (type, id, ambit), priority-ordered.
+                let protected: Vec<(&str, String, String)> = [COMMAND_SHIP_TYPE, REFINERY_TYPE, EXTRACTOR_TYPE]
+                    .iter()
+                    .filter_map(|t| find_type(t).map(|(id, ambit)| (*t, id, ambit)))
+                    .collect();
+                if protected.is_empty() {
                     return;
-                };
+                }
 
-                // Assign the first idle (unassigned, built) combat struct to defend it.
+                // Pass 1: classify every combat struct — count existing assignments
+                // per protected target, collect idle (built, unassigned) candidates.
+                let mut counts: HashMap<String, usize> = HashMap::new();
+                let mut idle: Vec<(String, String)> = Vec::new(); // (id, ambit)
                 for s in &structs {
                     if truthy(s.get("is_destroyed")) {
                         continue;
@@ -156,7 +183,8 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoDefendConfig) {
                     let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else {
                         continue;
                     };
-                    if ASSIGNED_CACHE.lock().unwrap().contains(&sid) {
+                    if let Some(target) = ASSIGNED_CACHE.lock().unwrap().get(&sid).cloned() {
+                        *counts.entry(target).or_insert(0) += 1;
                         continue;
                     }
                     // On-chain check: built + not already defending something.
@@ -173,26 +201,68 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoDefendConfig) {
                         .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|v| v.parse().ok())))
                         .unwrap_or(0);
                     if prot_idx != 0 {
-                        ASSIGNED_CACHE.lock().unwrap().insert(sid); // already defending — cache & skip
+                        // Already defending — cache with its target (struct ids are "5-<index>").
+                        let target = format!("5-{}", prot_idx);
+                        *counts.entry(target.clone()).or_insert(0) += 1;
+                        ASSIGNED_CACHE.lock().unwrap().insert(sid, target);
                         continue;
                     }
-                    // Assign it to protect the refinery/extractor.
-                    let res = crate::mcp::vplayer_bridge::sign_action(
-                        &app,
-                        idx,
-                        "/structs.structs.MsgStructDefenseSet",
-                        json!({ "defenderStructId": sid, "protectedStructId": protected_id }),
-                        60,
-                    )
-                    .await;
-                    if let Ok(v) = res {
-                        if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 {
-                            ASSIGNED_CACHE.lock().unwrap().insert(sid.clone());
-                            eprintln!("[Auto-Defend] {} defends {} (player {})", sid, protected_id, pid);
-                        }
-                    }
-                    break; // one assignment per player per scan (charge-paced)
+                    let ambit = s
+                        .get("operating_ambit")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    idle.push((sid, ambit));
                 }
+                if idle.is_empty() {
+                    return;
+                }
+
+                // Pick the target: the Command Ship until it has CMD_MIN_DEFENDERS,
+                // then whichever protected struct has the fewest defenders
+                // (ties break toward the higher-priority target).
+                let (target_id, target_ambit) = {
+                    let cmd = protected.iter().find(|(t, _, _)| *t == COMMAND_SHIP_TYPE);
+                    match cmd {
+                        Some((_, id, ambit)) if counts.get(id).copied().unwrap_or(0) < CMD_MIN_DEFENDERS => {
+                            (id.clone(), ambit.clone())
+                        }
+                        _ => protected
+                            .iter()
+                            .min_by_key(|(_, id, _)| counts.get(id).copied().unwrap_or(0))
+                            .map(|(_, id, ambit)| (id.clone(), ambit.clone()))
+                            .unwrap(),
+                    }
+                };
+                // Prefer a same-ambit defender (only same-ambit defenders can block).
+                let (sid, _) = idle
+                    .iter()
+                    .find(|(_, a)| !target_ambit.is_empty() && *a == target_ambit)
+                    .or_else(|| idle.first())
+                    .cloned()
+                    .unwrap();
+
+                let res = crate::mcp::vplayer_bridge::sign_action(
+                    &app,
+                    idx,
+                    "/structs.structs.MsgStructDefenseSet",
+                    json!({ "defenderStructId": sid, "protectedStructId": target_id }),
+                    60,
+                )
+                .await;
+                if let Ok(v) = res {
+                    if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 {
+                        ASSIGNED_CACHE.lock().unwrap().insert(sid.clone(), target_id.clone());
+                        eprintln!("[Auto-Defend] {} defends {} (player {})", sid, target_id, pid);
+                        crate::mcp::board_feed::push(
+                            &app,
+                            crate::mcp::board_feed::Severity::Info,
+                            "auto_defend",
+                            format!("{} now defends {} (player {})", sid, target_id, pid),
+                        );
+                    }
+                }
+                // One assignment per player per scan (charge-paced).
             }
         },
     )

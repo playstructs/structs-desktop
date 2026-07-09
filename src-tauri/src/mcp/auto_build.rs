@@ -189,6 +189,10 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
     // serially — the serial walk reached the tail cohort minutes late.
     let complete_difficulty = cfg.complete_difficulty;
     let app = app_handle.clone();
+    // Scan-level counters → one summary feed entry instead of per-player spam.
+    let completes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let initiates = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (completes_c, initiates_c) = (completes.clone(), initiates.clone());
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
         crate::mcp::loop_util::MAX_CONCURRENT_PLAYERS,
@@ -196,6 +200,8 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
             let app = app.clone();
             let client = client.clone();
             let registry = registry.clone();
+            let completes = completes_c.clone();
+            let initiates = initiates_c.clone();
             async move {
                 let structs = match client.guild.struct_list_by_owner(&pid, 1).await {
                     Ok(p) => p.items,
@@ -252,6 +258,7 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
                         if let Some(idx) = idx_opt {
                             crate::hasher::register_vplayer_hash(sid.clone(), idx, "BUILD".to_string());
                         }
+                        completes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         eprintln!("[Auto-Build] complete {} (age {}, build-difficulty ≤ {})", sid, age, complete_difficulty);
                     }
                 }
@@ -360,6 +367,7 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
                     .await;
                     match res {
                         Ok(v) if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 => {
+                            initiates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             eprintln!("[Auto-Build] {} {} {} slot {} (player {})", target, ambit, type_name, slot, pid);
                         }
                         _ => {}
@@ -370,6 +378,18 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
         },
     )
     .await;
+    let (nc, ni) = (
+        completes.load(std::sync::atomic::Ordering::Relaxed),
+        initiates.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    if nc + ni > 0 {
+        crate::mcp::board_feed::push(
+            app_handle,
+            crate::mcp::board_feed::Severity::Info,
+            "auto_build",
+            format!("{} build completion(s) started, {} build(s) initiated", nc, ni),
+        );
+    }
 }
 
 #[cfg(test)]

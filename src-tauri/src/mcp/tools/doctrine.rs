@@ -185,7 +185,12 @@ async fn tick_doctrine() -> Vec<Content> {
     }
 
     if matches!(posture.as_str(), "aggressive" | "raid") {
-        if let Some(t) = &pinned {
+        if let Some(reason) = crate::mcp::policy::home_guard_block_reason() {
+            plan.push(format!(
+                "🏰 HOME GUARD — offense with the PRIMARY fleet is blocked: {} Use an expendable raider vplayer (structs_players act) for offense.",
+                reason
+            ));
+        } else if let Some(t) = &pinned {
             if charge_ready {
                 plan.push(format!(
                     "🎯 STRIKE — posture {} + charge ready: advance the kill-chain on pinned target {} (structs_strike {{target:\"{}\"}}).",

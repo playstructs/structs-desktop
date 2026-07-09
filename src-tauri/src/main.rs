@@ -55,6 +55,7 @@ fn main() {
             mcp::tools::board::mcp_board_html,
             mcp::tools::board::mcp_vplayer_list,
             mcp::tools::map::mcp_render_map,
+            mcp::board_feed::mcp_board_feed,
             game_state::get_sync_interval,
             game_state::notify_hash_complete,
             game_state::conn_log,
@@ -267,6 +268,44 @@ try {{
     var proto = CanvasRenderingContext2D.prototype;
     lockOff(proto, 'imageSmoothingEnabled');
     lockOff(proto, 'webkitImageSmoothingEnabled');
+}})();
+
+// Re-disable smoothing after every canvas resize. Setting canvas.width/height
+// RESETS the 2D context to defaults (imageSmoothingEnabled=true), so the
+// one-time disable at animation load does NOT survive Lottie resizing its
+// canvas — which is what leaves idle struct loops, the onboarding portrait,
+// and other animations blurry after they're shown/resized. Track which
+// canvases are 2D (via getContext) and re-apply smoothing=false on each
+// width/height write, before the next draw. Global, so it covers every
+// current and future animation without per-site patches.
+(function() {{
+    if (!window.HTMLCanvasElement || !HTMLCanvasElement.prototype) return;
+    var TWO_D = new WeakSet();
+    var origGet = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type) {{
+        var ctx = origGet.apply(this, arguments);
+        if (ctx && type === '2d') {{
+            TWO_D.add(this);
+            try {{ ctx.imageSmoothingEnabled = false; }} catch (e) {{}}
+        }}
+        return ctx;
+    }};
+    ['width', 'height'].forEach(function(prop) {{
+        var d = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, prop);
+        if (!d || !d.set) return;
+        Object.defineProperty(HTMLCanvasElement.prototype, prop, {{
+            get: d.get,
+            set: function(v) {{
+                d.set.call(this, v);
+                // Only for known-2D canvases, so we never force a 2D context
+                // onto a WebGL/other canvas.
+                if (TWO_D.has(this)) {{
+                    try {{ var c = origGet.call(this, '2d'); if (c) c.imageSmoothingEnabled = false; }} catch (e) {{}}
+                }}
+            }},
+            configurable: true
+        }});
+    }});
 }})();
 
 // SVG image-rendering fix for Lottie animations (defeat/victory banners)

@@ -28,6 +28,14 @@
     #vp-select { width: 100%; }
     #vp-map img { width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }
     .ops-muted { opacity: .7; }
+    /* EVENT FEED — newest first, capped height so it never swallows the page. */
+    #feed-list { list-style: none; margin: 4px 0 0; padding: 0; max-height: 240px; overflow-y: auto;
+                 font-family: monospace; font-size: 12px; width: 100%; }
+    #feed-list li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; }
+    .feed-ts { opacity: .55; flex: none; }
+    .feed-src { opacity: .75; flex: none; }
+    .feed-important { color: #ffb454; font-weight: 600; }
+    .feed-notice { font-weight: 500; }
   </style>
 </head>
 <body>
@@ -49,6 +57,12 @@
             <!-- Live region: replaced wholesale on each board-update. -->
             <div id="root"><div class="sui-data-card-row">Connecting…</div></div>
             <!-- Persistent region: NOT touched by board-update. -->
+            <div class="sui-data-card sui-theme-player">
+              <div class="sui-data-card-header">EVENT FEED</div>
+              <div class="sui-data-card-body sui-mod-spacing-xl">
+                <ul id="feed-list"><li class="ops-muted">no events yet</li></ul>
+              </div>
+            </div>
             <div class="sui-data-card sui-theme-player">
               <div class="sui-data-card-header">VPLAYER MAP</div>
               <div class="sui-data-card-body sui-mod-spacing-xl">
@@ -74,6 +88,35 @@
       T.event.listen('board-update', function (e) {
         render(e && e.payload && e.payload.html);
       });
+
+      // EVENT FEED — back-fill from the ring buffer, then append live entries.
+      var feed = document.getElementById('feed-list');
+      var FEED_MAX_ROWS = 150;
+      function feedRow(e) {
+        var li = document.createElement('li');
+        if (e.severity === 'important') li.className = 'feed-important';
+        else if (e.severity === 'notice') li.className = 'feed-notice';
+        var ts = document.createElement('span');
+        ts.className = 'feed-ts';
+        ts.textContent = new Date(e.ts_ms).toLocaleTimeString();
+        var src = document.createElement('span');
+        src.className = 'feed-src';
+        src.textContent = '[' + e.source + ']';
+        var msg = document.createElement('span');
+        msg.textContent = e.message;
+        li.appendChild(ts); li.appendChild(src); li.appendChild(msg);
+        return li;
+      }
+      function feedAdd(e) {
+        if (!e || !e.message) return;
+        if (feed.firstChild && feed.firstChild.className === 'ops-muted') feed.innerHTML = '';
+        feed.insertBefore(feedRow(e), feed.firstChild); // newest first
+        while (feed.children.length > FEED_MAX_ROWS) feed.removeChild(feed.lastChild);
+      }
+      T.core.invoke('mcp_board_feed').then(function (entries) {
+        (entries || []).forEach(feedAdd); // oldest→newest, so newest ends on top
+      }).catch(function () {});
+      T.event.listen('board-feed', function (e) { feedAdd(e && e.payload); });
 
       // VPLAYER MAP dropdown — populate once; render the chosen player's map.
       var sel = document.getElementById('vp-select');
