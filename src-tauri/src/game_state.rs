@@ -344,22 +344,16 @@ pub async fn sync_game_state(
             tokio::spawn(async move {
                 let _ = crate::notifications::send_notification(title, body).await;
             });
+            // No main-window toast: the native notification above + this
+            // Important feed entry (which can auto-open the Team Ops window if
+            // the player opted in) are the alert surfaces. Agent/automation
+            // visuals never overlay the game view.
             crate::mcp::board_feed::push(
                 &app_handle,
                 crate::mcp::board_feed::Severity::Important,
                 "combat",
                 format!("{} — {}", assess.headline, assess.detail),
             );
-            let comp = serde_json::json!({
-                "kind": "toast",
-                "title": format!("⚡ {}", assess.headline),
-                "body": assess.detail,
-                "level": "warn"
-            });
-            let app_t = app_handle.clone();
-            tokio::spawn(async move {
-                let _ = crate::mcp::ui_bridge::show_ui(&app_t, "notify", comp, None).await;
-            });
         }
         // Tier 1 — per-policy response.
         for r in assess.responses {

@@ -121,6 +121,31 @@ fn ensure_board_open(app: &tauri::AppHandle) {
     }
 }
 
+/// Spawn the Team Ops window unconditionally (no `board_auto_open` consent
+/// gate) — used for PROMPT directives, which the player sanctioned themselves
+/// (an ask-mode policy they configured, or an explicit agent elicitation) and
+/// which need a surface to be answered on. Returns whether a window exists.
+pub fn spawn_window(app: &tauri::AppHandle) -> bool {
+    if app.get_webview_window("board").is_some() {
+        return true;
+    }
+    match WebviewWindowBuilder::new(app, "board", WebviewUrl::App("board.html".into()))
+        .title("Structs — Team Ops")
+        .inner_size(580.0, 760.0)
+        .build()
+    {
+        Ok(w) => {
+            let _ = w.set_focus();
+            eprintln!("[Board Feed] opened Team Ops window (prompt directive)");
+            true
+        }
+        Err(e) => {
+            eprintln!("[Board Feed] couldn't open Team Ops window: {}", e);
+            false
+        }
+    }
+}
+
 /// Recent entries, oldest→newest — the board window back-fills from this on load.
 pub fn recent(limit: usize) -> Vec<FeedEntry> {
     FEED.lock()

@@ -97,6 +97,93 @@ fn rate_ok() -> bool {
     }
 }
 
+/// Directive kinds that deliberately DRIVE the main game window's UI through
+/// the webapp façade (open a menu, show a map preview). Only these still go to
+/// the main window — everything informational (toasts, dialogues, panels)
+/// renders in the Team Ops board window instead, so agent/automation chatter
+/// never overlays the game view.
+fn is_main_window_kind(component: &Value) -> bool {
+    matches!(
+        component.get("kind").and_then(|k| k.as_str()),
+        Some("open_menu") | Some("map_preview")
+    )
+}
+
+/// One-line text summary of a directive, for degrading a notify to a board
+/// feed entry when the board window is closed.
+fn summarize(component: &Value) -> String {
+    let s = |k: &str| component.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let title = s("title");
+    let body = if s("body").is_empty() { s("message") } else { s("body") };
+    match (title.is_empty(), body.is_empty()) {
+        (false, false) => format!("{} — {}", title, body),
+        (false, true) => title.to_string(),
+        (true, false) => body.to_string(),
+        (true, true) => component
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or("directive")
+            .to_string(),
+    }
+}
+
+/// Route a directive to the right window.
+/// - Façade action kinds → the main game window (app-wide emit; the main
+///   window's renderer executes them). These only occur when the agent
+///   deliberately drives the game UI.
+/// - Everything else → the Team Ops BOARD window. If the board is closed:
+///   a `notify` degrades to a feed entry (no window is forced open; the feed
+///   back-fills on next open); a `prompt` OPENS the board (a prompt is
+///   player-sanctioned — an ask-mode policy they configured, or an explicit
+///   agent elicitation — and needs a surface to answer). Emits to a freshly
+///   opened window are retried while the page loads; the board renderer
+///   dedupes by directive_id, so repeats are harmless.
+async fn deliver(
+    app_handle: &tauri::AppHandle,
+    directive: &UiDirective,
+    is_prompt: bool,
+) -> Result<(), String> {
+    use tauri::Manager;
+    if is_main_window_kind(&directive.component) {
+        return app_handle
+            .emit("mcp_ui_directive", directive)
+            .map_err(|e| format!("Failed to emit UI directive: {}", e));
+    }
+    let mut just_spawned = false;
+    if app_handle.get_webview_window("board").is_none() {
+        if is_prompt {
+            if !crate::mcp::board_feed::spawn_window(app_handle) {
+                crate::mcp::board_feed::push(
+                    app_handle,
+                    crate::mcp::board_feed::Severity::Important,
+                    "agent",
+                    format!("(unanswered prompt) {}", summarize(&directive.component)),
+                );
+                return Err("board window unavailable for prompt".to_string());
+            }
+            just_spawned = true;
+        } else {
+            crate::mcp::board_feed::push(
+                app_handle,
+                crate::mcp::board_feed::Severity::Notice,
+                "agent",
+                summarize(&directive.component),
+            );
+            return Ok(());
+        }
+    }
+    let attempts = if just_spawned { 8 } else { 1 };
+    for i in 0..attempts {
+        if let Some(w) = app_handle.get_webview_window("board") {
+            let _ = w.emit("mcp_ui_directive", directive);
+        }
+        if i + 1 < attempts {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+    Ok(())
+}
+
 /// Show a UI directive on the human's screen.
 /// - `notify`: emits and returns `Shown` immediately.
 /// - `prompt`: emits, then blocks until the human answers, cancels, or times out.
@@ -134,11 +221,11 @@ pub async fn show_ui(
         component,
     };
 
-    if let Err(e) = app_handle.emit("mcp_ui_directive", &directive) {
+    if let Err(e) = deliver(app_handle, &directive, is_prompt).await {
         if is_prompt {
             cleanup_inflight(&directive_id).await;
         }
-        return Err(format!("Failed to emit UI directive: {}", e));
+        return Err(e);
     }
     eprintln!("[Structs UI] Sent {} directive {}", directive.mode, directive_id);
 

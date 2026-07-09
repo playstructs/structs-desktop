@@ -36,6 +36,22 @@
     .feed-src { opacity: .75; flex: none; }
     .feed-important { color: #ffb454; font-weight: 600; }
     .feed-notice { font-weight: 500; }
+    /* AGENT UI directives (toasts + prompts) — board-window only. */
+    #agent-ui:empty { display: none; }
+    .agent-card { border: 1px solid rgba(120,180,255,.45); border-radius: 8px;
+                  background: rgba(120,180,255,.08); padding: 10px 12px; margin-bottom: 10px; }
+    .agent-card-head { display: flex; align-items: baseline; gap: 8px; }
+    .agent-mark { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
+                  background: rgba(120,180,255,.18); color: #9ecbff; flex: none; }
+    .agent-title { font-weight: 600; flex: 1; }
+    .agent-x { cursor: pointer; opacity: .7; flex: none; padding: 0 4px; }
+    .agent-x:hover { opacity: 1; }
+    .agent-body { margin: 6px 0 0; font-size: 13px; white-space: pre-wrap; }
+    .agent-buttons { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .agent-btn { cursor: pointer; border: 1px solid rgba(120,180,255,.55); border-radius: 6px;
+                 background: rgba(120,180,255,.14); color: inherit; padding: 4px 14px; font: inherit; }
+    .agent-btn:hover { background: rgba(120,180,255,.28); }
+    .agent-toast { border-color: rgba(255,180,84,.5); background: rgba(255,180,84,.08); }
   </style>
 </head>
 <body>
@@ -54,6 +70,9 @@
         </div>
         <div class="height-100 sui-screen sui-screen-full-width sui-screen-shrink">
           <div class="height-100 sui-page-body-screen ops-scroll">
+            <!-- AGENT UI — toasts + prompts from the policy engine / structs_ui
+                 render HERE (never over the main game window). -->
+            <div id="agent-ui"></div>
             <!-- Live region: replaced wholesale on each board-update. -->
             <div id="root"><div class="sui-data-card-row">Connecting…</div></div>
             <!-- Persistent region: NOT touched by board-update. -->
@@ -143,6 +162,83 @@
         }).catch(function (err) {
           box.innerHTML = '<div style="color:#ff6b6b">render failed: ' + err + '</div>';
         });
+      });
+
+      // ── AGENT UI directives ─────────────────────────────────────────────
+      // Toasts + prompts from the policy engine / structs_ui tool render here
+      // in the board window (never over the main game view). Prompts answer
+      // back via the mcp_ui_response command. Rust retries emits while a
+      // freshly-opened window loads, so dedupe by directive_id.
+      var agentBox = document.getElementById('agent-ui');
+      var agentSeen = {};
+      function agentRespond(id, value, cancelled) {
+        T.core.invoke('mcp_ui_response', {
+          response: { directive_id: id, value: value == null ? null : value, cancelled: !!cancelled }
+        }).catch(function () {});
+      }
+      function agentRemove(id) {
+        var el = document.getElementById('agent-d-' + id);
+        if (el && el.parentNode) el.parentNode.removeChild(el);
+      }
+      function agentCard(d) {
+        var c = d.component || {};
+        var isPrompt = d.mode === 'prompt';
+        var card = document.createElement('div');
+        card.className = 'agent-card' + (c.kind === 'toast' || c.kind === 'hud_badge' ? ' agent-toast' : '');
+        card.id = 'agent-d-' + d.directive_id;
+        var head = document.createElement('div');
+        head.className = 'agent-card-head';
+        var mark = document.createElement('span');
+        mark.className = 'agent-mark';
+        mark.textContent = '⚡ AGENT';
+        var title = document.createElement('span');
+        title.className = 'agent-title';
+        title.textContent = c.title || c.headline || c.kind || 'agent';
+        var x = document.createElement('span');
+        x.className = 'agent-x';
+        x.textContent = '✕';
+        x.addEventListener('click', function () {
+          if (isPrompt) agentRespond(d.directive_id, null, true);
+          agentRemove(d.directive_id);
+        });
+        head.appendChild(mark); head.appendChild(title); head.appendChild(x);
+        card.appendChild(head);
+        var bodyText = c.body || c.message || '';
+        if (bodyText) {
+          var body = document.createElement('div');
+          body.className = 'agent-body';
+          body.textContent = bodyText;
+          card.appendChild(body);
+        }
+        var buttons = c.buttons || c.options || [];
+        if (isPrompt) {
+          if (!buttons.length) buttons = [{ label: 'OK', value: 'ok' }];
+          var row = document.createElement('div');
+          row.className = 'agent-buttons';
+          buttons.forEach(function (b) {
+            var btn = document.createElement('button');
+            btn.className = 'agent-btn';
+            btn.textContent = (b && b.label) || String(b);
+            btn.addEventListener('click', function () {
+              agentRespond(d.directive_id, (b && b.value !== undefined) ? b.value : b, false);
+              agentRemove(d.directive_id);
+            });
+            row.appendChild(btn);
+          });
+          card.appendChild(row);
+        }
+        return card;
+      }
+      T.event.listen('mcp_ui_directive', function (e) {
+        var d = e && e.payload;
+        if (!d || !d.directive_id || agentSeen[d.directive_id]) return;
+        var c = d.component || {};
+        if (c.kind === 'dismiss') { if (c.target_id) agentRemove(c.target_id); return; }
+        agentSeen[d.directive_id] = true;
+        agentBox.insertBefore(agentCard(d), agentBox.firstChild);
+        if (d.mode !== 'prompt') {
+          setTimeout(function () { agentRemove(d.directive_id); }, 12000);
+        }
       });
     })();
   </script>
