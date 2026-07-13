@@ -718,13 +718,28 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               var data = JSON.parse(jsonStr.substring(0, jsonEnd));
               if (!data.category) return;
 
-              // Push all events to Rust event buffer for MCP access
+              // Push all events to Rust event buffer for MCP access.
+              // Fold any TOP-LEVEL grass fields into `detail` first: inventory
+              // events (refined/mined/sent/received/burned/infused) carry their
+              // `amount` at the top level of the message, NOT inside `detail`, so
+              // forwarding only `data.detail` dropped it and the MCP feed could
+              // never see inventory amounts. Merge top-level extras first, then
+              // let the structured `detail` keys win on any conflict.
               if (window.__TAURI__ && data.category !== 'block') {
+                var mergedDetail = {};
+                for (var __k in data) {
+                  if (__k !== 'category' && __k !== 'subject' && __k !== 'detail') {
+                    mergedDetail[__k] = data[__k];
+                  }
+                }
+                if (data.detail && typeof data.detail === 'object') {
+                  for (var __d in data.detail) mergedDetail[__d] = data.detail[__d];
+                }
                 window.__TAURI__.core.invoke('push_game_event', {
                   event: {
                     category: data.category,
                     subject: data.subject || '',
-                    detail: data.detail || {},
+                    detail: mergedDetail,
                     timestamp: Date.now()
                   }
                 }).catch(function() {});
@@ -2406,20 +2421,17 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
     function renderDirective(d) {
       var c = (d && d.component) || {};
+      // MAIN window only drives façade ACTIONS (open a menu, show a map preview)
+      // that deliberately touch the game UI. All informational/agent UI —
+      // toasts, dialogues, hud badges, panels — renders in the Team Ops board
+      // window (frontend/board.html #agent-ui), never as an overlay on the game
+      // view. This guard is defense-in-depth: the Rust bridge already targets
+      // the board via emit_to, but should a broadcast ever leak here, the main
+      // window silently ignores it instead of drawing over the game.
+      if (c.kind !== 'open_menu' && c.kind !== 'map_preview') return;
       switch (c.kind) {
-        case 'toast': return showToast(c);
-        case 'hud_badge': return showHudBadge(c);
-        case 'dismiss':
-          if (c.target_id) { removeHudBadge(c.target_id); closePanel(c.target_id, null, true); }
-          return;
-        case 'menu': return showSurface(d, 'menu');
-        case 'dialogue': return showSurface(d, 'dialogue');
-        case 'info': return showSurface(d, 'info');
-        case 'panel': return showSurface(d, 'panel');
-        case 'raw_html': return showSurface(d, 'raw_html');
         case 'open_menu': return facadeKind(d, 'openMenu', c);
         case 'map_preview': return facadeKind(d, 'showPreview', c);
-        default: console.warn('[Agent UI] unknown directive kind:', c.kind);
       }
     }
 

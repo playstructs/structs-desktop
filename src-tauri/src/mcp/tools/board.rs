@@ -302,8 +302,10 @@ pub async fn execute(
             Err(e) => out.push_str(&format!("\n(couldn't open the Team Ops window: {})\n", e)),
         }
     }
-    if let Some(w) = app.get_webview_window("board") {
-        let _ = w.emit("board-update", serde_json::json!({ "html": inner }));
+    // emit_to (not emit): Tauri v2 `emit` broadcasts to every window; target the
+    // board explicitly so this never reaches the main game window.
+    if app.get_webview_window("board").is_some() {
+        let _ = app.emit_to("board", "board-update", serde_json::json!({ "html": inner }));
     }
 
     // ── Optional summary push ──

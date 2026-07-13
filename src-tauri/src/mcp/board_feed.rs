@@ -78,8 +78,10 @@ pub fn push(app: &tauri::AppHandle, severity: Severity, source: &str, message: i
     if severity == Severity::Important {
         ensure_board_open(app);
     }
-    if let Some(w) = app.get_webview_window("board") {
-        let _ = w.emit("board-feed", &entry);
+    // emit_to (not emit): Tauri v2 `emit` broadcasts to every window; target the
+    // board explicitly so this never reaches the main game window.
+    if app.get_webview_window("board").is_some() {
+        let _ = app.emit_to("board", "board-feed", &entry);
     }
 }
 

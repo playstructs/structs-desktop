@@ -144,9 +144,13 @@ async fn deliver(
     is_prompt: bool,
 ) -> Result<(), String> {
     use tauri::Manager;
+    // NB: Tauri v2 `emit` BROADCASTS to every window, so `w.emit(...)` on the
+    // board handle would still reach the main window's `mcp_ui_directive`
+    // listener and draw the overlay on the game view. Use `emit_to(<label>, …)`
+    // so each directive lands on exactly ONE window.
     if is_main_window_kind(&directive.component) {
         return app_handle
-            .emit("mcp_ui_directive", directive)
+            .emit_to("main", "mcp_ui_directive", directive)
             .map_err(|e| format!("Failed to emit UI directive: {}", e));
     }
     let mut just_spawned = false;
@@ -174,8 +178,8 @@ async fn deliver(
     }
     let attempts = if just_spawned { 8 } else { 1 };
     for i in 0..attempts {
-        if let Some(w) = app_handle.get_webview_window("board") {
-            let _ = w.emit("mcp_ui_directive", directive);
+        if app_handle.get_webview_window("board").is_some() {
+            let _ = app_handle.emit_to("board", "mcp_ui_directive", directive);
         }
         if i + 1 < attempts {
             tokio::time::sleep(Duration::from_millis(300)).await;
