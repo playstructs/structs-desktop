@@ -24,6 +24,15 @@ use crate::mcp::cosmos_client::CosmosClient;
 const FILENAME: &str = "auto_harvest.json";
 const MINE_TARGET: u64 = 14_000;
 const REFINE_TARGET: u64 = 28_000;
+/// A refine anchor (`blockStartOreRefine`) still set this many blocks after it
+/// began is treated as STALE — a phantom left when the guild struct-list endpoint
+/// broke for ~1.5 days and refines couldn't complete; the committed ore is now
+/// unrecoverable (the chain rejects the completion). A stale anchor must NOT count
+/// as "actively refining", or a mined-out worker DEADLOCKS: it can't mine the empty
+/// planet and the phantom refine blocks the drain-first auto-explore forever. A
+/// genuine difficulty-≤4 refine completes within a single scan (well under 1k
+/// blocks), so 10k is comfortably past any legitimate in-progress refine.
+const STALE_REFINE_BLOCKS: u64 = 10_000;
 const EXTRACTOR_TYPE: &str = "14";
 // Ore Refinery is struct type 15 (verified live: worker refinery entities report
 // `"type": 15, "type_name": "Ore Refinery"`). Was "16", so auto-refine never matched
@@ -221,17 +230,25 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                     } else {
                         ("REFINE", REFINE_TARGET, read_u64_field(sa, "blockStartOreRefine"))
                     };
-                    if is_refinery && anchor != 0 {
-                        refining_active = true; // an active refine cycle is committed
-                    }
-                    // A non-zero anchor already means an ACTIVE cycle: for a refinery,
-                    // `blockStartOreRefine` is only set once a refine has begun (i.e. the
-                    // player's stored ore is committed), so the anchor IS the "has ore"
-                    // signal.
                     if anchor == 0 {
                         continue; // not in a cycle (extractor between mines / refinery idle)
                     }
                     let age = current_block.saturating_sub(anchor);
+                    // Stale refine anchor → treat the refinery as idle: don't set
+                    // refining_active (which would block the drain-first auto-explore of a
+                    // mined-out worker) and don't keep re-issuing a doomed completion. The
+                    // chain allows exploring past it (verified live); the lost ore is gone
+                    // either way. See STALE_REFINE_BLOCKS.
+                    if is_refinery && age >= STALE_REFINE_BLOCKS {
+                        continue;
+                    }
+                    if is_refinery {
+                        // A genuine, RECENT refine cycle is committed — don't explore mid-
+                        // refine (it would destroy the refinery + strand the committed ore);
+                        // `blockStartOreRefine` is set once a refine begins, so the anchor
+                        // is the "has ore" signal.
+                        refining_active = true;
+                    }
                     if !is_ripe(age, target, difficulty_threshold) {
                         continue;
                     }
