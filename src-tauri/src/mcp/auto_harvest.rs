@@ -165,55 +165,54 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
             let registry = registry.clone();
             let started = started_body.clone();
             async move {
-                let page = match client.guild.struct_list_by_owner(&pid, 1).await {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
+                // Resolve THIS player's structs from its planet + fleet slot arrays.
+                // The guild struct-LIST endpoints (owner AND location) are broken —
+                // they ignore their filter and return a global page of every
+                // player's structs, so scanning them meant we never saw a vplayer's
+                // OWN extractor/refinery (refines never completed, explores never
+                // fired, the whole fleet froze). See loop_util::player_struct_ids.
+                let sids = crate::mcp::loop_util::player_struct_ids(&client, &pid).await;
                 let mut extractor_planet: Option<String> = None;
                 // For PRODUCTIVE workers: is the refinery mid-refine (an active cycle OR a
                 // REFINE proof already in flight)? We must NOT explore while refining —
                 // exploring destroys the planetary refinery and would strand the committed
                 // ore. Bait have no refinery, so this stays false for them.
                 let mut refining_active = false;
-                for s in page.items.iter() {
-                    let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else {
-                        continue;
+                for sid in sids.iter() {
+                    // The struct ENTITY is the reliable source for type + location +
+                    // online + anchors (the struct-LIST endpoints are unusable, above).
+                    let entity = match client.query_entity("struct", sid).await {
+                        Ok(e) => e,
+                        Err(_) => continue,
                     };
-                    let type_id = extract_type_id(s);
+                    let s = entity.get("Struct");
+                    let sa = entity.get("structAttributes");
+                    let type_id = s.map(extract_type_id).unwrap_or_default();
                     let is_extractor = type_id == EXTRACTOR_TYPE;
-                    // A planetary extractor's location_id IS the player's planet id.
-                    if is_extractor && !parse_bool(s.get("is_destroyed")) {
-                        // struct-list items are camelCase: the field is `locationId`
-                        // (an extractor's location IS the player's planet id). Reading the
-                        // snake_case `location_id` returned None, so `extractor_planet` was
-                        // NEVER set → the auto-explore block below never ran for ANY vplayer
-                        // (workers sat idle on mined-out planets; bait never cycled). Mining
-                        // was unaffected because it reads the struct ENTITY, not this field.
-                        if let Some(loc) = s.get("locationId").and_then(|x| x.as_str()) {
+                    let is_refinery = type_id == REFINERY_TYPE;
+                    // A planetary extractor's locationId IS the player's planet id → the
+                    // anchor the auto-explore block below keys off.
+                    if is_extractor && !parse_bool(sa.and_then(|x| x.get("isDestroyed"))) {
+                        if let Some(loc) = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) {
                             extractor_planet = Some(loc.to_string());
                         }
                     }
-                    let is_refinery = type_id == REFINERY_TYPE;
                     // Refine only for productive players (and if the config allows it);
                     // bait players mine only.
                     if !is_extractor && !(is_refinery && refine && may_refine) {
                         continue;
                     }
                     // Skip if a task for this struct is already in flight (completed ones
-                    // linger in the registry — those we DO allow to re-issue).
-                    if let Some(t) = registry.tasks.get(&sid) {
+                    // linger in the registry — those we DO allow to re-issue). A running
+                    // REFINE still counts toward refining_active for the explore gate.
+                    if let Some(t) = registry.tasks.get(sid) {
                         if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
                             if is_refinery {
-                                refining_active = true; // a REFINE proof is in flight
+                                refining_active = true;
                             }
                             continue;
                         }
                     }
-                    let entity = match client.query_entity("struct", &sid).await {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
-                    let sa = entity.get("structAttributes");
                     if !parse_bool(sa.and_then(|x| x.get("isOnline"))) {
                         continue;
                     }
@@ -228,9 +227,7 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                     // A non-zero anchor already means an ACTIVE cycle: for a refinery,
                     // `blockStartOreRefine` is only set once a refine has begun (i.e. the
                     // player's stored ore is committed), so the anchor IS the "has ore"
-                    // signal. (Do NOT re-check the refinery struct's own `gridAttributes.ore`
-                    // — mined ore lives in the PLAYER's storedOre, so the struct's ore is
-                    // always 0, and gating on it made auto-refine never fire.)
+                    // signal.
                     if anchor == 0 {
                         continue; // not in a cycle (extractor between mines / refinery idle)
                     }
@@ -238,7 +235,7 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                     if !is_ripe(age, target, difficulty_threshold) {
                         continue;
                     }
-                    let params = TaskParams::for_ore(&sid, task_type, anchor, target);
+                    let params = TaskParams::for_ore(sid, task_type, anchor, target);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {
                             crate::hasher::register_vplayer_hash(sid.clone(), idx, task_type.to_string());

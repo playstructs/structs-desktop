@@ -203,10 +203,15 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
             let completes = completes_c.clone();
             let initiates = initiates_c.clone();
             async move {
-                let structs = match client.guild.struct_list_by_owner(&pid, 1).await {
-                    Ok(p) => p.items,
-                    Err(_) => return,
-                };
+                // Resolve THIS player's structs from its planet + fleet slot arrays.
+                // The guild struct-LIST endpoints are broken (ignore their filter,
+                // return a global page) — using them made auto_build see no structs
+                // on the player's own planet and OVER-BUILD duplicates, inflating
+                // structsLoad toward a brownout. See loop_util::player_structs.
+                let structs = crate::mcp::loop_util::player_structs(&client, &pid).await;
+                if structs.is_empty() {
+                    return;
+                }
 
                 // ── 1. Complete ripe building structs ──
                 for s in &structs {

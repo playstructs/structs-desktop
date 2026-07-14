@@ -136,10 +136,14 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoDefendConfig) {
                 if !include_bait && role != Some(VPlayerRole::Productive) {
                     return;
                 }
-                let structs = match client.guild.struct_list_by_owner(&pid, 1).await {
-                    Ok(p) => p.items,
-                    Err(_) => return,
-                };
+                // Resolve THIS player's structs from its planet + fleet slot arrays;
+                // the guild struct-LIST endpoints are broken (return a global page,
+                // not the owner's), which made auto_defend classify OTHER players'
+                // combat structs. See loop_util::player_structs.
+                let structs = crate::mcp::loop_util::player_structs(&client, &pid).await;
+                if structs.is_empty() {
+                    return;
+                }
 
                 // Protected targets in priority order: Command Ship (the shield
                 // gate) first, then Refinery, then Extractor. (id, ambit) pairs.

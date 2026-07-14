@@ -8,6 +8,8 @@ use serde_json::Value;
 use std::future::Future;
 use tokio::task::JoinSet;
 
+use crate::mcp::cosmos_client::CosmosClient;
+
 // ── Shared JSON coercion helpers ──
 // The chain/guild APIs return numerics as either JSON numbers or strings and
 // booleans as either bools or "true"/"false" strings; these normalize both.
@@ -49,6 +51,89 @@ pub fn extract_type_id(s: &Value) -> String {
             _ => String::new(),
         })
         .unwrap_or_default()
+}
+
+/// Resolve a player's OWN struct ids from its planet + fleet entity slot arrays.
+///
+/// The guild `struct/list/owner` AND `struct/list/location` endpoints are broken:
+/// both IGNORE their filter path segment and return a global page-1 of ALL
+/// structs (verified live — querying any owner/location returns the same first
+/// 100 struct ids, `total` ≈ every struct in the game). So they cannot enumerate
+/// a specific vplayer's structs, which silently broke auto_harvest/auto_defend
+/// (they scanned other players' structs) and made auto_build over-build.
+///
+/// Planets and fleets, however, list their occupant struct ids directly in the
+/// `land`/`water`/`air`/`space` slot arrays of their ENTITY (LCD data, which we
+/// read correctly). Union those and you have exactly the player's structs.
+/// Returns `[]` on any resolve error (caller treats it as "nothing to act on").
+pub async fn player_struct_ids(client: &CosmosClient, pid: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let Ok(player) = client.query_entity("player", pid).await else {
+        return ids;
+    };
+    let p = player.get("Player");
+    let planet_id = p
+        .and_then(|x| x.get("planetId"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let fleet_id = p
+        .and_then(|x| x.get("fleetId"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    for (kind, wrapper, loc) in [
+        ("planet", "Planet", planet_id),
+        ("fleet", "Fleet", fleet_id),
+    ] {
+        if loc.is_empty() {
+            continue;
+        }
+        if let Ok(e) = client.query_entity(kind, loc).await {
+            let obj = e.get(wrapper);
+            for ambit in ["land", "water", "air", "space"] {
+                if let Some(arr) = obj.and_then(|o| o.get(ambit)).and_then(|a| a.as_array()) {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            if !s.is_empty() {
+                                ids.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// Like [`player_struct_ids`], but returns each struct as a FLAT, list-shaped
+/// item — the snake_case shape the auto-loops used to get from the (broken)
+/// guild struct-list: `id`, `type`, `type_name`, `location_type`,
+/// `operating_ambit`, `slot`, `is_destroyed`. Built by reading each struct's
+/// ENTITY (one LCD read per struct) and remapping its camelCase fields. Use this
+/// where a loop needs per-struct location/ambit/slot/type_name (auto_build slot
+/// detection, auto_defend combat-struct classification); use `player_struct_ids`
+/// where the loop re-queries the entity itself anyway (auto_harvest).
+pub async fn player_structs(client: &CosmosClient, pid: &str) -> Vec<Value> {
+    let ids = player_struct_ids(client, pid).await;
+    let mut out = Vec::with_capacity(ids.len());
+    for sid in ids {
+        let Ok(e) = client.query_entity("struct", &sid).await else {
+            continue;
+        };
+        let s = e.get("Struct");
+        let sa = e.get("structAttributes");
+        let get = |k: &str| s.and_then(|x| x.get(k)).cloned().unwrap_or(Value::Null);
+        out.push(serde_json::json!({
+            "id": get("id"),
+            "type": get("type"),
+            "type_name": get("type_name"),
+            "location_type": get("locationType"),
+            "operating_ambit": get("operatingAmbit"),
+            "slot": get("slot"),
+            "is_destroyed": Value::Bool(parse_bool(sa.and_then(|x| x.get("isDestroyed")))),
+        }));
+    }
+    out
 }
 
 /// Max player bodies in flight per scan. Each body does a handful of LCD reads
