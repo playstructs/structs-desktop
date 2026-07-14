@@ -12,14 +12,19 @@
 use crate::mcp::cosmos_client::CosmosClient;
 use serde_json::Value;
 
-/// Floor estimate of how much capacity one connected player consumes, used to
-/// translate substation capacity into "how many players can we still power".
-/// Chain power is in MILLIWATTS (keeper `PlayerPassiveDraw = 25000` mW = 25 W;
-/// 1 kW = 1,000,000 mW). A fully-built productive player draws ~1,075,000 mW
-/// (≈1.075 kW: base 25k + Command Ship 50k + Ore Extractor 500k + Refinery 500k);
-/// our defended vplayers observe ~1,400,000 mW (≈1.4 kW) with defenders/PDC/OSG.
-/// All `guild_power` values are raw chain mW; divide by 1e6 for kW.
-pub const MIN_PLAYER_DRAW_MW: f64 = 1_400_000.0;
+/// Conservative estimate of how much capacity one connected player consumes,
+/// used to translate substation capacity into "how many players can we still
+/// power" (and to gate new worker creates). Chain power is in MILLIWATTS (keeper
+/// `PlayerPassiveDraw = 25000` mW = 25 W; 1 kW = 1,000,000 mW). The theoretical
+/// minimum (base 25k + Command Ship 50k + Extractor 500k + Refinery 500k) is
+/// ~1.075 kW, but LIVE fully-built defended workers observe ~2.5 kW `structsLoad`
+/// (worker50, verified 2026-07-14), and over-built ones (the pre-fix auto_build
+/// duplication bug) hit ~5.6 kW. The old 1.4 kW value overstated headroom ~2.3×
+/// and let the create-gate run the fleet toward a simultaneous brownout. Set to
+/// 4 kW: comfortably above the ~2.5 kW real draw for a safety margin, so the
+/// headroom/create-gate stay conservative even for heavier or slightly-over-built
+/// loadouts. All `guild_power` values are raw chain mW; divide by 1e6 for kW.
+pub const MIN_PLAYER_DRAW_MW: f64 = 4_000_000.0;
 
 #[derive(Debug, Clone, Default)]
 pub struct GuildPower {
