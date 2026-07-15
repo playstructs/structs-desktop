@@ -1742,17 +1742,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += row('Status', 'checking...', 'debug-mcp-status');
       html += row('Token', '<span id="debug-mcp-token">loading...</span>');
       html += row('Config', '<span id="debug-mcp-config" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy to clipboard</span>');
-      html += '</div></div>';
-
-      // Connect Your Agent — everything a new player needs to hook up Claude
-      // Code (or any MCP client) in one card: the one-line add command with a
-      // copy button, plus what to say once connected.
-      html += '<div class="sui-data-card">';
-      html += '<div class="sui-data-card-header sui-text-header">Connect Your Agent</div>';
-      html += '<div class="sui-data-card-body">';
-      html += '<div style="color:var(--text-hint); padding:2px 0 6px 0;">Play co-op with an AI agent: it can scout, manage mining, and watch for raids while you command. With <a href="https://claude.com/claude-code" target="_blank" style="color:var(--accent-primary);">Claude Code</a> installed, run this in a terminal:</div>';
-      html += row('Command', '<span id="debug-agent-cmd" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy `claude mcp add …` command</span>');
-      html += '<div style="color:var(--text-hint); padding:6px 0 2px 0;">Then start <code>claude</code> and say: <em>&ldquo;Run the getting_started prompt from structs-game&rdquo;</em> — the agent becomes your tutorial. Already playing? Try <em>&ldquo;check structs_system status&rdquo;</em> for a health report.</div>';
+      html += row('Onboarding', '<span id="debug-onboard-prompt" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy Onboarding Prompt</span>');
       html += '</div></div>';
 
       // Engine
@@ -1833,16 +1823,35 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             });
           }
 
-          // Connect Your Agent: the exact one-line `claude mcp add` command.
-          var cmdEl = document.getElementById('debug-agent-cmd');
-          if (cmdEl) {
-            var addCmd = 'claude mcp add --transport http structs-game http://127.0.0.1:' +
-              mcpConfig.port + '/mcp --header "Authorization: Bearer ' +
-              (mcpConfig.bearer_token || 'TOKEN_NOT_SET') + '"';
-            cmdEl.addEventListener('click', function() {
-              copyToClipboard(addCmd);
-              cmdEl.textContent = 'Copied!';
-              setTimeout(function() { cmdEl.textContent = 'Copy `claude mcp add …` command'; }, 1000);
+          // Onboarding prompt: connection details + first instructions, in one
+          // paste for ANY MCP-capable agent (tool-agnostic by design).
+          var onboardEl = document.getElementById('debug-onboard-prompt');
+          if (onboardEl) {
+            var onboardPrompt =
+              'Connect to my Structs game via MCP (streamable HTTP):\n' +
+              '  URL: http://127.0.0.1:' + mcpConfig.port + '/mcp\n' +
+              '  Header: Authorization: Bearer ' + (mcpConfig.bearer_token || 'TOKEN_NOT_SET') + '\n' +
+              '\n' +
+              'MCP client config (JSON):\n' +
+              JSON.stringify({
+                mcpServers: {
+                  'structs-game': {
+                    type: 'http',
+                    url: 'http://127.0.0.1:' + mcpConfig.port + '/mcp',
+                    headers: {
+                      Authorization: 'Bearer ' + (mcpConfig.bearer_token || 'TOKEN_NOT_SET')
+                    }
+                  }
+                }
+              }, null, 2) + '\n' +
+              '\n' +
+              'Once connected, run the `getting_started` prompt from the structs-game ' +
+              'server and guide me through my first session. If I already have an ' +
+              'empire, start with `structs_dashboard` and `structs_system {command:"status"}` instead.';
+            onboardEl.addEventListener('click', function() {
+              copyToClipboard(onboardPrompt);
+              onboardEl.textContent = 'Copied!';
+              setTimeout(function() { onboardEl.textContent = 'Copy Onboarding Prompt'; }, 1000);
             });
           }
         }).catch(function() {});
