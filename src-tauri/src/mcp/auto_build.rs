@@ -101,6 +101,17 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// completion reads → ~0 once the fleet is built out).
 static BUILT_CACHE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// Thrash guard: player_id -> don't attempt another INITIATE before this ms
+/// epoch. Set when the chain deterministically rejects a build (slot occupied,
+/// load requirements, …) — state we mis-modeled won't change in 120s, so
+/// retrying every scan just burns cycles and floods the ledger (the failure
+/// mode structs_system caught live: 3.6k identical rejects/hour). The next
+/// attempt after the backoff re-derives everything from fresh chain state.
+static INITIATE_BACKOFF: LazyLock<Mutex<HashMap<String, f64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// How long a player sits out after a deterministic initiate rejection.
+const INITIATE_BACKOFF_MS: f64 = 30.0 * 60_000.0;
+
 fn load() -> AutoBuildConfig {
     crate::mcp::config_store::load_config(FILENAME)
 }
@@ -311,6 +322,16 @@ async fn scan(
                 }
 
                 // ── 2. Initiate one build in the next free slot (charge + power gated) ──
+                // Thrash guard: sit out the backoff window after a deterministic
+                // chain rejection instead of re-failing every scan.
+                if INITIATE_BACKOFF
+                    .lock()
+                    .unwrap()
+                    .get(&pid)
+                    .is_some_and(|until| now_millis() < *until)
+                {
+                    return;
+                }
                 // Read the player's grid (charge from lastAction, structsLoad, personal cap).
                 let player = match client.query_entity("player", &pid).await {
                     Ok(p) => p,
@@ -392,7 +413,9 @@ async fn scan(
                             None => continue,
                         }
                     };
-                    if conn_cap > 0.0 && available < draw {
+                    // `<=`: the chain rejects equality too ("cannot handle new
+                    // load requirements (required: 1, available: 1)" seen live).
+                    if conn_cap > 0.0 && available <= draw {
                         continue; // would push offline — skip this (heavier) type, try a cheaper one
                     }
                     let payload = json!({
@@ -424,10 +447,15 @@ async fn scan(
                         }
                         Err(e) => {
                             run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let until = now_millis() + INITIATE_BACKOFF_MS;
+                            INITIATE_BACKOFF.lock().unwrap().insert(pid.clone(), until);
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
                                 crate::mcp::telemetry::Sev::Warn,
-                                format!("initiate failed for {pid}: {e}"),
+                                format!(
+                                    "initiate failed for {pid} (backing off {} min): {e}",
+                                    (INITIATE_BACKOFF_MS / 60_000.0) as u64
+                                ),
                             );
                         }
                     }

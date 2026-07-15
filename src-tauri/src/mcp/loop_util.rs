@@ -130,7 +130,12 @@ pub async fn player_structs(client: &CosmosClient, pid: &str) -> Vec<Value> {
             "type_name": get("type_name"),
             "location_type": get("locationType"),
             "operating_ambit": get("operatingAmbit"),
-            "slot": get("slot"),
+            // LCD numerics are STRINGS ("slot": "1"); coerce to a real number
+            // here so consumers' as_u64() works. A raw copy made every struct
+            // read as slot 0 → auto_build picked "free" slot 1 on planets whose
+            // slot 1 was occupied → a permanent chain-reject loop (3.6k dead
+            // txs/hour across the fleet before structs_system surfaced it).
+            "slot": read_u64_field(s, "slot"),
             "is_destroyed": Value::Bool(parse_bool(sa.and_then(|x| x.get("isDestroyed")))),
         }));
     }
