@@ -270,6 +270,8 @@ fn emit_progress(app_handle: &tauri::AppHandle, handle: &TaskHandle, _pid: &str)
 fn emit_complete(app_handle: &tauri::AppHandle, handle: &TaskHandle, _pid: &str) {
     let snapshot = handle.snapshot();
     let _ = app_handle.emit("hash_complete", &snapshot);
+    // Solve history feeds the adaptive tuner (difficulty_start / max_concurrent).
+    crate::mcp::telemetry::record_solve(&snapshot, "cpu");
     // If this hash belongs to a virtual player, sign its completion tx.
     crate::hasher::maybe_complete_virtual(app_handle, &snapshot);
 }

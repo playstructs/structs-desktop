@@ -30,6 +30,8 @@ pub struct HashParams {
     pub difficulty_start: Option<u64>,
     /// MAX_CONCURRENT_PROCESSES — the webapp TaskManager's concurrent-job cap.
     pub max_concurrent: Option<u64>,
+    /// Adaptive tuner: steer difficulty_start/max_concurrent from solve history.
+    pub auto_tune: Option<bool>,
 }
 
 pub async fn execute(
@@ -235,11 +237,12 @@ pub async fn execute(
                 }
             }
 
-            // MAX_CONCURRENT_PROCESSES — the webapp TaskManager is the authoritative
-            // spawner, so push the value to it via the glue; track it here for reporting.
+            // MAX_CONCURRENT_PROCESSES — consumed live by the native scheduler's
+            // admission gate; also pushed to the webapp TaskManager spawner cap.
             if let Some(mc) = params.max_concurrent {
                 if (1..=64).contains(&mc) {
                     hasher::set_max_concurrent(mc);
+                    hasher::tuner::note_user_max(mc);
                     let _ = app_handle.emit("structs:task-overrides", json!({ "maxConcurrent": mc }));
                     changes.push(format!("max_concurrent → {}", mc));
                 } else {
@@ -247,9 +250,21 @@ pub async fn execute(
                 }
             }
 
+            // Adaptive tuner opt-in: steer difficulty_start/max_concurrent from
+            // solve history (runtime-only adjustments; config values stay yours).
+            if let Some(at) = params.auto_tune {
+                hasher::set_auto_tune(at);
+                changes.push(format!("auto_tune → {}", if at { "on" } else { "off" }));
+            }
+
+            // Knobs survive restarts now (hash_config.json).
+            if !changes.is_empty() {
+                hasher::persist_config();
+            }
+
             let mut out = serde_json::to_string_pretty(&hash_config_json()).unwrap();
             if !changes.is_empty() {
-                out.push_str(&format!("\n\nApplied: {}", changes.join(", ")));
+                out.push_str(&format!("\n\nApplied: {} (persisted)", changes.join(", ")));
             }
             if !errors.is_empty() {
                 out.push_str(&format!("\n\n⚠ Ignored: {}", errors.join("; ")));
@@ -296,6 +311,7 @@ fn hash_config_json() -> serde_json::Value {
         "gpu_available": gpu_available,
         "difficulty_start": hasher::difficulty_start(),
         "max_concurrent": hasher::max_concurrent(),
+        "auto_tune": hasher::auto_tune(),
     })
 }
 

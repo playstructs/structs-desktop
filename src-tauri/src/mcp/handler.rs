@@ -58,39 +58,6 @@ impl StructsMcpHandler {
                 })),
             ),
             Tool::new(
-                "structs_query",
-                "Query or list any game entity. Three modes: (1) provide 'id' to read one entity by ID via Cosmos LCD. (2) Omit 'id' and 'filter' to list all of a type via LCD with pagination_key. (3) Provide 'filter' for filtered queries via the Guild API (e.g., {type:'planet_activity', filter:{by:'planet', value:'2-5'}}). Filtered responses include _next_page when more pages exist.",
-                schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "description": "Entity type. Core (LCD): player, planet, struct, struct_type, fleet, guild, reactor, substation, provider, agreement, allocation. Extended (Guild API, requires filter): planet_activity, struct_defender, work, grid, infusion, planet_attribute, struct_attribute, permission.",
-                            "enum": [
-                                "player", "planet", "struct", "struct_type", "fleet", "guild",
-                                "reactor", "substation", "provider", "agreement", "allocation",
-                                "planet_activity", "struct_defender", "work", "grid",
-                                "infusion", "planet_attribute", "struct_attribute", "permission"
-                            ]
-                        },
-                        "id": { "type": "string", "description": "Entity ID (e.g., '1-18'). Omit to list all or use filter." },
-                        "pagination_key": { "type": "string", "description": "LCD opaque pagination key (list mode only)." },
-                        "limit": { "type": "integer", "description": "LCD page size (default 100)." },
-                        "filter": {
-                            "type": "object",
-                            "description": "Filtered query via Guild API. Valid (type, by) pairs: planet_activity+(planet|category|all); struct_defender+(defending|protected); struct+(location|owner); grid+(object|attribute_type); work+(player|guild); infusion+(player|destination|address); agreement+(provider|allocation|creator|owner|all); provider+(owner|denom|substation|all); planet_attribute+(object|type); struct_attribute+(object|type); permission+(object|player).",
-                            "properties": {
-                                "by": { "type": "string" },
-                                "value": { "type": "string" }
-                            },
-                            "required": ["by", "value"]
-                        },
-                        "page": { "type": "integer", "description": "1-indexed page for filtered queries (default 1)." }
-                    },
-                    "required": ["type"]
-                })),
-            ),
-            Tool::new(
                 "structs_dashboard",
                 "Full player overview: state, power, structs, fleet, active hash tasks, resources.",
                 schema(serde_json::json!({
@@ -116,14 +83,15 @@ impl StructsMcpHandler {
                         "target_id": { "type": "string", "description": "Planet ID for RAID tasks (e.g., '2-156'). Only for RAID start." },
                         "engine": { "type": "string", "enum": ["auto", "cpu", "gpu"], "description": "config: hashing engine preference." },
                         "difficulty_start": { "type": "integer", "description": "config: DIFFICULTY_START (1–64) — when a worker begins grinding." },
-                        "max_concurrent": { "type": "integer", "description": "config: MAX_CONCURRENT_PROCESSES (1–64) — concurrent hash-job cap." }
+                        "max_concurrent": { "type": "integer", "description": "config: MAX_CONCURRENT_PROCESSES (1–64) — concurrent hash-job cap." },
+                        "auto_tune": { "type": "boolean", "description": "config: adaptive tuner — steers difficulty_start/max_concurrent from measured solve history (runtime-only; your configured values stay the restart baseline)." }
                     },
                     "required": ["command"]
                 })),
             ),
             Tool::new(
                 "structs_intel",
-                "Strategic intelligence — covers what you'd otherwise query the DB for. COMBAT/RECON (use these before fighting): 'scout' {location_id} = enemy roster with HP/ambit/slot/weapon-reach + defender ids; 'valid_targets' {attacker,weapon} = reachable targets ranked, with HP + defenders; 'battle_log' {planet_id} = combat RESULTS (damage/blocked/counters/destroyed) — your own attack outcomes; 'ruleset' = weapon+defense matrix (guided/unguided, jam/evade, armour, counter rules); 'simulate' {attacker,target} = expected damage/kill/counter before committing; 'strike_options' {target} = TEAM strike planner — which of your structs (primary + all virtual players) can reach a target and for how much; 'is_active' {player_id} = enemy last-action recency (online?). IDENTITY/PLANNING: 'whoami', 'what_can_i_build', 'economy_status', 'plan_timeline', 'slot_map', 'intents'. ECONOMY/TREND: 'power_forecast', 'planet_history', 'market', 'metric_trend'.",
+                "Strategic intelligence — covers what you'd otherwise query the DB for. COMBAT/RECON (use these before fighting): 'scout' {location_id} = enemy roster with HP/ambit/slot/weapon-reach + defender ids; 'valid_targets' {attacker,weapon} = reachable targets ranked, with HP + defenders; 'battle_log' {planet_id} = combat RESULTS (damage/blocked/counters/destroyed) — your own attack outcomes; 'ruleset' = weapon+defense matrix (guided/unguided, jam/evade, armour, counter rules); 'simulate' {attacker,target} = expected damage/kill/counter before committing; 'strike_options' {target} = TEAM strike planner — which of your structs (primary + all virtual players) can reach a target and for how much; 'is_active' {player_id} = enemy last-action recency (online?). IDENTITY/PLANNING: 'whoami', 'what_can_i_build', 'economy_status', 'plan_timeline', 'slot_map', 'intents'. ECONOMY/TREND: 'power_forecast', 'planet_history', 'market', 'metric_trend'. RAW DATA: 'query' {type, id?, filter?} = raw entity read/list/filtered query (LCD + Guild API) when no curated view fits — args: {type: player|planet|struct|struct_type|fleet|guild|reactor|substation|provider|agreement|allocation|planet_activity|struct_defender|work|grid|infusion|planet_attribute|struct_attribute|permission, id? (read one), pagination_key?/limit? (list), filter?:{by,value} + page? (Guild API; pairs like planet_activity+planet, struct_defender+protected, work+player, permission+object)}.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -131,12 +99,12 @@ impl StructsMcpHandler {
                             "type": "string",
                             "enum": [
                                 "whoami", "intents", "ruleset", "simulate", "strike_options", "what_can_i_build", "power_forecast", "economy_status", "plan_timeline",
-                                "planet_history", "valid_targets", "scout", "battle_log", "slot_map", "is_active", "market", "metric_trend"
+                                "planet_history", "valid_targets", "scout", "battle_log", "slot_map", "is_active", "market", "metric_trend", "query"
                             ]
                         },
                         "args": {
                             "type": "object",
-                            "description": "Query-specific args. whoami: none. intents: none. ruleset: {struct_type?}. simulate: {attacker, target, weapon?} or {attacker, target_type, target_hp?, target_ambit?, weapon?}. strike_options: {target} (enemy struct id) or {target_type, target_ambit, target_hp?}. power_forecast: {struct_type, count}. planet_history: {planet_id, window_minutes?=60}. valid_targets: {near?, limit?=10, attacker?, weapon?}. scout: {location_id}. battle_log: {planet_id?, category?=struct_attack, struct_id?, limit?=15}. slot_map: {location_id}. is_active: {player_id}. market: {denom?}. metric_trend: {metric, object, window_blocks?=100}."
+                            "description": "Query-specific args. whoami: none. intents: none. ruleset: {struct_type?}. simulate: {attacker, target, weapon?} or {attacker, target_type, target_hp?, target_ambit?, weapon?}. strike_options: {target} (enemy struct id) or {target_type, target_ambit, target_hp?}. power_forecast: {struct_type, count}. planet_history: {planet_id, window_minutes?=60}. valid_targets: {near?, limit?=10, attacker?, weapon?}. scout: {location_id}. battle_log: {planet_id?, category?=struct_attack, struct_id?, limit?=15}. slot_map: {location_id}. is_active: {player_id}. market: {denom?}. metric_trend: {metric, object, window_blocks?=100}. query (raw): {type, id?, pagination_key?, limit?, filter?:{by,value}, page?}."
                         }
                     },
                     "required": ["query"]
@@ -144,7 +112,7 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_policy",
-                "Manage standing orders (automation policies). Commands: 'list' (show all policies + recent events), 'set' (enable/configure a policy), 'remove' (delete a policy), 'log' (view event history). Built-in policies: auto_refine, power_alert, agent_ui (master toggle for agent-driven UI).",
+                "Manage standing orders (automation policies). Commands: 'list' (show all policies + recent events), 'set' (enable/configure a policy), 'remove' (delete a policy), 'log' (view event history). Built-in policies: auto_refine, power_alert, combat_alert, agent_ui (master toggle for agent-driven UI), auto_counterattack, auto_retreat_if_cmd_below, auto_rebuild_losses, rules_of_engagement, primary_home_guard, board_auto_open, watchdog_remediate (self-healing for stuck loops/hashers/sync).",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -154,19 +122,6 @@ impl StructsMcpHandler {
                         "config": { "type": "object", "description": "Policy-specific config (for set). e.g., {threshold_pct: 80} for power_alert." }
                     },
                     "required": ["command"]
-                })),
-            ),
-            Tool::new(
-                "structs_ui",
-                "Drive the human player's screen for co-op play (the human and you share one session). MAIN-WINDOW SURFACES ARE FOR THE PRIMARY PLAYER'S OWN GAME ONLY — never display virtual-player/team info here; that belongs in the Team Ops window's event feed (the auto-loops and threat scans pipe it there automatically; use structs_board for team views). mode 'notify' shows a surface and returns immediately; mode 'prompt' shows an interactive surface and BLOCKS until the human chooses, returning their selection. Provide `component` = a spec with a `kind`: open_menu {controller,page,options?} (jump to an existing screen); menu {title,items:[{label,value,hint?}]} (a pick-list — prompt returns the chosen value); dialogue {title,message,buttons:[{label,value}]}; panel {title,placement?,theme?,body:[...]} (custom side panel); info {title,rows:[{key,value}]}; map_preview {planet_id,defender_id?,attacker_id?} (show another player's map); hud_badge {id,label,value,theme?} (add/update a HUD badge; same id updates, dismiss removes); toast {title,body,level?}; raw_html {title,html} (escape hatch); dismiss {target_id}. UI is display/elicitation only — it cannot sign; act on the human's choice via structs_action. Respects the agent_ui master toggle.",
-                schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "mode": { "type": "string", "enum": ["notify", "prompt"], "description": "notify = show-and-return; prompt = block for the human's choice." },
-                        "component": { "type": "object", "description": "Declarative component spec with a `kind` field (see tool description)." },
-                        "timeout_secs": { "type": "number", "description": "prompt only: seconds to wait for the human (default 180, clamped 10–600)." }
-                    },
-                    "required": ["component"]
                 })),
             ),
             Tool::new(
@@ -240,22 +195,26 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_board",
-                "Team operations board — one at-a-glance command view shared by the human and the agent: primary status (charge readiness, power margin, structs online, ore/alpha), virtual-player count, the team-wide PoW queue (running/waiting/done), active threats across the whole team (last ~2 min), and recommended next moves. The window also hosts the EVENT FEED — the single sink for vplayer/automation activity (auto-loops, policy events, threats pipe in automatically). Important entries auto-open the window ONLY if the player opted in via `structs_policy set board_auto_open true` (default off — never auto-open without consent). Pass 'open':true ONCE to pop the native window (later calls just refresh it live). 'push':true adds a one-line summary entry to the event feed (it no longer overlays the main game window).",
+                "Team operations board + human-facing UI surfaces (one tool for everything the human sees). DEFAULT (no component): renders the at-a-glance command view shared by the human and the agent — primary status (charge readiness, power margin, structs online, ore/alpha), virtual-player count, the team-wide PoW queue, active threats across the whole team (last ~2 min), and recommended next moves. The window also hosts the EVENT FEED (auto-loops, policy events, threats pipe in automatically); Important entries auto-open the window ONLY if the player opted in via `structs_policy set board_auto_open true`. Pass 'open':true ONCE to pop the native window. COMPONENT MODE (absorbed from the retired structs_ui): pass `component` = a spec with a `kind` to show the human a surface — open_menu {controller,page,options?}; menu {title,items:[{label,value,hint?}]}; dialogue {title,message,buttons}; panel {title,placement?,theme?,body}; info {title,rows}; map_preview {planet_id,...}; hud_badge {id,label,value,theme?}; toast {title,body,level?}; raw_html {title,html}; dismiss {target_id}. mode 'notify' shows-and-returns; 'prompt' BLOCKS until the human chooses and returns their selection. Toasts/dialogues render in the Team Ops window; only open_menu/map_preview touch the main game view. Display/elicitation only — it cannot sign; act on choices via structs_action. Respects the agent_ui master toggle.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "open": { "type": "boolean", "description": "Pop the board out as a separate OS window (default browser). Do this once; later calls just refresh the open window." },
-                        "push": { "type": "boolean", "description": "Pipe a one-line board summary into the Team Ops event feed (default false; never renders in the main game window)." }
+                        "push": { "type": "boolean", "description": "Pipe a one-line board summary into the Team Ops event feed (default false; never renders in the main game window)." },
+                        "component": { "type": "object", "description": "Declarative component spec with a `kind` field (see tool description). When present, shows this surface instead of rendering the ops board." },
+                        "mode": { "type": "string", "enum": ["notify", "prompt"], "description": "component only: notify = show-and-return (default); prompt = block for the human's choice." },
+                        "timeout_secs": { "type": "number", "description": "component prompt only: seconds to wait for the human (default 180, clamped 10–600)." }
                     }
                 })),
             ),
             Tool::new(
                 "structs_doctrine",
-                "Standing rules of engagement + a per-tick executor — the co-op autonomy loop. 'set' stores the doctrine once (posture: defensive|aggressive|raid; pinned_target; auto_counter; retreat_cmd_below; autonomy: advise|auto) and flips the matching combat policies. 'show' displays it. 'tick' reads the doctrine against live state (threats, charge, Command-Ship HP) and returns the prioritized next move WITHIN the mandate (retreat > defend > attack > hold). Run 'tick' on a loop and the agent holds the watch — executing via the action/strike tools and escalating to a human prompt for anything beyond the standing orders. Persists in the rules_of_engagement policy (visible via structs_intel intents).",
+                "Standing rules of engagement + a per-tick executor — the co-op autonomy loop. 'set' stores the doctrine once (posture: defensive|aggressive|raid; pinned_target; auto_counter; retreat_cmd_below; autonomy: advise|auto) and flips the matching combat policies. NEW-PLAYER SHORTCUT: 'set' with preset 'turtle' (max defense: auto_build + auto_defend + home guard + counter), 'economy' (mine→refine→infuse flywheel, combat notify-only), or 'balanced' configures a coherent bundle of loops + policies in ONE call — explicit fields override the preset. 'show' displays it. 'tick' reads the doctrine against live state (threats, charge, Command-Ship HP) and returns the prioritized next move WITHIN the mandate (retreat > defend > attack > hold). Run 'tick' on a loop and the agent holds the watch — executing via the action/strike tools and escalating to a human prompt for anything beyond the standing orders. Persists in the rules_of_engagement policy (visible via structs_intel intents).",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "enum": ["set", "show", "tick"], "description": "set | show | tick" },
+                        "preset": { "type": "string", "enum": ["turtle", "economy", "balanced"], "description": "set: one-call config bundle (loops + policies + doctrine). Explicit fields override it." },
                         "posture": { "type": "string", "enum": ["defensive", "aggressive", "raid"], "description": "set: overall stance." },
                         "pinned_target": { "type": "string", "description": "set: enemy struct id to focus offense on (kill-chain target)." },
                         "auto_counter": { "type": "boolean", "description": "set: counter when attacked (drives auto_counterattack)." },
@@ -279,6 +238,23 @@ impl StructsMcpHandler {
                     "required": ["target"]
                 })),
             ),
+            Tool::new(
+                "structs_system",
+                "System health, logs, and self-tuning — is the automation healthy, and if not, why. Commands: 'status' (one-page health: watchdog snapshot, per-loop last run/duration/error rate, tx success rate, live adaptive values, telemetry stats — START HERE when anything seems off); 'logs' {component?, severity?, since_ms?, limit?} (the app's persistent structured log — components: auto_build/auto_harvest/auto_defend/auto_infuse/tx/vplayer/policy/conn/watchdog/hasher); 'loops' (per-loop liveness/throughput over window_minutes); 'tx' (transaction-attempt ledger summary: successes/failures/skips per context + top error reasons — auto-loop failures are visible here, nothing is silently dropped); 'pow' (proof-of-work solve stats per engine: median/p90 durations, est. hashrate); 'watchdog' (recent findings + remediations, e.g. wedged loops reset, stalled hash tasks cancelled); 'feed' (the Team Ops board event feed); 'config' (read adaptive values; set {remediate:bool} to toggle self-healing). The system self-adapts: loop concurrency AIMD-halves under endpoint pressure and recovers on clean scans; the watchdog auto-heals stuck processes (logged, never silent).",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "enum": ["status", "logs", "loops", "tx", "pow", "watchdog", "feed", "config"] },
+                        "component": { "type": "string", "description": "logs: filter to one component (e.g. 'auto_build', 'tx', 'watchdog')." },
+                        "severity": { "type": "string", "enum": ["debug", "info", "notice", "warn", "error"], "description": "logs: minimum severity." },
+                        "since_ms": { "type": "number", "description": "logs: only events at/after this ms epoch." },
+                        "limit": { "type": "integer", "description": "logs/feed: max rows (default 50)." },
+                        "window_minutes": { "type": "integer", "description": "loops/tx/pow/watchdog: lookback window (default 60)." },
+                        "set": { "type": "object", "description": "config: values to change, e.g. {\"remediate\": false}." }
+                    },
+                    "required": ["command"]
+                })),
+            ),
         ]
     }
 }
@@ -289,8 +265,10 @@ impl ServerHandler for StructsMcpHandler {
             instructions: Some(
                 "Structs Desktop MCP Server. Start with structs_dashboard (no arguments needed — \
                  the player ID is auto-detected). Use structs_hash to manage proof-of-work, \
-                 structs_action for game actions, structs_intel for strategic analysis, \
-                 and structs_policy for automation."
+                 structs_action for game actions, structs_intel for strategic analysis \
+                 (including raw entity queries via query:\"query\"), structs_policy for \
+                 automation, and structs_system for health/logs/self-tuning when anything \
+                 seems stuck or stale. New to the game? Ask for the getting_started prompt."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder()
@@ -417,13 +395,6 @@ impl ServerHandler for StructsMcpHandler {
                         })?;
                     tools::action::execute(&self.app_handle, &self.task_registry, params).await
                 }
-                "structs_query" => {
-                    let params: tools::query::QueryParams =
-                        serde_json::from_value(args).map_err(|e| {
-                            McpError::invalid_params(format!("Invalid params: {}", e), None)
-                        })?;
-                    tools::query::execute(&self.cosmos_client, params).await
-                }
                 "structs_dashboard" => {
                     let params: tools::dashboard::DashboardParams =
                         serde_json::from_value(args).map_err(|e| {
@@ -452,13 +423,6 @@ impl ServerHandler for StructsMcpHandler {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
                     tools::policy::execute(params).await
-                }
-                "structs_ui" => {
-                    let params: tools::ui::UiParams =
-                        serde_json::from_value(args).map_err(|e| {
-                            McpError::invalid_params(format!("Invalid params: {}", e), None)
-                        })?;
-                    tools::ui::execute(&self.app_handle, params).await
                 }
                 "structs_events" => {
                     let params: tools::events::EventParams =
@@ -490,7 +454,7 @@ impl ServerHandler for StructsMcpHandler {
                 }
                 "structs_board" => {
                     let params: tools::board::BoardParams =
-                        serde_json::from_value(args).unwrap_or(tools::board::BoardParams { open: false, push: false });
+                        serde_json::from_value(args).unwrap_or_default();
                     tools::board::execute(&self.app_handle, &self.task_registry, params).await
                 }
                 "structs_doctrine" => {
@@ -507,6 +471,20 @@ impl ServerHandler for StructsMcpHandler {
                         })?;
                     tools::strike::execute(&self.app_handle, &self.cosmos_client, params).await
                 }
+                "structs_system" => {
+                    let params: tools::system::SystemParams =
+                        serde_json::from_value(args).map_err(|e| {
+                            McpError::invalid_params(format!("Invalid params: {}", e), None)
+                        })?;
+                    tools::system::execute(params).await
+                }
+                // Retired tools, absorbed elsewhere — point old prompts/workflows home.
+                "structs_query" => vec![Content::text(
+                    "structs_query was merged into structs_intel: use structs_intel {query:\"query\", args:{type, id?, filter?, pagination_key?, limit?, page?}} (same shapes).",
+                )],
+                "structs_ui" => vec![Content::text(
+                    "structs_ui was merged into structs_board: use structs_board {component:{kind:...}, mode:\"notify\"|\"prompt\", timeout_secs?} (same component specs).",
+                )],
                 _ => vec![Content::text(format!("Unknown tool: {}", name))],
             };
 

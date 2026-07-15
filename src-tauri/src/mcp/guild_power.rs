@@ -213,9 +213,11 @@ mod tests {
         // One more connection dilutes the per-connection share slightly.
         assert!((share - 1_512_960_000.0 / 221.0).abs() < 1.0);
         assert!(share < 6_877_091.0 && share > 6_800_000.0);
-        // At ~1.4M each the 1.5B pool supports ~1080 connections → ~860 more.
+        // Headroom scales with the assumed per-player draw: at the current
+        // MIN_PLAYER_DRAW_MW (4 kW — matched to observed worker draw) the
+        // 1.5B pool supports floor(1.512B/4M)=378 connections → 158 more.
         assert_eq!(more, (1_512_960_000.0 / MIN_PLAYER_DRAW_MW).floor() as i64 - 220);
-        assert!(more > 800);
+        assert!(more > 0, "live substation should still have growth headroom");
     }
 
     #[test]

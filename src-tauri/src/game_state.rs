@@ -246,6 +246,8 @@ pub async fn sync_game_state(
     // Used by the Tier-1/2 autonomous threat responder below (notify / prompt / tx).
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    // Liveness heartbeat for the watchdog — a stalled sync starves every loop.
+    crate::mcp::watchdog::note_sync_ran();
     if !SYNC_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
             "[Structs Sync] Connected: player={:?}, block={}, structs={}, types={}",
@@ -536,10 +538,11 @@ pub async fn notify_hash_complete(
 
 // ── Connection Health Logging ──
 
-/// Mirror a connection-monitor status/remedy message to the terminal, so dropped
-/// grass/signing connections and auto-reloads are visible even with DevTools closed.
+/// Mirror a connection-monitor status/remedy message to the terminal AND the
+/// persistent telemetry store, so dropped grass/signing connections and
+/// auto-reloads are visible after the fact (not just with DevTools open).
 #[tauri::command]
 pub async fn conn_log(msg: String) -> Result<(), String> {
-    eprintln!("[Structs Conn] {}", msg);
+    crate::mcp::telemetry::tlog("conn", crate::mcp::telemetry::Sev::Notice, &msg);
     Ok(())
 }

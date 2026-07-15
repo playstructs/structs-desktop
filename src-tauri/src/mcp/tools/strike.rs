@@ -13,7 +13,6 @@ use std::collections::HashMap;
 
 use crate::mcp::cosmos_client::CosmosClient;
 use crate::mcp::tools::intel::{plan_strike, StrikeRow};
-use crate::mcp::{tx_queue, vplayer_bridge};
 
 #[derive(Debug, Deserialize)]
 pub struct StrikeParams {
@@ -214,7 +213,7 @@ pub async fn execute(
                 "weapon_system": s.weapon,
                 "charge_cost": cost,
             });
-            match tx_queue::submit_tx(app, "struct_attack".to_string(), tx_args).await {
+            match crate::mcp::tx_retry::submit_with_retry(app, "struct_attack", tx_args, "strike:primary").await {
                 Ok(r) if r.success => {
                     fired += 1;
                     out.push_str(&format!("  ✓ you · {} [{}] → ~{:.1} dmg (queued; fires when charge ready)\n", s.struct_id, s.weapon, s.expected_dmg));
@@ -233,19 +232,23 @@ pub async fn execute(
                 "targetStructId": [target.clone()],
                 "weaponSystem": wsys,
             });
-            match vplayer_bridge::sign_action(app, index, "/structs.structs.MsgStructAttack", payload, 60).await
+            match crate::mcp::tx_retry::sign_with_retry(
+                app,
+                index,
+                "/structs.structs.MsgStructAttack",
+                payload,
+                &format!("strike:{}", s.player),
+            )
+            .await
             {
-                Ok(res) => {
-                    let code = res.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-                    if code == 0 {
-                        fired += 1;
-                        out.push_str(&format!("  ✓ {} · {} [{}] → ~{:.1} dmg\n", s.player, s.struct_id, s.weapon, s.expected_dmg));
-                    } else {
-                        let raw: String = res.get("rawLog").and_then(|r| r.as_str()).unwrap_or("").chars().take(90).collect();
-                        out.push_str(&format!("  ✗ {} · {}: code {} {}\n", s.player, s.struct_id, code, raw));
-                    }
+                Ok(_) => {
+                    fired += 1;
+                    out.push_str(&format!("  ✓ {} · {} [{}] → ~{:.1} dmg\n", s.player, s.struct_id, s.weapon, s.expected_dmg));
                 }
-                Err(e) => out.push_str(&format!("  ✗ {} · {}: {}\n", s.player, s.struct_id, e)),
+                Err(e) => {
+                    let short: String = e.chars().take(90).collect();
+                    out.push_str(&format!("  ✗ {} · {}: {}\n", s.player, s.struct_id, short));
+                }
             }
         }
     }

@@ -49,9 +49,21 @@ impl McpServer {
         let expected_token = token.clone();
         let app = axum08::Router::new()
             .nest_service("/mcp", mcp_service)
+            // Unauthenticated liveness probe: binds to 127.0.0.1 only and the
+            // snapshot is deliberately shallow (no player data, no token) — so
+            // launchd/cron monitors can watch the app without holding secrets.
+            .route(
+                "/health",
+                axum08::routing::get(|| async {
+                    axum08::Json(crate::mcp::watchdog::health_snapshot())
+                }),
+            )
             .layer(axum08::middleware::from_fn(move |req: axum08::extract::Request, next: axum08::middleware::Next| {
                 let expected = expected_token.clone();
                 async move {
+                    if req.uri().path() == "/health" {
+                        return Ok::<_, std::convert::Infallible>(next.run(req).await);
+                    }
                     let auth_header = req.headers().get("authorization")
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("");

@@ -162,6 +162,11 @@ impl PolicyEngine {
             // opted in via `structs_policy set board_auto_open true`, no matter
             // how important the event; entries still land in the feed either way.
             ("board_auto_open", false, serde_json::json!({})),
+            // Watchdog self-healing: reset wedged loop guards, cancel stalled
+            // hash tasks, re-nudge a dead sync tick. ON by default — every
+            // remedy is logged to telemetry + the board feed, and a native
+            // notification fires only when the same remedy fails twice.
+            ("watchdog_remediate", true, serde_json::json!({})),
         ];
 
         for (name, default_enabled, default_config) in defaults {
@@ -342,8 +347,15 @@ impl PolicyEngine {
             }
         }
 
-        // Store events in log (single pass — logged exactly once)
+        // Store events in log (single pass — logged exactly once). Mirrored to
+        // the persistent telemetry store so policy history survives restarts.
         for event in &events {
+            crate::mcp::telemetry::tlog_kv(
+                "policy",
+                crate::mcp::telemetry::Sev::Info,
+                format!("{}: {}", event.policy, event.action),
+                serde_json::json!({ "detail": event.detail }),
+            );
             self.event_log.push(event.clone());
             if self.event_log.len() > 500 {
                 self.event_log.remove(0);
@@ -543,8 +555,14 @@ impl PolicyEngine {
             }
         }
 
-        // Log all events
+        // Log all events (mirrored to persistent telemetry, as in `evaluate`).
         for event in &events {
+            crate::mcp::telemetry::tlog_kv(
+                "policy",
+                crate::mcp::telemetry::Sev::Info,
+                format!("{}: {}", event.policy, event.action),
+                serde_json::json!({ "detail": event.detail }),
+            );
             self.event_log.push(event.clone());
             if self.event_log.len() > 500 {
                 self.event_log.remove(0);

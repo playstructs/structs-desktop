@@ -38,6 +38,87 @@ pub struct DoctrineParams {
     /// defensive actions itself). Aggressive moves always stay advise/prompt.
     #[serde(default)]
     pub autonomy: Option<String>,
+    /// set: one-call configuration bundle for new players — "turtle" (max
+    /// defense), "economy" (mine→refine→infuse flywheel), or "balanced".
+    /// Explicit fields in the same call override the preset's values.
+    #[serde(default)]
+    pub preset: Option<String>,
+}
+
+/// Apply a named preset: a coherent bundle of doctrine values + auto-loop
+/// configs, replacing ~10 individual knob edits with one call. Returns
+/// (posture, autonomy, auto_counter, retreat_hp, summary lines).
+fn preset_bundle(name: &str) -> Option<(&'static str, &'static str, bool, Option<u64>, Vec<String>)> {
+    let mut applied: Vec<String> = Vec::new();
+    match name {
+        // Maximum defense: fill slots with the defensive loadout, assign
+        // defenders, keep the fleet home, counter when hit.
+        "turtle" => {
+            let mut b = crate::mcp::auto_build::get();
+            b.enabled = true;
+            crate::mcp::auto_build::set(b);
+            applied.push("auto_build loop → ON (defensive loadout, power-gated)".into());
+            let mut d = crate::mcp::auto_defend::get();
+            d.enabled = true;
+            crate::mcp::auto_defend::set(d);
+            applied.push("auto_defend loop → ON (Command Ship first, then production)".into());
+            if let Ok(mut e) = POLICY_ENGINE.write() {
+                e.set_policy("primary_home_guard", true, None);
+                e.set_policy("combat_alert", true, None);
+            }
+            applied.push("primary_home_guard + combat_alert policies → ON".into());
+            Some(("defensive", "auto", true, Some(4), applied))
+        }
+        // Economy flywheel: mine → refine → infuse; combat stays notify-only.
+        "economy" => {
+            let mut h = crate::mcp::auto_harvest::get();
+            h.enabled = true;
+            h.refine = true;
+            crate::mcp::auto_harvest::set(h);
+            applied.push("auto_harvest loop → ON (mine + refine when difficulty is ripe)".into());
+            let mut i = crate::mcp::auto_infuse::get();
+            i.enabled = true;
+            crate::mcp::auto_infuse::set(i);
+            applied.push("auto_infuse loop → ON (excess alpha into the guild reactor)".into());
+            if let Ok(mut e) = POLICY_ENGINE.write() {
+                e.set_policy("auto_refine", true, None);
+                e.set_policy("combat_alert", true, None);
+            }
+            applied.push("auto_refine + combat_alert policies → ON (combat stays notify-only)".into());
+            Some(("defensive", "advise", false, None, applied))
+        }
+        // A bit of everything: economy loops + defense loops + counter.
+        "balanced" => {
+            for (label, on) in [("auto_harvest", true), ("auto_build", true), ("auto_defend", true)] {
+                match label {
+                    "auto_harvest" => {
+                        let mut c = crate::mcp::auto_harvest::get();
+                        c.enabled = on;
+                        crate::mcp::auto_harvest::set(c);
+                    }
+                    "auto_build" => {
+                        let mut c = crate::mcp::auto_build::get();
+                        c.enabled = on;
+                        crate::mcp::auto_build::set(c);
+                    }
+                    _ => {
+                        let mut c = crate::mcp::auto_defend::get();
+                        c.enabled = on;
+                        crate::mcp::auto_defend::set(c);
+                    }
+                }
+                applied.push(format!("{label} loop → ON"));
+            }
+            if let Ok(mut e) = POLICY_ENGINE.write() {
+                e.set_policy("auto_refine", true, None);
+                e.set_policy("combat_alert", true, None);
+                e.set_policy("primary_home_guard", true, None);
+            }
+            applied.push("auto_refine + combat_alert + primary_home_guard policies → ON".into());
+            Some(("defensive", "advise", true, Some(4), applied))
+        }
+        _ => None,
+    }
 }
 
 pub async fn execute(params: DoctrineParams) -> Vec<Content> {
@@ -69,10 +150,30 @@ fn read_doctrine() -> (String, Option<String>, String) {
 
 fn set_doctrine(p: DoctrineParams) -> Vec<Content> {
     let (cur_posture, cur_pinned, cur_autonomy) = read_doctrine();
-    let posture = p.posture.unwrap_or(cur_posture);
-    let autonomy = p.autonomy.unwrap_or(cur_autonomy);
+
+    // A preset supplies the baseline; explicit fields still override it below.
+    let mut preset_lines: Vec<String> = Vec::new();
+    let (base_posture, base_autonomy, base_counter, base_retreat) = match p.preset.as_deref() {
+        Some(name) => match preset_bundle(name) {
+            Some((po, au, ac, rt, lines)) => {
+                preset_lines = lines;
+                (po.to_string(), au.to_string(), Some(ac), rt)
+            }
+            None => {
+                return vec![Content::text(format!(
+                    "structs_doctrine: unknown preset '{name}'. Available: turtle (max defense), economy (mine→refine→infuse), balanced."
+                ))]
+            }
+        },
+        None => (cur_posture, cur_autonomy, None, None),
+    };
+
+    let posture = p.posture.clone().unwrap_or(base_posture);
+    let autonomy = p.autonomy.clone().unwrap_or(base_autonomy);
     // pinned_target: explicit value sets it; absent keeps current.
-    let pinned = p.pinned_target.or(cur_pinned);
+    let pinned = p.pinned_target.clone().or(cur_pinned);
+    let auto_counter = p.auto_counter.or(base_counter);
+    let retreat_cmd_below = p.retreat_cmd_below.or(base_retreat);
 
     let mut cfg = json!({ "posture": posture, "autonomy": autonomy });
     if let Some(t) = &pinned {
@@ -85,25 +186,31 @@ fn set_doctrine(p: DoctrineParams) -> Vec<Content> {
     };
     engine.set_policy("rules_of_engagement", true, Some(cfg.clone()));
     // Mirror the standing orders onto the combat-policy toggles the engine evaluates.
-    if let Some(ac) = p.auto_counter {
+    if let Some(ac) = auto_counter {
         engine.set_policy("auto_counterattack", ac, None);
     }
-    if let Some(hp) = p.retreat_cmd_below {
+    if let Some(hp) = retreat_cmd_below {
         engine.set_policy("auto_retreat_if_cmd_below", true, Some(json!({ "hp": hp })));
     }
     drop(engine);
 
     let mut out = String::from("Doctrine set:\n");
+    if let Some(name) = &p.preset {
+        out.push_str(&format!("  preset: {} —\n", name));
+        for line in &preset_lines {
+            out.push_str(&format!("    • {}\n", line));
+        }
+    }
     out.push_str(&format!("  posture: {}\n", cfg.get("posture").and_then(|v| v.as_str()).unwrap_or("?")));
     out.push_str(&format!(
         "  pinned_target: {}\n",
         pinned.as_deref().unwrap_or("(none)")
     ));
     out.push_str(&format!("  autonomy: {}\n", cfg.get("autonomy").and_then(|v| v.as_str()).unwrap_or("?")));
-    if let Some(ac) = p.auto_counter {
+    if let Some(ac) = auto_counter {
         out.push_str(&format!("  auto_counter: {}\n", ac));
     }
-    if let Some(hp) = p.retreat_cmd_below {
+    if let Some(hp) = retreat_cmd_below {
         out.push_str(&format!("  retreat_cmd_below: HP {}\n", hp));
     }
     out.push_str("\nRun structs_doctrine {command:\"tick\"} on a loop to execute the doctrine.\n");

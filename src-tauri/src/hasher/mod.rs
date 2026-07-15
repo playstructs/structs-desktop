@@ -2,6 +2,7 @@ pub mod cpu;
 pub mod difficulty;
 pub mod gpu;
 pub mod scheduler;
+pub mod tuner;
 pub mod types;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -23,9 +24,67 @@ static HASH_ENABLED: AtomicBool = AtomicBool::new(true);
 static ENGINE_PREF: AtomicU8 = AtomicU8::new(0);
 /// DIFFICULTY_START override; 0 = use the compile-time default in `difficulty`.
 static DIFFICULTY_START_OVERRIDE: AtomicU64 = AtomicU64::new(0);
-/// Last max-concurrent value (mirrors the webapp `TASK.MAX_CONCURRENT_PROCESSES`,
-/// which is the authoritative spawner cap — tracked here only for reporting).
+/// Concurrent-grind cap. CONSUMED LIVE by `scheduler::admit` (the native
+/// admission gate), and mirrored to the webapp `TASK.MAX_CONCURRENT_PROCESSES`
+/// spawner cap.
 static MAX_CONCURRENT: AtomicU64 = AtomicU64::new(5);
+/// Opt-in adaptive tuning of difficulty_start/max_concurrent from solve history.
+static AUTO_TUNE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_auto_tune(v: bool) {
+    AUTO_TUNE.store(v, Ordering::Relaxed);
+}
+pub fn auto_tune() -> bool {
+    AUTO_TUNE.load(Ordering::Relaxed)
+}
+
+/// Persisted mirror of the runtime hash knobs. Before this existed the knobs
+/// were memory-only atomics that silently reset to defaults on every restart.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct HashConfig {
+    pub enabled: bool,
+    /// "auto" | "cpu" | "gpu"
+    pub engine: String,
+    /// 0 = compile-time default.
+    pub difficulty_start: u64,
+    pub max_concurrent: u64,
+    pub auto_tune: bool,
+}
+
+impl Default for HashConfig {
+    fn default() -> Self {
+        Self { enabled: true, engine: "auto".into(), difficulty_start: 0, max_concurrent: 5, auto_tune: false }
+    }
+}
+
+const HASH_CONFIG_FILE: &str = "hash_config.json";
+
+/// Apply the persisted knob values to the runtime atomics. Call once at startup.
+pub fn load_persisted_config() {
+    let cfg: HashConfig = crate::mcp::config_store::load_config(HASH_CONFIG_FILE);
+    set_hash_enabled(cfg.enabled);
+    set_engine_pref(match cfg.engine.as_str() {
+        "cpu" => 1,
+        "gpu" => 2,
+        _ => 0,
+    });
+    set_difficulty_start(cfg.difficulty_start);
+    set_max_concurrent(cfg.max_concurrent.clamp(1, 64));
+    set_auto_tune(cfg.auto_tune);
+}
+
+/// Snapshot the runtime atomics to disk. Call after any knob change (the
+/// structs_hash config handler and the tuner both do).
+pub fn persist_config() {
+    let cfg = HashConfig {
+        enabled: hash_enabled(),
+        engine: engine_pref_label().to_string(),
+        difficulty_start: DIFFICULTY_START_OVERRIDE.load(Ordering::Relaxed),
+        max_concurrent: max_concurrent(),
+        auto_tune: auto_tune(),
+    };
+    crate::mcp::config_store::save_config(HASH_CONFIG_FILE, &cfg);
+}
 
 pub fn set_hash_enabled(v: bool) {
     HASH_ENABLED.store(v, Ordering::Relaxed);

@@ -9,6 +9,7 @@
 //! player, not the agent, decides when their screen changes.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use serde::Serialize;
@@ -85,6 +86,70 @@ pub fn push(app: &tauri::AppHandle, severity: Severity, source: &str, message: i
     }
 }
 
+/// Set true when the app is shutting down (from `RunEvent::ExitRequested`) so
+/// the board window's close handler can distinguish an intentional user-dismiss
+/// (clear the reopen flag) from the window being torn down as part of app exit
+/// (leave the flag set, so a board that was open at quit reopens next launch).
+static APP_QUITTING: AtomicBool = AtomicBool::new(false);
+
+/// Record that the app is exiting. Call from the Tauri `RunEvent::ExitRequested`
+/// handler, before windows are destroyed.
+pub fn mark_app_quitting() {
+    APP_QUITTING.store(true, Ordering::SeqCst);
+}
+
+fn persist_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("structs-app").join("board_window.json"))
+}
+
+/// Whether the Team Ops window was open (and not user-dismissed) at last exit.
+/// This is only ever set to `true` by `build_board_window`, i.e. after the
+/// player intentionally opened the board via MCP at least once — so a player
+/// who has never opened it stays at the `false` default and startup reopen
+/// never fires. That is the "never open automatically the first time" gate.
+pub fn persisted_open() -> bool {
+    persist_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("open").and_then(|o| o.as_bool()))
+        .unwrap_or(false)
+}
+
+fn set_persisted_open(open: bool) {
+    if let Some(p) = persist_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(p, serde_json::json!({ "open": open }).to_string());
+    }
+}
+
+/// Build the Team Ops window and wire up reopen persistence. EVERY open path
+/// (prompt directive, important-event auto-open, `structs_board open:true`, and
+/// startup reopen) funnels through here so behaviour is consistent:
+///  - records `open = true` so the window reopens on the next launch, and
+///  - installs a `CloseRequested` handler that clears the flag when the PLAYER
+///    dismisses the board window themselves — but NOT when the window is torn
+///    down as part of app shutdown (guarded by `APP_QUITTING`), so "open at
+///    quit" is preserved and reopens next time.
+/// Callers still guard on `get_webview_window("board").is_none()` and apply any
+/// consent gate (e.g. the `board_auto_open` policy) before calling.
+pub fn build_board_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
+    let window = WebviewWindowBuilder::new(app, "board", WebviewUrl::App("board.html".into()))
+        .title("Structs — Team Ops")
+        .inner_size(580.0, 760.0)
+        .build()?;
+    window.on_window_event(|event| {
+        if matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            && !APP_QUITTING.load(Ordering::SeqCst)
+        {
+            set_persisted_open(false);
+        }
+    });
+    set_persisted_open(true);
+    Ok(window)
+}
+
 /// Open the Team Ops window if it isn't open — ONLY when the player opted in
 /// via the `board_auto_open` policy (`structs_policy set board_auto_open true`).
 /// Without that consent the window stays closed no matter how important the
@@ -110,11 +175,7 @@ fn ensure_board_open(app: &tauri::AppHandle) {
         }
         *last = now;
     }
-    match WebviewWindowBuilder::new(app, "board", WebviewUrl::App("board.html".into()))
-        .title("Structs — Team Ops")
-        .inner_size(580.0, 760.0)
-        .build()
-    {
+    match build_board_window(app) {
         Ok(w) => {
             let _ = w.set_focus();
             eprintln!("[Board Feed] opened Team Ops window (important event)");
@@ -131,11 +192,7 @@ pub fn spawn_window(app: &tauri::AppHandle) -> bool {
     if app.get_webview_window("board").is_some() {
         return true;
     }
-    match WebviewWindowBuilder::new(app, "board", WebviewUrl::App("board.html".into()))
-        .title("Structs — Team Ops")
-        .inner_size(580.0, 760.0)
-        .build()
-    {
+    match build_board_window(app) {
         Ok(w) => {
             let _ = w.set_focus();
             eprintln!("[Board Feed] opened Team Ops window (prompt directive)");
@@ -145,6 +202,21 @@ pub fn spawn_window(app: &tauri::AppHandle) -> bool {
             eprintln!("[Board Feed] couldn't open Team Ops window: {}", e);
             false
         }
+    }
+}
+
+/// On app startup, reopen the Team Ops window iff it was open (and not
+/// user-dismissed) at last exit. Because the persisted flag is only ever set
+/// after an intentional MCP open, this never surprises a player who has not
+/// opened the board — matching the "never open automatically unless the player
+/// opened it via MCP first" rule. Does not steal focus from the game window.
+pub fn reopen_if_persisted(app: &tauri::AppHandle) {
+    if !persisted_open() || app.get_webview_window("board").is_some() {
+        return;
+    }
+    match build_board_window(app) {
+        Ok(_) => eprintln!("[Board Feed] reopened Team Ops window (was open at last exit)"),
+        Err(e) => eprintln!("[Board Feed] couldn't reopen Team Ops window: {}", e),
     }
 }
 

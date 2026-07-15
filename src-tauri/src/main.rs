@@ -493,6 +493,12 @@ try {{
 
             let _ = window;
 
+            // Reopen the Team Ops (dashboard) window if it was open at last exit.
+            // The reopen flag is only ever set after the player intentionally
+            // opened the board via MCP, so this never opens for a player who
+            // hasn't — it only restores a board they chose to have open.
+            mcp::board_feed::reopen_if_persisted(app.handle());
+
             // On-chain guild directory refresh (non-blocking; persisted config
             // is authoritative at boot). Keeps guild infra URLs fresh and
             // re-applies the active config if its URLs changed on-chain.
@@ -516,9 +522,17 @@ try {{
                         let interval_ms = game_state::current_sync_interval_ms();
                         tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
                         let _ = app_handle_tick.emit("structs://sync-tick", ());
+                        // Watchdog lives on THIS timer (not the sync tick) so a
+                        // dead webview/sync pipeline is still detected. Cheap:
+                        // self-throttles to one detection pass per minute.
+                        mcp::watchdog::check(&app_handle_tick);
                     }
                 });
             }
+
+            // Restore persisted PoW knobs (they were memory-only atomics that
+            // reset on every restart before hash_config.json existed).
+            hasher::load_persisted_config();
 
             // Start MCP server (auto-enable on first run)
             let mut mcp_config = mcp::config::McpConfig::load();
@@ -579,6 +593,14 @@ try {{
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running structs app");
+        .build(tauri::generate_context!())
+        .expect("error while building structs app")
+        .run(|_app_handle, event| {
+            // Mark shutdown BEFORE windows are torn down, so the board window's
+            // close handler treats app-exit teardown as "leave the reopen flag
+            // set" (it was open at quit) rather than a user dismiss.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                mcp::board_feed::mark_app_quitting();
+            }
+        });
 }

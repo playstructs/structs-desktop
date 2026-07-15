@@ -6,6 +6,7 @@
 
 use serde_json::Value;
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::task::JoinSet;
 
 use crate::mcp::cosmos_client::CosmosClient;
@@ -138,9 +139,66 @@ pub async fn player_structs(client: &CosmosClient, pid: &str) -> Vec<Value> {
 
 /// Max player bodies in flight per scan. Each body does a handful of LCD reads
 /// and possibly one webview sign, so this also caps simultaneous LCD requests
-/// and sign events. 8–12 is the working band; drop it if the node 429s or the
-/// PoW burst saturates CPU.
+/// and sign events. 8–12 is the working band. This is the CEILING; the live
+/// value is `effective_max_concurrent()`, which AIMD-adjusts itself downward
+/// when the node shows pressure (429s/timeouts) and recovers one step per
+/// clean scan — no more manual constant-editing when the endpoint struggles.
 pub const MAX_CONCURRENT_PLAYERS: usize = 10;
+
+/// AIMD floor — never drop below this or long scans starve entirely.
+const MIN_CONCURRENT_PLAYERS: usize = 2;
+/// Halve when this many pressure failures land inside the window…
+const FAILURE_WINDOW_MS: f64 = 60_000.0;
+const FAILURES_TO_HALVE: usize = 3;
+/// …but at most once per window (debounce), so one burst = one halving.
+static EFFECTIVE_MAX: AtomicUsize = AtomicUsize::new(MAX_CONCURRENT_PLAYERS);
+static RECENT_FAILURES: std::sync::LazyLock<std::sync::Mutex<std::collections::VecDeque<f64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+static LAST_HALVE_MS: std::sync::LazyLock<std::sync::Mutex<f64>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(0.0));
+
+/// The live fan-out cap. Loops pass this (not `MAX_CONCURRENT_PLAYERS`) to
+/// `for_each_player_concurrent`.
+pub fn effective_max_concurrent() -> usize {
+    EFFECTIVE_MAX.load(Ordering::Relaxed)
+}
+
+/// Endpoint-pressure signal (429 / timeout / bridge failure), fed by
+/// `tx_retry` and `CosmosClient`. Multiplicative decrease: halve (floor
+/// MIN_CONCURRENT_PLAYERS) when failures cluster.
+pub fn report_failure() {
+    let now = crate::hasher::types::now_millis();
+    let mut window = RECENT_FAILURES.lock().unwrap();
+    window.push_back(now);
+    while window.front().is_some_and(|t| now - *t > FAILURE_WINDOW_MS) {
+        window.pop_front();
+    }
+    if window.len() >= FAILURES_TO_HALVE {
+        let mut last = LAST_HALVE_MS.lock().unwrap();
+        if now - *last >= FAILURE_WINDOW_MS {
+            *last = now;
+            let cur = EFFECTIVE_MAX.load(Ordering::Relaxed);
+            let next = (cur / 2).max(MIN_CONCURRENT_PLAYERS);
+            if next < cur {
+                EFFECTIVE_MAX.store(next, Ordering::Relaxed);
+                crate::mcp::telemetry::tlog_kv(
+                    "auto",
+                    crate::mcp::telemetry::Sev::Warn,
+                    "endpoint pressure: lowering loop concurrency",
+                    serde_json::json!({ "from": cur, "to": next, "failures_in_window": window.len() }),
+                );
+            }
+        }
+    }
+}
+
+/// Additive increase: a scan finished with zero errors → +1 toward the ceiling.
+pub fn report_clean_scan() {
+    let cur = EFFECTIVE_MAX.load(Ordering::Relaxed);
+    if cur < MAX_CONCURRENT_PLAYERS {
+        EFFECTIVE_MAX.store(cur + 1, Ordering::Relaxed);
+    }
+}
 
 /// Run `body` for every target with at most `max` in flight. Each task gets an
 /// owned target; bodies are independent (no shared borrows). A panicking body is

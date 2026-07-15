@@ -114,6 +114,12 @@ pub fn set(cfg: AutoBuildConfig) {
     crate::mcp::config_store::save_config(FILENAME, &cfg);
 }
 
+/// Watchdog remediation: clear a wedged single-flight guard so the next tick
+/// can scan again.
+pub fn force_reset_running() {
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
 fn ambit_to_enum(a: &str) -> i64 {
     match a {
         "water" => 1,
@@ -150,11 +156,23 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
-    scan(app_handle, &cfg).await;
+    let run = crate::mcp::telemetry::LoopRun::start("auto_build");
+    scan(app_handle, &cfg, &run).await;
+    run.finish(Some(format!(
+        "eff_conc={}",
+        crate::mcp::loop_util::effective_max_concurrent()
+    )));
+    if run.errors.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        crate::mcp::loop_util::report_clean_scan();
+    }
     RUNNING.store(false, Ordering::SeqCst);
 }
 
-async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
+async fn scan(
+    app_handle: &tauri::AppHandle,
+    cfg: &AutoBuildConfig,
+    run: &std::sync::Arc<crate::mcp::telemetry::LoopRun>,
+) {
     let registry = match app_handle.try_state::<Arc<TaskRegistry>>() {
         Some(r) => r.inner().clone(),
         None => return,
@@ -193,16 +211,19 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
     let completes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let initiates = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (completes_c, initiates_c) = (completes.clone(), initiates.clone());
+    let run_c = run.clone();
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
-        crate::mcp::loop_util::MAX_CONCURRENT_PLAYERS,
+        crate::mcp::loop_util::effective_max_concurrent(),
         move |(pid, idx_opt, role)| {
             let app = app.clone();
             let client = client.clone();
             let registry = registry.clone();
             let completes = completes_c.clone();
             let initiates = initiates_c.clone();
+            let run = run_c.clone();
             async move {
+                run.players.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Resolve THIS player's structs from its planet + fleet slot arrays.
                 // The guild struct-LIST endpoints are broken (ignore their filter,
                 // return a global page) — using them made auto_build see no structs
@@ -264,7 +285,12 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
                             crate::hasher::register_vplayer_hash(sid.clone(), idx, "BUILD".to_string());
                         }
                         completes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        eprintln!("[Auto-Build] complete {} (age {}, build-difficulty ≤ {})", sid, age, complete_difficulty);
+                        run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        crate::mcp::telemetry::tlog(
+                            "auto_build",
+                            crate::mcp::telemetry::Sev::Info,
+                            format!("complete {} (age {}, build-difficulty ≤ {})", sid, age, complete_difficulty),
+                        );
                     }
                 }
 
@@ -362,20 +388,32 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoBuildConfig) {
                     // Only vplayers route through the façade signer; primary needs its own
                     // path (not wired here), so skip primary initiates for now.
                     let Some(idx) = idx_opt else { break };
-                    let res = crate::mcp::vplayer_bridge::sign_action(
+                    let res = crate::mcp::tx_retry::sign_with_retry(
                         &app,
                         idx,
                         "/structs.structs.MsgStructBuildInitiate",
                         payload,
-                        60,
+                        &format!("auto_build:{pid}"),
                     )
                     .await;
                     match res {
-                        Ok(v) if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 => {
+                        Ok(_) => {
                             initiates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            eprintln!("[Auto-Build] {} {} {} slot {} (player {})", target, ambit, type_name, slot, pid);
+                            run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            crate::mcp::telemetry::tlog(
+                                "auto_build",
+                                crate::mcp::telemetry::Sev::Info,
+                                format!("{} {} {} slot {} (player {})", target, ambit, type_name, slot, pid),
+                            );
                         }
-                        _ => {}
+                        Err(e) => {
+                            run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            crate::mcp::telemetry::tlog(
+                                "auto_build",
+                                crate::mcp::telemetry::Sev::Warn,
+                                format!("initiate failed for {pid}: {e}"),
+                            );
+                        }
                     }
                     break; // one initiate per player per scan (charge resets to 0)
                 }

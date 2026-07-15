@@ -1744,6 +1744,17 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += row('Config', '<span id="debug-mcp-config" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy to clipboard</span>');
       html += '</div></div>';
 
+      // Connect Your Agent — everything a new player needs to hook up Claude
+      // Code (or any MCP client) in one card: the one-line add command with a
+      // copy button, plus what to say once connected.
+      html += '<div class="sui-data-card">';
+      html += '<div class="sui-data-card-header sui-text-header">Connect Your Agent</div>';
+      html += '<div class="sui-data-card-body">';
+      html += '<div style="color:var(--text-hint); padding:2px 0 6px 0;">Play co-op with an AI agent: it can scout, manage mining, and watch for raids while you command. With <a href="https://claude.com/claude-code" target="_blank" style="color:var(--accent-primary);">Claude Code</a> installed, run this in a terminal:</div>';
+      html += row('Command', '<span id="debug-agent-cmd" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy `claude mcp add …` command</span>');
+      html += '<div style="color:var(--text-hint); padding:6px 0 2px 0;">Then start <code>claude</code> and say: <em>&ldquo;Run the getting_started prompt from structs-game&rdquo;</em> — the agent becomes your tutorial. Already playing? Try <em>&ldquo;check structs_system status&rdquo;</em> for a health report.</div>';
+      html += '</div></div>';
+
       // Engine
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-header sui-text-header">Hash Engine</div>';
@@ -1819,6 +1830,19 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               copyToClipboard(configJson);
               configEl.textContent = 'Copied!';
               setTimeout(function() { configEl.textContent = 'Copy to clipboard'; }, 1000);
+            });
+          }
+
+          // Connect Your Agent: the exact one-line `claude mcp add` command.
+          var cmdEl = document.getElementById('debug-agent-cmd');
+          if (cmdEl) {
+            var addCmd = 'claude mcp add --transport http structs-game http://127.0.0.1:' +
+              mcpConfig.port + '/mcp --header "Authorization: Bearer ' +
+              (mcpConfig.bearer_token || 'TOKEN_NOT_SET') + '"';
+            cmdEl.addEventListener('click', function() {
+              copyToClipboard(addCmd);
+              cmdEl.textContent = 'Copied!';
+              setTimeout(function() { cmdEl.textContent = 'Copy `claude mcp add …` command'; }, 1000);
             });
           }
         }).catch(function() {});

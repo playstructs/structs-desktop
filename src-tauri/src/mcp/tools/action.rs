@@ -6,7 +6,6 @@ use crate::game_state::{StructTypeInfo, GAME_STATE};
 use crate::hasher;
 use crate::hasher::types::{TaskParams, TaskRegistry};
 use crate::mcp::error_translator::translate_error;
-use crate::mcp::tx_queue;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -78,7 +77,7 @@ async fn action_explore(app_handle: &tauri::AppHandle, player_id: &str, args: &V
         tx_args["name"] = json!(name);
     }
 
-    match tx_queue::submit_tx(app_handle, "planet_explore".to_string(), tx_args).await {
+    match crate::mcp::tx_retry::submit_once(app_handle, "planet_explore", tx_args, "mcp:planet_explore").await {
         Ok(resp) if resp.success => {
             let named = if name.is_empty() { String::new() } else { format!(" (name: {})", name) };
             vec![Content::text(format!(
@@ -350,7 +349,7 @@ async fn action_build(
         "charge_cost": build_charge_cost,
     });
 
-    match tx_queue::submit_tx(app_handle, "struct_build_initiate".to_string(), tx_args).await {
+    match crate::mcp::tx_retry::submit_once(app_handle, "struct_build_initiate", tx_args, "mcp:struct_build_initiate").await {
         Ok(resp) if resp.success => vec![Content::text(format!(
             "{} build submitted in {} (slot {}). Build difficulty: {}.\nCharge: {}\nHash starts automatically once the initiate lands; the receipt appears in structs_events (tx_settled).{}",
             struct_type,
@@ -430,7 +429,7 @@ async fn action_attack(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         "charge_cost": charge_cost,
     });
 
-    match tx_queue::submit_tx(app_handle, "struct_attack".to_string(), tx_args).await {
+    match crate::mcp::tx_retry::submit_once(app_handle, "struct_attack", tx_args, "mcp:struct_attack").await {
         Ok(resp) if resp.success => vec![Content::text(format!(
             "Attack submitted: {} → {} (weapon: {})\nCharge: {}\nResult resolves on-chain — read it with structs_intel {{query:\"battle_log\"}} or watch structs_events (tx_settled + struct_attack).{}",
             attacker_id,
@@ -472,7 +471,7 @@ async fn action_defend(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         "charge_cost": charge_cost,
     });
 
-    match tx_queue::submit_tx(app_handle, "struct_defense_set".to_string(), tx_args).await {
+    match crate::mcp::tx_retry::submit_once(app_handle, "struct_defense_set", tx_args, "mcp:struct_defense_set").await {
         Ok(resp) if resp.success => vec![Content::text(format!(
             "Defense set: {} now defending {}\nCharge: {}",
             defender_id,
@@ -527,7 +526,7 @@ async fn action_move_fleet(app_handle: &tauri::AppHandle, args: &Value) -> Vec<C
         "destination_id": destination,
     });
 
-    match tx_queue::submit_tx(app_handle, "fleet_move".to_string(), tx_args).await {
+    match crate::mcp::tx_retry::submit_once(app_handle, "fleet_move", tx_args, "mcp:fleet_move").await {
         Ok(resp) if resp.success => vec![Content::text(format!(
             "Fleet {} moving to planet {}\nTx hash: {}",
             fleet_id,
@@ -570,7 +569,7 @@ async fn action_transfer(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Con
         "amount": amount,
     });
 
-    match tx_queue::submit_tx(app_handle, "bank_send".to_string(), tx_args).await {
+    match crate::mcp::tx_retry::submit_once(app_handle, "bank_send", tx_args, "mcp:bank_send").await {
         Ok(resp) if resp.success => vec![Content::text(format!(
             "Transfer sent: {} to {}\nTx hash: {}{}",
             amount,
@@ -616,7 +615,7 @@ async fn action_deploy(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conte
         "charge_cost": charge_cost,
     });
 
-    match tx_queue::submit_tx(app_handle, "struct_move".to_string(), tx_args).await {
+    match crate::mcp::tx_retry::submit_once(app_handle, "struct_move", tx_args, "mcp:struct_move").await {
         Ok(resp) if resp.success => vec![Content::text(format!(
             "Struct {} deploy submitted to {} slot {}\nCharge: {}",
             struct_id,
@@ -741,7 +740,7 @@ async fn action_update_primary_reactor(app_handle: &tauri::AppHandle, args: &Val
         "reactor_id": reactor_id,
     });
 
-    match tx_queue::submit_tx(app_handle, "guild_update_primary_reactor".to_string(), tx_args).await {
+    match crate::mcp::tx_retry::submit_once(app_handle, "guild_update_primary_reactor", tx_args, "mcp:guild_update_primary_reactor").await {
         Ok(resp) if resp.success => vec![Content::text(format!(
             "Guild {} primary reactor updated to {}.\nTx hash: {}",
             guild_id,
@@ -796,7 +795,7 @@ async fn action_simple(
         "charge_cost": charge_cost,
     });
 
-    match tx_queue::submit_tx(app_handle, action_type.to_string(), tx_args).await {
+    match crate::mcp::tx_retry::submit_once(app_handle, action_type, tx_args, &format!("mcp:{}", action_type)).await {
         Ok(resp) if resp.success => vec![Content::text(format!(
             "{} on {} submitted.\nCharge: {}",
             action_type,

@@ -6,6 +6,11 @@ use std::collections::HashMap;
 pub fn list() -> Vec<Prompt> {
     vec![
         Prompt::new(
+            "getting_started",
+            Some("Guided first session for a BRAND-NEW player: explore, build, mine, refine — the agent is the tutorial."),
+            None,
+        ),
+        Prompt::new(
             "structs_first_session",
             Some("Orientation for a new Structs commander. Checks dashboard, identifies priorities."),
             None,
@@ -40,6 +45,38 @@ pub fn list() -> Vec<Prompt> {
 
 pub fn get(name: &str, _arguments: Option<HashMap<String, String>>) -> Result<GetPromptResult, String> {
     let message = match name {
+        "getting_started" => {
+            "I'm brand new to Structs. Be my guide — teach me the game by playing my first \
+            session WITH me. Explain each concept in one or two plain sentences right before \
+            we use it, then act. Check in with me before anything irreversible.\n\
+            \n\
+            1. WHO AM I: Call structs_intel {query:\"whoami\"}. If no player exists yet, tell \
+               me to log into the Structs window and pick a guild first — you can't play until \
+               the app is signed in. (The guild fronts my join fee; I don't need any funds.)\n\
+            2. FIRST EXPLORE: A fresh player owns NOTHING — no planet, no fleet, no Command \
+               Ship — until their first explore. Run structs_action {action:\"explore\"} and \
+               explain: this spawns my planet, fleet, and Command Ship.\n\
+            3. LOOK AROUND: Call structs_dashboard and walk me through what I now own. \
+               Explain the two resources (Ore: mined, raidable; Alpha: refined from ore, safe, \
+               powers everything) and charge (1 per block ≈ 6s; every action spends it).\n\
+            4. BUILD THE ECONOMY: Build an Ore Extractor, then an Ore Refinery \
+               (structs_action {action:\"build\"} — use structs_intel what_can_i_build for \
+               slots). Explain: builds finish with a proof-of-work; the app grinds it \
+               automatically (structs_hash list shows progress and ETAs).\n\
+            5. MINE → REFINE: Start a mine (structs_action {action:\"mine\"}). When it \
+               completes, refining starts automatically if the auto_refine policy is on \
+               (it is by default) — explain that policies are standing orders I can toggle \
+               with structs_policy.\n\
+            6. STAY SAFE: Explain in one paragraph why stored ore attracts raids and how \
+               defense assignments work; check structs_policy list and confirm power_alert \
+               and combat_alert are on.\n\
+            7. WHAT'S NEXT: Show me structs_system {command:\"status\"} — the health view I \
+               (or you) can check anytime — and suggest ONE preset doctrine \
+               (structs_doctrine {command:\"set\", preset:\"economy\"}) as my training wheels.\n\
+            \n\
+            Keep each step short. Never fire more than one transaction without telling me \
+            what it does first."
+        }
         "structs_first_session" => {
             "I'm starting a new Structs session. Help me get oriented:\n\
             \n\

@@ -130,9 +130,16 @@ fn build_sync(
 
     if player_id.is_empty() {
         return Err(vec![Content::text(
-            "Player ID not available yet — the Structs app is still loading game state.\n\
-            Call structs_intel {query:\"whoami\"} to check sync status, retry in a few seconds, \
-            or pass player_id explicitly (e.g., '1-18').",
+            "No player yet — nothing to show.\n\
+            \n\
+            FOR THE HUMAN: open the Structs window, sign in, and pick a guild (the guild \
+            covers the join fee — you don't need any funds). Once you're in, I can see your \
+            empire here. Brand new? Ask your agent to run the `getting_started` prompt and \
+            it will walk you through your first session.\n\
+            \n\
+            FOR THE AGENT: the app may also just still be syncing — call \
+            structs_intel {query:\"whoami\"} to check, retry in a few seconds, or pass \
+            player_id explicitly (e.g., '1-18').",
         )]);
     }
 

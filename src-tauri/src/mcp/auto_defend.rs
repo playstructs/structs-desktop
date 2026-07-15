@@ -69,6 +69,12 @@ fn load() -> AutoDefendConfig {
 pub fn get() -> AutoDefendConfig {
     CONFIG.read().map(|c| c.clone()).unwrap_or_default()
 }
+
+/// Watchdog remediation: clear a wedged single-flight guard so the next tick
+/// can scan again.
+pub fn force_reset_running() {
+    RUNNING.store(false, Ordering::SeqCst);
+}
 pub fn set(cfg: AutoDefendConfig) {
     if let Ok(mut c) = CONFIG.write() {
         *c = cfg.clone();
@@ -113,25 +119,40 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
-    scan(app_handle, &cfg).await;
+    let run = crate::mcp::telemetry::LoopRun::start("auto_defend");
+    scan(app_handle, &cfg, &run).await;
+    run.finish(Some(format!(
+        "eff_conc={}",
+        crate::mcp::loop_util::effective_max_concurrent()
+    )));
+    if run.errors.load(Ordering::Relaxed) == 0 {
+        crate::mcp::loop_util::report_clean_scan();
+    }
     RUNNING.store(false, Ordering::SeqCst);
 }
 
-async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoDefendConfig) {
+async fn scan(
+    app_handle: &tauri::AppHandle,
+    cfg: &AutoDefendConfig,
+    run: &std::sync::Arc<crate::mcp::telemetry::LoopRun>,
+) {
     use crate::mcp::virtual_players::VPlayerRole;
     let client = CosmosClient::new();
     let targets = crate::mcp::virtual_players::collect_targets(false);
     let include_bait = cfg.include_bait;
     let app = app_handle.clone();
+    let run_c = run.clone();
 
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
-        crate::mcp::loop_util::MAX_CONCURRENT_PLAYERS,
+        crate::mcp::loop_util::effective_max_concurrent(),
         move |(pid, idx_opt, role)| {
             let client = client.clone();
             let app = app.clone();
+            let run = run_c.clone();
             async move {
                 let Some(idx) = idx_opt else { return }; // vplayers only (façade signer)
+                run.players.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Default: only defend productive workers; bait are deliberate raid fodder.
                 if !include_bait && role != Some(VPlayerRole::Productive) {
                     return;
@@ -246,23 +267,36 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoDefendConfig) {
                     .cloned()
                     .unwrap();
 
-                let res = crate::mcp::vplayer_bridge::sign_action(
+                let res = crate::mcp::tx_retry::sign_with_retry(
                     &app,
                     idx,
                     "/structs.structs.MsgStructDefenseSet",
                     json!({ "defenderStructId": sid, "protectedStructId": target_id }),
-                    60,
+                    &format!("auto_defend:{pid}"),
                 )
                 .await;
-                if let Ok(v) = res {
-                    if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 {
+                match res {
+                    Ok(_) => {
                         ASSIGNED_CACHE.lock().unwrap().insert(sid.clone(), target_id.clone());
-                        eprintln!("[Auto-Defend] {} defends {} (player {})", sid, target_id, pid);
+                        run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        crate::mcp::telemetry::tlog(
+                            "auto_defend",
+                            crate::mcp::telemetry::Sev::Info,
+                            format!("{} defends {} (player {})", sid, target_id, pid),
+                        );
                         crate::mcp::board_feed::push(
                             &app,
                             crate::mcp::board_feed::Severity::Info,
                             "auto_defend",
                             format!("{} now defends {} (player {})", sid, target_id, pid),
+                        );
+                    }
+                    Err(e) => {
+                        run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        crate::mcp::telemetry::tlog(
+                            "auto_defend",
+                            crate::mcp::telemetry::Sev::Warn,
+                            format!("defense-set failed for {pid}: {e}"),
                         );
                     }
                 }

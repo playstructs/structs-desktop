@@ -114,18 +114,14 @@ pub async fn infuse_primary_excess(
         "amount": { "denom": "ualpha", "amount": infuse.to_string() },
     });
     // HD index 0 = the primary's own key off the shared mnemonic.
-    let res = crate::mcp::vplayer_bridge::sign_action(
+    let res = crate::mcp::tx_retry::sign_with_retry(
         app_handle,
         0,
         "/structs.structs.MsgReactorInfuse",
         payload,
-        60,
+        &format!("auto_infuse:{primary_pid}"),
     )
     .await?;
-    let code = res.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-    if code != 0 {
-        return Err(format!("infuse tx rejected (code {}): {}", code, res));
-    }
     let tx = res
         .get("transactionHash")
         .and_then(|h| h.as_str())
@@ -153,11 +149,18 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
+    let run = crate::mcp::telemetry::LoopRun::start("auto_infuse");
+    run.players.fetch_add(1, Ordering::Relaxed);
     match infuse_primary_excess(app_handle, cfg.keep_grams).await {
         Ok(r) => {
-            eprintln!(
-                "[Auto-Infuse] infused {} ualpha (kept {} g), tx {}",
-                r.infused_ualpha, cfg.keep_grams, r.tx
+            run.actions.fetch_add(1, Ordering::Relaxed);
+            crate::mcp::telemetry::tlog(
+                "auto_infuse",
+                crate::mcp::telemetry::Sev::Notice,
+                format!(
+                    "infused {} ualpha (kept {} g), tx {}",
+                    r.infused_ualpha, cfg.keep_grams, r.tx
+                ),
             );
             crate::mcp::board_feed::push(
                 app_handle,
@@ -173,10 +176,18 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
         Err(e) => {
             // "nothing to infuse" is normal/quiet; only note real failures.
             if !e.starts_with("nothing to infuse") {
-                eprintln!("[Auto-Infuse] {}", e);
+                run.errors.fetch_add(1, Ordering::Relaxed);
+                crate::mcp::telemetry::tlog("auto_infuse", crate::mcp::telemetry::Sev::Warn, &e);
             }
         }
     }
+    run.finish(None);
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
+/// Watchdog remediation: clear a wedged single-flight guard so the next tick
+/// can run again.
+pub fn force_reset_running() {
     RUNNING.store(false, Ordering::SeqCst);
 }
 

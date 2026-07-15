@@ -162,7 +162,11 @@ pub async fn execute(
             let guild_id_opt = { crate::game_state::GAME_STATE.read().unwrap().guild_id.clone() };
             let Some(gid) = guild_id_opt.as_deref().filter(|s| !s.is_empty()) else {
                 return vec![Content::text(
-                    "No guild id synced yet — open the app and log in first.".to_string(),
+                    "No guild yet — virtual players need one.\n\
+                     FOR THE HUMAN: open the Structs window, sign in, and pick a guild (it \
+                     covers your join fee). FOR THE AGENT: retry once the app has synced; \
+                     structs_intel {query:\"whoami\"} shows sync status."
+                        .to_string(),
                 )];
             };
             match crate::mcp::guild_power::resolve_guild_power(client, gid).await {
@@ -1178,25 +1182,24 @@ pub async fn execute(
                 }
             };
 
-            // Sign+broadcast as the virtual player via the façade (its key, never Rust's).
-            match vplayer_bridge::sign_action(app_handle, index, &type_url, payload, 60).await
+            // Sign+broadcast as the virtual player via the façade (its key, never
+            // Rust's) — through the ledgered retry path (sequence mismatches
+            // auto-retry; deterministic rejections surface immediately).
+            match crate::mcp::tx_retry::sign_with_retry(
+                app_handle,
+                index,
+                &type_url,
+                payload,
+                &format!("players_act:{player_id}"),
+            )
+            .await
             {
                 Ok(res) => {
-                    let code = res.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
                     let hash = res.get("transactionHash").and_then(|h| h.as_str()).unwrap_or("");
-                    if code == 0 {
-                        vec![Content::text(format!(
-                            "[vplayer {}] {} submitted — tx {}\nRead the outcome via structs_intel battle_log / structs_events.",
-                            index, action, if hash.is_empty() { "(pending)" } else { hash }
-                        ))]
-                    } else {
-                        let raw = res.get("rawLog").and_then(|r| r.as_str()).unwrap_or("");
-                        vec![Content::text(format!(
-                            "[vplayer {}] {} rejected — chain code {}{}",
-                            index, action, code,
-                            if raw.is_empty() { String::new() } else { format!(": {}", raw) }
-                        ))]
-                    }
+                    vec![Content::text(format!(
+                        "[vplayer {}] {} submitted — tx {}\nRead the outcome via structs_intel battle_log / structs_events.",
+                        index, action, if hash.is_empty() { "(pending)" } else { hash }
+                    ))]
                 }
                 Err(e) => vec![Content::text(format!("[vplayer {}] {} failed: {}", index, action, e))],
             }

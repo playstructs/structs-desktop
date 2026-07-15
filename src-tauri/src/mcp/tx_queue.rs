@@ -52,20 +52,26 @@ pub async fn submit_tx(
         .emit("mcp_transaction_request", &request)
         .map_err(|e| format!("Failed to emit tx request: {}", e))?;
 
-    eprintln!("[Structs TX] Sent request {}: {}", request_id, request.action);
+    crate::mcp::telemetry::tlog(
+        "tx",
+        crate::mcp::telemetry::Sev::Debug,
+        format!("Sent request {}: {}", request_id, request.action),
+    );
 
     // Wait for response with timeout (30s)
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
         Ok(Ok(response)) => {
             if response.success {
-                eprintln!(
-                    "[Structs TX] Success {}: hash={:?}",
-                    request_id, response.tx_hash
+                crate::mcp::telemetry::tlog(
+                    "tx",
+                    crate::mcp::telemetry::Sev::Info,
+                    format!("Success {}: hash={:?}", request_id, response.tx_hash),
                 );
             } else {
-                eprintln!(
-                    "[Structs TX] Failed {}: {:?}",
-                    request_id, response.error
+                crate::mcp::telemetry::tlog(
+                    "tx",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("Failed {}: {:?}", request_id, response.error),
                 );
             }
             Ok(response)

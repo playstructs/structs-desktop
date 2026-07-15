@@ -10,9 +10,54 @@ static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 fn client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {
         Client::builder()
+            // Bounded so a dead/unroutable LCD fails a scan in seconds instead
+            // of hanging a loop body for the OS socket timeout (or forever).
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(15))
             .build()
             .expect("failed to build HTTP client")
     })
+}
+
+/// One shared GET with a single jittered retry on transport errors, timeouts,
+/// 429s, and 5xx — safe because these are idempotent reads. Retried-and-still-
+/// failing pressure errors feed the AIMD loop-concurrency controller.
+async fn get_json(url: &str) -> Result<Value, String> {
+    let mut last_err = String::new();
+    for attempt in 0..2 {
+        if attempt > 0 {
+            // 300–800ms jitter, from the sub-ms clock bits (no rand dep).
+            let frac = (crate::hasher::types::now_millis().fract() * 1000.0) as u64 % 500;
+            tokio::time::sleep(std::time::Duration::from_millis(300 + frac)).await;
+        }
+        match client().get(url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = match resp.text().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        last_err = format!("Read error: {}", e);
+                        continue;
+                    }
+                };
+                if status.is_success() {
+                    return serde_json::from_str(&body)
+                        .map_err(|e| format!("JSON parse error: {}", e));
+                }
+                last_err = format!("API returned {}: {}", status, body);
+                let retryable = status.as_u16() == 429 || status.is_server_error();
+                if !retryable {
+                    return Err(last_err);
+                }
+            }
+            Err(e) => {
+                last_err = format!("HTTP error: {}", e);
+            }
+        }
+    }
+    // Both attempts failed on a retryable class → endpoint pressure.
+    crate::mcp::loop_util::report_failure();
+    Err(last_err)
 }
 
 /// Process-global URL cells shared by every CosmosClient (and the
@@ -102,21 +147,7 @@ impl CosmosClient {
         let path = Self::entity_path(entity_type)?;
         let base = self.reactor_api.read().unwrap().clone();
         let url = format!("{}/structs/{}/{}", base, path, id);
-
-        let resp = client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP error: {}", e))?;
-
-        let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("Read error: {}", e))?;
-
-        if !status.is_success() {
-            return Err(format!("API returned {}: {}", status, body));
-        }
-
-        serde_json::from_str(&body).map_err(|e| format!("JSON parse error: {}", e))
+        get_json(&url).await
     }
 
     /// List entities of a given type with optional pagination
@@ -140,21 +171,7 @@ impl CosmosClient {
         if !params.is_empty() {
             url = format!("{}?{}", url, params.join("&"));
         }
-
-        let resp = client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP error: {}", e))?;
-
-        let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("Read error: {}", e))?;
-
-        if !status.is_success() {
-            return Err(format!("API returned {}: {}", status, body));
-        }
-
-        serde_json::from_str(&body).map_err(|e| format!("JSON parse error: {}", e))
+        get_json(&url).await
     }
 
 }

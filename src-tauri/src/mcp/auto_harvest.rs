@@ -127,11 +127,29 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     if HARVESTING.swap(true, Ordering::SeqCst) {
         return;
     }
-    scan(app_handle, &cfg).await;
+    let run = crate::mcp::telemetry::LoopRun::start("auto_harvest");
+    scan(app_handle, &cfg, &run).await;
+    run.finish(Some(format!(
+        "eff_conc={}",
+        crate::mcp::loop_util::effective_max_concurrent()
+    )));
+    if run.errors.load(Ordering::Relaxed) == 0 {
+        crate::mcp::loop_util::report_clean_scan();
+    }
     HARVESTING.store(false, Ordering::SeqCst);
 }
 
-async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
+/// Watchdog remediation: clear a wedged single-flight guard so the next tick
+/// can scan again.
+pub fn force_reset_running() {
+    HARVESTING.store(false, Ordering::SeqCst);
+}
+
+async fn scan(
+    app_handle: &tauri::AppHandle,
+    cfg: &AutoHarvestConfig,
+    run: &Arc<crate::mcp::telemetry::LoopRun>,
+) {
     let registry = match app_handle.try_state::<Arc<TaskRegistry>>() {
         Some(r) => r.inner().clone(),
         None => return,
@@ -165,15 +183,18 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
     let refine = cfg.refine;
     let auto_explore = cfg.auto_explore;
     let app = app_handle.clone();
+    let run_c = run.clone();
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
-        crate::mcp::loop_util::MAX_CONCURRENT_PLAYERS,
+        crate::mcp::loop_util::effective_max_concurrent(),
         move |(pid, idx_opt, may_refine)| {
             let app = app.clone();
             let client = client.clone();
             let registry = registry.clone();
             let started = started_body.clone();
+            let run = run_c.clone();
             async move {
+                run.players.fetch_add(1, Ordering::Relaxed);
                 // Resolve THIS player's structs from its planet + fleet slot arrays.
                 // The guild struct-LIST endpoints (owner AND location) are broken —
                 // they ignore their filter and return a global page of every
@@ -258,13 +279,18 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                             crate::hasher::register_vplayer_hash(sid.clone(), idx, task_type.to_string());
                         }
                         started.fetch_add(1, Ordering::Relaxed);
-                        eprintln!(
-                            "[Auto-Harvest] {} {} (age {}, difficulty {} ≤ {})",
-                            task_type,
-                            sid,
-                            age,
-                            calculate_difficulty(age, target),
-                            difficulty_threshold
+                        run.actions.fetch_add(1, Ordering::Relaxed);
+                        crate::mcp::telemetry::tlog(
+                            "auto_harvest",
+                            crate::mcp::telemetry::Sev::Info,
+                            format!(
+                                "{} {} (age {}, difficulty {} ≤ {})",
+                                task_type,
+                                sid,
+                                age,
+                                calculate_difficulty(age, target),
+                                difficulty_threshold
+                            ),
                         );
                     }
                 }
@@ -303,25 +329,38 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
                             true // bait: no refinery to protect
                         };
                         if planet_ore <= 0.0 && role_ready {
-                            let res = crate::mcp::vplayer_bridge::sign_action(
+                            let res = crate::mcp::tx_retry::sign_with_retry(
                                 &app,
                                 idx,
                                 "/structs.structs.MsgPlanetExplore",
                                 serde_json::json!({ "playerId": pid }),
-                                60,
+                                &format!("auto_harvest:{pid}"),
                             )
                             .await;
-                            if let Ok(v) = res {
-                                if v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) == 0 {
+                            match res {
+                                Ok(_) => {
                                     // Planet changed → bust the owned-cache so threat
                                     // detection re-resolves this player's new planet.
                                     crate::mcp::virtual_players::invalidate_owned(&pid);
-                                    eprintln!("[Auto-Harvest] explored (planet {} mined out) for {}", planet_id, pid);
+                                    run.actions.fetch_add(1, Ordering::Relaxed);
+                                    crate::mcp::telemetry::tlog(
+                                        "auto_harvest",
+                                        crate::mcp::telemetry::Sev::Notice,
+                                        format!("explored (planet {} mined out) for {}", planet_id, pid),
+                                    );
                                     crate::mcp::board_feed::push(
                                         &app,
                                         crate::mcp::board_feed::Severity::Notice,
                                         "auto_harvest",
                                         format!("{} explored to a fresh planet ({} mined out)", pid, planet_id),
+                                    );
+                                }
+                                Err(e) => {
+                                    run.errors.fetch_add(1, Ordering::Relaxed);
+                                    crate::mcp::telemetry::tlog(
+                                        "auto_harvest",
+                                        crate::mcp::telemetry::Sev::Warn,
+                                        format!("explore failed for {pid}: {e}"),
                                     );
                                 }
                             }
@@ -334,7 +373,11 @@ async fn scan(app_handle: &tauri::AppHandle, cfg: &AutoHarvestConfig) {
     .await;
     let started = started.load(Ordering::Relaxed);
     if started > 0 {
-        eprintln!("[Auto-Harvest] started {} task(s)", started);
+        crate::mcp::telemetry::tlog(
+            "auto_harvest",
+            crate::mcp::telemetry::Sev::Info,
+            format!("started {} task(s)", started),
+        );
         crate::mcp::board_feed::push(
             app_handle,
             crate::mcp::board_feed::Severity::Info,

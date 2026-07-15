@@ -115,15 +115,18 @@ structs-universe/
 │           ├── error_translator.rs  # Chain error → human message
 │           ├── prompts.rs    # 6 built-in agent workflow prompts
 │           ├── resources.rs  # Compendium file serving (structs-ai docs)
+│           ├── telemetry.rs  # Persistent SQLite telemetry (events/loop_runs/tx_attempts/pow_solves) + tlog facade
+│           ├── watchdog.rs   # Stall detection + policy-gated self-healing
+│           ├── tx_retry.rs   # Classified, ledgered tx retries + AIMD signals
 │           └── tools/
 │               ├── dashboard.rs  # Player situational awareness (charge, HP, slots)
-│               ├── query.rs      # Entity lookup with enrichment
 │               ├── hasher.rs     # Hash task management with ETAs
 │               ├── action.rs     # Game actions with preflight checks
-│               ├── intel.rs      # Strategic intelligence + recon/ruleset/simulate
+│               ├── intel.rs      # Strategic intelligence + recon/ruleset/simulate + raw entity queries
 │               ├── events.rs     # Event feed (long-poll over the NATS buffer)
 │               ├── sequence.rs   # Guarded autonomous action chains
-│               ├── ui.rs         # structs_ui tool (drive the human's screen)
+│               ├── board.rs      # Team Ops board + human-facing UI surfaces
+│               ├── system.rs     # structs_system tool (health, logs, self-tuning)
 │               ├── players.rs    # structs_players tool (virtual players: create/list/roster/state/act)
 │               ├── policy.rs     # Standing order management
 │               └── format.rs     # Shared formatting utilities
@@ -136,22 +139,25 @@ structs-universe/
 
 ## MCP Server
 
-The app runs an MCP server on `localhost:8420` with bearer token authentication. AI agents interact with the game through 10 tools, 6 prompts, and compendium resources.
+The app runs an MCP server on `localhost:8420` with bearer token authentication (plus an unauthenticated `GET /health` liveness probe for external monitors). AI agents interact with the game through 13 tools, built-in prompts, and compendium resources.
 
 ### Tools
 
 | Tool | Purpose |
 |------|---------|
 | `structs_dashboard` | Full player overview: power, charge (with per-action readiness), resources, structs + HP, hash tasks, recent events |
-| `structs_query` | Query any game entity with enriched output (resolved names, decoded flags, 25-bit permission decode, formatted units) |
-| `structs_hash` | Manage proof-of-work tasks with ETAs (list, start, stop, progress) + tune the engine (`config`: enable/disable, GPU/CPU, `DIFFICULTY_START`, `MAX_CONCURRENT_PROCESSES`) |
+| `structs_hash` | Manage proof-of-work tasks with ETAs (list, start, stop, progress) + tune the engine (`config`: enable/disable, GPU/CPU, `DIFFICULTY_START`, `MAX_CONCURRENT_PROCESSES`, `auto_tune`) — knobs persist across restarts |
 | `structs_action` | Execute game actions with preflight checks (explore, build, mine, attack, defend, raid, resync, etc.) |
-| `structs_intel` | Strategic intelligence + perception: `whoami`, `scout`, `valid_targets`, `simulate`, `strike_options` (team-wide "who can hit this target"), `battle_log`, `ruleset`, `slot_map`, `is_active`, `intents`, power forecast, economy, timeline |
-| `structs_policy` | Standing orders (auto_refine, power_alert, agent_ui, combat orders) |
-| `structs_ui` | Drive the human's screen for co-op play (menus, map previews, HUD badges, prompts) — display/elicitation only, never signs |
+| `structs_intel` | Strategic intelligence + perception: `whoami`, `scout`, `valid_targets`, `simulate`, `strike_options` (team-wide "who can hit this target"), `battle_log`, `ruleset`, `slot_map`, `is_active`, `intents`, power forecast, economy, timeline — plus `query` for raw entity reads/lists/filtered queries (absorbed the old `structs_query` tool) |
+| `structs_policy` | Standing orders (auto_refine, power_alert, agent_ui, combat orders, watchdog_remediate) |
 | `structs_events` | Long-poll event feed (raids, attacks, fleet moves, completions) so agents react instead of polling |
 | `structs_sequence` | Guarded autonomous action chains, paced to the charge cooldown, with abort predicates (e.g. CMD-ship HP floor); pass `as` to run the chain as a virtual player |
 | `structs_players` | Manage virtual players — extra players off the same mnemonic (different HD indices) joined to your guild; create / list / `roster` (team overview) / state / act-as. Keys stay in the webapp |
+| `structs_board` | Team Ops board + human-facing UI surfaces: the at-a-glance command view and event feed, plus declarative components (menus, dialogues, map previews, HUD badges, prompts — absorbed the old `structs_ui` tool). Display/elicitation only, never signs |
+| `structs_system` | System health, logs, and self-tuning: watchdog status, per-loop liveness, the tx-attempt ledger, PoW solve stats, and the persistent structured log — the agent's window into "is the automation healthy, and if not, why" |
+| `structs_map` | Render a planet map to PNG/GIF using the game's own renderer |
+| `structs_doctrine` | Standing rules of engagement + per-tick executor (advise/auto autonomy) |
+| `structs_strike` | Coordinated team attack + kill-chain (strip blockers → kill → raid window) |
 
 ### Prompts
 
@@ -272,11 +278,12 @@ Standing orders that run automatically on game state transitions:
 |--------|---------|----------|
 | `auto_refine` | ON | Auto-start refine when mining completes |
 | `power_alert` | ON (80%) | Warn when power utilization crosses threshold |
-| `agent_ui` | ON | Master toggle for agent-driven UI (`structs_ui`); off = directives dropped |
+| `agent_ui` | ON | Master toggle for agent-driven UI (`structs_board` components); off = directives dropped |
 | `auto_counterattack` | OFF | Standing order: counter an incoming attacker |
 | `auto_retreat_if_cmd_below` | OFF (HP 4) | Standing order: retreat when Command Ship HP drops below threshold |
 | `auto_rebuild_losses` | OFF | Standing order: rebuild destroyed structs |
 | `rules_of_engagement` | OFF | Human→agent posture / pinned target, read via `structs_intel {query:"intents"}` |
+| `watchdog_remediate` | ON | Self-healing: reset wedged loop guards, cancel stalled hash tasks, re-nudge a dead sync tick — every remedy logged; native notification only if the same remedy fails twice |
 
 `auto_refine` / `power_alert` use delta tracking — they compare previous vs current state snapshots to detect transitions (not just current conditions), preventing double-triggers and missed events. The combat orders and `rules_of_engagement` are **agent-honored standing orders**: the agent reads them via `intents` and acts through `structs_action`/`structs_sequence` — the engine never auto-signs on the player's behalf.
 
@@ -297,9 +304,9 @@ Game actions submitted through MCP flow through a Rust ↔ JS bridge:
 
 ## Agent-Driven UI
 
-For human+agent co-op play, the `structs_ui` tool lets an agent render on the human's screen, mirroring the transaction bridge:
+For human+agent co-op play, `structs_board`'s component mode lets an agent render on the human's screen, mirroring the transaction bridge:
 
-1. Agent calls `structs_ui` with a declarative component spec (`menu`, `dialogue`, `panel`, `info`, `map_preview`, `hud_badge`, `toast`, `open_menu`, `raw_html`)
+1. Agent calls `structs_board` with a declarative component spec (`menu`, `dialogue`, `panel`, `info`, `map_preview`, `hud_badge`, `toast`, `open_menu`, `raw_html`)
 2. Rust emits `mcp_ui_directive` to the webview; the renderer in `structs-config.js` builds the surface using the game's own SUI styles
 3. **notify** mode shows-and-returns; **prompt** mode blocks until the human chooses, returning the selection via `mcp_ui_response` (same oneshot pattern as the tx bridge)
 

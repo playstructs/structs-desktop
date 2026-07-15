@@ -494,6 +494,8 @@ fn emit_event(app_handle: &tauri::AppHandle, event: &str, handle: &TaskHandle) {
     let _ = app_handle.emit(event, &snapshot);
     // If this hash belongs to a virtual player, sign its completion tx.
     if event == "hash_complete" {
+        // Solve history feeds the adaptive tuner (difficulty_start / max_concurrent).
+        crate::mcp::telemetry::record_solve(&snapshot, "gpu");
         crate::hasher::maybe_complete_virtual(app_handle, &snapshot);
     }
 }
