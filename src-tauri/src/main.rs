@@ -525,7 +525,19 @@ try {{
                         // Watchdog lives on THIS timer (not the sync tick) so a
                         // dead webview/sync pipeline is still detected. Cheap:
                         // self-throttles to one detection pass per minute.
-                        mcp::watchdog::check(&app_handle_tick);
+                        // catch_unwind: this task is the resilience backstop —
+                        // a panic in a detection or remedy must not kill the
+                        // sync-tick fallback AND the watchdog in one stroke.
+                        let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            mcp::watchdog::check(&app_handle_tick);
+                        }));
+                        if check.is_err() {
+                            mcp::telemetry::tlog(
+                                "watchdog",
+                                mcp::telemetry::Sev::Error,
+                                "watchdog check panicked — resilience loop continuing",
+                            );
+                        }
                     }
                 });
             }

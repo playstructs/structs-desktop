@@ -114,9 +114,18 @@ pub fn set(cfg: AutoBuildConfig) {
     crate::mcp::config_store::save_config(FILENAME, &cfg);
 }
 
-/// Watchdog remediation: clear a wedged single-flight guard so the next tick
-/// can scan again.
+/// Run generation: bumped by every watchdog reset. A scan captures the value
+/// at start; if it changed by the time the scan finishes, the scan was
+/// invalidated (a newer scan may already own RUNNING) and its epilogue must
+/// not clear the guard or report liveness — otherwise a slow-but-alive scan
+/// that survives a reset would unlock a THIRD concurrent scan and corrupt the
+/// watchdog's picture, exactly when the node is already struggling.
+static RUN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Watchdog remediation: invalidate the wedged scan and clear the
+/// single-flight guard so the next tick can scan again.
 pub fn force_reset_running() {
+    RUN_GEN.fetch_add(1, Ordering::SeqCst);
     RUNNING.store(false, Ordering::SeqCst);
 }
 
@@ -156,8 +165,15 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
+    let gen = RUN_GEN.load(Ordering::SeqCst);
     let run = crate::mcp::telemetry::LoopRun::start("auto_build");
     scan(app_handle, &cfg, &run).await;
+    if RUN_GEN.load(Ordering::SeqCst) != gen {
+        // Invalidated by a watchdog reset mid-scan: a newer scan owns the
+        // guard now — record the row, touch nothing else.
+        run.finish_stale(Some("invalidated by watchdog reset mid-scan".into()));
+        return;
+    }
     run.finish(Some(format!(
         "eff_conc={}",
         crate::mcp::loop_util::effective_max_concurrent()

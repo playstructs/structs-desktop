@@ -1,16 +1,26 @@
-//! Shared retrying submit path for automation-initiated transactions.
+//! Shared ledgered submit path for automation-initiated transactions.
 //!
 //! Every auto-loop (and the team-level tools) used to call the signing bridges
 //! directly and silently drop failures. These wrappers make each attempt an
-//! auditable `tx_attempts` row, retry the failure classes where a retry is the
-//! documented remedy (sequence mismatch: "wait ~6s and retry"), back off on
-//! endpoint pressure, and feed the AIMD concurrency controller in `loop_util`
-//! so a struggling node automatically shrinks the fan-out instead of being
-//! hammered by 182 players' worth of scans.
+//! auditable `tx_attempts` row and feed the AIMD concurrency controller in
+//! `loop_util` so a struggling node automatically shrinks the fan-out instead
+//! of being hammered by 182 players' worth of scans.
 //!
-//! Deterministic rejections (insufficient charge/funds, player offline,
-//! invalid target) are never retried — the state that caused them won't change
-//! within a retry budget, and each retry burns a scarce SIGN_GATE permit.
+//! RETRY POLICY — resubmit only when non-inclusion is CERTAIN:
+//! * `SequenceMismatch` is the ONLY auto-retried class: the node rejected the
+//!   tx at CheckTx with the account sequence intact, so it definitively did
+//!   NOT land; waiting one block and re-signing is the documented remedy.
+//! * `Timeout` / `BridgeDown` / `RateLimited` are UNCERTAIN-OUTCOME: the tx
+//!   may have committed on-chain with only the ack lost (e.g. block inclusion
+//!   slower than the 60s bridge timeout). Blindly re-signing with a fresh
+//!   sequence would double-execute — a second reactor infuse burns alpha
+//!   twice, a second strike double-fires. These classes are recorded, feed
+//!   the AIMD pressure signal, and return an error so the CALLER re-assesses:
+//!   the loops re-derive intent from chain state on their next scan, which is
+//!   the safe form of "retry".
+//! * Deterministic rejections (insufficient charge/funds, player offline,
+//!   invalid target) are never retried — the state that caused them won't
+//!   change within a retry budget, and each retry burns a SIGN_GATE permit.
 
 use serde_json::Value;
 use std::time::Duration;
@@ -20,13 +30,11 @@ use crate::mcp::error_translator::translate_error;
 use crate::mcp::telemetry::{self, TxAttemptRow};
 use crate::mcp::{loop_util, tx_queue, vplayer_bridge};
 
-/// Max attempts per submit (1 initial + 2 retries).
+/// Max attempts per submit (1 initial + 2 retries), sequence-mismatch only.
 const MAX_ATTEMPTS: u32 = 3;
 /// Sequence mismatch: the chain frees the account after the pending tx's
 /// block; ~6s block time + margin.
 const SEQ_RETRY_BASE_MS: u64 = 7_000;
-/// Endpoint-pressure backoff base (doubles per attempt).
-const BACKOFF_BASE_MS: u64 = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
@@ -42,15 +50,12 @@ pub enum ErrorClass {
 }
 
 impl ErrorClass {
-    /// Whether a retry can plausibly change the outcome.
+    /// Whether the tx DEFINITIVELY did not land, making a resubmit safe.
+    /// Only SequenceMismatch qualifies — every other failure class is either
+    /// deterministic (retry can't help) or uncertain-outcome (retry can
+    /// double-execute; see module docs).
     fn retryable(self) -> bool {
-        matches!(
-            self,
-            ErrorClass::SequenceMismatch
-                | ErrorClass::RateLimited
-                | ErrorClass::Timeout
-                | ErrorClass::BridgeDown
-        )
+        matches!(self, ErrorClass::SequenceMismatch)
     }
 
     /// The `tx_attempts.outcome` value for a failed attempt of this class.
@@ -67,11 +72,9 @@ impl ErrorClass {
         }
     }
 
-    fn delay_ms(self, attempt: u32) -> u64 {
-        match self {
-            ErrorClass::SequenceMismatch => SEQ_RETRY_BASE_MS,
-            _ => BACKOFF_BASE_MS * (1u64 << (attempt.saturating_sub(1)).min(4)),
-        }
+    fn delay_ms(self, _attempt: u32) -> u64 {
+        // Only SequenceMismatch is ever retried (see `retryable`).
+        SEQ_RETRY_BASE_MS
     }
 
     /// Endpoint pressure (as opposed to per-account state) — feeds AIMD.
@@ -276,6 +279,50 @@ pub async fn submit_with_retry(
     Err(translate_error(&last_err))
 }
 
+/// Single recorded VPLAYER sign attempt, NO retry — for interactive MCP paths
+/// (`structs_players act`) where the connected agent decides what happens
+/// next; the ledger still sees the attempt. Returns the chain response Value
+/// on success (code 0) or the translated error.
+pub async fn sign_once(
+    app: &tauri::AppHandle,
+    index: u32,
+    type_url: &str,
+    payload: Value,
+    context: &str,
+) -> Result<Value, String> {
+    let started = now_millis();
+    let res = vplayer_bridge::sign_action(app, index, type_url, payload, 60).await;
+    let outcome = match res {
+        Ok(v) => {
+            let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+            if code == 0 {
+                AttemptResult::Success {
+                    tx_hash: v
+                        .get("transactionHash")
+                        .or_else(|| v.get("txhash"))
+                        .and_then(|h| h.as_str())
+                        .map(String::from),
+                    value: v,
+                }
+            } else {
+                let raw = v
+                    .get("rawLog")
+                    .or_else(|| v.get("raw_log"))
+                    .and_then(|r| r.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| format!("code {code}: {v}"));
+                AttemptResult::Failure { raw, code: Some(code) }
+            }
+        }
+        Err(e) => AttemptResult::Failure { raw: e, code: None },
+    };
+    record(context, type_url, 1, started, &outcome);
+    match outcome {
+        AttemptResult::Success { value, .. } => Ok(value),
+        AttemptResult::Failure { raw, .. } => Err(translate_error(&raw)),
+    }
+}
+
 /// Single recorded attempt, NO retry — for interactive MCP paths where the
 /// connected agent is itself the retry loop, but the ledger should still see
 /// every attempt. Same row shape as the retrying wrappers.
@@ -317,16 +364,25 @@ mod tests {
 
     #[test]
     fn retry_policy_shape() {
+        // ONLY sequence mismatch (definitively-not-included) may resubmit.
         assert!(ErrorClass::SequenceMismatch.retryable());
-        assert!(ErrorClass::RateLimited.retryable());
+        // Uncertain-outcome classes must NEVER auto-retry — the tx may have
+        // landed with only the ack lost; a resubmit would double-execute
+        // (double infuse, double strike). This is the regression guard for
+        // the reported double-execution bug.
+        assert!(!ErrorClass::Timeout.retryable());
+        assert!(!ErrorClass::BridgeDown.retryable());
+        assert!(!ErrorClass::RateLimited.retryable());
+        // Deterministic rejections never retry either.
         assert!(!ErrorClass::InsufficientCharge.retryable());
         assert!(!ErrorClass::Other.retryable());
         assert_eq!(ErrorClass::InsufficientCharge.outcome(), "skipped");
         assert_eq!(ErrorClass::Timeout.outcome(), "timeout");
-        // Backoff grows: attempt 1 → 2s, attempt 2 → 4s.
-        assert_eq!(ErrorClass::Timeout.delay_ms(1), 2_000);
-        assert_eq!(ErrorClass::Timeout.delay_ms(2), 4_000);
         assert_eq!(ErrorClass::SequenceMismatch.delay_ms(1), 7_000);
+        // Uncertain classes still count as pressure for the AIMD controller.
+        assert!(ErrorClass::Timeout.is_pressure());
+        assert!(ErrorClass::RateLimited.is_pressure());
+        assert!(!ErrorClass::SequenceMismatch.is_pressure());
     }
 
     #[test]

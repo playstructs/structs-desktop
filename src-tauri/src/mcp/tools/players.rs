@@ -1183,9 +1183,11 @@ pub async fn execute(
             };
 
             // Sign+broadcast as the virtual player via the façade (its key, never
-            // Rust's) — through the ledgered retry path (sequence mismatches
-            // auto-retry; deterministic rejections surface immediately).
-            match crate::mcp::tx_retry::sign_with_retry(
+            // Rust's) — single ledgered attempt, NO auto-retry: this is the
+            // interactive path, so the agent re-assesses and decides whether a
+            // fresh transaction even makes sense (a blind resubmit could
+            // double-execute if the first landed slowly).
+            match crate::mcp::tx_retry::sign_once(
                 app_handle,
                 index,
                 &type_url,

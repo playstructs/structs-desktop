@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager};
@@ -65,22 +65,29 @@ static HASH_PROGRESS: LazyLock<Mutex<HashMap<String, (u64, f64)>>> =
 static REMEDY_FAILS: LazyLock<Mutex<HashMap<String, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Lock a mutex, recovering from poisoning. The watchdog is the LAST line of
+/// defense — if some earlier panic poisoned a mutex, propagating that panic
+/// here would kill the whole resilience loop (the exact silent death this
+/// module exists to prevent). The guarded data are plain liveness scalars, so
+/// recovering the inner value is always safe.
+fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // ── Liveness reporting (called by telemetry::LoopRun and sync_game_state) ──
 
 pub fn note_loop_started(name: &'static str, ts_ms: f64) {
-    if let Ok(mut m) = LOOPS.lock() {
-        let s = m.entry(name).or_default();
-        s.last_started_ms = ts_ms;
-        s.running = true;
-    }
+    let mut m = lock_recover(&LOOPS);
+    let s = m.entry(name).or_default();
+    s.last_started_ms = ts_ms;
+    s.running = true;
 }
 
 pub fn note_loop_finished(name: &'static str, ts_ms: f64) {
-    if let Ok(mut m) = LOOPS.lock() {
-        let s = m.entry(name).or_default();
-        s.last_finished_ms = ts_ms;
-        s.running = false;
-    }
+    let mut m = lock_recover(&LOOPS);
+    let s = m.entry(name).or_default();
+    s.last_finished_ms = ts_ms;
+    s.running = false;
 }
 
 pub fn note_sync_ran() {
@@ -152,7 +159,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
     }
 
     // Per-loop overdue / wedged.
-    let stats = LOOPS.lock().map(|m| m.clone()).unwrap_or_default();
+    let stats = lock_recover(&LOOPS).clone();
     for (name, enabled, interval_ms) in loop_configs() {
         let stat = stats.get(name).copied().unwrap_or_default();
 
@@ -190,7 +197,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
 
     // Hasher: a "running" task whose iteration counter stopped moving.
     if let Some(registry) = app.try_state::<Arc<TaskRegistry>>() {
-        let mut progress = HASH_PROGRESS.lock().unwrap();
+        let mut progress = lock_recover(&HASH_PROGRESS);
         let mut live_ids = Vec::new();
         for entry in registry.tasks.iter() {
             let id = entry.key().clone();
@@ -235,7 +242,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
 pub fn check(app: &tauri::AppHandle) {
     let now = now_millis();
     {
-        let mut last = LAST_CHECK_MS.lock().unwrap();
+        let mut last = lock_recover(&LAST_CHECK_MS);
         if now - *last < CHECK_EVERY_MS {
             return;
         }
@@ -252,7 +259,7 @@ pub fn check(app: &tauri::AppHandle) {
         .map(|e| e.is_enabled("watchdog_remediate"))
         .unwrap_or(false);
 
-    let mut fails = REMEDY_FAILS.lock().unwrap();
+    let mut fails = lock_recover(&REMEDY_FAILS);
     let current_keys: Vec<String> = findings.iter().map(|f| f.key.clone()).collect();
 
     for f in findings {
@@ -304,7 +311,7 @@ pub fn health_snapshot() -> Value {
     let sync_age_ms = now - sync_baseline;
     let sync_interval = crate::game_state::current_sync_interval_ms() as f64;
 
-    let stats = LOOPS.lock().map(|m| m.clone()).unwrap_or_default();
+    let stats = lock_recover(&LOOPS).clone();
     let mut overdue = Vec::new();
     let mut wedged = Vec::new();
     for (name, enabled, interval_ms) in loop_configs() {

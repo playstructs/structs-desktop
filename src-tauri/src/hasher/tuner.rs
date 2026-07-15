@@ -52,8 +52,11 @@ pub fn note_user_max(v: u64) {
     HEALTHY_STREAK.store(0, Ordering::Relaxed);
 }
 
-/// Called from the watchdog check. Cheap no-op unless auto_tune is on and the
-/// interval elapsed; the actual pass runs on a blocking thread (SQLite reads).
+/// Called from the watchdog check (which runs on the tokio timer task).
+/// Cheap no-op unless auto_tune is on and the interval elapsed. The actual
+/// pass — including its synchronous SQLite reads — runs on the dedicated
+/// `hash-tuner` OS thread spawned below, NEVER on the async runtime; this is
+/// the telemetry module's "reads go off-runtime" contract.
 pub fn maybe_tune() {
     if !crate::hasher::auto_tune() {
         return;

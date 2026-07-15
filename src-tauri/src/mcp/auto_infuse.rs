@@ -149,6 +149,7 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
+    let gen = RUN_GEN.load(Ordering::SeqCst);
     let run = crate::mcp::telemetry::LoopRun::start("auto_infuse");
     run.players.fetch_add(1, Ordering::Relaxed);
     match infuse_primary_excess(app_handle, cfg.keep_grams).await {
@@ -181,13 +182,23 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
             }
         }
     }
+    if RUN_GEN.load(Ordering::SeqCst) != gen {
+        run.finish_stale(Some("invalidated by watchdog reset mid-run".into()));
+        return;
+    }
     run.finish(None);
     RUNNING.store(false, Ordering::SeqCst);
 }
 
-/// Watchdog remediation: clear a wedged single-flight guard so the next tick
-/// can run again.
+/// Run generation: bumped by every watchdog reset. See auto_build::RUN_GEN —
+/// a run whose generation went stale must not clear the guard or report
+/// liveness (a newer run owns them).
+static RUN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Watchdog remediation: invalidate the wedged run and clear the
+/// single-flight guard so the next tick can run again.
 pub fn force_reset_running() {
+    RUN_GEN.fetch_add(1, Ordering::SeqCst);
     RUNNING.store(false, Ordering::SeqCst);
 }
 

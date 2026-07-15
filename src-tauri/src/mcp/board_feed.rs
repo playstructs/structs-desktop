@@ -103,10 +103,20 @@ fn persist_path() -> Option<std::path::PathBuf> {
 }
 
 /// Whether the Team Ops window was open (and not user-dismissed) at last exit.
-/// This is only ever set to `true` by `build_board_window`, i.e. after the
-/// player intentionally opened the board via MCP at least once — so a player
-/// who has never opened it stays at the `false` default and startup reopen
-/// never fires. That is the "never open automatically the first time" gate.
+/// Set to `true` by `build_board_window`, which is reached by ANY MCP open
+/// path — `structs_board open:true`, a prompt directive, or a consent-gated
+/// important-event auto-open — so an agent-opened board persists across
+/// restarts too. The invariant that matters still holds: a fresh player who
+/// has never had the board open stays at the `false` default, so startup
+/// reopen never fires as a surprise; and the player closing the window clears
+/// the flag.
+///
+/// Platform note: the shutdown guard relies on `RunEvent::ExitRequested`
+/// (which sets `APP_QUITTING`) firing before the window's `CloseRequested`.
+/// That ordering holds on macOS (the shipping target); on Windows/Linux
+/// `CloseRequested` can fire first, so quit-with-board-open would clear the
+/// flag and NOT reopen — latent, benign (fails toward "closed"), revisit if
+/// those platforms ship.
 pub fn persisted_open() -> bool {
     persist_path()
         .and_then(|p| std::fs::read_to_string(p).ok())

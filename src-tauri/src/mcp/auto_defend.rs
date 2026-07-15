@@ -70,9 +70,15 @@ pub fn get() -> AutoDefendConfig {
     CONFIG.read().map(|c| c.clone()).unwrap_or_default()
 }
 
-/// Watchdog remediation: clear a wedged single-flight guard so the next tick
-/// can scan again.
+/// Run generation: bumped by every watchdog reset. See auto_build::RUN_GEN —
+/// a scan whose generation went stale must not clear the guard or report
+/// liveness (a newer scan owns them).
+static RUN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Watchdog remediation: invalidate the wedged scan and clear the
+/// single-flight guard so the next tick can scan again.
 pub fn force_reset_running() {
+    RUN_GEN.fetch_add(1, Ordering::SeqCst);
     RUNNING.store(false, Ordering::SeqCst);
 }
 pub fn set(cfg: AutoDefendConfig) {
@@ -119,8 +125,13 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
+    let gen = RUN_GEN.load(Ordering::SeqCst);
     let run = crate::mcp::telemetry::LoopRun::start("auto_defend");
     scan(app_handle, &cfg, &run).await;
+    if RUN_GEN.load(Ordering::SeqCst) != gen {
+        run.finish_stale(Some("invalidated by watchdog reset mid-scan".into()));
+        return;
+    }
     run.finish(Some(format!(
         "eff_conc={}",
         crate::mcp::loop_util::effective_max_concurrent()

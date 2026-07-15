@@ -452,6 +452,20 @@ impl LoopRun {
     }
 
     pub fn finish(&self, notes: Option<String>) {
+        let finished_ms = self.record_finish(notes);
+        crate::mcp::watchdog::note_loop_finished(self.loop_name, finished_ms);
+    }
+
+    /// Finish for a scan that was INVALIDATED mid-flight (a watchdog reset
+    /// bumped the loop's run generation and a newer scan may already own the
+    /// single-flight guard). Persists the SQLite row for the audit trail but
+    /// does NOT touch the watchdog's liveness mirror — the newer scan's
+    /// start/finish is the truth now.
+    pub fn finish_stale(&self, notes: Option<String>) {
+        self.record_finish(notes);
+    }
+
+    fn record_finish(&self, notes: Option<String>) -> f64 {
         let finished_ms = now_millis();
         send(Msg::LoopFinish {
             run_id: self.run_id,
@@ -461,7 +475,7 @@ impl LoopRun {
             errors: self.errors.load(Ordering::Relaxed),
             notes,
         });
-        crate::mcp::watchdog::note_loop_finished(self.loop_name, finished_ms);
+        finished_ms
     }
 }
 
