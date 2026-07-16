@@ -299,7 +299,7 @@ fn stop_task(registry: &Arc<TaskRegistry>, task_id: &str) -> bool {
 
 /// Current hashing configuration (engine pref, effective DIFFICULTY_START,
 /// concurrency cap, GPU availability) — shared by `config` and `list`.
-fn hash_config_json() -> serde_json::Value {
+pub(crate) fn hash_config_json() -> serde_json::Value {
     let gpu_available = hasher::ensure_gpu_init();
     let pref = hasher::engine_pref_label();
     // What a NEW task would actually run on, given the preference + hardware.
@@ -360,7 +360,7 @@ fn format_duration(ms: f64) -> String {
 }
 
 /// Build a task summary with ETA for list/progress output
-fn task_summary(snapshot: &crate::hasher::types::TaskStateSnapshot) -> serde_json::Value {
+pub(crate) fn task_summary(snapshot: &crate::hasher::types::TaskStateSnapshot) -> serde_json::Value {
     let hashrate_display = if snapshot.estimated_hashrate > 1000.0 {
         format!("{:.0}M h/s", snapshot.estimated_hashrate / 1000.0)
     } else if snapshot.estimated_hashrate > 0.0 {

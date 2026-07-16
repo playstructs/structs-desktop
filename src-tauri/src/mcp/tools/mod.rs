@@ -1,5 +1,6 @@
 pub mod action;
 pub mod board;
+pub mod board_pages;
 pub mod dashboard;
 pub mod doctrine;
 pub mod events;
@@ -7,6 +8,7 @@ pub mod format;
 pub mod hasher;
 pub mod intel;
 pub mod map;
+pub mod mass_action;
 pub mod players;
 pub mod policy;
 pub mod sequence;

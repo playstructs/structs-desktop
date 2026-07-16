@@ -135,7 +135,7 @@ pub async fn execute(params: DoctrineParams) -> Vec<Content> {
 
 /// Read the current doctrine (posture, pinned_target, autonomy) from the
 /// rules_of_engagement policy config.
-fn read_doctrine() -> (String, Option<String>, String) {
+pub(crate) fn read_doctrine() -> (String, Option<String>, String) {
     let engine = POLICY_ENGINE.read().ok();
     let cfg = engine
         .as_ref()

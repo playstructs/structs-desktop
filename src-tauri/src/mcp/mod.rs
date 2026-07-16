@@ -16,6 +16,7 @@ pub mod handler;
 pub mod policy;
 pub mod prompts;
 pub mod resources;
+pub mod roster_cache;
 pub mod server;
 pub mod telemetry;
 pub mod tools;

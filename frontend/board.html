@@ -25,6 +25,17 @@
     .ops-val { font-weight: 600; }
     .ops-list { margin: 4px 0 0; padding-left: 16px; }
     .ops-list li { margin: 4px 0; }
+    /* Nav bar: tabs left, refresh control right. Scoped to the board window so
+       it can't affect the game's own sui-screen-nav elsewhere. */
+    #board-layout .sui-screen-nav { display: flex; align-items: center; justify-content: space-between; }
+    #board-layout .sui-screen-nav-items { overflow-x: auto; }
+    .ops-refresh { display: flex; align-items: baseline; gap: 10px; padding-right: 16px; font-size: 12px; white-space: nowrap; }
+    .ops-refresh-btn { cursor: pointer; text-decoration: underline; text-decoration-style: dotted;
+                       color: var(--accent-primary, #6cf); white-space: nowrap; }
+    .ops-refresh-btn.is-busy { opacity: .5; pointer-events: none; }
+    /* Pages: persistent sibling containers toggled with [hidden] so per-page
+       state (feed list, map image, fleet selection) survives tab switches. */
+    .page[hidden] { display: none; }
     #vp-select { width: 100%; }
     #vp-map img { width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }
     .ops-muted { opacity: .7; }
@@ -52,6 +63,42 @@
                  background: rgba(120,180,255,.14); color: inherit; padding: 4px 14px; font: inherit; }
     .agent-btn:hover { background: rgba(120,180,255,.28); }
     .agent-toast { border-color: rgba(255,180,84,.5); background: rgba(255,180,84,.08); }
+    /* ── FLEET page: dense roster grid (precedent: #feed-list scoped CSS). ── */
+    #fleet-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+    #fleet-toolbar .sui-input-text { flex: 1; min-width: 120px; }
+    #fleet-rows { max-height: calc(100vh - 380px); min-height: 120px; overflow-y: auto; width: 100%; }
+    .frow { display: grid;
+            grid-template-columns: 22px minmax(90px,1.4fr) 72px 62px 62px 96px 58px 64px 54px;
+            gap: 6px; font-size: 12px; padding: 3px 4px; align-items: center; width: 100%; }
+    .frow.fhead { position: sticky; top: 0; background: var(--background, #0d0f15); z-index: 1;
+                  font-weight: 700; cursor: default; border-bottom: 1px solid var(--border, #345); }
+    .fhead span[data-sort] { cursor: pointer; text-decoration: underline; text-decoration-style: dotted; }
+    .frow:not(.fhead):hover { background: rgba(120,180,255,.07); cursor: pointer; }
+    .frow .fnum { text-align: right; font-variant-numeric: tabular-nums; }
+    .frow-detail { padding: 6px 10px 10px 28px; font-size: 12px; border-bottom: 1px solid var(--border, #345); }
+    .fleet-foot { display: flex; justify-content: space-between; font-size: 12px; margin-top: 6px; }
+    .fleet-progress { width: 100%; margin: 4px 0; }
+    .fbat { display: inline-flex; gap: 2px; align-items: center; }
+    .fbat i { width: 6px; height: 10px; background: rgba(120,180,255,.15); display: inline-block; }
+    .fbat i.on { background: var(--accent-primary, #6cf); }
+    .attn { color: #ffb454; }
+    .err { color: #ff6b6b; }
+    /* Mass-action toolbar buttons: keep SUI look, add busy state. */
+    .mass-btn.is-busy { opacity: .5; pointer-events: none; }
+    #mass-progress { width: 100%; margin: 6px 0; }
+    .bar { height: 8px; background: rgba(120,180,255,.12); border: 1px solid var(--border, #345); width: 100%; }
+    .bar > i { display: block; height: 100%; background: var(--accent-primary, #6cf); width: 0; transition: width .3s; }
+    /* WORK / ENERGY lists reuse .frow with their own column templates. */
+    #work-rows .frow { grid-template-columns: minmax(80px,1fr) 60px 70px 90px 70px 90px; }
+    #energy-rows .frow { grid-template-columns: minmax(90px,1.4fr) 90px 90px 70px 60px; }
+    /* CONFIG page */
+    .cfg-group { margin-bottom: 4px; }
+    .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+               padding: 3px 0; font-size: 13px; width: 100%; }
+    .cfg-row input[type="number"] { width: 80px; background: transparent; color: inherit;
+               border: 1px solid var(--border, #345); padding: 2px 6px; }
+    .cfg-row select { background: transparent; color: inherit; border: 1px solid var(--border, #345); padding: 2px 6px; }
+    .cfg-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -63,184 +110,96 @@
       <div class="sui-panel-chunk sui-mod-grow sui-mod-shrink">
         <div class="sui-screen sui-screen-full-width">
           <div class="sui-screen-nav">
-            <div class="sui-screen-nav-items">
-              <a class="sui-screen-nav-item sui-mod-active" href="javascript:void(0)">Team Ops</a>
+            <div class="sui-screen-nav-items" id="board-tabs">
+              <a class="sui-screen-nav-item sui-mod-active" data-page="ops" href="#/ops">Ops</a>
+              <a class="sui-screen-nav-item" data-page="fleet" href="#/fleet">Fleet</a>
+              <a class="sui-screen-nav-item" data-page="energy" href="#/energy">Energy</a>
+              <a class="sui-screen-nav-item" data-page="work" href="#/work">Work</a>
+              <a class="sui-screen-nav-item" data-page="config" href="#/config">Config</a>
+              <a class="sui-screen-nav-item" data-page="map" href="#/map">Map</a>
+            </div>
+            <div class="ops-refresh">
+              <span id="board-updated" class="ops-muted"></span>
+              <a id="board-refresh" class="ops-refresh-btn" href="javascript:void(0)"
+                 title="Refresh the current page now (pages also auto-refresh while this window is focused)">Refresh</a>
             </div>
           </div>
         </div>
         <div class="height-100 sui-screen sui-screen-full-width sui-screen-shrink">
           <div class="height-100 sui-page-body-screen ops-scroll">
-            <!-- AGENT UI — toasts + prompts from the policy engine / structs_ui
-                 render HERE (never over the main game window). -->
+            <!-- AGENT UI — toasts + prompts from the policy engine / board
+                 directives render HERE, above the router: visible on EVERY tab
+                 (never over the main game window). -->
             <div id="agent-ui"></div>
-            <!-- Live region: replaced wholesale on each board-update. -->
-            <div id="root"><div class="sui-data-card-row">Connecting…</div></div>
-            <!-- Persistent region: NOT touched by board-update. -->
-            <div class="sui-data-card sui-theme-player">
-              <div class="sui-data-card-header">EVENT FEED</div>
-              <div class="sui-data-card-body sui-mod-spacing-xl">
-                <ul id="feed-list"><li class="ops-muted">no events yet</li></ul>
+
+            <!-- ═══ OPS ═══ -->
+            <div class="page" id="page-ops">
+              <!-- Live region: replaced wholesale on each board-update. -->
+              <div id="root"><div class="sui-data-card-row">Connecting…</div></div>
+              <!-- Persistent region: NOT touched by board-update. -->
+              <div class="sui-data-card sui-theme-player">
+                <div class="sui-data-card-header">EVENT FEED</div>
+                <div class="sui-data-card-body sui-mod-spacing-xl">
+                  <ul id="feed-list"><li class="ops-muted">no events yet</li></ul>
+                </div>
               </div>
             </div>
-            <div class="sui-data-card sui-theme-player">
-              <div class="sui-data-card-header">VPLAYER MAP</div>
-              <div class="sui-data-card-body sui-mod-spacing-xl">
-                <select id="vp-select" class="sui-input-text">
-                  <option value="">— select a planet —</option>
-                </select>
-                <div id="vp-map"></div>
+
+            <!-- ═══ FLEET ═══ -->
+            <div class="page" id="page-fleet" hidden>
+              <div class="sui-data-card sui-theme-player">
+                <div class="sui-data-card-header">FLEET ROSTER</div>
+                <div class="sui-data-card-body sui-mod-spacing-xl" id="fleet-body">
+                  <div class="sui-message-inline-alert"><i class="sui-icon sui-icon-players sui-icon-sm"></i>
+                    <span class="sui-message-inline-alert-text">Roster loading…</span></div>
+                </div>
               </div>
             </div>
+
+            <!-- ═══ ENERGY ═══ -->
+            <div class="page" id="page-energy" hidden>
+              <div id="energy-body">
+                <div class="sui-message-inline-alert"><i class="sui-icon sui-icon-energy sui-icon-sm"></i>
+                  <span class="sui-message-inline-alert-text">Energy data loading…</span></div>
+              </div>
+            </div>
+
+            <!-- ═══ WORK ═══ -->
+            <div class="page" id="page-work" hidden>
+              <div id="work-body">
+                <div class="sui-message-inline-alert"><i class="icon-in-progress"></i>
+                  <span class="sui-message-inline-alert-text">Work data loading…</span></div>
+              </div>
+            </div>
+
+            <!-- ═══ CONFIG ═══ -->
+            <div class="page" id="page-config" hidden>
+              <div id="config-body">
+                <div class="sui-message-inline-alert"><i class="icon-edit"></i>
+                  <span class="sui-message-inline-alert-text">Config loading…</span></div>
+              </div>
+            </div>
+
+            <!-- ═══ MAP ═══ -->
+            <div class="page" id="page-map" hidden>
+              <div class="sui-data-card sui-theme-player">
+                <div class="sui-data-card-header">VPLAYER MAP</div>
+                <div class="sui-data-card-body sui-mod-spacing-xl">
+                  <select id="vp-select" class="sui-input-text">
+                    <option value="">— select a planet —</option>
+                  </select>
+                  <div id="vp-map"></div>
+                </div>
+              </div>
+            </div>
+
           </div>
         </div>
       </div>
       <div class="sui-panel-edge-right"></div>
     </div>
   </div>
-  <script>
-    (function boot() {
-      var T = window.__TAURI__;
-      if (!T || !T.event || !T.core) { setTimeout(boot, 150); return; }
-      var root = document.getElementById('root');
-      function render(html) { if (typeof html === 'string') root.innerHTML = html; }
-      T.core.invoke('mcp_board_html').then(render).catch(function () {});
-      T.event.listen('board-update', function (e) {
-        render(e && e.payload && e.payload.html);
-      });
-
-      // EVENT FEED — back-fill from the ring buffer, then append live entries.
-      var feed = document.getElementById('feed-list');
-      var FEED_MAX_ROWS = 150;
-      function feedRow(e) {
-        var li = document.createElement('li');
-        if (e.severity === 'important') li.className = 'feed-important';
-        else if (e.severity === 'notice') li.className = 'feed-notice';
-        var ts = document.createElement('span');
-        ts.className = 'feed-ts';
-        ts.textContent = new Date(e.ts_ms).toLocaleTimeString();
-        var src = document.createElement('span');
-        src.className = 'feed-src';
-        src.textContent = '[' + e.source + ']';
-        var msg = document.createElement('span');
-        msg.textContent = e.message;
-        li.appendChild(ts); li.appendChild(src); li.appendChild(msg);
-        return li;
-      }
-      function feedAdd(e) {
-        if (!e || !e.message) return;
-        if (feed.firstChild && feed.firstChild.className === 'ops-muted') feed.innerHTML = '';
-        feed.insertBefore(feedRow(e), feed.firstChild); // newest first
-        while (feed.children.length > FEED_MAX_ROWS) feed.removeChild(feed.lastChild);
-      }
-      T.core.invoke('mcp_board_feed').then(function (entries) {
-        (entries || []).forEach(feedAdd); // oldest→newest, so newest ends on top
-      }).catch(function () {});
-      T.event.listen('board-feed', function (e) { feedAdd(e && e.payload); });
-
-      // VPLAYER MAP dropdown — populate once; render the chosen player's map.
-      var sel = document.getElementById('vp-select');
-      var box = document.getElementById('vp-map');
-      T.core.invoke('mcp_vplayer_list').then(function (list) {
-        (list || []).forEach(function (p) {
-          if (!p.player_id) return;
-          var o = document.createElement('option');
-          o.value = p.player_id;
-          o.textContent = p.name + ' (' + p.player_id + ')';
-          sel.appendChild(o);
-        });
-      }).catch(function () {});
-      sel.addEventListener('change', function () {
-        var v = sel.value;
-        if (!v) { box.innerHTML = ''; return; }
-        box.innerHTML = '<div class="ops-muted">rendering map…</div>';
-        T.core.invoke('mcp_render_map', { player: v }).then(function (durl) {
-          var img = new Image();
-          img.alt = 'map';
-          img.onload = function () { box.innerHTML = ''; box.appendChild(img); };
-          img.onerror = function () { box.innerHTML = '<div style="color:#ff6b6b">image failed to load</div>'; };
-          img.src = durl;
-        }).catch(function (err) {
-          box.innerHTML = '<div style="color:#ff6b6b">render failed: ' + err + '</div>';
-        });
-      });
-
-      // ── AGENT UI directives ─────────────────────────────────────────────
-      // Toasts + prompts from the policy engine / structs_ui tool render here
-      // in the board window (never over the main game view). Prompts answer
-      // back via the mcp_ui_response command. Rust retries emits while a
-      // freshly-opened window loads, so dedupe by directive_id.
-      var agentBox = document.getElementById('agent-ui');
-      var agentSeen = {};
-      function agentRespond(id, value, cancelled) {
-        T.core.invoke('mcp_ui_response', {
-          response: { directive_id: id, value: value == null ? null : value, cancelled: !!cancelled }
-        }).catch(function () {});
-      }
-      function agentRemove(id) {
-        var el = document.getElementById('agent-d-' + id);
-        if (el && el.parentNode) el.parentNode.removeChild(el);
-      }
-      function agentCard(d) {
-        var c = d.component || {};
-        var isPrompt = d.mode === 'prompt';
-        var card = document.createElement('div');
-        card.className = 'agent-card' + (c.kind === 'toast' || c.kind === 'hud_badge' ? ' agent-toast' : '');
-        card.id = 'agent-d-' + d.directive_id;
-        var head = document.createElement('div');
-        head.className = 'agent-card-head';
-        var mark = document.createElement('span');
-        mark.className = 'agent-mark';
-        mark.textContent = '⚡ AGENT';
-        var title = document.createElement('span');
-        title.className = 'agent-title';
-        title.textContent = c.title || c.headline || c.kind || 'agent';
-        var x = document.createElement('span');
-        x.className = 'agent-x';
-        x.textContent = '✕';
-        x.addEventListener('click', function () {
-          if (isPrompt) agentRespond(d.directive_id, null, true);
-          agentRemove(d.directive_id);
-        });
-        head.appendChild(mark); head.appendChild(title); head.appendChild(x);
-        card.appendChild(head);
-        var bodyText = c.body || c.message || '';
-        if (bodyText) {
-          var body = document.createElement('div');
-          body.className = 'agent-body';
-          body.textContent = bodyText;
-          card.appendChild(body);
-        }
-        var buttons = c.buttons || c.options || [];
-        if (isPrompt) {
-          if (!buttons.length) buttons = [{ label: 'OK', value: 'ok' }];
-          var row = document.createElement('div');
-          row.className = 'agent-buttons';
-          buttons.forEach(function (b) {
-            var btn = document.createElement('button');
-            btn.className = 'agent-btn';
-            btn.textContent = (b && b.label) || String(b);
-            btn.addEventListener('click', function () {
-              agentRespond(d.directive_id, (b && b.value !== undefined) ? b.value : b, false);
-              agentRemove(d.directive_id);
-            });
-            row.appendChild(btn);
-          });
-          card.appendChild(row);
-        }
-        return card;
-      }
-      T.event.listen('mcp_ui_directive', function (e) {
-        var d = e && e.payload;
-        if (!d || !d.directive_id || agentSeen[d.directive_id]) return;
-        var c = d.component || {};
-        if (c.kind === 'dismiss') { if (c.target_id) agentRemove(c.target_id); return; }
-        agentSeen[d.directive_id] = true;
-        agentBox.insertBefore(agentCard(d), agentBox.firstChild);
-        if (d.mode !== 'prompt') {
-          setTimeout(function () { agentRemove(d.directive_id); }, 12000);
-        }
-      });
-    })();
-  </script>
+  <script src="board.js"></script>
+  <script src="board-pages.js"></script>
 </body>
 </html>

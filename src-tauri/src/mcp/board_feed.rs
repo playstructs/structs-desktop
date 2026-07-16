@@ -149,6 +149,11 @@ pub fn build_board_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow
         .title("Structs — Team Ops")
         .inner_size(580.0, 760.0)
         .build()?;
+    // Command Center data spine: kick a roster sweep for the FLEET page (debounced
+    // — a reopen within a minute reuses the snapshot) and make sure the 5-minute
+    // background refresher is running for as long as the window keeps existing.
+    crate::mcp::roster_cache::trigger_sweep(app.clone(), 60_000.0);
+    crate::mcp::roster_cache::ensure_background_refresh(app.clone());
     window.on_window_event(|event| {
         if matches!(event, tauri::WindowEvent::CloseRequested { .. })
             && !APP_QUITTING.load(Ordering::SeqCst)

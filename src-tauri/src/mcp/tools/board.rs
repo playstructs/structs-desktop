@@ -70,6 +70,53 @@ pub async fn execute(
         let mode = params.mode.clone().unwrap_or_else(|| "notify".to_string());
         return show_component(app, &mode, component.clone(), params.timeout_secs).await;
     }
+    let render = render_board(registry).await;
+    let mut out = render.text;
+
+    // Cache for first-paint, spawn the window on demand, and push a live update.
+    if let Ok(mut g) = LAST_BOARD.lock() {
+        *g = render.inner_html.clone();
+    }
+    if params.open && app.get_webview_window("board").is_none() {
+        match crate::mcp::board_feed::build_board_window(app) {
+            Ok(_) => out.push_str(
+                "\nOpened the native Team Ops window — it refreshes on its own (auto every 10s + a Refresh button); no need to loop structs_board.\n",
+            ),
+            Err(e) => out.push_str(&format!("\n(couldn't open the Team Ops window: {})\n", e)),
+        }
+    }
+    // emit_to (not emit): Tauri v2 `emit` broadcasts to every window; target the
+    // board explicitly so this never reaches the main game window.
+    if app.get_webview_window("board").is_some() {
+        let _ = app.emit_to("board", "board-update", serde_json::json!({ "html": render.inner_html }));
+    }
+
+    // ── Optional summary push into the Team Ops EVENT FEED ──
+    // Team/vplayer info never renders in the MAIN game window; `push` pipes a
+    // one-line summary into the board's event feed instead.
+    if params.push {
+        crate::mcp::board_feed::push(
+            app,
+            crate::mcp::board_feed::Severity::Notice,
+            "board",
+            render.push_line,
+        );
+    }
+
+    vec![Content::text(out)]
+}
+
+/// Everything the board needs, computed once: the agent-facing text, the
+/// window inner-HTML, and the one-line event-feed summary. Shared by the
+/// `structs_board` tool and the window's own `mcp_board_refresh` command so the
+/// two renders never drift.
+struct BoardRender {
+    text: String,
+    inner_html: String,
+    push_line: String,
+}
+
+async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
     // ── Primary player status ──
     let (charge, load, cap, ore, alpha, nstructs, nonline, pid, name) = {
         let gs = GAME_STATE.read().unwrap();
@@ -300,43 +347,38 @@ pub async fn execute(
     };
 
     let inner = format!(
-        "{}{}{}{}{}<div class='ops-title'>{} {} · updates live</div>",
+        "{}{}{}{}{}<div class='ops-title'>{} {} · live</div>",
         status_card, guild_card, pow_card, threats_card, rec_card, esc(&pid), esc(&name)
     );
 
-    // Cache for first-paint, spawn the window on demand, and push a live update.
+    let push_line = format!(
+        "charge {} · {:.1}/{:.1}W · {}/{} online · {} vp · PoW {}r/{}w · {}",
+        charge, load, cap, nonline, nstructs, nvp, running, waiting,
+        if threats.is_empty() { "no threats".to_string() } else { format!("⚠ {} threats", threats.len()) }
+    );
+
+    BoardRender { text: out, inner_html: inner, push_line }
+}
+
+/// Tauri command: the board window's OWN refresh. Recomputes the board and
+/// returns the fresh inner-HTML so the window stays live on a timer + a Refresh
+/// button, WITHOUT an agent looping structs_board. That gap left the header
+/// frozen at the "waiting for first update" placeholder while only the
+/// independently-pushed event feed moved. Also re-caches LAST_BOARD and emits
+/// board-update so first-paint and any other listeners stay in sync.
+#[tauri::command]
+pub async fn mcp_board_refresh(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, Arc<TaskRegistry>>,
+) -> Result<String, String> {
+    let render = render_board(registry.inner()).await;
     if let Ok(mut g) = LAST_BOARD.lock() {
-        *g = inner.clone();
+        *g = render.inner_html.clone();
     }
-    if params.open && app.get_webview_window("board").is_none() {
-        match crate::mcp::board_feed::build_board_window(app) {
-            Ok(_) => out.push_str("\nOpened the native Team Ops window — it refreshes live as you loop structs_board.\n"),
-            Err(e) => out.push_str(&format!("\n(couldn't open the Team Ops window: {})\n", e)),
-        }
-    }
-    // emit_to (not emit): Tauri v2 `emit` broadcasts to every window; target the
-    // board explicitly so this never reaches the main game window.
     if app.get_webview_window("board").is_some() {
-        let _ = app.emit_to("board", "board-update", serde_json::json!({ "html": inner }));
+        let _ = app.emit_to("board", "board-update", serde_json::json!({ "html": render.inner_html }));
     }
-
-    // ── Optional summary push ──
-    // Team/vplayer info never renders in the MAIN game window; `push` now pipes
-    // a summary into the Team Ops EVENT FEED instead of a main-window overlay.
-    if params.push {
-        crate::mcp::board_feed::push(
-            app,
-            crate::mcp::board_feed::Severity::Notice,
-            "board",
-            format!(
-                "charge {} · {:.1}/{:.1}W · {}/{} online · {} vp · PoW {}r/{}w · {}",
-                charge, load, cap, nonline, nstructs, nvp, running, waiting,
-                if threats.is_empty() { "no threats".to_string() } else { format!("⚠ {} threats", threats.len()) }
-            ),
-        );
-    }
-
-    vec![Content::text(out)]
+    Ok(render.inner_html)
 }
 
 // ══════════════════════════════════════════════════════════════════════════
