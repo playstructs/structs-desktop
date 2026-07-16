@@ -158,10 +158,67 @@
     if (opts.onClick) { r.style.cursor = 'pointer'; r.addEventListener('click', opts.onClick); }
     return r;
   }
+  // ── Shared sorting ──────────────────────────────────────────────────────
+  // sortControl builds a `<select>` of {key,label} + a caret asc/desc toggle,
+  // mutating `state` ({key,dir}) and calling onChange. sortBy returns a sorted
+  // copy using per-key accessors. Used identically by Fleet / Energy / Work.
+  function sortControl(keys, state, onChange) {
+    var wrap = el('div', null);
+    wrap.style.cssText = 'display:flex;gap:8px;align-items:center;';
+    var sel = el('select', 'sui-input-text');
+    keys.forEach(function (k, i) {
+      var op = el('option', null, (i === 0 ? 'sort: ' : '') + k.label);
+      op.value = k.key;
+      if (k.key === state.key) op.selected = true;
+      sel.appendChild(op);
+    });
+    sel.addEventListener('change', function () { state.key = sel.value; onChange(); });
+    var dir = el('a', 'ops-refresh-btn'); dir.href = 'javascript:void(0)';
+    var di = el('i', state.dir > 0 ? 'icon-caret-down' : 'icon-caret-up');
+    dir.appendChild(di);
+    dir.addEventListener('click', function () {
+      state.dir = -state.dir;
+      di.className = state.dir > 0 ? 'icon-caret-down' : 'icon-caret-up';
+      onChange();
+    });
+    wrap.appendChild(sel); wrap.appendChild(dir);
+    return wrap;
+  }
+  function sortBy(rows, state, accessors) {
+    var acc = accessors[state.key] || function () { return 0; };
+    var d = state.dir;
+    return rows.slice().sort(function (a, b) {
+      var va = acc(a), vb = acc(b);
+      if (va < vb) return -d;
+      if (va > vb) return d;
+      return 0;
+    });
+  }
+  // A centered modal overlay (row detail). Returns a close() fn.
+  function detailModal(title, contentNode) {
+    var existing = document.getElementById('detail-overlay');
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    var ov = el('div', null); ov.id = 'detail-overlay';
+    var panel = el('div', 'detail-panel');
+    var head = el('div', 'detail-head');
+    head.appendChild(el('div', 'sui-text-header', title));
+    var x = el('a', 'detail-x'); x.href = 'javascript:void(0)';
+    x.appendChild(el('i', 'icon-close'));
+    function close() { if (ov.parentNode) ov.parentNode.removeChild(ov); }
+    x.addEventListener('click', close);
+    head.appendChild(x);
+    panel.appendChild(head);
+    if (contentNode) panel.appendChild(contentNode);
+    ov.appendChild(panel);
+    ov.addEventListener('click', function (e) { if (e.target === ov) close(); });
+    document.body.appendChild(ov);
+    return close;
+  }
   Board.helpers = {
     esc: esc, el: el, row: row, card: card, badge: badge, battery: battery,
     progressBar: progressBar, fmtNum: fmtNum, ago: ago, alertLine: alertLine,
     iconClass: iconClass, resultTable: resultTable, resource: resource, resultRow: resultRow,
+    sortControl: sortControl, sortBy: sortBy, detailModal: detailModal,
   };
 
   // ── Router ────────────────────────────────────────────────────────────────

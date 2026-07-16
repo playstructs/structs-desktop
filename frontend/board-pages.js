@@ -42,28 +42,22 @@
     });
   }
 
-  function fleetSorted(rows) {
-    var k = fleet.sort.key, d = fleet.sort.dir;
-    var val = function (r) {
-      switch (k) {
-        case 'index': return r.index == null ? -1 : r.index;
-        case 'name': return r.name.toLowerCase();
-        case 'charge': return r.charge;
-        case 'alpha': return r.alpha_ualpha;
-        case 'ore': return r.ore;
-        case 'power': return r.structs_load;
-        case 'planet': return r.planet_id || '';
-        case 'age': return r.fetched_at_ms;
-        default: return 0;
-      }
-    };
-    return rows.slice().sort(function (a, b) {
-      var va = val(a), vb = val(b);
-      if (va < vb) return -d;
-      if (va > vb) return d;
-      return 0;
-    });
-  }
+  var FLEET_SORT_KEYS = [
+    { key: 'index', label: 'index' }, { key: 'name', label: 'name' },
+    { key: 'charge', label: 'charge' }, { key: 'alpha', label: 'alpha' },
+    { key: 'ore', label: 'ore' }, { key: 'power', label: 'load' },
+    { key: 'age', label: 'age' },
+  ];
+  var FLEET_ACC = {
+    index: function (r) { return r.index == null ? -1 : r.index; },
+    name: function (r) { return r.name.toLowerCase(); },
+    charge: function (r) { return r.charge; },
+    alpha: function (r) { return r.alpha_ualpha; },
+    ore: function (r) { return r.ore; },
+    power: function (r) { return r.structs_load; },
+    age: function (r) { return r.fetched_at_ms; },
+  };
+  function fleetSorted(rows) { return H.sortBy(rows, fleet.sort, FLEET_ACC); }
 
   function selCount() { return Object.keys(fleet.selection).length; }
 
@@ -169,19 +163,7 @@
     //    dropdown rather than clickable column headers) ──
     var sortBar = H.el('div', null);
     sortBar.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:6px;font-size:12px;';
-    var sortSel = H.el('select', 'sui-input-text');
-    [['index', 'sort: index'], ['name', 'name'], ['charge', 'charge'], ['alpha', 'alpha'],
-     ['ore', 'ore'], ['power', 'load'], ['age', 'age']].forEach(function (o) {
-      var op = H.el('option', null, o[1]); op.value = o[0]; sortSel.appendChild(op);
-    });
-    sortSel.addEventListener('change', function () { fleet.sort.key = sortSel.value; renderFleetRows(); });
-    var dirBtn = H.el('a', 'ops-refresh-btn'); dirBtn.href = 'javascript:void(0)';
-    var dirIcon = H.el('i', 'icon-caret-down'); dirBtn.appendChild(dirIcon);
-    dirBtn.addEventListener('click', function () {
-      fleet.sort.dir = -fleet.sort.dir;
-      dirIcon.className = fleet.sort.dir > 0 ? 'icon-caret-down' : 'icon-caret-up';
-      renderFleetRows();
-    });
+    sortBar.appendChild(H.sortControl(FLEET_SORT_KEYS, fleet.sort, renderFleetRows));
     var allLbl = H.el('label', null);
     var allCb = H.el('input'); allCb.type = 'checkbox'; allCb.id = 'fleet-select-all';
     allCb.addEventListener('change', function () {
@@ -191,7 +173,7 @@
       renderFleetRows();
     });
     allLbl.appendChild(allCb); allLbl.appendChild(document.createTextNode(' select all shown'));
-    sortBar.appendChild(sortSel); sortBar.appendChild(dirBtn); sortBar.appendChild(allLbl);
+    sortBar.appendChild(allLbl);
     body.appendChild(sortBar);
 
     var rowsBox = H.resultTable(); rowsBox.id = 'fleet-rows';
@@ -260,7 +242,7 @@
           H.resource(H.fmtNum(r.ore), 'sui-icon-alpha-ore'),
         ],
       });
-      row.addEventListener('click', function () { toggleDetail(row, r); });
+      row.addEventListener('click', function () { showDetail(r); });
       row.style.cursor = 'pointer';
       rowsBox.appendChild(row);
     });
@@ -379,20 +361,29 @@
       .catch(function () {});
   }
 
-  function toggleDetail(rowEl, r) {
-    var next = rowEl.nextSibling;
-    if (next && next.className === 'frow-detail') { next.parentNode.removeChild(next); return; }
-    var det = H.el('div', 'frow-detail', 'loading detail…');
-    rowEl.parentNode.insertBefore(det, rowEl.nextSibling);
+  // Row detail as a modal (clean inside the responsive grid, unlike a sibling
+  // band that would split the columns).
+  function showDetail(r) {
+    var content = H.el('div', null);
+    content.appendChild(H.el('div', 'ops-muted', 'loading detail…'));
+    var close = H.detailModal(r.name + ' · ' + r.player_id, content);
     Board.T.core.invoke('mcp_player_detail', { player: r.player_id }).then(function (d) {
-      det.innerHTML = '';
-      det.appendChild(H.el('div', null,
-        r.player_id + ' · ' + d.struct_count + ' structs · planet ' + (r.planet_id || '—') + ' · fleet ' + (r.fleet_id || '—')));
+      content.innerHTML = '';
+      content.appendChild(H.el('div', null,
+        d.struct_count + ' structs · planet ' + (r.planet_id || '—') + ' · fleet ' + (r.fleet_id || '—')));
       if (d.struct_ids && d.struct_ids.length) {
-        det.appendChild(H.el('div', 'ops-muted', d.struct_ids.join('  ')));
+        content.appendChild(H.el('div', 'ops-muted', d.struct_ids.join('  ')));
+      }
+      if (r.planet_id) {
+        var mapLink = H.el('a', 'ops-refresh-btn', 'View map →');
+        mapLink.href = '#/map?p=' + encodeURIComponent(r.player_id);
+        mapLink.style.cssText = 'display:inline-block;margin-top:10px;';
+        mapLink.addEventListener('click', function () { close(); });
+        content.appendChild(mapLink);
       }
     }).catch(function (e) {
-      det.textContent = 'detail failed: ' + e;
+      content.innerHTML = '';
+      content.appendChild(H.el('div', 'err', 'detail failed: ' + e));
     });
   }
 
@@ -431,39 +422,54 @@
   });
 
   // ═══════════════════════════ ENERGY ═══════════════════════════════════════
+  // Compact kW: 2 decimals for small draws (5.67), whole numbers for big ones
+  // (1062) so a "load / capacity kW" chip never needs two lines.
+  function kwv(mw) { var v = mw / 1e6; return v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2); }
+  var energyState = { data: null, sort: { key: 'margin', dir: 1 } };
+  var ENERGY_KEYS = [{ key: 'margin', label: 'margin' }, { key: 'name', label: 'name' },
+    { key: 'load', label: 'load' }, { key: 'capacity', label: 'capacity' }];
+  var ENERGY_ACC = {
+    margin: function (p) { return p.margin_pct; }, name: function (p) { return p.name.toLowerCase(); },
+    load: function (p) { return p.load_mw; }, capacity: function (p) { return p.capacity_mw; },
+  };
+  function renderEnergyBody() {
+    var d = energyState.data; if (!d) return;
+    var body = document.getElementById('energy-body');
+    body.innerHTML = '';
+    var g = d.guild;
+    var gbody = H.el('div');
+    gbody.appendChild(H.row('Reactor fuel', kw(g.reactor_fuel_mw) + '  (' + Math.round(g.reactor_commission * 100) + '% commission)', 'sui-icon-energy'));
+    gbody.appendChild(H.row('Substation capacity', kw(g.sub_capacity_mw) + ' · ' + g.sub_connection_count + ' connections'));
+    gbody.appendChild(H.row('Per-connection', kw(g.sub_connection_capacity_mw) + '  (→ ' + kw(g.share_if_one_more_mw) + ' with 1 more)'));
+    gbody.appendChild(H.row('Substation load', kw(g.sub_load_mw)));
+    gbody.appendChild(H.row('Growth headroom', '~' + g.supportable_more + ' more players',
+      g.supportable_more > 0 ? 'icon-success' : 'icon-alert'));
+    body.appendChild(H.card('GUILD POWER', gbody));
+
+    var pbody = H.el('div');
+    var bar = H.el('div'); bar.style.cssText = 'margin-bottom:6px;';
+    bar.appendChild(H.sortControl(ENERGY_KEYS, energyState.sort, renderEnergyBody));
+    pbody.appendChild(bar);
+    var table = H.resultTable();
+    H.sortBy((d.players || []), energyState.sort, ENERGY_ACC).slice(0, 80).forEach(function (p) {
+      table.appendChild(H.resultRow({
+        icon: p.ok ? 'sui-icon-energy' : 'sui-icon-no-power',
+        title: p.err ? H.el('span', 'err', p.name) : p.name,
+        subtitle: p.role,
+        chips: [
+          H.resource(kwv(p.load_mw) + ' / ' + kwv(p.capacity_mw) + ' kW', 'sui-icon-energy'),
+          H.resource(Math.round(p.margin_pct) + '%', null, p.margin_pct < 15 ? 'attn' : ''),
+        ],
+      }));
+    });
+    pbody.appendChild(table);
+    pbody.appendChild(H.el('div', 'ops-muted', 'roster ' + H.ago(d.roster_refreshed_at_ms) + ' old'));
+    body.appendChild(H.card('PLAYER MARGINS', pbody));
+    Board.stamp('updated ' + new Date().toLocaleTimeString());
+  }
   function renderEnergy() {
     return Board.T.core.invoke('mcp_energy').then(function (d) {
-      var body = document.getElementById('energy-body');
-      body.innerHTML = '';
-      var g = d.guild;
-      var gbody = H.el('div');
-      gbody.appendChild(H.row('Reactor fuel', kw(g.reactor_fuel_mw) + '  (' + Math.round(g.reactor_commission * 100) + '% commission)', 'sui-icon-energy'));
-      gbody.appendChild(H.row('Substation capacity', kw(g.sub_capacity_mw) + ' · ' + g.sub_connection_count + ' connections'));
-      gbody.appendChild(H.row('Per-connection', kw(g.sub_connection_capacity_mw) + '  (→ ' + kw(g.share_if_one_more_mw) + ' with 1 more)'));
-      gbody.appendChild(H.row('Substation load', kw(g.sub_load_mw)));
-      gbody.appendChild(H.row('Growth headroom', '~' + g.supportable_more + ' more players',
-        g.supportable_more > 0 ? 'icon-success' : 'icon-alert'));
-      body.appendChild(H.card('GUILD POWER', gbody));
-
-      var pbody = H.el('div');
-      var table = H.resultTable();
-      (d.players || []).slice(0, 60).forEach(function (p) {
-        table.appendChild(H.resultRow({
-          icon: p.ok ? 'sui-icon-energy' : 'sui-icon-no-power',
-          title: p.err ? H.el('span', 'err', p.name) : p.name,
-          subtitle: p.role,
-          chips: [
-            // demand / supply as one self-describing power chip
-            H.resource(kw(p.load_mw) + ' / ' + kw(p.capacity_mw), 'sui-icon-energy'),
-            // margin — the headline number, colored when tight
-            H.resource(Math.round(p.margin_pct) + '%', null, p.margin_pct < 15 ? 'attn' : ''),
-          ],
-        }));
-      });
-      pbody.appendChild(table);
-      pbody.appendChild(H.el('div', 'ops-muted', 'worst margins first · roster ' + H.ago(d.roster_refreshed_at_ms) + ' old'));
-      body.appendChild(H.card('PLAYER MARGINS', pbody));
-      Board.stamp('updated ' + new Date().toLocaleTimeString());
+      energyState.data = d; renderEnergyBody();
     }).catch(function (e) {
       var body = document.getElementById('energy-body');
       body.innerHTML = '';
@@ -473,43 +479,59 @@
   Board.registerPage('energy', { refresh: renderEnergy, cadenceMs: 30000, onEnter: renderEnergy });
 
   // ═══════════════════════════ WORK ═════════════════════════════════════════
-  function renderWork() {
-    return Board.T.core.invoke('mcp_work').then(function (d) {
-      var body = document.getElementById('work-body');
-      body.innerHTML = '';
+  var workState = { data: null, sort: { key: 'progress', dir: -1 } };
+  var WORK_KEYS = [{ key: 'progress', label: 'progress' }, { key: 'difficulty', label: 'difficulty' },
+    { key: 'status', label: 'status' }, { key: 'type', label: 'type' }, { key: 'task', label: 'task id' }];
+  var WORK_ACC = {
+    progress: function (t) { return t.percent_complete || 0; },
+    difficulty: function (t) { return t.current_difficulty == null ? -1 : t.current_difficulty; },
+    status: function (t) { return (t.status || '').toLowerCase(); },
+    type: function (t) { return (t.task_type || '').toLowerCase(); },
+    task: function (t) { return t.task_id || ''; },
+  };
+  function renderWorkBody() {
+    var d = workState.data; if (!d) return;
+    var body = document.getElementById('work-body');
+    body.innerHTML = '';
 
-      var c = d.counts || {};
-      var hc = d.hash_config || {};
-      var qbody = H.el('div');
-      qbody.appendChild(H.row('Running / Waiting / Done', (c.running || 0) + ' / ' + (c.waiting || 0) + ' / ' + (c.completed || 0), 'icon-in-progress'));
-      qbody.appendChild(H.row('Engine', (hc.effective_engine || '?') + (hc.gpu_available ? ' (GPU available)' : '')));
-      qbody.appendChild(H.row('difficulty_start / max_concurrent', hc.difficulty_start + ' / ' + hc.max_concurrent +
-        (hc.auto_tune ? ' · auto-tune ON' : '')));
-      body.appendChild(H.card('PoW QUEUE', qbody));
+    var c = d.counts || {};
+    var hc = d.hash_config || {};
+    var qbody = H.el('div');
+    qbody.appendChild(H.row('Running / Waiting / Done', (c.running || 0) + ' / ' + (c.waiting || 0) + ' / ' + (c.completed || 0), 'icon-in-progress'));
+    qbody.appendChild(H.row('Engine', (hc.effective_engine || '?') + (hc.gpu_available ? ' (GPU available)' : '')));
+    qbody.appendChild(H.row('difficulty_start / max_concurrent', hc.difficulty_start + ' / ' + hc.max_concurrent +
+      (hc.auto_tune ? ' · auto-tune ON' : '')));
+    body.appendChild(H.card('PoW QUEUE', qbody));
 
-      var tasks = (d.tasks || []).slice(0, 40);
-      if (tasks.length) {
-        var tbody = H.el('div');
-        var table = H.resultTable();
-        var typeIcon = { MINE: 'icon-mine', REFINE: 'icon-refine', BUILD: 'icon-in-progress', RAID: 'icon-raid' };
-        tasks.forEach(function (t) {
-          var diff = (t.current_difficulty != null ? t.current_difficulty : '—') +
-            '→' + (t.difficulty_target != null ? t.difficulty_target : '—');
-          table.appendChild(H.resultRow({
-            icon: typeIcon[t.task_type] || 'icon-in-progress',
-            title: t.task_id || '?',
-            subtitle: (t.task_type || '?') + ' · ' + (t.status || '?'),
-            chips: [
-              H.resource(H.progressBar((t.percent_complete || 0) / 100)),
-              H.resource(diff),
-              H.resource(t.eta || '—', null, 'ops-muted'),
-            ],
-          }));
-        });
-        tbody.appendChild(table);
-        if ((d.tasks || []).length > 40) tbody.appendChild(H.el('div', 'ops-muted', (d.tasks.length - 40) + ' more not shown'));
-        body.appendChild(H.card('TASKS', tbody));
-      }
+    var all = d.tasks || [];
+    if (all.length) {
+      // Sort the FULL task set, then cap the render — so the sort reflects
+      // every task, not just an arbitrary first 40.
+      var tasks = H.sortBy(all, workState.sort, WORK_ACC).slice(0, 40);
+      var tbody = H.el('div');
+      var bar = H.el('div'); bar.style.cssText = 'margin-bottom:6px;';
+      bar.appendChild(H.sortControl(WORK_KEYS, workState.sort, renderWorkBody));
+      tbody.appendChild(bar);
+      var table = H.resultTable();
+      var typeIcon = { MINE: 'icon-mine', REFINE: 'icon-refine', BUILD: 'icon-in-progress', RAID: 'icon-raid' };
+      tasks.forEach(function (t) {
+        var diff = (t.current_difficulty != null ? t.current_difficulty : '—') +
+          '→' + (t.difficulty_target != null ? t.difficulty_target : '—');
+        table.appendChild(H.resultRow({
+          icon: typeIcon[t.task_type] || 'icon-in-progress',
+          title: t.task_id || '?',
+          subtitle: (t.task_type || '?') + ' · ' + (t.status || '?'),
+          chips: [
+            H.resource(H.progressBar((t.percent_complete || 0) / 100)),
+            H.resource(diff),
+            H.resource(t.eta || '—', null, 'ops-muted'),
+          ],
+        }));
+      });
+      tbody.appendChild(table);
+      if (all.length > 40) tbody.appendChild(H.el('div', 'ops-muted', (all.length - 40) + ' more not shown'));
+      body.appendChild(H.card('TASKS', tbody));
+    }
 
       var lh = d.loop_health;
       if (lh && lh.length) {
@@ -530,6 +552,10 @@
         body.appendChild(H.card('TOP TX ERRORS (1h)', xbody));
       }
       Board.stamp('updated ' + new Date().toLocaleTimeString());
+  }
+  function renderWork() {
+    return Board.T.core.invoke('mcp_work').then(function (d) {
+      workState.data = d; renderWorkBody();
     }).catch(function (e) {
       var body = document.getElementById('work-body');
       body.innerHTML = '';

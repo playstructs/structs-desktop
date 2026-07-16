@@ -18,8 +18,16 @@
        sub-pixel rounding or the panel edge chrome. */
     #board-layout { height: 100%; display: flex; position: relative; overflow-x: hidden; max-width: 100%; }
     #board-layout .sui-panel { flex: 1; min-height: 0; min-width: 0; }
-    .ops-scroll { overflow-y: auto; overflow-x: hidden; padding: 14px 18px; }
-    .sui-data-card { width: 100%; margin-bottom: 12px; }
+    /* Force the content chain to fill the window's full width. The SUI card
+       chain (sui-data-card is align-items:flex-start) leaves children content-
+       sized unless each level is told to stretch — so the scroll body, each
+       page, and the cards are all pinned to 100% and pages are stretch-flex
+       columns so cards span edge-to-edge on a wide window. */
+    #board-layout .sui-page-body-screen { width: 100%; align-self: stretch; }
+    .ops-scroll { width: 100%; overflow-y: auto; overflow-x: hidden; padding: 14px 18px; }
+    .page { width: 100%; }
+    .page:not([hidden]) { display: flex; flex-direction: column; align-items: stretch; }
+    #board-layout .sui-data-card { width: 100%; align-self: stretch; margin-bottom: 12px; }
     .sui-data-card-body { width: 100%; flex-direction: column; }
     .sui-data-card-row { width: 100%; justify-content: space-between; gap: 16px; }
     .ops-val { font-weight: 600; }
@@ -63,19 +71,47 @@
                  background: rgba(120,180,255,.14); color: inherit; padding: 4px 14px; font: inherit; }
     .agent-btn:hover { background: rgba(120,180,255,.28); }
     .agent-toast { border-color: rgba(255,180,84,.5); background: rgba(255,180,84,.08); }
-    /* ── Native SUI result-rows (raid-scan / roster idiom) — compacted for the
-       narrow board window. Tighter padding + a lower left-min so more rows fit
-       and the two sections still sit side-by-side at ~580px. ── */
-    .sui-result-rows.sui-result-table { max-height: calc(100vh - 300px); overflow-y: auto; }
-    #board-layout .sui-result-row { padding: 5px 8px; gap: 8px 16px; font-size: 12px; }
-    #board-layout .sui-result-row-left-section { min-width: 150px; gap: 8px; padding-right: 8px; }
-    #board-layout .sui-result-row-right-section { min-width: 150px; }
+    /* ── Native SUI result-rows (raid-scan / roster idiom), laid out as a
+       RESPONSIVE GRID so rows flow into 1→N columns as the window widens and
+       collapse to one column when narrow — using the full horizontal space
+       instead of stranding the right half. Each row keeps its own border
+       (bordered "cards" separated by a small gap, which reads cleaner than
+       contiguous borders once there are multiple columns). ── */
+    #board-layout .sui-result-rows.sui-result-table {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 6px;
+      width: 100%;
+      max-height: calc(100vh - 300px);
+      overflow-y: auto;
+      align-content: start;
+    }
+    #board-layout .sui-result-row {
+      border: 1px solid var(--border, #345);   /* every cell fully bordered in a grid */
+      padding: 5px 8px; gap: 8px 16px; font-size: 12px; min-width: 0;
+    }
+    #board-layout .sui-result-row-left-section { min-width: 0; flex: 1 1 auto; gap: 8px; padding-right: 8px; }
+    #board-layout .sui-result-row-right-section { min-width: 0; flex: 0 1 auto; }
     #board-layout .sui-result-row-portrait,
-    #board-layout .sui-result-row-portrait-icon { width: 24px; height: 24px; }
+    #board-layout .sui-result-row-portrait-icon { width: 24px; height: 24px; flex: none; }
     #board-layout .sui-result-row-resources { gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
     #board-layout .sui-result-row:hover { background: rgba(120,180,255,.07); }
-    .sui-resource { font-variant-numeric: tabular-nums; }
-    .frow-detail { padding: 4px 10px 8px 34px; font-size: 12px; border-bottom: 1px solid var(--border, #345); }
+    /* Values must never break mid-unit ("1062 / 1077 kW" stays on one line). */
+    .sui-resource { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .sui-resource span { white-space: nowrap; }
+    #board-layout .sui-result-row-player-info,
+    #board-layout .sui-text-label-block { min-width: 0; }
+    #board-layout .sui-text-label-block { overflow: hidden; text-overflow: ellipsis; }
+    /* Row-detail modal (click a fleet row) — clean in a grid, unlike a sibling
+       band that would split the columns. */
+    #detail-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
+      display: flex; align-items: center; justify-content: center; z-index: 50; }
+    #detail-overlay .detail-panel { background: var(--surface-player-body, #0f1520);
+      border: 1px solid var(--border, #345); max-width: 520px; width: 90%;
+      max-height: 80%; overflow-y: auto; padding: 14px 16px; }
+    #detail-overlay .detail-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+    #detail-overlay .detail-x { cursor: pointer; opacity: .7; padding: 0 4px; }
+    #detail-overlay .detail-x:hover { opacity: 1; }
     /* Toolbars */
     #fleet-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
     #fleet-toolbar .sui-input-text { flex: 1; min-width: 120px; }
