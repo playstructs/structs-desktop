@@ -165,14 +165,24 @@
     prog.appendChild(H.el('div', 'ops-muted', '')); prog.appendChild(H.progressBar(0));
     body.appendChild(prog);
 
-    // ── Header + rows + footer ──
-    var head = H.el('div', 'frow fhead');
-    head.appendChild(headCell('', null)); // checkbox col
-    [['name', 'Player'], ['charge', 'Charge'], ['alpha', 'Alpha'], ['ore', 'Ore'],
-     ['power', 'Load'], ['index', 'Idx'], ['planet', 'Planet'], ['age', 'Age']].forEach(function (c) {
-      head.appendChild(headCell(c[1], c[0]));
+    // ── Sort + select-all (result rows are header-less, so sorting is a
+    //    dropdown rather than clickable column headers) ──
+    var sortBar = H.el('div', null);
+    sortBar.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:6px;font-size:12px;';
+    var sortSel = H.el('select', 'sui-input-text');
+    [['index', 'sort: index'], ['name', 'name'], ['charge', 'charge'], ['alpha', 'alpha'],
+     ['ore', 'ore'], ['power', 'load'], ['age', 'age']].forEach(function (o) {
+      var op = H.el('option', null, o[1]); op.value = o[0]; sortSel.appendChild(op);
     });
-    // select-all-filtered checkbox in the first header cell
+    sortSel.addEventListener('change', function () { fleet.sort.key = sortSel.value; renderFleetRows(); });
+    var dirBtn = H.el('a', 'ops-refresh-btn'); dirBtn.href = 'javascript:void(0)';
+    var dirIcon = H.el('i', 'icon-caret-down'); dirBtn.appendChild(dirIcon);
+    dirBtn.addEventListener('click', function () {
+      fleet.sort.dir = -fleet.sort.dir;
+      dirIcon.className = fleet.sort.dir > 0 ? 'icon-caret-down' : 'icon-caret-up';
+      renderFleetRows();
+    });
+    var allLbl = H.el('label', null);
     var allCb = H.el('input'); allCb.type = 'checkbox'; allCb.id = 'fleet-select-all';
     allCb.addEventListener('change', function () {
       var shown = fleetFiltered();
@@ -180,28 +190,16 @@
       else shown.forEach(function (r) { delete fleet.selection[r.player_id]; });
       renderFleetRows();
     });
-    head.firstChild.appendChild(allCb);
-    body.appendChild(head);
+    allLbl.appendChild(allCb); allLbl.appendChild(document.createTextNode(' select all shown'));
+    sortBar.appendChild(sortSel); sortBar.appendChild(dirBtn); sortBar.appendChild(allLbl);
+    body.appendChild(sortBar);
 
-    var rowsBox = H.el('div', null); rowsBox.id = 'fleet-rows';
+    var rowsBox = H.resultTable(); rowsBox.id = 'fleet-rows';
     body.appendChild(rowsBox);
     var foot = H.el('div', 'fleet-foot');
     foot.appendChild(H.el('span', null, '')); foot.appendChild(H.el('span', null, ''));
     foot.id = 'fleet-foot';
     body.appendChild(foot);
-  }
-
-  function headCell(label, sortKey) {
-    var s = H.el('span', null, label);
-    if (sortKey) {
-      s.setAttribute('data-sort', sortKey);
-      s.addEventListener('click', function () {
-        if (fleet.sort.key === sortKey) fleet.sort.dir = -fleet.sort.dir;
-        else { fleet.sort.key = sortKey; fleet.sort.dir = 1; }
-        renderFleetRows();
-      });
-    }
-    return s;
   }
 
   function massBtn(id, iconCls, label, mod) {
@@ -219,43 +217,52 @@
     var shown = fleetSorted(fleetFiltered());
     rowsBox.innerHTML = '';
     shown.forEach(function (r) {
-      var d = H.el('div', 'frow');
-      var cbCell = H.el('span');
-      if (r.index != null) { // primary is not selectable (never a mass target)
-        var cb = H.el('input'); cb.type = 'checkbox';
-        cb.checked = !!fleet.selection[r.player_id];
-        cb.addEventListener('click', function (ev) { ev.stopPropagation(); });
-        cb.addEventListener('change', function () {
-          if (cb.checked) fleet.selection[r.player_id] = true;
+      // Checkbox (vplayers only; primary is never a mass-action target).
+      var lead = null;
+      if (r.index != null) {
+        lead = H.el('input'); lead.type = 'checkbox';
+        lead.checked = !!fleet.selection[r.player_id];
+        lead.addEventListener('click', function (ev) { ev.stopPropagation(); });
+        lead.addEventListener('change', function () {
+          if (lead.checked) fleet.selection[r.player_id] = true;
           else delete fleet.selection[r.player_id];
           updateFleetChrome();
         });
-        cbCell.appendChild(cb);
       }
-      d.appendChild(cbCell);
-      var nameCell = H.el('span', r.err ? 'err' : null, r.name + ' ');
-      nameCell.appendChild(H.badge(r.role === 'productive' ? 'PROD' : r.role === 'primary' ? 'PRIME' : 'BAIT',
+      // Title: name + role badge.
+      var title = H.el('span', r.err ? 'err' : null, r.name + ' ');
+      title.appendChild(H.badge(r.role === 'productive' ? 'PROD' : r.role === 'primary' ? 'PRIME' : 'BAIT',
         r.role === 'productive' ? 'solid' : r.role === 'primary' ? 'warning' : 'default'));
-      d.appendChild(nameCell);
-      var chargeCell = H.el('span');
-      chargeCell.appendChild(H.battery(Math.min(8, r.charge), 8));
-      chargeCell.appendChild(document.createTextNode(' ' + (r.charge >= 8 ? 'RDY' : r.charge)));
-      d.appendChild(chargeCell);
-      d.appendChild(H.el('span', 'fnum', alpha(r.alpha_ualpha)));
-      d.appendChild(H.el('span', 'fnum', H.fmtNum(r.ore)));
-      d.appendChild(H.el('span', 'fnum', (r.structs_load / 1e6).toFixed(1) + 'kW'));
-      d.appendChild(H.el('span', 'fnum', r.index == null ? '—' : String(r.index)));
-      var planetCell = H.el('span');
+      // Subtitle: index · planet (deep-links to Map) · freshness.
+      var sub = H.el('span');
+      sub.appendChild(document.createTextNode((r.index == null ? 'primary' : 'idx ' + r.index) + ' · '));
       if (r.planet_id) {
         var pl = H.el('a', 'ops-refresh-btn', r.planet_id);
         pl.href = '#/map?p=' + encodeURIComponent(r.player_id);
         pl.addEventListener('click', function (ev) { ev.stopPropagation(); });
-        planetCell.appendChild(pl);
-      } else planetCell.textContent = '—';
-      d.appendChild(planetCell);
-      d.appendChild(H.el('span', fleetAttention(r) ? 'attn' : 'ops-muted', H.ago(r.fetched_at_ms)));
-      d.addEventListener('click', function () { toggleDetail(d, r); });
-      rowsBox.appendChild(d);
+        sub.appendChild(pl);
+      } else sub.appendChild(document.createTextNode('—'));
+      sub.appendChild(document.createTextNode(' · '));
+      sub.appendChild(H.el('span', fleetAttention(r) ? 'attn' : null, H.ago(r.fetched_at_ms)));
+      // Charge chip: the battery is its own icon, so no extra glyph.
+      var chargeVal = H.el('span');
+      chargeVal.appendChild(H.battery(Math.min(8, r.charge), 8));
+      chargeVal.appendChild(document.createTextNode(' ' + (r.charge >= 8 ? 'RDY' : r.charge)));
+      var row = H.resultRow({
+        lead: lead,
+        icon: r.role === 'productive' ? 'sui-icon-alpha-matter'
+          : r.role === 'primary' ? 'sui-icon-player-indicator' : 'sui-icon-players',
+        title: title,
+        subtitle: sub,
+        chips: [
+          H.resource(chargeVal),
+          H.resource(alpha(r.alpha_ualpha), 'sui-icon-alpha-matter'),
+          H.resource(H.fmtNum(r.ore), 'sui-icon-alpha-ore'),
+        ],
+      });
+      row.addEventListener('click', function () { toggleDetail(row, r); });
+      row.style.cursor = 'pointer';
+      rowsBox.appendChild(row);
     });
     updateFleetChrome(shown);
   }
@@ -439,22 +446,21 @@
       body.appendChild(H.card('GUILD POWER', gbody));
 
       var pbody = H.el('div');
-      var head = H.el('div', 'frow fhead');
-      ['Player', 'Demand', 'Supply', 'Margin', ''].forEach(function (h2) { head.appendChild(H.el('span', null, h2)); });
-      pbody.appendChild(head);
-      var rowsBox = H.el('div'); rowsBox.id = 'energy-rows';
+      var table = H.resultTable();
       (d.players || []).slice(0, 60).forEach(function (p) {
-        var r = H.el('div', 'frow');
-        r.appendChild(H.el('span', p.err ? 'err' : null, p.name));
-        r.appendChild(H.el('span', 'fnum', kw(p.load_mw)));
-        r.appendChild(H.el('span', 'fnum', kw(p.capacity_mw)));
-        r.appendChild(H.el('span', 'fnum ' + (p.margin_pct < 15 ? 'attn' : ''), Math.round(p.margin_pct) + '%'));
-        var ic = H.el('span');
-        if (!p.ok) ic.appendChild(H.el('i', 'sui-icon sui-icon-no-power sui-icon-sm'));
-        r.appendChild(ic);
-        rowsBox.appendChild(r);
+        table.appendChild(H.resultRow({
+          icon: p.ok ? 'sui-icon-energy' : 'sui-icon-no-power',
+          title: p.err ? H.el('span', 'err', p.name) : p.name,
+          subtitle: p.role,
+          chips: [
+            // demand / supply as one self-describing power chip
+            H.resource(kw(p.load_mw) + ' / ' + kw(p.capacity_mw), 'sui-icon-energy'),
+            // margin — the headline number, colored when tight
+            H.resource(Math.round(p.margin_pct) + '%', null, p.margin_pct < 15 ? 'attn' : ''),
+          ],
+        }));
       });
-      pbody.appendChild(rowsBox);
+      pbody.appendChild(table);
       pbody.appendChild(H.el('div', 'ops-muted', 'worst margins first · roster ' + H.ago(d.roster_refreshed_at_ms) + ' old'));
       body.appendChild(H.card('PLAYER MARGINS', pbody));
       Board.stamp('updated ' + new Date().toLocaleTimeString());
@@ -484,23 +490,23 @@
       var tasks = (d.tasks || []).slice(0, 40);
       if (tasks.length) {
         var tbody = H.el('div');
-        var head = H.el('div', 'frow fhead');
-        ['Task', 'Type', 'Status', 'Progress', 'Diff', 'ETA'].forEach(function (h2) { head.appendChild(H.el('span', null, h2)); });
-        tbody.appendChild(head);
-        var box = H.el('div'); box.id = 'work-rows';
+        var table = H.resultTable();
+        var typeIcon = { MINE: 'icon-mine', REFINE: 'icon-refine', BUILD: 'icon-in-progress', RAID: 'icon-raid' };
         tasks.forEach(function (t) {
-          var r = H.el('div', 'frow');
-          r.appendChild(H.el('span', null, t.task_id || '?'));
-          r.appendChild(H.el('span', null, t.task_type || '?'));
-          r.appendChild(H.el('span', t.status === 'running' ? null : 'ops-muted', t.status || '?'));
-          var pc = H.el('span');
-          pc.appendChild(H.progressBar((t.percent_complete || 0) / 100));
-          r.appendChild(pc);
-          r.appendChild(H.el('span', 'fnum', (t.current_difficulty != null ? t.current_difficulty : '—') + '→' + (t.difficulty_target != null ? t.difficulty_target : '—')));
-          r.appendChild(H.el('span', 'fnum ops-muted', t.eta || '—'));
-          box.appendChild(r);
+          var diff = (t.current_difficulty != null ? t.current_difficulty : '—') +
+            '→' + (t.difficulty_target != null ? t.difficulty_target : '—');
+          table.appendChild(H.resultRow({
+            icon: typeIcon[t.task_type] || 'icon-in-progress',
+            title: t.task_id || '?',
+            subtitle: (t.task_type || '?') + ' · ' + (t.status || '?'),
+            chips: [
+              H.resource(H.progressBar((t.percent_complete || 0) / 100)),
+              H.resource(diff),
+              H.resource(t.eta || '—', null, 'ops-muted'),
+            ],
+          }));
         });
-        tbody.appendChild(box);
+        tbody.appendChild(table);
         if ((d.tasks || []).length > 40) tbody.appendChild(H.el('div', 'ops-muted', (d.tasks.length - 40) + ' more not shown'));
         body.appendChild(H.card('TASKS', tbody));
       }

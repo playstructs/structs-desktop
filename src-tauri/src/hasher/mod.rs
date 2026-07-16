@@ -244,24 +244,51 @@ pub fn start_hash_task_core(
 
     let app_clone = app.clone();
     let handle_clone = handle.clone();
+    let registry_reaper = Arc::clone(registry);
+    let pid_reaper = pid.clone();
 
     let use_gpu = resolve_use_gpu();
 
     let join = std::thread::spawn(move || {
-        if use_gpu {
-            let device = GPU_DEVICE.get().unwrap().clone();
-            let queue = GPU_QUEUE.get().unwrap().clone();
-            eprintln!("[Structs Hasher] Starting task {} on GPU", handle_clone.params.object_id);
-            gpu::run_gpu_hash(handle_clone, device, queue, app_clone);
-        } else {
-            eprintln!("[Structs Hasher] Starting task {} on CPU ({} threads)",
-                handle_clone.params.object_id, num_cpus::get().saturating_sub(1).max(1));
-            cpu::run_cpu_hash(handle_clone, app_clone);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if use_gpu {
+                let device = GPU_DEVICE.get().unwrap().clone();
+                let queue = GPU_QUEUE.get().unwrap().clone();
+                eprintln!("[Structs Hasher] Starting task {} on GPU", handle_clone.params.object_id);
+                gpu::run_gpu_hash(handle_clone.clone(), device, queue, app_clone);
+            } else {
+                eprintln!("[Structs Hasher] Starting task {} on CPU ({} threads)",
+                    handle_clone.params.object_id, num_cpus::get().saturating_sub(1).max(1));
+                cpu::run_cpu_hash(handle_clone.clone(), app_clone);
+            }
+        }));
+        if outcome.is_err() {
+            eprintln!("[Structs Hasher] task {} worker panicked; reclaiming slot", pid_reaper);
         }
+        // Always reclaim the slot (normal completion OR panic) so a finished
+        // worker thread is never left as a zombie holding its stack + TCB.
+        reap_self(&registry_reaper, &pid_reaper, &handle_clone);
     });
 
     *handle.join_handle.lock().unwrap() = Some(join);
     Ok(())
+}
+
+/// Release a finished task's registry slot so the worker thread is reclaimed
+/// (its retained JoinHandle drops with the TaskHandle instead of lingering as a
+/// zombie — one leaked thread per completed proof was the source of the
+/// grows-over-time thread/memory bloat). Ptr-eq guard: never evict a NEWER task
+/// re-issued for the same struct while this one was running.
+fn reap_self(registry: &Arc<TaskRegistry>, pid: &str, handle: &Arc<TaskHandle>) {
+    let is_current = registry
+        .tasks
+        .get(pid)
+        .is_some_and(|e| Arc::ptr_eq(e.value(), handle));
+    if is_current {
+        registry.tasks.remove(pid);
+    }
+    // Drop any orphaned vplayer-hash mapping (normally removed on completion).
+    VPLAYER_HASHES.remove(pid);
 }
 
 #[tauri::command]
@@ -285,21 +312,29 @@ pub async fn start_hash_task(
 
     let app_clone = app.clone();
     let handle_clone = handle.clone();
+    let registry_reaper = registry.inner().clone();
+    let pid_reaper = pid.clone();
 
     // Check GPU availability
     let use_gpu = resolve_use_gpu();
 
     let join = std::thread::spawn(move || {
-        if use_gpu {
-            let device = GPU_DEVICE.get().unwrap().clone();
-            let queue = GPU_QUEUE.get().unwrap().clone();
-            eprintln!("[Structs Hasher] Starting task {} on GPU", handle_clone.params.object_id);
-            gpu::run_gpu_hash(handle_clone, device, queue, app_clone);
-        } else {
-            eprintln!("[Structs Hasher] Starting task {} on CPU ({} threads)",
-                handle_clone.params.object_id, num_cpus::get().saturating_sub(1).max(1));
-            cpu::run_cpu_hash(handle_clone, app_clone);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if use_gpu {
+                let device = GPU_DEVICE.get().unwrap().clone();
+                let queue = GPU_QUEUE.get().unwrap().clone();
+                eprintln!("[Structs Hasher] Starting task {} on GPU", handle_clone.params.object_id);
+                gpu::run_gpu_hash(handle_clone.clone(), device, queue, app_clone);
+            } else {
+                eprintln!("[Structs Hasher] Starting task {} on CPU ({} threads)",
+                    handle_clone.params.object_id, num_cpus::get().saturating_sub(1).max(1));
+                cpu::run_cpu_hash(handle_clone.clone(), app_clone);
+            }
+        }));
+        if outcome.is_err() {
+            eprintln!("[Structs Hasher] task {} worker panicked; reclaiming slot", pid_reaper);
         }
+        reap_self(&registry_reaper, &pid_reaper, &handle_clone);
     });
 
     *handle.join_handle.lock().unwrap() = Some(join);

@@ -63,34 +63,33 @@
                  background: rgba(120,180,255,.14); color: inherit; padding: 4px 14px; font: inherit; }
     .agent-btn:hover { background: rgba(120,180,255,.28); }
     .agent-toast { border-color: rgba(255,180,84,.5); background: rgba(255,180,84,.08); }
-    /* ── FLEET page: dense roster grid (precedent: #feed-list scoped CSS). ── */
+    /* ── Native SUI result-rows (raid-scan / roster idiom) — compacted for the
+       narrow board window. Tighter padding + a lower left-min so more rows fit
+       and the two sections still sit side-by-side at ~580px. ── */
+    .sui-result-rows.sui-result-table { max-height: calc(100vh - 300px); overflow-y: auto; }
+    #board-layout .sui-result-row { padding: 5px 8px; gap: 8px 16px; font-size: 12px; }
+    #board-layout .sui-result-row-left-section { min-width: 150px; gap: 8px; padding-right: 8px; }
+    #board-layout .sui-result-row-right-section { min-width: 150px; }
+    #board-layout .sui-result-row-portrait,
+    #board-layout .sui-result-row-portrait-icon { width: 24px; height: 24px; }
+    #board-layout .sui-result-row-resources { gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    #board-layout .sui-result-row:hover { background: rgba(120,180,255,.07); }
+    .sui-resource { font-variant-numeric: tabular-nums; }
+    .frow-detail { padding: 4px 10px 8px 34px; font-size: 12px; border-bottom: 1px solid var(--border, #345); }
+    /* Toolbars */
     #fleet-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
     #fleet-toolbar .sui-input-text { flex: 1; min-width: 120px; }
-    #fleet-rows { max-height: calc(100vh - 380px); min-height: 120px; overflow-y: auto; width: 100%; }
-    .frow { display: grid;
-            grid-template-columns: 22px minmax(90px,1.4fr) 72px 62px 62px 96px 58px 64px 54px;
-            gap: 6px; font-size: 12px; padding: 3px 4px; align-items: center; width: 100%; }
-    .frow.fhead { position: sticky; top: 0; background: var(--background, #0d0f15); z-index: 1;
-                  font-weight: 700; cursor: default; border-bottom: 1px solid var(--border, #345); }
-    .fhead span[data-sort] { cursor: pointer; text-decoration: underline; text-decoration-style: dotted; }
-    .frow:not(.fhead):hover { background: rgba(120,180,255,.07); cursor: pointer; }
-    .frow .fnum { text-align: right; font-variant-numeric: tabular-nums; }
-    .frow-detail { padding: 6px 10px 10px 28px; font-size: 12px; border-bottom: 1px solid var(--border, #345); }
     .fleet-foot { display: flex; justify-content: space-between; font-size: 12px; margin-top: 6px; }
-    .fleet-progress { width: 100%; margin: 4px 0; }
     .fbat { display: inline-flex; gap: 2px; align-items: center; }
-    .fbat i { width: 6px; height: 10px; background: rgba(120,180,255,.15); display: inline-block; }
+    .fbat i { width: 5px; height: 10px; background: rgba(120,180,255,.15); display: inline-block; }
     .fbat i.on { background: var(--accent-primary, #6cf); }
     .attn { color: #ffb454; }
     .err { color: #ff6b6b; }
     /* Mass-action toolbar buttons: keep SUI look, add busy state. */
     .mass-btn.is-busy { opacity: .5; pointer-events: none; }
     #mass-progress { width: 100%; margin: 6px 0; }
-    .bar { height: 8px; background: rgba(120,180,255,.12); border: 1px solid var(--border, #345); width: 100%; }
+    .bar { height: 8px; background: rgba(120,180,255,.12); border: 1px solid var(--border, #345); width: 80px; }
     .bar > i { display: block; height: 100%; background: var(--accent-primary, #6cf); width: 0; transition: width .3s; }
-    /* WORK / ENERGY lists reuse .frow with their own column templates. */
-    #work-rows .frow { grid-template-columns: minmax(80px,1fr) 60px 70px 90px 70px 90px; }
-    #energy-rows .frow { grid-template-columns: minmax(90px,1.4fr) 90px 90px 70px 60px; }
     /* CONFIG page */
     .cfg-group { margin-bottom: 4px; }
     .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 10px;

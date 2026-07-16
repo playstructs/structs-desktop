@@ -100,9 +100,68 @@
     a.appendChild(t);
     return a;
   }
+  // Resolve an icon name to the right class string: PNG sui-icon-* glyphs need
+  // the `sui-icon` base + a size; structicon `icon-*` glyphs stand alone.
+  function iconClass(name, size) {
+    if (!name) return '';
+    return name.indexOf('sui-icon-') === 0
+      ? 'sui-icon ' + name + ' ' + (size || 'sui-icon-sm')
+      : name;
+  }
+  // ── Native SUI result-row builders (the game's raid-scan / roster idiom) ──
+  // Header-less: each row self-describes via a left identity section and a
+  // right row of `sui-resource` chips (value + icon). No column headers to
+  // misalign; reflows on the narrow board window.
+  function resultTable() { return el('div', 'sui-result-rows sui-result-table'); }
+  // A single value+icon chip. `value` may be a node or string; icon optional.
+  function resource(value, iconName, extraCls) {
+    var d = el('div', 'sui-resource' + (extraCls ? ' ' + extraCls : ''));
+    var v = el('span');
+    if (value && value.nodeType) v.appendChild(value); else v.textContent = value == null ? '' : String(value);
+    d.appendChild(v);
+    if (iconName) d.appendChild(el('i', iconClass(iconName)));
+    return d;
+  }
+  // Build one sui-result-row. opts: { lead?(node, e.g. checkbox), icon?(portrait
+  // glyph), title(str|node), subtitle?(str|node), chips?([node]), action?(node),
+  // onClick? }.
+  function resultRow(opts) {
+    var r = el('div', 'sui-result-row');
+    var left = el('div', 'sui-result-row-left-section');
+    if (opts.lead) left.appendChild(opts.lead);
+    if (opts.icon) {
+      var port = el('div', 'sui-result-row-portrait');
+      var pin = el('div', 'sui-result-row-portrait-icon');
+      pin.appendChild(el('i', iconClass(opts.icon, 'sui-icon-md')));
+      port.appendChild(pin);
+      left.appendChild(port);
+    }
+    var info = el('div', 'sui-result-row-player-info');
+    var lbl = el('div', 'sui-text-label-block');
+    if (opts.title && opts.title.nodeType) lbl.appendChild(opts.title);
+    else lbl.appendChild(document.createTextNode(opts.title == null ? '' : String(opts.title)));
+    if (opts.subtitle != null) {
+      lbl.appendChild(el('br'));
+      var hint = el('span', 'sui-text-hint');
+      if (opts.subtitle.nodeType) hint.appendChild(opts.subtitle); else hint.textContent = String(opts.subtitle);
+      lbl.appendChild(hint);
+    }
+    info.appendChild(lbl);
+    left.appendChild(info);
+    r.appendChild(left);
+    var right = el('div', 'sui-result-row-right-section');
+    var res = el('div', 'sui-result-row-resources');
+    (opts.chips || []).forEach(function (c) { if (c) res.appendChild(c); });
+    right.appendChild(res);
+    if (opts.action) right.appendChild(opts.action);
+    r.appendChild(right);
+    if (opts.onClick) { r.style.cursor = 'pointer'; r.addEventListener('click', opts.onClick); }
+    return r;
+  }
   Board.helpers = {
     esc: esc, el: el, row: row, card: card, badge: badge, battery: battery,
     progressBar: progressBar, fmtNum: fmtNum, ago: ago, alertLine: alertLine,
+    iconClass: iconClass, resultTable: resultTable, resource: resource, resultRow: resultRow,
   };
 
   // ── Router ────────────────────────────────────────────────────────────────

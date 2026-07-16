@@ -14,6 +14,13 @@ fn client() -> &'static Client {
             // of hanging a loop body for the OS socket timeout (or forever).
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(15))
+            // Bound the idle-connection pool. Fleet-wide scans open many short
+            // requests to one host; without a cap the pool retains idle sockets
+            // (memory + fds) and churns more buffers than needed. Cap idle
+            // sockets per host and reap them after 30s idle so resources are
+            // released promptly once a scan wave finishes.
+            .pool_max_idle_per_host(8)
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build HTTP client")
     })
