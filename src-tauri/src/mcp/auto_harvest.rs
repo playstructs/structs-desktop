@@ -24,15 +24,6 @@ use crate::mcp::cosmos_client::CosmosClient;
 const FILENAME: &str = "auto_harvest.json";
 const MINE_TARGET: u64 = 14_000;
 const REFINE_TARGET: u64 = 28_000;
-/// A refine anchor (`blockStartOreRefine`) still set this many blocks after it
-/// began is treated as STALE — a phantom left when the guild struct-list endpoint
-/// broke for ~1.5 days and refines couldn't complete; the committed ore is now
-/// unrecoverable (the chain rejects the completion). A stale anchor must NOT count
-/// as "actively refining", or a mined-out worker DEADLOCKS: it can't mine the empty
-/// planet and the phantom refine blocks the drain-first auto-explore forever. A
-/// genuine difficulty-≤4 refine completes within a single scan (well under 1k
-/// blocks), so 10k is comfortably past any legitimate in-progress refine.
-const STALE_REFINE_BLOCKS: u64 = 10_000;
 const EXTRACTOR_TYPE: &str = "14";
 // Ore Refinery is struct type 15 (verified live: worker refinery entities report
 // `"type": 15, "type_name": "Ore Refinery"`). Was "16", so auto-refine never matched
@@ -214,11 +205,6 @@ async fn scan(
                 // fired, the whole fleet froze). See loop_util::player_struct_ids.
                 let sids = crate::mcp::loop_util::player_struct_ids(&client, &pid).await;
                 let mut extractor_planet: Option<String> = None;
-                // For PRODUCTIVE workers: is the refinery mid-refine (an active cycle OR a
-                // REFINE proof already in flight)? We must NOT explore while refining —
-                // exploring destroys the planetary refinery and would strand the committed
-                // ore. Bait have no refinery, so this stays false for them.
-                let mut refining_active = false;
                 for sid in sids.iter() {
                     // The struct ENTITY is the reliable source for type + location +
                     // online + anchors (the struct-LIST endpoints are unusable, above).
@@ -244,13 +230,9 @@ async fn scan(
                         continue;
                     }
                     // Skip if a task for this struct is already in flight (completed ones
-                    // linger in the registry — those we DO allow to re-issue). A running
-                    // REFINE still counts toward refining_active for the explore gate.
+                    // linger in the registry — those we DO allow to re-issue).
                     if let Some(t) = registry.tasks.get(sid) {
                         if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
-                            if is_refinery {
-                                refining_active = true;
-                            }
                             continue;
                         }
                     }
@@ -266,21 +248,14 @@ async fn scan(
                         continue; // not in a cycle (extractor between mines / refinery idle)
                     }
                     let age = current_block.saturating_sub(anchor);
-                    // Stale refine anchor → treat the refinery as idle: don't set
-                    // refining_active (which would block the drain-first auto-explore of a
-                    // mined-out worker) and don't keep re-issuing a doomed completion. The
-                    // chain allows exploring past it (verified live); the lost ore is gone
-                    // either way. See STALE_REFINE_BLOCKS.
-                    if is_refinery && age >= STALE_REFINE_BLOCKS {
-                        continue;
-                    }
-                    if is_refinery {
-                        // A genuine, RECENT refine cycle is committed — don't explore mid-
-                        // refine (it would destroy the refinery + strand the committed ore);
-                        // `blockStartOreRefine` is set once a refine begins, so the anchor
-                        // is the "has ore" signal.
-                        refining_active = true;
-                    }
+                    // Refines do NOT expire. An aged refine anchor is simply a LOW-difficulty
+                    // (cheap) proof — exactly like an aged mine — so it completes instantly
+                    // and the chain auto-restarts the cycle (resets blockStartOreRefine).
+                    // Verified live: completing a 49k-block-old "stale" refine yielded Alpha
+                    // and reset the anchor. The old STALE_REFINE_BLOCKS guard skipped these as
+                    // "unrecoverable", which silently froze the ENTIRE productive refine leg
+                    // (0 Alpha across 116 workers holding 461 ore). Removed — an old anchor is
+                    // the EASIEST alpha, not a phantom.
                     if !is_ripe(age, target, difficulty_threshold) {
                         continue;
                     }
@@ -328,14 +303,20 @@ async fn scan(
                             Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
                             Err(_) => 1.0, // unknown → don't explore
                         };
-                        // Workers must also be fully drained: no refine in flight AND no
-                        // stored ore left (all converted to Alpha, which survives explore).
+                        // Workers explore only once fully drained: stored ore <= 0 means
+                        // every ore has been refined to Alpha (which survives explore).
+                        // stored_ore already counts ore committed to an active refine cycle,
+                        // so this alone prevents stranding — no separate "mid-refine" flag is
+                        // needed. (That flag plus a residual sliver of un-refined ore was the
+                        // deadlock that pinned mined-out workers: refine couldn't clear the
+                        // ore because its cycle looked "stale", and the leftover ore then
+                        // blocked the explore. With refines completing, the ore drains to 0
+                        // and the worker moves on.)
                         let role_ready = if may_refine {
-                            !refining_active
-                                && match client.query_entity("player", &pid).await {
-                                    Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0,
-                                    Err(_) => false, // unknown → don't explore
-                                }
+                            match client.query_entity("player", &pid).await {
+                                Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0,
+                                Err(_) => false, // unknown → don't explore
+                            }
                         } else {
                             true // bait: no refinery to protect
                         };
