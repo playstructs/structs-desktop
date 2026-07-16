@@ -11,6 +11,20 @@
   var kw = function (mw) { return (mw / 1e6).toFixed(2) + ' kW'; };
   var alpha = function (ualpha) { return H.fmtNum(ualpha / 1e6); };
 
+  // A compact stat tile: the value (optionally + a sui-icon) over a small
+  // uppercase caption. Used in the right-hand section of a fleet row so each
+  // number reads with its label instead of a bare icon.
+  function statTile(label, value, iconName, cls) {
+    var t = H.el('div', 'fstat' + (cls ? ' ' + cls : ''));
+    var v = H.el('div', 'fstat-v');
+    if (value && value.nodeType) v.appendChild(value);
+    else v.appendChild(document.createTextNode(value == null ? '—' : String(value)));
+    if (iconName) v.appendChild(H.el('i', H.iconClass(iconName)));
+    t.appendChild(v);
+    t.appendChild(H.el('div', 'fstat-l', label));
+    return t;
+  }
+
   // ═══════════════════════════ FLEET ═══════════════════════════════════════
   var fleet = {
     rows: [],
@@ -211,35 +225,35 @@
           updateFleetChrome();
         });
       }
-      // Title: name + role badge.
+      // Title: name + role badge (the avatar frame already signals role, the
+      // badge names it in words).
       var title = H.el('span', r.err ? 'err' : null, r.name + ' ');
       title.appendChild(H.badge(r.role === 'productive' ? 'PROD' : r.role === 'primary' ? 'PRIME' : 'BAIT',
         r.role === 'productive' ? 'solid' : r.role === 'primary' ? 'warning' : 'default'));
-      // Subtitle: index · planet (deep-links to Map) · freshness.
+      // Subtitle: PID (the native roster's identity line). Freshness is shown
+      // only when a row needs attention, so the common case stays clean; the
+      // rest (index, planet, last action) lives in the click-through detail.
       var sub = H.el('span');
-      sub.appendChild(document.createTextNode((r.index == null ? 'primary' : 'idx ' + r.index) + ' · '));
-      if (r.planet_id) {
-        var pl = H.el('a', 'ops-refresh-btn', r.planet_id);
-        pl.href = '#/map?p=' + encodeURIComponent(r.player_id);
-        pl.addEventListener('click', function (ev) { ev.stopPropagation(); });
-        sub.appendChild(pl);
-      } else sub.appendChild(document.createTextNode('—'));
-      sub.appendChild(document.createTextNode(' · '));
-      sub.appendChild(H.el('span', fleetAttention(r) ? 'attn' : null, H.ago(r.fetched_at_ms)));
-      // Charge chip: the battery is its own icon, so no extra glyph.
+      sub.appendChild(document.createTextNode('PID #' + r.player_id));
+      if (fleetAttention(r)) {
+        sub.appendChild(document.createTextNode(' · '));
+        sub.appendChild(H.el('span', 'attn', r.err ? 'read failed' : 'idle ' + H.ago(r.fetched_at_ms)));
+      }
+      // Charge: battery + a clear Ready/n so "what is this number" is answered.
       var chargeVal = H.el('span');
       chargeVal.appendChild(H.battery(Math.min(8, r.charge), 8));
-      chargeVal.appendChild(document.createTextNode(' ' + (r.charge >= 8 ? 'RDY' : r.charge)));
+      chargeVal.appendChild(document.createTextNode(' ' + (r.charge >= 8 ? 'Ready' : r.charge)));
       var row = H.resultRow({
         lead: lead,
-        icon: r.role === 'productive' ? 'sui-icon-alpha-matter'
-          : r.role === 'primary' ? 'sui-icon-player-indicator' : 'sui-icon-players',
+        portrait: H.pfpPortrait(r.pfp_attrs),
         title: title,
         subtitle: sub,
+        // Labeled stat tiles — value over a small uppercase caption, so every
+        // number says what it is at a glance.
         chips: [
-          H.resource(chargeVal),
-          H.resource(alpha(r.alpha_ualpha), 'sui-icon-alpha-matter'),
-          H.resource(H.fmtNum(r.ore), 'sui-icon-alpha-ore'),
+          statTile('Charge', chargeVal, null, r.charge >= 8 ? 'ok' : null),
+          statTile('Alpha', alpha(r.alpha_ualpha), 'sui-icon-alpha-matter'),
+          statTile('Ore', H.fmtNum(r.ore), 'sui-icon-alpha-ore'),
         ],
       });
       row.addEventListener('click', function () { showDetail(r); });

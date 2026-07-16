@@ -44,6 +44,10 @@ pub struct RosterRow {
     pub charge: u64,
     pub last_action_block: u64,
     pub fetched_at_ms: f64,
+    /// On-chain `pfpClientRenderAttributes` (a JSON string of layer indices);
+    /// None if the player never set a portrait. The board composes the avatar
+    /// from this — authoritative, so a player's real pfp always wins.
+    pub pfp_attrs: Option<String>,
     /// Read failure: row kept (stale) with the error stamped.
     pub err: Option<String>,
 }
@@ -104,6 +108,7 @@ fn parse_row(
         charge: current_block.saturating_sub(last_action),
         last_action_block: last_action,
         fetched_at_ms: now_ms,
+        pfp_attrs: gets("pfpClientRenderAttributes"),
         err: None,
     }
 }
@@ -254,6 +259,7 @@ async fn run_sweep(app: &tauri::AppHandle) {
                             charge: 0,
                             last_action_block: 0,
                             fetched_at_ms: 0.0,
+                            pfp_attrs: None,
                             err: None,
                         });
                         row.err = Some(e);
@@ -305,7 +311,8 @@ mod tests {
     fn sample_entity() -> Value {
         // Shape mirrors a live LCD player entity: numerics are STRINGS.
         json!({
-            "Player": { "id": "1-283", "planetId": "2-459", "fleetId": "9-283" },
+            "Player": { "id": "1-283", "planetId": "2-459", "fleetId": "9-283",
+                        "pfpClientRenderAttributes": "{\"head\":3,\"neck\":6,\"body\":10,\"arms\":12,\"background\":2}" },
             "gridAttributes": {
                 "ore": "3", "load": "25000", "capacity": "0",
                 "structsLoad": "2500000", "lastAction": "1650000"
@@ -324,6 +331,7 @@ mod tests {
         assert_eq!(row.structs_load, 2_500_000.0);
         assert_eq!(row.charge, 42); // 1650042 - 1650000
         assert_eq!(row.last_action_block, 1_650_000);
+        assert_eq!(row.pfp_attrs.as_deref(), Some("{\"head\":3,\"neck\":6,\"body\":10,\"arms\":12,\"background\":2}"));
         assert!(row.err.is_none());
     }
 

@@ -108,6 +108,35 @@
       ? 'sui-icon ' + name + ' ' + (size || 'sui-icon-sm')
       : name;
   }
+  // Compose the game's 5-layer profile portrait from on-chain attributes
+  // (`{head,neck,body,arms,background}`), painted back-to-front exactly like the
+  // webapp's PfpViewerComponent. Falls back to the placeholder when a player has
+  // no portrait yet. `fallbackIcon` (a sui-icon name) is used only if even the
+  // placeholder is unwanted — normally omit it. Returns a portrait node.
+  var PFP_LAYERS = ['background', 'arms', 'body', 'neck', 'head'];
+  function pfpPortrait(attrsJson) {
+    var box = el('div', 'sui-result-row-portrait');
+    var img = el('div', 'sui-result-row-portrait-image pfp-frame');
+    var pfp = null;
+    if (attrsJson) { try { pfp = JSON.parse(attrsJson); } catch (e) { pfp = null; } }
+    if (pfp && typeof pfp === 'object' && pfp.head != null) {
+      PFP_LAYERS.forEach(function (part) {
+        var idx = pfp[part];
+        if (idx == null) return;
+        var im = el('img', 'pfp-viewer-layer');
+        im.src = 'img/pfp/' + part + '/pfp_' + part + '_' + idx + '.png';
+        im.alt = '';
+        img.appendChild(im);
+      });
+    } else {
+      var ph = el('img', 'pfp-viewer-layer');
+      ph.src = 'img/portrait-placeholder.png';
+      ph.alt = '';
+      img.appendChild(ph);
+    }
+    box.appendChild(img);
+    return box;
+  }
   // ── Native SUI result-row builders (the game's raid-scan / roster idiom) ──
   // Header-less: each row self-describes via a left identity section and a
   // right row of `sui-resource` chips (value + icon). No column headers to
@@ -129,7 +158,11 @@
     var r = el('div', 'sui-result-row');
     var left = el('div', 'sui-result-row-left-section');
     if (opts.lead) left.appendChild(opts.lead);
-    if (opts.icon) {
+    // `portrait` (a prebuilt node, e.g. from pfpPortrait) wins over `icon`
+    // (a sui-icon glyph framed as a portrait).
+    if (opts.portrait) {
+      left.appendChild(opts.portrait);
+    } else if (opts.icon) {
       var port = el('div', 'sui-result-row-portrait');
       var pin = el('div', 'sui-result-row-portrait-icon');
       pin.appendChild(el('i', iconClass(opts.icon, 'sui-icon-md')));
@@ -219,6 +252,7 @@
     progressBar: progressBar, fmtNum: fmtNum, ago: ago, alertLine: alertLine,
     iconClass: iconClass, resultTable: resultTable, resource: resource, resultRow: resultRow,
     sortControl: sortControl, sortBy: sortBy, detailModal: detailModal,
+    pfpPortrait: pfpPortrait,
   };
 
   // ── Router ────────────────────────────────────────────────────────────────

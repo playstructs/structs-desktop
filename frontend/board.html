@@ -79,26 +79,46 @@
        contiguous borders once there are multiple columns). ── */
     #board-layout .sui-result-rows.sui-result-table {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-      gap: 6px;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 8px;
       width: 100%;
       max-height: calc(100vh - 300px);
       overflow-y: auto;
       align-content: start;
     }
+    /* Roomy like the game's own MEMBER ROSTER row — not the old compressed
+       override. Portrait + identity on the left, labeled stats on the right. */
     #board-layout .sui-result-row {
       border: 1px solid var(--border, #345);   /* every cell fully bordered in a grid */
-      padding: 5px 8px; gap: 8px 16px; font-size: 12px; min-width: 0;
+      padding: 9px 12px; gap: 10px; min-width: 0; align-items: center;
     }
-    #board-layout .sui-result-row-left-section { min-width: 0; flex: 1 1 auto; gap: 8px; padding-right: 8px; }
+    #board-layout .sui-result-row-left-section { min-width: 0; flex: 1 1 auto; gap: 10px; padding-right: 8px; align-items: center; }
     #board-layout .sui-result-row-right-section { min-width: 0; flex: 0 1 auto; }
+    /* Profile portrait — 40px framed avatar; the 5 pfp layers stack absolutely
+       and paint back-to-front (crisp pixel art). */
     #board-layout .sui-result-row-portrait,
-    #board-layout .sui-result-row-portrait-icon { width: 24px; height: 24px; flex: none; }
-    #board-layout .sui-result-row-resources { gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    #board-layout .sui-result-row-portrait-icon { width: 40px; height: 40px; flex: none; }
+    #board-layout .sui-result-row-portrait-image {
+      position: relative; width: 40px; height: 40px; overflow: hidden;
+      border: 1px solid var(--border-subtle, #2a3a4d); background: #0b1017;
+    }
+    #board-layout .pfp-viewer-layer {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      image-rendering: pixelated;
+    }
+    #board-layout .sui-result-row-resources { gap: 16px; flex-wrap: wrap; justify-content: flex-end; }
     #board-layout .sui-result-row:hover { background: rgba(120,180,255,.07); }
     /* Values must never break mid-unit ("1062 / 1077 kW" stays on one line). */
     .sui-resource { font-variant-numeric: tabular-nums; white-space: nowrap; }
     .sui-resource span { white-space: nowrap; }
+    /* Labeled stat tile: value over a tiny uppercase caption. */
+    .fstat { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
+    .fstat-v { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+      font-variant-numeric: tabular-nums; font-size: 13px; line-height: 1.1; }
+    .fstat-v i { flex: none; }
+    .fstat-l { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 1;
+      text-transform: uppercase; letter-spacing: .5px; color: var(--text-hint, #6883a0); }
+    .fstat.ok .fstat-v { color: var(--accent-positive, #6ac68a); }
     #board-layout .sui-result-row-player-info,
     #board-layout .sui-text-label-block { min-width: 0; }
     #board-layout .sui-text-label-block { overflow: hidden; text-overflow: ellipsis; }

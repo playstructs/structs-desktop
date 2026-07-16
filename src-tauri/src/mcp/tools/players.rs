@@ -868,6 +868,27 @@ pub async fn execute(
                         });
                         let _ = reg.save();
                     }
+                    // Give the new player its role-themed portrait so it lands
+                    // in the roster already looking like its squad. Best-effort:
+                    // needs the on-chain id (skip if signup is still pending —
+                    // the backfill sweeps it up later), and a failure here must
+                    // not fail the create.
+                    if let Some(pid) = player_id.as_deref() {
+                        let role = params
+                            .role
+                            .as_deref()
+                            .and_then(VPlayerRole::parse)
+                            .unwrap_or_default();
+                        let attrs = crate::mcp::pfp::role_pfp_attrs(role.as_str(), index);
+                        let _ = vplayer_bridge::sign_action(
+                            app_handle,
+                            index,
+                            "/structs.structs.MsgPlayerUpdatePfpClientRenderAttributes",
+                            json!({ "playerId": pid, "pfpClientRenderAttributes": attrs }),
+                            60,
+                        )
+                        .await;
+                    }
                     vec![Content::text(format!(
                         "Virtual player '{}' created at HD index {}.\nAddress: {}\nPlayer id: {}\n{}",
                         name,
@@ -879,6 +900,101 @@ pub async fn execute(
                 }
                 Err(e) => vec![Content::text(format!("Virtual player create failed: {}", e))],
             }
+        }
+
+        "pfp" => {
+            // Backfill role-themed portraits across the whole team. Idempotent
+            // (skips players whose on-chain attrs already match the computed
+            // look) and non-destructive to the PRIMARY (never clobbers a real
+            // portrait the operator chose). Signing self-throttles via the
+            // vplayer bridge's SIGN_GATE + per-account locks.
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
+
+            // (HD index, player_id, role, is_primary)
+            let mut targets: Vec<(u32, String, String, bool)> = Vec::new();
+            {
+                let gs = crate::game_state::GAME_STATE.read().unwrap();
+                if let Some(pid) = gs.player_id.clone().filter(|s| !s.is_empty()) {
+                    targets.push((0, pid, "primary".to_string(), true));
+                }
+            }
+            {
+                let reg = REGISTRY.read().unwrap();
+                for p in &reg.players {
+                    if let Some(pid) = p.player_id.clone() {
+                        targets.push((p.index, pid, p.role.as_str().to_string(), false));
+                    }
+                }
+            }
+            if targets.is_empty() {
+                return vec![Content::text(
+                    "No players with on-chain ids yet — create some first.".to_string(),
+                )];
+            }
+            let total = targets.len();
+            let set = Arc::new(AtomicUsize::new(0));
+            let skipped = Arc::new(AtomicUsize::new(0));
+            let failed = Arc::new(AtomicUsize::new(0));
+            // Read-side handles kept outside the closure (which moves its own clones).
+            let (r_set, r_skipped, r_failed) = (set.clone(), skipped.clone(), failed.clone());
+            let client = client.clone();
+            let app = app_handle.clone();
+            crate::mcp::loop_util::for_each_player_concurrent(
+                targets,
+                crate::mcp::loop_util::effective_max_concurrent(),
+                move |(index, pid, role, is_primary)| {
+                    let client = client.clone();
+                    let app = app.clone();
+                    let (set, skipped, failed) = (set.clone(), skipped.clone(), failed.clone());
+                    async move {
+                        let desired = crate::mcp::pfp::role_pfp_attrs(&role, index);
+                        let current = client
+                            .query_entity("player", &pid)
+                            .await
+                            .ok()
+                            .and_then(|e| {
+                                e.get("Player")
+                                    .and_then(|p| p.get("pfpClientRenderAttributes"))
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from)
+                            })
+                            .filter(|s| !s.is_empty());
+                        // Already correct, or a primary that already has a look → leave it.
+                        if current.as_deref() == Some(desired.as_str())
+                            || (is_primary && current.is_some())
+                        {
+                            skipped.fetch_add(1, Ordering::Relaxed);
+                            return;
+                        }
+                        let res = vplayer_bridge::sign_action(
+                            &app,
+                            index,
+                            "/structs.structs.MsgPlayerUpdatePfpClientRenderAttributes",
+                            json!({ "playerId": pid, "pfpClientRenderAttributes": desired }),
+                            60,
+                        )
+                        .await;
+                        if res.is_ok() {
+                            set.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            failed.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                },
+            )
+            .await;
+            // Refresh the roster snapshot so the board picks up the new avatars.
+            crate::mcp::roster_cache::trigger_sweep(app_handle.clone(), 0.0);
+            vec![Content::text(format!(
+                "Portrait backfill complete — {} set · {} already-current/skipped · {} failed · {} total.\n\
+                 Frames by role: bait → red, productive → blue, primary → starfield. \
+                 Open Team Ops · Fleet to see them.",
+                r_set.load(Ordering::Relaxed),
+                r_skipped.load(Ordering::Relaxed),
+                r_failed.load(Ordering::Relaxed),
+                total,
+            ))]
         }
 
         "state" | "dashboard" => {

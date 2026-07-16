@@ -13,6 +13,7 @@ pub mod guild_power;
 pub mod loop_util;
 pub mod event_buffer;
 pub mod handler;
+pub mod pfp;
 pub mod policy;
 pub mod prompts;
 pub mod resources;
