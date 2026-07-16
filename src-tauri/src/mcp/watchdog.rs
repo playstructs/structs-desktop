@@ -221,8 +221,22 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                         message: format!(
                             "hash task {id} stalled: status running, no progress for {mins} min"
                         ),
-                        remedy: Some(Box::new(move |_| {
-                            handle.cancel.store(true, Ordering::Relaxed);
+                        remedy: Some(Box::new(move |app: &tauri::AppHandle| {
+                            // REMOVE + cancel, not just cancel: a zombie task
+                            // whose worker died (e.g. unclean restart) never
+                            // observes the cancel flag — it would sit in the
+                            // registry as "running" forever and re-trigger
+                            // this finding every cycle (seen live: 238 wedged
+                            // MINE tasks, watchdog "2nd attempt" spam). Same
+                            // remove-first shape as tools/hasher.rs stop_task
+                            // (avoids the DashMap get-then-remove deadlock).
+                            if let Some(reg) = app.try_state::<Arc<TaskRegistry>>() {
+                                if let Some((_, h)) = reg.tasks.remove(&id) {
+                                    h.cancel.store(true, Ordering::SeqCst);
+                                    return format!("removed stalled hash task {id} from the queue");
+                                }
+                            }
+                            handle.cancel.store(true, Ordering::SeqCst);
                             format!("cancelled stalled hash task {id}")
                         })),
                     });
