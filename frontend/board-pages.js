@@ -589,6 +589,143 @@
     if (body) body.insertBefore(H.alertLine(text, 'icon-alert'), body.firstChild);
   }
 
+  // ── Role Appearance (per-role, per-layer pfp config) ──────────────────────
+  // Mirror of Rust pfp.rs so the live preview equals what will be written.
+  function jsFnv(s) { var x = 2166136261; for (var i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 16777619) >>> 0; } return x; }
+  var APPEAR_LAYERS = [
+    { key: 'background', label: 'Background' }, { key: 'body', label: 'Body' },
+    { key: 'head', label: 'Head' }, { key: 'neck', label: 'Neck' }, { key: 'arms', label: 'Arms' },
+  ];
+  // Three stable sample HD indices so "randomize" visibly varies in the preview.
+  var APPEAR_SAMPLES = [7, 34, 58];
+  var appear = { config: null, counts: null, players: null };
+
+  function layerVal(cfg, part, idx, count) {
+    var v = cfg[part];
+    if (v == null) return (jsFnv(idx + ':' + part) % count) + 1;
+    return Math.min(count, Math.max(1, v));
+  }
+  function composeAttrs(cfg, idx) {
+    var c = appear.counts;
+    return JSON.stringify({
+      head: layerVal(cfg, 'head', idx, c.head), neck: layerVal(cfg, 'neck', idx, c.neck),
+      body: layerVal(cfg, 'body', idx, c.body), arms: layerVal(cfg, 'arms', idx, c.arms),
+      background: layerVal(cfg, 'background', idx, c.background),
+    });
+  }
+  // A single-layer thumbnail (over the role's current background for context).
+  function layerThumb(cfg, part, idx) {
+    var box = H.el('div', 'appear-thumb');
+    if (part !== 'background') {
+      var bgIdx = layerVal(cfg, 'background', APPEAR_SAMPLES[0], appear.counts.background);
+      var bg = H.el('img', 'pfp-viewer-layer'); bg.src = 'img/pfp/background/pfp_background_' + bgIdx + '.png'; box.appendChild(bg);
+    }
+    var im = H.el('img', 'pfp-viewer-layer'); im.src = 'img/pfp/' + part + '/pfp_' + part + '_' + idx + '.png'; box.appendChild(im);
+    return box;
+  }
+  // Grid modal to pick a fixed layer index.
+  function pickLayerModal(role, part, count, cfg, onPick) {
+    var grid = H.el('div', 'appear-grid');
+    for (var i = 1; i <= count; i++) {
+      (function (idx) {
+        var cell = H.el('a', 'appear-grid-cell'); cell.href = 'javascript:void(0)';
+        if (cfg[part] === idx) cell.classList.add('sel');
+        cell.appendChild(layerThumb(cfg, part, idx));
+        cell.appendChild(H.el('span', 'appear-grid-n', String(idx)));
+        cell.addEventListener('click', function () { onPick(idx); close(); });
+        grid.appendChild(cell);
+      })(i);
+    }
+    var close = H.detailModal('Pick ' + part + ' — ' + role, grid);
+  }
+
+  function buildRoleCard(role) {
+    var cfg = appear.config[role];
+    var count = appear.players[role] || 0;
+    var body = H.el('div', 'appear-role');
+
+    // Live preview: three sample avatars (identical when all layers fixed).
+    var prev = H.el('div', 'appear-preview');
+    APPEAR_SAMPLES.forEach(function (s) { prev.appendChild(H.pfpPortrait(composeAttrs(cfg, s))); });
+    body.appendChild(prev);
+
+    // Per-layer controls.
+    APPEAR_LAYERS.forEach(function (L) {
+      var cnt = appear.counts[L.key];
+      var isRandom = cfg[L.key] == null;
+      var r = H.el('div', 'appear-layer');
+      r.appendChild(H.el('span', 'appear-layer-name', L.label));
+      var ctl = H.el('div', 'appear-layer-ctl');
+      if (isRandom) {
+        ctl.appendChild(H.el('span', 'ops-muted', 'varies per player'));
+      } else {
+        var idx = Math.min(cnt, Math.max(1, cfg[L.key]));
+        var thumb = layerThumb(cfg, L.key, idx);
+        thumb.classList.add('appear-thumb-btn');
+        thumb.addEventListener('click', function () {
+          pickLayerModal(role, L.key, cnt, cfg, function (v) { cfg[L.key] = v; rerenderRole(role); });
+        });
+        ctl.appendChild(thumb);
+        var step = function (d) { var v = ((idx - 1 + d + cnt) % cnt) + 1; cfg[L.key] = v; rerenderRole(role); };
+        var prevB = H.el('a', 'appear-step'); prevB.href = 'javascript:void(0)'; prevB.appendChild(H.el('i', 'icon-caret-left')); prevB.addEventListener('click', function () { step(-1); });
+        var nextB = H.el('a', 'appear-step'); nextB.href = 'javascript:void(0)'; nextB.appendChild(H.el('i', 'icon-caret-right')); nextB.addEventListener('click', function () { step(1); });
+        ctl.appendChild(prevB);
+        ctl.appendChild(H.el('span', 'appear-idx', '#' + idx + ' / ' + cnt));
+        ctl.appendChild(nextB);
+      }
+      // Fixed/Random toggle.
+      var tog = H.el('a', 'appear-toggle' + (isRandom ? ' is-random' : '')); tog.href = 'javascript:void(0)';
+      tog.textContent = isRandom ? 'Randomized' : 'Fixed';
+      tog.addEventListener('click', function () {
+        cfg[L.key] = isRandom ? layerVal(cfg, L.key, APPEAR_SAMPLES[0], cnt) : null;
+        rerenderRole(role);
+      });
+      ctl.appendChild(tog);
+      r.appendChild(ctl);
+      body.appendChild(r);
+    });
+
+    // Apply — persist + restyle every player in this role.
+    var applyRow = H.el('div', 'cfg-actions');
+    var applyBtn = massBtn('appear-apply-' + role, 'icon-success', 'Apply to all ' + role + ' (' + count + ')', 'sui-mod-primary');
+    applyBtn.addEventListener('click', function () {
+      applyBtn.classList.add('is-busy');
+      Board.T.core.invoke('mcp_role_pfp_set', { role: role, config: cfg }).then(function (r) {
+        applyBtn.classList.remove('is-busy');
+        applyBtn.lastChild.textContent = ' Restyling ' + (r && r.restyling != null ? r.restyling : count) + '…';
+      }).catch(function (e) { applyBtn.classList.remove('is-busy'); alertInto('config-body', 'restyle failed: ' + e); });
+    });
+    applyRow.appendChild(applyBtn);
+    body.appendChild(applyRow);
+
+    return H.card(role.toUpperCase() + ' APPEARANCE', body);
+  }
+
+  function rerenderRole(role) {
+    var host = document.getElementById('appear-' + role);
+    if (!host) return;
+    var fresh = buildRoleCard(role);
+    fresh.id = 'appear-' + role;
+    host.parentNode.replaceChild(fresh, host);
+  }
+
+  function renderRoleAppearance(body) {
+    var host = H.el('div'); host.id = 'appear-host';
+    body.appendChild(host);
+    Board.T.core.invoke('mcp_role_pfp_get').then(function (d) {
+      appear.config = d.config || {}; appear.counts = d.part_counts || {}; appear.players = d.counts || {};
+      host.innerHTML = '';
+      var intro = H.el('div', 'ops-muted');
+      intro.textContent = 'Style each squad. Fixed layers pin the look; randomized layers give every player a unique one. Apply restyles everyone in the role.';
+      host.appendChild(intro);
+      ['productive', 'bait'].forEach(function (role) {
+        if (!appear.config[role]) return;
+        var c = buildRoleCard(role); c.id = 'appear-' + role;
+        host.appendChild(c);
+      });
+    }).catch(function (e) { host.appendChild(H.alertLine('appearance unavailable: ' + e, 'icon-alert')); });
+  }
+
   function renderConfig() {
     return Board.T.core.invoke('mcp_config_bundle').then(function (d) {
       var body = document.getElementById('config-body');
@@ -689,6 +826,8 @@
         });
         body.appendChild(H.card('POLICIES', pbody));
       }
+      // ── Role appearance (per-role avatar config) ──
+      renderRoleAppearance(body);
       Board.stamp('updated ' + new Date().toLocaleTimeString());
     }).catch(function (e) {
       var body = document.getElementById('config-body');

@@ -388,3 +388,107 @@ pub async fn mcp_config_set(
         other => Err(format!("unknown config domain '{other}'")),
     }
 }
+
+// ── ROLE APPEARANCE ────────────────────────────────────────────────────────
+
+const PFP_TYPE_URL: &str = "/structs.structs.MsgPlayerUpdatePfpClientRenderAttributes";
+
+/// Read the per-role appearance config + the picker's layer inventory + how
+/// many players each managed role currently has (for the "Apply to all N" label).
+#[tauri::command]
+pub async fn mcp_role_pfp_get() -> Value {
+    let (mut productive, mut bait) = (0u32, 0u32);
+    {
+        let reg = crate::mcp::virtual_players::REGISTRY
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for p in &reg.players {
+            match p.role.as_str() {
+                "productive" => productive += 1,
+                "bait" => bait += 1,
+                _ => {}
+            }
+        }
+    }
+    json!({
+        "config": crate::mcp::pfp::config_json(),
+        "part_counts": crate::mcp::pfp::part_counts_json(),
+        "counts": { "productive": productive, "bait": bait },
+    })
+}
+
+/// Persist a managed role's appearance, then re-style every player currently in
+/// that role to the new look. Board-guarded; the batch signs in the background
+/// (self-throttled by the vplayer bridge) and reports start/finish to the feed.
+#[tauri::command]
+pub async fn mcp_role_pfp_set(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    role: String,
+    config: Value,
+) -> Result<Value, String> {
+    require_board(&window)?;
+    let role_cfg: crate::mcp::pfp::RolePfp =
+        serde_json::from_value(config).map_err(|e| format!("bad appearance config: {e}"))?;
+    let stored = crate::mcp::pfp::set_role(&role, role_cfg)?;
+
+    // Every player currently in this role gets the new look (explicit restyle —
+    // unlike the passive empty-only self-heal, this intentionally overwrites).
+    let targets: Vec<(u32, String)> = {
+        let reg = crate::mcp::virtual_players::REGISTRY
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        reg.players
+            .iter()
+            .filter(|p| p.role.as_str() == role)
+            .filter_map(|p| p.player_id.clone().map(|pid| (p.index, pid)))
+            .collect()
+    };
+    let n = targets.len();
+    board_feed::push(
+        &app,
+        board_feed::Severity::Notice,
+        "appearance",
+        format!("{role} look updated — restyling {n} player(s)"),
+    );
+
+    let app2 = app.clone();
+    let role2 = role.clone();
+    tauri::async_runtime::spawn(async move {
+        // Clones for the per-player closure; app2/role2 survive for the summary.
+        let (fa, fr) = (app2.clone(), role2.clone());
+        crate::mcp::loop_util::for_each_player_concurrent(
+            targets,
+            crate::mcp::loop_util::effective_max_concurrent(),
+            move |(index, pid)| {
+                let app = fa.clone();
+                let role = fr.clone();
+                async move {
+                    let attrs = crate::mcp::pfp::role_pfp_attrs(&role, index);
+                    let _ = crate::mcp::vplayer_bridge::sign_action(
+                        &app,
+                        index,
+                        PFP_TYPE_URL,
+                        json!({ "playerId": pid, "pfpClientRenderAttributes": attrs }),
+                        60,
+                    )
+                    .await;
+                }
+            },
+        )
+        .await;
+        board_feed::push(
+            &app2,
+            board_feed::Severity::Notice,
+            "appearance",
+            format!("{role2} restyle complete ({n} player(s))"),
+        );
+        roster_cache::trigger_sweep(app2.clone(), 0.0);
+    });
+
+    Ok(json!({
+        "ok": true,
+        "restyling": n,
+        "config": serde_json::to_value(&stored).unwrap_or_else(|_| json!({})),
+    }))
+}

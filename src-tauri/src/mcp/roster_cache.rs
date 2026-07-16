@@ -63,6 +63,44 @@ static ROSTER: LazyLock<RwLock<RosterState>> =
 static SWEEP_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// Background 5-minute refresher — started once, on first window open.
 static BG_LOOP_STARTED: OnceLock<()> = OnceLock::new();
+/// Player ids whose portrait is currently being self-healed — so overlapping
+/// sweeps never sign the same player twice. Cleared when the sign settles.
+static PFP_HEALING: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Fire-and-forget: give a player with no on-chain portrait its role-themed
+/// look. Callers gate on an ABSENT pfp, so this never clobbers a portrait a
+/// player chose, and it converges — once set the player is no longer empty and
+/// is never revisited. De-duped against concurrent sweeps. Signing
+/// self-throttles via the vplayer bridge (SIGN_GATE + per-account locks), so
+/// healing the whole roster at once is safe; a failed sign simply leaves the
+/// player empty to retry on a later sweep.
+///
+/// This is the ONLY avatar-assignment path for existing players — no bespoke
+/// backfill verb. New players get their look at creation (players.rs).
+fn heal_missing_pfp(app: tauri::AppHandle, index: u32, role: String, pid: String) {
+    {
+        let mut inflight = PFP_HEALING.lock().unwrap_or_else(|e| e.into_inner());
+        if !inflight.insert(pid.clone()) {
+            return;
+        }
+    }
+    tauri::async_runtime::spawn(async move {
+        let attrs = crate::mcp::pfp::role_pfp_attrs(&role, index);
+        let _ = crate::mcp::vplayer_bridge::sign_action(
+            &app,
+            index,
+            "/structs.structs.MsgPlayerUpdatePfpClientRenderAttributes",
+            serde_json::json!({ "playerId": pid, "pfpClientRenderAttributes": attrs }),
+            60,
+        )
+        .await;
+        PFP_HEALING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&pid);
+    });
+}
 
 /// Progress event cadence (rows completed between board-roster-progress emits).
 const PROGRESS_EVERY: usize = 10;
@@ -266,6 +304,17 @@ async fn run_sweep(app: &tauri::AppHandle) {
                         row
                     }
                 };
+                // Self-heal a missing portrait: only when the read SUCCEEDED,
+                // the player has no on-chain pfp, and it's a managed vplayer
+                // role (NEVER the primary — the operator owns their own
+                // portrait). Fire-and-forget so the read sweep is never slowed.
+                if row.err.is_none()
+                    && row.index.is_some()
+                    && row.role != "primary"
+                    && row.pfp_attrs.as_deref().map_or(true, |s| s.trim().is_empty())
+                {
+                    heal_missing_pfp(app.clone(), index.unwrap_or(0), row.role.clone(), pid.clone());
+                }
                 upsert(row);
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if n % PROGRESS_EVERY == 0 || n == total {

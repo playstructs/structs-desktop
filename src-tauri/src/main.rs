@@ -62,6 +62,8 @@ fn main() {
             mcp::tools::board_pages::mcp_work,
             mcp::tools::board_pages::mcp_config_bundle,
             mcp::tools::board_pages::mcp_config_set,
+            mcp::tools::board_pages::mcp_role_pfp_get,
+            mcp::tools::board_pages::mcp_role_pfp_set,
             mcp::tools::mass_action::mcp_mass_action,
             mcp::tools::map::mcp_render_map,
             mcp::board_feed::mcp_board_feed,

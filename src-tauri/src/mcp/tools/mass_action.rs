@@ -614,6 +614,7 @@ mod tests {
             charge,
             last_action_block: 0,
             fetched_at_ms: 1.0,
+            pfp_attrs: None,
             err: err.map(String::from),
         }
     }
