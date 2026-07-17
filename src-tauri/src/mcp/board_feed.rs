@@ -147,7 +147,9 @@ fn set_persisted_open(open: bool) {
 pub fn build_board_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
     let window = WebviewWindowBuilder::new(app, "board", WebviewUrl::App("board.html".into()))
         .title("Structs — Team Ops")
-        .inner_size(580.0, 760.0)
+        // Wide enough for the fleet rows (avatar + identity + labeled stats) to
+        // breathe and for the responsive grid to show a second column.
+        .inner_size(774.0, 760.0)
         .build()?;
     // Command Center data spine: kick a roster sweep for the FLEET page (debounced
     // — a reopen within a minute reuses the snapshot) and make sure the 5-minute

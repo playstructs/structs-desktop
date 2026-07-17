@@ -1845,7 +1845,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 }
               }, null, 2) + '\n' +
               '\n' +
-              'Once connected, run the `getting_started` prompt from the structs-game ' +
+              'Once connected, open the Team Ops dashboard right away by calling ' +
+              '`structs_board {open:true}` so I can watch my fleet, power, and work live. ' +
+              'Then run the `getting_started` prompt from the structs-game ' +
               'server and guide me through my first session. If I already have an ' +
               'empire, start with `structs_dashboard` and `structs_system {command:"status"}` instead.';
             onboardEl.addEventListener('click', function() {

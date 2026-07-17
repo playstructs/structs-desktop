@@ -102,10 +102,12 @@
       position: relative; width: 40px; height: 40px; overflow: hidden;
       border: 1px solid var(--border-subtle, #2a3a4d); background: #0b1017;
     }
-    #board-layout .pfp-viewer-layer {
-      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-      image-rendering: pixelated;
-    }
+    /* Let the webapp's own .pfp-viewer-layer rule position the 5 layers (a 72px
+       layer centered, then cropped by the 40px frame — the native
+       head-and-shoulders portrait). Overriding width/left here fights the
+       native translateX and shoves the layer off-frame (black gap). We only
+       make the pixel art crisp. */
+    #board-layout .pfp-viewer-layer { image-rendering: pixelated; }
     #board-layout .sui-result-row-resources { gap: 16px; flex-wrap: wrap; justify-content: flex-end; }
     #board-layout .sui-result-row:hover { background: rgba(120,180,255,.07); }
     /* Values must never break mid-unit ("1062 / 1077 kW" stays on one line). */
