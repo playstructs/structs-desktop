@@ -1,7 +1,10 @@
 {
   "identifier": "default",
   "description": "Default capabilities for Structs App",
-  "windows": ["main"],
+  "windows": [
+    "main",
+    "board"
+  ],
   "permissions": [
     "core:default"
   ]

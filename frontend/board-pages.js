@@ -881,8 +881,34 @@
     refreshGrassCats();
   }
 
+  // Merge a back-fill batch into the live ring (dedupe on ts+category+subject
+  // — receive-time ms is effectively unique per event). Keeps live-only rows
+  // (e.g. block ticks, which are relay-only and never in the Rust buffer).
+  function grassMerge(events) {
+    var seen = {};
+    grassState.rows.forEach(function (ev) { seen[ev.timestamp + '|' + ev.category + '|' + ev.subject] = true; });
+    events.forEach(function (ev) {
+      if (seen[ev.timestamp + '|' + ev.category + '|' + ev.subject]) return;
+      grassState.rows.push(ev);
+      noteGrassCategory(ev.category);
+    });
+    grassState.rows.sort(function (a, b) { return b.timestamp - a.timestamp; });
+    if (grassState.rows.length > GRASS_MAX) grassState.rows.length = GRASS_MAX;
+  }
+
+  function grassBackfill() {
+    return Board.T.core.invoke('mcp_grass_recent', { limit: GRASS_MAX }).then(function (d) {
+      grassMerge((d && d.events) || []);
+      ((d && d.categories) || []).forEach(noteGrassCategory);
+      refreshGrassCats();
+    }).catch(function () {});
+  }
+
   function renderGrass() {
     buildGrassToolbar();
+    // Defensive: the board may have booted before any events existed (its
+    // buffer back-fill was empty) — refresh from the Rust ring on each visit.
+    grassBackfill().then(renderGrassList);
     renderGrassList();
     return Promise.resolve();
   }
@@ -892,15 +918,7 @@
       // Back-fill from the Rust ring buffer, then tail the live relay. The
       // listener lives for the window's lifetime and buffers even while other
       // tabs are showing, so switching to Grass is instant.
-      Board.T.core.invoke('mcp_grass_recent', { limit: GRASS_MAX }).then(function (d) {
-        var evs = (d && d.events) || [];
-        // get_recent returns oldest→newest; we keep newest-first.
-        grassState.rows = evs.slice().reverse().concat(grassState.rows).slice(0, GRASS_MAX);
-        grassState.cats = ((d && d.categories) || []).slice().sort();
-        buildGrassToolbar();
-        refreshGrassCats();
-        renderGrassList();
-      }).catch(function () {});
+      grassBackfill().then(renderGrassList);
       Board.T.event.listen('grass-event', function (e) {
         var ev = e && e.payload;
         if (!ev || !ev.category) return;
