@@ -65,7 +65,12 @@ pub fn get_categories() -> Vec<String> {
 
 #[tauri::command]
 pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<(), String> {
-    push_event(event.clone());
+    // `block` ticks (~every 6s) are RELAY-ONLY: buffered they'd drown the
+    // 1000-entry ring (and every policy/threat scan over it) within the hour,
+    // but the GRASS page wants the heartbeat.
+    if event.category != "block" {
+        push_event(event.clone());
+    }
     // Live-relay to the Team Ops GRASS page when it exists (mirror of the
     // board_feed pattern). Board closing mid-emit is a benign race — the
     // event is already in the ring for the next back-fill.

@@ -725,7 +725,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               // forwarding only `data.detail` dropped it and the MCP feed could
               // never see inventory amounts. Merge top-level extras first, then
               // let the structured `detail` keys win on any conflict.
-              if (window.__TAURI__ && data.category !== 'block') {
+              // `block` ticks are forwarded too — Rust relays them to the GRASS
+              // page as a liveness heartbeat but keeps them out of the MCP buffer.
+              if (window.__TAURI__) {
                 var mergedDetail = {};
                 for (var __k in data) {
                   if (__k !== 'category' && __k !== 'subject' && __k !== 'detail') {
