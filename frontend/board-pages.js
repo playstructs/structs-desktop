@@ -298,9 +298,11 @@
         fleet.lastSweepPlan = r;
         var btn = document.getElementById('sweep-btn');
         if (!btn) return;
+        // Compact: the ambient dry-run detail (who/how many) lives in the plan
+        // echo; the button just needs the action + total so it fits one line.
         var label = sel.length
-          ? 'Sweep ' + r.entries.length + ' of ' + sel.length + ' sel · ~' + H.fmtNum(r.total_alpha) + 'α'
-          : 'Sweep all productive (' + r.entries.length + ') · ~' + H.fmtNum(r.total_alpha) + 'α';
+          ? 'Sweep ' + r.entries.length + ' ~' + H.fmtNum(r.total_alpha) + 'α'
+          : 'Sweep all ~' + H.fmtNum(r.total_alpha) + 'α';
         btn.lastChild.textContent = ' ' + label;
         btn.classList.toggle('sui-mod-disabled', r.entries.length === 0 || fleet.jobRunning);
       }).catch(function () {});
