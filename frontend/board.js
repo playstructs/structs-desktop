@@ -15,7 +15,7 @@
     helpers: {},
   };
 
-  var PAGE_NAMES = ['ops', 'fleet', 'energy', 'work', 'config', 'map'];
+  var PAGE_NAMES = ['ops', 'fleet', 'energy', 'work', 'tx', 'grass', 'config', 'map'];
 
   Board.registerPage = function (name, def) {
     def = def || {};

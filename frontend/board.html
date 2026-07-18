@@ -55,6 +55,22 @@
     .feed-src { opacity: .75; flex: none; }
     .feed-important { color: #ffb454; font-weight: 600; }
     .feed-notice { font-weight: 500; }
+    /* GRASS stream — one generic row style for every message category. */
+    #grass-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+    #grass-toolbar .sui-input-text { min-width: 110px; }
+    #grass-list { list-style: none; margin: 4px 0 0; padding: 0; width: 100%;
+                  max-height: calc(100vh - 190px); overflow-y: auto;
+                  font-family: monospace; font-size: 12px; }
+    #grass-list li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+    .grass-badge { flex: none; padding: 0 6px; border: 1px solid; font-size: 10px;
+                   text-transform: uppercase; letter-spacing: .5px; white-space: nowrap; }
+    .grass-subj { opacity: .7; flex: none; }
+    .grass-chip { white-space: nowrap; opacity: .9; }
+    .grass-chip b { font-weight: 500; opacity: .65; }
+    /* TX queue rows */
+    .tx-btns { display: inline-flex; gap: 6px; align-items: center; }
+    .tx-btns a { padding: 0 5px; cursor: pointer; }
+    .tx-pos { opacity: .55; flex: none; min-width: 18px; text-align: right; }
     /* AGENT UI directives (toasts + prompts) — board-window only. */
     #agent-ui:empty { display: none; }
     .agent-card { border: 1px solid rgba(120,180,255,.45); border-radius: 8px;
@@ -196,6 +212,8 @@
               <a class="sui-screen-nav-item" data-page="fleet" href="#/fleet">Fleet</a>
               <a class="sui-screen-nav-item" data-page="energy" href="#/energy">Energy</a>
               <a class="sui-screen-nav-item" data-page="work" href="#/work">Work</a>
+              <a class="sui-screen-nav-item" data-page="tx" href="#/tx">Tx</a>
+              <a class="sui-screen-nav-item" data-page="grass" href="#/grass">Grass</a>
               <a class="sui-screen-nav-item" data-page="config" href="#/config">Config</a>
               <a class="sui-screen-nav-item" data-page="map" href="#/map">Map</a>
             </div>
@@ -246,6 +264,20 @@
                 <div class="sui-message-inline-alert"><i class="icon-in-progress"></i>
                   <span class="sui-message-inline-alert-text">Work data loading…</span></div>
               </div>
+            </div>
+
+            <!-- ═══ TX (signing queue + team results) ═══ -->
+            <div class="page" id="page-tx" hidden>
+              <div id="tx-body">
+                <div class="sui-message-inline-alert"><i class="icon-in-progress"></i>
+                  <span class="sui-message-inline-alert-text">Transaction queue loading…</span></div>
+              </div>
+            </div>
+
+            <!-- ═══ GRASS (live game-event stream) ═══ -->
+            <div class="page" id="page-grass" hidden>
+              <div id="grass-toolbar"></div>
+              <ul id="grass-list" class="ops-feed"></ul>
             </div>
 
             <!-- ═══ CONFIG ═══ -->

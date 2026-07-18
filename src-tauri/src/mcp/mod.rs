@@ -23,6 +23,7 @@ pub mod telemetry;
 pub mod tools;
 pub mod tx_queue;
 pub mod tx_retry;
+pub mod txq_bridge;
 pub mod watchdog;
 pub mod ui_bridge;
 pub mod virtual_players;

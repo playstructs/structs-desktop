@@ -619,6 +619,40 @@ pub fn loop_health(window_ms: f64) -> Result<Vec<Value>, String> {
 }
 
 /// Per-context tx outcomes over a window plus the most common failure reasons.
+/// Recent tx attempts, newest first — per-row detail (unlike `tx_summary`'s
+/// aggregates). Feeds the board TX page's RECENT RESULTS section; covers the
+/// vplayer fire-and-forget txs that never enter the primary's signing queue.
+pub fn tx_attempts_recent(limit: usize) -> Result<Vec<Value>, String> {
+    let conn = open_read()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT ts_ms, context, action, player_id, attempt, outcome,
+                    tx_hash, code, raw_error, translated, duration_ms
+             FROM tx_attempts ORDER BY id DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([limit.min(200) as i64], |r| {
+            Ok(serde_json::json!({
+                "ts_ms": r.get::<_, f64>(0)?,
+                "context": r.get::<_, String>(1)?,
+                "action": r.get::<_, String>(2)?,
+                "player_id": r.get::<_, Option<String>>(3)?,
+                "attempt": r.get::<_, i64>(4)?,
+                "outcome": r.get::<_, String>(5)?,
+                "tx_hash": r.get::<_, Option<String>>(6)?,
+                "code": r.get::<_, Option<i64>>(7)?,
+                "raw_error": r.get::<_, Option<String>>(8)?,
+                "translated": r.get::<_, Option<String>>(9)?,
+                "duration_ms": r.get::<_, Option<f64>>(10)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 pub fn tx_summary(window_ms: f64) -> Result<Value, String> {
     let conn = open_read()?;
     let since = now_millis() - window_ms;

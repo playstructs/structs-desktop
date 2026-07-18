@@ -470,6 +470,85 @@ VP_EOF
 grep -q "__STRUCTS_VPLAYERS__" "$BUILD_DIR/js/index.js" \
   || { echo "ERROR: vplayers façade patch did not apply"; exit 1; }
 
+echo "    Patching index.js (expose __STRUCTS_TXQ__ signing-queue façade)..."
+# Read/mutate surface over the primary's SigningQueueManager for the Team Ops
+# TX page. Pure in-memory ops — never signs or broadcasts itself. The queue's
+# own mutation API (cancel/reorder/move, "no player UI yet") does the work.
+cat >> "$BUILD_DIR/js/index.js" <<'TXQ_EOF'
+
+// [structs-universe patch] Signing-queue façade (Team Ops TX page).
+try {
+  // Serialize one SigningTransaction to safe plain JSON: payloads are
+  // truncated to a preview and rawLog is dropped entirely (telemetry already
+  // holds the translated error) so big messages never cross the bridge.
+  const __txJson = (tx) => {
+    if (!tx) return null;
+    let preview = '';
+    let truncated = false;
+    try {
+      preview = JSON.stringify(tx.message && tx.message.payload) || '';
+      if (preview.length > 240) { preview = preview.slice(0, 240); truncated = true; }
+    } catch (e) { preview = '(unserializable)'; }
+    const typeUrl = (tx.message && tx.message.typeUrl) || '';
+    return {
+      id: tx.id,
+      type_url: typeUrl,
+      type_short: typeUrl.replace(/^.*Msg/, ''),
+      payload_preview: preview,
+      payload_truncated: truncated,
+      is_action: !!tx.isAction,
+      charge_cost: tx.chargeCost || 0,
+      status: tx.status,
+      created_at: tx.createdAt,
+      enqueued_at_block: tx.enqueuedAtBlock,
+      broadcast_at_block: tx.broadcastAtBlock,
+      attempts: tx.attempts || 0,
+      retry_limit: tx.retryLimit,
+      response: tx.response ? {
+        code: tx.response.code,
+        transactionHash: tx.response.transactionHash,
+        height: tx.response.height,
+      } : null,
+      error: tx.error ? String(tx.error).slice(0, 300) : null,
+    };
+  };
+  window.__STRUCTS_TXQ__ = {
+    snapshot() {
+      const q = signingClientManager.queue;
+      if (!q) throw new Error('signing queue not initialized (not signed in yet)');
+      const etas = {};
+      const percents = {};
+      try { q.estimateScheduleTime().forEach((e) => { etas[e.id] = e; }); } catch (e) {}
+      try { q.estimateSchedulePercent().forEach((p) => { percents[p.id] = p.percent; }); } catch (e) {}
+      return {
+        block_height: gameState.currentBlockHeight,
+        avg_block_ms: q.getAvgBlockMs(),
+        in_flight: __txJson(q.inFlight),
+        action_queue: (q.actionQueue || []).map(__txJson),
+        immediate_queue: (q.immediateQueue || []).map(__txJson),
+        etas: etas,
+        percents: percents,
+      };
+    },
+    // Thin dispatch to the queue's existing mutation API. All ops return a
+    // boolean (in-flight cancel returns false — surfaced, not thrown). A fresh
+    // snapshot rides back so the board repaints in one round-trip.
+    mutate(op, id, newIndex) {
+      let ok = false;
+      if (op === 'cancel') ok = signingClientManager.cancelQueueItem(id);
+      else if (op === 'move_up') ok = signingClientManager.moveActionItemUp(id);
+      else if (op === 'move_down') ok = signingClientManager.moveActionItemDown(id);
+      else if (op === 'reorder') ok = signingClientManager.reorderActionQueue(id, newIndex);
+      else throw new Error('unknown txq op ' + op);
+      return { ok: !!ok, snapshot: this.snapshot() };
+    },
+  };
+  console.info('[structs-universe] __STRUCTS_TXQ__ ready');
+} catch (e) { console.warn('[structs-universe] txq façade failed', e); }
+TXQ_EOF
+grep -q "__STRUCTS_TXQ__" "$BUILD_DIR/js/index.js" \
+  || { echo "ERROR: txq façade patch did not apply"; exit 1; }
+
 # Clean up .bak files
 find "$BUILD_DIR" -name "*.bak" -delete
 

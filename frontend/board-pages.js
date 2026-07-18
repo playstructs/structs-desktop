@@ -580,6 +580,341 @@
   }
   Board.registerPage('work', { refresh: renderWork, cadenceMs: 5000, onEnter: renderWork });
 
+  // ═══════════════════════════ TX ═══════════════════════════════════════════
+  // The primary's live signing queue (via the txq bridge) + the whole team's
+  // recent tx results (telemetry). The queue emits no non-terminal events, so
+  // this page polls; `refreshing` stops calls from stacking on a slow bridge.
+  var txState = { data: null, notice: null, refreshing: false };
+
+  function txMutate(op, id) {
+    Board.T.core.invoke('mcp_tx_mutate', { op: op, id: id, newIndex: null }).then(function (r) {
+      if (r && r.ok === false) {
+        txState.notice = 'refused — item is in flight or already gone';
+      } else {
+        txState.notice = null;
+      }
+      if (r && r.snapshot && txState.data) {
+        txState.data.queue = r.snapshot;
+        txState.data.queue_error = null;
+      }
+      renderTxBody();
+    }).catch(function (e) {
+      txState.notice = 'action failed: ' + e;
+      renderTxBody();
+    });
+  }
+
+  // One queue row: identity on the left, ETA/progress/controls on the right.
+  function txRow(t, pos, total, etas, percents, withOrder) {
+    var r = H.el('div', 'sui-data-card-row');
+    var left = H.el('span');
+    if (pos != null) left.appendChild(H.el('span', 'tx-pos', pos + '.'));
+    left.appendChild(document.createTextNode(' ' + (t.type_short || t.type_url || '?')));
+    if (t.charge_cost > 0) left.appendChild(H.el('span', 'ops-muted', ' ⚡' + t.charge_cost));
+    if (t.attempts > 0) {
+      left.appendChild(H.el('span', 'attn', ' try ' + t.attempts + (t.retry_limit > 0 ? '/' + t.retry_limit : '')));
+    }
+    var right = H.el('span', 'ops-val');
+    var eta = etas && etas[t.id];
+    if (eta && eta.blocksRemaining != null) {
+      right.appendChild(H.el('span', 'ops-muted', eta.blocksRemaining + ' blk · ~' +
+        Math.max(0, Math.round((eta.etaMs || 0) / 1000)) + 's '));
+    }
+    if (percents && percents[t.id] != null) {
+      var bar = H.progressBar((percents[t.id] || 0) / 100);
+      bar.style.width = '52px'; bar.style.display = 'inline-block';
+      right.appendChild(bar);
+    }
+    var btns = H.el('span', 'tx-btns');
+    function ctl(iconCls, title, op, hidden) {
+      if (hidden) return;
+      var a = H.el('a', 'ops-refresh-btn'); a.href = 'javascript:void(0)'; a.title = title;
+      a.appendChild(H.el('i', iconCls));
+      a.addEventListener('click', function (ev) { ev.stopPropagation(); txMutate(op, t.id); });
+      btns.appendChild(a);
+    }
+    if (withOrder) {
+      ctl('icon-caret-up', 'Move up', 'move_up', pos === 1);
+      ctl('icon-caret-down', 'Move down', 'move_down', pos === total);
+    }
+    ctl('icon-close', 'Cancel', 'cancel', false);
+    right.appendChild(btns);
+    r.appendChild(left);
+    r.appendChild(right);
+    return r;
+  }
+
+  function renderTxBody() {
+    var d = txState.data; if (!d) return;
+    var body = document.getElementById('tx-body');
+    body.innerHTML = '';
+    if (txState.notice) body.appendChild(H.alertLine(txState.notice, 'icon-alert'));
+    var q = d.queue;
+    if (!q) {
+      body.appendChild(H.alertLine('signing queue unavailable — sign in on the game window' +
+        (d.queue_error ? ' (' + d.queue_error + ')' : ''), 'icon-alert'));
+    } else {
+      // IN FLIGHT
+      var fbody = H.el('div');
+      if (q.in_flight) {
+        fbody.appendChild(txRow(q.in_flight, null, 0, null, null, false));
+        // No controls make sense here: the queue refuses in-flight mutation.
+        var ifBtns = fbody.lastChild.querySelector('.tx-btns');
+        if (ifBtns) ifBtns.remove();
+      } else {
+        fbody.appendChild(H.el('div', 'ops-muted', 'nothing broadcasting'));
+      }
+      body.appendChild(H.card('IN FLIGHT', fbody));
+
+      // ACTION QUEUE (ordered, charge-gated)
+      var abody = H.el('div');
+      var aq = q.action_queue || [];
+      if (aq.length) {
+        aq.forEach(function (t, i) {
+          abody.appendChild(txRow(t, i + 1, aq.length, q.etas, q.percents, true));
+        });
+      } else {
+        abody.appendChild(H.el('div', 'ops-muted', 'no queued actions'));
+      }
+      body.appendChild(H.card('ACTION QUEUE — PRIMARY (' + aq.length + ')', abody));
+
+      // IMMEDIATE QUEUE (FIFO)
+      var iq = q.immediate_queue || [];
+      if (iq.length) {
+        var ibody = H.el('div');
+        iq.forEach(function (t) { ibody.appendChild(txRow(t, null, 0, null, null, false)); });
+        body.appendChild(H.card('IMMEDIATE QUEUE — PRIMARY (' + iq.length + ')', ibody));
+      }
+    }
+
+    // RECENT RESULTS (whole team, telemetry)
+    var hist = d.history || [];
+    var hbody = H.el('div');
+    if (d.history_error) {
+      hbody.appendChild(H.el('div', 'ops-muted', 'history unavailable: ' + d.history_error));
+    } else if (!hist.length) {
+      hbody.appendChild(H.el('div', 'ops-muted', 'no recent transactions'));
+    } else {
+      hist.forEach(function (h) {
+        var r = H.el('div', 'sui-data-card-row');
+        var left = H.el('span');
+        var ok = h.outcome === 'success';
+        left.appendChild(H.badge(h.outcome.replace('_', ' ').toUpperCase(),
+          ok ? 'solid' : h.outcome === 'skipped' ? 'default' : 'warning'));
+        left.appendChild(document.createTextNode(' ' + (h.action || '').replace(/^.*Msg/, '') +
+          ' · ' + (h.player_id || h.context || '?')));
+        var right = H.el('span', 'ops-val');
+        var note = ok
+          ? (h.tx_hash ? String(h.tx_hash).slice(0, 10) + '…' : 'ok')
+          : String(h.translated || h.raw_error || '').slice(0, 80);
+        right.appendChild(H.el('span', ok ? 'ops-muted' : 'attn', note + ' · ' + H.ago(h.ts_ms)));
+        r.appendChild(left); r.appendChild(right);
+        hbody.appendChild(r);
+      });
+    }
+    body.appendChild(H.card('RECENT RESULTS — WHOLE TEAM (14d)', hbody));
+    Board.stamp('updated ' + new Date().toLocaleTimeString());
+  }
+
+  function renderTx() {
+    if (txState.refreshing) return Promise.resolve();
+    txState.refreshing = true;
+    return Board.T.core.invoke('mcp_tx_snapshot').then(function (d) {
+      txState.data = d;
+      // A fresh good poll clears a stale refusal notice.
+      if (d && d.queue && txState.notice && txState.notice.indexOf('refused') === 0) txState.notice = null;
+      renderTxBody();
+    }).catch(function (e) {
+      var body = document.getElementById('tx-body');
+      body.innerHTML = '';
+      body.appendChild(H.alertLine('tx data unavailable: ' + e, 'icon-alert'));
+    }).then(function () { txState.refreshing = false; });
+  }
+  Board.registerPage('tx', { refresh: renderTx, cadenceMs: 2500, onEnter: renderTx });
+
+  // ═══════════════════════════ GRASS ════════════════════════════════════════
+  // Live tail of the full game-event stream. ONE generic renderer for every
+  // category — no per-message-type UI. Events arrive via the Rust relay
+  // ('grass-event'); a back-fill seeds from the event ring buffer.
+  var grassState = { rows: [], paused: false, cat: '', text: '', cats: [], built: false, renderQueued: false };
+  var GRASS_MAX = 200;
+
+  function grassHue(cat) {
+    var h = 0;
+    for (var i = 0; i < cat.length; i++) h = ((h * 31) + cat.charCodeAt(i)) >>> 0;
+    return h % 360;
+  }
+
+  function grassChip(k, v) {
+    var c = H.el('span', 'grass-chip');
+    var b = H.el('b', null, k + ': ');
+    c.appendChild(b);
+    var text;
+    if (typeof v === 'number') text = H.fmtNum(v);
+    else if (v && typeof v === 'object') { try { text = JSON.stringify(v).slice(0, 60); } catch (e) { text = '…'; } }
+    else text = String(v);
+    c.appendChild(document.createTextNode(text));
+    return c;
+  }
+
+  // The one algorithm: time · colored category badge · compact subject ·
+  // detail flattened to k:v chips, with `x`+`x_old` pairs folded to old→new.
+  function grassRow(ev) {
+    var li = H.el('li');
+    // timestamp is local receive-time (the stream carries none on the wire)
+    li.appendChild(H.el('span', 'feed-ts', new Date(ev.timestamp).toLocaleTimeString()));
+    var badge = H.el('span', 'grass-badge', ev.category);
+    var hue = grassHue(ev.category);
+    badge.style.color = 'hsl(' + hue + ',60%,60%)';
+    badge.style.borderColor = 'hsl(' + hue + ',60%,40%)';
+    li.appendChild(badge);
+    li.appendChild(H.el('span', 'grass-subj', String(ev.subject || '').replace(/^structs\./, '')));
+    var det = ev.detail;
+    if (det == null || typeof det !== 'object') {
+      if (det != null && det !== '') li.appendChild(grassChip('value', det));
+      return li;
+    }
+    var keys = Object.keys(det);
+    var keySet = {};
+    keys.forEach(function (k) { keySet[k] = true; });
+    keys.forEach(function (k) {
+      var v = det[k];
+      if (v == null || v === '') return;
+      if (/_old$/.test(k) && keySet[k.replace(/_old$/, '')] != null && det[k.replace(/_old$/, '')] != null) {
+        return; // folded into the new-value chip below
+      }
+      if (keySet[k + '_old'] && det[k + '_old'] != null) {
+        var oldV = det[k + '_old'];
+        var c = H.el('span', 'grass-chip');
+        c.appendChild(H.el('b', null, k + ': '));
+        c.appendChild(document.createTextNode(
+          (typeof oldV === 'number' ? H.fmtNum(oldV) : String(oldV)) + ' → ' +
+          (typeof v === 'number' ? H.fmtNum(v) : String(v))));
+        li.appendChild(c);
+        return;
+      }
+      li.appendChild(grassChip(k, v));
+    });
+    return li;
+  }
+
+  function grassMatches(ev) {
+    if (grassState.cat && ev.category !== grassState.cat) return false;
+    if (grassState.text) {
+      var hay = (ev.category + ' ' + ev.subject + ' ' + JSON.stringify(ev.detail || '')).toLowerCase();
+      if (hay.indexOf(grassState.text.toLowerCase()) < 0) return false;
+    }
+    return true;
+  }
+
+  function renderGrassList() {
+    var list = document.getElementById('grass-list');
+    if (!list) return;
+    list.innerHTML = '';
+    var shown = 0;
+    for (var i = 0; i < grassState.rows.length; i++) {
+      var ev = grassState.rows[i];
+      if (!grassMatches(ev)) continue;
+      list.appendChild(grassRow(ev));
+      shown++;
+    }
+    if (!shown) {
+      var empty = H.el('li', 'ops-muted', grassState.rows.length
+        ? 'no events match the filter'
+        : 'no events yet — they appear as the game plays');
+      list.appendChild(empty);
+    }
+    var count = document.getElementById('grass-count');
+    if (count) count.textContent = shown + ' / ' + grassState.rows.length;
+  }
+
+  // Debounced render: live events always BUFFER (cheap array ops); the DOM is
+  // only touched when the grass tab is showing and not paused.
+  function queueGrassRender() {
+    if (Board.current !== 'grass' || grassState.paused || grassState.renderQueued) return;
+    grassState.renderQueued = true;
+    setTimeout(function () {
+      grassState.renderQueued = false;
+      renderGrassList();
+    }, 250);
+  }
+
+  function buildGrassToolbar() {
+    var bar = document.getElementById('grass-toolbar');
+    if (!bar || grassState.built) return;
+    grassState.built = true;
+    var catSel = H.el('select', 'sui-input-text'); catSel.id = 'grass-cat';
+    catSel.addEventListener('change', function () { grassState.cat = catSel.value; renderGrassList(); });
+    bar.appendChild(catSel);
+    var search = H.el('input', 'sui-input-text'); search.placeholder = 'filter…';
+    search.addEventListener('input', function () { grassState.text = search.value; renderGrassList(); });
+    bar.appendChild(search);
+    var pause = H.el('a', 'ops-refresh-btn'); pause.href = 'javascript:void(0)'; pause.id = 'grass-pause';
+    pause.textContent = 'Pause';
+    pause.addEventListener('click', function () {
+      grassState.paused = !grassState.paused;
+      pause.textContent = grassState.paused ? 'Resume' : 'Pause';
+      if (!grassState.paused) renderGrassList();
+    });
+    bar.appendChild(pause);
+    bar.appendChild(H.el('span', 'ops-muted')).id = 'grass-count';
+  }
+
+  function refreshGrassCats() {
+    var catSel = document.getElementById('grass-cat');
+    if (!catSel) return;
+    var cur = grassState.cat;
+    catSel.innerHTML = '';
+    var all = H.el('option', null, 'all categories'); all.value = '';
+    catSel.appendChild(all);
+    grassState.cats.forEach(function (c) {
+      var o = H.el('option', null, c); o.value = c;
+      if (c === cur) o.selected = true;
+      catSel.appendChild(o);
+    });
+  }
+
+  function noteGrassCategory(cat) {
+    if (grassState.cats.indexOf(cat) >= 0) return;
+    grassState.cats.push(cat);
+    grassState.cats.sort();
+    refreshGrassCats();
+  }
+
+  function renderGrass() {
+    buildGrassToolbar();
+    renderGrassList();
+    return Promise.resolve();
+  }
+
+  Board.registerPage('grass', {
+    onBoot: function () {
+      // Back-fill from the Rust ring buffer, then tail the live relay. The
+      // listener lives for the window's lifetime and buffers even while other
+      // tabs are showing, so switching to Grass is instant.
+      Board.T.core.invoke('mcp_grass_recent', { limit: GRASS_MAX }).then(function (d) {
+        var evs = (d && d.events) || [];
+        // get_recent returns oldest→newest; we keep newest-first.
+        grassState.rows = evs.slice().reverse().concat(grassState.rows).slice(0, GRASS_MAX);
+        grassState.cats = ((d && d.categories) || []).slice().sort();
+        buildGrassToolbar();
+        refreshGrassCats();
+        renderGrassList();
+      }).catch(function () {});
+      Board.T.event.listen('grass-event', function (e) {
+        var ev = e && e.payload;
+        if (!ev || !ev.category) return;
+        grassState.rows.unshift(ev);
+        if (grassState.rows.length > GRASS_MAX) grassState.rows.length = GRASS_MAX;
+        noteGrassCategory(ev.category);
+        queueGrassRender();
+      });
+    },
+    onEnter: renderGrass,
+    refresh: renderGrass,
+    cadenceMs: 60000,
+  });
+
   // ═══════════════════════════ CONFIG ═══════════════════════════════════════
   function cfgSet(domain, payload) {
     return Board.T.core.invoke('mcp_config_set', { domain: domain, payload: payload })

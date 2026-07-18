@@ -61,10 +61,28 @@ pub fn get_categories() -> Vec<String> {
     cats
 }
 
-// ── Tauri Command ──
+// ── Tauri Commands ──
 
 #[tauri::command]
-pub async fn push_game_event(event: GameEvent) -> Result<(), String> {
-    push_event(event);
+pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<(), String> {
+    push_event(event.clone());
+    // Live-relay to the Team Ops GRASS page when it exists (mirror of the
+    // board_feed pattern). Board closing mid-emit is a benign race — the
+    // event is already in the ring for the next back-fill.
+    use tauri::{Emitter, Manager};
+    if app.get_webview_window("board").is_some() {
+        let _ = app.emit_to("board", "grass-event", &event);
+    }
     Ok(())
+}
+
+/// Back-fill for the board GRASS page: newest events (oldest→newest order for
+/// direct newest-first insertion client-side) plus the distinct-category list
+/// for the filter dropdown. Read-only — unguarded, like the other board reads.
+#[tauri::command]
+pub fn mcp_grass_recent(limit: Option<usize>, category: Option<String>) -> serde_json::Value {
+    serde_json::json!({
+        "events": get_recent(limit.unwrap_or(200).min(MAX_EVENTS), category.as_deref(), None),
+        "categories": get_categories(),
+    })
 }

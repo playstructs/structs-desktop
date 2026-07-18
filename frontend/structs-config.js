@@ -1385,6 +1385,39 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     console.info('[Structs] virtual-players bridge enabled');
   })();
 
+  // ── Signing-queue bridge (Team Ops TX page) ──
+  // Same round-trip shape as the vplayer bridge: Rust emits structs:txq-request,
+  // we dispatch to the injected __STRUCTS_TXQ__ façade (snapshot/mutate over the
+  // primary's SigningQueueManager) and reply via txq_response.
+  (function setupTxqBridge() {
+    if (!window.__TAURI__ || !window.__TAURI__.event) return;
+    window.__TAURI__.event.listen('structs:txq-request', function (event) {
+      var req = event.payload || {};
+      var reqId = req.req_id;
+      var op = req.op;
+      var args = req.args || {};
+      function respond(success, data, error) {
+        window.__TAURI__.core.invoke('txq_response', {
+          response: { req_id: reqId, success: success, data: data || {}, error: error || null }
+        }).catch(function (e) { console.warn('[TXQ] response failed', e); });
+      }
+      try {
+        var txq = window.__STRUCTS_TXQ__;
+        if (!txq) { respond(false, {}, 'tx-queue façade unavailable (not signed in / patch not built)'); return; }
+        var data;
+        switch (op) {
+          case 'snapshot': data = txq.snapshot(); break;
+          case 'mutate': data = txq.mutate(args.op, args.id, args.new_index); break;
+          default: respond(false, {}, 'unknown txq op: ' + op); return;
+        }
+        respond(true, data, null);
+      } catch (e) {
+        respond(false, {}, String((e && e.message) || e));
+      }
+    });
+    console.info('[Structs] signing-queue bridge enabled');
+  })();
+
   // ── UI Reactivity Driver ──
   // The webapp's HUD + own-planet map already live-update via grass listeners,
   // but OPEN MENU CONTENT pages are static snapshots (rendered once on navigation).

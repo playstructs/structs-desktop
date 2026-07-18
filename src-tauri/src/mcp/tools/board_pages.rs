@@ -492,3 +492,73 @@ pub async fn mcp_role_pfp_set(
         "config": serde_json::to_value(&stored).unwrap_or_else(|_| json!({})),
     }))
 }
+
+// ── TX (signing-queue lifecycle + team tx history) ──────────────────────────
+
+/// Read the primary's live signing queue (via the txq bridge to the main
+/// webview) plus the whole team's recent tx attempts (telemetry). Read-only —
+/// unguarded, like the other board reads. Each half degrades independently:
+/// a signed-out webview still leaves history working, and vice versa.
+#[tauri::command]
+pub async fn mcp_tx_snapshot(app: tauri::AppHandle) -> Value {
+    let (queue, queue_error) =
+        match crate::mcp::txq_bridge::call(&app, "snapshot", json!({}), 10).await {
+            Ok(v) => (v, Value::Null),
+            Err(e) => (Value::Null, json!(e)),
+        };
+    let (history, history_error) = match tokio::task::spawn_blocking(|| {
+        crate::mcp::telemetry::tx_attempts_recent(50)
+    })
+    .await
+    {
+        Ok(Ok(rows)) => (json!(rows), Value::Null),
+        Ok(Err(e)) => (json!([]), json!(e)),
+        Err(e) => (json!([]), json!(format!("history query panicked: {e}"))),
+    };
+    json!({
+        "queue": queue,
+        "queue_error": queue_error,
+        "history": history,
+        "history_error": history_error,
+    })
+}
+
+/// Mutate the primary's signing queue: cancel / move_up / move_down / reorder.
+/// Board-guarded — this is the write path. Delegates to the queue's own
+/// mutation API (which refuses in-flight items by returning ok:false).
+#[tauri::command]
+pub async fn mcp_tx_mutate(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    op: String,
+    id: String,
+    new_index: Option<i64>,
+) -> Result<Value, String> {
+    require_board(&window)?;
+    match op.as_str() {
+        "cancel" | "move_up" | "move_down" => {}
+        "reorder" => {
+            if new_index.is_none() {
+                return Err("reorder requires new_index".into());
+            }
+        }
+        other => return Err(format!("unknown tx op '{other}'")),
+    }
+    let result = crate::mcp::txq_bridge::call(
+        &app,
+        "mutate",
+        json!({ "op": op, "id": id, "new_index": new_index }),
+        10,
+    )
+    .await?;
+    if op == "cancel" && result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let short: String = id.chars().take(8).collect();
+        board_feed::push(
+            &app,
+            board_feed::Severity::Info,
+            "txq",
+            format!("cancelled queued tx {short}…"),
+        );
+    }
+    Ok(result)
+}
