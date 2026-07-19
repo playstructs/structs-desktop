@@ -1181,6 +1181,39 @@
         });
         body.appendChild(H.card('POLICIES', pbody));
       }
+      // ── Web dashboard (opt-in remote access) ──
+      var wb = d.web_board || {};
+      var wbody = H.el('div');
+      var wrow = H.el('div', 'cfg-row');
+      var wlbl = H.el('label');
+      var wcb = H.el('input'); wcb.type = 'checkbox'; wcb.checked = !!wb.enabled;
+      wcb.addEventListener('change', function () {
+        cfgSet('web_board', { enabled: wcb.checked });
+      });
+      wlbl.appendChild(wcb);
+      wlbl.appendChild(document.createTextNode(' serve this dashboard as a web page'));
+      wrow.appendChild(wlbl);
+      wbody.appendChild(wrow);
+      if (wb.enabled && wb.url) {
+        var urow = H.el('div', 'cfg-row');
+        var ulink = H.el('a', 'ops-refresh-btn', wb.url);
+        ulink.href = 'javascript:void(0)';
+        ulink.title = 'Copy URL — anyone holding it has FULL operator control';
+        ulink.addEventListener('click', function () {
+          try { navigator.clipboard.writeText(wb.url); } catch (e) {}
+          ulink.textContent = 'Copied!';
+          setTimeout(function () { ulink.textContent = wb.url; }, 1000);
+        });
+        urow.appendChild(ulink);
+        wbody.appendChild(urow);
+        wbody.appendChild(H.el('div', 'ops-muted',
+          'Token grants full control — treat like a password. Server binds 127.0.0.1; remote players connect through your tunnel (SSH/Tailscale).'));
+      } else {
+        wbody.appendChild(H.el('div', 'ops-muted',
+          'Off by default. When enabled, this exact dashboard is served at /board on the MCP port, authenticated by the bearer token.'));
+      }
+      body.appendChild(H.card('WEB DASHBOARD', wbody));
+
       // ── Role appearance (per-role avatar config) ──
       renderRoleAppearance(body);
       Board.stamp('updated ' + new Date().toLocaleTimeString());

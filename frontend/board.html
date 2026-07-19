@@ -307,6 +307,9 @@
       <div class="sui-panel-edge-right"></div>
     </div>
   </div>
+  <!-- Web shim FIRST: fakes __TAURI__ over HTTP/SSE when served as a web page;
+       no-ops inside the native Tauri window. -->
+  <script src="board-shim.js"></script>
   <script src="board.js"></script>
   <script src="board-pages.js"></script>
 </body>

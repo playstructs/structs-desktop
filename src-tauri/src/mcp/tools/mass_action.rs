@@ -66,6 +66,17 @@ pub async fn mcp_mass_action(
     request: MassActionRequest,
 ) -> Result<Value, String> {
     require_board(&window)?;
+    mcp_mass_action_impl(app, request).await
+}
+
+/// Body of `mcp_mass_action` — native path enters via the require_board
+/// wrapper; the token-authenticated web dashboard calls this directly. The
+/// JOB_RUNNING single-job gate and all audit/ledger lines live in the per-
+/// action fns, shared by both paths.
+pub async fn mcp_mass_action_impl(
+    app: tauri::AppHandle,
+    request: MassActionRequest,
+) -> Result<Value, String> {
     match request.action.as_str() {
         "sweep_alpha" => sweep_alpha(app, request).await,
         "launch_players" => launch_players(app, request).await,

@@ -81,9 +81,7 @@ pub fn push(app: &tauri::AppHandle, severity: Severity, source: &str, message: i
     }
     // emit_to (not emit): Tauri v2 `emit` broadcasts to every window; target the
     // board explicitly so this never reaches the main game window.
-    if app.get_webview_window("board").is_some() {
-        let _ = app.emit_to("board", "board-feed", &entry);
-    }
+    crate::mcp::web_board::emit_board(app, "board-feed", &entry);
 }
 
 /// Set true when the app is shutting down (from `RunEvent::ExitRequested`) so

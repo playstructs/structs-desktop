@@ -36,6 +36,7 @@ rmcp = { version = "0.15", features = ["server", "macros", "transport-streamable
 # Operational telemetry: persistent event/liveness/tx/pow store (state.db)
 rusqlite = { version = "0.32", features = ["bundled"] }
 axum08 = { package = "axum", version = "0.8" }
+tokio-stream = { version = "0.1", features = ["sync"] }
 schemars = "1"
 uuid = { version = "1", features = ["v4"] }
 tower = "0.5"

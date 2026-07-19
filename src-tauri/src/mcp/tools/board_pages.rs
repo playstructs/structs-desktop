@@ -153,6 +153,11 @@ pub async fn mcp_energy() -> Result<Value, String> {
 /// reads run on the blocking pool (SQLite).
 #[tauri::command]
 pub async fn mcp_work(registry: tauri::State<'_, Arc<TaskRegistry>>) -> Result<Value, String> {
+    mcp_work_impl(registry.inner()).await
+}
+
+/// Body of `mcp_work`, callable without Tauri state (web dashboard path).
+pub async fn mcp_work_impl(registry: &Arc<TaskRegistry>) -> Result<Value, String> {
     let mut tasks: Vec<Value> = Vec::new();
     let mut running = 0usize;
     let mut waiting = 0usize;
@@ -220,6 +225,12 @@ pub async fn mcp_config_bundle() -> Result<Value, String> {
         "hash": crate::mcp::tools::hasher::hash_config_json(),
         "doctrine": { "posture": posture, "pinned_target": pinned, "autonomy": autonomy },
         "presets": ["turtle", "economy", "balanced"],
+        "web_board": {
+            "enabled": crate::mcp::web_board::is_enabled(),
+            "url": if crate::mcp::web_board::is_enabled() {
+                json!(crate::mcp::web_board::board_url())
+            } else { json!(null) },
+        },
     }))
 }
 
@@ -235,6 +246,18 @@ pub async fn mcp_config_set(
     payload: Value,
 ) -> Result<Value, String> {
     require_board(&window)?;
+    mcp_config_set_impl(app, domain, payload).await
+}
+
+/// Body of `mcp_config_set` — the native path enters via the require_board
+/// wrapper above; the token-authenticated web dashboard calls this directly
+/// (the bearer token IS the operator authority there). Audit feed pushes live
+/// in here so both paths are logged identically.
+pub async fn mcp_config_set_impl(
+    app: tauri::AppHandle,
+    domain: String,
+    payload: Value,
+) -> Result<Value, String> {
     match domain.as_str() {
         "policy" => {
             let name = payload
@@ -385,6 +408,26 @@ pub async fn mcp_config_set(
             );
             Ok(json!({ "ok": true, "detail": text }))
         }
+        "web_board" => {
+            let enabled = payload
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .ok_or("web_board: enabled (bool) required")?;
+            crate::mcp::web_board::set_enabled(enabled);
+            board_feed::push(
+                &app,
+                board_feed::Severity::Notice,
+                "web_board",
+                format!("web dashboard → {}", if enabled { "ENABLED" } else { "off" }),
+            );
+            Ok(json!({
+                "ok": true,
+                "web_board": {
+                    "enabled": enabled,
+                    "url": if enabled { json!(crate::mcp::web_board::board_url()) } else { json!(null) },
+                },
+            }))
+        }
         other => Err(format!("unknown config domain '{other}'")),
     }
 }
@@ -428,6 +471,15 @@ pub async fn mcp_role_pfp_set(
     config: Value,
 ) -> Result<Value, String> {
     require_board(&window)?;
+    mcp_role_pfp_set_impl(app, role, config).await
+}
+
+/// Body of `mcp_role_pfp_set` (see mcp_config_set_impl for the split rationale).
+pub async fn mcp_role_pfp_set_impl(
+    app: tauri::AppHandle,
+    role: String,
+    config: Value,
+) -> Result<Value, String> {
     let role_cfg: crate::mcp::pfp::RolePfp =
         serde_json::from_value(config).map_err(|e| format!("bad appearance config: {e}"))?;
     let stored = crate::mcp::pfp::set_role(&role, role_cfg)?;
@@ -535,6 +587,16 @@ pub async fn mcp_tx_mutate(
     new_index: Option<i64>,
 ) -> Result<Value, String> {
     require_board(&window)?;
+    mcp_tx_mutate_impl(app, op, id, new_index).await
+}
+
+/// Body of `mcp_tx_mutate` (see mcp_config_set_impl for the split rationale).
+pub async fn mcp_tx_mutate_impl(
+    app: tauri::AppHandle,
+    op: String,
+    id: String,
+    new_index: Option<i64>,
+) -> Result<Value, String> {
     match op.as_str() {
         "cancel" | "move_up" | "move_down" => {}
         "reorder" => {

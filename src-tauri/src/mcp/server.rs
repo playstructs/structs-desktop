@@ -30,6 +30,13 @@ impl McpServer {
             .clone()
             .ok_or("No bearer token configured")?;
 
+        // Web dashboard state (opt-in; routes 404 until enabled).
+        crate::mcp::web_board::init_from_config();
+        let web_state = crate::mcp::web_board::WebState {
+            app: app_handle.clone(),
+            registry: task_registry.clone(),
+        };
+
         let handler = StructsMcpHandler::new(task_registry, app_handle);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -58,17 +65,34 @@ impl McpServer {
                     axum08::Json(crate::mcp::watchdog::health_snapshot())
                 }),
             )
+            .merge(crate::mcp::web_board::router(web_state))
             .layer(axum08::middleware::from_fn(move |req: axum08::extract::Request, next: axum08::middleware::Next| {
                 let expected = expected_token.clone();
                 async move {
-                    if req.uri().path() == "/health" {
+                    let path = req.uri().path();
+                    if path == "/health" {
                         return Ok::<_, std::convert::Infallible>(next.run(req).await);
                     }
                     let auth_header = req.headers().get("authorization")
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("");
-                    let provided = auth_header.strip_prefix("Bearer ").unwrap_or("");
-                    if provided != expected {
+                    let bearer_ok = auth_header.strip_prefix("Bearer ").map(|t| t == expected).unwrap_or(false);
+                    // Browser paths only: the /board pages authenticate via the
+                    // session cookie (set on first visit) or a one-time ?token=
+                    // query. NEVER honored for /mcp — its auth is unchanged.
+                    let board_ok = path.starts_with("/board") && (
+                        req.headers().get("cookie")
+                            .and_then(|v| v.to_str().ok()).unwrap_or("")
+                            .split(';')
+                            .filter_map(|p| p.trim().split_once('='))
+                            .any(|(k, v)| k == crate::mcp::web_board::BOARD_COOKIE && v == expected)
+                        ||
+                        req.uri().query().unwrap_or("")
+                            .split('&')
+                            .filter_map(|p| p.split_once('='))
+                            .any(|(k, v)| k == "token" && v == expected)
+                    );
+                    if !(bearer_ok || board_ok) {
                         return Ok(axum08::http::Response::builder()
                             .status(400)
                             .header("content-type", "application/json")

@@ -228,7 +228,7 @@ pub fn trigger_sweep(app: tauri::AppHandle, min_age_ms: f64) -> bool {
     tauri::async_runtime::spawn(async move {
         run_sweep(&app).await;
         SWEEP_IN_FLIGHT.store(false, Ordering::SeqCst);
-        let _ = app.emit_to("board", "board-roster-updated", ());
+        crate::mcp::web_board::emit_board(&app, "board-roster-updated", ());
     });
     true
 }
@@ -318,8 +318,8 @@ async fn run_sweep(app: &tauri::AppHandle) {
                 upsert(row);
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if n % PROGRESS_EVERY == 0 || n == total {
-                    let _ = app.emit_to(
-                        "board",
+                    crate::mcp::web_board::emit_board(
+                        &app,
                         "board-roster-progress",
                         serde_json::json!({ "done": n, "total": total }),
                     );

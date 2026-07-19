@@ -58,6 +58,10 @@ pub struct BoardParams {
     /// prompt only: seconds to wait for the human (clamped 10–600).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Web dashboard control: "status" (or `true`) reports state + the
+    /// shareable URL; "on"/"off" toggles serving. Opt-in, default off.
+    #[serde(default)]
+    pub web: Option<serde_json::Value>,
 }
 
 pub async fn execute(
@@ -65,6 +69,51 @@ pub async fn execute(
     registry: &Arc<TaskRegistry>,
     params: BoardParams,
 ) -> Vec<Content> {
+    // Web-dashboard control path (opt-in, default off).
+    if let Some(web) = &params.web {
+        let op = match web {
+            serde_json::Value::Bool(true) => "status",
+            serde_json::Value::String(s) => s.as_str(),
+            _ => "status",
+        };
+        let enabled = match op {
+            "on" => {
+                let e = crate::mcp::web_board::set_enabled(true);
+                crate::mcp::board_feed::push(
+                    app,
+                    crate::mcp::board_feed::Severity::Notice,
+                    "web_board",
+                    "web dashboard ENABLED (token-authenticated /board)",
+                );
+                e
+            }
+            "off" => {
+                let e = crate::mcp::web_board::set_enabled(false);
+                crate::mcp::board_feed::push(
+                    app,
+                    crate::mcp::board_feed::Severity::Notice,
+                    "web_board",
+                    "web dashboard disabled",
+                );
+                e
+            }
+            _ => crate::mcp::web_board::is_enabled(),
+        };
+        let text = if enabled {
+            format!(
+                "Web dashboard: ENABLED\n  {}\nOpening the link sets a session cookie and drops the token from the address bar.\n\
+                 The server binds 127.0.0.1 only — a REMOTE human reaches it through their own tunnel, e.g.\n  \
+                 ssh -L 8420:127.0.0.1:8420 <user>@<this-host>\nthen opens the URL locally. \
+                 Disable any time with structs_board {{web:\"off\"}}.",
+                crate::mcp::web_board::board_url()
+            )
+        } else {
+            "Web dashboard: disabled (default). Enable with structs_board {web:\"on\"} or in Team Ops · Config — \
+             then share the returned URL; the bearer token in it grants FULL operator control to whoever holds it."
+                .to_string()
+        };
+        return vec![Content::text(text)];
+    }
     // Component directive path (the former structs_ui tool).
     if let Some(component) = &params.component {
         let mode = params.mode.clone().unwrap_or_else(|| "notify".to_string());
@@ -85,11 +134,9 @@ pub async fn execute(
             Err(e) => out.push_str(&format!("\n(couldn't open the Team Ops window: {})\n", e)),
         }
     }
-    // emit_to (not emit): Tauri v2 `emit` broadcasts to every window; target the
-    // board explicitly so this never reaches the main game window.
-    if app.get_webview_window("board").is_some() {
-        let _ = app.emit_to("board", "board-update", serde_json::json!({ "html": render.inner_html }));
-    }
+    // emit_board targets the board window + web viewers; never the main game
+    // window.
+    crate::mcp::web_board::emit_board(app, "board-update", serde_json::json!({ "html": render.inner_html }));
 
     // ── Optional summary push into the Team Ops EVENT FEED ──
     // Team/vplayer info never renders in the MAIN game window; `push` pipes a
@@ -371,13 +418,19 @@ pub async fn mcp_board_refresh(
     app: tauri::AppHandle,
     registry: tauri::State<'_, Arc<TaskRegistry>>,
 ) -> Result<String, String> {
-    let render = render_board(registry.inner()).await;
+    mcp_board_refresh_impl(&app, registry.inner()).await
+}
+
+/// Body of `mcp_board_refresh`, callable without Tauri state (web dashboard).
+pub async fn mcp_board_refresh_impl(
+    app: &tauri::AppHandle,
+    registry: &Arc<TaskRegistry>,
+) -> Result<String, String> {
+    let render = render_board(registry).await;
     if let Ok(mut g) = LAST_BOARD.lock() {
         *g = render.inner_html.clone();
     }
-    if app.get_webview_window("board").is_some() {
-        let _ = app.emit_to("board", "board-update", serde_json::json!({ "html": render.inner_html }));
-    }
+    crate::mcp::web_board::emit_board(app, "board-update", serde_json::json!({ "html": render.inner_html }));
     Ok(render.inner_html)
 }
 

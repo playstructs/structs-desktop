@@ -4750,6 +4750,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-updater",
  "tokio",
+ "tokio-stream",
  "tower",
  "uuid",
  "wgpu",
@@ -5415,6 +5416,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

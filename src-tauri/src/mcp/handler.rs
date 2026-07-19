@@ -203,7 +203,8 @@ impl StructsMcpHandler {
                         "push": { "type": "boolean", "description": "Pipe a one-line board summary into the Team Ops event feed (default false; never renders in the main game window)." },
                         "component": { "type": "object", "description": "Declarative component spec with a `kind` field (see tool description). When present, shows this surface instead of rendering the ops board." },
                         "mode": { "type": "string", "enum": ["notify", "prompt"], "description": "component only: notify = show-and-return (default); prompt = block for the human's choice." },
-                        "timeout_secs": { "type": "number", "description": "component prompt only: seconds to wait for the human (default 180, clamped 10–600)." }
+                        "timeout_secs": { "type": "number", "description": "component prompt only: seconds to wait for the human (default 180, clamped 10–600)." },
+                        "web": { "type": "string", "enum": ["status", "on", "off"], "description": "Web dashboard control (OPT-IN, default off): 'status' reports state + the shareable browser URL for the SAME Team Ops board (token-authenticated; the token grants full operator control — treat like a password); 'on'/'off' toggles serving. Remote humans reach it via their own tunnel to 127.0.0.1:<port> (e.g. ssh -L). Share the URL with your human to play together." }
                     }
                 })),
             ),

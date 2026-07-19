@@ -74,10 +74,7 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     // Live-relay to the Team Ops GRASS page when it exists (mirror of the
     // board_feed pattern). Board closing mid-emit is a benign race — the
     // event is already in the ring for the next back-fill.
-    use tauri::{Emitter, Manager};
-    if app.get_webview_window("board").is_some() {
-        let _ = app.emit_to("board", "grass-event", &event);
-    }
+    crate::mcp::web_board::emit_board(&app, "grass-event", &event);
     Ok(())
 }
 

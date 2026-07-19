@@ -8,6 +8,11 @@ pub struct McpConfig {
     pub enabled: bool,
     pub port: u16,
     pub bearer_token: Option<String>,
+    /// Serve the Team Ops dashboard as a token-authenticated web page under
+    /// /board on the MCP port. OPT-IN — off by default; the player enables it
+    /// via `structs_board web:"on"` or the Team Ops CONFIG page.
+    #[serde(default)]
+    pub web_board_enabled: bool,
 }
 
 impl Default for McpConfig {
@@ -16,6 +21,7 @@ impl Default for McpConfig {
             enabled: false,
             port: 8420,
             bearer_token: None,
+            web_board_enabled: false,
         }
     }
 }

@@ -179,7 +179,7 @@ async fn deliver(
     let attempts = if just_spawned { 8 } else { 1 };
     for i in 0..attempts {
         if app_handle.get_webview_window("board").is_some() {
-            let _ = app_handle.emit_to("board", "mcp_ui_directive", directive);
+            crate::mcp::web_board::emit_board(app_handle, "mcp_ui_directive", directive);
         }
         if i + 1 < attempts {
             tokio::time::sleep(Duration::from_millis(300)).await;
