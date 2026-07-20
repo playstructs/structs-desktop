@@ -707,7 +707,13 @@
         var right = H.el('span', 'ops-val');
         var note = ok
           ? (h.tx_hash ? String(h.tx_hash).slice(0, 10) + '…' : 'ok')
-          : String(h.translated || h.raw_error || '').slice(0, 80);
+          // Drop the chain boilerplate prefix ("failed to execute message;
+          // message index: 0: ") and widen — otherwise the diagnostic tail
+          // (e.g. "(required: 1, available: 1)", which distinguishes a
+          // build-count cap from a power shortage) gets truncated away.
+          : String(h.translated || h.raw_error || '')
+              .replace(/^failed to execute message; message index: \d+: /, '')
+              .slice(0, 160);
         right.appendChild(H.el('span', ok ? 'ops-muted' : 'attn', note + ' · ' + H.ago(h.ts_ms)));
         r.appendChild(left); r.appendChild(right);
         hbody.appendChild(r);

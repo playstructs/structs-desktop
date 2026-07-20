@@ -68,6 +68,33 @@ const ONE_PER_PLAYER: &[&str] = &[
     "Planetary Defense Cannon",
 ];
 
+/// The chain OVERLOADS one error string — `cannot handle new load requirements
+/// (required: X, available: Y)` — for two gates, told apart by magnitude: tiny
+/// equal integers = the per-player build-COUNT cap (we already own this
+/// 1-per-player struct); large values = a real milliwatt power shortage. Returns
+/// true only for the COUNT-cap variant, so the caller can treat the type as
+/// already-present and advance instead of backing the whole player off. We
+/// pre-gate power before initiating (see `available <= draw`), so a load error
+/// reaching us is almost always the count cap — but we still check the numbers
+/// so a power reject that slips through (e.g. when conn_cap is unknown) is NOT
+/// mistaken for a count cap. See the `build_load_error_is_count_cap` notes.
+fn is_count_cap_reject(err: &str) -> bool {
+    if !err.contains("cannot handle new load requirements") {
+        return false;
+    }
+    // The trailing "(required: X, available: Y)" are the last two integers in the
+    // string (earlier digits are the message index and the player id). Count cap
+    // when both are small; a power shortage reports milliwatt magnitudes.
+    let nums: Vec<u64> = err
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|s| s.parse::<u64>().ok())
+        .collect();
+    match nums.as_slice() {
+        [.., required, available] => *required < 1000 && *available < 1000,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoBuildConfig {
     /// Master on/off. Off by default — it auto-signs build txs.
@@ -444,6 +471,21 @@ async fn scan(
                                 crate::mcp::telemetry::Sev::Info,
                                 format!("{} {} {} slot {} (player {})", target, ambit, type_name, slot, pid),
                             );
+                            break; // one successful initiate per player per scan (charge resets to 0)
+                        }
+                        // The chain rejected a 1-per-player struct we actually already
+                        // own — our `present` set missed it (a stale/cold struct read).
+                        // Don't back the whole player off (that stranded freshly-explored
+                        // workers retrying an extractor they already have); treat the type
+                        // as present and advance to the next loadout item THIS scan. A
+                        // count-cap reject doesn't consume charge, so this is free.
+                        Err(e) if is_count_cap_reject(&e) => {
+                            crate::mcp::telemetry::tlog(
+                                "auto_build",
+                                crate::mcp::telemetry::Sev::Debug,
+                                format!("{pid} already has {type_name} (count cap) — advancing to next type"),
+                            );
+                            continue; // try the next loadout item, no backoff/break
                         }
                         Err(e) => {
                             run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -457,9 +499,9 @@ async fn scan(
                                     (INITIATE_BACKOFF_MS / 60_000.0) as u64
                                 ),
                             );
+                            break; // real failure — stop this player for this scan
                         }
                     }
-                    break; // one initiate per player per scan (charge resets to 0)
                 }
             }
         },
@@ -492,6 +534,21 @@ mod tests {
         assert_eq!(LOADOUT.last().unwrap().2, "Ore Bunker"); // heavy last
         assert_eq!(PRODUCTIVE_LOADOUT[0].2, "Ore Extractor");
         assert_eq!(PRODUCTIVE_LOADOUT[1].2, "Ore Refinery");
+    }
+
+    #[test]
+    fn count_cap_reject_detection() {
+        // Tiny equal integers = build-count cap → true (advance, don't back off).
+        assert!(is_count_cap_reject(
+            "failed to execute message; message index: 0: player (1-403) cannot handle new load requirements (required: 1, available: 1)"
+        ));
+        // Large milliwatt values = real power shortage → false (back off).
+        assert!(!is_count_cap_reject(
+            "player (1-403) cannot handle new load requirements (required: 500000, available: 300000)"
+        ));
+        // Unrelated errors → false.
+        assert!(!is_count_cap_reject("account sequence mismatch"));
+        assert!(!is_count_cap_reject("insufficient charge"));
     }
 
     #[test]
