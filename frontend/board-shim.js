@@ -31,7 +31,8 @@
   // wired on the next (re)connect.
   var KNOWN = ['board-update', 'board-feed', 'mcp_ui_directive',
                'board-roster-progress', 'board-roster-updated',
-               'board-mass-progress', 'board-mass-done', 'grass-event'];
+               'board-mass-progress', 'board-mass-done', 'grass-event',
+               'grass-lookups'];
   var listeners = {}; // name -> [cb]
   var backoff = 1000;
 

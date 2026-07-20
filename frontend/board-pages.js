@@ -8,7 +8,8 @@
   'use strict';
   var Board = window.Board;
   var H = Board.helpers;
-  var kw = function (mw) { return (mw / 1e6).toFixed(2) + ' kW'; };
+  // Energy displays follow the game's unit ladder (H.fmtWatts, input mW).
+  var kw = function (mw) { return H.fmtWatts(mw); };
   var alpha = function (ualpha) { return H.fmtNum(ualpha / 1e6); };
 
   // A compact stat tile: the value (optionally + a sui-icon) over a small
@@ -473,7 +474,7 @@
         title: p.err ? H.el('span', 'err', p.name) : p.name,
         subtitle: p.role,
         chips: [
-          H.resource(kwv(p.load_mw) + ' / ' + kwv(p.capacity_mw) + ' kW', 'sui-icon-energy'),
+          H.resource(H.fmtWatts(p.load_mw) + ' / ' + H.fmtWatts(p.capacity_mw), 'sui-icon-energy'),
           H.resource(Math.round(p.margin_pct) + '%', null, p.margin_pct < 15 ? 'attn' : ''),
         ],
       }));
@@ -736,8 +737,20 @@
   // Live tail of the full game-event stream. ONE generic renderer for every
   // category — no per-message-type UI. Events arrive via the Rust relay
   // ('grass-event'); a back-fill seeds from the event ring buffer.
-  var grassState = { rows: [], paused: false, cat: '', text: '', cats: [], built: false, renderQueued: false };
+  var grassState = { rows: [], paused: false, cat: '', text: '', cats: [], built: false, renderQueued: false, lookups: {} };
   var GRASS_MAX = 200;
+
+  // Merge partial {players:{id:name}, guilds:{…}, struct_types:{…}, structs:{…}}
+  // maps into the client lookup state (backfill + live grass-lookups events).
+  function grassMergeLookups(part) {
+    if (!part || typeof part !== 'object') return;
+    Object.keys(part).forEach(function (kind) {
+      var src = part[kind];
+      if (!src || typeof src !== 'object') return;
+      var dst = grassState.lookups[kind] = grassState.lookups[kind] || {};
+      Object.keys(src).forEach(function (id) { if (src[id]) dst[id] = src[id]; });
+    });
+  }
 
   function grassHue(cat) {
     var h = 0;
@@ -745,20 +758,80 @@
     return h % 360;
   }
 
-  function grassChip(k, v) {
+  // ── Enrichment-aware value formatting: ONE key-driven rule table for every
+  // category (no per-message templates). Uses the game's own semantics:
+  // status bitmask, server display ladders, and id→name lookups.
+  var STRUCT_FLAGS = [[1, 'mat'], [2, 'built'], [4, 'online'], [8, 'stored'],
+    [16, 'HIDDEN'], [32, 'DESTROYED'], [64, 'LOCKED']];
+  function decodeStatus(v) {
+    var n = Number(v);
+    if (isNaN(n)) return String(v);
+    if (n === 0) return 'none';
+    var parts = [];
+    STRUCT_FLAGS.forEach(function (f) { if (n & f[0]) parts.push(f[1]); });
+    return parts.length ? parts.join('·') : String(n);
+  }
+  var GRASS_SUPPRESS = { seq: 1, updated_at: 1, time: 1 };
+  var ENERGY_ATTRS = { capacity: 1, load: 1, structsLoad: 1, power: 1, connectionCapacity: 1 };
+  var HEIGHT_KEY = /^(height|block|block_height|last_action)$|^block_|_block$/;
+
+  function lookupName(kind, id) {
+    var m = grassState.lookups && grassState.lookups[kind];
+    var n = m && m[id];
+    return n ? id + ' (' + n + ')' : id;
+  }
+
+  // Format ONE detail value. `variant` picks the precise twin: 'new' prefers
+  // det[key+'_p'], 'old' prefers det[key+'_old_p'] (falling back to the
+  // legacy-scaled field). Returns a display string, or null to suppress.
+  function grassVal(ev, det, key, raw, variant) {
+    if (GRASS_SUPPRESS[key]) return null;
+    var precise = variant === 'old' ? det[key + '_old_p'] : det[key + '_p'];
+    // Full block heights — never abbreviated (the whole point of a height).
+    if (HEIGHT_KEY.test(key)) return H.fmtInt(raw);
+    // Struct status bitmask → readable flags.
+    if ((key === 'status' || key === 'status_old') && ev.category === 'struct_status') {
+      return decodeStatus(raw);
+    }
+    // Grid attribute values: unit by attribute_type (energy in mW via _p;
+    // legacy `value` is watts → ×1000; fuel is ualpha; ore is grams).
+    var attr = det.attribute_type;
+    if (key === 'value' && attr) {
+      if (ENERGY_ATTRS[attr]) return H.fmtWatts(precise != null ? Number(precise) : Number(raw) * 1000);
+      if (attr === 'fuel') return H.fmtAlpha(precise != null ? Number(precise) : Number(raw) * 1e6);
+      if (attr === 'ore') return H.fmtOre(precise != null ? Number(precise) : Number(raw));
+      if (HEIGHT_KEY.test(attr) || attr === 'lastAction') return H.fmtInt(raw);
+    }
+    // Direct energy keys on non-grid events (rare but generic).
+    if (ENERGY_ATTRS[key]) return H.fmtWatts(precise != null ? Number(precise) : Number(raw) * 1000);
+    // Alpha inventory amounts (subject structs.inventory.ualpha.…) are raw ualpha.
+    if (key === 'amount' && String(ev.subject || '').indexOf('structs.inventory.ualpha') === 0) {
+      return H.fmtAlpha(Number(raw));
+    }
+    if (key === 'seized_ore' || key === 'ore') return H.fmtOre(Number(raw));
+    // Ids → names from the enrichment lookups.
+    if (key === 'player_id') return lookupName('players', String(raw));
+    if (key === 'guild_id') return lookupName('guilds', String(raw));
+    if (key === 'struct_id' || /_struct_id$/.test(key)) return lookupName('structs', String(raw));
+    if (key === 'counterparty' && /^1-\d+$/.test(String(raw))) return lookupName('players', String(raw));
+    if (key === 'object_id' && det.object_type === 'player') return lookupName('players', String(raw));
+    if (key === 'object_id' && det.object_type === 'struct') return lookupName('structs', String(raw));
+    // Defaults.
+    if (typeof raw === 'number') return H.fmtNum(raw);
+    if (raw && typeof raw === 'object') { try { return JSON.stringify(raw).slice(0, 60); } catch (e) { return '…'; } }
+    return String(raw);
+  }
+
+  function grassChipNode(label, text) {
     var c = H.el('span', 'grass-chip');
-    var b = H.el('b', null, k + ': ');
-    c.appendChild(b);
-    var text;
-    if (typeof v === 'number') text = H.fmtNum(v);
-    else if (v && typeof v === 'object') { try { text = JSON.stringify(v).slice(0, 60); } catch (e) { text = '…'; } }
-    else text = String(v);
+    c.appendChild(H.el('b', null, label + ': '));
     c.appendChild(document.createTextNode(text));
     return c;
   }
 
   // The one algorithm: time · colored category badge · compact subject ·
-  // detail flattened to k:v chips, with `x`+`x_old` pairs folded to old→new.
+  // detail flattened to k:v chips, with `x`+`x_old` pairs folded to old→new
+  // and `_p` twins used for precision but never rendered separately.
   function grassRow(ev) {
     var li = H.el('li');
     // timestamp is local receive-time (the stream carries none on the wire)
@@ -771,7 +844,7 @@
     li.appendChild(H.el('span', 'grass-subj', String(ev.subject || '').replace(/^structs\./, '')));
     var det = ev.detail;
     if (det == null || typeof det !== 'object') {
-      if (det != null && det !== '') li.appendChild(grassChip('value', det));
+      if (det != null && det !== '') li.appendChild(grassChipNode('value', String(det)));
       return li;
     }
     var keys = Object.keys(det);
@@ -780,20 +853,20 @@
     keys.forEach(function (k) {
       var v = det[k];
       if (v == null || v === '') return;
-      if (/_old$/.test(k) && keySet[k.replace(/_old$/, '')] != null && det[k.replace(/_old$/, '')] != null) {
+      if (/_p$/.test(k)) return; // precision twin — consumed by its base key
+      if (/_old$/.test(k) && keySet[k.replace(/_old$/, '')] && det[k.replace(/_old$/, '')] != null) {
         return; // folded into the new-value chip below
       }
+      var text = grassVal(ev, det, k, v, 'new');
+      if (text == null) return;
       if (keySet[k + '_old'] && det[k + '_old'] != null) {
-        var oldV = det[k + '_old'];
-        var c = H.el('span', 'grass-chip');
-        c.appendChild(H.el('b', null, k + ': '));
-        c.appendChild(document.createTextNode(
-          (typeof oldV === 'number' ? H.fmtNum(oldV) : String(oldV)) + ' → ' +
-          (typeof v === 'number' ? H.fmtNum(v) : String(v))));
-        li.appendChild(c);
+        // Old value formats by the BASE key's semantics; variant 'old' makes
+        // the precise lookup use k+'_old_p'.
+        var oldText = grassVal(ev, det, k, det[k + '_old'], 'old');
+        li.appendChild(grassChipNode(k, (oldText == null ? String(det[k + '_old']) : oldText) + ' → ' + text));
         return;
       }
-      li.appendChild(grassChip(k, v));
+      li.appendChild(grassChipNode(k, text));
     });
     return li;
   }
@@ -899,6 +972,7 @@
   function grassBackfill() {
     return Board.T.core.invoke('mcp_grass_recent', { limit: GRASS_MAX }).then(function (d) {
       grassMerge((d && d.events) || []);
+      grassMergeLookups(d && d.lookups);
       ((d && d.categories) || []).forEach(noteGrassCategory);
       refreshGrassCats();
     }).catch(function () {});
@@ -925,6 +999,11 @@
         grassState.rows.unshift(ev);
         if (grassState.rows.length > GRASS_MAX) grassState.rows.length = GRASS_MAX;
         noteGrassCategory(ev.category);
+        queueGrassRender();
+      });
+      // Lazily-resolved names arrive here; visible rows upgrade in place.
+      Board.T.event.listen('grass-lookups', function (e) {
+        grassMergeLookups(e && e.payload);
         queueGrassRender();
       });
     },

@@ -2,6 +2,7 @@ pub mod combat;
 pub mod config;
 pub mod config_store;
 pub mod cosmos_client;
+pub mod enrich;
 pub mod error_translator;
 pub mod auto_build;
 pub mod auto_defend;

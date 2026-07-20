@@ -71,6 +71,9 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     if event.category != "block" {
         push_event(event.clone());
     }
+    // Queue background name lookups for any ids this event mentions (cheap
+    // scan; fetches spawn; resolved names push to the board as grass-lookups).
+    crate::mcp::enrich::note_event(&app, &event);
     // Live-relay to the Team Ops GRASS page when it exists (mirror of the
     // board_feed pattern). Board closing mid-emit is a benign race — the
     // event is already in the ring for the next back-fill.
@@ -86,5 +89,6 @@ pub fn mcp_grass_recent(limit: Option<usize>, category: Option<String>) -> serde
     serde_json::json!({
         "events": get_recent(limit.unwrap_or(200).min(MAX_EVENTS), category.as_deref(), None),
         "categories": get_categories(),
+        "lookups": crate::mcp::enrich::lookups_json(),
     })
 }

@@ -85,6 +85,38 @@
     if (a >= 100) return String(Math.round(n));
     return (Math.round(n * 10) / 10).toString();
   }
+  // Full integer, thousands-separated — for block heights and anything where
+  // abbreviation destroys the meaning.
+  function fmtInt(n) {
+    if (n == null || isNaN(n)) return '—';
+    return Math.round(Number(n)).toLocaleString();
+  }
+  // The game's display ladders (server UNIT_DISPLAY_FORMAT): pick a unit by
+  // the integer digit-length of the RAW value, round to 2 decimals.
+  function ladder(raw, steps) {
+    if (raw == null || isNaN(raw)) return '—';
+    var n = Math.abs(Math.floor(Number(raw)));
+    var len = String(n).length;
+    var step = steps[steps.length - 1];
+    for (var i = 0; i < steps.length; i++) {
+      if (len <= steps[i][0]) { step = steps[i]; break; }
+    }
+    var v = Number(raw) / step[1];
+    var txt = v.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+    return txt + ' ' + step[2];
+  }
+  // Energy: raw value in MILLIWATTS.
+  function fmtWatts(mw) {
+    return ladder(mw, [[2, 1, 'mW'], [5, 1e3, 'W'], [9, 1e6, 'kW'], [15, 1e9, 'MW'], [99, 1e18, 'TW']]);
+  }
+  // Alpha: raw value in ualpha (micrograms).
+  function fmtAlpha(ualpha) {
+    return ladder(ualpha, [[2, 1, 'μg'], [5, 1e3, 'mg'], [9, 1e6, 'g'], [15, 1e9, 'Kg'], [99, 1e18, 'Tg']]);
+  }
+  // Ore: raw value in grams.
+  function fmtOre(g) {
+    return ladder(g, [[3, 1, 'g'], [11, 1e3, 'Kg'], [99, 1e18, 'Tg']]);
+  }
   function ago(ms) {
     if (!ms) return '—';
     var s = Math.max(0, (Date.now() - ms) / 1000);
@@ -253,6 +285,7 @@
     iconClass: iconClass, resultTable: resultTable, resource: resource, resultRow: resultRow,
     sortControl: sortControl, sortBy: sortBy, detailModal: detailModal,
     pfpPortrait: pfpPortrait,
+    fmtInt: fmtInt, fmtWatts: fmtWatts, fmtAlpha: fmtAlpha, fmtOre: fmtOre,
   };
 
   // ── Router ────────────────────────────────────────────────────────────────
