@@ -208,6 +208,43 @@
     return b;
   }
 
+  // "~7m" / "1.2h" / "now" — the tightest honest ETA text.
+  function fmtEta(s) {
+    if (s == null) return null;
+    if (s <= 0) return 'now';
+    if (s < 3600) return Math.max(1, Math.round(s / 60)) + 'm';
+    if (s < 86400) return (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
+    return Math.round(s / 86400) + 'd';
+  }
+
+  // Icons-only harvest line: [buried ore] N · [mine] eta · [refine] eta.
+  // Null fields (no planet read yet / no such struct / idle cycle) are simply
+  // omitted — absence IS the signal, no placeholder words.
+  function harvestTrio(r) {
+    var parts = [];
+    function piece(iconCls, text, title) {
+      var s = H.el('span', 'htrio');
+      s.title = title;
+      s.appendChild(H.el('i', iconCls));
+      s.appendChild(document.createTextNode(' ' + text));
+      return s;
+    }
+    if (r.planet_ore != null) {
+      parts.push(piece('icon-undiscovered-ore', H.fmtNum(r.planet_ore), 'ore left on planet'));
+    }
+    var m = fmtEta(r.mine_eta_s);
+    if (m) parts.push(piece('icon-mine', m, 'next extraction ~'));
+    var f = fmtEta(r.refine_eta_s);
+    if (f) parts.push(piece('icon-refine', f, 'next refine ~'));
+    if (!parts.length) return null;
+    var line = H.el('span', 'htrio-line');
+    parts.forEach(function (p, i) {
+      if (i) line.appendChild(document.createTextNode('  '));
+      line.appendChild(p);
+    });
+    return line;
+  }
+
   function renderFleetRows() {
     var rowsBox = document.getElementById('fleet-rows');
     if (!rowsBox) return;
@@ -240,6 +277,10 @@
         sub.appendChild(document.createTextNode(' · '));
         sub.appendChild(H.el('span', 'attn', r.err ? 'read failed' : 'idle ' + H.ago(r.fetched_at_ms)));
       }
+      // Harvest trio — icons only, no words (tooltips explain): ore left on
+      // the planet · time to next mine completion · time to next refine.
+      var trio = harvestTrio(r);
+      if (trio) { sub.appendChild(H.el('br')); sub.appendChild(trio); }
       // Charge: battery + a clear Ready/n so "what is this number" is answered.
       var chargeVal = H.el('span');
       chargeVal.appendChild(H.battery(Math.min(8, r.charge), 8));

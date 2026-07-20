@@ -22,13 +22,14 @@ use crate::hasher::types::{now_millis, TaskParams, TaskRegistry};
 use crate::mcp::cosmos_client::CosmosClient;
 
 const FILENAME: &str = "auto_harvest.json";
-const MINE_TARGET: u64 = 14_000;
-const REFINE_TARGET: u64 = 28_000;
-const EXTRACTOR_TYPE: &str = "14";
+// Pub: the roster sweep reuses these to estimate per-player cycle ETAs.
+pub const MINE_TARGET: u64 = 14_000;
+pub const REFINE_TARGET: u64 = 28_000;
+pub const EXTRACTOR_TYPE: &str = "14";
 // Ore Refinery is struct type 15 (verified live: worker refinery entities report
 // `"type": 15, "type_name": "Ore Refinery"`). Was "16", so auto-refine never matched
 // a refinery and the refine step of the flywheel never fired.
-const REFINERY_TYPE: &str = "15";
+pub const REFINERY_TYPE: &str = "15";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoHarvestConfig {
@@ -91,6 +92,17 @@ pub fn set(cfg: AutoHarvestConfig) {
 /// The decision: is a struct ripe to harvest at the given threshold?
 pub fn is_ripe(age: u64, difficulty_target: u64, threshold: u64) -> bool {
     calculate_difficulty(age, difficulty_target) <= threshold
+}
+
+/// The anchor age (in blocks) at which a proof becomes "ripe" for the given
+/// threshold — the inverse of `calculate_difficulty`:
+///   difficulty(age) = 64 − floor(log10(age)/log10(target)·63) ≤ t
+///   ⇒ age ≥ target^((64−t)/63)
+/// Used by the roster sweep to estimate time-to-next-completion per player.
+pub fn ripe_age(difficulty_target: u64, threshold: u64) -> u64 {
+    let t = threshold.min(64) as f64;
+    let exp = (64.0 - t) / 63.0;
+    (difficulty_target as f64).powf(exp).ceil() as u64
 }
 
 use crate::mcp::loop_util::{extract_type_id, parse_bool, parse_f64, read_u64_field};
@@ -390,6 +402,20 @@ mod tests {
         assert_eq!(c.difficulty_threshold, 4);
         assert!(c.refine);
         assert!(!c.include_primary);
+    }
+
+    #[test]
+    fn ripe_age_inverts_difficulty_decay() {
+        for threshold in [1u64, 4, 10, 32] {
+            for target in [MINE_TARGET, REFINE_TARGET] {
+                let a = ripe_age(target, threshold);
+                assert!(is_ripe(a, target, threshold), "age {a} should be ripe (t={threshold})");
+                assert!(
+                    a < 3 || !is_ripe(a * 9 / 10, target, threshold),
+                    "10% younger than {a} should not be ripe (t={threshold})"
+                );
+            }
+        }
     }
 
     #[test]
