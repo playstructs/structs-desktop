@@ -101,8 +101,25 @@ pub async fn player_struct_ids(client: &CosmosClient, pid: &str) -> Vec<String> 
                     }
                 }
             }
+            // The fleet's Command Ship lives in the `commandStruct` field, NOT in
+            // the land/water/air/space slot arrays. Without this the resolver never
+            // sees it, so callers thought the player had no Command Ship — auto_build
+            // kept trying to build a second one (a 1-per-player struct → endless
+            // "cannot handle new load (required:1, available:1)" count-cap rejects)
+            // and auto_defend couldn't protect it. Include it explicitly.
+            if kind == "fleet" {
+                if let Some(cs) = obj.and_then(|o| o.get("commandStruct")).and_then(|c| c.as_str()) {
+                    if !cs.is_empty() {
+                        ids.push(cs.to_string());
+                    }
+                }
+            }
         }
     }
+    // De-dup (order-preserving) in case a struct is ever listed in both a slot
+    // array and commandStruct — avoids double-querying it in player_structs.
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
     ids
 }
 
