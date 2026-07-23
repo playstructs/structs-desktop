@@ -126,6 +126,39 @@ pub fn plan_infra(
 
 use crate::mcp::loop_util::parse_f64 as num;
 
+/// Find `controller`'s existing DYNAMIC allocation feeding `substation_id`, if
+/// any, as `(allocation_id, current_power_mw)`. Enables the single-allocation
+/// policy: GROW one allocation via `MsgAllocationUpdate` each infuse cycle
+/// instead of minting a new one (simpler for us + the chain; the update
+/// capacity double-count bug that once forced create-new is fixed). Returns the
+/// FIRST match (we deliberately keep exactly one). The allocation LIST endpoint
+/// zeroes `power`, so we GET the matched entity for its real value.
+pub async fn find_dynamic_allocation(
+    client: &CosmosClient,
+    controller: &str,
+    substation_id: &str,
+) -> Option<(String, u64)> {
+    let list = client.list_entities("allocation", None, Some(2000)).await.ok()?;
+    let arr = list.get("Allocation").and_then(|a| a.as_array())?;
+    let id = arr
+        .iter()
+        .find(|a| {
+            a.get("controller").and_then(|c| c.as_str()) == Some(controller)
+                && a.get("destinationId").and_then(|d| d.as_str()) == Some(substation_id)
+                && a.get("type").and_then(|t| t.as_str()) == Some("dynamic")
+        })
+        .and_then(|a| a.get("id").and_then(|i| i.as_str()))?
+        .to_string();
+    let full = client.query_entity("allocation", &id).await.ok()?;
+    let power = full
+        .get("gridAttributes")
+        .and_then(|g| g.get("power"))
+        .and_then(|p| p.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    Some((id, power))
+}
+
 /// Resolve the guild's reactor + entry substation into one power picture.
 pub async fn resolve_guild_power(
     client: &CosmosClient,

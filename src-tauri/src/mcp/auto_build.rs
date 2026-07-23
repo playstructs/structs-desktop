@@ -402,23 +402,40 @@ async fn scan(
                 // Extractor, which the chain rejects with "cannot handle new load",
                 // and never advanced to the refinery). So fall back to resolving the
                 // numeric `type` id through the catalog, which is always present.
-                let present: HashSet<String> = {
+                // Resolve a struct's type NAME robustly: `type_name` is EMPTY or
+                // ABSENT on some entities (notably the Command Ship, resolved via
+                // `commandStruct`), so fall back to the numeric `type` id through
+                // the catalog — which is always present. Used for both `present`
+                // (1-per-player skip) and the command-built check below. A raw
+                // `type_name` read made `cmd_built` never match "Command Ship",
+                // so the gate `!cmd_built` returned for EVERY player → auto_build
+                // built nothing fleet-wide (workers stranded on empty planets).
+                let (present, cmd_built): (HashSet<String>, bool) = {
                     let gs = crate::game_state::GAME_STATE.read().unwrap();
-                    structs
-                        .iter()
-                        .filter(|s| !parse_bool(s.get("is_destroyed")))
-                        .filter_map(|s| {
-                            if let Some(n) = s.get("type_name").and_then(|x| x.as_str()) {
+                    let name_of = |s: &Value| -> Option<String> {
+                        if let Some(n) = s.get("type_name").and_then(|x| x.as_str()) {
+                            if !n.is_empty() {
                                 return Some(n.to_string());
                             }
-                            let tid = s.get("type").map(|t| match t {
-                                Value::Number(n) => n.to_string(),
-                                Value::String(s) => s.clone(),
-                                _ => String::new(),
-                            })?;
-                            gs.struct_types.get(&tid).map(|st| st.name.clone())
-                        })
-                        .collect()
+                        }
+                        let tid = s.get("type").map(|t| match t {
+                            Value::Number(n) => n.to_string(),
+                            Value::String(s) => s.clone(),
+                            _ => String::new(),
+                        })?;
+                        gs.struct_types.get(&tid).map(|st| st.name.clone())
+                    };
+                    let present: HashSet<String> = structs
+                        .iter()
+                        .filter(|s| !parse_bool(s.get("is_destroyed")))
+                        .filter_map(name_of)
+                        .collect();
+                    let cmd_built = structs.iter().any(|s| {
+                        !parse_bool(s.get("is_destroyed"))
+                            && parse_bool(s.get("is_built"))
+                            && name_of(s).as_deref() == Some("Command Ship")
+                    });
+                    (present, cmd_built)
                 };
 
                 // ── Command-struct-first gate ──
@@ -434,11 +451,6 @@ async fn scan(
                 // free slot, so pick the first free fleet ambit (CMD possibleAmbit
                 // covers all four).
                 let cmd_alive = present.contains("Command Ship");
-                let cmd_built = structs.iter().any(|s| {
-                    !parse_bool(s.get("is_destroyed"))
-                        && parse_bool(s.get("is_built"))
-                        && s.get("type_name").and_then(|x| x.as_str()) == Some("Command Ship")
-                });
                 if !cmd_alive {
                     let (type_id, draw) = {
                         let gs = crate::game_state::GAME_STATE.read().unwrap();

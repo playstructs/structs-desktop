@@ -524,19 +524,41 @@ pub async fn execute(
                 "primary: do in-app (reactor infuse/staking isn't on the primary tx bridge)",
             ));
             if mode == "direct" {
-                // 2) Allocate host → guild substation directly, 3) connect it.
-                out.push_str("2. Allocate your capacity toward the guild pool (dynamic, so you can adjust):\n");
-                out.push_str(&wrap(
-                    "/structs.structs.MsgAllocationCreate",
-                    format!("{{\"controller\":\"{}\",\"sourceObjectId\":\"{}\",\"allocationType\":\"dynamic\",\"power\":\"{}\",\"destinationId\":\"\"}}", host_pid, host_pid, donate_s),
-                    "primary: allocation_create IS on the tx bridge (needs a primary tool arm) — or do in-app",
-                ));
-                out.push_str("3. Connect that allocation to the guild substation (NO guild-owner permission needed):\n");
-                out.push_str(&wrap(
-                    "/structs.structs.MsgSubstationAllocationConnect",
-                    format!("{{\"allocationId\":\"<id from step 2>\",\"destinationId\":\"{}\"}}", gp.substation_id),
-                    "primary: NOT on the tx bridge — do in-app",
-                ));
+                // SINGLE-ALLOCATION POLICY: if the host already feeds the guild
+                // substation with a dynamic allocation, GROW that one allocation
+                // (MsgAllocationUpdate) rather than mint a new one each cycle —
+                // simpler for us and lighter on-chain. The update capacity
+                // double-count bug that once forced create-new is fixed, so
+                // raising an existing allocation into freed/infused capacity works.
+                // Only bootstrap a new allocation when none exists yet.
+                match crate::mcp::guild_power::find_dynamic_allocation(client, &host_pid, &gp.substation_id).await {
+                    Some((aid, cur_power)) => {
+                        let new_power = cur_power.saturating_add(plan.donate_mw as u64);
+                        out.push_str(&format!(
+                            "2. GROW your existing allocation {} into the guild pool (single-allocation policy — {:.0} kW → {:.0} kW):\n",
+                            aid, cur_power as f64 / 1e6, new_power as f64 / 1e6,
+                        ));
+                        out.push_str(&wrap(
+                            "/structs.structs.MsgAllocationUpdate",
+                            format!("{{\"allocationId\":\"{}\",\"power\":\"{}\"}}", aid, new_power),
+                            "primary: sign via act {player:0, tx} (bypasses the tx bridge)",
+                        ));
+                    }
+                    None => {
+                        out.push_str("2. Allocate your capacity toward the guild pool (dynamic — FIRST/bootstrap allocation, keep just this one):\n");
+                        out.push_str(&wrap(
+                            "/structs.structs.MsgAllocationCreate",
+                            format!("{{\"controller\":\"{}\",\"sourceObjectId\":\"{}\",\"allocationType\":\"dynamic\",\"power\":\"{}\"}}", host_pid, host_pid, donate_s),
+                            "primary: sign via act {player:0, tx}",
+                        ));
+                        out.push_str("3. Connect that allocation to the guild substation (NO guild-owner permission needed):\n");
+                        out.push_str(&wrap(
+                            "/structs.structs.MsgSubstationAllocationConnect",
+                            format!("{{\"allocationId\":\"<id from step 2>\",\"destinationId\":\"{}\"}}", gp.substation_id),
+                            "primary: sign via act {player:0, tx}",
+                        ));
+                    }
+                }
             } else {
                 // HUB: build an owned substation S, then feed the guild from it.
                 out.push_str("2. Allocate capacity from yourself (dynamic — NOT automated, which would route 100%):\n");
