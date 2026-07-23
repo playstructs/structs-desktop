@@ -154,6 +154,9 @@ pub async fn player_structs(client: &CosmosClient, pid: &str) -> Vec<Value> {
             // txs/hour across the fleet before structs_system surfaced it).
             "slot": read_u64_field(s, "slot"),
             "is_destroyed": Value::Bool(parse_bool(sa.and_then(|x| x.get("isDestroyed")))),
+            // Built vs still-under-construction — auto_build's command-first
+            // gate needs to know a replacement Command Ship isn't online yet.
+            "is_built": Value::Bool(parse_bool(sa.and_then(|x| x.get("isBuilt")))),
         }));
     }
     out

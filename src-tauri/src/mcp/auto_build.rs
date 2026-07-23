@@ -421,6 +421,105 @@ async fn scan(
                         .collect()
                 };
 
+                // ── Command-struct-first gate ──
+                // Raids target the Command Ship (it's the raid gate), and a fleet
+                // with no living command struct can build almost NOTHING: every
+                // other fleet deploy rejects with "fleet (9-X) needs a command
+                // struct before deploy" and planet builds require the Command Ship
+                // online. So when it's been destroyed, rebuilding it is the only
+                // useful (or even possible) initiate. Verified live on 1-396: a
+                // command-less fleet CAN initiate a replacement (no catch-22), the
+                // new ship registers in `commandStruct` immediately, and it does
+                // NOT occupy a fleet slot — but the initiate still wants a valid
+                // free slot, so pick the first free fleet ambit (CMD possibleAmbit
+                // covers all four).
+                let cmd_alive = present.contains("Command Ship");
+                let cmd_built = structs.iter().any(|s| {
+                    !parse_bool(s.get("is_destroyed"))
+                        && parse_bool(s.get("is_built"))
+                        && s.get("type_name").and_then(|x| x.as_str()) == Some("Command Ship")
+                });
+                if !cmd_alive {
+                    let (type_id, draw) = {
+                        let gs = crate::game_state::GAME_STATE.read().unwrap();
+                        match gs.struct_types.values().find(|t| t.name.eq_ignore_ascii_case("Command Ship")) {
+                            Some(t) => (t.id, t.passive_draw.unwrap_or(0.0)),
+                            None => return,
+                        }
+                    };
+                    if conn_cap > 0.0 && available <= draw {
+                        return; // no headroom even for the CMD ship — wait for power
+                    }
+                    let slot_pick = ["land", "water", "air", "space"].iter().find_map(|amb| {
+                        let key = ("fleet".to_string(), amb.to_string());
+                        let used = occ.get(&key).cloned().unwrap_or_default();
+                        if used.len() >= SLOTS_PER_AMBIT {
+                            return None;
+                        }
+                        first_free(&used).map(|slot| (*amb, slot))
+                    });
+                    let Some((amb, slot)) = slot_pick else {
+                        crate::mcp::telemetry::tlog(
+                            "auto_build",
+                            crate::mcp::telemetry::Sev::Warn,
+                            format!("{pid} lost its Command Ship and every fleet slot is full — can't rebuild (trash a fleet struct to free a slot)"),
+                        );
+                        return;
+                    };
+                    let Some(idx) = idx_opt else { return };
+                    let payload = json!({
+                        "playerId": pid,
+                        "structTypeId": type_id,
+                        "operatingAmbit": ambit_to_enum(amb),
+                        "slot": slot,
+                    });
+                    let res = crate::mcp::tx_retry::sign_with_retry(
+                        &app,
+                        idx,
+                        "/structs.structs.MsgStructBuildInitiate",
+                        payload,
+                        &format!("auto_build:{pid}"),
+                    )
+                    .await;
+                    match res {
+                        Ok(_) => {
+                            initiates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            crate::mcp::telemetry::tlog(
+                                "auto_build",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("rebuilding LOST Command Ship for {pid} (fleet {} slot {})", amb, slot),
+                            );
+                            crate::mcp::board_feed::push(
+                                &app,
+                                crate::mcp::board_feed::Severity::Notice,
+                                "auto_build",
+                                format!("{} lost its Command Ship — rebuild initiated (fleet {} slot {})", pid, amb, slot),
+                            );
+                        }
+                        Err(e) if is_count_cap_reject(&e) => {
+                            // We actually do have one (stale read) — benign; no backoff.
+                        }
+                        Err(e) => {
+                            run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let until = now_millis() + INITIATE_BACKOFF_MS;
+                            INITIATE_BACKOFF.lock().unwrap().insert(pid.clone(), until);
+                            crate::mcp::telemetry::tlog(
+                                "auto_build",
+                                crate::mcp::telemetry::Sev::Warn,
+                                format!("Command Ship rebuild failed for {pid} (backing off): {e}"),
+                            );
+                        }
+                    }
+                    return; // the CMD ship is the only thing buildable this scan
+                }
+                if !cmd_built {
+                    // Replacement CMD is still under construction — every other
+                    // initiate would still be rejected, so wait; the completion
+                    // pass above finishes it as its difficulty decays.
+                    return;
+                }
+
                 // Walk the loadout; build the first ripe (free slot + power + known type).
                 for (target, ambit, type_name) in loadout {
                     if ONE_PER_PLAYER.contains(type_name) && present.contains(*type_name) {
