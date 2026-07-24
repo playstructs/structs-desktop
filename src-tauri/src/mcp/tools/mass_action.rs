@@ -594,6 +594,12 @@ fn force_scan(app: tauri::AppHandle, request: MassActionRequest) -> Result<Value
         "infuse" => {
             tauri::async_runtime::spawn(async move { crate::mcp::auto_infuse::tick(&app_c, true).await });
         }
+        "response" => {
+            tauri::async_runtime::spawn(async move { crate::mcp::auto_response::tick(&app_c, true).await });
+        }
+        "raid" => {
+            tauri::async_runtime::spawn(async move { crate::mcp::auto_raid::tick(&app_c, true).await });
+        }
         other => return Err(format!("unknown loop '{other}'")),
     }
     board_feed::push(

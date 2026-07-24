@@ -200,6 +200,12 @@
                border: 1px solid var(--border, #345); padding: 2px 6px; }
     .cfg-row select { background: transparent; color: inherit; border: 1px solid var(--border, #345); padding: 2px 6px; }
     .cfg-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+    /* WAR page: the list cards add free-text id inputs alongside the numeric
+       ones, and each result row carries a couple of inline icon actions. */
+    .cfg-row input[type="text"] { background: transparent; color: inherit;
+               border: 1px solid var(--border, #345); padding: 2px 6px; min-width: 11em; }
+    .cfg-row .sui-result-row-right-section .cfg-actions,
+    .sui-result-row .cfg-actions { margin-top: 0; gap: 4px; }
   </style>
 </head>
 <body>
@@ -218,6 +224,7 @@
               <a class="sui-screen-nav-item" data-page="work" href="#/work">Work</a>
               <a class="sui-screen-nav-item" data-page="tx" href="#/tx">Tx</a>
               <a class="sui-screen-nav-item" data-page="grass" href="#/grass">Grass</a>
+              <a class="sui-screen-nav-item" data-page="war" href="#/war">War</a>
               <a class="sui-screen-nav-item" data-page="config" href="#/config">Config</a>
               <a class="sui-screen-nav-item" data-page="map" href="#/map">Map</a>
             </div>
@@ -282,6 +289,14 @@
             <div class="page" id="page-grass" hidden>
               <div id="grass-toolbar"></div>
               <ul id="grass-list" class="ops-feed"></ul>
+            </div>
+
+            <!-- ═══ WAR (grudges, target board, incidents, combat settings) ═══ -->
+            <div class="page" id="page-war" hidden>
+              <div id="war-body">
+                <div class="sui-message-inline-alert"><i class="icon-raid"></i>
+                  <span class="sui-message-inline-alert-text">Combat data loading…</span></div>
+              </div>
             </div>
 
             <!-- ═══ CONFIG ═══ -->

@@ -113,7 +113,7 @@
     actions.appendChild(sweepBtn);
 
     var roleApplySel = H.el('select', 'sui-input-text');
-    [['productive', '→ productive'], ['bait', '→ bait']].forEach(function (o) {
+    [['productive', '→ productive'], ['bait', '→ bait'], ['raider', '→ raider']].forEach(function (o) {
       var op = H.el('option', null, o[1]); op.value = o[0]; roleApplySel.appendChild(op);
     });
     roleApplySel.id = 'role-apply-sel';
@@ -122,7 +122,7 @@
     actions.appendChild(roleApplySel); actions.appendChild(roleBtn);
 
     var scanSel = H.el('select', 'sui-input-text');
-    ['harvest', 'build', 'defend', 'infuse'].forEach(function (l) {
+    ['harvest', 'build', 'defend', 'infuse', 'response', 'raid'].forEach(function (l) {
       var op = H.el('option', null, l); op.value = l; scanSel.appendChild(op);
     });
     scanSel.id = 'scan-sel';
@@ -1058,6 +1058,372 @@
     refresh: renderGrass,
     cadenceMs: 60000,
   });
+
+  // ═══════════════════════════ WAR ══════════════════════════════════════════
+  // Grudges, priority guilds, the scored raid target board, response incidents
+  // and both combat loops' settings. The lists are what make retaliation happen
+  // on OUR schedule instead of inside the attacker's two-minute window.
+  var warState = { data: null, sort: { key: 'score', dir: -1 } };
+  var WAR_KEYS = [{ key: 'score', label: 'score' }, { key: 'ore', label: 'ore' },
+    { key: 'shield', label: 'shield' }, { key: 'defenders', label: 'defenders' },
+    { key: 'name', label: 'name' }];
+  var WAR_ACC = {
+    score: function (t) { return t.score; }, ore: function (t) { return t.stored_ore; },
+    shield: function (t) { return t.planetary_shield; },
+    defenders: function (t) { return t.defenders_on_cmd; },
+    name: function (t) { return (t.name || '').toLowerCase(); },
+  };
+
+  function warSet(payload) {
+    return Board.T.core.invoke('mcp_config_set', { domain: 'combat_lists', payload: payload })
+      .then(function () { return renderWar(); })
+      .catch(function (e) { alertInto('war-body', 'write failed: ' + e); });
+  }
+  function warLoopSet(which, cfg, extra) {
+    var payload = { loop: which, config: cfg };
+    if (extra) Object.keys(extra).forEach(function (k) { payload[k] = extra[k]; });
+    return Board.T.core.invoke('mcp_config_set', { domain: 'loop', payload: payload })
+      .then(function () { return renderWar(); })
+      .catch(function (e) { alertInto('war-body', 'write failed: ' + e); });
+  }
+  // A small "label [input] [button]" add-row, used by every list card.
+  function addRow(placeholder, onAdd, extraPlaceholder) {
+    var r = H.el('div', 'cfg-row');
+    var idIn = H.el('input', 'sui-input-text'); idIn.type = 'text'; idIn.placeholder = placeholder;
+    var wIn = H.el('input', 'sui-input-text'); wIn.type = 'number'; wIn.step = '0.1'; wIn.min = '0'; wIn.max = '10';
+    wIn.placeholder = extraPlaceholder || 'weight'; wIn.style.maxWidth = '5.5em';
+    var btn = massBtn('', 'icon-add', 'Add', 'sui-mod-secondary');
+    function submit() {
+      var id = (idIn.value || '').trim();
+      if (!id) return;
+      onAdd(id, wIn.value === '' ? null : Number(wIn.value));
+      idIn.value = ''; wIn.value = '';
+    }
+    btn.addEventListener('click', submit);
+    idIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+    var wrap = H.el('span');
+    wrap.appendChild(idIn); wrap.appendChild(document.createTextNode(' '));
+    wrap.appendChild(wIn); wrap.appendChild(document.createTextNode(' '));
+    wrap.appendChild(btn);
+    r.appendChild(wrap);
+    return r;
+  }
+  function iconBtn(iconCls, title, onClick) {
+    var a = H.el('a', 'ops-refresh-btn'); a.href = 'javascript:void(0)'; a.title = title;
+    a.appendChild(H.el('i', iconCls));
+    a.addEventListener('click', onClick);
+    return a;
+  }
+  // A labelled numeric input bound to one field of a loop config.
+  function numField(label, cfg, key, which, opts) {
+    var r = H.el('div', 'cfg-row');
+    r.appendChild(H.el('span', null, label));
+    var i = H.el('input', 'sui-input-text');
+    i.type = 'number'; i.value = cfg[key];
+    if (opts && opts.step != null) i.step = opts.step;
+    if (opts && opts.min != null) i.min = opts.min;
+    i.style.maxWidth = '6.5em';
+    i.addEventListener('change', function () {
+      var next = JSON.parse(JSON.stringify(cfg));
+      next[key] = Number(i.value);
+      warLoopSet(which, next);
+    });
+    r.appendChild(i);
+    return r;
+  }
+  function boolField(label, cfg, key, which) {
+    var r = H.el('div', 'cfg-row');
+    var l = H.el('label');
+    var cb = H.el('input'); cb.type = 'checkbox'; cb.checked = !!cfg[key];
+    cb.addEventListener('change', function () {
+      var next = JSON.parse(JSON.stringify(cfg));
+      next[key] = cb.checked;
+      warLoopSet(which, next);
+    });
+    l.appendChild(cb); l.appendChild(document.createTextNode(' ' + label));
+    r.appendChild(l);
+    return r;
+  }
+  function selectField(label, cfg, key, which, options, extra) {
+    var r = H.el('div', 'cfg-row');
+    r.appendChild(H.el('span', null, label));
+    var sel = H.el('select', 'sui-input-text');
+    options.forEach(function (o) {
+      var op = H.el('option', null, o); op.value = o;
+      if (cfg[key] === o) op.selected = true;
+      sel.appendChild(op);
+    });
+    sel.addEventListener('change', function () {
+      var next = JSON.parse(JSON.stringify(cfg));
+      next[key] = sel.value;
+      warLoopSet(which, next, extra);
+    });
+    r.appendChild(sel);
+    return r;
+  }
+
+  function renderWarBody() {
+    var d = warState.data; if (!d) return;
+    var body = document.getElementById('war-body');
+    body.innerHTML = '';
+    var lists = d.lists || {};
+    var resp = d.response || {};
+    var raid = d.raid || {};
+
+    // ── Posture strip: what the two loops are allowed to do right now. ──
+    var sbody = H.el('div');
+    sbody.appendChild(H.row('Raid response',
+      (resp.enabled ? 'ON' : 'off') + ' · ' + (resp.autonomy || '?') + ' · ' + (resp.mode || '?'),
+      resp.enabled ? 'icon-defend' : 'icon-blocked'));
+    sbody.appendChild(H.row('Raid targeting',
+      (raid.enabled ? 'ON' : 'off') + ' · ' + (raid.autonomy || '?') + ' · ' + (raid.posture || '?'),
+      raid.enabled ? 'icon-raid' : 'icon-blocked'));
+    var sb = d.shot_budget || {};
+    sbody.appendChild(H.row('Retaliation budget', (sb.used || 0) + ' / ' + (sb.cap || 0) + ' shots this hour', 'icon-dmg'));
+    if (resp.dry_run || raid.dry_run) {
+      sbody.appendChild(H.alertLine('dry-run is on — plans are computed and logged, nothing signs.', 'icon-tip'));
+    }
+    body.appendChild(H.card('POSTURE', sbody));
+
+    // ── Target board (auto_raid phase B output). ──
+    var tbody = H.el('div');
+    var targets = d.targets || [];
+    if (!targets.length) {
+      tbody.appendChild(H.alertLine(
+        raid.enabled
+          ? 'No candidates scored yet — the loop sweeps a bounded batch each scan. Use Scan now → raid on the Fleet page to force one.'
+          : 'Raid targeting is off. Enable it below to start scoring targets (it starts in advise mode and signs nothing).',
+        'icon-info'));
+    } else {
+      var tbar = H.el('div'); tbar.style.cssText = 'margin-bottom:6px;';
+      tbar.appendChild(H.sortControl(WAR_KEYS, warState.sort, renderWarBody));
+      tbody.appendChild(tbar);
+      var ttable = H.resultTable();
+      H.sortBy(targets, warState.sort, WAR_ACC).slice(0, 40).forEach(function (t) {
+        var go = !t.blocked_by;
+        var act = H.el('div', 'cfg-actions');
+        act.appendChild(iconBtn('icon-attention', 'Add ' + t.player_id + ' to the grudge list', function () {
+          warSet({ action: 'add', kind: 'grudge', id: t.player_id, label: t.name, guild_id: t.guild_id, weight: 1.5 });
+        }));
+        act.appendChild(iconBtn('icon-blocked', 'Never attack ' + t.player_id, function () {
+          warSet({ action: 'add', kind: 'protected', id: t.player_id });
+        }));
+        ttable.appendChild(H.resultRow({
+          icon: go ? 'icon-raid' : 'icon-planetary-shield',
+          title: t.name + '  ' + t.planet_id,
+          subtitle: (go ? 'GO — ' + t.vulnerability_reason : 'NO-GO — ' + t.blocked_by),
+          chips: [
+            H.resource(Math.round(t.stored_ore), 'sui-icon-alpha-ore', t.stored_ore >= (raid.min_ore || 0) ? '' : 'attn'),
+            H.resource(t.planetary_shield + ' → ~' + Math.round(t.raid_minutes) + 'm', 'icon-planetary-shield'),
+            H.resource(t.defenders_on_cmd, 'icon-defend'),
+            H.resource(Math.round(t.score), null, go ? '' : 'attn'),
+          ],
+          action: act,
+        }));
+      });
+      tbody.appendChild(ttable);
+    }
+    var exps = d.expeditions || [];
+    if (exps.length) {
+      tbody.appendChild(H.el('div', 'ops-muted', exps.length + ' expedition(s) in flight:'));
+      exps.forEach(function (e) {
+        tbody.appendChild(H.row(e.raider_player + ' → ' + e.target_planet,
+          e.note + (e.hashing ? ' · proof running' : ''), 'icon-outgoing'));
+      });
+    }
+    body.appendChild(H.card('TARGET BOARD', tbody));
+
+    // ── Grudges. Auto-written by auto_response; hand-editable here. ──
+    var gbody = H.el('div');
+    var grudges = lists.grudges || [];
+    if (!grudges.length) {
+      gbody.appendChild(H.alertLine(
+        'No grudges yet. One is recorded automatically on every confirmed attack — or add a player below who has never touched you.',
+        'icon-info'));
+    } else {
+      var gtable = H.resultTable();
+      grudges.forEach(function (g) {
+        var act = H.el('div', 'cfg-actions');
+        act.appendChild(iconBtn(g.muted ? 'icon-okay' : 'icon-blocked',
+          g.muted ? 'Unmute — act on this grudge again' : 'Mute — keep the record, stop acting on it',
+          function () {
+            warSet({ action: g.muted ? 'unmute' : 'mute', kind: 'grudge', id: g.player_id });
+          }));
+        act.appendChild(iconBtn('icon-subtract', 'Forget this grudge', function () {
+          warSet({ action: 'remove', kind: 'grudge', id: g.player_id });
+        }));
+        var sub = g.attacks + ' attack(s) · ' + g.structs_lost + ' struct(s) lost · '
+          + g.source + (g.muted ? ' · MUTED' : '') + (g.expired ? ' · lapsed' : '');
+        gtable.appendChild(H.resultRow({
+          icon: g.muted ? 'icon-unknown' : 'icon-enemy-tile',
+          title: (g.label || g.player_id) + (g.guild_id ? '  [' + g.guild_id + ']' : ''),
+          subtitle: g.note ? sub + ' · ' + g.note : sub,
+          chips: [
+            H.resource(g.damage_taken, 'icon-dmg'),
+            H.resource('×' + (Math.round(g.weight * 10) / 10), null),
+            H.resource(Math.round(g.heat * 100) / 100, 'icon-attention', g.muted ? 'attn' : ''),
+          ],
+          action: act,
+        }));
+      });
+      gbody.appendChild(gtable);
+    }
+    gbody.appendChild(addRow('player id (e.g. 1-61)', function (id, w) {
+      warSet({ action: 'add', kind: 'grudge', id: id, weight: w == null ? 1 : w });
+    }));
+    gbody.appendChild(H.el('div', 'ops-muted',
+      'Weight multiplies how far a target climbs the raid board. Heat blends it with the harm actually done.'));
+    body.appendChild(H.card('GRUDGES', gbody));
+
+    // ── Guild-level priorities + the hard never-attack vetoes. ──
+    var qbody = H.el('div');
+    (lists.priority_guilds || []).forEach(function (g) {
+      var r = H.el('div', 'cfg-row');
+      var l = H.el('span');
+      l.appendChild(H.el('i', 'icon-guild'));
+      l.appendChild(document.createTextNode(' ' + (g.label || g.guild_id) + '  ×' + g.weight));
+      r.appendChild(l);
+      r.appendChild(iconBtn('icon-subtract', 'Remove ' + g.guild_id, function () {
+        warSet({ action: 'remove', kind: 'priority_guild', id: g.guild_id });
+      }));
+      qbody.appendChild(r);
+    });
+    if (!(lists.priority_guilds || []).length) {
+      qbody.appendChild(H.el('div', 'ops-muted', 'No prioritised guilds — every member of one listed here gains its weight as a target.'));
+    }
+    qbody.appendChild(addRow('guild id (e.g. 0-2)', function (id, w) {
+      warSet({ action: 'add', kind: 'priority_guild', id: id, weight: w == null ? 1 : w });
+    }));
+    body.appendChild(H.card('PRIORITY GUILDS', qbody));
+
+    var abody = H.el('div');
+    abody.appendChild(H.el('div', 'ops-muted',
+      'A hard veto in BOTH loops, checked before anything is scored — the chain does not stop you attacking guild-mates, so this does.'));
+    (lists.allies || []).forEach(function (gid) {
+      var r = H.el('div', 'cfg-row');
+      var l = H.el('span');
+      l.appendChild(H.el('i', 'icon-guild'));
+      l.appendChild(document.createTextNode(' ' + gid));
+      r.appendChild(l);
+      r.appendChild(iconBtn('icon-subtract', 'Stop protecting ' + gid, function () {
+        warSet({ action: 'remove', kind: 'ally', id: gid });
+      }));
+      abody.appendChild(r);
+    });
+    (lists.protected_players || []).forEach(function (pid) {
+      var r = H.el('div', 'cfg-row');
+      var l = H.el('span');
+      l.appendChild(H.el('i', 'icon-member'));
+      l.appendChild(document.createTextNode(' ' + pid));
+      r.appendChild(l);
+      r.appendChild(iconBtn('icon-subtract', 'Stop protecting ' + pid, function () {
+        warSet({ action: 'remove', kind: 'protected', id: pid });
+      }));
+      abody.appendChild(r);
+    });
+    abody.appendChild(addRow('guild id to protect', function (id) {
+      warSet({ action: 'add', kind: 'ally', id: id });
+    }, ' '));
+    abody.appendChild(addRow('player id to protect', function (id) {
+      warSet({ action: 'add', kind: 'protected', id: id });
+    }, ' '));
+    body.appendChild(H.card('NEVER ATTACK', abody));
+
+    // ── What the response loop actually did. ──
+    var ibody = H.el('div');
+    var incidents = d.incidents || [];
+    if (!incidents.length) {
+      ibody.appendChild(H.alertLine('No incidents recorded yet.', 'icon-info'));
+    } else {
+      var itable = H.resultTable();
+      incidents.slice(0, 25).forEach(function (i) {
+        itable.appendChild(H.resultRow({
+          icon: i.shots_fired > 0 ? 'icon-counter' : 'icon-incoming',
+          title: i.defender_player + ' @ ' + i.planet_id
+            + (i.attacker_player ? '  ← ' + i.attacker_player : ''),
+          subtitle: i.mode + ' · ' + (i.fire_target ? 'fired at ' + i.fire_target + ' (' + i.target_kind + ')' : i.note),
+          chips: [
+            H.resource(i.shots_fired + '/' + i.shots_planned, 'icon-dmg'),
+            H.resource(Math.round(i.projected_damage * 10) / 10, 'icon-ballistic-weapon'),
+            H.resource(H.ago(i.at_ms), null),
+          ],
+          onClick: function () {
+            var pre = H.el('div', 'ops-muted');
+            pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;';
+            pre.textContent = i.note;
+            H.detailModal('Incident — ' + i.planet_id, pre);
+          },
+        }));
+      });
+      ibody.appendChild(itable);
+    }
+    body.appendChild(H.card('INCIDENTS', ibody));
+
+    // ── Editable settings for both loops (the CONFIG page only shows toggles). ──
+    var rbody = H.el('div');
+    rbody.appendChild(boolField('enabled', resp, 'enabled', 'response'));
+    rbody.appendChild(selectField('autonomy', resp, 'autonomy', 'response', ['advise', 'auto']));
+    rbody.appendChild(selectField('mode', resp, 'mode', 'response', d.modes || ['harden', 'counter', 'decapitate']));
+    rbody.appendChild(numField('scan every (s)', resp, 'interval_secs', 'response', { min: 5 }));
+    rbody.appendChild(numField('max shots / incident', resp, 'max_shots_per_incident', 'response', { min: 0 }));
+    rbody.appendChild(numField('max shots / hour', resp, 'max_shots_per_hour', 'response', { min: 0 }));
+    rbody.appendChild(numField('incident cooldown (s)', resp, 'incident_cooldown_secs', 'response', { min: 0 }));
+    rbody.appendChild(boolField('prefer a counter-free ambit (free shots)', resp, 'prefer_counter_free_ambit', 'response'));
+    rbody.appendChild(boolField('panic-refine the threatened ore', resp, 'panic_refine', 'response'));
+    rbody.appendChild(boolField('let the primary shoot too', resp, 'include_primary_shooters', 'response'));
+    // Raider safety lives in TARGETING GATES (recall below CMD HP) — auto_raid
+    // supervises the expedition, so it is the loop that can actually pull it out.
+    rbody.appendChild(boolField('dry run', resp, 'dry_run', 'response'));
+    rbody.appendChild(H.el('div', 'ops-muted',
+      'A raid resolves in about four minutes, and every recorded defensive win fired back inside the first two — hence the short scan interval.'));
+    body.appendChild(H.card('RESPONSE SETTINGS', rbody));
+
+    var kbody = H.el('div');
+    kbody.appendChild(boolField('enabled', raid, 'enabled', 'raid'));
+    kbody.appendChild(selectField('autonomy', raid, 'autonomy', 'raid', ['advise', 'auto']));
+    // A posture change rewrites every gate below it, so it is sent with the
+    // apply_posture flag rather than merged into whatever the form last showed.
+    kbody.appendChild(selectField('posture (resets the gates)', raid, 'posture', 'raid',
+      d.postures || ['cautious', 'opportunist', 'aggressive'], { apply_posture: true }));
+    kbody.appendChild(numField('min ore (the whole prize)', raid, 'min_ore', 'raid', { min: 0, step: 1 }));
+    kbody.appendChild(numField('min score (0-100)', raid, 'min_score', 'raid', { min: 0, step: 1 }));
+    kbody.appendChild(numField('max raid proof (min)', raid, 'max_raid_minutes', 'raid', { min: 1 }));
+    kbody.appendChild(numField('max defenders on their CMD', raid, 'max_defenders', 'raid', { min: 0 }));
+    kbody.appendChild(numField('skip if defender acted within (min)', raid, 'skip_if_defender_active_mins', 'raid', { min: 0 }));
+    kbody.appendChild(numField('target cooldown (min)', raid, 'target_cooldown_mins', 'raid', { min: 0 }));
+    kbody.appendChild(numField('max concurrent raids', raid, 'max_concurrent_raids', 'raid', { min: 1 }));
+    kbody.appendChild(numField('recall raider below CMD HP', raid, 'abort_cmd_hp_below', 'raid', { min: 0 }));
+    kbody.appendChild(boolField('only raid already-vulnerable targets', raid, 'require_vulnerable_now', 'raid'));
+    kbody.appendChild(boolField('allow siege (kill their CMD to open the window)', raid, 'allow_siege', 'raid'));
+    kbody.appendChild(boolField('dry run', raid, 'dry_run', 'raid'));
+    kbody.appendChild(H.el('div', 'ops-muted',
+      'Of every raid on record, none that started against a non-vulnerable planet ever completed — and going anyway drops your own shields for the trip.'));
+    body.appendChild(H.card('TARGETING GATES', kbody));
+
+    var wbody = H.el('div');
+    wbody.appendChild(H.el('div', 'ops-muted',
+      'How the 0-100 score is blended. Raising one weight lifts targets that are strong on it; the scale stays 0-100 either way, so min_score keeps meaning the same thing.'));
+    [['w_ore', 'ore held (the prize)'], ['w_vulnerability', 'vulnerable right now'],
+     ['w_weakness', 'weak defences'], ['w_grudge', 'grudge heat'],
+     ['w_guild', 'priority guild'], ['w_speed', 'fast raid proof'],
+     ['w_history', 'our record vs this planet']].forEach(function (p) {
+      wbody.appendChild(numField(p[1], raid, p[0], 'raid', { min: 0, step: 0.1 }));
+    });
+    body.appendChild(H.card('SCORING WEIGHTS', wbody));
+
+    Board.stamp('updated ' + new Date().toLocaleTimeString());
+  }
+
+  function renderWar() {
+    return Board.T.core.invoke('mcp_war_bundle').then(function (d) {
+      warState.data = d; renderWarBody();
+    }).catch(function (e) {
+      var body = document.getElementById('war-body');
+      body.innerHTML = '';
+      body.appendChild(H.alertLine('combat data unavailable: ' + e, 'icon-alert'));
+    });
+  }
+  Board.registerPage('war', { onEnter: renderWar, refresh: renderWar, cadenceMs: 20000 });
 
   // ═══════════════════════════ CONFIG ═══════════════════════════════════════
   function cfgSet(domain, payload) {

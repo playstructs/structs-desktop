@@ -152,6 +152,68 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
 /// liveness (a newer scan owns them).
 static RUN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Start a REFINE proof for `player_id` RIGHT NOW, ignoring both the loop's
+/// cadence and its difficulty threshold.
+///
+/// Called by `auto_response` when a raid alarm fires. A raid seizes **all** of a
+/// player's stored ore in one go, and refining is the only thing that converts
+/// it into Alpha, which cannot be stolen — so during a raid the usual "wait for
+/// the anchor to age into a cheap proof" economics are irrelevant. Even an
+/// expensive proof beats losing the pile.
+///
+/// Independent of `AutoHarvestConfig::enabled`: hardening under fire must not
+/// depend on the economy loop being switched on. No-ops when the player has no
+/// online refinery, no ore, or a refine already in flight.
+pub async fn request_priority_refine(app_handle: &tauri::AppHandle, player_id: &str) -> bool {
+    let Some(registry) = app_handle.try_state::<Arc<TaskRegistry>>().map(|r| r.inner().clone()) else {
+        return false;
+    };
+    let client = CosmosClient::new();
+    let idx = crate::mcp::virtual_players::REGISTRY
+        .read()
+        .ok()
+        .and_then(|r| {
+            r.players
+                .iter()
+                .find(|p| p.player_id.as_deref() == Some(player_id))
+                .map(|p| p.index)
+        });
+
+    for sid in crate::mcp::loop_util::player_struct_ids(&client, player_id).await {
+        let Ok(entity) = client.query_entity("struct", &sid).await else { continue };
+        let s = entity.get("Struct");
+        let sa = entity.get("structAttributes");
+        if s.map(extract_type_id).unwrap_or_default() != REFINERY_TYPE {
+            continue;
+        }
+        if !parse_bool(sa.and_then(|x| x.get("isOnline"))) {
+            continue;
+        }
+        if let Some(t) = registry.tasks.get(&sid) {
+            if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
+                return true; // already refining — nothing more to do
+            }
+        }
+        let anchor = read_u64_field(sa, "blockStartOreRefine");
+        if anchor == 0 {
+            continue; // refinery isn't in a cycle, so there's nothing to complete
+        }
+        let params = TaskParams::for_ore(&sid, "REFINE", anchor, REFINE_TARGET);
+        if crate::hasher::start_hash_task_core(params, app_handle.clone(), &registry).is_ok() {
+            if let Some(i) = idx {
+                crate::hasher::register_vplayer_hash(sid.clone(), i, "REFINE".to_string());
+            }
+            crate::mcp::telemetry::tlog(
+                "auto_harvest",
+                crate::mcp::telemetry::Sev::Notice,
+                format!("priority REFINE {} for {} (under attack — ore is seizable)", sid, player_id),
+            );
+            return true;
+        }
+    }
+    false
+}
+
 /// Watchdog remediation: invalidate the wedged scan and clear the
 /// single-flight guard so the next tick can scan again.
 pub fn force_reset_running() {

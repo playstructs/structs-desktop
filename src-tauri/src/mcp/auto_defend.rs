@@ -164,6 +164,12 @@ async fn scan(
             async move {
                 let Some(idx) = idx_opt else { return }; // vplayers only (façade signer)
                 run.players.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Raiders are deliberately expendable — their whole point is that
+                // losing a Command Ship costs a rebuild, not the economy. Never
+                // spend charge hardening them, even with include_bait on.
+                if role == Some(VPlayerRole::Raider) {
+                    return;
+                }
                 // Default: only defend productive workers; bait are deliberate raid fodder.
                 if !include_bait && role != Some(VPlayerRole::Productive) {
                     return;

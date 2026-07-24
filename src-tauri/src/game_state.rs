@@ -215,6 +215,39 @@ pub struct StructTypeInfo {
     pub post_destruction_damage: Option<u64>,
     #[serde(default)]
     pub has_stealth_system: Option<bool>,
+    // ── Defensive / evasion model ──
+    // The chain exposes evasion as two rates keyed on the INCOMING weapon's
+    // control. e.g. the Battleship's signalJamming is guided 2/3 (66% miss vs
+    // guided) and unguided 0/0 (no effect). Without these the simulator treated
+    // every shot as landing, which is why guided attacks kept underperforming.
+    #[serde(default)]
+    pub unit_defenses: Option<String>,
+    #[serde(default)]
+    pub guided_defensive_success_rate_numerator: Option<u64>,
+    #[serde(default)]
+    pub guided_defensive_success_rate_denominator: Option<u64>,
+    #[serde(default)]
+    pub unguided_defensive_success_rate_numerator: Option<u64>,
+    #[serde(default)]
+    pub unguided_defensive_success_rate_denominator: Option<u64>,
+    // Armour-piercing weapons ignore the target's attack_reduction.
+    #[serde(default)]
+    pub primary_weapon_armour_piercing: Option<bool>,
+    #[serde(default)]
+    pub secondary_weapon_armour_piercing: Option<bool>,
+    // Planetary layer: `lowOrbitBallisticInterceptorNetwork` (Jamming Satellite)
+    // gives the whole planet a compounding evade chance vs GUIDED ordnance only.
+    #[serde(default)]
+    pub planetary_defenses: Option<String>,
+    #[serde(default)]
+    pub planetary_shield_contribution: Option<u64>,
+    /// True on the Command Ship: destroying it while its fleet is away ends the
+    /// raid (`attackerDefeated`). The authoritative marker for a decapitation
+    /// target — preferred over hardcoding struct type "1".
+    #[serde(default)]
+    pub trigger_raid_defeat_by_destruction: Option<bool>,
+    #[serde(default)]
+    pub movable: Option<bool>,
 }
 
 /// Global synced game state, protected by RwLock for concurrent access
@@ -365,8 +398,20 @@ pub async fn sync_game_state(
                         let app_a = app_handle.clone();
                         let pol = r.policy.clone();
                         tokio::spawn(async move {
-                            match crate::mcp::tx_queue::submit_tx(&app_a, action, args).await {
-                                Ok(_) => eprintln!("[Structs Auto] {} auto-response submitted", pol),
+                            // Through tx_retry, not tx_queue directly: an
+                            // autonomous combat action must land in the
+                            // tx_attempts ledger and feed the AIMD controller
+                            // like every other loop-issued transaction.
+                            let ctx = format!("policy:{pol}");
+                            match crate::mcp::tx_retry::submit_with_retry(&app_a, &action, args, &ctx).await {
+                                Ok(r) if r.success => {
+                                    eprintln!("[Structs Auto] {} auto-response submitted", pol)
+                                }
+                                Ok(r) => eprintln!(
+                                    "[Structs Auto] {} auto-response rejected: {}",
+                                    pol,
+                                    r.error.unwrap_or_else(|| "unknown".into())
+                                ),
                                 Err(e) => eprintln!("[Structs Auto] {} auto-response failed: {}", pol, e),
                             }
                         });
@@ -392,7 +437,8 @@ pub async fn sync_game_state(
                                 if v.as_str() == Some("approve") =>
                             {
                                 if let Some((action, args)) = act {
-                                    let _ = crate::mcp::tx_queue::submit_tx(&app_p, action, args).await;
+                                    let ctx = format!("policy:{pol}");
+                                    let _ = crate::mcp::tx_retry::submit_with_retry(&app_p, &action, args, &ctx).await;
                                 }
                             }
                             _ => {}
@@ -461,6 +507,17 @@ pub async fn sync_game_state(
         let app_d = app_handle.clone();
         tokio::spawn(async move {
             crate::mcp::auto_defend::tick(&app_d, false).await;
+        });
+        // Combat loops. auto_response deliberately rides the sync tick at its
+        // own 20 s cadence — a raid resolves in about four minutes end to end,
+        // and every defensive win on record fired back inside the first two.
+        let app_r = app_handle.clone();
+        tokio::spawn(async move {
+            crate::mcp::auto_response::tick(&app_r, false).await;
+        });
+        let app_rd = app_handle.clone();
+        tokio::spawn(async move {
+            crate::mcp::auto_raid::tick(&app_rd, false).await;
         });
     }
 

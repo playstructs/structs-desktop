@@ -249,13 +249,21 @@ pub async fn execute(
                     "Error: player required (index, address, or player id).".to_string(),
                 )];
             };
+            let roles = || {
+                VPlayerRole::ALL
+                    .iter()
+                    .map(|r| format!("\"{}\"", r.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            };
             let Some(role_str) = params.role.as_deref().filter(|s| !s.is_empty()) else {
-                return vec![Content::text("Error: role required — \"bait\" or \"productive\".".to_string())];
+                return vec![Content::text(format!("Error: role required — {}.", roles()))];
             };
             let Some(role) = VPlayerRole::parse(role_str) else {
                 return vec![Content::text(format!(
-                    "Error: unknown role '{}'. Use \"bait\" or \"productive\".",
-                    role_str
+                    "Error: unknown role '{}'. Use {}.",
+                    role_str,
+                    roles()
                 ))];
             };
             let mut reg = REGISTRY.write().unwrap();
@@ -273,6 +281,7 @@ pub async fn execute(
             let note = match role {
                 VPlayerRole::Bait => "mines only; ore accumulates on its planet as raid bait (no refinery, no transfers).",
                 VPlayerRole::Productive => "runs the flywheel: mine → refine → send alpha to the primary (drive it with structs_players economy).",
+                VPlayerRole::Raider => "expendable offensive arm for auto_raid: no extractor, keeps a refinery to launder seized ore into Alpha. Losing its Command Ship is affordable — the primary never leaves home.",
             };
             vec![Content::text(format!(
                 "Virtual player {} (idx {}) → role {} — {}",
@@ -746,6 +755,244 @@ pub async fn execute(
                     "Set {enabled:true} to run it, {now:true} to scan immediately. It idles once all defenders are assigned.".to_string()
                 }
             ))]
+        }
+
+        // ── Raid-response loop (defensive combat automation) ──
+        // The whole raid window is ~4 minutes, so this loop reacts on the raid
+        // alarm rather than on damage, and prefers the raider's Command Ship
+        // (16/16 of all recorded `attackerDefeated` outcomes came from killing it).
+        "autoresponse" | "response" => {
+            use crate::mcp::auto_response as ar;
+            let mut cfg = ar::get();
+            let a = &params.args;
+            let mut changed = false;
+            if let Some(v) = a.get("enabled").and_then(|v| v.as_bool()) {
+                cfg.enabled = v;
+                changed = true;
+            }
+            if let Some(v) = a.get("autonomy").and_then(|v| v.as_str()) {
+                cfg.autonomy = match v.to_ascii_lowercase().as_str() {
+                    "auto" => ar::Autonomy::Auto,
+                    _ => ar::Autonomy::Advise,
+                };
+                changed = true;
+            }
+            if let Some(v) = a.get("mode").and_then(|v| v.as_str()) {
+                cfg.mode = match v.to_ascii_lowercase().as_str() {
+                    "harden" => ar::ResponseMode::Harden,
+                    "counter" => ar::ResponseMode::Counter,
+                    "decapitate" => ar::ResponseMode::Decapitate,
+                    other => {
+                        return vec![Content::text(format!(
+                            "mode '{other}' unknown — use harden | counter | decapitate."
+                        ))]
+                    }
+                };
+                changed = true;
+            }
+            // Keep the floor at 5 s: the loop is deliberately fast, but a
+            // 0-second interval would spin the event drain on every sync tick.
+            if let Some(v) = a.get("interval_secs").and_then(|v| v.as_u64()) {
+                cfg.interval_secs = v.max(5);
+                changed = true;
+            }
+            for (key, slot) in [
+                ("max_shots_per_incident", &mut cfg.max_shots_per_incident),
+                ("max_shots_per_hour", &mut cfg.max_shots_per_hour),
+            ] {
+                if let Some(v) = a.get(key).and_then(|v| v.as_u64()) {
+                    *slot = v as usize;
+                    changed = true;
+                }
+            }
+            if let Some(v) = a.get("incident_cooldown_secs").and_then(|v| v.as_u64()) {
+                cfg.incident_cooldown_secs = v;
+                changed = true;
+            }
+            for (key, slot) in [
+                ("prefer_counter_free_ambit", &mut cfg.prefer_counter_free_ambit),
+                ("panic_refine", &mut cfg.panic_refine),
+                ("include_primary_shooters", &mut cfg.include_primary_shooters),
+                ("dry_run", &mut cfg.dry_run),
+            ] {
+                if let Some(v) = a.get(key).and_then(|v| v.as_bool()) {
+                    *slot = v;
+                    changed = true;
+                }
+            }
+            if changed {
+                ar::set(cfg.clone());
+            }
+            let force_now = a.get("now").and_then(|v| v.as_bool()).unwrap_or(false);
+            if force_now && cfg.enabled {
+                let app = app_handle.clone();
+                tokio::spawn(async move { ar::tick(&app, true).await });
+            }
+            let (used, cap) = ar::shot_budget();
+            vec![Content::text(format!(
+                "Raid response {} ({:?}, mode {:?}) — scans every {}s · ≤{} shots/incident · budget {}/{} this hour · counter-free ambit {} · panic refine {}{}\n{}",
+                if cfg.enabled { "ON" } else { "OFF" },
+                cfg.autonomy,
+                cfg.mode,
+                cfg.interval_secs,
+                cfg.max_shots_per_incident,
+                used,
+                cap,
+                cfg.prefer_counter_free_ambit,
+                cfg.panic_refine,
+                if changed { " (updated)" } else { "" },
+                if cfg.enabled {
+                    "Watch the WAR page's INCIDENTS card. In `advise` it posts the plan; set autonomy:\"auto\" to have it fire."
+                } else {
+                    "Set {enabled:true} to arm it. It starts in `advise`, so it will show you the shot plan before it ever signs."
+                }
+            ))]
+        }
+
+        // ── Raid target-selection loop (offensive combat automation) ──
+        "autoraid" | "raid_loop" => {
+            use crate::mcp::auto_raid as arl;
+            let mut cfg = arl::get();
+            let a = &params.args;
+            let mut changed = false;
+            // Posture first: it rewrites the gates, so explicit gate args in the
+            // same call must be applied after it and win.
+            if let Some(v) = a.get("posture").and_then(|v| v.as_str()) {
+                let p = match v.to_ascii_lowercase().as_str() {
+                    "cautious" => arl::RaidPosture::Cautious,
+                    "opportunist" => arl::RaidPosture::Opportunist,
+                    "aggressive" => arl::RaidPosture::Aggressive,
+                    other => {
+                        return vec![Content::text(format!(
+                            "posture '{other}' unknown — use cautious | opportunist | aggressive."
+                        ))]
+                    }
+                };
+                cfg.apply_posture(p);
+                changed = true;
+            }
+            if let Some(v) = a.get("enabled").and_then(|v| v.as_bool()) {
+                cfg.enabled = v;
+                changed = true;
+            }
+            if let Some(v) = a.get("autonomy").and_then(|v| v.as_str()) {
+                cfg.autonomy = match v.to_ascii_lowercase().as_str() {
+                    "auto" => crate::mcp::auto_response::Autonomy::Auto,
+                    _ => crate::mcp::auto_response::Autonomy::Advise,
+                };
+                changed = true;
+            }
+            for (key, slot) in [
+                ("min_ore", &mut cfg.min_ore),
+                ("min_score", &mut cfg.min_score),
+                ("abort_cmd_hp_below", &mut cfg.abort_cmd_hp_below),
+                ("w_ore", &mut cfg.w_ore),
+                ("w_vulnerability", &mut cfg.w_vulnerability),
+                ("w_weakness", &mut cfg.w_weakness),
+                ("w_grudge", &mut cfg.w_grudge),
+                ("w_guild", &mut cfg.w_guild),
+                ("w_speed", &mut cfg.w_speed),
+                ("w_history", &mut cfg.w_history),
+            ] {
+                if let Some(v) = a.get(key).and_then(|v| v.as_f64()) {
+                    *slot = v;
+                    changed = true;
+                }
+            }
+            for (key, slot) in [
+                ("max_raid_minutes", &mut cfg.max_raid_minutes),
+                ("target_cooldown_mins", &mut cfg.target_cooldown_mins),
+                ("skip_if_defender_active_mins", &mut cfg.skip_if_defender_active_mins),
+                ("max_raid_wall_minutes", &mut cfg.max_raid_wall_minutes),
+            ] {
+                if let Some(v) = a.get(key).and_then(|v| v.as_u64()) {
+                    *slot = v as u32;
+                    changed = true;
+                }
+            }
+            for (key, slot) in [
+                ("max_defenders", &mut cfg.max_defenders),
+                ("max_concurrent_raids", &mut cfg.max_concurrent_raids),
+                ("siege_max_shots", &mut cfg.siege_max_shots),
+                ("evaluate_per_scan", &mut cfg.evaluate_per_scan),
+                ("sweep_max_pages", &mut cfg.sweep_max_pages),
+            ] {
+                if let Some(v) = a.get(key).and_then(|v| v.as_u64()) {
+                    *slot = v as usize;
+                    changed = true;
+                }
+            }
+            for (key, slot) in [
+                ("require_vulnerable_now", &mut cfg.require_vulnerable_now),
+                ("allow_siege", &mut cfg.allow_siege),
+                ("return_home_after", &mut cfg.return_home_after),
+                ("dry_run", &mut cfg.dry_run),
+            ] {
+                if let Some(v) = a.get(key).and_then(|v| v.as_bool()) {
+                    *slot = v;
+                    changed = true;
+                }
+            }
+            if let Some(v) = a.get("interval_secs").and_then(|v| v.as_u64()) {
+                cfg.interval_secs = v.max(60);
+                changed = true;
+            }
+            if let Some(arr) = a.get("raid_hours_utc").and_then(|v| v.as_array()) {
+                cfg.raid_hours_utc = arr.iter().filter_map(|v| v.as_u64()).map(|v| (v % 24) as u32).collect();
+                changed = true;
+            }
+            if let Some(arr) = a.get("raider_players").and_then(|v| v.as_array()) {
+                cfg.raider_players = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                changed = true;
+            }
+            if changed {
+                arl::set(cfg.clone());
+            }
+            let force_now = a.get("now").and_then(|v| v.as_bool()).unwrap_or(false);
+            if force_now && cfg.enabled {
+                let app = app_handle.clone();
+                tokio::spawn(async move { arl::tick(&app, true).await });
+            }
+            let board = arl::target_board();
+            let mut out = format!(
+                "Raid targeting {} ({:?}, posture {:?}) — min_ore {:.0} · min_score {:.0} · ≤{} min proof · ≤{} defenders · vulnerable-only {} · siege {} · ≤{} concurrent{}\n",
+                if cfg.enabled { "ON" } else { "OFF" },
+                cfg.autonomy,
+                cfg.posture,
+                cfg.min_ore,
+                cfg.min_score,
+                cfg.max_raid_minutes,
+                cfg.max_defenders,
+                cfg.require_vulnerable_now,
+                cfg.allow_siege,
+                cfg.max_concurrent_raids,
+                if changed { " (updated)" } else { "" }
+            );
+            if board.is_empty() {
+                out.push_str("No target board yet — run with {now:true} once enabled to score candidates.\n");
+            } else {
+                out.push_str("Top targets:\n");
+                for c in board.iter().take(8) {
+                    out.push_str(&format!(
+                        "  {} {} ({}) — {:.0} ore · shield {} (~{:.0} min) · {} defenders · score {:.0} — {}\n",
+                        if c.blocked_by.is_none() { "GO  " } else { "no-go" },
+                        c.name,
+                        c.planet_id,
+                        c.stored_ore,
+                        c.planetary_shield,
+                        c.raid_minutes,
+                        c.defenders_on_cmd,
+                        c.score,
+                        c.blocked_by.clone().unwrap_or_else(|| c.vulnerability_reason.clone())
+                    ));
+                }
+            }
+            let active = arl::active_expeditions();
+            if !active.is_empty() {
+                out.push_str(&format!("{} expedition(s) in flight.\n", active.len()));
+            }
+            out.push_str("Raids are flown by VPlayerRole::Raider accounts only — the primary never leaves home.\n");
+            vec![Content::text(out)]
         }
 
         // Configurable "keep N grams, infuse the rest" rule for the PRIMARY.

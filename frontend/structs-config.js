@@ -1032,7 +1032,20 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               counter_attack_same_ambit: pickNum(t, 'counter_attack_same_ambit', 'counterAttackSameAmbit'),
               attack_reduction: pickNum(t, 'attack_reduction', 'attackReduction'),
               post_destruction_damage: pickNum(t, 'post_destruction_damage', 'postDestructionDamage'),
-              has_stealth_system: pickBool(t, 'has_stealth_system', 'hasStealthSystem')
+              has_stealth_system: pickBool(t, 'has_stealth_system', 'hasStealthSystem'),
+              // Defensive/evasion model. The chain keys evasion on the INCOMING
+              // weapon's control: signalJamming is guided 2/3, unguided 0/0.
+              unit_defenses: pickStr(t, 'unit_defenses', 'unitDefenses'),
+              guided_defensive_success_rate_numerator: pickNum(t, 'guided_defensive_success_rate_numerator', 'guidedDefensiveSuccessRateNumerator'),
+              guided_defensive_success_rate_denominator: pickNum(t, 'guided_defensive_success_rate_denominator', 'guidedDefensiveSuccessRateDenominator'),
+              unguided_defensive_success_rate_numerator: pickNum(t, 'unguided_defensive_success_rate_numerator', 'unguidedDefensiveSuccessRateNumerator'),
+              unguided_defensive_success_rate_denominator: pickNum(t, 'unguided_defensive_success_rate_denominator', 'unguidedDefensiveSuccessRateDenominator'),
+              primary_weapon_armour_piercing: pickBool(t, 'primary_weapon_armour_piercing', 'primaryWeaponArmourPiercing'),
+              secondary_weapon_armour_piercing: pickBool(t, 'secondary_weapon_armour_piercing', 'secondaryWeaponArmourPiercing'),
+              planetary_defenses: pickStr(t, 'planetary_defenses', 'planetaryDefenses'),
+              planetary_shield_contribution: pickNum(t, 'planetary_shield_contribution', 'planetaryShieldContribution'),
+              trigger_raid_defeat_by_destruction: pickBool(t, 'trigger_raid_defeat_by_destruction', 'triggerRaidDefeatByDestruction'),
+              movable: pickBool(t, 'movable', 'movable')
             };
           }
         }

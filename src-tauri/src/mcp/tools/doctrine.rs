@@ -43,6 +43,23 @@ pub struct DoctrineParams {
     /// Explicit fields in the same call override the preset's values.
     #[serde(default)]
     pub preset: Option<String>,
+    // ── `lists` command ──
+    /// lists: show | add | remove | mute | unmute. Named `list_action` so it
+    /// doesn't collide with the top-level `command`.
+    #[serde(default)]
+    pub list_action: Option<String>,
+    /// lists: grudge | priority_guild | ally | protected.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// lists: the player id (grudge/protected) or guild id (priority_guild/ally).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// lists: priority multiplier for a grudge or guild.
+    #[serde(default)]
+    pub weight: Option<f64>,
+    /// lists: free-text reason, shown on the WAR page.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Apply a named preset: a coherent bundle of doctrine values + auto-loop
@@ -117,20 +134,158 @@ fn preset_bundle(name: &str) -> Option<(&'static str, &'static str, bool, Option
             applied.push("auto_refine + combat_alert + primary_home_guard policies → ON".into());
             Some(("defensive", "advise", true, Some(4), applied))
         }
+        // Turtle, plus the two autonomous combat loops — armed but ADVISING.
+        // Deliberately not `auto`: the response loop shoots and the raid loop
+        // sends a fleet into someone else's guns, so the operator sees a few
+        // rounds of proposals before either of them signs anything.
+        "warfighter" => {
+            let (_, _, _, _, mut applied) = preset_bundle("turtle")?;
+            let mut r = crate::mcp::auto_response::get();
+            r.enabled = true;
+            r.autonomy = crate::mcp::auto_response::Autonomy::Advise;
+            crate::mcp::auto_response::set(r);
+            applied.push("auto_response loop → ON (advise — raid alarms produce a shot plan)".into());
+            let mut rd = crate::mcp::auto_raid::get();
+            rd.enabled = true;
+            rd.autonomy = crate::mcp::auto_response::Autonomy::Advise;
+            crate::mcp::auto_raid::set(rd);
+            applied.push("auto_raid loop → ON (advise — targets are scored and ranked, not flown)".into());
+            applied.push(
+                "Set autonomy:\"auto\" on either loop (structs_players autoresponse / autoraid) once the proposals look right."
+                    .into(),
+            );
+            Some(("defensive", "auto", true, Some(4), applied))
+        }
         _ => None,
     }
 }
+
+/// Every preset name, for the tool description and the board's preset buttons.
+pub const PRESETS: &[&str] = &["turtle", "economy", "balanced", "warfighter"];
 
 pub async fn execute(params: DoctrineParams) -> Vec<Content> {
     match params.command.as_str() {
         "set" => set_doctrine(params),
         "show" => show_doctrine(),
         "tick" => tick_doctrine().await,
+        "lists" => lists(params),
         other => vec![Content::text(format!(
-            "structs_doctrine: unknown command '{}'. Use set | show | tick.",
+            "structs_doctrine: unknown command '{}'. Use set | show | tick | lists.",
             other
         ))],
     }
+}
+
+/// `structs_doctrine lists` — read and edit the persistent grudge / priority-
+/// guild / never-attack lists that both combat loops consult.
+///
+/// These live outside the policy store because they are row-oriented (the WAR
+/// page edits one entry at a time), and outside either loop because both read
+/// them: `auto_response` writes grudges as it observes attacks, `auto_raid`
+/// reads them to decide who deserves a visit.
+fn lists(p: DoctrineParams) -> Vec<Content> {
+    use crate::mcp::combat_lists as cl;
+    let action = p.list_action.as_deref().unwrap_or("show");
+    let kind = p.kind.as_deref().unwrap_or("grudge");
+
+    if action == "show" {
+        let snap = cl::snapshot_json();
+        let mut out = String::from("Combat lists\n");
+        let grudges = snap.get("grudges").and_then(|g| g.as_array()).cloned().unwrap_or_default();
+        if grudges.is_empty() {
+            out.push_str("  Grudges: (none yet — auto_response adds one on every confirmed attack, or add one by hand)\n");
+        } else {
+            out.push_str("  Grudges (hottest first):\n");
+            for g in grudges.iter().take(25) {
+                let s = |k: &str| g.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let n = |k: &str| g.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                out.push_str(&format!(
+                    "    {} {} — {:.0} attacks, {:.0} structs lost, weight {:.1}, heat {:.2}{}{}\n",
+                    s("player_id"),
+                    if s("label").is_empty() { String::new() } else { format!("({})", s("label")) },
+                    n("attacks"),
+                    n("structs_lost"),
+                    n("weight"),
+                    n("heat"),
+                    if g.get("muted").and_then(|v| v.as_bool()) == Some(true) { " [muted]" } else { "" },
+                    if g.get("expired").and_then(|v| v.as_bool()) == Some(true) { " [lapsed]" } else { "" },
+                ));
+            }
+        }
+        let list = |k: &str| -> String {
+            snap.get(k)
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|x| x.as_str().map(String::from).unwrap_or_else(|| x.to_string()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "(none)".into())
+        };
+        out.push_str(&format!("  Priority guilds: {}\n", list("priority_guilds")));
+        out.push_str(&format!("  Allied guilds (never attack): {}\n", list("allies")));
+        out.push_str(&format!("  Protected players (never attack): {}\n", list("protected_players")));
+        out.push_str("\nEdit with {command:\"lists\", list_action:\"add\"|\"remove\"|\"mute\"|\"unmute\", kind:\"grudge\"|\"priority_guild\"|\"ally\"|\"protected\", id, weight?, note?}.\n");
+        return vec![Content::text(out)];
+    }
+
+    let Some(id) = p.id.clone().filter(|s| !s.is_empty()) else {
+        return vec![Content::text(
+            "lists: 'id' required (a player id for grudge/protected, a guild id for priority_guild/ally).".to_string(),
+        )];
+    };
+    let msg = match (kind, action) {
+        ("grudge", "remove") => {
+            if cl::remove_grudge(&id) {
+                format!("grudge on {id} removed")
+            } else {
+                format!("no grudge on {id}")
+            }
+        }
+        ("grudge", "mute") | ("grudge", "unmute") => {
+            let muted = action == "mute";
+            if cl::set_muted(&id, muted) {
+                format!("grudge on {id} {}", if muted { "muted (kept, but no longer acted on)" } else { "unmuted" })
+            } else {
+                format!("no grudge on {id}")
+            }
+        }
+        ("grudge", _) => {
+            let g = cl::upsert_grudge(&id, None, None, p.weight, p.note.clone(), Some(None));
+            format!(
+                "grudge on {id} → weight {:.1} (manual, never expires). auto_raid will prioritise it.",
+                g.weight
+            )
+        }
+        ("priority_guild", "remove") => {
+            cl::remove_priority_guild(&id);
+            format!("guild {id} removed from the priority list")
+        }
+        ("priority_guild", _) => {
+            let g = cl::upsert_priority_guild(&id, None, p.weight);
+            format!("guild {id} → priority weight {:.1}; every member gains that bonus", g.weight)
+        }
+        ("ally", a) => {
+            let allied = a != "remove";
+            cl::set_ally(&id, allied);
+            format!(
+                "guild {id} {} the never-attack list",
+                if allied { "added to" } else { "REMOVED from" }
+            )
+        }
+        ("protected", a) => {
+            let prot = a != "remove";
+            cl::set_protected(&id, prot);
+            format!(
+                "player {id} {} the never-attack list",
+                if prot { "added to" } else { "REMOVED from" }
+            )
+        }
+        (other, _) => format!("unknown kind '{other}' — use grudge | priority_guild | ally | protected."),
+    };
+    vec![Content::text(msg)]
 }
 
 /// Read the current doctrine (posture, pinned_target, autonomy) from the

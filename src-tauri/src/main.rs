@@ -62,6 +62,7 @@ fn main() {
             mcp::tools::board_pages::mcp_player_detail,
             mcp::tools::board_pages::mcp_energy,
             mcp::tools::board_pages::mcp_work,
+            mcp::tools::board_pages::mcp_war_bundle,
             mcp::tools::board_pages::mcp_config_bundle,
             mcp::tools::board_pages::mcp_config_set,
             mcp::tools::board_pages::mcp_role_pfp_get,

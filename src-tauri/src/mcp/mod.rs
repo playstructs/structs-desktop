@@ -1,4 +1,7 @@
 pub mod combat;
+pub mod combat_lists;
+pub mod auto_raid;
+pub mod auto_response;
 pub mod config;
 pub mod config_store;
 pub mod cosmos_client;

@@ -364,6 +364,8 @@ fn prefix(component: &str) -> String {
         "auto_defend" => "[Auto-Defend]".into(),
         "auto_harvest" => "[Auto-Harvest]".into(),
         "auto_infuse" => "[Auto-Infuse]".into(),
+        "auto_response" => "[Auto-Response]".into(),
+        "auto_raid" => "[Auto-Raid]".into(),
         "auto" => "[Structs Auto]".into(),
         "tx" => "[Structs TX]".into(),
         "vplayer" => "[Structs VPlayer]".into(),

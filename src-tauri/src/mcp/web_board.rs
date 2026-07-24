@@ -257,6 +257,7 @@ async fn board_invoke(
         },
         "mcp_energy" => from_result(board_pages::mcp_energy().await),
         "mcp_work" => from_result(board_pages::mcp_work_impl(&st.registry).await),
+        "mcp_war_bundle" => from_result(board_pages::mcp_war_bundle().await),
         "mcp_config_bundle" => from_result(board_pages::mcp_config_bundle().await),
         "mcp_config_set" => match (s("domain"), body.get("payload").cloned()) {
             (Some(d), Some(p)) => {

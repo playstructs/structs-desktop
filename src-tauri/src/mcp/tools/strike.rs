@@ -177,11 +177,6 @@ pub async fn execute(
         return vec![Content::text(out)];
     }
 
-    // name -> vplayer HD index, for routing each shot to its signer.
-    let name_to_index: HashMap<String, u32> = {
-        let reg = crate::mcp::virtual_players::REGISTRY.read().unwrap();
-        reg.players.iter().map(|p| (p.name.clone(), p.index)).collect()
-    };
     let primary_charge = |sid: &str, weapon: &str| -> u64 {
         let gs = crate::game_state::GAME_STATE.read().unwrap();
         gs.structs
@@ -208,8 +203,12 @@ pub async fn execute(
             let cost = primary_charge(&s.struct_id, &s.weapon);
             let tx_args = json!({
                 "action_type": "struct_attack",
+                // Fire at the EFFECTIVE target. In a STRIP phase that is the
+                // same-ambit blocker, not the struct it shields — previously the
+                // plan was computed against the blocker but the shot was sent at
+                // the protected struct, so every strip round was blocked.
                 "operating_struct_id": s.struct_id,
-                "target_struct_id": target,
+                "target_struct_id": fire_target,
                 "weapon_system": s.weapon,
                 "charge_cost": cost,
             });
@@ -221,7 +220,7 @@ pub async fn execute(
                 Ok(r) => out.push_str(&format!("  ✗ you · {}: {}\n", s.struct_id, r.error.unwrap_or_else(|| "rejected".into()))),
                 Err(e) => out.push_str(&format!("  ✗ you · {}: {}\n", s.struct_id, e)),
             }
-        } else if let Some(&index) = name_to_index.get(&s.player) {
+        } else if let Some(index) = s.hd_index {
             let wsys = if s.weapon.eq_ignore_ascii_case("secondary") {
                 "secondaryWeapon"
             } else {
@@ -229,7 +228,7 @@ pub async fn execute(
             };
             let payload = json!({
                 "operatingStructId": s.struct_id,
-                "targetStructId": [target.clone()],
+                "targetStructId": [fire_target.clone()],
                 "weaponSystem": wsys,
             });
             match crate::mcp::tx_retry::sign_with_retry(

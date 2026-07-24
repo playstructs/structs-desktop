@@ -5,8 +5,10 @@
 //! (which starved the tail cohort).
 
 use serde_json::Value;
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex};
 use tokio::task::JoinSet;
 
 use crate::mcp::cosmos_client::CosmosClient;
@@ -146,6 +148,10 @@ pub async fn player_structs(client: &CosmosClient, pid: &str) -> Vec<Value> {
             "type": get("type"),
             "type_name": get("type_name"),
             "location_type": get("locationType"),
+            // Combat is co-located: a struct can only be attacked by something at
+            // the same planet (the raider's fleet parks there), so shooter
+            // selection needs the location id, not just its kind.
+            "location_id": get("locationId"),
             "operating_ambit": get("operatingAmbit"),
             // LCD numerics are STRINGS ("slot": "1"); coerce to a real number
             // here so consumers' as_u64() works. A raw copy made every struct
@@ -160,6 +166,59 @@ pub async fn player_structs(client: &CosmosClient, pid: &str) -> Vec<Value> {
         }));
     }
     out
+}
+
+/// TTL'd cache behind [`player_structs`]. `player_structs` costs 3 + N LCD reads
+/// per player, which is fine for a per-player loop body but ruinous for anything
+/// that sweeps the WHOLE roster (180 vplayers ≈ 1,000+ requests per pass) —
+/// exactly what team-wide strike planning and the combat loops need to do.
+///
+/// The cached data is composition (type / ambit / slot / built / destroyed),
+/// which only changes when a struct is built or dies — both of which invalidate
+/// explicitly. Anything needing live HP or `protectedStructIndex` must still
+/// read the entity itself.
+/// (fetched_at_ms, the player's structs).
+type CachedStructs = (f64, Vec<Value>);
+static STRUCTS_CACHE: LazyLock<Mutex<HashMap<String, CachedStructs>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Default freshness for the struct-composition cache (10 min).
+pub const STRUCTS_CACHE_TTL_MS: f64 = 600_000.0;
+
+/// [`player_structs`], memoised for `ttl_ms`. Use from roster-wide sweeps.
+pub async fn player_structs_cached(client: &CosmosClient, pid: &str, ttl_ms: f64) -> Vec<Value> {
+    let now = crate::hasher::types::now_millis();
+    if let Ok(c) = STRUCTS_CACHE.lock() {
+        if let Some((at, v)) = c.get(pid) {
+            if now - *at < ttl_ms {
+                return v.clone();
+            }
+        }
+    }
+    let fresh = player_structs(client, pid).await;
+    // Don't cache an empty result: it's indistinguishable from a failed resolve,
+    // and caching it would blind every sweep for the whole TTL.
+    if !fresh.is_empty() {
+        if let Ok(mut c) = STRUCTS_CACHE.lock() {
+            c.insert(pid.to_string(), (now, fresh.clone()));
+        }
+    }
+    fresh
+}
+
+/// Drop a player's cached composition — call after a build completes or a
+/// struct is destroyed, so the next sweep sees the new fleet.
+pub fn invalidate_player_structs(pid: &str) {
+    if let Ok(mut c) = STRUCTS_CACHE.lock() {
+        c.remove(pid);
+    }
+}
+
+/// Drop every player's cached composition.
+pub fn invalidate_all_player_structs() {
+    if let Ok(mut c) = STRUCTS_CACHE.lock() {
+        c.clear();
+    }
 }
 
 /// Max player bodies in flight per scan. Each body does a handful of LCD reads
@@ -257,6 +316,42 @@ where
             set.spawn(async move { b(t).await });
         }
     }
+}
+
+/// Like [`for_each_player_concurrent`], but collects each body's return value.
+/// Ordering is NOT preserved (results arrive as tasks finish); a panicking body
+/// is logged and simply contributes no result.
+pub async fn map_concurrent<T, R, F, Fut>(targets: Vec<T>, max: usize, body: F) -> Vec<R>
+where
+    T: Send + 'static,
+    R: Send + 'static,
+    F: Fn(T) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+{
+    let max = max.max(1);
+    let mut it = targets.into_iter();
+    let mut set: JoinSet<R> = JoinSet::new();
+    let mut out = Vec::new();
+    for _ in 0..max {
+        match it.next() {
+            Some(t) => {
+                let b = body.clone();
+                set.spawn(async move { b(t).await });
+            }
+            None => break,
+        }
+    }
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(r) => out.push(r),
+            Err(e) => eprintln!("[loop_util] mapped task failed: {e}"),
+        }
+        if let Some(t) = it.next() {
+            let b = body.clone();
+            set.spawn(async move { b(t).await });
+        }
+    }
+    out
 }
 
 #[cfg(test)]

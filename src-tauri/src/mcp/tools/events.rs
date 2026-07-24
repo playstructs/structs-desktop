@@ -53,8 +53,8 @@ pub struct EventParams {
 
 /// A classified incoming threat to one of the team's own assets, ordered by how
 /// urgently it demands a response.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Threat {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Threat {
     RaidArmed,
     StructLost,
     TakingDamage,
@@ -63,7 +63,7 @@ enum Threat {
 }
 
 impl Threat {
-    fn priority(self) -> u8 {
+    pub fn priority(self) -> u8 {
         match self {
             Threat::RaidArmed => 5,
             Threat::StructLost => 4,
@@ -72,7 +72,7 @@ impl Threat {
             Threat::ShieldDrop => 1,
         }
     }
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Threat::RaidArmed => "🚨 RAID ARMED — Command Ship vulnerable; stored ore can be seized",
             Threat::StructLost => "💥 STRUCT DESTROYED",
@@ -87,19 +87,32 @@ impl Threat {
 /// when `team`, every virtual player. Threat classification + the mine-only
 /// filter both run against these.
 #[derive(Default)]
-struct Owned {
-    players: HashSet<String>,
-    planets: HashSet<String>,
-    fleets: HashSet<String>,
-    structs: HashSet<String>,
+pub struct Owned {
+    pub players: HashSet<String>,
+    pub planets: HashSet<String>,
+    pub fleets: HashSet<String>,
+    pub structs: HashSet<String>,
     /// All ids flattened, for the subject/detail contains-filter.
     flat: Vec<String>,
     /// planet id -> owner label (vplayer name, or "you" for the primary).
-    label_by_planet: HashMap<String, String>,
-    primary_planet: String,
+    pub label_by_planet: HashMap<String, String>,
+    /// planet id -> owning player id. Only that player's own fleet is
+    /// co-located with an attacker at that planet, so this is who can shoot back.
+    pub player_by_planet: HashMap<String, String>,
+    pub primary_planet: String,
 }
 
 impl Owned {
+    /// Which of our planets does this event concern, if any? The response loop
+    /// needs the planet to pull the authoritative attack record from the Guild
+    /// API (GRASS stubs any real fight).
+    pub fn planet_for(&self, e: &GameEvent) -> Option<String> {
+        let ds = e.detail.to_string();
+        self.planets
+            .iter()
+            .find(|p| !p.is_empty() && (e.subject.contains(p.as_str()) || ds.contains(p.as_str())))
+            .cloned()
+    }
     fn refresh_flat(&mut self) {
         let mut flat: Vec<String> = Vec::new();
         flat.extend(self.players.iter().cloned());
@@ -130,7 +143,7 @@ fn num(d: &Value, k: &str) -> Option<f64> {
 /// no `struct_attack` in grass — it surfaces as the *consequences* below. Struct
 /// events are keyed to the planet subject, so matching an owned planet covers a
 /// vplayer's structs without enumerating each one.
-fn classify(e: &GameEvent, o: &Owned) -> Option<Threat> {
+pub fn classify(e: &GameEvent, o: &Owned) -> Option<Threat> {
     let cat = e.category.as_str();
     let d = &e.detail;
     let sid = d.get("struct_id").and_then(|v| v.as_str());
@@ -186,7 +199,7 @@ fn classify(e: &GameEvent, o: &Owned) -> Option<Threat> {
 
 /// Build the owned-entity set: the primary player, plus (when `team`) every
 /// virtual player's planet/fleet. Shared by the tool and the autonomous scan.
-async fn build_owned(team: bool) -> Owned {
+pub async fn build_owned(team: bool) -> Owned {
     let mut o = Owned::default();
     {
         let gs = GAME_STATE.read().unwrap();
@@ -196,6 +209,9 @@ async fn build_owned(team: bool) -> Owned {
         if let Some(p) = &gs.planet_id {
             o.planets.insert(p.clone());
             o.label_by_planet.insert(p.clone(), "you".to_string());
+            if let Some(me) = &gs.player_id {
+                o.player_by_planet.insert(p.clone(), me.clone());
+            }
             o.primary_planet = p.clone();
         }
         if let Some(f) = &gs.fleet_id {
@@ -211,6 +227,9 @@ async fn build_owned(team: bool) -> Owned {
         o.fleets.extend(t.fleets);
         for (planet, name) in t.label_by_planet {
             o.label_by_planet.entry(planet).or_insert(name);
+        }
+        for (planet, pid) in t.player_by_planet {
+            o.player_by_planet.entry(planet).or_insert(pid);
         }
     }
     o.refresh_flat();
@@ -230,6 +249,7 @@ pub async fn poll_team_threats(since: f64) -> (f64, Vec<String>) {
     o.planets = t.planets;
     o.fleets = t.fleets;
     o.label_by_planet = t.label_by_planet;
+    o.player_by_planet = t.player_by_planet;
     o.refresh_flat();
 
     let recent = event_buffer::get_recent(200, None, None);

@@ -244,7 +244,7 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
 /// Args: `{ attacker, target, weapon?="primary" }` (structs resolved from game
 /// state); or override the target with `{ target_type, target_hp?, target_ambit? }`.
 async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
-    use crate::mcp::combat::{simulate, WeaponStats};
+    use crate::mcp::combat::{simulate, DefenseProfile, WeaponStats};
     use crate::mcp::tools::format::{ambit_bit, decode_ambits};
 
     let weapon = args.get("weapon").and_then(|v| v.as_str()).unwrap_or("primary");
@@ -357,31 +357,7 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
         None => return vec![Content::text("simulate: attacker struct type unknown (combat fields not synced?).".to_string())],
     };
 
-    let w = if secondary {
-        WeaponStats {
-            shots: att_type.secondary_weapon_shots.unwrap_or(0),
-            guaranteed: att_type.secondary_weapon_guaranteed_shots.unwrap_or(0),
-            success_num: att_type.secondary_weapon_shot_success_numerator.unwrap_or(0),
-            success_den: att_type.secondary_weapon_shot_success_denominator.unwrap_or(1),
-            damage: att_type.secondary_weapon_damage.unwrap_or(0),
-            recoil: att_type.secondary_weapon_recoil_damage.unwrap_or(0),
-            ambits: att_type.secondary_weapon_ambits.unwrap_or(0),
-            blockable: att_type.secondary_weapon_blockable.unwrap_or(false),
-            counterable: att_type.secondary_weapon_counterable.unwrap_or(false),
-        }
-    } else {
-        WeaponStats {
-            shots: att_type.primary_weapon_shots.unwrap_or(0),
-            guaranteed: att_type.primary_weapon_guaranteed_shots.unwrap_or(0),
-            success_num: att_type.primary_weapon_shot_success_numerator.unwrap_or(0),
-            success_den: att_type.primary_weapon_shot_success_denominator.unwrap_or(1),
-            damage: att_type.primary_weapon_damage.unwrap_or(0),
-            recoil: att_type.primary_weapon_recoil_damage.unwrap_or(0),
-            ambits: att_type.primary_weapon_ambits.unwrap_or(0),
-            blockable: att_type.primary_weapon_blockable.unwrap_or(false),
-            counterable: att_type.primary_weapon_counterable.unwrap_or(false),
-        }
-    };
+    let w = WeaponStats::from_type(att_type, secondary);
     if w.shots == 0 && w.damage == 0 {
         return vec![Content::text(format!(
             "simulate: no {} weapon data for {} — combat fields may not be synced yet (reload the app).",
@@ -390,40 +366,54 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
     }
 
     // Resolve target: the pre-fetched struct (local or chain), or explicit overrides.
-    let (tgt_name, tgt_hp, tgt_ambit_bit, reduction, counter_same, counter_cross) = if let Some((tgt_type_id, tgt_ambit, tgt_hp)) = &target_resolved {
+    let defense_of = |tt: Option<&crate::game_state::StructTypeInfo>| {
+        (
+            tt.map(DefenseProfile::from_type).unwrap_or_default(),
+            tt.and_then(|t| t.unit_defenses.clone()).unwrap_or_else(|| "unit".to_string()),
+        )
+    };
+    let (tgt_name, tgt_hp, tgt_ambit_bit, defense, defense_label) = if let Some((tgt_type_id, tgt_ambit, tgt_hp)) = &target_resolved {
         let tt = gs.struct_types.get(tgt_type_id);
+        let (d, label) = defense_of(tt);
         (
             tt.map(|t| t.name.clone()).unwrap_or_else(|| "target".to_string()),
             *tgt_hp,
             ambit_bit(tgt_ambit),
-            tt.and_then(|t| t.attack_reduction).unwrap_or(0),
-            tt.and_then(|t| t.counter_attack_same_ambit).unwrap_or(0),
-            tt.and_then(|t| t.counter_attack).unwrap_or(0),
+            d,
+            label,
         )
     } else if let Some(tt_name) = args.get("target_type").and_then(|v| v.as_str()) {
         let tt = gs.struct_types.values().find(|t| t.name.eq_ignore_ascii_case(tt_name));
         let hp = args.get("target_hp").and_then(|v| v.as_f64())
             .unwrap_or_else(|| tt.and_then(|t| t.max_health).unwrap_or(0.0));
         let ab = args.get("target_ambit").and_then(|v| v.as_str()).map(ambit_bit).unwrap_or(0);
-        (
-            tt_name.to_string(),
-            hp,
-            ab,
-            tt.and_then(|t| t.attack_reduction).unwrap_or(0),
-            tt.and_then(|t| t.counter_attack_same_ambit).unwrap_or(0),
-            tt.and_then(|t| t.counter_attack).unwrap_or(0),
-        )
+        let (d, label) = defense_of(tt);
+        (tt_name.to_string(), hp, ab, d, label)
     } else {
         return vec![Content::text("simulate: provide 'target' (a visible struct id) or 'target_type' (+ optional target_hp/target_ambit).".to_string())];
     };
+    let reduction = defense.reduction;
 
     let same_ambit = att_ambit_bit != 0 && att_ambit_bit == tgt_ambit_bit;
-    let r = simulate(&w, tgt_ambit_bit, tgt_hp, reduction, counter_same, counter_cross, same_ambit);
+    let r = simulate(&w, tgt_ambit_bit, tgt_hp, &defense, same_ambit);
 
     let mut out = String::new();
     out.push_str(&format!(
-        "Simulate: {} ({} weapon, reach [{}]) → {} (HP {:.0}, armour −{})\n",
-        att_type.name, weapon, decode_ambits(w.ambits), tgt_name, tgt_hp, reduction
+        "Simulate: {} ({} weapon, {}, reach [{}]) → {} (HP {:.0}, armour −{}{})\n",
+        att_type.name,
+        weapon,
+        w.control.as_str(),
+        decode_ambits(w.ambits),
+        tgt_name,
+        tgt_hp,
+        // `r.reduction` is 0 when the weapon is armour-piercing, whatever the
+        // target's armour says — report what will actually apply.
+        r.reduction,
+        if w.armour_piercing && reduction > 0 {
+            format!(", armour {reduction} PIERCED")
+        } else {
+            String::new()
+        }
     ));
     if !r.reachable {
         out.push_str("  ✗ OUT OF REACH — this weapon cannot hit the target's ambit. No damage.\n");
@@ -433,6 +423,16 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
         "  Damage → min {:.0} · expected {:.1} · max {:.0}  (target HP {:.0})\n",
         r.min_damage, r.expected_damage, r.max_damage, r.target_hp
     ));
+    if r.evade_chance > 0.0 {
+        // Evasion is rolled ONCE per target: on a successful evade the whole
+        // volley misses, so "expected" is already discounted by this.
+        out.push_str(&format!(
+            "  ⚠ Evasion: {:.0}% chance the WHOLE volley misses ({} defense vs {} ordnance) — min/max are the non-evaded case.\n",
+            r.evade_chance * 100.0,
+            defense_label,
+            w.control.as_str()
+        ));
+    }
     out.push_str(&format!(
         "  Kill → {}\n",
         if r.kills_min { "GUARANTEED (even minimum hits drop it)" }
@@ -450,6 +450,9 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
             if r.kills_expected { " — but a kill prevents the target's own counter" } else { "" }
         ));
     }
+    if w.blockable {
+        out.push_str("  Blockable: a defender sharing the TARGET's ambit can absorb this shot — strip same-ambit blockers first (structs_strike does this automatically).\n");
+    }
     out.push_str("  (Estimate from synced struct stats; defender blocks/counters and evasion rolls can shift the result.)\n");
     vec![Content::text(out)]
 }
@@ -457,11 +460,27 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
 /// One team struct's option against a target.
 #[derive(Debug, Clone)]
 pub struct StrikeRow {
+    /// Display label — the vplayer's name, or `"you"` for the primary.
     pub player: String,
+    /// The owning player's chain id (`1-xxx`). Lets callers reach roster data
+    /// (charge, online) without a name→id round trip.
+    pub player_id: Option<String>,
+    /// HD index for façade signing; `None` for the primary (webview queue).
+    pub hd_index: Option<u32>,
     pub struct_id: String,
     pub weapon: String,
+    /// Evasion-aware expected damage — the honest, chain-derived number.
     pub expected_dmg: f64,
     pub reachable: bool,
+    /// Ambit this shooter fires FROM (bitmask), which decides counter exposure.
+    pub att_ambit_bit: u64,
+    /// How many of the target's defenders can counter into this shooter's ambit.
+    /// 0 is the free shot the docs call "the single biggest combat lever".
+    pub counter_exposure: usize,
+    /// Ranking score: expected damage after the planetary interceptor heuristic,
+    /// penalised by counter risk. Ordering only — never shown as damage.
+    pub score: f64,
+    pub control: crate::mcp::combat::WeaponControl,
 }
 
 /// A computed team strike plan against a resolved target.
@@ -472,6 +491,9 @@ pub struct StrikePlan {
     pub tgt_ambit_bit: u64,
     pub tgt_hp: f64,
     pub reduction: u64,
+    /// Bitmask of ambits from which NO registered defender can counter — the
+    /// zero-counter-damage lever. 0 when the target wasn't given by id.
+    pub counter_free: u64,
     pub rows: Vec<StrikeRow>,
 }
 
@@ -479,7 +501,9 @@ pub struct StrikePlan {
 /// (primary + each virtual player), and simulate each one's best reaching weapon.
 /// Shared by `strike_options` (display) and `structs_strike` (execute).
 pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePlan, String> {
-    use crate::mcp::combat::{simulate, WeaponStats};
+    use crate::mcp::combat::{
+        counter_exposure, shooter_score, simulate, DefenseProfile, InterceptorNet, WeaponStats,
+    };
     use crate::mcp::tools::format::ambit_bit;
 
     let num_or_str = |x: &Value| match x {
@@ -489,13 +513,30 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
     };
 
     let target_id_arg = args.get("target").and_then(|v| v.as_str()).map(|s| s.to_string());
+    // Optional scoping — the combat loops pass a candidate subset so a strike
+    // plan doesn't have to resolve all ~180 vplayers' fleets.
+    let only_players: Option<std::collections::HashSet<String>> = args
+        .get("players")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
 
-    // ── Resolve the target: ambit, HP, armour, counter values. ──
-    let (target_label, tgt_ambit_bit, tgt_hp, reduction, counter_same, counter_cross) =
+    // ── Resolve the target: ambit, HP, armour, counters, evasion. ──
+    // Planet the target sits on, if any — its interceptor network is a second
+    // evasion layer against guided ordnance.
+    let mut target_planet: Option<String> = None;
+    let (target_label, tgt_ambit_bit, tgt_hp, defense, target_is_planetary) =
         if let Some(tid) = args.get("target").and_then(|v| v.as_str()) {
             match client.query_entity("struct", tid).await {
                 Ok(v) => {
                     let st = v.get("Struct");
+                    if st.and_then(|s| s.get("locationType")).and_then(|x| x.as_str())
+                        == Some("planet")
+                    {
+                        target_planet = st
+                            .and_then(|s| s.get("locationId"))
+                            .and_then(|x| x.as_str())
+                            .map(String::from);
+                    }
                     let type_id = st.and_then(|s| s.get("type")).and_then(&num_or_str);
                     let ambit = st
                         .and_then(|s| s.get("operatingAmbit"))
@@ -508,15 +549,19 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
                         .and_then(json_to_f64)
                         .or_else(|| st.and_then(|s| s.get("health_max")).and_then(json_to_f64))
                         .unwrap_or(0.0);
+                    let on_planet = st
+                        .and_then(|s| s.get("locationType"))
+                        .and_then(|x| x.as_str())
+                        .map(|l| l.eq_ignore_ascii_case("planet"))
+                        .unwrap_or(false);
                     let gs = GAME_STATE.read().unwrap();
                     let t = type_id.as_ref().and_then(|t| gs.struct_types.get(t));
                     (
                         format!("{}{}", tid, t.map(|t| format!(" ({})", t.name)).unwrap_or_default()),
                         ambit,
                         hp,
-                        t.and_then(|t| t.attack_reduction).unwrap_or(0),
-                        t.and_then(|t| t.counter_attack_same_ambit).unwrap_or(0),
-                        t.and_then(|t| t.counter_attack).unwrap_or(0),
+                        t.map(DefenseProfile::from_type).unwrap_or_default(),
+                        on_planet,
                     )
                 }
                 Err(e) => {
@@ -532,99 +577,173 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
                 .and_then(|v| v.as_f64())
                 .or_else(|| t.and_then(|t| t.max_health))
                 .unwrap_or(0.0);
+            let planetary = t
+                .and_then(|t| t.category.as_deref())
+                .map(|c| c.eq_ignore_ascii_case("planet"))
+                .unwrap_or(false);
             (
                 tt.to_string(),
                 ambit,
                 hp,
-                t.and_then(|t| t.attack_reduction).unwrap_or(0),
-                t.and_then(|t| t.counter_attack_same_ambit).unwrap_or(0),
-                t.and_then(|t| t.counter_attack).unwrap_or(0),
+                t.map(DefenseProfile::from_type).unwrap_or_default(),
+                planetary,
             )
         } else {
             return Err(
                 "provide 'target' (enemy struct id) or 'target_type' (+ target_ambit, target_hp?).".to_string(),
             );
         };
+    let reduction = defense.reduction;
 
-    // ── Gather attackers: (player_label, struct_id, type_id, ambit_bit). ──
-    // Primary from GAME_STATE; each virtual player from the Guild API.
-    let mut attackers: Vec<(String, String, String, u64)> = Vec::new();
+    // ── Counter exposure: which ambits the target's registered defenders can
+    // reach. Firing from an uncovered ambit costs zero counter damage. ──
+    let defender_masks: Vec<u64> = match &target_id_arg {
+        Some(tid) => defender_weapon_masks(client, tid).await,
+        None => vec![],
+    };
+    // The planet's interceptor network only bites guided ordnance aimed at a
+    // struct sitting on that planet. Its rate is chain-exposed (e.g. 1/3 per
+    // interceptor), so this is real data, not a guess.
+    let interceptors = match &target_planet {
+        Some(p) => client
+            .query_entity("planet", p)
+            .await
+            .ok()
+            .map(|e| InterceptorNet::from_planet_attributes(e.get("planetAttributes")))
+            .unwrap_or_default(),
+        None => InterceptorNet::default(),
+    };
+
+    // ── Gather attackers: (label, player_id, hd_index, struct_id, type_id, ambit_bit). ──
+    // Primary from GAME_STATE; each virtual player from its planet/fleet slots.
+    type Attacker = (String, Option<String>, Option<u32>, String, String, u64);
+    let mut attackers: Vec<Attacker> = Vec::new();
     {
         let gs = GAME_STATE.read().unwrap();
         if let Some(me) = gs.player_id.clone() {
-            for (id, s) in gs.structs.iter() {
-                if s.owner != me || s.status & 2 == 0 || s.status & 32 != 0 {
-                    continue;
+            if only_players.as_ref().map(|s| s.contains(&me)).unwrap_or(true) {
+                for (id, s) in gs.structs.iter() {
+                    if s.owner != me || s.status & 2 == 0 || s.status & 32 != 0 {
+                        continue;
+                    }
+                    let bit = s.operating_ambit.as_deref().map(ambit_bit).unwrap_or(0);
+                    attackers.push((
+                        "you".to_string(),
+                        Some(me.clone()),
+                        None,
+                        id.clone(),
+                        s.struct_type_id.to_string(),
+                        bit,
+                    ));
                 }
-                let bit = s.operating_ambit.as_deref().map(ambit_bit).unwrap_or(0);
-                attackers.push(("you".to_string(), id.clone(), s.struct_type_id.to_string(), bit));
             }
         }
     }
-    let vplayers: Vec<(String, Option<String>)> = {
+    let vplayers: Vec<(String, String, u32)> = {
         let reg = crate::mcp::virtual_players::REGISTRY.read().unwrap();
-        reg.players.iter().map(|p| (p.name.clone(), p.player_id.clone())).collect()
+        reg.players
+            .iter()
+            .filter_map(|p| p.player_id.clone().map(|id| (p.name.clone(), id, p.index)))
+            .filter(|(_, id, _)| only_players.as_ref().map(|s| s.contains(id)).unwrap_or(true))
+            .collect()
     };
-    for (name, pid) in vplayers {
-        let Some(pid) = pid else { continue };
-        if let Ok(page) = client.guild.struct_list_by_owner(&pid, 1).await {
-            for v in page.items.iter() {
-                if v.get("is_destroyed").and_then(|x| x.as_bool()).unwrap_or(false) {
-                    continue;
+    // Resolve every vplayer's fleet concurrently off the TTL'd composition cache.
+    // The old code walked the roster serially through the guild `struct/list/owner`
+    // endpoint, which IGNORES its owner filter and returns a global page — so every
+    // vplayer contributed the same 100 foreign structs and the plan was nonsense.
+    // See loop_util::player_struct_ids for the endpoint bug.
+    let resolved = {
+        let client = client.clone();
+        crate::mcp::loop_util::map_concurrent(
+            vplayers,
+            crate::mcp::loop_util::effective_max_concurrent(),
+            move |(name, pid, index)| {
+                let client = client.clone();
+                async move {
+                    let structs = crate::mcp::loop_util::player_structs_cached(
+                        &client,
+                        &pid,
+                        crate::mcp::loop_util::STRUCTS_CACHE_TTL_MS,
+                    )
+                    .await;
+                    (name, pid, index, structs)
                 }
-                let Some(id) = v.get("id").and_then(|x| x.as_str()) else { continue };
-                let type_id = v
-                    .get("type")
-                    .or_else(|| v.get("struct_type"))
-                    .and_then(&num_or_str)
-                    .unwrap_or_default();
-                let bit = v.get("operating_ambit").and_then(|x| x.as_str()).map(ambit_bit).unwrap_or(0);
-                attackers.push((name.clone(), id.to_string(), type_id, bit));
+            },
+        )
+        .await
+    };
+    for (name, pid, index, structs) in resolved {
+        for v in structs.iter() {
+            if crate::mcp::loop_util::parse_bool(v.get("is_destroyed"))
+                || !crate::mcp::loop_util::parse_bool(v.get("is_built"))
+            {
+                continue;
             }
+            let Some(id) = v.get("id").and_then(|x| x.as_str()) else { continue };
+            let type_id = v
+                .get("type")
+                .or_else(|| v.get("struct_type"))
+                .and_then(&num_or_str)
+                .unwrap_or_default();
+            let bit = v.get("operating_ambit").and_then(|x| x.as_str()).map(ambit_bit).unwrap_or(0);
+            attackers.push((name.clone(), Some(pid.clone()), Some(index), id.to_string(), type_id, bit));
         }
     }
 
     // ── Simulate each attacker's best reaching weapon against the target. ──
-    let mut rows: Vec<(String, String, String, f64, bool)> = Vec::new();
+    let mut rows: Vec<StrikeRow> = Vec::new();
     {
         let gs = GAME_STATE.read().unwrap();
-        let build = |t: &crate::game_state::StructTypeInfo, secondary: bool| WeaponStats {
-            shots: if secondary { t.secondary_weapon_shots } else { t.primary_weapon_shots }.unwrap_or(0),
-            guaranteed: 0,
-            success_num: if secondary { t.secondary_weapon_shot_success_numerator } else { t.primary_weapon_shot_success_numerator }.unwrap_or(0),
-            success_den: if secondary { t.secondary_weapon_shot_success_denominator } else { t.primary_weapon_shot_success_denominator }.unwrap_or(1),
-            damage: if secondary { t.secondary_weapon_damage } else { t.primary_weapon_damage }.unwrap_or(0),
-            recoil: 0,
-            ambits: if secondary { t.secondary_weapon_ambits } else { t.primary_weapon_ambits }.unwrap_or(0),
-            blockable: false,
-            counterable: false,
-        };
-        for (player, id, type_id, att_ambit) in &attackers {
+        for (player, player_id, hd_index, id, type_id, att_ambit) in &attackers {
             let Some(t) = gs.struct_types.get(type_id) else { continue };
-            let prim = build(t, false);
-            let sec = build(t, true);
+            let prim = WeaponStats::from_type(t, false);
+            let sec = WeaponStats::from_type(t, true);
             if prim.ambits == 0 && sec.ambits == 0 {
                 continue; // non-combat struct
             }
-            // Prefer the weapon that reaches the target's ambit.
-            let (w, wlabel) = if tgt_ambit_bit != 0 && (prim.ambits & tgt_ambit_bit) != 0 {
-                (prim, "primary")
-            } else if tgt_ambit_bit != 0 && (sec.ambits & tgt_ambit_bit) != 0 {
-                (sec, "secondary")
-            } else if prim.ambits != 0 {
-                (prim, "primary")
-            } else {
-                (sec, "secondary")
+            // Prefer the weapon that reaches the target's ambit; between two that
+            // both reach, prefer the one the target can't evade (unguided into a
+            // jammer, guided into a defensive-maneuver hull).
+            let prim_ok = tgt_ambit_bit != 0 && (prim.ambits & tgt_ambit_bit) != 0;
+            let sec_ok = tgt_ambit_bit != 0 && (sec.ambits & tgt_ambit_bit) != 0;
+            let (w, wlabel) = match (prim_ok, sec_ok) {
+                (true, true) => {
+                    if defense.evade_chance(sec.control) < defense.evade_chance(prim.control) {
+                        (sec, "secondary")
+                    } else {
+                        (prim, "primary")
+                    }
+                }
+                (true, false) => (prim, "primary"),
+                (false, true) => (sec, "secondary"),
+                (false, false) if prim.ambits != 0 => (prim, "primary"),
+                _ => (sec, "secondary"),
             };
             let same = *att_ambit != 0 && *att_ambit == tgt_ambit_bit;
-            let r = simulate(&w, tgt_ambit_bit, tgt_hp, reduction, counter_same, counter_cross, same);
-            rows.push((player.clone(), id.clone(), wlabel.to_string(), r.expected_damage, r.reachable));
+            let r = simulate(&w, tgt_ambit_bit, tgt_hp, &defense, same);
+            let exposure = counter_exposure(&defender_masks, *att_ambit);
+            rows.push(StrikeRow {
+                player: player.clone(),
+                player_id: player_id.clone(),
+                hd_index: *hd_index,
+                struct_id: id.clone(),
+                weapon: wlabel.to_string(),
+                expected_dmg: r.expected_damage,
+                reachable: r.reachable,
+                att_ambit_bit: *att_ambit,
+                counter_exposure: exposure,
+                score: shooter_score(&r, w.control, interceptors, target_is_planetary, exposure),
+                control: w.control,
+            });
         }
     }
 
+    // Reachable first, then by score (evasion- and counter-aware), then raw damage.
     rows.sort_by(|a, b| {
-        b.4.cmp(&a.4)
-            .then(b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
+        b.reachable
+            .cmp(&a.reachable)
+            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+            .then(b.expected_dmg.partial_cmp(&a.expected_dmg).unwrap_or(std::cmp::Ordering::Equal))
     });
 
     Ok(StrikePlan {
@@ -633,17 +752,54 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
         tgt_ambit_bit,
         tgt_hp,
         reduction,
-        rows: rows
-            .into_iter()
-            .map(|(player, struct_id, weapon, expected_dmg, reachable)| StrikeRow {
-                player,
-                struct_id,
-                weapon,
-                expected_dmg,
-                reachable,
-            })
-            .collect(),
+        counter_free: crate::mcp::combat::counter_free_ambits(&defender_masks),
+        rows,
     })
+}
+
+/// Weapon-reach masks of every live struct registered to defend `target`, plus
+/// the target's own reach (it counters too). Feeds `counter_free_ambits` /
+/// `counter_exposure` so a shooter can be picked in an ambit nobody covers.
+pub async fn defender_weapon_masks(client: &CosmosClient, target: &str) -> Vec<u64> {
+    let mut ids: Vec<String> = vec![target.to_string()];
+    if let Ok(page) = client.guild.struct_defender_by_protected(target, 1).await {
+        for d in page.items.iter() {
+            if let Some(id) = d.get("defending_struct_id").and_then(|x| x.as_str()) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    let mut masks = Vec::new();
+    for id in ids {
+        let Ok(e) = client.query_entity("struct", &id).await else { continue };
+        if crate::mcp::loop_util::parse_bool(
+            e.get("structAttributes").and_then(|x| x.get("isDestroyed")),
+        ) {
+            continue;
+        }
+        let type_id = e
+            .get("Struct")
+            .and_then(|s| s.get("type"))
+            .map(|x| match x {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_default();
+        let gs = GAME_STATE.read().unwrap();
+        if let Some(t) = gs.struct_types.get(&type_id) {
+            // A struct with no counter value can't punish anyone regardless of
+            // reach (Mobile Artillery's indirectCombatModule, unarmed planetary
+            // structs) — it must not make an ambit look covered.
+            if t.counter_attack.unwrap_or(0) == 0 && t.counter_attack_same_ambit.unwrap_or(0) == 0 {
+                continue;
+            }
+            let mask = t.primary_weapon_ambits.unwrap_or(0) | t.secondary_weapon_ambits.unwrap_or(0);
+            if mask != 0 {
+                masks.push(mask);
+            }
+        }
+    }
+    masks
 }
 
 /// `intel.strike_options` — team-wide strike planner (display). Reports which of
@@ -663,12 +819,37 @@ async fn query_strike_options(client: &CosmosClient, args: &Value) -> Vec<Conten
         if plan.tgt_ambit_bit == 0 { "?".to_string() } else { decode_ambits(plan.tgt_ambit_bit) },
         plan.reduction
     ));
+    // The single biggest combat lever: counters are gated on the defender's
+    // weapon reaching the ATTACKER's ambit, so firing from an ambit nobody
+    // covers costs zero counter damage.
+    if plan.counter_free != 0 {
+        out.push_str(&format!(
+            "Counter-free ambits: [{}] — attacking from these takes NO counter damage.\n",
+            decode_ambits(plan.counter_free)
+        ));
+    } else if plan.target_id.is_some() {
+        out.push_str("Counter-free ambits: none — every ambit is covered by a defender that can counter.\n");
+    }
+    out.push('\n');
     let reachable: Vec<_> = plan.rows.iter().filter(|r| r.reachable).collect();
     if reachable.is_empty() {
         out.push_str("  No combat struct on your team can reach this target's ambit.\n");
     } else {
         for r in &reachable {
-            out.push_str(&format!("  {} · {} [{}] → ~{:.1} expected dmg\n", r.player, r.struct_id, r.weapon, r.expected_dmg));
+            let free = r.att_ambit_bit != 0 && (plan.counter_free & r.att_ambit_bit) != 0;
+            out.push_str(&format!(
+                "  {} · {} [{}, {}] → ~{:.1} expected dmg · {}\n",
+                r.player,
+                r.struct_id,
+                r.weapon,
+                r.control.as_str(),
+                r.expected_dmg,
+                if free {
+                    "FREE SHOT (no counter reaches its ambit)".to_string()
+                } else {
+                    format!("{} defender(s) can counter into its ambit", r.counter_exposure)
+                }
+            ));
         }
     }
     let unreachable = plan.rows.len() - reachable.len();
@@ -1375,8 +1556,9 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
         )];
     }
 
-    // (id, defender_count, reachable, note)
-    let mut targets: Vec<(String, usize, bool, String)> = Vec::new();
+    // (id, defender_count, reachable, note, owner_stored_ore, owner_vulnerable)
+    #[allow(clippy::type_complexity)]
+    let mut targets: Vec<(String, usize, bool, String, f64, bool)> = Vec::new();
     for (id, ambit, hp) in candidates.iter().take(20) {
         let defenders = match client.guild.struct_defender_by_protected(id, 1).await {
             Ok(page) => page.items,
@@ -1408,16 +1590,36 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
         } else {
             hp.clone()
         };
+        // What the owner is actually worth taking. A raid seizes ALL of a
+        // player's stored ore, and only a *vulnerable* owner can be raided at
+        // all — historically 0 of 50 non-vulnerable raids ever completed. Both
+        // were missing here, so this ranked a 0-ore fortress above the galaxy's
+        // fattest undefended pile.
+        let prize = owner_prize(client, id).await;
         let mut note = format!("HP {} · {}", hp_str, def_note);
+        if let Some(p) = &prize {
+            note.push_str(&format!(
+                " · owner {} holds {:.0} ore, {}",
+                p.owner,
+                p.stored_ore,
+                if p.vulnerable { "RAIDABLE NOW" } else { "shields up" }
+            ));
+        }
         if weapon_mask.is_some() && !reachable {
             note.push_str(" — OUT OF WEAPON AMBIT (cannot reach)");
         }
-        targets.push((id.clone(), defender_count, reachable, note));
+        let ore = prize.as_ref().map(|p| p.stored_ore).unwrap_or(0.0);
+        let vulnerable = prize.as_ref().map(|p| p.vulnerable).unwrap_or(false);
+        targets.push((id.clone(), defender_count, reachable, note, ore, vulnerable));
     }
 
-    // Rank: reachable first, then undefended first, then lowest defender count.
+    // Rank: reachable first, then the raidable ones, then by the size of the
+    // prize, and only then by how lightly defended the struct itself is.
     targets.sort_by(|a, b| {
-        b.2.cmp(&a.2).then(a.1.cmp(&b.1))
+        b.2.cmp(&a.2)
+            .then(b.5.cmp(&a.5))
+            .then(b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
+            .then(a.1.cmp(&b.1))
     });
     targets.truncate(limit);
 
@@ -1438,10 +1640,10 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
             "\nNote: pass 'attacker' (your struct id) + 'weapon' to filter by ambit reachability.\n\n",
         ),
     }
-    for (id, _, _, note) in &targets {
+    for (id, _, _, note, _, _) in &targets {
         out.push_str(&format!("  {}  — {}\n", id, note));
     }
-    out.push_str("\nNote: defender chains are read live from the Guild API.\n");
+    out.push_str("\nNote: defender chains are read live from the Guild API. Ranked by reachable → raidable → size of the owner's ore pile → lightly defended, because a raid seizes ALL of the owner's stored ore and cannot complete at all unless their shields are vulnerable.\n");
     out.push_str(
         "Combat rules (v0.17.0): the target's defenders fire a counter-attack but take no counter-damage themselves — only the attacker and the original target can be hit by counters. A fleet that is AWAY from its home planet cannot defend planetary structs there, so on-station targets are better protected than they look.\n",
     );
@@ -1624,6 +1826,176 @@ async fn query_battle_log(client: &CosmosClient, args: &Value) -> Vec<Content> {
         out.push_str("  (no matching events — combat may not have resolved yet; events also stream live on structs_events)\n");
     }
     vec![Content::text(out)]
+}
+
+/// What raiding a struct's OWNER would actually be worth, and whether it is
+/// possible right now. Cached per scan so a 20-candidate ranking doesn't re-read
+/// the same owner's player/fleet entities once per struct they own.
+struct OwnerPrize {
+    owner: String,
+    stored_ore: f64,
+    vulnerable: bool,
+}
+
+/// Resolve the owner of `struct_id` and answer the only two questions that
+/// decide whether attacking around them pays: how much stored ore they hold
+/// (a raid takes all of it) and whether their shields are currently vulnerable.
+async fn owner_prize(client: &CosmosClient, struct_id: &str) -> Option<OwnerPrize> {
+    let st = client.query_entity("struct", struct_id).await.ok()?;
+    let owner = st.get("Struct")?.get("owner").and_then(|x| x.as_str())?.to_string();
+    let pl = client.query_entity("player", &owner).await.ok()?;
+    let p = pl.get("Player")?;
+    let stored_ore = crate::mcp::loop_util::parse_f64(pl.get("gridAttributes").and_then(|g| g.get("ore")));
+    let planet = p.get("planetId").and_then(|x| x.as_str()).unwrap_or("");
+    let fleet = p.get("fleetId").and_then(|x| x.as_str()).unwrap_or("");
+
+    // IsDefenderCommandStructVulnerable(): no fleet, fleet off-station, or no /
+    // destroyed / offline Command Ship.
+    let vulnerable = if fleet.is_empty() {
+        true
+    } else {
+        match client.query_entity("fleet", fleet).await {
+            Ok(fl) => {
+                let f = fl.get("Fleet");
+                let on_station = f.and_then(|x| x.get("status")).and_then(|x| x.as_str()) == Some("onStation")
+                    && f.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) == Some(planet);
+                if !on_station {
+                    true
+                } else {
+                    match f.and_then(|x| x.get("commandStruct")).and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                        None => true,
+                        Some(cs) => client
+                            .query_entity("struct", cs)
+                            .await
+                            .map(|e| {
+                                let sa = e.get("structAttributes");
+                                crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isDestroyed")))
+                                    || !crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isOnline")))
+                            })
+                            .unwrap_or(false),
+                    }
+                }
+            }
+            Err(_) => false,
+        }
+    };
+    Some(OwnerPrize { owner, stored_ore, vulnerable })
+}
+
+/// One resolved `struct_attack` row, typed. The GRASS/NATS stream STUBS this
+/// event whenever the payload exceeds ~8 KB — which any multi-shot, multi-defender
+/// fight does — so the stub carries no attacker fields at all. The Guild API's
+/// `planet-activity` feed always has the full record, which makes this the only
+/// reliable way to answer "who just shot me". Used by `battle_log` (display) and
+/// by `auto_response` (attacker resolution).
+#[derive(Debug, Clone, Default)]
+pub struct AttackEvent {
+    pub time: String,
+    pub seq: i64,
+    pub attacker_player_id: Option<String>,
+    pub attacker_struct_id: Option<String>,
+    pub attacker_struct_type: Option<String>,
+    pub attacker_ambit: Option<String>,
+    pub target_player_id: Option<String>,
+    pub weapon_system: Option<String>,
+    pub shots: Vec<AttackShot>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AttackShot {
+    pub target_struct_id: Option<String>,
+    pub target_player_id: Option<String>,
+    pub damage_dealt: u64,
+    pub evaded: bool,
+    pub blocked: bool,
+    pub destroyed: bool,
+    pub countered: bool,
+    pub countered_damage: u64,
+}
+
+impl AttackEvent {
+    /// Did this volley touch any of `mine` (struct ids we own)?
+    pub fn hits_any(&self, mine: &std::collections::HashSet<String>) -> bool {
+        self.shots
+            .iter()
+            .any(|s| s.target_struct_id.as_deref().map(|t| mine.contains(t)).unwrap_or(false))
+    }
+    pub fn total_damage(&self) -> u64 {
+        self.shots.iter().map(|s| s.damage_dealt).sum()
+    }
+    pub fn destroyed_count(&self) -> u32 {
+        self.shots.iter().filter(|s| s.destroyed).count() as u32
+    }
+}
+
+fn json_bool(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        Some(Value::Number(n)) => n.as_i64().unwrap_or(0) != 0,
+        _ => false,
+    }
+}
+
+/// Read the most recent `struct_attack` rows for a planet, newest first.
+pub async fn fetch_attack_events(
+    client: &CosmosClient,
+    planet_id: &str,
+    limit: usize,
+) -> Result<Vec<AttackEvent>, String> {
+    let pid = planet_id.to_string();
+    let items = fetch_all_pages(|page| client.guild.planet_activity_by_planet(&pid, page), 5)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut out: Vec<AttackEvent> = Vec::new();
+    for ev in items.iter() {
+        if ev.get("category").and_then(|x| x.as_str()) != Some("struct_attack") {
+            continue;
+        }
+        // The REST feed encodes `detail` as a JSON STRING; GRASS delivers it
+        // already parsed. `coerce_detail` normalises both.
+        let detail = coerce_detail(&ev.get("detail").cloned().unwrap_or(Value::Null));
+        let sval = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(String::from).filter(|s| !s.is_empty());
+
+        let shots: Vec<AttackShot> = detail
+            .get("eventAttackShotDetail")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|s| AttackShot {
+                        target_struct_id: sval(s, "targetStructId"),
+                        target_player_id: sval(s, "targetPlayerId"),
+                        damage_dealt: s.get("damageDealt").and_then(json_to_u64).unwrap_or(0),
+                        evaded: json_bool(s.get("evaded")),
+                        blocked: json_bool(s.get("blocked")),
+                        destroyed: json_bool(s.get("targetDestroyed")),
+                        countered: json_bool(s.get("targetCountered")),
+                        countered_damage: s.get("targetCounteredDamage").and_then(json_to_u64).unwrap_or(0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        out.push(AttackEvent {
+            time: ev.get("time").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            seq: ev.get("seq").and_then(json_to_u64).unwrap_or(0) as i64,
+            attacker_player_id: sval(&detail, "attackerPlayerId"),
+            attacker_struct_id: sval(&detail, "attackerStructId"),
+            attacker_struct_type: sval(&detail, "attackerStructType"),
+            attacker_ambit: sval(&detail, "attackerStructOperatingAmbit"),
+            // `targetPlayerId` sits on the flat block in the REST shape and on
+            // each shot in combat.md's schema — take whichever is present.
+            target_player_id: sval(&detail, "targetPlayerId")
+                .or_else(|| shots.iter().find_map(|s: &AttackShot| s.target_player_id.clone())),
+            weapon_system: sval(&detail, "weaponSystem"),
+            shots,
+        });
+    }
+    // Newest first: `seq` is monotonic per planet; fall back to the timestamp.
+    out.sort_by(|a, b| b.seq.cmp(&a.seq).then(b.time.cmp(&a.time)));
+    out.truncate(limit);
+    Ok(out)
 }
 
 /// Summarize one `EventAttackShotDetail` row into a readable combat line:

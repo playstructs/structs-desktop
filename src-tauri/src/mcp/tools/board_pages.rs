@@ -209,7 +209,30 @@ fn loops_json() -> Value {
         "build": auto_build::get(),
         "defend": auto_defend::get(),
         "infuse": auto_infuse::get(),
+        "response": crate::mcp::auto_response::get(),
+        "raid": crate::mcp::auto_raid::get(),
     })
+}
+
+// ── WAR ──────────────────────────────────────────────────────────────────────
+
+/// Everything the WAR page renders, in one call: the grudge/guild lists, the
+/// scored target board from `auto_raid`, expeditions in flight, recent
+/// `auto_response` incidents, and both combat loops' configs.
+#[tauri::command]
+pub async fn mcp_war_bundle() -> Result<Value, String> {
+    let (shots_used, shots_cap) = crate::mcp::auto_response::shot_budget();
+    Ok(json!({
+        "lists": crate::mcp::combat_lists::snapshot_json(),
+        "targets": crate::mcp::auto_raid::target_board(),
+        "expeditions": crate::mcp::auto_raid::active_expeditions(),
+        "incidents": crate::mcp::auto_response::recent_incidents(),
+        "shot_budget": { "used": shots_used, "cap": shots_cap },
+        "response": crate::mcp::auto_response::get(),
+        "raid": crate::mcp::auto_raid::get(),
+        "postures": ["cautious", "opportunist", "aggressive"],
+        "modes": ["harden", "counter", "decapitate"],
+    }))
 }
 
 // ── CONFIG ───────────────────────────────────────────────────────────────────
@@ -224,7 +247,7 @@ pub async fn mcp_config_bundle() -> Result<Value, String> {
         "loops": loops_json(),
         "hash": crate::mcp::tools::hasher::hash_config_json(),
         "doctrine": { "posture": posture, "pinned_target": pinned, "autonomy": autonomy },
-        "presets": ["turtle", "economy", "balanced"],
+        "presets": crate::mcp::tools::doctrine::PRESETS,
         "web_board": {
             "enabled": crate::mcp::web_board::is_enabled(),
             "url": if crate::mcp::web_board::is_enabled() {
@@ -316,6 +339,36 @@ pub async fn mcp_config_set_impl(
                     auto_infuse::set(c);
                     s
                 }
+                "response" => {
+                    let c: crate::mcp::auto_response::AutoResponseConfig =
+                        serde_json::from_value(cfg).map_err(|e| e.to_string())?;
+                    let s = format!(
+                        "auto_response → {} ({:?}, {:?})",
+                        if c.enabled { "ON" } else { "off" },
+                        c.autonomy,
+                        c.mode
+                    );
+                    crate::mcp::auto_response::set(c);
+                    s
+                }
+                "raid" => {
+                    let mut c: crate::mcp::auto_raid::AutoRaidConfig =
+                        serde_json::from_value(cfg).map_err(|e| e.to_string())?;
+                    // A posture change rewrites the gates; an explicit posture in
+                    // the same payload therefore wins over stale gate values the
+                    // UI round-tripped from before the change.
+                    if payload.get("apply_posture").and_then(|v| v.as_bool()) == Some(true) {
+                        c.apply_posture(c.posture);
+                    }
+                    let s = format!(
+                        "auto_raid → {} ({:?}, posture {:?})",
+                        if c.enabled { "ON" } else { "off" },
+                        c.autonomy,
+                        c.posture
+                    );
+                    crate::mcp::auto_raid::set(c);
+                    s
+                }
                 other => return Err(format!("unknown loop '{other}'")),
             };
             board_feed::push(&app, board_feed::Severity::Notice, "config", summary);
@@ -387,6 +440,11 @@ pub async fn mcp_config_set_impl(
                 retreat_cmd_below: payload.get("retreat_cmd_below").and_then(|v| v.as_u64()),
                 autonomy: payload.get("autonomy").and_then(|v| v.as_str()).map(String::from),
                 preset: payload.get("preset").and_then(|v| v.as_str()).map(String::from),
+                list_action: None,
+                kind: None,
+                id: None,
+                weight: None,
+                note: None,
             };
             let out = crate::mcp::tools::doctrine::execute(params).await;
             let text = out
@@ -407,6 +465,67 @@ pub async fn mcp_config_set_impl(
                 ),
             );
             Ok(json!({ "ok": true, "detail": text }))
+        }
+        // ── Grudge / guild lists, edited one row at a time from the WAR page. ──
+        // Shape: {action, kind, id, ...}. Kept row-scoped rather than
+        // whole-document so two operators editing different rows can't clobber
+        // each other's list.
+        "combat_lists" => {
+            use crate::mcp::combat_lists as cl;
+            let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("add");
+            let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("grudge");
+            let id = payload
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("combat_lists: id required (player id or guild id)")?
+                .to_string();
+            let f = |k: &str| payload.get(k).and_then(|v| v.as_f64());
+            let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(String::from);
+
+            let summary = match (kind, action) {
+                ("grudge", "remove") => {
+                    cl::remove_grudge(&id);
+                    format!("grudge {id} removed")
+                }
+                ("grudge", "mute") | ("grudge", "unmute") => {
+                    let muted = action == "mute";
+                    cl::set_muted(&id, muted);
+                    format!("grudge {id} {}", if muted { "muted" } else { "unmuted" })
+                }
+                ("grudge", _) => {
+                    let g = cl::upsert_grudge(
+                        &id,
+                        s("label"),
+                        s("guild_id"),
+                        f("weight"),
+                        s("note"),
+                        // `expires_ms: null` in the payload means "never expire".
+                        payload.get("expires_ms").map(|v| v.as_f64()),
+                    );
+                    format!("grudge {id} → weight {:.1}", g.weight)
+                }
+                ("priority_guild", "remove") => {
+                    cl::remove_priority_guild(&id);
+                    format!("priority guild {id} removed")
+                }
+                ("priority_guild", _) => {
+                    let g = cl::upsert_priority_guild(&id, s("label"), f("weight"));
+                    format!("priority guild {id} → weight {:.1}", g.weight)
+                }
+                ("ally", a) => {
+                    let allied = a != "remove";
+                    cl::set_ally(&id, allied);
+                    format!("guild {id} {} the never-attack list", if allied { "added to" } else { "removed from" })
+                }
+                ("protected", a) => {
+                    let prot = a != "remove";
+                    cl::set_protected(&id, prot);
+                    format!("player {id} {} the never-attack list", if prot { "protected" } else { "unprotected" })
+                }
+                (other, _) => return Err(format!("combat_lists: unknown kind '{other}'")),
+            };
+            board_feed::push(&app, board_feed::Severity::Notice, "war", summary);
+            Ok(json!({ "ok": true, "lists": cl::snapshot_json() }))
         }
         "web_board" => {
             let enabled = payload

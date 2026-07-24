@@ -21,13 +21,21 @@ pub fn under_cap(current: usize) -> bool {
 /// What a virtual player is FOR. `Bait` (default) just mines so ore — which is
 /// non-transferable — piles up on its planet as a raid lure. `Productive` runs
 /// the self-funding flywheel: mine → refine → send alpha to the primary, which
-/// infuses the guild reactor.
+/// infuses the guild reactor. `Raider` is the expendable offensive arm: it
+/// carries no extractor and no stored value, so losing its Command Ship costs
+/// nothing but a rebuild — the primary never has to leave home to raid (every
+/// one of our Command Ship deaths happened with the fleet in the field).
+///
+/// A raider DOES keep a refinery: a raid seizes the victim's stored ore into the
+/// raider's own `storedOre`, where it is itself stealable until refined into
+/// Alpha, which is unstealable and sendable to the primary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VPlayerRole {
     #[default]
     Bait,
     Productive,
+    Raider,
 }
 
 impl VPlayerRole {
@@ -35,6 +43,7 @@ impl VPlayerRole {
         match s.trim().to_lowercase().as_str() {
             "bait" => Some(Self::Bait),
             "productive" | "miner" | "worker" => Some(Self::Productive),
+            "raider" | "raid" | "vulture" => Some(Self::Raider),
             _ => None,
         }
     }
@@ -42,8 +51,13 @@ impl VPlayerRole {
         match self {
             Self::Bait => "bait",
             Self::Productive => "productive",
+            Self::Raider => "raider",
         }
     }
+    /// Every role name accepted by `parse`, canonical spellings only — used by
+    /// the tool schemas and the board's role pickers so a new role shows up
+    /// everywhere without another hardcoded list.
+    pub const ALL: &'static [Self] = &[Self::Bait, Self::Productive, Self::Raider];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +152,28 @@ pub fn collect_targets(include_primary: bool) -> Vec<(String, Option<u32>, Optio
     targets
 }
 
+/// Is this player id one of ours — the primary, or any registered vplayer?
+/// The combat loops veto on this before anything else: friendly fire between
+/// our own accounts is never a legitimate target, however it scores.
+pub fn is_team_player(player_id: &str) -> bool {
+    if player_id.is_empty() {
+        return false;
+    }
+    if crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .and_then(|g| g.player_id.clone())
+        .as_deref()
+        == Some(player_id)
+    {
+        return true;
+    }
+    REGISTRY
+        .read()
+        .map(|r| r.players.iter().any(|p| p.player_id.as_deref() == Some(player_id)))
+        .unwrap_or(false)
+}
+
 /// The team's owned on-chain entities (for threat detection across all virtual
 /// players, not just the primary). Planet-subject matching covers each vplayer's
 /// structs too (their struct events are keyed to the planet subject), so we only
@@ -149,6 +185,12 @@ pub struct TeamOwned {
     pub fleets: std::collections::HashSet<String>,
     /// planet id -> vplayer display name, for tagging which player was hit.
     pub label_by_planet: std::collections::HashMap<String, String>,
+    /// planet id -> owning player id. The response loop needs the id, not the
+    /// label: only the attacked player's OWN fleet is co-located with the
+    /// raider, so that's who can actually shoot back.
+    pub player_by_planet: std::collections::HashMap<String, String>,
+    /// player id -> its fleet id, for locating that player's shooters.
+    pub fleet_by_player: std::collections::HashMap<String, String>,
 }
 
 /// player_id -> (planet_id, fleet_id), resolved lazily; planet/fleet never change
@@ -162,6 +204,9 @@ pub fn invalidate_owned(player_id: &str) {
     if let Ok(mut c) = OWNED_CACHE.write() {
         c.remove(player_id);
     }
+    // Exploring destroys every planetary struct and migrates the fleet, so the
+    // cached composition is wrong too.
+    crate::mcp::loop_util::invalidate_player_structs(player_id);
 }
 
 /// Resolve the planet/fleet ids of every registered virtual player (cached),
@@ -202,9 +247,11 @@ pub async fn team_owned(client: &crate::mcp::cosmos_client::CosmosClient) -> Tea
         };
         if !planet.is_empty() {
             out.planets.insert(planet.clone());
-            out.label_by_planet.insert(planet, name.clone());
+            out.label_by_planet.insert(planet.clone(), name.clone());
+            out.player_by_planet.insert(planet, pid.clone());
         }
         if !fleet.is_empty() {
+            out.fleet_by_player.insert(pid.clone(), fleet.clone());
             out.fleets.insert(fleet);
         }
     }

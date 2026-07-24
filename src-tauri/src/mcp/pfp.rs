@@ -46,6 +46,14 @@ pub struct RolePfp {
 pub struct PfpConfig {
     pub productive: RolePfp,
     pub bait: RolePfp,
+    /// `#[serde(default)]` so a `role_pfp.json` written before raiders existed
+    /// still loads instead of failing the whole config back to defaults.
+    #[serde(default = "default_raider")]
+    pub raider: RolePfp,
+}
+
+fn default_raider() -> RolePfp {
+    RolePfp { background: Some(4), body: Some(33), head: None, neck: None, arms: None }
 }
 
 impl Default for PfpConfig {
@@ -54,6 +62,7 @@ impl Default for PfpConfig {
             // bg + body fixed (the role signal); face randomized.
             productive: RolePfp { background: Some(6), body: Some(25), head: None, neck: None, arms: None },
             bait: RolePfp { background: Some(2), body: Some(10), head: None, neck: None, arms: None },
+            raider: default_raider(),
         }
     }
 }
@@ -108,6 +117,7 @@ pub fn role_pfp_attrs(role: &str, index: u32) -> String {
     let role_cfg = match role {
         "productive" => cfg.productive.clone(),
         "bait" => cfg.bait.clone(),
+        "raider" => cfg.raider.clone(),
         _ => fallback_role(),
     };
     compose(&role_cfg, index)
@@ -140,6 +150,7 @@ pub fn set_role(role: &str, mut role_cfg: RolePfp) -> Result<RolePfp, String> {
         match role {
             "productive" => cfg.productive = role_cfg.clone(),
             "bait" => cfg.bait = role_cfg.clone(),
+            "raider" => cfg.raider = role_cfg.clone(),
             other => return Err(format!("role '{}' is not configurable here", other)),
         }
         crate::mcp::config_store::save_config(CONFIG_FILE, &*cfg);

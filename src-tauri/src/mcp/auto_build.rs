@@ -497,6 +497,9 @@ async fn scan(
                         Ok(_) => {
                             initiates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            // The player's composition just changed; drop the
+                            // shared cache so strike planning sees the new hull.
+                            crate::mcp::loop_util::invalidate_player_structs(&pid);
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
                                 crate::mcp::telemetry::Sev::Notice,
@@ -577,6 +580,9 @@ async fn scan(
                         Ok(_) => {
                             initiates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            // Composition changed — drop the shared struct cache
+                            // so strike planning picks the new hull up next scan.
+                            crate::mcp::loop_util::invalidate_player_structs(&pid);
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
                                 crate::mcp::telemetry::Sev::Info,

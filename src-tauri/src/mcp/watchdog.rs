@@ -107,17 +107,21 @@ struct Finding {
     remedy: Option<Box<dyn FnOnce(&tauri::AppHandle) -> String + Send>>,
 }
 
-/// The four native loops: name → (enabled, interval_ms) from live config.
-fn loop_configs() -> [(&'static str, bool, f64); 4] {
+/// The native loops: name → (enabled, interval_ms) from live config.
+fn loop_configs() -> [(&'static str, bool, f64); 6] {
     let h = auto_harvest::get();
     let b = auto_build::get();
     let d = auto_defend::get();
     let i = auto_infuse::get();
+    let r = crate::mcp::auto_response::get();
+    let rd = crate::mcp::auto_raid::get();
     [
         ("auto_harvest", h.enabled, h.interval_secs as f64 * 1000.0),
         ("auto_build", b.enabled, b.interval_secs as f64 * 1000.0),
         ("auto_defend", d.enabled, d.interval_secs as f64 * 1000.0),
         ("auto_infuse", i.enabled, i.interval_secs as f64 * 1000.0),
+        ("auto_response", r.enabled, r.interval_secs as f64 * 1000.0),
+        ("auto_raid", rd.enabled, rd.interval_secs as f64 * 1000.0),
     ]
 }
 
@@ -127,6 +131,8 @@ fn reset_loop_guard(name: &str) {
         "auto_build" => auto_build::force_reset_running(),
         "auto_defend" => auto_defend::force_reset_running(),
         "auto_infuse" => auto_infuse::force_reset_running(),
+        "auto_response" => crate::mcp::auto_response::force_reset_running(),
+        "auto_raid" => crate::mcp::auto_raid::force_reset_running(),
         _ => {}
     }
 }
