@@ -259,6 +259,110 @@
       return 0;
     });
   }
+  // ── Native SUI form controls ─────────────────────────────────────────────
+  // The game's own checkbox/stepper/select markup, so config surfaces look like
+  // the rest of the client instead of raw browser widgets. Each returns a node
+  // and calls `onChange(value)`; none of them hold state.
+  function checkbox(checked, labelText, onChange) {
+    var c = el('span', 'sui-checkbox-container');
+    var box = el('input', 'sui-checkbox');
+    box.type = 'checkbox';
+    box.checked = !!checked;
+    var disp = el('span', 'sui-checkbox-display');
+    var lab = el('label');
+    if (labelText != null) lab.appendChild(document.createTextNode(String(labelText)));
+    box.addEventListener('change', function () { onChange(box.checked); });
+    // The display is a sibling styled by `:checked ~ .sui-checkbox-display`, so
+    // the input must come first and the label last.
+    c.appendChild(box); c.appendChild(disp); c.appendChild(lab);
+    return c;
+  }
+  // Numeric stepper with the game's caret buttons. `opts`: {min,max,step,width}.
+  function stepper(value, opts, onChange) {
+    opts = opts || {};
+    var w = el('span', 'sui-input-stepper');
+    var input = el('input');
+    input.type = 'number';
+    input.value = value == null ? '' : value;
+    if (opts.min != null) input.min = opts.min;
+    if (opts.max != null) input.max = opts.max;
+    input.step = opts.step == null ? 1 : opts.step;
+    if (opts.width) input.style.width = opts.width;
+    function commit(v) {
+      var n = Number(v);
+      if (isNaN(n)) return;
+      if (opts.min != null) n = Math.max(opts.min, n);
+      if (opts.max != null) n = Math.min(opts.max, n);
+      // Float steps accumulate noise (0.1+0.2); round to the step's precision.
+      var dp = String(input.step).indexOf('.') >= 0 ? String(input.step).split('.')[1].length : 0;
+      n = Number(n.toFixed(dp));
+      input.value = n;
+      onChange(n);
+    }
+    function bump(dir) {
+      var cur = Number(input.value) || 0;
+      commit(cur + dir * Number(input.step || 1));
+    }
+    var down = el('a', 'sui-nav-btn'); down.href = 'javascript:void(0)';
+    down.appendChild(el('i', 'icon-caret-down'));
+    down.addEventListener('click', function () { bump(-1); });
+    var up = el('a', 'sui-nav-btn'); up.href = 'javascript:void(0)';
+    up.appendChild(el('i', 'icon-caret-up'));
+    up.addEventListener('click', function () { bump(1); });
+    input.addEventListener('change', function () { commit(input.value); });
+    w.appendChild(down); w.appendChild(input); w.appendChild(up);
+    return w;
+  }
+  function selectBox(value, options, onChange) {
+    var s = el('select', 'sui-input-text');
+    (options || []).forEach(function (o) {
+      var val = (o && o.value != null) ? o.value : o;
+      var lbl = (o && o.label != null) ? o.label : o;
+      var op = el('option', null, String(lbl));
+      op.value = val;
+      if (val === value) op.selected = true;
+      s.appendChild(op);
+    });
+    s.addEventListener('change', function () { onChange(s.value); });
+    return s;
+  }
+  function textBox(value, placeholder, onChange) {
+    var i = el('input', 'sui-input-text');
+    i.type = 'text';
+    i.value = value == null ? '' : value;
+    if (placeholder) i.placeholder = placeholder;
+    i.addEventListener('change', function () { onChange(i.value); });
+    return i;
+  }
+  // A secondary nav strip — the same component as the board's own tab bar, so
+  // a page that needs sub-sections reads as native rather than bespoke.
+  // `items`: [{key,label}]. Returns a node; `onPick(key)` fires on click.
+  function navStrip(items, activeKey, onPick) {
+    var wrap = el('div', 'sui-screen sui-screen-full-width subnav');
+    var bar = el('div', 'sui-screen-nav');
+    var list = el('div', 'sui-screen-nav-items');
+    items.forEach(function (it) {
+      var a = el('a', 'sui-screen-nav-item' + (it.key === activeKey ? ' sui-mod-active' : ''));
+      a.href = 'javascript:void(0)';
+      a.textContent = it.label;
+      a.addEventListener('click', function () { onPick(it.key); });
+      list.appendChild(a);
+    });
+    bar.appendChild(list);
+    wrap.appendChild(bar);
+    return wrap;
+  }
+  // Label on the left, control on the right — the config idiom.
+  function field(label, controlNode, hint) {
+    var r = el('div', 'cfg-row');
+    var l = el('div', 'sui-form-element-label-group');
+    l.appendChild(el('span', null, label));
+    if (hint) l.appendChild(el('span', 'sui-text-hint', hint));
+    r.appendChild(l);
+    r.appendChild(controlNode);
+    return r;
+  }
+
   // A centered modal overlay (row detail). Returns a close() fn.
   function detailModal(title, contentNode) {
     var existing = document.getElementById('detail-overlay');
@@ -285,6 +389,8 @@
     iconClass: iconClass, resultTable: resultTable, resource: resource, resultRow: resultRow,
     sortControl: sortControl, sortBy: sortBy, detailModal: detailModal,
     pfpPortrait: pfpPortrait,
+    checkbox: checkbox, stepper: stepper, selectBox: selectBox, textBox: textBox,
+    navStrip: navStrip, field: field,
     fmtInt: fmtInt, fmtWatts: fmtWatts, fmtAlpha: fmtAlpha, fmtOre: fmtOre,
   };
 

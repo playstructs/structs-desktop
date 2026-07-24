@@ -1087,23 +1087,25 @@
       .catch(function (e) { alertInto('war-body', 'write failed: ' + e); });
   }
   // A small "label [input] [button]" add-row, used by every list card.
-  function addRow(placeholder, onAdd, extraPlaceholder) {
+  function addRow(placeholder, onAdd, withWeight) {
     var r = H.el('div', 'cfg-row');
     var idIn = H.el('input', 'sui-input-text'); idIn.type = 'text'; idIn.placeholder = placeholder;
-    var wIn = H.el('input', 'sui-input-text'); wIn.type = 'number'; wIn.step = '0.1'; wIn.min = '0'; wIn.max = '10';
-    wIn.placeholder = extraPlaceholder || 'weight'; wIn.style.maxWidth = '5.5em';
+    // Weight only makes sense for the lists that rank; the veto lists don't.
+    var weight = withWeight === false ? null : 1;
+    var wCtl = weight == null ? null
+      : H.stepper(weight, { min: 0, max: 10, step: 0.1, width: '3.5em' }, function (v) { weight = v; });
     var btn = massBtn('', 'icon-add', 'Add', 'sui-mod-secondary');
     function submit() {
       var id = (idIn.value || '').trim();
       if (!id) return;
-      onAdd(id, wIn.value === '' ? null : Number(wIn.value));
-      idIn.value = ''; wIn.value = '';
+      onAdd(id, weight);
+      idIn.value = '';
     }
     btn.addEventListener('click', submit);
     idIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
-    var wrap = H.el('span');
-    wrap.appendChild(idIn); wrap.appendChild(document.createTextNode(' '));
-    wrap.appendChild(wIn); wrap.appendChild(document.createTextNode(' '));
+    var wrap = H.el('span', 'war-addrow');
+    wrap.appendChild(idIn);
+    if (wCtl) wrap.appendChild(wCtl);
     wrap.appendChild(btn);
     r.appendChild(wrap);
     return r;
@@ -1114,52 +1116,34 @@
     a.addEventListener('click', onClick);
     return a;
   }
-  // A labelled numeric input bound to one field of a loop config.
-  function numField(label, cfg, key, which, opts) {
-    var r = H.el('div', 'cfg-row');
-    r.appendChild(H.el('span', null, label));
-    var i = H.el('input', 'sui-input-text');
-    i.type = 'number'; i.value = cfg[key];
-    if (opts && opts.step != null) i.step = opts.step;
-    if (opts && opts.min != null) i.min = opts.min;
-    i.style.maxWidth = '6.5em';
-    i.addEventListener('change', function () {
+  // One field of a loop config, using the game's own form controls. Each writes
+  // the whole config back through the same setter the agent and the Config page
+  // use, so there is a single write path however you got here.
+  function warField(label, cfg, key, which, control, extra, hint) {
+    function write(v) {
       var next = JSON.parse(JSON.stringify(cfg));
-      next[key] = Number(i.value);
-      warLoopSet(which, next);
+      next[key] = v;
+      warLoopSet(which, next, extra);
+    }
+    return H.field(label, control(cfg[key], write), hint);
+  }
+  function numField(label, cfg, key, which, opts) {
+    return warField(label, cfg, key, which, function (v, write) {
+      return H.stepper(v, {
+        min: opts && opts.min, max: opts && opts.max,
+        step: opts && opts.step, width: '3.5em',
+      }, write);
     });
-    r.appendChild(i);
-    return r;
   }
   function boolField(label, cfg, key, which) {
-    var r = H.el('div', 'cfg-row');
-    var l = H.el('label');
-    var cb = H.el('input'); cb.type = 'checkbox'; cb.checked = !!cfg[key];
-    cb.addEventListener('change', function () {
-      var next = JSON.parse(JSON.stringify(cfg));
-      next[key] = cb.checked;
-      warLoopSet(which, next);
+    return warField(label, cfg, key, which, function (v, write) {
+      return H.checkbox(v, null, write);
     });
-    l.appendChild(cb); l.appendChild(document.createTextNode(' ' + label));
-    r.appendChild(l);
-    return r;
   }
-  function selectField(label, cfg, key, which, options, extra) {
-    var r = H.el('div', 'cfg-row');
-    r.appendChild(H.el('span', null, label));
-    var sel = H.el('select', 'sui-input-text');
-    options.forEach(function (o) {
-      var op = H.el('option', null, o); op.value = o;
-      if (cfg[key] === o) op.selected = true;
-      sel.appendChild(op);
-    });
-    sel.addEventListener('change', function () {
-      var next = JSON.parse(JSON.stringify(cfg));
-      next[key] = sel.value;
-      warLoopSet(which, next, extra);
-    });
-    r.appendChild(sel);
-    return r;
+  function selectField(label, cfg, key, which, options, extra, hint) {
+    return warField(label, cfg, key, which, function (v, write) {
+      return H.selectBox(v, options, write);
+    }, extra, hint);
   }
 
   function renderWarBody() {
@@ -1323,10 +1307,10 @@
     });
     abody.appendChild(addRow('guild id to protect', function (id) {
       warSet({ action: 'add', kind: 'ally', id: id });
-    }, ' '));
+    }, false));
     abody.appendChild(addRow('player id to protect', function (id) {
       warSet({ action: 'add', kind: 'protected', id: id });
-    }, ' '));
+    }, false));
     body.appendChild(H.card('NEVER ATTACK', abody));
 
     // ── What the response loop actually did. ──
@@ -1565,155 +1549,357 @@
       var intro = H.el('div', 'ops-muted');
       intro.textContent = 'Style each squad. Fixed layers pin the look; randomized layers give every player a unique one. Apply restyles everyone in the role.';
       host.appendChild(intro);
-      ['productive', 'bait'].forEach(function (role) {
-        if (!appear.config[role]) return;
+      // Driven by whatever roles the backend manages, so a new one (raider)
+      // appears here without another hardcoded list to forget.
+      Object.keys(appear.config).forEach(function (role) {
         var c = buildRoleCard(role); c.id = 'appear-' + role;
         host.appendChild(c);
       });
     }).catch(function (e) { host.appendChild(H.alertLine('appearance unavailable: ' + e, 'icon-alert')); });
   }
 
+  // ── Loop metadata ────────────────────────────────────────────────────────
+  // What each loop IS, so the list can say it in a sentence instead of dumping
+  // twenty key=value pairs. `chips` names the two or three numbers worth seeing
+  // without opening the editor.
+  // `short` is the row subtitle and must stay one line on a narrow board
+  // window; `blurb` is the full sentence, shown once the editor is open.
+  var LOOP_META = {
+    harvest: {
+      label: 'auto_harvest', icon: 'icon-mine', short: 'mine + refine when the proof is cheap',
+      blurb: 'Mines and refines every owned struct once its proof has decayed enough to be cheap.',
+      chips: [{ key: 'difficulty_threshold', icon: 'icon-computer' }],
+    },
+    build: {
+      label: 'auto_build', icon: 'icon-deploy', short: 'fill free slots with the defensive loadout',
+      blurb: 'Fills each player’s free slots with the defensive loadout, one charge-paced build per scan.',
+      chips: [{ key: 'complete_difficulty', icon: 'icon-computer' }],
+    },
+    defend: {
+      label: 'auto_defend', icon: 'icon-defend', short: 'guard the Command Ship, then production',
+      blurb: 'Assigns idle combat structs to guard the Command Ship first, then production.',
+      chips: [],
+    },
+    infuse: {
+      label: 'auto_infuse', icon: 'icon-send-alpha', short: 'infuse spare Alpha into the reactor',
+      blurb: 'Keeps a reserve of Alpha and infuses the rest into the guild reactor.',
+      chips: [{ key: 'keep_grams', icon: 'sui-icon-alpha-matter' }],
+    },
+    response: {
+      label: 'auto_response', icon: 'icon-counter', short: 'answer a raid inside its 2-minute window',
+      blurb: 'Answers a raid alarm inside the two-minute window — identifies the attacker and fires back.',
+      chips: [{ key: 'mode' }], war: true,
+    },
+    raid: {
+      label: 'auto_raid', icon: 'icon-raid', short: 'score targets, fly expendable raiders',
+      blurb: 'Scores every reachable player as a raid target and flies expendable raiders at the best one.',
+      chips: [{ key: 'posture' }, { key: 'min_ore', icon: 'sui-icon-alpha-ore' }], war: true,
+    },
+  };
+
+  // Per-field presentation. Anything not listed still renders — the type of the
+  // value decides the control — so a new knob on the Rust side needs no UI work.
+  var FIELD_META = {
+    autonomy: { label: 'autonomy', options: ['advise', 'auto'], hint: 'advise proposes; auto signs' },
+    mode: { label: 'response mode', options: ['harden', 'counter', 'decapitate'] },
+    posture: { label: 'posture', options: ['cautious', 'opportunist', 'aggressive'], hint: 'resets the gates below' },
+    interval_secs: { label: 'scan every (s)', min: 5 },
+    difficulty_threshold: { label: 'harvest at difficulty ≤', min: 1, max: 64 },
+    complete_difficulty: { label: 'complete at difficulty ≤', min: 1, max: 64 },
+    keep_grams: { label: 'Alpha reserve (g)', min: 0 },
+    min_ore: { label: 'min ore (the whole prize)', min: 0 },
+    min_score: { label: 'min score (0-100)', min: 0, max: 100 },
+    max_raid_minutes: { label: 'max raid proof (min)', min: 1 },
+    max_defenders: { label: 'max defenders on their CMD', min: 0 },
+    skip_if_defender_active_mins: { label: 'skip if defender acted within (min)', min: 0 },
+    target_cooldown_mins: { label: 'target cooldown (min)', min: 0 },
+    max_concurrent_raids: { label: 'max concurrent raids', min: 1 },
+    abort_cmd_hp_below: { label: 'recall raider below CMD HP', min: 0 },
+    abort_on_ongoing_blocks: { label: 'give up after (blocks)', min: 0 },
+    max_raid_wall_minutes: { label: 'max expedition (min)', min: 1 },
+    siege_max_shots: { label: 'siege shot budget', min: 0 },
+    require_vulnerable_now: { label: 'only raid already-vulnerable targets' },
+    allow_siege: { label: 'allow siege (kill their CMD to open the window)' },
+    return_home_after: { label: 'return home when done' },
+    max_shots_per_incident: { label: 'max shots / incident', min: 0 },
+    max_shots_per_hour: { label: 'max shots / hour', min: 0 },
+    incident_cooldown_secs: { label: 'incident cooldown (s)', min: 0 },
+    min_charge_margin: { label: 'charge headroom before firing', min: 0 },
+    prefer_counter_free_ambit: { label: 'prefer a counter-free ambit (free shots)' },
+    panic_refine: { label: 'panic-refine the threatened ore' },
+    include_primary_shooters: { label: 'let the primary shoot too' },
+    include_primary: { label: 'include the primary player' },
+    include_bait: { label: 'include bait players' },
+    auto_explore: { label: 'explore when the planet runs dry' },
+    refine: { label: 'refine, not just mine' },
+    dry_run: { label: 'dry run (compute, never sign)' },
+    roster_ttl_secs: { label: 'candidate roster freshness (s)', min: 60 },
+    sweep_max_pages: { label: 'sweep depth (pages)', min: 1 },
+    evaluate_per_scan: { label: 'candidates scored per scan', min: 1 },
+    raid_difficulty: { label: 'raid proof difficulty', min: 1, max: 64 },
+    raid_hours_utc: { label: 'raid only during (UTC hours)', hint: 'comma-separated, empty = any hour' },
+    raider_players: { label: 'raider players', hint: 'comma-separated ids, empty = every raider' },
+    w_ore: { label: 'weight: ore held', step: 0.1, min: 0 },
+    w_vulnerability: { label: 'weight: vulnerable now', step: 0.1, min: 0 },
+    w_weakness: { label: 'weight: weak defences', step: 0.1, min: 0 },
+    w_grudge: { label: 'weight: grudge heat', step: 0.1, min: 0 },
+    w_guild: { label: 'weight: priority guild', step: 0.1, min: 0 },
+    w_speed: { label: 'weight: fast raid proof', step: 0.1, min: 0 },
+    w_history: { label: 'weight: our record here', step: 0.1, min: 0 },
+  };
+
+  function prettyKey(k) { return k.replace(/_/g, ' '); }
+
+  // A loop's cadence. NOT fmtEta: that one floors everything under a minute to
+  // "1m", which would hide the whole point of auto_response's 20-second scan.
+  function fmtCadence(s) {
+    if (s == null) return '—';
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.round(s / 60) + 'm';
+    return (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
+  }
+
+  // Policies with no config of their own would otherwise render as a bare name.
+  var POLICY_BLURB = {
+    agent_ui: 'lets the agent draw toasts and prompts in this window',
+    auto_counterattack: 'recommends a counter when you are attacked',
+    auto_rebuild_losses: 'recommends rebuilding what combat destroyed',
+    auto_refine: 'starts a refine as soon as a mine completes',
+    board_auto_open: 'opens this window on an important event',
+    combat_alert: 'notifies on hostile activity against the team',
+    watchdog_remediate: 'restarts loops, hashers and sync when they wedge',
+  };
+
+  // Build an editor for one loop config, generically: booleans become SUI
+  // checkboxes, numbers steppers, known enums selects, arrays comma text.
+  // Every edit writes the WHOLE config back through the same setter the agent
+  // uses, so there is one write path regardless of who is driving.
+  function loopEditor(which, cfg) {
+    var host = H.el('div');
+    var meta = LOOP_META[which] || { label: which };
+    var draft = JSON.parse(JSON.stringify(cfg));
+    function commit(extra) {
+      return Board.T.core.invoke('mcp_config_set', {
+        domain: 'loop',
+        payload: Object.assign({ loop: which, config: draft }, extra || {}),
+      }).then(function () { return renderConfig(); })
+        .catch(function (e) { alertInto('config-body', 'write failed: ' + e); });
+    }
+
+    if (meta.blurb) host.appendChild(H.el('div', 'ops-muted', meta.blurb));
+    if (meta.war) {
+      host.appendChild(H.alertLine(
+        'Grudges, the never-attack list and the live target board live on the War tab.', 'icon-raid'));
+    }
+
+    Object.keys(draft).sort(function (a, b) {
+      // `enabled` first, then booleans, then the rest alphabetically — the
+      // switch you came for should never be buried under twenty numbers.
+      if (a === 'enabled') return -1;
+      if (b === 'enabled') return 1;
+      var ba = typeof draft[a] === 'boolean', bb = typeof draft[b] === 'boolean';
+      if (ba !== bb) return ba ? -1 : 1;
+      return a < b ? -1 : 1;
+    }).forEach(function (k) {
+      var v = draft[k];
+      var fm = FIELD_META[k] || {};
+      var label = fm.label || prettyKey(k);
+      var ctl;
+      if (typeof v === 'boolean') {
+        ctl = H.checkbox(v, null, function (nv) { draft[k] = nv; commit(); });
+      } else if (typeof v === 'number') {
+        ctl = H.stepper(v, { min: fm.min, max: fm.max, step: fm.step, width: '3.5em' },
+          function (nv) { draft[k] = nv; commit(); });
+      } else if (Array.isArray(v)) {
+        ctl = H.textBox(v.join(', '), fm.hint, function (nv) {
+          var parts = nv.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+          // Numeric arrays (raid_hours_utc) must stay numbers on the wire.
+          draft[k] = parts.map(function (s) { return /^\d+$/.test(s) ? Number(s) : s; });
+          commit();
+        });
+      } else if (fm.options) {
+        ctl = H.selectBox(v, fm.options, function (nv) {
+          draft[k] = nv;
+          // A posture rewrites every gate under it, so tell the backend to
+          // re-apply the preset rather than merging whatever the form showed.
+          commit(k === 'posture' ? { apply_posture: true } : null);
+        });
+      } else {
+        ctl = H.textBox(v, fm.hint, function (nv) { draft[k] = nv; commit(); });
+      }
+      host.appendChild(H.field(label, ctl, typeof v === 'boolean' ? fm.hint : null));
+    });
+    return host;
+  }
+
+  // ── CONFIG sections ──────────────────────────────────────────────────────
+  var CONFIG_SECTIONS = [
+    { key: 'doctrine', label: 'Doctrine' },
+    { key: 'loops', label: 'Loops' },
+    { key: 'policies', label: 'Policies' },
+    { key: 'engine', label: 'Engine' },
+    { key: 'access', label: 'Access' },
+    { key: 'appearance', label: 'Squads' },
+  ];
+  var configState = { section: 'doctrine', data: null };
+
+  function sectionDoctrine(d, body) {
+    var doc = d.doctrine || {};
+    var dbody = H.el('div');
+    dbody.appendChild(H.row('Posture / Autonomy', (doc.posture || '?') + ' / ' + (doc.autonomy || '?')));
+    if (doc.pinned_target) dbody.appendChild(H.row('Pinned target', doc.pinned_target));
+    dbody.appendChild(H.el('div', 'ops-muted',
+      'A preset configures a coherent bundle of loops and policies in one move. Later edits to any single knob stick.'));
+    var pr = H.el('div', 'cfg-actions');
+    (d.presets || []).forEach(function (p) {
+      var b = massBtn('preset-' + p, 'icon-key', p, 'sui-mod-secondary');
+      b.addEventListener('click', function () { cfgSet('doctrine', { preset: p }); });
+      pr.appendChild(b);
+    });
+    dbody.appendChild(pr);
+    body.appendChild(H.card('DOCTRINE', dbody));
+  }
+
+  function sectionLoops(d, body) {
+    var loops = d.loops || {};
+    var lbody = H.el('div');
+    var table = H.resultTable();
+    Object.keys(LOOP_META).forEach(function (name) {
+      var cfg = loops[name];
+      if (!cfg) return;
+      var meta = LOOP_META[name];
+      // The checkbox already says on/off, so the chips carry only what it
+      // can't: how it is configured. Kept to three so the row stays one line.
+      var chips = (meta.chips || []).map(function (c) {
+        return H.resource(String(cfg[c.key]), c.icon || null);
+      });
+      chips.push(H.resource(fmtCadence(cfg.interval_secs), 'icon-refresh-8'));
+      if (cfg.autonomy) chips.push(H.resource(cfg.autonomy, null, cfg.autonomy === 'auto' ? 'attn' : ''));
+      if (cfg.dry_run) chips.push(H.resource('dry run', 'icon-tip'));
+      var edit = massBtn('', 'icon-edit', 'Edit', 'sui-mod-secondary');
+      edit.addEventListener('click', function (e) {
+        e.stopPropagation();
+        H.detailModal(meta.label, loopEditor(name, cfg));
+      });
+      table.appendChild(H.resultRow({
+        lead: H.checkbox(cfg.enabled, null, function (on) {
+          var next = JSON.parse(JSON.stringify(cfg));
+          next.enabled = on;
+          cfgSet('loop', { loop: name, config: next });
+        }),
+        icon: meta.icon,
+        title: meta.label,
+        subtitle: meta.short || meta.blurb,
+        chips: chips,
+        action: edit,
+      }));
+    });
+    lbody.appendChild(table);
+    lbody.appendChild(H.el('div', 'ops-muted',
+      'Every loop is off until you switch it on. Edit opens its full settings.'));
+    body.appendChild(H.card('AUTO-LOOPS', lbody));
+  }
+
+  function sectionPolicies(d, body) {
+    var pol = d.policies || {};
+    var names = Object.keys(pol).sort();
+    if (!names.length) return;
+    var pbody = H.el('div');
+    // Same idiom as the loop list: the switch leads the row, so a column of
+    // toggles reads as a column of toggles instead of labels with a control
+    // stranded at the far edge of a wide window.
+    var ptable = H.resultTable();
+    names.forEach(function (name) {
+      var p = pol[name] || {};
+      var cfgStr = p.config && Object.keys(p.config).length
+        ? Object.keys(p.config).map(function (k) { return prettyKey(k) + ' ' + p.config[k]; }).join(' · ')
+        : POLICY_BLURB[name] || null;
+      ptable.appendChild(H.resultRow({
+        lead: H.checkbox(p.enabled, null, function (on) { cfgSet('policy', { name: name, enabled: on }); }),
+        title: name,
+        subtitle: cfgStr,
+        chips: [H.resource(p.enabled ? 'on' : 'off', null, p.enabled ? '' : 'attn')],
+      }));
+    });
+    pbody.appendChild(ptable);
+    pbody.appendChild(H.el('div', 'ops-muted',
+      'Policies are single rules the engine evaluates each sync. Loops do the repeated work; policies react to one event.'));
+    body.appendChild(H.card('POLICIES', pbody));
+  }
+
+  function sectionEngine(d, body) {
+    var hc = d.hash || {};
+    var hbody = H.el('div');
+    hbody.appendChild(H.field('hashing enabled',
+      H.checkbox(hc.enabled, null, function (on) { cfgSet('hash', { enabled: on }); })));
+    hbody.appendChild(H.field('engine',
+      H.selectBox(hc.engine_pref, ['auto', 'cpu', 'gpu'], function (v) { cfgSet('hash', { engine: v }); }),
+      hc.gpu_available ? 'GPU available' : 'CPU only'));
+    hbody.appendChild(H.field('difficulty start',
+      H.stepper(hc.difficulty_start, { min: 1, max: 64, width: '3.5em' },
+        function (v) { cfgSet('hash', { difficulty_start: v }); })));
+    hbody.appendChild(H.field('max concurrent proofs',
+      H.stepper(hc.max_concurrent, { min: 1, max: 64, width: '3.5em' },
+        function (v) { cfgSet('hash', { max_concurrent: v }); })));
+    hbody.appendChild(H.field('auto-tune from solve history',
+      H.checkbox(hc.auto_tune, null, function (on) { cfgSet('hash', { auto_tune: on }); })));
+    body.appendChild(H.card('HASH ENGINE', hbody));
+  }
+
+  function sectionAccess(d, body) {
+    var wb = d.web_board || {};
+    var wbody = H.el('div');
+    wbody.appendChild(H.field('serve this dashboard as a web page',
+      H.checkbox(wb.enabled, null, function (on) { cfgSet('web_board', { enabled: on }); })));
+    if (wb.enabled && wb.url) {
+      var urow = H.el('div', 'cfg-row');
+      var ulink = H.el('a', 'ops-refresh-btn', wb.url);
+      ulink.href = 'javascript:void(0)';
+      ulink.title = 'Copy URL — anyone holding it has FULL operator control';
+      ulink.addEventListener('click', function () {
+        try { navigator.clipboard.writeText(wb.url); } catch (e) {}
+        ulink.textContent = 'Copied!';
+        setTimeout(function () { ulink.textContent = wb.url; }, 1000);
+      });
+      urow.appendChild(ulink);
+      wbody.appendChild(urow);
+      wbody.appendChild(H.el('div', 'ops-muted',
+        'Token grants full control — treat like a password. Server binds 127.0.0.1; remote players connect through your tunnel (SSH/Tailscale).'));
+    } else {
+      wbody.appendChild(H.el('div', 'ops-muted',
+        'Off by default. When enabled, this exact dashboard is served at /board on the MCP port, authenticated by the bearer token.'));
+    }
+    body.appendChild(H.card('WEB DASHBOARD', wbody));
+  }
+
   function renderConfig() {
     return Board.T.core.invoke('mcp_config_bundle').then(function (d) {
-      var body = document.getElementById('config-body');
-      body.innerHTML = '';
-
-      // ── Doctrine presets ──
-      var doc = d.doctrine || {};
-      var dbody = H.el('div');
-      dbody.appendChild(H.row('Posture / Autonomy', (doc.posture || '?') + ' / ' + (doc.autonomy || '?')));
-      if (doc.pinned_target) dbody.appendChild(H.row('Pinned target', doc.pinned_target));
-      var pr = H.el('div', 'cfg-actions');
-      (d.presets || []).forEach(function (p) {
-        var b = massBtn('preset-' + p, 'icon-key', p, 'sui-mod-secondary');
-        b.addEventListener('click', function () { cfgSet('doctrine', { preset: p }); });
-        pr.appendChild(b);
-      });
-      dbody.appendChild(pr);
-      body.appendChild(H.card('DOCTRINE', dbody));
-
-      // ── Auto-loops ──
-      var loops = d.loops || {};
-      var lbody = H.el('div');
-      Object.keys(loops).forEach(function (name) {
-        var cfg = loops[name];
-        var r = H.el('div', 'cfg-row');
-        var lbl = H.el('label');
-        var cb = H.el('input'); cb.type = 'checkbox'; cb.checked = !!cfg.enabled;
-        cb.addEventListener('change', function () {
-          var next = JSON.parse(JSON.stringify(cfg));
-          next.enabled = cb.checked;
-          cfgSet('loop', { loop: name, config: next });
-        });
-        lbl.appendChild(cb);
-        lbl.appendChild(document.createTextNode(' auto_' + name));
-        r.appendChild(lbl);
-        var detail = Object.keys(cfg).filter(function (k) { return k !== 'enabled'; })
-          .map(function (k) { return k + '=' + cfg[k]; }).join(' · ');
-        r.appendChild(H.el('span', 'ops-muted', detail));
-        lbody.appendChild(r);
-      });
-      body.appendChild(H.card('AUTO-LOOPS', lbody));
-
-      // ── Hash engine ──
-      var hc = d.hash || {};
-      var hbody = H.el('div');
-      var hr1 = H.el('div', 'cfg-row');
-      var hlbl = H.el('label');
-      var hcb = H.el('input'); hcb.type = 'checkbox'; hcb.checked = !!hc.enabled;
-      hcb.addEventListener('change', function () { cfgSet('hash', { enabled: hcb.checked }); });
-      hlbl.appendChild(hcb); hlbl.appendChild(document.createTextNode(' hashing enabled'));
-      hr1.appendChild(hlbl);
-      var engSel = H.el('select');
-      ['auto', 'cpu', 'gpu'].forEach(function (e2) {
-        var o = H.el('option', null, e2); o.value = e2;
-        if (hc.engine_pref === e2) o.selected = true;
-        engSel.appendChild(o);
-      });
-      engSel.addEventListener('change', function () { cfgSet('hash', { engine: engSel.value }); });
-      hr1.appendChild(engSel);
-      hbody.appendChild(hr1);
-      var hr2 = H.el('div', 'cfg-row');
-      hr2.appendChild(H.el('span', null, 'difficulty_start / max_concurrent'));
-      var dsIn = H.el('input'); dsIn.type = 'number'; dsIn.min = '1'; dsIn.max = '64'; dsIn.value = hc.difficulty_start;
-      var mcIn = H.el('input'); mcIn.type = 'number'; mcIn.min = '1'; mcIn.max = '64'; mcIn.value = hc.max_concurrent;
-      dsIn.addEventListener('change', function () { cfgSet('hash', { difficulty_start: parseInt(dsIn.value, 10) }); });
-      mcIn.addEventListener('change', function () { cfgSet('hash', { max_concurrent: parseInt(mcIn.value, 10) }); });
-      var wrap = H.el('span'); wrap.appendChild(dsIn); wrap.appendChild(document.createTextNode(' ')); wrap.appendChild(mcIn);
-      hr2.appendChild(wrap);
-      hbody.appendChild(hr2);
-      var hr3 = H.el('div', 'cfg-row');
-      var atLbl = H.el('label');
-      var atCb = H.el('input'); atCb.type = 'checkbox'; atCb.checked = !!hc.auto_tune;
-      atCb.addEventListener('change', function () { cfgSet('hash', { auto_tune: atCb.checked }); });
-      atLbl.appendChild(atCb); atLbl.appendChild(document.createTextNode(' auto-tune from solve history'));
-      hr3.appendChild(atLbl);
-      hbody.appendChild(hr3);
-      body.appendChild(H.card('HASH ENGINE', hbody));
-
-      // ── Policies (map: name -> {enabled, config}) ──
-      var pol = d.policies || {};
-      var names = Object.keys(pol).sort();
-      if (names.length) {
-        var pbody = H.el('div');
-        names.forEach(function (name) {
-          var p = pol[name] || {};
-          var r = H.el('div', 'cfg-row');
-          var lbl = H.el('label');
-          var cb = H.el('input'); cb.type = 'checkbox'; cb.checked = !!p.enabled;
-          cb.addEventListener('change', function () {
-            cfgSet('policy', { name: name, enabled: cb.checked });
-          });
-          lbl.appendChild(cb);
-          lbl.appendChild(document.createTextNode(' ' + name));
-          r.appendChild(lbl);
-          var cfgStr = p.config && Object.keys(p.config).length ? JSON.stringify(p.config).slice(0, 60) : '';
-          r.appendChild(H.el('span', 'ops-muted', cfgStr));
-          pbody.appendChild(r);
-        });
-        body.appendChild(H.card('POLICIES', pbody));
-      }
-      // ── Web dashboard (opt-in remote access) ──
-      var wb = d.web_board || {};
-      var wbody = H.el('div');
-      var wrow = H.el('div', 'cfg-row');
-      var wlbl = H.el('label');
-      var wcb = H.el('input'); wcb.type = 'checkbox'; wcb.checked = !!wb.enabled;
-      wcb.addEventListener('change', function () {
-        cfgSet('web_board', { enabled: wcb.checked });
-      });
-      wlbl.appendChild(wcb);
-      wlbl.appendChild(document.createTextNode(' serve this dashboard as a web page'));
-      wrow.appendChild(wlbl);
-      wbody.appendChild(wrow);
-      if (wb.enabled && wb.url) {
-        var urow = H.el('div', 'cfg-row');
-        var ulink = H.el('a', 'ops-refresh-btn', wb.url);
-        ulink.href = 'javascript:void(0)';
-        ulink.title = 'Copy URL — anyone holding it has FULL operator control';
-        ulink.addEventListener('click', function () {
-          try { navigator.clipboard.writeText(wb.url); } catch (e) {}
-          ulink.textContent = 'Copied!';
-          setTimeout(function () { ulink.textContent = wb.url; }, 1000);
-        });
-        urow.appendChild(ulink);
-        wbody.appendChild(urow);
-        wbody.appendChild(H.el('div', 'ops-muted',
-          'Token grants full control — treat like a password. Server binds 127.0.0.1; remote players connect through your tunnel (SSH/Tailscale).'));
-      } else {
-        wbody.appendChild(H.el('div', 'ops-muted',
-          'Off by default. When enabled, this exact dashboard is served at /board on the MCP port, authenticated by the bearer token.'));
-      }
-      body.appendChild(H.card('WEB DASHBOARD', wbody));
-
-      // ── Role appearance (per-role avatar config) ──
-      renderRoleAppearance(body);
-      Board.stamp('updated ' + new Date().toLocaleTimeString());
+      configState.data = d;
+      renderConfigBody();
     }).catch(function (e) {
       var body = document.getElementById('config-body');
       body.innerHTML = '';
       body.appendChild(H.alertLine('config unavailable: ' + e, 'icon-alert'));
     });
+  }
+
+  function renderConfigBody() {
+    var d = configState.data; if (!d) return;
+    var body = document.getElementById('config-body');
+    body.innerHTML = '';
+    body.appendChild(H.navStrip(CONFIG_SECTIONS, configState.section, function (k) {
+      configState.section = k;
+      renderConfigBody();
+    }));
+    switch (configState.section) {
+      case 'loops': sectionLoops(d, body); break;
+      case 'policies': sectionPolicies(d, body); break;
+      case 'engine': sectionEngine(d, body); break;
+      case 'access': sectionAccess(d, body); break;
+      case 'appearance': renderRoleAppearance(body); break;
+      default: sectionDoctrine(d, body); break;
+    }
+    Board.stamp('updated ' + new Date().toLocaleTimeString());
   }
   Board.registerPage('config', { onEnter: renderConfig, refresh: renderConfig, cadenceMs: 60000 });
 

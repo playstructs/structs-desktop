@@ -206,6 +206,23 @@
                border: 1px solid var(--border, #345); padding: 2px 6px; min-width: 11em; }
     .cfg-row .sui-result-row-right-section .cfg-actions,
     .sui-result-row .cfg-actions { margin-top: 0; gap: 4px; }
+    .war-addrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    /* Config sub-sections: the same nav component as the board's own tab bar,
+       inset so it reads as a level down rather than a second top-level bar. */
+    .subnav { margin: 0 0 10px; }
+    .subnav .sui-screen-nav { padding: 0 4px; }
+    .subnav .sui-screen-nav-items { flex-wrap: wrap; }
+    /* SUI's checkbox is a 48px-offset label + absolutely-positioned art; inside
+       a dense config row there is no label, so collapse the reserved space. */
+    .cfg-row .sui-checkbox-container { width: var(--form-input-height-total, 32px); flex: 0 0 auto; }
+    .cfg-row .sui-checkbox-container label { margin-left: 0; }
+    .sui-result-row-left-section .sui-checkbox-container { margin-right: 6px; }
+    .sui-result-row-left-section .sui-checkbox-container label { margin-left: 0; }
+    /* Steppers need room for 4-5 digits; SUI's default input is 25px wide. */
+    .sui-input-stepper input[type="number"] { width: 3.5em; }
+    .sui-input-stepper .sui-nav-btn { padding: 0 2px; line-height: 1; }
+    .cfg-row .sui-form-element-label-group { min-width: 0; }
+    .cfg-row .sui-form-element-label-group .sui-text-hint { font-size: 11px; }
   </style>
 </head>
 <body>
