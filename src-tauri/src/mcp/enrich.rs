@@ -64,6 +64,36 @@ fn seed_players() {
     }
 }
 
+/// bech32 address -> a label we can show.
+///
+/// The ledger keys rows on `address`, not on a player id, so without this
+/// "who did I actually pay" reads as a wall of `structs1…`. Our own team is
+/// resolvable locally — the vplayer registry stores an address per player, and
+/// the primary's is in game state.
+pub fn addresses_map() -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Ok(reg) = crate::mcp::virtual_players::REGISTRY.read() {
+        for p in &reg.players {
+            if p.address.is_empty() {
+                continue;
+            }
+            let label = match &p.player_id {
+                Some(pid) => format!("{} ({})", p.name, pid),
+                None => p.name.clone(),
+            };
+            out.insert(p.address.clone(), label);
+        }
+    }
+    if let Ok(gs) = crate::game_state::GAME_STATE.read() {
+        if let Some(addr) = gs.wallet_address.clone() {
+            if !addr.is_empty() {
+                out.insert(addr, "primary".to_string());
+            }
+        }
+    }
+    out
+}
+
 /// guild_id -> name from the persisted guild configs (discovery-fresh).
 fn guilds_map() -> HashMap<String, String> {
     crate::guild_config::load_configs()
@@ -92,6 +122,7 @@ pub fn lookups_json() -> Value {
     let players = PLAYERS.read().map(|m| m.clone()).unwrap_or_default();
     let structs = STRUCTS.read().map(|m| m.clone()).unwrap_or_default();
     json!({
+        "addresses": addresses_map(),
         "players": players,
         "structs": structs,
         "guilds": guilds_map(),

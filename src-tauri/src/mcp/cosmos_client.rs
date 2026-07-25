@@ -149,6 +149,26 @@ impl CosmosClient {
         }
     }
 
+    /// Every coin an address holds, straight from the bank module.
+    ///
+    /// `playerInventory.rocks` is a single `Coin` and is always `ualpha`, so it
+    /// structurally cannot show a player's guild tokens (`uguild.<id>`). This
+    /// bypasses `entity_path` — it is a Cosmos SDK endpoint, not a Structs one.
+    /// Returns the raw `balances` array: `[{denom, amount}, …]`.
+    pub async fn bank_balances(&self, address: &str) -> Result<Vec<Value>, String> {
+        let base = self.reactor_api.read().unwrap().clone();
+        let url = format!(
+            "{}/cosmos/bank/v1beta1/balances/{}",
+            base.trim_end_matches('/'),
+            address
+        );
+        let v = get_json(&url).await?;
+        Ok(v.get("balances")
+            .and_then(|b| b.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
     /// Query a single entity by type and ID
     pub async fn query_entity(&self, entity_type: &str, id: &str) -> Result<Value, String> {
         let path = Self::entity_path(entity_type)?;

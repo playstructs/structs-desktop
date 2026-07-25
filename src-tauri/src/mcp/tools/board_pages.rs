@@ -214,6 +214,378 @@ fn loops_json() -> Value {
     })
 }
 
+// ── INVENTORY ────────────────────────────────────────────────────────────────
+// Balances, the ledger, and (for ualpha only) transfers.
+//
+// TWO HARD RULES, both of which the chain enforces and this code must not
+// invite a player to discover the expensive way:
+//
+//   1. ORE IS NOT A BANK ASSET. It lives in `gridAttributes.ore`, never in
+//      `playerInventory.rocks`, and `MsgPlayerSend` is a bank send — it
+//      structurally cannot carry ore. Ore moves by being REFINED into ualpha,
+//      or by being seized/forfeited in battle. So ore is read-only here and
+//      gets no transfer control at all: not a disabled one, absent.
+//   2. Anything whose transferability we have not verified is read-only too.
+//      `SENDABLE_DENOMS` is an allow-list, never a free-text denom field.
+
+/// Denoms we know a player can send with `MsgPlayerSend` / `bank_send`.
+/// `uguild.*` is deliberately absent: it is observed only in provider/guild
+/// flows, so it stays read-only until proven otherwise.
+pub const SENDABLE_DENOMS: &[&str] = &["ualpha"];
+
+pub fn is_sendable(denom: &str) -> bool {
+    SENDABLE_DENOMS.contains(&denom)
+}
+
+/// Resolve a player reference (index, address, player id, or "primary") to
+/// `(player_id, index, name, address)`.
+fn resolve_player(player: &str) -> Result<(String, Option<u32>, String, String), String> {
+    let reg = crate::mcp::virtual_players::REGISTRY
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    if !player.is_empty() && player != "primary" {
+        if let Some(p) = reg.find(player) {
+            return Ok((
+                p.player_id.clone().unwrap_or_default(),
+                Some(p.index),
+                p.name.clone(),
+                p.address.clone(),
+            ));
+        }
+    }
+    let (pid, addr) = crate::game_state::GAME_STATE
+        .read()
+        .map(|g| (g.player_id.clone().unwrap_or_default(), g.wallet_address.clone().unwrap_or_default()))
+        .unwrap_or_default();
+    if addr.is_empty() {
+        return Err("no wallet address known yet — is the game window signed in?".into());
+    }
+    Ok((pid, None, "primary".to_string(), addr))
+}
+
+/// Balances for one player (default: the primary), plus the denom registry the
+/// UI needs to name them, plus the team-wide totals the roster cache already
+/// holds for free.
+#[tauri::command]
+pub async fn mcp_inventory(player: Option<String>) -> Result<Value, String> {
+    let who = player.unwrap_or_else(|| "primary".into());
+    let (player_id, index, name, address) = resolve_player(&who)?;
+
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    // Bank coins: ualpha AND every uguild.<id> the address holds. A single-key
+    // `playerInventory.rocks` read could never have shown the latter.
+    let (balances, bank_err) = match client.bank_balances(&address).await {
+        Ok(b) => (b, None),
+        Err(e) => (vec![], Some(e)),
+    };
+
+    // Ore is NOT in the bank — it is a planet grid attribute — so it is fetched
+    // separately and marked read-only.
+    let ore = if player_id.is_empty() {
+        None
+    } else {
+        client
+            .query_entity("player", &player_id)
+            .await
+            .ok()
+            .and_then(|p| {
+                p.get("gridAttributes")
+                    .and_then(|g| g.get("ore"))
+                    .and_then(|o| match o {
+                        Value::String(s) => s.parse::<f64>().ok(),
+                        other => other.as_f64(),
+                    })
+            })
+    };
+
+    let registry = crate::guild_config::denom_registry();
+    let mut assets: Vec<Value> = balances
+        .iter()
+        .map(|c| {
+            let denom = c.get("denom").and_then(|d| d.as_str()).unwrap_or("").to_string();
+            let amount = c
+                .get("amount")
+                .and_then(|a| a.as_str())
+                .and_then(|a| a.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let info = registry.get(&denom);
+            json!({
+                "denom": denom,
+                "amount": amount,
+                "sendable": is_sendable(&denom),
+                "base_name": info.map(|i| i.base_name.clone()),
+                "display_name": info.map(|i| i.display_name.clone()),
+                "exponent": info.map(|i| i.exponent).unwrap_or(0),
+                "guild_id": info.map(|i| i.guild_id.clone()),
+                "guild_tag": info.map(|i| i.guild_tag.clone()),
+            })
+        })
+        .collect();
+    if let Some(o) = ore {
+        assets.push(json!({
+            "denom": "ore",
+            "amount": o,
+            "sendable": false,
+            "display_name": "Ore",
+            "base_name": "g",
+            "exponent": 0,
+            // Said in the payload, not just in a tooltip, so every surface
+            // that renders this row gets the same explanation.
+            "note": "not transferable — ore only moves by refining it into Alpha, or by being seized in battle",
+        }));
+    }
+
+    // Team totals: free, already swept, and the reason to have a per-player
+    // filter at all.
+    let rows = roster_cache::all_rows();
+    let team_alpha: f64 = rows.iter().map(|r| r.alpha_ualpha).sum();
+    let team_ore: f64 = rows.iter().map(|r| r.ore).sum();
+
+    Ok(json!({
+        "player": { "player_id": player_id, "index": index, "name": name, "address": address },
+        "assets": assets,
+        "bank_error": bank_err,
+        "team": { "players": rows.len(), "alpha_ualpha": team_alpha, "ore": team_ore },
+        "sendable_denoms": SENDABLE_DENOMS,
+        "denoms": registry,
+        "roster_refreshed_at_ms": roster_cache::refreshed_at_ms(),
+    }))
+}
+
+/// A page of the durable Guild-API ledger for one player. This reaches back
+/// further than the app has been running — the GRASS inventory stream is the
+/// live tail on top of it, not the system of record.
+#[tauri::command]
+pub async fn mcp_inventory_history(player: Option<String>, page: Option<u32>) -> Result<Value, String> {
+    let who = player.unwrap_or_else(|| "primary".into());
+    let (player_id, _index, name, address) = resolve_player(&who)?;
+    let page = page.unwrap_or(1).max(1);
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+
+    // Prefer the player-keyed endpoint; fall back to the address one for a
+    // player that has no on-chain id yet.
+    let res = if player_id.is_empty() {
+        client.guild.ledger_by_address(&address, page).await
+    } else {
+        client.guild.ledger_by_player(&player_id, page).await
+    };
+    let page_data = res.map_err(|e| format!("ledger unavailable: {e}"))?;
+
+    Ok(json!({
+        "player": { "player_id": player_id, "name": name, "address": address },
+        "rows": page_data.items,
+        "page": page_data.page,
+        "has_more": page_data.has_more,
+        "addresses": crate::mcp::enrich::addresses_map(),
+        "denoms": crate::guild_config::denom_registry(),
+    }))
+}
+
+/// Dry-run a transfer. ALWAYS called before a send: it names the sender,
+/// resolves the destination against the roster, and says plainly when the
+/// destination is an address we do not know.
+#[tauri::command]
+pub async fn mcp_transfer_preview(
+    from: Option<String>,
+    to: String,
+    denom: String,
+    amount: f64,
+) -> Result<Value, String> {
+    let who = from.unwrap_or_else(|| "primary".into());
+    let (player_id, index, name, address) = resolve_player(&who)?;
+
+    let mut problems: Vec<String> = Vec::new();
+    if !is_sendable(&denom) {
+        problems.push(format!(
+            "{denom} cannot be sent from here — only {} may be transferred",
+            SENDABLE_DENOMS.join(", ")
+        ));
+    }
+    // bech32 for this chain: `structs1` + data. Cheap shape check, not a
+    // checksum — the chain rejects a bad one, but a typo caught here costs
+    // nothing.
+    let to = to.trim().to_string();
+    if !to.starts_with("structs1") || to.len() < 39 {
+        problems.push("destination is not a well-formed structs1… address".into());
+    }
+    if to == address {
+        problems.push("destination is the sender's own address".into());
+    }
+    if !(amount > 0.0) {
+        problems.push("amount must be greater than zero".into());
+    }
+
+    // Who is on the other end?
+    let known = crate::mcp::enrich::addresses_map();
+    let recipient = known.get(&to).cloned();
+
+    // Can they afford it?
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let balance = client
+        .bank_balances(&address)
+        .await
+        .ok()
+        .and_then(|bs| {
+            bs.iter()
+                .find(|c| c.get("denom").and_then(|d| d.as_str()) == Some(denom.as_str()))
+                .and_then(|c| c.get("amount").and_then(|a| a.as_str()))
+                .and_then(|a| a.parse::<f64>().ok())
+        })
+        .unwrap_or(0.0);
+    if amount > balance {
+        problems.push(format!("balance is {balance} {denom}, short by {}", amount - balance));
+    }
+
+    let registry = crate::guild_config::denom_registry();
+    let info = registry.get(&denom);
+    Ok(json!({
+        "ok": problems.is_empty(),
+        "problems": problems,
+        "from": { "player_id": player_id, "index": index, "name": name, "address": address },
+        "to": to,
+        // null here is the point: an unrecognised destination must be shown as
+        // an external address, not silently rendered as if it were a teammate.
+        "recipient": recipient,
+        "denom": denom,
+        "amount": amount,
+        "balance": balance,
+        "denom_info": info,
+        "route": if index.is_some() { "vplayer bridge" } else { "primary signing queue" },
+    }))
+}
+
+/// Execute a transfer. Board-only, and it re-runs the preview server-side so a
+/// stale or hand-crafted client payload cannot skip the gates.
+#[tauri::command]
+pub async fn mcp_transfer_execute(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    from: Option<String>,
+    to: String,
+    denom: String,
+    amount: f64,
+) -> Result<Value, String> {
+    require_board(&window)?;
+    mcp_transfer_execute_impl(app, from, to, denom, amount).await
+}
+
+/// Body of `mcp_transfer_execute`, callable without a window (web dashboard;
+/// the bearer token there IS the operator authority).
+pub async fn mcp_transfer_execute_impl(
+    app: tauri::AppHandle,
+    from: Option<String>,
+    to: String,
+    denom: String,
+    amount: f64,
+) -> Result<Value, String> {
+    let preview = mcp_transfer_preview(from.clone(), to.clone(), denom.clone(), amount).await?;
+    if preview.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let why = preview
+            .get("problems")
+            .and_then(|p| p.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
+        return Err(format!("refused: {why}"));
+    }
+
+    let who = from.unwrap_or_else(|| "primary".into());
+    let (_pid, index, name, address) = resolve_player(&who)?;
+    let amount_str = format!("{}", amount.round() as i128);
+
+    let result = match index {
+        // A vplayer signs through the same bridge every loop uses.
+        Some(i) => {
+            let payload = json!({
+                "fromAddress": address,
+                "toAddress": to,
+                "amount": [{ "denom": denom, "amount": amount_str }],
+            });
+            crate::mcp::tx_retry::sign_with_retry(
+                &app,
+                i,
+                "/structs.structs.MsgPlayerSend",
+                payload,
+                "board:transfer",
+            )
+            .await
+            .map(|_| ())
+        }
+        // The primary signs through the webview queue (`bank_send`). Sweep
+        // deliberately excludes the primary as a SOURCE, so this is the first
+        // place on the board it can send from.
+        None => {
+            let tx_args = json!({
+                "action_type": "bank_send",
+                "from_address": address,
+                "to_address": to,
+                "amount": format!("{amount_str}{denom}"),
+            });
+            crate::mcp::tx_retry::submit_once(&app, "bank_send", tx_args, "board:transfer")
+                .await
+                .and_then(|r| {
+                    if r.success {
+                        Ok(())
+                    } else {
+                        Err(r.error.unwrap_or_else(|| "unknown error".into()))
+                    }
+                })
+        }
+    };
+
+    match result {
+        Ok(()) => {
+            board_feed::push(
+                &app,
+                board_feed::Severity::Notice,
+                "transfer",
+                format!("Sent {amount_str} {denom} from {name} to {to}"),
+            );
+            Ok(json!({ "ok": true, "sent": amount_str, "denom": denom, "to": to }))
+        }
+        Err(e) => {
+            board_feed::push(
+                &app,
+                board_feed::Severity::Important,
+                "transfer",
+                format!("Transfer from {name} failed: {e}"),
+            );
+            Err(e)
+        }
+    }
+}
+
+// ── HEALTH ───────────────────────────────────────────────────────────────────
+
+/// System health for the board's status strip. Everything here was already
+/// computed for the watchdog and the `structs_system` agent tool, and none of
+/// it had a UI: whether sync is alive, which loops are overdue or wedged, how
+/// far the AIMD controller has backed off, and whether telemetry is dropping.
+#[tauri::command]
+pub async fn mcp_health() -> Result<Value, String> {
+    let mut h = crate::mcp::watchdog::health_snapshot();
+    if let Some(obj) = h.as_object_mut() {
+        obj.insert(
+            "concurrency".into(),
+            json!({
+                "effective": crate::mcp::loop_util::effective_max_concurrent(),
+                "max": crate::mcp::loop_util::MAX_CONCURRENT_PLAYERS,
+            }),
+        );
+        // Loops that are running fine but cannot act — see telemetry::blocked.
+        let blocked: Vec<Value> = crate::mcp::telemetry::blocked_reasons()
+            .into_iter()
+            .map(|(name, (reason, at))| json!({ "loop": name, "reason": reason, "at_ms": at }))
+            .collect();
+        obj.insert("loops_blocked".into(), json!(blocked));
+    }
+    Ok(h)
+}
+
 // ── WAR ──────────────────────────────────────────────────────────────────────
 
 /// Everything the WAR page renders, in one call: the grudge/guild lists, the
@@ -742,4 +1114,32 @@ pub async fn mcp_tx_mutate_impl(
         );
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+
+    /// The whole point of the allow-list. A failed ore send is exactly the
+    /// mistake an Inventory page could invite, so this is asserted rather than
+    /// left to the UI to remember.
+    #[test]
+    fn ore_is_never_sendable() {
+        assert!(!is_sendable("ore"));
+        assert!(!SENDABLE_DENOMS.contains(&"ore"));
+    }
+
+    /// Guild tokens are real bank assets but their transferability is not
+    /// verified, so they stay read-only until it is.
+    #[test]
+    fn guild_tokens_are_read_only_for_now() {
+        assert!(!is_sendable("uguild.0-5"));
+        assert!(!is_sendable("uguild.0-1"));
+    }
+
+    #[test]
+    fn alpha_is_the_only_sendable_denom() {
+        assert_eq!(SENDABLE_DENOMS, &["ualpha"]);
+        assert!(is_sendable("ualpha"));
+    }
 }

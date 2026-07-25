@@ -347,6 +347,46 @@ impl GuildApiClient {
         .await
     }
 
+    // -- ledger --
+    // The double-entry ledger the Guild API has always served and this client
+    // never called. It is durable and chain-authoritative, so it reaches
+    // further back than the app has been running — the GRASS inventory stream
+    // is the live tail on top of it, not the system of record.
+    //
+    // `action` is wider than a live sample suggests: genesis · received · sent ·
+    // migrated · infused · defusion_started/cancelled/completed · mined ·
+    // refined · seized · forfeited · minted · burned ·
+    // diversion_started/completed.
+    pub async fn ledger_by_player(
+        &self,
+        player_id: &str,
+        page: u32,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page(
+            &format!("/api/ledger/player/{}/page/{}", player_id, page),
+            page,
+        )
+        .await
+    }
+    pub async fn ledger_count_by_player(&self, player_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/ledger/player/{}/count", player_id))
+            .await
+    }
+    pub async fn ledger_by_address(
+        &self,
+        address: &str,
+        page: u32,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page(
+            &format!("/api/ledger/list/address/{}/page/{}", address, page),
+            page,
+        )
+        .await
+    }
+    pub async fn ledger_by_tx(&self, tx_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/ledger/{}", tx_id)).await
+    }
+
     // -- agreements --
     pub async fn agreement_all(&self, page: u32) -> Result<GuildPage<Value>, String> {
         self.get_page(&format!("/api/agreement/all/page/{}", page), page)

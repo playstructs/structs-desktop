@@ -50,6 +50,13 @@ pub struct GuildConfig {
     /// Unix seconds of the last successful discovery refresh for this entry.
     #[serde(default)]
     pub last_refreshed: Option<u64>,
+    /// Cosmetic names the guild publishes for its own token, keyed by exponent
+    /// — SN Corp's `{"0": "ack", "6": "snack"}` means the base unit of
+    /// `uguild.0-5` is an *ack* and 10^6 of them is a *snack*, exactly
+    /// mirroring ualpha→alpha. Fetched from guild.json since discovery
+    /// existed; parsed and kept only since the Inventory work.
+    #[serde(default)]
+    pub denoms: std::collections::BTreeMap<u32, String>,
 }
 
 /// The shape exposed to the frontend as window.__STRUCTS_CONFIG__
@@ -123,6 +130,8 @@ fn default_configs() -> Vec<GuildConfig> {
             endpoint: Some("https://beta.playstructs.com/guild.json".into()),
             source: ConfigSource::Seed,
             last_refreshed: None,
+            // Left empty on purpose: discovery fills these from guild.json.
+            denoms: Default::default(),
         },
         // Kept (inactive) so players on Orbital Hydro can switch back and still
         // reach their own guild_api — only the active guild's config is exposed.
@@ -138,8 +147,78 @@ fn default_configs() -> Vec<GuildConfig> {
             endpoint: None,
             source: ConfigSource::Seed,
             last_refreshed: None,
+            // Left empty on purpose: discovery fills these from guild.json.
+            denoms: Default::default(),
         },
     ]
+}
+
+/// One guild token, as the UI needs to talk about it.
+///
+/// Every guild mints `uguild.<guild_id>` and publishes its own cosmetic names
+/// for it. Two guilds can independently pick the same word, so anything that
+/// can show more than one guild's token at once (the ledger does exactly that)
+/// must disambiguate with `tag`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DenomInfo {
+    /// The on-chain denom, e.g. `uguild.0-5` or `ualpha`.
+    pub chain: String,
+    /// Cosmetic name of the BASE unit (exponent 0), e.g. "ack".
+    pub base_name: String,
+    /// Cosmetic name of the DISPLAY unit, e.g. "snack".
+    pub display_name: String,
+    /// How many base units make one display unit (10^exponent).
+    pub exponent: u32,
+    pub guild_id: String,
+    pub guild_name: String,
+    pub guild_tag: String,
+}
+
+/// Every denom we can name, keyed by its on-chain denom string.
+///
+/// `ualpha` is chain-wide rather than guild-published, so it is seeded here
+/// with the ladder the game itself uses (1 g Alpha = 1,000,000 ualpha).
+pub fn denom_registry() -> std::collections::BTreeMap<String, DenomInfo> {
+    let mut out = std::collections::BTreeMap::new();
+    out.insert(
+        "ualpha".to_string(),
+        DenomInfo {
+            chain: "ualpha".into(),
+            base_name: "μg Alpha".into(),
+            display_name: "Alpha".into(),
+            exponent: 6,
+            guild_id: String::new(),
+            guild_name: "chain".into(),
+            guild_tag: String::new(),
+        },
+    );
+    for c in load_configs() {
+        if c.guild_id.is_empty() || c.denoms.is_empty() {
+            continue;
+        }
+        // Lowest exponent is the base unit, highest the display unit. A guild
+        // that publishes only one name uses it for both.
+        let base = c.denoms.iter().next().map(|(e, n)| (*e, n.clone()));
+        let disp = c.denoms.iter().next_back().map(|(e, n)| (*e, n.clone()));
+        let (base_exp, base_name) = match base {
+            Some(v) => v,
+            None => continue,
+        };
+        let (disp_exp, display_name) = disp.unwrap_or((base_exp, base_name.clone()));
+        out.insert(
+            format!("uguild.{}", c.guild_id),
+            DenomInfo {
+                chain: format!("uguild.{}", c.guild_id),
+                base_name,
+                display_name,
+                exponent: disp_exp.saturating_sub(base_exp),
+                guild_id: c.guild_id.clone(),
+                guild_name: c.name.clone(),
+                guild_tag: c.guild_tag.clone(),
+            },
+        );
+    }
+    out
 }
 
 /// Backfill guild ids on legacy entries by known infrastructure host.

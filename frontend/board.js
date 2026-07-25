@@ -11,11 +11,87 @@
   var Board = window.Board = {
     T: null,                 // window.__TAURI__ once available
     pages: {},               // name -> { onEnter?, refresh?, cadenceMs?, lastRun }
-    current: 'ops',
+    current: 'ops',          // the PAGE (div + renderer) currently visible
+    area: 'command',         // the top-level area in the tab bar
+    section: 'overview',     // the sub-section within it
     helpers: {},
   };
 
-  var PAGE_NAMES = ['ops', 'fleet', 'energy', 'work', 'tx', 'grass', 'war', 'config', 'map'];
+  // ── The page manifest ───────────────────────────────────────────────────
+  // The console grew one tab per feature until nine of them sat in a bar that
+  // no longer said what any of them were for. These are the five things the
+  // operator actually does; every old tab is a section inside one of them.
+  //
+  // ONE list. The tab bar, the sub-nav, which page div is visible and the
+  // router all read it — previously three parallel lists (PAGE_NAMES, the
+  // <a data-page> markup, the <div id="page-*"> containers) drifted apart.
+  //
+  // `page` is the renderer/div key (unchanged, so registerPage keeps working);
+  // `view` is passed to that page's onEnter for pages that hold several
+  // sections in one body (War, Config).
+  var AREAS = [
+    { key: 'command', label: 'Command', sections: [
+      { key: 'overview', label: 'Overview', page: 'ops' },
+    ] },
+    // "Armada", not "Fleet": a fleet is a specific game entity (9-xxx, the
+    // thing that moves between planets). This is our roster of players.
+    { key: 'armada', label: 'Armada', sections: [
+      { key: 'roster', label: 'Roster', page: 'armada' },
+      { key: 'map', label: 'Map', page: 'map' },
+      { key: 'squads', label: 'Squads', page: 'config', view: 'appearance' },
+    ] },
+    { key: 'industry', label: 'Industry', sections: [
+      { key: 'power', label: 'Power', page: 'energy' },
+      { key: 'work', label: 'Work', page: 'work' },
+      { key: 'transactions', label: 'Transactions', page: 'tx' },
+    ] },
+    { key: 'war', label: 'War', sections: [
+      { key: 'doctrine', label: 'Doctrine', page: 'war', view: 'doctrine' },
+      { key: 'targets', label: 'Targets', page: 'war', view: 'targets' },
+      { key: 'lists', label: 'Lists', page: 'war', view: 'lists' },
+      { key: 'incidents', label: 'Incidents', page: 'war', view: 'incidents' },
+    ] },
+    { key: 'system', label: 'System', sections: [
+      { key: 'doctrine', label: 'Doctrine', page: 'config', view: 'doctrine' },
+      { key: 'loops', label: 'Loops', page: 'config', view: 'loops' },
+      { key: 'policies', label: 'Policies', page: 'config', view: 'policies' },
+      { key: 'engine', label: 'Engine', page: 'config', view: 'engine' },
+      { key: 'access', label: 'Access', page: 'config', view: 'access' },
+      { key: 'stream', label: 'Stream', page: 'grass' },
+      { key: 'diagnostics', label: 'Diagnostics', page: 'diagnostics' },
+    ] },
+  ];
+  Board.AREAS = AREAS;
+
+  // Every page div the manifest can show — derived, never hand-listed.
+  var PAGE_NAMES = (function () {
+    var seen = {}, out = [];
+    AREAS.forEach(function (a) {
+      a.sections.forEach(function (s) {
+        if (!seen[s.page]) { seen[s.page] = 1; out.push(s.page); }
+      });
+    });
+    return out;
+  })();
+
+  // Old single-word routes stay live — bookmarks, the agent's own deep links
+  // (`#/map?p=…`) and anything the Rust side emits must not 404.
+  var LEGACY_ROUTES = {
+    ops: 'command/overview', fleet: 'armada/roster', armada: 'armada/roster',
+    map: 'armada/map', energy: 'industry/power', work: 'industry/work',
+    tx: 'industry/transactions', grass: 'system/stream', config: 'system/loops',
+  };
+
+  function findArea(key) {
+    for (var i = 0; i < AREAS.length; i++) if (AREAS[i].key === key) return AREAS[i];
+    return null;
+  }
+  function findSection(area, key) {
+    for (var i = 0; i < area.sections.length; i++) {
+      if (area.sections[i].key === key) return area.sections[i];
+    }
+    return area.sections[0];
+  }
 
   Board.registerPage = function (name, def) {
     def = def || {};
@@ -182,6 +258,19 @@
     d.appendChild(v);
     if (iconName) d.appendChild(el('i', iconClass(iconName)));
     return d;
+  }
+  // Compact stat: big value over a small ExtremeHazard label. Used in roster
+  // rows, the health strip and anywhere a number needs naming without a
+  // full label/value row's horizontal budget.
+  function statTile(label, value, iconName, cls) {
+    var t = el('div', 'fstat' + (cls ? ' ' + cls : ''));
+    var v = el('div', 'fstat-v');
+    if (value && value.nodeType) v.appendChild(value);
+    else v.appendChild(document.createTextNode(value == null ? '\u2014' : String(value)));
+    if (iconName) v.appendChild(el('i', iconClass(iconName)));
+    t.appendChild(v);
+    t.appendChild(el('div', 'fstat-l', label));
+    return t;
   }
   // Build one sui-result-row. opts: { lead?(node, e.g. checkbox), icon?(portrait
   // glyph), title(str|node), subtitle?(str|node), chips?([node]), action?(node),
@@ -373,15 +462,17 @@
   // A secondary nav strip — the same component as the board's own tab bar, so
   // a page that needs sub-sections reads as native rather than bespoke.
   // `items`: [{key,label}]. Returns a node; `onPick(key)` fires on click.
-  function navStrip(items, activeKey, onPick) {
+  // `href(key)` makes the strip navigate for real (routed sub-sections);
+  // omit it and the strip is a local state switch driven by `onPick`.
+  function navStrip(items, activeKey, onPick, href) {
     var wrap = el('div', 'sui-screen sui-screen-full-width subnav');
     var bar = el('div', 'sui-screen-nav');
     var list = el('div', 'sui-screen-nav-items');
     items.forEach(function (it) {
       var a = el('a', 'sui-screen-nav-item' + (it.key === activeKey ? ' sui-mod-active' : ''));
-      a.href = 'javascript:void(0)';
+      a.href = href ? href(it.key) : 'javascript:void(0)';
       a.textContent = it.label;
-      a.addEventListener('click', function () { onPick(it.key); });
+      if (onPick) a.addEventListener('click', function () { onPick(it.key); });
       list.appendChild(a);
     });
     bar.appendChild(list);
@@ -452,11 +543,16 @@
 
   // Render into a container with one error path, replacing the five
   // byte-identical `innerHTML=''` + catch blocks across the pages.
+  // `build(host)` gets a freshly emptied container; a throw anywhere in it
+  // leaves the error block and nothing half-painted.
   function renderInto(id, build) {
     var host = document.getElementById(id);
     if (!host) return Promise.resolve();
     return Promise.resolve()
-      .then(build)
+      .then(function () {
+        host.innerHTML = '';
+        return build(host);
+      })
       .catch(function (e) {
         host.innerHTML = '';
         host.appendChild(stateBlock('error', String(e)));
@@ -716,6 +812,7 @@
     esc: esc, el: el, row: row, card: card, badge: badge, battery: battery,
     progressBar: progressBar, fmtNum: fmtNum, ago: ago, alertLine: alertLine,
     iconClass: iconClass, resultTable: resultTable, resource: resource, resultRow: resultRow,
+    statTile: statTile,
     // `detailModal` is the historical name every page already calls; it now
     // opens the native drawer. Kept as an alias rather than renamed across
     // every call site in one go.
@@ -726,7 +823,86 @@
     duration: duration, stateBlock: stateBlock, renderInto: renderInto, busy: busy,
     listView: listView, pagination: pagination, pageSlots: pageSlots,
     fmtInt: fmtInt, fmtWatts: fmtWatts, fmtAlpha: fmtAlpha, fmtOre: fmtOre,
+    denomName: denomName, denomAmount: denomAmount, confirmModal: confirmModal,
   };
+
+  // ── Denom naming ────────────────────────────────────────────────────────
+  // Every guild mints `uguild.<id>` and publishes cosmetic names for it, so
+  // `uguild.0-5` is displayed as *snack*. Two guilds can independently pick
+  // the same word, which is why anything that can show more than one guild's
+  // token (the ledger does exactly that) disambiguates with the guild tag.
+  //
+  // `style`:
+  //   'cosmetic' (default) — "snack"           readable, the common case
+  //   'both'               — "snack · uguild.0-5"
+  //                          REQUIRED anywhere getting it wrong costs money:
+  //                          transfer forms, the confirm dialog, row detail.
+  //   'chain'              — "uguild.0-5"
+  // Decided once here rather than at every call site.
+  function denomName(chainDenom, registry, opts) {
+    opts = opts || {};
+    var info = (registry || {})[chainDenom];
+    if (chainDenom === 'ore') return opts.style === 'chain' ? 'ore' : 'Ore';
+    if (!info) return chainDenom;                       // unknown: never invent
+    var cosmetic = info.display_name || chainDenom;
+    if (opts.tag !== false && info.guild_tag) cosmetic += ' [' + info.guild_tag + ']';
+    if (opts.style === 'chain') return chainDenom;
+    if (opts.style === 'both') return cosmetic + ' · ' + chainDenom;
+    return cosmetic;
+  }
+  // Raw base units → display units, using the denom's own exponent
+  // (ualpha 10^6 → Alpha, uguild.0-5 10^6 → snack). Ore is already whole grams.
+  function denomAmount(amount, chainDenom, registry) {
+    var info = (registry || {})[chainDenom];
+    var exp = info ? (info.exponent || 0) : 0;
+    return fmtNum(Number(amount || 0) / Math.pow(10, exp));
+  }
+
+  // ── Confirm dialog ──────────────────────────────────────────────────────
+  // SUI's system modal. Used for anything irreversible; `bodyNode` should
+  // spell out exactly what is about to happen, not just ask "are you sure".
+  function confirmModal(title, bodyNode, ctaLabel, onConfirm) {
+    var ov = el('div', 'modal-overlay');
+    var modal = el('div', 'sui-message-system-modal');
+    var frame = el('div', 'sui-message-system-modal-frame');
+    var left = el('div', 'sui-message-system-modal-frame-left');
+    left.appendChild(el('div', 'sui-message-system-modal-frame-left-top'));
+    var mid = el('div', 'sui-message-system-modal-frame-left-middle');
+    mid.appendChild(el('i', iconClass('icon-attention', 'sui-icon-md')));
+    left.appendChild(mid);
+    left.appendChild(el('div', 'sui-message-system-modal-frame-left-bottom'));
+    frame.appendChild(left);
+
+    var center = el('div', 'sui-message-system-model-frame-center');
+    var stack = el('div');
+    stack.appendChild(el('div', 'sui-text-header', title));
+    if (bodyNode) stack.appendChild(bodyNode);
+    center.appendChild(stack);
+    frame.appendChild(center);
+    modal.appendChild(frame);
+
+    var cta = el('div', 'sui-message-system-modal-cta');
+    function close() { if (ov.parentNode) ov.parentNode.removeChild(ov); }
+    var cancelW = el('div', 'sui-message-system-modal-cta-btn-wrapper');
+    var cancel = el('a', 'sui-screen-btn sui-mod-secondary');
+    cancel.href = 'javascript:void(0)';
+    cancel.appendChild(el('span', null, 'Cancel'));
+    cancel.addEventListener('click', close);
+    cancelW.appendChild(cancel);
+    var goW = el('div', 'sui-message-system-modal-cta-btn-wrapper');
+    var go = el('a', 'sui-screen-btn sui-mod-destructive');
+    go.href = 'javascript:void(0)';
+    go.appendChild(el('span', null, ctaLabel || 'Confirm'));
+    go.addEventListener('click', function () { close(); onConfirm(); });
+    goW.appendChild(go);
+    cta.appendChild(cancelW); cta.appendChild(goW);
+    modal.appendChild(cta);
+
+    ov.appendChild(modal);
+    ov.addEventListener('click', function (e) { if (e.target === ov) close(); });
+    document.body.appendChild(ov);
+    return close;
+  }
 
   // ── Router ────────────────────────────────────────────────────────────────
   // #/fleet, #/map?p=2-459 … Persistent [hidden]-toggled page divs.
@@ -742,19 +918,46 @@
       });
       h = h.slice(0, qi);
     }
-    var page = PAGE_NAMES.indexOf(h) >= 0 ? h : 'ops';
-    Board.current = page;
+    // `#/fleet` and friends resolve to their new home rather than dead-ending.
+    var parts = h.split('/').filter(Boolean);
+    if (parts.length === 1 && LEGACY_ROUTES[parts[0]]) parts = LEGACY_ROUTES[parts[0]].split('/');
+
+    var area = findArea(parts[0]) || AREAS[0];
+    var section = findSection(area, parts[1]);
+
+    Board.area = area.key;
+    Board.section = section.key;
+    Board.current = section.page;
     Board.pageParams = params;
+
     PAGE_NAMES.forEach(function (p) {
       var div = document.getElementById('page-' + p);
-      if (div) div.hidden = (p !== page);
+      if (div) div.hidden = (p !== section.page);
     });
     var tabs = document.querySelectorAll('#board-tabs .sui-screen-nav-item');
     for (var i = 0; i < tabs.length; i++) {
-      tabs[i].classList.toggle('sui-mod-active', tabs[i].getAttribute('data-page') === page);
+      tabs[i].classList.toggle('sui-mod-active', tabs[i].getAttribute('data-area') === area.key);
     }
-    var def = Board.pages[page];
-    if (def && def.onEnter) def.onEnter(params);
+    renderSubnav(area, section);
+
+    var def = Board.pages[section.page];
+    // Claim the cadence slot NOW. onEnter already fetches; without this the
+    // 1s scheduler saw lastRun === 0 and fired a second identical fetch the
+    // moment the page opened.
+    if (def) def.lastRun = Date.now();
+    if (def && def.onEnter) def.onEnter(params, section.view);
+  }
+
+  // The sub-nav is a real link strip: sections are in the hash, so they are
+  // bookmarkable, survive a reload, and Back steps between them.
+  function renderSubnav(area, section) {
+    var host = document.getElementById('board-subnav');
+    if (!host) return;
+    host.innerHTML = '';
+    if (area.sections.length < 2) return;
+    host.appendChild(navStrip(area.sections, section.key, null, function (k) {
+      return '#/' + area.key + '/' + k;
+    }));
   }
 
   // ── Scheduler: one 1s tick dispatching per-page cadence ─────────────────
@@ -765,9 +968,25 @@
     var now = Date.now();
     if (now - def.lastRun >= def.cadenceMs) {
       def.lastRun = now;
-      def.refresh();
+      runRefresh(def);
     }
   }, 1000);
+
+  // One place that runs a page refresh, so the "updated" stamp is truthful on
+  // every page instead of only the ones that remember to call Board.stamp.
+  function runRefresh(def) {
+    var btn = document.getElementById('board-refresh');
+    if (btn) btn.classList.add('is-busy');
+    var done = function () {
+      if (btn) btn.classList.remove('is-busy');
+      Board.stamp('updated ' + new Date().toLocaleTimeString());
+    };
+    var r;
+    try { r = def.refresh(); } catch (e) { done(); throw e; }
+    if (r && r.then) return r.then(done, done);
+    done();
+    return r;
+  }
 
   // Manual Refresh button = refresh the CURRENT page.
   function wireRefreshButton() {
@@ -777,7 +996,7 @@
       var def = Board.pages[Board.current];
       if (def && def.refresh) {
         def.lastRun = Date.now();
-        def.refresh();
+        runRefresh(def);
       }
     });
   }
@@ -785,6 +1004,78 @@
     var s = document.getElementById('board-updated');
     if (s) s.textContent = text;
   };
+
+  // ── HEALTH STRIP ────────────────────────────────────────────────────────
+  // The watchdog has always known whether sync is alive, which loops are
+  // overdue or wedged, how far the AIMD fan-out has backed off, and whether
+  // telemetry is dropping — none of it had a surface, so a stalled machine
+  // looked exactly like a quiet one. This strip sits above the game snapshot
+  // for that reason: a stale snapshot is only readable once you know sync
+  // stopped producing it.
+  function healthTiles(h) {
+    var strip = el('div', 'hstrip');
+    var status = String(h.status || 'unknown');
+    var mod = status === 'ok' ? 'ok' : (status === 'warn' ? 'live' : 'bad');
+    var icon = status === 'ok' ? 'icon-success' : (status === 'warn' ? 'icon-attention' : 'icon-alert');
+    strip.appendChild(statTile('status', status.toUpperCase(), icon, mod));
+
+    var age = (h.sync_age_ms || 0) / 1000;
+    var interval = (h.sync_interval_ms || 0) / 1000;
+    // Late is relative to the loop's own cadence, not a fixed number.
+    var syncBad = interval > 0 && age > interval * 3;
+    strip.appendChild(statTile('sync age', duration(age), null,
+      syncBad ? 'bad' : 'ok'));
+
+    var overdue = h.loops_overdue || [];
+    var wedged = h.loops_wedged || [];
+    strip.appendChild(statTile('loops overdue', overdue.length || '0', null,
+      overdue.length ? 'live' : 'muted'));
+    strip.appendChild(statTile('loops wedged', wedged.length || '0', null,
+      wedged.length ? 'bad' : 'muted'));
+
+    var c = h.concurrency || {};
+    var eff = c.effective, max = c.max;
+    strip.appendChild(statTile('fan-out', (eff == null ? '?' : eff) + ' / ' + (max == null ? '?' : max),
+      null, (eff != null && max != null && eff < max) ? 'live' : 'muted'));
+
+    strip.appendChild(statTile('uptime', duration(h.uptime_s || 0), null, 'muted'));
+    var drops = h.telemetry_dropped || 0;
+    strip.appendChild(statTile('telemetry drops', drops, null, drops ? 'live' : 'muted'));
+    return strip;
+  }
+
+  // Shared with the System/Diagnostics page, which shows the same tiles above
+  // the loop and transaction detail rather than a second, drifting summary.
+  Board.healthTiles = healthTiles;
+
+  function renderHealth() {
+    return Board.T.core.invoke('mcp_health').then(function (h) {
+      renderInto('ops-health', function (body) {
+        body.appendChild(healthTiles(h));
+
+        // Name the loops, don't just count them — "2 overdue" is not
+        // actionable, "auto_raid overdue" is. (The snapshot reports names.)
+        var notes = el('div', 'hblocked');
+        (h.loops_wedged || []).forEach(function (w) {
+          notes.appendChild(stateBlock('error', w + ' wedged — its scan has been running long enough ' +
+            'that the single-flight guard never cleared'));
+        });
+        (h.loops_overdue || []).forEach(function (o) {
+          notes.appendChild(stateBlock('warning', o + ' overdue — enabled, but has not completed a ' +
+            'scan within its own interval'));
+        });
+        // Enabled, running on time, and still unable to act (telemetry::blocked).
+        (h.loops_blocked || []).forEach(function (b) {
+          notes.appendChild(stateBlock('warning', (b.loop || 'loop') + ' blocked — ' + (b.reason || '?')));
+        });
+        if (notes.childNodes.length) body.appendChild(card('SYSTEM', notes));
+      });
+    }).catch(function (e) {
+      renderInto('ops-health', function (body) {
+        body.appendChild(stateBlock('error', 'health unavailable: ' + e));
+      });
+    });
+  }
 
   // ── OPS page (existing Rust-rendered HTML path, unchanged) ──────────────
   function setupOps() {
@@ -814,31 +1105,90 @@
         if (btn) btn.classList.remove('is-busy');
       });
     }
-    Board.registerPage('ops', { refresh: refreshBoard, cadenceMs: 10000 });
+    Board.registerPage('ops', {
+      refresh: function () { return Promise.all([refreshBoard(), renderHealth()]); },
+      cadenceMs: 10000,
+    });
     refreshBoard(); // immediate live paint on open
+    renderHealth();
   }
 
   // ── EVENT FEED (global infra; lives on the Ops page) ────────────────────
+  // ── EVENT FEED ───────────────────────────────────────────────────────────
+  // Two problems this solves. First, the stream is overwhelmingly one loop
+  // repeating itself — a live sample was 85 of 104 entries from just three
+  // message templates (54 of them the same auto_harvest line), which buried
+  // the raid alarm and the lost Command Ship. Consecutive entries from the
+  // same source with the same shape now collapse into one row with a count.
+  //
+  // Second, severity had no effect on placement, so "something needs you" sat
+  // wherever it happened to land in time order. Important entries are now
+  // ALSO pinned into a NEEDS YOU card above the stream. They stay in the
+  // stream too — the stream is the record, the card is the summons.
+  var FEED_MAX_ROWS = 150;
+  var FEED_MAX_ALERTS = 8;
+
+  // Collapse a message to its shape: digits (counts, ids, durations) are what
+  // vary between otherwise identical lines.
+  function feedTemplate(e) {
+    return (e.source || '') + '|' + String(e.message).replace(/\d+/g, 'N');
+  }
+
+  function feedRow(e, opts) {
+    var li = document.createElement('li');
+    if (e.severity === 'important') li.className = 'feed-important';
+    else if (e.severity === 'notice') li.className = 'feed-notice';
+    li.dataset.tkey = feedTemplate(e);
+    li.dataset.count = '1';
+    li.appendChild(el('span', 'feed-ts', new Date(e.ts_ms).toLocaleTimeString()));
+    li.appendChild(el('span', 'feed-src', '[' + e.source + ']'));
+    var count = el('span', 'feed-count');
+    count.hidden = true;
+    li.appendChild(count);
+    li.appendChild(el('span', 'feed-msg', e.message));
+    if (opts && opts.noCollapse) li.dataset.tkey = '';
+    return li;
+  }
+
+  // Fold `e` into `li` if it is another instance of the same line: bump the
+  // count, and show the NEWEST text and time (the latest numbers are the ones
+  // worth reading).
+  function feedFold(li, e) {
+    var n = (parseInt(li.dataset.count, 10) || 1) + 1;
+    li.dataset.count = String(n);
+    li.querySelector('.feed-ts').textContent = new Date(e.ts_ms).toLocaleTimeString();
+    li.querySelector('.feed-msg').textContent = e.message;
+    var c = li.querySelector('.feed-count');
+    c.textContent = '×' + n;
+    c.hidden = false;
+  }
+
   function setupFeed() {
     var T = Board.T;
     var feed = document.getElementById('feed-list');
-    var FEED_MAX_ROWS = 150;
-    function feedRow(e) {
-      var li = document.createElement('li');
-      if (e.severity === 'important') li.className = 'feed-important';
-      else if (e.severity === 'notice') li.className = 'feed-notice';
-      var ts = el('span', 'feed-ts', new Date(e.ts_ms).toLocaleTimeString());
-      var src = el('span', 'feed-src', '[' + e.source + ']');
-      var msg = el('span', null, e.message);
-      li.appendChild(ts); li.appendChild(src); li.appendChild(msg);
-      return li;
-    }
+    var alerts = document.getElementById('feed-alerts');
+    var alertCard = document.getElementById('feed-alerts-card');
+
     function feedAdd(e) {
       if (!e || !e.message) return;
       if (feed.firstChild && feed.firstChild.className === 'ops-muted') feed.innerHTML = '';
-      feed.insertBefore(feedRow(e), feed.firstChild); // newest first
-      while (feed.children.length > FEED_MAX_ROWS) feed.removeChild(feed.lastChild);
+
+      var top = feed.firstChild;
+      if (top && top.dataset && top.dataset.tkey && top.dataset.tkey === feedTemplate(e)) {
+        feedFold(top, e);
+      } else {
+        feed.insertBefore(feedRow(e), feed.firstChild); // newest first
+        while (feed.children.length > FEED_MAX_ROWS) feed.removeChild(feed.lastChild);
+      }
+
+      if (e.severity === 'important' && alerts) {
+        // Never collapse an alert: two raids on two planets are two events.
+        alerts.insertBefore(feedRow(e, { noCollapse: true }), alerts.firstChild);
+        while (alerts.children.length > FEED_MAX_ALERTS) alerts.removeChild(alerts.lastChild);
+        if (alertCard) alertCard.hidden = false;
+      }
     }
+
     T.core.invoke('mcp_board_feed').then(function (entries) {
       (entries || []).forEach(feedAdd); // oldest→newest, so newest ends on top
     }).catch(function () {});

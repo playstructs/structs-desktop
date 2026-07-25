@@ -14,7 +14,8 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, LazyLock};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::hasher::types::now_millis;
 use crate::mcp::board_feed;
@@ -428,6 +429,24 @@ fn next_run_id() -> i64 {
 
 /// One scan of one loop. Counters are atomics so the per-player bodies running
 /// under `for_each_player_concurrent` can tally without locks.
+/// loop name -> (why it couldn't act, when). In memory by design: this is a
+/// CURRENT-state question ("is this loop stuck right now?"), not history, and
+/// a stale reason surviving a restart would be worse than none.
+static BLOCKED: LazyLock<Mutex<HashMap<&'static str, (String, f64)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// What each loop last reported it couldn't do, for the dashboard.
+pub fn blocked_reasons() -> HashMap<String, (String, f64)> {
+    BLOCKED
+        .lock()
+        .map(|m| {
+            m.iter()
+                .map(|(k, (r, t))| (k.to_string(), (r.clone(), *t)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub struct LoopRun {
     run_id: i64,
     pub loop_name: &'static str,
@@ -465,6 +484,27 @@ impl LoopRun {
     /// start/finish is the truth now.
     pub fn finish_stale(&self, notes: Option<String>) {
         self.record_finish(notes);
+    }
+
+    /// Record that this scan ran correctly but could NOT act, and why.
+    ///
+    /// "Enabled" and "working" are different states, and the gap between them
+    /// was invisible: auto_response fired eight times against a live raid and
+    /// every one ended "co-located shooters exist but none have charge ready".
+    /// The loop was on, correct, and useless, and nothing said so. A loop that
+    /// then succeeds clears the flag, so this always reflects the last outcome
+    /// rather than an old grievance.
+    pub fn blocked(&self, reason: impl Into<String>) {
+        if let Ok(mut m) = BLOCKED.lock() {
+            m.insert(self.loop_name, (reason.into(), now_millis()));
+        }
+    }
+
+    /// Clear the blocked flag — a scan that acted is proof it isn't blocked.
+    pub fn acted(&self) {
+        if let Ok(mut m) = BLOCKED.lock() {
+            m.remove(self.loop_name);
+        }
     }
 
     fn record_finish(&self, notes: Option<String>) -> f64 {
@@ -617,7 +657,18 @@ pub fn loop_health(window_ms: f64) -> Result<Vec<Value>, String> {
             }))
         })
         .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    let mut out = rows.collect::<Result<Vec<Value>, _>>().map_err(|e| e.to_string())?;
+    // Fold in the current blocked state, so "on but unable to act" is part of
+    // a loop's health rather than something you'd only catch in the log.
+    let blocked = blocked_reasons();
+    for row in out.iter_mut() {
+        let name = row.get("loop").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if let Some((reason, at)) = blocked.get(&name) {
+            row["blocked_reason"] = json!(reason);
+            row["blocked_at_ms"] = json!(at);
+        }
+    }
+    Ok(out)
 }
 
 /// Per-context tx outcomes over a window plus the most common failure reasons.

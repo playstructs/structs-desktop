@@ -305,7 +305,7 @@ async fn scan(
 
     for (_, alarm) in alarms {
         run.players.fetch_add(1, Ordering::Relaxed);
-        if let Err(e) = handle_alarm(app_handle, &client, cfg, &owned, &alarm).await {
+        if let Err(e) = handle_alarm(app_handle, &client, cfg, &owned, &alarm, run).await {
             run.errors.fetch_add(1, Ordering::Relaxed);
             crate::mcp::telemetry::tlog(
                 "auto_response",
@@ -324,6 +324,7 @@ async fn handle_alarm(
     cfg: &AutoResponseConfig,
     owned: &crate::mcp::tools::events::Owned,
     alarm: &Alarm,
+    run: &std::sync::Arc<crate::mcp::telemetry::LoopRun>,
 ) -> Result<(), String> {
     // ── 1. Who hit us? ──
     // The GRASS event may be a stub, so the authoritative record comes from the
@@ -433,6 +434,7 @@ async fn handle_alarm(
         ),
     };
     let Some(fire_target) = fire_target else {
+        run.blocked("attacker not identifiable yet (no resolved attack record)");
         alert(app, alarm, "attacker not yet identifiable — no shot taken");
         return Ok(());
     };
@@ -442,6 +444,10 @@ async fn handle_alarm(
     // vplayer's charge bar is useless here, however many we have.
     let shooters = co_located_players(owned, &alarm.planet_id, cfg.include_primary_shooters);
     if shooters.is_empty() {
+        run.blocked(format!(
+            "no co-located combat structs at {} — nothing can reach the attacker",
+            alarm.planet_id
+        ));
         alert(app, alarm, "no co-located combat structs — nothing can reach the attacker");
         return Ok(());
     }
@@ -491,6 +497,12 @@ async fn handle_alarm(
     let planned = shots.len();
 
     if planned == 0 {
+        // The live failure mode: the loop is on, the target is right, and every
+        // shooter's charge has been spent by the economy loops.
+        run.blocked(format!(
+            "{} co-located shooter(s) at {}, none with charge ready (need weapon cost + {} margin)",
+            shooters.len(), alarm.planet_id, cfg.min_charge_margin
+        ));
         alert(app, alarm, "co-located shooters exist but none have charge ready");
         return Ok(());
     }
@@ -526,6 +538,7 @@ async fn handle_alarm(
     } else {
         let granted = reserve_shots(planned, cfg.max_shots_per_hour);
         if granted == 0 {
+            run.blocked(format!("hourly shot budget exhausted ({} max)", cfg.max_shots_per_hour));
             alert(app, alarm, "hourly shot budget exhausted — no response fired");
             return Ok(());
         }
@@ -557,6 +570,7 @@ async fn handle_alarm(
         );
     }
 
+    run.acted();
     mark_incident(&cooldown_key);
     record_incident(Incident {
         at_ms: now_millis(),

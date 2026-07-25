@@ -13,21 +13,12 @@
   var alpha = function (ualpha) { return H.fmtNum(ualpha / 1e6); };
 
   // A compact stat tile: the value (optionally + a sui-icon) over a small
-  // uppercase caption. Used in the right-hand section of a fleet row so each
+  // uppercase caption. Used in the right-hand section of a armada row so each
   // number reads with its label instead of a bare icon.
-  function statTile(label, value, iconName, cls) {
-    var t = H.el('div', 'fstat' + (cls ? ' ' + cls : ''));
-    var v = H.el('div', 'fstat-v');
-    if (value && value.nodeType) v.appendChild(value);
-    else v.appendChild(document.createTextNode(value == null ? '—' : String(value)));
-    if (iconName) v.appendChild(H.el('i', H.iconClass(iconName)));
-    t.appendChild(v);
-    t.appendChild(H.el('div', 'fstat-l', label));
-    return t;
-  }
+  var statTile = H.statTile;
 
   // ═══════════════════════════ FLEET ═══════════════════════════════════════
-  var fleet = {
+  var armada = {
     rows: [],
     refreshedAt: 0,
     sort: { key: 'index', dir: 1 },
@@ -37,7 +28,7 @@
     built: false,
   };
 
-  function fleetAttention(r) {
+  function armadaAttention(r) {
     return !!r.err || r.charge >= 24; // read failed, or idle 24+ blocks (~2min+)
   }
 
@@ -57,16 +48,16 @@
     age: function (r) { return r.fetched_at_ms; },
   };
 
-  function selCount() { return Object.keys(fleet.selection).length; }
+  function selCount() { return Object.keys(armada.selection).length; }
 
   function buildFleetDom() {
-    if (fleet.built) return;
-    fleet.built = true;
-    var body = document.getElementById('fleet-body');
+    if (armada.built) return;
+    armada.built = true;
+    var body = document.getElementById('armada-body');
     body.innerHTML = '';
 
     // ── Toolbar: mass actions (one-click; ambient dry-run on the buttons) ──
-    var actions = H.el('div', 'sui-screen-btn-flex-wrapper'); actions.id = 'fleet-actions';
+    var actions = H.el('div', 'sui-screen-btn-flex-wrapper'); actions.id = 'armada-actions';
     actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;align-items:center;';
 
     var sweepBtn = massBtn('sweep-btn', 'icon-send-alpha', 'Sweep…', 'sui-mod-primary');
@@ -112,7 +103,7 @@
         launchHint.textContent = 'per-conn ' + kw(r.per_connection_now_mw) + ' → ' +
           kw(r.per_connection_after_mw) + ' after +' + r.count +
           (r.power_ok ? '' : '  ⛔ below minimum draw');
-        launchBtn.classList.toggle('sui-mod-disabled', !r.power_ok || fleet.jobRunning);
+        launchBtn.classList.toggle('sui-mod-disabled', !r.power_ok || armada.jobRunning);
       }).catch(function (e) { launchHint.textContent = String(e); });
     }
     countIn.addEventListener('input', launchPreview);
@@ -144,18 +135,18 @@
     var allCb = H.checkbox(false, null, function (on) {
       // "Shown" means everything matching the filters, not just this page —
       // paging is a viewport, not a change of what you selected.
-      fleet.lv.visible().forEach(function (r) {
+      armada.lv.visible().forEach(function (r) {
         if (r.index == null) return;               // primary is never a target
-        if (on) fleet.selection[r.player_id] = true;
-        else delete fleet.selection[r.player_id];
+        if (on) armada.selection[r.player_id] = true;
+        else delete armada.selection[r.player_id];
       });
-      renderFleetRows();
+      renderArmadaRows();
     });
     allLbl.appendChild(allCb);
     allLbl.appendChild(H.el('span', null, 'select all shown'));
     extras.appendChild(allLbl);
 
-    var selInfo = H.el('span', 'ops-muted'); selInfo.id = 'fleet-selinfo';
+    var selInfo = H.el('span', 'ops-muted'); selInfo.id = 'armada-selinfo';
     extras.appendChild(selInfo);
 
     var refreshBtn = H.el('a', 'ops-refresh-btn', 'Refresh roster');
@@ -165,16 +156,16 @@
     });
     extras.appendChild(refreshBtn);
 
-    fleet.lv = H.listView({
+    armada.lv = H.listView({
       key: function (r) { return r.player_id; },
       // Selection and freshness are part of what a row DRAWS, so they belong
       // in the change signature or a toggled checkbox wouldn't repaint.
       sig: function (r) {
         return [r.name, r.role, r.charge, r.alpha_ualpha, r.ore, r.planet_ore,
           r.mine_eta_s, r.refine_eta_s, r.err, r.pfp_attrs,
-          fleet.selection[r.player_id] ? 1 : 0].join('|');
+          armada.selection[r.player_id] ? 1 : 0].join('|');
       },
-      render: fleetRow,
+      render: armadaRow,
       pageSize: 60,
       filters: [
         { key: 'q', type: 'text', placeholder: 'filter name / id / planet' },
@@ -184,7 +175,7 @@
       ],
       filterFn: function (r, v) {
         if (v.role && r.role !== v.role) return false;
-        if (v.attn && !fleetAttention(r)) return false;
+        if (v.attn && !armadaAttention(r)) return false;
         if (v.q) {
           var hay = (r.name + ' ' + r.player_id + ' ' + (r.planet_id || '')).toLowerCase();
           if (hay.indexOf(String(v.q).toLowerCase()) < 0) return false;
@@ -193,12 +184,12 @@
       },
       sortKeys: FLEET_SORT_KEYS,
       sortAccessors: FLEET_SORT_ACC,
-      sort: fleet.sort,
+      sort: armada.sort,
       toolbarExtra: extras,
       empty: 'no players match these filters',
       onCounts: function () { updateFleetChrome(); },
     });
-    body.appendChild(fleet.lv.node);
+    body.appendChild(armada.lv.node);
   }
 
   function massBtn(id, iconCls, label, mod) {
@@ -248,21 +239,21 @@
   }
 
   // Push the current roster at the list; it decides what actually changed.
-  function renderFleetRows() {
-    if (!fleet.lv) return;
-    fleet.lv.setRows(fleet.rows);
+  function renderArmadaRows() {
+    if (!armada.lv) return;
+    armada.lv.setRows(armada.rows);
   }
 
   // One roster row. Pure: given a row it returns a node, so listView can cache
   // and reuse it until that row's data (or its selected state) changes.
-  function fleetRow(r) {
+  function armadaRow(r) {
     return (function () {
       // Checkbox (vplayers only; primary is never a mass-action target).
       var lead = null;
       if (r.index != null) {
-        lead = H.checkbox(!!fleet.selection[r.player_id], null, function (on) {
-          if (on) fleet.selection[r.player_id] = true;
-          else delete fleet.selection[r.player_id];
+        lead = H.checkbox(!!armada.selection[r.player_id], null, function (on) {
+          if (on) armada.selection[r.player_id] = true;
+          else delete armada.selection[r.player_id];
           updateFleetChrome();
         });
       }
@@ -276,7 +267,7 @@
       // rest (index, planet, last action) lives in the click-through detail.
       var sub = H.el('span');
       sub.appendChild(document.createTextNode('PID #' + r.player_id));
-      if (fleetAttention(r)) {
+      if (armadaAttention(r)) {
         sub.appendChild(document.createTextNode(' · '));
         sub.appendChild(H.el('span', 'attn', r.err ? 'read failed' : 'idle ' + H.ago(r.fetched_at_ms)));
       }
@@ -308,21 +299,21 @@
   }
 
   function updateFleetChrome() {
-    var info = document.getElementById('fleet-selinfo');
+    var info = document.getElementById('armada-selinfo');
     if (info) {
       info.innerHTML = '';
       if (selCount()) {
         info.appendChild(document.createTextNode(selCount() + ' selected · '));
         var clr = H.el('a', 'ops-refresh-btn', 'clear');
         clr.href = 'javascript:void(0)';
-        clr.addEventListener('click', function () { fleet.selection = {}; renderFleetRows(); });
+        clr.addEventListener('click', function () { armada.selection = {}; renderArmadaRows(); });
         info.appendChild(clr);
       } else {
-        info.textContent = 'roster ' + (fleet.refreshedAt ? H.ago(fleet.refreshedAt) + ' old' : 'loading…');
+        info.textContent = 'roster ' + (armada.refreshedAt ? H.ago(armada.refreshedAt) + ' old' : 'loading…');
       }
     }
     var roleBtn = document.getElementById('role-btn');
-    if (roleBtn) H.busy(roleBtn, selCount() === 0 || fleet.jobRunning);
+    if (roleBtn) H.busy(roleBtn, selCount() === 0 || armada.jobRunning);
     ambientSweepPreview();
   }
 
@@ -331,13 +322,13 @@
   function ambientSweepPreview() {
     clearTimeout(sweepPreviewTimer);
     sweepPreviewTimer = setTimeout(function () {
-      var sel = Object.keys(fleet.selection);
+      var sel = Object.keys(armada.selection);
       Board.T.core.invoke('mcp_mass_action', { request: {
         action: 'sweep_alpha', mode: 'dry_run',
         players: sel.length ? sel : null,
         args: {},
       }}).then(function (r) {
-        fleet.lastSweepPlan = r;
+        armada.lastSweepPlan = r;
         var btn = document.getElementById('sweep-btn');
         if (!btn) return;
         // Compact: the ambient dry-run detail (who/how many) lives in the plan
@@ -346,13 +337,13 @@
           ? 'Sweep ' + r.entries.length + ' ~' + H.fmtNum(r.total_alpha) + 'α'
           : 'Sweep all ~' + H.fmtNum(r.total_alpha) + 'α';
         btn.lastChild.textContent = ' ' + label;
-        btn.classList.toggle('sui-mod-disabled', r.entries.length === 0 || fleet.jobRunning);
+        btn.classList.toggle('sui-mod-disabled', r.entries.length === 0 || armada.jobRunning);
       }).catch(function () {});
     }, 300);
   }
 
   function setJobRunning(on) {
-    fleet.jobRunning = on;
+    armada.jobRunning = on;
     ['sweep-btn', 'role-btn', 'scan-btn', 'launch-btn'].forEach(function (id) {
       var b = document.getElementById(id);
       if (b) b.classList.toggle('is-busy', on);
@@ -392,9 +383,9 @@
   }
 
   function runSweep() {
-    var plan = fleet.lastSweepPlan;
+    var plan = armada.lastSweepPlan;
     if (!plan || !plan.entries || !plan.entries.length) return;
-    var sel = Object.keys(fleet.selection);
+    var sel = Object.keys(armada.selection);
     runMass({
       action: 'sweep_alpha', mode: 'execute',
       players: sel.length ? sel : null,
@@ -404,7 +395,7 @@
   }
 
   function runSetRole(role) {
-    var sel = Object.keys(fleet.selection);
+    var sel = Object.keys(armada.selection);
     if (!sel.length) return;
     runMass({ action: 'set_role', mode: 'execute', players: sel, args: { role: role } },
       'Setting role for ' + sel.length + '…').then(function () {
@@ -448,22 +439,22 @@
   function loadRoster(kickIfOlderMs) {
     return Board.T.core.invoke('mcp_roster', { refreshIfOlderMs: kickIfOlderMs == null ? 120000 : kickIfOlderMs })
       .then(function (snap) {
-        fleet.rows = snap.rows || [];
-        fleet.refreshedAt = snap.refreshed_at_ms || 0;
+        armada.rows = snap.rows || [];
+        armada.refreshedAt = snap.refreshed_at_ms || 0;
         buildFleetDom();
-        renderFleetRows();
+        renderArmadaRows();
       }).catch(function () {});
   }
 
-  Board.registerPage('fleet', {
+  Board.registerPage('armada', {
     onBoot: function () {
       var T = Board.T;
       T.event.listen('board-roster-progress', function (e) {
         var p = e && e.payload;
-        if (p && Board.current === 'fleet') showProgress('roster sweep ' + p.done + '/' + p.total, p.done / p.total);
+        if (p && Board.current === 'armada') showProgress('roster sweep ' + p.done + '/' + p.total, p.done / p.total);
       });
       T.event.listen('board-roster-updated', function () {
-        if (Board.current === 'fleet') { loadRoster(null); hideProgressSoon(); }
+        if (Board.current === 'armada') { loadRoster(null); hideProgressSoon(); }
       });
       T.event.listen('board-mass-progress', function (e) {
         var p = e && e.payload;
@@ -602,13 +593,10 @@
     });
     body.appendChild(H.card('TASKS', workState.lv.node));
 
-    var lbody = H.el('div'); lbody.id = 'work-loops';
-    workState.loopCard = H.card('LOOP HEALTH (1h)', lbody);
-    body.appendChild(workState.loopCard);
+    var pbody = H.el('div'); pbody.id = 'work-pow';
+    workState.powCard = H.card('SOLVE RATE (24h)', pbody);
+    body.appendChild(workState.powCard);
 
-    var xbody = H.el('div'); xbody.id = 'work-tx';
-    workState.txCard = H.card('TOP TX ERRORS (1h)', xbody);
-    body.appendChild(workState.txCard);
   }
 
   function renderWorkBody() {
@@ -626,23 +614,35 @@
 
     workState.lv.setRows(d.tasks || []);
 
-    var lh = d.loop_health || [];
-    var lbody = document.getElementById('work-loops');
-    lbody.innerHTML = '';
-    lh.forEach(function (l) {
-      var line = l.runs + ' runs · ' + (l.actions || 0) + ' actions · ' + (l.errors || 0) + ' errors';
-      lbody.appendChild(H.row(l.loop, line, (l.errors || 0) > 0 ? 'icon-alert' : 'icon-success'));
-    });
-    workState.loopCard.hidden = !lh.length;
+    // How fast the machine actually solves — telemetry has recorded this since
+    // the reliability work landed and nothing ever showed it, so "is the GPU
+    // engine doing anything for us" was unanswerable from the dashboard.
+    var pow = d.pow_stats;
+    var pbody = document.getElementById('work-pow');
+    pbody.innerHTML = '';
+    if (pow && pow.error) {
+      pbody.appendChild(H.stateBlock('error', 'solve stats unavailable: ' + pow.error));
+      workState.powCard.hidden = false;
+    } else {
+      var engines = Array.isArray(pow) ? pow : [];
+      engines.sort(function (a, b) { return (b.solves || 0) - (a.solves || 0); });
+      engines.forEach(function (e2) {
+        pbody.appendChild(H.resultRow({
+          icon: 'icon-computer',
+          title: String(e2.engine || '?').toUpperCase(),
+          subtitle: (e2.solves || 0) + ' solves in the last 24h',
+          chips: [
+            statTile('median', H.duration((e2.median_duration_ms || 0) / 1000)),
+            statTile('p90', H.duration((e2.p90_duration_ms || 0) / 1000)),
+            statTile('median diff', e2.median_difficulty == null ? '—' : e2.median_difficulty),
+            statTile('hashrate', e2.est_hashrate_hps == null
+              ? '—' : H.fmtNum(e2.est_hashrate_hps) + 'H/s'),
+          ],
+        }));
+      });
+      workState.powCard.hidden = !engines.length;
+    }
 
-    var tx = d.tx_summary || {};
-    var errs = (tx.top_errors || []).slice(0, 5);
-    var xbody = document.getElementById('work-tx');
-    xbody.innerHTML = '';
-    errs.forEach(function (e2) {
-      xbody.appendChild(H.row(String(e2.count) + '×', e2.reason.slice(0, 90), 'icon-alert'));
-    });
-    workState.txCard.hidden = !errs.length;
   }
   function renderWork() {
     return Board.T.core.invoke('mcp_work').then(function (d) {
@@ -660,6 +660,105 @@
     });
   }
   Board.registerPage('work', { refresh: renderWork, cadenceMs: 5000, onEnter: renderWork });
+
+  // ═══════════════════════════ DIAGNOSTICS ══════════════════════════════════
+  // Is the machine itself healthy? Command carries the one-line strip; this is
+  // where you come when it says something is wrong. Loop health and the
+  // transaction ledger live here rather than on Work, because Work is about
+  // the proof-of-work queue and these are about the loops that feed it.
+  function renderDiagnostics() {
+    return H.renderInto('diag-body', function (body) {
+      return Promise.all([
+        Board.T.core.invoke('mcp_health').catch(function (e) { return { _err: String(e) }; }),
+        Board.T.core.invoke('mcp_work').catch(function (e) { return { _err: String(e) }; }),
+      ]).then(function (r) {
+        var h = r[0], w = r[1];
+
+        if (h._err) {
+          body.appendChild(H.stateBlock('error', 'health unavailable: ' + h._err));
+        } else {
+          body.appendChild(H.card('SYSTEM HEALTH', Board.healthTiles(h)));
+        }
+        if (w._err) {
+          body.appendChild(H.stateBlock('error', 'telemetry unavailable: ' + w._err));
+          return;
+        }
+
+        // Loop health carries duration, players scanned and — since the
+        // blocked-state work — WHY a loop that is running fine still can't
+        // act. All of it was computed and thrown away; a loop firing on time
+        // and doing nothing looked identical to a healthy one.
+        var lh = w.loop_health || [];
+        var lbody = H.el('div');
+        lh.slice().sort(function (a, b) {
+          // Anything that needs attention first: blocked, then errors, then noise.
+          var rank = function (l) { return l.blocked_reason ? 0 : ((l.errors || 0) > 0 ? 1 : 2); };
+          return rank(a) - rank(b) || (b.runs || 0) - (a.runs || 0);
+        }).forEach(function (l) {
+          var blocked = !!l.blocked_reason;
+          var last = l.last_finished_ms || l.last_started_ms;
+          lbody.appendChild(H.resultRow({
+            icon: blocked ? 'icon-blocked' : ((l.errors || 0) > 0 ? 'icon-alert' : 'icon-success'),
+            title: l.loop,
+            subtitle: blocked ? 'BLOCKED — ' + l.blocked_reason
+              : ((l.unfinished_runs || 0) > 0
+                ? (l.unfinished_runs + ' run(s) still in flight')
+                : 'running normally'),
+            chips: [
+              statTile('runs', l.runs || 0),
+              statTile('actions', l.actions || 0, null, (l.actions || 0) ? 'ok' : 'muted'),
+              statTile('errors', l.errors || 0, null, (l.errors || 0) ? 'bad' : 'muted'),
+              statTile('scanned', H.fmtNum(l.players || 0), null, 'muted'),
+              statTile('avg', l.avg_duration_ms == null
+                ? '—' : H.duration(l.avg_duration_ms / 1000), null, 'muted'),
+              statTile('last run', last ? H.ago(last) : '—', null, 'muted'),
+            ],
+          }));
+        });
+        if (!lh.length) lbody.appendChild(H.stateBlock('empty', 'no loop runs recorded in the last hour'));
+        body.appendChild(H.card('LOOP HEALTH (1h)', lbody));
+
+        var tx = w.tx_summary || {};
+        // Per-context success rate — WHICH kind of transaction is failing,
+        // not just which error text is most common.
+        var ctxs = (tx.by_context || []).slice(0, 12);
+        if (ctxs.length) {
+          var cbody = H.el('div');
+          ctxs.forEach(function (c2) {
+            var att = c2.attempts || 0, ok = c2.successes || 0, fail = c2.failures || 0;
+            var rate = att > 0 ? ok / att : 0;
+            cbody.appendChild(H.resultRow({
+              icon: fail ? 'icon-alert' : 'icon-success',
+              title: c2.context || '?',
+              subtitle: H.progressBar(rate),
+              chips: [
+                statTile('attempts', att),
+                statTile('ok', ok, null, ok ? 'ok' : 'muted'),
+                statTile('failed', fail, null, fail ? 'bad' : 'muted'),
+                statTile('skipped', c2.skipped || 0, null, 'muted'),
+                statTile('success', Math.round(rate * 100) + '%', null,
+                  rate >= 0.9 ? 'ok' : (rate >= 0.5 ? 'live' : 'bad')),
+              ],
+            }));
+          });
+          body.appendChild(H.card('TRANSACTIONS BY CONTEXT (1h)', cbody));
+        }
+
+        var errs = (tx.top_errors || []).slice(0, 8);
+        if (errs.length) {
+          var xbody = H.el('div');
+          errs.forEach(function (e2) {
+            xbody.appendChild(H.row(String(e2.count) + '×', e2.reason.slice(0, 120), 'icon-alert'));
+          });
+          body.appendChild(H.card('TOP TX ERRORS (1h)', xbody));
+        }
+        Board.stamp('updated ' + new Date().toLocaleTimeString());
+      });
+    });
+  }
+  Board.registerPage('diagnostics', {
+    onEnter: renderDiagnostics, refresh: renderDiagnostics, cadenceMs: 15000,
+  });
 
   // ═══════════════════════════ TX ═══════════════════════════════════════════
   // The primary's live signing queue (via the txq bridge) + the whole team's
@@ -1102,7 +1201,7 @@
   // Grudges, priority guilds, the scored raid target board, response incidents
   // and both combat loops' settings. The lists are what make retaliation happen
   // on OUR schedule instead of inside the attacker's two-minute window.
-  var warState = { data: null, sort: { key: 'score', dir: -1 } };
+  var warState = { data: null, section: 'doctrine', sort: { key: 'score', dir: -1 } };
   var WAR_KEYS = [{ key: 'score', label: 'score' }, { key: 'ore', label: 'ore' },
     { key: 'shield', label: 'shield' }, { key: 'defenders', label: 'defenders' },
     { key: 'name', label: 'name' }];
@@ -1115,13 +1214,6 @@
 
   function warSet(payload) {
     return Board.T.core.invoke('mcp_config_set', { domain: 'combat_lists', payload: payload })
-      .then(function () { return renderWar(); })
-      .catch(function (e) { alertInto('war-body', 'write failed: ' + e); });
-  }
-  function warLoopSet(which, cfg, extra) {
-    var payload = { loop: which, config: cfg };
-    if (extra) Object.keys(extra).forEach(function (k) { payload[k] = extra[k]; });
-    return Board.T.core.invoke('mcp_config_set', { domain: 'loop', payload: payload })
       .then(function () { return renderWar(); })
       .catch(function (e) { alertInto('war-body', 'write failed: ' + e); });
   }
@@ -1155,36 +1247,9 @@
     a.addEventListener('click', onClick);
     return a;
   }
-  // One field of a loop config, using the game's own form controls. Each writes
-  // the whole config back through the same setter the agent and the Config page
-  // use, so there is a single write path however you got here.
-  function warField(label, cfg, key, which, control, extra, hint) {
-    function write(v) {
-      var next = JSON.parse(JSON.stringify(cfg));
-      next[key] = v;
-      warLoopSet(which, next, extra);
-    }
-    return H.field(label, control(cfg[key], write), hint);
-  }
-  function numField(label, cfg, key, which, opts) {
-    return warField(label, cfg, key, which, function (v, write) {
-      return H.stepper(v, {
-        min: opts && opts.min, max: opts && opts.max,
-        step: opts && opts.step, width: '3.5em',
-      }, write);
-    });
-  }
-  function boolField(label, cfg, key, which) {
-    return warField(label, cfg, key, which, function (v, write) {
-      return H.checkbox(v, null, write);
-    });
-  }
-  function selectField(label, cfg, key, which, options, extra, hint) {
-    return warField(label, cfg, key, which, function (v, write) {
-      return H.selectBox(v, options, write);
-    }, extra, hint);
-  }
-
+  // War is four sections in one page body: Doctrine (what the loops may do),
+  // Targets (who they're looking at), Lists (grudges and vetoes) and Incidents
+  // (what actually happened). Which one renders comes from the route.
   function renderWarBody() {
     var d = warState.data; if (!d) return;
     var body = document.getElementById('war-body');
@@ -1192,8 +1257,12 @@
     var lists = d.lists || {};
     var resp = d.response || {};
     var raid = d.raid || {};
+    var sec = warState.section || 'doctrine';
+    var show = function (k) { return sec === k; };
 
-    // ── Posture strip: what the two loops are allowed to do right now. ──
+    // ── Posture strip: what the two loops are allowed to do right now. It
+    //    heads every section — "is anything even armed" is the question you
+    //    ask before reading any of the rest. ──
     var sbody = H.el('div');
     sbody.appendChild(H.row('Raid response',
       (resp.enabled ? 'ON' : 'off') + ' · ' + (resp.autonomy || '?') + ' · ' + (resp.mode || '?'),
@@ -1209,6 +1278,7 @@
     body.appendChild(H.card('POSTURE', sbody));
 
     // ── Target board (auto_raid phase B output). ──
+    if (show('targets')) {
     var tbody = H.el('div');
     var targets = d.targets || [];
     if (!targets.length) {
@@ -1255,8 +1325,10 @@
       });
     }
     body.appendChild(H.card('TARGET BOARD', tbody));
+    }
 
     // ── Grudges. Auto-written by auto_response; hand-editable here. ──
+    if (show('lists')) {
     var gbody = H.el('div');
     var grudges = lists.grudges || [];
     if (!grudges.length) {
@@ -1351,8 +1423,10 @@
       warSet({ action: 'add', kind: 'protected', id: id });
     }, false));
     body.appendChild(H.card('NEVER ATTACK', abody));
+    }
 
     // ── What the response loop actually did. ──
+    if (show('incidents')) {
     var ibody = H.el('div');
     var incidents = d.incidents || [];
     if (!incidents.length) {
@@ -1381,58 +1455,36 @@
       ibody.appendChild(itable);
     }
     body.appendChild(H.card('INCIDENTS', ibody));
+    }
 
+    if (show('doctrine')) {
     // ── Editable settings for both loops (the CONFIG page only shows toggles). ──
-    var rbody = H.el('div');
-    rbody.appendChild(boolField('enabled', resp, 'enabled', 'response'));
-    rbody.appendChild(selectField('autonomy', resp, 'autonomy', 'response', ['advise', 'auto']));
-    rbody.appendChild(selectField('mode', resp, 'mode', 'response', d.modes || ['harden', 'counter', 'decapitate']));
-    rbody.appendChild(numField('scan every (s)', resp, 'interval_secs', 'response', { min: 5 }));
-    rbody.appendChild(numField('max shots / incident', resp, 'max_shots_per_incident', 'response', { min: 0 }));
-    rbody.appendChild(numField('max shots / hour', resp, 'max_shots_per_hour', 'response', { min: 0 }));
-    rbody.appendChild(numField('incident cooldown (s)', resp, 'incident_cooldown_secs', 'response', { min: 0 }));
-    rbody.appendChild(boolField('prefer a counter-free ambit (free shots)', resp, 'prefer_counter_free_ambit', 'response'));
-    rbody.appendChild(boolField('panic-refine the threatened ore', resp, 'panic_refine', 'response'));
-    rbody.appendChild(boolField('let the primary shoot too', resp, 'include_primary_shooters', 'response'));
-    // Raider safety lives in TARGETING GATES (recall below CMD HP) — auto_raid
-    // supervises the expedition, so it is the loop that can actually pull it out.
-    rbody.appendChild(boolField('dry run', resp, 'dry_run', 'response'));
-    rbody.appendChild(H.el('div', 'ops-muted',
-      'A raid resolves in about four minutes, and every recorded defensive win fired back inside the first two — hence the short scan interval.'));
-    body.appendChild(H.card('RESPONSE SETTINGS', rbody));
+    // Same editor, same FIELD_META, same write path as Config — War only
+    // decides which keys land in which card. A hand-written field list here
+    // is how the labels drifted from FIELD_META the first time.
+    var isWeight = function (k) { return k.indexOf('w_') === 0; };
+    var warEditor = function (which, cfg, o) {
+      return loopEditor(which, cfg, Object.assign(
+        { chrome: false, after: renderWar, errorHost: 'war-body' }, o));
+    };
 
-    var kbody = H.el('div');
-    kbody.appendChild(boolField('enabled', raid, 'enabled', 'raid'));
-    kbody.appendChild(selectField('autonomy', raid, 'autonomy', 'raid', ['advise', 'auto']));
-    // A posture change rewrites every gate below it, so it is sent with the
-    // apply_posture flag rather than merged into whatever the form last showed.
-    kbody.appendChild(selectField('posture (resets the gates)', raid, 'posture', 'raid',
-      d.postures || ['cautious', 'opportunist', 'aggressive'], { apply_posture: true }));
-    kbody.appendChild(numField('min ore (the whole prize)', raid, 'min_ore', 'raid', { min: 0, step: 1 }));
-    kbody.appendChild(numField('min score (0-100)', raid, 'min_score', 'raid', { min: 0, step: 1 }));
-    kbody.appendChild(numField('max raid proof (min)', raid, 'max_raid_minutes', 'raid', { min: 1 }));
-    kbody.appendChild(numField('max defenders on their CMD', raid, 'max_defenders', 'raid', { min: 0 }));
-    kbody.appendChild(numField('skip if defender acted within (min)', raid, 'skip_if_defender_active_mins', 'raid', { min: 0 }));
-    kbody.appendChild(numField('target cooldown (min)', raid, 'target_cooldown_mins', 'raid', { min: 0 }));
-    kbody.appendChild(numField('max concurrent raids', raid, 'max_concurrent_raids', 'raid', { min: 1 }));
-    kbody.appendChild(numField('recall raider below CMD HP', raid, 'abort_cmd_hp_below', 'raid', { min: 0 }));
-    kbody.appendChild(boolField('only raid already-vulnerable targets', raid, 'require_vulnerable_now', 'raid'));
-    kbody.appendChild(boolField('allow siege (kill their CMD to open the window)', raid, 'allow_siege', 'raid'));
-    kbody.appendChild(boolField('dry run', raid, 'dry_run', 'raid'));
-    kbody.appendChild(H.el('div', 'ops-muted',
-      'Of every raid on record, none that started against a non-vulnerable planet ever completed — and going anyway drops your own shields for the trip.'));
-    body.appendChild(H.card('TARGETING GATES', kbody));
+    body.appendChild(H.card('RESPONSE SETTINGS', warEditor('response', resp, {
+      note: 'A raid resolves in about four minutes, and every recorded defensive win fired back ' +
+        'inside the first two — hence the short scan interval.',
+    })));
 
-    var wbody = H.el('div');
-    wbody.appendChild(H.el('div', 'ops-muted',
-      'How the 0-100 score is blended. Raising one weight lifts targets that are strong on it; the scale stays 0-100 either way, so min_score keeps meaning the same thing.'));
-    [['w_ore', 'ore held (the prize)'], ['w_vulnerability', 'vulnerable right now'],
-     ['w_weakness', 'weak defences'], ['w_grudge', 'grudge heat'],
-     ['w_guild', 'priority guild'], ['w_speed', 'fast raid proof'],
-     ['w_history', 'our record vs this planet']].forEach(function (p) {
-      wbody.appendChild(numField(p[1], raid, p[0], 'raid', { min: 0, step: 0.1 }));
-    });
-    body.appendChild(H.card('SCORING WEIGHTS', wbody));
+    body.appendChild(H.card('TARGETING GATES', warEditor('raid', raid, {
+      filter: function (k) { return !isWeight(k); },
+      note: 'Of every raid on record, none that started against a non-vulnerable planet ever ' +
+        'completed — and going anyway drops your own shields for the trip.',
+    })));
+
+    body.appendChild(H.card('SCORING WEIGHTS', warEditor('raid', raid, {
+      filter: isWeight,
+      note: 'How the 0-100 score is blended. Raising one weight lifts targets that are strong on ' +
+        'it; the scale stays 0-100 either way, so min_score keeps meaning the same thing.',
+    })));
+    }
 
     Board.stamp('updated ' + new Date().toLocaleTimeString());
   }
@@ -1446,7 +1498,14 @@
       body.appendChild(H.alertLine('combat data unavailable: ' + e, 'icon-alert'));
     });
   }
-  Board.registerPage('war', { onEnter: renderWar, refresh: renderWar, cadenceMs: 20000 });
+  Board.registerPage('war', {
+    onEnter: function (params, view) {
+      if (view) warState.section = view;
+      return renderWar();
+    },
+    refresh: renderWar,
+    cadenceMs: 20000,
+  });
 
   // ═══════════════════════════ CONFIG ═══════════════════════════════════════
   function cfgSet(domain, payload) {
@@ -1722,25 +1781,37 @@
   // checkboxes, numbers steppers, known enums selects, arrays comma text.
   // Every edit writes the WHOLE config back through the same setter the agent
   // uses, so there is one write path regardless of who is driving.
-  function loopEditor(which, cfg) {
+  // opts (all optional):
+  //   filter(key)  — render only the keys it accepts, so one config can be
+  //                  split across several cards without forking the editor
+  //   chrome:false — drop the loop blurb / cross-page pointer (already implied
+  //                  by the page you're on)
+  //   note         — a line of explanation appended under the fields
+  //   after()      — what to re-render once a write lands (defaults to Config)
+  function loopEditor(which, cfg, opts) {
+    opts = opts || {};
     var host = H.el('div');
     var meta = LOOP_META[which] || { label: which };
     var draft = JSON.parse(JSON.stringify(cfg));
+    var after = opts.after || renderConfig;
+    var errHost = opts.errorHost || 'config-body';
     function commit(extra) {
       return Board.T.core.invoke('mcp_config_set', {
         domain: 'loop',
         payload: Object.assign({ loop: which, config: draft }, extra || {}),
-      }).then(function () { return renderConfig(); })
-        .catch(function (e) { alertInto('config-body', 'write failed: ' + e); });
+      }).then(function () { return after(); })
+        .catch(function (e) { alertInto(errHost, 'write failed: ' + e); });
     }
 
-    if (meta.blurb) host.appendChild(H.el('div', 'ops-muted', meta.blurb));
-    if (meta.war) {
-      host.appendChild(H.alertLine(
-        'Grudges, the never-attack list and the live target board live on the War tab.', 'icon-raid'));
+    if (opts.chrome !== false) {
+      if (meta.blurb) host.appendChild(H.el('div', 'ops-muted', meta.blurb));
+      if (meta.war) {
+        host.appendChild(H.alertLine(
+          'Grudges, the never-attack list and the live target board live on the War tab.', 'icon-raid'));
+      }
     }
 
-    Object.keys(draft).sort(function (a, b) {
+    Object.keys(draft).filter(opts.filter || function () { return true; }).sort(function (a, b) {
       // `enabled` first, then booleans, then the rest alphabetically — the
       // switch you came for should never be buried under twenty numbers.
       if (a === 'enabled') return -1;
@@ -1777,18 +1848,14 @@
       }
       host.appendChild(H.field(label, ctl, typeof v === 'boolean' ? fm.hint : null));
     });
+    if (opts.note) host.appendChild(H.el('div', 'ops-muted', opts.note));
     return host;
   }
 
   // ── CONFIG sections ──────────────────────────────────────────────────────
-  var CONFIG_SECTIONS = [
-    { key: 'doctrine', label: 'Doctrine' },
-    { key: 'loops', label: 'Loops' },
-    { key: 'policies', label: 'Policies' },
-    { key: 'engine', label: 'Engine' },
-    { key: 'access', label: 'Access' },
-    { key: 'appearance', label: 'Squads' },
-  ];
+  // Which section is showing comes from the route (Board.AREAS), not a local
+  // list — Squads lives under Armada and the rest under System, and this page
+  // just renders whichever one it was handed.
   var configState = { section: 'doctrine', data: null };
 
   function sectionDoctrine(d, body) {
@@ -1935,10 +2002,8 @@
     var d = configState.data; if (!d) return;
     var body = document.getElementById('config-body');
     body.innerHTML = '';
-    body.appendChild(H.navStrip(CONFIG_SECTIONS, configState.section, function (k) {
-      configState.section = k;
-      renderConfigBody();
-    }));
+    // No local nav strip: these sections are routed (System/… and Armada/
+    // Squads), so the area sub-nav above is the one place they're listed.
     switch (configState.section) {
       case 'loops': sectionLoops(d, body); break;
       case 'policies': sectionPolicies(d, body); break;
@@ -1949,7 +2014,14 @@
     }
     Board.stamp('updated ' + new Date().toLocaleTimeString());
   }
-  Board.registerPage('config', { onEnter: renderConfig, refresh: renderConfig, cadenceMs: 60000 });
+  Board.registerPage('config', {
+    onEnter: function (params, view) {
+      if (view) configState.section = view;
+      return renderConfig();
+    },
+    refresh: renderConfig,
+    cadenceMs: 60000,
+  });
 
   // ═══════════════════════════ MAP ══════════════════════════════════════════
   Board.registerPage('map', {

@@ -37,12 +37,15 @@
        it can't affect the game's own sui-screen-nav elsewhere. */
     #board-layout .sui-screen-nav { display: flex; align-items: center; justify-content: space-between; }
     #board-layout .sui-screen-nav-items { overflow-x: auto; }
+    .board-navaside { display: flex; align-items: center; gap: 10px; flex: none; padding: 0 8px; }
+    .board-navaside #board-updated { font-size: 10px; white-space: nowrap; }
+    .board-navaside .is-busy { opacity: .4; pointer-events: none; }
     .ops-refresh { display: flex; align-items: baseline; gap: 10px; padding-right: 16px; font-size: 12px; white-space: nowrap; }
     .ops-refresh-btn { cursor: pointer; text-decoration: underline; text-decoration-style: dotted;
                        color: var(--accent-primary, #6cf); white-space: nowrap; }
     .ops-refresh-btn.is-busy { opacity: .5; pointer-events: none; }
     /* Pages: persistent sibling containers toggled with [hidden] so per-page
-       state (feed list, map image, fleet selection) survives tab switches. */
+       state (feed list, map image, roster selection) survives tab switches. */
     .page[hidden] { display: none; }
     #vp-select { width: 100%; }
     #vp-map img { width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }
@@ -53,8 +56,15 @@
     #feed-list li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; }
     .feed-ts { opacity: .55; flex: none; }
     .feed-src { opacity: .75; flex: none; }
-    .feed-important { color: #ffb454; font-weight: 600; }
+    .feed-important { color: var(--text-warning); font-weight: 600; }
     .feed-notice { font-weight: 500; }
+    /* Repeat counter: 54 identical auto_harvest lines collapse to one row. */
+    .feed-count { flex: none; padding: 0 5px; font-size: 10px; letter-spacing: .5px;
+      border: 1px solid var(--accent-secondary); color: var(--accent-secondary); }
+    .feed-msg { min-width: 0; overflow-wrap: anywhere; }
+    #feed-alerts { list-style: none; margin: 0; padding: 0; width: 100%;
+      font-family: monospace; font-size: 12px; }
+    #feed-alerts li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; }
     /* GRASS stream — one generic row style for every message category. */
     #grass-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
     #grass-toolbar .sui-input-text { min-width: 110px; }
@@ -144,13 +154,21 @@
       font-variant-numeric: tabular-nums; font-size: 13px; line-height: 1.1; }
     .fstat-v i { flex: none; }
     .fstat-l { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 1;
-      text-transform: uppercase; letter-spacing: .5px; color: var(--text-hint, #6883a0); }
-    .fstat.ok .fstat-v { color: var(--accent-positive, #6ac68a); }
+      text-transform: uppercase; letter-spacing: .5px; color: var(--text-hint); }
+    /* Four severities, all on real SUI tokens: player-teal = good,
+       warning-amber = wants a look, enemy-red = wrong, hint = inert. */
+    .fstat.ok .fstat-v { color: var(--text-player-primary); }
     /* A tile whose value is a state word rather than a number: `live` marks the
        setting that is actively signing, `muted` an inert one. */
-    .fstat.live .fstat-v { color: var(--accent-warning, #ffb454); }
-    .fstat.muted .fstat-v { color: var(--text-hint, #6883a0); }
+    .fstat.live .fstat-v { color: var(--text-warning); }
+    .fstat.muted .fstat-v { color: var(--text-hint); }
+    .fstat.bad .fstat-v { color: var(--text-enemy-primary); }
     .fstat-v { justify-content: center; }
+    /* Health strip — one row of stat tiles, wrapping on narrow windows. */
+    #ops-health .hstrip { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: flex-start; }
+    #ops-health .hstrip .fstat { flex: 0 0 auto; align-items: flex-start; }
+    #ops-health .hstrip .fstat-v, #ops-health .hstrip .fstat-l { justify-content: flex-start; text-align: left; }
+    #ops-health .hblocked { margin-top: 10px; }
     /* Row title with an inline glyph — the light alternative to a portrait. */
     .row-title { display: inline-flex; align-items: center; gap: 7px; }
     .row-title i { flex: none; opacity: .8; }
@@ -179,14 +197,18 @@
     .appear-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; width: 100%; max-height: 60vh; overflow-y: auto; }
     .appear-grid-cell { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 3px; border: 1px solid transparent; }
     .appear-grid-cell:hover { border-color: var(--accent-primary, #6cf); }
-    .appear-grid-cell.sel { border-color: var(--accent-positive, #6ac68a); }
+    .appear-grid-cell.sel { border-color: var(--text-player-primary); }
     .appear-grid-cell .appear-thumb { width: 40px; height: 40px; }
     .appear-grid-n { font-size: 9px; color: var(--text-hint, #6883a0); }
     #board-layout .sui-result-row-player-info,
     #board-layout .sui-text-label-block { min-width: 0; }
     #board-layout .sui-text-label-block { overflow: hidden; text-overflow: ellipsis; }
-    /* Row-detail modal (click a fleet row) — clean in a grid, unlike a sibling
+    /* Row-detail modal (click a roster row) — clean in a grid, unlike a sibling
        band that would split the columns. */
+    /* Backdrop shared by the fallback detail panel and the confirm dialog. */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
+      display: flex; align-items: center; justify-content: center; z-index: 60; padding: 20px; }
+    .modal-overlay .sui-message-system-modal { max-height: 90%; overflow-y: auto; }
     #detail-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
       display: flex; align-items: center; justify-content: center; z-index: 50; }
     #detail-overlay .detail-panel { background: var(--surface-player-body, #0f1520);
@@ -308,7 +330,7 @@
     }
 
     /* A short list (loops, policies) should grow with the card — the internal
-       scroll exists for the 180-row fleet roster, and here it just clipped the
+       scroll exists for the 180-row Armada roster, and here it just clipped the
        last row under the card footer. */
     #board-layout .sui-result-rows.sui-result-table.list-short {
       max-height: none; overflow: visible;
@@ -350,16 +372,23 @@
       <div class="sui-panel-chunk sui-mod-grow sui-mod-shrink">
         <div class="sui-screen sui-screen-full-width">
           <div class="sui-screen-nav">
+            <!-- Five areas. The sub-nav under this bar is built by the
+                 router from the AREAS manifest in board.js — the section is
+                 in the hash, so it is linkable and Back works. -->
             <div class="sui-screen-nav-items" id="board-tabs">
-              <a class="sui-screen-nav-item sui-mod-active" data-page="ops" href="#/ops">Ops</a>
-              <a class="sui-screen-nav-item" data-page="fleet" href="#/fleet">Fleet</a>
-              <a class="sui-screen-nav-item" data-page="energy" href="#/energy">Energy</a>
-              <a class="sui-screen-nav-item" data-page="work" href="#/work">Work</a>
-              <a class="sui-screen-nav-item" data-page="tx" href="#/tx">Tx</a>
-              <a class="sui-screen-nav-item" data-page="grass" href="#/grass">Grass</a>
-              <a class="sui-screen-nav-item" data-page="war" href="#/war">War</a>
-              <a class="sui-screen-nav-item" data-page="config" href="#/config">Config</a>
-              <a class="sui-screen-nav-item" data-page="map" href="#/map">Map</a>
+              <a class="sui-screen-nav-item sui-mod-active" data-area="command" href="#/command">Command</a>
+              <a class="sui-screen-nav-item" data-area="armada" href="#/armada">Armada</a>
+              <a class="sui-screen-nav-item" data-area="industry" href="#/industry">Industry</a>
+              <a class="sui-screen-nav-item" data-area="war" href="#/war">War</a>
+              <a class="sui-screen-nav-item" data-area="system" href="#/system">System</a>
+            </div>
+            <!-- The right-hand side of the nav bar. Six Board.stamp() calls
+                 wrote to #board-updated and the refresh handler bound to
+                 #board-refresh — neither element existed until now. -->
+            <div class="board-navaside">
+              <span id="board-updated" class="sui-text-hint"></span>
+              <a id="board-refresh" class="ops-refresh-btn" href="javascript:void(0)"
+                 title="Refresh this page now"><i class="icon-refresh-12"></i></a>
             </div>
           </div>
         </div>
@@ -370,11 +399,26 @@
                  (never over the main game window). -->
             <div id="agent-ui"></div>
 
+            <!-- Sub-nav for the active area (router-built, empty for areas
+                 with a single section). -->
+            <div id="board-subnav"></div>
+
             <!-- ═══ OPS ═══ -->
             <div class="page" id="page-ops">
+              <!-- Health strip: is the machine itself alive? Sits ABOVE the
+                   game snapshot because a stale snapshot is only readable if
+                   you know sync stopped. -->
+              <div id="ops-health"></div>
               <!-- Live region: replaced wholesale on each board-update. -->
               <div id="root"><div class="sui-data-card-row">Connecting…</div></div>
               <!-- Persistent region: NOT touched by board-update. -->
+              <!-- Anything that wants a human. Hidden until something does. -->
+              <div class="sui-data-card sui-theme-player" id="feed-alerts-card" hidden>
+                <div class="sui-data-card-header">NEEDS YOU</div>
+                <div class="sui-data-card-body sui-mod-spacing-xl">
+                  <ul id="feed-alerts"></ul>
+                </div>
+              </div>
               <div class="sui-data-card sui-theme-player">
                 <div class="sui-data-card-header">EVENT FEED</div>
                 <div class="sui-data-card-body sui-mod-spacing-xl">
@@ -384,10 +428,10 @@
             </div>
 
             <!-- ═══ FLEET ═══ -->
-            <div class="page" id="page-fleet" hidden>
+            <div class="page" id="page-armada" hidden>
               <div class="sui-data-card sui-theme-player">
                 <div class="sui-data-card-header">FLEET ROSTER</div>
-                <div class="sui-data-card-body sui-mod-spacing-xl" id="fleet-body">
+                <div class="sui-data-card-body sui-mod-spacing-xl" id="armada-body">
                   <div class="sui-message-inline-alert"><i class="sui-icon sui-icon-players sui-icon-sm"></i>
                     <span class="sui-message-inline-alert-text">Roster loading…</span></div>
                 </div>
@@ -438,6 +482,11 @@
                 <div class="sui-message-inline-alert"><i class="icon-edit"></i>
                   <span class="sui-message-inline-alert-text">Config loading…</span></div>
               </div>
+            </div>
+
+            <!-- ═══ DIAGNOSTICS — is the machine itself healthy? ═══ -->
+            <div class="page" id="page-diagnostics" hidden>
+              <div id="diag-body"></div>
             </div>
 
             <!-- ═══ MAP ═══ -->

@@ -79,6 +79,12 @@ struct GuildDocBody {
     name: String,
     #[serde(default)]
     tag: String,
+    /// Cosmetic denom names keyed by exponent, e.g. `{"0":"ack","6":"snack"}`.
+    /// Fetched with the rest of the document and, until the Inventory work,
+    /// thrown away — which is why guild tokens could only ever be shown by
+    /// their raw `uguild.<id>` name.
+    #[serde(default)]
+    denom: std::collections::BTreeMap<String, String>,
     services: GuildServices,
 }
 
@@ -188,6 +194,21 @@ fn validate_guild_doc(chain: &ChainGuild, body: &[u8]) -> Result<GuildConfig, St
         endpoint: Some(chain.endpoint.clone()),
         source: ConfigSource::Chain,
         last_refreshed: Some(now_secs()),
+        // Same sanitising as name/tag: this is guild-authored text that ends
+        // up rendered next to real balances.
+        denoms: doc
+            .guild
+            .denom
+            .iter()
+            .filter_map(|(k, v)| {
+                let exp: u32 = k.trim().parse().ok()?;
+                let label = sanitize_label(v, 24);
+                if label.is_empty() {
+                    return None;
+                }
+                Some((exp, label))
+            })
+            .collect(),
     })
 }
 
@@ -327,6 +348,9 @@ fn upsert_discovered(existing: &mut Vec<GuildConfig>, found: Vec<GuildConfig>) -
                 }
                 if !f.guild_tag.is_empty() {
                     c.guild_tag = f.guild_tag;
+                }
+                if !f.denoms.is_empty() {
+                    c.denoms = f.denoms;
                 }
                 c.endpoint = f.endpoint;
                 c.source = ConfigSource::Chain;
@@ -566,6 +590,34 @@ mod tests {
         .into_bytes()
     }
 
+    /// The `denom` block is guild-authored text rendered next to real
+    /// balances, so it is parsed with the same sanitising as name/tag —
+    /// non-numeric exponents and empty labels are dropped, not shown.
+    #[test]
+    fn denom_block_is_parsed_and_sanitised() {
+        let body = format!(
+            r#"{{"guild":{{"id":"0-5","name":"Test","tag":"TG",
+                "denom":{{"0":"ack","6":"snack","x":"junk","9":"  "}},
+                "services":{{
+                "guild_api":"https://beta.playstructs.com/api/",
+                "grass_nats_websocket":"wss://beta.playstructs.com:1443"}}}}}}"#
+        )
+        .into_bytes();
+        let cfg = validate_guild_doc(&chain("0-5"), &body).unwrap();
+        assert_eq!(cfg.denoms.get(&0).map(String::as_str), Some("ack"));
+        assert_eq!(cfg.denoms.get(&6).map(String::as_str), Some("snack"));
+        assert_eq!(cfg.denoms.len(), 2, "non-numeric and blank entries dropped");
+    }
+
+    /// A guild without a denom block must still validate — most do not
+    /// publish one, and losing the guild over a cosmetic field would be absurd.
+    #[test]
+    fn missing_denom_block_is_not_an_error() {
+        let body = doc_json("0-5", "https://beta.playstructs.com/api/", "wss://beta.playstructs.com:1443");
+        let cfg = validate_guild_doc(&chain("0-5"), &body).unwrap();
+        assert!(cfg.denoms.is_empty());
+    }
+
     #[test]
     fn valid_doc_passes() {
         let body = doc_json("0-5", "https://beta.playstructs.com/api/", "wss://beta.playstructs.com:1443");
@@ -642,6 +694,7 @@ mod tests {
             endpoint: None,
             source: ConfigSource::User,
             last_refreshed: None,
+            denoms: Default::default(),
         }];
         let body = doc_json("0-5", "https://beta.playstructs.com/api/", "wss://beta.playstructs.com:1443");
         let found = validate_guild_doc(&chain("0-5"), &body).unwrap();

@@ -356,6 +356,38 @@ async fn board_invoke(
         },
         "mcp_energy" => from_result(board_pages::mcp_energy().await),
         "mcp_work" => from_result(board_pages::mcp_work_impl(&st.registry).await),
+        "mcp_health" => from_result(board_pages::mcp_health().await),
+        "mcp_inventory" => from_result(
+            board_pages::mcp_inventory(s("player")).await,
+        ),
+        "mcp_inventory_history" => from_result(
+            board_pages::mcp_inventory_history(
+                s("player"),
+                body.get("page").and_then(|v| v.as_u64()).map(|v| v as u32),
+            )
+            .await,
+        ),
+        "mcp_transfer_preview" => from_result(
+            board_pages::mcp_transfer_preview(
+                s("from"),
+                s("to").unwrap_or_default(),
+                s("denom").unwrap_or_default(),
+                body.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            )
+            .await,
+        ),
+        // Deliberately routed to the *_impl body: the bearer token IS the
+        // operator here, and the impl re-runs the preview gates server-side.
+        "mcp_transfer_execute" => from_result(
+            board_pages::mcp_transfer_execute_impl(
+                st.app.clone(),
+                s("from"),
+                s("to").unwrap_or_default(),
+                s("denom").unwrap_or_default(),
+                body.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            )
+            .await,
+        ),
         "mcp_war_bundle" => from_result(board_pages::mcp_war_bundle().await),
         "mcp_config_bundle" => from_result(board_pages::mcp_config_bundle().await),
         "mcp_config_set" => match (s("domain"), body.get("payload").cloned()) {
