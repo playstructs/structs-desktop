@@ -31,9 +31,6 @@
     rows: [],
     refreshedAt: 0,
     sort: { key: 'index', dir: 1 },
-    filterText: '',
-    filterRole: '',
-    filterAttn: false,
     selection: {},          // player_id -> true
     lastSweepPlan: null,    // ambient dry-run result (echoed on execute)
     jobRunning: false,
@@ -44,26 +41,13 @@
     return !!r.err || r.charge >= 24; // read failed, or idle 24+ blocks (~2min+)
   }
 
-  function fleetFiltered() {
-    var t = fleet.filterText.toLowerCase();
-    return fleet.rows.filter(function (r) {
-      if (fleet.filterRole && r.role !== fleet.filterRole) return false;
-      if (fleet.filterAttn && !fleetAttention(r)) return false;
-      if (t) {
-        var hay = (r.name + ' ' + r.player_id + ' ' + (r.planet_id || '')).toLowerCase();
-        if (hay.indexOf(t) < 0) return false;
-      }
-      return true;
-    });
-  }
-
   var FLEET_SORT_KEYS = [
     { key: 'index', label: 'index' }, { key: 'name', label: 'name' },
     { key: 'charge', label: 'charge' }, { key: 'alpha', label: 'alpha' },
     { key: 'ore', label: 'ore' }, { key: 'power', label: 'load' },
     { key: 'age', label: 'age' },
   ];
-  var FLEET_ACC = {
+  var FLEET_SORT_ACC = {
     index: function (r) { return r.index == null ? -1 : r.index; },
     name: function (r) { return r.name.toLowerCase(); },
     charge: function (r) { return r.charge; },
@@ -72,7 +56,6 @@
     power: function (r) { return r.structs_load; },
     age: function (r) { return r.fetched_at_ms; },
   };
-  function fleetSorted(rows) { return H.sortBy(rows, fleet.sort, FLEET_ACC); }
 
   function selCount() { return Object.keys(fleet.selection).length; }
 
@@ -81,28 +64,6 @@
     fleet.built = true;
     var body = document.getElementById('fleet-body');
     body.innerHTML = '';
-
-    // ── Toolbar: filters ──
-    var bar = H.el('div', null); bar.id = 'fleet-toolbar';
-    var search = H.el('input', 'sui-input-text');
-    search.type = 'text'; search.placeholder = 'filter name / id / planet';
-    search.addEventListener('input', function () { fleet.filterText = search.value; renderFleetRows(); });
-    var roleSel = H.el('select', 'sui-input-text');
-    [['', 'all roles'], ['productive', 'productive'], ['bait', 'bait'], ['primary', 'primary']].forEach(function (o) {
-      var op = H.el('option', null, o[1]); op.value = o[0]; roleSel.appendChild(op);
-    });
-    roleSel.addEventListener('change', function () { fleet.filterRole = roleSel.value; renderFleetRows(); });
-    var attnLbl = H.el('label', null);
-    var attn = H.el('input'); attn.type = 'checkbox';
-    attn.addEventListener('change', function () { fleet.filterAttn = attn.checked; renderFleetRows(); });
-    attnLbl.appendChild(attn); attnLbl.appendChild(document.createTextNode(' attention'));
-    var refreshBtn = H.el('a', 'ops-refresh-btn', 'Refresh roster');
-    refreshBtn.href = 'javascript:void(0)';
-    refreshBtn.addEventListener('click', function () {
-      Board.T.core.invoke('mcp_roster_refresh').catch(function () {});
-    });
-    bar.appendChild(search); bar.appendChild(roleSel); bar.appendChild(attnLbl); bar.appendChild(refreshBtn);
-    body.appendChild(bar);
 
     // ── Toolbar: mass actions (one-click; ambient dry-run on the buttons) ──
     var actions = H.el('div', 'sui-screen-btn-flex-wrapper'); actions.id = 'fleet-actions';
@@ -174,29 +135,70 @@
     prog.appendChild(H.el('div', 'ops-muted', '')); prog.appendChild(H.progressBar(0));
     body.appendChild(prog);
 
-    // ── Sort + select-all (result rows are header-less, so sorting is a
-    //    dropdown rather than clickable column headers) ──
-    var sortBar = H.el('div', null);
-    sortBar.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:6px;font-size:12px;';
-    sortBar.appendChild(H.sortControl(FLEET_SORT_KEYS, fleet.sort, renderFleetRows));
-    var allLbl = H.el('label', null);
-    var allCb = H.el('input'); allCb.type = 'checkbox'; allCb.id = 'fleet-select-all';
-    allCb.addEventListener('change', function () {
-      var shown = fleetFiltered();
-      if (allCb.checked) shown.forEach(function (r) { if (r.index != null) fleet.selection[r.player_id] = true; });
-      else shown.forEach(function (r) { delete fleet.selection[r.player_id]; });
+    // ── The roster itself: filtered, sorted, paginated, incrementally
+    //    updated. At 459 players a full rebuild was ~22k DOM nodes per tick
+    //    and ate whatever you were typing; listView keeps one page live. ──
+    var extras = H.el('div', 'listview-toolbar');
+
+    var allLbl = H.el('label', 'listview-toggle');
+    var allCb = H.checkbox(false, null, function (on) {
+      // "Shown" means everything matching the filters, not just this page —
+      // paging is a viewport, not a change of what you selected.
+      fleet.lv.visible().forEach(function (r) {
+        if (r.index == null) return;               // primary is never a target
+        if (on) fleet.selection[r.player_id] = true;
+        else delete fleet.selection[r.player_id];
+      });
       renderFleetRows();
     });
-    allLbl.appendChild(allCb); allLbl.appendChild(document.createTextNode(' select all shown'));
-    sortBar.appendChild(allLbl);
-    body.appendChild(sortBar);
+    allLbl.appendChild(allCb);
+    allLbl.appendChild(H.el('span', null, 'select all shown'));
+    extras.appendChild(allLbl);
 
-    var rowsBox = H.resultTable(); rowsBox.id = 'fleet-rows';
-    body.appendChild(rowsBox);
-    var foot = H.el('div', 'fleet-foot');
-    foot.appendChild(H.el('span', null, '')); foot.appendChild(H.el('span', null, ''));
-    foot.id = 'fleet-foot';
-    body.appendChild(foot);
+    var selInfo = H.el('span', 'ops-muted'); selInfo.id = 'fleet-selinfo';
+    extras.appendChild(selInfo);
+
+    var refreshBtn = H.el('a', 'ops-refresh-btn', 'Refresh roster');
+    refreshBtn.href = 'javascript:void(0)';
+    refreshBtn.addEventListener('click', function () {
+      Board.T.core.invoke('mcp_roster_refresh').catch(function () {});
+    });
+    extras.appendChild(refreshBtn);
+
+    fleet.lv = H.listView({
+      key: function (r) { return r.player_id; },
+      // Selection and freshness are part of what a row DRAWS, so they belong
+      // in the change signature or a toggled checkbox wouldn't repaint.
+      sig: function (r) {
+        return [r.name, r.role, r.charge, r.alpha_ualpha, r.ore, r.planet_ore,
+          r.mine_eta_s, r.refine_eta_s, r.err, r.pfp_attrs,
+          fleet.selection[r.player_id] ? 1 : 0].join('|');
+      },
+      render: fleetRow,
+      pageSize: 60,
+      filters: [
+        { key: 'q', type: 'text', placeholder: 'filter name / id / planet' },
+        { key: 'role', type: 'select', options: [
+          { value: '', label: 'all roles' }, 'productive', 'bait', 'raider', 'primary' ] },
+        { key: 'attn', type: 'toggle', label: 'attention' },
+      ],
+      filterFn: function (r, v) {
+        if (v.role && r.role !== v.role) return false;
+        if (v.attn && !fleetAttention(r)) return false;
+        if (v.q) {
+          var hay = (r.name + ' ' + r.player_id + ' ' + (r.planet_id || '')).toLowerCase();
+          if (hay.indexOf(String(v.q).toLowerCase()) < 0) return false;
+        }
+        return true;
+      },
+      sortKeys: FLEET_SORT_KEYS,
+      sortAccessors: FLEET_SORT_ACC,
+      sort: fleet.sort,
+      toolbarExtra: extras,
+      empty: 'no players match these filters',
+      onCounts: function () { updateFleetChrome(); },
+    });
+    body.appendChild(fleet.lv.node);
   }
 
   function massBtn(id, iconCls, label, mod) {
@@ -245,20 +247,21 @@
     return line;
   }
 
+  // Push the current roster at the list; it decides what actually changed.
   function renderFleetRows() {
-    var rowsBox = document.getElementById('fleet-rows');
-    if (!rowsBox) return;
-    var shown = fleetSorted(fleetFiltered());
-    rowsBox.innerHTML = '';
-    shown.forEach(function (r) {
+    if (!fleet.lv) return;
+    fleet.lv.setRows(fleet.rows);
+  }
+
+  // One roster row. Pure: given a row it returns a node, so listView can cache
+  // and reuse it until that row's data (or its selected state) changes.
+  function fleetRow(r) {
+    return (function () {
       // Checkbox (vplayers only; primary is never a mass-action target).
       var lead = null;
       if (r.index != null) {
-        lead = H.el('input'); lead.type = 'checkbox';
-        lead.checked = !!fleet.selection[r.player_id];
-        lead.addEventListener('click', function (ev) { ev.stopPropagation(); });
-        lead.addEventListener('change', function () {
-          if (lead.checked) fleet.selection[r.player_id] = true;
+        lead = H.checkbox(!!fleet.selection[r.player_id], null, function (on) {
+          if (on) fleet.selection[r.player_id] = true;
           else delete fleet.selection[r.player_id];
           updateFleetChrome();
         });
@@ -300,29 +303,26 @@
       });
       row.addEventListener('click', function () { showDetail(r); });
       row.style.cursor = 'pointer';
-      rowsBox.appendChild(row);
-    });
-    updateFleetChrome(shown);
+      return row;
+    })();
   }
 
-  function updateFleetChrome(shownArg) {
-    var shown = shownArg || fleetSorted(fleetFiltered());
-    var foot = document.getElementById('fleet-foot');
-    if (foot) {
-      foot.firstChild.textContent = shown.length + ' / ' + fleet.rows.length + ' shown · ' + selCount() + ' selected' +
-        (selCount() ? '' : '');
-      foot.lastChild.innerHTML = '';
+  function updateFleetChrome() {
+    var info = document.getElementById('fleet-selinfo');
+    if (info) {
+      info.innerHTML = '';
       if (selCount()) {
-        var clr = H.el('a', 'ops-refresh-btn', 'clear selection');
+        info.appendChild(document.createTextNode(selCount() + ' selected · '));
+        var clr = H.el('a', 'ops-refresh-btn', 'clear');
         clr.href = 'javascript:void(0)';
         clr.addEventListener('click', function () { fleet.selection = {}; renderFleetRows(); });
-        foot.lastChild.appendChild(clr);
+        info.appendChild(clr);
       } else {
-        foot.lastChild.textContent = 'roster ' + (fleet.refreshedAt ? H.ago(fleet.refreshedAt) + ' old' : 'loading…');
+        info.textContent = 'roster ' + (fleet.refreshedAt ? H.ago(fleet.refreshedAt) + ' old' : 'loading…');
       }
     }
     var roleBtn = document.getElementById('role-btn');
-    if (roleBtn) roleBtn.classList.toggle('sui-mod-disabled', selCount() === 0 || fleet.jobRunning);
+    if (roleBtn) H.busy(roleBtn, selCount() === 0 || fleet.jobRunning);
     ambientSweepPreview();
   }
 
@@ -537,7 +537,7 @@
   Board.registerPage('energy', { refresh: renderEnergy, cadenceMs: 30000, onEnter: renderEnergy });
 
   // ═══════════════════════════ WORK ═════════════════════════════════════════
-  var workState = { data: null, sort: { key: 'progress', dir: -1 } };
+  var workState = { data: null, sort: { key: 'progress', dir: -1 }, built: false, lv: null };
   var WORK_KEYS = [{ key: 'progress', label: 'progress' }, { key: 'difficulty', label: 'difficulty' },
     { key: 'status', label: 'status' }, { key: 'type', label: 'type' }, { key: 'task', label: 'task id' }];
   var WORK_ACC = {
@@ -547,35 +547,30 @@
     type: function (t) { return (t.task_type || '').toLowerCase(); },
     task: function (t) { return t.task_id || ''; },
   };
-  function renderWorkBody() {
-    var d = workState.data; if (!d) return;
+  // The Work page is rebuilt every 5s. The TASKS list must NOT be rebuilt with
+  // it — at 851 queued proofs that is the same full-teardown problem the roster
+  // had, and it would also reset the sort/page you just chose. So the page is
+  // built once as a skeleton of card bodies, and each tick only refills them;
+  // the task list is a persistent listView that is handed new rows.
+  function buildWorkSkeleton() {
+    if (workState.built) return;
+    workState.built = true;
     var body = document.getElementById('work-body');
     body.innerHTML = '';
 
-    var c = d.counts || {};
-    var hc = d.hash_config || {};
-    var qbody = H.el('div');
-    qbody.appendChild(H.row('Running / Waiting / Done', (c.running || 0) + ' / ' + (c.waiting || 0) + ' / ' + (c.completed || 0), 'icon-in-progress'));
-    qbody.appendChild(H.row('Engine', (hc.effective_engine || '?') + (hc.gpu_available ? ' (GPU available)' : '')));
-    qbody.appendChild(H.row('difficulty_start / max_concurrent', hc.difficulty_start + ' / ' + hc.max_concurrent +
-      (hc.auto_tune ? ' · auto-tune ON' : '')));
+    var qbody = H.el('div'); qbody.id = 'work-queue';
     body.appendChild(H.card('PoW QUEUE', qbody));
 
-    var all = d.tasks || [];
-    if (all.length) {
-      // Sort the FULL task set, then cap the render — so the sort reflects
-      // every task, not just an arbitrary first 40.
-      var tasks = H.sortBy(all, workState.sort, WORK_ACC).slice(0, 40);
-      var tbody = H.el('div');
-      var bar = H.el('div'); bar.style.cssText = 'margin-bottom:6px;';
-      bar.appendChild(H.sortControl(WORK_KEYS, workState.sort, renderWorkBody));
-      tbody.appendChild(bar);
-      var table = H.resultTable();
-      var typeIcon = { MINE: 'icon-mine', REFINE: 'icon-refine', BUILD: 'icon-in-progress', RAID: 'icon-raid' };
-      tasks.forEach(function (t) {
+    var typeIcon = { MINE: 'icon-mine', REFINE: 'icon-refine', BUILD: 'icon-in-progress', RAID: 'icon-raid' };
+    workState.lv = H.listView({
+      key: function (t) { return t.task_id || (t.task_type + ':' + t.object_id); },
+      sig: function (t) {
+        return [t.status, t.percent_complete, t.current_difficulty, t.difficulty_target, t.eta].join('|');
+      },
+      render: function (t) {
         var diff = (t.current_difficulty != null ? t.current_difficulty : '—') +
           '→' + (t.difficulty_target != null ? t.difficulty_target : '—');
-        table.appendChild(H.resultRow({
+        return H.resultRow({
           icon: typeIcon[t.task_type] || 'icon-in-progress',
           title: t.task_id || '?',
           subtitle: (t.task_type || '?') + ' · ' + (t.status || '?'),
@@ -584,40 +579,84 @@
             H.resource(diff),
             H.resource(t.eta || '—', null, 'ops-muted'),
           ],
-        }));
-      });
-      tbody.appendChild(table);
-      if (all.length > 40) tbody.appendChild(H.el('div', 'ops-muted', (all.length - 40) + ' more not shown'));
-      body.appendChild(H.card('TASKS', tbody));
-    }
-
-      var lh = d.loop_health;
-      if (lh && lh.length) {
-        var lbody = H.el('div');
-        lh.forEach(function (l) {
-          var line = l.runs + ' runs · ' + (l.actions || 0) + ' actions · ' + (l.errors || 0) + ' errors';
-          lbody.appendChild(H.row(l.loop, line, (l.errors || 0) > 0 ? 'icon-alert' : 'icon-success'));
         });
-        body.appendChild(H.card('LOOP HEALTH (1h)', lbody));
-      }
+      },
+      pageSize: 50,
+      filters: [
+        { key: 'q', type: 'text', placeholder: 'filter task / struct id' },
+        { key: 'type', type: 'select', options: [
+          { value: '', label: 'all types' }, 'MINE', 'REFINE', 'BUILD', 'RAID' ] },
+        { key: 'status', type: 'select', options: [
+          { value: '', label: 'any status' }, 'running', 'waiting', 'completed' ] },
+      ],
+      filterFn: function (t, v) {
+        if (v.type && t.task_type !== v.type) return false;
+        if (v.status && String(t.status) !== v.status) return false;
+        if (v.q && String(t.task_id || '').toLowerCase().indexOf(String(v.q).toLowerCase()) < 0) return false;
+        return true;
+      },
+      sortKeys: WORK_KEYS,
+      sortAccessors: WORK_ACC,
+      sort: workState.sort,
+      empty: 'no tasks match',
+    });
+    body.appendChild(H.card('TASKS', workState.lv.node));
 
-      var tx = d.tx_summary || {};
-      if (tx.top_errors && tx.top_errors.length) {
-        var xbody = H.el('div');
-        tx.top_errors.slice(0, 5).forEach(function (e2) {
-          xbody.appendChild(H.row(String(e2.count) + '×', e2.reason.slice(0, 90), 'icon-alert'));
-        });
-        body.appendChild(H.card('TOP TX ERRORS (1h)', xbody));
-      }
-      Board.stamp('updated ' + new Date().toLocaleTimeString());
+    var lbody = H.el('div'); lbody.id = 'work-loops';
+    workState.loopCard = H.card('LOOP HEALTH (1h)', lbody);
+    body.appendChild(workState.loopCard);
+
+    var xbody = H.el('div'); xbody.id = 'work-tx';
+    workState.txCard = H.card('TOP TX ERRORS (1h)', xbody);
+    body.appendChild(workState.txCard);
+  }
+
+  function renderWorkBody() {
+    var d = workState.data; if (!d) return;
+    buildWorkSkeleton();
+
+    var c = d.counts || {};
+    var hc = d.hash_config || {};
+    var qbody = document.getElementById('work-queue');
+    qbody.innerHTML = '';
+    qbody.appendChild(H.row('Running / Waiting / Done', (c.running || 0) + ' / ' + (c.waiting || 0) + ' / ' + (c.completed || 0), 'icon-in-progress'));
+    qbody.appendChild(H.row('Engine', (hc.effective_engine || '?') + (hc.gpu_available ? ' (GPU available)' : '')));
+    qbody.appendChild(H.row('difficulty_start / max_concurrent', hc.difficulty_start + ' / ' + hc.max_concurrent +
+      (hc.auto_tune ? ' · auto-tune ON' : '')));
+
+    workState.lv.setRows(d.tasks || []);
+
+    var lh = d.loop_health || [];
+    var lbody = document.getElementById('work-loops');
+    lbody.innerHTML = '';
+    lh.forEach(function (l) {
+      var line = l.runs + ' runs · ' + (l.actions || 0) + ' actions · ' + (l.errors || 0) + ' errors';
+      lbody.appendChild(H.row(l.loop, line, (l.errors || 0) > 0 ? 'icon-alert' : 'icon-success'));
+    });
+    workState.loopCard.hidden = !lh.length;
+
+    var tx = d.tx_summary || {};
+    var errs = (tx.top_errors || []).slice(0, 5);
+    var xbody = document.getElementById('work-tx');
+    xbody.innerHTML = '';
+    errs.forEach(function (e2) {
+      xbody.appendChild(H.row(String(e2.count) + '×', e2.reason.slice(0, 90), 'icon-alert'));
+    });
+    workState.txCard.hidden = !errs.length;
   }
   function renderWork() {
     return Board.T.core.invoke('mcp_work').then(function (d) {
       workState.data = d; renderWorkBody();
     }).catch(function (e) {
+      // Don't tear the page down on a transient read failure — the skeleton
+      // (and whatever sort/page/filter you set) should survive it.
       var body = document.getElementById('work-body');
-      body.innerHTML = '';
-      body.appendChild(H.alertLine('work unavailable: ' + e, 'icon-alert'));
+      if (!workState.built) body.innerHTML = '';
+      var note = document.getElementById('work-error') || H.el('div');
+      note.id = 'work-error';
+      note.innerHTML = '';
+      note.appendChild(H.stateBlock('error', 'work unavailable: ' + e));
+      body.insertBefore(note, body.firstChild);
     });
   }
   Board.registerPage('work', { refresh: renderWork, cadenceMs: 5000, onEnter: renderWork });
@@ -1568,12 +1607,12 @@
     harvest: {
       label: 'auto_harvest', icon: 'icon-mine', short: 'mine + refine when the proof is cheap',
       blurb: 'Mines and refines every owned struct once its proof has decayed enough to be cheap.',
-      chips: [{ key: 'difficulty_threshold', icon: 'icon-computer' }],
+      chips: [{ key: 'difficulty_threshold', label: 'difficulty' }],
     },
     build: {
       label: 'auto_build', icon: 'icon-deploy', short: 'fill free slots with the defensive loadout',
       blurb: 'Fills each player’s free slots with the defensive loadout, one charge-paced build per scan.',
-      chips: [{ key: 'complete_difficulty', icon: 'icon-computer' }],
+      chips: [{ key: 'complete_difficulty', label: 'difficulty' }],
     },
     defend: {
       label: 'auto_defend', icon: 'icon-defend', short: 'guard the Command Ship, then production',
@@ -1583,17 +1622,17 @@
     infuse: {
       label: 'auto_infuse', icon: 'icon-send-alpha', short: 'infuse spare Alpha into the reactor',
       blurb: 'Keeps a reserve of Alpha and infuses the rest into the guild reactor.',
-      chips: [{ key: 'keep_grams', icon: 'sui-icon-alpha-matter' }],
+      chips: [{ key: 'keep_grams', label: 'reserve', icon: 'sui-icon-alpha-matter' }],
     },
     response: {
       label: 'auto_response', icon: 'icon-counter', short: 'answer a raid inside its 2-minute window',
       blurb: 'Answers a raid alarm inside the two-minute window — identifies the attacker and fires back.',
-      chips: [{ key: 'mode' }], war: true,
+      chips: [{ key: 'mode', label: 'response' }], war: true,
     },
     raid: {
       label: 'auto_raid', icon: 'icon-raid', short: 'score targets, fly expendable raiders',
       blurb: 'Scores every reachable player as a raid target and flies expendable raiders at the best one.',
-      chips: [{ key: 'posture' }, { key: 'min_ore', icon: 'sui-icon-alpha-ore' }], war: true,
+      chips: [{ key: 'posture', label: 'posture' }, { key: 'min_ore', label: 'min ore', icon: 'sui-icon-alpha-ore' }], war: true,
     },
   };
 
@@ -1649,6 +1688,15 @@
   };
 
   function prettyKey(k) { return k.replace(/_/g, ' '); }
+
+  // A structicon set inline with a row's name — lighter than a 40px portrait
+  // frame in a list whose real control is the checkbox beside it.
+  function titleWithIcon(iconName, text) {
+    var w = H.el('span', 'row-title');
+    if (iconName) w.appendChild(H.el('i', H.iconClass(iconName)));
+    w.appendChild(document.createTextNode(text));
+    return w;
+  }
 
   // A loop's cadence. NOT fmtEta: that one floors everything under a minute to
   // "1m", which would hide the whole point of auto_response's 20-second scan.
@@ -1764,39 +1812,38 @@
     var loops = d.loops || {};
     var lbody = H.el('div');
     var table = H.resultTable();
+    table.classList.add('list-short');
     Object.keys(LOOP_META).forEach(function (name) {
       var cfg = loops[name];
       if (!cfg) return;
       var meta = LOOP_META[name];
-      // The checkbox already says on/off, so the chips carry only what it
-      // can't: how it is configured. Kept to three so the row stays one line.
+      // The checkbox already says on/off, so the tiles carry only what it
+      // can't: how the loop is configured. Each is captioned rather than
+      // relying on an icon to imply what a bare number means.
       var chips = (meta.chips || []).map(function (c) {
-        return H.resource(String(cfg[c.key]), c.icon || null);
+        return statTile(c.label, String(cfg[c.key]), c.icon || null);
       });
-      chips.push(H.resource(fmtCadence(cfg.interval_secs), 'icon-refresh-8'));
-      if (cfg.autonomy) chips.push(H.resource(cfg.autonomy, null, cfg.autonomy === 'auto' ? 'attn' : ''));
-      if (cfg.dry_run) chips.push(H.resource('dry run', 'icon-tip'));
-      var edit = massBtn('', 'icon-edit', 'Edit', 'sui-mod-secondary');
-      edit.addEventListener('click', function (e) {
-        e.stopPropagation();
-        H.detailModal(meta.label, loopEditor(name, cfg));
-      });
+      chips.push(statTile('every', fmtCadence(cfg.interval_secs)));
+      if (cfg.autonomy) {
+        chips.push(statTile('autonomy', cfg.autonomy, null, cfg.autonomy === 'auto' ? 'live' : ''));
+      }
+      if (cfg.dry_run) chips.push(statTile('mode', 'dry run'));
       table.appendChild(H.resultRow({
         lead: H.checkbox(cfg.enabled, null, function (on) {
           var next = JSON.parse(JSON.stringify(cfg));
           next.enabled = on;
           cfgSet('loop', { loop: name, config: next });
         }),
-        icon: meta.icon,
-        title: meta.label,
+        title: titleWithIcon(meta.icon, meta.label),
         subtitle: meta.short || meta.blurb,
         chips: chips,
-        action: edit,
+        action: H.el('i', 'icon-chevron-right row-chevron'),
+        onClick: function () { H.detailModal(meta.label, loopEditor(name, cfg)); },
       }));
     });
     lbody.appendChild(table);
     lbody.appendChild(H.el('div', 'ops-muted',
-      'Every loop is off until you switch it on. Edit opens its full settings.'));
+      'Every loop is off until you switch it on. Select a row to open its full settings.'));
     body.appendChild(H.card('AUTO-LOOPS', lbody));
   }
 
@@ -1809,6 +1856,7 @@
     // toggles reads as a column of toggles instead of labels with a control
     // stranded at the far edge of a wide window.
     var ptable = H.resultTable();
+    ptable.classList.add('list-short');
     names.forEach(function (name) {
       var p = pol[name] || {};
       var cfgStr = p.config && Object.keys(p.config).length
@@ -1818,7 +1866,7 @@
         lead: H.checkbox(p.enabled, null, function (on) { cfgSet('policy', { name: name, enabled: on }); }),
         title: name,
         subtitle: cfgStr,
-        chips: [H.resource(p.enabled ? 'on' : 'off', null, p.enabled ? '' : 'attn')],
+        chips: [statTile('state', p.enabled ? 'on' : 'off', null, p.enabled ? 'live' : 'muted')],
       }));
     });
     pbody.appendChild(ptable);
@@ -1853,7 +1901,7 @@
       H.checkbox(wb.enabled, null, function (on) { cfgSet('web_board', { enabled: on }); })));
     if (wb.enabled && wb.url) {
       var urow = H.el('div', 'cfg-row');
-      var ulink = H.el('a', 'ops-refresh-btn', wb.url);
+      var ulink = H.el('a', 'ops-refresh-btn cfg-url', wb.url);
       ulink.href = 'javascript:void(0)';
       ulink.title = 'Copy URL — anyone holding it has FULL operator control';
       ulink.addEventListener('click', function () {

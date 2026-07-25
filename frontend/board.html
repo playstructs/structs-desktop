@@ -107,9 +107,12 @@
     #board-layout .sui-result-row {
       border: 1px solid var(--border, #345);   /* every cell fully bordered in a grid */
       padding: 9px 12px; gap: 10px; min-width: 0; align-items: center;
+      /* Never let the stats drop below the identity: the row is a single line
+         and the LEFT side absorbs the shrink (its label already ellipses). */
+      flex-wrap: nowrap;
     }
     #board-layout .sui-result-row-left-section { min-width: 0; flex: 1 1 auto; gap: 10px; padding-right: 8px; align-items: center; }
-    #board-layout .sui-result-row-right-section { min-width: 0; flex: 0 1 auto; }
+    #board-layout .sui-result-row-right-section { min-width: 0; flex: 0 0 auto; gap: 10px; align-items: center; }
     /* Profile portrait — 40px framed avatar; the 5 pfp layers stack absolutely
        and paint back-to-front (crisp pixel art). */
     #board-layout .sui-result-row-portrait,
@@ -137,6 +140,14 @@
     .fstat-l { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 1;
       text-transform: uppercase; letter-spacing: .5px; color: var(--text-hint, #6883a0); }
     .fstat.ok .fstat-v { color: var(--accent-positive, #6ac68a); }
+    /* A tile whose value is a state word rather than a number: `live` marks the
+       setting that is actively signing, `muted` an inert one. */
+    .fstat.live .fstat-v { color: var(--accent-warning, #ffb454); }
+    .fstat.muted .fstat-v { color: var(--text-hint, #6883a0); }
+    .fstat-v { justify-content: center; }
+    /* Row title with an inline glyph — the light alternative to a portrait. */
+    .row-title { display: inline-flex; align-items: center; gap: 7px; }
+    .row-title i { flex: none; opacity: .8; }
     /* Harvest trio under the PID: icons + values only, quiet by design. */
     .htrio-line { display: inline-flex; gap: 10px; opacity: .75; font-size: 11px; }
     .htrio { white-space: nowrap; }
@@ -179,14 +190,11 @@
     #detail-overlay .detail-x { cursor: pointer; opacity: .7; padding: 0 4px; }
     #detail-overlay .detail-x:hover { opacity: 1; }
     /* Toolbars */
-    #fleet-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
-    #fleet-toolbar .sui-input-text { flex: 1; min-width: 120px; }
-    .fleet-foot { display: flex; justify-content: space-between; font-size: 12px; margin-top: 6px; }
     .fbat { display: inline-flex; gap: 2px; align-items: center; }
     .fbat i { width: 5px; height: 10px; background: rgba(120,180,255,.15); display: inline-block; }
     .fbat i.on { background: var(--accent-primary, #6cf); }
-    .attn { color: #ffb454; }
-    .err { color: #ff6b6b; }
+    .attn { color: var(--text-warning); }
+    .err { color: var(--accent-destructive); }
     /* Mass-action toolbar buttons: keep SUI look, add busy state. */
     .mass-btn.is-busy { opacity: .5; pointer-events: none; }
     #mass-progress { width: 100%; margin: 6px 0; }
@@ -196,33 +204,135 @@
     .cfg-group { margin-bottom: 4px; }
     .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
                padding: 3px 0; font-size: 13px; width: 100%; }
-    .cfg-row input[type="number"] { width: 80px; background: transparent; color: inherit;
-               border: 1px solid var(--border, #345); padding: 2px 6px; }
-    .cfg-row select { background: transparent; color: inherit; border: 1px solid var(--border, #345); padding: 2px 6px; }
+    /* (The raw input/select restyling that used to live here is gone — H.field,
+       H.stepper, H.selectBox and H.textBox now emit SUI's own markup, so
+       sui.css styles them and an override would only fight it.) */
     .cfg-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
     /* WAR page: the list cards add free-text id inputs alongside the numeric
        ones, and each result row carries a couple of inline icon actions. */
-    .cfg-row input[type="text"] { background: transparent; color: inherit;
-               border: 1px solid var(--border, #345); padding: 2px 6px; min-width: 11em; }
     .cfg-row .sui-result-row-right-section .cfg-actions,
     .sui-result-row .cfg-actions { margin-top: 0; gap: 4px; }
     .war-addrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     /* Config sub-sections: the same nav component as the board's own tab bar,
        inset so it reads as a level down rather than a second top-level bar. */
-    .subnav { margin: 0 0 10px; }
+    .subnav { margin: 0 0 12px; }
     .subnav .sui-screen-nav { padding: 0 4px; }
     .subnav .sui-screen-nav-items { flex-wrap: wrap; }
-    /* SUI's checkbox is a 48px-offset label + absolutely-positioned art; inside
-       a dense config row there is no label, so collapse the reserved space. */
-    .cfg-row .sui-checkbox-container { width: var(--form-input-height-total, 32px); flex: 0 0 auto; }
-    .cfg-row .sui-checkbox-container label { margin-left: 0; }
-    .sui-result-row-left-section .sui-checkbox-container { margin-right: 6px; }
-    .sui-result-row-left-section .sui-checkbox-container label { margin-left: 0; }
-    /* Steppers need room for 4-5 digits; SUI's default input is 25px wide. */
-    .sui-input-stepper input[type="number"] { width: 3.5em; }
-    .sui-input-stepper .sui-nav-btn { padding: 0 2px; line-height: 1; }
-    .cfg-row .sui-form-element-label-group { min-width: 0; }
-    .cfg-row .sui-form-element-label-group .sui-text-hint { font-size: 11px; }
+
+    /* ── SUI checkbox, used bare (no text label) ──────────────────────────
+       The component is a zero-size <input>, an ABSOLUTELY positioned art
+       layer, and a label that reserves 48px for itself. With no label text
+       the container collapses to ~0 wide and the art paints straight over
+       whatever follows it. Anywhere we use it as a control rather than a
+       labelled form field, it has to reserve its own box. */
+    #board-layout .sui-checkbox-container,
+    #board-layout .sui-radio-container,
+    #sui-offcanvas .sui-checkbox-container,
+    #sui-offcanvas .sui-radio-container {
+      width: var(--form-input-height-total, 32px);
+      flex: 0 0 auto;
+    }
+    #board-layout .sui-checkbox-container label,
+    #board-layout .sui-radio-container label,
+    #sui-offcanvas .sui-checkbox-container label,
+    #sui-offcanvas .sui-radio-container label { margin-left: 0; }
+    /* …unless it genuinely carries text, which needs the offset back. */
+    #board-layout .sui-checkbox-container.has-label { width: auto; }
+    #board-layout .sui-checkbox-container.has-label label { margin-left: 40px; }
+
+    /* Steppers. Two board-specific sizings, both because the game renders SUI
+       at transform:scale(2)/(4) (main.css:2338) while this console runs at 1x:
+       an 8px inherited font is legible there and not here, and SUI's 25px
+       input is sized for a 1-2 digit quantity picker, not a 5-digit interval. */
+    #board-layout .sui-input-stepper,
+    #sui-offcanvas .sui-input-stepper { gap: 4px; }
+    #board-layout .sui-input-stepper input[type="number"],
+    #sui-offcanvas .sui-input-stepper input[type="number"] {
+      width: 4.5em; font-size: 13px; font-variant-numeric: tabular-nums;
+    }
+    /* The +/- buttons are sui-screen-btn, whose 36px height dwarfs a dense
+       settings row; trim to the field height without touching the component. */
+    #board-layout .sui-input-stepper .sui-screen-btn,
+    #sui-offcanvas .sui-input-stepper .sui-screen-btn {
+      height: 24px; min-height: 0; padding: 0 6px; margin: 0;
+    }
+    #board-layout .sui-input-stepper .sui-screen-btn i,
+    #sui-offcanvas .sui-input-stepper .sui-screen-btn i { font-size: 12px; width: 12px; height: 12px; }
+
+    /* ── Config field ────────────────────────────────────────────────────
+       H.field builds SUI's own `label.sui-input-text` wrapper, so the label,
+       focus ring and input underline all come from sui.css. Two board-side
+       adjustments: SUI's 256px min-width is sized for a full page and would
+       overflow the 332px offcanvas drawer, and a settings list reads better
+       with the control beside its label than under it. ── */
+    #board-layout label.sui-input-text.cfg-field,
+    #sui-offcanvas label.sui-input-text.cfg-field {
+      min-width: 0;
+      flex-direction: row; align-items: center; justify-content: space-between;
+      gap: 8px 18px; padding: 3px 0;
+    }
+    /* :first-child — only the caption span, never a control that happens to
+       be a span (SUI's own `label.sui-input-text span` rule has this bug). */
+    #board-layout label.sui-input-text.cfg-field > span:first-child,
+    #sui-offcanvas label.sui-input-text.cfg-field > span:first-child {
+      min-height: 0; flex: 1 1 auto; min-width: 0; text-align: left;
+    }
+    /* Below the drawer width there is no room for two columns — stack. */
+    @media (max-width: 420px) {
+      #board-layout label.sui-input-text.cfg-field,
+      #sui-offcanvas label.sui-input-text.cfg-field { flex-direction: column; align-items: stretch; }
+    }
+
+    /* ── listView ────────────────────────────────────────────────────────
+       Toolbar / rows / count / pager. The rows grid never scrolls internally:
+       it is paginated, so the page scrolls and the pager stays reachable
+       instead of a list scrolling inside a scrolling page. ── */
+    .listview { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+    .listview-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .listview-text { min-width: 140px; flex: 1 1 160px; max-width: 320px;
+      background: transparent; color: inherit; padding: 4px 8px;
+      border: 0 none; border-bottom: 2px solid var(--accent-secondary); }
+    .listview-text:focus { outline: none; border-bottom-color: var(--accent-primary-active); }
+    .listview-toggle { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .listview-foot { display: flex; justify-content: space-between; align-items: center;
+      gap: 12px; font-size: 11px; }
+    .listview-pager { display: flex; justify-content: center; }
+    #board-layout .sui-result-rows.sui-result-table.list-managed {
+      max-height: none; overflow: visible;
+    }
+
+    /* A short list (loops, policies) should grow with the card — the internal
+       scroll exists for the 180-row fleet roster, and here it just clipped the
+       last row under the card footer. */
+    #board-layout .sui-result-rows.sui-result-table.list-short {
+      max-height: none; overflow: visible;
+    }
+    /* Rows that open an editor on click get the same affordance as Fleet. */
+    #board-layout .sui-result-row.is-clickable .row-chevron { opacity: .5; }
+    #board-layout .sui-result-row.is-clickable:hover .row-chevron { opacity: 1; }
+
+    /* Long opaque strings (the dashboard URL + its token) must wrap inside the
+       card rather than run off the edge of it. */
+    /* Drawer body. SUI's page-body chain is `.sui-page-body-screen`(block) >
+       `-content`(flex:1 0 0) > `.sui-screen-body`(flex:1 0 0) — and a flex
+       basis of 0 inside a BLOCK parent has nothing to stretch against, so both
+       collapsed to 32px and the editor's fields were clipped. Let the inner
+       boxes size to their content and leave the scrolling to
+       `.sui-page-body-screen`, which is already `overflow-y: auto`. */
+    #sui-offcanvas .sui-page-body-screen-content {
+      flex: none; height: auto; align-items: stretch; text-align: left;
+    }
+    #sui-offcanvas .sui-offcanvas-body {
+      flex: none; height: auto; overflow: visible; text-align: left;
+    }
+    #sui-offcanvas label.sui-input-text { width: 100%; }
+    .cfg-url { display: inline-block; max-width: 100%; word-break: break-all;
+      line-height: 1.4; text-align: left; }
+    /* Card footnotes are asides, not headlines: quiet, left-aligned, and clear
+       of the list they follow. */
+    .sui-data-card-body > .ops-muted:last-child,
+    .cfg-note { font-size: 11px; line-height: 1.45; text-align: left;
+      margin-top: 10px; max-width: 62ch; }
   </style>
 </head>
 <body>
@@ -345,6 +455,27 @@
   </div>
   <!-- Web shim FIRST: fakes __TAURI__ over HTTP/SSE when served as a web page;
        no-ops inside the native Tauri window. -->
+  <!-- SUI's own behaviour, loaded as native ES modules straight from the
+       webapp's source (sync.sh keeps frontend/sui in lockstep).
+       We import individual features rather than SUI.js, whose extensionless
+       `import "./SUIOffcanvas"` only resolves under webpack.
+       Only the two that suit a fully dynamic page are loaded:
+         · SUITooltip  — delegates from document.body, so it picks up
+                         [data-sui-tooltip] on content rendered later.
+         · SUIOffcanvas — a singleton container we fill on demand.
+       SUIInputStepper is deliberately NOT used: it wires each input once at
+       init, and every stepper on this board is created after that. H.stepper
+       builds the same markup and wires itself. -->
+  <script type="module">
+    import { SUITooltip } from './sui/SUITooltip.js';
+    import { SUIOffcanvas } from './sui/SUIOffcanvas.js';
+    var offcanvas = new SUIOffcanvas();
+    [new SUITooltip(), offcanvas].forEach(function (f) {
+      try { f.autoInitAll(); } catch (e) { console.warn('SUI feature init failed', e); }
+    });
+    window.SUIRuntime = { offcanvas: offcanvas };
+    window.dispatchEvent(new Event('sui-ready'));
+  </script>
   <script src="board-shim.js"></script>
   <script src="board.js"></script>
   <script src="board-pages.js"></script>

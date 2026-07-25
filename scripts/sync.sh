@@ -64,6 +64,16 @@ cp -r "$WEBAPP_DIR/src/public/structicons" "$FRONTEND_DIR/structicons" 2>/dev/nu
 mkdir -p "$FRONTEND_DIR/js"
 cp -r "$BUILD_DIR/public/js/"* "$FRONTEND_DIR/js/"
 
+# SUI's own behaviour modules, UNBUNDLED. The game gets these through webpack,
+# but the Team Ops board is plain scripts, so it loads them as native ES
+# modules instead of reimplementing the stepper/tooltip/offcanvas behaviour.
+# Copied (not vendored by hand) so they stay in lockstep with the submodule.
+# NOTE: board.html deliberately imports the individual features rather than
+# SUI.js — that aggregator has an extensionless `import "./SUIOffcanvas"`,
+# which webpack resolves but a browser will not.
+rm -rf "$FRONTEND_DIR/sui"
+cp -r "$WEBAPP_DIR/src/js/sui" "$FRONTEND_DIR/sui"
+
 # Copy vendor scripts that aren't part of webpack
 cp "$WEBAPP_DIR/src/public/js/plugins.js" "$FRONTEND_DIR/js/plugins.js"
 cp "$WEBAPP_DIR/src/public/js/main.js" "$FRONTEND_DIR/js/main.js"

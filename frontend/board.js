@@ -220,7 +220,11 @@
     right.appendChild(res);
     if (opts.action) right.appendChild(opts.action);
     r.appendChild(right);
-    if (opts.onClick) { r.style.cursor = 'pointer'; r.addEventListener('click', opts.onClick); }
+    if (opts.onClick) {
+      r.classList.add('is-clickable');
+      r.style.cursor = 'pointer';
+      r.addEventListener('click', opts.onClick);
+    }
     return r;
   }
   // ── Shared sorting ──────────────────────────────────────────────────────
@@ -264,20 +268,36 @@
   // the rest of the client instead of raw browser widgets. Each returns a node
   // and calls `onChange(value)`; none of them hold state.
   function checkbox(checked, labelText, onChange) {
-    var c = el('span', 'sui-checkbox-container');
+    // A DIV, matching SUI's documented markup. It must not be a <span>:
+    // `label.sui-input-text span` (sui.css:1974) styles *any* span inside the
+    // field wrapper as the field's label — a span container was inheriting
+    // display:flex and a 32px min-height and blowing the control out to ~106px.
+    var c = el('div', 'sui-checkbox-container');
     var box = el('input', 'sui-checkbox');
     box.type = 'checkbox';
     box.checked = !!checked;
     var disp = el('span', 'sui-checkbox-display');
     var lab = el('label');
     if (labelText != null) lab.appendChild(document.createTextNode(String(labelText)));
+    if (labelText != null) c.classList.add('has-label');
     box.addEventListener('change', function () { onChange(box.checked); });
+    // These often sit inside a row that opens an editor on click; toggling the
+    // switch must not also open it.
+    c.addEventListener('click', function (e) { e.stopPropagation(); });
     // The display is a sibling styled by `:checked ~ .sui-checkbox-display`, so
     // the input must come first and the label last.
     c.appendChild(box); c.appendChild(disp); c.appendChild(lab);
     return c;
   }
-  // Numeric stepper with the game's caret buttons. `opts`: {min,max,step,width}.
+  // Numeric stepper. `opts`: {min,max,step,width}.
+  //
+  // Markup follows SUI's contract exactly — `sui-screen-btn sui-mod-secondary`
+  // buttons carrying icon-subtract / icon-add, and the buttons as the input's
+  // literal previous/next siblings, because that is how SUIInputStepper finds
+  // them. We wire the behaviour ourselves rather than using that module: it
+  // binds each input once during autoInitAll, and every stepper on this board
+  // is created long after page load. Disabling the buttons at min/max is the
+  // one thing it does that we'd otherwise lose, so it's reproduced here.
   function stepper(value, opts, onChange) {
     opts = opts || {};
     var w = el('span', 'sui-input-stepper');
@@ -288,6 +308,21 @@
     if (opts.max != null) input.max = opts.max;
     input.step = opts.step == null ? 1 : opts.step;
     if (opts.width) input.style.width = opts.width;
+
+    function stepBtn(iconName) {
+      var b = el('button', 'sui-screen-btn sui-mod-secondary');
+      b.type = 'button';
+      b.appendChild(el('i', 'sui-icon sui-icon-md ' + iconName));
+      return b;
+    }
+    var down = stepBtn('icon-subtract');
+    var up = stepBtn('icon-add');
+
+    function syncDisabled() {
+      var n = Number(input.value);
+      down.disabled = opts.min != null && !isNaN(n) && n <= Number(opts.min);
+      up.disabled = opts.max != null && !isNaN(n) && n >= Number(opts.max);
+    }
     function commit(v) {
       var n = Number(v);
       if (isNaN(n)) return;
@@ -297,24 +332,22 @@
       var dp = String(input.step).indexOf('.') >= 0 ? String(input.step).split('.')[1].length : 0;
       n = Number(n.toFixed(dp));
       input.value = n;
+      syncDisabled();
       onChange(n);
     }
-    function bump(dir) {
-      var cur = Number(input.value) || 0;
-      commit(cur + dir * Number(input.step || 1));
-    }
-    var down = el('a', 'sui-nav-btn'); down.href = 'javascript:void(0)';
-    down.appendChild(el('i', 'icon-caret-down'));
-    down.addEventListener('click', function () { bump(-1); });
-    var up = el('a', 'sui-nav-btn'); up.href = 'javascript:void(0)';
-    up.appendChild(el('i', 'icon-caret-up'));
-    up.addEventListener('click', function () { bump(1); });
+    down.addEventListener('click', function () { commit((Number(input.value) || 0) - Number(input.step || 1)); });
+    up.addEventListener('click', function () { commit((Number(input.value) || 0) + Number(input.step || 1)); });
     input.addEventListener('change', function () { commit(input.value); });
+
     w.appendChild(down); w.appendChild(input); w.appendChild(up);
+    syncDisabled();
     return w;
   }
+  // SUI styles the BARE `select` element (sui.css:1937) — no class. A
+  // `.sui-input-text` class here would style nothing; the label wrapper from
+  // field() is what carries that class.
   function selectBox(value, options, onChange) {
-    var s = el('select', 'sui-input-text');
+    var s = el('select');
     (options || []).forEach(function (o) {
       var val = (o && o.value != null) ? o.value : o;
       var lbl = (o && o.label != null) ? o.label : o;
@@ -326,8 +359,11 @@
     s.addEventListener('change', function () { onChange(s.value); });
     return s;
   }
+  // Likewise: SUI styles `label.sui-input-text input[type=text]`, a DESCENDANT
+  // selector, so the input must sit inside field()'s label wrapper and carries
+  // no class of its own.
   function textBox(value, placeholder, onChange) {
-    var i = el('input', 'sui-input-text');
+    var i = el('input');
     i.type = 'text';
     i.value = value == null ? '' : value;
     if (placeholder) i.placeholder = placeholder;
@@ -352,19 +388,312 @@
     wrap.appendChild(bar);
     return wrap;
   }
-  // Label on the left, control on the right — the config idiom.
+  // One labelled control, built the way the game builds them: `label.sui-input-text`
+  // is SUI's universal field wrapper — its <span> labels a stepper, a select or
+  // even a nested checkbox, not just a text input (see the webapp's ScanViewModel).
+  //
+  // `hint` becomes a press-and-hold tooltip on a small secondary tip icon
+  // rather than a permanent grey line under the label — SUITooltip delegates
+  // from document.body, so this works on content rendered at any time. Each
+  // trigger needs its own id and a positioned parent, which the <span> provides.
+  var fieldSeq = 0;
   function field(label, controlNode, hint) {
-    var r = el('div', 'cfg-row');
-    var l = el('div', 'sui-form-element-label-group');
-    l.appendChild(el('span', null, label));
-    if (hint) l.appendChild(el('span', 'sui-text-hint', hint));
-    r.appendChild(l);
-    r.appendChild(controlNode);
-    return r;
+    var wrap = el('label', 'sui-input-text cfg-field');
+    var cap = el('span');
+    cap.appendChild(document.createTextNode(label));
+    if (hint) {
+      cap.appendChild(document.createTextNode(' '));
+      var tip = el('a', 'sui-text-secondary');
+      tip.id = 'cfg-tip-' + (++fieldSeq);
+      tip.href = 'javascript:void(0)';
+      tip.setAttribute('data-sui-tooltip', hint);
+      tip.appendChild(el('i', 'sui-icon icon-tip'));
+      cap.appendChild(tip);
+    }
+    wrap.appendChild(cap);
+    wrap.appendChild(controlNode);
+    return wrap;
   }
 
-  // A centered modal overlay (row detail). Returns a close() fn.
-  function detailModal(title, contentNode) {
+  // ── Durations ────────────────────────────────────────────────────────────
+  // One formatter, replacing `ago` / `fmtEta` / `fmtCadence`, which existed as
+  // three because none of them took options. Seconds in; `opts.zero` is the
+  // word for 0 ("now" for an ETA, nothing for a cadence).
+  function duration(seconds, opts) {
+    opts = opts || {};
+    if (seconds == null || isNaN(seconds)) return opts.empty || '—';
+    var s = Math.max(0, Number(seconds));
+    if (s <= 0 && opts.zero) return opts.zero;
+    if (s < 60) return Math.round(s) + 's';
+    if (s < 3600) return Math.round(s / 60) + 'm';
+    if (s < 86400) return (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
+    return Math.round(s / 86400) + 'd';
+  }
+
+  // ── One state block for loading / empty / error ──────────────────────────
+  // Replaces four empty-state and seven error-state idioms with SUI's inline
+  // alert. `kind` picks the severity colour and the default icon.
+  var STATE_KINDS = {
+    loading: { mod: 'sui-mod-secondary', icon: 'icon-in-progress' },
+    empty: { mod: 'sui-mod-secondary', icon: 'icon-info' },
+    info: { mod: 'sui-mod-primary', icon: 'icon-info' },
+    warning: { mod: 'sui-mod-warning', icon: 'icon-alert' },
+    error: { mod: 'sui-mod-destructive', icon: 'icon-alert' },
+  };
+  function stateBlock(kind, text, iconOverride) {
+    var k = STATE_KINDS[kind] || STATE_KINDS.info;
+    var a = el('div', 'sui-message-inline-alert ' + k.mod);
+    a.appendChild(el('i', iconClass(iconOverride || k.icon, 'sui-icon-md')));
+    var t = el('div', 'sui-message-inline-alert-text');
+    t.textContent = text;
+    a.appendChild(t);
+    return a;
+  }
+
+  // Render into a container with one error path, replacing the five
+  // byte-identical `innerHTML=''` + catch blocks across the pages.
+  function renderInto(id, build) {
+    var host = document.getElementById(id);
+    if (!host) return Promise.resolve();
+    return Promise.resolve()
+      .then(build)
+      .catch(function (e) {
+        host.innerHTML = '';
+        host.appendChild(stateBlock('error', String(e)));
+      });
+  }
+
+  // One busy state. `.is-busy` and `sui-mod-disabled` were both in use on the
+  // same buttons, so a control could be one and not the other.
+  function busy(node, on) {
+    if (!node) return;
+    node.classList.toggle('sui-mod-disabled', !!on);
+    node.classList.toggle('is-busy', !!on);
+    if ('disabled' in node) node.disabled = !!on;
+  }
+
+  // ── Pagination ───────────────────────────────────────────────────────────
+  // SUI's component, following the webapp's Pagination.js contract exactly:
+  // at most five number slots, prev/next OMITTED (not disabled) at the ends,
+  // and the ellipsis is a <div> so it isn't clickable.
+  function pageSlots(current, total) {
+    if (total <= 1) return [1];
+    var slots = [1];
+    if (total >= 2) slots.push(total <= 5 || current <= 3 ? 2 : '...');
+    if (total >= 3) {
+      if (total <= 5 || current <= 3) slots.push(3);
+      else if (current > 3 && total - current > 2) slots.push(current);
+      else slots.push('...');
+    }
+    if (total >= 4) slots.push(total <= 5 ? 4 : '...');
+    if (total >= 5) {
+      if (total - current <= 2) { slots[2] = total - 2; slots[3] = total - 1; }
+      slots.push(total);
+    }
+    return slots;
+  }
+
+  function pagination(current, total, onPick) {
+    var wrap = el('div', 'sui-pagination');
+    function chevron(dir, icon) {
+      var a = el('a'); a.href = 'javascript:void(0)';
+      a.appendChild(el('i', 'sui-icon sui-icon-md ' + icon));
+      a.addEventListener('click', function () { onPick(current + dir); });
+      return a;
+    }
+    if (current > 1) wrap.appendChild(chevron(-1, 'icon-chevron-left'));
+    var nums = el('div', 'sui-pagination-numbers');
+    pageSlots(current, total).forEach(function (n) {
+      if (n === '...') { nums.appendChild(el('div', 'sui-pagination-number', '...')); return; }
+      var a = el('a', 'sui-pagination-number' + (n === current ? ' sui-mod-active' : ''), String(n));
+      a.href = 'javascript:void(0)';
+      a.addEventListener('click', function () { onPick(n); });
+      nums.appendChild(a);
+    });
+    wrap.appendChild(nums);
+    if (current < total) wrap.appendChild(chevron(1, 'icon-chevron-right'));
+    return wrap;
+  }
+
+  // ── listView ─────────────────────────────────────────────────────────────
+  // The component this console was missing: one filtered, sorted, paginated
+  // list that updates INCREMENTALLY.
+  //
+  // Every page used to rebuild its whole list with `innerHTML = ''` on each
+  // refresh tick — which at 459 roster rows meant ~22k DOM nodes thrown away
+  // and rebuilt every time, and destroyed scroll position, focus and any
+  // half-typed filter text on a 2.5-20s cadence. Here rows are cached by key
+  // and only re-rendered when their data actually changes, so an untouched
+  // row keeps its identity (and its focus) across refreshes.
+  //
+  // opts: {
+  //   key(row)->string        stable identity, required
+  //   render(row)->Node       build a row
+  //   sig(row)->string        change detector (default JSON of the row)
+  //   pageSize                default 60
+  //   filters[]               {key, type:'text'|'select'|'toggle', label, options?, placeholder?}
+  //   filterFn(row, values)   true to keep
+  //   sortKeys[], sortAccessors{}, sort{key,dir}
+  //   toolbarExtra            Node appended to the toolbar (page-specific actions)
+  //   empty                   text shown when nothing matches
+  //   onCounts(shown, total)  called after each render
+  // }
+  function listView(opts) {
+    var pageSize = opts.pageSize || 60;
+    var state = {
+      rows: [], page: 1,
+      values: {},
+      sort: opts.sort || (opts.sortKeys && opts.sortKeys[0] ? { key: opts.sortKeys[0].key, dir: 1 } : null),
+    };
+    (opts.filters || []).forEach(function (f) { state.values[f.key] = f.type === 'toggle' ? false : ''; });
+
+    var root = el('div', 'listview');
+    var toolbar = el('div', 'listview-toolbar');
+    var body = resultTable();
+    body.classList.add('list-managed');
+    var footer = el('div', 'listview-foot');
+    var pager = el('div', 'listview-pager');
+    root.appendChild(toolbar);
+    root.appendChild(body);
+    root.appendChild(footer);
+    root.appendChild(pager);
+
+    // Toolbar is built ONCE — rebuilding it is what used to eat keystrokes.
+    (opts.filters || []).forEach(function (f) {
+      var ctl;
+      if (f.type === 'select') {
+        ctl = selectBox('', f.options || [], function (v) { state.values[f.key] = v; state.page = 1; paint(); });
+      } else if (f.type === 'toggle') {
+        var wrapT = el('label', 'listview-toggle');
+        var cb = checkbox(false, null, function (on) { state.values[f.key] = on; state.page = 1; paint(); });
+        wrapT.appendChild(cb);
+        wrapT.appendChild(el('span', null, f.label));
+        ctl = wrapT;
+      } else {
+        ctl = el('input', 'listview-text');
+        ctl.type = 'search';
+        ctl.placeholder = f.placeholder || f.label || 'filter';
+        // `input`, not `change`: filtering should feel live, and because the
+        // toolbar is never rebuilt the field keeps focus while you type.
+        ctl.addEventListener('input', function () {
+          state.values[f.key] = ctl.value;
+          state.page = 1;
+          paint();
+        });
+      }
+      toolbar.appendChild(ctl);
+    });
+    if (opts.sortKeys && state.sort) {
+      toolbar.appendChild(sortControl(opts.sortKeys, state.sort, function () { paint(); }));
+    }
+    if (opts.toolbarExtra) toolbar.appendChild(opts.toolbarExtra);
+
+    var cache = {};   // key -> { node, sig }
+
+    function visible() {
+      var out = state.rows;
+      if (opts.filterFn) {
+        out = out.filter(function (r) { return opts.filterFn(r, state.values); });
+      }
+      if (state.sort && opts.sortAccessors) out = sortBy(out, state.sort, opts.sortAccessors);
+      return out;
+    }
+
+    function paint() {
+      var shown = visible();
+      var total = Math.max(1, Math.ceil(shown.length / pageSize));
+      if (state.page > total) state.page = total;
+      var start = (state.page - 1) * pageSize;
+      var slice = shown.slice(start, start + pageSize);
+
+      // Build/reuse nodes for this page.
+      var wanted = slice.map(function (r) {
+        var k = opts.key(r);
+        var s = opts.sig ? opts.sig(r) : JSON.stringify(r);
+        var hit = cache[k];
+        if (!hit || hit.sig !== s) {
+          hit = cache[k] = { node: opts.render(r), sig: s };
+        }
+        return hit.node;
+      });
+
+      // Reorder in place. Only touch the DOM where it actually differs, so a
+      // focused control inside an unchanged row is never moved or replaced.
+      var cur = body.firstChild;
+      wanted.forEach(function (node) {
+        if (cur === node) { cur = cur.nextSibling; return; }
+        body.insertBefore(node, cur);
+      });
+      while (cur) { var next = cur.nextSibling; body.removeChild(cur); cur = next; }
+
+      // Drop cached nodes for rows that no longer exist at all, so the cache
+      // can't grow without bound as the roster churns.
+      var live = {};
+      shown.forEach(function (r) { live[opts.key(r)] = true; });
+      Object.keys(cache).forEach(function (k) { if (!live[k]) delete cache[k]; });
+
+      footer.innerHTML = '';
+      if (!shown.length) {
+        footer.appendChild(stateBlock('empty', opts.empty || 'nothing to show'));
+      } else {
+        // Say what is on screen versus what exists — the old lists silently
+        // truncated at six different hard-coded caps.
+        var from = start + 1, to = Math.min(start + pageSize, shown.length);
+        var txt = shown.length > pageSize
+          ? from + '–' + to + ' of ' + shown.length
+          : shown.length + ' shown';
+        if (shown.length !== state.rows.length) txt += ' (' + state.rows.length + ' total)';
+        footer.appendChild(el('span', 'ops-muted', txt));
+      }
+
+      pager.innerHTML = '';
+      if (total > 1) {
+        pager.appendChild(pagination(state.page, total, function (p) {
+          state.page = Math.min(Math.max(1, p), total);
+          paint();
+        }));
+      }
+      if (opts.onCounts) opts.onCounts(shown, state.rows);
+    }
+
+    return {
+      node: root,
+      body: body,
+      toolbar: toolbar,
+      state: state,
+      setRows: function (rows) { state.rows = rows || []; paint(); },
+      refresh: paint,
+      // Force a row to rebuild (after an action mutates it locally).
+      invalidate: function (k) { delete cache[k]; paint(); },
+      visible: visible,
+    };
+  }
+
+  // Row detail / editors, in the game's own offcanvas drawer (SUIOffcanvas —
+  // a singleton panel appended to <body>, opened from the right). Its own
+  // setContent() takes an HTML string; we append the node instead so live
+  // controls keep their listeners. Returns a close() fn.
+  //
+  // Falls back to a plain centred overlay if the SUI module didn't load, so a
+  // module failure degrades to a working dialog rather than a dead button.
+  function drawer(title, contentNode) {
+    var oc = window.SUIRuntime && window.SUIRuntime.offcanvas;
+    if (!oc || !oc.offcanvasElm) return fallbackModal(title, contentNode);
+    oc.setHeader(esc(title));
+    var body = oc.offcanvasElm.querySelector('.sui-offcanvas-body');
+    body.innerHTML = '';
+    if (contentNode) body.appendChild(contentNode);
+    // SUIOffcanvas.setPlacement assigns this.placement BEFORE removing the old
+    // class, so it removes and re-adds the same (new) class and the previous
+    // one is never dropped — leaving sui-mod-left AND sui-mod-right on the
+    // element. Clear both ourselves rather than patching the submodule.
+    oc.offcanvasElm.classList.remove('sui-mod-left', 'sui-mod-right');
+    oc.setPlacement('right');
+    oc.open();
+    return function close() { oc.close(); };
+  }
+
+  function fallbackModal(title, contentNode) {
     var existing = document.getElementById('detail-overlay');
     if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
     var ov = el('div', null); ov.id = 'detail-overlay';
@@ -387,10 +716,15 @@
     esc: esc, el: el, row: row, card: card, badge: badge, battery: battery,
     progressBar: progressBar, fmtNum: fmtNum, ago: ago, alertLine: alertLine,
     iconClass: iconClass, resultTable: resultTable, resource: resource, resultRow: resultRow,
-    sortControl: sortControl, sortBy: sortBy, detailModal: detailModal,
+    // `detailModal` is the historical name every page already calls; it now
+    // opens the native drawer. Kept as an alias rather than renamed across
+    // every call site in one go.
+    sortControl: sortControl, sortBy: sortBy, drawer: drawer, detailModal: drawer,
     pfpPortrait: pfpPortrait,
     checkbox: checkbox, stepper: stepper, selectBox: selectBox, textBox: textBox,
     navStrip: navStrip, field: field,
+    duration: duration, stateBlock: stateBlock, renderInto: renderInto, busy: busy,
+    listView: listView, pagination: pagination, pageSlots: pageSlots,
     fmtInt: fmtInt, fmtWatts: fmtWatts, fmtAlpha: fmtAlpha, fmtOre: fmtOre,
   };
 

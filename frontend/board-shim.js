@@ -27,32 +27,23 @@
     });
   }
 
-  // All events the board listens for; late listeners for other names get
-  // wired on the next (re)connect.
-  var KNOWN = ['board-update', 'board-feed', 'mcp_ui_directive',
-               'board-roster-progress', 'board-roster-updated',
-               'board-mass-progress', 'board-mass-done', 'grass-event',
-               'grass-lookups'];
+  // The server wraps every event in one `board` SSE envelope carrying its real
+  // name, so a single listener covers all of them. There is deliberately no
+  // list of event names here: keeping one meant a listener registered for a
+  // name nobody had added silently never fired.
   var listeners = {}; // name -> [cb]
   var backoff = 1000;
 
-  function wire(es, name) {
-    es.addEventListener(name, function (e) {
-      var payload = null;
-      try { payload = JSON.parse(e.data); } catch (err) {}
-      (listeners[name] || []).slice().forEach(function (cb) {
-        try { cb({ event: name, payload: payload }); } catch (err) {}
-      });
-    });
-  }
-
   function connect() {
     var es = new EventSource('events'); // session cookie rides along
-    var names = KNOWN.slice();
-    Object.keys(listeners).forEach(function (n) {
-      if (names.indexOf(n) < 0) names.push(n);
+    es.addEventListener('board', function (e) {
+      var msg = null;
+      try { msg = JSON.parse(e.data); } catch (err) { return; }
+      if (!msg || !msg.event) return;
+      (listeners[msg.event] || []).slice().forEach(function (cb) {
+        try { cb({ event: msg.event, payload: msg.payload }); } catch (err) {}
+      });
     });
-    names.forEach(function (n) { wire(es, n); });
     es.onopen = function () { backoff = 1000; };
     es.onerror = function () {
       es.close();

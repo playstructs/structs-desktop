@@ -168,13 +168,54 @@ async fn board_asset(State(st): State<WebState>, Path(path): Path<String>) -> Re
 
 fn serve_asset(st: &WebState, path: &str) -> Response {
     match st.app.asset_resolver().get(path.to_string()) {
-        Some(asset) => (
-            [(header::CONTENT_TYPE, asset.mime_type)],
-            asset.bytes,
-        )
-            .into_response(),
+        Some(asset) => {
+            // The stylesheets are written for the game, where the frontend is
+            // the web root, so they reference sprites and the icon font
+            // absolutely (`url("/img/…")`, `url('/fonts/…')`). Here everything
+            // lives under /board — and the session cookie is scoped to /board
+            // too — so those requests 404'd and the browser copy rendered with
+            // NO icons and NO checkbox/radio art at all. Re-base them on the
+            // way out rather than widening the auth surface to serve /img and
+            // /fonts at the root.
+            let bytes = if is_css(&asset.mime_type, path) {
+                rebase_css_urls(&asset.bytes)
+            } else {
+                asset.bytes
+            };
+            ([(header::CONTENT_TYPE, asset.mime_type)], bytes).into_response()
+        }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
+}
+
+fn is_css(mime: &str, path: &str) -> bool {
+    mime.starts_with("text/css") || path.ends_with(".css")
+}
+
+/// Prefix root-absolute `url(...)` targets with `/board`. Leaves relative URLs,
+/// `data:` URIs and absolute URLs with a scheme untouched.
+fn rebase_css_urls(bytes: &[u8]) -> Vec<u8> {
+    let Ok(css) = std::str::from_utf8(bytes) else {
+        return bytes.to_vec();
+    };
+    let mut out = String::with_capacity(css.len() + 512);
+    let mut rest = css;
+    while let Some(i) = rest.find("url(") {
+        out.push_str(&rest[..i + 4]);
+        rest = &rest[i + 4..];
+        // Preserve whichever quote style the source used.
+        let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'');
+        let after_quote = if quote.is_some() { &rest[1..] } else { rest };
+        if let Some(q) = quote {
+            out.push(q);
+        }
+        if after_quote.starts_with('/') {
+            out.push_str("/board");
+        }
+        rest = after_quote;
+    }
+    out.push_str(rest);
+    out.into_bytes()
 }
 
 /// SSE tail of the board event bus. Keep-alive comments (~15s) keep SSH
@@ -185,17 +226,75 @@ async fn board_events() -> Response {
         return disabled();
     }
     use tokio_stream::StreamExt;
+    // Everything rides ONE SSE event name with the real name in the envelope.
+    // Named SSE events would each need `addEventListener(name)` on the client,
+    // which meant the shim carried a hand-maintained list of event names — and
+    // any listener registered for a name not on that list silently never fired
+    // until the next reconnect. With an envelope the client needs one listener
+    // and a new event type works with no client change at all.
     let stream = tokio_stream::wrappers::BroadcastStream::new(BOARD_BUS.subscribe()).filter_map(
         |msg| -> Option<Result<SseEvent, Infallible>> {
             match msg {
-                Ok((name, payload)) => {
-                    Some(Ok(SseEvent::default().event(name).data(payload.to_string())))
-                }
+                Ok((name, payload)) => Some(Ok(SseEvent::default()
+                    .event("board")
+                    .data(json!({ "event": name, "payload": payload }).to_string()))),
                 Err(_lagged) => None,
             }
         },
     );
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    fn rebase(s: &str) -> String {
+        String::from_utf8(rebase_css_urls(s.as_bytes())).unwrap()
+    }
+
+    /// The three shapes that actually appear in sui.css / main.css /
+    /// structicons.css — double-quoted, single-quoted, and bare.
+    #[test]
+    fn root_absolute_urls_get_the_board_prefix() {
+        assert_eq!(
+            rebase(r#"a{background:url("/img/sui/form/checkbox_true.png")}"#),
+            r#"a{background:url("/board/img/sui/form/checkbox_true.png")}"#
+        );
+        assert_eq!(
+            rebase("@font-face{src:url('/fonts/Structicons.woff?471nh8')}"),
+            "@font-face{src:url('/board/fonts/Structicons.woff?471nh8')}"
+        );
+        assert_eq!(rebase("a{background:url(/img/x.png)}"), "a{background:url(/board/img/x.png)}");
+    }
+
+    /// Anything not root-absolute must be left exactly as it was.
+    #[test]
+    fn relative_data_and_scheme_urls_are_untouched() {
+        for css in [
+            "@font-face{src:url(../../fonts/sui/ExtremeHazard.ttf)}",
+            r#"a{background:url("img/pfp/head.png")}"#,
+            "a{background:url(data:image/png;base64,AAAA)}",
+            r#"a{background:url("https://example.com/x.png")}"#,
+        ] {
+            assert_eq!(rebase(css), css, "rewrote a URL it should not have: {css}");
+        }
+    }
+
+    #[test]
+    fn multiple_urls_in_one_declaration_all_rebase() {
+        let src = "@font-face{src:url('/fonts/a.eot') format('eot'),url('/fonts/a.woff') format('woff')}";
+        let got = rebase(src);
+        assert_eq!(got.matches("/board/fonts/").count(), 2);
+        // `format('eot')` is not a url() and must survive untouched.
+        assert!(got.contains("format('eot')"), "got: {got}");
+    }
+
+    #[test]
+    fn css_with_no_urls_is_unchanged() {
+        let css = ".x{color:red}";
+        assert_eq!(rebase(css), css);
+    }
 }
 
 // ── Invoke dispatcher ───────────────────────────────────────────────────────

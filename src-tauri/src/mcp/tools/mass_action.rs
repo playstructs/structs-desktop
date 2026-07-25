@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tauri::Emitter;
 
 use crate::hasher::types::now_millis;
 use crate::mcp::telemetry::{tlog, Sev};
@@ -273,8 +272,8 @@ async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Resul
                     }
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if n % 5 == 0 || n == total {
-                        let _ = app.emit_to(
-                            "board",
+                        crate::mcp::web_board::emit_board(
+                            &app,
                             "board-mass-progress",
                             json!({
                                 "job_id": job, "action": "sweep_alpha",
@@ -304,8 +303,8 @@ async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Resul
                 }
             ),
         );
-        let _ = app.emit_to(
-            "board",
+        crate::mcp::web_board::emit_board(
+            &app,
             "board-mass-done",
             json!({
                 "job_id": job, "action": "sweep_alpha",
@@ -490,8 +489,8 @@ async fn launch_players(app: tauri::AppHandle, request: MassActionRequest) -> Re
                     }
                 }
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                let _ = app.emit_to(
-                    "board",
+                crate::mcp::web_board::emit_board(
+                    &app,
                     "board-mass-progress",
                     json!({
                         "job_id": job, "action": "launch_players",
@@ -517,8 +516,8 @@ async fn launch_players(app: tauri::AppHandle, request: MassActionRequest) -> Re
                 }
             ),
         );
-        let _ = app.emit_to(
-            "board",
+        crate::mcp::web_board::emit_board(
+            &app,
             "board-mass-done",
             json!({
                 "job_id": job, "action": "launch_players",

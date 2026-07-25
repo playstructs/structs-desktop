@@ -6,6 +6,8 @@ frontend/lottie/
 frontend/structicons/
 frontend/js/
 frontend/js/workers/
+# SUI behaviour modules, copied from the webapp submodule by sync.sh.
+frontend/sui/
 .build-tmp/
 
 # Rust build
