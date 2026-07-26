@@ -2,7 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::RwLock;
 
-const MAX_EVENTS: usize = 1000;
+/// Ring capacity. The stream is the main way an operator watches the world,
+/// and 1000 was under ten minutes of scrollback on a busy guild — raised so
+/// the pop-out window is worth leaving open. Each event is a few hundred
+/// bytes of JSON, so this is single-digit MB.
+const MAX_EVENTS: usize = 2000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameEvent {
@@ -87,7 +91,7 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
 #[tauri::command]
 pub fn mcp_grass_recent(limit: Option<usize>, category: Option<String>) -> serde_json::Value {
     serde_json::json!({
-        "events": get_recent(limit.unwrap_or(200).min(MAX_EVENTS), category.as_deref(), None),
+        "events": get_recent(limit.unwrap_or(500).min(MAX_EVENTS), category.as_deref(), None),
         "categories": get_categories(),
         "lookups": crate::mcp::enrich::lookups_json(),
     })

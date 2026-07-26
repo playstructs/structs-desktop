@@ -217,7 +217,11 @@
     .row-title { display: inline-flex; align-items: center; gap: 7px; }
     .row-title i { flex: none; opacity: .8; }
     /* Harvest trio under the PID: icons + values only, quiet by design. */
-    .htrio-line { display: inline-flex; gap: 10px; opacity: .75; font-size: 11px; }
+    /* Three nowrap items in a non-wrapping inline-flex: in a narrow window
+       the trio pushed the whole roster row past its card rather than
+       dropping to a second line. */
+    .htrio-line { display: inline-flex; flex-wrap: wrap; gap: 2px 10px;
+                  max-width: 100%; opacity: .75; font-size: 11px; }
     .htrio { white-space: nowrap; }
     .htrio i { font-size: 11px; }
     /* Role Appearance config section */
@@ -471,8 +475,17 @@
     html[data-solo] #board-subnav,
     html[data-solo] #agent-ui { display: none; }
     html[data-solo] .sui-screen-nav { justify-content: flex-end; }
-    html[data-solo] #grass-list { max-height: none; }
-    html[data-solo] .ops-scroll { max-height: 100vh; }
+    /* The window IS the log, so it owns the height: the toolbar stays pinned
+       and the list scrolls inside it. Just dropping the list's max-height let
+       it grow to its full 16,000px content and the filter controls scrolled
+       away with the rows. */
+    html[data-solo] .ops-scroll { height: 100vh; max-height: 100vh; overflow: hidden;
+                                  padding: 10px 12px; }
+    html[data-solo] #page-grass { display: flex; flex-direction: column;
+                                  height: 100%; min-height: 0; }
+    html[data-solo] #grass-toolbar { flex: none; }
+    html[data-solo] #grass-list { flex: 1 1 auto; min-height: 0; max-height: none;
+                                  overflow-y: auto; }
   </style>
 </head>
 <body>

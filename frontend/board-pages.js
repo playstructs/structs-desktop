@@ -1222,8 +1222,20 @@
   // Live tail of the full game-event stream. ONE generic renderer for every
   // category — no per-message-type UI. Events arrive via the Rust relay
   // ('grass-event'); a back-fill seeds from the event ring buffer.
-  var grassState = { rows: [], paused: false, cat: '', text: '', cats: [], built: false, renderQueued: false, lookups: {} };
-  var GRASS_MAX = 200;
+  // How much history the client keeps. The Rust ring holds the same, so a
+  // back-fill can refill the whole window after a reconnect.
+  var GRASS_MAX = 2000;
+  // How much of it is in the DOM at once. Kept separate on purpose: 2000 rows
+  // is ~24,000 nodes, and this list is rebuilt whenever names resolve, so an
+  // uncapped render would be the same 22k-node stall the roster used to have.
+  // "Show more" raises it by a page when you actually need to read further.
+  var GRASS_RENDER_STEP = 500;
+  // Declared AFTER the constants it reads: `var` hoists the declaration but
+  // not the value, so initialising renderCap above them left it undefined and
+  // the render loop's `matched.length < renderCap` was false from the start —
+  // the list stayed empty while the count said 2000 buffered.
+  var grassState = { rows: [], paused: false, cat: '', text: '', cats: [], built: false,
+    renderQueued: false, lookups: {}, renderCap: GRASS_RENDER_STEP, keys: null };
 
   // Merge partial {players:{id:name}, guilds:{…}, struct_types:{…}, structs:{…}}
   // maps into the client lookup state (backfill + live grass-lookups events).
@@ -1379,6 +1391,8 @@
     return li;
   }
 
+  function grassKey(ev) { return ev.timestamp + '|' + ev.category + '|' + ev.subject; }
+
   function grassMatches(ev) {
     if (grassState.cat && ev.category !== grassState.cat) return false;
     if (grassState.text) {
@@ -1388,35 +1402,113 @@
     return true;
   }
 
-  function renderGrassList() {
+  // `opts.full` forces a rebuild. A live event only ever PREPENDS, so the
+  // common path just inserts the new rows and trims the tail — at 2000 buffered
+  // events a rebuild-per-tick would be ~24,000 nodes every 250ms. A rebuild is
+  // still required when the filter changes (different set) or when names
+  // resolve (existing rows must re-render with the resolved label).
+  function renderGrassList(opts) {
     var list = document.getElementById('grass-list');
     if (!list) return;
-    list.innerHTML = '';
-    var shown = 0;
-    for (var i = 0; i < grassState.rows.length; i++) {
-      var ev = grassState.rows[i];
-      if (!grassMatches(ev)) continue;
-      list.appendChild(grassRow(ev));
-      shown++;
+    var full = !!(opts && opts.full) || !grassState.keys;
+
+    // Placeholder rows (empty state, "show more") are not events and are not
+    // in `keys`, so they must go BEFORE the reconcile: the tail trim removes
+    // `list.lastChild`, and if that were the note it would pop a key while
+    // leaving a real row behind, desyncing keys from the DOM.
+    [].slice.call(list.querySelectorAll('li.grass-note')).forEach(function (n) {
+      n.parentNode.removeChild(n);
+    });
+
+    var matched = [];
+    for (var i = 0; i < grassState.rows.length && matched.length < grassState.renderCap; i++) {
+      if (grassMatches(grassState.rows[i])) matched.push(grassState.rows[i]);
     }
-    if (!shown) {
-      var empty = H.el('li', 'ops-muted', grassState.rows.length
+    // Total matches (not just rendered) — the count must describe the buffer,
+    // not the window into it.
+    var total = 0;
+    for (var j = 0; j < grassState.rows.length; j++) {
+      if (grassMatches(grassState.rows[j])) total++;
+    }
+
+    // Rows are newest-first, so sitting at the top means "tail the live
+    // stream" and anywhere else means "I am reading". Both paths move content
+    // under the reader, so hold their position unless they were tailing.
+    var wasTailing = list.scrollTop <= 4;
+    var keepTop = list.scrollTop;
+    var keepHeight = list.scrollHeight;
+
+    if (full) {
+      list.innerHTML = '';
+      grassState.keys = [];
+      matched.forEach(function (ev) {
+        list.appendChild(grassRow(ev));
+        grassState.keys.push(grassKey(ev));
+      });
+    } else {
+      // Prepend only what is genuinely new, newest last so insertBefore keeps
+      // the order right.
+      var known = {};
+      grassState.keys.forEach(function (k) { known[k] = 1; });
+      var fresh = [];
+      for (var n = 0; n < matched.length; n++) {
+        var k = grassKey(matched[n]);
+        if (known[k]) break;      // first known row: everything after is older
+        fresh.push(matched[n]);
+      }
+      for (var f = fresh.length - 1; f >= 0; f--) {
+        list.insertBefore(grassRow(fresh[f]), list.firstChild);
+        grassState.keys.unshift(grassKey(fresh[f]));
+      }
+      // Trim the tail back to the render cap.
+      while (grassState.keys.length > grassState.renderCap && list.lastChild) {
+        list.removeChild(list.lastChild);
+        grassState.keys.pop();
+      }
+    }
+
+    if (!grassState.keys.length) {
+      list.appendChild(H.el('li', 'ops-muted grass-note', grassState.rows.length
         ? 'no events match the filter'
-        : 'no events yet — they appear as the game plays');
-      list.appendChild(empty);
+        : 'no events yet — they appear as the game plays'));
+    } else if (total > grassState.keys.length) {
+      // Never silently truncate: say what is being held back and offer it.
+      var more = H.el('li', 'ops-muted grass-note');
+      var link = H.el('a', 'ops-refresh-btn', 'Show ' + GRASS_RENDER_STEP + ' more');
+      link.href = 'javascript:void(0)';
+      link.addEventListener('click', function () {
+        grassState.renderCap += GRASS_RENDER_STEP;
+        renderGrassList({ full: true });
+      });
+      more.appendChild(document.createTextNode(
+        (total - grassState.keys.length) + ' older matching event(s) not shown · '));
+      more.appendChild(link);
+      list.appendChild(more);
+    }
+
+    if (!wasTailing) {
+      // Prepending pushes content down; keep the reader looking at the same
+      // rows rather than the same offset.
+      list.scrollTop = keepTop + (list.scrollHeight - keepHeight);
     }
     var count = document.getElementById('grass-count');
-    if (count) count.textContent = shown + ' / ' + grassState.rows.length;
+    if (count) {
+      count.textContent = grassState.keys.length + ' / ' + total
+        + (total < grassState.rows.length ? ' (of ' + grassState.rows.length + ')' : '');
+    }
   }
 
   // Debounced render: live events always BUFFER (cheap array ops); the DOM is
   // only touched when the grass tab is showing and not paused.
-  function queueGrassRender() {
+  function queueGrassRender(full) {
+    if (full) grassState.renderFull = true;
     if (Board.current !== 'grass' || grassState.paused || grassState.renderQueued) return;
     grassState.renderQueued = true;
     setTimeout(function () {
       grassState.renderQueued = false;
-      renderGrassList();
+      var f = grassState.renderFull;
+      grassState.renderFull = false;
+      renderGrassList({ full: f });
     }, 250);
   }
 
@@ -1425,17 +1517,26 @@
     if (!bar || grassState.built) return;
     grassState.built = true;
     var catSel = H.el('select', 'sui-input-text'); catSel.id = 'grass-cat';
-    catSel.addEventListener('change', function () { grassState.cat = catSel.value; renderGrassList(); });
+    catSel.addEventListener('change', function () {
+      grassState.cat = catSel.value;
+      grassState.renderCap = GRASS_RENDER_STEP;   // a new filter starts a new window
+      renderGrassList({ full: true });
+    });
     bar.appendChild(catSel);
     var search = H.el('input', 'sui-input-text'); search.placeholder = 'filter…';
-    search.addEventListener('input', function () { grassState.text = search.value; renderGrassList(); });
+    search.addEventListener('input', function () {
+      grassState.text = search.value;
+      grassState.renderCap = GRASS_RENDER_STEP;
+      renderGrassList({ full: true });
+    });
     bar.appendChild(search);
     var pause = H.el('a', 'ops-refresh-btn'); pause.href = 'javascript:void(0)'; pause.id = 'grass-pause';
     pause.textContent = 'Pause';
     pause.addEventListener('click', function () {
       grassState.paused = !grassState.paused;
       pause.textContent = grassState.paused ? 'Resume' : 'Pause';
-      if (!grassState.paused) renderGrassList();
+      // Resuming may need to catch up on a backlog the DOM never saw.
+      if (!grassState.paused) renderGrassList({ full: true });
     });
     bar.appendChild(pause);
     bar.appendChild(H.el('span', 'ops-muted')).id = 'grass-count';
@@ -1510,8 +1611,9 @@
     buildGrassToolbar();
     // Defensive: the board may have booted before any events existed (its
     // buffer back-fill was empty) — refresh from the Rust ring on each visit.
-    grassBackfill().then(renderGrassList);
-    renderGrassList();
+    // A back-fill can insert rows anywhere in the ordering, so it rebuilds.
+    grassBackfill().then(function () { renderGrassList({ full: true }); });
+    renderGrassList({ full: true });
     return Promise.resolve();
   }
 
@@ -1520,7 +1622,7 @@
       // Back-fill from the Rust ring buffer, then tail the live relay. The
       // listener lives for the window's lifetime and buffers even while other
       // tabs are showing, so switching to Grass is instant.
-      grassBackfill().then(renderGrassList);
+      grassBackfill().then(function () { renderGrassList({ full: true }); });
       Board.T.event.listen('grass-event', function (e) {
         var ev = e && e.payload;
         if (!ev || !ev.category) return;
@@ -1532,7 +1634,9 @@
       // Lazily-resolved names arrive here; visible rows upgrade in place.
       Board.T.event.listen('grass-lookups', function (e) {
         grassMergeLookups(e && e.payload);
-        queueGrassRender();
+        // Names resolving must upgrade rows ALREADY in the DOM, which an
+        // incremental prepend would never touch.
+        queueGrassRender(true);
       });
     },
     onEnter: renderGrass,
