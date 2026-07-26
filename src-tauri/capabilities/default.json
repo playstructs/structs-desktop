@@ -3,7 +3,8 @@
   "description": "Default capabilities for Structs App",
   "windows": [
     "main",
-    "board"
+    "board",
+    "stream"
   ],
   "permissions": [
     "core:default"

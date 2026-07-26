@@ -1169,8 +1169,18 @@
         var r = H.el('div', 'sui-data-card-row');
         var left = H.el('span');
         var ok = h.outcome === 'success';
+        // Success is the boring case and it is 50 rows out of 50 — a solid
+        // filled badge on every one of them shouted the least informative
+        // thing on the page. Quiet the routine outcome so a failure is what
+        // the eye lands on.
+        // Success is the boring case and it was 50 rows out of 50 — `solid`
+        // put a filled block on every one, shouting the least informative
+        // thing on the page. SUI ships exactly four badge variants
+        // (default / warning / destructive / solid), so this is the honest
+        // severity ladder within the system: outlined for routine, amber for
+        // "didn't happen", red for failed.
         left.appendChild(H.badge(h.outcome.replace('_', ' ').toUpperCase(),
-          ok ? 'solid' : h.outcome === 'skipped' ? 'default' : 'warning'));
+          ok ? 'default' : h.outcome === 'skipped' ? 'warning' : 'destructive'));
         left.appendChild(document.createTextNode(' ' + (h.action || '').replace(/^.*Msg/, '') +
           ' · ' + (h.player_id || h.context || '?')));
         var right = H.el('span', 'ops-val');
@@ -1316,18 +1326,33 @@
   // detail flattened to k:v chips, with `x`+`x_old` pairs folded to old→new
   // and `_p` twins used for precision but never rendered separately.
   function grassRow(ev) {
+    // Two bands, not one flow: a header line you scan (time · category ·
+    // subject) and a wrapped chip band you read only when the header caught
+    // your eye. Previously everything — including a 60-character subject with
+    // a bech32 address in it — ran together as centred prose.
     var li = H.el('li');
+    var head = H.el('div', 'grass-head');
     // timestamp is local receive-time (the stream carries none on the wire)
-    li.appendChild(H.el('span', 'feed-ts', new Date(ev.timestamp).toLocaleTimeString()));
+    head.appendChild(H.el('span', 'feed-ts', new Date(ev.timestamp).toLocaleTimeString()));
     var badge = H.el('span', 'grass-badge', ev.category);
     var hue = grassHue(ev.category);
     badge.style.color = 'hsl(' + hue + ',60%,60%)';
     badge.style.borderColor = 'hsl(' + hue + ',60%,40%)';
-    li.appendChild(badge);
-    li.appendChild(H.el('span', 'grass-subj', String(ev.subject || '').replace(/^structs\./, '')));
+    head.appendChild(badge);
+    var subj = String(ev.subject || '').replace(/^structs\./, '');
+    var subjEl = H.el('span', 'grass-subj', subj);
+    // Truncated with the full value on hover: the head of a subject carries
+    // the meaning (inventory.ualpha.<guild>.<player>), the tail is an address.
+    subjEl.title = subj;
+    head.appendChild(subjEl);
+    li.appendChild(head);
+
+    var chips = H.el('div', 'grass-chips');
+    li.appendChild(chips);
+
     var det = ev.detail;
     if (det == null || typeof det !== 'object') {
-      if (det != null && det !== '') li.appendChild(grassChipNode('value', String(det)));
+      if (det != null && det !== '') chips.appendChild(grassChipNode('value', String(det)));
       return li;
     }
     var keys = Object.keys(det);
@@ -1346,10 +1371,10 @@
         // Old value formats by the BASE key's semantics; variant 'old' makes
         // the precise lookup use k+'_old_p'.
         var oldText = grassVal(ev, det, k, det[k + '_old'], 'old');
-        li.appendChild(grassChipNode(k, (oldText == null ? String(det[k + '_old']) : oldText) + ' → ' + text));
+        chips.appendChild(grassChipNode(k, (oldText == null ? String(det[k + '_old']) : oldText) + ' → ' + text));
         return;
       }
-      li.appendChild(grassChipNode(k, text));
+      chips.appendChild(grassChipNode(k, text));
     });
     return li;
   }
@@ -1414,6 +1439,26 @@
     });
     bar.appendChild(pause);
     bar.appendChild(H.el('span', 'ops-muted')).id = 'grass-count';
+
+    // Pop out — the stream is a thing you park beside the game and watch, not
+    // something to go find under System every time. Hidden in the pop-out
+    // itself (it IS the pop-out) and on the web copy, where a second browser
+    // window is the operating system's job, not ours.
+    if (!Board.solo) {
+      var pop = H.el('a', 'ops-refresh-btn');
+      pop.href = 'javascript:void(0)';
+      pop.title = 'Open the live stream in its own window';
+      pop.appendChild(H.el('i', 'icon-link-out'));
+      pop.appendChild(document.createTextNode(' Pop out'));
+      pop.addEventListener('click', function () {
+        Board.T.core.invoke('open_stream_window').catch(function () {
+          // Web dashboard: no Tauri window to build, so open a browser one at
+          // the same chrome-less URL.
+          window.open('./?view=stream', 'structs-stream', 'width=560,height=900');
+        });
+      });
+      bar.appendChild(pop);
+    }
   }
 
   function refreshGrassCats() {

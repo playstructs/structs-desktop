@@ -62,6 +62,7 @@ fn main() {
             mcp::tools::board_pages::mcp_player_detail,
             mcp::tools::board_pages::mcp_energy,
             mcp::tools::board_pages::mcp_work,
+            mcp::board_feed::open_stream_window,
             mcp::tools::board_pages::mcp_health,
             mcp::tools::board_pages::mcp_inventory,
             mcp::tools::board_pages::mcp_inventory_history,

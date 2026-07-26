@@ -76,6 +76,11 @@ pub fn board_url() -> String {
 pub static BOARD_BUS: LazyLock<broadcast::Sender<(String, Value)>> =
     LazyLock::new(|| broadcast::channel(256).0);
 
+/// Windows that render board content and therefore need board events. The
+/// pop-out Stream window runs the same board.html in a chrome-less mode, so it
+/// listens for exactly the same `grass-event` / `grass-lookups` traffic.
+pub const BOARD_WINDOWS: &[&str] = &["board", "stream"];
+
 /// Single choke point replacing every `emit_to("board", …)`. The broadcast
 /// always fires (web viewers may exist with no native window); the native emit
 /// keeps its window-existence guard.
@@ -83,8 +88,10 @@ pub fn emit_board<S: serde::Serialize>(app: &tauri::AppHandle, event: &str, payl
     let value = serde_json::to_value(&payload).unwrap_or(Value::Null);
     let _ = BOARD_BUS.send((event.to_string(), value.clone()));
     use tauri::{Emitter, Manager};
-    if app.get_webview_window("board").is_some() {
-        let _ = app.emit_to("board", event, value);
+    for label in BOARD_WINDOWS {
+        if app.get_webview_window(label).is_some() {
+            let _ = app.emit_to(*label, event, value.clone());
+        }
     }
 }
 

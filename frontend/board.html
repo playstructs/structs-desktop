@@ -74,19 +74,38 @@
     #feed-alerts li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; }
     /* GRASS stream — one generic row style for every message category. */
     #grass-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
-    #grass-toolbar .sui-input-text { min-width: 110px; }
+    /* The category select would otherwise take the full row and push the
+       pause/count/pop-out controls onto a line of their own. */
+    #grass-toolbar .sui-input-text { min-width: 110px; max-width: 210px; flex: 0 1 auto; }
+    #grass-toolbar #grass-count { margin-left: auto; }
     #grass-list { list-style: none; margin: 4px 0 0; padding: 0; width: 100%;
                   max-height: calc(100vh - 190px); overflow-y: auto;
                   font-family: monospace; font-size: 12px; }
-    #grass-list li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+    /* A log entry, not a paragraph. One header line you scan (time · category
+       · subject) over a band of key/value chips you read only if the header
+       caught your eye. The old single flow put a 60-character subject with a
+       bech32 address in it inline with the values, centred, and the whole
+       thing read as a wall. */
+    #grass-list li { margin: 0; padding: 6px 2px; display: block; text-align: left;
+                     border-bottom: 1px solid rgba(167,192,198,.10); }
+    #grass-list li:last-child { border-bottom: 0; }
+    .grass-head { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+    /* A log reads down the left edge, so the time is a fixed column: 12-hour
+       stamps vary in width ("9:18:28 AM" vs "11:18:28 AM") and without this
+       every badge started at a different x. */
+    .grass-head .feed-ts { width: 10ch; font-variant-numeric: tabular-nums; }
     .grass-badge { flex: none; padding: 0 6px; border: 1px solid; font-size: 10px;
                    text-transform: uppercase; letter-spacing: .5px; white-space: nowrap; }
-    /* A NATS subject carries a full bech32 address, so `flex: none` made the
-       row 506px wide in a 441px window and clipped the chips after it. Give
-       the subject its own line and let both it and the chips break. */
-    .grass-subj { opacity: .7; flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
-    .grass-chip { opacity: .9; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-    .grass-chip b { font-weight: 500; opacity: .65; }
+    /* Truncate rather than wrap: the head of a subject carries the meaning and
+       the tail is an address. Full value is on the element's title. */
+    .grass-subj { flex: 1 1 auto; min-width: 0; opacity: .7;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .grass-chips { display: flex; flex-wrap: wrap; gap: 3px 5px; margin-top: 3px; }
+    /* Discrete pills so pairs stop running together into prose. */
+    .grass-chip { min-width: 0; max-width: 100%; overflow-wrap: anywhere;
+                  padding: 0 5px; border: 1px solid rgba(167,192,198,.16);
+                  background: rgba(167,192,198,.05); line-height: 1.6; }
+    .grass-chip b { font-weight: 500; color: var(--text-hint); }
     /* TX queue rows */
     .tx-btns { display: inline-flex; gap: 6px; align-items: center; }
     .tx-btns a { padding: 0 5px; cursor: pointer; }
@@ -189,6 +208,10 @@
     .hstrip { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: flex-start; }
     .hstrip .fstat { flex: 0 0 auto; align-items: flex-start; }
     .hstrip .fstat-v, .hstrip .fstat-l { justify-content: flex-start; text-align: left; }
+    /* The strip is deliberately card-less, but it sat flush against the
+       PRIMARY card header below it — the last tile caption and that header
+       read as one collided line. */
+    #ops-health { margin-bottom: 14px; }
     #ops-health .hblocked { margin-top: 10px; }
     /* Row title with an inline glyph — the light alternative to a portrait. */
     .row-title { display: inline-flex; align-items: center; gap: 7px; }
@@ -396,13 +419,60 @@
        card to 1100px in a 441px window — pushing the enable checkbox off
        screen. `min-width: 0` is the load-bearing declaration. */
     .cfg-url { display: block; min-width: 0; max-width: 100%;
+      /* `.ops-refresh-btn` (this anchor's other class) sets white-space:
+         nowrap for the icon buttons, and at equal specificity it wins by
+         source order — which is why min-width and overflow-wrap alone left
+         the card 1101px wide in a 441px window. Undo it explicitly. */
+      white-space: normal;
       overflow-wrap: anywhere; word-break: break-all;
       line-height: 1.4; text-align: left; }
     /* Card footnotes are asides, not headlines: quiet, left-aligned, and clear
        of the list they follow. */
+    /* SUI's inline alert ships with NO severity variants — the base rule is
+       layout only, so `sui-mod-warning` and `sui-mod-destructive` on one
+       rendered identically to `sui-mod-secondary` and every state block read
+       the same. Map the four modifiers we emit onto SUI's OWN colour tokens
+       rather than inventing a new component: colour on the icon and the text,
+       which is how the design system carries severity everywhere else. */
+    #board-layout .sui-message-inline-alert.sui-mod-warning,
+    #sui-offcanvas .sui-message-inline-alert.sui-mod-warning { color: var(--text-warning); }
+    #board-layout .sui-message-inline-alert.sui-mod-warning .sui-message-inline-alert-text,
+    #sui-offcanvas .sui-message-inline-alert.sui-mod-warning .sui-message-inline-alert-text {
+      color: var(--text-warning);
+    }
+    #board-layout .sui-message-inline-alert.sui-mod-destructive,
+    #sui-offcanvas .sui-message-inline-alert.sui-mod-destructive { color: var(--text-enemy-primary); }
+    #board-layout .sui-message-inline-alert.sui-mod-destructive .sui-message-inline-alert-text,
+    #sui-offcanvas .sui-message-inline-alert.sui-mod-destructive .sui-message-inline-alert-text {
+      color: var(--text-enemy-primary);
+    }
+    #board-layout .sui-message-inline-alert.sui-mod-secondary,
+    #sui-offcanvas .sui-message-inline-alert.sui-mod-secondary { color: var(--text-hint); }
+    #board-layout .sui-message-inline-alert.sui-mod-secondary .sui-message-inline-alert-text,
+    #sui-offcanvas .sui-message-inline-alert.sui-mod-secondary .sui-message-inline-alert-text {
+      color: var(--text-hint);
+    }
+    #board-layout .sui-message-inline-alert.sui-mod-primary,
+    #sui-offcanvas .sui-message-inline-alert.sui-mod-primary { color: var(--text-player-primary); }
+
+    /* Every .ops-muted on the board is an explanatory aside, and SUI card
+       bodies centre their text — so a three-line explanation (War's NEVER
+       ATTACK note) rendered centred while the footnote below it was left
+       aligned. Align them all; only the trailing ones get the top margin. */
+    #board-layout .sui-data-card-body .ops-muted,
+    #sui-offcanvas .ops-muted { text-align: left; }
     .sui-data-card-body .ops-muted:last-child,
     .cfg-note { font-size: 11px; line-height: 1.45; text-align: left;
       margin-top: 10px; max-width: 62ch; }
+
+    /* ── Pop-out mode (board.html?view=stream) ──────────────────────────────
+       Same page, one section, no chrome: the window IS the stream. */
+    html[data-solo] #board-tabs,
+    html[data-solo] #board-subnav,
+    html[data-solo] #agent-ui { display: none; }
+    html[data-solo] .sui-screen-nav { justify-content: flex-end; }
+    html[data-solo] #grass-list { max-height: none; }
+    html[data-solo] .ops-scroll { max-height: 100vh; }
   </style>
 </head>
 <body>

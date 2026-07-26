@@ -252,8 +252,11 @@ async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
     let mut out = String::new();
     out.push_str("══ TEAM OPS BOARD ══\n");
     out.push_str(&format!(
-        "Primary {} {} — charge {} ({}) · power {:.1}/{:.1}W ({:.0}% free) · {}/{} structs online · ore {:.0} alpha {:.0}\n",
-        pid, name, charge, if charge_ready { "READY" } else { "charging" }, load, cap, margin, nonline, nstructs, ore, alpha
+        "Primary {} {} — charge {} ({}) · power {}/{} ({:.0}% free) · {}/{} structs online · ore {:.0} alpha {:.0}\n",
+        pid, name, charge, if charge_ready { "READY" } else { "charging" },
+        crate::mcp::tools::format::format_power(load),
+        crate::mcp::tools::format::format_power(cap),
+        margin, nonline, nstructs, ore, alpha
     ));
     out.push_str(&format!("Virtual players: {}\n", nvp));
     if let Some(gp) = &gpower {
@@ -324,7 +327,15 @@ async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
         format!(
             "{}{}{}{}{}{}",
             irow("", "Charge", charge_badge),
-            irow("sui-icon-energy", "Power", format!("{:.1} / {:.1}W &nbsp;({:.0}% free)", load, cap, margin)),
+            // `format_power` has existed unused since the formatters landed;
+            // printing raw milliwatts as "5672579.0 / 5685836.0W" was both
+            // wrong by 1000 and unreadable.
+            irow("sui-icon-energy", "Power", format!(
+                "{} / {} &nbsp;({:.0}% free)",
+                crate::mcp::tools::format::format_power(load),
+                crate::mcp::tools::format::format_power(cap),
+                margin
+            )),
             irow("sui-icon-deployed-structs", "Structs online", format!("{} / {}", nonline, nstructs)),
             irow("sui-icon-alpha-ore", "Ore", format!("{:.0}", ore)),
             irow("sui-icon-alpha-matter", "Alpha", format!("{:.0}", alpha)),

@@ -30,8 +30,12 @@
   // `view` is passed to that page's onEnter for pages that hold several
   // sections in one body (War, Config).
   var AREAS = [
+    // Stream lives here, not under System: it is "what is happening in the
+    // world right now", which is the same question Overview answers — and as
+    // System's seventh entry it was effectively buried.
     { key: 'command', label: 'Command', sections: [
       { key: 'overview', label: 'Overview', page: 'ops' },
+      { key: 'stream', label: 'Stream', page: 'grass' },
     ] },
     // "Armada", not "Fleet": a fleet is a specific game entity (9-xxx, the
     // thing that moves between planets). This is our roster of players.
@@ -58,7 +62,6 @@
       { key: 'policies', label: 'Policies', page: 'config', view: 'policies' },
       { key: 'engine', label: 'Engine', page: 'config', view: 'engine' },
       { key: 'access', label: 'Access', page: 'config', view: 'access' },
-      { key: 'stream', label: 'Stream', page: 'grass' },
       { key: 'diagnostics', label: 'Diagnostics', page: 'diagnostics' },
     ] },
   ];
@@ -80,8 +83,23 @@
   var LEGACY_ROUTES = {
     ops: 'command/overview', fleet: 'armada/roster', armada: 'armada/roster',
     map: 'armada/map', energy: 'industry/power', work: 'industry/work',
-    tx: 'industry/transactions', grass: 'system/stream', config: 'system/loops',
+    tx: 'industry/transactions', grass: 'command/stream', config: 'system/loops',
   };
+  // Sections that have moved between areas. Same job as LEGACY_ROUTES, one
+  // level down — without it `#/system/stream` would silently land on
+  // System's first section instead of the page you bookmarked.
+  var LEGACY_SECTIONS = { 'system/stream': 'command/stream' };
+
+  // ── Pop-out mode ────────────────────────────────────────────────────────
+  // `board.html?view=stream` runs this SAME page as a standalone window
+  // showing one section and nothing else. One renderer, one set of event
+  // listeners — a second implementation of the stream would drift immediately.
+  var SOLO_VIEWS = { stream: 'command/stream' };
+  function soloView() {
+    var m = /[?&]view=([a-z]+)/.exec(location.search || '');
+    return (m && SOLO_VIEWS[m[1]]) ? m[1] : null;
+  }
+  Board.solo = soloView();
 
   function findArea(key) {
     for (var i = 0; i < AREAS.length; i++) if (AREAS[i].key === key) return AREAS[i];
@@ -952,6 +970,10 @@
     // `#/fleet` and friends resolve to their new home rather than dead-ending.
     var parts = h.split('/').filter(Boolean);
     if (parts.length === 1 && LEGACY_ROUTES[parts[0]]) parts = LEGACY_ROUTES[parts[0]].split('/');
+    var moved = LEGACY_SECTIONS[parts.join('/')];
+    if (moved) parts = moved.split('/');
+    // A pop-out window shows its one section regardless of the hash.
+    if (Board.solo) parts = SOLO_VIEWS[Board.solo].split('/');
 
     var area = findArea(parts[0]) || AREAS[0];
     var section = findSection(area, parts[1]);
@@ -985,7 +1007,7 @@
     var host = document.getElementById('board-subnav');
     if (!host) return;
     host.innerHTML = '';
-    if (area.sections.length < 2) return;
+    if (Board.solo || area.sections.length < 2) return;
     host.appendChild(navStrip(area.sections, section.key, null, function (k) {
       return '#/' + area.key + '/' + k;
     }));
@@ -1140,8 +1162,12 @@
       refresh: function () { return Promise.all([refreshBoard(), renderHealth()]); },
       cadenceMs: 10000,
     });
-    refreshBoard(); // immediate live paint on open
-    renderHealth();
+    // A pop-out shows one section; don't pay for the Ops snapshot or the
+    // health read in a window that will never display them.
+    if (!Board.solo) {
+      refreshBoard(); // immediate live paint on open
+      renderHealth();
+    }
   }
 
   // ── EVENT FEED (global infra; lives on the Ops page) ────────────────────
@@ -1304,9 +1330,12 @@
   }
   function init(T) {
     Board.T = T;
+    if (Board.solo) document.documentElement.setAttribute('data-solo', Board.solo);
     setupOps();
     setupFeed();
-    setupAgentUi();
+    // Agent directives belong in the full console — a pop-out log is not the
+    // place for a prompt the operator might never see.
+    if (!Board.solo) setupAgentUi();
     wireRefreshButton();
     // Page modules (board-pages.js) have registered by now — script order +
     // the async boot poll guarantee it. Let them do Tauri-dependent setup.

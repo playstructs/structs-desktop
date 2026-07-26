@@ -149,7 +149,8 @@ pub fn format_power(milliwatts: f64) -> String {
     } else if abs >= 1e9 {
         format!("{:.1}MW", milliwatts / 1e9)
     } else if abs >= 1e6 {
-        format!("{:.1}KW", milliwatts / 1e6)
+        // Lower-case k, matching the SI prefix and the JS ladder in board.js.
+        format!("{:.1}kW", milliwatts / 1e6)
     } else if abs >= 1e3 {
         format!("{:.1}W", milliwatts / 1e3)
     } else {

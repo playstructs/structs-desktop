@@ -165,6 +165,35 @@ pub fn build_board_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow
     Ok(window)
 }
 
+/// Pop the live event stream out into its own window.
+///
+/// It runs the SAME board.html in a chrome-less mode (`?view=stream`), so the
+/// stream keeps one implementation and one set of `grass-event` listeners
+/// rather than growing a second renderer. `emit_board` fans out to every label
+/// in `web_board::BOARD_WINDOWS`, so this window gets the live relay whether
+/// or not the main Team Ops window is open.
+#[tauri::command]
+pub fn open_stream_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("stream") {
+        // Already open — bring it forward rather than stacking duplicates.
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        &app,
+        "stream",
+        WebviewUrl::App("board.html?view=stream".into()),
+    )
+    .title("Structs — Live Stream")
+    // Tall and narrow: this is a log you keep parked beside the game, and the
+    // rows are one subject line plus wrapped chips.
+    .inner_size(560.0, 900.0)
+    .build()
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 /// Open the Team Ops window if it isn't open — ONLY when the player opted in
 /// via the `board_auto_open` policy (`structs_policy set board_auto_open true`).
 /// Without that consent the window stays closed no matter how important the
