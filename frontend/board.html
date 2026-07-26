@@ -37,7 +37,7 @@
        it can't affect the game's own sui-screen-nav elsewhere. */
     #board-layout .sui-screen-nav { display: flex; align-items: center; justify-content: space-between; }
     #board-layout .sui-screen-nav-items { overflow-x: auto; }
-    .board-navaside { display: flex; align-items: center; gap: 10px; flex: none; padding: 0 8px; }
+    .board-navaside { display: flex; align-items: center; gap: 6px; flex: none; padding: 0 4px; }
     .board-navaside #board-updated { font-size: 10px; white-space: nowrap; }
     .board-navaside .is-busy { opacity: .4; pointer-events: none; }
     /* The five area tabs need ~394px in the game font. Below that the
@@ -81,8 +81,11 @@
     #grass-list li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
     .grass-badge { flex: none; padding: 0 6px; border: 1px solid; font-size: 10px;
                    text-transform: uppercase; letter-spacing: .5px; white-space: nowrap; }
-    .grass-subj { opacity: .7; flex: none; }
-    .grass-chip { white-space: nowrap; opacity: .9; }
+    /* A NATS subject carries a full bech32 address, so `flex: none` made the
+       row 506px wide in a 441px window and clipped the chips after it. Give
+       the subject its own line and let both it and the chips break. */
+    .grass-subj { opacity: .7; flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+    .grass-chip { opacity: .9; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
     .grass-chip b { font-weight: 500; opacity: .65; }
     /* TX queue rows */
     .tx-btns { display: inline-flex; gap: 6px; align-items: center; }
@@ -151,6 +154,15 @@
        make the pixel art crisp. */
     #board-layout .pfp-viewer-layer { image-rendering: pixelated; }
     #board-layout .sui-result-row-resources { gap: 16px; flex-wrap: wrap; justify-content: flex-end; }
+    /* Flex items default to `min-width: auto`, so a long unbroken name
+       (auto_retreat_if_cmd_belowhp) pushed the row wider than its card
+       instead of wrapping. */
+    #board-layout .sui-result-row-left-section,
+    #board-layout .sui-result-row-player-info,
+    #sui-offcanvas .sui-result-row-left-section,
+    #sui-offcanvas .sui-result-row-player-info { min-width: 0; }
+    #board-layout .sui-result-row .sui-text-label-block,
+    #sui-offcanvas .sui-result-row .sui-text-label-block { overflow-wrap: anywhere; }
     #board-layout .sui-result-row:hover { background: rgba(120,180,255,.07); }
     /* Values must never break mid-unit ("1062 / 1077 kW" stays on one line). */
     .sui-resource { font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -244,7 +256,7 @@
     /* CONFIG page */
     .cfg-group { margin-bottom: 4px; }
     .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
-               padding: 3px 0; font-size: 13px; width: 100%; }
+               padding: 3px 0; font-size: 13px; width: 100%; flex-wrap: wrap; }
     /* (The raw input/select restyling that used to live here is gone — H.field,
        H.stepper, H.selectBox and H.textBox now emit SUI's own markup, so
        sui.css styles them and an override would only fight it.) */
@@ -290,11 +302,18 @@
     #board-layout .sui-input-stepper input[type="number"],
     #sui-offcanvas .sui-input-stepper input[type="number"] {
       /* Wide enough for the widest real setting (roster_ttl_secs = 21600).
-         At 4.5em it clipped silently — "300" read as "3" and "21600" as "2",
-         which is worse than useless on a settings form. */
-      width: 7em; font-size: 13px; font-variant-numeric: tabular-nums;
-      text-align: center;
+         At SUI's 25px it clipped silently — "300" read as "3" and "21600" as
+         "2", which is worse than useless on a settings form.
+         `flex: none` is the load-bearing part: the input is a flex child of
+         .sui-input-stepper, so a plain width is only a basis and got shrunk
+         straight back down. SUI's 16px side padding also has to go, or half
+         the field is padding at this size. */
+      flex: none; width: 7.2em; min-width: 7.2em;
+      padding: var(--spacing-md) 4px;
+      font-size: 13px; font-variant-numeric: tabular-nums; text-align: center;
     }
+    #board-layout .sui-input-stepper,
+    #sui-offcanvas .sui-input-stepper { flex: none; }
     /* The +/- buttons are sui-screen-btn, whose 36px height dwarfs a dense
        settings row; trim to the field height without touching the component. */
     #board-layout .sui-input-stepper .sui-screen-btn,
@@ -371,11 +390,17 @@
       flex: none; height: auto; overflow: visible; text-align: left;
     }
     #sui-offcanvas label.sui-input-text { width: 100%; }
-    .cfg-url { display: inline-block; max-width: 100%; word-break: break-all;
+    /* The share URL is one long unbreakable token. `word-break` alone did
+       nothing here: as a flex item the anchor keeps `min-width: auto`, so it
+       refused to shrink below its min-content width and stretched the whole
+       card to 1100px in a 441px window — pushing the enable checkbox off
+       screen. `min-width: 0` is the load-bearing declaration. */
+    .cfg-url { display: block; min-width: 0; max-width: 100%;
+      overflow-wrap: anywhere; word-break: break-all;
       line-height: 1.4; text-align: left; }
     /* Card footnotes are asides, not headlines: quiet, left-aligned, and clear
        of the list they follow. */
-    .sui-data-card-body > .ops-muted:last-child,
+    .sui-data-card-body .ops-muted:last-child,
     .cfg-note { font-size: 11px; line-height: 1.45; text-align: left;
       margin-top: 10px; max-width: 62ch; }
   </style>
