@@ -1337,6 +1337,29 @@
   // The one algorithm: time · colored category badge · compact subject ·
   // detail flattened to k:v chips, with `x`+`x_old` pairs folded to old→new
   // and `_p` twins used for precision but never rendered separately.
+  // The event's own block height, whichever key carries it. Hoisted out of the
+  // chip band into the header: it is on nearly every event, it is the same
+  // shape every time, and as a chip it cost a third of the band.
+  var BLOCK_KEYS = ['block_height', 'block', 'height'];
+  function grassBlock(det) {
+    if (!det || typeof det !== 'object') return null;
+    for (var i = 0; i < BLOCK_KEYS.length; i++) {
+      var v = det[BLOCK_KEYS[i]];
+      if (v != null && v !== '') return v;
+    }
+    return null;
+  }
+
+  // 24-hour, zero-padded, built by hand rather than via toLocaleTimeString:
+  // a 12-hour stamp is 11 characters ("10:33:55 AM") and wrapped onto a second
+  // line in the fixed time column, and locale formats vary in width anyway.
+  // A log wants one unambiguous 8-character column.
+  function grassTime(ms) {
+    var d = new Date(ms);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
   function grassRow(ev) {
     // Two bands, not one flow: a header line you scan (time · category ·
     // subject) and a wrapped chip band you read only when the header caught
@@ -1345,7 +1368,7 @@
     var li = H.el('li');
     var head = H.el('div', 'grass-head');
     // timestamp is local receive-time (the stream carries none on the wire)
-    head.appendChild(H.el('span', 'feed-ts', new Date(ev.timestamp).toLocaleTimeString()));
+    head.appendChild(H.el('span', 'feed-ts', grassTime(ev.timestamp)));
     var badge = H.el('span', 'grass-badge', ev.category);
     var hue = grassHue(ev.category);
     badge.style.color = 'hsl(' + hue + ',60%,60%)';
@@ -1357,6 +1380,11 @@
     // the meaning (inventory.ualpha.<guild>.<player>), the tail is an address.
     subjEl.title = subj;
     head.appendChild(subjEl);
+    // Right-aligned so heights form a column you can read down.
+    var blk = grassBlock(ev.detail);
+    if (blk != null) {
+      head.appendChild(H.el('span', 'grass-block', '#' + H.fmtInt(blk)));
+    }
     li.appendChild(head);
 
     var chips = H.el('div', 'grass-chips');
@@ -1370,10 +1398,19 @@
     var keys = Object.keys(det);
     var keySet = {};
     keys.forEach(function (k) { keySet[k] = true; });
+    var headBlock = grassBlock(det);
     keys.forEach(function (k) {
       var v = det[k];
       if (v == null || v === '') return;
       if (/_p$/.test(k)) return; // precision twin — consumed by its base key
+      // In the header now. Both `block` and `block_height` appear on the same
+      // event carrying the same number, so match on the VALUE and the pair
+      // collapses too.
+      if (headBlock != null && BLOCK_KEYS.indexOf(k) >= 0 && String(v) === String(headBlock)) return;
+      // The subject already ends with the address on every inventory event, so
+      // the chip repeated a 44-character bech32 string verbatim. Only dropped
+      // when the subject genuinely contains it — nothing is hidden.
+      if (k === 'address' && String(ev.subject || '').indexOf(String(v)) >= 0) return;
       if (/_old$/.test(k) && keySet[k.replace(/_old$/, '')] && det[k.replace(/_old$/, '')] != null) {
         return; // folded into the new-value chip below
       }

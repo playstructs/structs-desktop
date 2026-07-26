@@ -89,11 +89,16 @@
     #grass-list li { margin: 0; padding: 6px 2px; display: block; text-align: left;
                      border-bottom: 1px solid rgba(167,192,198,.10); }
     #grass-list li:last-child { border-bottom: 0; }
-    .grass-head { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
-    /* A log reads down the left edge, so the time is a fixed column: 12-hour
-       stamps vary in width ("9:18:28 AM" vs "11:18:28 AM") and without this
-       every badge started at a different x. */
-    .grass-head .feed-ts { width: 10ch; font-variant-numeric: tabular-nums; }
+    .grass-head { display: flex; gap: 8px; align-items: baseline; min-width: 0;
+                  flex-wrap: nowrap; }
+    /* A log reads down the left edge, so the time is a fixed column. It holds
+       a 24-hour stamp (8 chars) — the 12-hour form is 11 and wrapped "AM" onto
+       a second line, which doubled the height of every row. */
+    .grass-head .feed-ts { flex: none; width: 8ch; font-variant-numeric: tabular-nums; }
+    /* Block height: right-aligned so the numbers form a readable column, and
+       out of the chip band where it was costing a third of the width. */
+    .grass-block { flex: none; margin-left: auto; padding-left: 8px;
+                   opacity: .5; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .grass-badge { flex: none; padding: 0 6px; border: 1px solid; font-size: 10px;
                    text-transform: uppercase; letter-spacing: .5px; white-space: nowrap; }
     /* Truncate rather than wrap: the head of a subject carries the meaning and
