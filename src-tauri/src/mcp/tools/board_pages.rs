@@ -371,13 +371,54 @@ pub async fn mcp_inventory_history(player: Option<String>, page: Option<u32>) ->
     };
     let page_data = res.map_err(|e| format!("ledger unavailable: {e}"))?;
 
+    let registry = crate::guild_config::denom_registry();
+    // Normalise every row to ONE convention: base units, the same thing bank
+    // balances and `alpha_ualpha` are in.
+    //
+    // The sources disagree. GRASS inventory events carry BOTH `amount_p` (the
+    // precise base-unit value) and `amount` (that value FLOORED to display
+    // units — 98 800 000 uguild.0-5 is published as `amount: 98`, losing the
+    // .8). The Guild-API ledger ships only the lossy `amount`. Handing those
+    // two straight to the UI is how a 2-Alpha sweep credit rendered as "0":
+    // the display number was divided by 10^6 a second time.
+    //
+    // So: prefer `amount_p`; otherwise scale `amount` back up and mark the row
+    // `precise: false` so the UI can say the value is approximate rather than
+    // quietly claiming a precision the ledger never gave us.
+    let rows: Vec<Value> = page_data
+        .items
+        .into_iter()
+        .map(|mut r| {
+            let denom = r.get("denom").and_then(|d| d.as_str()).unwrap_or("");
+            let exp = registry.get(denom).map(|i| i.exponent).unwrap_or(0);
+            let num = |v: Option<&Value>| -> Option<f64> {
+                match v? {
+                    Value::String(s) => s.parse::<f64>().ok(),
+                    other => other.as_f64(),
+                }
+            };
+            let (base, precise) = match num(r.get("amount_p")) {
+                Some(p) => (p, true),
+                None => (
+                    num(r.get("amount")).unwrap_or(0.0) * 10f64.powi(exp as i32),
+                    exp == 0,
+                ),
+            };
+            if let Some(obj) = r.as_object_mut() {
+                obj.insert("amount_base".into(), json!(base));
+                obj.insert("precise".into(), json!(precise));
+            }
+            r
+        })
+        .collect();
+
     Ok(json!({
         "player": { "player_id": player_id, "name": name, "address": address },
-        "rows": page_data.items,
+        "rows": rows,
         "page": page_data.page,
         "has_more": page_data.has_more,
         "addresses": crate::mcp::enrich::addresses_map(),
-        "denoms": crate::guild_config::denom_registry(),
+        "denoms": registry,
     }))
 }
 
@@ -1141,5 +1182,62 @@ mod inventory_tests {
     fn alpha_is_the_only_sendable_denom() {
         assert_eq!(SENDABLE_DENOMS, &["ualpha"]);
         assert!(is_sendable("ualpha"));
+    }
+}
+
+#[cfg(test)]
+mod ledger_amount_tests {
+    use serde_json::{json, Value};
+
+    /// Mirrors the normalisation in `mcp_inventory_history` so the convention
+    /// is pinned by a test rather than by a comment.
+    fn base_units(row: &Value, exp: u32) -> (f64, bool) {
+        let num = |v: Option<&Value>| -> Option<f64> {
+            match v? {
+                Value::String(s) => s.parse::<f64>().ok(),
+                other => other.as_f64(),
+            }
+        };
+        match num(row.get("amount_p")) {
+            Some(p) => (p, true),
+            None => (
+                num(row.get("amount")).unwrap_or(0.0) * 10f64.powi(exp as i32),
+                exp == 0,
+            ),
+        }
+    }
+
+    /// GRASS publishes both, and `amount` is the FLOORED display value —
+    /// 98 800 000 base units surface as `amount: 98`. Taking `amount` would
+    /// silently discard 800 000.
+    #[test]
+    fn precise_field_wins_over_the_floored_one() {
+        let row = json!({ "denom": "uguild.0-5", "amount": 98, "amount_p": 98_800_000i64 });
+        assert_eq!(base_units(&row, 6), (98_800_000.0, true));
+    }
+
+    /// The Guild-API ledger ships only the lossy value, so it is scaled back
+    /// up and flagged — never presented as exact.
+    #[test]
+    fn display_only_rows_scale_up_and_are_marked_imprecise() {
+        let row = json!({ "denom": "ualpha", "amount": "2" });
+        assert_eq!(base_units(&row, 6), (2_000_000.0, false));
+    }
+
+    /// This is the bug that shipped: treating the ledger's display `amount`
+    /// as base units divided it by 10^6 a second time, so a 2-Alpha credit
+    /// rendered as "0".
+    #[test]
+    fn a_two_alpha_credit_is_never_zero() {
+        let row = json!({ "denom": "ualpha", "amount": "2" });
+        let (base, _) = base_units(&row, 6);
+        assert!(base / 1e6 >= 1.0, "2 Alpha must not round away, got {}", base / 1e6);
+    }
+
+    /// Ore has no sub-unit, so a display-only row is already exact.
+    #[test]
+    fn zero_exponent_denoms_need_no_scaling() {
+        let row = json!({ "denom": "ore", "amount": "340" });
+        assert_eq!(base_units(&row, 0), (340.0, true));
     }
 }

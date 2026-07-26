@@ -123,6 +123,9 @@ pub fn lookups_json() -> Value {
     let structs = STRUCTS.read().map(|m| m.clone()).unwrap_or_default();
     json!({
         "addresses": addresses_map(),
+        // So every surface names and scales a denom the same way, rather than
+        // each page hard-coding "ualpha is 10^6" and going silent on uguild.*.
+        "denoms": crate::guild_config::denom_registry(),
         "players": players,
         "structs": structs,
         "guilds": guilds_map(),

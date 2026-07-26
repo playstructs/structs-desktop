@@ -831,7 +831,8 @@
     duration: duration, stateBlock: stateBlock, renderInto: renderInto, busy: busy,
     listView: listView, pagination: pagination, pageSlots: pageSlots,
     fmtInt: fmtInt, fmtWatts: fmtWatts, fmtAlpha: fmtAlpha, fmtOre: fmtOre,
-    denomName: denomName, denomAmount: denomAmount, confirmModal: confirmModal,
+    denomName: denomName, denomAmount: denomAmount, denomQty: denomQty,
+    confirmModal: confirmModal,
   };
 
   // ── Denom naming ────────────────────────────────────────────────────────
@@ -860,10 +861,32 @@
   }
   // Raw base units → display units, using the denom's own exponent
   // (ualpha 10^6 → Alpha, uguild.0-5 10^6 → snack). Ore is already whole grams.
+  // Returns a bare number string; see denomQty for the number WITH its unit.
   function denomAmount(amount, chainDenom, registry) {
     var info = (registry || {})[chainDenom];
     var exp = info ? (info.exponent || 0) : 0;
     return fmtNum(Number(amount || 0) / Math.pow(10, exp));
+  }
+  // A quantity with the right unit attached, dropping to the BASE unit when
+  // the display unit would round the value away.
+  //
+  // `amount` MUST be base units — `amount_p` from a GRASS event, `amount_base`
+  // from the normalised ledger, or a raw bank balance. Never a bare `amount`
+  // off an inventory event: that one is already floored to display units, and
+  // dividing it again is how a 2-Alpha credit rendered as "0".
+  //
+  // The base-unit fallback matters because a genuinely tiny balance (2 ualpha)
+  // has no honest display form — that is what the guild-published `base_name`
+  // (ualpha → "μg Alpha", uguild.0-5 → "ack") exists for.
+  function denomQty(amount, chainDenom, registry) {
+    var info = (registry || {})[chainDenom];
+    var exp = info ? (info.exponent || 0) : 0;
+    var raw = Number(amount || 0);
+    var disp = raw / Math.pow(10, exp);
+    if (exp > 0 && raw !== 0 && Math.abs(disp) < 0.01) {
+      return fmtInt(raw) + ' ' + ((info && info.base_name) || chainDenom);
+    }
+    return fmtNum(disp) + ' ' + denomName(chainDenom, registry);
   }
 
   // ── Confirm dialog ──────────────────────────────────────────────────────

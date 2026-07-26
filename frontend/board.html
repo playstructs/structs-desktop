@@ -40,6 +40,13 @@
     .board-navaside { display: flex; align-items: center; gap: 10px; flex: none; padding: 0 8px; }
     .board-navaside #board-updated { font-size: 10px; white-space: nowrap; }
     .board-navaside .is-busy { opacity: .4; pointer-events: none; }
+    /* The five area tabs need ~394px in the game font. Below that the
+       timestamp was stealing 170px and scrolling Command and System out of
+       the bar entirely — the nav is not the place to lose. The stamp is
+       mirrored into the refresh button's tooltip, so nothing is lost. */
+    @media (max-width: 760px) {
+      .board-navaside #board-updated { display: none; }
+    }
     .ops-refresh { display: flex; align-items: baseline; gap: 10px; padding-right: 16px; font-size: 12px; white-space: nowrap; }
     .ops-refresh-btn { cursor: pointer; text-decoration: underline; text-decoration-style: dotted;
                        color: var(--accent-primary, #6cf); white-space: nowrap; }
@@ -165,9 +172,11 @@
     .fstat.bad .fstat-v { color: var(--text-enemy-primary); }
     .fstat-v { justify-content: center; }
     /* Health strip — one row of stat tiles, wrapping on narrow windows. */
-    #ops-health .hstrip { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: flex-start; }
-    #ops-health .hstrip .fstat { flex: 0 0 auto; align-items: flex-start; }
-    #ops-health .hstrip .fstat-v, #ops-health .hstrip .fstat-l { justify-content: flex-start; text-align: left; }
+    /* Not scoped to #ops-health: System/Diagnostics renders the same tiles,
+       and while it was, they fell back to .fstat's centred column there. */
+    .hstrip { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: flex-start; }
+    .hstrip .fstat { flex: 0 0 auto; align-items: flex-start; }
+    .hstrip .fstat-v, .hstrip .fstat-l { justify-content: flex-start; text-align: left; }
     #ops-health .hblocked { margin-top: 10px; }
     /* Row title with an inline glyph — the light alternative to a portrait. */
     .row-title { display: inline-flex; align-items: center; gap: 7px; }
@@ -225,6 +234,10 @@
     .err { color: var(--accent-destructive); }
     /* Mass-action toolbar buttons: keep SUI look, add busy state. */
     .mass-btn.is-busy { opacity: .5; pointer-events: none; }
+    /* SUI buttons are a fixed 36px tall, so a wrapping label ("Sweep All
+       ~48α" went to three lines) overflows its own frame. Let the button
+       grow sideways instead. */
+    .mass-btn span { white-space: nowrap; }
     #mass-progress { width: 100%; margin: 6px 0; }
     .bar { height: 8px; background: rgba(120,180,255,.12); border: 1px solid var(--border, #345); width: 80px; }
     .bar > i { display: block; height: 100%; background: var(--accent-primary, #6cf); width: 0; transition: width .3s; }
@@ -276,7 +289,11 @@
     #sui-offcanvas .sui-input-stepper { gap: 4px; }
     #board-layout .sui-input-stepper input[type="number"],
     #sui-offcanvas .sui-input-stepper input[type="number"] {
-      width: 4.5em; font-size: 13px; font-variant-numeric: tabular-nums;
+      /* Wide enough for the widest real setting (roster_ttl_secs = 21600).
+         At 4.5em it clipped silently — "300" read as "3" and "21600" as "2",
+         which is worse than useless on a settings form. */
+      width: 7em; font-size: 13px; font-variant-numeric: tabular-nums;
+      text-align: center;
     }
     /* The +/- buttons are sui-screen-btn, whose 36px height dwarfs a dense
        settings row; trim to the field height without touching the component. */

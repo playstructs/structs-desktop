@@ -689,12 +689,12 @@
       // The chain name is always one line away, and the reason a read-only
       // asset is read-only is stated rather than implied by a missing button.
       subtitle: a.denom + (a.note ? ' · ' + a.note : (a.sendable ? '' : ' · not transferable')),
-      chips: [statTile('balance', H.denomAmount(a.amount, a.denom, reg))],
+      chips: [statTile('balance', H.denomQty(a.amount, a.denom, reg))],
       action: act,
       onClick: function () {
         var d = H.el('div');
         d.appendChild(H.row('Asset', H.denomName(a.denom, reg, { style: 'both' })));
-        d.appendChild(H.row('Balance (display)', H.denomAmount(a.amount, a.denom, reg)));
+        d.appendChild(H.row('Balance', H.denomQty(a.amount, a.denom, reg)));
         d.appendChild(H.row('Balance (base units)', H.fmtInt(a.amount)));
         d.appendChild(H.row('Transferable', a.sendable ? 'yes' : 'no'));
         if (a.note) d.appendChild(H.stateBlock('info', a.note));
@@ -743,7 +743,7 @@
         out.appendChild(p.recipient
           ? H.stateBlock('info', 'Recipient: ' + p.recipient)
           : H.stateBlock('warning', 'Recipient: EXTERNAL address — not one of your players'));
-        out.appendChild(H.row('Sending', H.denomAmount(p.amount, denom, reg) + ' ('
+        out.appendChild(H.row('Sending', H.denomQty(p.amount, denom, reg) + ' ('
           + H.fmtInt(p.amount) + ' base units)'));
         out.appendChild(H.row('Signed via', p.route));
 
@@ -754,8 +754,8 @@
             'This is irreversible. The funds leave ' + p.from.name + ' immediately.'));
           // The confirm never shows the cosmetic name alone.
           body.appendChild(H.row('Asset', H.denomName(denom, reg, { style: 'both' })));
-          body.appendChild(H.row('Amount', H.denomAmount(p.amount, denom, reg)
-            + ' (' + H.fmtInt(p.amount) + ')'));
+          body.appendChild(H.row('Amount', H.denomQty(p.amount, denom, reg)
+            + ' (' + H.fmtInt(p.amount) + ' base units)'));
           body.appendChild(H.row('From', p.from.name + ' · ' + p.from.address));
           body.appendChild(H.row('To', (p.recipient || 'EXTERNAL') + ' · ' + p.to));
           H.confirmModal('Send ' + H.denomName(denom, reg, { style: 'both' }) + '?',
@@ -795,21 +795,34 @@
     var reg = invDenoms();
     var credit = String(r.direction || '') === 'credit';
     var who = r.counterparty_player_id || addresses[r.counterparty] || r.counterparty;
+    var when = r.time ? Date.parse(String(r.time).replace(' ', 'T')) : NaN;
+    // `amount_base` is the backend's single convention (base units); `precise`
+    // is false when it had to be reconstructed from the Guild ledger's floored
+    // display value, in which case we say so with a ~ instead of implying an
+    // exactness the row never carried.
+    var qty = H.denomQty(r.amount_base, r.denom, reg);
+    if (r.precise === false) qty = '~' + qty;
     return H.resultRow({
       icon: LEDGER_ICON[r.action] || (credit ? 'icon-incoming' : 'icon-outgoing'),
-      title: (credit ? '+' : '−') + ' ' + H.denomAmount(r.amount, r.denom, reg)
-        + ' ' + H.denomName(r.denom, reg),
+      title: (credit ? '+' : '−') + ' ' + qty,
       subtitle: (r.action || '?') + (who ? ' · ' + who : '')
         + (r.block_height ? ' · block ' + H.fmtInt(r.block_height) : ''),
-      chips: [statTile('when', r.time ? String(r.time).slice(0, 16) : '—', null, 'muted')],
+      // Relative time scans far better than a full timestamp in a list; the
+      // exact one is a click away in the drawer.
+      chips: [statTile('when', isNaN(when) ? '—' : H.ago(when), null, 'muted')],
       onClick: function () {
         var d = H.el('div');
         d.appendChild(H.row('Action', r.action));
         d.appendChild(H.row('Direction', r.direction));
         // Row detail is one of the places the chain name must be visible.
         d.appendChild(H.row('Asset', H.denomName(r.denom, reg, { style: 'both' })));
-        d.appendChild(H.row('Amount', H.denomAmount(r.amount, r.denom, reg)
-          + ' (' + H.fmtInt(r.amount) + ')'));
+        d.appendChild(H.row('Amount', qty + ' (' + H.fmtInt(r.amount_base) + ' base units)'));
+        if (r.precise === false) {
+          d.appendChild(H.stateBlock('info',
+            'The Guild ledger reports this row only in whole display units, so the '
+            + 'value is reconstructed and may be short by a fraction. Live GRASS '
+            + 'events carry the exact figure.'));
+        }
         d.appendChild(H.row('Address', r.address || '—'));
         if (r.counterparty) d.appendChild(H.row('Counterparty', who + ' · ' + r.counterparty));
         if (r.block_height) d.appendChild(H.row('Block', H.fmtInt(r.block_height)));
@@ -852,7 +865,8 @@
         title: 'Team total',
         subtitle: t.players + ' player(s) in the roster cache',
         chips: [
-          statTile('alpha', H.fmtNum((t.alpha_ualpha || 0) / 1e6), 'sui-icon-alpha-matter'),
+          statTile('alpha', H.denomAmount(t.alpha_ualpha || 0, 'ualpha', d.denoms),
+            'sui-icon-alpha-matter'),
           statTile('ore', H.fmtNum(t.ore || 0), 'sui-icon-alpha-ore'),
         ],
       }));
@@ -900,7 +914,8 @@
         if (nav.childNodes.length) hbody.appendChild(nav);
         hbody.appendChild(H.el('div', 'ops-muted',
           'Page ' + invState.page + ' of the Guild ledger — durable and chain-authoritative, '
-          + 'so it reaches back further than this app has been running.'));
+          + 'so it reaches back further than this app has been running. A ~ marks a row the '
+          + 'ledger reports only in whole display units.'));
       }
       body.appendChild(H.card('HISTORY', hbody));
     });
@@ -1264,9 +1279,17 @@
     }
     // Direct energy keys on non-grid events (rare but generic).
     if (ENERGY_ATTRS[key]) return H.fmtWatts(precise != null ? Number(precise) : Number(raw) * 1000);
-    // Alpha inventory amounts (subject structs.inventory.ualpha.…) are raw ualpha.
-    if (key === 'amount' && String(ev.subject || '').indexOf('structs.inventory.ualpha') === 0) {
-      return H.fmtAlpha(Number(raw));
+    // Inventory amounts. `amount` is the FLOORED DISPLAY value, not base units
+    // — a 98 800 000 uguild.0-5 transfer publishes as `amount: 98` — so the
+    // precise twin `amount_p` is what we scale, and `amount` is only ever a
+    // last resort (scaled back up, and therefore short by a fraction).
+    // Reading `amount` as base units, as this did, was wrong by 10^exponent
+    // AND labelled the result "μg".
+    if (key === 'amount' && det.denom) {
+      var reg = (grassState.lookups && grassState.lookups.denoms) || {};
+      var exp = (reg[det.denom] && reg[det.denom].exponent) || 0;
+      var base = precise != null ? Number(precise) : Number(raw) * Math.pow(10, exp);
+      return H.denomQty(base, det.denom, reg);
     }
     if (key === 'seized_ore' || key === 'ore') return H.fmtOre(Number(raw));
     // Ids → names from the enrichment lookups.
