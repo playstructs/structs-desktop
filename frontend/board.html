@@ -335,7 +335,7 @@
     #board-layout .sui-result-rows.sui-result-table.list-short {
       max-height: none; overflow: visible;
     }
-    /* Rows that open an editor on click get the same affordance as Fleet. */
+    /* Rows that open an editor on click get the same affordance as the Armada roster. */
     #board-layout .sui-result-row.is-clickable .row-chevron { opacity: .5; }
     #board-layout .sui-result-row.is-clickable:hover .row-chevron { opacity: 1; }
 
@@ -427,10 +427,10 @@
               </div>
             </div>
 
-            <!-- ═══ FLEET ═══ -->
+            <!-- ═══ ARMADA (our roster of players — NOT the game fleet entity) ═══ -->
             <div class="page" id="page-armada" hidden>
               <div class="sui-data-card sui-theme-player">
-                <div class="sui-data-card-header">FLEET ROSTER</div>
+                <div class="sui-data-card-header">ARMADA ROSTER</div>
                 <div class="sui-data-card-body sui-mod-spacing-xl" id="armada-body">
                   <div class="sui-message-inline-alert"><i class="sui-icon sui-icon-players sui-icon-sm"></i>
                     <span class="sui-message-inline-alert-text">Roster loading…</span></div>
@@ -482,6 +482,11 @@
                 <div class="sui-message-inline-alert"><i class="icon-edit"></i>
                   <span class="sui-message-inline-alert-text">Config loading…</span></div>
               </div>
+            </div>
+
+            <!-- ═══ INVENTORY — balances, ledger, transfers ═══ -->
+            <div class="page" id="page-inventory" hidden>
+              <div id="inventory-body"></div>
             </div>
 
             <!-- ═══ DIAGNOSTICS — is the machine itself healthy? ═══ -->

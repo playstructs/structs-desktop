@@ -43,6 +43,7 @@
     { key: 'industry', label: 'Industry', sections: [
       { key: 'power', label: 'Power', page: 'energy' },
       { key: 'work', label: 'Work', page: 'work' },
+      { key: 'inventory', label: 'Inventory', page: 'inventory' },
       { key: 'transactions', label: 'Transactions', page: 'tx' },
     ] },
     { key: 'war', label: 'War', sections: [
@@ -312,14 +313,21 @@
     if (opts.onClick) {
       r.classList.add('is-clickable');
       r.style.cursor = 'pointer';
-      r.addEventListener('click', opts.onClick);
+      r.addEventListener('click', function (ev) {
+        // A row can be both clickable (opens detail) and carry action
+        // controls. Without this, clicking Send also opened the detail
+        // drawer, which then rendered over the form you asked for.
+        if (opts.action && opts.action.contains(ev.target)) return;
+        if (opts.lead && opts.lead.contains(ev.target)) return;
+        opts.onClick(ev);
+      });
     }
     return r;
   }
   // ── Shared sorting ──────────────────────────────────────────────────────
   // sortControl builds a `<select>` of {key,label} + a caret asc/desc toggle,
   // mutating `state` ({key,dir}) and calling onChange. sortBy returns a sorted
-  // copy using per-key accessors. Used identically by Fleet / Energy / Work.
+  // copy using per-key accessors. Used identically by Armada / Energy / Work.
   function sortControl(keys, state, onChange) {
     var wrap = el('div', null);
     wrap.style.cssText = 'display:flex;gap:8px;align-items:center;';

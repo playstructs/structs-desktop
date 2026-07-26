@@ -1,6 +1,7 @@
-// Team Ops Command Center — page renderers: FLEET / ENERGY / WORK / CONFIG /
-// MAP. Core runtime (router, scheduler, helpers, feed, agent-UI, OPS) is in
-// board.js, which loads first and exposes window.Board.
+// Team Ops Command Center — page renderers: ARMADA / ENERGY / WORK /
+// INVENTORY / TX / GRASS / WAR / CONFIG / DIAGNOSTICS / MAP. Core runtime
+// (router, scheduler, helpers, feed, agent-UI, OPS) is in board.js, which
+// loads first, owns the AREAS manifest and exposes window.Board.
 //
 // Root-level file on purpose: scripts/sync.sh deletes frontend/js/ but
 // preserves root files.
@@ -13,11 +14,11 @@
   var alpha = function (ualpha) { return H.fmtNum(ualpha / 1e6); };
 
   // A compact stat tile: the value (optionally + a sui-icon) over a small
-  // uppercase caption. Used in the right-hand section of a armada row so each
+  // uppercase caption. Used in the right-hand section of an Armada row so each
   // number reads with its label instead of a bare icon.
   var statTile = H.statTile;
 
-  // ═══════════════════════════ FLEET ═══════════════════════════════════════
+  // ═══════════════════════════ ARMADA ══════════════════════════════════════
   var armada = {
     rows: [],
     refreshedAt: 0,
@@ -32,13 +33,13 @@
     return !!r.err || r.charge >= 24; // read failed, or idle 24+ blocks (~2min+)
   }
 
-  var FLEET_SORT_KEYS = [
+  var ARMADA_SORT_KEYS = [
     { key: 'index', label: 'index' }, { key: 'name', label: 'name' },
     { key: 'charge', label: 'charge' }, { key: 'alpha', label: 'alpha' },
     { key: 'ore', label: 'ore' }, { key: 'power', label: 'load' },
     { key: 'age', label: 'age' },
   ];
-  var FLEET_SORT_ACC = {
+  var ARMADA_SORT_ACC = {
     index: function (r) { return r.index == null ? -1 : r.index; },
     name: function (r) { return r.name.toLowerCase(); },
     charge: function (r) { return r.charge; },
@@ -50,7 +51,7 @@
 
   function selCount() { return Object.keys(armada.selection).length; }
 
-  function buildFleetDom() {
+  function buildArmadaDom() {
     if (armada.built) return;
     armada.built = true;
     var body = document.getElementById('armada-body');
@@ -182,12 +183,12 @@
         }
         return true;
       },
-      sortKeys: FLEET_SORT_KEYS,
-      sortAccessors: FLEET_SORT_ACC,
+      sortKeys: ARMADA_SORT_KEYS,
+      sortAccessors: ARMADA_SORT_ACC,
       sort: armada.sort,
       toolbarExtra: extras,
       empty: 'no players match these filters',
-      onCounts: function () { updateFleetChrome(); },
+      onCounts: function () { updateArmadaChrome(); },
     });
     body.appendChild(armada.lv.node);
   }
@@ -254,7 +255,7 @@
         lead = H.checkbox(!!armada.selection[r.player_id], null, function (on) {
           if (on) armada.selection[r.player_id] = true;
           else delete armada.selection[r.player_id];
-          updateFleetChrome();
+          updateArmadaChrome();
         });
       }
       // Title: name + role badge (the avatar frame already signals role, the
@@ -298,7 +299,7 @@
     })();
   }
 
-  function updateFleetChrome() {
+  function updateArmadaChrome() {
     var info = document.getElementById('armada-selinfo');
     if (info) {
       info.innerHTML = '';
@@ -441,7 +442,7 @@
       .then(function (snap) {
         armada.rows = snap.rows || [];
         armada.refreshedAt = snap.refreshed_at_ms || 0;
-        buildFleetDom();
+        buildArmadaDom();
         renderArmadaRows();
       }).catch(function () {});
   }
@@ -471,9 +472,6 @@
   });
 
   // ═══════════════════════════ ENERGY ═══════════════════════════════════════
-  // Compact kW: 2 decimals for small draws (5.67), whole numbers for big ones
-  // (1062) so a "load / capacity kW" chip never needs two lines.
-  function kwv(mw) { var v = mw / 1e6; return v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2); }
   var energyState = { data: null, sort: { key: 'margin', dir: 1 } };
   var ENERGY_KEYS = [{ key: 'margin', label: 'margin' }, { key: 'name', label: 'name' },
     { key: 'load', label: 'load' }, { key: 'capacity', label: 'capacity' }];
@@ -660,6 +658,283 @@
     });
   }
   Board.registerPage('work', { refresh: renderWork, cadenceMs: 5000, onEnter: renderWork });
+
+  // ═══════════════════════════ INVENTORY ════════════════════════════════════
+  // Balances, the durable ledger, and — for Alpha only — transfers.
+  //
+  // ORE GETS NO TRANSFER CONTROL. Not a disabled one: absent, with the reason
+  // stated. Ore is not a bank asset (it lives in the planet grid), MsgPlayerSend
+  // is a bank send, and the only ways ore moves are refining it into Alpha or
+  // losing it in battle. A greyed-out button here would read as "not right now"
+  // when the truth is "never".
+  var invState = {
+    player: 'primary', data: null, history: null, page: 1, loadingHistory: false,
+  };
+
+  function invDenoms() { return (invState.data && invState.data.denoms) || {}; }
+
+  // A balance row. `sendable` decides whether an action control exists at all.
+  function assetRow(a) {
+    var reg = invDenoms();
+    var act = null;
+    if (a.sendable) {
+      act = H.el('div', 'cfg-actions');
+      var b = massBtn('', 'icon-send-alpha', 'Send', 'sui-mod-secondary');
+      b.addEventListener('click', function () { openTransfer(a.denom); });
+      act.appendChild(b);
+    }
+    return H.resultRow({
+      icon: a.denom === 'ore' ? 'sui-icon-alpha-ore' : 'sui-icon-alpha-matter',
+      title: H.denomName(a.denom, reg),
+      // The chain name is always one line away, and the reason a read-only
+      // asset is read-only is stated rather than implied by a missing button.
+      subtitle: a.denom + (a.note ? ' · ' + a.note : (a.sendable ? '' : ' · not transferable')),
+      chips: [statTile('balance', H.denomAmount(a.amount, a.denom, reg))],
+      action: act,
+      onClick: function () {
+        var d = H.el('div');
+        d.appendChild(H.row('Asset', H.denomName(a.denom, reg, { style: 'both' })));
+        d.appendChild(H.row('Balance (display)', H.denomAmount(a.amount, a.denom, reg)));
+        d.appendChild(H.row('Balance (base units)', H.fmtInt(a.amount)));
+        d.appendChild(H.row('Transferable', a.sendable ? 'yes' : 'no'));
+        if (a.note) d.appendChild(H.stateBlock('info', a.note));
+        H.drawer('Asset — ' + H.denomName(a.denom, reg), d);
+      },
+    });
+  }
+
+  // ── Transfer ──────────────────────────────────────────────────────────────
+  // Dry-run first and always: the preview names the sender, resolves the
+  // destination against the roster, and flags an address we don't know BEFORE
+  // anything is signed. The backend re-runs these gates on execute.
+  function openTransfer(denom) {
+    var reg = invDenoms();
+    var form = H.el('div');
+    var to = '', amount = 0;
+
+    form.appendChild(H.field('From', H.el('span', 'ops-val',
+      (invState.data.player.name || '?') + ' · ' + invState.data.player.address)));
+    // Both names, always, on a form that moves money.
+    form.appendChild(H.field('Asset', H.el('span', 'ops-val',
+      H.denomName(denom, reg, { style: 'both' }))));
+    form.appendChild(H.field('To (structs1… address)',
+      H.textBox('', 'paste the destination address', function (v) { to = v.trim(); })));
+    form.appendChild(H.field('Amount (base units)',
+      H.textBox('', 'e.g. 1000000 = 1 ' + H.denomName(denom, reg, { tag: false }),
+        function (v) { amount = Number(v) || 0; })));
+
+    var out = H.el('div');
+    form.appendChild(out);
+
+    var check = massBtn('', 'icon-detected', 'Preview', 'sui-mod-secondary');
+    check.addEventListener('click', function () {
+      out.innerHTML = '';
+      out.appendChild(H.stateBlock('loading', 'checking…'));
+      Board.T.core.invoke('mcp_transfer_preview', {
+        from: invState.player, to: to, denom: denom, amount: amount,
+      }).then(function (p) {
+        out.innerHTML = '';
+        (p.problems || []).forEach(function (x) {
+          out.appendChild(H.stateBlock('error', x));
+        });
+        if (!p.ok) return;
+        // Who is actually on the other end. An address we can't name is
+        // called out as external rather than shown as a bare string.
+        out.appendChild(p.recipient
+          ? H.stateBlock('info', 'Recipient: ' + p.recipient)
+          : H.stateBlock('warning', 'Recipient: EXTERNAL address — not one of your players'));
+        out.appendChild(H.row('Sending', H.denomAmount(p.amount, denom, reg) + ' ('
+          + H.fmtInt(p.amount) + ' base units)'));
+        out.appendChild(H.row('Signed via', p.route));
+
+        var go = massBtn('', 'icon-send-alpha', 'Send', 'sui-mod-destructive');
+        go.addEventListener('click', function () {
+          var body = H.el('div');
+          body.appendChild(H.el('div', 'ops-muted',
+            'This is irreversible. The funds leave ' + p.from.name + ' immediately.'));
+          // The confirm never shows the cosmetic name alone.
+          body.appendChild(H.row('Asset', H.denomName(denom, reg, { style: 'both' })));
+          body.appendChild(H.row('Amount', H.denomAmount(p.amount, denom, reg)
+            + ' (' + H.fmtInt(p.amount) + ')'));
+          body.appendChild(H.row('From', p.from.name + ' · ' + p.from.address));
+          body.appendChild(H.row('To', (p.recipient || 'EXTERNAL') + ' · ' + p.to));
+          H.confirmModal('Send ' + H.denomName(denom, reg, { style: 'both' }) + '?',
+            body, 'Send', function () {
+              out.innerHTML = '';
+              out.appendChild(H.stateBlock('loading', 'signing…'));
+              Board.T.core.invoke('mcp_transfer_execute', {
+                from: invState.player, to: p.to, denom: denom, amount: p.amount,
+              }).then(function () {
+                out.innerHTML = '';
+                out.appendChild(H.stateBlock('info', 'sent'));
+                renderInventory();
+              }).catch(function (e) {
+                out.innerHTML = '';
+                out.appendChild(H.stateBlock('error', String(e)));
+              });
+            });
+        });
+        out.appendChild(go);
+      }).catch(function (e) {
+        out.innerHTML = '';
+        out.appendChild(H.stateBlock('error', String(e)));
+      });
+    });
+    form.appendChild(check);
+
+    H.drawer('Send ' + H.denomName(denom, reg, { style: 'both' }), form);
+  }
+
+  // ── Ledger ────────────────────────────────────────────────────────────────
+  var LEDGER_ICON = {
+    mined: 'icon-mine', refined: 'icon-refine', sent: 'icon-outgoing',
+    received: 'icon-incoming', seized: 'icon-raid', forfeited: 'icon-wreckage',
+    minted: 'icon-add', burned: 'icon-subtract', infused: 'icon-send-alpha',
+  };
+  function ledgerRow(r, addresses) {
+    var reg = invDenoms();
+    var credit = String(r.direction || '') === 'credit';
+    var who = r.counterparty_player_id || addresses[r.counterparty] || r.counterparty;
+    return H.resultRow({
+      icon: LEDGER_ICON[r.action] || (credit ? 'icon-incoming' : 'icon-outgoing'),
+      title: (credit ? '+' : '−') + ' ' + H.denomAmount(r.amount, r.denom, reg)
+        + ' ' + H.denomName(r.denom, reg),
+      subtitle: (r.action || '?') + (who ? ' · ' + who : '')
+        + (r.block_height ? ' · block ' + H.fmtInt(r.block_height) : ''),
+      chips: [statTile('when', r.time ? String(r.time).slice(0, 16) : '—', null, 'muted')],
+      onClick: function () {
+        var d = H.el('div');
+        d.appendChild(H.row('Action', r.action));
+        d.appendChild(H.row('Direction', r.direction));
+        // Row detail is one of the places the chain name must be visible.
+        d.appendChild(H.row('Asset', H.denomName(r.denom, reg, { style: 'both' })));
+        d.appendChild(H.row('Amount', H.denomAmount(r.amount, r.denom, reg)
+          + ' (' + H.fmtInt(r.amount) + ')'));
+        d.appendChild(H.row('Address', r.address || '—'));
+        if (r.counterparty) d.appendChild(H.row('Counterparty', who + ' · ' + r.counterparty));
+        if (r.block_height) d.appendChild(H.row('Block', H.fmtInt(r.block_height)));
+        if (r.time) d.appendChild(H.row('Time', r.time));
+        H.drawer('Ledger entry', d);
+      },
+    });
+  }
+
+  function loadHistory(page) {
+    invState.loadingHistory = true;
+    return Board.T.core.invoke('mcp_inventory_history', {
+      player: invState.player, page: page,
+    }).then(function (h) {
+      invState.history = h; invState.page = page;
+    }).catch(function (e) {
+      invState.history = { _err: String(e) };
+    }).then(function () { invState.loadingHistory = false; });
+  }
+
+  function renderInventoryBody() {
+    var d = invState.data;
+    return H.renderInto('inventory-body', function (body) {
+      if (!d) { body.appendChild(H.stateBlock('loading', 'loading…')); return; }
+
+      // Scope: primary by default, any player, or the team totals.
+      var opts = [{ value: 'primary', label: 'primary' }];
+      (armada.rows || []).forEach(function (r) {
+        if (r.index == null) return;
+        opts.push({ value: r.player_id, label: r.name + ' (' + r.player_id + ')' });
+      });
+      var head = H.el('div');
+      head.appendChild(H.field('Player', H.selectBox(invState.player, opts, function (v) {
+        invState.player = v; invState.page = 1; invState.history = null;
+        renderInventory();
+      })));
+      var t = d.team || {};
+      head.appendChild(H.resultRow({
+        icon: 'icon-group',
+        title: 'Team total',
+        subtitle: t.players + ' player(s) in the roster cache',
+        chips: [
+          statTile('alpha', H.fmtNum((t.alpha_ualpha || 0) / 1e6), 'sui-icon-alpha-matter'),
+          statTile('ore', H.fmtNum(t.ore || 0), 'sui-icon-alpha-ore'),
+        ],
+      }));
+      body.appendChild(H.card('SCOPE', head));
+
+      var abody = H.el('div');
+      if (d.bank_error) abody.appendChild(H.stateBlock('error', 'bank read failed: ' + d.bank_error));
+      var assets = d.assets || [];
+      if (!assets.length) abody.appendChild(H.stateBlock('empty', 'no assets held'));
+      assets.forEach(function (a) { abody.appendChild(assetRow(a)); });
+      abody.appendChild(H.el('div', 'ops-muted',
+        'Ore is shown for completeness only — it is not a bank asset and cannot be sent. '
+        + 'It leaves a player by being refined into Alpha, or by being seized in battle.'));
+      body.appendChild(H.card('BALANCES', abody));
+
+      var hbody = H.el('div');
+      var h = invState.history;
+      if (!h) {
+        hbody.appendChild(H.stateBlock('loading', 'loading ledger…'));
+      } else if (h._err) {
+        hbody.appendChild(H.stateBlock('error', h._err));
+      } else {
+        var rows = h.rows || [];
+        if (!rows.length) {
+          hbody.appendChild(H.stateBlock('empty', 'no ledger entries on this page'));
+        } else {
+          var addrs = h.addresses || {};
+          rows.forEach(function (r) { hbody.appendChild(ledgerRow(r, addrs)); });
+        }
+        var nav = H.el('div', 'cfg-actions');
+        if (invState.page > 1) {
+          var prev = massBtn('', 'icon-chevron-left', 'Newer', 'sui-mod-secondary');
+          prev.addEventListener('click', function () {
+            loadHistory(invState.page - 1).then(renderInventoryBody);
+          });
+          nav.appendChild(prev);
+        }
+        if (h.has_more) {
+          var next = massBtn('', 'icon-chevron-right', 'Older', 'sui-mod-secondary');
+          next.addEventListener('click', function () {
+            loadHistory(invState.page + 1).then(renderInventoryBody);
+          });
+          nav.appendChild(next);
+        }
+        if (nav.childNodes.length) hbody.appendChild(nav);
+        hbody.appendChild(H.el('div', 'ops-muted',
+          'Page ' + invState.page + ' of the Guild ledger — durable and chain-authoritative, '
+          + 'so it reaches back further than this app has been running.'));
+      }
+      body.appendChild(H.card('HISTORY', hbody));
+    });
+  }
+
+  function renderInventory() {
+    // The player selector needs the roster, and Inventory may well be the
+    // first page opened this session — take the cache without waiting on a
+    // sweep rather than showing a one-entry dropdown.
+    var roster = armada.rows.length
+      ? Promise.resolve()
+      : Board.T.core.invoke('mcp_roster', {}).then(function (snap) {
+        armada.rows = (snap && snap.rows) || [];
+      }).catch(function () {});
+    return roster
+      .then(function () { return Board.T.core.invoke('mcp_inventory', { player: invState.player }); })
+      .then(function (d) {
+        invState.data = d;
+        return renderInventoryBody();
+      })
+      .then(function () {
+        if (!invState.history && !invState.loadingHistory) {
+          return loadHistory(invState.page).then(renderInventoryBody);
+        }
+      })
+      .catch(function (e) {
+        return H.renderInto('inventory-body', function (body) {
+          body.appendChild(H.stateBlock('error', 'inventory unavailable: ' + e));
+        });
+      });
+  }
+  Board.registerPage('inventory', {
+    onEnter: renderInventory, refresh: renderInventory, cadenceMs: 30000,
+  });
 
   // ═══════════════════════════ DIAGNOSTICS ══════════════════════════════════
   // Is the machine itself healthy? Command carries the one-line strip; this is
@@ -1284,7 +1559,7 @@
     if (!targets.length) {
       tbody.appendChild(H.alertLine(
         raid.enabled
-          ? 'No candidates scored yet — the loop sweeps a bounded batch each scan. Use Scan now → raid on the Fleet page to force one.'
+          ? 'No candidates scored yet — the loop sweeps a bounded batch each scan. Use Scan now → raid on the Armada page to force one.'
           : 'Raid targeting is off. Enable it below to start scoring targets (it starts in advise mode and signs nothing).',
         'icon-info'));
     } else {
