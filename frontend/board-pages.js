@@ -1314,6 +1314,14 @@
       return H.denomQty(base, det.denom, reg);
     }
     if (key === 'seized_ore' || key === 'ore') return H.fmtOre(Number(raw));
+    // Any bech32 value, whatever key carries it (address, counterparty,
+    // creator, owner…) — resolved to a name when we know one, shortened when
+    // we don't.
+    if (typeof raw === 'string' && ADDR_RE.test(raw)) {
+      var known = grassState.lookups && grassState.lookups.addresses
+        && grassState.lookups.addresses[raw];
+      return known ? known : shortAddr(raw);
+    }
     // Ids → names from the enrichment lookups.
     if (key === 'player_id') return lookupName('players', String(raw));
     if (key === 'guild_id') return lookupName('guilds', String(raw));
@@ -1327,12 +1335,20 @@
     return String(raw);
   }
 
-  function grassChipNode(label, text) {
+  function grassChipNode(label, text, title) {
     var c = H.el('span', 'grass-chip');
     c.appendChild(H.el('b', null, label + ': '));
     c.appendChild(document.createTextNode(text));
+    if (title) c.title = title;
     return c;
   }
+
+  // A bech32 address is 44 characters and was the widest thing on the page by
+  // a factor of three — one `counterparty` chip is 437px at every window size
+  // and wrapped to two lines. Head and tail are what anyone actually compares;
+  // the full value stays on the chip's title.
+  var ADDR_RE = /^structs1[0-9a-z]{20,}$/;
+  function shortAddr(a) { return a.slice(0, 12) + '…' + a.slice(-6); }
 
   // The one algorithm: time · colored category badge · compact subject ·
   // detail flattened to k:v chips, with `x`+`x_old` pairs folded to old→new
@@ -1423,7 +1439,8 @@
         chips.appendChild(grassChipNode(k, (oldText == null ? String(det[k + '_old']) : oldText) + ' → ' + text));
         return;
       }
-      chips.appendChild(grassChipNode(k, text));
+      chips.appendChild(grassChipNode(k, text,
+        (typeof v === 'string' && ADDR_RE.test(v)) ? v : null));
     });
     return li;
   }

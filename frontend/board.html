@@ -74,10 +74,12 @@
     #feed-alerts li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; }
     /* GRASS stream — one generic row style for every message category. */
     #grass-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
-    /* The category select would otherwise take the full row and push the
-       pause/count/pop-out controls onto a line of their own. */
-    #grass-toolbar .sui-input-text { min-width: 110px; max-width: 210px; flex: 0 1 auto; }
-    #grass-toolbar #grass-count { margin-left: auto; }
+    /* The controls need 652px laid out at their natural size, so in the 560px
+       pop-out they wrapped onto two rows. Let the two text fields absorb the
+       difference instead — they are the only elastic things here. */
+    #grass-toolbar .sui-input-text { flex: 1 1 120px; min-width: 90px; max-width: 210px; }
+    #grass-toolbar #grass-count { margin-left: auto; flex: none; }
+    #grass-toolbar > a { flex: none; }
     #grass-list { list-style: none; margin: 4px 0 0; padding: 0; width: 100%;
                   max-height: calc(100vh - 190px); overflow-y: auto;
                   font-family: monospace; font-size: 12px; }
