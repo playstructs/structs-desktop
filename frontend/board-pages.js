@@ -688,7 +688,8 @@
       title: H.denomName(a.denom, reg),
       // The chain name is always one line away, and the reason a read-only
       // asset is read-only is stated rather than implied by a missing button.
-      subtitle: a.denom + (a.note ? ' · ' + a.note : (a.sendable ? '' : ' · not transferable')),
+      // Short here; the card footnote and the drawer carry the full reason.
+      subtitle: a.denom + (a.sendable ? '' : ' · not transferable'),
       chips: [statTile('balance', H.denomQty(a.amount, a.denom, reg))],
       action: act,
       onClick: function () {
@@ -791,11 +792,19 @@
     received: 'icon-incoming', seized: 'icon-raid', forfeited: 'icon-wreckage',
     minted: 'icon-add', burned: 'icon-subtract', infused: 'icon-send-alpha',
   };
+  // Postgres emits `2026-07-26 02:01:38.870569+00` — a space separator and a
+  // TWO-digit UTC offset. ISO 8601 requires `T` and `+00:00`, so a bare
+  // Date.parse returns NaN and every row's timestamp rendered as "—".
+  function parseLedgerTime(t) {
+    if (!t) return NaN;
+    return Date.parse(String(t).trim().replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'));
+  }
+
   function ledgerRow(r, addresses) {
     var reg = invDenoms();
     var credit = String(r.direction || '') === 'credit';
     var who = r.counterparty_player_id || addresses[r.counterparty] || r.counterparty;
-    var when = r.time ? Date.parse(String(r.time).replace(' ', 'T')) : NaN;
+    var when = parseLedgerTime(r.time);
     // `amount_base` is the backend's single convention (base units); `precise`
     // is false when it had to be reconstructed from the Guild ledger's floored
     // display value, in which case we say so with a ~ instead of implying an
@@ -1270,7 +1279,11 @@
   }
   var GRASS_SUPPRESS = { seq: 1, updated_at: 1, time: 1 };
   var ENERGY_ATTRS = { capacity: 1, load: 1, structsLoad: 1, power: 1, connectionCapacity: 1 };
-  var HEIGHT_KEY = /^(height|block|block_height|last_action)$|^block_|_block$/;
+  // Values that must NEVER be abbreviated: a block height rendered as "1.8M"
+  // makes an old→new transition read as "1.8M → 1.8M", and an abbreviated
+  // record id ("33.3k") is not an id at all. Covers snake_case keys and the
+  // camelCase grid attribute names (checkpointBlock, lastAction).
+  var HEIGHT_KEY = /^(height|block|block_height|last_action|lastAction|id|nonce)$|^block_|_block$|Block$|Nonce$|Pointer(Start|End)$/;
 
   function lookupName(kind, id) {
     var m = grassState.lookups && grassState.lookups[kind];
@@ -1297,7 +1310,7 @@
       if (ENERGY_ATTRS[attr]) return H.fmtWatts(precise != null ? Number(precise) : Number(raw) * 1000);
       if (attr === 'fuel') return H.fmtAlpha(precise != null ? Number(precise) : Number(raw) * 1e6);
       if (attr === 'ore') return H.fmtOre(precise != null ? Number(precise) : Number(raw));
-      if (HEIGHT_KEY.test(attr) || attr === 'lastAction') return H.fmtInt(raw);
+      if (HEIGHT_KEY.test(attr)) return H.fmtInt(raw);
     }
     // Direct energy keys on non-grid events (rare but generic).
     if (ENERGY_ATTRS[key]) return H.fmtWatts(precise != null ? Number(precise) : Number(raw) * 1000);
