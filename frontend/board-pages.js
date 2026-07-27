@@ -1799,7 +1799,7 @@
       tbody.appendChild(H.alertLine(
         raid.enabled
           ? 'No candidates scored yet — the loop sweeps a bounded batch each scan. Use Scan now → raid on the Armada page to force one.'
-          : 'Raid targeting is off. Enable it below to start scoring targets (it starts in advise mode and signs nothing).',
+          : 'Raid targeting is off. Enable it on the Doctrine tab to start scoring targets (it starts in advise mode and signs nothing).',
         'icon-info'));
     } else {
       var tbar = H.el('div'); tbar.style.cssText = 'margin-bottom:6px;';
@@ -2197,6 +2197,16 @@
       blurb: 'Keeps a reserve of Alpha and infuses the rest into the guild reactor.',
       chips: [{ key: 'keep_grams', label: 'reserve', icon: 'sui-icon-alpha-matter' }],
     },
+    sweep: {
+      label: 'auto_sweep', icon: 'icon-transfers', short: 'move Alpha to the primary as it accumulates',
+      blurb: 'Sends a player\u2019s Alpha to the primary once it crosses a threshold, a few players '
+        + 'per scan \u2014 the same eligibility as the Sweep All button, spread out so the whole '
+        + 'roster is never queued at once.',
+      chips: [
+        { key: 'min_send_alpha', label: 'at', icon: 'sui-icon-alpha-matter' },
+        { key: 'max_sends_per_scan', label: 'per scan' },
+      ],
+    },
     response: {
       label: 'auto_response', icon: 'icon-counter', short: 'answer a raid inside its 2-minute window',
       blurb: 'Answers a raid alarm inside the two-minute window — identifies the attacker and fires back.',
@@ -2214,11 +2224,18 @@
   var FIELD_META = {
     autonomy: { label: 'autonomy', options: ['advise', 'auto'], hint: 'advise proposes; auto signs' },
     mode: { label: 'response mode', options: ['harden', 'counter', 'decapitate'] },
-    posture: { label: 'posture', options: ['cautious', 'opportunist', 'aggressive'], hint: 'resets the gates below' },
+    posture: { label: 'posture', options: ['cautious', 'opportunist', 'aggressive'], hint: 'rewrites every gate in this card' },
     interval_secs: { label: 'scan every (s)', min: 5 },
     difficulty_threshold: { label: 'harvest at difficulty ≤', min: 1, max: 64 },
     complete_difficulty: { label: 'complete at difficulty ≤', min: 1, max: 64 },
     keep_grams: { label: 'Alpha reserve (g)', min: 0 },
+    min_send_alpha: { label: 'sweep once a player holds (Alpha)', min: 0, step: 1,
+      hint: 'measured AFTER the reserve below is set aside' },
+    keep_reserve_alpha: { label: 'leave behind (Alpha)', min: 0, step: 1 },
+    min_charge: { label: 'only if charge is at least', min: 0,
+      hint: 'sending resets charge to 0, so a low bar steals charge from mining' },
+    max_sends_per_scan: { label: 'max players per scan', min: 1,
+      hint: 'the cap that stops this becoming the burst it replaces' },
     min_ore: { label: 'min ore (the whole prize)', min: 0 },
     min_score: { label: 'min score (0-100)', min: 0, max: 100 },
     max_raid_minutes: { label: 'max raid proof (min)', min: 1 },
@@ -2545,7 +2562,12 @@
   // the selector permanently holding its single placeholder and the page blank
   // forever — nothing retried it. Now every visit reconciles, and a failure is
   // visible instead of silent.
-  var mapState = { wired: false, loaded: false, current: '' };
+  // `mcp_render_map` round-trips to the GAME's own canvas renderer to draw a
+  // 2304x3328 planet image — measured at ~11s, and the backend allows up to 90.
+  // That is inherent, so the page is built around the wait rather than
+  // pretending it isn't there: say how long it takes, keep the last image for
+  // each player, and show it immediately while a fresh one renders behind it.
+  var mapState = { wired: false, loaded: false, current: '', cache: {} };
 
   function mapBox() { return document.getElementById('vp-map'); }
 
@@ -2555,19 +2577,49 @@
     if (!playerId) { box.innerHTML = ''; return; }
     mapState.current = playerId;
     box.innerHTML = '';
-    box.appendChild(H.stateBlock('loading', 'rendering map…'));
+
+    // Stale-while-revalidate: a previously rendered map for this player appears
+    // instantly. Without it, switching players blanked the panel for ~11s.
+    var cached = mapState.cache[playerId];
+    if (cached) {
+      var old = new Image();
+      old.alt = 'planet map for ' + playerId + ' (refreshing)';
+      old.src = cached;
+      box.appendChild(old);
+    }
+    var note = H.stateBlock('loading',
+      cached ? 'refreshing map… (about 10 seconds)' : 'rendering map… (about 10 seconds)');
+    box.appendChild(note);
+
     Board.T.core.invoke('mcp_render_map', { player: playerId }).then(function (durl) {
+      // Cache on ARRIVAL, not on decode: we have the bytes either way, and
+      // hanging the cache off `img.onload` meant a slow or failed decode threw
+      // away a perfectly good render.
+      mapState.cache[playerId] = durl;
       if (mapState.current !== playerId) return;   // a newer selection won
       var img = new Image();
       img.alt = 'planet map for ' + playerId;
-      img.onload = function () { box.innerHTML = ''; box.appendChild(img); };
+      img.onload = function () {
+        if (mapState.current !== playerId) return;
+        box.innerHTML = '';
+        box.appendChild(img);
+      };
       img.onerror = function () {
+        if (mapState.current !== playerId) return;
         box.innerHTML = '';
         box.appendChild(H.stateBlock('error', 'map image failed to load'));
       };
       img.src = durl;
     }).catch(function (err) {
+      if (mapState.current !== playerId) return;
       box.innerHTML = '';
+      // Keep whatever we had rather than throwing it away on a failed refresh.
+      if (mapState.cache[playerId]) {
+        var keep = new Image();
+        keep.alt = 'planet map for ' + playerId + ' (stale)';
+        keep.src = mapState.cache[playerId];
+        box.appendChild(keep);
+      }
       box.appendChild(H.stateBlock('error', 'render failed: ' + err));
     });
   }

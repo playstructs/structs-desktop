@@ -209,6 +209,7 @@ fn loops_json() -> Value {
         "build": auto_build::get(),
         "defend": auto_defend::get(),
         "infuse": auto_infuse::get(),
+        "sweep": crate::mcp::auto_sweep::get(),
         "response": crate::mcp::auto_response::get(),
         "raid": crate::mcp::auto_raid::get(),
     })
@@ -750,6 +751,18 @@ pub async fn mcp_config_set_impl(
                         serde_json::from_value(cfg).map_err(|e| e.to_string())?;
                     let s = format!("auto_infuse → {}", if c.enabled { "ON" } else { "off" });
                     auto_infuse::set(c);
+                    s
+                }
+                "sweep" => {
+                    let c: crate::mcp::auto_sweep::AutoSweepConfig =
+                        serde_json::from_value(cfg).map_err(|e| e.to_string())?;
+                    let s = format!(
+                        "auto_sweep → {} (at {} Alpha, {} per scan)",
+                        if c.enabled { "ON" } else { "off" },
+                        c.min_send_alpha,
+                        c.max_sends_per_scan
+                    );
+                    crate::mcp::auto_sweep::set(c);
                     s
                 }
                 "response" => {

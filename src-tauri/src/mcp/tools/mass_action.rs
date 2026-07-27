@@ -90,11 +90,11 @@ pub async fn mcp_mass_action_impl(
 // ── Sweep Alpha ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
-struct SweepArgs {
-    keep_reserve_alpha: f64,
-    min_send_alpha: f64,
-    min_charge: u64,
-    include_bait: bool,
+pub struct SweepArgs {
+    pub keep_reserve_alpha: f64,
+    pub min_send_alpha: f64,
+    pub min_charge: u64,
+    pub include_bait: bool,
 }
 
 fn sweep_args(v: &Value) -> SweepArgs {
@@ -107,7 +107,9 @@ fn sweep_args(v: &Value) -> SweepArgs {
 }
 
 /// Pure plan builder over roster rows — unit-tested. Returns (entries, skipped).
-fn build_sweep_plan(
+/// Shared with `auto_sweep`: the loop and the manual button must agree exactly
+/// on who is eligible and how much leaves each player.
+pub(crate) fn build_sweep_plan(
     rows: &[roster_cache::RosterRow],
     selection: Option<&Vec<String>>,
     a: SweepArgs,
@@ -152,7 +154,7 @@ fn build_sweep_plan(
     (entries, skipped)
 }
 
-fn primary_send_target() -> Result<(String, String), String> {
+pub(crate) fn primary_send_target() -> Result<(String, String), String> {
     let gs = crate::game_state::GAME_STATE
         .read()
         .unwrap_or_else(|e| e.into_inner());

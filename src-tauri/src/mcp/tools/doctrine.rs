@@ -93,6 +93,13 @@ fn preset_bundle(name: &str) -> Option<(&'static str, &'static str, bool, Option
             h.refine = true;
             crate::mcp::auto_harvest::set(h);
             applied.push("auto_harvest loop → ON (mine + refine when difficulty is ripe)".into());
+            // The flywheel's missing link: infusing only ever had the
+            // primary's own Alpha to work with unless the workers' Alpha gets
+            // to the primary first.
+            let mut sw = crate::mcp::auto_sweep::get();
+            sw.enabled = true;
+            crate::mcp::auto_sweep::set(sw);
+            applied.push("auto_sweep loop → ON (worker alpha to the primary as it accumulates)".into());
             let mut i = crate::mcp::auto_infuse::get();
             i.enabled = true;
             crate::mcp::auto_infuse::set(i);
@@ -126,6 +133,10 @@ fn preset_bundle(name: &str) -> Option<(&'static str, &'static str, bool, Option
                 }
                 applied.push(format!("{label} loop → ON"));
             }
+            let mut sw = crate::mcp::auto_sweep::get();
+            sw.enabled = true;
+            crate::mcp::auto_sweep::set(sw);
+            applied.push("auto_sweep loop → ON (worker alpha to the primary as it accumulates)".into());
             if let Ok(mut e) = POLICY_ENGINE.write() {
                 e.set_policy("auto_refine", true, None);
                 e.set_policy("combat_alert", true, None);
