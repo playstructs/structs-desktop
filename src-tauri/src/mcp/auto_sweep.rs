@@ -91,6 +91,19 @@ pub fn swept_total_alpha() -> f64 {
     *SWEPT_TOTAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Resolve an HD index to the address we hold the key for. `None` means we do
+/// not control that player, which must never result in a transfer.
+fn registry_address(index: u32) -> Option<String> {
+    crate::mcp::virtual_players::REGISTRY
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .players
+        .iter()
+        .find(|p| p.index == index)
+        .map(|p| p.address.clone())
+        .filter(|a| !a.is_empty())
+}
+
 impl AutoSweepConfig {
     fn sweep_args(&self) -> SweepArgs {
         SweepArgs {
@@ -202,15 +215,32 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
             let to = to_c.clone();
             let (ok, failed, swept) = (ok_c.clone(), failed_c.clone(), swept_c.clone());
             async move {
+                // The source address MUST come from the local vplayer registry —
+                // that is the structural guarantee that this loop can only ever
+                // move OUR OWN players' Alpha: a player we hold no HD key for
+                // has no entry here and cannot be signed for.
+                //
+                // `unwrap_or_default()` used to turn a missing entry into an
+                // EMPTY fromAddress and still attempt the send. The chain would
+                // reject it, but a money transaction should never be built
+                // malformed in the first place — refuse and count it.
+                let from = match registry_address(e.index) {
+                    Some(a) => a,
+                    None => {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        tlog(
+                            "auto_sweep",
+                            Sev::Warn,
+                            format!(
+                                "{} (hd index {}) is not in the vplayer registry — refusing to send",
+                                e.player_id, e.index
+                            ),
+                        );
+                        return;
+                    }
+                };
                 let payload = json!({
-                    "fromAddress": crate::mcp::virtual_players::REGISTRY
-                        .read()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .players
-                        .iter()
-                        .find(|p| p.index == e.index)
-                        .map(|p| p.address.clone())
-                        .unwrap_or_default(),
+                    "fromAddress": from,
                     "toAddress": to,
                     "amount": [{ "denom": "ualpha", "amount": e.amount_ualpha }],
                 });
@@ -387,6 +417,31 @@ mod tests {
         plan.truncate(cfg.max_sends_per_scan);
         let ids: Vec<&str> = plan.iter().map(|e| e.player_id.as_str()).collect();
         assert_eq!(ids, vec!["1-2", "1-3"]);
+    }
+
+    /// The safety property the whole loop rests on: a source must be a player
+    /// we hold an HD key for. Anything else — someone else's account, a stale
+    /// roster row — resolves to None and must never produce a transfer.
+    #[test]
+    fn only_players_we_hold_keys_for_can_be_a_source() {
+        // Index 999_999 is not in any registry this test could load.
+        assert!(registry_address(999_999).is_none());
+    }
+
+    /// The roster is the union of our own vplayers plus the primary, and the
+    /// primary is the only row without an index — so "everyone" in a sweep
+    /// plan is, by construction, our own workers.
+    #[test]
+    fn a_plan_only_ever_contains_indexed_team_players() {
+        let cfg = AutoSweepConfig { min_send_alpha: 1.0, ..Default::default() };
+        let rows = vec![
+            row("1-194", None, "primary", 500.0, 99),      // primary: no index
+            row("1-271", Some(1), "productive", 50.0, 20), // ours
+            row("1-999", Some(2), "productive", 50.0, 20), // ours
+        ];
+        let (plan, _) = crate::mcp::tools::mass_action::build_sweep_plan(&rows, None, cfg.sweep_args());
+        assert!(plan.iter().all(|e| e.player_id != "1-194"), "primary must never be a source");
+        assert_eq!(plan.len(), 2);
     }
 
     /// Bait players are excluded unless asked for.

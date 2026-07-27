@@ -501,13 +501,58 @@ async fn scan(
     }
 
     // ── Phase C: dispatch the best GO, if we have room and a raider. ──
+    // Every early return below is a DIFFERENT reason the loop did nothing, and
+    // all of them used to leave the loop reporting "running normally" — 13 runs
+    // that scored 25 candidates and dispatched nothing looked identical to a
+    // healthy idle loop. Each one now says why (see telemetry::LoopRun::blocked).
+    let scanned = board.len();
     let best = board
-        .into_iter()
-        .find(|c| c.blocked_by.is_none() && c.score >= cfg.min_score);
-    let Some(target) = best else { return };
+        .iter()
+        .find(|c| c.blocked_by.is_none() && c.score >= cfg.min_score)
+        .cloned();
+    let Some(target) = best else {
+        if scanned == 0 {
+            run.blocked("no candidate planets in range this scan");
+        } else {
+            // Name the gate that actually stopped the most targets — "25
+            // blocked" is not actionable, "all 25 hold less than min_ore 15" is.
+            let mut tally: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            let mut passed_gates_but_low_score = 0usize;
+            for c in &board {
+                match c.blocked_by.as_deref() {
+                    Some(why) => {
+                        // Collapse "ore 0 < min_ore 15" to its gate name.
+                        let key = why.split_whitespace().next().unwrap_or(why);
+                        *tally.entry(key).or_default() += 1;
+                    }
+                    None => passed_gates_but_low_score += 1,
+                }
+            }
+            let top = tally.iter().max_by_key(|(_, n)| **n).map(|(k, n)| (*k, *n));
+            match top {
+                Some((gate_name, n)) => run.blocked(format!(
+                    "{scanned} scored, none dispatchable — {n} stopped at '{gate_name}'{}",
+                    if passed_gates_but_low_score > 0 {
+                        format!(", {passed_gates_but_low_score} passed the gates but scored under min_score {}", cfg.min_score)
+                    } else {
+                        String::new()
+                    }
+                )),
+                None => run.blocked(format!(
+                    "{scanned} scored and all passed the gates, but none reached min_score {}",
+                    cfg.min_score
+                )),
+            }
+        }
+        return;
+    };
 
     let in_flight = ACTIVE.lock().map(|a| a.len()).unwrap_or(0);
     if in_flight >= cfg.max_concurrent_raids {
+        run.blocked(format!(
+            "{in_flight} raid(s) already in flight (max_concurrent_raids {})",
+            cfg.max_concurrent_raids
+        ));
         return;
     }
 
@@ -533,10 +578,15 @@ async fn scan(
     }
 
     if !in_raid_window(cfg, current_hour_utc()) {
+        run.blocked(format!(
+            "outside the configured raid window (UTC hour {} not in raid_hours_utc)",
+            current_hour_utc()
+        ));
         return;
     }
     match dispatch(app, &client, cfg, &target).await {
         Ok(msg) => {
+            run.acted();   // clears any blocked reason from an earlier scan
             run.actions.fetch_add(1, Ordering::Relaxed);
             crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Important, "auto_raid", msg);
         }

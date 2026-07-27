@@ -797,7 +797,17 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
         solves.sort_by(|a, b| a.1.total_cmp(&b.1));
         let n = solves.len();
         let median = solves[n / 2].1;
-        let p90 = solves[(n * 9 / 10).min(n - 1)].1;
+        // A percentile needs a sample. `(n*9/10).min(n-1)` lands on the LAST
+        // element for every n <= 10, so "p90" was literally the maximum — one
+        // CPU solve that spanned a machine sleep reported a p90 of 7.9 hours
+        // from 8 samples and made the engine look broken. Below the threshold
+        // we report nothing rather than something false.
+        const MIN_P90_SAMPLES: usize = 10;
+        let p90 = if n > MIN_P90_SAMPLES {
+            Some(solves[(n * 9 / 10).min(n - 1)].1)
+        } else {
+            None
+        };
         let mut diffs: Vec<i64> = solves.iter().map(|s| s.0).collect();
         diffs.sort_unstable();
         // Sustained hashrate estimate from iterations/duration where available.
@@ -814,8 +824,17 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
             "solves": n,
             "median_duration_ms": median,
             "p90_duration_ms": p90,
+            // So a caller can say "n too small" rather than guessing why p90 is null.
+            "p90_min_samples": MIN_P90_SAMPLES,
             "median_difficulty": diffs[n / 2],
-            "est_hashrate_hps": if rate_den > 0.0 { Some(rate_num / rate_den) } else { None },
+            // Same exposure: this is sum(iterations)/sum(seconds), so a single
+            // multi-hour outlier drags it to a nonsense figure (80 h/s for a
+            // CPU). Suppress it on a sample too small to absorb one.
+            "est_hashrate_hps": if rate_den > 0.0 && n > MIN_P90_SAMPLES {
+                Some(rate_num / rate_den)
+            } else {
+                None
+            },
         }));
     }
     Ok(json!(out))
@@ -917,5 +936,39 @@ mod tests {
         dedup.sort_unstable();
         dedup.dedup();
         assert_eq!(dedup.len(), ids.len());
+    }
+}
+
+#[cfg(test)]
+mod pow_percentile_tests {
+    /// Mirrors the index maths in `pow_stats`. For every n <= 10 the "p90"
+    /// index is the LAST element — i.e. the maximum, not a percentile. This is
+    /// why a single CPU solve that spanned a machine sleep was reported as a
+    /// p90 of 7.9 hours from an 8-solve sample.
+    fn p90_index(n: usize) -> usize {
+        (n * 9 / 10).min(n - 1)
+    }
+
+    #[test]
+    fn p90_is_just_the_maximum_on_small_samples() {
+        for n in 1..=10 {
+            assert_eq!(p90_index(n), n - 1, "n={n} should collapse onto the max");
+        }
+    }
+
+    #[test]
+    fn p90_becomes_meaningful_above_the_threshold() {
+        assert!(p90_index(11) < 10, "n=11 must not be the max");
+        assert!(p90_index(100) < 99);
+    }
+
+    /// The guard we ship: report nothing below the threshold.
+    #[test]
+    fn threshold_excludes_exactly_the_degenerate_range() {
+        const MIN: usize = 10;
+        for n in 1..=MIN {
+            assert_eq!(p90_index(n), n - 1, "n={n} is degenerate and must be suppressed");
+        }
+        assert!(p90_index(MIN + 1) < MIN, "the first reported sample size is honest");
     }
 }

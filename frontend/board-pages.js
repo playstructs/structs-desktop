@@ -633,11 +633,19 @@
           title: String(e2.engine || '?').toUpperCase(),
           subtitle: (e2.solves || 0) + ' solves in the last 24h',
           chips: [
+            statTile('solves', H.fmtInt(e2.solves)),
             statTile('median', H.duration((e2.median_duration_ms || 0) / 1000)),
-            statTile('p90', H.duration((e2.p90_duration_ms || 0) / 1000)),
+            // null = the sample is too small for a percentile to mean
+            // anything (see telemetry::pow_stats). Say that, don't print a
+            // number that is really just the slowest solve.
+            statTile('p90', e2.p90_duration_ms == null
+              ? 'n<' + (e2.p90_min_samples || 10)
+              : H.duration(e2.p90_duration_ms / 1000),
+              null, e2.p90_duration_ms == null ? 'muted' : ''),
             statTile('median diff', e2.median_difficulty == null ? '—' : e2.median_difficulty),
             statTile('hashrate', e2.est_hashrate_hps == null
-              ? '—' : H.fmtNum(e2.est_hashrate_hps) + 'H/s'),
+              ? 'n<' + (e2.p90_min_samples || 10) : H.fmtNum(e2.est_hashrate_hps) + 'H/s',
+              null, e2.est_hashrate_hps == null ? 'muted' : ''),
           ],
         }));
       });
@@ -675,6 +683,10 @@
   };
 
   function invDenoms() { return (invState.data && invState.data.denoms) || {}; }
+  function balanceOf(denom) {
+    var a = ((invState.data && invState.data.assets) || []).find(function (x) { return x.denom === denom; });
+    return a ? a.amount : 0;
+  }
 
   // A balance row. `sendable` decides whether an action control exists at all.
   function assetRow(a) {
@@ -711,21 +723,64 @@
   // Dry-run first and always: the preview names the sender, resolves the
   // destination against the roster, and flags an address we don't know BEFORE
   // anything is signed. The backend re-runs these gates on execute.
+  // A read-only fact row: label above value, value free to wrap.
+  function formFact(label, value, title) {
+    var d = H.el('div', 'form-fact');
+    d.appendChild(H.el('div', 'form-fact-label', label));
+    var v = H.el('div', 'form-fact-value', value);
+    if (title) v.title = title;
+    d.appendChild(v);
+    return d;
+  }
+
+  function shortAddress(a) {
+    a = String(a || '');
+    return a.length > 20 ? a.slice(0, 12) + '…' + a.slice(-6) : a;
+  }
+
   function openTransfer(denom) {
     var reg = invDenoms();
+    var info = reg[denom] || {};
+    var exp = info.exponent || 0;
+    var scale = Math.pow(10, exp);
+    var unit = H.denomName(denom, reg, { tag: false });
     var form = H.el('div');
-    var to = '', amount = 0;
+    var to = '', amountDisplay = 0;
 
-    form.appendChild(H.field('From', H.el('span', 'ops-val',
-      (invState.data.player.name || '?') + ' · ' + invState.data.player.address)));
-    // Both names, always, on a form that moves money.
-    form.appendChild(H.field('Asset', H.el('span', 'ops-val',
-      H.denomName(denom, reg, { style: 'both' }))));
-    form.appendChild(H.field('To (structs1… address)',
-      H.textBox('', 'paste the destination address', function (v) { to = v.trim(); })));
-    form.appendChild(H.field('Amount (base units)',
-      H.textBox('', 'e.g. 1000000 = 1 ' + H.denomName(denom, reg, { tag: false }),
-        function (v) { amount = Number(v) || 0; })));
+    // FROM and ASSET are facts, not fields — they were rendered as labelled
+    // inputs, so a 44-character address sat in a 332px two-column row and
+    // collided with its own label.
+    var me = invState.data.player;
+    form.appendChild(formFact('From',
+      (me.name || '?') + ' · ' + shortAddress(me.address), me.address));
+    form.appendChild(formFact('Asset', H.denomName(denom, reg, { style: 'both' })));
+    form.appendChild(formFact('Available',
+      H.denomQty(balanceOf(denom), denom, reg)));
+
+    form.appendChild(H.field('To', H.textBox('', 'structs1…', function (v) {
+      to = v.trim();
+      renderEcho();
+    })));
+
+    // Amount is entered in DISPLAY units. It used to demand base units with a
+    // hint reading "e.g. 1000000 = 1 Alpha" — asking someone to do a 10^6
+    // conversion in their head on a form that moves money is how you get a
+    // transfer that is a million times too big.
+    form.appendChild(H.field('Amount (' + unit + ')',
+      H.textBox('', '0', function (v) {
+        amountDisplay = Number(v) || 0;
+        renderEcho();
+      })));
+
+    // Live echo of exactly what will be sent, in both units.
+    var echo = H.el('div', 'form-note');
+    form.appendChild(echo);
+    function baseUnits() { return Math.round(amountDisplay * scale); }
+    function renderEcho() {
+      if (!amountDisplay) { echo.textContent = ''; return; }
+      echo.textContent = 'Sends ' + H.fmtNum(amountDisplay) + ' ' + unit
+        + ' (' + H.fmtInt(baseUnits()) + ' ' + denom + ')';
+    }
 
     var out = H.el('div');
     form.appendChild(out);
@@ -735,7 +790,7 @@
       out.innerHTML = '';
       out.appendChild(H.stateBlock('loading', 'checking…'));
       Board.T.core.invoke('mcp_transfer_preview', {
-        from: invState.player, to: to, denom: denom, amount: amount,
+        from: invState.player, to: to, denom: denom, amount: baseUnits(),
       }).then(function (p) {
         out.innerHTML = '';
         (p.problems || []).forEach(function (x) {
@@ -747,9 +802,10 @@
         out.appendChild(p.recipient
           ? H.stateBlock('info', 'Recipient: ' + p.recipient)
           : H.stateBlock('warning', 'Recipient: EXTERNAL address — not one of your players'));
-        out.appendChild(H.row('Sending', H.denomQty(p.amount, denom, reg) + ' ('
-          + H.fmtInt(p.amount) + ' base units)'));
-        out.appendChild(H.row('Signed via', p.route));
+        out.appendChild(formFact('Sending', H.denomQty(p.amount, denom, reg)
+          + ' (' + H.fmtInt(p.amount) + ' ' + denom + ')'));
+        out.appendChild(formFact('To', shortAddress(p.to), p.to));
+        out.appendChild(formFact('Signed via', p.route));
 
         var go = massBtn('', 'icon-send-alpha', 'Send', 'sui-mod-destructive');
         go.addEventListener('click', function () {
@@ -786,7 +842,7 @@
     });
     form.appendChild(check);
 
-    H.drawer('Send ' + H.denomName(denom, reg, { style: 'both' }), form);
+    H.drawer('Send ' + H.denomName(denom, reg, { tag: false }), form);
   }
 
   // ── Ledger ────────────────────────────────────────────────────────────────
