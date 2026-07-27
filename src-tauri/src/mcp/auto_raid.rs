@@ -1135,6 +1135,15 @@ async fn start_raid_proof(
 mod tests {
     use super::*;
 
+    /// `gate()` consults the combat lists, which load from the OPERATOR'S data
+    /// directory — so without this these tests assert against whatever guilds
+    /// and players happen to be on the running machine. They passed until `0-1`
+    /// (the fixture's guild) was added as a real ally, at which point every
+    /// gate test failed with "vetoed". Pin the lists to empty first.
+    fn isolate_lists() {
+        crate::mcp::combat_lists::set_for_test(Default::default());
+    }
+
     fn cand() -> Candidate {
         Candidate {
             player_id: "1-61".into(),
@@ -1159,6 +1168,7 @@ mod tests {
 
     #[test]
     fn defaults_are_safe_and_opportunist() {
+        isolate_lists();
         let c = AutoRaidConfig::default();
         assert!(!c.enabled);
         assert_eq!(c.autonomy, Autonomy::Advise);
@@ -1170,6 +1180,7 @@ mod tests {
     /// Each posture must produce exactly the documented gate table.
     #[test]
     fn postures_set_the_documented_gates() {
+        isolate_lists();
         let mut c = AutoRaidConfig::default();
         c.apply_posture(RaidPosture::Cautious);
         assert_eq!((c.min_ore, c.min_score, c.max_raid_minutes, c.max_defenders), (30.0, 75.0, 10, 2));
@@ -1187,6 +1198,7 @@ mod tests {
     /// the inverse of the chain's decay formula must reproduce that exactly.
     #[test]
     fn raid_proof_decay_matches_the_documented_example() {
+        isolate_lists();
         assert!((raid_ready_blocks(125, 1) - 125.0).abs() < 0.001);
         // A harder proof is reached sooner; an easier one takes longer.
         assert!(raid_ready_blocks(125, 8) < raid_ready_blocks(125, 1));
@@ -1196,6 +1208,7 @@ mod tests {
 
     #[test]
     fn a_non_vulnerable_target_is_gated_out() {
+        isolate_lists();
         let cfg = AutoRaidConfig::default();
         let mut c = cand();
         c.vulnerable = false;
@@ -1205,6 +1218,7 @@ mod tests {
 
     #[test]
     fn thin_piles_are_gated_out() {
+        isolate_lists();
         let cfg = AutoRaidConfig::default();
         let mut c = cand();
         c.stored_ore = 3.0;
@@ -1213,6 +1227,7 @@ mod tests {
 
     #[test]
     fn a_slow_proof_and_a_thick_guard_are_gated_out() {
+        isolate_lists();
         let cfg = AutoRaidConfig::default();
         let mut slow = cand();
         slow.raid_minutes = 999.0;
@@ -1225,6 +1240,7 @@ mod tests {
 
     #[test]
     fn an_awake_defender_and_a_cooldown_both_block() {
+        isolate_lists();
         let cfg = AutoRaidConfig::default();
         let mut fresh = cand();
         fresh.blocks_since_action = 10; // ~1 minute ago
@@ -1234,11 +1250,13 @@ mod tests {
 
     #[test]
     fn a_clean_target_passes_every_gate() {
+        isolate_lists();
         assert!(gate(&cand(), &AutoRaidConfig::default(), 0.0).is_none());
     }
 
     #[test]
     fn score_rewards_ore_vulnerability_and_weakness() {
+        isolate_lists();
         let cfg = AutoRaidConfig::default();
         let base = score(&cand(), &cfg);
 
@@ -1264,6 +1282,7 @@ mod tests {
     /// scale, so `min_score` keeps meaning the same thing.
     #[test]
     fn score_stays_on_a_zero_to_hundred_scale_under_reweighting() {
+        isolate_lists();
         let mut cfg = AutoRaidConfig::default();
         for w in [0.1, 1.0, 5.0] {
             cfg.w_ore = w;
@@ -1285,6 +1304,7 @@ mod tests {
 
     #[test]
     fn siege_gives_a_non_vulnerable_target_partial_credit_but_only_when_allowed() {
+        isolate_lists();
         let mut cfg = AutoRaidConfig::default();
         let mut c = cand();
         c.vulnerable = false;
@@ -1299,6 +1319,7 @@ mod tests {
     /// abort timer fired. The two settings have to move together.
     #[test]
     fn only_aggressive_dispatches_against_a_closed_window_and_it_sieges() {
+        isolate_lists();
         let mut c = cand();
         c.vulnerable = false;
 
@@ -1315,6 +1336,7 @@ mod tests {
 
     #[test]
     fn raid_window_is_open_when_unconfigured() {
+        isolate_lists();
         let mut cfg = AutoRaidConfig::default();
         assert!(in_raid_window(&cfg, 3));
         cfg.raid_hours_utc = vec![15, 16, 17, 18, 19, 20];
@@ -1324,6 +1346,7 @@ mod tests {
 
     #[test]
     fn round_robin_covers_the_roster_across_scans() {
+        isolate_lists();
         let roster: Vec<RosterEntry> = (0..10)
             .map(|i| (format!("1-{i}"), "0-9".to_string()))
             .collect();

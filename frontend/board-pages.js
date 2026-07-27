@@ -589,11 +589,14 @@
       sort: workState.sort,
       empty: 'no tasks match',
     });
-    body.appendChild(H.card('TASKS', workState.lv.node));
-
+    // Solve rate sits ABOVE the task list: it is the summary that tells you
+    // whether the queue is moving at all, and below a 750-row list nobody
+    // scrolls far enough to find it.
     var pbody = H.el('div'); pbody.id = 'work-pow';
     workState.powCard = H.card('SOLVE RATE (24h)', pbody);
     body.appendChild(workState.powCard);
+
+    body.appendChild(H.card('TASKS', workState.lv.node));
 
   }
 

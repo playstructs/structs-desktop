@@ -713,12 +713,20 @@ pub fn tx_summary(window_ms: f64) -> Result<Value, String> {
     {
         let mut stmt = conn
             .prepare(
-                "SELECT context,
+                // Group by the context PREFIX (`auto_defend:1-928` -> `auto_defend`).
+                // Callers tag each attempt with the player id, so at 683 players a
+                // single busy loop produced 683 distinct contexts and filled the
+                // whole LIMIT — every other loop, including auto_sweep, vanished
+                // from this view. The per-player rows are still in tx_attempts for
+                // drill-down; this is the rollup the panel actually wants.
+                "SELECT CASE WHEN instr(context, ':') > 0
+                             THEN substr(context, 1, instr(context, ':') - 1)
+                             ELSE context END AS ctx,
                         COUNT(*) AS attempts,
                         SUM(CASE WHEN outcome='success' THEN 1 ELSE 0 END) AS successes,
                         SUM(CASE WHEN outcome IN ('chain_error','timeout','bridge_error','rate_limited') THEN 1 ELSE 0 END) AS failures,
                         SUM(CASE WHEN outcome='skipped' THEN 1 ELSE 0 END) AS skipped
-                 FROM tx_attempts WHERE ts_ms >= ?1 GROUP BY context ORDER BY attempts DESC LIMIT 50",
+                 FROM tx_attempts WHERE ts_ms >= ?1 GROUP BY ctx ORDER BY attempts DESC LIMIT 50",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -819,6 +827,71 @@ pub fn db_size_bytes() -> u64 {
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.len())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod context_rollup_tests {
+    use rusqlite::Connection;
+
+    /// Mirrors the GROUP BY in `tx_summary`. The panel must show one row per
+    /// LOOP, not one per player — at 683 players a single loop's per-player
+    /// contexts filled the entire LIMIT 50 and hid every other loop.
+    fn rollup(conn: &Connection) -> Vec<(String, i64)> {
+        let mut st = conn
+            .prepare(
+                "SELECT CASE WHEN instr(context, ':') > 0
+                             THEN substr(context, 1, instr(context, ':') - 1)
+                             ELSE context END AS ctx,
+                        COUNT(*) AS n
+                 FROM tx_attempts GROUP BY ctx ORDER BY n DESC",
+            )
+            .unwrap();
+        st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn db_with(contexts: &[&str]) -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute("CREATE TABLE tx_attempts (context TEXT)", []).unwrap();
+        for ctx in contexts {
+            c.execute("INSERT INTO tx_attempts (context) VALUES (?1)", [ctx]).unwrap();
+        }
+        c
+    }
+
+    #[test]
+    fn per_player_contexts_collapse_to_one_row_per_loop() {
+        let ctxs: Vec<String> = (0..100)
+            .map(|i| format!("auto_defend:1-{i}"))
+            .chain((0..3).map(|i| format!("auto_sweep:1-{i}")))
+            .collect();
+        let refs: Vec<&str> = ctxs.iter().map(|s| s.as_str()).collect();
+        let rows = rollup(&db_with(&refs));
+        assert_eq!(rows.len(), 2, "one row per loop, not per player: {rows:?}");
+        assert_eq!(rows[0], ("auto_defend".into(), 100));
+        assert_eq!(rows[1], ("auto_sweep".into(), 3));
+    }
+
+    /// A small loop must stay visible next to a busy one — the actual bug.
+    #[test]
+    fn a_quiet_loop_is_not_crowded_out() {
+        let mut ctxs: Vec<String> = (0..683).map(|i| format!("auto_defend:1-{i}")).collect();
+        ctxs.push("auto_sweep:1-1".into());
+        let refs: Vec<&str> = ctxs.iter().map(|s| s.as_str()).collect();
+        let rows = rollup(&db_with(&refs));
+        assert!(rows.iter().any(|(c, _)| c == "auto_sweep"), "swept rows vanished: {rows:?}");
+    }
+
+    /// Contexts without a player suffix pass through unchanged.
+    #[test]
+    fn colonless_contexts_are_untouched() {
+        let rows = rollup(&db_with(&["mcp:bank_send", "board:transfer", "plain"]));
+        let names: Vec<&str> = rows.iter().map(|(c, _)| c.as_str()).collect();
+        assert!(names.contains(&"plain"));
+        assert!(names.contains(&"mcp"));
+    }
 }
 
 #[cfg(test)]

@@ -185,6 +185,17 @@ pub fn seed_own_guild(guild_id: &str) {
     });
 }
 
+/// Replace the in-memory lists WITHOUT persisting. Tests only: the real lists
+/// load from the operator's data directory, so any test touching a veto path is
+/// otherwise asserting against live machine state — which is exactly how the
+/// auto_raid gate tests began failing the day `0-1` was added as an ally.
+#[cfg(test)]
+pub fn set_for_test(lists: CombatLists) {
+    if let Ok(mut l) = LISTS.write() {
+        *l = lists;
+    }
+}
+
 /// True when this target must never be attacked: our own team, an allied guild,
 /// or an explicitly protected player. Checked BEFORE scoring in both loops so no
 /// score can ever outvote it.
