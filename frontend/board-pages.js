@@ -2538,41 +2538,88 @@
   });
 
   // ═══════════════════════════ MAP ══════════════════════════════════════════
-  Board.registerPage('map', {
-    onBoot: function () {
-      var T = Board.T;
-      var sel = document.getElementById('vp-select');
-      var box = document.getElementById('vp-map');
-      T.core.invoke('mcp_vplayer_list').then(function (list) {
-        (list || []).forEach(function (p) {
-          if (!p.player_id) return;
-          var o = document.createElement('option');
-          o.value = p.player_id;
-          o.textContent = p.name + ' (' + p.player_id + ')';
-          sel.appendChild(o);
-        });
-      }).catch(function () {});
-      function renderMap(v) {
-        if (!v) { box.innerHTML = ''; return; }
-        box.innerHTML = '<div class="ops-muted">rendering map…</div>';
-        T.core.invoke('mcp_render_map', { player: v }).then(function (durl) {
-          var img = new Image();
-          img.alt = 'map';
-          img.onload = function () { box.innerHTML = ''; box.appendChild(img); };
-          img.onerror = function () { box.innerHTML = '<div class="err">image failed to load</div>'; };
-          img.src = durl;
-        }).catch(function (err) {
-          box.innerHTML = '<div class="err">render failed: ' + H.esc(err) + '</div>';
-        });
-      }
-      sel.addEventListener('change', function () { renderMap(sel.value); });
-      Board.mapShow = function (playerId) {
-        sel.value = playerId;
-        renderMap(playerId);
+  // ═══════════════════════════ MAP ══════════════════════════════════════════
+  // The roster list is filled on ENTER, not on boot. It used to be a one-shot
+  // `onBoot` fetch whose failure was swallowed by `.catch(function(){})`, so a
+  // transient error at page load (the web copy races the session cookie) left
+  // the selector permanently holding its single placeholder and the page blank
+  // forever — nothing retried it. Now every visit reconciles, and a failure is
+  // visible instead of silent.
+  var mapState = { wired: false, loaded: false, current: '' };
+
+  function mapBox() { return document.getElementById('vp-map'); }
+
+  function renderMapFor(playerId) {
+    var box = mapBox();
+    if (!box) return;
+    if (!playerId) { box.innerHTML = ''; return; }
+    mapState.current = playerId;
+    box.innerHTML = '';
+    box.appendChild(H.stateBlock('loading', 'rendering map…'));
+    Board.T.core.invoke('mcp_render_map', { player: playerId }).then(function (durl) {
+      if (mapState.current !== playerId) return;   // a newer selection won
+      var img = new Image();
+      img.alt = 'planet map for ' + playerId;
+      img.onload = function () { box.innerHTML = ''; box.appendChild(img); };
+      img.onerror = function () {
+        box.innerHTML = '';
+        box.appendChild(H.stateBlock('error', 'map image failed to load'));
       };
-    },
+      img.src = durl;
+    }).catch(function (err) {
+      box.innerHTML = '';
+      box.appendChild(H.stateBlock('error', 'render failed: ' + err));
+    });
+  }
+
+  function loadMapRoster() {
+    var sel = document.getElementById('vp-select');
+    if (!sel) return Promise.resolve();
+    return Board.T.core.invoke('mcp_vplayer_list').then(function (list) {
+      var players = (list || []).filter(function (p) { return p.player_id; });
+      // Rebuild wholesale so a retry after a partial failure can't duplicate.
+      sel.innerHTML = '';
+      var head = H.el('option', null,
+        players.length ? '— select a player —' : '— no players —');
+      head.value = '';
+      sel.appendChild(head);
+      players.forEach(function (p) {
+        var o = H.el('option', null, p.name + ' (' + p.player_id + ')');
+        o.value = p.player_id;
+        sel.appendChild(o);
+      });
+      mapState.loaded = players.length > 0;
+      if (mapState.current) sel.value = mapState.current;
+    }).catch(function (err) {
+      mapState.loaded = false;
+      var box = mapBox();
+      if (box && !box.firstChild) {
+        box.appendChild(H.stateBlock('error', 'player list unavailable: ' + err));
+      }
+    });
+  }
+
+  Board.registerPage('map', {
     onEnter: function (params) {
-      if (params && params.p && Board.mapShow) Board.mapShow(params.p);
+      var sel = document.getElementById('vp-select');
+      if (sel && !mapState.wired) {
+        mapState.wired = true;
+        sel.addEventListener('change', function () { renderMapFor(sel.value); });
+        // Deep link from elsewhere on the board (#/armada/map?p=2-459).
+        Board.mapShow = function (playerId) {
+          mapState.current = playerId;
+          var s = document.getElementById('vp-select');
+          if (s) s.value = playerId;
+          renderMapFor(playerId);
+        };
+      }
+      var want = (params && params.p) || null;
+      // Retry the roster on every visit until it actually lands.
+      var ready = mapState.loaded ? Promise.resolve() : loadMapRoster();
+      return ready.then(function () {
+        if (want) Board.mapShow(want);
+      });
     },
   });
+
 })();
