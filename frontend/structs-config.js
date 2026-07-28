@@ -897,11 +897,17 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               if (!ws.onmessage) return;
               var snapshot = convertSnapshotDates(event.payload);
               ws.onmessage({ data: [snapshot] });
-              // Notify Rust for auto-chain policies (e.g., auto_refine after mine)
+              // Notify Rust for auto-chain policies (e.g., auto_refine after mine).
+              // Arg names MUST be camelCase — Tauri v2 camelCases command args
+              // across the bridge, so snake_case keys fail to deserialize and the
+              // command never runs. Never swallow the rejection: a silent catch
+              // here is what hid this call being dead.
               window.__TAURI__.core.invoke('notify_hash_complete', {
-                struct_id: event.payload.object_id,
-                task_type: event.payload.task_type || ''
-              }).catch(function() {});
+                structId: event.payload.object_id,
+                taskType: event.payload.task_type || ''
+              }).catch(function(e) {
+                console.error('[Structs Hasher] notify_hash_complete failed:', e);
+              });
             })
           ]).then(function(unlistenFns) {
             _unlisteners = _unlisteners.concat(unlistenFns);

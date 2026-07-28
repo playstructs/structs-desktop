@@ -579,16 +579,61 @@ pub async fn notify_hash_complete(
 
     // auto_refine: start the REFINE hash task now that we hold AppHandle + registry.
     if let Some(req) = auto_refine {
+        // Never stomp a refine already in flight on this refinery.
+        // `start_hash_task_core` CANCELS any task sharing the struct id, so
+        // without this guard a completing MINE would kill a live REFINE (e.g.
+        // one auto_harvest started when include_primary is on) and restart it.
+        // Completed tasks linger in the registry — those we do re-issue.
+        if let Some(t) = registry.tasks.get(&req.struct_id) {
+            if matches!(
+                t.snapshot().status.as_str(),
+                "running" | "waiting" | "starting"
+            ) {
+                eprintln!(
+                    "[Structs Auto] auto_refine skipped {} — a refine is already in flight",
+                    req.struct_id
+                );
+                return Ok(());
+            }
+        }
+
+        // Anchor the proof on the refinery's on-chain blockStartOreRefine, read
+        // fresh from the chain. The current block height is NOT a valid anchor —
+        // the prefix is {structId}REFINE{blockStartOreRefine}NONCE and the chain
+        // rejects anything else (mirrors tools::action::action_refine).
+        let client = crate::mcp::cosmos_client::CosmosClient::new();
+        let block_height = match client.query_entity("struct", &req.struct_id).await {
+            Ok(v) => v
+                .get("structAttributes")
+                .and_then(|x| x.get("blockStartOreRefine"))
+                .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0),
+            Err(e) => {
+                eprintln!(
+                    "[Structs Auto] auto_refine lookup failed for {}: {}",
+                    req.struct_id, e
+                );
+                return Ok(());
+            }
+        };
+        if block_height == 0 {
+            eprintln!(
+                "[Structs Auto] auto_refine skipped {} — blockStartOreRefine=0 (not in a refining cycle yet)",
+                req.struct_id
+            );
+            return Ok(());
+        }
+
         let params = crate::hasher::types::TaskParams::for_ore(
             &req.struct_id,
             "REFINE",
-            req.block_height,
+            block_height,
             req.difficulty_target,
         );
         match crate::hasher::start_hash_task_core(params, app_handle.clone(), registry.inner()) {
             Ok(()) => eprintln!(
                 "[Structs Auto] auto_refine started REFINE on {} (difficulty {}, block {})",
-                req.struct_id, req.difficulty_target, req.block_height
+                req.struct_id, req.difficulty_target, block_height
             ),
             Err(e) => eprintln!("[Structs Auto] auto_refine failed to start: {}", e),
         }
