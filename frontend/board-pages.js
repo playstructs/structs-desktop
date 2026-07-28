@@ -472,13 +472,7 @@
   });
 
   // ═══════════════════════════ ENERGY ═══════════════════════════════════════
-  var energyState = { data: null, sort: { key: 'margin', dir: 1 } };
-  var ENERGY_KEYS = [{ key: 'margin', label: 'margin' }, { key: 'name', label: 'name' },
-    { key: 'load', label: 'load' }, { key: 'capacity', label: 'capacity' }];
-  var ENERGY_ACC = {
-    margin: function (p) { return p.margin_pct; }, name: function (p) { return p.name.toLowerCase(); },
-    load: function (p) { return p.load_mw; }, capacity: function (p) { return p.capacity_mw; },
-  };
+  var energyState = { data: null };
   // ── Allocations ───────────────────────────────────────────────────────────
   // An allocation routes YOUR capacity into a substation. Two facts shape this
   // panel: raising one raises your own load (it is not free), and if load ever
@@ -495,14 +489,40 @@
     if (!d) { host.appendChild(H.stateBlock('loading', 'reading allocations…')); return; }
     var b = d.budget || {};
 
-    // The budget this whole panel is measured against.
-    var head = H.el('div', 'hstrip');
-    head.appendChild(statTile('capacity', H.fmtWatts(b.capacity_mw)));
-    head.appendChild(statTile('load', H.fmtWatts(b.load_mw)));
-    head.appendChild(statTile('headroom', H.fmtWatts(b.headroom_mw), null,
-      b.capacity_mw > 0 && b.headroom_mw / b.capacity_mw < 0.15 ? 'live' : 'ok'));
-    head.appendChild(statTile('allocations', (d.allocations || []).length, null, 'muted'));
+    // A bar, not four numbers. Three figures in mismatched units ("8.45 MW /
+    // 8.45 MW / 1.22 W") hid the only thing that matters: the grid is full.
+    var used = b.capacity_mw > 0 ? Math.min(1, b.load_mw / b.capacity_mw) : 0;
+    var pct = Math.round(used * 1000) / 10;
+    var meter = H.el('div', 'alloc-meter');
+    var bar = H.el('div', 'alloc-meter-bar');
+    var fill = H.el('i');
+    fill.style.width = (used * 100) + '%';
+    // Amber under 15% spare, red when there is effectively nothing left.
+    var spare = b.capacity_mw > 0 ? b.allocatable_mw / b.capacity_mw : 1;
+    bar.className += spare < 0.01 ? ' full' : (spare < 0.15 ? ' tight' : '');
+    bar.appendChild(fill);
+    meter.appendChild(bar);
+    var cap = H.el('div', 'alloc-meter-caption');
+    cap.appendChild(H.el('span', null,
+      H.fmtWatts(b.load_mw) + ' allocated of ' + H.fmtWatts(b.capacity_mw) + ' capacity'));
+    cap.appendChild(H.el('span', 'alloc-meter-pct', pct + '%'));
+    meter.appendChild(cap);
+    host.appendChild(meter);
+
+    // The two numbers people actually confuse. Allocatable is what this panel
+    // can spend; available is whether the structs stay on.
+    var head = H.el('div', 'hstrip alloc-budget');
+    head.appendChild(statTile('allocatable', H.fmtWatts(b.allocatable_mw), null,
+      spare < 0.01 ? 'bad' : (spare < 0.15 ? 'live' : 'ok')));
+    head.appendChild(statTile('structs draw', H.fmtWatts(b.structs_load_mw), null, 'muted'));
+    head.appendChild(statTile('from substation', H.fmtWatts(b.capacity_secondary_mw), null, 'muted'));
+    head.appendChild(statTile('available', H.fmtWatts(b.available_mw), null,
+      b.online === false ? 'bad' : 'ok'));
     host.appendChild(head);
+    if (b.online === false) {
+      host.appendChild(H.stateBlock('error',
+        'Draw exceeds supply — structs go offline until you free capacity.'));
+    }
 
     var rows = d.allocations || [];
     if (!rows.length) {
@@ -528,13 +548,18 @@
       move.addEventListener('click', function () { openAllocMove(a, d); });
       act.appendChild(move);
 
+      var dest = (d.substations || []).find(function (s) { return s.id === a.destination_id; });
+      var chips = [];
+      if (dest) {
+        // What feeding it is worth: contributions are diluted by 1/connections.
+        chips.push(statTile('per connection', H.fmtWatts(dest.connection_capacity_mw), null, 'muted'));
+        chips.push(statTile('connections', H.fmtInt(dest.connection_count), null, 'muted'));
+      }
       host.appendChild(H.resultRow({
         icon: 'sui-icon-energy',
         title: H.fmtWatts(a.power_mw) + ' → ' + a.destination_id,
-        subtitle: a.id + ' · ' + a.type + ' · from ' + a.source_object_id
-          + (a.locked ? ' · LOCKED' : ''),
-        chips: [statTile('share of your load',
-          b.load_mw > 0 ? Math.round(a.power_mw / b.load_mw * 100) + '%' : '—', null, 'muted')],
+        subtitle: a.id + ' · ' + a.type + (a.locked ? ' · LOCKED' : ''),
+        chips: chips,
         action: act,
       }));
 
@@ -542,16 +567,19 @@
     });
 
     host.appendChild(allocCreate(d));
-    host.appendChild(H.el('div', 'ops-muted',
-      'Raising an allocation raises your load by the same amount. If load ever exceeds capacity '
-      + 'the chain brownouts and destroys allocations in creation order, so changes are capped at '
-      + 'your headroom.'));
+    // Definitions last: the data answers the question, this only explains the
+    // two words above it. `cfg-note` is the 11px aside style — `.ops-muted`
+    // alone only dims, so it rendered at full body size and dominated the card.
+    host.appendChild(H.el('div', 'cfg-note',
+      'Allocatable is capacity minus what you already route out — what these controls can spend. '
+      + 'Available also counts your structs\u2019 draw and the share coming back from the '
+      + 'substation, and is what decides whether your structs stay online.'));
   }
 
   function allocEditor(a, d) {
     var wrap = H.el('div', 'alloc-editor');
     var b = d.budget || {};
-    var maxKw = kwOf(a.power_mw + b.headroom_mw);   // everything we could commit
+    var maxKw = kwOf(a.power_mw + b.allocatable_mw);   // everything we could commit
 
     var out = H.el('div');
     function refreshPreview() {
@@ -598,7 +626,8 @@
     wrap.appendChild(quick);
     wrap.appendChild(H.el('div', 'ops-muted',
       'Currently ' + H.fmtWatts(a.power_mw) + '; the most you could commit is '
-      + H.fmtWatts(a.power_mw + (d.budget || {}).headroom_mw) + '.'));
+      + H.fmtWatts(a.power_mw + (d.budget || {}).allocatable_mw)
+      + '. Going over capacity brownouts the grid and destroys allocations in creation order.'));
     wrap.appendChild(out);
     return wrap;
   }
@@ -665,7 +694,7 @@
       var form = H.el('div');
       var kwVal = 0, type = 'dynamic', src = d.player_id;
       form.appendChild(formFact('Source', d.player_id + ' (you)'));
-      form.appendChild(formFact('Headroom', H.fmtWatts(b.headroom_mw)));
+      form.appendChild(formFact('Allocatable now', H.fmtWatts(b.allocatable_mw)));
       form.appendChild(H.field('Type', H.selectBox('dynamic',
         [{value:'dynamic',label:'dynamic — power you can change later'},
          {value:'static',label:'static — fixed at creation'},
@@ -714,26 +743,12 @@
       g.supportable_more > 0 ? 'icon-success' : 'icon-alert'));
     body.appendChild(H.card('GUILD POWER', gbody));
 
-    var pbody = H.el('div');
-    var bar = H.el('div'); bar.style.cssText = 'margin-bottom:6px;';
-    bar.appendChild(H.sortControl(ENERGY_KEYS, energyState.sort, renderEnergyBody));
-    pbody.appendChild(bar);
-    var table = H.resultTable();
-    H.sortBy((d.players || []), energyState.sort, ENERGY_ACC).slice(0, 80).forEach(function (p) {
-      table.appendChild(H.resultRow({
-        icon: p.ok ? 'sui-icon-energy' : 'sui-icon-no-power',
-        title: p.err ? H.el('span', 'err', p.name) : p.name,
-        subtitle: p.role,
-        chips: [
-          H.resource(H.fmtWatts(p.load_mw) + ' / ' + H.fmtWatts(p.capacity_mw), 'sui-icon-energy'),
-          H.resource(Math.round(p.margin_pct) + '%', null, p.margin_pct < 15 ? 'attn' : ''),
-        ],
-      }));
-    });
-    pbody.appendChild(table);
-    pbody.appendChild(H.el('div', 'ops-muted', 'roster ' + H.ago(d.roster_refreshed_at_ms) + ' old'));
-    body.appendChild(H.card('PLAYER MARGINS', pbody));
-
+    // Rolled up by ROLE. Listing 733 near-identical workers was 80 rows of
+    // noise; what you actually need is "is any group in trouble", and the
+    // WORST margin in a group is the one that decides that — an average hides
+    // a single starved player behind 600 healthy ones. The primary stays on
+    // its own row because it is the only genuinely individual case.
+    // Allocations before margins: this is the panel you come here to ACT on.
     var abody = H.el('div');
     if (allocState.data && allocState.data._err) {
       abody.appendChild(H.stateBlock('error', 'allocations unavailable: ' + allocState.data._err));
@@ -741,6 +756,59 @@
       renderAllocations(abody);
     }
     body.appendChild(H.card('ALLOCATIONS', abody));
+
+    var pbody = H.el('div');
+    var table = H.resultTable();
+    var players = d.players || [];
+    var primary = players.filter(function (p) { return p.role === 'primary'; });
+    var groups = {};
+    players.forEach(function (p) {
+      if (p.role === 'primary') return;
+      var g = groups[p.role] || (groups[p.role] = { role: p.role, n: 0, sumMargin: 0,
+        worst: Infinity, worstName: null, under: 0, load: 0, cap: 0, errs: 0 });
+      g.n++; g.sumMargin += p.margin_pct; g.load += p.load_mw; g.cap += p.capacity_mw;
+      if (p.err) g.errs++;
+      if (p.margin_pct < g.worst) { g.worst = p.margin_pct; g.worstName = p.name; }
+      if (p.margin_pct < 15) g.under++;
+    });
+
+    primary.forEach(function (p) {
+      table.appendChild(H.resultRow({
+        icon: p.ok ? 'sui-icon-energy' : 'sui-icon-no-power',
+        title: p.err ? H.el('span', 'err', p.name) : p.name,
+        subtitle: 'primary',
+        chips: [
+          statTile('load / capacity', H.fmtWatts(p.load_mw) + ' / ' + H.fmtWatts(p.capacity_mw)),
+          statTile('margin', Math.round(p.margin_pct) + '%', null,
+            p.margin_pct < 15 ? 'bad' : 'ok'),
+        ],
+      }));
+    });
+
+    Object.keys(groups).sort().forEach(function (role) {
+      var g = groups[role];
+      var avg = g.n ? g.sumMargin / g.n : 0;
+      table.appendChild(H.resultRow({
+        icon: g.under ? 'sui-icon-no-power' : 'sui-icon-energy',
+        title: role + ' × ' + H.fmtInt(g.n),
+        subtitle: g.under
+          ? g.under + ' below 15% — worst is ' + g.worstName + ' at ' + Math.round(g.worst) + '%'
+          : 'all above 15%',
+        chips: [
+          statTile('avg margin', Math.round(avg) + '%', null, avg < 15 ? 'live' : 'ok'),
+          statTile('worst', Math.round(g.worst) + '%', null, g.worst < 15 ? 'bad' : 'muted'),
+          statTile('total load', H.fmtWatts(g.load), null, 'muted'),
+          statTile('stale reads', g.errs, null, g.errs ? 'live' : 'muted'),
+        ],
+      }));
+    });
+    pbody.appendChild(table);
+    pbody.appendChild(H.el('div', 'cfg-note',
+      'Grouped by role — the primary is listed individually. "Worst" is the figure that matters: '
+      + 'an average stays healthy while one starved player goes offline. Roster '
+      + H.ago(d.roster_refreshed_at_ms) + ' old.'));
+
+    body.appendChild(H.card('PLAYER MARGINS', pbody));
     Board.stamp('updated ' + new Date().toLocaleTimeString());
   }
   function renderEnergy() {

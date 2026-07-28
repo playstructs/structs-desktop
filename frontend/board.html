@@ -437,11 +437,31 @@
        ends up a screen away from its own input. */
     #board-layout label.sui-input-text.cfg-field { max-width: 620px; }
 
+    /* Allocation utilisation meter. The numbers alone read as "8.45 MW /
+       8.45 MW / 1.22 W" — three different units and no signal that the grid is
+       full. The bar carries that instantly; the numbers stay for precision. */
+    .alloc-meter { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }
+    .alloc-meter-bar { height: 10px; border: 1px solid var(--border);
+      background: var(--surface-player-body); position: relative; }
+    .alloc-meter-bar > i { display: block; height: 100%; background: var(--text-player-primary);
+      transition: width .3s; }
+    .alloc-meter-bar.tight > i { background: var(--text-warning); }
+    .alloc-meter-bar.full  > i { background: var(--text-enemy-primary); }
+    .alloc-meter-caption { display: flex; justify-content: space-between; align-items: baseline;
+      gap: 10px; font-size: 11px; color: var(--text-hint); text-align: left; }
+    .alloc-meter-pct { font-variant-numeric: tabular-nums; flex: none; }
+    /* The four budget tiles sat shoulder to shoulder and read as one string. */
+    #board-layout .alloc-budget.hstrip { gap: 14px 28px; margin-bottom: 4px; }
+
+    /* "New allocation" is the rarest action here — it should not be the
+       loudest thing in the card. */
+    .alloc-create { margin-top: 12px; display: flex; justify-content: flex-start; }
+    .alloc-create .mass-btn { margin: 0; }
+
     /* Allocation editor: an inline panel under the row it edits. */
     .alloc-editor { border-left: 2px solid var(--accent-secondary); padding: 6px 0 6px 10px;
       margin: 0 0 8px 10px; display: flex; flex-direction: column; gap: 4px; text-align: left; }
     .alloc-editor label.sui-input-text { max-width: 420px; }
-    .alloc-create { margin-top: 10px; }
 
     /* ── listView ────────────────────────────────────────────────────────
        Toolbar / rows / count / pager. The rows grid never scrolls internally:

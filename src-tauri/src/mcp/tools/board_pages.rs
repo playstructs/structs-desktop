@@ -700,17 +700,20 @@ pub async fn mcp_allocations() -> Result<Value, String> {
 
     // The budget. `load` already INCLUDES the power of these allocations, so a
     // change of +X moves load by +X and headroom by −X.
-    let (capacity, load, structs_load) = match client.query_entity("player", &pid).await {
-        Ok(p) => {
-            let ga = p.get("gridAttributes");
-            (
-                grid_num(ga.and_then(|g| g.get("capacity"))),
-                grid_num(ga.and_then(|g| g.get("load"))),
-                grid_num(ga.and_then(|g| g.get("structsLoad"))),
-            )
-        }
-        Err(e) => return Err(format!("could not read the primary's power: {e}")),
-    };
+    let (capacity, load, structs_load, capacity_secondary) =
+        match client.query_entity("player", &pid).await {
+            Ok(p) => {
+                let ga = p.get("gridAttributes");
+                (
+                    grid_num(ga.and_then(|g| g.get("capacity"))),
+                    grid_num(ga.and_then(|g| g.get("load"))),
+                    grid_num(ga.and_then(|g| g.get("structsLoad"))),
+                    // The share received from the substation we're connected to.
+                    grid_num(ga.and_then(|g| g.get("connectionCapacity"))),
+                )
+            }
+            Err(e) => return Err(format!("could not read the primary's power: {e}")),
+        };
 
     // Candidate destinations: the guild's substation plus any we already feed.
     let mut subs: Vec<Value> = Vec::new();
@@ -756,11 +759,24 @@ pub async fn mcp_allocations() -> Result<Value, String> {
     Ok(json!({
         "player_id": pid,
         "allocations": allocations,
+        // TWO different numbers, and conflating them is the easy mistake:
+        //
+        //   allocatable = capacity - load
+        //       what you can still route OUT into an allocation.
+        //   available   = (capacity + capacitySecondary) - (load + structsLoad)
+        //       whether your own structs stay ONLINE.
+        //
+        // Your structs draw against the second, and the incoming substation
+        // share only counts there — it cannot be re-allocated onward.
+        // (Verified against structs-ai/knowledge/mechanics/energy.md:44.)
         "budget": {
             "capacity_mw": capacity,
             "load_mw": load,
             "structs_load_mw": structs_load,
-            "headroom_mw": (capacity - load).max(0.0),
+            "capacity_secondary_mw": capacity_secondary,
+            "allocatable_mw": (capacity - load).max(0.0),
+            "available_mw": (capacity + capacity_secondary) - (load + structs_load),
+            "online": (load + structs_load) <= (capacity + capacity_secondary),
         },
         "substations": substations,
         "mw_per_kw": MW_PER_KW,
