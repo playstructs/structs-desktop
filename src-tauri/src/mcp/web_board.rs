@@ -364,6 +364,35 @@ async fn board_invoke(
         "mcp_energy" => from_result(board_pages::mcp_energy().await),
         "mcp_work" => from_result(board_pages::mcp_work_impl(&st.registry).await),
         "mcp_health" => from_result(board_pages::mcp_health().await),
+        "mcp_allocations" => from_result(board_pages::mcp_allocations().await),
+        "mcp_allocation_preview" => from_result(
+            board_pages::mcp_allocation_preview(
+                s("allocationId").unwrap_or_default(),
+                body.get("powerMw").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            ).await,
+        ),
+        "mcp_allocation_set_power" => from_result(
+            board_pages::mcp_allocation_set_power_impl(
+                st.app.clone(),
+                s("allocationId").unwrap_or_default(),
+                body.get("powerMw").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            ).await,
+        ),
+        "mcp_allocation_connect" => from_result(
+            board_pages::mcp_allocation_connect_impl(
+                st.app.clone(),
+                s("allocationId").unwrap_or_default(),
+                s("destinationId").unwrap_or_default(),
+            ).await,
+        ),
+        "mcp_allocation_create" => from_result(
+            board_pages::mcp_allocation_create_impl(
+                st.app.clone(),
+                s("sourceObjectId").unwrap_or_default(),
+                s("allocationType").unwrap_or_default(),
+                body.get("powerMw").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            ).await,
+        ),
         "mcp_inventory" => from_result(
             board_pages::mcp_inventory(s("player")).await,
         ),

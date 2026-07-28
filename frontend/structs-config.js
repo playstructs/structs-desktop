@@ -1247,6 +1247,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           case 'allocation_create':
             promise = scm.queueMsgAllocationCreate(args.controller, args.source_object_id, args.allocation_type, args.power);
             break;
+          case 'allocation_update':
+            promise = scm.queueMsgAllocationUpdate(args.allocation_id, args.power);
+            break;
+          case 'allocation_delete':
+            promise = scm.queueMsgAllocationDelete(args.allocation_id);
+            break;
+          case 'substation_allocation_connect':
+            promise = scm.queueMsgSubstationAllocationConnect(args.allocation_id, args.destination_id);
+            break;
+          case 'substation_allocation_disconnect':
+            promise = scm.queueMsgSubstationAllocationDisconnect(args.allocation_id);
+            break;
 
           // ── Substation ──
           case 'substation_player_connect':

@@ -479,6 +479,227 @@
     margin: function (p) { return p.margin_pct; }, name: function (p) { return p.name.toLowerCase(); },
     load: function (p) { return p.load_mw; }, capacity: function (p) { return p.capacity_mw; },
   };
+  // ── Allocations ───────────────────────────────────────────────────────────
+  // An allocation routes YOUR capacity into a substation. Two facts shape this
+  // panel: raising one raises your own load (it is not free), and if load ever
+  // exceeds capacity the chain brownouts and DESTROYS your allocations in
+  // creation order. So every control is presented against remaining headroom,
+  // and the backend refuses a change it computes as unsafe even if this UI
+  // somehow asked for it.
+  var allocState = { data: null, editing: null, draftKw: null, preview: null, busy: false };
+
+  function kwOf(mw) { return mw / 1e6; }
+
+  function renderAllocations(host) {
+    var d = allocState.data;
+    if (!d) { host.appendChild(H.stateBlock('loading', 'reading allocations…')); return; }
+    var b = d.budget || {};
+
+    // The budget this whole panel is measured against.
+    var head = H.el('div', 'hstrip');
+    head.appendChild(statTile('capacity', H.fmtWatts(b.capacity_mw)));
+    head.appendChild(statTile('load', H.fmtWatts(b.load_mw)));
+    head.appendChild(statTile('headroom', H.fmtWatts(b.headroom_mw), null,
+      b.capacity_mw > 0 && b.headroom_mw / b.capacity_mw < 0.15 ? 'live' : 'ok'));
+    head.appendChild(statTile('allocations', (d.allocations || []).length, null, 'muted'));
+    host.appendChild(head);
+
+    var rows = d.allocations || [];
+    if (!rows.length) {
+      host.appendChild(H.stateBlock('empty',
+        'No allocations. One routes your capacity into a substation — the substation gains it, you carry it as load.'));
+    }
+
+    rows.forEach(function (a) {
+      var editable = a.type === 'dynamic' && !a.locked;
+      var act = H.el('div', 'cfg-actions');
+      var edit = massBtn('', 'icon-edit', editable ? 'Power' : 'Fixed',
+        editable ? 'sui-mod-secondary' : 'sui-mod-disabled');
+      if (editable) {
+        edit.addEventListener('click', function () {
+          allocState.editing = allocState.editing === a.id ? null : a.id;
+          allocState.draftKw = kwOf(a.power_mw);
+          allocState.preview = null;
+          renderEnergyBody();
+        });
+      }
+      act.appendChild(edit);
+      var move = massBtn('', 'icon-transfers', 'Move', 'sui-mod-secondary');
+      move.addEventListener('click', function () { openAllocMove(a, d); });
+      act.appendChild(move);
+
+      host.appendChild(H.resultRow({
+        icon: 'sui-icon-energy',
+        title: H.fmtWatts(a.power_mw) + ' → ' + a.destination_id,
+        subtitle: a.id + ' · ' + a.type + ' · from ' + a.source_object_id
+          + (a.locked ? ' · LOCKED' : ''),
+        chips: [statTile('share of your load',
+          b.load_mw > 0 ? Math.round(a.power_mw / b.load_mw * 100) + '%' : '—', null, 'muted')],
+        action: act,
+      }));
+
+      if (allocState.editing === a.id) host.appendChild(allocEditor(a, d));
+    });
+
+    host.appendChild(allocCreate(d));
+    host.appendChild(H.el('div', 'ops-muted',
+      'Raising an allocation raises your load by the same amount. If load ever exceeds capacity '
+      + 'the chain brownouts and destroys allocations in creation order, so changes are capped at '
+      + 'your headroom.'));
+  }
+
+  function allocEditor(a, d) {
+    var wrap = H.el('div', 'alloc-editor');
+    var b = d.budget || {};
+    var maxKw = kwOf(a.power_mw + b.headroom_mw);   // everything we could commit
+
+    var out = H.el('div');
+    function refreshPreview() {
+      out.innerHTML = '';
+      var kwVal = Number(allocState.draftKw);
+      if (!isFinite(kwVal)) { return; }
+      out.appendChild(H.stateBlock('loading', 'checking…'));
+      Board.T.core.invoke('mcp_allocation_preview', {
+        allocationId: a.id, powerMw: Math.round(kwVal * 1e6),
+      }).then(function (p) {
+        allocState.preview = p;
+        out.innerHTML = '';
+        if (!p.ok) { out.appendChild(H.stateBlock('error', p.refusal)); return; }
+        var delta = p.delta_mw;
+        out.appendChild(H.row(delta >= 0 ? 'Adds to your load' : 'Frees from your load',
+          H.fmtWatts(Math.abs(delta))));
+        out.appendChild(H.row('Headroom after',
+          H.fmtWatts(p.projected_headroom_mw) + ' (' + Math.round(p.projected_headroom_pct) + '%)'));
+        var go = massBtn('', 'icon-success', 'Apply', 'sui-mod-primary');
+        go.addEventListener('click', function () { applyAllocPower(a, kwVal); });
+        out.appendChild(go);
+      }).catch(function (e) {
+        out.innerHTML = '';
+        out.appendChild(H.stateBlock('error', String(e)));
+      });
+    }
+
+    // Entered in kW — the unit the rest of this page speaks. The exact mW that
+    // will be signed is echoed by the preview above the Apply button.
+    var input = H.textBox(String(Math.round(kwOf(a.power_mw) * 100) / 100), 'kW', function (v) {
+      allocState.draftKw = Number(v) || 0;
+      refreshPreview();
+    });
+    wrap.appendChild(H.field('New power (kW)', input));
+
+    var quick = H.el('div', 'cfg-actions');
+    var max = massBtn('', 'icon-add', 'Use all headroom', 'sui-mod-secondary');
+    max.addEventListener('click', function () {
+      allocState.draftKw = Math.floor(maxKw * 100) / 100;
+      input.value = String(allocState.draftKw);
+      refreshPreview();
+    });
+    quick.appendChild(max);
+    wrap.appendChild(quick);
+    wrap.appendChild(H.el('div', 'ops-muted',
+      'Currently ' + H.fmtWatts(a.power_mw) + '; the most you could commit is '
+      + H.fmtWatts(a.power_mw + (d.budget || {}).headroom_mw) + '.'));
+    wrap.appendChild(out);
+    return wrap;
+  }
+
+  function applyAllocPower(a, kwVal) {
+    if (allocState.busy) return;
+    var body = H.el('div');
+    body.appendChild(H.el('div', 'ops-muted',
+      'This changes real grid capacity. The substation gains (or loses) the difference, '
+      + 'and your own load moves by the same amount.'));
+    body.appendChild(H.row('Allocation', a.id + ' → ' + a.destination_id));
+    body.appendChild(H.row('From', H.fmtWatts(a.power_mw)));
+    body.appendChild(H.row('To', H.fmtWatts(kwVal * 1e6)));
+    H.confirmModal('Set allocation power?', body, 'Apply', function () {
+      allocState.busy = true;
+      Board.T.core.invoke('mcp_allocation_set_power', {
+        allocationId: a.id, powerMw: Math.round(kwVal * 1e6),
+      }).then(function () {
+        allocState.busy = false; allocState.editing = null; allocState.preview = null;
+        loadAllocations().then(renderEnergyBody);
+      }).catch(function (e) {
+        allocState.busy = false;
+        alertInto('energy-body', 'allocation update failed: ' + e);
+      });
+    });
+  }
+
+  function openAllocMove(a, d) {
+    var form = H.el('div');
+    form.appendChild(formFact('Allocation', a.id + ' · ' + H.fmtWatts(a.power_mw)));
+    form.appendChild(formFact('Currently feeding', a.destination_id));
+    var dest = a.destination_id;
+    var opts = (d.substations || []).map(function (s) {
+      return { value: s.id, label: s.id + ' — ' + H.fmtWatts(s.connection_capacity_mw)
+        + '/conn across ' + s.connection_count };
+    });
+    form.appendChild(H.field('Move to', H.selectBox(dest, opts, function (v) { dest = v; })));
+    form.appendChild(H.el('div', 'form-note',
+      'Connecting needs no permission from the destination. Your contribution is diluted '
+      + 'by the connection count — feeding a busy substation helps the group, not your own share.'));
+    var go = massBtn('', 'icon-transfers', 'Move', 'sui-mod-destructive');
+    go.addEventListener('click', function () {
+      if (dest === a.destination_id) {
+        form.appendChild(H.stateBlock('info', 'already feeding that substation'));
+        return;
+      }
+      Board.T.core.invoke('mcp_allocation_connect', {
+        allocationId: a.id, destinationId: dest,
+      }).then(function () {
+        loadAllocations().then(renderEnergyBody);
+      }).catch(function (e) {
+        form.appendChild(H.stateBlock('error', String(e)));
+      });
+    });
+    form.appendChild(go);
+    H.drawer('Move allocation ' + a.id, form);
+  }
+
+  function allocCreate(d) {
+    var wrap = H.el('div', 'alloc-create');
+    var b = d.budget || {};
+    var open = massBtn('', 'icon-add', 'New allocation', 'sui-mod-secondary');
+    open.addEventListener('click', function () {
+      var form = H.el('div');
+      var kwVal = 0, type = 'dynamic', src = d.player_id;
+      form.appendChild(formFact('Source', d.player_id + ' (you)'));
+      form.appendChild(formFact('Headroom', H.fmtWatts(b.headroom_mw)));
+      form.appendChild(H.field('Type', H.selectBox('dynamic',
+        [{value:'dynamic',label:'dynamic — power you can change later'},
+         {value:'static',label:'static — fixed at creation'},
+         {value:'automated',label:'automated — tracks your full capacity (one per source)'}],
+        function (v) { type = v; })));
+      form.appendChild(H.field('Power (kW)', H.textBox('', '0', function (v) { kwVal = Number(v) || 0; })));
+      form.appendChild(H.el('div', 'form-note',
+        'A new allocation takes its power from your headroom immediately. It is created '
+        + 'unconnected — use Move to point it at a substation.'));
+      var go = massBtn('', 'icon-add', 'Create', 'sui-mod-destructive');
+      go.addEventListener('click', function () {
+        Board.T.core.invoke('mcp_allocation_create', {
+          sourceObjectId: src, allocationType: type, powerMw: Math.round(kwVal * 1e6),
+        }).then(function () {
+          loadAllocations().then(renderEnergyBody);
+        }).catch(function (e) {
+          form.appendChild(H.stateBlock('error', String(e)));
+        });
+      });
+      form.appendChild(go);
+      H.drawer('New allocation', form);
+    });
+    wrap.appendChild(open);
+    return wrap;
+  }
+
+  function loadAllocations() {
+    return Board.T.core.invoke('mcp_allocations').then(function (d) {
+      allocState.data = d;
+    }).catch(function (e) {
+      allocState.data = { _err: String(e) };
+    });
+  }
+
   function renderEnergyBody() {
     var d = energyState.data; if (!d) return;
     var body = document.getElementById('energy-body');
@@ -512,11 +733,22 @@
     pbody.appendChild(table);
     pbody.appendChild(H.el('div', 'ops-muted', 'roster ' + H.ago(d.roster_refreshed_at_ms) + ' old'));
     body.appendChild(H.card('PLAYER MARGINS', pbody));
+
+    var abody = H.el('div');
+    if (allocState.data && allocState.data._err) {
+      abody.appendChild(H.stateBlock('error', 'allocations unavailable: ' + allocState.data._err));
+    } else {
+      renderAllocations(abody);
+    }
+    body.appendChild(H.card('ALLOCATIONS', abody));
     Board.stamp('updated ' + new Date().toLocaleTimeString());
   }
   function renderEnergy() {
-    return Board.T.core.invoke('mcp_energy').then(function (d) {
-      energyState.data = d; renderEnergyBody();
+    return Promise.all([
+      Board.T.core.invoke('mcp_energy'),
+      loadAllocations(),
+    ]).then(function (r) {
+      energyState.data = r[0]; renderEnergyBody();
     }).catch(function (e) {
       var body = document.getElementById('energy-body');
       body.innerHTML = '';

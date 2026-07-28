@@ -601,6 +601,410 @@ pub async fn mcp_transfer_execute_impl(
     }
 }
 
+// ── ALLOCATIONS ──────────────────────────────────────────────────────────────
+// An allocation routes capacity from a SOURCE object (usually you) to a
+// DESTINATION (usually a substation). Two facts drive this whole surface:
+//
+//   * `SetPower` adds the allocation's power to the destination's CAPACITY and
+//     to the source's LOAD. Raising an allocation therefore raises YOUR load —
+//     it is not free.
+//   * If an object's load ever exceeds its capacity the chain runs a brownout
+//     (`GridCascade`) and DESTROYS that object's outgoing allocations in
+//     creation order, cascading downstream. Over-committing does not merely
+//     fail; it tears down the thing you were trying to grow.
+//
+// So every number here is presented against the headroom it consumes, and a
+// change that would exceed capacity is refused rather than signed.
+
+/// Milliwatts per kilowatt — the chain stores power in mW.
+const MW_PER_KW: f64 = 1_000_000.0;
+
+fn grid_num(v: Option<&Value>) -> f64 {
+    match v {
+        Some(Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
+        Some(other) => other.as_f64().unwrap_or(0.0),
+        None => 0.0,
+    }
+}
+
+/// One allocation plus everything the UI needs to reason about a change.
+async fn allocation_row(client: &crate::mcp::cosmos_client::CosmosClient, id: &str) -> Option<Value> {
+    let e = client.query_entity("allocation", id).await.ok()?;
+    let a = e.get("Allocation")?;
+    let ga = e.get("gridAttributes");
+    Some(json!({
+        "id": a.get("id").and_then(|v| v.as_str()).unwrap_or(id),
+        "type": a.get("type").and_then(|v| v.as_str()).unwrap_or("static"),
+        "source_object_id": a.get("sourceObjectId").and_then(|v| v.as_str()).unwrap_or(""),
+        "destination_id": a.get("destinationId").and_then(|v| v.as_str()).unwrap_or(""),
+        "controller": a.get("controller").and_then(|v| v.as_str()).unwrap_or(""),
+        "creator": a.get("creator").and_then(|v| v.as_str()).unwrap_or(""),
+        "locked": a.get("locked").and_then(|v| v.as_bool()).unwrap_or(false),
+        "power_mw": grid_num(ga.and_then(|g| g.get("power"))),
+    }))
+}
+
+/// The primary's allocations, plus the power budget any change is measured
+/// against and the substations a connection could point at.
+#[tauri::command]
+pub async fn mcp_allocations() -> Result<Value, String> {
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let (pid, addr, guild_id) = {
+        let gs = crate::game_state::GAME_STATE.read().map_err(|e| e.to_string())?;
+        (
+            gs.player_id.clone().unwrap_or_default(),
+            gs.wallet_address.clone().unwrap_or_default(),
+            gs.guild_id.clone().unwrap_or_default(),
+        )
+    };
+    if pid.is_empty() {
+        return Err("primary player not synced yet".into());
+    }
+
+    // Prefer the indexed Guild API; fall back to the LCD list, which is small
+    // today but is a full scan and would not stay cheap.
+    let mut ids: Vec<String> = Vec::new();
+    if let Ok(page) = client.guild.allocation_by_controller(&pid, 1).await {
+        for a in page.items {
+            if let Some(id) = a.get("id").and_then(|v| v.as_str()) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    if ids.is_empty() {
+        if let Ok(list) = client.list_entities("allocation", None, Some(500)).await {
+            let arr = list
+                .get("Allocation")
+                .or_else(|| list.get("allocation"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            for a in arr {
+                let mine = a.get("controller").and_then(|v| v.as_str()) == Some(pid.as_str())
+                    || a.get("creator").and_then(|v| v.as_str()) == Some(addr.as_str());
+                if mine {
+                    if let Some(id) = a.get("id").and_then(|v| v.as_str()) {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut allocations = Vec::new();
+    for id in &ids {
+        if let Some(row) = allocation_row(&client, id).await {
+            allocations.push(row);
+        }
+    }
+
+    // The budget. `load` already INCLUDES the power of these allocations, so a
+    // change of +X moves load by +X and headroom by −X.
+    let (capacity, load, structs_load) = match client.query_entity("player", &pid).await {
+        Ok(p) => {
+            let ga = p.get("gridAttributes");
+            (
+                grid_num(ga.and_then(|g| g.get("capacity"))),
+                grid_num(ga.and_then(|g| g.get("load"))),
+                grid_num(ga.and_then(|g| g.get("structsLoad"))),
+            )
+        }
+        Err(e) => return Err(format!("could not read the primary's power: {e}")),
+    };
+
+    // Candidate destinations: the guild's substation plus any we already feed.
+    let mut subs: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut add_sub = |id: &str, subs: &mut Vec<Value>, seen: &mut std::collections::HashSet<String>| {
+        if id.is_empty() || !seen.insert(id.to_string()) {
+            return;
+        }
+        subs.push(json!({ "id": id }));
+    };
+    for a in &allocations {
+        if let Some(d) = a.get("destination_id").and_then(|v| v.as_str()) {
+            add_sub(d, &mut subs, &mut seen);
+        }
+    }
+    if !guild_id.is_empty() {
+        if let Ok(gp) = crate::mcp::guild_power::resolve_guild_power(&client, &guild_id).await {
+            add_sub(&gp.substation_id, &mut subs, &mut seen);
+        }
+    }
+    // Enrich each candidate with what a connection there would actually be worth.
+    let mut substations = Vec::new();
+    for s in subs {
+        let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let (cap, ld, conns, conn_cap) = match client.query_entity("substation", &id).await {
+            Ok(v) => {
+                let ga = v.get("gridAttributes");
+                (
+                    grid_num(ga.and_then(|g| g.get("capacity"))),
+                    grid_num(ga.and_then(|g| g.get("load"))),
+                    grid_num(ga.and_then(|g| g.get("connectionCount"))),
+                    grid_num(ga.and_then(|g| g.get("connectionCapacity"))),
+                )
+            }
+            Err(_) => (0.0, 0.0, 0.0, 0.0),
+        };
+        substations.push(json!({
+            "id": id, "capacity_mw": cap, "load_mw": ld,
+            "connection_count": conns, "connection_capacity_mw": conn_cap,
+        }));
+    }
+
+    Ok(json!({
+        "player_id": pid,
+        "allocations": allocations,
+        "budget": {
+            "capacity_mw": capacity,
+            "load_mw": load,
+            "structs_load_mw": structs_load,
+            "headroom_mw": (capacity - load).max(0.0),
+        },
+        "substations": substations,
+        "mw_per_kw": MW_PER_KW,
+    }))
+}
+
+/// Shared guard for anything that raises an allocation's power.
+///
+/// Returns the reason a change must NOT be signed, or None. Kept pure so the
+/// brownout rule is unit-testable — this is the check that stands between a
+/// typo and the chain tearing down your allocations.
+pub fn power_change_refusal(
+    new_power_mw: f64,
+    current_power_mw: f64,
+    capacity_mw: f64,
+    load_mw: f64,
+) -> Option<String> {
+    if !new_power_mw.is_finite() || new_power_mw < 0.0 {
+        return Some("power must be zero or more".into());
+    }
+    // load already includes current_power, so the delta is what moves it.
+    let projected_load = load_mw - current_power_mw + new_power_mw;
+    if projected_load > capacity_mw {
+        return Some(format!(
+            "that would put your load at {:.2} kW against {:.2} kW of capacity. \
+             The chain brownouts an object whose load exceeds its capacity and \
+             DESTROYS its allocations in creation order — reduce the amount or \
+             raise capacity first.",
+            projected_load / MW_PER_KW,
+            capacity_mw / MW_PER_KW
+        ));
+    }
+    None
+}
+
+
+/// Read the budget an allocation change is measured against.
+async fn allocation_budget(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    pid: &str,
+) -> Result<(f64, f64), String> {
+    let p = client
+        .query_entity("player", pid)
+        .await
+        .map_err(|e| format!("could not read the primary's power: {e}"))?;
+    let ga = p.get("gridAttributes");
+    Ok((
+        grid_num(ga.and_then(|g| g.get("capacity"))),
+        grid_num(ga.and_then(|g| g.get("load"))),
+    ))
+}
+
+/// Preview a power change without signing: what it costs, what it leaves, and
+/// the reason it would be refused. ALWAYS call this before the setter — the
+/// setter re-runs the same guard, so a stale UI cannot slip a bad value past.
+#[tauri::command]
+pub async fn mcp_allocation_preview(allocation_id: String, power_mw: f64) -> Result<Value, String> {
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let pid = {
+        let gs = crate::game_state::GAME_STATE.read().map_err(|e| e.to_string())?;
+        gs.player_id.clone().unwrap_or_default()
+    };
+    let row = allocation_row(&client, &allocation_id)
+        .await
+        .ok_or_else(|| format!("allocation {allocation_id} not found"))?;
+    let current = row.get("power_mw").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let (capacity, load) = allocation_budget(&client, &pid).await?;
+    let refusal = power_change_refusal(power_mw, current, capacity, load);
+    let projected_load = load - current + power_mw;
+    Ok(json!({
+        "ok": refusal.is_none(),
+        "refusal": refusal,
+        "allocation": row,
+        "current_power_mw": current,
+        "new_power_mw": power_mw,
+        "delta_mw": power_mw - current,
+        "capacity_mw": capacity,
+        "load_mw": load,
+        "projected_load_mw": projected_load,
+        "projected_headroom_mw": (capacity - projected_load).max(0.0),
+        "projected_headroom_pct": if capacity > 0.0 {
+            (capacity - projected_load) / capacity * 100.0
+        } else { 0.0 },
+    }))
+}
+
+/// Set an allocation's power. Board-only; re-runs the brownout guard.
+#[tauri::command]
+pub async fn mcp_allocation_set_power(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    allocation_id: String,
+    power_mw: f64,
+) -> Result<Value, String> {
+    require_board(&window)?;
+    mcp_allocation_set_power_impl(app, allocation_id, power_mw).await
+}
+
+pub async fn mcp_allocation_set_power_impl(
+    app: tauri::AppHandle,
+    allocation_id: String,
+    power_mw: f64,
+) -> Result<Value, String> {
+    let preview = mcp_allocation_preview(allocation_id.clone(), power_mw).await?;
+    if preview.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(format!(
+            "refused: {}",
+            preview.get("refusal").and_then(|v| v.as_str()).unwrap_or("unsafe change")
+        ));
+    }
+    // `dynamic` is the only type whose power is meant to be edited: `static` is
+    // fixed, `automated` re-sizes itself to the source's full capacity, and
+    // provider-agreement allocations are system-managed.
+    let atype = preview
+        .pointer("/allocation/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if atype != "dynamic" {
+        return Err(format!(
+            "allocation {allocation_id} is '{atype}' — only 'dynamic' allocations have an editable power"
+        ));
+    }
+    let args = json!({ "allocation_id": allocation_id, "power": power_mw.round() as i64 });
+    match crate::mcp::tx_retry::submit_once(&app, "allocation_update", args, "board:allocation_update").await {
+        Ok(r) if r.success => {
+            crate::mcp::board_feed::push(
+                &app,
+                crate::mcp::board_feed::Severity::Notice,
+                "allocation",
+                format!(
+                    "allocation {allocation_id} set to {:.2} kW",
+                    power_mw / MW_PER_KW
+                ),
+            );
+            Ok(json!({ "ok": true, "power_mw": power_mw }))
+        }
+        Ok(r) => Err(r.error.unwrap_or_else(|| "rejected".into())),
+        Err(e) => Err(e),
+    }
+}
+
+/// Point an allocation at a different substation. Connecting needs no
+/// permission from the destination — the chain checks only your own allocation.
+#[tauri::command]
+pub async fn mcp_allocation_connect(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    allocation_id: String,
+    destination_id: String,
+) -> Result<Value, String> {
+    require_board(&window)?;
+    mcp_allocation_connect_impl(app, allocation_id, destination_id).await
+}
+
+pub async fn mcp_allocation_connect_impl(
+    app: tauri::AppHandle,
+    allocation_id: String,
+    destination_id: String,
+) -> Result<Value, String> {
+    if !destination_id.starts_with("4-") {
+        return Err(format!(
+            "'{destination_id}' is not a substation id (they look like 4-1)"
+        ));
+    }
+    let args = json!({ "allocation_id": allocation_id, "destination_id": destination_id });
+    match crate::mcp::tx_retry::submit_once(
+        &app, "substation_allocation_connect", args, "board:allocation_connect",
+    ).await {
+        Ok(r) if r.success => {
+            crate::mcp::board_feed::push(
+                &app,
+                crate::mcp::board_feed::Severity::Notice,
+                "allocation",
+                format!("allocation {allocation_id} now feeds {destination_id}"),
+            );
+            Ok(json!({ "ok": true }))
+        }
+        Ok(r) => Err(r.error.unwrap_or_else(|| "rejected".into())),
+        Err(e) => Err(e),
+    }
+}
+
+/// Create a new allocation from a source you control.
+#[tauri::command]
+pub async fn mcp_allocation_create(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    source_object_id: String,
+    allocation_type: String,
+    power_mw: f64,
+) -> Result<Value, String> {
+    require_board(&window)?;
+    mcp_allocation_create_impl(app, source_object_id, allocation_type, power_mw).await
+}
+
+pub async fn mcp_allocation_create_impl(
+    app: tauri::AppHandle,
+    source_object_id: String,
+    allocation_type: String,
+    power_mw: f64,
+) -> Result<Value, String> {
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let pid = {
+        let gs = crate::game_state::GAME_STATE.read().map_err(|e| e.to_string())?;
+        gs.player_id.clone().unwrap_or_default()
+    };
+    if !matches!(allocation_type.as_str(), "static" | "dynamic" | "automated") {
+        return Err(format!(
+            "'{allocation_type}' is not a creatable type (static, dynamic or automated; \
+             provider-agreement allocations are system-managed)"
+        ));
+    }
+    // A new allocation adds its power to our load from nothing, so the guard
+    // runs with current = 0.
+    if source_object_id == pid {
+        let (capacity, load) = allocation_budget(&client, &pid).await?;
+        if let Some(why) = power_change_refusal(power_mw, 0.0, capacity, load) {
+            return Err(format!("refused: {why}"));
+        }
+    }
+    let args = json!({
+        "controller": pid,
+        "source_object_id": source_object_id,
+        "allocation_type": allocation_type,
+        "power": power_mw.round() as i64,
+    });
+    match crate::mcp::tx_retry::submit_once(&app, "allocation_create", args, "board:allocation_create").await {
+        Ok(r) if r.success => {
+            crate::mcp::board_feed::push(
+                &app,
+                crate::mcp::board_feed::Severity::Notice,
+                "allocation",
+                format!(
+                    "created a {allocation_type} allocation of {:.2} kW from {source_object_id}",
+                    power_mw / MW_PER_KW
+                ),
+            );
+            Ok(json!({ "ok": true }))
+        }
+        Ok(r) => Err(r.error.unwrap_or_else(|| "rejected".into())),
+        Err(e) => Err(e),
+    }
+}
+
 // ── HEALTH ───────────────────────────────────────────────────────────────────
 
 /// System health for the board's status strip. Everything here was already
@@ -1252,5 +1656,58 @@ mod ledger_amount_tests {
     fn zero_exponent_denoms_need_no_scaling() {
         let row = json!({ "denom": "ore", "amount": "340" });
         assert_eq!(base_units(&row, 0), (340.0, true));
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::power_change_refusal;
+
+    const KW: f64 = 1_000_000.0;
+
+    /// The live shape: 5.67 kW allocated out of 6.46 kW capacity, load == the
+    /// allocation. Raising it into the spare headroom is fine.
+    #[test]
+    fn raising_within_headroom_is_allowed() {
+        assert!(power_change_refusal(6.4 * KW, 5.67 * KW, 6.46 * KW, 5.67 * KW).is_none());
+    }
+
+    /// The whole point of the guard: exceeding capacity does not merely fail,
+    /// the chain brownouts and DESTROYS the allocations in creation order.
+    #[test]
+    fn exceeding_capacity_is_refused_with_the_reason() {
+        let why = power_change_refusal(7.0 * KW, 5.67 * KW, 6.46 * KW, 5.67 * KW)
+            .expect("must refuse");
+        assert!(why.contains("DESTROYS"), "the reason must state the stake: {why}");
+    }
+
+    /// Exactly at capacity is the boundary and is permitted — the chain
+    /// brownouts on load > capacity, not >=.
+    #[test]
+    fn exactly_at_capacity_is_the_boundary() {
+        assert!(power_change_refusal(6.46 * KW, 5.67 * KW, 6.46 * KW, 5.67 * KW).is_none());
+        assert!(power_change_refusal(6.47 * KW, 5.67 * KW, 6.46 * KW, 5.67 * KW).is_some());
+    }
+
+    /// Load already INCLUDES the allocation, so the delta is what moves it.
+    /// Treating `new` as additive would refuse every legal raise.
+    #[test]
+    fn the_delta_moves_load_not_the_absolute_value() {
+        // Lowering always frees headroom, even from a fully committed grid.
+        assert!(power_change_refusal(1.0 * KW, 6.46 * KW, 6.46 * KW, 6.46 * KW).is_none());
+    }
+
+    /// A second allocation from the same source competes for the same budget.
+    #[test]
+    fn a_new_allocation_is_measured_from_zero() {
+        // 0.79 kW of headroom: 0.5 fits, 1.0 does not.
+        assert!(power_change_refusal(0.5 * KW, 0.0, 6.46 * KW, 5.67 * KW).is_none());
+        assert!(power_change_refusal(1.0 * KW, 0.0, 6.46 * KW, 5.67 * KW).is_some());
+    }
+
+    #[test]
+    fn negative_and_nonfinite_are_refused() {
+        assert!(power_change_refusal(-1.0, 0.0, 6.46 * KW, 0.0).is_some());
+        assert!(power_change_refusal(f64::NAN, 0.0, 6.46 * KW, 0.0).is_some());
     }
 }

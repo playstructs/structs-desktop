@@ -158,10 +158,12 @@
        contiguous borders once there are multiple columns). ── */
     #board-layout .sui-result-rows.sui-result-table {
       display: grid;
-      /* min() so the track can go below 400px when the container is
-         narrower — a bare minmax(400px,…) is a hard floor, and in a 334px
-         card body it overflowed by 80px on every page with a result table. */
-      grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr));
+      /* 520, not 400: a result row needs 256px (left) + 224px (right) by SUI's
+         own minimums, so a 470px track squeezed the identity column to 90px
+         and wrapped "WORKER 17" and "PID #1-287" onto two lines each. At 520
+         the identity gets ~170-220px and rows stop wrapping entirely (measured
+         137px tall -> 88px). min() keeps it collapsible on a narrow window. */
+      grid-template-columns: repeat(auto-fill, minmax(min(520px, 100%), 1fr));
       gap: 8px;
       width: 100%;
       max-height: calc(100vh - 300px);
@@ -422,6 +424,24 @@
     #sui-offcanvas .form-fact-value { overflow-wrap: anywhere; }
     #sui-offcanvas .form-note { text-align: left; font-size: 11px; color: var(--text-hint);
       margin-top: 2px; }
+
+    /* SUI's `.sui-data-card-body` is `align-items: flex-start`, so its children
+       shrink to their own content instead of filling the card. On a wide
+       window that stranded everything in a narrow left column — the power
+       table rendered 438px wide inside a 1940px card, and a roster grid that
+       could have shown three columns showed one. Stretch them; cap the width
+       of things that should NOT be 1900px wide (forms) individually. */
+    #board-layout .sui-data-card-body { align-items: stretch; }
+    #board-layout .sui-data-card-body > * { max-width: 100%; }
+    /* A label/control pair is unreadable spanning a wide window — the label
+       ends up a screen away from its own input. */
+    #board-layout label.sui-input-text.cfg-field { max-width: 620px; }
+
+    /* Allocation editor: an inline panel under the row it edits. */
+    .alloc-editor { border-left: 2px solid var(--accent-secondary); padding: 6px 0 6px 10px;
+      margin: 0 0 8px 10px; display: flex; flex-direction: column; gap: 4px; text-align: left; }
+    .alloc-editor label.sui-input-text { max-width: 420px; }
+    .alloc-create { margin-top: 10px; }
 
     /* ── listView ────────────────────────────────────────────────────────
        Toolbar / rows / count / pager. The rows grid never scrolls internally:

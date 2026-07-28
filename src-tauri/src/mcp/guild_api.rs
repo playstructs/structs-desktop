@@ -387,6 +387,44 @@ impl GuildApiClient {
         self.get(&format!("/api/ledger/{}", tx_id)).await
     }
 
+    // -- allocations --
+    // An allocation moves capacity from a source object to a destination
+    // (usually a substation). `controller` is a PLAYER id; `creator` is the
+    // signing address — the two differ, so both lookups exist.
+    pub async fn allocation_by_controller(
+        &self,
+        controller: &str,
+        page: u32,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page(
+            &format!("/api/allocation/controller/{}/page/{}", controller, page),
+            page,
+        )
+        .await
+    }
+    pub async fn allocation_by_creator(
+        &self,
+        creator: &str,
+        page: u32,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page(
+            &format!("/api/allocation/creator/{}/page/{}", creator, page),
+            page,
+        )
+        .await
+    }
+    pub async fn allocation_by_destination(
+        &self,
+        destination_id: &str,
+        page: u32,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page(
+            &format!("/api/allocation/destination/{}/page/{}", destination_id, page),
+            page,
+        )
+        .await
+    }
+
     // -- agreements --
     pub async fn agreement_all(&self, page: u32) -> Result<GuildPage<Value>, String> {
         self.get_page(&format!("/api/agreement/all/page/{}", page), page)
