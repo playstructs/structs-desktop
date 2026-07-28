@@ -145,6 +145,33 @@ fn placements_from(body: &Value, category: &str, owner: &str, command: Option<&s
     out
 }
 
+/// Placements for one fleet: its four ambit arrays PLUS its Command Ship.
+///
+/// The Command Ship is NOT in the ambit arrays — the game gives it a column
+/// of its own, one slot per ambit, always slot 0, and places it by its
+/// operating ambit (which `build_struct` reads off the struct entity; the
+/// empty ambit here is deliberately just a fallback). Verified live: fleet
+/// 9-61's `commandStruct` 5-14098 appears in none of its arrays, which is
+/// exactly why command ships were invisible on the first build.
+fn fleet_placements(fbody: &Value) -> Vec<Placement> {
+    let owner = str_of(fbody.get("owner")).unwrap_or_default();
+    let command = str_of(fbody.get("commandStruct"));
+    let mut out = placements_from(fbody, "fleet", &owner, command.as_deref());
+    if let Some(cmd) = command {
+        if !out.iter().any(|p| p.struct_id == cmd) {
+            out.push(Placement {
+                struct_id: cmd,
+                ambit: String::new(),
+                slot: 0,
+                category: "fleet".into(),
+                owner_hint: owner,
+                is_command: true,
+            });
+        }
+    }
+    out
+}
+
 /// One struct as the renderer needs it. Everything here maps to something
 /// drawn: `ambit` + `slot` + `category` place it on the grid, `type_slug` picks
 /// its art and animation bundles, `health`/`max_health` drive the damaged
@@ -184,6 +211,10 @@ pub struct Snapshot {
     pub raiding_fleet: Option<String>,
     /// Every fleet parked at this planet, in list order.
     pub fleets: Vec<String>,
+    /// Planetary slots per ambit (`spaceSlots` etc. off the Planet body). The
+    /// renderer needs the COUNT, not just the occupants: an unoccupied slot
+    /// under the count shows a build beacon, a cell past it shows blocked art.
+    pub slots: HashMap<String, u64>,
     pub structs: Vec<SpectatorStruct>,
     pub fetched_at_ms: f64,
     /// Populated when a read failed, so the window can say "stale" rather than
@@ -214,6 +245,7 @@ pub async fn snapshot_planet(
                 raid_status: None,
                 raiding_fleet: None,
                 fleets: vec![],
+                slots: HashMap::new(),
                 structs: vec![],
                 fetched_at_ms: crate::hasher::types::now_millis(),
                 warning: Some(format!("planet unavailable: {e}")),
@@ -231,6 +263,21 @@ pub async fn snapshot_planet(
         .and_then(|a| a.get("blockStartRaid"))
         .and_then(num_u64)
         .unwrap_or(0);
+
+    // Planetary capacity per ambit — `"spaceSlots": "4"` etc., strings again.
+    let mut slots: HashMap<String, u64> = HashMap::new();
+    for ambit in AMBIT_KEYS {
+        let n = body
+            .get(format!("{ambit}Slots"))
+            .and_then(num_u64)
+            .unwrap_or_else(|| {
+                body.get(*ambit)
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len() as u64)
+                    .unwrap_or(0)
+            });
+        slots.insert((*ambit).to_string(), n);
+    }
 
     let mut placements = placements_from(
         body,
@@ -252,13 +299,7 @@ pub async fn snapshot_planet(
             break;
         };
         let fbody = fleet.get("Fleet").unwrap_or(&fleet);
-        let fleet_owner = str_of(fbody.get("owner")).unwrap_or_default();
-        placements.extend(placements_from(
-            fbody,
-            "fleet",
-            &fleet_owner,
-            fbody.get("commandStruct").and_then(|v| v.as_str()),
-        ));
+        placements.extend(fleet_placements(fbody));
         fleets.push(fleet_id);
         next = str_of(fbody.get("locationListForward"));
     }
@@ -293,10 +334,72 @@ pub async fn snapshot_planet(
         raid_status: None,
         raiding_fleet: None,
         fleets,
+        slots,
         structs,
         fetched_at_ms: crate::hasher::types::now_millis(),
         warning,
     }
+}
+
+/// Full snapshot enriched with the raid record — shared by the watcher's push
+/// and the window's pull so the two can never disagree on shape.
+pub async fn enriched_snapshot(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    planet_id: &str,
+) -> Snapshot {
+    let mut snap = snapshot_planet(client, planet_id).await;
+    if let Ok(raid) = client.guild.planet_raid_active_by_planet(planet_id).await {
+        let r = raid.as_array().and_then(|a| a.first()).unwrap_or(&raid);
+        snap.raid_status = str_of(r.get("status"));
+        snap.raiding_fleet = str_of(r.get("fleet_id"));
+    }
+    snap
+}
+
+/// Current re-target generation for a watched location; 0 when nothing
+/// watches it yet. A pulled snapshot must carry this so the attack payloads
+/// that follow (stamped by the watcher) reconcile against it.
+pub fn generation_for(target: &Target) -> u64 {
+    WATCHES
+        .lock()
+        .unwrap()
+        .get(&watch_key(target))
+        .map(|w| w.generation)
+        .unwrap_or(0)
+}
+
+/// The pull half of the protocol: build the current state for a target ON
+/// DEMAND, for the window to fetch on load.
+///
+/// The push path alone has a first-paint hole: `open_window` attaches the
+/// watcher before the window's JS has parsed, so the first `raid-snapshot`
+/// emit can fire at a document with no listeners — Tauri drops events nobody
+/// is listening for — and the map then sits empty until the NEXT cycle,
+/// 20 seconds later. The game's own map does not have this problem because it
+/// pulls first (`MapStructLayerComponent.initPageCode` → `renderAllStructs`)
+/// and treats events purely as updates; this mirrors that, the same way
+/// board.html pulls `mcp_board_html` on load.
+pub async fn pull_state(target: &Target) -> Value {
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let planet_id = match target {
+        Target::Planet { planet_id } => Some(planet_id.clone()),
+        Target::Fleet { fleet_id } => client
+            .query_entity("fleet", fleet_id)
+            .await
+            .ok()
+            .and_then(|v| {
+                let b = v.get("Fleet").unwrap_or(&v).clone();
+                str_of(b.get("locationId"))
+            }),
+    };
+    let Some(pid) = planet_id else {
+        return json!({
+            "snapshot": Value::Null,
+            "reason": "fleet is not at a planet right now",
+        });
+    };
+    let snap = enriched_snapshot(&client, &pid).await;
+    json!({ "generation": generation_for(target), "snapshot": snap })
 }
 
 /// Resolve one placement into a drawable struct.
@@ -505,12 +608,7 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
             let now = crate::hasher::types::now_millis();
             if now - last_snapshot >= SNAPSHOT_INTERVAL_MS as f64 {
                 last_snapshot = now;
-                let mut snap = snapshot_planet(&client, &pid).await;
-                if let Ok(raid) = client.guild.planet_raid_active_by_planet(&pid).await {
-                    let r = raid.as_array().and_then(|a| a.first()).unwrap_or(&raid);
-                    snap.raid_status = str_of(r.get("status"));
-                    snap.raiding_fleet = str_of(r.get("fleet_id"));
-                }
+                let snap = enriched_snapshot(&client, &pid).await;
                 let payload = json!({ "generation": generation, "snapshot": snap });
                 for label in &windows {
                     emit(&app, label, "raid-snapshot", payload.clone());
@@ -788,6 +886,37 @@ mod tests {
         let flagged: Vec<_> = p2.iter().filter(|x| x.is_command).collect();
         assert_eq!(flagged.len(), 1);
         assert_eq!(flagged[0].struct_id, "5-14112");
+    }
+
+    #[test]
+    fn a_command_ship_absent_from_the_arrays_is_still_placed() {
+        // fleet 9-61 exactly as read live: commandStruct 5-14098 appears in
+        // NONE of its ambit arrays. It must get a synthetic slot-0 placement
+        // or the raid's most important struct never renders.
+        let p = fleet_placements(&fleet_body());
+        let cmd: Vec<_> = p.iter().filter(|x| x.is_command).collect();
+        assert_eq!(cmd.len(), 1);
+        assert_eq!(cmd[0].struct_id, "5-14098");
+        assert_eq!(cmd[0].slot, 0, "command tiles are always slot 0");
+        assert_eq!(cmd[0].category, "fleet");
+        assert_eq!(cmd[0].owner_hint, "1-61");
+        // 13 array occupants (space 4 + air 3 + land 2 + water 4) + the
+        // injected command ship.
+        assert_eq!(p.len(), 14);
+    }
+
+    #[test]
+    fn a_command_ship_that_is_in_the_arrays_is_not_duplicated() {
+        let mut body = fleet_body();
+        body["commandStruct"] = json!("5-14112"); // land slot 0 occupant
+        let p = fleet_placements(&body);
+        assert_eq!(
+            p.iter().filter(|x| x.struct_id == "5-14112").count(),
+            1,
+            "one placement, flagged, never a second synthetic one"
+        );
+        assert!(p.iter().find(|x| x.struct_id == "5-14112").unwrap().is_command);
+        assert_eq!(p.len(), 13);
     }
 
     #[test]

@@ -64,9 +64,27 @@
       width: var(--tile-width, 128px); height: var(--tile-height, 128px);
       background-repeat: no-repeat; background-position: center;
     }
-    /* The vertical divider between the defender's half of the board and the
-       attacker's. The game renders it as a column of its own. */
-    .rv-cell.rv-divider { background: transparent; opacity: .35; }
+    /* Transition rows: layers STACK inside one tile-height block (the game's
+       .map-terrain-transition) — the previous ambit's edge-bottom under the
+       next ambit's edge-top is what blends two bands together. */
+    .rv-row.rv-transition { position: relative; height: var(--tile-height, 128px); }
+    .rv-strip { position: absolute; top: 0; left: 0; display: flex; }
+    .rv-tile { flex: none; width: var(--tile-width, 128px); height: var(--tile-height, 128px);
+      background-repeat: no-repeat; background-position: center; }
+
+    /* Slot markers: beacon on a buildable planetary slot, blocked art on an
+       unusable cell — the game's MapTileMarkersComponent overlay. */
+    .rv-marker { position: absolute; max-width: 100%; max-height: 100%;
+      left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 50; }
+
+    /* The mount a struct renders into. Attacker-side mounts are mirrored so
+       raiders face the planet (.map-struct-layer-tile.mod-side-right). The
+       HUD un-mirrors itself inside so text stays readable — the game keeps
+       its HUD on a separate unflipped layer. */
+    .rv-mount { position: absolute; inset: 0; }
+    .rv-mount.rv-flip { transform: scaleX(-1); }
+    .rv-mount.rv-flip .rv-hud { transform: scaleX(-1); }
+    .rv-struct-wrap { position: absolute; inset: 0; }
 
     /* One struct: stacked absolutely-positioned PNG layers. The z-indices
        match the game's --struct-*-z-index so a weapon that renders over the
@@ -81,16 +99,19 @@
     /* Lottie mounts here, above the still it is animating. */
     .rv-anim { position: absolute; inset: 0; z-index: 400; pointer-events: none; }
 
-    /* Health + ownership HUD. Attacker structs are tinted so the two sides
-       read apart at a glance without needing to hover anything. */
-    .rv-hud { position: absolute; left: 6px; right: 6px; bottom: 4px; z-index: 500; }
-    .rv-hp { height: 3px; background: rgba(0,0,0,.55); overflow: hidden; }
-    .rv-hp i { display: block; height: 100%; background: var(--text-player-primary, #7fd6ff); }
-    .rv-struct.rv-attacker ~ .rv-hud .rv-hp i { background: var(--text-enemy-primary, #ff6b6b); }
-    .rv-hp.rv-hurt i { background: var(--text-warning, #ffb454); }
-    .rv-hp.rv-critical i { background: var(--text-enemy-primary, #ff6b6b); }
-    .rv-tag { font-size: 8px; font-family: 'ExtremeHazard', sans-serif;
-      letter-spacing: .06em; text-align: center; margin-top: 2px;
+    /* HUD: segmented health (one cell per hit point) in a 48px dark box near
+       the top of the tile — .map-struct-hud-status-bars + .struct-health-bar. */
+    .rv-hud { position: absolute; inset: 0; z-index: 500; pointer-events: none; }
+    .rv-hudbox { position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      width: 48px; padding: 2px; background: rgba(10, 12, 18, .85);
+      border: 2px solid rgba(10, 12, 18, .85); }
+    .rv-hp { display: flex; height: 4px; gap: 2px; }
+    .rv-seg { display: block; flex: 1 1 100%;
+      background: var(--struct-health-bar-damage, #612b3d); }
+    .rv-seg.on { background: var(--struct-health-bar-health, #43d675); }
+    .rv-tag { position: absolute; left: 4px; right: 4px; bottom: 4px;
+      font-size: 8px; font-family: 'ExtremeHazard', sans-serif;
+      letter-spacing: .06em; text-align: center;
       color: var(--text-hint, #6b7488); text-shadow: 0 1px 2px #000;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 

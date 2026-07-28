@@ -433,6 +433,9 @@ async fn board_invoke(
         // would appear on the HOST's screen, not the remote viewer's. Say so
         // rather than appear to work — but only once past the same gate, so a
         // disabled instance still reveals nothing.
+        "mcp_raid_state" => from_result(
+            crate::mcp::raid_view::mcp_raid_state(s("planetId"), s("fleetId")).await,
+        ),
         // Opening a native window is meaningless over the web path: the window
         // would appear on the HOST's screen, not the remote viewer's.
         "mcp_raid_view_open" => err_json(

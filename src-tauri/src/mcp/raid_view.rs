@@ -468,6 +468,22 @@ pub fn mcp_raid_view_open(
     })
 }
 
+/// First-paint pull for the spectator window, invoked on load.
+///
+/// Push alone loses the first snapshot: the watcher can emit before the
+/// window's JS has attached a listener, and Tauri drops events with no
+/// listener — the map then sits empty until the next 20-second cycle. This is
+/// the same reason board.html pulls `mcp_board_html` on load. Also what makes
+/// a manual reload of the window repaint immediately.
+#[tauri::command]
+pub async fn mcp_raid_state(
+    planet_id: Option<String>,
+    fleet_id: Option<String>,
+) -> Result<Value, String> {
+    let target = parse_target(planet_id.as_deref(), fleet_id.as_deref())?;
+    Ok(crate::mcp::spectator::pull_state(&target).await)
+}
+
 /// Idempotent per location: a second request for a location already on screen
 /// raises that window instead of stacking a duplicate.
 pub fn open_window(

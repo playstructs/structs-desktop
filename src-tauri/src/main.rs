@@ -78,6 +78,7 @@ fn main() {
             mcp::tools::board_pages::mcp_config_bundle,
             mcp::raid_view::mcp_raids,
             mcp::raid_view::mcp_raid_view_open,
+            mcp::raid_view::mcp_raid_state,
             mcp::tools::board_pages::mcp_config_set,
             mcp::tools::board_pages::mcp_role_pfp_get,
             mcp::tools::board_pages::mcp_role_pfp_set,

@@ -282,19 +282,13 @@
   // Grid
   // ══════════════════════════════════════════════════════════════════════════
 
-  /* How many planetary columns this planet needs.
-   *
-   * The game derives this from the planet's slot capacity; we derive it from
-   * the slots actually occupied, which needs no extra chain read and cannot
-   * under-count what we are about to draw. Two is the floor either way
-   * (MAP_DEFAULT_PLANETARY_COL_COUNT). */
-  function planetaryColCount(structs) {
-    var maxSlot = -1;
-    structs.forEach(function (s) {
-      if (s.category === 'planet' && s.slot > maxSlot) maxSlot = s.slot;
-    });
-    if (maxSlot < 0) return DEFAULT_COL_COUNTS[COL.DEF_PLAN];
-    return Math.max(DEFAULT_COL_COUNTS[COL.DEF_PLAN], Math.ceil((maxSlot + 1) / ROWS_PER_AMBIT));
+  /* How many planetary columns this planet needs — the game's
+   * calcColsNeededBySlots: ceil(max slots per ambit / rows), floored at the
+   * default 2 (MAP_DEFAULT_PLANETARY_COL_COUNT). */
+  function planetaryColCount(slots) {
+    var most = 0;
+    AMBITS.forEach(function (a) { most = Math.max(most, Number((slots || {})[a] || 0)); });
+    return Math.max(DEFAULT_COL_COUNTS[COL.DEF_PLAN], Math.ceil(most / ROWS_PER_AMBIT));
   }
 
   /* The flat list of column types, left to right.
@@ -303,9 +297,9 @@
    * MapTerrainComponent). A spectator belongs to neither side, and the planet
    * is the subject of the window, so showing it as its owner sees it is the
    * least confusing choice — defenders left, raiders right. */
-  function buildColumns(structs) {
+  function buildColumns(slots) {
     var counts = Object.assign({}, DEFAULT_COL_COUNTS);
-    counts[COL.DEF_PLAN] = planetaryColCount(structs);
+    counts[COL.DEF_PLAN] = planetaryColCount(slots);
     var cols = [];
     COL_ORDER.forEach(function (type) {
       for (var i = 0; i < counts[type]; i++) cols.push(type);
@@ -327,35 +321,146 @@
     return (last - colIndex) + row * perRow;
   }
 
-  /* Which column block a struct belongs in. Planetary structs occupy the
-   * defender's planetary columns; fleet structs sit on the side matching who
-   * owns them. */
+  /* The cell-anchor key a struct mounts at. Three separate slot-spaces:
+   * command (one per side PER AMBIT, always slot 0 — GenericMapLayerComponent
+   * "Command structs are always slot 0 in a fleet"), planetary, and fleet. */
+  function anchorKeyFor(s) {
+    if (s.is_command) return 'cmd|' + s.side + '|' + s.ambit;
+    if (s.category === 'planet') return 'plan|' + s.ambit + '|' + s.slot;
+    return 'fleet|' + s.side + '|' + s.ambit + '|' + s.slot;
+  }
+
+  /* Which column block a struct belongs in — kept for the harness. */
   function colTypeFor(s) {
     if (s.category === 'planet') return COL.DEF_PLAN;
-    // `is_command` comes from the fleet's own `commandStruct` field, not from
-    // the type — a fleet designates exactly one, and it is the struct whose
-    // loss ends a raid, so it gets its own column.
     if (s.is_command) return s.side === 'defender' ? COL.DEF_CMD : COL.ATK_CMD;
     return s.side === 'defender' ? COL.DEF_FLEET : COL.ATK_FLEET;
   }
 
-  function buildGrid(structs) {
-    var cols = buildColumns(structs);
+  /* ── The board, built the way MapComponent builds it ─────────────────────
+   *
+   * The game stacks seven full-size layers (terrain, ornaments, markers,
+   * structs, HUD, fog, selection). We collapse that into one flow of rows
+   * where each CELL stacks its own layers — same visual result, and the
+   * per-window DOM scoping the game's layers cannot give us. The row model
+   * is transcribed exactly:
+   *
+   *   edge-top(space)                        ← transition row
+   *   space ×2                               ← band rows
+   *   edge-bottom(space) ⊕ edge-top(air)     ← transition row (layers STACK)
+   *   air ×2
+   *   edge-bottom(air) ⊕ HORIZON ⊕ edge-top(land)
+   *   land ×2
+   *   edge-bottom(land) ⊕ edge-top(water)
+   *   water ×2
+   *   edge-bottom(water)
+   *
+   * Terrain is CONTINUOUS across all nine columns — the divider is an empty
+   * column of clean terrain, not a hole (the game draws the divider only in
+   * its marker/selection layers). */
+
+  // Anchor cells for struct mounting, rebuilt with the grid.
+  var anchors = {};
+
+  function edgeStrip(cols, ambit, edge) {
+    // edge: 'top' (V_POS 0) or 'bottom' (V_POS 4).
+    var strip = el('div', 'rv-strip');
+    var v = edge === 'top' ? 0 : 4;
+    for (var c = 0; c < cols.length; c++) {
+      var t = el('div', 'rv-tile');
+      t.style.backgroundImage = 'url("' + tileUrl(ambit, v, hPosOf(c, cols.length)) + '")';
+      strip.appendChild(t);
+    }
+    return strip;
+  }
+
+  function horizonStrip(cols) {
+    var strip = el('div', 'rv-strip');
+    for (var c = 0; c < cols.length; c++) {
+      var h = hPosOf(c, cols.length);
+      var hIndex = h === 'left' ? 1 : (h === 'right' ? 3 : 2);
+      var t = el('div', 'rv-tile');
+      t.style.backgroundImage = 'url("img/tiles/horizon/horizon-1-' + hIndex + '-' + h + '.png")';
+      strip.appendChild(t);
+    }
+    return strip;
+  }
+
+  function hPosOf(colIndex, colCount) {
+    return colIndex === 0 ? 'left' : (colIndex === colCount - 1 ? 'right' : 'middle');
+  }
+
+  /* One transition row: previous ambit's edge-bottom layered OVER the next
+   * ambit's edge-top (plus the horizon strip above land) — the overlap is
+   * what blends the two bands; MapTransitionComponent stacks its layers
+   * absolutely inside one tile-height block. */
+  function transitionRow(cols, prevAmbit, nextAmbit) {
+    var row = el('div', 'rv-row rv-transition');
+    // Painter's order matters: the LAST child paints on top, and the builder
+    // pushes topAmbit's edge first, horizon, then bottomAmbit's edge — so the
+    // next ambit's edge-top ends up on top, exactly as in the game.
+    if (prevAmbit) row.appendChild(edgeStrip(cols, prevAmbit, 'bottom'));
+    if (nextAmbit === 'land') row.appendChild(horizonStrip(cols));
+    if (nextAmbit) row.appendChild(edgeStrip(cols, nextAmbit, 'top'));
+    return row;
+  }
+
+  function markerImg(cls, urls) {
+    // Beacon art ships as gifs for some ambits and og-*.png stills for the
+    // rest; try in order and hide when nothing exists rather than showing a
+    // broken-image glyph.
+    var img = document.createElement('img');
+    img.className = cls;
+    img.alt = '';
+    var i = 0;
+    img.addEventListener('error', function () {
+      i++;
+      if (i < urls.length) img.src = urls[i];
+      else img.style.display = 'none';
+    });
+    img.src = urls[0];
+    return img;
+  }
+
+  function blockedMarker(ambit) {
+    return markerImg('rv-marker', ['img/tiles/blocked/' + ambit + '.png']);
+  }
+
+  function beaconMarker(ambit) {
+    return markerImg('rv-marker', [
+      'img/tiles/beacon/' + ambit + '.gif',
+      'img/tiles/beacon/og-' + ambit + '.png',
+    ]);
+  }
+
+  /* Build the whole board for a snapshot. Returns the anchor map. */
+  function buildGrid(snap) {
+    var cols = buildColumns(snap.slots);
     var map = document.getElementById('rv-map');
     map.innerHTML = '';
+    anchors = {};
 
-    // Index structs by (ambit, colType, slot) so each cell is a direct lookup
-    // rather than a scan of the whole roster per tile.
-    var index = {};
-    structs.forEach(function (s) {
-      var key = s.ambit + '|' + colTypeFor(s) + '|' + s.slot;
-      (index[key] = index[key] || []).push(s);
+    // Occupancy first, so empty planetary slots know to show a beacon.
+    var occupied = {};
+    (snap.structs || []).forEach(function (s) { occupied[anchorKeyFor(s)] = true; });
+
+    var slots = snap.slots || {};
+    // A missing count means the backend could not read it — treat as the full
+    // drawn capacity rather than zero, or every planetary cell would render
+    // blocked. An explicit 0 stays 0 (that ambit has no slots).
+    function slotsFor(a) {
+      var v = slots[a];
+      return v == null ? ROWS_PER_AMBIT * DEFAULT_COL_COUNTS[COL.DEF_PLAN] : Number(v);
+    }
+    var prevAmbit = '';
+    var ambits = AMBITS.filter(function (a) {
+      // The game maps only ambits with slots; every current planet has all
+      // four, but a zero-slot ambit must not draw an empty band.
+      return slotsFor(a) > 0;
     });
 
-    var prevAmbit = '';
-    AMBITS.forEach(function (ambit) {
-      var transition = TRANSITIONS[prevAmbit + '>' + ambit];
-      if (transition) map.appendChild(transitionRow(cols, transition));
+    ambits.forEach(function (ambit) {
+      map.appendChild(transitionRow(cols, prevAmbit, ambit));
       prevAmbit = ambit;
 
       for (var r = 0; r < ROWS_PER_AMBIT; r++) {
@@ -366,54 +471,73 @@
           rowNode.appendChild(band);
         }
         for (var c = 0; c < cols.length; c++) {
-          rowNode.appendChild(cell(cols, ambit, r, c, index));
+          rowNode.appendChild(cell(cols, slotsFor, occupied, ambit, r, c));
         }
         map.appendChild(rowNode);
       }
     });
+    map.appendChild(transitionRow(cols, prevAmbit, ''));
+    return anchors;
   }
 
-  function transitionRow(cols, kind) {
-    var row = el('div', 'rv-row rv-transition');
-    for (var c = 0; c < cols.length; c++) {
-      var n = el('div', 'rv-cell');
-      n.style.height = '128px';
-      var art = TRANSITION_ART[kind];
-      if (art) {
-        var h = c === 0 ? 'left' : (c === cols.length - 1 ? 'right' : 'middle');
-        var hIndex = h === 'left' ? 1 : (h === 'right' ? 3 : 2);
-        n.style.backgroundImage = 'url("img/tiles/' + art + '/' + art + '-1-' + hIndex + '-' + h + '.png")';
-      } else {
-        // No art for atmosphere/shore — a hairline keeps the band readable
-        // without inventing a texture the game does not have.
-        n.style.height = '10px';
-        n.style.borderBottom = '1px solid rgba(255,255,255,.08)';
-      }
-      row.appendChild(n);
-    }
-    return row;
-  }
-
-  function cell(cols, ambit, row, colIndex, index) {
+  function cell(cols, slotsFor, occupied, ambit, row, colIndex) {
     var colType = cols[colIndex];
     var n = el('div', 'rv-cell');
 
-    if (colType === COL.DIVIDER) {
-      n.classList.add('rv-divider');
-      return n;
+    // Terrain everywhere, divider included — continuity is the point.
+    n.style.backgroundColor = AMBIT_BG[ambit] || 'transparent';
+    n.style.backgroundImage = 'url("' + tileUrl(ambit, row === 0 ? 1 : 3, hPosOf(colIndex, cols.length)) + '")';
+
+    if (colType === COL.DIVIDER) return n;
+
+    var side = colIndex < cols.indexOf(COL.DIVIDER) ? 'defender' : 'attacker';
+    var key = null;
+
+    if (colType === COL.DEF_CMD || colType === COL.ATK_CMD) {
+      // One usable command slot per side per ambit (always slot 0); the
+      // second row is blocked, exactly as createCommandSlotTracker deals it.
+      if (row === 0) {
+        key = 'cmd|' + side + '|' + ambit;
+      } else {
+        n.appendChild(blockedMarker(ambit));
+        return n;
+      }
+    } else if (colType === COL.DEF_PLAN) {
+      var pslot = slotAt(cols, COL.DEF_PLAN, row, colIndex);
+      if (pslot >= slotsFor(ambit)) {
+        n.appendChild(blockedMarker(ambit));
+        return n;
+      }
+      key = 'plan|' + ambit + '|' + pslot;
+      if (!occupied[key]) n.appendChild(beaconMarker(ambit));
+    } else {
+      var fslot = slotAt(cols, colType, row, colIndex);
+      key = 'fleet|' + side + '|' + ambit + '|' + fslot;
     }
 
-    var hPos = colIndex === 0 ? 'left' : (colIndex === cols.length - 1 ? 'right' : 'middle');
-    // Two rows per ambit: the first uses the `top` slice, the second `bottom`.
-    var vIndex = row === 0 ? 1 : 3;
-    n.style.backgroundColor = AMBIT_BG[ambit] || 'transparent';
-    n.style.backgroundImage = 'url("' + tileUrl(ambit, vIndex, hPos) + '")';
-
-    var slot = slotAt(cols, colType, row, colIndex);
-    if (slot == null) return n;
-    var here = index[ambit + '|' + colType + '|' + slot];
-    if (here && here.length) n.appendChild(structNode(here[0]));
+    // The mount a struct renders into. Right-side mounts are mirrored so
+    // raiders face the planet (.map-struct-layer-tile.mod-side-right).
+    var mount = el('div', 'rv-mount' + (side === 'attacker' ? ' rv-flip' : ''));
+    n.appendChild(mount);
+    anchors[key] = mount;
     return n;
+  }
+
+  /* Mount every struct into its anchor. Returns how many had nowhere to go
+   * (e.g. a third attacker command ship in one ambit — the game's own board
+   * cannot seat that either). */
+  function placeStructs(structs) {
+    var unplaced = 0;
+    (structs || []).forEach(function (s) {
+      var mount = anchors[anchorKeyFor(s)];
+      if (!mount) { unplaced++; return; }
+      if (mount.childNodes.length) { unplaced++; return; } // seat taken
+      mount.appendChild(structNode(s));
+      // An occupied planetary slot must not keep its build beacon.
+      var beacon = mount.parentNode && mount.parentNode.querySelector('.rv-marker');
+      if (beacon) beacon.style.display = 'none';
+    });
+    return unplaced;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -422,8 +546,6 @@
 
   function structNode(s) {
     var wrap = el('div', 'rv-struct-wrap');
-    wrap.style.position = 'absolute';
-    wrap.style.inset = '0';
     wrap.id = domId('slot', s.id);
 
     var still = el('div', 'rv-struct'
@@ -495,20 +617,23 @@
     return override != null || state.liveHealth[s.id] != null || s.health != null;
   }
 
-  /* Health bar + label. We show health for foreign structs, which the game
-   * deliberately hides — but only health, which the chain publishes to
-   * everyone. Nothing here is derived from privileged state. */
+  /* Health bar + label. SEGMENTED, one cell per hit point, in a 48px dark box
+   * pinned near the top of the tile — transcribed from
+   * MapStructHUDLayerComponent.renderHealthBar + .map-struct-hud-status-bars.
+   * We show it for foreign structs too, which the game deliberately hides;
+   * health is public chain state, nothing privileged. */
   function renderHud(node, s, healthOverride) {
     node.innerHTML = '';
     var hp = healthOverride != null ? healthOverride : currentHealth(s);
     var max = s.max_health || 0;
     if (max > 0) {
-      var frac = Math.max(0, Math.min(1, hp / max));
-      var bar = el('div', 'rv-hp' + (frac <= 0.34 ? ' rv-critical' : (frac < 1 ? ' rv-hurt' : '')));
-      var fill = el('i');
-      fill.style.width = (frac * 100) + '%';
-      bar.appendChild(fill);
-      node.appendChild(bar);
+      var box = el('div', 'rv-hudbox');
+      var bar = el('div', 'rv-hp');
+      for (var i = 0; i < max; i++) {
+        bar.appendChild(el('i', i < hp ? 'rv-seg on' : 'rv-seg'));
+      }
+      box.appendChild(bar);
+      node.appendChild(box);
     }
     node.appendChild(el('div', 'rv-tag', s.type_name || s.type_slug || '?'));
   }
@@ -856,7 +981,11 @@
     // playing, the sequence's own values win.
     if (!playing) state.liveHealth = {};
 
-    buildGrid(snap.structs || []);
+    // The rebuild replaces every mount, so every idle player must go first or
+    // lottie keeps animating into detached nodes forever.
+    stopAllIdle();
+    buildGrid(snap);
+    var unplaced = placeStructs(snap.structs || []);
     (snap.structs || []).forEach(startIdle);
     // Only diff against a real previous state on the same planet — the first
     // snapshot would otherwise deploy the entire garrison at once.
@@ -865,9 +994,11 @@
     }
     if (snap.raid_status) showBanner(snap.raid_status);
     renderHeader();
-    note(snap.warning || (unmatchedShots
-      ? unmatchedShots + ' shot(s) had no matching animation and were shown as a health change only.'
-      : null), snap.warning ? 'sui-mod-warning' : 'sui-mod-secondary');
+    var notices = [];
+    if (snap.warning) notices.push(snap.warning);
+    if (unplaced) notices.push(unplaced + ' struct(s) had no free tile (a second fleet contests the same slots).');
+    if (unmatchedShots) notices.push(unmatchedShots + ' shot(s) had no matching animation and were shown as a health change only.');
+    note(notices.join(' ') || null, snap.warning ? 'sui-mod-warning' : 'sui-mod-secondary');
   }
 
   /* A live delta from the GRASS stream. These arrive INSTANTLY, ahead of the
@@ -912,6 +1043,10 @@
   }
 
   function applyAttacks(payload) {
+    // Before the first snapshot there is nothing to animate ON — processing
+    // shots against an empty struct table is exactly what produced "11
+    // shot(s) had no matching animation" over a bare terrain grid.
+    if (!state.snapshot) return;
     if (payload.generation !== state.generation) return;   // stale planet
     state.lastEventMs = Date.now();
     (payload.attacks || []).forEach(choreograph);
@@ -925,6 +1060,11 @@
       note('This window was opened without a target.', 'sui-mod-destructive');
       return;
     }
+    // PULL the first snapshot rather than waiting for a push: the watcher's
+    // first emit can fire before these listeners exist, and Tauri drops
+    // events nobody is listening for — the map then sat empty until the next
+    // 20-second cycle. Same pattern as board.html pulling mcp_board_html.
+    // Listeners are attached first so nothing lands in the gap.
     T.event.listen('raid-snapshot', function (e) { applySnapshot(e.payload || {}); });
     T.event.listen('raid-delta', function (e) { applyDelta(e.payload || {}); });
     T.event.listen('raid-attacks', function (e) { applyAttacks(e.payload || {}); });
@@ -939,6 +1079,23 @@
     // Keep the "feed" freshness readout honest between events.
     setInterval(renderHeader, 5000);
     renderHeader();
+
+    T.core.invoke('mcp_raid_state', {
+      planetId: TARGET.kind === 'planet' ? TARGET.id : null,
+      fleetId: TARGET.kind === 'fleet' ? TARGET.id : null,
+    }).then(function (d) {
+      d = d || {};
+      if (!d.snapshot) {
+        note(d.reason || 'no state available yet', 'sui-mod-warning');
+        return;
+      }
+      // A pushed snapshot may have landed while the pull was in flight; the
+      // newer fetched_at wins so a slow pull cannot roll the map backwards.
+      var have = state.snapshot ? (state.snapshot.fetched_at_ms || 0) : -1;
+      if ((d.snapshot.fetched_at_ms || 0) > have) applySnapshot(d);
+    }).catch(function (e) {
+      note('could not load the planet: ' + e, 'sui-mod-destructive');
+    });
   }
 
   // Exported for the jsdom harness: the pure pieces are worth asserting on
@@ -953,7 +1110,11 @@
     buildColumns: buildColumns,
     slotAt: slotAt,
     colTypeFor: colTypeFor,
+    anchorKeyFor: anchorKeyFor,
     planetaryColCount: planetaryColCount,
+    buildGrid: buildGrid,
+    placeStructs: placeStructs,
+    _anchors: function () { return anchors; },
     COL: COL,
     domId: domId,
     _state: state,
