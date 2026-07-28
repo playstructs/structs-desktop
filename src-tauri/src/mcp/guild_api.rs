@@ -195,6 +195,27 @@ impl GuildApiClient {
         .await
     }
 
+    // -- planet-raid --
+    //
+    // `planet_raid` holds only the LATEST raid per planet, as a `PlanetRaid`:
+    // `{planet_id, planet_owner, fleet_id, fleet_owner, status, updated_at}`.
+    // It is the only source that carries the two OWNERS — the activity feed
+    // carries ids only — so it is what turns "planet 2-1595 is being raided"
+    // into "who is raiding whom".
+    //
+    // Note the table keeps non-terminal rows indefinitely: a raid that never
+    // reached a terminal status stays `initiated` forever (two such rows are
+    // live today, one 19 days old). Freshness is decided by the caller, not by
+    // the status field. See [`crate::mcp::raid_view::reduce_raids`].
+    pub async fn planet_raid_active_by_planet(&self, planet_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/planet/{}/raid/active", planet_id))
+            .await
+    }
+    pub async fn planet_raid_active_by_fleet(&self, fleet_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/planet/raid/active/fleet/{}", fleet_id))
+            .await
+    }
+
     // -- struct-defender --
     pub async fn struct_defender_by_defending(&self, struct_id: &str) -> Result<Value, String> {
         self.get(&format!("/api/struct-defender/defending/{}", struct_id))

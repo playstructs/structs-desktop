@@ -32,6 +32,9 @@ impl McpServer {
 
         // Web dashboard state (opt-in; routes 404 until enabled).
         crate::mcp::web_board::init_from_config();
+        // Raid View is opt-in on the same terms — load its flag before any
+        // route or command can be reached.
+        crate::mcp::raid_view::init_from_config();
         let web_state = crate::mcp::web_board::WebState {
             app: app_handle.clone(),
             registry: task_registry.clone(),

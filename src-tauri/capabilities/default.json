@@ -4,7 +4,8 @@
   "windows": [
     "main",
     "board",
-    "stream"
+    "stream",
+    "raid-*"
   ],
   "permissions": [
     "core:default"

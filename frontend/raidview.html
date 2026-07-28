@@ -1,0 +1,148 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Structs — Raid View</title>
+  <link rel="stylesheet" href="css/normalize.css" />
+  <link rel="stylesheet" href="css/structicons.css" />
+  <link rel="stylesheet" href="css/sui/sui.css" />
+  <style>
+    /* ── Raid View ────────────────────────────────────────────────────────
+       A read-only spectator. This document deliberately does NOT load the
+       game bundle: it shares an origin with the game (both are served from
+       tauri://localhost), so booting index.html here would share localStorage
+       — which holds the mnemonic — resume proof-of-work whose task registry is
+       keyed on struct id (duplicate tasks cancel each other), and double-answer
+       broadcast signing requests. Tauri applies initialization_script per
+       window, and raid-* windows are built without one. Nothing below can
+       sign, mine, or write.
+
+       The layout re-derives the game's own map geometry from MapConstants
+       rather than reusing MapComponent, which cannot be reused here: its
+       struct lookup is hardcoded to five keyPlayers buckets (one spectated
+       planet per GameState) and it uses bare struct ids as DOM ids, so two
+       windows on one planet would collide. Every id here is window-scoped. */
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body {
+      background: var(--background, #0d0f15);
+      color: var(--text-body, #c8d0e0);
+      font-family: 'DirectiveZero', sans-serif;
+      display: flex; flex-direction: column;
+    }
+
+    /* ── Header: who is fighting whom, and the shield ─────────────────── */
+    #rv-head {
+      flex: none; display: flex; align-items: center; gap: 18px;
+      padding: 8px 14px; border-bottom: 1px solid var(--border-primary, #2a3040);
+      background: var(--background-secondary, #141824);
+      flex-wrap: wrap;
+    }
+    #rv-head .rv-title { font-family: 'ExtremeHazard', sans-serif; font-size: 13px;
+      letter-spacing: .06em; color: var(--text-player-primary, #7fd6ff); }
+    .rv-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .rv-stat-v { font-size: 13px; white-space: nowrap; display: inline-flex;
+      align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+    .rv-stat-l { font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
+      letter-spacing: .08em; color: var(--text-hint, #6b7488); text-transform: uppercase; }
+    .rv-stat.warn .rv-stat-v { color: var(--text-warning, #ffb454); }
+    .rv-stat.bad .rv-stat-v { color: var(--text-enemy-primary, #ff6b6b); }
+    .rv-stat.ok .rv-stat-v { color: var(--text-player-primary, #7fd6ff); }
+    #rv-head .rv-spacer { flex: 1 1 auto; }
+
+    /* ── Map ──────────────────────────────────────────────────────────────
+       Plain DOM + CSS background tiles, exactly the technique the game uses —
+       no canvas, no WebGL, no sprite sheets. --tile-width/--tile-height come
+       from sui.css (128px). */
+    #rv-scroll { flex: 1 1 auto; overflow: auto; display: flex;
+      align-items: flex-start; justify-content: center; padding: 16px; }
+    #rv-map { position: relative; flex: none; }
+    .rv-row { display: flex; }
+    .rv-cell {
+      position: relative; flex: none;
+      width: var(--tile-width, 128px); height: var(--tile-height, 128px);
+      background-repeat: no-repeat; background-position: center;
+    }
+    /* The vertical divider between the defender's half of the board and the
+       attacker's. The game renders it as a column of its own. */
+    .rv-cell.rv-divider { background: transparent; opacity: .35; }
+
+    /* One struct: stacked absolutely-positioned PNG layers. The z-indices
+       match the game's --struct-*-z-index so a weapon that renders over the
+       hull in game renders over it here. */
+    .rv-struct { position: absolute; inset: 0; display: flex;
+      align-items: center; justify-content: center; }
+    .rv-struct img { position: absolute; max-width: 100%; max-height: 100%;
+      z-index: 200; image-rendering: pixelated; }
+    .rv-struct img.rv-top { z-index: 300; }
+    .rv-struct img.rv-bottom { z-index: 100; }
+    .rv-struct.rv-stealth { opacity: .5; }
+    /* Lottie mounts here, above the still it is animating. */
+    .rv-anim { position: absolute; inset: 0; z-index: 400; pointer-events: none; }
+
+    /* Health + ownership HUD. Attacker structs are tinted so the two sides
+       read apart at a glance without needing to hover anything. */
+    .rv-hud { position: absolute; left: 6px; right: 6px; bottom: 4px; z-index: 500; }
+    .rv-hp { height: 3px; background: rgba(0,0,0,.55); overflow: hidden; }
+    .rv-hp i { display: block; height: 100%; background: var(--text-player-primary, #7fd6ff); }
+    .rv-struct.rv-attacker ~ .rv-hud .rv-hp i { background: var(--text-enemy-primary, #ff6b6b); }
+    .rv-hp.rv-hurt i { background: var(--text-warning, #ffb454); }
+    .rv-hp.rv-critical i { background: var(--text-enemy-primary, #ff6b6b); }
+    .rv-tag { font-size: 8px; font-family: 'ExtremeHazard', sans-serif;
+      letter-spacing: .06em; text-align: center; margin-top: 2px;
+      color: var(--text-hint, #6b7488); text-shadow: 0 1px 2px #000;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* Ambit band label down the left edge. */
+    .rv-band { position: absolute; left: -14px; top: 0; bottom: 0; width: 12px;
+      display: flex; align-items: center; justify-content: center; }
+    .rv-band span { font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
+      letter-spacing: .1em; color: var(--text-hint, #6b7488);
+      writing-mode: vertical-rl; text-orientation: mixed; }
+
+    /* ── End-of-raid banner ───────────────────────────────────────────── */
+    #rv-banner {
+      display: none; position: fixed; inset: 0; z-index: 900;
+      align-items: center; justify-content: center; pointer-events: none;
+    }
+    #rv-banner svg { max-width: min(70vw, 640px); max-height: 50vh; }
+
+    /* ── Status / empty states ────────────────────────────────────────── */
+    #rv-note { flex: none; padding: 8px 14px; display: none; }
+    #rv-note.on { display: block; }
+    .rv-empty { display: flex; flex-direction: column; gap: 8px;
+      align-items: center; justify-content: center; padding: 60px 20px;
+      color: var(--text-hint, #6b7488); text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="rv-head">
+    <div class="rv-title" id="rv-where">—</div>
+    <div class="rv-stat" id="rv-stat-status"><div class="rv-stat-v">—</div><div class="rv-stat-l">raid</div></div>
+    <div class="rv-stat" id="rv-stat-shield"><div class="rv-stat-v">—</div><div class="rv-stat-l">shield</div></div>
+    <div class="rv-stat" id="rv-stat-def"><div class="rv-stat-v">—</div><div class="rv-stat-l">defender</div></div>
+    <div class="rv-stat" id="rv-stat-atk"><div class="rv-stat-v">—</div><div class="rv-stat-l">attacker</div></div>
+    <div class="rv-spacer"></div>
+    <div class="rv-stat" id="rv-stat-live"><div class="rv-stat-v">connecting</div><div class="rv-stat-l">feed</div></div>
+  </div>
+
+  <div id="rv-note"></div>
+
+  <!-- The end-of-raid banner overlays the map; pointer-events:none so it
+       never intercepts a scroll while it is playing out. -->
+  <div id="rv-banner"></div>
+
+  <div id="rv-scroll">
+    <div id="rv-map">
+      <div class="rv-empty" id="rv-boot">
+        <i class="icon-in-progress"></i>
+        <div>Waiting for the first snapshot…</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/vendor/lottie-5.12.2.min.js"></script>
+  <script src="raidview.js"></script>
+</body>
+</html>

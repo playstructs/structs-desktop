@@ -13,6 +13,14 @@ pub struct McpConfig {
     /// via `structs_board web:"on"` or the Team Ops CONFIG page.
     #[serde(default)]
     pub web_board_enabled: bool,
+    /// Raid View — the read-only spectator window and its galaxy-wide raid
+    /// list. OPT-IN, off by default: while this is false the feature is not
+    /// merely refused but *absent* — every entry point 404s and no trace of it
+    /// renders in Team Ops, so a player who has not enabled it has no way to
+    /// discover it exists. Enable via `structs_board raid_view:"on"` or the
+    /// Team Ops System · Access page.
+    #[serde(default)]
+    pub raid_view_enabled: bool,
 }
 
 impl Default for McpConfig {
@@ -22,6 +30,7 @@ impl Default for McpConfig {
             port: 8420,
             bearer_token: None,
             web_board_enabled: false,
+            raid_view_enabled: false,
         }
     }
 }

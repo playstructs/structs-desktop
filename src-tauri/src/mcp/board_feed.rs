@@ -165,6 +165,28 @@ pub fn build_board_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow
     Ok(window)
 }
 
+/// Open (or focus) Team Ops from the game window itself.
+///
+/// Every other open path runs through the MCP tool surface, which makes the
+/// dashboard invisible to a player who has never connected an agent — even
+/// though everything on it (roster, energy, work queue, transactions) is local
+/// Tauri state that needs no agent at all. This is the door for them: a direct
+/// `invoke`, no MCP server, no bearer token, no connection state consulted.
+#[tauri::command]
+pub fn open_board_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("board") {
+        // Already open — raise it rather than stacking a duplicate.
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    build_board_window(&app)
+        .map(|w| {
+            let _ = w.set_focus();
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// Pop the live event stream out into its own window.
 ///
 /// It runs the SAME board.html in a chrome-less mode (`?view=stream`), so the

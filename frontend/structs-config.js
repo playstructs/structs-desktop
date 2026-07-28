@@ -1826,6 +1826,27 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div id="debug-policies">' + row('Status', 'Loading...') + '</div>';
       html += '</div></div>';
 
+      // ── Team Ops door ──
+      // Team Ops is otherwise only reachable through the MCP tool surface,
+      // which hides it from anyone who has never connected an agent — even
+      // though the dashboard is local Tauri state that needs no agent at all.
+      // This opens it directly. Deliberately unlabelled: it is a door for
+      // people who already know it is here, not a feature to advertise.
+      //
+      // The font stack is pinned because π is U+03C0, and BOTH bundled faces
+      // (DirectiveZero, ExtremeHazard) contain zero glyphs in the Greek block —
+      // verified against the .ttf cmaps, 95 and 96 codepoints, none Greek. The
+      // glyph would therefore fall through to whatever generic the platform
+      // happens to pick, which differs per OS. Naming the stack makes it look
+      // the same everywhere.
+      html += '<div style="display:flex; justify-content:flex-end; padding:2px 4px 0 0;">'
+        + '<span id="debug-teamops" title="Team Ops" '
+        + 'style="font-family: Georgia, \'Times New Roman\', \'DejaVu Serif\', serif;'
+        + ' font-size:15px; line-height:1; cursor:pointer; user-select:none;'
+        + ' color:var(--text-hint); opacity:.45; padding:2px 4px;'
+        + ' transition:opacity .15s ease, color .15s ease;">π</span>'
+        + '</div>';
+
       html += '</div>';
 
       // Inject into page content
@@ -1842,6 +1863,29 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             copyToClipboard(walletAddress);
             addrEl.textContent = 'Copied!';
             setTimeout(function() { addrEl.textContent = walletAddress.substring(0, 20) + '...'; }, 1000);
+          });
+        }
+
+        // Team Ops door. Opens the dashboard window directly — no MCP server,
+        // no bearer token, no connection state consulted — so it works for a
+        // player who has never run an agent.
+        var teamOpsEl = document.getElementById('debug-teamops');
+        if (teamOpsEl) {
+          teamOpsEl.addEventListener('mouseenter', function() {
+            teamOpsEl.style.opacity = '1';
+            teamOpsEl.style.color = 'var(--text-player-primary)';
+          });
+          teamOpsEl.addEventListener('mouseleave', function() {
+            teamOpsEl.style.opacity = '.45';
+            teamOpsEl.style.color = 'var(--text-hint)';
+          });
+          teamOpsEl.addEventListener('click', function() {
+            window.__TAURI__.core.invoke('open_board_window').catch(function(e) {
+              // Say so in place rather than failing silently — there is no
+              // other affordance here to retry from.
+              teamOpsEl.title = 'Could not open Team Ops: ' + e;
+              teamOpsEl.style.color = 'var(--text-enemy-primary)';
+            });
           });
         }
 

@@ -1418,6 +1418,178 @@
     onEnter: renderDiagnostics, refresh: renderDiagnostics, cadenceMs: 15000,
   });
 
+  // ═══════════════════════ LIVE RAIDS (opt-in) ══════════════════════════════
+  // Every raid running in the galaxy, not only ours — the point is to be able
+  // to watch anyone's. Ours are ranked first and badged so the list still
+  // answers "is anything happening to me" at a glance.
+  //
+  // Only reachable while System · Access · Raid View is on; `mcp_raids` guards
+  // itself server-side too, so a stale nav can't reach data the flag denies.
+  var raidState = { view: null, meta: null };
+
+  // Badge colour per status. SUI badges only ship default/warning/destructive/
+  // solid, so anything not listed falls back to the plain badge rather than
+  // inventing a modifier. `shieldsVulnerable` is destructive because that is
+  // the status that decides the raid: empirically a raid reaching it succeeds,
+  // and one that never does has never once succeeded.
+  var RAID_STATUS_MOD = {
+    initiated: 'warning',
+    ongoing: 'warning',
+    shieldsVulnerable: 'destructive',
+    raidSuccessful: 'destructive',
+  };
+
+  function raidStatusLabel(s) {
+    // camelCase → spaced words, so `shieldsVulnerable` reads as a phrase.
+    return String(s || '?').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+  }
+
+  function raidRow(r) {
+    var who = r.our_side;
+    var chips = [];
+    if (who && who !== 'none') {
+      chips.push(H.badge(
+        who === 'defender' ? 'RAID ON US' : (who === 'attacker' ? 'OURS' : 'BOTH OURS'),
+        who === 'defender' ? 'destructive' : 'warning'));
+    }
+    if (r.stale) chips.push(H.badge('STALE'));
+    chips.push(H.badge(raidStatusLabel(r.status), RAID_STATUS_MOD[r.status]));
+    if (r.seized_ore > 0) chips.push(statTile('ore taken', H.fmtNum(r.seized_ore), 'icon-alpha-ore'));
+    chips.push(statTile('updated', H.duration((Date.now() - r.updated_ms) / 1000) + ' ago'));
+
+    // Attacker → defender, naming whoever we could resolve.
+    var sub = (r.attacker || 'unknown fleet owner') + ' → ' + (r.defender || 'unknown planet owner');
+    if (r.fleet_id) sub += '  ·  fleet ' + r.fleet_id;
+
+    var watch = iconBtn('icon-raid', 'Watch this raid', function (ev) {
+      ev.stopPropagation();
+      openRaidWindow({ planet_id: r.planet_id });
+    });
+
+    return H.resultRow({
+      icon: r.live ? 'icon-raid' : 'icon-combat-log',
+      title: 'planet ' + r.planet_id,
+      subtitle: sub,
+      chips: chips,
+      action: watch,
+      onClick: function () { showRaidDetail(r); },
+    });
+  }
+
+  function showRaidDetail(r) {
+    var box = H.el('div');
+    box.appendChild(H.row('planet', r.planet_id, 'icon-planet'));
+    box.appendChild(H.row('defender', r.defender || 'unresolved', 'icon-planetary-shield'));
+    box.appendChild(H.row('attacker', r.attacker || 'unresolved', 'icon-raid'));
+    box.appendChild(H.row('raiding fleet', r.fleet_id || '—', 'icon-fleet-tile'));
+    box.appendChild(H.row('status', raidStatusLabel(r.status), 'icon-combat-log'));
+    box.appendChild(H.row('ore seized', H.fmtNum(r.seized_ore || 0), 'icon-alpha-ore'));
+    if (r.stale) {
+      box.appendChild(H.stateBlock('warning',
+        'No status change in over an hour. This is almost certainly an abandoned raid record rather than a running raid — the chain keeps non-terminal rows indefinitely.'));
+    }
+    var cta = H.el('div', 'cfg-row');
+    var watchPlanet = massBtn('raid-watch-planet', 'icon-planet', 'Watch the planet', 'sui-mod-primary');
+    watchPlanet.addEventListener('click', function () { openRaidWindow({ planet_id: r.planet_id }); });
+    cta.appendChild(watchPlanet);
+    if (r.fleet_id) {
+      var follow = massBtn('raid-follow-fleet', 'icon-fleet-tile', 'Follow the fleet');
+      follow.addEventListener('click', function () { openRaidWindow({ fleet_id: r.fleet_id }); });
+      cta.appendChild(follow);
+    }
+    box.appendChild(cta);
+    H.drawer('Raid on ' + r.planet_id, box);
+  }
+
+  function openRaidWindow(args) {
+    return Board.T.core.invoke('mcp_raid_view_open', args).catch(function (e) {
+      alertInto('raids-body', 'could not open the spectator window: ' + e);
+    });
+  }
+
+  function buildRaidList() {
+    return H.listView({
+      pageSize: 40,
+      key: function (r) { return r.planet_id; },
+      sig: function (r) { return r.status + '|' + r.updated_ms + '|' + r.our_side + '|' + r.seized_ore; },
+      render: raidRow,
+      empty: 'no raids recorded recently — the galaxy is quiet',
+      filters: [
+        { key: 'q', type: 'text', placeholder: 'planet, player or fleet' },
+        { key: 'ours', type: 'toggle', label: 'ours only' },
+        { key: 'live', type: 'toggle', label: 'live only' },
+      ],
+      filterFn: function (r, v) {
+        if (v.ours && (!r.our_side || r.our_side === 'none')) return false;
+        if (v.live && !r.live) return false;
+        if (v.q) {
+          var hay = [r.planet_id, r.fleet_id, r.attacker, r.defender, r.status]
+            .join(' ').toLowerCase();
+          if (hay.indexOf(v.q.toLowerCase()) < 0) return false;
+        }
+        return true;
+      },
+      sortKeys: [
+        { key: 'relevance', label: 'ours first' },
+        { key: 'updated', label: 'most recent' },
+        { key: 'ore', label: 'ore seized' },
+      ],
+      sortAccessors: {
+        // Mirrors the Rust-side sort_raids ranking so toggling back to the
+        // default ordering reproduces exactly what the backend sent.
+        relevance: function (r) {
+          var ours = r.our_side && r.our_side !== 'none';
+          if (ours && r.live) return 0;
+          if (r.live) return 1;
+          if (ours && r.stale) return 2;
+          if (r.stale) return 3;
+          return ours ? 4 : 5;
+        },
+        updated: function (r) { return -r.updated_ms; },
+        ore: function (r) { return -(r.seized_ore || 0); },
+      },
+    });
+  }
+
+  function renderRaids() {
+    return Board.T.core.invoke('mcp_raids').then(function (d) {
+      raidState.meta = d;
+      var body = document.getElementById('raids-body');
+      if (!raidState.view) {
+        body.innerHTML = '';
+        var head = H.el('div', 'hstrip');
+        head.appendChild(statTile('live now', d.live, null, d.live ? 'live' : 'muted'));
+        head.appendChild(statTile('involving us', d.ours, null, d.ours ? 'bad' : 'muted'));
+        head.appendChild(statTile('tracked', (d.raids || []).length));
+        body.appendChild(H.card('RAIDS', head));
+        raidState.view = buildRaidList();
+        body.appendChild(H.card('ALL RAIDS', raidState.view.node));
+        if (d.unidentified > 0) {
+          // Say it rather than let a capped list read as a complete one.
+          body.appendChild(H.stateBlock('info', d.unidentified +
+            ' older raid(s) are listed without attacker/defender names — identity lookups are capped per refresh.'));
+        }
+      } else {
+        var tiles = body.querySelectorAll('.hstrip .fstat .fstat-v');
+        if (tiles.length >= 3) {
+          tiles[0].firstChild.nodeValue = String(d.live);
+          tiles[1].firstChild.nodeValue = String(d.ours);
+          tiles[2].firstChild.nodeValue = String((d.raids || []).length);
+        }
+      }
+      raidState.view.setRows(d.raids || []);
+    }).catch(function (e) {
+      var body = document.getElementById('raids-body');
+      body.innerHTML = '';
+      raidState.view = null;
+      body.appendChild(H.alertLine('raids unavailable: ' + e, 'icon-alert'));
+    });
+  }
+
+  Board.registerPage('raids', {
+    onEnter: renderRaids, refresh: renderRaids, cadenceMs: 10000,
+  });
+
   // ═══════════════════════════ TX ═══════════════════════════════════════════
   // The primary's live signing queue (via the txq bridge) + the whole team's
   // recent tx results (telemetry). The queue emits no non-terminal events, so
@@ -2384,6 +2556,10 @@
   function cfgSet(domain, payload) {
     return Board.T.core.invoke('mcp_config_set', { domain: domain, payload: payload })
       .then(function () { return renderConfig(); })
+      // Some config domains gate a whole nav section, so the nav has to be
+      // re-derived after a write — otherwise enabling Raid View leaves the
+      // War sub-nav a reload behind.
+      .then(function () { return Board.refreshFlags && Board.refreshFlags(); })
       .catch(function (e) { alertInto('config-body', 'write failed: ' + e); });
   }
   function alertInto(id, text) {
@@ -2875,6 +3051,18 @@
         'Off by default. When enabled, this exact dashboard is served at /board on the MCP port, authenticated by the bearer token.'));
     }
     body.appendChild(H.card('WEB DASHBOARD', wbody));
+
+    // Raid View — off by default. While it is off, War has no Live Raids
+    // section and the spectator commands 404, so this checkbox is the only
+    // place the feature is named.
+    var rv = d.raid_view || {};
+    var rbody = H.el('div');
+    rbody.appendChild(H.field('watch raids in a spectator window',
+      H.checkbox(rv.enabled, null, function (on) { cfgSet('raid_view', { enabled: on }); })));
+    rbody.appendChild(H.el('div', 'ops-muted', rv.enabled
+      ? 'War · Live Raids lists every raid running in the galaxy. Opening a row spawns a read-only window for that planet or fleet — it cannot sign, mine, or touch your session. Turning this off closes any open windows.'
+      : 'Off by default. When enabled, adds War · Live Raids and lets you open read-only spectator windows on any planet or fleet.'));
+    body.appendChild(H.card('RAID VIEW', rbody));
   }
 
   function renderConfig() {

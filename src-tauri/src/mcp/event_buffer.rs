@@ -78,6 +78,9 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     // Queue background name lookups for any ids this event mentions (cheap
     // scan; fetches spawn; resolved names push to the board as grass-lookups).
     crate::mcp::enrich::note_event(&app, &event);
+    // Route live deltas to any open spectator window watching this planet. A
+    // no-op (and near-free) unless Raid View is enabled AND a window is up.
+    crate::mcp::spectator::note_event(&app, &event);
     // Live-relay to the Team Ops GRASS page when it exists (mirror of the
     // board_feed pattern). Board closing mid-emit is a benign race — the
     // event is already in the ring for the next back-fill.
