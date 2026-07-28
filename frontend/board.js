@@ -55,11 +55,7 @@
       { key: 'targets', label: 'Targets', page: 'war', view: 'targets' },
       { key: 'lists', label: 'Lists', page: 'war', view: 'lists' },
       { key: 'incidents', label: 'Incidents', page: 'war', view: 'incidents' },
-      // Opt-in. `gate` names a flag in Board.flags; while it is false the
-      // section is not merely disabled but absent — no tab, and the route
-      // redirects — so the feature leaves no trace for anyone who has not
-      // turned it on in System · Access.
-      { key: 'raids', label: 'Live Raids', page: 'raids', gate: 'raid_view' },
+      { key: 'raids', label: 'Live Raids', page: 'raids' },
     ] },
     { key: 'system', label: 'System', sections: [
       { key: 'doctrine', label: 'Doctrine', page: 'config', view: 'doctrine' },
@@ -111,30 +107,12 @@
     return null;
   }
 
-  // Runtime feature flags, loaded once at boot and refreshed whenever a toggle
-  // flips. A section carrying `gate: 'x'` exists only while Board.flags.x is
-  // true; defaulting to false means a slow or failed flag fetch hides an
-  // opt-in feature rather than flashing it on screen.
-  Board.flags = {};
-  function sectionVisible(s) { return !s.gate || !!Board.flags[s.gate]; }
-  function visibleSections(area) { return area.sections.filter(sectionVisible); }
-  Board.visibleSections = visibleSections;
-
   function findSection(area, key) {
-    var open = visibleSections(area);
-    for (var i = 0; i < open.length; i++) if (open[i].key === key) return open[i];
-    // Falls through to the area's first *visible* section, so a bookmark to a
-    // gated section lands somewhere real instead of on a hidden page.
-    return open[0] || area.sections[0];
+    for (var i = 0; i < area.sections.length; i++) {
+      if (area.sections[i].key === key) return area.sections[i];
+    }
+    return area.sections[0];
   }
-
-  // Re-read the flags and re-route if the current section just disappeared.
-  Board.refreshFlags = function () {
-    return Board.T.core.invoke('mcp_config_bundle').then(function (d) {
-      Board.flags.raid_view = !!((d || {}).raid_view || {}).enabled;
-      route();
-    }).catch(function () { /* leave flags at their defaults */ });
-  };
 
   Board.registerPage = function (name, def) {
     def = def || {};
@@ -1031,9 +1009,8 @@
     var host = document.getElementById('board-subnav');
     if (!host) return;
     host.innerHTML = '';
-    var open = visibleSections(area);
-    if (Board.solo || open.length < 2) return;
-    host.appendChild(navStrip(open, section.key, null, function (k) {
+    if (Board.solo || area.sections.length < 2) return;
+    host.appendChild(navStrip(area.sections, section.key, null, function (k) {
       return '#/' + area.key + '/' + k;
     }));
   }
@@ -1369,11 +1346,7 @@
       if (def.onBoot) def.onBoot();
     });
     window.addEventListener('hashchange', route);
-    // Route once immediately so the console paints, then again once the
-    // feature flags land — a gated section can only appear after that fetch,
-    // and waiting for it would leave the window blank on a slow backend.
     route();
-    Board.refreshFlags();
   }
   boot();
 })();

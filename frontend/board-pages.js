@@ -1489,22 +1489,55 @@
         'No status change in over an hour. This is almost certainly an abandoned raid record rather than a running raid — the chain keeps non-terminal rows indefinitely.'));
     }
     var cta = H.el('div', 'cfg-row');
+    var close;
     var watchPlanet = massBtn('raid-watch-planet', 'icon-planet', 'Watch the planet', 'sui-mod-primary');
-    watchPlanet.addEventListener('click', function () { openRaidWindow({ planet_id: r.planet_id }); });
+    watchPlanet.addEventListener('click', function () {
+      // Dismiss the drawer: the window it opens is the thing you wanted, and
+      // leaving the panel over it just hides what you asked to see.
+      if (close) close();
+      openRaidWindow({ planet_id: r.planet_id });
+    });
     cta.appendChild(watchPlanet);
     if (r.fleet_id) {
       var follow = massBtn('raid-follow-fleet', 'icon-fleet-tile', 'Follow the fleet');
-      follow.addEventListener('click', function () { openRaidWindow({ fleet_id: r.fleet_id }); });
+      follow.addEventListener('click', function () {
+        if (close) close();
+        openRaidWindow({ fleet_id: r.fleet_id });
+      });
       cta.appendChild(follow);
     }
     box.appendChild(cta);
-    H.drawer('Raid on ' + r.planet_id, box);
+    close = H.drawer('Raid on ' + r.planet_id, box);
   }
 
-  function openRaidWindow(args) {
-    return Board.T.core.invoke('mcp_raid_view_open', args).catch(function (e) {
-      alertInto('raids-body', 'could not open the spectator window: ' + e);
+  /// Open a spectator window on a planet or a fleet.
+  ///
+  /// Tauri camelCases command arguments across the bridge, so the Rust
+  /// `planet_id` / `fleet_id` parameters are `planetId` / `fleetId` here —
+  /// sending the snake_case names delivers nothing at all and the command
+  /// refuses with "planet_id or fleet_id required". Same convention as
+  /// `refreshIfOlderMs` and `newIndex` elsewhere on this page.
+  function openRaidWindow(opts) {
+    raidNotice(null);
+    return Board.T.core.invoke('mcp_raid_view_open', {
+      planetId: opts.planet_id || null,
+      fleetId: opts.fleet_id || null,
+    }).catch(function (e) {
+      raidNotice('could not open the spectator window: ' + e);
     });
+  }
+
+  /// One notice line above the list, replaced rather than appended — clicking
+  /// a broken button three times should say one thing, not stack three copies.
+  function raidNotice(text) {
+    var body = document.getElementById('raids-body');
+    if (!body) return;
+    var old = document.getElementById('raid-notice');
+    if (old) old.parentNode.removeChild(old);
+    if (!text) return;
+    var n = H.stateBlock('error', text);
+    n.id = 'raid-notice';
+    body.insertBefore(n, body.firstChild);
   }
 
   function buildRaidList() {
@@ -2556,10 +2589,6 @@
   function cfgSet(domain, payload) {
     return Board.T.core.invoke('mcp_config_set', { domain: domain, payload: payload })
       .then(function () { return renderConfig(); })
-      // Some config domains gate a whole nav section, so the nav has to be
-      // re-derived after a write — otherwise enabling Raid View leaves the
-      // War sub-nav a reload behind.
-      .then(function () { return Board.refreshFlags && Board.refreshFlags(); })
       .catch(function (e) { alertInto('config-body', 'write failed: ' + e); });
   }
   function alertInto(id, text) {
@@ -3052,17 +3081,6 @@
     }
     body.appendChild(H.card('WEB DASHBOARD', wbody));
 
-    // Raid View — off by default. While it is off, War has no Live Raids
-    // section and the spectator commands 404, so this checkbox is the only
-    // place the feature is named.
-    var rv = d.raid_view || {};
-    var rbody = H.el('div');
-    rbody.appendChild(H.field('watch raids in a spectator window',
-      H.checkbox(rv.enabled, null, function (on) { cfgSet('raid_view', { enabled: on }); })));
-    rbody.appendChild(H.el('div', 'ops-muted', rv.enabled
-      ? 'War · Live Raids lists every raid running in the galaxy. Opening a row spawns a read-only window for that planet or fleet — it cannot sign, mine, or touch your session. Turning this off closes any open windows.'
-      : 'Off by default. When enabled, adds War · Live Raids and lets you open read-only spectator windows on any planet or fleet.'));
-    body.appendChild(H.card('RAID VIEW', rbody));
   }
 
   function renderConfig() {

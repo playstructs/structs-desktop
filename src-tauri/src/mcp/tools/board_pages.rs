@@ -1088,7 +1088,6 @@ pub async fn mcp_config_bundle() -> Result<Value, String> {
                 json!(crate::mcp::web_board::board_url())
             } else { json!(null) },
         },
-        "raid_view": { "enabled": crate::mcp::raid_view::is_enabled() },
     }))
 }
 
@@ -1393,20 +1392,6 @@ pub async fn mcp_config_set_impl(
                     "url": if enabled { json!(crate::mcp::web_board::board_url()) } else { json!(null) },
                 },
             }))
-        }
-        "raid_view" => {
-            let enabled = payload
-                .get("enabled")
-                .and_then(|v| v.as_bool())
-                .ok_or("raid_view: enabled (bool) required")?;
-            crate::mcp::raid_view::set_enabled(&app, enabled);
-            board_feed::push(
-                &app,
-                board_feed::Severity::Notice,
-                "raid_view",
-                format!("raid view → {}", if enabled { "ENABLED" } else { "off" }),
-            );
-            Ok(json!({ "ok": true, "raid_view": { "enabled": enabled } }))
         }
         other => Err(format!("unknown config domain '{other}'")),
     }

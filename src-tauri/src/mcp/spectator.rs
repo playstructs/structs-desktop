@@ -422,11 +422,6 @@ pub fn detach(target: &Target, window_label: &str) {
     }
 }
 
-/// Drop every watch — used when the feature is switched off.
-pub fn detach_all() {
-    WATCHES.lock().unwrap().clear();
-}
-
 /// Window labels watching a given planet, for the GRASS fan-out.
 fn windows_for_planet(planet_id: &str) -> Vec<String> {
     WATCHES
@@ -466,9 +461,6 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                     _ => return,
                 }
             };
-            if !crate::mcp::raid_view::is_enabled() {
-                return;
-            }
 
             // A fleet target has to resolve (and keep re-resolving) which
             // planet it is at — that is the whole point of following one.
@@ -636,9 +628,6 @@ const WATCHED_CATEGORIES: &[&str] = &[
 /// `structs.>`, so every planet's events arrive here regardless of who is
 /// watching — this only decides where they go.
 pub fn note_event(app: &tauri::AppHandle, event: &crate::mcp::event_buffer::GameEvent) {
-    if !crate::mcp::raid_view::is_enabled() {
-        return;
-    }
     if !WATCHED_CATEGORIES.contains(&event.category.as_str()) {
         return;
     }

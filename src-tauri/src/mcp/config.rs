@@ -13,14 +13,6 @@ pub struct McpConfig {
     /// via `structs_board web:"on"` or the Team Ops CONFIG page.
     #[serde(default)]
     pub web_board_enabled: bool,
-    /// Raid View — the read-only spectator window and its galaxy-wide raid
-    /// list. OPT-IN, off by default: while this is false the feature is not
-    /// merely refused but *absent* — every entry point 404s and no trace of it
-    /// renders in Team Ops, so a player who has not enabled it has no way to
-    /// discover it exists. Enable via `structs_board raid_view:"on"` or the
-    /// Team Ops System · Access page.
-    #[serde(default)]
-    pub raid_view_enabled: bool,
 }
 
 impl Default for McpConfig {
@@ -30,7 +22,6 @@ impl Default for McpConfig {
             port: 8420,
             bearer_token: None,
             web_board_enabled: false,
-            raid_view_enabled: false,
         }
     }
 }
@@ -109,4 +100,49 @@ pub async fn set_mcp_port(port: u16) -> Result<McpConfig, String> {
     config.port = port;
     config.save()?;
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `load()` falls back to `Default` on any parse failure — which would
+    /// silently discard the bearer token and the port, breaking a working MCP
+    /// setup. Removing a field from this struct must therefore leave older
+    /// config files parseable, not merely "probably fine".
+    #[test]
+    fn a_config_written_by_an_older_build_still_parses() {
+        // Exactly what shipped while Raid View had an opt-in flag.
+        let older = r#"{
+            "enabled": true,
+            "port": 8420,
+            "bearer_token": "81e115c4",
+            "web_board_enabled": true,
+            "raid_view_enabled": true
+        }"#;
+        let cfg: McpConfig = serde_json::from_str(older).expect("unknown fields must be ignored");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.port, 8420);
+        assert_eq!(cfg.bearer_token.as_deref(), Some("81e115c4"));
+        assert!(cfg.web_board_enabled, "the surviving flag must keep its value");
+    }
+
+    /// The oldest shape of all: before `web_board_enabled` existed either.
+    #[test]
+    fn a_config_missing_optional_fields_still_parses() {
+        let ancient = r#"{"enabled": true, "port": 8420, "bearer_token": "abc"}"#;
+        let cfg: McpConfig = serde_json::from_str(ancient).expect("serde(default) covers these");
+        assert!(!cfg.web_board_enabled);
+        assert_eq!(cfg.bearer_token.as_deref(), Some("abc"));
+    }
+
+    /// Round-tripping drops the retired key rather than preserving it, so a
+    /// stale flag cannot linger in the file forever.
+    #[test]
+    fn saving_drops_a_retired_field() {
+        let older = r#"{"enabled":true,"port":8420,"bearer_token":"x","raid_view_enabled":true}"#;
+        let cfg: McpConfig = serde_json::from_str(older).unwrap();
+        let written = serde_json::to_string(&cfg).unwrap();
+        assert!(!written.contains("raid_view_enabled"));
+    }
 }

@@ -433,14 +433,13 @@ async fn board_invoke(
         // would appear on the HOST's screen, not the remote viewer's. Say so
         // rather than appear to work — but only once past the same gate, so a
         // disabled instance still reveals nothing.
-        "mcp_raid_view_open" => match crate::mcp::raid_view::guard() {
-            Err(e) => err_json(e),
-            Ok(()) => err_json(
-                "Spectator windows are native — they open on the machine running Structs, \
-                 not in this browser. Open Team Ops on that machine to watch a raid."
-                    .into(),
-            ),
-        },
+        // Opening a native window is meaningless over the web path: the window
+        // would appear on the HOST's screen, not the remote viewer's.
+        "mcp_raid_view_open" => err_json(
+            "Spectator windows are native — they open on the machine running Structs, \
+             not in this browser. Open Team Ops on that machine to watch a raid."
+                .into(),
+        ),
         "mcp_config_bundle" => from_result(board_pages::mcp_config_bundle().await),
         "mcp_config_set" => match (s("domain"), body.get("payload").cloned()) {
             (Some(d), Some(p)) => {

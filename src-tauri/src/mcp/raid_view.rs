@@ -1,32 +1,20 @@
 //! Raid View — the read-only spectator surface.
 //!
-//! Two pieces sit behind one opt-in flag: a galaxy-wide list of live raids
-//! (rendered as `War · Live Raids` in Team Ops) and a per-location window that
-//! draws a planet the way the game draws it, with combat choreography playing
-//! as shots resolve.
+//! Two pieces: a galaxy-wide list of live raids (rendered as `War · Live
+//! Raids` in Team Ops) and a per-location window that draws a planet the way
+//! the game draws it, with combat choreography playing as shots resolve.
 //!
-//! # Why this is gated, and gated the way it is
+//! # Reaching Team Ops is the gate
 //!
-//! This is an operator tool, not a game feature. Two different audiences need
-//! two different answers, and the split is deliberate:
+//! There is deliberately no second switch. Team Ops is the operator console —
+//! you get there by connecting an agent, or through the unlabelled door on the
+//! DEBUG tab — and anyone who has it open is already the audience for this.
+//! Making them find and flip a toggle as well would only hide a feature from
+//! the people looking straight at it.
 //!
-//! - **The operator console** (Team Ops, the `structs_board` tool, the
-//!   token-authenticated `/board`) may see the flag and report it as `false` —
-//!   reaching any of those already means an agent is connected, and the toggle
-//!   has to live *somewhere* the operator can find it.
-//! - **Everything else** — the spectator windows, the raid data commands, their
-//!   web routes — behaves as though the code were not compiled in. Commands
-//!   return the same "unknown command" a typo returns, and routes return
-//!   **404, never 403**: a 403 confirms the endpoint exists, which is precisely
-//!   what must not leak.
-//!
-//! So a player who never connects an agent has no surface that mentions this,
-//! and one who does must still turn it on deliberately.
-//!
-//! The mechanism mirrors [`crate::mcp::web_board`]'s opt-in exactly — persisted
-//! field, runtime atomic, `init_from_config`, `set_enabled` — because that
-//! pattern is already proven, and a second dialect of "off" is how one of them
-//! ends up subtly on.
+//! Nothing here is privileged in any case: raids are public chain state that
+//! the game's own client already streams to every player. The windows are
+//! read-only and cannot sign.
 //!
 //! # Why the window never loads the game
 //!
@@ -46,61 +34,6 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-// ── Opt-in flag ─────────────────────────────────────────────────────────────
-
-static RAID_VIEW_ENABLED: AtomicBool = AtomicBool::new(false);
-
-/// Load the persisted flag into the runtime atomic. Called at server start,
-/// beside [`crate::mcp::web_board::init_from_config`].
-pub fn init_from_config() {
-    let cfg = crate::mcp::config::McpConfig::load();
-    RAID_VIEW_ENABLED.store(cfg.raid_view_enabled, Ordering::Relaxed);
-}
-
-pub fn is_enabled() -> bool {
-    RAID_VIEW_ENABLED.load(Ordering::Relaxed)
-}
-
-/// Flip the flag (runtime + persisted). Returns the new state.
-///
-/// Turning it *off* also closes any spectator windows still open — leaving one
-/// on screen would be a live surface the flag claims does not exist, and its
-/// poller would keep hitting the Guild API.
-pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) -> bool {
-    RAID_VIEW_ENABLED.store(enabled, Ordering::Relaxed);
-    let mut cfg = crate::mcp::config::McpConfig::load();
-    cfg.raid_view_enabled = enabled;
-    let _ = cfg.save();
-    if !enabled {
-        close_all(app);
-        // Belt and braces: the windows' own close handlers detach them, but a
-        // watcher outliving the flag would keep polling for a feature the
-        // config says is off.
-        crate::mcp::spectator::detach_all();
-    }
-    enabled
-}
-
-/// The error every disabled entry point returns.
-///
-/// Deliberately identical to what an unknown command yields: a caller probing
-/// for the feature learns nothing from the response that they would not learn
-/// by misspelling any other command.
-pub fn not_found() -> String {
-    "Unknown command".to_string()
-}
-
-/// `Err(not_found())` when the feature is off. The single guard every command
-/// in this module starts with.
-pub fn guard() -> Result<(), String> {
-    if is_enabled() {
-        Ok(())
-    } else {
-        Err(not_found())
-    }
-}
 
 // ── Window labels ───────────────────────────────────────────────────────────
 
@@ -119,26 +52,6 @@ pub fn label_for(location_id: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
         .collect();
     format!("{}{}", LABEL_PREFIX, safe)
-}
-
-/// Every open spectator window.
-pub fn open_labels(app: &tauri::AppHandle) -> Vec<String> {
-    use tauri::Manager;
-    app.webview_windows()
-        .keys()
-        .filter(|l| l.starts_with(LABEL_PREFIX))
-        .cloned()
-        .collect()
-}
-
-/// Close every spectator window. Used when the feature is switched off.
-pub fn close_all(app: &tauri::AppHandle) {
-    use tauri::Manager;
-    for label in open_labels(app) {
-        if let Some(w) = app.get_webview_window(&label) {
-            let _ = w.close();
-        }
-    }
 }
 
 // ── Raid enumeration ────────────────────────────────────────────────────────
@@ -420,7 +333,6 @@ async fn enrich_row(client: crate::mcp::cosmos_client::CosmosClient, mut row: Ra
 /// module docs for why the refusal is shaped that way.
 #[tauri::command]
 pub async fn mcp_raids() -> Result<Value, String> {
-    guard()?;
     let client = crate::mcp::cosmos_client::CosmosClient::new();
     let rows = crate::mcp::guild_api::fetch_all_pages(
         |page| client.guild.planet_activity_by_category("raid_status", page),
@@ -550,7 +462,6 @@ pub fn mcp_raid_view_open(
     planet_id: Option<String>,
     fleet_id: Option<String>,
 ) -> Result<Value, String> {
-    guard()?;
     let target = parse_target(planet_id.as_deref(), fleet_id.as_deref())?;
     open_window(&app, &target).map(|_| {
         serde_json::json!({ "ok": true, "label": label_for(target.key()), "target": target })
@@ -877,11 +788,12 @@ mod tests {
     }
 
     #[test]
-    fn disabled_guard_is_indistinguishable_from_an_unknown_command() {
-        // The gate must not leak the feature's existence through its wording.
-        let msg = not_found();
-        assert!(!msg.to_lowercase().contains("raid"));
-        assert!(!msg.to_lowercase().contains("disabled"));
-        assert!(!msg.to_lowercase().contains("enable"));
+    fn nothing_here_is_gated_behind_a_flag() {
+        // Reaching Team Ops IS the gate — there is deliberately no second
+        // switch. This pins that: if a future change reintroduces one, the
+        // commands would start refusing and this catches it at compile time
+        // (the guard/flag symbols simply do not exist to be called).
+        assert!(parse_target(Some("2-1595"), None).is_ok());
+        assert_eq!(label_for("2-1595"), "raid-2-1595");
     }
 }

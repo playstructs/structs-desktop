@@ -62,10 +62,6 @@ pub struct BoardParams {
     /// shareable URL; "on"/"off" toggles serving. Opt-in, default off.
     #[serde(default)]
     pub web: Option<serde_json::Value>,
-    /// Raid View control: "status" (or `true`) reports state; "on"/"off"
-    /// toggles the spectator surface. Opt-in, default off.
-    #[serde(default)]
-    pub raid_view: Option<serde_json::Value>,
 }
 
 pub async fn execute(
@@ -114,44 +110,6 @@ pub async fn execute(
         } else {
             "Web dashboard: disabled (default). Enable with structs_board {web:\"on\"} or in Team Ops · Config — \
              then share the returned URL; the bearer token in it grants FULL operator control to whoever holds it."
-                .to_string()
-        };
-        return vec![Content::text(text)];
-    }
-    // Raid View control path (opt-in, default off).
-    if let Some(rv) = &params.raid_view {
-        let op = match rv {
-            serde_json::Value::Bool(true) => "status",
-            serde_json::Value::Bool(false) => "off",
-            serde_json::Value::String(s) => s.as_str(),
-            _ => "status",
-        };
-        let enabled = match op {
-            "on" | "off" => {
-                let want = op == "on";
-                let e = crate::mcp::raid_view::set_enabled(app, want);
-                crate::mcp::board_feed::push(
-                    app,
-                    crate::mcp::board_feed::Severity::Notice,
-                    "raid_view",
-                    if want {
-                        "raid view ENABLED (spectator windows + War · Live Raids)"
-                    } else {
-                        "raid view disabled — open spectator windows closed"
-                    },
-                );
-                e
-            }
-            _ => crate::mcp::raid_view::is_enabled(),
-        };
-        let text = if enabled {
-            "Raid View: ENABLED\n  War · Live Raids lists every raid running in the galaxy (ours ranked first).\n  \
-             Opening a row spawns a read-only spectator window for that planet or fleet.\n\
-             Spectator windows never load the game: they cannot sign, mine, or touch your session. \
-             Disable any time with structs_board {raid_view:\"off\"}."
-                .to_string()
-        } else {
-            "Raid View: disabled (default). Enable with structs_board {raid_view:\"on\"} or in Team Ops · System · Access."
                 .to_string()
         };
         return vec![Content::text(text)];
