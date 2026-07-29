@@ -90,7 +90,9 @@
     var countIn = H.el('input'); countIn.type = 'number'; countIn.min = '1'; countIn.max = '50'; countIn.value = '1';
     countIn.style.cssText = 'width:64px;background:transparent;color:inherit;border:1px solid var(--border,#345);padding:2px 6px;';
     var launchRole = H.el('select', 'sui-input-text');
-    [['productive', 'productive'], ['bait', 'bait']].forEach(function (o) {
+    // Every launchable role; auto_raid can only dispatch VPlayerRole::Raider,
+    // so leaving raider out of this list silently caps the war machine.
+    [['productive', 'productive'], ['bait', 'bait'], ['raider', 'raider']].forEach(function (o) {
       var op = H.el('option', null, o[1]); op.value = o[0]; launchRole.appendChild(op);
     });
     var launchBtn = massBtn('launch-btn', 'sui-icon-players', 'Launch', 'sui-mod-secondary');

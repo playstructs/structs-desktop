@@ -28,6 +28,20 @@ use crate::mcp::tools::mass_action::SweepArgs;
 const FILENAME: &str = "auto_sweep.json";
 const UALPHA_PER_ALPHA: f64 = 1_000_000.0;
 
+/// player_id → the CACHED balance at which the chain rejected their sweep with
+/// "insufficient funds". The roster cache lags a successful sweep, so the same
+/// stale row would otherwise be re-sent every scan; the entry clears itself as
+/// soon as the cache reports any different balance for that player.
+static BROKE_AT_BALANCE: LazyLock<Mutex<std::collections::HashMap<String, f64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Lock, recovering from poisoning — this map is advisory (worst case a
+/// duplicate send the chain rejects again), so a poisoned lock must never
+/// take the loop down.
+fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoSweepConfig {
     /// Off by default — this signs real transfers.
@@ -169,6 +183,24 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
     let (mut entries, _skipped) =
         crate::mcp::tools::mass_action::build_sweep_plan(&rows, None, cfg.sweep_args());
 
+    // Drop candidates the chain already rejected for insufficient funds at
+    // this exact cached balance. The roster cache lags a successful sweep, so
+    // without this every scan re-sends from the same freshly-emptied players
+    // (seen live: 17 rejects in one afternoon, 1-821 hit twice in 6 minutes).
+    // A candidate re-qualifies the moment the cache shows a DIFFERENT balance
+    // — that's proof the stale row was refreshed.
+    {
+        let mut broke = lock_recover(&BROKE_AT_BALANCE);
+        entries.retain(|e| match broke.get(&e.player_id) {
+            Some(bal) if *bal == e.alpha_before => false,
+            Some(_) => {
+                broke.remove(&e.player_id);
+                true
+            }
+            None => true,
+        });
+    }
+
     if entries.is_empty() {
         run.blocked(format!(
             "no player is holding {} Alpha or more with {}+ charge",
@@ -260,6 +292,13 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
                     }
                     Err(err) => {
                         failed.fetch_add(1, Ordering::Relaxed);
+                        // Chain says the money isn't there — remember the
+                        // cached balance this happened at so the next scans
+                        // skip this player until the cache shows movement.
+                        if err.to_lowercase().contains("insufficient funds") {
+                            lock_recover(&BROKE_AT_BALANCE)
+                                .insert(e.player_id.clone(), e.alpha_before);
+                        }
                         tlog(
                             "auto_sweep",
                             Sev::Warn,

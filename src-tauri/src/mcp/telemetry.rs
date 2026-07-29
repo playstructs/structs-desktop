@@ -382,6 +382,11 @@ fn prefix(component: &str) -> String {
 /// Sync, non-blocking, callable from any thread.
 pub fn tlog(component: &'static str, sev: Sev, msg: impl AsRef<str>) {
     let msg = msg.as_ref();
+    // A loop that logs is alive — feed the watchdog's progress stamp so long
+    // scans are never mistaken for wedged ones.
+    if let Some(name) = crate::mcp::watchdog::loop_name_of(component) {
+        crate::mcp::watchdog::note_loop_progress(name);
+    }
     eprintln!("{} {}", prefix(component), msg);
     send(Msg::Event(EventRow {
         ts_ms: now_millis(),
@@ -395,6 +400,9 @@ pub fn tlog(component: &'static str, sev: Sev, msg: impl AsRef<str>) {
 /// `tlog` with structured fields persisted as a JSON object in `events.kv`.
 pub fn tlog_kv(component: &'static str, sev: Sev, msg: impl AsRef<str>, kv: Value) {
     let msg = msg.as_ref();
+    if let Some(name) = crate::mcp::watchdog::loop_name_of(component) {
+        crate::mcp::watchdog::note_loop_progress(name);
+    }
     eprintln!("{} {} {}", prefix(component), msg, kv);
     send(Msg::Event(EventRow {
         ts_ms: now_millis(),
@@ -524,6 +532,11 @@ impl LoopRun {
 // ── Direct recorders ──
 
 pub fn record_tx_attempt(row: TxAttemptRow) {
+    // Every loop action signs a tx, so this is the other universal sign of
+    // life for the watchdog (contexts look like "auto_sweep:1-821").
+    if let Some(name) = crate::mcp::watchdog::loop_name_of(&row.context) {
+        crate::mcp::watchdog::note_loop_progress(name);
+    }
     send(Msg::TxAttempt(row));
 }
 

@@ -47,6 +47,13 @@ const NOTIFY_AFTER_FAILURES: u32 = 2;
 struct LoopStat {
     last_started_ms: f64,
     last_finished_ms: f64,
+    /// Last sign of life DURING a scan (a tx attempt or a loop log line).
+    /// Distinguishes "long scan, still working" from "guard held, thread gone":
+    /// at fleet scale a healthy auto_build scan runs well past LOOP_STUCK_MS,
+    /// and resetting its guard mid-run starts an OVERLAPPING scan that makes
+    /// every loop slower (seen live at 870 vplayers: sweep/build/harvest all
+    /// "wedged" every cycle while doing real work the whole time).
+    last_progress_ms: f64,
     running: bool,
 }
 
@@ -88,6 +95,37 @@ pub fn note_loop_finished(name: &'static str, ts_ms: f64) {
     let s = m.entry(name).or_default();
     s.last_finished_ms = ts_ms;
     s.running = false;
+}
+
+/// Record a sign of life from a running scan. Called from the telemetry
+/// choke points (every tx attempt and every loop log line), so no loop needs
+/// to remember to heartbeat explicitly. Cheap: one mutex + two stores.
+pub fn note_loop_progress(name: &'static str) {
+    let mut m = lock_recover(&LOOPS);
+    let s = m.entry(name).or_default();
+    s.last_progress_ms = now_millis();
+}
+
+/// The seven native loop names — used to map free-form telemetry components /
+/// tx contexts back onto a loop's liveness entry.
+pub const LOOP_NAMES: [&str; 7] = [
+    "auto_harvest",
+    "auto_build",
+    "auto_defend",
+    "auto_infuse",
+    "auto_sweep",
+    "auto_response",
+    "auto_raid",
+];
+
+/// Resolve a component name or tx context ("auto_sweep", "auto_sweep:1-821")
+/// to its static loop name, if it belongs to a native loop.
+pub fn loop_name_of(component_or_context: &str) -> Option<&'static str> {
+    let head = component_or_context
+        .split(':')
+        .next()
+        .unwrap_or(component_or_context);
+    LOOP_NAMES.iter().find(|n| **n == head).copied()
 }
 
 pub fn note_sync_ran() {
@@ -172,13 +210,24 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
     for (name, enabled, interval_ms) in loop_configs() {
         let stat = stats.get(name).copied().unwrap_or_default();
 
-        if stat.running && now - stat.last_started_ms > LOOP_STUCK_MS {
-            let mins = ((now - stat.last_started_ms) / 60_000.0) as u64;
+        // Wedged = guard held AND no sign of life. Run duration alone is NOT
+        // wedged: at fleet scale a healthy scan legitimately outlives
+        // LOOP_STUCK_MS, and resetting the guard mid-run lets the cadence
+        // start an OVERLAPPING scan — doubling API + signing load and slowing
+        // every loop further (the self-amplifying spiral seen at 870 players).
+        // Progress is stamped by every tx attempt and loop log line, so a
+        // working scan is never silent for LOOP_STUCK_MS.
+        let last_life = stat.last_progress_ms.max(stat.last_started_ms);
+        if stat.running
+            && now - stat.last_started_ms > LOOP_STUCK_MS
+            && now - last_life > LOOP_STUCK_MS
+        {
+            let mins = ((now - last_life) / 60_000.0) as u64;
             let name_owned = name.to_string();
             findings.push(Finding {
                 key: format!("wedged:{name}"),
                 severity: Sev::Error,
-                message: format!("{name} wedged: scan running for {mins} min (single-flight guard never cleared)"),
+                message: format!("{name} wedged: guard held with no sign of life for {mins} min"),
                 remedy: Some(Box::new(move |_| {
                     reset_loop_guard(&name_owned);
                     format!("reset {name_owned} RUNNING guard")
@@ -371,4 +420,32 @@ pub fn health_snapshot() -> Value {
         "uptime_s": ((now - app_start) / 1000.0) as u64,
         "telemetry_dropped": crate::mcp::telemetry::dropped_count(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loop_name_of_maps_components_and_contexts() {
+        assert_eq!(loop_name_of("auto_sweep"), Some("auto_sweep"));
+        assert_eq!(loop_name_of("auto_sweep:1-821"), Some("auto_sweep"));
+        assert_eq!(loop_name_of("auto_build:1-1044"), Some("auto_build"));
+        // Non-loop telemetry must NOT stamp loop progress.
+        assert_eq!(loop_name_of("launch:1-1165"), None);
+        assert_eq!(loop_name_of("watchdog"), None);
+        assert_eq!(loop_name_of("hasher"), None);
+        // A context whose prefix merely STARTS with a loop name is not a match.
+        assert_eq!(loop_name_of("auto_sweeper:1-1"), None);
+    }
+
+    #[test]
+    fn progress_note_marks_liveness() {
+        note_loop_started("auto_build", 1000.0);
+        note_loop_progress("auto_build");
+        let m = lock_recover(&LOOPS);
+        let s = m.get("auto_build").unwrap();
+        assert!(s.running);
+        assert!(s.last_progress_ms > 0.0, "progress stamp recorded");
+    }
 }
