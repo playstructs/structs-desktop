@@ -433,6 +433,26 @@
     ]);
   }
 
+  /* Scale the board to the window. The game only integer-UPSCALES pixel art
+   * (scale(2)/scale(4) at huge resolutions) and pans otherwise; a spectator
+   * window instead fits the whole board: shrink continuously to fit narrow
+   * windows, and on very large windows snap to INTEGER upscales so the pixel
+   * art stays crisp. `zoom` rather than `transform` so the scroll box's
+   * layout agrees with what is painted. */
+  var boardCols = 9;
+  function setBoardScale() {
+    var map = document.getElementById('rv-map');
+    var sc = document.getElementById('rv-scroll');
+    if (!map || !sc) return;
+    var avail = (sc.clientWidth || 0) - 36; // padding + the ambit band gutter
+    if (avail <= 0) return;                 // not laid out yet (or headless)
+    var w = boardCols * 128;
+    var scale = avail / w;
+    if (scale >= 1) scale = Math.max(1, Math.floor(scale));   // crisp integers up
+    else scale = Math.max(0.2, scale);                        // continuous down
+    map.style.zoom = scale;
+  }
+
   /* Build the whole board for a snapshot. Returns the anchor map. */
   function buildGrid(snap) {
     var cols = buildColumns(snap.slots);
@@ -473,6 +493,8 @@
       }
     });
     map.appendChild(transitionRow(cols, prevAmbit, ''));
+    boardCols = cols.length;
+    setBoardScale();
     return anchors;
   }
 
@@ -573,6 +595,12 @@
   function renderStill(node, s, healthOverride) {
     var art = ART[s.type_slug];
     node.innerHTML = '';
+    // A struct still being built shows the deployment indicator, not a hull —
+    // MapStructLayerComponent.renderStruct's !isBuilt() branch.
+    if (s.built === false) {
+      node.appendChild(layer('img/structs/deployment-indicator/deployment-indicator.gif', ''));
+      return;
+    }
     if (!art) return;                                   // unknown type: no art, no crash
     var hp = healthOverride != null ? healthOverride : currentHealth(s);
     // Zero means destroyed ONLY when the health is actually known. An unknown
@@ -630,6 +658,12 @@
       }
       box.appendChild(bar);
       node.appendChild(box);
+    }
+    // Offline = the no-power badge, from the game's HUD status indicators.
+    if (s.online === false && s.built !== false) {
+      var badge = el('div', 'rv-status-badges');
+      badge.appendChild(el('i', 'sui-icon sui-icon-no-power sui-icon-sm'));
+      node.appendChild(badge);
     }
     node.appendChild(el('div', 'rv-tag', s.type_name || s.type_slug || '?'));
   }
@@ -733,6 +767,10 @@
 
     var still = el2('div', 'rv-struct' + (s.hidden ? ' rv-stealth' : ''));
     renderStill(still, s, healthNow);
+    // The bubble obeys the same still-visibility rules as the tile: during an
+    // attack/impact/destroy the bundle owns the sprite, and a visible still
+    // would double it inside the bubble too.
+    if (name && !stillFlags([name]).during) still.classList.add('rv-invisible');
     mount.appendChild(still);
 
     if (name && window.lottie) {
@@ -844,17 +882,42 @@
     runAnimation(ev, playNext);
   }
 
-  /* Play one animation over a struct, then hand back control.
+  /* Still-visibility rules, straight from the factory's AnimationEvent flags:
+   * `showStructStillDuringAnimation` is TRUE only for evades (the struct
+   * visibly dodges); every attack/impact/shake/destroy HIDES the still while
+   * it plays — the attack bundles contain the firing struct themselves, so a
+   * visible still would double the sprite. `showStructStillAfterAnimation` is
+   * false only for destroys. Derived from the names rather than carried as
+   * flags, because the mapping is total. */
+  function stillFlags(names) {
+    var evadeOnly = names.length > 0 && names.every(function (n) {
+      return n === 'DEFENSIVE_MANEUVER' || n === 'SIGNAL_JAMMING';
+    });
+    var destroys = names.some(function (n) { return String(n).indexOf('DESTROY_') === 0; });
+    return { during: evadeOnly, after: !destroys };
+  }
+
+  function setStillHidden(structId, hidden) {
+    var still = document.getElementById(domId('struct', structId));
+    if (still) still.classList.toggle('rv-invisible', !!hidden);
+  }
+
+  /* Play one queue event over a struct, then hand back control.
    *
-   * `healthAfter` is applied when the animation ENDS, so a three-shot burst
-   * steps the bar down three times instead of jumping to the final value —
-   * and so a snapshot that has already moved past this shot does not erase the
+   * ALL of the event's names play SIMULTANEOUSLY — impact and shake are two
+   * layers of one moment, and the event completes when the LAST of them does
+   * (AnimationEvent: "the names of the animations to play simultaneously";
+   * prepareAnimationLifecycle counts them down). `healthAfter` is applied at
+   * completion, so a three-shot burst steps the bar down three times — and a
+   * snapshot that has already moved past this shot cannot erase the
    * intermediate frames. */
   function runAnimation(ev, done) {
     var mount = document.getElementById(domId('anim', ev.structId));
     var still = document.getElementById(domId('struct', ev.structId));
     var hud = document.getElementById(domId('hud', ev.structId));
     var s = state.structsById[ev.structId];
+    var names = ev.names || [];
+    var flags = stillFlags(names);
 
     var finish = function () {
       if (ev.healthAfter != null && s) {
@@ -863,41 +926,55 @@
         if (hud) renderHud(hud, s, ev.healthAfter);
         if (ev.healthAfter === 0 && still) still.innerHTML = '';
       }
+      // Restore the still unless this was a destroy — and never resurrect a
+      // struct the sequence just emptied.
+      if (still && flags.after && ev.healthAfter !== 0) syncStill(ev.structId);
       done();
     };
 
-    if (!mount || !window.lottie || !ev.names || !ev.names.length) { finish(); return; }
+    if (!mount || !window.lottie || !names.length) { finish(); return; }
 
-    // Names play in sequence within one event (impact, then shake).
-    var i = 0;
-    var playOne = function () {
-      if (i >= ev.names.length) { finish(); return; }
-      var name = ev.names[i++];
-      pipOnAnimation(ev, name);
+    // The still hides while the animation owns the tile (evades excepted),
+    // and the idle loop pauses with it.
+    if (!flags.during) {
+      pauseIdle(ev.structId);
+      setStillHidden(ev.structId, true);
+    }
+
+    var pending = names.length;
+    var finished = false;
+    var oneDone = function () {
+      pending--;
+      if (pending <= 0 && !finished) {
+        finished = true;
+        mount.innerHTML = '';
+        finish();
+      }
+    };
+
+    names.forEach(function (name) {
+      var box = document.createElement('div');
+      box.className = 'rv-anim-layer';
+      mount.appendChild(box);
       var anim;
       try {
         anim = window.lottie.loadAnimation({
-          container: mount,
+          container: box,
           renderer: 'svg',
           loop: false,
           autoplay: true,
           path: lottiePath(name, ev.typeSlug),
         });
-      } catch (e) { finish(); return; }
-
+      } catch (e) { oneDone(); return; }
       var cleanup = function () {
-        try { anim.destroy(); } catch (e) {}
-        mount.innerHTML = '';
-        playOne();
+        try { anim.destroy(); } catch (e2) {}
+        oneDone();
       };
       anim.addEventListener('complete', cleanup);
       // A bundle that fails to load must not wedge the queue for good.
       anim.addEventListener('data_failed', cleanup);
-      setTimeout(function () {
-        if (anim && !anim.isLoaded) cleanup();
-      }, 4000);
-    };
-    playOne();
+      setTimeout(function () { if (anim && !anim.isLoaded) cleanup(); }, 4000);
+    });
   }
 
   /* Idle animation for the economic structs that have one. Looped, and always
@@ -910,6 +987,9 @@
   var idleAnims = {};
   function startIdle(s) {
     if (!IDLE_TYPES[s.type_slug] || !window.lottie) return;
+    // The game plays the loop only while the struct is ONLINE
+    // (showStructStill: offline → loop stops, still shows).
+    if (s.online === false || s.built === false) return;
     if (idleAnims[s.id]) return;
     var mount = document.getElementById(domId('anim', s.id));
     if (!mount) return;
@@ -918,13 +998,31 @@
         container: mount, renderer: 'svg', loop: true, autoplay: true,
         path: lottiePath('ACTIVE_LOOP', s.type_slug),
       });
+      // The loop bundle CONTAINS the struct art — the still must hide or the
+      // sprite doubles (hideStructStill/showStructStill do exactly this).
+      setStillHidden(s.id, true);
     } catch (e) { /* no idle animation is not an error */ }
+  }
+  function pauseIdle(structId) {
+    var a = idleAnims[structId];
+    if (a) { try { a.stop(); } catch (e) {} }
   }
   function stopIdle(structId) {
     var a = idleAnims[structId];
     if (!a) return;
     try { a.destroy(); } catch (e) {}
     delete idleAnims[structId];
+    setStillHidden(structId, false);
+  }
+  /* Whichever of loop/still should show right now, show exactly one. */
+  function syncStill(structId) {
+    var a = idleAnims[structId];
+    if (a) {
+      try { a.goToAndPlay(0); } catch (e) {}
+      setStillHidden(structId, true);
+    } else {
+      setStillHidden(structId, false);
+    }
   }
   function stopAllIdle() {
     Object.keys(idleAnims).forEach(stopIdle);
@@ -944,10 +1042,9 @@
   function choreograph(attack) {
     var atk = state.structsById[attack.attacker_id];
     var atkType = attack.attacker_type || (atk && atk.type_name);
-    // The attacker's ambit is the one field the shot detail does NOT carry —
-    // it comes from the snapshot. Combat is co-located, so the attacker is on
-    // this map.
-    var atkAmbit = atk && atk.ambit;
+    // The attacker's ambit rides on the PARENT detail
+    // (attackerStructOperatingAmbit) — the snapshot is only the fallback.
+    var atkAmbit = attack.attacker_ambit || (atk && atk.ambit);
     var weapon = attack.weapon || PRIMARY;
 
     if (atk) {
@@ -1001,6 +1098,31 @@
         });
       }
     });
+
+    // The attacker's own aftermath: counters and recoil land on it
+    // (attackerHealthBefore/After on the parent detail). Step its bar down —
+    // and when a counter KILLS it (the classic Command-Ship-dies-to-
+    // strongCounterAttack ending), play its destroy instead of leaving a
+    // ghost until the next snapshot.
+    var after = numOf(attack.attacker_health_after);
+    var before = numOf(attack.attacker_health_before);
+    if (after != null && before != null && after < before) {
+      if (after === 0) {
+        enqueue({
+          structId: attack.attacker_id,
+          typeSlug: atk && atk.type_slug,
+          names: ['DESTROY_' + String(atkAmbit || LAND).toUpperCase()],
+          healthAfter: 0,
+        });
+      } else {
+        enqueue({
+          structId: attack.attacker_id,
+          typeSlug: atk && atk.type_slug,
+          names: [],
+          healthAfter: after,
+        });
+      }
+    }
   }
 
   /* Arrivals and departures between two snapshots.
@@ -1260,7 +1382,11 @@
     // scroll/resize re-evaluation the game's PIP does.
     var sc = document.getElementById('rv-scroll');
     if (sc) sc.addEventListener('scroll', pipUpdateVisibility);
-    window.addEventListener('resize', pipUpdateVisibility);
+    window.addEventListener('resize', function () {
+      setBoardScale();
+      pipUpdateVisibility();
+    });
+    setBoardScale();
 
     T.core.invoke('mcp_raid_state', {
       planetId: TARGET.kind === 'planet' ? TARGET.id : null,
@@ -1305,6 +1431,8 @@
     _applyDelta: applyDelta,
     _queue: function () { return queue; },
     isAttackSequence: isAttackSequence,
+    stillFlags: stillFlags,
+    setBoardScale: setBoardScale,
     _pip: pip,
     _pipOnAnimation: pipOnAnimation,
     _pipOffscreen: pipOffscreen,

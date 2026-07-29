@@ -192,6 +192,12 @@ pub struct SpectatorStruct {
     pub health: Option<u64>,
     pub max_health: u64,
     pub destroyed: bool,
+    /// `structAttributes.isOnline` — an offline struct shows the no-power
+    /// badge, and its idle loop must not play (the game freezes it).
+    pub online: bool,
+    /// `structAttributes.isBuilt` — an unbuilt struct renders as the
+    /// deployment-indicator gif, not as its hull.
+    pub built: bool,
     /// Stealth is chain-visible (`structAttributes.isHidden`); the game renders
     /// a hidden struct at half opacity rather than removing it.
     pub hidden: bool,
@@ -503,6 +509,16 @@ async fn build_struct(
             .or_else(|| body.get("maxHealth").and_then(num_u64))
             .unwrap_or(0),
         destroyed: false,
+        // Both default to true when absent: a read hiccup must degrade to a
+        // normal-looking struct, not a board of powerless ghosts.
+        online: sattrs
+            .and_then(|a| a.get("isOnline"))
+            .map(|v| flag(Some(v)))
+            .unwrap_or(true),
+        built: sattrs
+            .and_then(|a| a.get("isBuilt"))
+            .map(|v| flag(Some(v)))
+            .unwrap_or(true),
         hidden: flag(sattrs.and_then(|a| a.get("isHidden"))),
         is_command: p.is_command,
     })
@@ -765,8 +781,18 @@ pub fn collect_shots(rows: &[Value], cursor: f64) -> (Vec<Value>, f64) {
                 "at_ms": ts,
                 "attacker_id": str_of(detail.get("attackerStructId")),
                 "attacker_type": str_of(detail.get("attackerStructType")),
+                // On the PARENT detail, not the shot — this is the one ambit
+                // the shots themselves omit, and it completes the dispatch
+                // geometry without leaning on the snapshot.
+                "attacker_ambit": str_of(detail.get("attackerStructOperatingAmbit")),
                 "weapon": str_of(detail.get("weaponSystem")),
                 "recoil": detail.get("recoilDamage").and_then(num_u64).unwrap_or(0),
+                // Counters and recoil land on the attacker; threading these
+                // lets the choreography step the attacker's bar down (and play
+                // its destroy when a counter kills it) instead of waiting for
+                // the next snapshot.
+                "attacker_health_before": detail.get("attackerHealthBefore").and_then(num_u64),
+                "attacker_health_after": detail.get("attackerHealthAfter").and_then(num_u64),
                 "shots": shots,
             }),
         ));

@@ -55,15 +55,26 @@
        Plain DOM + CSS background tiles, exactly the technique the game uses —
        no canvas, no WebGL, no sprite sheets. --tile-width/--tile-height come
        from sui.css (128px). */
-    #rv-scroll { flex: 1 1 auto; overflow: auto; display: flex;
-      align-items: flex-start; justify-content: center; padding: 16px; }
-    #rv-map { position: relative; flex: none; }
+    #rv-scroll { flex: 1 1 auto; overflow: auto; padding: 16px; }
+    /* margin:auto, not flex centering — a centered flex child that overflows
+       clips its left edge unreachably; margins degrade to scrollable. */
+    #rv-map { position: relative; width: -moz-fit-content; width: fit-content;
+      margin: 0 auto; }
     .rv-row { display: flex; }
     .rv-cell {
       position: relative; flex: none;
       width: var(--tile-width, 128px); height: var(--tile-height, 128px);
       background-repeat: no-repeat; background-position: center;
+      image-rendering: pixelated;
     }
+    .rv-tile, .rv-marker, .rv-pip-mask, .rv-pip-focus { image-rendering: pixelated; }
+    /* Hidden-during-animation still (the game's .invisible). */
+    .rv-invisible { visibility: hidden; }
+    /* Concurrent animation layers stack inside the one mount. */
+    .rv-anim-layer { position: absolute; inset: 0; }
+    /* Offline badge, top-right of the tile. */
+    .rv-status-badges { position: absolute; top: 6px; right: 6px; z-index: 520;
+      display: flex; gap: 2px; }
     /* Transition rows: layers STACK inside one tile-height block (the game's
        .map-terrain-transition) — the previous ambit's edge-bottom under the
        next ambit's edge-top is what blends two bands together. */
