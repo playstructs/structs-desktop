@@ -122,6 +122,69 @@
       letter-spacing: .1em; color: var(--text-hint, #6b7488);
       writing-mode: vertical-rl; text-orientation: mixed; }
 
+    /* ── PiP bubble — combat happening off-screen ─────────────────────────
+       Transcribed from the game's .map-pip: a fixed 128px viewer at mid-
+       height that slides in from the LEFT for a defender-side struct and the
+       RIGHT for an attacker-side one, only while an attack-sequence animation
+       plays for a struct whose tile is fully outside the scroll viewport.
+       The side class anchors the off-screen rest position; sliding is done by
+       toggling rv-vis while the side class stays put, so the left/right jump
+       from swapping sides is never visible. */
+    #rv-pip {
+      position: fixed;
+      top: calc(50vh - 64px);
+      width: 128px; height: 128px;
+      z-index: 800;
+      display: block;
+      visibility: hidden;
+      transition: left 0.3s ease-in-out, right 0.3s ease-in-out;
+    }
+    #rv-pip.rv-side-left  { visibility: visible; left: -200px; right: auto; }
+    #rv-pip.rv-side-right { visibility: visible; left: auto; right: -200px; }
+    #rv-pip.rv-side-left.rv-vis  { left: 26px; }
+    #rv-pip.rv-side-right.rv-vis { right: 26px; }
+
+    .rv-pip-mask {
+      position: absolute; top: 0; left: 0;
+      display: flex; box-sizing: border-box;
+      width: 118px; height: 118px;
+      border-radius: 8px; margin: 5px;
+      overflow: hidden; align-items: center; justify-content: center;
+      background-repeat: no-repeat; background-position: center;
+    }
+    #rv-pip.rv-side-left  .rv-pip-mask { border: 1px solid var(--border-focus-friendly-dark, #2e7d5b); }
+    #rv-pip.rv-side-right .rv-pip-mask { border: 1px solid var(--border-focus-enemy-dark, #7d2e3a); }
+
+    .rv-pip-focus {
+      position: relative; z-index: 10; display: flex;
+      width: 128px; height: 128px;
+      background-repeat: no-repeat; background-position: center;
+    }
+    #rv-pip.rv-side-left  .rv-pip-focus { background-image: url("img/focus/focus-friendly.png"); }
+    #rv-pip.rv-side-right .rv-pip-focus { background-image: url("img/focus/focus-enemy.png"); }
+
+    .rv-pip-caret-container {
+      position: absolute; top: 0; left: 0;
+      display: flex; width: 100%; height: 100%;
+      flex-direction: column; align-items: center; justify-content: center;
+    }
+    .rv-pip-caret { position: relative; display: inline-block; width: 12px; height: 36px; }
+    #rv-pip.rv-side-left .rv-pip-caret {
+      left: -71px;
+      background: url("img/focus/focus-caret-friendly.png") no-repeat center/cover;
+    }
+    #rv-pip.rv-side-right .rv-pip-caret {
+      left: 71px;
+      background: url("img/focus/focus-caret-enemy.png") no-repeat center/cover;
+      transform: scaleX(-1);
+    }
+
+    /* The struct (still + its own lottie mount) inside the mask; attacker-side
+       content mirrored, exactly like its on-map tile. */
+    .rv-pip-struct { position: absolute; top: 0; left: 0; width: 128px; height: 128px; }
+    #rv-pip.rv-side-right .rv-pip-struct { transform: scaleX(-1); }
+    .rv-pip-struct .rv-marker { z-index: 40; }
+
     /* ── End-of-raid banner ───────────────────────────────────────────── */
     #rv-banner {
       display: none; position: fixed; inset: 0; z-index: 900;
@@ -153,6 +216,14 @@
   <!-- The end-of-raid banner overlays the map; pointer-events:none so it
        never intercepts a scroll while it is playing out. -->
   <div id="rv-banner"></div>
+
+  <!-- PiP bubble: mirrors the struct currently animating when its tile is
+       fully off-screen. Structure matches the game's .map-pip markup. -->
+  <div id="rv-pip">
+    <div class="rv-pip-focus"></div>
+    <div class="rv-pip-mask"><div class="rv-pip-struct" id="rv-pip-struct"></div></div>
+    <div class="rv-pip-caret-container"><div class="rv-pip-caret"></div></div>
+  </div>
 
   <div id="rv-scroll">
     <div id="rv-map">

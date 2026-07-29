@@ -522,6 +522,11 @@ struct Watch {
     /// replays a fight the window has already animated.
     shot_cursor: f64,
     generation: u64,
+    /// Set by the GRASS fan-out when a fleet arrives or departs: the board's
+    /// composition changed, so the next poll tick rebuilds the snapshot
+    /// immediately instead of waiting out the 20-second cadence. The game
+    /// reacts to arrivals instantly; a spectator should too.
+    force_snapshot: bool,
 }
 
 static WATCHES: LazyLock<Mutex<HashMap<String, Watch>>> =
@@ -555,6 +560,7 @@ pub fn attach(app: &tauri::AppHandle, target: &Target, window_label: &str) -> bo
                 },
                 shot_cursor: 0.0,
                 generation: 0,
+                force_snapshot: false,
             }
         });
         if !entry.windows.iter().any(|l| l == window_label) {
@@ -659,8 +665,18 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                 continue;
             };
 
+            let forced = {
+                let mut w = WATCHES.lock().unwrap();
+                match w.get_mut(&key) {
+                    Some(e) if e.force_snapshot => {
+                        e.force_snapshot = false;
+                        true
+                    }
+                    _ => false,
+                }
+            };
             let now = crate::hasher::types::now_millis();
-            if now - last_snapshot >= SNAPSHOT_INTERVAL_MS as f64 {
+            if forced || now - last_snapshot >= SNAPSHOT_INTERVAL_MS as f64 {
                 last_snapshot = now;
                 let snap = enriched_snapshot(&client, &pid).await;
                 let payload = json!({ "generation": generation, "snapshot": snap });
@@ -789,6 +805,17 @@ pub fn note_event(app: &tauri::AppHandle, event: &crate::mcp::event_buffer::Game
     let windows = windows_for_planet(&planet_id);
     if windows.is_empty() {
         return;
+    }
+    // Fleet movement changes WHO IS ON THE BOARD — deltas alone can't add or
+    // remove a whole fleet's structs, so ask the watcher for a fresh snapshot
+    // on its next tick (≤4s) instead of waiting out the snapshot cadence.
+    if event.category == "fleet_arrive" || event.category == "fleet_depart" {
+        let mut w = WATCHES.lock().unwrap();
+        for e in w.values_mut() {
+            if e.planet_id.as_deref() == Some(planet_id.as_str()) {
+                e.force_snapshot = true;
+            }
+        }
     }
     let payload = json!({
         "category": event.category,

@@ -440,10 +440,6 @@
     map.innerHTML = '';
     anchors = {};
 
-    // Occupancy first, so empty planetary slots know to show a beacon.
-    var occupied = {};
-    (snap.structs || []).forEach(function (s) { occupied[anchorKeyFor(s)] = true; });
-
     var slots = snap.slots || {};
     // A missing count means the backend could not read it — treat as the full
     // drawn capacity rather than zero, or every planetary cell would render
@@ -471,7 +467,7 @@
           rowNode.appendChild(band);
         }
         for (var c = 0; c < cols.length; c++) {
-          rowNode.appendChild(cell(cols, slotsFor, occupied, ambit, r, c));
+          rowNode.appendChild(cell(cols, slotsFor, ambit, r, c));
         }
         map.appendChild(rowNode);
       }
@@ -480,7 +476,7 @@
     return anchors;
   }
 
-  function cell(cols, slotsFor, occupied, ambit, row, colIndex) {
+  function cell(cols, slotsFor, ambit, row, colIndex) {
     var colType = cols[colIndex];
     var n = el('div', 'rv-cell');
 
@@ -509,7 +505,10 @@
         return n;
       }
       key = 'plan|' + ambit + '|' + pslot;
-      if (!occupied[key]) n.appendChild(beaconMarker(ambit));
+      // The beacon renders whether or not the slot is occupied — the game's
+      // marker layer never consults occupancy, and the struct simply draws
+      // over it. That IS the platform a water struct appears to stand on.
+      n.appendChild(beaconMarker(ambit));
     } else {
       var fslot = slotAt(cols, colType, row, colIndex);
       key = 'fleet|' + side + '|' + ambit + '|' + fslot;
@@ -533,9 +532,6 @@
       if (!mount) { unplaced++; return; }
       if (mount.childNodes.length) { unplaced++; return; } // seat taken
       mount.appendChild(structNode(s));
-      // An occupied planetary slot must not keep its build beacon.
-      var beacon = mount.parentNode && mount.parentNode.querySelector('.rv-marker');
-      if (beacon) beacon.style.display = 'none';
     });
     return unplaced;
   }
@@ -647,6 +643,180 @@
   // health values the sequence is animating toward.
   // ══════════════════════════════════════════════════════════════════════════
 
+  /* ── PiP bubble — combat happening off-screen ──────────────────────────
+   *
+   * Transcribed from MapPictureInPictureComponent: while an attack-sequence
+   * animation (ATTACK_/IMPACT_/SHAKE_/EVADE/DESTROY_ — status animations
+   * never qualify) plays for a struct whose tile is FULLY outside the scroll
+   * viewport, a fixed 128px bubble slides in — from the left for a
+   * defender-side struct, from the right for an attacker — showing that
+   * tile's terrain, the struct, and the SAME animation. It hides when the
+   * queue drains, and visibility re-evaluates on scroll/resize so scrolling
+   * the real tile into view retracts the bubble.
+   *
+   * The bubble's lottie is MUTED: its completion never advances the queue —
+   * only the on-map animation drives playNext, exactly as the game keeps its
+   * PIP viewer from driving the global AnimationEventQueue. */
+
+  var PIP_SEQ = ['ATTACK_', 'IMPACT_', 'SHAKE_', 'EVADE', 'DESTROY_',
+                 'DEFENSIVE_MANEUVER', 'SIGNAL_JAMMING'];
+  function isAttackSequence(names) {
+    return (names || []).some(function (n) {
+      return PIP_SEQ.some(function (p) { return n === p || String(n).indexOf(p) === 0; });
+    });
+  }
+
+  var pip = { structId: null, side: null, anim: null, swapTimer: null };
+
+  function pipEl() { return document.getElementById('rv-pip'); }
+
+  function pipCellOf(structId) {
+    var wrap = document.getElementById(domId('slot', structId));
+    if (!wrap) return null;
+    var n = wrap;
+    while (n && String(n.className || '').indexOf('rv-cell') < 0) n = n.parentNode;
+    return n || null;
+  }
+
+  /* Fully off the SCROLL VIEWPORT — not the window. The map lives inside
+   * #rv-scroll under a fixed header, so the scroll box is the visible area.
+   * Any partially visible tile means no bubble, same as the game. */
+  function pipOffscreen(cell) {
+    if (!cell || !cell.getBoundingClientRect) return false;
+    var sc = document.getElementById('rv-scroll');
+    if (!sc) return false;
+    var v = sc.getBoundingClientRect();
+    var r = cell.getBoundingClientRect();
+    return r.bottom <= v.top || r.top >= v.bottom || r.right <= v.left || r.left >= v.right;
+  }
+
+  function pipDestroyAnim() {
+    if (pip.anim) { try { pip.anim.destroy(); } catch (e) {} pip.anim = null; }
+  }
+
+  function pipClear() {
+    pipDestroyAnim();
+    if (pip.swapTimer) { clearTimeout(pip.swapTimer); pip.swapTimer = null; }
+    var el = pipEl();
+    if (el) {
+      el.classList.remove('rv-vis', 'rv-side-left', 'rv-side-right');
+      var mount = document.getElementById('rv-pip-struct');
+      if (mount) mount.innerHTML = '';
+    }
+    pip.structId = null;
+    pip.side = null;
+  }
+
+  /* Fill the bubble for one struct: the tile's own terrain as the mask
+   * background, the marker if the cell shows one, the still at the health the
+   * sequence has reached, and the animation the map is playing right now. */
+  function pipRender(s, cell, name, healthNow) {
+    var el = pipEl();
+    var mount = document.getElementById('rv-pip-struct');
+    if (!el || !mount) return false;
+
+    var mask = el.querySelector('.rv-pip-mask');
+    if (mask && cell) {
+      mask.style.backgroundColor = cell.style.backgroundColor || '';
+      mask.style.backgroundImage = cell.style.backgroundImage || '';
+    }
+
+    pipDestroyAnim();
+    mount.innerHTML = '';
+
+    var marker = cell && cell.querySelector('.rv-marker');
+    if (marker && marker.style.display !== 'none') {
+      var m2 = document.createElement('img');
+      m2.src = marker.src; m2.alt = ''; m2.className = 'rv-marker';
+      mount.appendChild(m2);
+    }
+
+    var still = el2('div', 'rv-struct' + (s.hidden ? ' rv-stealth' : ''));
+    renderStill(still, s, healthNow);
+    mount.appendChild(still);
+
+    if (name && window.lottie) {
+      var animBox = el2('div', 'rv-anim');
+      mount.appendChild(animBox);
+      try {
+        pip.anim = window.lottie.loadAnimation({
+          container: animBox, renderer: 'svg', loop: false, autoplay: true,
+          path: lottiePath(name, s.type_slug),
+        });
+      } catch (e) { /* the still alone is still informative */ }
+    }
+    return true;
+  }
+  function el2(tag, cls) { var n = document.createElement(tag); if (cls) n.className = cls; return n; }
+
+  /* Show/refresh the bubble for the struct the queue is animating.
+   * Same struct: refresh in place (counter-chains keep the bubble up).
+   * Different struct: slide out, swap contents and side off-screen, slide
+   * back in — the side-class jump is invisible while parked off-screen. */
+  function pipShow(ev, name) {
+    var s = state.structsById[ev.structId];
+    if (!s) return;
+    var cell = pipCellOf(ev.structId);
+    if (!cell) return;
+    var el = pipEl();
+    if (!el) return;
+    var side = s.side === 'attacker' ? 'right' : 'left';
+    var healthNow = ev.healthAfter != null ? ev.healthAfter : currentHealth(s);
+
+    var apply = function () {
+      pip.structId = ev.structId;
+      pip.side = side;
+      el.classList.remove('rv-side-left', 'rv-side-right');
+      el.classList.add(side === 'right' ? 'rv-side-right' : 'rv-side-left');
+      if (pipRender(s, cell, name, healthNow)) {
+        // Force a layout flush so the browser commits the off-screen anchor
+        // before rv-vis lands — otherwise the slide-in transition is skipped.
+        void el.offsetWidth;
+        pipUpdateVisibility();
+      } else {
+        pipClear();
+      }
+    };
+
+    if (pip.structId && pip.structId !== ev.structId && el.classList.contains('rv-vis')) {
+      el.classList.remove('rv-vis');
+      if (pip.swapTimer) clearTimeout(pip.swapTimer);
+      pip.swapTimer = setTimeout(function () { pip.swapTimer = null; apply(); }, 320);
+    } else {
+      apply();
+    }
+  }
+
+  function pipRequestHide() {
+    var el = pipEl();
+    if (el) el.classList.remove('rv-vis');
+    if (pip.swapTimer) { clearTimeout(pip.swapTimer); pip.swapTimer = null; }
+    pip.swapTimer = setTimeout(function () { pip.swapTimer = null; pipClear(); }, 320);
+  }
+
+  /* Called from the queue as each animation starts, and from scroll/resize. */
+  function pipOnAnimation(ev, name) {
+    if (!ev.names || !ev.names.length || !isAttackSequence(ev.names)) {
+      if (pip.structId) pipRequestHide();
+      return;
+    }
+    var cell = pipCellOf(ev.structId);
+    if (pipOffscreen(cell)) {
+      pipShow(ev, name);
+    } else if (pip.structId === ev.structId || !pip.structId) {
+      // Tile visible: the map itself is the viewer.
+      pipUpdateVisibility();
+    }
+  }
+
+  function pipUpdateVisibility() {
+    var el = pipEl();
+    if (!el) return;
+    if (!pip.structId) { el.classList.remove('rv-vis'); return; }
+    var cell = pipCellOf(pip.structId);
+    el.classList.toggle('rv-vis', pipOffscreen(cell));
+  }
+
   var queue = [];
   var playing = false;
   var pendingReconcile = null;
@@ -659,6 +829,9 @@
   function playNext() {
     if (!queue.length) {
       playing = false;
+      // The fight is over (for now) — retract the bubble the way the game
+      // does on ANIMATION_QUEUE_EMPTY.
+      if (pip.structId) pipRequestHide();
       if (pendingReconcile) {
         var fn = pendingReconcile;
         pendingReconcile = null;
@@ -700,6 +873,7 @@
     var playOne = function () {
       if (i >= ev.names.length) { finish(); return; }
       var name = ev.names[i++];
+      pipOnAnimation(ev, name);
       var anim;
       try {
         anim = window.lottie.loadAnimation({
@@ -966,6 +1140,7 @@
       queue.length = 0;
       playing = false;
       stopAllIdle();
+      pipClear();
       state.liveHealth = {};
       // A new planet gets its own end-of-raid banner; without this reset the
       // window would refuse to show one after having shown it elsewhere.
@@ -1080,6 +1255,13 @@
     setInterval(renderHeader, 5000);
     renderHeader();
 
+    // Scrolling the animating tile back into view retracts the bubble, and
+    // scrolling it out mid-fight brings the bubble back — the same
+    // scroll/resize re-evaluation the game's PIP does.
+    var sc = document.getElementById('rv-scroll');
+    if (sc) sc.addEventListener('scroll', pipUpdateVisibility);
+    window.addEventListener('resize', pipUpdateVisibility);
+
     T.core.invoke('mcp_raid_state', {
       planetId: TARGET.kind === 'planet' ? TARGET.id : null,
       fleetId: TARGET.kind === 'fleet' ? TARGET.id : null,
@@ -1122,6 +1304,11 @@
     _applyAttacks: applyAttacks,
     _applyDelta: applyDelta,
     _queue: function () { return queue; },
+    isAttackSequence: isAttackSequence,
+    _pip: pip,
+    _pipOnAnimation: pipOnAnimation,
+    _pipOffscreen: pipOffscreen,
+    _pipUpdateVisibility: pipUpdateVisibility,
   };
 
   boot();
