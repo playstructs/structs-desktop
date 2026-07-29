@@ -342,6 +342,15 @@ pub async fn snapshot_planet(
                 break;
             };
             let fbody = fleet.get("Fleet").unwrap_or(&fleet);
+            // The pointers DANGLE: when the last visitor leaves, the chain
+            // clears `locationListStart` but leaves `locationListLast` naming
+            // the departed fleet (verified live on 2-2124 — start "", last
+            // "9-275", 9-275 onStation at its own home). A fleet the list
+            // names is only real if the fleet itself agrees it is here;
+            // otherwise it would render as a ghost army.
+            if str_of(fbody.get("locationId")).as_deref() != Some(planet_id) {
+                break;
+            }
             placements.extend(fleet_placements(fbody));
             fleets.push(fleet_id);
             next = str_of(fbody.get(link));

@@ -116,92 +116,18 @@ fn main() {
             let config = guild_config::get_active_guild_config();
             let config_json = serde_json::to_string(&config).unwrap_or_else(|_| "null".into());
 
-            // macOS WKWebView pixel-art workarounds. These are HARMFUL on Windows/Linux,
-            // where the WebView is Chromium (WebView2): `html { zoom }` makes the compositor
-            // re-rasterize full-screen layers at 2x/4x, exhausting the renderer's memory budget
-            // ("Out of Memory" crash at launch on high-res displays). Chromium gets crisp
-            // pixel-art from the global `image-rendering: pixelated` rules + the webapp's own
-            // `transform: scale()` path (structs-webapp main.css), so on non-macOS we omit
-            // these and fall back to the webapp's native, browser-tested rendering.
-            let macos_zoom_css = if cfg!(target_os = "macos") {
-                r#"
-            /* Replace per-element transform: scale() with html-level zoom.
-               This preserves all internal layout relationships since the entire
-               page is zoomed uniformly. The webapp's media queries still fire
-               at the correct breakpoints because zoom affects CSS pixel size. */
-            @media only screen and (min-width: 1152px),
-            only screen and (min-height: 1024px) {
-                html {
-                    zoom: 2 !important;
-                }
-                /* Remove the per-element transforms since html zoom handles it */
-                #menu-page-layout,
-                #banner-layer,
-                #hud-container,
-                #alpha-base-map-container,
-                #raid-map-container,
-                #preview-map-container,
-                #loading-screen,
-                #sui-offcanvas,
-                #sui-cheatsheet-container,
-                #notification-dialogue,
-                .map-pip {
-                    transform: none !important;
-                    transform-origin: unset !important;
-                }
-                /* Restore dimensions to 100% since zoom is on html now */
-                #menu-page-layout,
-                #banner-layer,
-                #hud-container,
-                #loading-screen {
-                    width: 100vw !important;
-                    height: 100vh !important;
-                }
-                #notification-dialogue {
-                    width: 100vw !important;
-                }
-                #sui-offcanvas {
-                    height: 100vh !important;
-                }
-            }
-
-            @media only screen and (min-width: 2304px),
-            only screen and (min-height: 2048px) {
-                html {
-                    zoom: 4 !important;
-                }
-                #menu-page-layout,
-                #banner-layer,
-                #hud-container,
-                #alpha-base-map-container,
-                #raid-map-container,
-                #preview-map-container,
-                #loading-screen,
-                #sui-offcanvas,
-                #sui-cheatsheet-container,
-                #notification-dialogue,
-                .map-pip {
-                    transform: none !important;
-                    transform-origin: unset !important;
-                }
-                #menu-page-layout,
-                #banner-layer,
-                #hud-container,
-                #loading-screen {
-                    width: 100vw !important;
-                    height: 100vh !important;
-                }
-                #notification-dialogue {
-                    width: 100vw !important;
-                }
-                #sui-offcanvas {
-                    height: 100vh !important;
-                }
-            }
-"#
-            } else {
-                ""
-            };
+            // RETIRED: the macOS `html { zoom: 2/4 }` injection that replaced the
+            // webapp's per-element `transform: scale()`. Its correctness depended on
+            // LEGACY WebKit zoom semantics, where viewport units (100vw/100vh) were
+            // divided by the root zoom so full-screen layers still fit. Safari 17.4
+            // standardized CSS zoom and viewport units are no longer divided — on any
+            // recent macOS the injected `width: 100vw` layers painted at 2x/4x the
+            // window, anchored top-left, cropping the ENTIRE app (loading screen
+            // included) to its top-left quarter. Verified against a user's 3440x1440
+            // screen recording and reproduced pixel-for-pixel in a viewport fixture;
+            // the webapp's own transform+50vw path renders correctly at 1512/2560/
+            // 3440 wide under both semantics, so macOS now simply uses it, like every
+            // browser player does.
 
             // macOS WKWebView forces all Lottie animations to the canvas renderer for crisp
             // pixel-art. On Chromium (Windows/Linux) this creates a per-animation canvas
@@ -391,7 +317,6 @@ try {{
                 image-rendering: pixelated !important;
                 image-rendering: -webkit-optimize-contrast !important;
             }}
-{macos_zoom_css}
         `;
         document.head.appendChild(style);
     }}
@@ -499,7 +424,6 @@ try {{
 {macos_lottie_canvas}
 "#,
                 config_json = config_json,
-                macos_zoom_css = macos_zoom_css,
                 macos_lottie_canvas = macos_lottie_canvas,
             );
 
