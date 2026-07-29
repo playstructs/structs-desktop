@@ -123,7 +123,22 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()))
             {
-                Ok(v) => text(v),
+                Ok(mut v) => {
+                    // Live pool gauges beside the historical stats: worker
+                    // threads should track the cap (never the queue depth),
+                    // and pending is the threadless backlog awaiting ripeness.
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "pool".into(),
+                            json!({
+                                "workers": crate::hasher::pool::worker_count(),
+                                "pending": crate::hasher::pool::pending_len(),
+                                "cap": crate::hasher::max_concurrent(),
+                            }),
+                        );
+                    }
+                    text(v)
+                }
                 Err(e) => err(e),
             }
         }

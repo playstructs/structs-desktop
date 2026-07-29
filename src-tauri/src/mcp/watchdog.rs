@@ -239,6 +239,11 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                             // MINE tasks, watchdog "2nd attempt" spam). Same
                             // remove-first shape as tools/hasher.rs stop_task
                             // (avoids the DashMap get-then-remove deadlock).
+                            // A stalled RUNNING task may have its pool worker
+                            // wedged in an unbounded block — write that worker
+                            // off and spawn a replacement so the bounded pool
+                            // never silently drains.
+                            crate::hasher::pool::note_wedged();
                             if let Some(reg) = app.try_state::<Arc<TaskRegistry>>() {
                                 if let Some((_, h)) = reg.tasks.remove(&id) {
                                     h.cancel.store(true, Ordering::SeqCst);

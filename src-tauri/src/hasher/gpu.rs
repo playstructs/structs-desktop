@@ -9,6 +9,11 @@ use crate::hasher::types::{now_millis, TaskHandle};
 
 /// Batch size: number of nonces tested per GPU dispatch
 const GPU_BATCH_SIZE: u32 = 1 << 20; // ~1M nonces per dispatch
+/// A healthy batch reads back in well under a second; a batch that hasn't
+/// mapped after this long is lost (observed live as tasks frozen at exactly
+/// one batch of iterations). Generous so slow-device false positives are
+/// impossible, but bounded so a pool worker can never wedge forever.
+const GPU_READBACK_TIMEOUT_MS: u64 = 60_000;
 
 /// Uniform params matching the WGSL Params struct (8 x u32 = 32 bytes)
 #[repr(C)]
@@ -351,16 +356,43 @@ pub fn run_gpu_hash(
         encoder.copy_buffer_to_buffer(&result_buffer, 0, &result_staging, 0, 11 * 4);
         queue.submit(std::iter::once(encoder.finish()));
 
-        // Read back result
+        // Read back result. BOUNDED wait, never Maintain::Wait + recv():
+        // a lost batch (seen live ~40×/hr, iterations frozen at exactly one
+        // batch) used to block this thread forever — tolerable when every task
+        // had its own thread, fatal now that a bounded pool runs the grinds
+        // (each wedge would permanently eat a worker). On timeout we abandon
+        // the task; reap + the auto loops re-enqueue it later.
         let result_slice = result_staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         result_slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        device.poll(wgpu::Maintain::Wait);
-        if rx.recv().unwrap().is_err() {
-            eprintln!("[Structs Hasher GPU] Failed to read result buffer");
-            return;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(GPU_READBACK_TIMEOUT_MS);
+        let mapped = loop {
+            device.poll(wgpu::Maintain::Poll);
+            match rx.try_recv() {
+                Ok(r) => break Some(r),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break None,
+            }
+            if std::time::Instant::now() >= deadline || handle.is_cancelled() {
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        match mapped {
+            Some(Ok(())) => {}
+            Some(Err(_)) => {
+                eprintln!("[Structs Hasher GPU] Failed to read result buffer");
+                return;
+            }
+            None => {
+                eprintln!(
+                    "[Structs Hasher GPU] {} readback timed out after {}ms — abandoning batch (task will be re-issued)",
+                    pid, GPU_READBACK_TIMEOUT_MS
+                );
+                return;
+            }
         }
 
         let data = result_slice.get_mapped_range();

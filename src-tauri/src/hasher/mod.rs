@@ -1,6 +1,7 @@
 pub mod cpu;
 pub mod difficulty;
 pub mod gpu;
+pub mod pool;
 pub mod scheduler;
 pub mod tuner;
 pub mod types;
@@ -117,6 +118,8 @@ pub fn difficulty_start() -> u64 {
 }
 pub fn set_max_concurrent(v: u64) {
     MAX_CONCURRENT.store(v, Ordering::Relaxed);
+    // A live raise should take effect without waiting for the next enqueue.
+    pool::ensure_workers();
 }
 pub fn max_concurrent() -> u64 {
     MAX_CONCURRENT.load(Ordering::Relaxed)
@@ -242,35 +245,10 @@ pub fn start_hash_task_core(
     let handle = Arc::new(TaskHandle::new(params));
     registry.tasks.insert(pid.clone(), handle.clone());
 
-    let app_clone = app.clone();
-    let handle_clone = handle.clone();
-    let registry_reaper = Arc::clone(registry);
-    let pid_reaper = pid.clone();
-
-    let use_gpu = resolve_use_gpu();
-
-    let join = std::thread::spawn(move || {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if use_gpu {
-                let device = GPU_DEVICE.get().unwrap().clone();
-                let queue = GPU_QUEUE.get().unwrap().clone();
-                eprintln!("[Structs Hasher] Starting task {} on GPU", handle_clone.params.object_id);
-                gpu::run_gpu_hash(handle_clone.clone(), device, queue, app_clone);
-            } else {
-                eprintln!("[Structs Hasher] Starting task {} on CPU ({} threads)",
-                    handle_clone.params.object_id, num_cpus::get().saturating_sub(1).max(1));
-                cpu::run_cpu_hash(handle_clone.clone(), app_clone);
-            }
-        }));
-        if outcome.is_err() {
-            eprintln!("[Structs Hasher] task {} worker panicked; reclaiming slot", pid_reaper);
-        }
-        // Always reclaim the slot (normal completion OR panic) so a finished
-        // worker thread is never left as a zombie holding its stack + TCB.
-        reap_self(&registry_reaper, &pid_reaper, &handle_clone);
-    });
-
-    *handle.join_handle.lock().unwrap() = Some(join);
+    // No thread here: the task waits in the pool's pending queue and a bounded
+    // worker (≤ max_concurrent) picks it up once ripe. Thread-per-task at this
+    // point is what drove the process past 1,500 threads at fleet scale.
+    pool::enqueue(&app, registry, handle);
     Ok(())
 }
 
@@ -297,49 +275,8 @@ pub async fn start_hash_task(
     app: AppHandle,
     registry: State<'_, Arc<TaskRegistry>>,
 ) -> Result<(), String> {
-    if !hash_enabled() {
-        return Err("Hashing is disabled. Re-enable with structs_hash config { enabled: true }.".to_string());
-    }
-    let pid = params.object_id.clone();
-
-    // Cancel any existing task with the same PID
-    if let Some(existing) = registry.tasks.remove(&pid) {
-        existing.1.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    let handle = Arc::new(TaskHandle::new(params));
-    registry.tasks.insert(pid.clone(), handle.clone());
-
-    let app_clone = app.clone();
-    let handle_clone = handle.clone();
-    let registry_reaper = registry.inner().clone();
-    let pid_reaper = pid.clone();
-
-    // Check GPU availability
-    let use_gpu = resolve_use_gpu();
-
-    let join = std::thread::spawn(move || {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if use_gpu {
-                let device = GPU_DEVICE.get().unwrap().clone();
-                let queue = GPU_QUEUE.get().unwrap().clone();
-                eprintln!("[Structs Hasher] Starting task {} on GPU", handle_clone.params.object_id);
-                gpu::run_gpu_hash(handle_clone.clone(), device, queue, app_clone);
-            } else {
-                eprintln!("[Structs Hasher] Starting task {} on CPU ({} threads)",
-                    handle_clone.params.object_id, num_cpus::get().saturating_sub(1).max(1));
-                cpu::run_cpu_hash(handle_clone.clone(), app_clone);
-            }
-        }));
-        if outcome.is_err() {
-            eprintln!("[Structs Hasher] task {} worker panicked; reclaiming slot", pid_reaper);
-        }
-        reap_self(&registry_reaper, &pid_reaper, &handle_clone);
-    });
-
-    *handle.join_handle.lock().unwrap() = Some(join);
-
-    Ok(())
+    // Same path as MCP-started tasks: registry insert + pool enqueue.
+    start_hash_task_core(params, app, registry.inner())
 }
 
 #[tauri::command]
