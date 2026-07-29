@@ -47,11 +47,12 @@ use crate::mcp::raid_view::Target;
 // in slot 0 and a fleet struct in slot 0 are indistinguishable. The arrays make
 // that structural.
 //
-// One read per struct then supplies everything else — `type_name`,
-// `health_max`, `structAttributes.health`, `isDestroyed`, `isHidden` — so no
-// struct-type catalogue is needed and no field has to be cross-referenced from
-// the database's column names, which differ from the LCD's (`max_health` vs
-// `maxHealth`).
+// One read per struct then supplies health and status
+// (`structAttributes.{health,isDestroyed,isHidden}`). Type name and max
+// health are NOT on the raw LCD entity — they only look like they are through
+// structs_intel, which enriches from GAME_STATE.struct_types. `build_struct`
+// resolves them from that same in-memory catalogue (synced by the game
+// window), with the entity fields as fallback.
 
 /// The four ambits, top to bottom, exactly as the map stacks them.
 pub const AMBIT_KEYS: &[&str] = &["space", "air", "land", "water"];
@@ -286,22 +287,59 @@ pub async fn snapshot_planet(
         None,
     );
 
-    // Walk the fleet list parked at this planet. `locationListStart` heads it
-    // and each fleet's `locationListForward` continues it.
+    // The DEFENDER's fleet first. A planet's `locationList` holds only
+    // VISITING fleets — the owner's own fleet, even onStation at this exact
+    // planet, is not in it (verified live: 2-2124 is 1-274's active planet,
+    // fleet 9-274 sits there onStation, and the list is empty). Without this
+    // read, a defended raid renders with the defender's entire fleet — command
+    // ship included — missing. `Player.fleetId` names it.
     let mut fleets: Vec<String> = vec![];
-    let mut next = str_of(body.get("locationListStart"));
-    while let Some(fleet_id) = next.take() {
-        if fleets.len() >= MAX_FLEETS_AT_PLANET || fleets.contains(&fleet_id) {
-            break; // guard against a malformed or cyclic list
-        }
-        let Ok(fleet) = client.query_entity("fleet", &fleet_id).await else {
-            warning = Some(format!("fleet {fleet_id} unavailable"));
-            break;
+    if let Some(owner_id) = owner.as_deref() {
+        let owner_fleet = match client.query_entity("player", owner_id).await {
+            Ok(v) => str_of(v.get("Player").unwrap_or(&v).get("fleetId")),
+            Err(_) => None,
         };
-        let fbody = fleet.get("Fleet").unwrap_or(&fleet);
-        placements.extend(fleet_placements(fbody));
-        fleets.push(fleet_id);
-        next = str_of(fbody.get("locationListForward"));
+        if let Some(fid) = owner_fleet {
+            if let Ok(fleet) = client.query_entity("fleet", &fid).await {
+                let fbody = fleet.get("Fleet").unwrap_or(&fleet);
+                // Only when it is actually HERE — the owner may be off raiding
+                // someone else, and a fleet that left must not be drawn.
+                if str_of(fbody.get("locationId")).as_deref() == Some(planet_id) {
+                    placements.extend(fleet_placements(fbody));
+                    fleets.push(fid);
+                }
+            }
+        }
+    }
+
+    // Then every VISITING fleet. The linked list's naming is from the CHAIN's
+    // perspective and inverts intuition — verified live with two fleets at
+    // 2-1590: START's `locationListBackward` points at the next fleet, and
+    // `locationListForward` points from the LAST back toward the start. So
+    // start→forward (the obvious reading) enumerates exactly one fleet and
+    // silently drops every later arrival. Walk BOTH directions, deduped, so
+    // either reading of the naming still enumerates the whole list.
+    for (head, link) in [
+        ("locationListStart", "locationListBackward"),
+        ("locationListLast", "locationListForward"),
+    ] {
+        let mut next = str_of(body.get(head));
+        while let Some(fleet_id) = next.take() {
+            if fleets.len() >= MAX_FLEETS_AT_PLANET {
+                break;
+            }
+            if fleets.contains(&fleet_id) {
+                break; // reached fleets the other walk already covered
+            }
+            let Ok(fleet) = client.query_entity("fleet", &fleet_id).await else {
+                warning = Some(format!("fleet {fleet_id} unavailable"));
+                break;
+            };
+            let fbody = fleet.get("Fleet").unwrap_or(&fleet);
+            placements.extend(fleet_placements(fbody));
+            fleets.push(fleet_id);
+            next = str_of(fbody.get(link));
+        }
     }
 
     // One read per struct supplies type, health and status together.
@@ -421,11 +459,28 @@ async fn build_struct(
     }
 
     let owner = str_of(body.get("owner")).unwrap_or(p.owner_hint);
-    let type_name = str_of(body.get("type_name")).unwrap_or_default();
+    let type_id = body.get("type").and_then(num_u64).unwrap_or(0);
+
+    // `type_name` and `health_max` are NOT on the raw LCD entity — they are
+    // enrichments the intel layer adds from GAME_STATE.struct_types (verified
+    // the hard way: the same struct returns them through structs_intel and
+    // blanks through a raw read). The game window keeps that table synced, so
+    // resolve from it here too, with the entity fields as a fallback for any
+    // future LCD that starts carrying them.
+    let (catalog_name, catalog_max) = {
+        let gs = crate::game_state::GAME_STATE.read().unwrap();
+        match gs.struct_types.get(&type_id.to_string()) {
+            Some(st) => (Some(st.name.clone()), st.max_health.map(|m| m as u64)),
+            None => (None, None),
+        }
+    };
+    let type_name = catalog_name
+        .or_else(|| str_of(body.get("type_name")))
+        .unwrap_or_default();
 
     Some(SpectatorStruct {
         id: p.struct_id,
-        type_id: body.get("type").and_then(num_u64).unwrap_or(0),
+        type_id,
         type_slug: type_slug(&type_name),
         type_name,
         category: p.category,
@@ -441,11 +496,10 @@ async fn build_struct(
         ambit: str_of(body.get("operatingAmbit")).unwrap_or(p.ambit),
         slot: p.slot,
         health: sattrs.and_then(|a| a.get("health")).and_then(num_u64),
-        // LCD spells this `health_max`; the database column is `max_health`.
-        // Read both so neither naming can silently yield zero.
-        max_health: body
-            .get("health_max")
-            .and_then(num_u64)
+        // The catalogue is authoritative; entity fields (both LCD and DB
+        // spellings) are fallbacks only.
+        max_health: catalog_max
+            .or_else(|| body.get("health_max").and_then(num_u64))
             .or_else(|| body.get("maxHealth").and_then(num_u64))
             .unwrap_or(0),
         destroyed: false,
