@@ -123,22 +123,18 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()))
             {
-                Ok(mut v) => {
-                    // Live pool gauges beside the historical stats: worker
-                    // threads should track the cap (never the queue depth),
-                    // and pending is the threadless backlog awaiting ripeness.
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert(
-                            "pool".into(),
-                            json!({
-                                "workers": crate::hasher::pool::worker_count(),
-                                "pending": crate::hasher::pool::pending_len(),
-                                "cap": crate::hasher::max_concurrent(),
-                            }),
-                        );
-                    }
-                    text(v)
-                }
+                // pow_stats returns a per-engine ARRAY; wrap it so the live
+                // pool gauges ride alongside. Workers should track the cap
+                // (never the queue depth — that was the 1,500-thread crash),
+                // and pending is the threadless backlog awaiting ripeness.
+                Ok(v) => text(json!({
+                    "engines": v,
+                    "pool": {
+                        "workers": crate::hasher::pool::worker_count(),
+                        "pending": crate::hasher::pool::pending_len(),
+                        "cap": crate::hasher::max_concurrent(),
+                    },
+                })),
                 Err(e) => err(e),
             }
         }

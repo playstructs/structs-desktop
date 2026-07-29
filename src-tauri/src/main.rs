@@ -29,6 +29,21 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Remember every window's position/size/maximized state across
+        // launches, keyed by window label — the game view, Team Ops, the
+        // Stream pop-out, and each raid-<location> window all come back where
+        // the player parked them. SIZE/POSITION/MAXIMIZED only: restoring
+        // VISIBLE would fight the board's own reopen-on-boot flag, and
+        // FULLSCREEN restores have known quirks on macOS spaces.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        )
         .menu(menu::build)
         .invoke_handler(tauri::generate_handler![
             guild_config::get_active_guild_config,
