@@ -740,10 +740,18 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
 /// Emit to one spectator window. `emit_board` is not reused here: it fans out
 /// to a fixed list of board labels, and a raid window must receive only the
 /// location it is actually watching.
+///
+/// The event NAME is namespaced with the window label (`raid-attacks::raid-2-1595`):
+/// the renderer's plain `listen()` registers with `EventTarget::Any`, which
+/// Tauri matches against targeted emits meant for OTHER windows too — with two
+/// raid windows open, un-namespaced names delivered every location's events to
+/// every window (each would replace its state with whichever planet emitted
+/// last). Distinct names make cross-delivery impossible regardless of listener
+/// target semantics. raidview.js learns its label from the window URL.
 fn emit(app: &tauri::AppHandle, label: &str, event: &str, payload: Value) {
     use tauri::{Emitter, Manager};
     if app.get_webview_window(label).is_some() {
-        let _ = app.emit_to(label, event, payload);
+        let _ = app.emit_to(label, format!("{event}::{label}").as_str(), payload);
     }
 }
 

@@ -499,7 +499,10 @@ pub fn open_window(
         return Ok(w);
     }
 
-    let url = format!("raidview.html?{}", target.query());
+    // `label` rides along so the renderer can subscribe to its own namespaced
+    // event names (`raid-*::<label>` — see spectator::emit) without having to
+    // replicate label_for's sanitisation in JS.
+    let url = format!("raidview.html?{}&label={}", target.query(), label);
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title(target.title())
         // The map is wider than it is tall — six columns of 128px tiles plus

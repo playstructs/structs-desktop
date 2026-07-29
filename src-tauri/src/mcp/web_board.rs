@@ -84,14 +84,32 @@ pub const BOARD_WINDOWS: &[&str] = &["board", "stream"];
 /// Single choke point replacing every `emit_to("board", …)`. The broadcast
 /// always fires (web viewers may exist with no native window); the native emit
 /// keeps its window-existence guard.
+///
+/// ONE emission, never `emit_to` per label: the board's JS uses plain
+/// `listen()`, which registers with `EventTarget::Any`, and Tauri matches
+/// Any-target listeners against EVERY targeted emit in EVERY webview
+/// (`match_any_or_filter`, tauri src/event/listener.rs). A per-label loop
+/// therefore delivered one copy per open board window to each listener — the
+/// moment the Stream pop-out existed, the whole board (grass stream included)
+/// received everything twice. A single `emit_filter` delivers exactly once per
+/// listener; the label filter only constrains target-scoped listeners, and
+/// windows without a listener for the event name receive nothing at all.
 pub fn emit_board<S: serde::Serialize>(app: &tauri::AppHandle, event: &str, payload: S) {
     let value = serde_json::to_value(&payload).unwrap_or(Value::Null);
     let _ = BOARD_BUS.send((event.to_string(), value.clone()));
-    use tauri::{Emitter, Manager};
-    for label in BOARD_WINDOWS {
-        if app.get_webview_window(label).is_some() {
-            let _ = app.emit_to(*label, event, value.clone());
-        }
+    use tauri::{Emitter, EventTarget, Manager};
+    if BOARD_WINDOWS
+        .iter()
+        .any(|l| app.get_webview_window(l).is_some())
+    {
+        let _ = app.emit_filter(event, value, |t| {
+            matches!(t,
+                EventTarget::Window { label }
+                | EventTarget::Webview { label }
+                | EventTarget::WebviewWindow { label }
+                | EventTarget::AnyLabel { label }
+                    if BOARD_WINDOWS.contains(&label.as_str()))
+        });
     }
 }
 

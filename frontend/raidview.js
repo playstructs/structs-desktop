@@ -1362,15 +1362,23 @@
     // events nobody is listening for — the map then sat empty until the next
     // 20-second cycle. Same pattern as board.html pulling mcp_board_html.
     // Listeners are attached first so nothing lands in the gap.
-    T.event.listen('raid-snapshot', function (e) { applySnapshot(e.payload || {}); });
-    T.event.listen('raid-delta', function (e) { applyDelta(e.payload || {}); });
-    T.event.listen('raid-attacks', function (e) { applyAttacks(e.payload || {}); });
-    T.event.listen('raid-target-moved', function (e) {
+    //
+    // Names are namespaced with THIS window's label (spectator::emit appends
+    // `::<label>`): a plain listen() registers target Any, which Tauri matches
+    // against emits aimed at other windows too — without the namespace, two
+    // raid windows would receive each other's snapshots and re-render to
+    // whichever planet emitted last. The label arrives in the window URL.
+    var LABEL = params.label || ('raid-' + (TARGET ? TARGET.id : 'none'));
+    function scoped(name) { return name + '::' + LABEL; }
+    T.event.listen(scoped('raid-snapshot'), function (e) { applySnapshot(e.payload || {}); });
+    T.event.listen(scoped('raid-delta'), function (e) { applyDelta(e.payload || {}); });
+    T.event.listen(scoped('raid-attacks'), function (e) { applyAttacks(e.payload || {}); });
+    T.event.listen(scoped('raid-target-moved'), function (e) {
       var p = e.payload || {};
       note('Fleet ' + p.fleet_id + (p.planet_id ? ' arrived at planet ' + p.planet_id : ' left orbit'),
         'sui-mod-primary');
     });
-    T.event.listen('raid-detached', function (e) {
+    T.event.listen(scoped('raid-detached'), function (e) {
       note((e.payload && e.payload.reason) || 'No live location.', 'sui-mod-warning');
     });
     // Keep the "feed" freshness readout honest between events.
