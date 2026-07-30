@@ -69,6 +69,11 @@ pub fn get_categories() -> Vec<String> {
 
 #[tauri::command]
 pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<(), String> {
+    // Durable copy FIRST, and unconditionally — including `block` heartbeats.
+    // The in-memory ring below is a working set (2000 entries = minutes at
+    // fleet scale); this is the 7-day record that a support bundle carries.
+    crate::mcp::telemetry::record_grass(&event.category, &event.subject, &event.detail);
+
     // `block` ticks (~every 6s) are RELAY-ONLY: buffered they'd drown the
     // 1000-entry ring (and every policy/threat scan over it) within the hour,
     // but the GRASS page wants the heartbeat.

@@ -1777,6 +1777,14 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
       var html = '<div style="padding: 4px; display:flex; flex-direction:column; gap:8px; width:100%;">';
 
+      // Support bundle — first thing in the panel, because when someone needs
+      // it they are already having a bad time and shouldn't have to hunt.
+      html += '<div class="sui-data-card">';
+      html += '<div class="sui-data-card-body" style="padding:6px;">';
+      html += '<div id="debug-download-logs" class="sui-button sui-mod-secondary" style="cursor:pointer; text-align:center; padding:6px 10px;">Download logs</div>';
+      html += '<div id="debug-download-logs-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">7 days of activity as a zip · no wallet keys included</div>';
+      html += '</div></div>';
+
       // Identity
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-header sui-text-header">Identity</div>';
@@ -1860,6 +1868,39 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       if (contentEl) {
         contentEl.innerHTML = html;
       }
+
+      // Support bundle. Writes a zip to Downloads and reveals it in Finder.
+      // Zipping the telemetry DB takes a moment at fleet scale, so the button
+      // reports progress and disables itself rather than looking dead.
+      setTimeout(function() {
+        var dlEl = document.getElementById('debug-download-logs');
+        var dlNote = document.getElementById('debug-download-logs-note');
+        if (dlEl) {
+          dlEl.addEventListener('click', function() {
+            if (dlEl.dataset.busy === '1') return;
+            dlEl.dataset.busy = '1';
+            var restore = dlEl.textContent;
+            dlEl.textContent = 'Packaging…';
+            if (dlNote) dlNote.textContent = 'collecting database, configs and crash reports';
+            var done = function(text, note) {
+              dlEl.textContent = text;
+              if (dlNote) dlNote.textContent = note;
+              setTimeout(function() {
+                dlEl.textContent = restore;
+                if (dlNote) dlNote.textContent = '7 days of activity as a zip · no wallet keys included';
+                dlEl.dataset.busy = '0';
+              }, 6000);
+            };
+            if (!window.__TAURI__) { done('Unavailable', 'desktop app only'); return; }
+            window.__TAURI__.core.invoke('export_log_bundle').then(function(res) {
+              var name = String((res && res.path) || '').split('/').pop();
+              done('Saved to Downloads', name + ' · ' + ((res && res.mb) || 0) + ' MB');
+            }).catch(function(e) {
+              done('Export failed', String(e));
+            });
+          });
+        }
+      }, 0);
 
       // Copy address on click
       setTimeout(function() {

@@ -209,6 +209,15 @@ pub fn invalidate_owned(player_id: &str) {
     crate::mcp::loop_util::invalidate_player_structs(player_id);
 }
 
+/// How many virtual players are registered. Used by the log bundle manifest
+/// (and anything else that wants fleet size without loading the roster).
+pub fn count() -> usize {
+    REGISTRY
+        .read()
+        .map(|r| r.players.len())
+        .unwrap_or(0)
+}
+
 /// Resolve the planet/fleet ids of every registered virtual player (cached),
 /// for team-wide threat detection.
 pub async fn team_owned(client: &crate::mcp::cosmos_client::CosmosClient) -> TeamOwned {

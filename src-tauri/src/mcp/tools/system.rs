@@ -113,7 +113,14 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()))
             {
-                Ok(v) => text(v),
+                // Gate gauges alongside the history: deep `queued_bulk` with a
+                // full `in_flight` is normal saturation; a non-zero
+                // `queued_critical` means combat answers are being delayed and
+                // is the number to watch.
+                Ok(v) => text(json!({
+                    "history": v,
+                    "gate": crate::mcp::tx_gate::snapshot(),
+                })),
                 Err(e) => err(e),
             }
         }

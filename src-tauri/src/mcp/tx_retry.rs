@@ -133,6 +133,23 @@ enum AttemptResult {
     Failure { raw: String, code: Option<i64> },
 }
 
+/// Log a transaction the instant it is built, before the signer is handed it.
+/// `tx_attempts` only ever held OUTCOMES, so a tx that was built and then never
+/// answered for (app quit mid-flight, façade silent, queue dropped it) left no
+/// evidence it had ever existed. Payloads are game messages — no keys, no
+/// credentials — so they are stored verbatim for replay/diagnosis.
+fn log_build(context: &str, action: &str, attempt: u32, payload: Option<&Value>) {
+    telemetry::record_tx_build(telemetry::TxBuildRow {
+        ts_ms: now_millis(),
+        context: context.to_string(),
+        action: action.to_string(),
+        player_id: player_from_context(context),
+        attempt,
+        priority: crate::mcp::tx_gate::classify(context).as_str(),
+        payload: payload.map(|p| p.to_string()),
+    });
+}
+
 fn record(
     context: &str,
     action: &str,
@@ -193,7 +210,12 @@ pub async fn sign_with_retry(
 ) -> Result<Value, String> {
     let mut last_err = String::new();
     for attempt in 1..=MAX_ATTEMPTS {
+        // Admission gate: keeps the signing façade's own FIFO shallow so a
+        // deadline-bound combat answer isn't stuck behind hundreds of bulk
+        // builds. Held for the attempt; released on success, failure or cancel.
+        let _slot = crate::mcp::tx_gate::acquire(context).await;
         let started = now_millis();
+        log_build(context, type_url, attempt, Some(&payload));
         let res = vplayer_bridge::sign_action(app, index, type_url, payload.clone(), 60).await;
         let outcome = match res {
             Ok(v) => {
@@ -251,7 +273,10 @@ pub async fn submit_with_retry(
 ) -> Result<tx_queue::TxResponse, String> {
     let mut last_err = String::new();
     for attempt in 1..=MAX_ATTEMPTS {
+        // Primary-player txs share the same façade, so they share the gate.
+        let _slot = crate::mcp::tx_gate::acquire(context).await;
         let started = now_millis();
+        log_build(context, action, attempt, Some(&args));
         let res = tx_queue::submit_tx(app, action.to_string(), args.clone()).await;
         let outcome = match res {
             Ok(resp) if resp.success => {

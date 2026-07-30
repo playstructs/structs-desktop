@@ -55,6 +55,8 @@ fn main() {
             guild_directory::apply_guild_switch,
             http_proxy::proxy_fetch,
             notifications::send_notification,
+            mcp::log_bundle::export_log_bundle,
+            mcp::log_bundle::log_ui_events,
             hasher::start_hash_task,
             hasher::stop_hash_task,
             hasher::get_hash_task_progress,

@@ -217,10 +217,16 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
         // every loop further (the self-amplifying spiral seen at 870 players).
         // Progress is stamped by every tx attempt and loop log line, so a
         // working scan is never silent for LOOP_STUCK_MS.
+        // Outstanding signs prove liveness on their own: a single explore has
+        // been measured at 71 minutes, so a loop awaiting one is silent for
+        // far longer than LOOP_STUCK_MS while being perfectly healthy. Only a
+        // loop holding its guard with NOTHING outstanding and no log line is
+        // actually wedged.
         let last_life = stat.last_progress_ms.max(stat.last_started_ms);
         if stat.running
             && now - stat.last_started_ms > LOOP_STUCK_MS
             && now - last_life > LOOP_STUCK_MS
+            && crate::mcp::tx_gate::in_flight_for(name) == 0
         {
             let mins = ((now - last_life) / 60_000.0) as u64;
             let name_owned = name.to_string();

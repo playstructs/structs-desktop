@@ -110,6 +110,37 @@ enum Msg {
     },
     TxAttempt(TxAttemptRow),
     PowSolve(PowSolveRow),
+    TxBuild(TxBuildRow),
+    Grass(GrassRow),
+    Ui(UiRow),
+}
+
+/// A transaction at BUILD time — logged before the signer sees it.
+pub struct TxBuildRow {
+    pub ts_ms: f64,
+    pub context: String,
+    pub action: String,
+    pub player_id: Option<String>,
+    pub attempt: u32,
+    pub priority: &'static str,
+    pub payload: Option<String>,
+}
+
+pub struct GrassRow {
+    pub ts_ms: f64,
+    pub category: String,
+    pub subject: Option<String>,
+    pub detail: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UiRow {
+    pub ts_ms: f64,
+    pub window: String,
+    pub page: Option<String>,
+    pub kind: String,
+    pub label: Option<String>,
+    pub target: Option<String>,
 }
 
 // ── Writer plumbing ──
@@ -122,12 +153,19 @@ const BATCH_MAX: usize = 256;
 /// Retention sweep cadence: whichever comes first.
 const RETENTION_EVERY_INSERTS: u64 = 10_000;
 const RETENTION_EVERY_MS: f64 = 30.0 * 60_000.0;
-/// Per-table retention windows.
-const EVENTS_KEEP_MS: f64 = 7.0 * 86_400_000.0;
-const EVENTS_MAX_ROWS: u64 = 200_000;
-const LOOP_RUNS_KEEP_MS: f64 = 7.0 * 86_400_000.0;
-const TX_KEEP_MS: f64 = 14.0 * 86_400_000.0;
-const POW_KEEP_MS: f64 = 30.0 * 86_400_000.0;
+/// ONE retention window for every table: seven days. Uniform on purpose — a
+/// support bundle is only useful if all of its streams cover the same period,
+/// and per-table windows (events 7d / tx 14d / pow 30d) made "what was
+/// happening at 03:00 on Tuesday" answerable for some streams and not others.
+const RETENTION_DAYS: f64 = 7.0;
+const RETENTION_MS: f64 = RETENTION_DAYS * 86_400_000.0;
+/// Row caps are a runaway SAFETY NET, not the primary bound — time is. The old
+/// 200k events cap was the effective limit instead: at fleet scale it held only
+/// ~1.5 days, so the 7-day promise was quietly not being kept. These are set
+/// well above seven days of observed volume.
+const EVENTS_MAX_ROWS: u64 = 2_000_000;
+const GRASS_MAX_ROWS: u64 = 1_000_000;
+const UI_MAX_ROWS: u64 = 500_000;
 
 static WRITER: LazyLock<Option<SyncSender<Msg>>> = LazyLock::new(init_writer);
 /// Messages dropped because the queue was full (or the writer died) —
@@ -226,6 +264,49 @@ CREATE TABLE IF NOT EXISTS pow_solves (
   struct_type       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pow_ts ON pow_solves(ts_ms);
+
+-- Every transaction the client BUILDS, written before it is handed to the
+-- signer. tx_attempts only ever recorded OUTCOMES, so a tx that was built and
+-- then vanished (app killed mid-flight, façade never answered, queue dropped
+-- it) left no trace at all — precisely the case worth investigating.
+-- `payload` is the game message; it carries no keys or credentials.
+CREATE TABLE IF NOT EXISTS tx_builds (
+  id         INTEGER PRIMARY KEY,
+  ts_ms      REAL NOT NULL,
+  context    TEXT NOT NULL,
+  action     TEXT NOT NULL,
+  player_id  TEXT,
+  attempt    INTEGER NOT NULL DEFAULT 1,
+  priority   TEXT,
+  payload    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tx_builds_ts ON tx_builds(ts_ms);
+
+-- Every GRASS message, block heartbeats included. The in-memory ring is 2000
+-- entries (minutes at fleet scale) and drops `block`; this is the durable copy.
+CREATE TABLE IF NOT EXISTS grass_events (
+  id        INTEGER PRIMARY KEY,
+  ts_ms     REAL NOT NULL,
+  category  TEXT NOT NULL,
+  subject   TEXT,
+  detail    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_grass_ts  ON grass_events(ts_ms);
+CREATE INDEX IF NOT EXISTS idx_grass_cat ON grass_events(category, ts_ms);
+
+-- UI interactions: which control, in which window, on which page. Labels and
+-- identities only — never field VALUES, so this can never capture what someone
+-- typed (addresses, amounts, names).
+CREATE TABLE IF NOT EXISTS ui_events (
+  id       INTEGER PRIMARY KEY,
+  ts_ms    REAL NOT NULL,
+  window   TEXT NOT NULL,
+  page     TEXT,
+  kind     TEXT NOT NULL,
+  label    TEXT,
+  target   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ui_ts ON ui_events(ts_ms);
 ";
 
 fn open_writer_conn(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
@@ -315,6 +396,28 @@ fn apply_batch(conn: &Connection, batch: Vec<Msg>) -> Result<(), rusqlite::Error
                         ],
                     )?;
                 }
+                Msg::TxBuild(b) => {
+                    conn.execute(
+                        "INSERT INTO tx_builds (ts_ms, context, action, player_id, attempt, priority, payload)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                        rusqlite::params![
+                            b.ts_ms, b.context, b.action, b.player_id, b.attempt, b.priority, b.payload
+                        ],
+                    )?;
+                }
+                Msg::Grass(g) => {
+                    conn.execute(
+                        "INSERT INTO grass_events (ts_ms, category, subject, detail) VALUES (?1,?2,?3,?4)",
+                        rusqlite::params![g.ts_ms, g.category, g.subject, g.detail],
+                    )?;
+                }
+                Msg::Ui(u) => {
+                    conn.execute(
+                        "INSERT INTO ui_events (ts_ms, window, page, kind, label, target)
+                         VALUES (?1,?2,?3,?4,?5,?6)",
+                        rusqlite::params![u.ts_ms, u.window, u.page, u.kind, u.label, u.target],
+                    )?;
+                }
                 Msg::PowSolve(p) => {
                     conn.execute(
                         "INSERT INTO pow_solves (ts_ms, object_id, task_type, engine, difficulty, difficulty_target, duration_ms, iterations, hashrate, struct_type)
@@ -340,17 +443,34 @@ fn apply_batch(conn: &Connection, batch: Vec<Msg>) -> Result<(), rusqlite::Error
 }
 
 fn sweep_retention(conn: &Connection, now: f64) -> Result<(), rusqlite::Error> {
-    conn.execute("DELETE FROM events WHERE ts_ms < ?1", [now - EVENTS_KEEP_MS])?;
-    // Row cap on events, oldest first.
-    conn.execute(
-        "DELETE FROM events WHERE id IN (
-           SELECT id FROM events ORDER BY id DESC LIMIT -1 OFFSET ?1
-         )",
-        [EVENTS_MAX_ROWS as i64],
-    )?;
-    conn.execute("DELETE FROM loop_runs WHERE started_ms < ?1", [now - LOOP_RUNS_KEEP_MS])?;
-    conn.execute("DELETE FROM tx_attempts WHERE ts_ms < ?1", [now - TX_KEEP_MS])?;
-    conn.execute("DELETE FROM pow_solves WHERE ts_ms < ?1", [now - POW_KEEP_MS])?;
+    let cutoff = now - RETENTION_MS;
+    // Time is the real bound; every stream gets the same window.
+    for (table, ts_col) in [
+        ("events", "ts_ms"),
+        ("loop_runs", "started_ms"),
+        ("tx_attempts", "ts_ms"),
+        ("tx_builds", "ts_ms"),
+        ("pow_solves", "ts_ms"),
+        ("grass_events", "ts_ms"),
+        ("ui_events", "ts_ms"),
+    ] {
+        conn.execute(&format!("DELETE FROM {table} WHERE {ts_col} < ?1"), [cutoff])?;
+    }
+    // Runaway safety nets, oldest first.
+    for (table, cap) in [
+        ("events", EVENTS_MAX_ROWS),
+        ("grass_events", GRASS_MAX_ROWS),
+        ("ui_events", UI_MAX_ROWS),
+    ] {
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE id IN (
+                   SELECT id FROM {table} ORDER BY id DESC LIMIT -1 OFFSET ?1
+                 )"
+            ),
+            [cap as i64],
+        )?;
+    }
     let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
     Ok(())
 }
@@ -542,6 +662,42 @@ pub fn record_tx_attempt(row: TxAttemptRow) {
 
 pub fn record_pow_solve(row: PowSolveRow) {
     send(Msg::PowSolve(row));
+}
+
+/// Record a transaction at BUILD time — before the signer is called, so a tx
+/// that never returns still leaves evidence that it existed.
+pub fn record_tx_build(row: TxBuildRow) {
+    send(Msg::TxBuild(row));
+}
+
+/// Persist one GRASS message. Called for EVERY message including `block`
+/// heartbeats, which the in-memory ring deliberately drops.
+pub fn record_grass(category: &str, subject: &str, detail: &Value) {
+    send(Msg::Grass(GrassRow {
+        ts_ms: now_millis(),
+        category: category.to_string(),
+        subject: (!subject.is_empty()).then(|| subject.to_string()),
+        detail: (!detail.is_null()).then(|| detail.to_string()),
+    }));
+}
+
+/// Record one UI interaction. Batched by the frontend; see `log_ui_events`.
+pub fn record_ui(row: UiRow) {
+    send(Msg::Ui(row));
+}
+
+/// On-disk size of the telemetry database (including WAL), for `status`.
+pub fn db_size_bytes() -> u64 {
+    let Some(p) = db_path() else { return 0 };
+    ["", "-wal", "-shm"]
+        .iter()
+        .filter_map(|suffix| {
+            let mut s = p.clone().into_os_string();
+            s.push(suffix);
+            std::fs::metadata(std::path::PathBuf::from(s)).ok()
+        })
+        .map(|m| m.len())
+        .sum()
 }
 
 /// Record a completed proof-of-work solve from a task snapshot. Called from
@@ -851,14 +1007,6 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
         }));
     }
     Ok(json!(out))
-}
-
-/// Current DB file size in bytes (0 if missing) — for `structs_system status`.
-pub fn db_size_bytes() -> u64 {
-    db_path()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
