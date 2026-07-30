@@ -74,6 +74,17 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     // fleet scale); this is the 7-day record that a support bundle carries.
     crate::mcp::telemetry::record_grass(&event.category, &event.subject, &event.detail);
 
+    // A DROPPED settlement is the most dangerous event in the system and used
+    // to be the quietest. The signing bridge acks "queued" the moment a message
+    // is accepted — it must, because charge-gated messages settle minutes later
+    // — so `tx_attempts` records success for a tx that may never reach the
+    // chain. When the real receipt finally arrives as `tx_settled`, a failure
+    // was going only to the webview console. That is the same blind spot that
+    // hid 15 days of futile mining; surface it loudly instead.
+    if event.category == "tx_settled" {
+        note_failed_settlement(&app, &event);
+    }
+
     // `block` ticks (~every 6s) are RELAY-ONLY: buffered they'd drown the
     // 1000-entry ring (and every policy/threat scan over it) within the hour,
     // but the GRASS page wants the heartbeat.
@@ -93,6 +104,59 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     Ok(())
 }
 
+/// Statuses that mean the transaction actually landed. Anything else — the
+/// bridge's own `dropped`, an encoder rejection, a non-zero chain code — means
+/// the action did NOT happen, however cheerful the earlier "queued" ack was.
+fn settlement_failed(status: &str, code: Option<i64>, error: Option<&str>) -> bool {
+    let bad_status = !matches!(status, "success" | "settled" | "confirmed" | "delivered");
+    let bad_code = code.is_some_and(|c| c != 0);
+    bad_status || bad_code || error.is_some_and(|e| !e.is_empty())
+}
+
+/// Log + surface a settlement that did not land. Ledgered as a real tx failure
+/// so `structs_system tx` and the board's Transactions page stop reporting a
+/// success that never happened.
+fn note_failed_settlement(app: &tauri::AppHandle, event: &GameEvent) {
+    let d = &event.detail;
+    let status = d.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let code = d.get("code").and_then(|v| v.as_i64());
+    let error = d.get("error").and_then(|v| v.as_str());
+    if !settlement_failed(status, code, error) {
+        return;
+    }
+    let action = d
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&event.subject);
+    let reason = error
+        .or_else(|| d.get("rawLog").and_then(|v| v.as_str()))
+        .unwrap_or(status);
+    let msg = format!("{action} did NOT land: {reason}");
+
+    crate::mcp::telemetry::record_tx_attempt(crate::mcp::telemetry::TxAttemptRow {
+        ts_ms: crate::hasher::types::now_millis(),
+        context: format!("settle:{action}"),
+        action: action.to_string(),
+        player_id: None,
+        attempt: 1,
+        outcome: "settle_failed",
+        tx_hash: d
+            .get("transactionHash")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        code,
+        raw_error: Some(reason.to_string()),
+        translated: Some(msg.clone()),
+        duration_ms: 0.0,
+    });
+    crate::mcp::telemetry::tlog_feed(
+        app,
+        "tx",
+        crate::mcp::telemetry::Sev::Warn,
+        msg,
+    );
+}
+
 /// Back-fill for the board GRASS page: newest events (oldest→newest order for
 /// direct newest-first insertion client-side) plus the distinct-category list
 /// for the filter dropdown. Read-only — unguarded, like the other board reads.
@@ -103,4 +167,27 @@ pub fn mcp_grass_recent(limit: Option<usize>, category: Option<String>) -> serde
         "categories": get_categories(),
         "lookups": crate::mcp::enrich::lookups_json(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropped_settlements_are_flagged() {
+        // The exact shape that silently swallowed five allocation attempts:
+        // bridge acked "queued", then the encoder rejected the message.
+        assert!(settlement_failed("dropped", None, Some("Error: invalid int32: NaN")));
+        // Non-zero chain code, even with an otherwise happy status.
+        assert!(settlement_failed("success", Some(11), None));
+        // Unknown/absent status must not be assumed good.
+        assert!(settlement_failed("unknown", None, None));
+    }
+
+    #[test]
+    fn genuine_settlements_are_not_flagged() {
+        assert!(!settlement_failed("success", Some(0), None));
+        assert!(!settlement_failed("settled", None, None));
+        assert!(!settlement_failed("confirmed", Some(0), Some("")));
+    }
 }

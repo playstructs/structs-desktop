@@ -708,16 +708,25 @@
         + 'unconnected — use Move to point it at a substation.'));
       var go = massBtn('', 'icon-add', 'Create', 'sui-mod-destructive');
       go.addEventListener('click', function () {
+        if (go.dataset.busy === '1') return; // double-click sent it twice
+        go.dataset.busy = '1';
+        go.querySelector('span').textContent = ' Submitting…';
         Board.T.core.invoke('mcp_allocation_create', {
           sourceObjectId: src, allocationType: type, powerMw: Math.round(kwVal * 1e6),
         }).then(function () {
+          // Only ACCEPTED, not settled — charge-gated messages broadcast later,
+          // so promising "created" here would be a lie. The Transactions page
+          // (and a feed warning) carry the real receipt.
+          close();
           loadAllocations().then(renderEnergyBody);
         }).catch(function (e) {
+          go.dataset.busy = '0';
+          go.querySelector('span').textContent = ' Create';
           form.appendChild(H.stateBlock('error', String(e)));
         });
       });
       form.appendChild(go);
-      H.drawer('New allocation', form);
+      var close = H.drawer('New allocation', form);
     });
     wrap.appendChild(open);
     return wrap;

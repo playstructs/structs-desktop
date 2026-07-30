@@ -42,8 +42,17 @@ pub struct AutoHarvestConfig {
     /// exponential work), so one GPU can carry a much larger vplayer fleet.
     pub difficulty_threshold: u64,
     /// Minimum seconds between scans (the loop is invoked far more often but
-    /// throttles to this). 1800 = every 30 min — frequent enough to catch
-    /// ripeness promptly without hammering the chain.
+    /// throttles to this). 60 = every minute.
+    ///
+    /// A long interval does NOT reduce work, it only DELAYS it: ripeness is
+    /// decided per struct by `difficulty_threshold`, so a scan that finds
+    /// nothing ripe is cheap, and one that finds ripe work should act on it
+    /// now rather than leave proofs aging for another half hour. The cost of
+    /// scanning is bounded elsewhere — the mined-out guard skips drained
+    /// planets, and the tx gate bounds signing pressure — so the interval is
+    /// free to be short. It was raised to 1800 while runaway futile mining was
+    /// being diagnosed; with that cause fixed, throttling the scan is just lost
+    /// production, most visibly right after launch when a backlog is waiting.
     pub interval_secs: u64,
     /// Also auto-refine refineries that hold stored ore.
     pub refine: bool,
@@ -62,7 +71,7 @@ impl Default for AutoHarvestConfig {
         Self {
             enabled: false,
             difficulty_threshold: 4,
-            interval_secs: 1800,
+            interval_secs: 60,
             refine: true,
             include_primary: false,
             auto_explore: false,

@@ -1250,9 +1250,25 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             break;
 
           // ── Allocation ──
-          case 'allocation_create':
-            promise = scm.queueMsgAllocationCreate(args.controller, args.source_object_id, args.allocation_type, args.power);
+          case 'allocation_create': {
+            // `allocationType` is a protobuf INT32 ENUM, not a string. Passing
+            // "dynamic" through made the encoder do Number("dynamic") → NaN and
+            // the tx died with "invalid int32: NaN" — after the bridge had
+            // already acked "queued", so the UI showed nothing and the ledger
+            // recorded a success that never reached the chain.
+            var ALLOC_TYPE = { static: 0, dynamic: 1, automated: 2, providerAgreement: 3 };
+            var allocType = typeof args.allocation_type === 'number'
+              ? args.allocation_type
+              : ALLOC_TYPE[String(args.allocation_type)];
+            if (allocType === undefined) {
+              respondTx(requestId, false, null,
+                'Unknown allocation type: ' + args.allocation_type);
+              return;
+            }
+            promise = scm.queueMsgAllocationCreate(
+              args.controller, args.source_object_id, allocType, args.power);
             break;
+          }
           case 'allocation_update':
             promise = scm.queueMsgAllocationUpdate(args.allocation_id, args.power);
             break;
