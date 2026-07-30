@@ -1203,13 +1203,11 @@
   // Header
   // ══════════════════════════════════════════════════════════════════════════
 
-  function setStat(id, value, mod) {
-    var n = document.getElementById(id);
-    if (!n) return;
-    n.querySelector('.rv-stat-v').textContent = value == null ? '—' : String(value);
-    n.className = 'rv-stat' + (mod ? ' ' + mod : '');
-  }
 
+  /* Drive the game's HUD panels from the snapshot. The mapping is the game's
+   * own: top-left = energy, top-right = the spectated planet's shield + ore
+   * (the game's ENEMY-themed panel, which is what this planet is to a
+   * spectator), bottom-left = defender, bottom-right = raider. */
   function renderHeader() {
     var snap = state.snapshot;
     var where = TARGET
@@ -1217,21 +1215,303 @@
           ? 'FLEET ' + TARGET.id + (snap ? ' · AT PLANET ' + snap.planet_id : ' · IN TRANSIT')
           : 'PLANET ' + TARGET.id)
       : '—';
-    document.getElementById('rv-where').textContent = where;
+    setText('rv-where', where);
+
+    // Freshness is only meaningful once something has actually arrived. A
+    // missing stamp is 0, and `Date.now() - 0` renders the whole Unix epoch as
+    // an age ("17854432765s ago"), so treat it as unknown instead.
+    var stamp = state.lastEventMs || (snap && snap.fetched_at_ms) || 0;
+    var age = stamp > 0 ? Date.now() - stamp : null;
+    var live = document.getElementById('rv-live');
+    if (live) {
+      live.textContent = !snap ? 'connecting'
+        : age == null ? 'live'
+        : age < 30000 ? 'live' : fmtAge(age);
+      live.className = 'rv-live-dot'
+        + (age == null || age < 30000 ? '' : (age < 120000 ? ' stale' : ' dead'));
+    }
     if (!snap) return;
 
+    // Shield: the game shows the value beside a shield glyph whose state is
+    // up/down. `planetaryShield` arrives on the live stream ahead of the next
+    // snapshot, so prefer it.
+    var shield = state.planetaryShield || snap.planetary_shield || 0;
+    setText('rv-shield', fmtNum(shield));
+    // The game's own shield art and vocabulary: secure / vulnerable /
+    // breached, drawn from img/non_standard_icons. The `_raid_enemy` suffix is
+    // the variant the game uses for a planet that is not yours — which, to a
+    // spectator, is always the case.
     var status = state.raidStatus || snap.raid_status;
-    setStat('rv-stat-status',
-      status ? String(status).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase() : 'no raid',
-      status === 'shieldsVulnerable' ? 'bad' : (status ? 'warn' : ''));
-    setStat('rv-stat-shield', state.planetaryShield || snap.planetary_shield,
-      (state.planetaryShield || snap.planetary_shield) > 0 ? 'ok' : 'bad');
-    setStat('rv-stat-def', snap.owner || 'unknown');
-    setStat('rv-stat-atk', snap.raiding_fleet ? 'fleet ' + snap.raiding_fleet : 'none');
+    var shieldState = shield <= 0 ? 'breached'
+      : (status === 'shieldsVulnerable' ? 'vulnerable' : 'secure');
+    var icon = document.getElementById('rv-shield-icon');
+    if (icon && icon.dataset.shieldState !== shieldState) {
+      icon.dataset.shieldState = shieldState;
+      icon.innerHTML = '<img src="img/non_standard_icons/shield_' + shieldState
+        + '_raid_enemy.png" alt="' + shieldState + '" />';
+    }
+    var shieldRes = document.getElementById('rv-shield-res');
+    if (shieldRes) {
+      shieldRes.setAttribute('data-sui-tooltip',
+        'Planetary shield ' + fmtNum(shield)
+        + (shield > 0 ? ' — raids cannot seize until it falls' : ' — DOWN, the planet is vulnerable')
+        + (status ? '\nRaid: ' + humanStatus(status) : ''));
+    }
 
-    var age = Date.now() - (state.lastEventMs || snap.fetched_at_ms || 0);
-    setStat('rv-stat-live', age < 30000 ? 'live' : Math.round(age / 1000) + 's ago',
-      age < 30000 ? 'ok' : 'warn');
+    setText('rv-ore', snap.stored_ore == null ? '—' : fmtNum(snap.stored_ore));
+    setText('rv-energy', snap.owner_energy || '—');
+
+    // Defender (bottom-left) and raider (bottom-right).
+    renderSide('def', snap.owner, snap.owner_name, snap.owner_charge, snap.owner_pfp,
+      'Defender — this planet\'s owner');
+    var raiding = snap.raiding_fleet || state.raidingFleet;
+    var br = document.getElementById('rv-hud-br');
+    if (br) br.classList.toggle('hidden', !raiding);
+    if (raiding) {
+      renderSide('atk', snap.raider_id || raiding, snap.raider_name, snap.raider_charge,
+        snap.raider_pfp, 'Raider — fleet ' + raiding);
+    }
+  }
+
+  /** One HUD action bar: portrait, charge battery, and an identifying tooltip. */
+  function renderSide(which, id, name, charge, pfp, label) {
+    var portrait = document.getElementById('rv-' + which + '-portrait');
+    if (portrait) {
+      portrait.setAttribute('data-sui-tooltip',
+        label + '\n' + (name ? name + ' (' + (id || '?') + ')' : (id || 'unknown'))
+        + (charge == null ? '' : '\nCharge ' + fmtNum(charge)));
+    }
+    var img = document.getElementById('rv-' + which + '-pfp');
+    if (img && img.dataset.pfp !== (pfp || '')) {
+      img.dataset.pfp = pfp || '';
+      img.innerHTML = '';
+      renderPfpInto(img, pfp);
+    }
+    // Charge drives the 5-chunk battery by the game's OWN ladder, not a linear
+    // scale: ChargeCalculator maps raw charge through the thresholds
+    // [0,1,2,3,5,8] to a level 0-5. Copied rather than approximated so a
+    // spectator reads the same "can this player act?" the owner does.
+    var battery = document.getElementById('rv-' + which + '-battery');
+    if (battery) {
+      var level = chargeLevel(charge);
+      var chunks = battery.children;
+      for (var i = 0; i < chunks.length; i++) {
+        chunks[i].classList.toggle('sui-mod-filled', i + 1 <= level);
+      }
+    }
+  }
+
+  // A portrait is STACKED IMAGE LAYERS, not one file: the chain stores part
+  // indices in `pfpClientRenderAttributes` and the client composites them.
+  // Same layer order as the game's PfpViewerComponent and the Team Ops roster,
+  // so one player looks like the same person everywhere.
+  var PFP_LAYERS = ['background', 'arms', 'body', 'neck', 'head'];
+
+  function renderPfpInto(host, attrsJson) {
+    var attrs = null;
+    if (attrsJson) { try { attrs = JSON.parse(attrsJson); } catch (e) { attrs = null; } }
+    if (attrs && typeof attrs === 'object' && attrs.head != null) {
+      PFP_LAYERS.forEach(function (part) {
+        if (attrs[part] == null) return;
+        var im = el('img', 'pfp-viewer-layer');
+        im.src = 'img/pfp/' + part + '/pfp_' + part + '_' + attrs[part] + '.png';
+        im.alt = '';
+        host.appendChild(im);
+      });
+      return;
+    }
+    // No attributes on chain yet — the game shows a placeholder rather than a
+    // blank frame, so the HUD keeps its shape.
+    var ph = el('img', 'pfp-viewer-layer');
+    ph.src = 'img/portrait-placeholder.png';
+    ph.alt = '';
+    host.appendChild(ph);
+  }
+
+  // Port of ChargeCalculator (util/ChargeCalculator.js): raw charge → level 0-5.
+  var CHARGE_THRESHOLDS = [0, 1, 2, 3, 5, 8];
+  function chargeLevel(charge) {
+    if (charge == null) return 0;
+    for (var i = 0; i < CHARGE_THRESHOLDS.length; i++) {
+      if (charge <= CHARGE_THRESHOLDS[i]) return i;
+    }
+    return CHARGE_THRESHOLDS.length - 1;
+  }
+
+  /** Compact age: 45s / 12m / 3.2h. */
+  function fmtAge(ms) {
+    var s = Math.round(ms / 1000);
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.round(s / 60) + 'm ago';
+    return (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h ago';
+  }
+
+  /** `raid_status` / `shieldsVulnerable` → "raid status" / "shields vulnerable". */
+  function humanStatus(s) {
+    return String(s)
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/_/g, ' ')
+      .toLowerCase();
+  }
+  function fmtNum(n) {
+    var v = Number(n) || 0;
+    return v >= 1e6 ? (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M'
+      : v >= 1e4 ? Math.round(v / 1e3) + 'k' : String(Math.round(v));
+  }
+  function setText(id, text) {
+    var e = document.getElementById(id);
+    if (e) e.textContent = text;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tooltips — a port of the game's SUITooltip (sui/SUITooltip.js)
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // Same contract as the game's: press and hold (100 ms) on any element
+  // carrying `data-sui-tooltip` shows a `.sui-tooltip` bubble positioned above
+  // the trigger — or below it when `data-sui-mod-placement="bottom"` — and
+  // releasing hides it. Ported rather than imported because the real one is an
+  // ES module inside the game bundle, and this window must never load that
+  // bundle (same origin as the game: it would share localStorage, which holds
+  // the mnemonic). The styling comes from the shipped sui.css either way, so
+  // the bubble is the game's, not a lookalike.
+  //
+  // This is the one piece of HUD interactivity kept live: a tooltip only
+  // reveals information, which is precisely a spectator's job.
+  function initTooltips() {
+    var bubble = document.createElement('div');
+    bubble.id = 'rv-tooltip';
+    bubble.className = 'sui-tooltip';
+    bubble.style.position = 'absolute';
+    var timer = null;
+
+    function hide() {
+      bubble.classList.remove('sui-mod-show');
+      if (bubble.parentElement) bubble.parentElement.removeChild(bubble);
+      clearTimeout(timer);
+    }
+
+    function show(trigger) {
+      clearTimeout(timer);
+      if (bubble.parentElement) bubble.parentElement.removeChild(bubble);
+      timer = setTimeout(function () {
+        var host = trigger.parentElement;
+        if (!host) return;
+        // The bubble is positioned against its offset parent, so that parent
+        // must not be `static` — the same guard the game applies.
+        if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+        host.appendChild(bubble);
+        // Newlines in the data attribute become real line breaks; the text is
+        // ours (never user content), so this cannot inject markup.
+        bubble.innerHTML = String(trigger.dataset.suiTooltip || '')
+          .split('\n').map(esc).join('<br>');
+        bubble.classList.add('sui-mod-show');
+        place(bubble, trigger, trigger.dataset.suiModPlacement === 'bottom');
+      }, 100);
+    }
+
+    // Horizontally centre, then sit above/below — flipping to the other side
+    // when there is not enough room, exactly as SUIUtil does.
+    function place(bub, origin, below) {
+      var r = origin.getBoundingClientRect();
+      var left = origin.offsetLeft + (origin.offsetWidth / 2) - (bub.offsetWidth / 2);
+      bub.style.left = Math.max(0, left) + 'px';
+      var fitsBelow = (window.innerHeight - r.bottom) >= bub.offsetHeight;
+      var fitsAbove = r.top >= bub.offsetHeight;
+      var putBelow = below ? (fitsBelow || !fitsAbove) : (!fitsAbove && fitsBelow);
+      bub.style.top = putBelow
+        ? (origin.offsetTop + origin.offsetHeight) + 'px'
+        : (origin.offsetTop - bub.offsetHeight) + 'px';
+    }
+
+    function triggerFor(node) {
+      for (var n = node; n && n !== document.body; n = n.parentElement) {
+        if (n.dataset && n.dataset.suiTooltip) return n;
+      }
+      return null;
+    }
+
+    document.body.addEventListener('mousedown', function (e) {
+      var t = triggerFor(e.target);
+      if (t) show(t);
+    }, { passive: true });
+    window.addEventListener('mouseup', hide, { passive: true });
+    // A tooltip left showing while the pointer leaves would never clear.
+    window.addEventListener('blur', hide, { passive: true });
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Battle log — every planet_activity row for this planet
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // The deliberate exception to map parity: the game never shows a planet's
+  // whole recorded history in one place, and for a spectator that history IS
+  // the story. Collapsed by default so the map stays the focus.
+  var logState = { rows: [], open: false, loading: false, pending: false, planetId: null };
+
+  var LOG_TONE = {
+    struct_attack: 'rv-bad', struct_destroyed: 'rv-bad', raid_complete: 'rv-bad',
+    raid_status: 'rv-warn', shield_change: 'rv-warn', block_raid_start: 'rv-warn',
+  };
+
+  function initLog() {
+    var toggle = document.getElementById('rv-log-toggle');
+    if (!toggle) return;
+    toggle.addEventListener('click', function () {
+      logState.open = !logState.open;
+      document.getElementById('rv-log').classList.toggle('rv-collapsed', !logState.open);
+      toggle.textContent = logState.open ? 'hide' : 'show';
+      if (logState.open) refreshLog();
+    });
+  }
+
+  function refreshLog() {
+    var planetId = state.snapshot && state.snapshot.planet_id;
+    // Opened before the first snapshot arrived: remember that we still owe a
+    // load, so the snapshot can trigger it rather than leaving the panel
+    // permanently claiming there is no activity.
+    if (!planetId) { logState.pending = true; return; }
+    if (logState.loading || !window.__TAURI__) return;
+    logState.pending = false;
+    logState.loading = true;
+    window.__TAURI__.core.invoke('mcp_raid_log', { planetId: planetId, limit: 200 })
+      .then(function (d) {
+        logState.rows = (d && d.rows) || [];
+        logState.planetId = planetId;
+        renderLog();
+      })
+      .catch(function (e) { renderLogError(String(e)); })
+      .then(function () { logState.loading = false; });
+  }
+
+  function renderLog() {
+    var body = document.getElementById('rv-log-body');
+    var count = document.getElementById('rv-log-count');
+    if (!body) return;
+    if (count) count.textContent = logState.rows.length ? String(logState.rows.length) : '';
+    body.innerHTML = '';
+    if (!logState.rows.length) {
+      body.appendChild(el('div', 'rv-log-empty', 'No recorded activity for this planet yet.'));
+      return;
+    }
+    logState.rows.forEach(function (r) {
+      var row = el('div', 'rv-log-row' + (LOG_TONE[r.category] ? ' ' + LOG_TONE[r.category] : ''));
+      row.appendChild(el('div', 'rv-log-t', r.time || ''));
+      row.appendChild(el('div', 'rv-log-cat', humanStatus(r.category || '')));
+      row.appendChild(el('div', 'rv-log-d', r.detail || ''));
+      body.appendChild(row);
+    });
+  }
+
+  function renderLogError(msg) {
+    var body = document.getElementById('rv-log-body');
+    if (body) { body.innerHTML = ''; body.appendChild(el('div', 'rv-log-empty', 'log unavailable: ' + msg)); }
   }
 
   function note(text, kind) {
@@ -1256,6 +1536,13 @@
     var generationChanged = payload.generation !== state.generation;
     state.generation = payload.generation;
     state.snapshot = snap;
+    // The log is per-planet: load it once the planet is known, and reload it
+    // when a followed fleet re-targets us at a DIFFERENT planet (the old
+    // planet's history is not this window's subject any more).
+    if (logState.open && (logState.pending || logState.planetId !== snap.planet_id)) {
+      logState.planetId = snap.planet_id;
+      refreshLog();
+    }
     if (generationChanged) {
       // The window re-targeted (a followed fleet moved). Nothing from the old
       // planet may survive — including in-flight animations.
@@ -1384,6 +1671,8 @@
     // Keep the "feed" freshness readout honest between events.
     setInterval(renderHeader, 5000);
     renderHeader();
+    initTooltips();
+    initLog();
 
     // Scrolling the animating tile back into view retracts the bubble, and
     // scrolling it out mid-fight brings the bubble back — the same

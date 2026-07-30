@@ -223,6 +223,24 @@ pub struct Snapshot {
     /// under the count shows a build beacon, a cell past it shows blocked art.
     pub slots: HashMap<String, u64>,
     pub structs: Vec<SpectatorStruct>,
+    // ── HUD fields ──
+    // The game's HUD shows whose planet this is, their charge and energy, and
+    // the ore at stake. The spectator HUD mirrors it, so the snapshot has to
+    // carry the same facts. All optional: a read failure must degrade the HUD
+    // to dashes, never fail the whole snapshot.
+    /// Stealable ore held by the planet's owner.
+    pub stored_ore: Option<f64>,
+    /// Owner's charge (blocks since their last action) — drives the battery.
+    pub owner_charge: Option<f64>,
+    /// "8M/8M"-style capacity readout, pre-formatted the way the game shows it.
+    pub owner_energy: Option<String>,
+    pub owner_name: Option<String>,
+    pub owner_pfp: Option<String>,
+    /// The raiding fleet's owner, for the enemy-side action bar.
+    pub raider_id: Option<String>,
+    pub raider_name: Option<String>,
+    pub raider_charge: Option<f64>,
+    pub raider_pfp: Option<String>,
     pub fetched_at_ms: f64,
     /// Populated when a read failed, so the window can say "stale" rather than
     /// silently showing a half-built map.
@@ -254,6 +272,15 @@ pub async fn snapshot_planet(
                 fleets: vec![],
                 slots: HashMap::new(),
                 structs: vec![],
+                stored_ore: None,
+                owner_charge: None,
+                owner_energy: None,
+                owner_name: None,
+                owner_pfp: None,
+                raider_id: None,
+                raider_name: None,
+                raider_charge: None,
+                raider_pfp: None,
                 fetched_at_ms: crate::hasher::types::now_millis(),
                 warning: Some(format!("planet unavailable: {e}")),
             }
@@ -379,6 +406,10 @@ pub async fn snapshot_planet(
             .then(a.id.cmp(&b.id))
     });
 
+    // HUD facts for the planet's owner. One extra read, concurrent with
+    // nothing else here because it needs `owner` which the planet read gave us.
+    let owner_hud = read_owner_hud(client, owner.as_deref()).await;
+
     Snapshot {
         planet_id: planet_id.to_string(),
         owner,
@@ -389,8 +420,76 @@ pub async fn snapshot_planet(
         fleets,
         slots,
         structs,
+        stored_ore: owner_hud.0,
+        owner_charge: owner_hud.1,
+        owner_energy: owner_hud.2,
+        owner_name: owner_hud.3,
+        owner_pfp: owner_hud.4,
+        raider_id: None,
+        raider_name: None,
+        raider_charge: None,
+        raider_pfp: None,
         fetched_at_ms: crate::hasher::types::now_millis(),
         warning,
+    }
+}
+
+/// The planet owner's HUD facts: stored ore, charge, an "8M/8M" energy
+/// readout, display name and pfp URL.
+///
+/// Returned as a tuple of options because EVERY one of them is decoration: a
+/// failed read must dim one HUD chip, never cost the caller its map. The
+/// energy string is formatted here rather than in JS so the window and the
+/// game's own HUD phrase it the same way.
+type OwnerHud = (Option<f64>, Option<f64>, Option<String>, Option<String>, Option<String>);
+
+async fn read_owner_hud(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    owner: Option<&str>,
+) -> OwnerHud {
+    let Some(pid) = owner else {
+        return (None, None, None, None, None);
+    };
+    let Ok(p) = client.query_entity("player", pid).await else {
+        return (None, None, None, None, None);
+    };
+    let ga = p.get("gridAttributes");
+    let f = |k: &str| ga.and_then(|g| g.get(k)).and_then(|v| {
+        v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    });
+    let ore = f("ore");
+    // Charge is derived, not stored: it is the block count since the player's
+    // last action, which is exactly how the game computes it.
+    let charge = f("lastAction").map(|last| {
+        let now = crate::game_state::GAME_STATE
+            .read()
+            .map(|g| g.current_block_height)
+            .unwrap_or(0) as f64;
+        (now - last).max(0.0)
+    });
+    let energy = match (f("capacity"), f("load")) {
+        (Some(cap), Some(load)) => Some(format!("{}/{}", fmt_watts(cap - load), fmt_watts(cap))),
+        _ => None,
+    };
+    let body = p.get("Player").unwrap_or(&p);
+    let name = str_of(body.get("username"));
+    // The pfp is LAYERED, not a URL: `pfpClientRenderAttributes` is a JSON
+    // string of part indices that the renderer stacks as images, the same way
+    // the game's PfpViewerComponent and the Team Ops roster do.
+    let pfp = str_of(body.get("pfpClientRenderAttributes"))
+        .or_else(|| str_of(body.get("pfp_client_render_attributes")));
+    (ore, charge, energy, name, pfp)
+}
+
+/// Watts → the game's compact HUD form (`8M`, `450k`, `72`).
+fn fmt_watts(w: f64) -> String {
+    let w = w.max(0.0);
+    if w >= 1e6 {
+        format!("{}M", (w / 1e6).round() as i64)
+    } else if w >= 1e3 {
+        format!("{}k", (w / 1e3).round() as i64)
+    } else {
+        format!("{}", w.round() as i64)
     }
 }
 

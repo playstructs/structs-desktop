@@ -6,6 +6,14 @@
   <link rel="stylesheet" href="css/normalize.css" />
   <link rel="stylesheet" href="css/structicons.css" />
   <link rel="stylesheet" href="css/sui/sui.css" />
+  <!-- The GAME's own stylesheet, so the HUD panels below are styled by the
+       exact rules that style them in play rather than by a lookalike.
+       Safe to load wholesale: its 2x/4x viewport scaling is scoped to the
+       game's own ids (#hud-container, #raid-map-container, …), none of which
+       exist here — this document uses #rv-* — so nothing double-scales on
+       top of the map's own integer scaler. Its only global rules are
+       html/body height. -->
+  <link rel="stylesheet" href="css/main.css" />
   <style>
     /* ── Raid View ────────────────────────────────────────────────────────
        A read-only spectator. This document deliberately does NOT load the
@@ -30,26 +38,113 @@
       color: var(--text-body, #c8d0e0);
       font-family: 'DirectiveZero', sans-serif;
       display: flex; flex-direction: column;
+      /* The HUD is absolutely positioned against the window, the way the
+         game's is — this is its containing block. */
+      position: relative;
     }
 
-    /* ── Header: who is fighting whom, and the shield ─────────────────── */
-    #rv-head {
-      flex: none; display: flex; align-items: center; gap: 18px;
-      padding: 8px 14px; border-bottom: 1px solid var(--border-primary, #2a3040);
-      background: var(--background-secondary, #141824);
-      flex-wrap: wrap;
+    /* ── HUD ──────────────────────────────────────────────────────────────
+       OVERLAYS the map, exactly as the game's does — the game's HUD floats
+       above its map container rather than occupying a header row, and a
+       header row was the single biggest thing making this window read as a
+       tool rather than as the game. Panels place themselves via main.css's
+       .status-bar-panel-top-* / .action-bar-bottom-* rules; the anchor here
+       only has to be full-bleed and non-blocking. */
+    /* The stage is map + HUD. Giving the HUD its own containing block means
+       the battle log docks BELOW it rather than covering the action bars —
+       the HUD stays pinned to the map it describes, at any log height. */
+    #rv-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+    #rv-hud {
+      position: absolute; inset: 0; z-index: 40;
+      pointer-events: none;              /* the map still scrolls underneath */
     }
-    #rv-head .rv-title { font-family: 'ExtremeHazard', sans-serif; font-size: 13px;
-      letter-spacing: .06em; color: var(--text-player-primary, #7fd6ff); }
-    .rv-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-    .rv-stat-v { font-size: 13px; white-space: nowrap; display: inline-flex;
-      align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
-    .rv-stat-l { font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
-      letter-spacing: .08em; color: var(--text-hint, #6b7488); text-transform: uppercase; }
-    .rv-stat.warn .rv-stat-v { color: var(--text-warning, #ffb454); }
-    .rv-stat.bad .rv-stat-v { color: var(--text-enemy-primary, #ff6b6b); }
-    .rv-stat.ok .rv-stat-v { color: var(--text-player-primary, #7fd6ff); }
-    #rv-head .rv-spacer { flex: 1 1 auto; }
+    /* Re-enable pointer events only on the panels, so tooltips work while
+       the rest of the overlay stays transparent to the mouse. */
+    #rv-hud > * { pointer-events: auto; }
+    /* Inert by construction: nothing here binds a listener, but make that
+       visible too — no hand cursor promising an action that never comes. */
+    #rv-hud a { cursor: default; }
+    #rv-hud .hidden { display: none; }
+
+    /* Viewport scaling, matching the game EXACTLY (main.css breakpoints):
+       the HUD paints at 2x from 1152px and 4x from 2304px, with the element
+       shrunk to 50%/25% of the viewport so the scaled result still fills it.
+       Without this the HUD would stay 1x while the map's own integer scaler
+       grew, and the two would visibly disagree about how big the world is.
+       Transform + viewport-unit compensation is used rather than `zoom` for
+       the reason recorded in main.rs: standardized CSS zoom stopped dividing
+       viewport units, which cropped the whole app to its top-left quarter. */
+    @media only screen and (min-width: 1152px), only screen and (min-height: 1024px) {
+      #rv-hud {
+        transform: scale(2); transform-origin: 0 0;
+        width: 50vw; height: 50vh; height: 50dvh;
+      }
+    }
+    @media only screen and (min-width: 2304px), only screen and (min-height: 2048px) {
+      #rv-hud {
+        transform: scale(4); transform-origin: 0 0;
+        width: 25vw; height: 25vh; height: 25dvh;
+      }
+    }
+
+    /* Where you are + how fresh the feed is. The game needs neither (a player
+       knows where they are, and their own client is the feed). */
+    #rv-where-chip {
+      position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+      display: flex; align-items: center; gap: 8px; white-space: nowrap;
+      padding: 3px 10px; border: 1px solid var(--border-primary, #2a3040);
+      background: rgba(13, 15, 21, .82);
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
+      letter-spacing: .08em; text-transform: uppercase;
+      color: var(--text-player-primary, #7fd6ff);
+    }
+    .rv-live-dot { color: var(--text-hint, #6b7488); }
+    .rv-live-dot.stale { color: var(--text-warning, #ffb454); }
+    .rv-live-dot.dead { color: var(--text-enemy-primary, #ff6b6b); }
+
+    /* ── Battle log ───────────────────────────────────────────────────── */
+    #rv-log {
+      flex: none; z-index: 45;
+      border-top: 1px solid var(--border-primary, #2a3040);
+      background: var(--background-secondary, #141824);
+      display: flex; flex-direction: column; min-height: 0;
+      max-height: 45%;
+    }
+    #rv-log.rv-collapsed #rv-log-body { display: none; }
+    #rv-log-head {
+      flex: none; display: flex; align-items: center; gap: 8px;
+      padding: 5px 12px; font-family: 'ExtremeHazard', sans-serif;
+      font-size: 8px; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--text-hint, #6b7488);
+    }
+    #rv-log-head .rv-spacer { flex: 1 1 auto; }
+    .rv-log-count { color: var(--text-body, #c8d0e0); }
+    .rv-log-toggle { color: var(--text-player-primary, #7fd6ff); text-decoration: none; }
+    #rv-log-body { overflow: auto; padding: 0 12px 8px; }
+    .rv-log-empty { color: var(--text-hint, #6b7488); font-size: 11px; padding: 6px 0; }
+    .rv-log-row {
+      /* The category column is sized for the WIDEST label in ExtremeHazard
+         ("struct block ore refine start"); too narrow and a nowrap label
+         overprints the detail beside it. */
+      display: grid; grid-template-columns: 62px 150px 1fr; gap: 10px;
+      align-items: baseline; padding: 3px 0;
+      border-bottom: 1px solid rgba(42, 48, 64, .5); font-size: 11px;
+    }
+    .rv-log-t { color: var(--text-hint, #6b7488); font-variant-numeric: tabular-nums; }
+    .rv-log-cat {
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
+      letter-spacing: .06em; text-transform: uppercase;
+      color: var(--text-player-primary, #7fd6ff);
+      /* WRAP rather than nowrap: category names are chain-driven and can be
+         long ("struct block ore refine start"), and a nowrap label overprints
+         the detail column instead of being clipped. Wrapping keeps any future
+         category readable without anyone re-tuning a pixel width. */
+      overflow-wrap: anywhere;
+    }
+    .rv-log-row.rv-bad .rv-log-cat { color: var(--text-enemy-primary, #ff6b6b); }
+    .rv-log-row.rv-warn .rv-log-cat { color: var(--text-warning, #ffb454); }
+    .rv-log-d { color: var(--text-body, #c8d0e0); word-break: break-word; text-align: left; }
+    #rv-log-body, .rv-log-row { text-align: left; }
 
     /* ── Map ──────────────────────────────────────────────────────────────
        Plain DOM + CSS background tiles, exactly the technique the game uses —
@@ -212,14 +307,96 @@
   </style>
 </head>
 <body>
-  <div id="rv-head">
-    <div class="rv-title" id="rv-where">—</div>
-    <div class="rv-stat" id="rv-stat-status"><div class="rv-stat-v">—</div><div class="rv-stat-l">raid</div></div>
-    <div class="rv-stat" id="rv-stat-shield"><div class="rv-stat-v">—</div><div class="rv-stat-l">shield</div></div>
-    <div class="rv-stat" id="rv-stat-def"><div class="rv-stat-v">—</div><div class="rv-stat-l">defender</div></div>
-    <div class="rv-stat" id="rv-stat-atk"><div class="rv-stat-v">—</div><div class="rv-stat-l">attacker</div></div>
-    <div class="rv-spacer"></div>
-    <div class="rv-stat" id="rv-stat-live"><div class="rv-stat-v">connecting</div><div class="rv-stat-l">feed</div></div>
+  <!-- ── HUD ────────────────────────────────────────────────────────────
+       The game's own HUD markup (StatusBarTopLeft/TopRight + two
+       ActionBars), reproduced class-for-class so the shipped sui.css styles
+       it identically. Every control is an <a href="javascript: void(0)">
+       with NO listener bound: inert BY CONSTRUCTION rather than by a
+       disabled flag someone could later wire up. A spectator maps onto the
+       game's two-sided HUD naturally — defender on the left, raider on the
+       right — so the same panels carry the same meaning here.
+       `data-sui-tooltip` is live: it is pure information, which is exactly
+       what a spectator wants. -->
+  <div id="rv-stage">
+  <div id="rv-hud">
+    <div id="rv-hud-tl" class="sui-status-bar-panel status-bar-panel-top-left">
+      <a class="sui-resource" href="javascript: void(0)"
+         data-sui-tooltip="Energy Supply — the defender's capacity in use"
+         data-sui-mod-placement="bottom">
+        <span id="rv-energy" class="sui-text-body">—</span>
+        <i class="sui-icon sui-icon-energy"></i>
+      </a>
+    </div>
+
+    <div id="rv-hud-tr" class="sui-status-bar-panel status-bar-panel-top-right sui-mod-enemy">
+      <a class="sui-resource" href="javascript: void(0)"
+         id="rv-shield-res" data-sui-mod-placement="bottom">
+        <div id="rv-shield-icon" class="planetary-shield-symbol-wrapper"></div>
+        <span id="rv-shield" class="sui-text-warning">—</span>
+      </a>
+      <a class="sui-resource" href="javascript: void(0)"
+         data-sui-tooltip="Alpha Ore stored on this planet"
+         data-sui-mod-placement="bottom">
+        <i class="sui-icon sui-icon-alpha-ore"></i>
+        <span id="rv-ore">—</span>
+      </a>
+    </div>
+
+    <!-- Bottom-left: the DEFENDER (this planet's owner). -->
+    <div id="rv-hud-bl" class="sui-panel-wrapper-fit-content action-bar-bottom-left">
+      <div class="sui-panel">
+        <div class="sui-panel-edge-left"></div>
+        <div class="sui-panel-chunk">
+          <div class="sui-screen">
+            <a href="javascript: void(0)" class="sui-screen-portrait"
+               id="rv-def-portrait" data-sui-mod-placement="top">
+              <div class="sui-screen-portrait-image" id="rv-def-pfp"></div>
+              <i class="sui-icon-md icon-info"></i>
+            </a>
+          </div>
+          <div class="sui-screen">
+            <div class="sui-screen-battery" id="rv-def-battery">
+              <div class="sui-battery-chunk"></div><div class="sui-battery-chunk"></div>
+              <div class="sui-battery-chunk"></div><div class="sui-battery-chunk"></div>
+              <div class="sui-battery-chunk"></div>
+            </div>
+          </div>
+        </div>
+        <div class="sui-panel-edge-right"></div>
+      </div>
+    </div>
+
+    <!-- Bottom-right: the RAIDER. Hidden until a raid is actually live, the
+         same way the game hides its enemy action bar. -->
+    <div id="rv-hud-br" class="sui-panel-wrapper-fit-content action-bar-bottom-right hidden">
+      <div class="sui-panel sui-mod-enemy">
+        <div class="sui-panel-edge-left"></div>
+        <div class="sui-panel-chunk">
+          <div class="sui-screen">
+            <a href="javascript: void(0)" class="sui-screen-portrait"
+               id="rv-atk-portrait" data-sui-mod-placement="top">
+              <div class="sui-screen-portrait-image" id="rv-atk-pfp"></div>
+              <i class="sui-icon-md icon-info"></i>
+            </a>
+          </div>
+          <div class="sui-screen">
+            <div class="sui-screen-battery" id="rv-atk-battery">
+              <div class="sui-battery-chunk"></div><div class="sui-battery-chunk"></div>
+              <div class="sui-battery-chunk"></div><div class="sui-battery-chunk"></div>
+              <div class="sui-battery-chunk"></div>
+            </div>
+          </div>
+        </div>
+        <div class="sui-panel-edge-right"></div>
+      </div>
+    </div>
+
+    <!-- Location + feed freshness. The game has no equivalent (a player
+         always knows where they are); a spectator does not. -->
+    <div id="rv-where-chip">
+      <span id="rv-where">—</span>
+      <span id="rv-live" class="rv-live-dot" title="feed">connecting</span>
+    </div>
   </div>
 
   <div id="rv-note"></div>
@@ -243,6 +420,22 @@
         <div>Waiting for the first snapshot…</div>
       </div>
     </div>
+  </div>
+  </div><!-- /#rv-stage -->
+
+  <!-- Battle log. The one place the spectator is DELIBERATELY richer than
+       the player's map: every planet_activity row for this planet, which the
+       game itself never shows in one place. Collapsible so it can stay out of
+       the way of the map it belongs to. -->
+  <div id="rv-log" class="rv-collapsed">
+    <div id="rv-log-head">
+      <i class="icon-list"></i>
+      <span>Battle log</span>
+      <span id="rv-log-count" class="rv-log-count"></span>
+      <span class="rv-spacer"></span>
+      <a href="javascript: void(0)" id="rv-log-toggle" class="rv-log-toggle">show</a>
+    </div>
+    <div id="rv-log-body"><div class="rv-log-empty">No recorded activity for this planet yet.</div></div>
   </div>
 
   <script src="js/vendor/lottie-5.12.2.min.js"></script>

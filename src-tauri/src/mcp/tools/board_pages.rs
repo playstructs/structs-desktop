@@ -691,21 +691,24 @@ pub async fn mcp_allocations() -> Result<Value, String> {
         }
     }
 
-    // One read per allocation, fired together for the same reason as the
-    // substations below — serial round trips are what make this page slow.
-    let mut rows = tokio::task::JoinSet::new();
-    for (i, id) in ids.iter().enumerate() {
-        let c = client.clone();
-        let id = id.clone();
-        rows.spawn(async move { (i, allocation_row(&c, &id).await) });
-    }
-    let mut by_index: Vec<(usize, Value)> = Vec::new();
-    while let Some(res) = rows.join_next().await {
-        if let Ok((i, Some(row))) = res {
-            by_index.push((i, row));
-        }
-    }
-    // Stable order: the list must not reshuffle between refreshes.
+    // One read per allocation, run concurrently (capped) for the same reason
+    // as the substations below: serial round trips are what made this page
+    // slow, not any single endpoint.
+    let c = client.clone();
+    let mut by_index: Vec<(usize, Value)> = crate::mcp::loop_util::map_concurrent(
+        ids.iter().cloned().enumerate().collect::<Vec<_>>(),
+        8,
+        move |(i, id)| {
+            let c = c.clone();
+            async move { (i, allocation_row(&c, &id).await) }
+        },
+    )
+    .await
+    .into_iter()
+    .filter_map(|(i, row)| row.map(|r| (i, r)))
+    .collect();
+    // Stable order: results arrive as they finish, and the list must not
+    // reshuffle between refreshes.
     by_index.sort_by_key(|(i, _)| *i);
     let allocations: Vec<Value> = by_index.into_iter().map(|(_, r)| r).collect();
 
@@ -800,35 +803,35 @@ pub async fn mcp_allocations() -> Result<Value, String> {
         .map(|s| s.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
         .filter(|id| !id.is_empty())
         .collect();
-    let mut set = tokio::task::JoinSet::new();
-    for id in ids.clone() {
-        let c = client.clone();
-        set.spawn(async move {
-            let got = c.query_entity("substation", &id).await;
-            let nums = match got {
-                Ok(v) => {
-                    let ga = v.get("gridAttributes");
-                    (
-                        grid_num(ga.and_then(|g| g.get("capacity"))),
-                        grid_num(ga.and_then(|g| g.get("load"))),
-                        grid_num(ga.and_then(|g| g.get("connectionCount"))),
-                        grid_num(ga.and_then(|g| g.get("connectionCapacity"))),
-                    )
-                }
-                // A substation that fails to read still belongs in the list —
-                // it is a legal destination, we just cannot price it.
-                Err(_) => (0.0, 0.0, 0.0, 0.0),
-            };
-            (id, nums)
-        });
-    }
-    let mut enriched: std::collections::HashMap<String, (f64, f64, f64, f64)> =
-        std::collections::HashMap::new();
-    while let Some(res) = set.join_next().await {
-        if let Ok((id, nums)) = res {
-            enriched.insert(id, nums);
-        }
-    }
+    // `map_concurrent` rather than a raw JoinSet: it CAPS how many reads are
+    // in flight. Firing all of them at once would contradict the AIMD limiter
+    // the loops obey and could push the very endpoint pressure it exists to
+    // avoid — and the substation count is chain-driven, so it can grow.
+    let c = client.clone();
+    let enriched: std::collections::HashMap<String, (f64, f64, f64, f64)> =
+        crate::mcp::loop_util::map_concurrent(ids.clone(), 8, move |id| {
+            let c = c.clone();
+            async move {
+                let nums = match c.query_entity("substation", &id).await {
+                    Ok(v) => {
+                        let ga = v.get("gridAttributes");
+                        (
+                            grid_num(ga.and_then(|g| g.get("capacity"))),
+                            grid_num(ga.and_then(|g| g.get("load"))),
+                            grid_num(ga.and_then(|g| g.get("connectionCount"))),
+                            grid_num(ga.and_then(|g| g.get("connectionCapacity"))),
+                        )
+                    }
+                    // A substation that fails to read still belongs in the
+                    // list — it is a legal destination, we just cannot price it.
+                    Err(_) => (0.0, 0.0, 0.0, 0.0),
+                };
+                (id, nums)
+            }
+        })
+        .await
+        .into_iter()
+        .collect();
     // Rebuild in the ORIGINAL order — ours first, then the rest — because that
     // ordering is what the Move dropdown shows.
     let mut substations = Vec::new();

@@ -32,7 +32,7 @@
 //! never call `sync_game_state`, never touch `localStorage`, and cannot sign.
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 // ── Window labels ───────────────────────────────────────────────────────────
@@ -482,6 +482,134 @@ pub async fn mcp_raid_state(
 ) -> Result<Value, String> {
     let target = parse_target(planet_id.as_deref(), fleet_id.as_deref())?;
     Ok(crate::mcp::spectator::pull_state(&target).await)
+}
+
+/// Battle log: every `planet_activity` row recorded for one planet, newest
+/// first, rendered into one human line each.
+///
+/// This is the raid viewer's DELIBERATE departure from map parity. The game
+/// shows a planet's present state; it never shows the planet's history in one
+/// place, and for a spectator that history is the story — who arrived, what
+/// shot what, when the shield fell, how the raid ended. The rows come from the
+/// guild indexer, which already stores exactly this.
+#[tauri::command]
+pub async fn mcp_raid_log(planet_id: String, limit: Option<usize>) -> Result<Value, String> {
+    if !valid_entity_id(&planet_id, "2") {
+        return Err(format!("'{planet_id}' is not a planet id"));
+    }
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let want = limit.unwrap_or(200).min(500);
+
+    // Page until we have enough or the indexer runs out. Pages are small, so
+    // a deep log is a handful of requests rather than one huge one.
+    let mut rows: Vec<Value> = Vec::new();
+    for page in 1..=10u32 {
+        let Ok(p) = client.guild.planet_activity_by_planet(&planet_id, page).await else {
+            break;
+        };
+        let more = p.has_more;
+        for item in p.items {
+            rows.push(log_row(&item));
+            if rows.len() >= want {
+                break;
+            }
+        }
+        if rows.len() >= want || !more {
+            break;
+        }
+    }
+    Ok(json!({ "planet_id": planet_id, "rows": rows }))
+}
+
+/// One activity row → `{time, category, detail}` ready to render.
+fn log_row(item: &Value) -> Value {
+    let category = item
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("event")
+        .to_string();
+    // `detail` is a JSON STRING on this endpoint, not an object.
+    let detail = match item.get("detail") {
+        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
+        Some(other) => other.clone(),
+        None => Value::Null,
+    };
+    json!({
+        "time": short_time(item.get("time").and_then(|v| v.as_str()).unwrap_or("")),
+        "category": category,
+        "detail": describe_activity(&category, &detail),
+        "block": item.get("block_height").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// `2026-07-30 18:02:51.403416+00` → `18:02:51`. Falls back to the raw string
+/// so an unexpected format still shows something.
+fn short_time(ts: &str) -> String {
+    ts.split(' ')
+        .nth(1)
+        .map(|t| t.split('.').next().unwrap_or(t).to_string())
+        .unwrap_or_else(|| ts.to_string())
+}
+
+/// Render one activity detail as a sentence. Shapes transcribed from live rows
+/// (`structs.planet_activity`), so each category reads naturally instead of
+/// dumping JSON at the operator.
+fn describe_activity(category: &str, d: &Value) -> String {
+    let s = |k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let n = |k: &str| match d.get(k) {
+        Some(Value::String(x)) => x.clone(),
+        Some(Value::Number(x)) => x.to_string(),
+        _ => String::new(),
+    };
+    match category {
+        "struct_attack" => {
+            let mut out = format!("{} hit {}", s("attackerStructId"), s("targetStructId"));
+            let weapon = s("weaponSystem");
+            if !weapon.is_empty() {
+                out.push_str(&format!(" with {weapon}"));
+            }
+            if n("recoilDamage") != "0" && !n("recoilDamage").is_empty() {
+                out.push_str(&format!(", recoil {}", n("recoilDamage")));
+            }
+            out
+        }
+        "raid_status" => {
+            let mut out = format!("raid {}", s("status"));
+            if !s("fleet_id").is_empty() {
+                out.push_str(&format!(" by fleet {}", s("fleet_id")));
+            }
+            if !n("seized_ore").is_empty() && n("seized_ore") != "0" {
+                out.push_str(&format!(" — seized {} ore", n("seized_ore")));
+            }
+            out
+        }
+        "fleet_arrive" => format!("fleet {} arrived ({})", s("fleet_id"), s("fleet_status")),
+        "fleet_depart" => format!("fleet {} departed", s("fleet_id")),
+        "shield_change" => {
+            let (from, to) = (n("shield_old"), n("shield"));
+            if from.is_empty() { format!("shield now {to}") } else { format!("shield {from} → {to}") }
+        }
+        "struct_health" => format!("{} health {}", s("struct_id"), n("health")),
+        "struct_status" => format!("{} status {} → {}", s("struct_id"), n("status_old"), n("status")),
+        "struct_defense_add" => {
+            format!("{} now defends {}", s("defender_struct_id"), s("protected_struct_id"))
+        }
+        "struct_defense_remove" => {
+            format!("{} stopped defending {}", s("defender_struct_id"), s("protected_struct_id"))
+        }
+        "struct_move" => format!(
+            "{} moved to {} {} slot {}",
+            s("struct_id"), s("ambit"), s("location_id"), n("slot")
+        ),
+        "struct_block_build_start" => format!("{} build started", s("struct_id")),
+        "struct_block_ore_mine_start" => format!("{} mining started", s("struct_id")),
+        "struct_block_ore_refine_start" => format!("{} refining started", s("struct_id")),
+        // Unknown category: show the payload rather than nothing, so a new
+        // chain event type is still readable the day it appears.
+        _ => {
+            if d.is_null() { String::new() } else { d.to_string() }
+        }
+    }
 }
 
 /// Idempotent per location: a second request for a location already on screen
