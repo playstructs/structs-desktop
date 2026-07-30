@@ -1,5 +1,14 @@
-/// Estimated block time in milliseconds (matches TASK.ESTIMATED_BLOCK_TIME = 5000)
-pub const ESTIMATED_BLOCK_TIME_MS: f64 = 5000.0;
+/// Estimated block time in milliseconds.
+///
+/// The webapp's TASK.ESTIMATED_BLOCK_TIME is 5000, but the chain does NOT run
+/// at 5.000 s. Measured against `structs.planet_activity` (3,500+ blocks/day
+/// sampled over a week, 2026-07-30): **5.28 s**, steady at 5.277–5.341 daily.
+/// Assuming 5.000 made the estimator run ~5.6% fast, so `estimate_age` drifted
+/// AHEAD of the chain — computing a lower (easier) difficulty than the real
+/// age justifies and producing proofs the chain rejects. Drift grew with task
+/// runtime because the checkpoint is only taken once at task start; see
+/// `refresh_checkpoint`, which now re-anchors mid-task so it can't accumulate.
+pub const ESTIMATED_BLOCK_TIME_MS: f64 = 5280.0;
 
 /// Minimum difficulty before hashing starts (higher than JS default of 10
 /// because Rust hasher is orders of magnitude faster)
@@ -55,6 +64,32 @@ pub fn estimate_age(
         0
     };
     (age, block_current_estimated)
+}
+
+/// Re-anchor a task's block checkpoint to live chain state.
+///
+/// Without this the checkpoint is captured once at task start and every later
+/// age estimate is pure extrapolation, so any error in `ESTIMATED_BLOCK_TIME_MS`
+/// compounds for the whole grind (hours, for REFINE). Re-anchoring at each
+/// difficulty recalculation means the extrapolation only ever spans the time
+/// since the last game-state sync (~10 s), so drift cannot accumulate.
+///
+/// `GAME_STATE.current_block_height` may itself lag the chain by a tick, which
+/// biases the estimate slightly BEHIND — deliberately the safe direction: a
+/// conservative age yields a HIGHER required difficulty, so the proof we find
+/// is stronger than the chain demands and is still accepted. Overshooting is
+/// what gets proofs rejected.
+pub fn refresh_checkpoint(block_checkpoint: u64, checkpoint_time_ms: f64, now_ms: f64) -> (u64, f64) {
+    let live = crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .map(|g| g.current_block_height)
+        .unwrap_or(0);
+    if live > block_checkpoint {
+        (live, now_ms)
+    } else {
+        (block_checkpoint, checkpoint_time_ms)
+    }
 }
 
 /// Check if a SHA256 hash meets the required difficulty (leading hex zeros).
@@ -152,9 +187,33 @@ mod tests {
 
     #[test]
     fn test_estimate_age() {
-        let (age, block_est) = estimate_age(100, 110, 0.0, 25000.0);
-        // 25000ms / 5000ms = 5 blocks past checkpoint
+        let (age, block_est) = estimate_age(100, 110, 0.0, 26_400.0);
+        // 26400ms / 5280ms = exactly 5 blocks past the checkpoint
         assert_eq!(block_est, 115);
         assert_eq!(age, 15);
+    }
+
+    /// The estimator must never run AHEAD of the chain: an overshoot computes a
+    /// difficulty easier than the real age justifies, and the chain rejects the
+    /// resulting proof (the failure mode behind the 2026-07-30 solve treadmill).
+    #[test]
+    fn estimator_does_not_overshoot_real_chain_time() {
+        const REAL_BLOCK_MS: f64 = 5280.0; // measured from planet_activity
+        for minutes in [1.0_f64, 10.0, 60.0, 360.0] {
+            let elapsed = minutes * 60_000.0;
+            let (_, est) = estimate_age(0, 0, 0.0, elapsed);
+            let real = (elapsed / REAL_BLOCK_MS).floor() as u64;
+            assert!(
+                est <= real,
+                "after {minutes} min the estimate ({est}) must not exceed real blocks ({real})"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_checkpoint_only_moves_forward() {
+        // Live height unavailable in tests (GAME_STATE is 0) → keep the anchor.
+        let (cp, cpt) = refresh_checkpoint(500, 1000.0, 9999.0);
+        assert_eq!((cp, cpt), (500, 1000.0));
     }
 }

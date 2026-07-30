@@ -3,7 +3,7 @@ use tauri::Emitter;
 use wgpu::util::DeviceExt;
 
 use crate::hasher::difficulty::{
-    calculate_difficulty, estimate_age, CHECKPOINT_COMMIT, DIFFICULTY_START_SLEEP_MS,
+    calculate_difficulty, estimate_age, refresh_checkpoint, CHECKPOINT_COMMIT, DIFFICULTY_START_SLEEP_MS,
 };
 use crate::hasher::types::{now_millis, TaskHandle};
 
@@ -123,13 +123,15 @@ pub fn run_gpu_hash(
         }
         let now_ms = now_millis();
         let (age, block_est) = {
-            let progress = handle.progress.lock().unwrap();
-            estimate_age(
-                block_start,
+            let mut progress = handle.progress.lock().unwrap();
+            let (cp, cpt) = refresh_checkpoint(
                 progress.block_checkpoint,
                 progress.block_checkpoint_time_ms,
                 now_ms,
-            )
+            );
+            progress.block_checkpoint = cp;
+            progress.block_checkpoint_time_ms = cpt;
+            estimate_age(block_start, cp, cpt, now_ms)
         };
         let difficulty = calculate_difficulty(age, difficulty_target);
         {
@@ -303,13 +305,15 @@ pub fn run_gpu_hash(
     let mut difficulty = {
         let now_ms = now_millis();
         let (age, _) = {
-            let progress = handle.progress.lock().unwrap();
-            estimate_age(
-                block_start,
+            let mut progress = handle.progress.lock().unwrap();
+            let (cp, cpt) = refresh_checkpoint(
                 progress.block_checkpoint,
                 progress.block_checkpoint_time_ms,
                 now_ms,
-            )
+            );
+            progress.block_checkpoint = cp;
+            progress.block_checkpoint_time_ms = cpt;
+            estimate_age(block_start, cp, cpt, now_ms)
         };
         calculate_difficulty(age, difficulty_target)
     };

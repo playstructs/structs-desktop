@@ -279,6 +279,9 @@ async fn scan(
                 // fired, the whole fleet froze). See loop_util::player_struct_ids.
                 let sids = crate::mcp::loop_util::player_struct_ids(&client, &pid).await;
                 let mut extractor_planet: Option<String> = None;
+                // Planet ore, read at most ONCE per player per scan (see the
+                // mined-out guard below).
+                let mut planet_ore_cache: Option<f64> = None;
                 for sid in sids.iter() {
                     // The struct ENTITY is the reliable source for type + location +
                     // online + anchors (the struct-LIST endpoints are unusable, above).
@@ -313,6 +316,31 @@ async fn scan(
                     if !parse_bool(sa.and_then(|x| x.get("isOnline"))) {
                         continue;
                     }
+                    // MINED-OUT GUARD. An extractor on a planet with no undiscovered
+                    // ore can never complete: the chain rejects the completion, the
+                    // anchor never resets, and this loop re-issues the task forever.
+                    // Measured on 2026-07-30: one struct burned 448 solves in 16h
+                    // (difficulty decaying 7→1 the whole time — proof of a frozen
+                    // anchor), and 19 of 25 sampled fleet planets were drained, which
+                    // accounted for ~95% of ALL GPU work. Read the planet once per
+                    // player; the auto-explore block below relocates the player.
+                    if is_extractor {
+                        if planet_ore_cache.is_none() {
+                            if let Some(planet_id) = extractor_planet.as_deref() {
+                                planet_ore_cache =
+                                    Some(match client.query_entity("planet", planet_id).await {
+                                        Ok(p) => parse_f64(
+                                            p.get("gridAttributes").and_then(|g| g.get("ore")),
+                                        ),
+                                        // Unknown → don't block mining on a read failure.
+                                        Err(_) => 1.0,
+                                    });
+                            }
+                        }
+                        if planet_ore_cache.unwrap_or(1.0) <= 0.0 {
+                            continue;
+                        }
+                    }
                     let (task_type, target, anchor) = if is_extractor {
                         ("MINE", MINE_TARGET, read_u64_field(sa, "blockStartOreMine"))
                     } else {
@@ -340,9 +368,13 @@ async fn scan(
                         }
                         started.fetch_add(1, Ordering::Relaxed);
                         run.actions.fetch_add(1, Ordering::Relaxed);
+                        // Debug, not Info: one line per struct per scan was
+                        // 5,041 events/hour (90% of the whole telemetry DB) on
+                        // a 750-player fleet. The per-scan summary below keeps
+                        // the loop observable at Info.
                         crate::mcp::telemetry::tlog(
                             "auto_harvest",
-                            crate::mcp::telemetry::Sev::Info,
+                            crate::mcp::telemetry::Sev::Debug,
                             format!(
                                 "{} {} (age {}, difficulty {} ≤ {})",
                                 task_type,

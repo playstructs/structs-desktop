@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tauri::Emitter;
 
 use crate::hasher::difficulty::{
-    calculate_difficulty, check_difficulty, estimate_age, CHECKPOINT_COMMIT,
+    calculate_difficulty, check_difficulty, estimate_age, refresh_checkpoint, CHECKPOINT_COMMIT,
     DIFFICULTY_RECALCULATE, DIFFICULTY_START_SLEEP_MS,
 };
 use crate::hasher::types::{now_millis, TaskHandle};
@@ -39,13 +39,15 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
         }
         let now_ms = now_millis();
         let (age, block_est) = {
-            let progress = handle.progress.lock().unwrap();
-            estimate_age(
-                block_start,
+            let mut progress = handle.progress.lock().unwrap();
+            let (cp, cpt) = refresh_checkpoint(
                 progress.block_checkpoint,
                 progress.block_checkpoint_time_ms,
                 now_ms,
-            )
+            );
+            progress.block_checkpoint = cp;
+            progress.block_checkpoint_time_ms = cpt;
+            estimate_age(block_start, cp, cpt, now_ms)
         };
         let difficulty = calculate_difficulty(age, difficulty_target);
 
@@ -214,13 +216,15 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
                     if global_iters % DIFFICULTY_RECALCULATE == 0 && thread_id == 0 {
                         let now_ms = now_millis();
                         let (age, block_est) = {
-                            let progress = handle.progress.lock().unwrap();
-                            estimate_age(
-                                block_start,
+                            let mut progress = handle.progress.lock().unwrap();
+                            let (cp, cpt) = refresh_checkpoint(
                                 progress.block_checkpoint,
                                 progress.block_checkpoint_time_ms,
                                 now_ms,
-                            )
+                            );
+                            progress.block_checkpoint = cp;
+                            progress.block_checkpoint_time_ms = cpt;
+                            estimate_age(block_start, cp, cpt, now_ms)
                         };
                         difficulty = calculate_difficulty(age, difficulty_target);
 

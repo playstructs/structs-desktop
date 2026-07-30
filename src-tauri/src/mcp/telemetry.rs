@@ -166,6 +166,9 @@ const RETENTION_MS: f64 = RETENTION_DAYS * 86_400_000.0;
 const EVENTS_MAX_ROWS: u64 = 2_000_000;
 const GRASS_MAX_ROWS: u64 = 1_000_000;
 const UI_MAX_ROWS: u64 = 500_000;
+/// PoW solves are the highest-volume stream (670k rows / 46 MB observed before
+/// the futile-mining fix); time retention alone let it dominate the DB.
+const POW_MAX_ROWS: u64 = 500_000;
 
 static WRITER: LazyLock<Option<SyncSender<Msg>>> = LazyLock::new(init_writer);
 /// Messages dropped because the queue was full (or the writer died) —
@@ -461,6 +464,7 @@ fn sweep_retention(conn: &Connection, now: f64) -> Result<(), rusqlite::Error> {
         ("events", EVENTS_MAX_ROWS),
         ("grass_events", GRASS_MAX_ROWS),
         ("ui_events", UI_MAX_ROWS),
+        ("pow_solves", POW_MAX_ROWS),
     ] {
         conn.execute(
             &format!(

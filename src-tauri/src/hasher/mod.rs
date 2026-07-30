@@ -179,16 +179,36 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         ),
         _ => return,
     };
-    eprintln!(
-        "[Structs VPlayer] {} complete for vplayer {} ({}) — signing completion",
-        task_type, index, snap.object_id
-    );
     let app = app_handle.clone();
+    let object_id = snap.object_id.clone();
     tauri::async_runtime::spawn(async move {
-        match crate::mcp::vplayer_bridge::sign_action(&app, index, type_url, payload, 60).await
+        // Route through tx_retry — NOT vplayer_bridge directly. This is the
+        // most important tx class in the economy (every mine/refine/build/raid
+        // payoff), and signing it raw meant success AND failure were reported
+        // only to stderr: nothing in `tx_attempts`, nothing in the board feed,
+        // nothing queryable. A 15-day, ~600k-solve futile-mining incident went
+        // undetected precisely because of that blind spot. Now every completion
+        // is ledgered like any other tx (sequence-mismatch retry only).
+        let context = format!("pow_complete:{}", object_id);
+        match crate::mcp::tx_retry::sign_with_retry(&app, index, type_url, payload, &context).await
         {
-            Ok(_) => eprintln!("[Structs VPlayer] completion signed for vplayer {}", index),
-            Err(e) => eprintln!("[Structs VPlayer] completion sign failed for vplayer {}: {}", index, e),
+            Ok(_) => {
+                crate::mcp::telemetry::tlog(
+                    "hasher",
+                    crate::mcp::telemetry::Sev::Debug,
+                    format!("{task_type} completion signed for {object_id} (vplayer {index})"),
+                );
+            }
+            Err(e) => {
+                // Surface failures loudly: a completion that never lands leaves
+                // the anchor frozen, so the harvest loop will re-issue the same
+                // proof indefinitely. That treadmill must be visible.
+                crate::mcp::telemetry::tlog(
+                    "hasher",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("{task_type} completion FAILED for {object_id} (vplayer {index}): {e}"),
+                );
+            }
         }
     });
 }
