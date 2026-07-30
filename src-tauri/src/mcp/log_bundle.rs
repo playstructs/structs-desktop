@@ -26,7 +26,13 @@ use zip::write::SimpleFileOptions;
 
 /// Key substrings that mark a value as secret. Matched case-insensitively
 /// against JSON object keys.
-const SECRET_KEY_MARKERS: [&str; 8] = [
+///
+/// Deliberately NOT a bare "key": the codebase is full of innocuous ones
+/// (`next_key`, `pagination_key`, `keyPlayers`) and blanking those would gut
+/// the bundle's usefulness. The credential-shaped spellings are listed
+/// explicitly instead, and `token` already covers `bearer_token`,
+/// `auth_token` and `api_token`.
+const SECRET_KEY_MARKERS: [&str; 12] = [
     "mnemonic",
     "seed",
     "token",
@@ -35,6 +41,10 @@ const SECRET_KEY_MARKERS: [&str; 8] = [
     "passphrase",
     "privatekey",
     "private_key",
+    "apikey",
+    "api_key",
+    "credential",
+    "authorization",
 ];
 
 const REDACTED: &str = "<redacted by log export>";
@@ -50,9 +60,14 @@ fn redact(value: &mut Value) {
         Value::Object(map) => {
             for (k, v) in map.iter_mut() {
                 let lower = k.to_lowercase();
-                if SECRET_KEY_MARKERS.iter().any(|m| lower.contains(m)) {
-                    // Keep the shape (a string) so the file still parses as the
-                    // same schema for anyone reading it.
+                // Only STRING values are redacted. A credential is always a
+                // string, so this keeps the matcher aggressive (substring, so
+                // a new `api_token_v2` is caught the day it appears) without
+                // blanking useful non-secrets that merely contain a marker
+                // word — `own_guild_seeded: true` matches "seed" but is a flag,
+                // and exporting it as "<redacted>" would just confuse whoever
+                // reads the bundle.
+                if v.is_string() && SECRET_KEY_MARKERS.iter().any(|m| lower.contains(m)) {
                     *v = Value::String(REDACTED.to_string());
                 } else {
                     redact(v);
@@ -311,6 +326,38 @@ mod tests {
         assert_eq!(v["port"], json!(8420));
         assert_eq!(v["nested"]["keep"], json!(1));
         assert_eq!(v["list"][1]["fine"], json!(true));
+    }
+
+    #[test]
+    fn innocuous_key_named_fields_survive() {
+        // A bare "key" marker would blank these, which are structural, not
+        // secret — they are why the marker list spells out the credential
+        // forms instead.
+        let mut v = json!({
+            "next_key": "NC0xMg==",
+            "pagination_key": "abc",
+            "keyPlayers": "player-1",
+        });
+        redact(&mut v);
+        assert_eq!(v["next_key"], json!("NC0xMg=="));
+        assert_eq!(v["pagination_key"], json!("abc"));
+        assert_eq!(v["keyPlayers"], json!("player-1"));
+    }
+
+    #[test]
+    fn non_string_values_are_not_redacted() {
+        // Real case from combat_lists.json: `own_guild_seeded` contains the
+        // marker "seed" but is a boolean flag, not a credential. Blanking it
+        // told the bundle's reader nothing and lost real information.
+        let mut v = json!({
+            "own_guild_seeded": true,
+            "token_count": 42,
+            "bearer_token": "deadbeef",
+        });
+        redact(&mut v);
+        assert_eq!(v["own_guild_seeded"], json!(true), "flags survive");
+        assert_eq!(v["token_count"], json!(42), "numbers survive");
+        assert_eq!(v["bearer_token"], json!(REDACTED), "strings still redacted");
     }
 
     #[test]

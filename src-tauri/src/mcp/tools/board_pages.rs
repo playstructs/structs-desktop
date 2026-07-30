@@ -691,12 +691,23 @@ pub async fn mcp_allocations() -> Result<Value, String> {
         }
     }
 
-    let mut allocations = Vec::new();
-    for id in &ids {
-        if let Some(row) = allocation_row(&client, id).await {
-            allocations.push(row);
+    // One read per allocation, fired together for the same reason as the
+    // substations below — serial round trips are what make this page slow.
+    let mut rows = tokio::task::JoinSet::new();
+    for (i, id) in ids.iter().enumerate() {
+        let c = client.clone();
+        let id = id.clone();
+        rows.spawn(async move { (i, allocation_row(&c, &id).await) });
+    }
+    let mut by_index: Vec<(usize, Value)> = Vec::new();
+    while let Some(res) = rows.join_next().await {
+        if let Ok((i, Some(row))) = res {
+            by_index.push((i, row));
         }
     }
+    // Stable order: the list must not reshuffle between refreshes.
+    by_index.sort_by_key(|(i, _)| *i);
+    let allocations: Vec<Value> = by_index.into_iter().map(|(_, r)| r).collect();
 
     // The budget. `load` already INCLUDES the power of these allocations, so a
     // change of +X moves load by +X and headroom by −X.
@@ -776,22 +787,54 @@ pub async fn mcp_allocations() -> Result<Value, String> {
             break;
         }
     }
-    // Enrich each candidate with what a connection there would actually be worth.
+    // Enrich each candidate with what a connection there would actually be
+    // worth. CONCURRENTLY: the list read gives names but not grid attributes,
+    // so this is one request per substation, and doing them in series made the
+    // Power tab take 8–10 s. Individually each read is ~20 ms, but under live
+    // loop load the shared connection pool is busy and a queued request waits
+    // ~450 ms — so latency here is dominated by the NUMBER of sequential round
+    // trips, not by any one endpoint. Fired together, the whole set costs about
+    // as much as the slowest single read.
+    let ids: Vec<String> = subs
+        .iter()
+        .map(|s| s.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    let mut set = tokio::task::JoinSet::new();
+    for id in ids.clone() {
+        let c = client.clone();
+        set.spawn(async move {
+            let got = c.query_entity("substation", &id).await;
+            let nums = match got {
+                Ok(v) => {
+                    let ga = v.get("gridAttributes");
+                    (
+                        grid_num(ga.and_then(|g| g.get("capacity"))),
+                        grid_num(ga.and_then(|g| g.get("load"))),
+                        grid_num(ga.and_then(|g| g.get("connectionCount"))),
+                        grid_num(ga.and_then(|g| g.get("connectionCapacity"))),
+                    )
+                }
+                // A substation that fails to read still belongs in the list —
+                // it is a legal destination, we just cannot price it.
+                Err(_) => (0.0, 0.0, 0.0, 0.0),
+            };
+            (id, nums)
+        });
+    }
+    let mut enriched: std::collections::HashMap<String, (f64, f64, f64, f64)> =
+        std::collections::HashMap::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok((id, nums)) = res {
+            enriched.insert(id, nums);
+        }
+    }
+    // Rebuild in the ORIGINAL order — ours first, then the rest — because that
+    // ordering is what the Move dropdown shows.
     let mut substations = Vec::new();
-    for s in subs {
-        let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let (cap, ld, conns, conn_cap) = match client.query_entity("substation", &id).await {
-            Ok(v) => {
-                let ga = v.get("gridAttributes");
-                (
-                    grid_num(ga.and_then(|g| g.get("capacity"))),
-                    grid_num(ga.and_then(|g| g.get("load"))),
-                    grid_num(ga.and_then(|g| g.get("connectionCount"))),
-                    grid_num(ga.and_then(|g| g.get("connectionCapacity"))),
-                )
-            }
-            Err(_) => (0.0, 0.0, 0.0, 0.0),
-        };
+    for id in ids {
+        let (cap, ld, conns, conn_cap) =
+            enriched.get(&id).copied().unwrap_or((0.0, 0.0, 0.0, 0.0));
         substations.push(json!({
             "id": id,
             "name": names.get(&id).cloned().unwrap_or_default(),

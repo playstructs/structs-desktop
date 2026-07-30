@@ -104,13 +104,28 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     Ok(())
 }
 
-/// Statuses that mean the transaction actually landed. Anything else — the
-/// bridge's own `dropped`, an encoder rejection, a non-zero chain code — means
-/// the action did NOT happen, however cheerful the earlier "queued" ack was.
+/// Did this settlement fail to land?
+///
+/// The vocabulary is the webapp's `TX_STATUS`
+/// (`structs-webapp/src/js/models/SigningTransaction.js`): `queued`,
+/// `in_flight`, `succeeded`, `dropped`, `cancelled` — of which the last three
+/// are terminal. Transcribed rather than guessed: an earlier version of this
+/// allow-listed "success"/"settled"/"confirmed", none of which the queue ever
+/// emits, so every SUCCESSFUL transaction was reported as a failure.
+///
+/// Non-terminal statuses are NOT failures — they simply have not finished, and
+/// the real receipt arrives in a later event.
 fn settlement_failed(status: &str, code: Option<i64>, error: Option<&str>) -> bool {
-    let bad_status = !matches!(status, "success" | "settled" | "confirmed" | "delivered");
-    let bad_code = code.is_some_and(|c| c != 0);
-    bad_status || bad_code || error.is_some_and(|e| !e.is_empty())
+    match status {
+        "succeeded" => {
+            // Terminal-good, but the chain can still have rejected the message
+            // inside a delivered tx (non-zero code carries the reason).
+            code.is_some_and(|c| c != 0) || error.is_some_and(|e| !e.is_empty())
+        }
+        "dropped" | "cancelled" => true,
+        // queued / in_flight / anything unrecognised: not yet settled.
+        _ => false,
+    }
 }
 
 /// Log + surface a settlement that did not land. Ledgered as a real tx failure
@@ -173,21 +188,35 @@ pub fn mcp_grass_recent(limit: Option<usize>, category: Option<String>) -> serde
 mod tests {
     use super::*;
 
+    // Statuses are TX_STATUS from the webapp's SigningTransaction model:
+    // queued | in_flight | succeeded | dropped | cancelled.
+
     #[test]
     fn dropped_settlements_are_flagged() {
         // The exact shape that silently swallowed five allocation attempts:
         // bridge acked "queued", then the encoder rejected the message.
         assert!(settlement_failed("dropped", None, Some("Error: invalid int32: NaN")));
-        // Non-zero chain code, even with an otherwise happy status.
-        assert!(settlement_failed("success", Some(11), None));
-        // Unknown/absent status must not be assumed good.
-        assert!(settlement_failed("unknown", None, None));
+        assert!(settlement_failed("cancelled", None, None));
+        // Delivered, but the chain rejected the message inside it.
+        assert!(settlement_failed("succeeded", Some(11), None));
+        assert!(settlement_failed("succeeded", None, Some("insufficient funds")));
     }
 
     #[test]
     fn genuine_settlements_are_not_flagged() {
-        assert!(!settlement_failed("success", Some(0), None));
-        assert!(!settlement_failed("settled", None, None));
-        assert!(!settlement_failed("confirmed", Some(0), Some("")));
+        // REGRESSION: "succeeded" is the queue's real success value. Allow-
+        // listing invented names ("success"/"settled") flagged every good tx.
+        assert!(!settlement_failed("succeeded", Some(0), None));
+        assert!(!settlement_failed("succeeded", None, None));
+        assert!(!settlement_failed("succeeded", Some(0), Some("")));
+    }
+
+    #[test]
+    fn in_flight_is_not_a_failure() {
+        // Non-terminal: the receipt simply has not arrived yet. Treating these
+        // as failures would fire a warning for every transaction submitted.
+        assert!(!settlement_failed("queued", None, None));
+        assert!(!settlement_failed("in_flight", None, None));
+        assert!(!settlement_failed("unknown", None, None));
     }
 }
