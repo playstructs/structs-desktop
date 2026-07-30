@@ -190,7 +190,19 @@ impl CosmosClient {
 
         let mut params = vec![];
         if let Some(key) = pagination_key {
-            params.push(format!("pagination.key={}", key));
+            // next_key is base64, which contains '+', '/' and '=' — all of
+            // which change meaning inside a query string. Percent-encode them
+            // or page 2 silently returns page 1 (or an error).
+            let encoded: String = key
+                .chars()
+                .map(|c| match c {
+                    '+' => "%2B".to_string(),
+                    '/' => "%2F".to_string(),
+                    '=' => "%3D".to_string(),
+                    other => other.to_string(),
+                })
+                .collect();
+            params.push(format!("pagination.key={}", encoded));
         }
         if let Some(limit) = limit {
             params.push(format!("pagination.limit={}", limit));

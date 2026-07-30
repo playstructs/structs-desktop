@@ -715,7 +715,14 @@ pub async fn mcp_allocations() -> Result<Value, String> {
             Err(e) => return Err(format!("could not read the primary's power: {e}")),
         };
 
-    // Candidate destinations: the guild's substation plus any we already feed.
+    // Candidate destinations: EVERY substation on the chain.
+    //
+    // Connecting an allocation needs no permission from the destination, so
+    // any substation is a legal target — including another guild's, which is
+    // how power is lent across guilds. Listing only "the guild's plus ones we
+    // already feed" left exactly one choice in the Move dropdown and made a
+    // legal move look impossible. The galaxy holds a couple of dozen
+    // substations, so enumerating them is one cheap paged read.
     let mut subs: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut add_sub = |id: &str, subs: &mut Vec<Value>, seen: &mut std::collections::HashSet<String>| {
@@ -724,6 +731,7 @@ pub async fn mcp_allocations() -> Result<Value, String> {
         }
         subs.push(json!({ "id": id }));
     };
+    // Ours first so the familiar entries stay at the top of the dropdown.
     for a in &allocations {
         if let Some(d) = a.get("destination_id").and_then(|v| v.as_str()) {
             add_sub(d, &mut subs, &mut seen);
@@ -732,6 +740,40 @@ pub async fn mcp_allocations() -> Result<Value, String> {
     if !guild_id.is_empty() {
         if let Ok(gp) = crate::mcp::guild_power::resolve_guild_power(&client, &guild_id).await {
             add_sub(&gp.substation_id, &mut subs, &mut seen);
+        }
+    }
+    // Then everything else. A failure here must not break the page — the
+    // familiar destinations above are still perfectly usable on their own.
+    // Names come from this listing (the per-entity read below doesn't carry
+    // one), and "4-10" tells an operator nothing while "Orbital Hydro" does.
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut page_key: Option<String> = None;
+    loop {
+        let listed = client
+            .list_entities("substation", page_key.as_deref(), Some(200))
+            .await;
+        let Ok(v) = listed else { break };
+        if let Some(items) = v.get("Substation").and_then(|x| x.as_array()) {
+            for item in items {
+                let Some(id) = item.get("id").and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                if let Some(n) = item.get("name").and_then(|x| x.as_str()) {
+                    if !n.is_empty() {
+                        names.insert(id.to_string(), n.to_string());
+                    }
+                }
+                add_sub(id, &mut subs, &mut seen);
+            }
+        }
+        page_key = v
+            .get("pagination")
+            .and_then(|p| p.get("next_key"))
+            .and_then(|k| k.as_str())
+            .filter(|k| !k.is_empty())
+            .map(String::from);
+        if page_key.is_none() {
+            break;
         }
     }
     // Enrich each candidate with what a connection there would actually be worth.
@@ -751,7 +793,9 @@ pub async fn mcp_allocations() -> Result<Value, String> {
             Err(_) => (0.0, 0.0, 0.0, 0.0),
         };
         substations.push(json!({
-            "id": id, "capacity_mw": cap, "load_mw": ld,
+            "id": id,
+            "name": names.get(&id).cloned().unwrap_or_default(),
+            "capacity_mw": cap, "load_mw": ld,
             "connection_count": conns, "connection_capacity_mw": conn_cap,
         }));
     }

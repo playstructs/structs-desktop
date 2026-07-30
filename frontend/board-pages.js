@@ -663,7 +663,10 @@
     form.appendChild(formFact('Currently feeding', a.destination_id));
     var dest = a.destination_id;
     var opts = (d.substations || []).map(function (s) {
-      return { value: s.id, label: s.id + ' — ' + H.fmtWatts(s.connection_capacity_mw)
+      // Name first when the substation has one — every destination is now
+      // listed, and bare ids ("4-10") don't say whose grid you'd be feeding.
+      return { value: s.id, label: (s.name ? s.name + ' · ' : '') + s.id
+        + ' — ' + H.fmtWatts(s.connection_capacity_mw)
         + '/conn across ' + s.connection_count };
     });
     form.appendChild(H.field('Move to', H.selectBox(dest, opts, function (v) { dest = v; })));
