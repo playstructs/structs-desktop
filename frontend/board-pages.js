@@ -249,6 +249,40 @@
 
   // One roster row. Pure: given a row it returns a node, so listView can cache
   // and reuse it until that row's data (or its selected state) changes.
+  /// The two spectator entry points on a roster row: this player's planet and
+  /// the fleet they command. Each opens a live window on that location — the
+  /// same renderer War · Live Raids uses — so "show me what this player is
+  /// looking at" is one click from the list they are already reading.
+  ///
+  /// A player with no planet or no fleet simply gets fewer buttons rather than
+  /// a dead one; both ids come straight off the roster row.
+  function spectatorLinks(r) {
+    var wrap = H.el('span', 'ops-spectate');
+    [
+      { id: r.planet_id, icon: 'icon-planet', what: 'planet', arg: 'planet_id' },
+      { id: r.fleet_id, icon: 'icon-fleet-tile', what: 'fleet', arg: 'fleet_id' }
+    ].forEach(function (t) {
+      if (!t.id) return;
+      var a = H.el('a', 'ops-refresh-btn');
+      a.href = 'javascript:void(0)';
+      a.title = 'Watch ' + t.what + ' ' + t.id;
+      a.appendChild(H.el('i', 'sui-icon-md ' + t.icon));
+      a.addEventListener('click', function (e) {
+        // The row itself opens the detail modal; a spectator link must not
+        // also do that behind the new window.
+        e.stopPropagation();
+        var opts = {};
+        opts[t.arg] = t.id;
+        openSpectatorWindow(opts).catch(function (err) {
+          a.classList.add('err');
+          a.title = 'could not open the ' + t.what + ' window: ' + err;
+        });
+      });
+      wrap.appendChild(a);
+    });
+    return wrap.childNodes.length ? wrap : null;
+  }
+
   function armadaRow(r) {
     return (function () {
       // Checkbox (vplayers only; primary is never a mass-action target).
@@ -278,6 +312,14 @@
       // the planet · time to next mine completion · time to next refine.
       var trio = harvestTrio(r);
       if (trio) { sub.appendChild(H.el('br')); sub.appendChild(trio); }
+      // Watch this player's planet / fleet. On the subtitle line rather than
+      // in the stat tiles: tiles are readings, these are actions.
+      var spectate = spectatorLinks(r);
+      if (spectate) {
+        if (!trio) sub.appendChild(H.el('br'));
+        else sub.appendChild(document.createTextNode(' '));
+        sub.appendChild(spectate);
+      }
       // Charge: battery + a clear Ready/n so "what is this number" is answered.
       var chargeVal = H.el('span');
       chargeVal.appendChild(H.battery(Math.min(8, r.charge), 8));
@@ -426,13 +468,28 @@
       if (d.struct_ids && d.struct_ids.length) {
         content.appendChild(H.el('div', 'ops-muted', d.struct_ids.join('  ')));
       }
-      if (r.planet_id) {
-        var mapLink = H.el('a', 'ops-refresh-btn', 'View map →');
-        mapLink.href = '#/map?p=' + encodeURIComponent(r.player_id);
-        mapLink.style.cssText = 'display:inline-block;margin-top:10px;';
-        mapLink.addEventListener('click', function () { close(); });
-        content.appendChild(mapLink);
-      }
+      // Watch buttons, in words here — the drawer has room the row does not.
+      // These replace the old "View map →" link, which routed to a page that
+      // rendered a ~11-second still through the game's own canvas.
+      var watch = H.el('div');
+      watch.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
+      [
+        { id: r.planet_id, label: 'Watch planet', arg: 'planet_id' },
+        { id: r.fleet_id, label: 'Watch fleet', arg: 'fleet_id' }
+      ].forEach(function (t) {
+        if (!t.id) return;
+        var b = H.el('a', 'ops-refresh-btn', t.label + ' →');
+        b.href = 'javascript:void(0)';
+        b.addEventListener('click', function () {
+          var opts = {};
+          opts[t.arg] = t.id;
+          openSpectatorWindow(opts).then(function () { close(); }).catch(function (err) {
+            content.appendChild(H.stateBlock('error', 'could not open the window: ' + err));
+          });
+        });
+        watch.appendChild(b);
+      });
+      if (watch.childNodes.length) content.appendChild(watch);
     }).catch(function (e) {
       content.innerHTML = '';
       content.appendChild(H.el('div', 'err', 'detail failed: ' + e));
@@ -1531,12 +1588,21 @@
   /// sending the snake_case names delivers nothing at all and the command
   /// refuses with "planet_id or fleet_id required". Same convention as
   /// `refreshIfOlderMs` and `newIndex` elsewhere on this page.
-  function openRaidWindow(opts) {
-    raidNotice(null);
+  function openSpectatorWindow(opts) {
     return Board.T.core.invoke('mcp_raid_view_open', {
       planetId: opts.planet_id || null,
       fleetId: opts.fleet_id || null,
-    }).catch(function (e) {
+    });
+  }
+
+  /// Live Raids' wrapper: same call, with the failure reported above that list.
+  /// The Armada roster calls `openSpectatorWindow` directly and reports its own
+  /// failures where the click happened — a shared notice would have written
+  /// into `raids-body`, which does not exist on the roster page, and the error
+  /// would have vanished.
+  function openRaidWindow(opts) {
+    raidNotice(null);
+    return openSpectatorWindow(opts).catch(function (e) {
       raidNotice('could not open the spectator window: ' + e);
     });
   }
@@ -3131,126 +3197,6 @@
     },
     refresh: renderConfig,
     cadenceMs: 60000,
-  });
-
-  // ═══════════════════════════ MAP ══════════════════════════════════════════
-  // ═══════════════════════════ MAP ══════════════════════════════════════════
-  // The roster list is filled on ENTER, not on boot. It used to be a one-shot
-  // `onBoot` fetch whose failure was swallowed by `.catch(function(){})`, so a
-  // transient error at page load (the web copy races the session cookie) left
-  // the selector permanently holding its single placeholder and the page blank
-  // forever — nothing retried it. Now every visit reconciles, and a failure is
-  // visible instead of silent.
-  // `mcp_render_map` round-trips to the GAME's own canvas renderer to draw a
-  // 2304x3328 planet image — measured at ~11s, and the backend allows up to 90.
-  // That is inherent, so the page is built around the wait rather than
-  // pretending it isn't there: say how long it takes, keep the last image for
-  // each player, and show it immediately while a fresh one renders behind it.
-  var mapState = { wired: false, loaded: false, current: '', cache: {} };
-
-  function mapBox() { return document.getElementById('vp-map'); }
-
-  function renderMapFor(playerId) {
-    var box = mapBox();
-    if (!box) return;
-    if (!playerId) { box.innerHTML = ''; return; }
-    mapState.current = playerId;
-    box.innerHTML = '';
-
-    // Stale-while-revalidate: a previously rendered map for this player appears
-    // instantly. Without it, switching players blanked the panel for ~11s.
-    var cached = mapState.cache[playerId];
-    if (cached) {
-      var old = new Image();
-      old.alt = 'planet map for ' + playerId + ' (refreshing)';
-      old.src = cached;
-      box.appendChild(old);
-    }
-    var note = H.stateBlock('loading',
-      cached ? 'refreshing map… (about 10 seconds)' : 'rendering map… (about 10 seconds)');
-    box.appendChild(note);
-
-    Board.T.core.invoke('mcp_render_map', { player: playerId }).then(function (durl) {
-      // Cache on ARRIVAL, not on decode: we have the bytes either way, and
-      // hanging the cache off `img.onload` meant a slow or failed decode threw
-      // away a perfectly good render.
-      mapState.cache[playerId] = durl;
-      if (mapState.current !== playerId) return;   // a newer selection won
-      var img = new Image();
-      img.alt = 'planet map for ' + playerId;
-      img.onload = function () {
-        if (mapState.current !== playerId) return;
-        box.innerHTML = '';
-        box.appendChild(img);
-      };
-      img.onerror = function () {
-        if (mapState.current !== playerId) return;
-        box.innerHTML = '';
-        box.appendChild(H.stateBlock('error', 'map image failed to load'));
-      };
-      img.src = durl;
-    }).catch(function (err) {
-      if (mapState.current !== playerId) return;
-      box.innerHTML = '';
-      // Keep whatever we had rather than throwing it away on a failed refresh.
-      if (mapState.cache[playerId]) {
-        var keep = new Image();
-        keep.alt = 'planet map for ' + playerId + ' (stale)';
-        keep.src = mapState.cache[playerId];
-        box.appendChild(keep);
-      }
-      box.appendChild(H.stateBlock('error', 'render failed: ' + err));
-    });
-  }
-
-  function loadMapRoster() {
-    var sel = document.getElementById('vp-select');
-    if (!sel) return Promise.resolve();
-    return Board.T.core.invoke('mcp_vplayer_list').then(function (list) {
-      var players = (list || []).filter(function (p) { return p.player_id; });
-      // Rebuild wholesale so a retry after a partial failure can't duplicate.
-      sel.innerHTML = '';
-      var head = H.el('option', null,
-        players.length ? '— select a player —' : '— no players —');
-      head.value = '';
-      sel.appendChild(head);
-      players.forEach(function (p) {
-        var o = H.el('option', null, p.name + ' (' + p.player_id + ')');
-        o.value = p.player_id;
-        sel.appendChild(o);
-      });
-      mapState.loaded = players.length > 0;
-      if (mapState.current) sel.value = mapState.current;
-    }).catch(function (err) {
-      mapState.loaded = false;
-      var box = mapBox();
-      if (box && !box.firstChild) {
-        box.appendChild(H.stateBlock('error', 'player list unavailable: ' + err));
-      }
-    });
-  }
-
-  Board.registerPage('map', {
-    onEnter: function (params) {
-      var sel = document.getElementById('vp-select');
-      if (sel && !mapState.wired) {
-        mapState.wired = true;
-        sel.addEventListener('change', function () { renderMapFor(sel.value); });
-        // Deep link from elsewhere on the board (#/armada/map?p=2-459).
-        Board.mapShow = function (playerId) {
-          mapState.current = playerId;
-          var s = document.getElementById('vp-select');
-          if (s) s.value = playerId;
-          renderMapFor(playerId);
-        };
-      }
-      var want = (params && params.p) || null;
-      // Retry the roster on every visit until it actually lands.
-      var ready = mapState.loaded ? Promise.resolve() : loadMapRoster();
-      return ready.then(function () {
-        if (want) Board.mapShow(want);
-      });
-    },
   });
 
 })();

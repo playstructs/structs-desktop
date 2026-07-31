@@ -39,9 +39,14 @@
     ] },
     // "Armada", not "Fleet": a fleet is a specific game entity (9-xxx, the
     // thing that moves between planets). This is our roster of players.
+    // No Map section: a roster row now opens the SPECTATOR window on that
+    // player's planet or fleet. The old page round-tripped `mcp_render_map`
+    // through the game's own canvas renderer — ~11 seconds for a still image,
+    // and it briefly commandeered the visible map container to do it. The
+    // spectator draws the same board itself, live, in its own window, several
+    // at once, without touching the game view.
     { key: 'armada', label: 'Armada', sections: [
       { key: 'roster', label: 'Roster', page: 'armada' },
-      { key: 'map', label: 'Map', page: 'map' },
       { key: 'squads', label: 'Squads', page: 'config', view: 'appearance' },
     ] },
     { key: 'industry', label: 'Industry', sections: [
@@ -83,7 +88,10 @@
   // (`#/map?p=…`) and anything the Rust side emits must not 404.
   var LEGACY_ROUTES = {
     ops: 'command/overview', fleet: 'armada/roster', armada: 'armada/roster',
-    map: 'armada/map', energy: 'industry/power', work: 'industry/work',
+    // The Map page is gone; its bookmarks and any `#/map?p=…` the Rust side
+    // still emits land on the Roster, which is where the spectator is opened
+    // from now. A dead route would 404 an old link for no reason.
+    map: 'armada/roster', energy: 'industry/power', work: 'industry/work',
     tx: 'industry/transactions', grass: 'command/stream', config: 'system/loops',
   };
   // Sections that have moved between areas. Same job as LEGACY_ROUTES, one

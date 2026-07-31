@@ -59,11 +59,15 @@
                        color: var(--accent-primary, #6cf); white-space: nowrap; }
     .ops-refresh-btn.is-busy { opacity: .5; pointer-events: none; }
     /* Pages: persistent sibling containers toggled with [hidden] so per-page
-       state (feed list, map image, roster selection) survives tab switches. */
+       state (feed list, roster selection) survives tab switches. */
     .page[hidden] { display: none; }
-    #vp-select { width: 100%; }
-    #vp-map img { width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }
     .ops-muted { opacity: .7; }
+    /* Watch-planet / watch-fleet links on a roster row. Sized to sit inline
+       with the subtitle text rather than as full buttons — they are one glyph
+       each, and the row's own click still opens the detail drawer. */
+    .ops-spectate { display: inline-flex; gap: 4px; vertical-align: middle; }
+    .ops-spectate .ops-refresh-btn { padding: 0 4px; line-height: 1; }
+    .ops-spectate .ops-refresh-btn.err { color: var(--accent-destructive, #EE7D69); }
     /* EVENT FEED — newest first, capped height so it never swallows the page. */
     #feed-list { list-style: none; margin: 4px 0 0; padding: 0; max-height: 240px; overflow-y: auto;
                  font-family: monospace; font-size: 12px; width: 100%; }
@@ -713,20 +717,10 @@
               <div id="diag-body"></div>
             </div>
 
-            <!-- ═══ MAP ═══ -->
-            <div class="page" id="page-map" hidden>
-              <div class="sui-data-card sui-theme-player">
-                <div class="sui-data-card-header">VPLAYER MAP</div>
-                <div class="sui-data-card-body sui-mod-spacing-xl">
-                  <!-- Options are the ROSTER (players), not planets; filled by
-                       the map page on entry. -->
-                  <select id="vp-select" class="sui-input-text">
-                    <option value="">— loading players… —</option>
-                  </select>
-                  <div id="vp-map"></div>
-                </div>
-              </div>
-            </div>
+            <!-- The MAP page lived here. It rendered one ~11-second still
+                 image per player through the game's own canvas. A roster row
+                 now opens the live spectator window instead — same board,
+                 drawn continuously, without borrowing the game view. -->
 
           </div>
         </div>
