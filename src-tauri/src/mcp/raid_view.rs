@@ -534,9 +534,16 @@ fn log_row(item: &Value) -> Value {
         Some(other) => other.clone(),
         None => Value::Null,
     };
+    let ts = item.get("time").and_then(|v| v.as_str()).unwrap_or("");
     json!({
-        "time": short_time(item.get("time").and_then(|v| v.as_str()).unwrap_or("")),
+        "time": short_time(ts),
+        // The DATE, kept separate. Rows are strictly newest-first, but with
+        // only a clock the log read as unsorted the moment it crossed midnight
+        // — 12:51, then 14:46, then 19:28, each a different day. The renderer
+        // breaks the list on this instead.
+        "date": day_of(ts),
         "category": category,
+        "kind": activity_kind(&category),
         "detail": describe_activity(&category, &detail),
         "block": item.get("block_height").cloned().unwrap_or(Value::Null),
     })
@@ -551,6 +558,152 @@ fn short_time(ts: &str) -> String {
         .unwrap_or_else(|| ts.to_string())
 }
 
+/// `2026-07-30 18:02:51.403416+00` → `2026-07-30`.
+fn day_of(ts: &str) -> String {
+    ts.split(' ').next().unwrap_or("").to_string()
+}
+
+/// Which family a row belongs to. The log interleaves fourteen categories and
+/// most of them are routine bookkeeping; the renderer uses this to give combat
+/// its own weight and to let the operator filter the rest away.
+fn activity_kind(category: &str) -> &'static str {
+    match category {
+        "struct_attack" | "raid_status" => "combat",
+        "shield_change" | "block_raid_start" | "struct_defense_add"
+        | "struct_defense_remove" => "defense",
+        "fleet_arrive" | "fleet_depart" | "struct_move" => "movement",
+        "struct_block_build_start" | "struct_block_ore_mine_start"
+        | "struct_block_ore_refine_start" => "economy",
+        _ => "state",
+    }
+}
+
+/// `structAttributes.status` is a BITMASK, not an enum — the chain's
+/// `STRUCT_STATUS_FLAGS`. A raw "1 → 7" says nothing; "built, online" says the
+/// struct finished building and powered up.
+fn status_flags(mask: u64) -> String {
+    const FLAGS: [(u64, &str); 7] = [
+        (1, "materialized"),
+        (2, "built"),
+        (4, "online"),
+        (8, "stored"),
+        (16, "hidden"),
+        (32, "destroyed"),
+        (64, "locked"),
+    ];
+    let set: Vec<&str> = FLAGS
+        .iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    if set.is_empty() {
+        "none".into()
+    } else {
+        set.join(", ")
+    }
+}
+
+/// Summarise one `struct_attack`. The payload is the largest the chain emits —
+/// a volley carries `eventAttackShotDetail`, each shot with its own block,
+/// evade, counter and destruction outcomes — so this reduces it to the facts a
+/// spectator reads a battle log for: who shot whom, how hard, and what it cost.
+fn describe_attack(d: &Value) -> String {
+    let s = |k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let shots = d
+        .get("eventAttackShotDetail")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let weapon = match s("weaponControl") {
+        "guided" => "smart",
+        "unguided" => "ballistic",
+        _ => "",
+    };
+    let attacker = if s("attackerStructType").is_empty() {
+        s("attackerStructId").to_string()
+    } else {
+        format!("{} {}", s("attackerStructType"), s("attackerStructId"))
+    };
+
+    if shots.is_empty() {
+        // Pre-detail rows (and the GRASS stub above ~8KB) still have the parent
+        // fields; say what is known rather than nothing.
+        let target = s("targetStructId");
+        return match (weapon.is_empty(), target.is_empty()) {
+            (_, true) => format!("{attacker} attacked"),
+            (true, false) => format!("{attacker} hit {target}"),
+            (false, false) => format!("{attacker} hit {target} ({weapon})"),
+        };
+    }
+
+    // Fold the volley. Damage is what LANDED, so blocked and evaded shots
+    // contribute nothing to it — reporting `damage` instead of `damageDealt`
+    // would credit a blocked shot with the hit it never made.
+    let num = |v: Option<&Value>| -> u64 {
+        match v {
+            Some(Value::String(x)) => x.parse().unwrap_or(0),
+            Some(Value::Number(x)) => x.as_u64().unwrap_or(0),
+            _ => 0,
+        }
+    };
+    let flag = |v: Option<&Value>| matches!(v, Some(Value::Bool(true)));
+
+    let mut dealt = 0u64;
+    let mut evaded = 0usize;
+    let mut blocked = 0usize;
+    let mut destroyed: Vec<String> = Vec::new();
+    let mut countered = 0u64;
+    let mut targets: Vec<String> = Vec::new();
+    for shot in &shots {
+        dealt += num(shot.get("damageDealt"));
+        if flag(shot.get("evaded")) {
+            evaded += 1;
+        }
+        if flag(shot.get("blocked")) {
+            blocked += 1;
+        }
+        countered += num(shot.get("targetCounteredDamage"));
+        let tid = shot.get("targetStructId").and_then(|v| v.as_str()).unwrap_or("");
+        let ttype = shot.get("targetStructType").and_then(|v| v.as_str()).unwrap_or("");
+        let label = if ttype.is_empty() { tid.to_string() } else { format!("{ttype} {tid}") };
+        if flag(shot.get("targetDestroyed")) && !label.is_empty() {
+            destroyed.push(label.clone());
+        }
+        if !label.is_empty() && !targets.contains(&label) {
+            targets.push(label);
+        }
+    }
+
+    let target = if targets.len() == 1 {
+        targets[0].clone()
+    } else {
+        format!("{} targets", targets.len())
+    };
+    let mut out = if weapon.is_empty() {
+        format!("{attacker} → {target}")
+    } else {
+        format!("{attacker} → {target} ({weapon})")
+    };
+    out.push_str(&format!(", {dealt} dmg"));
+    if shots.len() > 1 {
+        out.push_str(&format!(" over {} shots", shots.len()));
+    }
+    if blocked > 0 {
+        out.push_str(&format!(", {blocked} blocked"));
+    }
+    if evaded > 0 {
+        out.push_str(&format!(", {evaded} evaded"));
+    }
+    if countered > 0 {
+        out.push_str(&format!(", countered for {countered}"));
+    }
+    if !destroyed.is_empty() {
+        out.push_str(&format!(" — DESTROYED {}", destroyed.join(", ")));
+    }
+    out
+}
+
 /// Render one activity detail as a sentence. Shapes transcribed from live rows
 /// (`structs.planet_activity`), so each category reads naturally instead of
 /// dumping JSON at the operator.
@@ -561,18 +714,15 @@ fn describe_activity(category: &str, d: &Value) -> String {
         Some(Value::Number(x)) => x.to_string(),
         _ => String::new(),
     };
-    match category {
-        "struct_attack" => {
-            let mut out = format!("{} hit {}", s("attackerStructId"), s("targetStructId"));
-            let weapon = s("weaponSystem");
-            if !weapon.is_empty() {
-                out.push_str(&format!(" with {weapon}"));
-            }
-            if n("recoilDamage") != "0" && !n("recoilDamage").is_empty() {
-                out.push_str(&format!(", recoil {}", n("recoilDamage")));
-            }
-            out
+    let u = |k: &str| -> Option<u64> {
+        match d.get(k) {
+            Some(Value::String(x)) => x.parse().ok(),
+            Some(Value::Number(x)) => x.as_u64(),
+            _ => None,
         }
+    };
+    match category {
+        "struct_attack" => describe_attack(d),
         "raid_status" => {
             let mut out = format!("raid {}", s("status"));
             if !s("fleet_id").is_empty() {
@@ -585,12 +735,41 @@ fn describe_activity(category: &str, d: &Value) -> String {
         }
         "fleet_arrive" => format!("fleet {} arrived ({})", s("fleet_id"), s("fleet_status")),
         "fleet_depart" => format!("fleet {} departed", s("fleet_id")),
-        "shield_change" => {
-            let (from, to) = (n("shield_old"), n("shield"));
-            if from.is_empty() { format!("shield now {to}") } else { format!("shield {from} → {to}") }
-        }
-        "struct_health" => format!("{} health {}", s("struct_id"), n("health")),
-        "struct_status" => format!("{} status {} → {}", s("struct_id"), n("status_old"), n("status")),
+        // The chain's keys are `planetary_shield{,_old}`. Reading `shield`
+        // produced a permanent "shield now" with no number on every row.
+        "shield_change" => match (u("planetary_shield_old"), u("planetary_shield")) {
+            (Some(from), Some(to)) => {
+                let arrow = if to >= from { "+" } else { "-" };
+                let delta = if to >= from { to - from } else { from - to };
+                format!("shield {from} → {to} ({arrow}{delta})")
+            }
+            (None, Some(to)) => format!("shield now {to}"),
+            _ => "shield changed".into(),
+        },
+        // Raidability: a non-zero block is when the raid window opened, 0 means
+        // the planet is no longer raidable.
+        "block_raid_start" => match u("block_start_raid") {
+            Some(0) => "planet no longer raidable".into(),
+            Some(b) => format!("planet became raidable (block {b})"),
+            None => "raid window changed".into(),
+        },
+        "struct_health" => match (u("health_old"), u("health")) {
+            (Some(from), Some(to)) if from != to => {
+                format!("{} health {from} → {to}", s("struct_id"))
+            }
+            (_, Some(to)) => format!("{} health {to}", s("struct_id")),
+            _ => format!("{} health changed", s("struct_id")),
+        },
+        "struct_status" => match (u("status_old"), u("status")) {
+            (Some(from), Some(to)) => format!(
+                "{} {} → {}",
+                s("struct_id"),
+                status_flags(from),
+                status_flags(to)
+            ),
+            (None, Some(to)) => format!("{} {}", s("struct_id"), status_flags(to)),
+            _ => format!("{} status changed", s("struct_id")),
+        },
         "struct_defense_add" => {
             format!("{} now defends {}", s("defender_struct_id"), s("protected_struct_id"))
         }
@@ -598,8 +777,8 @@ fn describe_activity(category: &str, d: &Value) -> String {
             format!("{} stopped defending {}", s("defender_struct_id"), s("protected_struct_id"))
         }
         "struct_move" => format!(
-            "{} moved to {} {} slot {}",
-            s("struct_id"), s("ambit"), s("location_id"), n("slot")
+            "{} moved to {} slot {} on {}",
+            s("struct_id"), s("ambit"), n("slot"), s("location_id")
         ),
         "struct_block_build_start" => format!("{} build started", s("struct_id")),
         "struct_block_ore_mine_start" => format!("{} mining started", s("struct_id")),
@@ -663,25 +842,131 @@ mod log_tests {
     // one invented here.
 
     #[test]
-    fn attack_reads_as_a_sentence() {
+    fn attack_folds_the_whole_volley() {
+        // Transcribed from a live row: one shot, blocked by a Tank, and the
+        // target counter-attacked for 1.
         let d = json!({
-            "recoilDamage": "0", "weaponSystem": "primaryWeapon",
-            "weaponControl": "guided", "activeWeaponry": "guidedWeaponry",
-            "attackerPlayerId": "1-61", "attackerStructId": "5-26262",
-            "targetStructId": "5-30829"
+            "weaponSystem": "primaryWeapon", "weaponControl": "unguided",
+            "attackerStructId": "5-4677", "attackerStructType": "Battleship",
+            "eventAttackShotDetail": [{
+                "damage": "2", "damageDealt": "2", "evaded": false, "blocked": true,
+                "targetStructId": "5-20268", "targetStructType": "Command Ship",
+                "targetDestroyed": false, "targetCounteredDamage": "1"
+            }]
         });
         assert_eq!(
             describe_activity("struct_attack", &d),
-            "5-26262 hit 5-30829 with primaryWeapon"
+            "Battleship 5-4677 → Command Ship 5-20268 (ballistic), 2 dmg, 1 blocked, countered for 1"
         );
     }
 
     #[test]
-    fn recoil_is_mentioned_only_when_it_happened() {
-        let none = json!({"attackerStructId": "5-1", "targetStructId": "5-2", "recoilDamage": "0"});
-        assert!(!describe_activity("struct_attack", &none).contains("recoil"));
-        let some = json!({"attackerStructId": "5-1", "targetStructId": "5-2", "recoilDamage": "2"});
-        assert!(describe_activity("struct_attack", &some).contains("recoil 2"));
+    fn a_kill_is_shouted_not_buried() {
+        let d = json!({
+            "weaponControl": "guided",
+            "attackerStructId": "5-1", "attackerStructType": "Starfighter",
+            "eventAttackShotDetail": [
+                {"damageDealt": "1", "targetStructId": "5-9", "targetStructType": "Tank",
+                 "targetDestroyed": false},
+                {"damageDealt": "2", "targetStructId": "5-9", "targetStructType": "Tank",
+                 "targetDestroyed": true}
+            ]
+        });
+        let out = describe_activity("struct_attack", &d);
+        assert!(out.contains("3 dmg over 2 shots"), "{out}");
+        assert!(out.contains("DESTROYED Tank 5-9"), "{out}");
+    }
+
+    #[test]
+    fn a_volley_that_all_missed_reports_zero_damage_not_the_rolled_damage() {
+        // `damage` is what the weapon would do; `damageDealt` is what landed.
+        // Reading the wrong one credits an evaded shot with a hit.
+        let d = json!({
+            "attackerStructId": "5-1",
+            "eventAttackShotDetail": [
+                {"damage": "5", "damageDealt": "0", "evaded": true, "targetStructId": "5-2"}
+            ]
+        });
+        let out = describe_activity("struct_attack", &d);
+        assert!(out.contains("0 dmg"), "{out}");
+        assert!(out.contains("1 evaded"), "{out}");
+    }
+
+    #[test]
+    fn an_attack_with_no_shot_detail_still_reads() {
+        // The GRASS stream stubs `struct_attack` above ~8KB, so the parent
+        // fields can arrive alone.
+        let d = json!({"attackerStructId": "5-1", "targetStructId": "5-2"});
+        assert_eq!(describe_activity("struct_attack", &d), "5-1 hit 5-2");
+    }
+
+    /// The bug this pins: the keys are `planetary_shield{,_old}`, so reading
+    /// `shield`/`shield_old` rendered every row as a bare "shield now".
+    #[test]
+    fn shield_change_reads_the_chains_own_keys() {
+        let d = json!({"planetary_shield": 225, "planetary_shield_old": 175});
+        assert_eq!(describe_activity("shield_change", &d), "shield 175 → 225 (+50)");
+        let down = json!({"planetary_shield": 100, "planetary_shield_old": 175});
+        assert_eq!(describe_activity("shield_change", &down), "shield 175 → 100 (-75)");
+    }
+
+    /// `status` is a bitmask; "1 → 7" is unreadable, "materialized → built"
+    /// is the same fact in words.
+    #[test]
+    fn status_is_decoded_from_its_bitmask() {
+        let d = json!({"struct_id": "5-7862", "status_old": 1, "status": 7});
+        assert_eq!(
+            describe_activity("struct_status", &d),
+            "5-7862 materialized → materialized, built, online"
+        );
+        assert_eq!(status_flags(0), "none");
+        assert_eq!(status_flags(32), "destroyed");
+    }
+
+    #[test]
+    fn health_shows_the_transition_when_there_is_one() {
+        let d = json!({"struct_id": "5-1", "health_old": 6, "health": 4});
+        assert_eq!(describe_activity("struct_health", &d), "5-1 health 6 → 4");
+    }
+
+    /// Previously fell through to a raw JSON dump in the operator's face.
+    #[test]
+    fn block_raid_start_is_a_sentence_not_a_payload() {
+        assert_eq!(
+            describe_activity("block_raid_start", &json!({"block_start_raid": 0})),
+            "planet no longer raidable"
+        );
+        assert!(describe_activity("block_raid_start", &json!({"block_start_raid": 1886798}))
+            .contains("raidable"));
+    }
+
+    #[test]
+    fn every_live_category_is_classified() {
+        // The fourteen categories present in production `planet_activity`.
+        for (cat, want) in [
+            ("struct_attack", "combat"),
+            ("raid_status", "combat"),
+            ("shield_change", "defense"),
+            ("block_raid_start", "defense"),
+            ("struct_defense_add", "defense"),
+            ("struct_defense_remove", "defense"),
+            ("fleet_arrive", "movement"),
+            ("fleet_depart", "movement"),
+            ("struct_move", "movement"),
+            ("struct_block_build_start", "economy"),
+            ("struct_block_ore_mine_start", "economy"),
+            ("struct_block_ore_refine_start", "economy"),
+            ("struct_status", "state"),
+            ("struct_health", "state"),
+        ] {
+            assert_eq!(activity_kind(cat), want, "{cat}");
+        }
+    }
+
+    #[test]
+    fn the_date_is_split_out_so_the_log_can_break_on_it() {
+        assert_eq!(day_of("2026-07-30 18:02:51.403416+00"), "2026-07-30");
+        assert_eq!(short_time("2026-07-30 18:02:51.403416+00"), "18:02:51");
     }
 
     #[test]

@@ -178,26 +178,60 @@
     #rv-log-body { overflow: auto; padding: 0 12px 8px; }
     .rv-log-empty { color: var(--text-hint, #A7C0C6); padding: 6px 0; }
     .rv-log-row {
-      /* The category column is sized for the WIDEST label in ExtremeHazard
-         ("struct block ore refine start"); too narrow and a nowrap label
-         overprints the detail beside it. */
-      display: grid; grid-template-columns: 62px 150px 1fr; gap: 10px;
+      /* Labels are single words now (see LOG_LABEL), so the column can be
+         narrow AND nowrap: every row is exactly one line tall, which is what
+         makes a few hundred of them skimmable. An unknown future category
+         falls back to its humanised chain name and is ellipsised rather than
+         being allowed to wrap and break the rhythm. */
+      display: grid; grid-template-columns: 62px 78px 1fr; gap: 10px;
       align-items: baseline; padding: 3px 0;
       border-bottom: 1px solid rgba(57, 73, 88, .5);
     }
     .rv-log-t { color: var(--text-hint, #A7C0C6); font-variant-numeric: tabular-nums; }
     .rv-log-cat {
       color: var(--text-player-primary, #43CDB6);
-      /* WRAP rather than nowrap: category names are chain-driven and can be
-         long ("struct block ore refine start"), and a nowrap label overprints
-         the detail column instead of being clipped. Wrapping keeps any future
-         category readable without anyone re-tuning a pixel width. */
-      overflow-wrap: anywhere;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .rv-log-row.rv-bad .rv-log-cat { color: var(--text-enemy-primary, #EE7D69); }
     .rv-log-row.rv-warn .rv-log-cat { color: var(--text-warning, #F3C878); }
+    .rv-log-row.rv-dim .rv-log-cat { color: var(--text-hint, #A7C0C6); }
     .rv-log-d { color: var(--text-body, #C5D7D9); word-break: break-word; text-align: left; }
     #rv-log-body, .rv-log-row { text-align: left; }
+
+    /* Combat is the story; bookkeeping is context. A left rule and a brighter
+       detail line give an attack visible weight in a list where thousands of
+       status flags otherwise look identical to it. */
+    .rv-log-row.rv-k-combat {
+      border-left: 2px solid var(--text-enemy-primary, #EE7D69);
+      padding-left: 8px; margin-left: -10px;
+    }
+    .rv-log-row.rv-k-state .rv-log-d { color: var(--text-hint, #A7C0C6); }
+
+    /* Day break. Rows arrive newest-first; without this a list crossing
+       midnight reads as unsorted. Sticky so the day stays legible while
+       scrolling a long log. */
+    .rv-log-day {
+      position: sticky; top: 0; z-index: 1;
+      padding: 6px 0 3px; margin-top: 4px;
+      color: var(--text-hint, #A7C0C6);
+      background: var(--surface-default, #222034);
+      border-bottom: 1px solid var(--border-subtle, #394958);
+    }
+    .rv-log-day:first-child { margin-top: 0; }
+
+    /* Filter strip in the log header. */
+    .rv-log-filters { display: inline-flex; gap: 6px; margin-left: 10px; }
+    .rv-log-chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 1px 6px; text-decoration: none;
+      border: 1px solid var(--border-subtle, #394958);
+      color: var(--text-hint, #A7C0C6); opacity: .55;
+    }
+    .rv-log-chip.rv-on { opacity: 1; border-color: var(--border, #5D7E90); }
+    .rv-log-chip .rv-bad { color: var(--text-enemy-primary, #EE7D69); }
+    .rv-log-chip .rv-warn { color: var(--text-warning, #F3C878); }
+    .rv-log-chip .rv-dim { color: var(--text-hint, #A7C0C6); }
+    .rv-log-chip-n { color: var(--text-hint, #A7C0C6); font-variant-numeric: tabular-nums; }
 
     /* ── Map ──────────────────────────────────────────────────────────────
        Plain DOM + CSS background tiles, exactly the technique the game uses —
@@ -239,8 +273,15 @@
 
     /* Slot markers: beacon on a buildable planetary slot, blocked art on an
        unusable cell — the game's MapTileMarkersComponent overlay. */
+    /* DECORATION ONLY. The beacon sits at z-index 50, above the struct mount,
+       so without this it is the click target on every planetary slot — the
+       struct underneath never sees the event and selecting a planetary Struct
+       silently selected its TILE instead ("WATER" + a beacon icon in the
+       Action Bar). Fleet cells have no marker, which is why only the planetary
+       half was broken. */
     .rv-marker { position: absolute; max-width: 100%; max-height: 100%;
-      left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 50; }
+      left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 50;
+      pointer-events: none; }
 
     /* The mount a struct renders into. Attacker-side mounts are mirrored so
        raiders face the planet (.map-struct-layer-tile.mod-side-right). The
@@ -497,6 +538,7 @@
       <i class="icon-list"></i>
       <span>Battle log</span>
       <span id="rv-log-count" class="rv-log-count"></span>
+      <span id="rv-log-filters" class="rv-log-filters"></span>
       <span class="rv-spacer"></span>
       <a href="javascript: void(0)" id="rv-log-toggle" class="rv-log-toggle">show</a>
     </div>
