@@ -197,6 +197,16 @@ pub fn snapshot() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// The gate is ONE process-global semaphore, so the two tests that fill it
+    /// to `MAX_IN_FLIGHT` cannot run at the same time — `cargo test` runs them
+    /// in parallel by default and each would then count the other's permits.
+    /// Poisoning is ignored: a panic in one test should fail that test, not
+    /// cascade into every later one.
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        GATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn classify_by_context_head() {
         assert_eq!(classify("auto_response:1-194"), Priority::Critical);
@@ -217,6 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn cap_bounds_in_flight_and_permits_release() {
+        let _gate = exclusive();
         let mut held = Vec::new();
         for _ in 0..MAX_IN_FLIGHT {
             held.push(acquire("auto_build:test").await);
@@ -240,6 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn critical_jumps_ahead_of_bulk() {
+        let _gate = exclusive();
         let mut held = Vec::new();
         for _ in 0..MAX_IN_FLIGHT {
             held.push(acquire("auto_build:fill").await);

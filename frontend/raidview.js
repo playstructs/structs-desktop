@@ -28,6 +28,13 @@
   // Geometry — transcribed from constants/MapConstants.js
   // ══════════════════════════════════════════════════════════════════════════
 
+  /* Mirrors `TERMINAL_STATUSES` in raid_view.rs and the game's
+   * RaidStatusUtil.hasRaidEnded — the four statuses that mean the raid is
+   * over and the attacker is no longer present. */
+  var TERMINAL_RAID_STATUSES = [
+    'attackerDefeated', 'attackerRetreated', 'raidSuccessful', 'demilitarized',
+  ];
+
   var COL = {
     DEF_CMD: 'DEFENDER_COMMAND',
     DEF_PLAN: 'DEFENDER_PLANETARY',
@@ -267,6 +274,14 @@
     // snapshot. Cleared when a snapshot for the same generation lands.
     liveHealth: {},
     lastEventMs: 0,
+    /// Struct whose readout is open, if any. Survives rebuilds.
+    selectedId: null,
+    /// Empty tile whose readout is open — `{key, icon, label, side}`. Mutually
+    /// exclusive with `selectedId`, as on the game's own map.
+    selectedTile: null,
+    /// Capability record per struct type id, from the snapshot. Drives the
+    /// Action Chunk's properties screen and ability buttons.
+    structTypes: {},
     planetaryShield: 0,
     raidStatus: null,
   };
@@ -361,6 +376,9 @@
 
   // Anchor cells for struct mounting, rebuilt with the grid.
   var anchors = {};
+  // The cell element behind each anchor, so an EMPTY tile can be selected and
+  // outlined. Same keys as `anchors`.
+  var tileAnchors = {};
 
   function edgeStrip(cols, ambit, edge) {
     // edge: 'top' (V_POS 0) or 'bottom' (V_POS 4).
@@ -459,6 +477,7 @@
     var map = document.getElementById('rv-map');
     map.innerHTML = '';
     anchors = {};
+    tileAnchors = {};
 
     var slots = snap.slots || {};
     // A missing count means the backend could not read it — treat as the full
@@ -483,7 +502,7 @@
         var rowNode = el('div', 'rv-row');
         if (r === 0) {
           var band = el('div', 'rv-band');
-          band.appendChild(el('span', null, ambit));
+          band.appendChild(el('span', 'sui-text-label', ambit));
           rowNode.appendChild(band);
         }
         for (var c = 0; c < cols.length; c++) {
@@ -494,8 +513,49 @@
     });
     map.appendChild(transitionRow(cols, prevAmbit, ''));
     boardCols = cols.length;
+    renderFogOfWar(cols);
     setBoardScale();
     return anchors;
+  }
+
+  /* FOG OF WAR — the game's `MapFogOfWarComponent`, same condition and same
+   * art. It covers everything from the DIVIDER to the right edge whenever
+   * there is no attacker present (`shouldDisplayFogOfWar()`: no attacker and a
+   * defender perspective). Without it an idle planet reads as though the
+   * attacker half were simply empty, when in fact the game hides it.
+   *
+   * Drawn as a sibling overlay inside #rv-map so it scales with the board's
+   * own zoom and needs no per-row participation. */
+  function renderFogOfWar(cols) {
+    var map = document.getElementById('rv-map');
+    if (!map) return;
+    var existing = map.querySelector('.rv-fog');
+    if (existing) existing.remove();
+
+    var raiding = (state.snapshot && state.snapshot.raiding_fleet) || state.raidingFleet;
+    if (raiding) return;                        // an attacker is here: no fog
+
+    var dividerIndex = cols.indexOf(COL.DIVIDER);
+    if (dividerIndex < 0) return;
+    var fog = el('div', 'rv-fog');
+    fog.style.left = (dividerIndex * 128) + 'px';
+    fog.style.width = ((cols.length - dividerIndex) * 128) + 'px';
+    var edge = el('div', 'rv-fog-edge');
+    var body = el('div', 'rv-fog-body');
+    fog.appendChild(edge);
+    fog.appendChild(body);
+    map.appendChild(fog);
+  }
+
+  /** A slot the planet does not have. Selectable like any other tile — the
+   * game gives it its own tile type and the `icon-blocked` property icon —
+   * but it never anchors a struct. */
+  function blockedCell(n, key, ambit, side) {
+    tileAnchors[key] = n;
+    n.addEventListener('click', function () {
+      selectTile({ key: key, icon: TILE_ICON.BLOCKED, label: ambit, side: side });
+    });
+    return n;
   }
 
   function cell(cols, slotsFor, ambit, row, colIndex) {
@@ -510,23 +570,26 @@
 
     var side = colIndex < cols.indexOf(COL.DIVIDER) ? 'defender' : 'attacker';
     var key = null;
+    var tileIcon = null;
 
     if (colType === COL.DEF_CMD || colType === COL.ATK_CMD) {
       // One usable command slot per side per ambit (always slot 0); the
       // second row is blocked, exactly as createCommandSlotTracker deals it.
       if (row === 0) {
         key = 'cmd|' + side + '|' + ambit;
+        tileIcon = TILE_ICON.COMMAND;
       } else {
         n.appendChild(blockedMarker(ambit));
-        return n;
+        return blockedCell(n, 'cmdblk|' + side + '|' + ambit, ambit, side);
       }
     } else if (colType === COL.DEF_PLAN) {
       var pslot = slotAt(cols, COL.DEF_PLAN, row, colIndex);
       if (pslot >= slotsFor(ambit)) {
         n.appendChild(blockedMarker(ambit));
-        return n;
+        return blockedCell(n, 'planblk|' + ambit + '|' + pslot, ambit, side);
       }
       key = 'plan|' + ambit + '|' + pslot;
+      tileIcon = TILE_ICON.PLANETARY_SLOT;
       // The beacon renders whether or not the slot is occupied — the game's
       // marker layer never consults occupancy, and the struct simply draws
       // over it. That IS the platform a water struct appears to stand on.
@@ -534,13 +597,25 @@
     } else {
       var fslot = slotAt(cols, colType, row, colIndex);
       key = 'fleet|' + side + '|' + ambit + '|' + fslot;
+      tileIcon = TILE_ICON.FLEET;
     }
+
+    // The attacker's half is the enemy's ground; the game swaps in the
+    // enemy-territory icon for it (`getPropertyIconForTileType`, align right).
+    if (side === 'attacker') tileIcon = TILE_ICON.ENEMY_TERRITORY;
 
     // The mount a struct renders into. Right-side mounts are mirrored so
     // raiders face the planet (.map-struct-layer-tile.mod-side-right).
     var mount = el('div', 'rv-mount' + (side === 'attacker' ? ' rv-flip' : ''));
     n.appendChild(mount);
     anchors[key] = mount;
+    tileAnchors[key] = n;
+
+    // Selecting the EMPTY tile. A struct's own mount stops the event before it
+    // reaches here, so an occupied tile still selects the struct.
+    n.addEventListener('click', function () {
+      selectTile({ key: key, icon: tileIcon, label: ambit, side: side });
+    });
     return n;
   }
 
@@ -554,8 +629,491 @@
       if (!mount) { unplaced++; return; }
       if (mount.childNodes.length) { unplaced++; return; } // seat taken
       mount.appendChild(structNode(s));
+      // Selecting a struct opens its readout. The game's tile-selection layer
+      // exists to choose a target for an ACTION; here the same gesture is
+      // worth keeping for the INFORMATION it surfaces — what this thing is,
+      // how hurt it is, whether it is online — which a spectator otherwise
+      // has no way to ask for.
+      mount.addEventListener('click', function (e) {
+        // Beat the cell's empty-tile handler underneath.
+        e.stopPropagation();
+        selectStruct(s.id);
+      });
     });
+    // A rebuild replaces every mount, so re-apply the ring to whatever is
+    // still selected rather than silently dropping the selection.
+    if (state.selectedId) applySelection(state.selectedId);
     return unplaced;
+  }
+
+  /* ── Status indicators ─────────────────────────────────────────────────
+   * Which icons a unit shows is FOCUS-DEPENDENT. From the Structs Design
+   * System, "Unit Tile → Status Indicators":
+   *
+   *   Defended  — with nothing in focus, show on every defended unit;
+   *               with a unit in focus, only on the unit the SELECTION guards.
+   *   Defender  — with nothing in focus, show on every defending unit;
+   *               with a unit in focus, only on the unit guarding the SELECTION.
+   *   Destroyed — only when that tile is in focus.
+   *   Stealth   — friendly: always. (Enemy visibility depends on what the
+   *               selected unit can see, which a spectator cannot compute, so
+   *               hidden enemies keep the half-opacity treatment instead.)
+   *
+   * The same document adds: "Reaction indicators supersede status indicators.
+   * Status indicators should be hidden when a reaction indicator is active" —
+   * so nothing is drawn while a combat animation is playing.
+   */
+  function badgesFor(s) {
+    if (playing) return [];                       // a reaction supersedes these
+    var sel = state.selectedId ? state.structsById[state.selectedId] : null;
+    var out = [];
+
+    if (s.destroyed) {
+      // Wreckage announces itself only when you look at it.
+      if (sel && sel.id === s.id) out.push('sui-icon-destroyed');
+      return out;
+    }
+    // Offline is ours, not the design system's: a spectator cannot see a
+    // power bar anywhere else, and the game shows the same glyph on its own
+    // tiles when a struct is unpowered.
+    if (s.online === false && s.built !== false) out.push('sui-icon-no-power');
+
+    if (s.defended) {
+      if (!sel) out.push('sui-icon-defended');
+      else if (sel.protects === s.id) out.push('sui-icon-defended');
+    }
+    if (s.defending) {
+      if (!sel) out.push('sui-icon-defending');
+      else if (s.protects === sel.id) out.push('sui-icon-defending');
+    }
+    if (s.hidden) out.push('sui-icon-stealth-mode');
+    return out;
+  }
+
+  function paintBadges(s) {
+    var host = document.getElementById(domId('badges', s.id));
+    if (!host) return;
+    host.innerHTML = '';
+    badgesFor(s).forEach(function (cls) {
+      host.appendChild(el('i', 'sui-icon ' + cls + ' sui-icon-sm'));
+    });
+  }
+
+  /** Repaint every tile's indicators — focus changed, or a sequence ended. */
+  function repaintAllBadges() {
+    Object.keys(state.structsById).forEach(function (id) {
+      paintBadges(state.structsById[id]);
+    });
+  }
+
+  /* ── Selection ─────────────────────────────────────────────────────────── */
+
+  function selectStruct(id) {
+    state.selectedTile = null;
+    state.selectedId = (state.selectedId === id) ? null : id;  // click again to clear
+    applySelection(state.selectedId);
+  }
+
+  /** An EMPTY tile is selectable too — the Design System's Action Chunk has a
+   * documented empty-tile form ("LAND", the tile-type icon, no button group),
+   * and without it half the board is inert to the pointer in a way the game's
+   * map is not. `info` is `{key, icon, label, side}`. */
+  function selectTile(info) {
+    state.selectedId = null;
+    var same = state.selectedTile && state.selectedTile.key === info.key;
+    state.selectedTile = same ? null : info;
+    applySelection(null);
+  }
+
+  function applySelection(id) {
+    // Clear any previous ring.
+    var old = document.querySelectorAll('.rv-focus-ring');
+    for (var i = 0; i < old.length; i++) old[i].remove();
+    var oldTile = document.querySelectorAll('.rv-cell.rv-tile-selected');
+    for (var t = 0; t < oldTile.length; t++) {
+      oldTile[t].classList.remove('rv-tile-selected', 'rv-enemy-side');
+    }
+
+    var s = id ? state.structsById[id] : null;
+    if (!s) {
+      state.selectedId = null;
+      repaintAllBadges();
+      var tile = state.selectedTile;
+      if (!tile) {
+        showInfo('def', null);
+        showInfo('atk', null);
+        return;
+      }
+      var cellNode = tileAnchors[tile.key];
+      if (cellNode) {
+        cellNode.classList.add('rv-tile-selected');
+        if (tile.side === 'attacker') cellNode.classList.add('rv-enemy-side');
+      }
+      var tside = tile.side === 'attacker' ? 'atk' : 'def';
+      showInfo(tside, { tile: tile });
+      showInfo(tside === 'def' ? 'atk' : 'def', null);
+      return;
+    }
+    var wrap = document.getElementById(domId('slot', id));
+    if (wrap) {
+      var ring = el('div', 'rv-focus-ring '
+        + (s.side === 'attacker' ? 'rv-enemy' : 'rv-friendly'));
+      wrap.appendChild(ring);
+    }
+    // Indicator visibility is focus-dependent, so a selection change rewrites
+    // every tile's icons, not just this one's.
+    repaintAllBadges();
+    // The readout appears on the side that owns the struct, which is where a
+    // player's own HUD would show it.
+    var side = s.side === 'attacker' ? 'atk' : 'def';
+    showInfo(side, { struct: s });
+    showInfo(side === 'def' ? 'atk' : 'def', null);
+  }
+
+  /* ── Action Bar ──────────────────────────────────────────────────────────
+     Structs Design System, "Action Bar" (Figma 3815-187846):
+
+       Action Bar  = Player Chunk + connector + Action Chunk, and the
+                     connector and Action Chunk are HIDDEN when no tile is
+                     selected. The Enemy style mirrors the order — Action
+                     Chunk first, Player Chunk last — which is why the two
+                     bars in raidview.html are built the way they are.
+       Action Chunk = a header screen naming the selection, then a bottom row
+                     of: Power Switch group · properties screen · button group.
+       Power Switch = shown only when the tile holds a Struct, and NEVER in
+                     the Enemy style.
+       Button Group = present only when the Struct has actionable abilities.
+
+     Every class below is the shipped `ActionBarComponent`'s, so sui.css
+     styles this the same way it styles the game's own bar — including the
+     decorative slivers, which the Design System requires on both groups and
+     which sui.css already paints as their backgrounds.
+
+     The buttons are deliberately inert: a spectator takes no actions, so they
+     render in the `disabled` state rather than being omitted (the bar's shape
+     is itself information — it says what this Struct can do). */
+
+  /** STRUCT_EQUIPMENT_ICON_MAP, verbatim from the game's StructConstants. */
+  var EQUIP_ICON = {
+    attackRun: 'icon-ballistic-weapon',
+    guidedWeaponry: 'icon-smart-weapon',
+    unguidedWeaponry: 'icon-ballistic-weapon',
+    advancedCounterAttack: 'icon-adv-counter',
+    counterAttack: 'icon-counter',
+    strongCounterAttack: 'icon-adv-counter',
+    armour: 'icon-armour',
+    defensiveManeuver: 'icon-kinetic-barrier',
+    indirectCombatModule: 'icon-indirect',
+    signalJamming: 'icon-signal-jam',
+    stealthMode: 'icon-stealth',
+    coordinatedReserveResponseTracker: 'icon-planetary-shield',
+    defensiveCannon: 'icon-counter',
+    lowOrbitBallisticInterceptorNetwork: 'icon-signal-jam',
+    monitoringStation: 'icon-planetary-shield',
+    oreBunker: 'icon-planetary-shield',
+    smallGenerator: 'icon-refine'
+  };
+
+  /** MAP_TILE_TYPE_ICONS, for the empty-tile case the spec calls out. */
+  var TILE_ICON = {
+    COMMAND: 'icon-cmd-post',
+    PLANETARY_SLOT: 'icon-beacon',
+    FLEET: 'icon-fleet-tile',
+    BLOCKED: 'icon-blocked',
+    ENEMY_TERRITORY: 'icon-enemy-tile'
+  };
+
+  /** The chain spells "this slot is empty" as `noUnitDefenses`,
+   * `noPlanetaryDefense`, … — a `no` prefix on the capability's own name. */
+  function equipped(v) { return !!v && !/^no[A-Z]/.test(v); }
+
+  /** The struct type record for a struct, or null if the catalogue read that
+   * fills it hasn't landed. Everything downstream degrades to a bare header. */
+  function typeOf(s) {
+    return (state.structTypes && state.structTypes[String(s.type_id)]) || null;
+  }
+
+  /** `<a>` wrapper the game uses inside the properties screen. Carries
+   * `data-sui-cheatsheet` so the Cheatsheet popover can explain the icon —
+   * which is the added information tile selection exists to surface. */
+  function propIcon(iconClass, sheetKey, s) {
+    var a = el('a', null);
+    a.href = 'javascript: void(0)';
+    if (sheetKey) a.setAttribute('data-sui-cheatsheet', sheetKey);
+    if (s) a.setAttribute('data-struct', s.id);
+    a.appendChild(el('i', 'sui-icon-md ' + iconClass));
+    return a;
+  }
+
+  /** The properties screen's icons: the four standard equipment slots in the
+   * game's own order, then the economic ones — or a single state icon when the
+   * struct is wreckage or unpowered, which is what the game shows instead.
+   *
+   * The game pairs the economic icons with live COUNTS (undiscovered ore, ore
+   * ready, fuel). Those are dropped here rather than guessed: they read the
+   * owner's inventory and the struct's fuel, neither of which a spectator can
+   * see per-struct. The icon alone still says truthfully what the Struct does;
+   * a number we invented would not. */
+  function propertyIcons(s, st) {
+    var out = [];
+    if (s.destroyed) {
+      out.push(propIcon('icon-wreckage', 'icon-wreckage', s));
+      return out;
+    }
+    if (s.online === false) {
+      out.push(propIcon('icon-unpowered', 'icon-unpowered', s));
+      return out;
+    }
+    if (!st) return out;
+    [
+      st.passive_weaponry,
+      st.unit_defenses,
+      st.ore_reserve_defenses,
+      st.planetary_defenses
+    ].forEach(function (equip) {
+      if (!equipped(equip)) return;
+      var icon = EQUIP_ICON[equip];
+      if (icon) out.push(propIcon(icon, s.type_slug, s));
+    });
+    // Economic capability — an extractor or refinery has no combat equipment
+    // at all, so without these its properties screen would be empty.
+    if (equipped(st.planetary_mining)) out.push(propIcon('icon-mine', s.type_slug, s));
+    if (equipped(st.planetary_refinery)) out.push(propIcon('icon-ore-ready', s.type_slug, s));
+    if (equipped(st.power_generation)) {
+      out.push(propIcon(EQUIP_ICON[st.power_generation] || 'icon-refine', s.type_slug, s));
+    }
+    return out;
+  }
+
+  /** One inert ability button, in the game's `sui-panel-btn` shape. */
+  function abilityBtn(iconClass, title, sheetKey) {
+    var a = el('a', 'sui-panel-btn sui-mod-disabled');
+    a.href = 'javascript: void(0)';
+    a.title = title;
+    if (sheetKey) a.setAttribute('data-sui-cheatsheet', sheetKey);
+    a.appendChild(el('i', 'sui-icon-md ' + iconClass));
+    return a;
+  }
+
+  /** The ability buttons this struct type would offer, in `buildStructAction
+   * Buttons` order. All disabled — see the note at the top of this section. */
+  function abilityButtons(s, st) {
+    if (!st) return [];
+    var out = [];
+    if (equipped(st.primary_weapon)) {
+      out.push(abilityBtn(
+        st.primary_weapon_control === 'guided' ? 'icon-smart-weapon' : 'icon-ballistic-weapon',
+        'Primary Weapon', s.type_slug));
+    }
+    if (equipped(st.secondary_weapon)) {
+      out.push(abilityBtn(
+        st.secondary_weapon_control === 'guided' ? 'icon-smart-weapon' : 'icon-ballistic-weapon',
+        'Secondary Weapon', s.type_slug));
+    }
+    if (st.stealth_systems) out.push(abilityBtn('icon-stealth', 'Stealth Mode', s.type_slug));
+    if (st.movable) out.push(abilityBtn('icon-move', 'Move', s.type_slug));
+    if (st.category === 'fleet') out.push(abilityBtn('icon-defend', 'Defend', s.type_slug));
+    if (equipped(st.power_generation)) {
+      out.push(abilityBtn('icon-send-alpha', 'Consume Alpha', s.type_slug));
+    }
+    return out;
+  }
+
+  /** The Power Switch group. Player style only, per the spec: "The Enemy style
+   * of Action Chunk does not display the power switch."
+   *
+   * The art tracks the struct's real state rather than always showing the
+   * `disabled` variant: nothing here is clickable, and on/off is the whole
+   * point of the control as a readout. */
+  function panelSwitch(s) {
+    var group = el('div', 'sui-action-bar-panel-switch-group');
+    var img = document.createElement('img');
+    img.src = '/img/sui/panel/panel-switch-'
+      + (s.online === false ? 'off' : 'on') + '.png';
+    img.alt = s.online === false ? 'powered off' : 'powered on';
+    img.style.height = '48px';
+    group.appendChild(img);
+    return group;
+  }
+
+  /** Fill (or clear) one action bar's Action Chunk.
+   *
+   * `sel` is either `{struct: <SpectatorStruct>}` or `{tile: {icon, label}}`
+   * for the empty-tile case; a falsy `sel` hides the connector and the chunk,
+   * which is the spec's "Tile Selected = False" state. */
+  function showInfo(which, sel) {
+    var chunk = document.getElementById('rv-' + which + '-chunk');
+    var connector = document.getElementById('rv-' + which + '-connector');
+    if (!chunk || !connector) return;
+    if (!sel) {
+      chunk.classList.add('hidden');
+      connector.classList.add('hidden');
+      chunk.innerHTML = '';
+      return;
+    }
+    chunk.classList.remove('hidden');
+    connector.classList.remove('hidden');
+    chunk.innerHTML = '';
+
+    var s = sel.struct || null;
+    var st = s ? typeOf(s) : null;
+
+    // Header screen — the chain's own class abbreviation for a struct, the
+    // tile's label for an empty tile. Uppercased by sui.css, not by us.
+    var headText = s
+      ? ((st && st.class_abbreviation) || s.type_name || s.type_slug || 'struct')
+      : (sel.tile.label || 'tile');
+    var headWrap = el('div', 'sui-screen sui-screen-full-width');
+    headWrap.appendChild(el('div', 'sui-screen-info', headText));
+    chunk.appendChild(headWrap);
+
+    var row = el('div', 'sui-action-bar-bottom-row');
+
+    // Power switch: struct tiles, player style only.
+    if (s && which === 'def') row.appendChild(panelSwitch(s));
+
+    var screen = el('div', 'sui-screen');
+    var props = el('div', 'sui-screen-properties');
+    var icons = s
+      ? propertyIcons(s, st)
+      : [propIcon(sel.tile.icon, null, null)];
+    // An empty properties screen collapses to a bare box; the game never
+    // shows one, so fall back to the struct's own silhouette icon.
+    if (!icons.length) icons = [propIcon('icon-unknown', s ? s.type_slug : null, s)];
+    icons.forEach(function (n) { props.appendChild(n); });
+    screen.appendChild(props);
+    row.appendChild(screen);
+
+    var btns = s ? abilityButtons(s, st) : [];
+    if (btns.length) {
+      var group = el('div', 'sui-action-bar-btn-group');
+      btns.forEach(function (n) { group.appendChild(n); });
+      row.appendChild(group);
+    }
+
+    chunk.appendChild(row);
+
+    // Every trigger in this chunk paints in its own bar's theme.
+    var theme = which === 'def' ? 'player' : 'enemy';
+    var trigs = chunk.querySelectorAll('[data-sui-cheatsheet]');
+    for (var i = 0; i < trigs.length; i++) trigs[i].setAttribute('data-sui-theme', theme);
+  }
+
+  /* ── Cheatsheet ──────────────────────────────────────────────────────────
+     The Design System's component for "information about an ability or
+     Struct", and a POPOVER rather than a panel body — `SUICheatsheet` opens it
+     on a 500ms press-and-hold, appends it to <body> so no ancestor's overflow
+     can clip it, and positions it best-fit against the trigger. Ported here so
+     the detail a spectator wants (health, what this thing is, why it is
+     inert) stays one press away from the icons that stand for it.
+
+     The content is ours: the game's CheatsheetContentBuilder reads a live
+     GameState this window deliberately does not have. The MARKUP is the
+     game's, so sui.css styles it. */
+
+  var CHEAT_DELAY = 500;
+
+  function initCheatsheets() {
+    var sheet = document.createElement('div');
+    sheet.id = 'rv-cheatsheet';
+    sheet.className = 'sui-cheatsheet';
+    sheet.style.position = 'fixed';
+    var timer = null;
+
+    function hide() {
+      clearTimeout(timer);
+      if (sheet.parentElement) sheet.parentElement.removeChild(sheet);
+    }
+
+    document.addEventListener('mousedown', function (e) {
+      var trig = e.target.closest ? e.target.closest('[data-sui-cheatsheet]') : null;
+      hide();
+      if (!trig) return;
+      timer = setTimeout(function () {
+        ['sui-theme-player', 'sui-theme-enemy', 'sui-theme-neutral']
+          .forEach(function (c) { sheet.classList.remove(c); });
+        sheet.classList.add('sui-theme-' + (trig.dataset.suiTheme || 'player'));
+        sheet.innerHTML = '';
+        sheet.appendChild(cheatsheetBody(trig));
+        document.body.appendChild(sheet);
+        placeCheatsheet(sheet, trig.getBoundingClientRect());
+      }, CHEAT_DELAY);
+    });
+    document.addEventListener('mouseup', hide);
+    document.addEventListener('mouseleave', hide);
+    // A scroll under an open sheet would leave it pointing at nothing.
+    var sc = document.getElementById('rv-scroll');
+    if (sc) sc.addEventListener('scroll', hide);
+  }
+
+  /** Try above, then right, then below, then left — `SUIUtil.positionBestFit
+   * Fixed`'s order — and clamp into the viewport. */
+  function placeCheatsheet(sheet, r) {
+    var w = sheet.offsetWidth, h = sheet.offsetHeight;
+    var vw = window.innerWidth, vh = window.innerHeight, gap = 4;
+    var top, left;
+    if (r.top - h - gap >= 0)            { top = r.top - h - gap;  left = r.left + r.width / 2 - w / 2; }
+    else if (r.right + w + gap <= vw)    { top = r.top + r.height / 2 - h / 2; left = r.right + gap; }
+    else if (r.bottom + h + gap <= vh)   { top = r.bottom + gap;   left = r.left + r.width / 2 - w / 2; }
+    else                                 { top = r.top + r.height / 2 - h / 2; left = r.left - w - gap; }
+    sheet.style.top = Math.max(0, Math.min(top, vh - h)) + 'px';
+    sheet.style.left = Math.max(0, Math.min(left, vw - w)) + 'px';
+  }
+
+  /** Cheatsheet content for a trigger: the struct it stands for when we know
+   * one, otherwise a plain title for the icon's own key. */
+  function cheatsheetBody(trig) {
+    var frag = document.createDocumentFragment();
+    frag.appendChild(el('div', 'sui-cheatsheet-top-frame'));
+
+    var s = state.structsById[trig.dataset.struct || ''] || null;
+    var st = s ? typeOf(s) : null;
+    var key = trig.dataset.suiCheatsheet || '';
+
+    var title = el('div', 'sui-cheatsheet-title');
+    title.appendChild(el('div', 'sui-cheatsheet-title-text',
+      s ? ((st && st.class_abbreviation) || s.type_name || s.type_slug)
+        : key.replace(/^icon-/, '').replace(/-/g, ' ')));
+    frag.appendChild(title);
+
+    var content = el('div', 'sui-cheatsheet-content');
+    if (!s) {
+      frag.appendChild(content);
+      return frag;
+    }
+
+    content.appendChild(el('div', 'sui-cheatsheet-description',
+      (s.ambit || '?') + ' · slot ' + (s.slot == null ? '?' : s.slot) + ' · ' + s.id));
+
+    var props = el('div', 'sui-cheatsheet-property-section');
+    props.appendChild(cheatRow('sui-icon-armour', 'HEALTH',
+      (s.health == null ? '?' : s.health) + '/' + (s.max_health == null ? '?' : s.max_health)));
+    if (s.is_command) props.appendChild(cheatRow('sui-icon-deployed-structs', 'ROLE', 'command ship'));
+    if (s.defending) props.appendChild(cheatRow('sui-icon-defending', 'DEFENDING', s.protects || 'a struct'));
+    if (s.defended) props.appendChild(cheatRow('sui-icon-defended', 'DEFENDED', 'by an ally'));
+    content.appendChild(props);
+
+    var msg = s.destroyed ? 'Destroyed.'
+      : (!s.built ? 'Under construction.'
+      : (s.online === false ? 'Offline — no power.'
+      : (s.hidden ? 'In stealth.' : null)));
+    if (msg) content.appendChild(el('div', 'sui-cheatsheet-contextual-message', msg));
+
+    frag.appendChild(content);
+    return frag;
+  }
+
+  /** One `sui-cheatsheet-property` row: icon + two lines of info. */
+  function cheatRow(iconClass, label, value) {
+    var row = el('div', 'sui-cheatsheet-property');
+    var ico = el('div', 'sui-cheatsheet-property-icon');
+    ico.appendChild(el('i', 'sui-icon sui-icon-md ' + iconClass));
+    row.appendChild(ico);
+    var info = el('div', 'sui-cheatsheet-property-info');
+    info.appendChild(el('div', null, label));
+    info.appendChild(el('div', null, String(value)));
+    row.appendChild(info);
+    return row;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -659,13 +1217,18 @@
       box.appendChild(bar);
       node.appendChild(box);
     }
-    // Offline = the no-power badge, from the game's HUD status indicators.
-    if (s.online === false && s.built !== false) {
-      var badge = el('div', 'rv-status-badges');
-      badge.appendChild(el('i', 'sui-icon sui-icon-no-power sui-icon-sm'));
-      node.appendChild(badge);
-    }
-    node.appendChild(el('div', 'rv-tag', s.type_name || s.type_slug || '?'));
+    // Status indicators live in their own layer so focus changes can rewrite
+    // them without rebuilding the struct. Contents decided by `badgesFor`.
+    var badge = el('div', 'rv-status-badges');
+    badge.id = domId('badges', s.id);
+    node.appendChild(badge);
+    paintBadges(s);
+    // NO type label. The game draws a health bar and status icons on a struct
+    // tile and nothing else — verified by comparing the same art side by side
+    // with the live client, where these tiles are unlabelled. A permanent
+    // truncated caption ("ORBITAL SHIE…") under every struct was the single
+    // most visible departure from the real map. Identity now comes from
+    // SELECTING the struct, which is how the game answers the same question.
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -867,6 +1430,9 @@
   function playNext() {
     if (!queue.length) {
       playing = false;
+      // Reaction indicators superseded the status ones while the sequence
+      // ran (Design System, Unit Tile); the fight is over, so bring them back.
+      repaintAllBadges();
       // The fight is over (for now) — retract the bubble the way the game
       // does on ANIMATION_QUEUE_EMPTY.
       if (pip.structId) pipRequestHide();
@@ -877,7 +1443,11 @@
       }
       return;
     }
+    var wasIdle = !playing;
     playing = true;
+    // First event of a sequence: clear the persistent icons so a reaction
+    // indicator is never competing with them on the same tile.
+    if (wasIdle) repaintAllBadges();
     var ev = queue.shift();
     runAnimation(ev, playNext);
   }
@@ -1217,10 +1787,13 @@
       : '—';
     setText('rv-where', where);
 
-    // Freshness is only meaningful once something has actually arrived. A
-    // missing stamp is 0, and `Date.now() - 0` renders the whole Unix epoch as
-    // an age ("17854432765s ago"), so treat it as unknown instead.
-    var stamp = state.lastEventMs || (snap && snap.fetched_at_ms) || 0;
+    // Freshness is the NEWEST of the two signals, not whichever exists.
+    // Taking lastEventMs first meant a planet that had one stream event and
+    // then went quiet reported "4m ago" forever while 20-second snapshots kept
+    // arriving — the feed was healthy and the HUD said it was dead.
+    // A missing stamp is 0, and `Date.now() - 0` renders the whole Unix epoch
+    // as an age ("17854432765s ago"), so treat that as unknown instead.
+    var stamp = Math.max(state.lastEventMs || 0, (snap && snap.fetched_at_ms) || 0);
     var age = stamp > 0 ? Date.now() - stamp : null;
     var live = document.getElementById('rv-live');
     if (live) {
@@ -1353,10 +1926,14 @@
       .replace(/_/g, ' ')
       .toLowerCase();
   }
+  /* The HUD shows shield and ore RAW, exactly as the game does — its
+   * ShieldStatusComponent and StatusBarTopRightComponent both assign the
+   * value straight to innerText with no formatter. (The design system's
+   * "shorten over 999 as 1.11k" rule belongs to Result Rows and tables, a
+   * different component; applying it here would make the spectator disagree
+   * with the same planet's own HUD.) */
   function fmtNum(n) {
-    var v = Number(n) || 0;
-    return v >= 1e6 ? (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M'
-      : v >= 1e4 ? Math.round(v / 1e3) + 'k' : String(Math.round(v));
+    return String(Math.round(Number(n) || 0));
   }
   function setText(id, text) {
     var e = document.getElementById(id);
@@ -1497,13 +2074,13 @@
     if (count) count.textContent = logState.rows.length ? String(logState.rows.length) : '';
     body.innerHTML = '';
     if (!logState.rows.length) {
-      body.appendChild(el('div', 'rv-log-empty', 'No recorded activity for this planet yet.'));
+      body.appendChild(el('div', 'rv-log-empty sui-text-tiny', 'No recorded activity for this planet yet.'));
       return;
     }
     logState.rows.forEach(function (r) {
       var row = el('div', 'rv-log-row' + (LOG_TONE[r.category] ? ' ' + LOG_TONE[r.category] : ''));
       row.appendChild(el('div', 'rv-log-t', r.time || ''));
-      row.appendChild(el('div', 'rv-log-cat', humanStatus(r.category || '')));
+      row.appendChild(el('div', 'rv-log-cat sui-text-label', humanStatus(r.category || '')));
       row.appendChild(el('div', 'rv-log-d', r.detail || ''));
       body.appendChild(row);
     });
@@ -1558,8 +2135,18 @@
     var previous = state.structsById;
     state.structsById = {};
     (snap.structs || []).forEach(function (s) { state.structsById[s.id] = s; });
+    // Struct types are cached backend-side and never change; keep the last
+    // good catalogue if a snapshot arrives without one rather than emptying
+    // the Action Bar mid-raid.
+    if (snap.struct_types && Object.keys(snap.struct_types).length) {
+      state.structTypes = snap.struct_types;
+    }
     state.planetaryShield = snap.planetary_shield;
     state.raidStatus = snap.raid_status;
+    // The snapshot is authoritative about who (if anyone) is raiding; drop any
+    // stream-tracked raider it contradicts, so a stale value can't keep the
+    // enemy action bar open or hold the fog off a quiet planet.
+    state.raidingFleet = snap.raiding_fleet || null;
 
     // Snapshot health is authoritative once the queue has drained; while it is
     // playing, the sequence's own values win.
@@ -1597,6 +2184,15 @@
       if (sh != null) state.planetaryShield = sh;
     } else if (d.category === 'raid_status') {
       state.raidStatus = detail.status || state.raidStatus;
+      // Track WHO is raiding, not just the status: the HUD's enemy action bar
+      // and the fog of war both key off an attacker being present, and the
+      // stream knows seconds before the next snapshot does. A terminal status
+      // means the attacker is gone, so the fog should close again.
+      var over = TERMINAL_RAID_STATUSES.indexOf(detail.status) >= 0;
+      state.raidingFleet = over ? null : (detail.fleet_id || state.raidingFleet);
+      renderHeader();
+      // The fog spans the attacker half, so its presence changes with theirs.
+      if (state.snapshot) buildGrid(state.snapshot);
       // The stream is the first to know a raid ended — several seconds ahead
       // of the next snapshot, which is when the banner should land.
       if (detail.status) showBanner(detail.status);
@@ -1672,6 +2268,7 @@
     setInterval(renderHeader, 5000);
     renderHeader();
     initTooltips();
+    initCheatsheets();
     initLog();
 
     // Scrolling the animating tile back into view retracts the bubble, and

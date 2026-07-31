@@ -34,8 +34,8 @@
     *, *::before, *::after { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; overflow: hidden; }
     body {
-      background: var(--background, #0d0f15);
-      color: var(--text-body, #c8d0e0);
+      background: var(--page-background, #1A2029);
+      color: var(--text-body, #C5D7D9);
       font-family: 'DirectiveZero', sans-serif;
       display: flex; flex-direction: column;
       /* The HUD is absolutely positioned against the window, the way the
@@ -89,68 +89,127 @@
 
     /* Where you are + how fresh the feed is. The game needs neither (a player
        knows where they are, and their own client is the feed). */
+    /* Typography comes from the Design System's named text styles, applied as
+       the shipped classes (`sui-text-label` = ExtremeHazard 8px, uppercase) —
+       not re-declared here with magic numbers that would drift from it. */
     #rv-where-chip {
-      position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+      /* BELOW the status panels, not level with them: the two panels are
+         pinned to the top corners, and a centred chip on the same line
+         overprints them as soon as the window is narrow. 38px clears a
+         panel in the HUD's own (pre-scale) coordinate space, so it stays
+         clear at 1x, 2x and 4x alike. */
+      position: absolute; top: 38px; left: 50%; transform: translateX(-50%);
+      max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis;
       display: flex; align-items: center; gap: 8px; white-space: nowrap;
-      padding: 3px 10px; border: 1px solid var(--border-primary, #2a3040);
-      background: rgba(13, 15, 21, .82);
-      font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
-      letter-spacing: .08em; text-transform: uppercase;
-      color: var(--text-player-primary, #7fd6ff);
+      padding: 3px 10px; border: 1px solid var(--border-subtle, #394958);
+      background: rgba(26, 32, 41, .88);
+      color: var(--text-player-primary, #43CDB6);
     }
-    .rv-live-dot { color: var(--text-hint, #6b7488); }
-    .rv-live-dot.stale { color: var(--text-warning, #ffb454); }
-    .rv-live-dot.dead { color: var(--text-enemy-primary, #ff6b6b); }
+    .rv-live-dot { color: var(--text-hint, #A7C0C6); }
+    .rv-live-dot.stale { color: var(--text-warning, #F3C878); }
+    .rv-live-dot.dead { color: var(--text-enemy-primary, #EE7D69); }
+
+    /* Tile selection. The ring art is the game's own (img/focus/*), and the
+       INFO it opens is the point: a spectator cannot act on a struct, but
+       wants to know what it is, how hurt it is and whether it is online.
+       Actions stay absent rather than present-but-dead. */
+    .rv-mount { cursor: pointer; }
+    .rv-focus-ring {
+      position: absolute; inset: 0; z-index: 515; pointer-events: none;
+      background-repeat: no-repeat; background-position: center;
+      image-rendering: pixelated;
+    }
+    .rv-focus-ring.rv-friendly { background-image: url("img/focus/focus-friendly.png"); }
+    .rv-focus-ring.rv-enemy    { background-image: url("img/focus/focus-enemy.png"); }
+    /* Empty tiles are selectable too — the Design System's Action Chunk has a
+       documented empty-tile form. The game marks the chosen tile in its own
+       selection layer; here the same job is one outline, tinted by side. */
+    .rv-cell { cursor: pointer; }
+    .rv-cell.rv-tile-selected {
+      outline: 2px solid var(--text-player-primary, #43CDB6);
+      outline-offset: -2px;
+    }
+    .rv-cell.rv-tile-selected.rv-enemy-side {
+      outline-color: var(--text-enemy-primary, #EE7D69);
+    }
+
+    /* The Cheatsheet is a POPOVER (Design System: "a popover used to display
+       information about an ability or Struct"), appended to <body> and
+       positioned fixed, so nothing here can clip it. Nothing of ours styles
+       it: sui.css already gives it its frame, its min-width and its
+       --popup-z-index, and re-declaring any of that would only let it drift. */
+
+    /* Fog of war — the game's own art. main.css declares these with ABSOLUTE
+       `/img/...` urls, which resolve differently depending on how the document
+       is served, so they are re-declared here with relative paths (the same
+       trap that made SUI form art invisible on the board). */
+    .rv-fog {
+      position: absolute; top: 0; bottom: 0; z-index: 30;
+      display: flex; flex-direction: row; flex-wrap: nowrap;
+      justify-content: flex-start; pointer-events: none;
+    }
+    .rv-fog-edge {
+      background: url("img/tiles/fog-of-war/fog-of-war-left.png") repeat-y top left;
+      height: 100%; width: var(--tile-width, 128px);
+      flex: 0 0 var(--tile-width, 128px);
+      image-rendering: pixelated;
+    }
+    .rv-fog-body {
+      background: url("img/tiles/fog-of-war/fog-of-war-middle.png") repeat top left;
+      height: 100%; flex-grow: 1; image-rendering: pixelated;
+    }
 
     /* ── Battle log ───────────────────────────────────────────────────── */
     #rv-log {
       flex: none; z-index: 45;
-      border-top: 1px solid var(--border-primary, #2a3040);
-      background: var(--background-secondary, #141824);
+      border-top: 1px solid var(--border-subtle, #394958);
+      background: var(--surface-default, #222034);
       display: flex; flex-direction: column; min-height: 0;
       max-height: 45%;
     }
     #rv-log.rv-collapsed #rv-log-body { display: none; }
     #rv-log-head {
       flex: none; display: flex; align-items: center; gap: 8px;
-      padding: 5px 12px; font-family: 'ExtremeHazard', sans-serif;
-      font-size: 8px; letter-spacing: .08em; text-transform: uppercase;
-      color: var(--text-hint, #6b7488);
+      padding: 5px 12px; color: var(--text-hint, #A7C0C6);
     }
     #rv-log-head .rv-spacer { flex: 1 1 auto; }
-    .rv-log-count { color: var(--text-body, #c8d0e0); }
-    .rv-log-toggle { color: var(--text-player-primary, #7fd6ff); text-decoration: none; }
+    .rv-log-count { color: var(--text-body, #C5D7D9); }
+    .rv-log-toggle { color: var(--text-player-primary, #43CDB6); text-decoration: none; }
     #rv-log-body { overflow: auto; padding: 0 12px 8px; }
-    .rv-log-empty { color: var(--text-hint, #6b7488); font-size: 11px; padding: 6px 0; }
+    .rv-log-empty { color: var(--text-hint, #A7C0C6); padding: 6px 0; }
     .rv-log-row {
       /* The category column is sized for the WIDEST label in ExtremeHazard
          ("struct block ore refine start"); too narrow and a nowrap label
          overprints the detail beside it. */
       display: grid; grid-template-columns: 62px 150px 1fr; gap: 10px;
       align-items: baseline; padding: 3px 0;
-      border-bottom: 1px solid rgba(42, 48, 64, .5); font-size: 11px;
+      border-bottom: 1px solid rgba(57, 73, 88, .5);
     }
-    .rv-log-t { color: var(--text-hint, #6b7488); font-variant-numeric: tabular-nums; }
+    .rv-log-t { color: var(--text-hint, #A7C0C6); font-variant-numeric: tabular-nums; }
     .rv-log-cat {
-      font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
-      letter-spacing: .06em; text-transform: uppercase;
-      color: var(--text-player-primary, #7fd6ff);
+      color: var(--text-player-primary, #43CDB6);
       /* WRAP rather than nowrap: category names are chain-driven and can be
          long ("struct block ore refine start"), and a nowrap label overprints
          the detail column instead of being clipped. Wrapping keeps any future
          category readable without anyone re-tuning a pixel width. */
       overflow-wrap: anywhere;
     }
-    .rv-log-row.rv-bad .rv-log-cat { color: var(--text-enemy-primary, #ff6b6b); }
-    .rv-log-row.rv-warn .rv-log-cat { color: var(--text-warning, #ffb454); }
-    .rv-log-d { color: var(--text-body, #c8d0e0); word-break: break-word; text-align: left; }
+    .rv-log-row.rv-bad .rv-log-cat { color: var(--text-enemy-primary, #EE7D69); }
+    .rv-log-row.rv-warn .rv-log-cat { color: var(--text-warning, #F3C878); }
+    .rv-log-d { color: var(--text-body, #C5D7D9); word-break: break-word; text-align: left; }
     #rv-log-body, .rv-log-row { text-align: left; }
 
     /* ── Map ──────────────────────────────────────────────────────────────
        Plain DOM + CSS background tiles, exactly the technique the game uses —
        no canvas, no WebGL, no sprite sheets. --tile-width/--tile-height come
        from sui.css (128px). */
-    #rv-scroll { flex: 1 1 auto; overflow: auto; padding: 16px; }
+    /* `position + z-index` makes this a STACKING CONTEXT. Without it the
+       map's internal layers (markers at ~500, status badges at 520) compete
+       directly with the HUD's z-index and paint over it — a marker was
+       covering the selected struct's readout. Contained here, every map layer
+       stays below the HUD however high its own z-index climbs. */
+    #rv-scroll { flex: 1 1 auto; overflow: auto; padding: 16px;
+      position: relative; z-index: 0; }
     /* margin:auto, not flex centering — a centered flex child that overflows
        clips its left edge unreachably; margins degrade to scrollable. */
     #rv-map { position: relative; width: -moz-fit-content; width: fit-content;
@@ -213,19 +272,19 @@
       border: 2px solid rgba(10, 12, 18, .85); }
     .rv-hp { display: flex; height: 4px; gap: 2px; }
     .rv-seg { display: block; flex: 1 1 100%;
-      background: var(--struct-health-bar-damage, #612b3d); }
-    .rv-seg.on { background: var(--struct-health-bar-health, #43d675); }
-    .rv-tag { position: absolute; left: 4px; right: 4px; bottom: 4px;
-      font-size: 8px; font-family: 'ExtremeHazard', sans-serif;
-      letter-spacing: .06em; text-align: center;
-      color: var(--text-hint, #6b7488); text-shadow: 0 1px 2px #000;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      background: var(--struct-health-bar-damage, #CC2D2D); }
+    .rv-seg.on { background: var(--struct-health-bar-health, #EFB719); }
+    /* (No per-struct type caption: the real client draws a health bar and
+       status icons on a struct tile and nothing else — confirmed by comparing
+       the same art side by side against the running game. Identity comes from
+       selecting the struct.) */
 
     /* Ambit band label down the left edge. */
     .rv-band { position: absolute; left: -14px; top: 0; bottom: 0; width: 12px;
       display: flex; align-items: center; justify-content: center; }
-    .rv-band span { font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
-      letter-spacing: .1em; color: var(--text-hint, #6b7488);
+    /* Typography from `sui-text-label` (applied in markup); only the vertical
+       orientation and colour are specific to this gutter. */
+    .rv-band span { color: var(--text-hint, #A7C0C6);
       writing-mode: vertical-rl; text-orientation: mixed; }
 
     /* ── PiP bubble — combat happening off-screen ─────────────────────────
@@ -258,8 +317,8 @@
       overflow: hidden; align-items: center; justify-content: center;
       background-repeat: no-repeat; background-position: center;
     }
-    #rv-pip.rv-side-left  .rv-pip-mask { border: 1px solid var(--border-focus-friendly-dark, #2e7d5b); }
-    #rv-pip.rv-side-right .rv-pip-mask { border: 1px solid var(--border-focus-enemy-dark, #7d2e3a); }
+    #rv-pip.rv-side-left  .rv-pip-mask { border: 1px solid var(--border-focus-friendly-dark, #2A9D9B); }
+    #rv-pip.rv-side-right .rv-pip-mask { border: 1px solid var(--border-focus-enemy-dark, #C11F16); }
 
     .rv-pip-focus {
       position: relative; z-index: 10; display: flex;
@@ -303,7 +362,7 @@
     #rv-note.on { display: block; }
     .rv-empty { display: flex; flex-direction: column; gap: 8px;
       align-items: center; justify-content: center; padding: 60px 20px;
-      color: var(--text-hint, #6b7488); text-align: center; }
+      color: var(--text-hint, #A7C0C6); text-align: center; }
   </style>
 </head>
 <body>
@@ -319,16 +378,18 @@
        what a spectator wants. -->
   <div id="rv-stage">
   <div id="rv-hud">
-    <div id="rv-hud-tl" class="sui-status-bar-panel status-bar-panel-top-left">
+    <div id="rv-hud-tl" class="sui-status-bar-panel status-bar-panel-top-left sui-theme-player">
       <a class="sui-resource" href="javascript: void(0)"
          data-sui-tooltip="Energy Supply — the defender's capacity in use"
          data-sui-mod-placement="bottom">
-        <span id="rv-energy" class="sui-text-body">—</span>
+        <!-- No text class: `.sui-resource` supplies the typography, exactly as
+             StatusBarTopRightComponent leaves its own value span bare. -->
+        <span id="rv-energy">—</span>
         <i class="sui-icon sui-icon-energy"></i>
       </a>
     </div>
 
-    <div id="rv-hud-tr" class="sui-status-bar-panel status-bar-panel-top-right sui-mod-enemy">
+    <div id="rv-hud-tr" class="sui-status-bar-panel status-bar-panel-top-right sui-theme-enemy">
       <a class="sui-resource" href="javascript: void(0)"
          id="rv-shield-res" data-sui-mod-placement="bottom">
         <div id="rv-shield-icon" class="planetary-shield-symbol-wrapper"></div>
@@ -344,7 +405,7 @@
 
     <!-- Bottom-left: the DEFENDER (this planet's owner). -->
     <div id="rv-hud-bl" class="sui-panel-wrapper-fit-content action-bar-bottom-left">
-      <div class="sui-panel">
+      <div class="sui-panel sui-theme-player">
         <div class="sui-panel-edge-left"></div>
         <div class="sui-panel-chunk">
           <div class="sui-screen">
@@ -362,6 +423,8 @@
             </div>
           </div>
         </div>
+        <div id="rv-def-connector" class="sui-panel-connector hidden"></div>
+        <div id="rv-def-chunk" class="sui-panel-chunk hidden"></div>
         <div class="sui-panel-edge-right"></div>
       </div>
     </div>
@@ -369,8 +432,10 @@
     <!-- Bottom-right: the RAIDER. Hidden until a raid is actually live, the
          same way the game hides its enemy action bar. -->
     <div id="rv-hud-br" class="sui-panel-wrapper-fit-content action-bar-bottom-right hidden">
-      <div class="sui-panel sui-mod-enemy">
+      <div class="sui-panel sui-theme-enemy">
         <div class="sui-panel-edge-left"></div>
+        <div id="rv-atk-chunk" class="sui-panel-chunk hidden"></div>
+        <div id="rv-atk-connector" class="sui-panel-connector hidden"></div>
         <div class="sui-panel-chunk">
           <div class="sui-screen">
             <a href="javascript: void(0)" class="sui-screen-portrait"
@@ -393,7 +458,7 @@
 
     <!-- Location + feed freshness. The game has no equivalent (a player
          always knows where they are); a spectator does not. -->
-    <div id="rv-where-chip">
+    <div id="rv-where-chip" class="sui-text-label">
       <span id="rv-where">—</span>
       <span id="rv-live" class="rv-live-dot" title="feed">connecting</span>
     </div>
@@ -428,14 +493,14 @@
        game itself never shows in one place. Collapsible so it can stay out of
        the way of the map it belongs to. -->
   <div id="rv-log" class="rv-collapsed">
-    <div id="rv-log-head">
+    <div id="rv-log-head" class="sui-text-label">
       <i class="icon-list"></i>
       <span>Battle log</span>
       <span id="rv-log-count" class="rv-log-count"></span>
       <span class="rv-spacer"></span>
       <a href="javascript: void(0)" id="rv-log-toggle" class="rv-log-toggle">show</a>
     </div>
-    <div id="rv-log-body"><div class="rv-log-empty">No recorded activity for this planet yet.</div></div>
+    <div id="rv-log-body" class="sui-text-tiny"><div class="rv-log-empty sui-text-tiny">No recorded activity for this planet yet.</div></div>
   </div>
 
   <script src="js/vendor/lottie-5.12.2.min.js"></script>

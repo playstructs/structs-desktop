@@ -201,10 +201,131 @@ pub struct SpectatorStruct {
     /// Stealth is chain-visible (`structAttributes.isHidden`); the game renders
     /// a hidden struct at half opacity rather than removing it.
     pub hidden: bool,
+    /// Guarding another struct — `structAttributes.protectedStructIndex` is
+    /// set. Mirrors the game's `Struct.isDefending()`; drives the `defending`
+    /// status icon on the tile.
+    pub defending: bool,
+    /// Guarded BY another struct: some other struct on this planet points its
+    /// `protectedStructIndex` here. The game's `Struct.isDefended()` reads the
+    /// inverse relation the same way.
+    pub defended: bool,
+    /// Id of the struct this one guards, if any (`5-<index>`).
+    ///
+    /// Sent to the renderer because indicator visibility is FOCUS-DEPENDENT
+    /// (Structs Design System, "Unit Tile → Status Indicators"): with a struct
+    /// selected, the Defended icon shows only on the unit the selection
+    /// guards, and the Defender icon only on the unit guarding the selection.
+    /// Both need the relation, not just the two booleans.
+    pub protects: Option<String>,
+    /// Raw protected index — the relation before it is resolved to an id.
+    #[serde(skip)]
+    pub protected_index: u64,
     /// The fleet's Command Ship, per `Fleet.commandStruct`.
     pub is_command: bool,
     /// "defender" (belongs to the planet's owner) or "attacker".
     pub side: String,
+}
+
+/// One struct type as the Action Bar needs it.
+///
+/// The Structs Design System's "Action Chunk" (Figma `3815-187846`) is driven
+/// entirely by what a struct *can do*: a properties screen of equipment icons,
+/// an ability button group, and a power switch. The shipped
+/// `ActionBarComponent` reads all of that off the chain's StructType record, so
+/// the spectator has to carry the same record to render the same bar.
+///
+/// Only the fields that reach the screen are kept — this rides on every
+/// snapshot, and the combat-math fields (damage, shot rates, ambit masks) have
+/// no pixel to their name.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SpectatorStructType {
+    /// Header text of the Action Chunk, e.g. "TANK". The chain's own
+    /// `classAbbreviation`; the game shows it verbatim.
+    pub class_abbreviation: String,
+    /// "fleet" | "planet" — the game offers Defend only on fleet structs.
+    pub category: String,
+    /// Equipment slots, chain vocabulary (`guidedWeaponry`, `counterAttack`,
+    /// `noUnitDefenses`, …). Mapped to icons by `STRUCT_EQUIPMENT_ICON_MAP`.
+    pub primary_weapon: String,
+    pub primary_weapon_control: String,
+    pub secondary_weapon: String,
+    pub secondary_weapon_control: String,
+    pub passive_weaponry: String,
+    pub unit_defenses: String,
+    pub ore_reserve_defenses: String,
+    pub planetary_defenses: String,
+    pub planetary_mining: String,
+    pub planetary_refinery: String,
+    pub power_generation: String,
+    pub stealth_systems: bool,
+    pub movable: bool,
+}
+
+/// Struct types never change once the chain is up, so one read per type per app
+/// run is enough. Shared across every spectator window.
+static STRUCT_TYPE_CACHE: std::sync::LazyLock<
+    std::sync::RwLock<HashMap<String, SpectatorStructType>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+
+fn parse_struct_type(v: &Value) -> SpectatorStructType {
+    // The LCD wraps the record; a raw body is accepted too so a future shape
+    // change degrades to blank fields rather than a panic.
+    let b = v.get("StructType").unwrap_or(v);
+    let s = |k: &str| str_of(b.get(k)).unwrap_or_default();
+    SpectatorStructType {
+        class_abbreviation: {
+            let abbr = s("classAbbreviation");
+            if abbr.is_empty() { s("type") } else { abbr }
+        },
+        category: s("category"),
+        primary_weapon: s("primaryWeapon"),
+        primary_weapon_control: s("primaryWeaponControl"),
+        secondary_weapon: s("secondaryWeapon"),
+        secondary_weapon_control: s("secondaryWeaponControl"),
+        passive_weaponry: s("passiveWeaponry"),
+        unit_defenses: s("unitDefenses"),
+        ore_reserve_defenses: s("oreReserveDefenses"),
+        planetary_defenses: s("planetaryDefenses"),
+        planetary_mining: s("planetaryMining"),
+        planetary_refinery: s("planetaryRefinery"),
+        power_generation: s("powerGeneration"),
+        stealth_systems: flag(b.get("stealthSystems")),
+        movable: flag(b.get("movable")),
+    }
+}
+
+/// Resolve every type id in `ids`, reading only the ones not already cached.
+/// A read failure drops that one type: the Action Bar falls back to a bare
+/// header rather than the whole snapshot failing.
+async fn load_struct_types(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    ids: &[u64],
+) -> HashMap<String, SpectatorStructType> {
+    let mut out = HashMap::new();
+    let mut missing = Vec::new();
+    {
+        let cache = STRUCT_TYPE_CACHE.read().unwrap();
+        for id in ids {
+            let key = id.to_string();
+            match cache.get(&key) {
+                Some(t) => {
+                    out.insert(key, t.clone());
+                }
+                None => missing.push(key),
+            }
+        }
+    }
+    for key in missing {
+        if let Ok(v) = client.query_entity("struct_type", &key).await {
+            let t = parse_struct_type(&v);
+            STRUCT_TYPE_CACHE
+                .write()
+                .unwrap()
+                .insert(key.clone(), t.clone());
+            out.insert(key, t);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -223,6 +344,9 @@ pub struct Snapshot {
     /// under the count shows a build beacon, a cell past it shows blocked art.
     pub slots: HashMap<String, u64>,
     pub structs: Vec<SpectatorStruct>,
+    /// Capability record per struct type present, keyed by type id as a string.
+    /// Drives the Action Chunk's properties screen and ability buttons.
+    pub struct_types: HashMap<String, SpectatorStructType>,
     // ── HUD fields ──
     // The game's HUD shows whose planet this is, their charge and energy, and
     // the ore at stake. The spectator HUD mirrors it, so the snapshot has to
@@ -272,6 +396,7 @@ pub async fn snapshot_planet(
                 fleets: vec![],
                 slots: HashMap::new(),
                 structs: vec![],
+                struct_types: HashMap::new(),
                 stored_ore: None,
                 owner_charge: None,
                 owner_energy: None,
@@ -397,6 +522,11 @@ pub async fn snapshot_planet(
     .flatten()
     .collect::<Vec<_>>();
 
+    // `defended` is a RELATION: a struct is defended when some OTHER struct
+    // points its protected index at it, so it can only be resolved once every
+    // struct on the board is known.
+    mark_defended(&mut structs);
+
     // Stable order so a refresh never reshuffles the DOM.
     structs.sort_by(|a, b| {
         ambit_rank(&a.ambit)
@@ -410,6 +540,13 @@ pub async fn snapshot_planet(
     // nothing else here because it needs `owner` which the planet read gave us.
     let owner_hud = read_owner_hud(client, owner.as_deref()).await;
 
+    // Capability records for the types actually on the board — cached across
+    // snapshots, so this is usually free.
+    let mut type_ids = structs.iter().map(|s| s.type_id).collect::<Vec<_>>();
+    type_ids.sort_unstable();
+    type_ids.dedup();
+    let struct_types = load_struct_types(client, &type_ids).await;
+
     Snapshot {
         planet_id: planet_id.to_string(),
         owner,
@@ -420,6 +557,7 @@ pub async fn snapshot_planet(
         fleets,
         slots,
         structs,
+        struct_types,
         stored_ore: owner_hud.0,
         owner_charge: owner_hud.1,
         owner_energy: owner_hud.2,
@@ -431,6 +569,60 @@ pub async fn snapshot_planet(
         raider_pfp: None,
         fetched_at_ms: crate::hasher::types::now_millis(),
         warning,
+    }
+}
+
+/// Resolve `defended` across a board: any struct named by another struct's
+/// `protectedStructIndex` is defended. Struct ids are `5-<index>`, so the
+/// index is matched against the id's suffix rather than assuming a position.
+fn mark_defended(structs: &mut [SpectatorStruct]) {
+    let guarded: std::collections::HashSet<u64> = structs
+        .iter()
+        .map(|s| s.protected_index)
+        .filter(|i| *i != 0)
+        .collect();
+    if guarded.is_empty() {
+        return;
+    }
+    for s in structs.iter_mut() {
+        if let Some(idx) = s.id.rsplit('-').next().and_then(|n| n.parse::<u64>().ok()) {
+            s.defended = guarded.contains(&idx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod defence_tests {
+    use super::*;
+
+    fn s(id: &str, protects: u64) -> SpectatorStruct {
+        SpectatorStruct {
+            id: id.into(), type_id: 1, type_name: "Tank".into(), type_slug: "tank".into(),
+            category: "planet".into(), owner: "1-1".into(), ambit: "land".into(), slot: 0,
+            health: Some(3), max_health: 3, destroyed: false, online: true, built: true,
+            hidden: false, defending: protects != 0, defended: false,
+            protects: (protects != 0).then(|| format!("5-{protects}")),
+            protected_index: protects, is_command: false, side: "defender".into(),
+        }
+    }
+
+    #[test]
+    fn defended_is_the_inverse_of_defending() {
+        // 5-2 guards 5-1; nobody guards 5-2.
+        let mut board = vec![s("5-1", 0), s("5-2", 1), s("5-3", 0)];
+        mark_defended(&mut board);
+        assert!(board[0].defended, "5-1 is guarded by 5-2");
+        assert!(!board[1].defended, "nobody guards the guard");
+        assert!(!board[2].defended);
+        assert!(board[1].defending, "5-2 is defending");
+        assert!(!board[0].defending);
+    }
+
+    #[test]
+    fn no_defenders_leaves_everything_undefended() {
+        let mut board = vec![s("5-1", 0), s("5-2", 0)];
+        mark_defended(&mut board);
+        assert!(board.iter().all(|x| !x.defended));
     }
 }
 
@@ -467,10 +659,18 @@ async fn read_owner_hud(
             .unwrap_or(0) as f64;
         (now - last).max(0.0)
     });
-    let energy = match (f("capacity"), f("load")) {
-        (Some(cap), Some(load)) => Some(format!("{}/{}", fmt_watts(cap - load), fmt_watts(cap))),
-        _ => None,
-    };
+    // The game's OWN energy readout (EnergyUsageComponent.getEnergyUsage):
+    //   load  = load + structsLoad
+    //   total = capacity + connectionCapacity
+    //   text  = "<load>/<total>"
+    // It is USAGE over total, not headroom, and it counts the structs' draw
+    // and the share coming back from the substation. Getting either half
+    // wrong makes the number quietly disagree with the same player's own HUD —
+    // a vplayer with capacity 0 drawing 5.59 MW through its substation
+    // rendered as a meaningless "0/0" before this.
+    let total_load = f("load").unwrap_or(0.0) + f("structsLoad").unwrap_or(0.0);
+    let total_capacity = f("capacity").unwrap_or(0.0) + f("connectionCapacity").unwrap_or(0.0);
+    let energy = Some(format!("{}/{}", fmt_watts(total_load), fmt_watts(total_capacity)));
     let body = p.get("Player").unwrap_or(&p);
     let name = str_of(body.get("username"));
     // The pfp is LAYERED, not a URL: `pfpClientRenderAttributes` is a JSON
@@ -481,15 +681,115 @@ async fn read_owner_hud(
     (ore, charge, energy, name, pfp)
 }
 
-/// Watts → the game's compact HUD form (`8M`, `450k`, `72`).
+/// Watts → the game's compact HUD form.
+///
+/// Port of `util/NumberFormatter.format`: keep the leading 1-3 digits and
+/// append a scale letter, TRUNCATING rather than rounding — 5,590,000 is
+/// "5M" in the game, not "6M". Copied so the spectator's numbers are
+/// character-for-character the ones a player sees.
 fn fmt_watts(w: f64) -> String {
-    let w = w.max(0.0);
-    if w >= 1e6 {
-        format!("{}M", (w / 1e6).round() as i64)
-    } else if w >= 1e3 {
-        format!("{}k", (w / 1e3).round() as i64)
-    } else {
-        format!("{}", w.round() as i64)
+    let n = w.max(0.0).trunc() as i64;
+    let s = n.to_string();
+    let digits = s.len();
+    if digits <= 3 {
+        return s;
+    }
+    const SCALE: [&str; 10] = ["k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q"];
+    let remainder = match digits % 3 {
+        0 => 3,
+        r => r,
+    };
+    let scale_index = (digits - remainder) / 3;
+    let unit = SCALE.get(scale_index - 1).copied().unwrap_or("");
+    format!("{}{}", &s[..remainder], unit)
+}
+
+#[cfg(test)]
+mod struct_type_tests {
+    use super::parse_struct_type;
+    use serde_json::json;
+
+    /// The live Starfighter record, transcribed field-for-field from the LCD.
+    /// If the chain ever renames one of these the Action Bar goes blank, so the
+    /// spelling is worth pinning.
+    fn starfighter() -> serde_json::Value {
+        json!({"StructType": {
+            "id": "3",
+            "type": "Starfighter",
+            "class": "Starfighter",
+            "classAbbreviation": "Starfighter",
+            "category": "fleet",
+            "primaryWeapon": "guidedWeaponry",
+            "primaryWeaponControl": "guided",
+            "secondaryWeapon": "attackRun",
+            "secondaryWeaponControl": "unguided",
+            "passiveWeaponry": "counterAttack",
+            "unitDefenses": "noUnitDefenses",
+            "oreReserveDefenses": "noOreReserveDefenses",
+            "planetaryDefenses": "noPlanetaryDefense",
+            "planetaryMining": "noPlanetaryMining",
+            "planetaryRefinery": "noPlanetaryRefinery",
+            "powerGeneration": "noPowerGeneration",
+            "stealthSystems": false,
+            "movable": false
+        }})
+    }
+
+    #[test]
+    fn reads_every_field_the_action_bar_draws() {
+        let t = parse_struct_type(&starfighter());
+        assert_eq!(t.class_abbreviation, "Starfighter");
+        assert_eq!(t.category, "fleet");
+        assert_eq!(t.primary_weapon, "guidedWeaponry");
+        assert_eq!(t.primary_weapon_control, "guided");
+        assert_eq!(t.secondary_weapon, "attackRun");
+        assert_eq!(t.secondary_weapon_control, "unguided");
+        assert_eq!(t.passive_weaponry, "counterAttack");
+        assert_eq!(t.unit_defenses, "noUnitDefenses");
+        assert!(!t.stealth_systems);
+        assert!(!t.movable);
+    }
+
+    #[test]
+    fn accepts_an_unwrapped_body() {
+        let wrapped = starfighter();
+        let bare = wrapped.get("StructType").unwrap().clone();
+        assert_eq!(
+            parse_struct_type(&bare).class_abbreviation,
+            parse_struct_type(&wrapped).class_abbreviation
+        );
+    }
+
+    #[test]
+    fn falls_back_to_type_when_the_abbreviation_is_absent() {
+        let v = json!({"StructType": {"type": "Ore Extractor", "category": "planet"}});
+        assert_eq!(parse_struct_type(&v).class_abbreviation, "Ore Extractor");
+    }
+
+    #[test]
+    fn a_shape_it_does_not_recognise_yields_blanks_not_a_panic() {
+        let t = parse_struct_type(&json!({"unexpected": 1}));
+        assert!(t.class_abbreviation.is_empty());
+        assert!(t.category.is_empty());
+        assert!(!t.movable);
+    }
+}
+
+#[cfg(test)]
+mod fmt_tests {
+    use super::fmt_watts;
+
+    #[test]
+    fn matches_the_games_number_formatter() {
+        // Values below 1000 print whole; above, 1-3 leading digits + scale.
+        assert_eq!(fmt_watts(72.0), "72");
+        assert_eq!(fmt_watts(999.0), "999");
+        assert_eq!(fmt_watts(1_000.0), "1k");
+        assert_eq!(fmt_watts(8_469_986.0), "8M");
+        // TRUNCATES, never rounds up — the game shows "5M" here.
+        assert_eq!(fmt_watts(5_590_000.0), "5M");
+        assert_eq!(fmt_watts(450_000.0), "450k");
+        assert_eq!(fmt_watts(0.0), "0");
     }
 }
 
@@ -567,6 +867,10 @@ async fn build_struct(
     let v = client.query_entity("struct", &p.struct_id).await.ok()?;
     let body = v.get("Struct").unwrap_or(&v);
     let sattrs = v.get("structAttributes");
+    let protected_index = sattrs
+        .and_then(|a| a.get("protectedStructIndex"))
+        .and_then(num_u64)
+        .unwrap_or(0);
 
     if flag(sattrs.and_then(|a| a.get("isDestroyed"))) {
         return None;
@@ -628,6 +932,14 @@ async fn build_struct(
             .map(|v| flag(Some(v)))
             .unwrap_or(true),
         hidden: flag(sattrs.and_then(|a| a.get("isHidden"))),
+        // A non-zero protected index means this struct is guarding something.
+        defending: protected_index != 0,
+        // Filled by `mark_defended` once every struct is known — it is a
+        // relation, not a property, so it cannot be read off one entity.
+        defended: false,
+        // Struct ids are `5-<index>`; the chain stores only the index.
+        protects: (protected_index != 0).then(|| format!("5-{protected_index}")),
+        protected_index,
         is_command: p.is_command,
     })
 }

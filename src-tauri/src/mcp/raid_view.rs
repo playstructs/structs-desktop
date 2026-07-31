@@ -654,6 +654,104 @@ pub fn open_window(
 }
 
 #[cfg(test)]
+mod log_tests {
+    use super::*;
+    use serde_json::json;
+
+    // Payload shapes below are copied from live `structs.planet_activity`
+    // rows, so these assert the format the chain actually emits rather than
+    // one invented here.
+
+    #[test]
+    fn attack_reads_as_a_sentence() {
+        let d = json!({
+            "recoilDamage": "0", "weaponSystem": "primaryWeapon",
+            "weaponControl": "guided", "activeWeaponry": "guidedWeaponry",
+            "attackerPlayerId": "1-61", "attackerStructId": "5-26262",
+            "targetStructId": "5-30829"
+        });
+        assert_eq!(
+            describe_activity("struct_attack", &d),
+            "5-26262 hit 5-30829 with primaryWeapon"
+        );
+    }
+
+    #[test]
+    fn recoil_is_mentioned_only_when_it_happened() {
+        let none = json!({"attackerStructId": "5-1", "targetStructId": "5-2", "recoilDamage": "0"});
+        assert!(!describe_activity("struct_attack", &none).contains("recoil"));
+        let some = json!({"attackerStructId": "5-1", "targetStructId": "5-2", "recoilDamage": "2"});
+        assert!(describe_activity("struct_attack", &some).contains("recoil 2"));
+    }
+
+    #[test]
+    fn raid_status_carries_fleet_and_loot() {
+        let d = json!({
+            "status": "raidSuccessful", "fleet_id": "9-61",
+            "planet_id": "2-2423", "seized_ore": "23"
+        });
+        assert_eq!(
+            describe_activity("raid_status", &d),
+            "raid raidSuccessful by fleet 9-61 — seized 23 ore"
+        );
+        // A raid that took nothing must not claim it seized zero ore.
+        let empty = json!({"status": "attackerRetreated", "fleet_id": "9-61", "seized_ore": "0"});
+        assert_eq!(
+            describe_activity("raid_status", &empty),
+            "raid attackerRetreated by fleet 9-61"
+        );
+    }
+
+    #[test]
+    fn fleet_and_defense_rows() {
+        assert_eq!(
+            describe_activity("fleet_arrive", &json!({"fleet_id":"9-900","fleet_status":"onStation"})),
+            "fleet 9-900 arrived (onStation)"
+        );
+        assert_eq!(
+            describe_activity("struct_defense_add",
+                &json!({"defender_struct_id":"5-30247","protected_struct_id":"5-30233"})),
+            "5-30247 now defends 5-30233"
+        );
+    }
+
+    #[test]
+    fn unknown_category_still_shows_its_payload() {
+        // A chain event type added tomorrow must remain readable rather than
+        // rendering as a blank row.
+        let d = json!({"something_new": "42"});
+        let out = describe_activity("brand_new_event", &d);
+        assert!(out.contains("something_new"), "got: {out}");
+        // …but a null detail should not print the word "null".
+        assert_eq!(describe_activity("brand_new_event", &Value::Null), "");
+    }
+
+    #[test]
+    fn timestamps_reduce_to_clock_time() {
+        assert_eq!(short_time("2026-07-30 18:02:51.403416+00"), "18:02:51");
+        // Unexpected shapes fall back to the raw value rather than vanishing.
+        assert_eq!(short_time("whenever"), "whenever");
+        assert_eq!(short_time(""), "");
+    }
+
+    #[test]
+    fn log_row_parses_the_stringified_detail() {
+        // `detail` arrives as a JSON STRING on this endpoint, not an object —
+        // the same trap that has bitten every other consumer of this feed.
+        let item = json!({
+            "time": "2026-07-30 18:02:51.403416+00",
+            "category": "fleet_depart",
+            "detail": "{\"fleet_id\": \"9-900\"}",
+            "block_height": 1885302
+        });
+        let row = log_row(&item);
+        assert_eq!(row["time"], json!("18:02:51"));
+        assert_eq!(row["category"], json!("fleet_depart"));
+        assert_eq!(row["detail"], json!("fleet 9-900 departed"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
