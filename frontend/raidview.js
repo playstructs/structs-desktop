@@ -466,9 +466,31 @@
     if (avail <= 0) return;                 // not laid out yet (or headless)
     var w = boardCols * 128;
     var scale = avail / w;
-    if (scale >= 1) scale = Math.max(1, Math.floor(scale));   // crisp integers up
-    else scale = Math.max(0.2, scale);                        // continuous down
+    if (scale >= 1) {
+      scale = Math.max(1, Math.floor(scale));                 // crisp integers up
+    } else {
+      // Shrinking needs a fraction, but an ARBITRARY fraction paints hairlines
+      // between tiles: at zoom 0.75434 a 128px cell becomes 96.555px, so cell
+      // boundaries land mid-device-pixel and each box antialiases its own edge
+      // against the next. The cells meet exactly in layout (measured gap: 0) —
+      // the seam is pure rasterisation, which is why only SOME boundaries show
+      // one, depending where each lands in the pixel grid.
+      //
+      // Quantise so one tile is a whole number of DEVICE pixels; every boundary
+      // then falls on the grid and no edge needs blending. Floor rather than
+      // round so the board can never grow past the space measured for it.
+      var dpr = window.devicePixelRatio || 1;
+      var tileDevicePx = Math.max(1, Math.floor(128 * scale * dpr));
+      scale = Math.max(0.2, tileDevicePx / (128 * dpr));
+    }
     map.style.zoom = scale;
+    // The board's left edge can still land on a half device pixel, because
+    // `margin: 0 auto` centres on whatever space is left over. That is fine:
+    // it offsets every boundary by the SAME fraction, so the tiles stay in
+    // phase with each other and the seam is uniform rather than appearing at
+    // scattered boundaries. Correcting it via margin was tried and is worse —
+    // an explicit margin-left cancels the auto centring and slams the board
+    // against the padding edge.
   }
 
   /* Build the whole board for a snapshot. Returns the anchor map. */
