@@ -663,30 +663,62 @@
    * Status indicators should be hidden when a reaction indicator is active" —
    * so nothing is drawn while a combat animation is playing.
    */
+  /** Ids of the structs currently guarding `s` — the game's
+   * `Struct.defending_struct_ids`, which it gets from the API and we derive
+   * from the inverse relation we already carry (`protects`). */
+  function defendersOf(s) {
+    var out = [];
+    if (!s) return out;
+    Object.keys(state.structsById).forEach(function (id) {
+      if (state.structsById[id].protects === s.id) out.push(id);
+    });
+    return out;
+  }
+
+  /** Which indicators may show on `s` given the current selection.
+   *
+   * Ported from `MapStructHUDLayerComponent.getVisibleStatusIndicators`
+   * (structs-webapp `8c4e0149`, "Contextual status indicators based on struct
+   * selection"). With nothing selected — or on the selected struct itself —
+   * everything shows. On every OTHER struct, a selection suppresses the
+   * self-describing indicators (destroyed, offline) and leaves only the two
+   * that describe a RELATIONSHIP TO THE SELECTION:
+   *
+   *   defended  → the struct the selection is guarding
+   *   defending → the structs that are guarding the selection
+   *
+   * so picking a unit turns the board into a diagram of its defence web
+   * instead of a wall of unrelated badges. */
+  function visibleIndicators(s, sel) {
+    if (!sel || s.id === sel.id) {
+      return { destroyed: true, offline: true, defended: true, defending: true };
+    }
+    return {
+      destroyed: false,
+      offline: false,
+      defended: s.id === sel.protects,
+      defending: defendersOf(sel).indexOf(s.id) >= 0
+    };
+  }
+
   function badgesFor(s) {
     if (playing) return [];                       // a reaction supersedes these
     var sel = state.selectedId ? state.structsById[state.selectedId] : null;
+    var vis = visibleIndicators(s, sel);
     var out = [];
-
-    if (s.destroyed) {
-      // Wreckage announces itself only when you look at it.
-      if (sel && sel.id === s.id) out.push('sui-icon-destroyed');
-      return out;
+    // Each indicator is contextual visibility AND the struct's own state, in
+    // the game's own order and with its own predicates: destroyed wins over
+    // everything, offline additionally requires the struct to be BUILT, and
+    // both defence icons are suppressed on wreckage.
+    if (vis.destroyed && s.destroyed) out.push('sui-icon-destroyed');
+    if (vis.offline && !s.destroyed && s.built !== false && s.online === false) {
+      out.push('sui-icon-no-power');
     }
-    // Offline is ours, not the design system's: a spectator cannot see a
-    // power bar anywhere else, and the game shows the same glyph on its own
-    // tiles when a struct is unpowered.
-    if (s.online === false && s.built !== false) out.push('sui-icon-no-power');
-
-    if (s.defended) {
-      if (!sel) out.push('sui-icon-defended');
-      else if (sel.protects === s.id) out.push('sui-icon-defended');
-    }
-    if (s.defending) {
-      if (!sel) out.push('sui-icon-defending');
-      else if (s.protects === sel.id) out.push('sui-icon-defending');
-    }
-    if (s.hidden) out.push('sui-icon-stealth-mode');
+    if (vis.defended && !s.destroyed && s.defended) out.push('sui-icon-defended');
+    if (vis.defending && !s.destroyed && !!s.protects) out.push('sui-icon-defending');
+    // No stealth badge: the game's indicator layer has only these four, and a
+    // hidden struct is already shown at half opacity (`.rv-stealth`), which is
+    // how the real client says it.
     return out;
   }
 
@@ -2851,6 +2883,11 @@
     _applyDelta: applyDelta,
     _queue: function () { return queue; },
     isAttackSequence: isAttackSequence,
+    // Status-indicator logic is a pure function of (struct, selection) and is
+    // the part most likely to drift from the game — assert it directly.
+    _badgesFor: badgesFor,
+    _visibleIndicators: visibleIndicators,
+    _defendersOf: defendersOf,
     stillFlags: stillFlags,
     setBoardScale: setBoardScale,
     _pip: pip,
