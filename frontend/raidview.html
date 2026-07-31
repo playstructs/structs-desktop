@@ -121,6 +121,18 @@
     }
     .rv-focus-ring.rv-friendly { background-image: url("img/focus/focus-friendly.png"); }
     .rv-focus-ring.rv-enemy    { background-image: url("img/focus/focus-enemy.png"); }
+    /* Portrait hover. sui.css hides the pfp on hover and reveals an icon in its
+       place — but it reveals `icon-menu` under the PLAYER theme and `icon-info`
+       only under the ENEMY one. This window uses `icon-info` on BOTH portraits
+       on purpose (a spectator has no menu to open, and a menu glyph would
+       promise one), so under the player theme the hover hid the face and
+       revealed nothing: an empty lit panel that read as a rendering glitch.
+       Reveal our icon in that theme too, in the theme's own accent. */
+    .sui-theme-player .sui-screen-portrait:hover i.icon-info {
+      display: inline-block;
+      color: var(--accent-primary, #43CDB6);
+    }
+
     /* Empty tiles are selectable too — the Design System's Action Chunk has a
        documented empty-tile form. The game marks the chosen tile in its own
        selection layer; here the same job is one outline, tinted by side. */

@@ -2384,8 +2384,18 @@
     // when there is not enough room, exactly as SUIUtil does.
     function place(bub, origin, below) {
       var r = origin.getBoundingClientRect();
-      var left = origin.offsetLeft + (origin.offsetWidth / 2) - (bub.offsetWidth / 2);
-      bub.style.left = Math.max(0, left) + 'px';
+      // `SUIUtil.horizontallyCenter`, ported in full. Centring plus a
+      // `Math.max(0, …)` floor only guards the LEFT edge, so a trigger in the
+      // right-hand action bar pushed most of its tooltip past the window —
+      // there has to be a matching right-edge case that aligns the bubble's
+      // right edge to the trigger's instead.
+      if (r.left - (origin.offsetWidth / 2) < bub.offsetWidth / 2) {
+        bub.style.left = origin.offsetLeft + 'px';
+      } else if ((origin.offsetWidth / 2) + (window.innerWidth - r.right) < bub.offsetWidth / 2) {
+        bub.style.left = ((origin.offsetLeft + origin.offsetWidth) - bub.offsetWidth) + 'px';
+      } else {
+        bub.style.left = (origin.offsetLeft - (bub.offsetWidth - origin.offsetWidth) / 2) + 'px';
+      }
       var fitsBelow = (window.innerHeight - r.bottom) >= bub.offsetHeight;
       var fitsAbove = r.top >= bub.offsetHeight;
       var putBelow = below ? (fitsBelow || !fitsAbove) : (!fitsAbove && fitsBelow);

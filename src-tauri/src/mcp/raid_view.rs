@@ -329,8 +329,9 @@ async fn enrich_row(client: crate::mcp::cosmos_client::CosmosClient, mut row: Ra
 
 /// Every raid the galaxy is currently running, ours first.
 ///
-/// 404s (as an unknown command) unless the operator has opted in — see the
-/// module docs for why the refusal is shaped that way.
+/// Not gated: reaching Team Ops is the gate, and raids are public chain state
+/// the game already streams to every player (see the module docs). An earlier
+/// draft had a second opt-in switch and this comment outlived it.
 #[tauri::command]
 pub async fn mcp_raids() -> Result<Value, String> {
     let client = crate::mcp::cosmos_client::CosmosClient::new();

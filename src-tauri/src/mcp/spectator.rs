@@ -831,7 +831,24 @@ async fn read_owner_hud(
     // a vplayer with capacity 0 drawing 5.59 MW through its substation
     // rendered as a meaningless "0/0" before this.
     let total_load = f("load").unwrap_or(0.0) + f("structsLoad").unwrap_or(0.0);
-    let total_capacity = f("capacity").unwrap_or(0.0) + f("connectionCapacity").unwrap_or(0.0);
+    // The substation share is NOT on the player. `connectionCapacity` is a
+    // SUBSTATION attribute (production's `structs.grid` has 14 of them, all
+    // `object_type = substation`, and not one on a player), so reading it off
+    // the player always yielded 0 — which is why a worker drawing 2.5 kW
+    // through the guild substation rendered as "2k/0", claiming it was over
+    // capacity when it has 7.7 kW available.
+    //
+    // The player side of that link is documented as `capacitySecondary`, but
+    // THIS LCD does not expose it — a live read of 1-1005 returns a
+    // gridAttributes block with `connectionCapacity: "0"` and no
+    // `capacitySecondary` key at all. It is still preferred when present (a
+    // future LCD may carry it); in practice the substation read below is what
+    // answers, every time.
+    let secondary = match f("capacitySecondary") {
+        Some(v) if v > 0.0 => v,
+        _ => substation_share(client, p.get("Player").unwrap_or(&p)).await,
+    };
+    let total_capacity = f("capacity").unwrap_or(0.0) + secondary;
     // UNITS: `gridAttributes` are raw chain integers, i.e. MILLIWATTS — a
     // defender showing `structsLoad: 2500000` is drawing 2.5 kW, not 2.5 MW.
     // The shipped webapp formats them undivided, so its HUD reads a factor of
@@ -851,6 +868,73 @@ async fn read_owner_hud(
     let pfp = str_of(body.get("pfpClientRenderAttributes"))
         .or_else(|| str_of(body.get("pfp_client_render_attributes")));
     (ore, charge, energy, name, pfp)
+}
+
+/// The capacity a player receives from the substation they are connected to.
+///
+/// Zero when they are connected to nothing, or when the substation cannot be
+/// read — a HUD that under-reports capacity is wrong, but a HUD that fails to
+/// render because one extra entity read hiccuped is worse.
+async fn substation_share(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    player_body: &Value,
+) -> f64 {
+    let Some(sub_id) = str_of(player_body.get("substationId"))
+        .or_else(|| str_of(player_body.get("substation_id")))
+        .filter(|s| !s.is_empty())
+    else {
+        return 0.0;
+    };
+    if let Some(v) = cached_substation_share(&sub_id) {
+        return v;
+    }
+    let Ok(sub) = client.query_entity("substation", &sub_id).await else {
+        return 0.0;
+    };
+    let share = connection_capacity_of(&sub);
+    SUBSTATION_CACHE
+        .lock()
+        .unwrap()
+        .insert(sub_id, (share, crate::hasher::types::now_millis()));
+    share
+}
+
+/// Substation share, memoised briefly.
+///
+/// Because the LCD carries no `capacitySecondary`, the read above fires on
+/// EVERY snapshot — once per watched location per [`SNAPSHOT_INTERVAL_MS`].
+/// Worse, it is usually the SAME substation: a whole roster shares one (all
+/// 1,283 connections on 4-1 here), so eight open windows meant eight identical
+/// requests every 20 seconds. The value only moves when someone connects,
+/// disconnects, or re-allocates, so a short TTL costs nothing in accuracy.
+const SUBSTATION_TTL_MS: f64 = 60_000.0;
+
+static SUBSTATION_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, (f64, f64)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn cached_substation_share(sub_id: &str) -> Option<f64> {
+    let now = crate::hasher::types::now_millis();
+    let cache = SUBSTATION_CACHE.lock().unwrap();
+    cache
+        .get(sub_id)
+        .filter(|(_, at)| now - at < SUBSTATION_TTL_MS)
+        .map(|(v, _)| *v)
+}
+
+/// A substation's per-connection share, in milliwatts.
+///
+/// Deliberately does NOT divide by `connectionCount`: the chain has already
+/// done that when it wrote the value ("the stored `connectionCapacity` is
+/// already the per-player share — do not divide by `connectionCount` again",
+/// structs.ai energy.md). Production's substation 4-1 stores capacity
+/// 9,962,700,000 across 1,283 connections and a `connectionCapacity` of
+/// 7,765,159 — dividing again would report 6 kW as 4.7 W.
+fn connection_capacity_of(substation: &Value) -> f64 {
+    substation
+        .get("gridAttributes")
+        .and_then(|g| g.get("connectionCapacity"))
+        .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+        .unwrap_or(0.0)
 }
 
 /// Watts → the game's compact HUD form.
@@ -990,6 +1074,37 @@ mod fmt_tests {
         assert_eq!(fmt_watts(5_590_000.0), "5M");
         assert_eq!(fmt_watts(450_000.0), "450k");
         assert_eq!(fmt_watts(0.0), "0");
+    }
+
+    /// The bug this pins: `connectionCapacity` is a SUBSTATION attribute, not a
+    /// player one — production's `structs.grid` holds fourteen of them and every
+    /// single one has `object_type = substation`. Reading it off the player
+    /// always yielded 0, so a worker drawing 2.5 kW through the guild substation
+    /// rendered "2k/0" and looked catastrophically over capacity when it in fact
+    /// had 7.7 kW available.
+    #[test]
+    fn the_substation_share_comes_off_the_substation() {
+        use super::connection_capacity_of;
+        use serde_json::json;
+
+        // Substation 4-1 as production stores it.
+        let sub = json!({"gridAttributes": {
+            "capacity": "9962700000",
+            "connectionCapacity": "7765159",
+            "connectionCount": "1283",
+            "load": "0"
+        }});
+        assert_eq!(connection_capacity_of(&sub), 7_765_159.0);
+
+        // Player 1-1005: no own capacity, 2.5 kW of struct load, on 4-1.
+        let own = 0.0;
+        let total = own + connection_capacity_of(&sub);
+        assert_eq!(fmt_watts(2_500_000.0 / 1000.0), "2k");
+        assert_eq!(fmt_watts(total / 1000.0), "7k", "reads 2k/7k, never 2k/0");
+
+        // A player connected to nothing degrades to zero, not to a panic.
+        assert_eq!(connection_capacity_of(&json!({})), 0.0);
+        assert_eq!(connection_capacity_of(&json!({"gridAttributes": {}})), 0.0);
     }
 
     /// The HUD readout after the milliwatt→watt correction. `gridAttributes`
