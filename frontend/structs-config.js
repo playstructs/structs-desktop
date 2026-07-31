@@ -1051,7 +1051,40 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               planetary_defenses: pickStr(t, 'planetary_defenses', 'planetaryDefenses'),
               planetary_shield_contribution: pickNum(t, 'planetary_shield_contribution', 'planetaryShieldContribution'),
               trigger_raid_defeat_by_destruction: pickBool(t, 'trigger_raid_defeat_by_destruction', 'triggerRaidDefeatByDestruction'),
-              movable: pickBool(t, 'movable', 'movable')
+              movable: pickBool(t, 'movable', 'movable'),
+
+              // ── Cheatsheet copy ──────────────────────────────────────────
+              // Human-written labels and descriptions for every ability. These
+              // exist ONLY on the Guild API's /struct/type record, which needs
+              // a logged-in session — the raw LCD entity has none of them. This
+              // window is the only place in the app that holds that session, so
+              // if they do not cross here they cannot be shown anywhere else.
+              // The raid viewer's Cheatsheets are built from exactly these.
+              class_name: pickStr(t, 'class', 'class'),
+              class_abbreviation: pickStr(t, 'class_abbreviation', 'classAbbreviation'),
+              default_cosmetic_model_number: pickStr(t, 'default_cosmetic_model_number', 'defaultCosmeticModelNumber'),
+              default_cosmetic_name: pickStr(t, 'default_cosmetic_name', 'defaultCosmeticName'),
+              build_draw: pickNum(t, 'build_draw', 'buildDraw'),
+              generating_rate: pickNum(t, 'generating_rate', 'generatingRate'),
+              primary_weapon_label: pickStr(t, 'primary_weapon_label', 'primaryWeaponLabel'),
+              primary_weapon_description: pickStr(t, 'primary_weapon_description', 'primaryWeaponDescription'),
+              secondary_weapon_label: pickStr(t, 'secondary_weapon_label', 'secondaryWeaponLabel'),
+              secondary_weapon_description: pickStr(t, 'secondary_weapon_description', 'secondaryWeaponDescription'),
+              passive_weaponry: pickStr(t, 'passive_weaponry', 'passiveWeaponry'),
+              passive_weaponry_label: pickStr(t, 'passive_weaponry_label', 'passiveWeaponryLabel'),
+              passive_weaponry_description: pickStr(t, 'passive_weaponry_description', 'passiveWeaponryDescription'),
+              unit_defenses_label: pickStr(t, 'unit_defenses_label', 'unitDefensesLabel'),
+              unit_defenses_description: pickStr(t, 'unit_defenses_description', 'unitDefensesDescription'),
+              ore_reserve_defenses: pickStr(t, 'ore_reserve_defenses', 'oreReserveDefenses'),
+              ore_reserve_defenses_label: pickStr(t, 'ore_reserve_defenses_label', 'oreReserveDefensesLabel'),
+              ore_reserve_defenses_description: pickStr(t, 'ore_reserve_defenses_description', 'oreReserveDefensesDescription'),
+              planetary_defenses_label: pickStr(t, 'planetary_defenses_label', 'planetaryDefensesLabel'),
+              planetary_defenses_description: pickStr(t, 'planetary_defenses_description', 'planetaryDefensesDescription'),
+              planetary_mining: pickStr(t, 'planetary_mining', 'planetaryMining'),
+              planetary_refinery: pickStr(t, 'planetary_refinery', 'planetaryRefinery'),
+              power_generation: pickStr(t, 'power_generation', 'powerGeneration'),
+              drive_label: pickStr(t, 'drive_label', 'driveLabel'),
+              drive_description: pickStr(t, 'drive_description', 'driveDescription')
             };
           }
         }

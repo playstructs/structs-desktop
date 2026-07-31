@@ -248,6 +248,63 @@ pub struct StructTypeInfo {
     pub trigger_raid_defeat_by_destruction: Option<bool>,
     #[serde(default)]
     pub movable: Option<bool>,
+
+    // ── Cheatsheet copy ──
+    // Human-written labels and descriptions for each ability, synced from the
+    // game window. They live only on the Guild API's `/struct/type` record,
+    // which requires a logged-in session, so the window is the sole path by
+    // which they can reach anything else in the app. All optional: an app that
+    // has not synced yet must degrade to the enum names, not to "undefined".
+    #[serde(default)]
+    pub class_name: Option<String>,
+    #[serde(default)]
+    pub class_abbreviation: Option<String>,
+    #[serde(default)]
+    pub default_cosmetic_model_number: Option<String>,
+    #[serde(default)]
+    pub default_cosmetic_name: Option<String>,
+    #[serde(default)]
+    pub build_draw: Option<u64>,
+    #[serde(default)]
+    pub generating_rate: Option<u64>,
+    #[serde(default)]
+    pub primary_weapon_label: Option<String>,
+    #[serde(default)]
+    pub primary_weapon_description: Option<String>,
+    #[serde(default)]
+    pub secondary_weapon_label: Option<String>,
+    #[serde(default)]
+    pub secondary_weapon_description: Option<String>,
+    #[serde(default)]
+    pub passive_weaponry: Option<String>,
+    #[serde(default)]
+    pub passive_weaponry_label: Option<String>,
+    #[serde(default)]
+    pub passive_weaponry_description: Option<String>,
+    #[serde(default)]
+    pub unit_defenses_label: Option<String>,
+    #[serde(default)]
+    pub unit_defenses_description: Option<String>,
+    #[serde(default)]
+    pub ore_reserve_defenses: Option<String>,
+    #[serde(default)]
+    pub ore_reserve_defenses_label: Option<String>,
+    #[serde(default)]
+    pub ore_reserve_defenses_description: Option<String>,
+    #[serde(default)]
+    pub planetary_defenses_label: Option<String>,
+    #[serde(default)]
+    pub planetary_defenses_description: Option<String>,
+    #[serde(default)]
+    pub planetary_mining: Option<String>,
+    #[serde(default)]
+    pub planetary_refinery: Option<String>,
+    #[serde(default)]
+    pub power_generation: Option<String>,
+    #[serde(default)]
+    pub drive_label: Option<String>,
+    #[serde(default)]
+    pub drive_description: Option<String>,
 }
 
 /// Global synced game state, protected by RwLock for concurrent access

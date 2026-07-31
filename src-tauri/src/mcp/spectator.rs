@@ -226,22 +226,24 @@ pub struct SpectatorStruct {
     pub side: String,
 }
 
-/// One struct type as the Action Bar needs it.
+/// One struct type as the Action Bar and its Cheatsheets need it.
 ///
-/// The Structs Design System's "Action Chunk" (Figma `3815-187846`) is driven
-/// entirely by what a struct *can do*: a properties screen of equipment icons,
-/// an ability button group, and a power switch. The shipped
-/// `ActionBarComponent` reads all of that off the chain's StructType record, so
-/// the spectator has to carry the same record to render the same bar.
-///
-/// Only the fields that reach the screen are kept — this rides on every
-/// snapshot, and the combat-math fields (damage, shot rates, ambit masks) have
-/// no pixel to their name.
+/// TWO SOURCES, and the difference matters. The chain's LCD `struct_type`
+/// entity carries the *mechanics* — which weapon, how much damage, what
+/// charge. The **Guild API's** `/struct/type` record additionally carries the
+/// human-written *copy*: "Ballistic Weapon", "Fires unguided ordnance…", the
+/// cosmetic model number. That endpoint requires a logged-in session, which
+/// only the game window has, so the copy reaches us through
+/// `GAME_STATE.struct_types` (synced by the window) and the mechanics through
+/// a direct read. [`load_struct_types`] merges them, preferring the copy where
+/// it exists and degrading to the enum names where it does not.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SpectatorStructType {
-    /// Header text of the Action Chunk, e.g. "TANK". The chain's own
-    /// `classAbbreviation`; the game shows it verbatim.
+    /// Header text of the Action Chunk, e.g. "TANK".
     pub class_abbreviation: String,
+    /// Full class name — the Cheatsheet title is "<model number> <class>".
+    pub class_name: String,
+    pub default_cosmetic_model_number: String,
     /// "fleet" | "planet" — the game offers Defend only on fleet structs.
     pub category: String,
     /// Equipment slots, chain vocabulary (`guidedWeaponry`, `counterAttack`,
@@ -259,6 +261,47 @@ pub struct SpectatorStructType {
     pub power_generation: String,
     pub stealth_systems: bool,
     pub movable: bool,
+
+    // ── Cheatsheet mechanics ──
+    pub build_charge: u64,
+    pub build_draw: u64,
+    pub generating_rate: u64,
+    pub planetary_shield_contribution: u64,
+    pub counter_attack: u64,
+    pub counter_attack_same_ambit: u64,
+    /// Ambit bitmasks — Water=2, Land=4, Air=8, Space=16. The renderer expands
+    /// them into the ambit icon rows the Cheatsheet shows as "range".
+    pub possible_ambit: u64,
+    pub primary_weapon_ambits: u64,
+    pub secondary_weapon_ambits: u64,
+    pub primary_weapon_damage: u64,
+    pub primary_weapon_shots: u64,
+    pub primary_weapon_charge: u64,
+    pub primary_weapon_armour_piercing: bool,
+    pub secondary_weapon_damage: u64,
+    pub secondary_weapon_shots: u64,
+    pub secondary_weapon_charge: u64,
+    pub secondary_weapon_armour_piercing: bool,
+    pub move_charge: u64,
+    pub defend_change_charge: u64,
+    pub stealth_activate_charge: u64,
+
+    // ── Cheatsheet copy (Guild API only; empty when the window has not
+    // synced, which the renderer treats as "fall back to the enum name") ──
+    pub primary_weapon_label: String,
+    pub primary_weapon_description: String,
+    pub secondary_weapon_label: String,
+    pub secondary_weapon_description: String,
+    pub passive_weaponry_label: String,
+    pub passive_weaponry_description: String,
+    pub unit_defenses_label: String,
+    pub unit_defenses_description: String,
+    pub ore_reserve_defenses_label: String,
+    pub ore_reserve_defenses_description: String,
+    pub planetary_defenses_label: String,
+    pub planetary_defenses_description: String,
+    pub drive_label: String,
+    pub drive_description: String,
 }
 
 /// Struct types never change once the chain is up, so one read per type per app
@@ -272,11 +315,17 @@ fn parse_struct_type(v: &Value) -> SpectatorStructType {
     // change degrades to blank fields rather than a panic.
     let b = v.get("StructType").unwrap_or(v);
     let s = |k: &str| str_of(b.get(k)).unwrap_or_default();
+    let n = |k: &str| b.get(k).and_then(num_u64).unwrap_or(0);
     SpectatorStructType {
         class_abbreviation: {
             let abbr = s("classAbbreviation");
             if abbr.is_empty() { s("type") } else { abbr }
         },
+        class_name: {
+            let c = s("class");
+            if c.is_empty() { s("type") } else { c }
+        },
+        default_cosmetic_model_number: s("defaultCosmeticModelNumber"),
         category: s("category"),
         primary_weapon: s("primaryWeapon"),
         primary_weapon_control: s("primaryWeaponControl"),
@@ -291,12 +340,120 @@ fn parse_struct_type(v: &Value) -> SpectatorStructType {
         power_generation: s("powerGeneration"),
         stealth_systems: flag(b.get("stealthSystems")),
         movable: flag(b.get("movable")),
+
+        build_charge: n("buildCharge"),
+        // UNITS. The chain stores power in MILLIWATTS (`buildDraw: 500000` is
+        // 500 W — structs.ai energy.md, and `structs.struct_type` in production
+        // keeps both: `build_draw_p` = 500000 raw, `build_draw` = 500 via
+        // `unit_legacy_format(…, 'milliwatt')`). The Guild API serves the
+        // divided one, which is what the game's own HUD prints. Normalise to
+        // WATTS here so the readout can never be a factor of 1000 out.
+        build_draw: n("buildDraw") / 1000,
+        // NOT the same convention: `generatingRate` is already kW per gram of
+        // Alpha (the chain's `_p` value; production's display column is the one
+        // that multiplies by 1000, to W/g). Taken verbatim — dividing it here
+        // would be the same mistake in the other direction.
+        generating_rate: n("generatingRate"),
+        planetary_shield_contribution: n("planetaryShieldContribution"),
+        counter_attack: n("counterAttack"),
+        counter_attack_same_ambit: n("counterAttackSameAmbit"),
+        possible_ambit: n("possibleAmbit"),
+        primary_weapon_ambits: n("primaryWeaponAmbits"),
+        secondary_weapon_ambits: n("secondaryWeaponAmbits"),
+        primary_weapon_damage: n("primaryWeaponDamage"),
+        primary_weapon_shots: n("primaryWeaponShots"),
+        primary_weapon_charge: n("primaryWeaponCharge"),
+        primary_weapon_armour_piercing: flag(b.get("primaryWeaponArmourPiercing")),
+        secondary_weapon_damage: n("secondaryWeaponDamage"),
+        secondary_weapon_shots: n("secondaryWeaponShots"),
+        secondary_weapon_charge: n("secondaryWeaponCharge"),
+        secondary_weapon_armour_piercing: flag(b.get("secondaryWeaponArmourPiercing")),
+        move_charge: n("moveCharge"),
+        defend_change_charge: n("defendChangeCharge"),
+        stealth_activate_charge: n("stealthActivateCharge"),
+
+        // The LCD has no copy at all; `merge_synced_copy` fills these in.
+        ..Default::default()
     }
+}
+
+/// Overlay the Guild-API copy the game window synced onto an LCD-derived
+/// record. Only non-empty values win, so a partial sync can never blank a
+/// field the LCD already answered.
+fn merge_synced_copy(t: &mut SpectatorStructType, type_id: u64) {
+    let gs = crate::game_state::GAME_STATE.read().unwrap();
+    let Some(st) = gs.struct_types.get(&type_id.to_string()) else {
+        return;
+    };
+    fn put(dst: &mut String, src: &Option<String>) {
+        if let Some(v) = src {
+            if !v.is_empty() {
+                *dst = v.clone();
+            }
+        }
+    }
+    put(&mut t.class_abbreviation, &st.class_abbreviation);
+    put(&mut t.class_name, &st.class_name);
+    put(
+        &mut t.default_cosmetic_model_number,
+        &st.default_cosmetic_model_number,
+    );
+    put(&mut t.primary_weapon_label, &st.primary_weapon_label);
+    put(
+        &mut t.primary_weapon_description,
+        &st.primary_weapon_description,
+    );
+    put(&mut t.secondary_weapon_label, &st.secondary_weapon_label);
+    put(
+        &mut t.secondary_weapon_description,
+        &st.secondary_weapon_description,
+    );
+    put(&mut t.passive_weaponry_label, &st.passive_weaponry_label);
+    put(
+        &mut t.passive_weaponry_description,
+        &st.passive_weaponry_description,
+    );
+    put(&mut t.unit_defenses_label, &st.unit_defenses_label);
+    put(
+        &mut t.unit_defenses_description,
+        &st.unit_defenses_description,
+    );
+    put(
+        &mut t.ore_reserve_defenses_label,
+        &st.ore_reserve_defenses_label,
+    );
+    put(
+        &mut t.ore_reserve_defenses_description,
+        &st.ore_reserve_defenses_description,
+    );
+    put(
+        &mut t.planetary_defenses_label,
+        &st.planetary_defenses_label,
+    );
+    put(
+        &mut t.planetary_defenses_description,
+        &st.planetary_defenses_description,
+    );
+    put(&mut t.drive_label, &st.drive_label);
+    put(&mut t.drive_description, &st.drive_description);
+    // Deliberately NOT merged: `build_draw` and `generating_rate`.
+    //
+    // The two sources disagree on units for both — the Guild API serves
+    // `build_draw` already divided to watts and `generating_rate` MULTIPLIED to
+    // watts-per-gram, while the chain serves milliwatts and kW-per-gram. Taking
+    // whichever arrived first would make the readout depend on sync timing.
+    // `parse_struct_type` normalises both from the chain, which is always
+    // available, and that is the only place either is set.
 }
 
 /// Resolve every type id in `ids`, reading only the ones not already cached.
 /// A read failure drops that one type: the Action Bar falls back to a bare
 /// header rather than the whole snapshot failing.
+///
+/// The CACHE holds the LCD half only. The Guild-API copy is merged fresh on
+/// every call because the game window syncs it asynchronously — cache it and a
+/// spectator opened before the first sync would show enum names forever, with
+/// nothing to invalidate it.
 async fn load_struct_types(
     client: &crate::mcp::cosmos_client::CosmosClient,
     ids: &[u64],
@@ -323,6 +480,11 @@ async fn load_struct_types(
                 .unwrap()
                 .insert(key.clone(), t.clone());
             out.insert(key, t);
+        }
+    }
+    for (key, t) in out.iter_mut() {
+        if let Ok(id) = key.parse::<u64>() {
+            merge_synced_copy(t, id);
         }
     }
     out
@@ -670,7 +832,17 @@ async fn read_owner_hud(
     // rendered as a meaningless "0/0" before this.
     let total_load = f("load").unwrap_or(0.0) + f("structsLoad").unwrap_or(0.0);
     let total_capacity = f("capacity").unwrap_or(0.0) + f("connectionCapacity").unwrap_or(0.0);
-    let energy = Some(format!("{}/{}", fmt_watts(total_load), fmt_watts(total_capacity)));
+    // UNITS: `gridAttributes` are raw chain integers, i.e. MILLIWATTS — a
+    // defender showing `structsLoad: 2500000` is drawing 2.5 kW, not 2.5 MW.
+    // The shipped webapp formats them undivided, so its HUD reads a factor of
+    // 1000 high; this window deliberately does not follow it there. Same
+    // correction as the Action Bar Cheatsheets, so the two never disagree
+    // about what a watt is.
+    let energy = Some(format!(
+        "{}/{}",
+        fmt_watts(total_load / 1000.0),
+        fmt_watts(total_capacity / 1000.0)
+    ));
     let body = p.get("Player").unwrap_or(&p);
     let name = str_of(body.get("username"));
     // The pfp is LAYERED, not a URL: `pfpClientRenderAttributes` is a JSON
@@ -719,6 +891,8 @@ mod struct_type_tests {
             "class": "Starfighter",
             "classAbbreviation": "Starfighter",
             "category": "fleet",
+            "buildCharge": "8",
+            "buildDraw": "100000",
             "primaryWeapon": "guidedWeaponry",
             "primaryWeaponControl": "guided",
             "secondaryWeapon": "attackRun",
@@ -748,6 +922,32 @@ mod struct_type_tests {
         assert_eq!(t.unit_defenses, "noUnitDefenses");
         assert!(!t.stealth_systems);
         assert!(!t.movable);
+    }
+
+    /// The bug this pins: the chain serves power in MILLIWATTS but the game
+    /// prints watts, so reading `buildDraw` straight through showed a
+    /// Battleship costing "135k" when it costs 135 W. Verified against
+    /// production `structs.struct_type`, which stores both
+    /// (`build_draw_p` 135000 / `build_draw` 135).
+    #[test]
+    fn build_draw_is_normalised_from_milliwatts_to_watts() {
+        let t = parse_struct_type(&starfighter());
+        assert_eq!(t.build_draw, 100, "100000 mW is 100 W, not 100k anything");
+
+        let cpp = json!({"StructType": {"buildDraw": "10000000"}});
+        assert_eq!(parse_struct_type(&cpp).build_draw, 10_000);
+    }
+
+    /// …and the same field name in the OTHER direction: `generatingRate` is
+    /// already kW per gram on the chain (Field Generator = 2, matching the
+    /// documented "2 kW/g"). Production's display column is the one that
+    /// multiplies by 1000, so dividing here would be the mirror-image bug.
+    #[test]
+    fn generating_rate_is_taken_verbatim() {
+        let gen = json!({"StructType": {"generatingRate": "2", "buildDraw": "500000"}});
+        let t = parse_struct_type(&gen);
+        assert_eq!(t.generating_rate, 2);
+        assert_eq!(t.build_draw, 500);
     }
 
     #[test]
@@ -790,6 +990,21 @@ mod fmt_tests {
         assert_eq!(fmt_watts(5_590_000.0), "5M");
         assert_eq!(fmt_watts(450_000.0), "450k");
         assert_eq!(fmt_watts(0.0), "0");
+    }
+
+    /// The HUD readout after the milliwatt→watt correction. `gridAttributes`
+    /// are raw chain integers: the live defender of planet 2-3176 carries
+    /// `structsLoad: 2500000`, which is 2.5 kW — five planetary structs at
+    /// 500 W each, not the 2.5 MW the undivided number implied.
+    #[test]
+    fn grid_attributes_are_milliwatts_before_they_are_formatted() {
+        assert_eq!(fmt_watts(2_500_000.0 / 1000.0), "2k");
+        assert_eq!(fmt_watts(8_000_000.0 / 1000.0), "8k");
+        // A single Ore Extractor's draw: 500000 mW is 500 W.
+        assert_eq!(fmt_watts(500_000.0 / 1000.0), "500");
+        // Sub-watt loads must not vanish into a bare "0" surprise — they do
+        // round down, which is the same truncation the game applies.
+        assert_eq!(fmt_watts(999.0 / 1000.0), "0");
     }
 }
 
