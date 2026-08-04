@@ -1284,8 +1284,9 @@ struct Watch {
     /// Planet actually being rendered. For a fleet target this follows the
     /// fleet and changes as it moves.
     planet_id: Option<String>,
-    /// `seq` of the newest `struct_attack` row already sent, so the poll never
-    /// replays a fight the window has already animated.
+    /// Wall-clock (epoch ms) of the newest `struct_attack` row already sent, so
+    /// the poll never replays a fight the window has already animated. Seeded to
+    /// `fresh_shot_cursor()` rather than 0 — see there for why.
     shot_cursor: f64,
     generation: u64,
     /// Set by the GRASS fan-out when a fleet arrives or departs: the board's
@@ -1324,7 +1325,7 @@ pub fn attach(app: &tauri::AppHandle, target: &Target, window_label: &str) -> bo
                     Target::Planet { planet_id } => Some(planet_id.clone()),
                     Target::Fleet { .. } => None,
                 },
-                shot_cursor: 0.0,
+                shot_cursor: fresh_shot_cursor(),
                 generation: 0,
                 force_snapshot: false,
             }
@@ -1372,6 +1373,25 @@ const SNAPSHOT_INTERVAL_MS: u64 = 20_000;
 /// seconds of lag on the animation is imperceptible next to the fight itself.
 const SHOT_POLL_MS: u64 = 4_000;
 
+/// How much combat history a freshly-attached window is allowed to animate.
+///
+/// The cursor used to start at 0, which meant "everything is newer than this" —
+/// so the first poll replayed every `struct_attack` still on page 1 of the
+/// planet's activity (100 rows; up to ~31 attacks, some MONTHS old) as live
+/// choreography. Opening a raid view looked like a fight was already underway:
+/// health bars stepped down, then snapped back on the next snapshot, with no
+/// matching charge spend and nothing new in the battle log.
+///
+/// Seeding it just behind `now` keeps the useful half of that — attach mid-fight
+/// and the last few seconds still play in — while making the archive unreachable.
+const SHOT_BACKFILL_MS: f64 = 30_000.0;
+
+/// Cursor for a window that is starting to watch a location for the first time,
+/// or that just followed its fleet to a different planet.
+fn fresh_shot_cursor() -> f64 {
+    crate::hasher::types::now_millis() - SHOT_BACKFILL_MS
+}
+
 fn spawn_watcher(app: tauri::AppHandle, key: String) {
     tauri::async_runtime::spawn(async move {
         let client = crate::mcp::cosmos_client::CosmosClient::new();
@@ -1403,11 +1423,14 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                         .and_then(|v| str_of(v.get("Fleet").and_then(|f| f.get("locationId"))));
                     if at != planet_id {
                         // Moved: reset the shot cursor and force a rebuild, so
-                        // the new planet never inherits the old one's combat.
+                        // the new planet never inherits the old one's combat —
+                        // nor, via a zeroed cursor, the new planet's own archive.
+                        // This is the tick that fires when a followed fleet
+                        // launches a raid and reaches the target.
                         let mut w = WATCHES.lock().unwrap();
                         if let Some(e) = w.get_mut(&key) {
                             e.planet_id = at.clone();
-                            e.shot_cursor = 0.0;
+                            e.shot_cursor = fresh_shot_cursor();
                             e.generation += 1;
                         }
                         last_snapshot = 0.0;
@@ -1890,6 +1913,37 @@ mod tests {
         assert_eq!(shot["targetHealthBefore"], "4");
         assert_eq!(shot["targetHealthAfter"], "0");
         assert_eq!(shot["targetDestroyed"], true);
+    }
+
+    /// Render an epoch-ms instant in the Guild API's timestamp format.
+    fn iso_at(ms: f64) -> String {
+        chrono::DateTime::from_timestamp_millis(ms as i64)
+            .unwrap()
+            .format("%Y-%m-%d %H:%M:%S%.6f+00")
+            .to_string()
+    }
+
+    #[test]
+    fn a_fresh_watch_animates_the_live_fight_but_not_the_archive() {
+        // The cursor used to start at 0, which means "everything is newer than
+        // this": attaching a window replayed every struct_attack still on page 1
+        // — up to ~31 rows, some of them months old — as live choreography.
+        let now = crate::hasher::types::now_millis();
+        let rows = vec![
+            attack_row("2026-05-12 22:29:33+00", "5-1", "5-2", 6, 4), // the archive
+            attack_row(&iso_at(now - 5_000.0), "5-3", "5-4", 4, 2),   // happening now
+        ];
+        let (shots, _) = collect_shots(&rows, fresh_shot_cursor());
+        assert_eq!(shots.len(), 1, "only the in-flight fight should animate");
+        assert_eq!(shots[0]["attacker_id"], "5-3");
+    }
+
+    #[test]
+    fn the_backfill_window_is_the_only_thing_a_new_watch_can_see() {
+        let now = crate::hasher::types::now_millis();
+        let stale = attack_row(&iso_at(now - SHOT_BACKFILL_MS - 60_000.0), "5-1", "5-2", 4, 2);
+        let (shots, _) = collect_shots(&[stale], fresh_shot_cursor());
+        assert!(shots.is_empty(), "anything older than the backfill window is history");
     }
 
     #[test]

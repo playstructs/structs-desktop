@@ -92,8 +92,9 @@ pub struct Owned {
     pub planets: HashSet<String>,
     pub fleets: HashSet<String>,
     pub structs: HashSet<String>,
-    /// All ids flattened, for the subject/detail contains-filter.
-    flat: Vec<String>,
+    /// All ids flattened into one set, for O(1) exact membership tests against
+    /// an event's tokens.
+    flat: HashSet<String>,
     /// planet id -> owner label (vplayer name, or "you" for the primary).
     pub label_by_planet: HashMap<String, String>,
     /// planet id -> owning player id. Only that player's own fleet is
@@ -106,15 +107,23 @@ impl Owned {
     /// Which of our planets does this event concern, if any? The response loop
     /// needs the planet to pull the authoritative attack record from the Guild
     /// API (GRASS stubs any real fight).
+    ///
+    /// The subject's own planet segment wins over a detail reference: an event
+    /// keyed to planet A can name planet B in its payload, and only A is where
+    /// the thing actually happened.
     pub fn planet_for(&self, e: &GameEvent) -> Option<String> {
-        let ds = e.detail.to_string();
-        self.planets
-            .iter()
-            .find(|p| !p.is_empty() && (e.subject.contains(p.as_str()) || ds.contains(p.as_str())))
-            .cloned()
+        if let Some(p) = subject_planet(&e.subject) {
+            if self.planets.contains(p) {
+                return Some(p.to_string());
+            }
+        }
+        event_tokens(e)
+            .into_iter()
+            .find(|t| !t.is_empty() && self.planets.contains(*t))
+            .map(|t| t.to_string())
     }
     fn refresh_flat(&mut self) {
-        let mut flat: Vec<String> = Vec::new();
+        let mut flat: HashSet<String> = HashSet::new();
         flat.extend(self.players.iter().cloned());
         flat.extend(self.planets.iter().cloned());
         flat.extend(self.fleets.iter().cloned());
@@ -122,16 +131,123 @@ impl Owned {
         flat.retain(|s| !s.is_empty());
         self.flat = flat;
     }
+    /// Does this event reference any owned entity at all? Backs `mine_only`.
+    fn refs_any(&self, e: &GameEvent) -> bool {
+        event_tokens(e).into_iter().any(|t| self.flat.contains(t))
+    }
     /// Which owner a threat event belongs to (for tagging in team mode).
+    ///
+    /// Subject first, for the same reason as `planet_for` — and because two
+    /// owned planets matching one event would otherwise let the HashMap's
+    /// arbitrary iteration order pick the name.
     fn label_for(&self, e: &GameEvent) -> String {
-        let ds = e.detail.to_string();
-        for (planet, name) in &self.label_by_planet {
-            if e.subject.contains(planet) || ds.contains(planet) {
+        if let Some(p) = subject_planet(&e.subject) {
+            if let Some(name) = self.label_by_planet.get(p) {
+                return name.clone();
+            }
+        }
+        for t in event_tokens(e) {
+            if let Some(name) = self.label_by_planet.get(t) {
                 return name.clone();
             }
         }
         "you".to_string()
     }
+}
+
+/// Does this subject name `id` as a whole segment?
+///
+/// Grass subjects are dot-delimited (`structs.planet.2-4228.1-750`), so an id is
+/// always a complete segment — never part of one. Shared with the callers outside
+/// this module that were doing `subject.contains(id)`.
+pub fn subject_names(subject: &str, id: &str) -> bool {
+    !id.is_empty() && subject.split('.').any(|s| s == id)
+}
+
+/// The planet id a subject is keyed to, if any. Both `structs.planet.<pid>.<player>`
+/// and `structs.grid.planet.<pid>.<player>` name it in the segment right after
+/// the literal `planet`.
+fn subject_planet(subject: &str) -> Option<&str> {
+    let mut it = subject.split('.');
+    while let Some(s) = it.next() {
+        if s == "planet" {
+            return it.next();
+        }
+    }
+    None
+}
+
+/// Every id-shaped token an event carries: its dot-delimited subject segments
+/// plus every string value in the detail (ids are always JSON strings in grass
+/// payloads).
+///
+/// This exists so ownership tests are EXACT. The previous `subject.contains(id)`
+/// matched any id that was a prefix of a longer one — ids are dense integers, so
+/// owning `2-422` claimed every event on `2-4220`..`2-4229`, and owning `1-61`
+/// claimed `1-611`. On the live guild that was 80 foreign planets reading as ours.
+fn event_tokens(e: &GameEvent) -> Vec<&str> {
+    let mut out: Vec<&str> = e.subject.split('.').collect();
+    collect_strs(&e.detail, &mut out);
+    out
+}
+
+fn collect_strs<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+    match v {
+        Value::String(s) => out.push(s.as_str()),
+        Value::Array(a) => a.iter().for_each(|x| collect_strs(x, out)),
+        Value::Object(m) => m.values().for_each(|x| collect_strs(x, out)),
+        _ => {}
+    }
+}
+
+/// Does this event name any id in `set`? Exact, whole-token matches only.
+fn refs_set(e: &GameEvent, set: &HashSet<String>) -> bool {
+    event_tokens(e).into_iter().any(|t| set.contains(t))
+}
+
+/// Raid statuses that mean the raid is OVER. `category.contains("raid")` fires on
+/// every `raid_status` transition, so without this the alarm that says "ore can be
+/// seized" also rings on the message announcing the raid ended.
+const RAID_TERMINAL: &[&str] = &[
+    "raidSuccessful",
+    "attackerDefeated",
+    "attackerRetreated",
+    "demilitarized",
+];
+
+/// How far either side of a destruction to look for the departure that explains
+/// it. Same-block events share a chain timestamp and arrive milliseconds apart;
+/// this is slack for ingest jitter, not a real time window.
+const RELOCATE_WINDOW_MS: f64 = 30_000.0;
+
+/// Was this planet's carnage self-inflicted?
+///
+/// `explore` relocates a player to a new planet and destroys everything left on
+/// the old one — which reaches us as exactly the `struct_status` bit-32 burst and
+/// shield collapse an enemy would produce. 33 of the team's own vplayers
+/// relocated in one hour on the live guild, paging "19 structs destroyed" each
+/// time.
+///
+/// The tell is in the same block on the same planet: a `fleet_depart` for a fleet
+/// WE own carrying `fleet_status: onStation` — the planet's own garrison leaving
+/// home. A raider departing a victim's planet is `away`, and an enemy killing our
+/// structs departs nothing at all, so neither is suppressed.
+fn is_self_relocation(e: &GameEvent, o: &Owned) -> bool {
+    let Some(planet) = subject_planet(&e.subject) else {
+        return false;
+    };
+    event_buffer::get_recent(200, Some("fleet_depart"), None)
+        .iter()
+        .any(|d| {
+            (e.timestamp - d.timestamp).abs() <= RELOCATE_WINDOW_MS
+                && subject_planet(&d.subject) == Some(planet)
+                && d.detail.get("fleet_status").and_then(|v| v.as_str()) == Some("onStation")
+                && d.detail
+                    .get("fleet_id")
+                    .and_then(|v| v.as_str())
+                    .map(|f| o.fleets.contains(f))
+                    .unwrap_or(false)
+        })
 }
 
 fn num(d: &Value, k: &str) -> Option<f64> {
@@ -147,36 +263,38 @@ pub fn classify(e: &GameEvent, o: &Owned) -> Option<Threat> {
     let cat = e.category.as_str();
     let d = &e.detail;
     let sid = d.get("struct_id").and_then(|v| v.as_str());
-    let detail_str = d.to_string();
-    let refs_planet = o
-        .planets
-        .iter()
-        .any(|p| e.subject.contains(p) || detail_str.contains(p));
+    let refs_planet = refs_set(e, &o.planets);
     let refs_struct = sid.map(|s| o.structs.contains(s)).unwrap_or(false);
     let mine = refs_planet || refs_struct;
 
-    // Raid clock arming on an owned planet — the top alarm (ore at risk).
+    // Raid clock arming on an owned planet — the top alarm (ore at risk). The
+    // message that ENDS a raid is also a raid_status; it is not an alarm.
     if cat.contains("raid") && refs_planet {
-        return Some(Threat::RaidArmed);
+        let status = d.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if !RAID_TERMINAL.contains(&status) {
+            return Some(Threat::RaidArmed);
+        }
+        return None;
     }
     // An owned struct destroyed (status bit 32) — by struct id or on an owned planet.
     if cat == "struct_status" && mine {
         if let Some(st) = num(d, "status") {
-            if (st as u64) & 32 != 0 {
+            if (st as u64) & 32 != 0 && !is_self_relocation(e, o) {
                 return Some(Threat::StructLost);
             }
         }
     }
     // An owned struct losing health → damage (or destroyed if it hit 0).
-    if cat == "struct_health" && mine {
+    if cat == "struct_health" && mine && !is_self_relocation(e, o) {
         if let (Some(h), Some(ho)) = (num(d, "health"), num(d, "health_old")) {
             if h < ho {
                 return Some(if h <= 0.0 { Threat::StructLost } else { Threat::TakingDamage });
             }
         }
     }
-    // Planetary shield dropping on an owned planet.
-    if cat == "shield_change" && refs_planet {
+    // Planetary shield dropping on an owned planet. Abandoning a planet collapses
+    // its shield too, so the same relocation gate applies.
+    if cat == "shield_change" && refs_planet && !is_self_relocation(e, o) {
         if let (Some(s), Some(so)) = (num(d, "planetary_shield"), num(d, "planetary_shield_old")) {
             if s < so {
                 return Some(Threat::ShieldDrop);
@@ -185,11 +303,15 @@ pub fn classify(e: &GameEvent, o: &Owned) -> Option<Threat> {
     }
     // A fleet that isn't ours arriving at an owned planet → incoming hostile.
     if cat == "fleet_arrive" && refs_planet {
-        let mine_fleet = o
-            .fleets
-            .iter()
-            .any(|f| e.subject.contains(f) || detail_str.contains(f))
-            || o.players.iter().any(|p| detail_str.contains(p));
+        // Only `fleet_id` says who arrived. The payload's `player_id` is stamped
+        // by the grass trigger with the PLANET's owner — us, on our own planets —
+        // so testing it made every arrival look friendly and this alarm never
+        // fired at all.
+        let mine_fleet = d
+            .get("fleet_id")
+            .and_then(|v| v.as_str())
+            .map(|f| o.fleets.contains(f))
+            .unwrap_or(false);
         if !mine_fleet {
             return Some(Threat::HostileInbound);
         }
@@ -292,12 +414,7 @@ pub async fn execute(params: EventParams) -> Vec<Content> {
             .filter(|e| e.timestamp > since)
             .filter(|e| match &owned {
                 None => true,
-                Some(o) => {
-                    let detail_str = e.detail.to_string();
-                    o.flat
-                        .iter()
-                        .any(|id| e.subject.contains(id.as_str()) || detail_str.contains(id.as_str()))
-                }
+                Some(o) => o.refs_any(e),
             })
             .collect();
         let threats: Vec<(GameEvent, Threat)> = if threats_only {
@@ -373,4 +490,190 @@ pub async fn execute(params: EventParams) -> Vec<Content> {
         out.push_str(&format!("\nnext_cursor: {} (pass as 'since' to page forward)\n", next_cursor));
     }
     vec![Content::text(out)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ev(cat: &str, subject: &str, detail: Value) -> GameEvent {
+        GameEvent {
+            category: cat.to_string(),
+            subject: subject.to_string(),
+            detail,
+            timestamp: 1_000.0,
+        }
+    }
+
+    /// Owns planet 2-422 / fleet 9-434 — the shape that made 2-4228 look ours.
+    fn owned() -> Owned {
+        let mut o = Owned::default();
+        o.players.insert("1-434".into());
+        o.planets.insert("2-422".into());
+        o.fleets.insert("9-434".into());
+        o.label_by_planet.insert("2-422".into(), "worker153".into());
+        o.refresh_flat();
+        o
+    }
+
+    #[test]
+    fn planet_id_prefix_is_not_a_match() {
+        // 2-4228 merely starts with 2-422; it belongs to someone else.
+        let e = ev(
+            "struct_status",
+            "structs.planet.2-4228.1-750",
+            json!({"planet_id": "2-4228", "status": 35, "status_old": 7, "struct_id": "5-39196"}),
+        );
+        assert_eq!(classify(&e, &owned()), None);
+        assert!(!owned().refs_any(&e));
+    }
+
+    #[test]
+    fn exact_planet_still_matches() {
+        let e = ev(
+            "struct_status",
+            "structs.planet.2-422.1-434",
+            json!({"planet_id": "2-422", "status": 35, "status_old": 7, "struct_id": "5-1"}),
+        );
+        assert_eq!(classify(&e, &owned()), Some(Threat::StructLost));
+    }
+
+    #[test]
+    fn player_id_prefix_is_not_a_match() {
+        // The 1-61 / 1-611 case, on the player set.
+        let mut o = Owned::default();
+        o.players.insert("1-61".into());
+        o.refresh_flat();
+        let e = ev("lastAction", "structs.grid.player.1-611.1-611", json!({"player_id": "1-611"}));
+        assert!(!o.refs_any(&e));
+    }
+
+    #[test]
+    fn label_follows_the_subject_not_whichever_planet_hashes_first() {
+        let mut o = owned();
+        o.planets.insert("2-4228".into());
+        o.label_by_planet.insert("2-4228".into(), "worker458".into());
+        o.refresh_flat();
+        let e = ev("struct_status", "structs.planet.2-4228.1-750", json!({"planet_id": "2-4228"}));
+        // Deterministic across runs: 2-422 must never win an event keyed to 2-4228.
+        for _ in 0..50 {
+            assert_eq!(o.label_for(&e), "worker458");
+        }
+    }
+
+    #[test]
+    fn terminal_raid_status_is_not_an_alarm() {
+        let o = owned();
+        let armed = ev(
+            "raid_status",
+            "structs.planet.2-422.1-434",
+            json!({"planet_id": "2-422", "status": "initiated"}),
+        );
+        assert_eq!(classify(&armed, &o), Some(Threat::RaidArmed));
+        for done in ["raidSuccessful", "attackerDefeated", "attackerRetreated", "demilitarized"] {
+            let e = ev(
+                "raid_status",
+                "structs.planet.2-422.1-434",
+                json!({"planet_id": "2-422", "status": done}),
+            );
+            assert_eq!(classify(&e, &o), None, "{done} should not raise an alarm");
+        }
+    }
+
+    #[test]
+    fn hostile_arrival_fires_despite_the_owner_stamped_player_id() {
+        // The grass trigger stamps `player_id` with the PLANET's owner (us), which
+        // used to make every arrival read as friendly.
+        let o = owned();
+        let e = ev(
+            "fleet_arrive",
+            "structs.planet.2-422.1-434",
+            json!({"planet_id": "2-422", "player_id": "1-434", "fleet_id": "9-61", "fleet_status": "away"}),
+        );
+        assert_eq!(classify(&e, &o), Some(Threat::HostileInbound));
+    }
+
+    #[test]
+    fn our_own_fleet_coming_home_is_not_hostile() {
+        let o = owned();
+        let e = ev(
+            "fleet_arrive",
+            "structs.planet.2-422.1-434",
+            json!({"planet_id": "2-422", "player_id": "1-434", "fleet_id": "9-434", "fleet_status": "onStation"}),
+        );
+        assert_eq!(classify(&e, &o), None);
+    }
+
+    #[test]
+    fn subject_planet_extraction() {
+        assert_eq!(subject_planet("structs.planet.2-5348.1-61"), Some("2-5348"));
+        assert_eq!(subject_planet("structs.grid.planet.2-6013.1-748"), Some("2-6013"));
+        assert_eq!(subject_planet("structs.grid.player.1-194.1-194"), None);
+        assert_eq!(subject_planet("consensus"), None);
+    }
+
+    #[test]
+    fn tokens_cover_nested_detail() {
+        let e = ev(
+            "fleet_arrive",
+            "structs.planet.2-5348.1-61",
+            json!({"fleet_id": "9-61", "fleet_list": ["9-61", "9-77"]}),
+        );
+        let t = event_tokens(&e);
+        assert!(t.contains(&"2-5348"));
+        assert!(t.contains(&"9-77"), "array members must be reachable");
+    }
+
+    /// Uses its own planet id so it can populate the shared global event buffer
+    /// without changing what the other tests in this module classify.
+    #[test]
+    fn abandoning_a_planet_is_not_an_attack() {
+        let mut o = owned();
+        o.planets.insert("2-999".into());
+        o.fleets.insert("9-999".into());
+        o.refresh_flat();
+
+        let killed = ev(
+            "struct_status",
+            "structs.planet.2-999.1-999",
+            json!({"planet_id": "2-999", "status": 35, "status_old": 7, "struct_id": "5-1"}),
+        );
+        let shield = ev(
+            "shield_change",
+            "structs.planet.2-999.1-999",
+            json!({"planet_id": "2-999", "planetary_shield": 25, "planetary_shield_old": 125}),
+        );
+        // Nothing explains it yet, so it reads as combat.
+        assert_eq!(classify(&killed, &o), Some(Threat::StructLost));
+        assert_eq!(classify(&shield, &o), Some(Threat::ShieldDrop));
+
+        // Our own garrison leaving home in the same block: this is an `explore`.
+        event_buffer::push_event(ev(
+            "fleet_depart",
+            "structs.planet.2-999.1-999",
+            json!({"fleet_id": "9-999", "fleet_status": "onStation"}),
+        ));
+        assert_eq!(classify(&killed, &o), None);
+        assert_eq!(classify(&shield, &o), None);
+    }
+
+    #[test]
+    fn a_raider_leaving_our_planet_does_not_excuse_the_damage() {
+        let mut o = owned();
+        o.planets.insert("2-998".into());
+        o.refresh_flat();
+        let killed = ev(
+            "struct_status",
+            "structs.planet.2-998.1-998",
+            json!({"planet_id": "2-998", "status": 35, "status_old": 7, "struct_id": "5-2"}),
+        );
+        // A hostile fleet departing is `away`, and is not one of ours.
+        event_buffer::push_event(ev(
+            "fleet_depart",
+            "structs.planet.2-998.1-998",
+            json!({"fleet_id": "9-61", "fleet_status": "away"}),
+        ));
+        assert_eq!(classify(&killed, &o), Some(Threat::StructLost));
+    }
 }

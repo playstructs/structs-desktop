@@ -1280,7 +1280,12 @@ pub async fn execute(
             let evs = crate::mcp::event_buffer::get_recent(60, None, None);
             let mine: Vec<_> = evs
                 .iter()
-                .filter(|e| e.subject.contains(&player_id) || e.detail.to_string().contains(&address))
+                // Whole-segment match: `contains` put 1-750's activity in 1-75's
+                // listing. The address is full-length bech32, so it cannot collide.
+                .filter(|e| {
+                    crate::mcp::tools::events::subject_names(&e.subject, &player_id)
+                        || e.detail.to_string().contains(&address)
+                })
                 .rev()
                 .take(6)
                 .collect();

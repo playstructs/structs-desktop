@@ -307,15 +307,15 @@ impl PolicyEngine {
             };
 
             let involves_me = |subject: &str| -> bool {
-                // Pattern is "structs.<entity>.<id>" — take whatever is after the
-                // last dot and compare. Defensive against future subject shapes:
-                // also check substring containment as a fallback.
-                if let Some(id) = subject.rsplit('.').next() {
-                    if owned.contains(id) {
-                        return true;
-                    }
-                }
-                owned.iter().any(|id| !id.is_empty() && subject.contains(id))
+                // Subjects are dot-delimited, and an owned id is always a whole
+                // segment — so test every segment. This covers any subject shape
+                // (the id is not always last: `structs.planet.<pid>.<player>`)
+                // without the substring fallback that used to be here, which
+                // claimed every id we happen to be a prefix of: owning `2-422`
+                // matched `2-4228`, so someone else's fight read as our combat.
+                subject
+                    .split('.')
+                    .any(|seg| !seg.is_empty() && owned.contains(seg))
             };
 
             let combat_events = event_buffer::get_recent(20, None, None);
