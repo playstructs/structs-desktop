@@ -1712,7 +1712,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           }
 
           var grassState = classifyGrass(now);
-          var signingMissing = (window.signingClientManager && !sc);
+          // The webapp's SigningClientManager.connect() calls disconnect() first,
+          // which nulls gameState.signingClient for the duration of a legitimate
+          // rebuild. Sampling mid-rebuild would look identical to a dead client,
+          // so don't call it missing while its own connection check is in flight.
+          var scmForCheck = window.signingClientManager;
+          var scmRebuilding = !!(scmForCheck && scmForCheck.connectionCheck);
+          var signingMissing = (scmForCheck && !sc && !scmRebuilding);
 
           window.dispatchEvent(new CustomEvent('structs:connection-status', {
             detail: {
@@ -1758,6 +1764,19 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 conn.grass.lastOpenAt = now;
                 reconnected = true;
                 logRust('grass reconnect() invoked');
+              }
+            } catch (e) {}
+
+            // (a2) signing: the webapp recovers silently-dead signing sockets
+            // natively (SigningClientManager.resumeCheck → liveness probe →
+            // rebuild) explicitly WITHOUT a page reload. Give that a turn before
+            // we escalate; reloading here would abort the rebuild it starts.
+            try {
+              var scm = window.signingClientManager;
+              if (signingDead && scm && typeof scm.resumeCheck === 'function') {
+                scm.resumeCheck(true);
+                reconnected = true;
+                logRust('signing resumeCheck() invoked');
               }
             } catch (e) {}
 
