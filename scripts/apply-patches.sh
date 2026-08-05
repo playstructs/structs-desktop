@@ -56,29 +56,25 @@ sed -i.bak 's|global.gameState = gameState;|global.gameState = gameState; window
   "$BUILD_DIR/js/index.js"
 verify_patched "$BUILD_DIR/js/index.js" 'window.gameState = gameState' "index.js window.gameState exposure"
 
-echo "    Patching GrassManager.js (background-stall resume-check)..."
-# The webapp already does its own self-healing — supervised connect/subscribe
-# loop, exponential backoff up to 30s, NATS-level reconnect attempts (see
-# `_supervise` in GrassManager.js). What it CAN'T detect is a silent stall:
-# WebView backgrounding can leave the WebSocket TCP socket alive while no
-# data flows. We layer two minimal pieces on top:
-#   1) heartbeat: stamp `_lastMessageAt` whenever a frame arrives
-#   2) resume-check listener: on the visibility-change foreground event
-#      dispatched by main.rs, if the heartbeat is >60s stale, force-close
-#      the NATS connection. The existing `_supervise` loop sees the close,
-#      backs off briefly, and reconnects — no manual `init()` call needed.
+echo "    Patching GrassManager.js (background-stall resume-check bridge)..."
+# The webapp now self-heals stalled grass connections natively: as of upstream
+# "Recover expired GuildAPI sessions and stalled GRASS connections", GrassManager
+# has its own `resumeCheck()` (block-clock staleness, debounced) + `reconnect()`,
+# already wired to visibilitychange/pageshow/online/focus and a poll interval.
+#
+# We only ADD extra trigger sources on top: main.rs dispatches
+# `structs:grass-resume-check` on the native WKWebView foreground event, and
+# structs-config.js's connection-recovery ladder dispatches it too. Bridge that
+# event to the webapp's OWN resumeCheck() — do NOT re-implement reconnection.
+# (The previous crude force-close + `_lastMessageAt` heartbeat fought upstream's
+# debounced logic and is removed.)
 GM="$BUILD_DIR/js/framework/GrassManager.js"
 
-# 1. Constructor: install a window-level resume-check listener. Anchor:
-#    `this.listeners = new Map();` (still present in current webapp source).
-sed -i.bak "s|this.listeners = new Map();|this.listeners = new Map(); this._lastMessageAt = Date.now(); var __self = this; window.addEventListener('structs:grass-resume-check', function() { try { var stale = (Date.now() - __self._lastMessageAt) > 60000; if (stale \&\& __self.nc) { console.info('[GrassManager] resume-check: stale, forcing reconnect on', __self.subject); try { __self.nc.close(); } catch(e) {} } } catch(e) { console.warn('[GrassManager] resume-check error', e); } });|" "$GM"
-verify_patched "$GM" 'structs:grass-resume-check' "GrassManager.js resume-check listener"
-
-# 2. Heartbeat: update `_lastMessageAt` in the consume loop right after the
-#    frame is parsed. Anchor: `messageData = this.getMessageData(message);`
-#    (note: webapp now declares `messageData` on a prior line — no `const`).
-sed -i.bak "s|messageData = this.getMessageData(message);|messageData = this.getMessageData(message); this._lastMessageAt = Date.now();|" "$GM"
-verify_patched "$GM" 'this._lastMessageAt = Date.now()' "GrassManager.js heartbeat update"
+# Constructor: bridge our resume event to the webapp's native resumeCheck().
+# Anchor: `this.listeners = new Map();` (still present in current webapp source).
+# The `typeof` guard no-ops gracefully if a build predates native resumeCheck.
+sed -i.bak "s|this.listeners = new Map();|this.listeners = new Map(); var __self = this; window.addEventListener('structs:grass-resume-check', function() { try { if (typeof __self.resumeCheck === 'function') __self.resumeCheck(); } catch(e) { console.warn('[GrassManager] resume-check bridge error', e); } });|" "$GM"
+verify_patched "$GM" 'structs:grass-resume-check' "GrassManager.js resume-check bridge"
 
 echo "    Patching index.js (expose UI reactor for external re-render)..."
 # index.js uses top-level await (it's an ES module), so gameState / grassManager /
