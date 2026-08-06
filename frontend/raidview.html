@@ -423,7 +423,26 @@
     #rv-banner svg { max-width: min(70vw, 640px); max-height: 50vh; }
 
     /* ── Status / empty states ────────────────────────────────────────── */
-    #rv-note { flex: none; padding: 8px 14px; display: none; }
+    /* An OVERLAY, not a flex sibling. #rv-stage is a flex ROW and this had
+       `flex: none`, so once it appeared it claimed its full content width —
+       768px of a 905px stage — and squeezed the board itself into a 137px
+       sliver. It only ever appears on a CONTESTED planet (two fleets, not
+       enough tiles), which is exactly the situation a raid spectator exists
+       for, so the one case that mattered was the one that broke. */
+    #rv-note {
+      display: none;
+      /* BOTTOM-centre, not top: the top-centre slot already belongs to the
+         planet/status chip (#rv-where-chip at 38px), and the top corners to
+         the two status panels. The strip between the two player portraits is
+         the only band that is always free. */
+      position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%);
+      z-index: 45; pointer-events: none;
+      max-width: min(92%, 620px); padding: 6px 12px;
+      text-align: center; line-height: 1.4;
+      background: rgba(13, 15, 21, .82);
+      border: 1px solid var(--border, #345);
+      color: var(--text-warning, #F3C878);
+    }
     #rv-note.on { display: block; }
     .rv-empty { display: flex; flex-direction: column; gap: 8px;
       align-items: center; justify-content: center; padding: 60px 20px;

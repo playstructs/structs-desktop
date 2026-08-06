@@ -734,6 +734,62 @@ pub async fn snapshot_planet(
     }
 }
 
+/// Every `locationId` that means "present at this planet": the planet itself,
+/// plus each fleet docked there (the owner's own, which the chain's visitor
+/// list omits, and every visitor).
+///
+/// Combat in Structs is CO-LOCATED — a struct can only fire at something at
+/// the same planet. `plan_strike` had no such filter, so it offered every
+/// reachable struct the team owns across 1,800 planets and the chain rejected
+/// each shot with "target struct is unreachable". This is the set that makes
+/// that filter possible, sharing the spectator's fleet walk rather than
+/// growing a second, drifting copy of it.
+pub async fn locations_at_planet(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    planet_id: &str,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    out.insert(planet_id.to_string());
+    let Ok(planet) = client.query_entity("planet", planet_id).await else { return out };
+    let body = planet.get("Planet").unwrap_or(&planet);
+
+    // The owner's own fleet is never in the visitor list even when on station.
+    if let Some(owner_id) = str_of(body.get("owner")) {
+        if let Ok(v) = client.query_entity("player", &owner_id).await {
+            if let Some(fid) = str_of(v.get("Player").unwrap_or(&v).get("fleetId")) {
+                if let Ok(fleet) = client.query_entity("fleet", &fid).await {
+                    let fbody = fleet.get("Fleet").unwrap_or(&fleet);
+                    if str_of(fbody.get("locationId")).as_deref() == Some(planet_id) {
+                        out.insert(fid);
+                    }
+                }
+            }
+        }
+    }
+
+    // Visitors. Same both-directions walk, and the same dangling-pointer guard,
+    // as the spectator board.
+    for (head, link) in [
+        ("locationListStart", "locationListBackward"),
+        ("locationListLast", "locationListForward"),
+    ] {
+        let mut next = str_of(body.get(head));
+        while let Some(fleet_id) = next.take() {
+            if out.len() > MAX_FLEETS_AT_PLANET + 1 || out.contains(&fleet_id) {
+                break;
+            }
+            let Ok(fleet) = client.query_entity("fleet", &fleet_id).await else { break };
+            let fbody = fleet.get("Fleet").unwrap_or(&fleet);
+            if str_of(fbody.get("locationId")).as_deref() != Some(planet_id) {
+                break;
+            }
+            out.insert(fleet_id);
+            next = str_of(fbody.get(link));
+        }
+    }
+    out
+}
+
 /// Resolve `defended` across a board: any struct named by another struct's
 /// `protectedStructIndex` is defended. Struct ids are `5-<index>`, so the
 /// index is matched against the id's suffix rather than assuming a position.

@@ -614,6 +614,25 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
         None => InterceptorNet::default(),
     };
 
+    // ── Who is actually THERE ────────────────────────────────────────────
+    // Combat is co-located: a struct can only fire at something at the same
+    // planet. Without this the planner ranked every reachable struct the team
+    // owns — 1,820 of them across 1,800 planets for one 6 HP bunker — and the
+    // chain rejected every single shot with "target struct is unreachable".
+    // `None` (an unresolvable target planet) means no filter rather than a
+    // silently empty plan.
+    let here: Option<std::collections::HashSet<String>> = match &target_planet {
+        Some(p) => Some(crate::mcp::spectator::locations_at_planet(client, p).await),
+        None => None,
+    };
+    let colocated = |loc: Option<&str>| -> bool {
+        match (&here, loc) {
+            (None, _) => true,
+            (Some(set), Some(l)) => set.contains(l),
+            (Some(_), None) => false,
+        }
+    };
+
     // ── Gather attackers: (label, player_id, hd_index, struct_id, type_id, ambit_bit). ──
     // Primary from GAME_STATE; each virtual player from its planet/fleet slots.
     type Attacker = (String, Option<String>, Option<u32>, String, String, u64);
@@ -624,6 +643,9 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
             if only_players.as_ref().map(|s| s.contains(&me)).unwrap_or(true) {
                 for (id, s) in gs.structs.iter() {
                     if s.owner != me || s.status & 2 == 0 || s.status & 32 != 0 {
+                        continue;
+                    }
+                    if !colocated(s.location_id.as_deref()) {
                         continue;
                     }
                     let bit = s.operating_ambit.as_deref().map(ambit_bit).unwrap_or(0);
@@ -680,6 +702,9 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
                 continue;
             }
             let Some(id) = v.get("id").and_then(|x| x.as_str()) else { continue };
+            if !colocated(v.get("location_id").and_then(|x| x.as_str())) {
+                continue;
+            }
             let type_id = v
                 .get("type")
                 .or_else(|| v.get("struct_type"))
