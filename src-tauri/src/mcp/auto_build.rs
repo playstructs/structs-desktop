@@ -39,6 +39,14 @@ const LOADOUT: &[(&str, &str, &str)] = &[
     ("planet", "water", "Planetary Defense Cannon"),
     ("planet", "space", "Orbital Shield Generator"),
     ("fleet", "air", "Pursuit Fighter"),
+    // A Battleship sits in a SPACE slot but its primary reaches [water, land]
+    // and is ARMOUR-PIERCING (verified on the live struct type: ambits 6,
+    // primaryWeaponArmourPiercing true). That is the answer to the fight we
+    // just lost: a raider's Command Ship is land and armoured, so every Tank
+    // shot we landed read "2 dmg, 1 blocked" while the Battleship would have
+    // hit for full — from an ambit the attacker was not contesting. Ahead of
+    // the Starfighter, which is cheaper but has nothing that pierces.
+    ("fleet", "space", "Battleship"),
     ("fleet", "land", "Tank"),
     ("fleet", "water", "Submersible"),
     ("fleet", "space", "Starfighter"),
@@ -53,6 +61,9 @@ const PRODUCTIVE_LOADOUT: &[(&str, &str, &str)] = &[
     ("planet", "land", "Ore Refinery"),
     ("fleet", "land", "Command Ship"),
     ("planet", "space", "Orbital Shield Generator"),
+    // Same reasoning as LOADOUT: one armour-piercing hull that can answer a
+    // land-based raider before the cheaper filler.
+    ("fleet", "space", "Battleship"),
     ("fleet", "land", "Tank"),
     ("fleet", "space", "Starfighter"),
 ];
@@ -649,6 +660,14 @@ mod tests {
         assert_eq!(c.complete_difficulty, 4);
         assert_eq!(LOADOUT[0].2, "Ore Extractor"); // miner first (rebuilt after explore)
         assert_eq!(LOADOUT.last().unwrap().2, "Ore Bunker"); // heavy last
+        // The only armour-piercing hull we field must be in the defensive
+        // loadout, and ahead of the Starfighter that shares its slot — a
+        // raider's Command Ship is armoured and nothing else we build pierces.
+        let space: Vec<&str> = LOADOUT.iter()
+            .filter(|(t, a, _)| *t == "fleet" && *a == "space").map(|(_, _, n)| *n).collect();
+        assert_eq!(space.first(), Some(&"Battleship"), "Battleship must lead the fleet space slot");
+        assert!(space.contains(&"Starfighter"));
+        assert!(PRODUCTIVE_LOADOUT.iter().any(|(_, _, n)| *n == "Battleship"));
         assert_eq!(PRODUCTIVE_LOADOUT[0].2, "Ore Extractor");
         assert_eq!(PRODUCTIVE_LOADOUT[1].2, "Ore Refinery");
     }

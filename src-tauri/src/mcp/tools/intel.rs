@@ -179,6 +179,12 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
             t.id,
             t.possible_ambit.map(decode_ambits).unwrap_or_else(|| "?".to_string())
         ));
+        // HP belongs beside armour: every damage number in this matrix is only
+        // meaningful against the health it has to chew through, and "how many
+        // shots to kill" was previously unanswerable from the combat tool.
+        if let Some(hp) = t.max_health {
+            out.push_str(&format!(" · {} HP", hp));
+        }
         if let Some(r) = t.attack_reduction {
             if r > 0 {
                 out.push_str(&format!(" · armour −{}", r));
@@ -190,7 +196,8 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
         out.push('\n');
         let weapon_line = |label: &str, ambits: Option<u64>, wtype: &Option<String>, ctrl: &Option<String>,
                            shots: Option<u64>, dmg: Option<u64>, gtd: Option<u64>,
-                           num: Option<u64>, den: Option<u64>, blockable: Option<bool>, counterable: Option<bool>| -> Option<String> {
+                           num: Option<u64>, den: Option<u64>, blockable: Option<bool>, counterable: Option<bool>,
+                           piercing: Option<bool>| -> Option<String> {
             let a = ambits.unwrap_or(0);
             if a == 0 { return None; }
             // This chain version has no guaranteed-shots field (always 0); only
@@ -202,7 +209,7 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
                 format!("{}/{} per-shot hit", num.unwrap_or(0), den.unwrap_or(1))
             };
             Some(format!(
-                "  {}: reach [{}] · {}×{} dmg · {} · {}{} · {}{}\n",
+                "  {}: reach [{}] · {}×{} dmg · {} · {}{} · {}{}",
                 label,
                 decode_ambits(a),
                 shots.unwrap_or(0),
@@ -212,18 +219,20 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
                 ctrl.clone().map(|c| format!("/{}", c)).unwrap_or_default(),
                 if blockable == Some(true) { "blockable" } else { "unblockable" },
                 if counterable == Some(true) { ", counterable" } else { "" },
-            ))
+            ) + if piercing == Some(true) { " · ARMOUR-PIERCING\n" } else { "\n" })
         };
         if let Some(l) = weapon_line("primary", t.primary_weapon_ambits, &t.primary_weapon, &t.primary_weapon_control,
             t.primary_weapon_shots, t.primary_weapon_damage, t.primary_weapon_guaranteed_shots,
             t.primary_weapon_shot_success_numerator, t.primary_weapon_shot_success_denominator,
-            t.primary_weapon_blockable, t.primary_weapon_counterable) {
+            t.primary_weapon_blockable, t.primary_weapon_counterable,
+            t.primary_weapon_armour_piercing) {
             out.push_str(&l);
         }
         if let Some(l) = weapon_line("secondary", t.secondary_weapon_ambits, &t.secondary_weapon, &t.secondary_weapon_control,
             t.secondary_weapon_shots, t.secondary_weapon_damage, t.secondary_weapon_guaranteed_shots,
             t.secondary_weapon_shot_success_numerator, t.secondary_weapon_shot_success_denominator,
-            t.secondary_weapon_blockable, t.secondary_weapon_counterable) {
+            t.secondary_weapon_blockable, t.secondary_weapon_counterable,
+            t.secondary_weapon_armour_piercing) {
             out.push_str(&l);
         }
         if t.counter_attack.unwrap_or(0) > 0 || t.counter_attack_same_ambit.unwrap_or(0) > 0 {
@@ -232,6 +241,73 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
                 t.counter_attack_same_ambit.unwrap_or(0),
                 t.counter_attack.unwrap_or(0)
             ));
+        }
+        // ── Evasion ──
+        // The defender's own dodge rates against each control type. These are
+        // what decide guided-vs-unguided, and the matrix asked you to choose a
+        // weapon without showing them.
+        let rate = |n: Option<u64>, d: Option<u64>| -> Option<String> {
+            match (n, d) {
+                (Some(n), Some(d)) if d > 0 && n > 0 => Some(format!("{}/{}", n, d)),
+                _ => None,
+            }
+        };
+        let ev_g = rate(t.guided_defensive_success_rate_numerator, t.guided_defensive_success_rate_denominator);
+        let ev_u = rate(t.unguided_defensive_success_rate_numerator, t.unguided_defensive_success_rate_denominator);
+        if ev_g.is_some() || ev_u.is_some() {
+            out.push_str(&format!(
+                "  evades: {} vs guided · {} vs unguided{}\n",
+                ev_g.unwrap_or_else(|| "never".into()),
+                ev_u.unwrap_or_else(|| "never".into()),
+                t.unit_defenses_label.clone()
+                    .or_else(|| t.unit_defenses.clone())
+                    .filter(|d| !d.starts_with("no"))
+                    .map(|d| format!(" ({})", d))
+                    .unwrap_or_default(),
+            ));
+        }
+        // ── Consequences of destroying it ──
+        // `trigger_raid_defeat_by_destruction` is the entire basis of the
+        // decapitate doctrine — kill this and the raid ends — and it was not
+        // surfaced anywhere. Same for the shield a struct props up, which is
+        // what makes Ore Bunkers worth shooting before the Command Ship.
+        let mut on_death: Vec<String> = Vec::new();
+        if t.trigger_raid_defeat_by_destruction == Some(true) {
+            on_death.push("destroying it ENDS A RAID".into());
+        }
+        if let Some(c) = t.planetary_shield_contribution {
+            if c > 0 {
+                on_death.push(format!("carries {} planetary shield", c));
+            }
+        }
+        if let Some(p) = t.post_destruction_damage {
+            if p > 0 {
+                on_death.push(format!("{} splash damage on death", p));
+            }
+        }
+        if !on_death.is_empty() {
+            out.push_str(&format!("  on destruction: {}\n", on_death.join(" · ")));
+        }
+        // ── What a shot costs ──
+        // Charge is the real limiter on how often anything can fire, and recoil
+        // is self-damage the attacker eats.
+        let cost = |label: &str, ch: Option<u64>, recoil: Option<u64>, ambits: Option<u64>| -> Option<String> {
+            if ambits.unwrap_or(0) == 0 { return None; }
+            let mut bits = vec![format!("{} charge", ch.unwrap_or(0))];
+            if recoil.unwrap_or(0) > 0 {
+                bits.push(format!("{} recoil", recoil.unwrap_or(0)));
+            }
+            Some(format!("{} {}", label, bits.join(", ")))
+        };
+        let costs: Vec<String> = [
+            cost("primary", t.primary_weapon_charge, t.primary_weapon_recoil_damage, t.primary_weapon_ambits),
+            cost("secondary", t.secondary_weapon_charge, t.secondary_weapon_recoil_damage, t.secondary_weapon_ambits),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !costs.is_empty() {
+            out.push_str(&format!("  cost to fire: {}\n", costs.join(" · ")));
         }
     }
     if !gs.struct_types.values().any(|t| t.primary_weapon_shots.is_some()) {
@@ -754,26 +830,48 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
             if prim.ambits == 0 && sec.ambits == 0 {
                 continue; // non-combat struct
             }
-            // Prefer the weapon that reaches the target's ambit; between two that
-            // both reach, prefer the one the target can't evade (unguided into a
-            // jammer, guided into a defensive-maneuver hull).
+            // Prefer the weapon that reaches the target's ambit; between two
+            // that both reach, SIMULATE BOTH and take the one that actually
+            // does more damage.
+            //
+            // This used to tie-break on evade chance alone, which silently threw
+            // away armour-piercing. A Battleship's AP weapon exists precisely to
+            // skip a target's `attack_reduction`, and against an armoured
+            // Command Ship that is the difference between the "2 dmg, 1 blocked"
+            // we kept landing and a full-strength hit — but with equal evade
+            // chances the old rule just took the primary. `simulate` already
+            // models armour, piercing, evasion and guaranteed shots, so asking
+            // it is both more accurate and self-maintaining as the rules grow.
             let prim_ok = tgt_ambit_bit != 0 && (prim.ambits & tgt_ambit_bit) != 0;
             let sec_ok = tgt_ambit_bit != 0 && (sec.ambits & tgt_ambit_bit) != 0;
-            let (w, wlabel) = match (prim_ok, sec_ok) {
+            let same = *att_ambit != 0 && *att_ambit == tgt_ambit_bit;
+            let (w, wlabel, r) = match (prim_ok, sec_ok) {
                 (true, true) => {
-                    if defense.evade_chance(sec.control) < defense.evade_chance(prim.control) {
-                        (sec, "secondary")
+                    let rp = simulate(&prim, tgt_ambit_bit, tgt_hp, &defense, same);
+                    let rs = simulate(&sec, tgt_ambit_bit, tgt_hp, &defense, same);
+                    if rs.expected_damage > rp.expected_damage {
+                        (sec, "secondary", rs)
                     } else {
-                        (prim, "primary")
+                        (prim, "primary", rp)
                     }
                 }
-                (true, false) => (prim, "primary"),
-                (false, true) => (sec, "secondary"),
-                (false, false) if prim.ambits != 0 => (prim, "primary"),
-                _ => (sec, "secondary"),
+                (true, false) => {
+                    let r = simulate(&prim, tgt_ambit_bit, tgt_hp, &defense, same);
+                    (prim, "primary", r)
+                }
+                (false, true) => {
+                    let r = simulate(&sec, tgt_ambit_bit, tgt_hp, &defense, same);
+                    (sec, "secondary", r)
+                }
+                (false, false) if prim.ambits != 0 => {
+                    let r = simulate(&prim, tgt_ambit_bit, tgt_hp, &defense, same);
+                    (prim, "primary", r)
+                }
+                _ => {
+                    let r = simulate(&sec, tgt_ambit_bit, tgt_hp, &defense, same);
+                    (sec, "secondary", r)
+                }
             };
-            let same = *att_ambit != 0 && *att_ambit == tgt_ambit_bit;
-            let r = simulate(&w, tgt_ambit_bit, tgt_hp, &defense, same);
             let exposure = counter_exposure(&defender_masks, *att_ambit);
             rows.push(StrikeRow {
                 player: player.clone(),

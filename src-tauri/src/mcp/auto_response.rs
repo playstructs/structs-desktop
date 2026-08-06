@@ -85,6 +85,12 @@ pub struct AutoResponseConfig {
     /// Cap on shots fired per incident. Each shot is one player's whole charge bar.
     pub max_shots_per_incident: usize,
     /// Rolling one-hour ceiling across all incidents — the runaway guard.
+    ///
+    /// Sized so ONE raid can actually be fought to a conclusion. A 6 HP Command
+    /// Ship behind a blocker takes ~1 net damage per shot (observed: "2 dmg,
+    /// 1 blocked"), so ending a raid needs 6-12 shots inside a ~4 minute
+    /// window. At the old 30/hour a defender ran dry after two minutes and the
+    /// raid finished unopposed.
     pub max_shots_per_hour: usize,
     /// Ignore repeat triggers from the same attacker inside this window; one
     /// fight produces dozens of events.
@@ -114,7 +120,7 @@ impl Default for AutoResponseConfig {
             interval_secs: 20,
             mode: ResponseMode::Decapitate,
             max_shots_per_incident: 8,
-            max_shots_per_hour: 30,
+            max_shots_per_hour: 120,
             incident_cooldown_secs: 300,
             min_charge_margin: 2,
             prefer_counter_free_ambit: true,
@@ -127,6 +133,18 @@ impl Default for AutoResponseConfig {
 
 static CONFIG: LazyLock<RwLock<AutoResponseConfig>> =
     LazyLock::new(|| RwLock::new(crate::mcp::config_store::load_config::<AutoResponseConfig>(FILENAME)));
+/// Planets of ours with a raid clock currently running, kept alive across scans.
+///
+/// A raid does NOT stop because the raider stopped shooting. Observed live: the
+/// attacker killed miner4's Command Ship, which armed the raid, then went
+/// completely quiet to grind the raid proof. This loop is event-driven — it
+/// raises alarms only for events newer than `EVENT_HW` — so with no new shots
+/// there were no alarms, and the defence sat idle for the rest of the raid
+/// while the ore was taken. Once a raid is seen, the planet stays watched and
+/// re-alarms every scan until the clock clears or the raider's CMD is dead.
+static RAID_WATCH: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static RUN_GEN: AtomicU64 = AtomicU64::new(0);
@@ -297,6 +315,49 @@ async fn scan(
         entry.is_raid |= is_raid;
     }
     *EVENT_HW.lock().unwrap() = hw;
+
+    // ── Sustained defence ────────────────────────────────────────────────
+    // Re-raise an alarm for every planet whose raid clock is still running,
+    // whether or not anything new happened this scan. Cost is bounded by the
+    // number of raids actually running against us (normally one), not by the
+    // roster: only watched planets are read.
+    let watched: Vec<(String, String)> = RAID_WATCH
+        .lock()
+        .map(|w| w.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    for (planet_id, defender) in watched {
+        let armed = client
+            .query_entity("planet", &planet_id)
+            .await
+            .ok()
+            .map(|e| {
+                crate::mcp::loop_util::read_u64_field(e.get("planetAttributes"), "blockStartRaid")
+            })
+            .unwrap_or(0);
+        if armed == 0 {
+            // Clock cleared: the raid completed, was abandoned, or we ended it.
+            if let Ok(mut w) = RAID_WATCH.lock() {
+                w.remove(&planet_id);
+            }
+            crate::mcp::telemetry::tlog(
+                "auto_response",
+                crate::mcp::telemetry::Sev::Notice,
+                format!("{planet_id}: raid clock cleared — standing down"),
+            );
+            continue;
+        }
+        alarms.entry(planet_id.clone()).or_insert_with(|| Alarm {
+            planet_id: planet_id.clone(),
+            defender_player: defender.clone(),
+            label: owned
+                .label_by_planet
+                .get(&planet_id)
+                .cloned()
+                .unwrap_or_else(|| "you".into()),
+            is_raid: true,
+        });
+    }
+
     if alarms.is_empty() {
         return;
     }
@@ -304,6 +365,13 @@ async fn scan(
     crate::mcp::combat_lists::prune_expired();
 
     for (_, alarm) in alarms {
+        // Keep fighting this one until the clock clears, even if the raider
+        // never fires another shot.
+        if alarm.is_raid && !alarm.defender_player.is_empty() {
+            if let Ok(mut w) = RAID_WATCH.lock() {
+                w.insert(alarm.planet_id.clone(), alarm.defender_player.clone());
+            }
+        }
         run.players.fetch_add(1, Ordering::Relaxed);
         if let Err(e) = handle_alarm(app_handle, &client, cfg, &owned, &alarm, run).await {
             run.errors.fetch_add(1, Ordering::Relaxed);
@@ -390,8 +458,13 @@ async fn handle_alarm(
         crate::mcp::auto_harvest::request_priority_refine(app, &alarm.defender_player).await;
     }
 
+    // The cooldown exists so one skirmish does not produce dozens of incidents.
+    // A RAID is the opposite case: the clock is running, the whole window is
+    // about four minutes, and every scan we skip is a shot the raider does not
+    // have to survive. At the shipped 300s cooldown a defender got ONE shot per
+    // raid against an attacker firing every 38 seconds.
     let cooldown_key = attacker_player.clone().unwrap_or_else(|| alarm.planet_id.clone());
-    if in_cooldown(&cooldown_key, cfg.incident_cooldown_secs) {
+    if cooldown_gags_us(alarm.is_raid, in_cooldown(&cooldown_key, cfg.incident_cooldown_secs)) {
         return Ok(());
     }
 
@@ -692,6 +765,17 @@ fn in_cooldown(key: &str, cooldown_secs: u64) -> bool {
         .unwrap_or(false)
 }
 
+/// Should the per-attacker cooldown suppress this response?
+///
+/// The cooldown exists so one skirmish does not produce dozens of incidents.
+/// A RAID is the opposite case: the clock is running, the whole window is about
+/// four minutes, and every scan skipped is a shot the raider does not have to
+/// survive. Live evidence — at the shipped 300s cooldown a defender landed ONE
+/// shot against an attacker firing every 38 seconds, and lost the ore.
+fn cooldown_gags_us(is_raid: bool, cooling: bool) -> bool {
+    !is_raid && cooling
+}
+
 fn mark_incident(key: &str) {
     if let Ok(mut m) = INCIDENT_SEEN.lock() {
         m.insert(key.to_string(), now_millis());
@@ -853,6 +937,33 @@ mod tests {
         assert_eq!(c.autonomy, Autonomy::Advise, "enabling it shows the plan first");
         assert!(!c.include_primary_shooters, "the primary's charge stays home");
         assert_eq!(c.mode, ResponseMode::Decapitate);
+    }
+
+    /// A raid must never be gagged by the per-attacker cooldown: the raider
+    /// stops shooting once the clock is armed and simply grinds the proof, so
+    /// waiting for "new activity" means waiting out the raid.
+    #[test]
+    fn a_raid_keeps_firing_through_the_cooldown() {
+        assert!(!cooldown_gags_us(true, true), "a live raid must not be gagged");
+        assert!(!cooldown_gags_us(true, false));
+        // A plain skirmish still gets the anti-spam cooldown.
+        assert!(cooldown_gags_us(false, true));
+        assert!(!cooldown_gags_us(false, false));
+    }
+
+    /// Sizing check: a 6 HP Command Ship taking ~1 net damage per shot needs
+    /// more shots than the old 30/hour ceiling allowed inside one raid.
+    #[test]
+    fn hourly_budget_can_finish_one_raid() {
+        let cfg = AutoResponseConfig::default();
+        let window_secs = 4 * 60;
+        let shots_available = window_secs / cfg.interval_secs.max(1) as usize;
+        assert!(
+            cfg.max_shots_per_hour >= shots_available,
+            "hourly cap {} cuts off a raid that affords {} shots",
+            cfg.max_shots_per_hour, shots_available
+        );
+        assert!(shots_available >= 6, "need >=6 shots to kill a 6 HP CMD at ~1 net dmg");
     }
 
     /// The whole response budget is ~4 minutes (2.1 min to shieldsVulnerable +
