@@ -458,7 +458,59 @@
    * art stays crisp. `zoom` rather than `transform` so the scroll box's
    * layout agrees with what is painted. */
   var boardCols = 9;
-  function setBoardScale() {
+
+  /* ── Board zoom mode ──────────────────────────────────────────────────────
+   * 'full' fits the WHOLE board — every ambit at once, which is what a
+   * spectator wants when reading a position. 'zoom' is the game's own feel:
+   * fit the width, upscale to whole pixels, and let the taller-than-window
+   * board pan vertically. Neither is right for every moment, so it is a
+   * toggle rather than a decision made for the operator.
+   *
+   * Persisted because it is a preference about how you like to look at a
+   * board, not a property of any one raid.
+   */
+  var FIT_KEY = 'rv-fit-mode';
+  function fitMode() {
+    try { return localStorage.getItem(FIT_KEY) === 'zoom' ? 'zoom' : 'full'; }
+    catch (e) { return 'full'; }
+  }
+  function setFitMode(m) {
+    try { localStorage.setItem(FIT_KEY, m); } catch (e) {}
+    syncFitToggle();
+    setBoardScale({ keepCentre: true });
+  }
+  function syncFitToggle() {
+    var a = document.getElementById('rv-fit-toggle');
+    if (a) a.textContent = fitMode() === 'full' ? 'zoom in' : 'fit all';
+  }
+
+  /* Refit whenever the board's viewport changes size, whatever caused it —
+   * the window resizing, the battle log opening, a future panel. A
+   * ResizeObserver reports the size AFTER layout, which is the one thing the
+   * click handlers could not know: they fire before the panel they toggled has
+   * taken its new height.
+   *
+   * Safe against feedback: this watches the SCROLL BOX, whose size comes from
+   * the flex layout, while a refit only changes the map's zoom inside it.
+   */
+  var boardObserver = null;
+  var boardPositioned = false;
+  function observeBoardViewport() {
+    var sc = document.getElementById('rv-scroll');
+    if (!sc || boardObserver || typeof ResizeObserver === 'undefined') return;
+    var queued = false;
+    boardObserver = new ResizeObserver(function () {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(function () {
+        queued = false;
+        setBoardScale({ keepCentre: true });
+      });
+    });
+    boardObserver.observe(sc);
+  }
+
+  function setBoardScale(opts) {
     var map = document.getElementById('rv-map');
     var sc = document.getElementById('rv-scroll');
     if (!map || !sc) return;
@@ -467,26 +519,134 @@
     var w = boardCols * 128;
     var scale = avail / w;
 
-    // ── Fit the HEIGHT too ────────────────────────────────────────────────
-    // This fitted width only, and a board is 13 rows — 1,664px — tall. In any
-    // normally-proportioned window (1280x720: 1,244px of width, 689px of
+    // Where the reader is looking, as a fraction of the board on each axis — so
+    // a change of zoom keeps the same rows under the eye instead of snapping to
+    // the top (which on this board means the empty space ambit). Now that
+    // 'zoom' snaps UP and overflows horizontally too, the x axis matters as
+    // much as the y: without it, switching modes slams the view to the left
+    // edge and hides the columns you were reading.
+    // The FIRST fit centres the board. Left to itself the scroll box opens at
+    // 0,0 — which on this board is the corner of the empty space ambit, the
+    // one region with nothing in it. In 'zoom' the board is larger than the
+    // viewport on both axes, so that corner is all you would see.
+    var centre = null;
+    // Gate on the grid EXISTING: `setBoardScale` also runs before the first
+    // snapshot builds any rows, and consuming the flag on that empty pass left
+    // the real board opening at 0,0 anyway.
+    if (!boardPositioned && map.querySelectorAll('.rv-row').length > 0) {
+      boardPositioned = true;
+      centre = { x: 0.5, y: 0.5 };
+    } else if (opts && opts.keepCentre) {
+      centre = {
+        y: sc.scrollHeight > sc.clientHeight
+          ? (sc.scrollTop + sc.clientHeight / 2) / sc.scrollHeight : 0.5,
+        x: sc.scrollWidth > sc.clientWidth
+          ? (sc.scrollLeft + sc.clientWidth / 2) / sc.scrollWidth : 0.5,
+      };
+    }
+
+    // ── Fit the HEIGHT too, in 'full' mode ────────────────────────────────
+    // The original fitted width only, and a board is 13 rows — 1,664px — tall.
+    // In any normally-proportioned window (1280x720: 1,244px of width, 689px of
     // height) the width fit returned 1, and everything below the space ambit
     // fell off the bottom. The container does scroll, but nothing said so, and
     // the ambit a raid is ABOUT — land, where the ore bunkers and the extractor
     // sit — was the part you could not see.
-    var availH = (sc.clientHeight || 0) - 8;
-    if (availH > 0) {
-      // Natural height, measured with the zoom neutralised so the reading is
-      // not scaled by the value we are about to replace.
-      var prior = map.style.zoom;
-      map.style.zoom = 1;
-      var naturalH = map.scrollHeight;
-      map.style.zoom = prior;
-      if (naturalH > 0) scale = Math.min(scale, availH / naturalH);
+    //
+    // 'zoom' does NOT fit at all — see quantiseScale: it snaps up to a whole
+    // multiple and pans, which is what the game itself does.
+    if (fitMode() === 'full') {
+      // The usable band, MEASURED rather than derived from clientHeight minus
+      // guesses. The collapsed log bar floats over the board (so the map gets
+      // the full window height), and the scroll box carries its own vertical
+      // padding — subtracting a flat 8px for one and the bar's height for the
+      // other still left the last row 5px behind the bar, in the one mode
+      // whose whole job is showing every row.
+      //
+      // The gap between the scroll box's top edge and whatever bounds the
+      // bottom accounts for both at once, whatever their values.
+      // The scroll box's CONTENT height — its client box less its own padding.
+      // Every earlier attempt measured around this (clientHeight minus a
+      // guessed 8px; the gap to the bar; the distance from the board's top) and
+      // each missed one of the two 16px paddings, leaving the last row clipped
+      // by a few pixels. The padding is the thing actually in the way, so read
+      // it rather than infer it.
+      var cs = getComputedStyle(sc);
+      var padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+      var availH = Math.max(0, (sc.clientHeight || 0) - padY);
+      if (availH > 0) {
+        // Natural height DERIVED, not measured. The obvious approach — set
+        // zoom to 1, read scrollHeight, put it back — does not work here:
+        // WebKit relayouts `zoom` asynchronously, so the read returns the
+        // still-zoomed height and the fit comes out far too large (measured:
+        // 0.43 where 0.27 was needed, leaving 303px hanging behind the log).
+        //
+        // Rows are a whole number of 128px tiles, exactly like the columns the
+        // width fit already counts, so the height is arithmetic.
+        var rows = map.querySelectorAll('.rv-row').length;
+        var naturalH = rows * 128;
+        if (naturalH > 0) scale = Math.min(scale, availH / naturalH);
+      }
     }
 
+    scale = quantiseScale(scale, fitMode() === 'zoom');
+    map.style.zoom = scale;
+
+    // ── Correct, don't guess ───────────────────────────────────────────────
+    // The height fit has to allow for chrome the map does not own — the log
+    // bar, row padding, the ambit gutter — and a hard-coded allowance is a
+    // guess that was wrong by 23px, leaving the bottom of the water ambit
+    // clipped in the very mode whose job is to show everything. Measure what
+    // actually overflowed and shrink by exactly that ratio, once.
+    if (fitMode() === 'full' && sc.scrollHeight > sc.clientHeight && sc.scrollHeight > 0) {
+      var corrected = quantiseScale(scale * (sc.clientHeight / sc.scrollHeight), false);
+      if (corrected > 0 && corrected < scale) {
+        scale = corrected;
+        map.style.zoom = scale;
+      }
+    }
+
+    if (centre != null) {
+      // After the reflow the scrollable extent has changed; put the same
+      // fraction of the board back under the middle of the viewport.
+      var restore = function () {
+        var top = centre.y * sc.scrollHeight - sc.clientHeight / 2;
+        var left = centre.x * sc.scrollWidth - sc.clientWidth / 2;
+        sc.scrollTop = Math.max(0, Math.min(sc.scrollHeight - sc.clientHeight, top));
+        sc.scrollLeft = Math.max(0, Math.min(sc.scrollWidth - sc.clientWidth, left));
+      };
+      restore();
+      // `zoom` relayouts asynchronously in WebKit, so the first read can be of
+      // the OLD extent; settle on the next frame.
+      if (window.requestAnimationFrame) window.requestAnimationFrame(restore);
+    }
+  }
+
+  /* Snap a raw scale to something that paints cleanly.
+   *
+   * `fill` = 'zoom' mode: snap UP to a whole multiple and let the board pan.
+   * This is the game's own behaviour (its CSS jumps to scale(2), then scale(4),
+   * and pans) and it is the only way to both fill the window and keep pixel art
+   * sharp. Two wrong turns got here:
+   *
+   *   · floor to an integer — 1.53 became 1, stranding a 1,152px board in an
+   *     1,800px window with 36% of the width as black bars;
+   *   · take the fraction — filled the window, but 1.53x resamples every sprite
+   *     onto a non-integer pixel grid, which is exactly the blur pixel art is
+   *     drawn to avoid.
+   *
+   * Snapping UP (ceil) does neither: 1.53 becomes 2, the board is larger than
+   * the viewport, and the overflow pans. No bars, no resampling.
+   *
+   * SHRINKING is different — below 1x there is no whole multiple to snap to, so
+   * the fraction is quantised to make one tile a whole number of DEVICE pixels,
+   * which is what stops seams appearing between tiles. */
+  function quantiseScale(scale, fill) {
+    if (fill) {
+      return Math.max(1, Math.ceil(scale));                   // whole multiples, pan the rest
+    }
     if (scale >= 1) {
-      scale = Math.max(1, Math.floor(scale));                 // crisp integers up
+      return Math.max(1, Math.floor(scale));                  // crisp integers up
     } else {
       // Shrinking needs a fraction, but an ARBITRARY fraction paints hairlines
       // between tiles: at zoom 0.75434 a 128px cell becomes 96.555px, so cell
@@ -500,9 +660,9 @@
       // round so the board can never grow past the space measured for it.
       var dpr = window.devicePixelRatio || 1;
       var tileDevicePx = Math.max(1, Math.floor(128 * scale * dpr));
-      scale = Math.max(0.2, tileDevicePx / (128 * dpr));
+      return Math.max(0.2, tileDevicePx / (128 * dpr));
     }
-    map.style.zoom = scale;
+    // (unreachable — both branches return)
     // The board's left edge can still land on a half device pixel, because
     // `margin: 0 auto` centres on whatever space is left over. That is fine:
     // it offsets every boundary by the SAME fraction, so the tiles stay in
@@ -2509,12 +2669,27 @@
   var logState = { rows: [], open: false, loading: false, pending: false, planetId: null };
 
   function initLog() {
+    // The zoom toggle shares this bar; wire it here so both controls in the
+    // strip are set up in one place.
+    observeBoardViewport();
+    var fit = document.getElementById('rv-fit-toggle');
+    if (fit) {
+      syncFitToggle();
+      fit.addEventListener('click', function () {
+        setFitMode(fitMode() === 'full' ? 'zoom' : 'full');
+      });
+    }
     var toggle = document.getElementById('rv-log-toggle');
     if (!toggle) return;
     toggle.addEventListener('click', function () {
       logState.open = !logState.open;
       document.getElementById('rv-log').classList.toggle('rv-collapsed', !logState.open);
       toggle.textContent = logState.open ? 'hide' : 'show';
+      // No refit call here: `observeBoardViewport` watches the scroll box and
+      // refits whenever this panel actually changes its height. Doing it from
+      // the click handler meant guessing how many frames the panel takes to
+      // lay out — one frame was not enough, and the board stayed fitted to a
+      // viewport that no longer existed.
       if (logState.open) refreshLog();
     });
   }

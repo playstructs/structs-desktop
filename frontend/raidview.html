@@ -180,13 +180,37 @@
       max-height: 45%;
     }
     #rv-log.rv-collapsed #rv-log-body { display: none; }
+    /* The bar is its OWN band, never an overlay. Floating it over the board to
+       win back its 31px was tried and reverted: a translucent strip with the
+       map showing through behind the action-bar icons and the filter chips
+       reads as clutter, and 31px is not worth it. */
     #rv-log-head {
       flex: none; display: flex; align-items: center; gap: 8px;
       padding: 5px 12px; color: var(--text-hint, #A7C0C6);
     }
-    #rv-log-head .rv-spacer { flex: 1 1 auto; }
+    #rv-log-head .rv-spacer { flex: 1 1 auto; min-width: 0; }
+    /* ── The bar must survive a narrow window ──────────────────────────────
+       Five category chips plus two controls need more width than a small
+       window has. Unmanaged, the flex row squeezed everything at once: the
+       "Battle log" label wrapped onto two lines and "FIT ALL" was clipped to
+       "FI AL". The controls on the right are the only things here you can
+       CLICK, so they never shrink; the chips are the elastic part and scroll
+       sideways instead. */
+    #rv-log-head > .sui-text-label,
+    #rv-log-head > span:first-of-type,
+    .rv-log-count,
+    #rv-log-head .rv-log-toggle { flex: none; white-space: nowrap; }
+    #rv-log-head { flex-wrap: nowrap; }
+    .rv-log-filters { display: inline-flex; gap: 6px; margin-left: 10px;
+      flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+    .rv-log-filters::-webkit-scrollbar { display: none; }
+    .rv-log-filters > * { flex: none; }
     .rv-log-count { color: var(--text-body, #C5D7D9); }
     .rv-log-toggle { color: var(--text-player-primary, #43CDB6); text-decoration: none; }
+    /* Separated from the log's own show/hide so the two reads as two controls
+       rather than one pair of words. */
+    .rv-fit-toggle { margin-left: 14px; padding-left: 14px;
+      border-left: 1px solid var(--border, #345); }
     #rv-log-body { overflow: auto; padding: 0 12px 8px; }
     .rv-log-empty { color: var(--text-hint, #A7C0C6); padding: 6px 0; }
     .rv-log-row {
@@ -232,7 +256,6 @@
     .rv-log-day:first-child { margin-top: 0; }
 
     /* Filter strip in the log header. */
-    .rv-log-filters { display: inline-flex; gap: 6px; margin-left: 10px; }
     .rv-log-chip {
       display: inline-flex; align-items: center; gap: 4px;
       padding: 1px 6px; text-decoration: none;
@@ -584,6 +607,11 @@
       <span id="rv-log-filters" class="rv-log-filters"></span>
       <span class="rv-spacer"></span>
       <a href="javascript: void(0)" id="rv-log-toggle" class="rv-log-toggle">show</a>
+      <!-- Board zoom. Lives in this bar rather than over the map: the map is
+           the thing being looked at, and a floating control would cover the
+           very board it resizes. Labelled with the ACTION, matching the log
+           toggle beside it ("show"/"hide"). -->
+      <a href="javascript: void(0)" id="rv-fit-toggle" class="rv-log-toggle rv-fit-toggle">zoom in</a>
     </div>
     <div id="rv-log-body" class="sui-text-tiny"><div class="rv-log-empty sui-text-tiny">No recorded activity for this planet yet.</div></div>
   </div>
