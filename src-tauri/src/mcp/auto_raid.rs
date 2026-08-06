@@ -461,6 +461,12 @@ async fn scan(
     }
 
     // ── Phase D first: an expedition already in flight outranks new targets. ──
+    // Recover anything that was in flight across a restart before supervising,
+    // or the raider sits at the enemy planet forever.
+    static READOPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !READOPTED.swap(true, Ordering::Relaxed) {
+        readopt_expeditions(&client).await;
+    }
     supervise(app, &client, cfg, run).await;
 
     // ── Is there anyone to send? ──
@@ -943,6 +949,83 @@ async fn raider_location(client: &CosmosClient, pid: &str) -> Option<(String, St
     let fleet = p.get("fleetId").and_then(|x| x.as_str())?.to_string();
     let planet = p.get("planetId").and_then(|x| x.as_str())?.to_string();
     Some((fleet, planet))
+}
+
+/// Re-adopt expeditions that were in flight when the app last stopped.
+///
+/// `ACTIVE` is in-memory, and so is the PoW task queue — so a restart mid-raid
+/// loses both. On-chain the consequences persist: the raid window stays armed
+/// and the raider's fleet stays parked at the target, but nothing is grinding a
+/// proof and nothing is watching for the abort conditions. Observed live: an
+/// app restart during a raid left the window open at `blockStartRaid` with the
+/// raider stranded at the enemy planet indefinitely.
+///
+/// Reality is the source of truth, so reconcile against it rather than trying
+/// to persist our own bookkeeping: any Raider whose fleet is somewhere other
+/// than its own planet is, by definition, on an expedition. Re-created entries
+/// carry `hashing: false`, which is exactly what makes `supervise` restart the
+/// proof (or abort and sail home) on the very next pass.
+async fn readopt_expeditions(client: &CosmosClient) {
+    use crate::mcp::virtual_players::VPlayerRole;
+    let raiders: Vec<(String, u32)> = {
+        let Ok(reg) = crate::mcp::virtual_players::REGISTRY.read() else { return };
+        reg.players
+            .iter()
+            .filter(|p| p.role == VPlayerRole::Raider)
+            .filter_map(|p| p.player_id.clone().map(|id| (id, p.index)))
+            .collect()
+    };
+    for (pid, idx) in raiders {
+        if ACTIVE.lock().map(|a| a.contains_key(&pid)).unwrap_or(true) {
+            continue; // already tracked
+        }
+        let Some((fleet_id, home_planet)) = raider_location(client, &pid).await else { continue };
+        let Ok(fl) = client.query_entity("fleet", &fleet_id).await else { continue };
+        let where_now = fl
+            .get("Fleet")
+            .and_then(|x| x.get("locationId"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if where_now.is_empty() || where_now == home_planet {
+            continue; // at home — nothing in flight
+        }
+        let target_player = client
+            .query_entity("planet", &where_now)
+            .await
+            .ok()
+            .and_then(|e| {
+                e.get("Planet")
+                    .and_then(|p| p.get("owner"))
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        ACTIVE.lock().unwrap().insert(
+            pid.clone(),
+            Expedition {
+                raider_player: pid.clone(),
+                raider_index: idx,
+                fleet_id,
+                home_planet,
+                target_planet: where_now.clone(),
+                target_player,
+                // Unknown — treat as just-started so the wall-clock abort gives
+                // the re-adopted raid a full window rather than killing it at
+                // once for time it may never have spent.
+                started_ms: now_millis(),
+                hashing: false,
+                ongoing_since_block: None,
+                siege_shots: 0,
+                note: "re-adopted after restart".into(),
+            },
+        );
+        crate::mcp::telemetry::tlog(
+            "auto_raid",
+            crate::mcp::telemetry::Sev::Notice,
+            format!("re-adopted in-flight expedition: {pid} is at {where_now}, not home"),
+        );
+    }
 }
 
 /// Phase D — watch every expedition: start the proof when the clock arms, and

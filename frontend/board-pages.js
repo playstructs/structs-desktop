@@ -965,10 +965,19 @@
 
   // ═══════════════════════════ WORK ═════════════════════════════════════════
   var workState = { data: null, sort: { key: 'progress', dir: -1 }, built: false, lv: null };
+  // `percent_complete` arrives as a PERCENTAGE STRING ("80.1%"), not a number.
+  // `("80.1%" || 0) / 100` is NaN, and `progressBar` treats NaN as zero — so
+  // every bar on this page rendered empty however far along the proof was. The
+  // default sort compared the same strings lexically, which put "9%" above
+  // "80.1%". Parse once, here, and let every call site take a real number.
+  function pctOf(v) {
+    var n = typeof v === 'number' ? v : parseFloat(String(v == null ? '' : v));
+    return isNaN(n) ? 0 : n;
+  }
   var WORK_KEYS = [{ key: 'progress', label: 'progress' }, { key: 'difficulty', label: 'difficulty' },
     { key: 'status', label: 'status' }, { key: 'type', label: 'type' }, { key: 'task', label: 'task id' }];
   var WORK_ACC = {
-    progress: function (t) { return t.percent_complete || 0; },
+    progress: function (t) { return pctOf(t.percent_complete); },
     difficulty: function (t) { return t.current_difficulty == null ? -1 : t.current_difficulty; },
     status: function (t) { return (t.status || '').toLowerCase(); },
     type: function (t) { return (t.task_type || '').toLowerCase(); },
@@ -1007,7 +1016,7 @@
           title: t.task_id || '?',
           subtitle: (t.task_type || '?') + ' · ' + (t.status || '?'),
           chips: [
-            H.resource(H.progressBar((t.percent_complete || 0) / 100)),
+            H.resource(H.progressBar(pctOf(t.percent_complete) / 100)),
             statTile('difficulty', d == null ? '—' : d + '/64', null,
               d == null ? 'muted' : (d <= 16 ? 'ok' : (d <= 32 ? 'live' : 'bad'))),
             statTile('eta', t.eta || '—', null, 'muted'),
@@ -1019,7 +1028,7 @@
             b.appendChild(H.row('Difficulty now', d == null ? '—' : d + ' of 64'));
             b.appendChild(H.row('Curve target', t.difficulty_target == null
               ? '—' : H.fmtInt(t.difficulty_target)));
-            b.appendChild(H.row('Progress', Math.round(t.percent_complete || 0) + '%'));
+            b.appendChild(H.row('Progress', Math.round(pctOf(t.percent_complete)) + '%'));
             b.appendChild(H.row('ETA', t.eta || '—'));
             H.drawer('Proof — ' + (t.task_id || '?'), b);
           },
