@@ -529,14 +529,42 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
             match client.query_entity("struct", tid).await {
                 Ok(v) => {
                     let st = v.get("Struct");
-                    if st.and_then(|s| s.get("locationType")).and_then(|x| x.as_str())
-                        == Some("planet")
-                    {
-                        target_planet = st
-                            .and_then(|s| s.get("locationId"))
-                            .and_then(|x| x.as_str())
-                            .map(String::from);
-                    }
+                    // Where the target actually STANDS. A struct on a planet
+                    // names the planet directly; a struct on a FLEET names the
+                    // fleet, so resolve one hop further to the planet the fleet
+                    // is at.
+                    //
+                    // Only the planet case was handled, which left
+                    // `target_planet` empty for every fleet-borne target — and
+                    // the defender's COMMAND SHIP, the whole point of a raid
+                    // kill-chain, is exactly that. With no planet the
+                    // co-location filter silently disables itself and the
+                    // planner goes back to offering the entire roster: six
+                    // players from six different planets, all six rejected by
+                    // the chain as unreachable.
+                    let loc_type = st
+                        .and_then(|s| s.get("locationType"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let loc_id = st
+                        .and_then(|s| s.get("locationId"))
+                        .and_then(|x| x.as_str())
+                        .map(String::from);
+                    target_planet = match (loc_type.as_str(), loc_id) {
+                        ("planet", id) => id,
+                        ("fleet", Some(fid)) => client
+                            .query_entity("fleet", &fid)
+                            .await
+                            .ok()
+                            .and_then(|f| {
+                                f.get("Fleet")
+                                    .and_then(|x| x.get("locationId"))
+                                    .and_then(|x| x.as_str())
+                                    .map(String::from)
+                            }),
+                        _ => None,
+                    };
                     let type_id = st.and_then(|s| s.get("type")).and_then(&num_or_str);
                     let ambit = st
                         .and_then(|s| s.get("operatingAmbit"))

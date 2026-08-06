@@ -37,6 +37,17 @@ const LOOP_STUCK_MS: f64 = 15.0 * 60_000.0;
 /// A hash task is STALLED when status is "running" but iterations haven't
 /// moved for this long.
 const HASH_STALL_MS: f64 = 5.0 * 60_000.0;
+/// A task that has NEVER completed an iteration is not stalled — it is queued
+/// behind easier work. The scheduler admits easiest-first, so the hardest proof
+/// in a busy queue (a RAID at difficulty 46 behind 28 difficulty-8 mines) can
+/// legitimately sit at zero iterations for a long time. Reaping it at the
+/// 5-minute stall threshold is how a raid proof silently disappeared while its
+/// window stayed open on-chain and its fleet sat parked at the target.
+///
+/// Zombies (workers that died without observing the cancel flag) also sit at
+/// zero forever, so they still get collected — just on a horizon long enough
+/// that real work is not mistaken for them.
+const HASH_STARVED_MS: f64 = 45.0 * 60_000.0;
 /// The sync tick is STALLED when nothing has synced for this many × the
 /// current sync interval.
 const SYNC_STALL_FACTOR: f64 = 3.0;
@@ -276,15 +287,25 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                 progress.insert(id, (snap.iterations, now));
             } else {
                 progress.insert(id.clone(), (last_iters, last_change));
-                if now - last_change > HASH_STALL_MS {
+                // Frozen AFTER doing work is a stall; frozen having never done
+                // any is starvation. Same symptom, opposite remedy — killing a
+                // starved task destroys work that only needed a turn.
+                let ever_ran = snap.iterations > 0;
+                let limit = if ever_ran { HASH_STALL_MS } else { HASH_STARVED_MS };
+                if now - last_change > limit {
                     let handle = entry.value().clone();
                     let mins = ((now - last_change) / 60_000.0) as u64;
                     findings.push(Finding {
                         key: format!("hash:{id}"),
                         severity: Sev::Warn,
-                        message: format!(
-                            "hash task {id} stalled: status running, no progress for {mins} min"
-                        ),
+                        message: if ever_ran {
+                            format!("hash task {id} stalled: status running, no progress for {mins} min")
+                        } else {
+                            format!(
+                                "hash task {id} never started: admitted {mins} min ago and still \
+                                 at zero iterations (starved behind easier proofs, or a dead worker)"
+                            )
+                        },
                         remedy: Some(Box::new(move |app: &tauri::AppHandle| {
                             // REMOVE + cancel, not just cancel: a zombie task
                             // whose worker died (e.g. unclean restart) never
