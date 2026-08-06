@@ -1127,7 +1127,7 @@ fn query_economy(registry: &Arc<TaskRegistry>) -> Vec<Content> {
     let mut out = String::new();
     out.push_str(&format!(
         "Alpha: {} | Ore: {}\n",
-        format_alpha(gs.alpha.unwrap_or(0.0)),
+        format_alpha_whole(gs.alpha.unwrap_or(0.0)),
         format_ore(gs.ore.unwrap_or(0.0))
     ));
 
@@ -1277,20 +1277,8 @@ fn estimate_blocks_remaining_simple(current_age: u64, difficulty_target: u64, ha
     blocks
 }
 
-fn format_alpha(ualpha: f64) -> String {
-    let abs = ualpha.abs();
-    if abs >= 1e18 { format!("{:.2}Tg", ualpha / 1e18) }
-    else if abs >= 1e9 { format!("{:.2}Kg", ualpha / 1e9) }
-    else if abs >= 1e6 { format!("{:.2}g", ualpha / 1e6) }
-    else if abs >= 1e3 { format!("{:.2}mg", ualpha / 1e3) }
-    else { format!("{:.0}μg", ualpha) }
-}
-
-fn format_ore(ore: f64) -> String {
-    if ore >= 1e12 { format!("{:.2}Tg", ore / 1e12) }
-    else if ore >= 1e3 { format!("{:.2}Kg", ore / 1e3) }
-    else { format!("{:.0}g", ore) }
-}
+// Shared ladder — see crate::mcp::tools::format.
+use crate::mcp::tools::format::{format_alpha_whole, format_ore};
 
 fn format_power(milliwatts: f64) -> String {
     let abs = milliwatts.abs();
@@ -2347,12 +2335,27 @@ pub struct RawQueryParams {
     pub page: Option<u32>,
 }
 
+/// Guild-API types that have an UNFILTERED list endpoint. Listing one of these
+/// with no filter used to fall through to the LCD, which answered "Unknown
+/// entity type: planet_activity" — for a type the tool's own schema advertises.
+/// The other Guild-API types genuinely require a filter, and reach
+/// `route_guild_query`'s fallthrough, which names the valid pairs.
+const GUILD_LISTABLE_TYPES: [&str; 3] = ["planet_activity", "agreement", "provider"];
+
 async fn raw_query(client: &CosmosClient, params: RawQueryParams) -> Vec<Content> {
+    let page = params.page.unwrap_or(1).max(1);
     let result: Result<Value, String> = if let Some(filter) = &params.filter {
-        let page = params.page.unwrap_or(1).max(1);
         route_guild_query(client, &params.r#type, filter, page).await
     } else if let Some(id) = &params.id {
         client.query_entity(&params.r#type, id).await
+    } else if GUILD_LISTABLE_TYPES.contains(&params.r#type.as_str()) {
+        route_guild_query(
+            client,
+            &params.r#type,
+            &RawQueryFilter { by: "all".into(), value: String::new() },
+            page,
+        )
+        .await
     } else {
         client
             .list_entities(

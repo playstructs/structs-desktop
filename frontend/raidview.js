@@ -466,6 +466,25 @@
     if (avail <= 0) return;                 // not laid out yet (or headless)
     var w = boardCols * 128;
     var scale = avail / w;
+
+    // ── Fit the HEIGHT too ────────────────────────────────────────────────
+    // This fitted width only, and a board is 13 rows — 1,664px — tall. In any
+    // normally-proportioned window (1280x720: 1,244px of width, 689px of
+    // height) the width fit returned 1, and everything below the space ambit
+    // fell off the bottom. The container does scroll, but nothing said so, and
+    // the ambit a raid is ABOUT — land, where the ore bunkers and the extractor
+    // sit — was the part you could not see.
+    var availH = (sc.clientHeight || 0) - 8;
+    if (availH > 0) {
+      // Natural height, measured with the zoom neutralised so the reading is
+      // not scaled by the value we are about to replace.
+      var prior = map.style.zoom;
+      map.style.zoom = 1;
+      var naturalH = map.scrollHeight;
+      map.style.zoom = prior;
+      if (naturalH > 0) scale = Math.min(scale, availH / naturalH);
+    }
+
     if (scale >= 1) {
       scale = Math.max(1, Math.floor(scale));                 // crisp integers up
     } else {

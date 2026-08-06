@@ -463,6 +463,30 @@ async fn scan(
     // ── Phase D first: an expedition already in flight outranks new targets. ──
     supervise(app, &client, cfg, run).await;
 
+    // ── Is there anyone to send? ──
+    // Raids are flown by `VPlayerRole::Raider` accounts only. With none in the
+    // registry the loop can never dispatch, whatever the target board says —
+    // and it would still report the gate that stopped the most CANDIDATES
+    // ("24 stopped at 'ore'"), sending you off to lower min_ore when the real
+    // fix is one click of the Armada roster's role control. Report the
+    // unconditional blocker first, and skip the scan that cannot be acted on.
+    let raider_count = crate::mcp::virtual_players::REGISTRY
+        .read()
+        .map(|reg| {
+            reg.players
+                .iter()
+                .filter(|p| p.role == crate::mcp::virtual_players::VPlayerRole::Raider)
+                .count()
+        })
+        .unwrap_or(0);
+    if raider_count == 0 {
+        run.blocked(
+            "no raider players — raids are flown by VPlayerRole::Raider accounts only \
+             (Armada → select a player → Set role → raider, or Launch one)",
+        );
+        return;
+    }
+
     // ── Phase A: candidates. ──
     let roster = refresh_roster(&client, cfg).await;
     if roster.is_empty() {

@@ -196,31 +196,77 @@
     if (n == null || isNaN(n)) return '—';
     return Math.round(Number(n)).toLocaleString();
   }
-  // The game's display ladders (server UNIT_DISPLAY_FORMAT): pick a unit by
-  // the integer digit-length of the RAW value, round to 2 decimals.
-  function ladder(raw, steps) {
-    if (raw == null || isNaN(raw)) return '—';
-    var n = Math.abs(Math.floor(Number(raw)));
-    var len = String(n).length;
-    var step = steps[steps.length - 1];
-    for (var i = 0; i < steps.length; i++) {
-      if (len <= steps[i][0]) { step = steps[i]; break; }
+  // ── The game's unit ladders ───────────────────────────────────────────────
+  // One transcription of the server's UNIT_DISPLAY_FORMAT (mirrored in the
+  // webapp's own `formatUnit`, structs-config.js): the unit is chosen by the
+  // INTEGER DIGIT-LENGTH of the raw value, not by magnitude thresholds, and the
+  // postfix is written the way the game writes it (`KW`, `Kg`, no space) so a
+  // number on this board is character-for-character the number in the HUD.
+  //
+  // Each ladder is `[minDigits, divisor, postfix]`, longest-first at read time.
+  // A scale is also addressable BY NAME (fmtIn / SCALES) so an input can offer
+  // "which unit am I typing in", which is the only honest way to ask someone
+  // for a quantity that spans twelve orders of magnitude.
+  var SCALES = {
+    // milliwatts in
+    power: [[16, 1e18, 'TW'], [10, 1e9, 'MW'], [6, 1e6, 'KW'], [3, 1e3, 'W'], [0, 1, 'mW']],
+    // ualpha in (1 g Alpha = 1e6 ualpha — "Alpha" and "gram" are the same unit)
+    alpha: [[16, 1e18, 'Tg'], [10, 1e9, 'Kg'], [6, 1e6, 'g'], [3, 1e3, 'mg'], [0, 1, 'μg']],
+    // grams in
+    ore: [[12, 1e12, 'Tg'], [4, 1e3, 'Kg'], [0, 1, 'g']],
+  };
+  // Trim to at most 2 decimals without leaving a trailing ".0"/".00" — exactly
+  // what the game's `toFixed(2).replace(/\.?0+$/,'')` does.
+  function trim2(v) {
+    return v.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+  }
+  function stepFor(raw, ladder) {
+    var len = String(Math.abs(Math.trunc(Number(raw)))).length;
+    for (var i = 0; i < ladder.length; i++) {
+      if (len >= ladder[i][0]) return ladder[i];
     }
-    var v = Number(raw) / step[1];
-    var txt = v.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
-    return txt + ' ' + step[2];
+    return ladder[ladder.length - 1];
+  }
+  function fmtScale(raw, kind) {
+    if (raw == null || isNaN(raw)) return '—';
+    var step = stepFor(raw, SCALES[kind]);
+    return trim2(Number(raw) / step[1]) + step[2];
   }
   // Energy: raw value in MILLIWATTS.
-  function fmtWatts(mw) {
-    return ladder(mw, [[2, 1, 'mW'], [5, 1e3, 'W'], [9, 1e6, 'kW'], [15, 1e9, 'MW'], [99, 1e18, 'TW']]);
-  }
+  function fmtWatts(mw) { return fmtScale(mw, 'power'); }
   // Alpha: raw value in ualpha (micrograms).
-  function fmtAlpha(ualpha) {
-    return ladder(ualpha, [[2, 1, 'μg'], [5, 1e3, 'mg'], [9, 1e6, 'g'], [15, 1e9, 'Kg'], [99, 1e18, 'Tg']]);
-  }
+  function fmtAlpha(ualpha) { return fmtScale(ualpha, 'alpha'); }
   // Ore: raw value in grams.
-  function fmtOre(g) {
-    return ladder(g, [[3, 1, 'g'], [11, 1e3, 'Kg'], [99, 1e18, 'Tg']]);
+  function fmtOre(g) { return fmtScale(g, 'ore'); }
+  // Format a whole SET of values on ONE shared unit — the unit the largest of
+  // them would pick. A strip of tiles meant to be compared against each other
+  // ("59 KW / 6.53 KW / 0 mW / 52.47 KW") is unreadable when every tile picks
+  // its own scale; the comparison is the whole point of putting them in a row.
+  // Returns { fmt(raw) -> "59", unit: "KW" }.
+  function scaleSet(values, kind) {
+    var max = 0;
+    (values || []).forEach(function (v) {
+      if (v != null && !isNaN(v) && Math.abs(v) > max) max = Math.abs(v);
+    });
+    var step = stepFor(max, SCALES[kind]);
+    return {
+      unit: step[2],
+      div: step[1],
+      fmt: function (raw) {
+        if (raw == null || isNaN(raw)) return '—';
+        return trim2(Number(raw) / step[1]) + step[2];
+      },
+    };
+  }
+  // The units an operator may type a quantity IN, largest first — the option
+  // list behind every amount field on this board.
+  function unitOptions(kind) {
+    return SCALES[kind].map(function (s) { return { value: s[2], label: s[2], div: s[1] }; });
+  }
+  function unitDivisor(kind, unit) {
+    var l = SCALES[kind];
+    for (var i = 0; i < l.length; i++) if (l[i][2] === unit) return l[i][1];
+    return 1;
   }
   function ago(ms) {
     if (!ms) return '—';
@@ -291,6 +337,11 @@
   // Compact stat: big value over a small ExtremeHazard label. Used in roster
   // rows, the health strip and anywhere a number needs naming without a
   // full label/value row's horizontal budget.
+  //
+  // `label` may be an ARRAY of two strings: the term, then what the figure
+  // decides. That second line is how a genuinely confusable pair (allocatable
+  // vs available) gets defined ON the number instead of in a paragraph under
+  // the card \u2014 it stays with the value at every window width.
   function statTile(label, value, iconName, cls) {
     var t = el('div', 'fstat' + (cls ? ' ' + cls : ''));
     var v = el('div', 'fstat-v');
@@ -298,7 +349,12 @@
     else v.appendChild(document.createTextNode(value == null ? '\u2014' : String(value)));
     if (iconName) v.appendChild(el('i', iconClass(iconName)));
     t.appendChild(v);
-    t.appendChild(el('div', 'fstat-l', label));
+    if (Array.isArray(label)) {
+      t.appendChild(el('div', 'fstat-l', label[0]));
+      if (label[1]) t.appendChild(el('div', 'fstat-l fstat-l2', label[1]));
+    } else {
+      t.appendChild(el('div', 'fstat-l', label));
+    }
     return t;
   }
   // Build one sui-result-row. opts: { lead?(node, e.g. checkbox), icon?(portrait
@@ -540,6 +596,69 @@
     wrap.appendChild(cap);
     wrap.appendChild(controlNode);
     return wrap;
+  }
+
+  // ── Amount field ─────────────────────────────────────────────────────────
+  // A quantity the operator TYPES, in a unit they choose. Every amount on this
+  // board spans a dozen orders of magnitude (μg→Tg, mW→TW), so a field fixed to
+  // one display unit forces a mental 10^n conversion on the one form where
+  // getting it wrong costs real money or browns out the grid.
+  //
+  // `opts`: { kind: 'alpha'|'ore'|'power', base: number (starting value in BASE
+  // units), unit: preferred starting unit, max: number (base units, enables the
+  // MAX control), onChange(base, unit) }.
+  //
+  // Always reports BASE units — callers never see the picked unit unless they
+  // want to echo it. The starting unit defaults to the one the current value
+  // would print in, so the field opens showing a number a human can read.
+  function amountField(label, opts) {
+    opts = opts || {};
+    var kind = opts.kind || 'alpha';
+    var unit = opts.unit || stepFor(opts.base || opts.max || 0, SCALES[kind])[2];
+    var div = unitDivisor(kind, unit);
+    var shown = opts.base ? Number(opts.base) / div : '';
+
+    var row = el('div', 'amount-field');
+    var input = el('input', 'amount-input');
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    input.value = shown === '' ? '' : String(trim2(Number(shown)));
+    input.placeholder = '0';
+
+    function emit() {
+      var n = Number(String(input.value).replace(/[, ]/g, ''));
+      if (isNaN(n)) n = 0;
+      if (opts.onChange) opts.onChange(Math.round(n * div), unit);
+    }
+    input.addEventListener('input', emit);
+
+    var sel = selectBox(unit, unitOptions(kind), function (u) {
+      // Keep the QUANTITY, restate it in the new unit — switching from g to mg
+      // should show the same amount, not silently multiply it by a thousand.
+      var n = Number(String(input.value).replace(/[, ]/g, ''));
+      var baseNow = isNaN(n) ? 0 : n * div;
+      unit = u;
+      div = unitDivisor(kind, unit);
+      input.value = baseNow ? String(trim2(baseNow / div)) : '';
+      emit();
+    });
+    sel.className = 'amount-unit';
+
+    row.appendChild(input);
+    row.appendChild(sel);
+    if (opts.max != null) {
+      var max = el('a', 'amount-max', 'MAX');
+      max.href = 'javascript:void(0)';
+      max.title = 'Use the whole available balance';
+      max.addEventListener('click', function () {
+        input.value = String(trim2(Number(opts.max) / div));
+        emit();
+      });
+      row.appendChild(max);
+    }
+    var node = field(label, row, opts.hint);
+    node.classList.add('cfg-field-amount');
+    return node;
   }
 
   // ── Durations ────────────────────────────────────────────────────────────
@@ -855,7 +974,8 @@
     sortControl: sortControl, sortBy: sortBy, drawer: drawer, detailModal: drawer,
     pfpPortrait: pfpPortrait,
     checkbox: checkbox, stepper: stepper, selectBox: selectBox, textBox: textBox,
-    navStrip: navStrip, field: field,
+    navStrip: navStrip, field: field, amountField: amountField,
+    scaleSet: scaleSet, unitOptions: unitOptions, unitDivisor: unitDivisor,
     duration: duration, stateBlock: stateBlock, renderInto: renderInto, busy: busy,
     listView: listView, pagination: pagination, pageSlots: pageSlots,
     fmtInt: fmtInt, fmtWatts: fmtWatts, fmtAlpha: fmtAlpha, fmtOre: fmtOre,
@@ -907,6 +1027,12 @@
   // has no honest display form — that is what the guild-published `base_name`
   // (ualpha → "μg Alpha", uguild.0-5 → "ack") exists for.
   function denomQty(amount, chainDenom, registry) {
+    // The two denoms the GAME itself has a display ladder for are shown the
+    // game's way — "7.57Kg", the same string the HUD prints. Only guild-minted
+    // tokens, which the game has no ladder for, fall back to the cosmetic
+    // name + exponent published in guild.json.
+    if (chainDenom === 'ualpha') return fmtAlpha(Number(amount || 0));
+    if (chainDenom === 'ore') return fmtOre(Number(amount || 0));
     var info = (registry || {})[chainDenom];
     var exp = info ? (info.exponent || 0) : 0;
     var raw = Number(amount || 0);

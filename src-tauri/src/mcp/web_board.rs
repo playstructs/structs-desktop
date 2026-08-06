@@ -454,6 +454,20 @@ async fn board_invoke(
         "mcp_raid_state" => from_result(
             crate::mcp::raid_view::mcp_raid_state(s("planetId"), s("fleetId")).await,
         ),
+        // The combat log is a READ behind the same gate as the snapshot above.
+        // Leaving it out meant the web copy could show a planet's board but not
+        // what had happened on it — and the omission looked like an unknown
+        // command rather than a decision.
+        "mcp_raid_log" => match s("planetId") {
+            Some(p) => from_result(
+                crate::mcp::raid_view::mcp_raid_log(
+                    p,
+                    body.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize),
+                )
+                .await,
+            ),
+            None => err_json("planetId required".into()),
+        },
         // Opening a native window is meaningless over the web path: the window
         // would appear on the HOST's screen, not the remote viewer's.
         "mcp_raid_view_open" => err_json(

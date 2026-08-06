@@ -99,8 +99,12 @@ pub async fn execute(
                     gs.fleet_id.clone().unwrap_or_else(|| "none".to_string()),
                     gs.structs.len(),
                     charge,
-                    gs.alpha.map(|a| format!("{:.0}", a)).unwrap_or_else(|| "?".to_string()),
-                    gs.ore.map(|o| format!("{:.0}", o)).unwrap_or_else(|| "?".to_string()),
+                    gs.alpha
+                        .map(crate::mcp::tools::format::format_alpha_whole)
+                        .unwrap_or_else(|| "?".to_string()),
+                    gs.ore
+                        .map(crate::mcp::tools::format::format_ore)
+                        .unwrap_or_else(|| "?".to_string()),
                 ));
             }
             let vplayers: Vec<(u32, String, Option<String>, VPlayerRole)> = {

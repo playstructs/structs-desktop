@@ -114,48 +114,63 @@ pub fn decode_ambits(mask: u64) -> String {
     }
 }
 
+/// ── The game's unit ladders ────────────────────────────────────────────────
+///
+/// One transcription of the server's `UNIT_DISPLAY_FORMAT`, matching the
+/// webapp's own `formatUnit` and the board's JS copy character for character:
+/// the unit is chosen by the INTEGER DIGIT-LENGTH of the raw value, the result
+/// is trimmed to at most two decimals, and the postfix is written the way the
+/// game writes it (`KW`, `Kg`, no space).
+///
+/// These previously used magnitude thresholds, `{:.1}`/`{:.2}` and a lower-case
+/// `kW`, so an MCP answer and the same figure in the HUD disagreed on both the
+/// precision and the spelling.
+fn ladder(raw: f64, steps: &[(usize, f64, &str)]) -> String {
+    let len = format!("{}", raw.abs().trunc() as i128).len();
+    let step = steps
+        .iter()
+        .find(|(min_digits, _, _)| len >= *min_digits)
+        .unwrap_or(&steps[steps.len() - 1]);
+    let v = raw / step.1;
+    let mut txt = format!("{:.2}", v);
+    if txt.ends_with(".00") {
+        txt.truncate(txt.len() - 3);
+    } else if txt.ends_with('0') {
+        txt.truncate(txt.len() - 1);
+    }
+    format!("{}{}", txt, step.2)
+}
+
 /// Format Alpha Matter amount (ualpha → μg/mg/g/Kg/Tg)
 pub fn format_alpha(ualpha: f64) -> String {
-    let abs = ualpha.abs();
-    if abs >= 1e18 {
-        format!("{:.2}Tg", ualpha / 1e18)
-    } else if abs >= 1e9 {
-        format!("{:.2}Kg", ualpha / 1e9)
-    } else if abs >= 1e6 {
-        format!("{:.2}g", ualpha / 1e6)
-    } else if abs >= 1e3 {
-        format!("{:.2}mg", ualpha / 1e3)
-    } else {
-        format!("{:.0}μg", ualpha)
-    }
+    ladder(
+        ualpha,
+        &[(16, 1e18, "Tg"), (10, 1e9, "Kg"), (6, 1e6, "g"), (3, 1e3, "mg"), (0, 1.0, "μg")],
+    )
+}
+
+/// Format an Alpha amount that arrived in WHOLE Alpha rather than ualpha.
+///
+/// The webapp's `player.alpha` (and therefore `GameState.alpha`) counts whole
+/// Alpha — the same unit `AlphaManager.convertAlphaToUAlpha` multiplies by 10^6
+/// before signing. Feeding it to [`format_alpha`], which expects ualpha, under-
+/// reported every holding by a factor of a million: 7,546 Alpha printed as
+/// "7.55mg" when the player was actually holding 7.55Kg of the stuff.
+pub fn format_alpha_whole(alpha: f64) -> String {
+    format_alpha(alpha * 1e6)
 }
 
 /// Format ore amount (g/Kg/Tg)
 pub fn format_ore(ore: f64) -> String {
-    if ore >= 1e12 {
-        format!("{:.2}Tg", ore / 1e12)
-    } else if ore >= 1e3 {
-        format!("{:.2}Kg", ore / 1e3)
-    } else {
-        format!("{:.0}g", ore)
-    }
+    ladder(ore, &[(12, 1e12, "Tg"), (4, 1e3, "Kg"), (0, 1.0, "g")])
 }
 
 /// Format power (milliwatts → mW/W/KW/MW/TW)
 pub fn format_power(milliwatts: f64) -> String {
-    let abs = milliwatts.abs();
-    if abs >= 1e18 {
-        format!("{:.1}TW", milliwatts / 1e18)
-    } else if abs >= 1e9 {
-        format!("{:.1}MW", milliwatts / 1e9)
-    } else if abs >= 1e6 {
-        // Lower-case k, matching the SI prefix and the JS ladder in board.js.
-        format!("{:.1}kW", milliwatts / 1e6)
-    } else if abs >= 1e3 {
-        format!("{:.1}W", milliwatts / 1e3)
-    } else {
-        format!("{:.0}mW", milliwatts)
-    }
+    ladder(
+        milliwatts,
+        &[(16, 1e18, "TW"), (10, 1e9, "MW"), (6, 1e6, "KW"), (3, 1e3, "W"), (0, 1.0, "mW")],
+    )
 }
 
 /// Format duration in milliseconds to human-readable string
@@ -200,6 +215,30 @@ pub fn entity_type_from_id(id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pinned against the webapp's own `formatUnit` (structs-config.js), which
+    /// is the transcription of the server's UNIT_DISPLAY_FORMAT. If these drift
+    /// the MCP and the HUD start disagreeing about the same number.
+    #[test]
+    fn ladders_match_the_games_display_format() {
+        // digit-length boundaries, not magnitude thresholds
+        assert_eq!(format_power(99.0), "99mW");
+        assert_eq!(format_power(100.0), "0.1W");
+        // 99,999 mW is 99.999 W, which rounds to 100 W — still a 5-digit raw
+        // value, so it stays on the W rung rather than jumping to KW.
+        assert_eq!(format_power(99_999.0), "100W");
+        assert_eq!(format_power(100_000.0), "0.1KW");
+        assert_eq!(format_power(15_467_472.0), "15.47KW");
+        assert_eq!(format_power(15_515_700_000.0), "15.52MW");
+        // Alpha: 7,546 whole Alpha is 7.55 Kg, not 7.55 mg.
+        assert_eq!(format_alpha(7546.0), "7.55mg");
+        assert_eq!(format_alpha_whole(7546.0), "7.55Kg");
+        assert_eq!(format_alpha(1_000_000.0), "1g");
+        // Ore's Tg divisor is 1e12 — the JS copy had 1e18.
+        assert_eq!(format_ore(999.0), "999g");
+        assert_eq!(format_ore(1000.0), "1Kg");
+        assert_eq!(format_ore(1e12), "1Tg");
+    }
 
     #[test]
     fn ambit_bits_match_chain_values() {

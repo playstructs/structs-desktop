@@ -62,5 +62,10 @@
     });
   }
 
+  // Tell the board it is the WEB copy. Some controls open native OS windows
+  // (the raid/planet spectator), which would appear on the machine running
+  // Structs rather than in this browser — the board hides those rather than
+  // offering a button whose only possible outcome is an error.
+  window.__BOARD_WEB__ = true;
   window.__TAURI__ = { core: { invoke: invoke }, event: { listen: listen } };
 })();

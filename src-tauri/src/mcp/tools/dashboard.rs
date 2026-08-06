@@ -2,6 +2,7 @@ use rmcp::model::Content;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
+use crate::mcp::tools::format::{format_alpha_whole, format_ore, format_power};
 
 use crate::game_state::GAME_STATE;
 use crate::hasher::types::TaskRegistry;
@@ -228,7 +229,7 @@ fn build_sync(
         let stored_ore = gs.stored_ore.unwrap_or(0.0);
         out.push_str(&format!(
             "Alpha: {} | Ore: {}",
-            format_alpha(alpha),
+            format_alpha_whole(alpha),
             format_ore(ore)
         ));
         if stored_ore > 0.0 {
@@ -422,42 +423,6 @@ fn build_sync(
     })
 }
 
-fn format_alpha(ualpha: f64) -> String {
-    let abs = ualpha.abs();
-    if abs >= 1e18 {
-        format!("{:.2}Tg", ualpha / 1e18)
-    } else if abs >= 1e9 {
-        format!("{:.2}Kg", ualpha / 1e9)
-    } else if abs >= 1e6 {
-        format!("{:.2}g", ualpha / 1e6)
-    } else if abs >= 1e3 {
-        format!("{:.2}mg", ualpha / 1e3)
-    } else {
-        format!("{:.0}μg", ualpha)
-    }
-}
-
-fn format_ore(ore: f64) -> String {
-    if ore >= 1e12 {
-        format!("{:.2}Tg", ore / 1e12)
-    } else if ore >= 1e3 {
-        format!("{:.2}Kg", ore / 1e3)
-    } else {
-        format!("{:.0}g", ore)
-    }
-}
-
-fn format_power(milliwatts: f64) -> String {
-    let abs = milliwatts.abs();
-    if abs >= 1e18 {
-        format!("{:.1}TW", milliwatts / 1e18)
-    } else if abs >= 1e9 {
-        format!("{:.1}MW", milliwatts / 1e9)
-    } else if abs >= 1e6 {
-        format!("{:.1}KW", milliwatts / 1e6)
-    } else if abs >= 1e3 {
-        format!("{:.1}W", milliwatts / 1e3)
-    } else {
-        format!("{:.0}mW", milliwatts)
-    }
-}
+// Alpha / ore / power all print through the shared ladder in
+// `crate::mcp::tools::format` — this file used to carry byte-identical private
+// copies of all three, which is how one of them drifted.

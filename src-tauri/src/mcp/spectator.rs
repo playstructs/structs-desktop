@@ -797,6 +797,24 @@ mod defence_tests {
 /// game's own HUD phrase it the same way.
 type OwnerHud = (Option<f64>, Option<f64>, Option<String>, Option<String>, Option<String>);
 
+/// A name for one of OUR players when the chain carries none: the primary from
+/// the synced game state, virtual players from the registry.
+fn local_player_name(pid: &str) -> Option<String> {
+    if let Ok(gs) = crate::game_state::GAME_STATE.read() {
+        if gs.player_id.as_deref() == Some(pid) {
+            if let Some(n) = gs.player_name.clone().filter(|s| !s.is_empty()) {
+                return Some(n);
+            }
+        }
+    }
+    let reg = crate::mcp::virtual_players::REGISTRY.read().ok()?;
+    reg.players
+        .iter()
+        .find(|p| p.player_id.as_deref() == Some(pid))
+        .map(|p| p.name.clone())
+        .filter(|n| !n.is_empty())
+}
+
 async fn read_owner_hud(
     client: &crate::mcp::cosmos_client::CosmosClient,
     owner: Option<&str>,
@@ -861,7 +879,11 @@ async fn read_owner_hud(
         fmt_watts(total_capacity / 1000.0)
     ));
     let body = p.get("Player").unwrap_or(&p);
-    let name = str_of(body.get("username"));
+    // `username` is the on-chain display name, and our own virtual players do
+    // not set one — so watching a planet belonging to `miner2` showed a bare
+    // "1-272" while the roster two windows over knew its name perfectly well.
+    // Fall back to what we know locally before giving up on naming a player.
+    let name = str_of(body.get("username")).or_else(|| local_player_name(pid));
     // The pfp is LAYERED, not a URL: `pfpClientRenderAttributes` is a JSON
     // string of part indices that the renderer stacks as images, the same way
     // the game's PfpViewerComponent and the Team Ops roster do.

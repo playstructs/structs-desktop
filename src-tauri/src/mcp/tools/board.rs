@@ -252,21 +252,23 @@ async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
     let mut out = String::new();
     out.push_str("══ TEAM OPS BOARD ══\n");
     out.push_str(&format!(
-        "Primary {} {} — charge {} ({}) · power {}/{} ({:.0}% free) · {}/{} structs online · ore {:.0} alpha {:.0}\n",
+        "Primary {} {} — charge {} ({}) · power {}/{} ({:.0}% free) · {}/{} structs online · ore {} alpha {}\n",
         pid, name, charge, if charge_ready { "READY" } else { "charging" },
         crate::mcp::tools::format::format_power(load),
         crate::mcp::tools::format::format_power(cap),
-        margin, nonline, nstructs, ore, alpha
+        margin, nonline, nstructs,
+        crate::mcp::tools::format::format_ore(ore),
+        crate::mcp::tools::format::format_alpha(alpha * 1e6)
     ));
     out.push_str(&format!("Virtual players: {}\n", nvp));
     if let Some(gp) = &gpower {
         out.push_str(&format!(
-            "Guild power: reactor fuel {:.1} kW ({}% comm) · substation {:.0} kW cap / {} conns / {:.2} kW each · headroom ~{} more\n",
-            gp.reactor_fuel / 1e6,
+            "Guild power: reactor fuel {} ({}% comm) · substation {} cap / {} conns / {} each · headroom ~{} more\n",
+            crate::mcp::tools::format::format_power(gp.reactor_fuel),
             (gp.reactor_commission * 100.0) as i64,
-            gp.sub_capacity / 1e6,
+            crate::mcp::tools::format::format_power(gp.sub_capacity),
             gp.sub_connection_count,
-            gp.sub_connection_capacity / 1e6,
+            crate::mcp::tools::format::format_power(gp.sub_connection_capacity),
             gp.supportable_more
         ));
     }
@@ -337,8 +339,13 @@ async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
                 margin
             )),
             irow("sui-icon-deployed-structs", "Structs online", format!("{} / {}", nonline, nstructs)),
-            irow("sui-icon-alpha-ore", "Ore", format!("{:.0}", ore)),
-            irow("sui-icon-alpha-matter", "Alpha", format!("{:.0}", alpha)),
+            // Ore and Alpha are QUANTITIES and must carry their units — this
+            // card printed both as bare integers, so "7546" could equally have
+            // been 7546 μg or 7546 g (it is the latter). `alpha` arrives from
+            // the webapp in whole Alpha, i.e. GRAMS, so the ladder — which
+            // takes ualpha — needs the 10^6.
+            irow("sui-icon-alpha-ore", "Ore", crate::mcp::tools::format::format_ore(ore)),
+            irow("sui-icon-alpha-matter", "Alpha", crate::mcp::tools::format::format_alpha(alpha * 1e6)),
             irow("sui-icon-players", "Virtual players", format!("{}", nvp)),
         ),
     );
@@ -380,7 +387,10 @@ async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
     let rec_card = card("RECOMMENDED", format!("<ul class='ops-list'>{}</ul>", rec_items));
 
     let guild_card = if let Some(gp) = &gpower {
-        let m = |w: f64| format!("{:.2} kW", w / 1_000_000.0);
+        // Was hard-wired to kW, which printed a 15.5 MW substation as
+        // "15515.70 kW" — five digits where the ladder gives two. Same
+        // formatter as every other power figure on the board.
+        let m = |w: f64| crate::mcp::tools::format::format_power(w);
         card(
             "GUILD POWER",
             format!(
@@ -409,9 +419,15 @@ async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
         status_card, guild_card, pow_card, threats_card, rec_card, esc(&pid), esc(&name)
     );
 
+    // `load`/`cap` are MILLIWATTS. Printing them with a bare "W" suffix was the
+    // exact off-by-1000 the status card had fixed and this line still carried,
+    // so the feed summary read "15407370.0/15467472.0W".
     let push_line = format!(
-        "charge {} · {:.1}/{:.1}W · {}/{} online · {} vp · PoW {}r/{}w · {}",
-        charge, load, cap, nonline, nstructs, nvp, running, waiting,
+        "charge {} · {}/{} · {}/{} online · {} vp · PoW {}r/{}w · {}",
+        charge,
+        crate::mcp::tools::format::format_power(load),
+        crate::mcp::tools::format::format_power(cap),
+        nonline, nstructs, nvp, running, waiting,
         if threats.is_empty() { "no threats".to_string() } else { format!("⚠ {} threats", threats.len()) }
     );
 

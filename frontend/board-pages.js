@@ -9,9 +9,12 @@
   'use strict';
   var Board = window.Board;
   var H = Board.helpers;
-  // Energy displays follow the game's unit ladder (H.fmtWatts, input mW).
+  // Quantities follow the game's own unit ladders — the strings here are the
+  // strings the HUD prints. `alpha` takes RAW ualpha, `ore` raw grams, `kw`
+  // raw milliwatts; none of them take a pre-divided number.
   var kw = function (mw) { return H.fmtWatts(mw); };
-  var alpha = function (ualpha) { return H.fmtNum(ualpha / 1e6); };
+  var alpha = function (ualpha) { return H.fmtAlpha(ualpha); };
+  var ore = function (g) { return H.fmtOre(g); };
 
   // A compact stat tile: the value (optionally + a sui-icon) over a small
   // uppercase caption. Used in the right-hand section of an Armada row so each
@@ -29,8 +32,17 @@
     built: false,
   };
 
+  // A row wants a human when we could not READ it, or when the roster sweep
+  // has not reached it in a long time — both mean the numbers beside it are not
+  // to be trusted.
+  //
+  // It used to also fire on `charge >= 24` — twenty-four blocks is about two
+  // minutes, which every bait player exceeds by design (banking charge is their
+  // whole job). That flagged ~1,800 of 1,822 rows, so the "attention" filter
+  // selected the entire roster and meant nothing.
+  var ROSTER_STALE_MS = 15 * 60 * 1000;
   function armadaAttention(r) {
-    return !!r.err || r.charge >= 24; // read failed, or idle 24+ blocks (~2min+)
+    return !!r.err || (Date.now() - (r.fetched_at_ms || 0)) > ROSTER_STALE_MS;
   }
 
   var ARMADA_SORT_KEYS = [
@@ -226,7 +238,7 @@
       return s;
     }
     if (r.planet_ore != null) {
-      parts.push(piece('icon-undiscovered-ore', H.fmtNum(r.planet_ore), 'ore left on planet'));
+      parts.push(piece('icon-undiscovered-ore', ore(r.planet_ore), 'ore left on planet'));
     }
     var m = fmtEta(r.mine_eta_s);
     if (m) parts.push(piece('icon-mine', m, 'next extraction ~'));
@@ -256,7 +268,14 @@
   ///
   /// A player with no planet or no fleet simply gets fewer buttons rather than
   /// a dead one; both ids come straight off the roster row.
+  // The spectator opens a native OS window, so it exists only in the desktop
+  // console. On the web copy it would open on the HOST's screen — `web_board`
+  // refuses the call for exactly that reason, and offering a control whose only
+  // outcome is that refusal is worse than not offering it.
+  function canSpectate() { return !window.__BOARD_WEB__; }
+
   function spectatorLinks(r) {
+    if (!canSpectate()) return null;
     var wrap = H.el('span', 'ops-spectate');
     [
       { id: r.planet_id, icon: 'icon-planet', what: 'planet', arg: 'planet_id' },
@@ -305,8 +324,11 @@
       var sub = H.el('span');
       sub.appendChild(document.createTextNode('PID #' + r.player_id));
       if (armadaAttention(r)) {
+        // `fetched_at_ms` is when WE last read this player, not when the player
+        // last acted — labelling it "idle" said the opposite of what it meant.
         sub.appendChild(document.createTextNode(' · '));
-        sub.appendChild(H.el('span', 'attn', r.err ? 'read failed' : 'idle ' + H.ago(r.fetched_at_ms)));
+        sub.appendChild(H.el('span', 'attn',
+          r.err ? 'read failed' : 'last read ' + H.ago(r.fetched_at_ms) + ' ago'));
       }
       // Harvest trio — icons only, no words (tooltips explain): ore left on
       // the planet · time to next mine completion · time to next refine.
@@ -334,7 +356,7 @@
         chips: [
           statTile('Charge', chargeVal, null, r.charge >= 8 ? 'ok' : null),
           statTile('Alpha', alpha(r.alpha_ualpha), 'sui-icon-alpha-matter'),
-          statTile('Ore', H.fmtNum(r.ore), 'sui-icon-alpha-ore'),
+          statTile('Ore', ore(r.ore), 'sui-icon-alpha-ore'),
         ],
       });
       row.addEventListener('click', function () { showDetail(r); });
@@ -378,10 +400,14 @@
         if (!btn) return;
         // Compact: the ambient dry-run detail (who/how many) lives in the plan
         // echo; the button just needs the action + total so it fits one line.
-        var label = sel.length
-          ? 'Sweep ' + r.entries.length + ' ~' + H.fmtNum(r.total_alpha) + 'α'
-          : 'Sweep all ~' + H.fmtNum(r.total_alpha) + 'α';
-        btn.lastChild.textContent = ' ' + label;
+        // `total_alpha` is whole Alpha (grams); the ladder wants raw ualpha.
+        // The figure goes in its own span: SUI uppercases button labels, which
+        // turned "113g" into "113G" — a unit this game does not have.
+        var amt = alpha(Number(r.total_alpha || 0) * 1e6);
+        var span = btn.lastChild;
+        span.textContent = sel.length
+          ? ' Sweep ' + r.entries.length + ' ~' : ' Sweep all ~';
+        span.appendChild(H.el('span', 'fig', amt));
         btn.classList.toggle('sui-mod-disabled', r.entries.length === 0 || armada.jobRunning);
       }).catch(function () {});
     }, 300);
@@ -473,10 +499,10 @@
       // rendered a ~11-second still through the game's own canvas.
       var watch = H.el('div');
       watch.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
-      [
+      (canSpectate() ? [
         { id: r.planet_id, label: 'Watch planet', arg: 'planet_id' },
         { id: r.fleet_id, label: 'Watch fleet', arg: 'fleet_id' }
-      ].forEach(function (t) {
+      ] : []).forEach(function (t) {
         if (!t.id) return;
         var b = H.el('a', 'ops-refresh-btn', t.label + ' →');
         b.href = 'javascript:void(0)';
@@ -503,7 +529,16 @@
         armada.refreshedAt = snap.refreshed_at_ms || 0;
         buildArmadaDom();
         renderArmadaRows();
-      }).catch(function () {});
+      }).catch(function (e) {
+        // This used to swallow everything, so a failed read (or a throw inside
+        // the row builder) left the page sitting on "Roster loading…" forever
+        // — indistinguishable from a slow sweep.
+        var body = document.getElementById('armada-body');
+        if (body && !armada.built) {
+          body.innerHTML = '';
+          body.appendChild(H.stateBlock('error', 'roster unavailable: ' + e));
+        }
+      });
   }
 
   Board.registerPage('armada', {
@@ -568,14 +603,26 @@
     meter.appendChild(cap);
     host.appendChild(meter);
 
-    // The two numbers people actually confuse. Allocatable is what this panel
-    // can spend; available is whether the structs stay on.
+    // The two numbers people actually confuse, named for what they DECIDE
+    // rather than for what they are — "spendable here" and "keeps structs on"
+    // is the whole distinction, and it fits in the caption.
+    //
+    // All four share ONE unit: they exist to be compared, and a strip that
+    // reads "59KW / 6.53KW / 0mW / 52.47KW" makes the comparison harder, not
+    // easier. Only the four DISPLAYED figures set the scale — feeding the
+    // 15.4 GW capacity in as well pushed every tile onto the MW rung and
+    // rendered a 6.53 KW draw as "0.01MW".
+    var sc = H.scaleSet([b.allocatable_mw, b.structs_load_mw,
+      b.capacity_secondary_mw, b.available_mw], 'power');
     var head = H.el('div', 'hstrip alloc-budget');
-    head.appendChild(statTile('allocatable', H.fmtWatts(b.allocatable_mw), null,
+    // The two confusable words get a second caption line saying what each one
+    // DECIDES. That is the whole content of the paragraph this replaced, and it
+    // sits on the number it describes instead of under the card.
+    head.appendChild(statTile(['allocatable', 'spendable here'], sc.fmt(b.allocatable_mw), null,
       spare < 0.01 ? 'bad' : (spare < 0.15 ? 'live' : 'ok')));
-    head.appendChild(statTile('structs draw', H.fmtWatts(b.structs_load_mw), null, 'muted'));
-    head.appendChild(statTile('from substation', H.fmtWatts(b.capacity_secondary_mw), null, 'muted'));
-    head.appendChild(statTile('available', H.fmtWatts(b.available_mw), null,
+    head.appendChild(statTile('structs draw', sc.fmt(b.structs_load_mw), null, 'muted'));
+    head.appendChild(statTile('from substation', sc.fmt(b.capacity_secondary_mw), null, 'muted'));
+    head.appendChild(statTile(['available', 'keeps structs on'], sc.fmt(b.available_mw), null,
       b.online === false ? 'bad' : 'ok'));
     host.appendChild(head);
     if (b.online === false) {
@@ -585,8 +632,7 @@
 
     var rows = d.allocations || [];
     if (!rows.length) {
-      host.appendChild(H.stateBlock('empty',
-        'No allocations. One routes your capacity into a substation — the substation gains it, you carry it as load.'));
+      host.appendChild(H.stateBlock('empty', 'No allocations.'));
     }
 
     rows.forEach(function (a) {
@@ -626,84 +672,85 @@
     });
 
     host.appendChild(allocCreate(d));
-    // Definitions last: the data answers the question, this only explains the
-    // two words above it. `cfg-note` is the 11px aside style — `.ops-muted`
-    // alone only dims, so it rendered at full body size and dominated the card.
-    host.appendChild(H.el('div', 'cfg-note',
-      'Allocatable is capacity minus what you already route out — what these controls can spend. '
-      + 'Available also counts your structs\u2019 draw and the share coming back from the '
-      + 'substation, and is what decides whether your structs stay online.'));
+    // No definitions block. The two words that needed a paragraph are now
+    // defined by their own tile captions ("spendable here" / "keeps structs
+    // on"); the long-form version lives in docs/team-ops.md.
   }
 
   function allocEditor(a, d) {
     var wrap = H.el('div', 'alloc-editor');
     var b = d.budget || {};
-    var maxKw = kwOf(a.power_mw + b.allocatable_mw);   // everything we could commit
+    // Everything we could commit: what this allocation already holds, plus
+    // whatever is still unspent.
+    var ceilingMw = a.power_mw + (b.allocatable_mw || 0);
 
     var out = H.el('div');
+    var applyRow = H.el('div', 'cfg-actions');
     function refreshPreview() {
       out.innerHTML = '';
-      var kwVal = Number(allocState.draftKw);
-      if (!isFinite(kwVal)) { return; }
+      applyRow.innerHTML = '';
+      var mw = Math.round(Number(allocState.draftMw));
+      if (!isFinite(mw)) return;
       out.appendChild(H.stateBlock('loading', 'checking…'));
       Board.T.core.invoke('mcp_allocation_preview', {
-        allocationId: a.id, powerMw: Math.round(kwVal * 1e6),
+        allocationId: a.id, powerMw: mw,
       }).then(function (p) {
         allocState.preview = p;
         out.innerHTML = '';
         if (!p.ok) { out.appendChild(H.stateBlock('error', p.refusal)); return; }
-        var delta = p.delta_mw;
-        out.appendChild(H.row(delta >= 0 ? 'Adds to your load' : 'Frees from your load',
-          H.fmtWatts(Math.abs(delta))));
-        out.appendChild(H.row('Headroom after',
-          H.fmtWatts(p.projected_headroom_mw) + ' (' + Math.round(p.projected_headroom_pct) + '%)'));
+        // What the change DOES, on one shared scale, so the two figures can be
+        // read against each other and against the ceiling above them.
+        var sc = H.scaleSet([p.delta_mw, p.projected_headroom_mw, ceilingMw], 'power');
+        var strip = H.el('div', 'hstrip');
+        strip.appendChild(statTile(p.delta_mw >= 0 ? 'adds to your load' : 'frees from your load',
+          sc.fmt(Math.abs(p.delta_mw)), null, p.delta_mw >= 0 ? 'live' : 'ok'));
+        strip.appendChild(statTile('headroom after',
+          sc.fmt(p.projected_headroom_mw), null,
+          p.projected_headroom_pct < 1 ? 'bad' : (p.projected_headroom_pct < 15 ? 'live' : 'ok')));
+        strip.appendChild(statTile('headroom after %',
+          Math.round(p.projected_headroom_pct) + '%', null, 'muted'));
+        out.appendChild(strip);
         var go = massBtn('', 'icon-success', 'Apply', 'sui-mod-primary');
-        go.addEventListener('click', function () { applyAllocPower(a, kwVal); });
-        out.appendChild(go);
+        go.addEventListener('click', function () { applyAllocPower(a, mw); });
+        applyRow.appendChild(go);
       }).catch(function (e) {
         out.innerHTML = '';
         out.appendChild(H.stateBlock('error', String(e)));
       });
     }
 
-    // Entered in kW — the unit the rest of this page speaks. The exact mW that
-    // will be signed is echoed by the preview above the Apply button.
-    var input = H.textBox(String(Math.round(kwOf(a.power_mw) * 100) / 100), 'kW', function (v) {
-      allocState.draftKw = Number(v) || 0;
-      refreshPreview();
-    });
-    wrap.appendChild(H.field('New power (kW)', input));
-
-    var quick = H.el('div', 'cfg-actions');
-    var max = massBtn('', 'icon-add', 'Use all headroom', 'sui-mod-secondary');
-    max.addEventListener('click', function () {
-      allocState.draftKw = Math.floor(maxKw * 100) / 100;
-      input.value = String(allocState.draftKw);
-      refreshPreview();
-    });
-    quick.appendChild(max);
-    wrap.appendChild(quick);
-    wrap.appendChild(H.el('div', 'ops-muted',
-      'Currently ' + H.fmtWatts(a.power_mw) + '; the most you could commit is '
-      + H.fmtWatts(a.power_mw + (d.budget || {}).allocatable_mw)
-      + '. Going over capacity brownouts the grid and destroys allocations in creation order.'));
+    // The operator picks the unit. A dynamic allocation on this grid can be
+    // anything from a few hundred mW to tens of MW, and a field hard-wired to
+    // kW makes one end of that range unreadable and the other error-prone.
+    // MAX fills in the ceiling, so "use all headroom" is part of the field
+    // rather than a separate button that has to explain itself.
+    allocState.draftMw = a.power_mw;
+    wrap.appendChild(H.amountField('New power', {
+      kind: 'power', base: a.power_mw, max: ceilingMw,
+      onChange: function (mw) { allocState.draftMw = mw; refreshPreview(); },
+    }));
+    // The two facts the old paragraph carried, as readings rather than prose.
+    var facts = H.el('div', 'hstrip');
+    facts.appendChild(statTile('now', H.fmtWatts(a.power_mw), null, 'muted'));
+    facts.appendChild(statTile('ceiling', H.fmtWatts(ceilingMw), null, 'muted'));
+    wrap.appendChild(facts);
     wrap.appendChild(out);
+    wrap.appendChild(applyRow);
     return wrap;
   }
 
-  function applyAllocPower(a, kwVal) {
+  function applyAllocPower(a, mw) {
     if (allocState.busy) return;
     var body = H.el('div');
-    body.appendChild(H.el('div', 'ops-muted',
-      'This changes real grid capacity. The substation gains (or loses) the difference, '
-      + 'and your own load moves by the same amount.'));
     body.appendChild(H.row('Allocation', a.id + ' → ' + a.destination_id));
     body.appendChild(H.row('From', H.fmtWatts(a.power_mw)));
-    body.appendChild(H.row('To', H.fmtWatts(kwVal * 1e6)));
+    body.appendChild(H.row('To', H.fmtWatts(mw)));
+    body.appendChild(H.row('Your load moves by',
+      (mw >= a.power_mw ? '+' : '−') + H.fmtWatts(Math.abs(mw - a.power_mw))));
     H.confirmModal('Set allocation power?', body, 'Apply', function () {
       allocState.busy = true;
       Board.T.core.invoke('mcp_allocation_set_power', {
-        allocationId: a.id, powerMw: Math.round(kwVal * 1e6),
+        allocationId: a.id, powerMw: Math.round(mw),
       }).then(function () {
         allocState.busy = false; allocState.editing = null; allocState.preview = null;
         loadAllocations().then(renderEnergyBody);
@@ -726,10 +773,10 @@
         + ' — ' + H.fmtWatts(s.connection_capacity_mw)
         + '/conn across ' + s.connection_count };
     });
+    // Each option already carries the dilution as a figure ("7.63KW/conn
+    // across 2033"), which is the fact the removed paragraph was describing.
     form.appendChild(H.field('Move to', H.selectBox(dest, opts, function (v) { dest = v; })));
-    form.appendChild(H.el('div', 'form-note',
-      'Connecting needs no permission from the destination. Your contribution is diluted '
-      + 'by the connection count — feeding a busy substation helps the group, not your own share.'));
+    var cta = H.el('div', 'drawer-cta');
     var go = massBtn('', 'icon-transfers', 'Move', 'sui-mod-destructive');
     go.addEventListener('click', function () {
       if (dest === a.destination_id) {
@@ -744,7 +791,8 @@
         form.appendChild(H.stateBlock('error', String(e)));
       });
     });
-    form.appendChild(go);
+    cta.appendChild(go);
+    form.appendChild(cta);
     H.drawer('Move allocation ' + a.id, form);
   }
 
@@ -754,7 +802,7 @@
     var open = massBtn('', 'icon-add', 'New allocation', 'sui-mod-secondary');
     open.addEventListener('click', function () {
       var form = H.el('div');
-      var kwVal = 0, type = 'dynamic', src = d.player_id;
+      var powerMw = 0, type = 'dynamic', src = d.player_id;
       form.appendChild(formFact('Source', d.player_id + ' (you)'));
       form.appendChild(formFact('Allocatable now', H.fmtWatts(b.allocatable_mw)));
       form.appendChild(H.field('Type', H.selectBox('dynamic',
@@ -762,17 +810,21 @@
          {value:'static',label:'static — fixed at creation'},
          {value:'automated',label:'automated — tracks your full capacity (one per source)'}],
         function (v) { type = v; })));
-      form.appendChild(H.field('Power (kW)', H.textBox('', '0', function (v) { kwVal = Number(v) || 0; })));
-      form.appendChild(H.el('div', 'form-note',
-        'A new allocation takes its power from your headroom immediately. It is created '
-        + 'unconnected — use Move to point it at a substation.'));
+      // MAX is bounded by the headroom shown above it, so "takes its power
+      // from your headroom immediately" is a property of the control now.
+      form.appendChild(H.amountField('Power', {
+        kind: 'power', max: b.allocatable_mw,
+        onChange: function (mw) { powerMw = mw; },
+      }));
+      form.appendChild(H.stateBlock('info', 'Created unconnected — use Move to point it at a substation.'));
+      var cta = H.el('div', 'drawer-cta');
       var go = massBtn('', 'icon-add', 'Create', 'sui-mod-destructive');
       go.addEventListener('click', function () {
         if (go.dataset.busy === '1') return; // double-click sent it twice
         go.dataset.busy = '1';
         go.querySelector('span').textContent = ' Submitting…';
         Board.T.core.invoke('mcp_allocation_create', {
-          sourceObjectId: src, allocationType: type, powerMw: Math.round(kwVal * 1e6),
+          sourceObjectId: src, allocationType: type, powerMw: Math.round(powerMw),
         }).then(function () {
           // Only ACCEPTED, not settled — charge-gated messages broadcast later,
           // so promising "created" here would be a lie. The Transactions page
@@ -785,7 +837,8 @@
           form.appendChild(H.stateBlock('error', String(e)));
         });
       });
-      form.appendChild(go);
+      cta.appendChild(go);
+      form.appendChild(cta);
       var close = H.drawer('New allocation', form);
     });
     wrap.appendChild(open);
@@ -862,24 +915,26 @@
       table.appendChild(H.resultRow({
         icon: g.under ? 'sui-icon-no-power' : 'sui-icon-energy',
         title: role + ' × ' + H.fmtInt(g.n),
+        // Name the player the worst figure belongs to right here — that is
+        // the whole reason the worst is shown ahead of the average.
         subtitle: g.under
-          ? g.under + ' below 15% — worst is ' + g.worstName + ' at ' + Math.round(g.worst) + '%'
-          : 'all above 15%',
+          ? g.under + ' below 15% — worst ' + g.worstName + ' at ' + Math.round(g.worst) + '%'
+          : 'all above 15% — worst ' + g.worstName + ' at ' + Math.round(g.worst) + '%',
         chips: [
-          statTile('avg margin', Math.round(avg) + '%', null, avg < 15 ? 'live' : 'ok'),
-          statTile('worst', Math.round(g.worst) + '%', null, g.worst < 15 ? 'bad' : 'muted'),
+          // Worst leads; the average is the reassuring number and is demoted
+          // to muted so it cannot be mistaken for the one that decides.
+          statTile('worst margin', Math.round(g.worst) + '%', null, g.worst < 15 ? 'bad' : 'ok'),
+          statTile('avg', Math.round(avg) + '%', null, 'muted'),
           statTile('total load', H.fmtWatts(g.load), null, 'muted'),
           statTile('stale reads', g.errs, null, g.errs ? 'live' : 'muted'),
         ],
       }));
     });
     pbody.appendChild(table);
-    pbody.appendChild(H.el('div', 'cfg-note',
-      'Grouped by role — the primary is listed individually. "Worst" is the figure that matters: '
-      + 'an average stays healthy while one starved player goes offline. Roster '
-      + H.ago(d.roster_refreshed_at_ms) + ' old.'));
 
-    body.appendChild(H.card('PLAYER MARGINS', pbody));
+    // Roster age belongs in the card header, not in a sentence under it: it
+    // qualifies every row above and it is the one thing here that goes stale.
+    body.appendChild(H.card('PLAYER MARGINS · roster ' + H.ago(d.roster_refreshed_at_ms) + ' old', pbody));
     Board.stamp('updated ' + new Date().toLocaleTimeString());
   }
   function renderEnergy() {
@@ -928,17 +983,34 @@
         return [t.status, t.percent_complete, t.current_difficulty, t.difficulty_target, t.eta].join('|');
       },
       render: function (t) {
-        var diff = (t.current_difficulty != null ? t.current_difficulty : '—') +
-          '→' + (t.difficulty_target != null ? t.difficulty_target : '—');
+        // `current_difficulty` is the live 0-64 bit difficulty; `difficulty_target`
+        // is a CURVE PARAMETER off the struct type (28,000 for a refinery, 720
+        // for a build) that the decay formula raises to a power. Printing them
+        // as "8→28000" implied one becomes the other — two incommensurable
+        // numbers joined by an arrow. The difficulty is what an operator reads;
+        // the target is a constant of the struct type and belongs on the hover.
+        var d = t.current_difficulty;
         return H.resultRow({
           icon: typeIcon[t.task_type] || 'icon-in-progress',
           title: t.task_id || '?',
           subtitle: (t.task_type || '?') + ' · ' + (t.status || '?'),
           chips: [
             H.resource(H.progressBar((t.percent_complete || 0) / 100)),
-            H.resource(diff),
-            H.resource(t.eta || '—', null, 'ops-muted'),
+            statTile('difficulty', d == null ? '—' : d + '/64', null,
+              d == null ? 'muted' : (d <= 16 ? 'ok' : (d <= 32 ? 'live' : 'bad'))),
+            statTile('eta', t.eta || '—', null, 'muted'),
           ],
+          onClick: function () {
+            var b = H.el('div');
+            b.appendChild(H.row('Task', t.task_id || '—'));
+            b.appendChild(H.row('Type / status', (t.task_type || '?') + ' · ' + (t.status || '?')));
+            b.appendChild(H.row('Difficulty now', d == null ? '—' : d + ' of 64'));
+            b.appendChild(H.row('Curve target', t.difficulty_target == null
+              ? '—' : H.fmtInt(t.difficulty_target)));
+            b.appendChild(H.row('Progress', Math.round(t.percent_complete || 0) + '%'));
+            b.appendChild(H.row('ETA', t.eta || '—'));
+            H.drawer('Proof — ' + (t.task_id || '?'), b);
+          },
         });
       },
       pageSize: 50,
@@ -981,8 +1053,11 @@
     qbody.innerHTML = '';
     qbody.appendChild(H.row('Running / Waiting / Done', (c.running || 0) + ' / ' + (c.waiting || 0) + ' / ' + (c.completed || 0), 'icon-in-progress'));
     qbody.appendChild(H.row('Engine', (hc.effective_engine || '?') + (hc.gpu_available ? ' (GPU available)' : '')));
-    qbody.appendChild(H.row('difficulty_start / max_concurrent', hc.difficulty_start + ' / ' + hc.max_concurrent +
-      (hc.auto_tune ? ' · auto-tune ON' : '')));
+    // Raw config keys as a row label — the only place on the board that spoke
+  // snake_case at the operator.
+  qbody.appendChild(H.row('Start grinding at difficulty',
+    hc.difficulty_start + ' of 64' + (hc.auto_tune ? '  · auto-tuned' : '')));
+  qbody.appendChild(H.row('Concurrent proofs', hc.max_concurrent));
 
     workState.lv.setRows(d.tasks || []);
 
@@ -1002,7 +1077,9 @@
         pbody.appendChild(H.resultRow({
           icon: 'icon-computer',
           title: String(e2.engine || '?').toUpperCase(),
-          subtitle: (e2.solves || 0) + ' solves in the last 24h',
+          // The solve count is already the first tile; repeating it unformatted
+          // in the subtitle just gave the same number two different spellings.
+          subtitle: 'proof engine',
           chips: [
             statTile('solves', H.fmtInt(e2.solves)),
             statTile('median', H.duration((e2.median_duration_ms || 0) / 1000)),
@@ -1111,12 +1188,17 @@
 
   function openTransfer(denom) {
     var reg = invDenoms();
-    var info = reg[denom] || {};
-    var exp = info.exponent || 0;
-    var scale = Math.pow(10, exp);
     var unit = H.denomName(denom, reg, { tag: false });
+    // Alpha and Ore are the two denoms the game has a display ladder for, so
+    // their amount field offers the game's own units (μg…Tg). A guild token has
+    // no ladder — it has one exponent and two published names — so it gets a
+    // plain field in its display unit.
+    var kind = denom === 'ualpha' ? 'alpha' : (denom === 'ore' ? 'ore' : null);
+    var info = reg[denom] || {};
+    var scale = Math.pow(10, info.exponent || 0);
+    var available = balanceOf(denom);
     var form = H.el('div');
-    var to = '', amountDisplay = 0;
+    var to = '', amountBase = 0, preview = null;
 
     // FROM and ASSET are facts, not fields — they were rendered as labelled
     // inputs, so a 44-character address sat in a 332px two-column row and
@@ -1125,49 +1207,71 @@
     form.appendChild(formFact('From',
       (me.name || '?') + ' · ' + shortAddress(me.address), me.address));
     form.appendChild(formFact('Asset', H.denomName(denom, reg, { style: 'both' })));
-    form.appendChild(formFact('Available',
-      H.denomQty(balanceOf(denom), denom, reg)));
+    form.appendChild(formFact('Available', H.denomQty(available, denom, reg)));
 
     form.appendChild(H.field('To', H.textBox('', 'structs1…', function (v) {
       to = v.trim();
-      renderEcho();
+      schedule();
     })));
 
-    // Amount is entered in DISPLAY units. It used to demand base units with a
-    // hint reading "e.g. 1000000 = 1 Alpha" — asking someone to do a 10^6
-    // conversion in their head on a form that moves money is how you get a
-    // transfer that is a million times too big.
-    form.appendChild(H.field('Amount (' + unit + ')',
-      H.textBox('', '0', function (v) {
-        amountDisplay = Number(v) || 0;
-        renderEcho();
-      })));
-
-    // Live echo of exactly what will be sent, in both units.
-    var echo = H.el('div', 'form-note');
-    form.appendChild(echo);
-    function baseUnits() { return Math.round(amountDisplay * scale); }
-    function renderEcho() {
-      if (!amountDisplay) { echo.textContent = ''; return; }
-      echo.textContent = 'Sends ' + H.fmtNum(amountDisplay) + ' ' + unit
-        + ' (' + H.fmtInt(baseUnits()) + ' ' + denom + ')';
+    if (kind) {
+      form.appendChild(H.amountField('Amount', {
+        kind: kind, max: available,
+        onChange: function (base) { amountBase = base; schedule(); },
+      }));
+    } else {
+      form.appendChild(H.field('Amount (' + unit + ')',
+        H.textBox('', '0', function (v) {
+          amountBase = Math.round((Number(v) || 0) * scale);
+          schedule();
+        })));
     }
 
+    // ── One review, always on screen ─────────────────────────────────────────
+    // This used to be Preview → Send → confirm: three deliberate steps, and
+    // because the review rendered at the BOTTOM of a drawer that was clipped by
+    // the panel frame, the middle one was frequently off screen entirely.
+    //
+    // Now the dry run is AMBIENT — it re-runs as you type, the same idiom the
+    // Sweep button uses — and the only button is the irreversible one, pinned
+    // to the bottom of the drawer where it is always reachable. The backend
+    // re-runs every gate on execute regardless of what this showed.
     var out = H.el('div');
     form.appendChild(out);
 
-    var check = massBtn('', 'icon-detected', 'Preview', 'sui-mod-secondary');
-    check.addEventListener('click', function () {
+    var cta = H.el('div', 'drawer-cta');
+    var go = massBtn('', 'icon-send-alpha', 'Send', 'sui-mod-destructive');
+    cta.appendChild(go);
+    form.appendChild(cta);
+
+    function setReady(on) {
+      go.classList.toggle('sui-mod-disabled', !on);
+    }
+    setReady(false);
+
+    var timer = null;
+    function schedule() {
+      preview = null;
+      setReady(false);
+      clearTimeout(timer);
+      if (!to || !amountBase) { out.innerHTML = ''; return; }
+      timer = setTimeout(runPreview, 350);
+    }
+
+    function runPreview() {
+      var seq = ++runPreview.seq;
       out.innerHTML = '';
       out.appendChild(H.stateBlock('loading', 'checking…'));
       Board.T.core.invoke('mcp_transfer_preview', {
-        from: invState.player, to: to, denom: denom, amount: baseUnits(),
+        from: invState.player, to: to, denom: denom, amount: amountBase,
       }).then(function (p) {
+        if (seq !== runPreview.seq) return;   // a later keystroke won
         out.innerHTML = '';
         (p.problems || []).forEach(function (x) {
           out.appendChild(H.stateBlock('error', x));
         });
         if (!p.ok) return;
+        preview = p;
         // Who is actually on the other end. An address we can't name is
         // called out as external rather than shown as a bare string.
         out.appendChild(p.recipient
@@ -1177,41 +1281,49 @@
           + ' (' + H.fmtInt(p.amount) + ' ' + denom + ')'));
         out.appendChild(formFact('To', shortAddress(p.to), p.to));
         out.appendChild(formFact('Signed via', p.route));
-
-        var go = massBtn('', 'icon-send-alpha', 'Send', 'sui-mod-destructive');
-        go.addEventListener('click', function () {
-          var body = H.el('div');
-          body.appendChild(H.el('div', 'ops-muted',
-            'This is irreversible. The funds leave ' + p.from.name + ' immediately.'));
-          // The confirm never shows the cosmetic name alone.
-          body.appendChild(H.row('Asset', H.denomName(denom, reg, { style: 'both' })));
-          body.appendChild(H.row('Amount', H.denomQty(p.amount, denom, reg)
-            + ' (' + H.fmtInt(p.amount) + ' base units)'));
-          body.appendChild(H.row('From', p.from.name + ' · ' + p.from.address));
-          body.appendChild(H.row('To', (p.recipient || 'EXTERNAL') + ' · ' + p.to));
-          H.confirmModal('Send ' + H.denomName(denom, reg, { style: 'both' }) + '?',
-            body, 'Send', function () {
-              out.innerHTML = '';
-              out.appendChild(H.stateBlock('loading', 'signing…'));
-              Board.T.core.invoke('mcp_transfer_execute', {
-                from: invState.player, to: p.to, denom: denom, amount: p.amount,
-              }).then(function () {
-                out.innerHTML = '';
-                out.appendChild(H.stateBlock('info', 'sent'));
-                renderInventory();
-              }).catch(function (e) {
-                out.innerHTML = '';
-                out.appendChild(H.stateBlock('error', String(e)));
-              });
-            });
-        });
-        out.appendChild(go);
+        // The button deliberately does NOT repeat the amount: SUI uppercases
+        // button labels, which turned "Send 2g" into "SEND 2G" — a unit the
+        // game does not have. The review line directly above it carries the
+        // figure in both units.
+        setReady(true);
       }).catch(function (e) {
+        if (seq !== runPreview.seq) return;
         out.innerHTML = '';
         out.appendChild(H.stateBlock('error', String(e)));
       });
+    }
+    runPreview.seq = 0;
+
+    go.addEventListener('click', function () {
+      var p = preview;
+      if (!p) return;
+      var body = H.el('div');
+      body.appendChild(H.el('div', 'ops-muted',
+        'Irreversible — the funds leave ' + p.from.name + ' immediately.'));
+      // The confirm never shows the cosmetic name alone.
+      body.appendChild(H.row('Asset', H.denomName(denom, reg, { style: 'both' })));
+      body.appendChild(H.row('Amount', H.denomQty(p.amount, denom, reg)
+        + ' (' + H.fmtInt(p.amount) + ' base units)'));
+      body.appendChild(H.row('From', p.from.name + ' · ' + p.from.address));
+      body.appendChild(H.row('To', (p.recipient || 'EXTERNAL') + ' · ' + p.to));
+      H.confirmModal('Send ' + H.denomName(denom, reg, { style: 'both' }) + '?',
+        body, 'Send', function () {
+          out.innerHTML = '';
+          out.appendChild(H.stateBlock('loading', 'signing…'));
+          setReady(false);
+          Board.T.core.invoke('mcp_transfer_execute', {
+            from: invState.player, to: p.to, denom: denom, amount: p.amount,
+          }).then(function () {
+            out.innerHTML = '';
+            out.appendChild(H.stateBlock('info', 'sent'));
+            renderInventory();
+          }).catch(function (e) {
+            out.innerHTML = '';
+            out.appendChild(H.stateBlock('error', String(e)));
+            setReady(true);
+          });
+        });
     });
-    form.appendChild(check);
 
     H.drawer('Send ' + H.denomName(denom, reg, { tag: false }), form);
   }
@@ -1237,13 +1349,28 @@
     var when = parseLedgerTime(r.time);
     // `amount_base` is the backend's single convention (base units); `precise`
     // is false when it had to be reconstructed from the Guild ledger's floored
-    // display value, in which case we say so with a ~ instead of implying an
-    // exactness the row never carried.
+    // display value.
+    //
+    // The imprecision marker used to be a leading `~`, which landed directly
+    // after the direction sign — "+ ~1 Alpha" — and in the game's pixel font a
+    // tilde beside a plus reads as a MINUS. A credit looked like a debit. The
+    // marker is now a dotted underline on the figure itself, which cannot be
+    // mistaken for arithmetic.
     var qty = H.denomQty(r.amount_base, r.denom, reg);
-    if (r.precise === false) qty = '~' + qty;
+    // The ladder names a unit ("1g"), not an asset, and a ledger row has no
+    // other place that says which asset moved.
+    var assetName = H.denomName(r.denom, reg, { tag: false });
+    var title = H.el('span');
+    title.appendChild(document.createTextNode(credit ? '+' : '−'));
+    var amt = H.el('span', r.precise === false ? 'approx' : null, qty);
+    if (r.precise === false) {
+      amt.title = 'the Guild ledger reports this row in whole display units only — the true value may be a fraction higher';
+    }
+    title.appendChild(amt);
+    title.appendChild(document.createTextNode(' ' + assetName));
     return H.resultRow({
       icon: LEDGER_ICON[r.action] || (credit ? 'icon-incoming' : 'icon-outgoing'),
-      title: (credit ? '+' : '−') + ' ' + qty,
+      title: title,
       subtitle: (r.action || '?') + (who ? ' · ' + who : '')
         + (r.block_height ? ' · block ' + H.fmtInt(r.block_height) : ''),
       // Relative time scans far better than a full timestamp in a list; the
@@ -1287,26 +1414,54 @@
     return H.renderInto('inventory-body', function (body) {
       if (!d) { body.appendChild(H.stateBlock('loading', 'loading…')); return; }
 
-      // Scope: primary by default, any player, or the team totals.
+      // ── Scope ────────────────────────────────────────────────────────────
+      // A <select> of every virtual player was 1,822 <option> nodes — 150 KB of
+      // DOM and a menu nobody can find a name in. A datalist-backed text field
+      // is the same control the operator would reach for anyway: type part of a
+      // name or id, pick, done. The list is capped because the browser renders
+      // the whole popup; the field still accepts any id you type.
       var opts = [{ value: 'primary', label: 'primary' }];
       (armada.rows || []).forEach(function (r) {
         if (r.index == null) return;
         opts.push({ value: r.player_id, label: r.name + ' (' + r.player_id + ')' });
       });
       var head = H.el('div');
-      head.appendChild(H.field('Player', H.selectBox(invState.player, opts, function (v) {
+      var pickId = 'inv-players';
+      var list = H.el('datalist'); list.id = pickId;
+      opts.slice(0, 400).forEach(function (o) {
+        var op = H.el('option'); op.value = o.value; op.label = o.label;
+        list.appendChild(op);
+      });
+      head.appendChild(list);
+      var picked = invState.player;
+      var pick = H.textBox(invState.player, 'primary, a name, or 1-xxx', function (v) {
+        v = String(v || '').trim();
+        if (!v) v = 'primary';
+        // Accept either the id or the "name (1-xxx)" label the datalist offers.
+        var m = /\((1-\d+)\)\s*$/.exec(v);
+        if (m) v = m[1];
+        else if (v !== 'primary') {
+          var hit = opts.find(function (o) {
+            return o.value === v || o.label.toLowerCase() === v.toLowerCase();
+          });
+          v = hit ? hit.value : v;
+        }
+        if (v === picked) return;
+        picked = v;
         invState.player = v; invState.page = 1; invState.history = null;
         renderInventory();
-      })));
+      });
+      pick.setAttribute('list', pickId);
+      head.appendChild(H.field('Player', pick,
+        opts.length - 1 + ' virtual players in the roster cache'));
       var t = d.team || {};
       head.appendChild(H.resultRow({
         icon: 'icon-group',
         title: 'Team total',
-        subtitle: t.players + ' player(s) in the roster cache',
+        subtitle: H.fmtInt(t.players) + ' player(s) in the roster cache',
         chips: [
-          statTile('alpha', H.denomAmount(t.alpha_ualpha || 0, 'ualpha', d.denoms),
-            'sui-icon-alpha-matter'),
-          statTile('ore', H.fmtNum(t.ore || 0), 'sui-icon-alpha-ore'),
+          statTile('alpha', alpha(t.alpha_ualpha || 0), 'sui-icon-alpha-matter'),
+          statTile('ore', ore(t.ore || 0), 'sui-icon-alpha-ore'),
         ],
       }));
       body.appendChild(H.card('SCOPE', head));
@@ -1316,9 +1471,8 @@
       var assets = d.assets || [];
       if (!assets.length) abody.appendChild(H.stateBlock('empty', 'no assets held'));
       assets.forEach(function (a) { abody.appendChild(assetRow(a)); });
-      abody.appendChild(H.el('div', 'ops-muted',
-        'Ore is shown for completeness only — it is not a bank asset and cannot be sent. '
-        + 'It leaves a player by being refined into Alpha, or by being seized in battle.'));
+      // Why ore has no Send control is carried by the row itself ("not
+      // transferable") and by its detail drawer; docs/team-ops.md has the rest.
       body.appendChild(H.card('BALANCES', abody));
 
       var hbody = H.el('div');
@@ -1351,12 +1505,9 @@
           nav.appendChild(next);
         }
         if (nav.childNodes.length) hbody.appendChild(nav);
-        hbody.appendChild(H.el('div', 'ops-muted',
-          'Page ' + invState.page + ' of the Guild ledger — durable and chain-authoritative, '
-          + 'so it reaches back further than this app has been running. A ~ marks a row the '
-          + 'ledger reports only in whole display units.'));
       }
-      body.appendChild(H.card('HISTORY', hbody));
+      // The page number is a property of the card, not a sentence under it.
+      body.appendChild(H.card('HISTORY · GUILD LEDGER · page ' + invState.page, hbody));
     });
   }
 
@@ -1473,11 +1624,37 @@
           body.appendChild(H.card('TRANSACTIONS BY CONTEXT (1h)', cbody));
         }
 
-        var errs = (tx.top_errors || []).slice(0, 8);
+        // ── Top errors, collapsed by SHAPE ───────────────────────────────
+        // The backend rolls these up by exact reason string, and a chain error
+        // carries the failing nonce — so one recurring failure arrived as five
+        // separate "1×" rows that differed only in digits. Same fix the event
+        // feed already uses: normalise the varying parts, then group.
+        //
+        // The message also rendered through H.row (a label/value pair), so a
+        // long reason wrapped under its own count and was cut at 120 characters
+        // — mid-word, and exactly where the useful tail lives.
+        var errs = tx.top_errors || [];
         if (errs.length) {
-          var xbody = H.el('div');
+          var shapes = {}, order = [];
           errs.forEach(function (e2) {
-            xbody.appendChild(H.row(String(e2.count) + '×', e2.reason.slice(0, 120), 'icon-alert'));
+            var reason = String(e2.reason || '')
+              .replace(/^failed to execute message; message index: \d+: /, '');
+            var key = reason.replace(/\d+/g, 'N');
+            if (!shapes[key]) { shapes[key] = { reason: reason, count: 0 }; order.push(key); }
+            shapes[key].count += (e2.count || 1);
+            // Keep the newest-looking example rather than the first.
+            shapes[key].reason = reason;
+          });
+          order.sort(function (a, b) { return shapes[b].count - shapes[a].count; });
+          var xbody = H.el('div');
+          order.slice(0, 8).forEach(function (k) {
+            var g = shapes[k];
+            xbody.appendChild(H.resultRow({
+              icon: 'icon-alert',
+              title: g.reason,
+              subtitle: g.count > 1 ? 'one example of ' + g.count + ' with the same shape' : null,
+              chips: [statTile('count', H.fmtInt(g.count), null, g.count > 1 ? 'bad' : 'live')],
+            }));
           });
           body.appendChild(H.card('TOP TX ERRORS (1h)', xbody));
         }
@@ -1525,17 +1702,17 @@
     }
     if (r.stale) chips.push(H.badge('STALE'));
     chips.push(H.badge(raidStatusLabel(r.status), RAID_STATUS_MOD[r.status]));
-    if (r.seized_ore > 0) chips.push(statTile('ore taken', H.fmtNum(r.seized_ore), 'icon-alpha-ore'));
+    if (r.seized_ore > 0) chips.push(statTile('ore taken', ore(r.seized_ore), 'icon-alpha-ore'));
     chips.push(statTile('updated', H.duration((Date.now() - r.updated_ms) / 1000) + ' ago'));
 
     // Attacker → defender, naming whoever we could resolve.
     var sub = (r.attacker || 'unknown fleet owner') + ' → ' + (r.defender || 'unknown planet owner');
     if (r.fleet_id) sub += '  ·  fleet ' + r.fleet_id;
 
-    var watch = iconBtn('icon-raid', 'Watch this raid', function (ev) {
+    var watch = canSpectate() ? iconBtn('icon-raid', 'Watch this raid', function (ev) {
       ev.stopPropagation();
       openRaidWindow({ planet_id: r.planet_id });
-    });
+    }) : null;
 
     return H.resultRow({
       icon: r.live ? 'icon-raid' : 'icon-combat-log',
@@ -1554,13 +1731,18 @@
     box.appendChild(H.row('attacker', r.attacker || 'unresolved', 'icon-raid'));
     box.appendChild(H.row('raiding fleet', r.fleet_id || '—', 'icon-fleet-tile'));
     box.appendChild(H.row('status', raidStatusLabel(r.status), 'icon-combat-log'));
-    box.appendChild(H.row('ore seized', H.fmtNum(r.seized_ore || 0), 'icon-alpha-ore'));
+    box.appendChild(H.row('ore seized', ore(r.seized_ore || 0), 'icon-alpha-ore'));
     if (r.stale) {
-      box.appendChild(H.stateBlock('warning',
-        'No status change in over an hour. This is almost certainly an abandoned raid record rather than a running raid — the chain keeps non-terminal rows indefinitely.'));
+      box.appendChild(H.stateBlock('warning', 'Abandoned — no status change in over an hour.'));
     }
     var cta = H.el('div', 'cfg-row');
     var close;
+    if (!canSpectate()) {
+      box.appendChild(H.stateBlock('info',
+        'Spectator windows open on the machine running Structs, not in this browser.'));
+      close = H.drawer('Raid on ' + r.planet_id, box);
+      return;
+    }
     var watchPlanet = massBtn('raid-watch-planet', 'icon-planet', 'Watch the planet', 'sui-mod-primary');
     watchPlanet.addEventListener('click', function () {
       // Dismiss the drawer: the window it opens is the thing you wanted, and
@@ -1680,7 +1862,7 @@
         if (d.unidentified > 0) {
           // Say it rather than let a capped list read as a complete one.
           body.appendChild(H.stateBlock('info', d.unidentified +
-            ' older raid(s) are listed without attacker/defender names — identity lookups are capped per refresh.'));
+            ' older raid(s) unnamed — identity lookups are capped per refresh.'));
         }
       } else {
         var tiles = body.querySelectorAll('.hstrip .fstat .fstat-v');
@@ -1922,6 +2104,10 @@
     return parts.length ? parts.join('·') : String(n);
   }
   var GRASS_SUPPRESS = { seq: 1, updated_at: 1, time: 1 };
+  // Chain sentinels for "this field does not apply". They are rendered as data
+  // — `guild_id: noGuild`, `player_id: noPlayer` — and on an inventory event
+  // three of the nine chips said nothing but took a third of the band.
+  var GRASS_SENTINEL = { noGuild: 1, noPlayer: 1, noStruct: 1, noPlanet: 1, noFleet: 1, none: 1 };
   var ENERGY_ATTRS = { capacity: 1, load: 1, structsLoad: 1, power: 1, connectionCapacity: 1 };
   // Values that must NEVER be abbreviated: a block height rendered as "1.8M"
   // makes an old→new transition read as "1.8M → 1.8M", and an abbreviated
@@ -1940,6 +2126,26 @@
   // legacy-scaled field). Returns a display string, or null to suppress.
   function grassVal(ev, det, key, raw, variant) {
     if (GRASS_SUPPRESS[key]) return null;
+    if (typeof raw === 'string' && GRASS_SENTINEL[raw]) return null;
+    // `action: refined` beside a REFINED badge is the same word twice. The
+    // badge is the one that carries colour and scans down the left edge.
+    if (key === 'action' && String(raw).toLowerCase() === String(ev.category || '').toLowerCase()) {
+      return null;
+    }
+    // An id whose RESOLVED twin is already on the row. `counterparty` renders
+    // as "worker783 (1-1075)", so a `counterparty_player_id: 1-1075` chip beside
+    // it is the same id a second time; likewise a counterparty guild that is
+    // simply the event's own guild.
+    if (key === 'counterparty_player_id' && det.counterparty != null) {
+      // Compare against the RENDERED counterparty (an address resolves to
+      // "worker783 (1-1075)"), not the raw bech32 it started as.
+      var cp = grassVal(ev, det, 'counterparty', det.counterparty, 'new');
+      if (cp != null && String(cp).indexOf(String(raw)) >= 0) return null;
+    }
+    if (key === 'counterparty_guild_id' && det.guild_id != null
+        && String(det.guild_id) === String(raw)) {
+      return null;
+    }
     var precise = variant === 'old' ? det[key + '_old_p'] : det[key + '_p'];
     // Full block heights — never abbreviated (the whole point of a height).
     if (HEIGHT_KEY.test(key)) return H.fmtInt(raw);
@@ -2463,11 +2669,16 @@
           icon: go ? 'icon-raid' : 'icon-planetary-shield',
           title: t.name + '  ' + t.planet_id,
           subtitle: (go ? 'GO — ' + t.vulnerability_reason : 'NO-GO — ' + t.blocked_by),
+          // Captioned tiles, not bare icon+number: "297" beside an ore glyph
+          // and "5" beside a shield glyph do not say which is the prize and
+          // which is the obstacle.
           chips: [
-            H.resource(Math.round(t.stored_ore), 'sui-icon-alpha-ore', t.stored_ore >= (raid.min_ore || 0) ? '' : 'attn'),
-            H.resource(t.planetary_shield + ' → ~' + Math.round(t.raid_minutes) + 'm', 'icon-planetary-shield'),
-            H.resource(t.defenders_on_cmd, 'icon-defend'),
-            H.resource(Math.round(t.score), null, go ? '' : 'attn'),
+            statTile('ore', ore(t.stored_ore), 'sui-icon-alpha-ore',
+              t.stored_ore >= (raid.min_ore || 0) ? '' : 'bad'),
+            statTile('shield · proof', t.planetary_shield + ' · ~' + Math.round(t.raid_minutes) + 'm',
+              'icon-planetary-shield', 'muted'),
+            statTile('defenders', t.defenders_on_cmd, 'icon-defend', 'muted'),
+            statTile('score / 100', Math.round(t.score), null, go ? 'ok' : 'bad'),
           ],
           action: act,
         }));
@@ -2524,8 +2735,6 @@
     gbody.appendChild(addRow('player id (e.g. 1-61)', function (id, w) {
       warSet({ action: 'add', kind: 'grudge', id: id, weight: w == null ? 1 : w });
     }));
-    gbody.appendChild(H.el('div', 'ops-muted',
-      'Weight multiplies how far a target climbs the raid board. Heat blends it with the harm actually done.'));
     body.appendChild(H.card('GRUDGES', gbody));
 
     // ── Guild-level priorities + the hard never-attack vetoes. ──
@@ -2542,7 +2751,7 @@
       qbody.appendChild(r);
     });
     if (!(lists.priority_guilds || []).length) {
-      qbody.appendChild(H.el('div', 'ops-muted', 'No prioritised guilds — every member of one listed here gains its weight as a target.'));
+      qbody.appendChild(H.stateBlock('empty', 'No prioritised guilds.'));
     }
     qbody.appendChild(addRow('guild id (e.g. 0-2)', function (id, w) {
       warSet({ action: 'add', kind: 'priority_guild', id: id, weight: w == null ? 1 : w });
@@ -2550,8 +2759,6 @@
     body.appendChild(H.card('PRIORITY GUILDS', qbody));
 
     var abody = H.el('div');
-    abody.appendChild(H.el('div', 'ops-muted',
-      'A hard veto in BOTH loops, checked before anything is scored — the chain does not stop you attacking guild-mates, so this does.'));
     (lists.allies || []).forEach(function (gid) {
       var r = H.el('div', 'cfg-row');
       var l = H.el('span');
@@ -2580,7 +2787,7 @@
     abody.appendChild(addRow('player id to protect', function (id) {
       warSet({ action: 'add', kind: 'protected', id: id });
     }, false));
-    body.appendChild(H.card('NEVER ATTACK', abody));
+    body.appendChild(H.card('NEVER ATTACK · hard veto in both loops', abody));
     }
 
     // ── What the response loop actually did. ──
@@ -2626,21 +2833,15 @@
         { chrome: false, after: renderWar, errorHost: 'war-body' }, o));
     };
 
-    body.appendChild(H.card('RESPONSE SETTINGS', warEditor('response', resp, {
-      note: 'A raid resolves in about four minutes, and every recorded defensive win fired back ' +
-        'inside the first two — hence the short scan interval.',
-    })));
-
+    // No explanatory notes under these cards: the reasoning behind each gate
+    // is in docs/team-ops.md, and the individual knobs that need a caveat carry
+    // it as a press-and-hold tip on the field itself (FIELD_META.hint).
+    body.appendChild(H.card('RESPONSE SETTINGS', warEditor('response', resp)));
     body.appendChild(H.card('TARGETING GATES', warEditor('raid', raid, {
       filter: function (k) { return !isWeight(k); },
-      note: 'Of every raid on record, none that started against a non-vulnerable planet ever ' +
-        'completed — and going anyway drops your own shields for the trip.',
     })));
-
-    body.appendChild(H.card('SCORING WEIGHTS', warEditor('raid', raid, {
+    body.appendChild(H.card('SCORING WEIGHTS · blended to 0-100', warEditor('raid', raid, {
       filter: isWeight,
-      note: 'How the 0-100 score is blended. Raising one weight lifts targets that are strong on ' +
-        'it; the scale stays 0-100 either way, so min_score keeps meaning the same thing.',
     })));
     }
 
@@ -2802,9 +3003,6 @@
     Board.T.core.invoke('mcp_role_pfp_get').then(function (d) {
       appear.config = d.config || {}; appear.counts = d.part_counts || {}; appear.players = d.counts || {};
       host.innerHTML = '';
-      var intro = H.el('div', 'ops-muted');
-      intro.textContent = 'Style each squad. Fixed layers pin the look; randomized layers give every player a unique one. Apply restyles everyone in the role.';
-      host.appendChild(intro);
       // Driven by whatever roles the backend manages, so a new one (raider)
       // appears here without another hardcoded list to forget.
       Object.keys(appear.config).forEach(function (role) {
@@ -2818,48 +3016,41 @@
   // What each loop IS, so the list can say it in a sentence instead of dumping
   // twenty key=value pairs. `chips` names the two or three numbers worth seeing
   // without opening the editor.
-  // `short` is the row subtitle and must stay one line on a narrow board
-  // window; `blurb` is the full sentence, shown once the editor is open.
+  // `short` is both the row subtitle and the editor's one-line header. There
+  // used to be a second, longer `blurb` for the editor; it restated the same
+  // fact in more words, which is the pattern this console is trying to lose.
   var LOOP_META = {
     harvest: {
       label: 'auto_harvest', icon: 'icon-mine', short: 'mine + refine when the proof is cheap',
-      blurb: 'Mines and refines every owned struct once its proof has decayed enough to be cheap.',
       chips: [{ key: 'difficulty_threshold', label: 'difficulty' }],
     },
     build: {
       label: 'auto_build', icon: 'icon-deploy', short: 'fill free slots with the defensive loadout',
-      blurb: 'Fills each player’s free slots with the defensive loadout, one charge-paced build per scan.',
       chips: [{ key: 'complete_difficulty', label: 'difficulty' }],
     },
     defend: {
       label: 'auto_defend', icon: 'icon-defend', short: 'guard the Command Ship, then production',
-      blurb: 'Assigns idle combat structs to guard the Command Ship first, then production.',
       chips: [],
     },
     infuse: {
       label: 'auto_infuse', icon: 'icon-send-alpha', short: 'infuse spare Alpha into the reactor',
-      blurb: 'Keeps a reserve of Alpha and infuses the rest into the guild reactor.',
-      chips: [{ key: 'keep_grams', label: 'reserve', icon: 'sui-icon-alpha-matter' }],
+      chips: [{ key: 'keep_grams', label: 'reserve', icon: 'sui-icon-alpha-matter', unit: 'alpha' }],
     },
     sweep: {
       label: 'auto_sweep', icon: 'icon-transfers', short: 'move Alpha to the primary as it accumulates',
-      blurb: 'Sends a player\u2019s Alpha to the primary once it crosses a threshold, a few players '
-        + 'per scan \u2014 the same eligibility as the Sweep All button, spread out so the whole '
-        + 'roster is never queued at once.',
       chips: [
-        { key: 'min_send_alpha', label: 'at', icon: 'sui-icon-alpha-matter' },
+        { key: 'min_send_alpha', label: 'at', icon: 'sui-icon-alpha-matter', unit: 'alpha' },
         { key: 'max_sends_per_scan', label: 'per scan' },
       ],
     },
     response: {
       label: 'auto_response', icon: 'icon-counter', short: 'answer a raid inside its 2-minute window',
-      blurb: 'Answers a raid alarm inside the two-minute window — identifies the attacker and fires back.',
       chips: [{ key: 'mode', label: 'response' }], war: true,
     },
     raid: {
       label: 'auto_raid', icon: 'icon-raid', short: 'score targets, fly expendable raiders',
-      blurb: 'Scores every reachable player as a raid target and flies expendable raiders at the best one.',
-      chips: [{ key: 'posture', label: 'posture' }, { key: 'min_ore', label: 'min ore', icon: 'sui-icon-alpha-ore' }], war: true,
+      chips: [{ key: 'posture', label: 'posture' },
+        { key: 'min_ore', label: 'min ore', icon: 'sui-icon-alpha-ore', unit: 'ore' }], war: true,
     },
   };
 
@@ -2869,18 +3060,18 @@
     autonomy: { label: 'autonomy', options: ['advise', 'auto'], hint: 'advise proposes; auto signs' },
     mode: { label: 'response mode', options: ['harden', 'counter', 'decapitate'] },
     posture: { label: 'posture', options: ['cautious', 'opportunist', 'aggressive'], hint: 'rewrites every gate in this card' },
-    interval_secs: { label: 'scan every (s)', min: 5 },
+    interval_secs: { label: 'scan every', min: 5, unit: 's' },
     difficulty_threshold: { label: 'harvest at difficulty ≤', min: 1, max: 64 },
     complete_difficulty: { label: 'complete at difficulty ≤', min: 1, max: 64 },
-    keep_grams: { label: 'Alpha reserve (g)', min: 0 },
-    min_send_alpha: { label: 'sweep once a player holds (Alpha)', min: 0, step: 1,
+    keep_grams: { label: 'Alpha reserve', min: 0, unit: 'g' },
+    min_send_alpha: { label: 'sweep once a player holds', min: 0, step: 1, unit: 'g',
       hint: 'measured AFTER the reserve below is set aside' },
-    keep_reserve_alpha: { label: 'leave behind (Alpha)', min: 0, step: 1 },
+    keep_reserve_alpha: { label: 'leave behind', min: 0, step: 1, unit: 'g' },
     min_charge: { label: 'only if charge is at least', min: 0,
       hint: 'sending resets charge to 0, so a low bar steals charge from mining' },
     max_sends_per_scan: { label: 'max players per scan', min: 1,
       hint: 'the cap that stops this becoming the burst it replaces' },
-    min_ore: { label: 'min ore (the whole prize)', min: 0 },
+    min_ore: { label: 'min ore (the whole prize)', min: 0, unit: 'g' },
     min_score: { label: 'min score (0-100)', min: 0, max: 100 },
     max_raid_minutes: { label: 'max raid proof (min)', min: 1 },
     max_defenders: { label: 'max defenders on their CMD', min: 0 },
@@ -2959,9 +3150,8 @@
   // opts (all optional):
   //   filter(key)  — render only the keys it accepts, so one config can be
   //                  split across several cards without forking the editor
-  //   chrome:false — drop the loop blurb / cross-page pointer (already implied
-  //                  by the page you're on)
-  //   note         — a line of explanation appended under the fields
+  //   chrome:false — drop the loop summary / cross-page pointer (already
+  //                  implied by the page you're on)
   //   after()      — what to re-render once a write lands (defaults to Config)
   function loopEditor(which, cfg, opts) {
     opts = opts || {};
@@ -2979,7 +3169,7 @@
     }
 
     if (opts.chrome !== false) {
-      if (meta.blurb) host.appendChild(H.el('div', 'ops-muted', meta.blurb));
+      if (meta.short) host.appendChild(H.el('div', 'ops-muted', meta.short));
       if (meta.war) {
         host.appendChild(H.alertLine(
           'Grudges, the never-attack list and the live target board live on the War tab.', 'icon-raid'));
@@ -3004,6 +3194,15 @@
       } else if (typeof v === 'number') {
         ctl = H.stepper(v, { min: fm.min, max: fm.max, step: fm.step, width: '3.5em' },
           function (nv) { draft[k] = nv; commit(); });
+        // The unit rides beside the control instead of inside the label text,
+        // so a column of steppers reads "300 s / 20 s / 30" rather than making
+        // every label carry a parenthetical.
+        if (fm.unit) {
+          var pair = H.el('span', 'stepper-unit-pair');
+          pair.appendChild(ctl);
+          pair.appendChild(H.el('span', 'stepper-unit', fm.unit));
+          ctl = pair;
+        }
       } else if (Array.isArray(v)) {
         ctl = H.textBox(v.join(', '), fm.hint, function (nv) {
           var parts = nv.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
@@ -3023,7 +3222,6 @@
       }
       host.appendChild(H.field(label, ctl, typeof v === 'boolean' ? fm.hint : null));
     });
-    if (opts.note) host.appendChild(H.el('div', 'ops-muted', opts.note));
     return host;
   }
 
@@ -3038,8 +3236,7 @@
     var dbody = H.el('div');
     dbody.appendChild(H.row('Posture / Autonomy', (doc.posture || '?') + ' / ' + (doc.autonomy || '?')));
     if (doc.pinned_target) dbody.appendChild(H.row('Pinned target', doc.pinned_target));
-    dbody.appendChild(H.el('div', 'ops-muted',
-      'A preset configures a coherent bundle of loops and policies in one move. Later edits to any single knob stick.'));
+
     var pr = H.el('div', 'cfg-actions');
     (d.presets || []).forEach(function (p) {
       var b = massBtn('preset-' + p, 'icon-key', p, 'sui-mod-secondary');
@@ -3062,8 +3259,15 @@
       // The checkbox already says on/off, so the tiles carry only what it
       // can't: how the loop is configured. Each is captioned rather than
       // relying on an icon to imply what a bare number means.
+      // A settings value that names a QUANTITY is shown in that quantity's
+      // own units — "reserve 5" and "reserve 5g" are not the same claim, and
+      // the icon beside it was doing all the work.
       var chips = (meta.chips || []).map(function (c) {
-        return statTile(c.label, String(cfg[c.key]), c.icon || null);
+        var v = cfg[c.key];
+        var text = c.unit === 'alpha' ? alpha(Number(v) * 1e6)
+          : c.unit === 'ore' ? ore(Number(v))
+          : String(v);
+        return statTile(c.label, text, c.icon || null);
       });
       chips.push(statTile('every', fmtCadence(cfg.interval_secs)));
       if (cfg.autonomy) {
@@ -3077,15 +3281,15 @@
           cfgSet('loop', { loop: name, config: next });
         }),
         title: titleWithIcon(meta.icon, meta.label),
-        subtitle: meta.short || meta.blurb,
+        subtitle: meta.short,
         chips: chips,
         action: H.el('i', 'icon-chevron-right row-chevron'),
         onClick: function () { H.detailModal(meta.label, loopEditor(name, cfg)); },
       }));
     });
     lbody.appendChild(table);
-    lbody.appendChild(H.el('div', 'ops-muted',
-      'Every loop is off until you switch it on. Select a row to open its full settings.'));
+    // The switch leads each row and every row carries a chevron, so "toggle
+    // here, click through for the rest" needs no sentence.
     body.appendChild(H.card('AUTO-LOOPS', lbody));
   }
 
@@ -3112,9 +3316,7 @@
       }));
     });
     pbody.appendChild(ptable);
-    pbody.appendChild(H.el('div', 'ops-muted',
-      'Policies are single rules the engine evaluates each sync. Loops do the repeated work; policies react to one event.'));
-    body.appendChild(H.card('POLICIES', pbody));
+    body.appendChild(H.card('POLICIES · one rule each, evaluated per sync', pbody));
   }
 
   function sectionEngine(d, body) {
@@ -3142,22 +3344,43 @@
     wbody.appendChild(H.field('serve this dashboard as a web page',
       H.checkbox(wb.enabled, null, function (on) { cfgSet('web_board', { enabled: on }); })));
     if (wb.enabled && wb.url) {
-      var urow = H.el('div', 'cfg-row');
-      var ulink = H.el('a', 'ops-refresh-btn cfg-url', wb.url);
-      ulink.href = 'javascript:void(0)';
-      ulink.title = 'Copy URL — anyone holding it has FULL operator control';
-      ulink.addEventListener('click', function () {
-        try { navigator.clipboard.writeText(wb.url); } catch (e) {}
-        ulink.textContent = 'Copied!';
-        setTimeout(function () { ulink.textContent = wb.url; }, 1000);
+      // The URL carries a bearer token that is FULL operator control. That used
+      // to be said in a sentence under it while the secret itself sat on screen
+      // in plain text — the wrong way round. Mask it like the credential it is:
+      // masked-by-default says "password" faster and more durably than prose,
+      // and Copy never requires revealing it at all.
+      var masked = String(wb.url).replace(/(token=)[^&]+/, '$1' + '•'.repeat(24));
+      var shown = false;
+      var urow = H.el('div', 'cfg-row secret-row');
+      var val = H.el('code', 'cfg-url secret-val', masked);
+      urow.appendChild(val);
+      var acts = H.el('span', 'secret-acts');
+      var eye = H.el('a', 'ops-refresh-btn'); eye.href = 'javascript:void(0)';
+      eye.title = 'Reveal the token';
+      eye.appendChild(H.el('i', 'icon-detected'));
+      eye.addEventListener('click', function () {
+        shown = !shown;
+        val.textContent = shown ? wb.url : masked;
+        eye.title = shown ? 'Hide the token' : 'Reveal the token';
       });
-      urow.appendChild(ulink);
+      var copy = H.el('a', 'ops-refresh-btn'); copy.href = 'javascript:void(0)';
+      copy.title = 'Copy the full URL';
+      copy.appendChild(H.el('i', 'icon-transfers'));
+      copy.addEventListener('click', function () {
+        try { navigator.clipboard.writeText(wb.url); } catch (e) {}
+        var was = copy.title; copy.title = 'Copied';
+        copy.classList.add('is-busy');
+        setTimeout(function () { copy.classList.remove('is-busy'); copy.title = was; }, 900);
+      });
+      acts.appendChild(eye); acts.appendChild(copy);
+      urow.appendChild(acts);
       wbody.appendChild(urow);
-      wbody.appendChild(H.el('div', 'ops-muted',
-        'Token grants full control — treat like a password. Server binds 127.0.0.1; remote players connect through your tunnel (SSH/Tailscale).'));
-    } else {
-      wbody.appendChild(H.el('div', 'ops-muted',
-        'Off by default. When enabled, this exact dashboard is served at /board on the MCP port, authenticated by the bearer token.'));
+      // Where it is reachable from is a READING, not advice.
+      var bind = H.el('div', 'hstrip');
+      bind.appendChild(statTile('bound to', wb.bind || '127.0.0.1', null, 'muted'));
+      if (wb.port) bind.appendChild(statTile('port', String(wb.port), null, 'muted'));
+      bind.appendChild(statTile('token', 'full operator control', null, 'bad'));
+      wbody.appendChild(bind);
     }
     body.appendChild(H.card('WEB DASHBOARD', wbody));
 

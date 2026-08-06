@@ -1172,8 +1172,13 @@ pub async fn mcp_config_bundle() -> Result<Value, String> {
         "hash": crate::mcp::tools::hasher::hash_config_json(),
         "doctrine": { "posture": posture, "pinned_target": pinned, "autonomy": autonomy },
         "presets": crate::mcp::tools::doctrine::PRESETS,
+        // `bind` and `port` are readings the Access card shows as tiles — the
+        // console used to explain the loopback binding in a sentence instead of
+        // simply displaying the address it is bound to.
         "web_board": {
             "enabled": crate::mcp::web_board::is_enabled(),
+            "bind": "127.0.0.1",
+            "port": crate::mcp::config::McpConfig::load().port,
             "url": if crate::mcp::web_board::is_enabled() {
                 json!(crate::mcp::web_board::board_url())
             } else { json!(null) },
