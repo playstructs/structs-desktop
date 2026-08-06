@@ -374,8 +374,11 @@ fn build_sync(
             out.push_str("Struct Types:\n");
             let mut types: Vec<_> = gs.struct_types.values().collect();
             types.sort_by(|a, b| a.name.cmp(&b.name));
+            // One unit for the whole column — see `format::power_column`.
+            let draws: Vec<f64> = types.iter().filter_map(|t| t.passive_draw).collect();
+            let fmt_draw = crate::mcp::tools::format::power_column(&draws);
             for t in &types {
-                let draw = t.passive_draw.map(|d| format_power(d)).unwrap_or_default();
+                let draw = t.passive_draw.map(&fmt_draw).unwrap_or_default();
                 out.push_str(&format!(
                     "  {:<24} build:{:<6} mine:{:<6} refine:{:<6} draw:{}\n",
                     t.name, t.build_difficulty, t.ore_mining_difficulty, t.ore_refining_difficulty, draw

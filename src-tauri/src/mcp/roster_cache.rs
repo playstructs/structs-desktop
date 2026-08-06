@@ -234,10 +234,17 @@ async fn harvest_enrich(
 }
 
 fn role_str(role: Option<VPlayerRole>, index: Option<u32>) -> &'static str {
+    // Delegate to the enum's own spelling. This used to match Productive
+    // explicitly and catch-all everything else to "bait" — written before
+    // Raider existed, so every raider was reported to the Armada roster as
+    // bait: badged BAIT, invisible to the `raider` role filter, and miscounted
+    // in the Squads appearance groups. A catch-all over an open enum silently
+    // absorbs each new variant; `as_str` cannot.
     match (index, role) {
         (None, _) => "primary",
-        (_, Some(VPlayerRole::Productive)) => "productive",
-        _ => "bait",
+        (_, Some(r)) => r.as_str(),
+        // A vplayer with no role recorded takes the enum's own default.
+        (_, None) => VPlayerRole::default().as_str(),
     }
 }
 
@@ -503,5 +510,7 @@ mod tests {
         assert_eq!(role_str(Some(VPlayerRole::Productive), Some(3)), "productive");
         assert_eq!(role_str(Some(VPlayerRole::Bait), Some(3)), "bait");
         assert_eq!(role_str(None, Some(3)), "bait");
+        // The variant a catch-all used to swallow.
+        assert_eq!(role_str(Some(VPlayerRole::Raider), Some(3)), "raider");
     }
 }

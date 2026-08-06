@@ -316,8 +316,15 @@
       // Title: name + role badge (the avatar frame already signals role, the
       // badge names it in words).
       var title = H.el('span', r.err ? 'err' : null, r.name + ' ');
-      title.appendChild(H.badge(r.role === 'productive' ? 'PROD' : r.role === 'primary' ? 'PRIME' : 'BAIT',
-        r.role === 'productive' ? 'solid' : r.role === 'primary' ? 'warning' : 'default'));
+      // Every role gets its own badge. `raider` used to fall through to BAIT
+      // here as well as in the backend's role_str, so a player you had just
+      // assigned to the war machine still read as bait in the roster.
+      var ROLE_BADGE = {
+        primary: ['PRIME', 'warning'], productive: ['PROD', 'solid'],
+        raider: ['RAID', 'destructive'], bait: ['BAIT', 'default'],
+      };
+      var rb = ROLE_BADGE[r.role] || [String(r.role || '?').toUpperCase(), 'default'];
+      title.appendChild(H.badge(rb[0], rb[1]));
       // Subtitle: PID (the native roster's identity line). Freshness is shown
       // only when a row needs attention, so the common case stays clean; the
       // rest (index, planet, last action) lives in the click-through detail.
@@ -860,9 +867,14 @@
     var g = d.guild;
     var gbody = H.el('div');
     gbody.appendChild(H.row('Reactor fuel', kw(g.reactor_fuel_mw) + '  (' + Math.round(g.reactor_commission * 100) + '% commission)', 'sui-icon-energy'));
-    gbody.appendChild(H.row('Substation capacity', kw(g.sub_capacity_mw) + ' · ' + g.sub_connection_count + ' connections'));
+    // Capacity and load are read against each other, so they share a unit —
+    // "15.52MW capacity" beside "0mW load" defeats the only comparison this
+    // card exists for. Per-connection is a different magnitude by nature and
+    // keeps its own scale.
+    var sub = H.scaleSet([g.sub_capacity_mw, g.sub_load_mw], 'power');
+    gbody.appendChild(H.row('Substation capacity', sub.fmt(g.sub_capacity_mw) + ' · ' + g.sub_connection_count + ' connections'));
     gbody.appendChild(H.row('Per-connection', kw(g.sub_connection_capacity_mw) + '  (→ ' + kw(g.share_if_one_more_mw) + ' with 1 more)'));
-    gbody.appendChild(H.row('Substation load', kw(g.sub_load_mw)));
+    gbody.appendChild(H.row('Substation load', sub.fmt(g.sub_load_mw)));
     gbody.appendChild(H.row('Growth headroom', '~' + g.supportable_more + ' more players',
       g.supportable_more > 0 ? 'icon-success' : 'icon-alert'));
     body.appendChild(H.card('GUILD POWER', gbody));

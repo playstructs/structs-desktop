@@ -391,6 +391,10 @@ async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
         // "15515.70 kW" — five digits where the ladder gives two. Same
         // formatter as every other power figure on the board.
         let m = |w: f64| crate::mcp::tools::format::format_power(w);
+        // Capacity and load are read AGAINST each other, so they share a unit:
+        // per-value laddering printed "15.52MW capacity" beside "0mW load",
+        // which is the one comparison this card exists to support.
+        let pair = crate::mcp::tools::format::power_column(&[gp.sub_capacity, gp.sub_load]);
         card(
             "GUILD POWER",
             format!(
@@ -400,9 +404,9 @@ async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
                     "Reactor fuel",
                     format!("{} &nbsp;({}% commission)", m(gp.reactor_fuel), (gp.reactor_commission * 100.0) as i64)
                 ),
-                irow("", "Substation capacity", format!("{} &nbsp;· {} connections", m(gp.sub_capacity), gp.sub_connection_count)),
+                irow("", "Substation capacity", format!("{} &nbsp;· {} connections", pair(gp.sub_capacity), gp.sub_connection_count)),
                 irow("", "Per-connection", format!("{} &nbsp;(&rarr; {} with 1 more)", m(gp.sub_connection_capacity), m(gp.share_if_one_more))),
-                irow("", "Substation load", m(gp.sub_load)),
+                irow("", "Substation load", pair(gp.sub_load)),
                 irow(
                     if gp.supportable_more > 0 { "icon-success" } else { "icon-alert" },
                     "Growth headroom",

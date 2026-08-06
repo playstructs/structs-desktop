@@ -173,6 +173,37 @@ pub fn format_power(milliwatts: f64) -> String {
     )
 }
 
+/// Format a SET of power figures on one shared unit — the unit the largest of
+/// them would pick on its own.
+///
+/// The per-value ladder is right for a single reading (it is what the server
+/// and the HUD do), and wrong for a COLUMN meant to be compared: the struct-type
+/// table rendered as `50mW / 0.11W / 0.14W / 0.5W / 0.1KW`, five units and three
+/// leading zeros down one column of the same quantity. Returns a closure that
+/// formats every member against the shared step.
+pub fn power_column(values: &[f64]) -> impl Fn(f64) -> String {
+    const STEPS: [(usize, f64, &str); 5] = [
+        (16, 1e18, "TW"), (10, 1e9, "MW"), (6, 1e6, "KW"), (3, 1e3, "W"), (0, 1.0, "mW"),
+    ];
+    let max = values.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let len = format!("{}", max.trunc() as i128).len();
+    let step = STEPS
+        .iter()
+        .find(|(min_digits, _, _)| len >= *min_digits)
+        .copied()
+        .unwrap_or(STEPS[STEPS.len() - 1]);
+    move |raw: f64| {
+        let v = raw / step.1;
+        let mut txt = format!("{:.2}", v);
+        if txt.ends_with(".00") {
+            txt.truncate(txt.len() - 3);
+        } else if txt.ends_with('0') {
+            txt.truncate(txt.len() - 1);
+        }
+        format!("{}{}", txt, step.2)
+    }
+}
+
 /// Format duration in milliseconds to human-readable string
 pub fn format_duration(ms: f64) -> String {
     let seconds = ms / 1000.0;
@@ -238,6 +269,24 @@ mod tests {
         assert_eq!(format_ore(999.0), "999g");
         assert_eq!(format_ore(1000.0), "1Kg");
         assert_eq!(format_ore(1e12), "1Tg");
+    }
+
+    /// A comparison column shares the LARGEST member's unit, so the figures can
+    /// be read against each other instead of each picking its own rung.
+    #[test]
+    fn power_column_shares_one_unit() {
+        // The struct-type draw column: 50 mW … 100 W. Per-value laddering gave
+        // "50mW / 0.11W / 0.14W / 0.1KW"; one shared unit gives one column.
+        let f = power_column(&[50_000.0, 110_000.0, 135_000.0, 100_000_000.0]);
+        assert_eq!(f(50_000.0), "0.05KW");
+        assert_eq!(f(135_000.0), "0.14KW");
+        assert_eq!(f(100_000_000.0), "100KW");
+        // Capacity vs load: a zero load must not drop to mW beside an MW cap.
+        let g = power_column(&[15_515_700_000.0, 0.0]);
+        assert_eq!(g(15_515_700_000.0), "15.52MW");
+        assert_eq!(g(0.0), "0MW");
+        // An empty set must not panic.
+        assert_eq!(power_column(&[])(0.0), "0mW");
     }
 
     #[test]
