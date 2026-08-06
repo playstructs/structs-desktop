@@ -14,6 +14,84 @@ use std::collections::HashMap;
 use crate::mcp::cosmos_client::CosmosClient;
 use crate::mcp::tools::intel::{plan_strike, StrikeRow};
 
+/// How many of the planned shots to show in a dry run before rolling the rest
+/// up. Enough to see the shape of the barrage, short enough to read.
+const SHOT_PREVIEW: usize = 12;
+
+/// Damage headroom over the target's HP. Shots miss (per-weapon success rate),
+/// get evaded, jammed or blocked, so "exactly lethal on paper" is not lethal in
+/// practice — but 300x is not insurance, it is waste.
+const OVERKILL: f64 = 2.0;
+
+/// The smallest prefix of `shots` (already sorted strongest-first) that is
+/// worth firing at a target with `tgt_hp` health.
+///
+/// Accumulates expected damage until it covers `OVERKILL x tgt_hp`, with a
+/// floor of 3 so a single unlucky miss cannot waste the whole sortie. Returns
+/// at most `shots.len()`.
+fn shots_to_kill(shots: &[&StrikeRow], tgt_hp: f64) -> usize {
+    const MIN_SHOTS: usize = 3;
+    if shots.is_empty() {
+        return 0;
+    }
+    let want = (tgt_hp.max(0.0)) * OVERKILL;
+    let mut acc = 0.0;
+    for (i, s) in shots.iter().enumerate() {
+        acc += s.expected_dmg;
+        if acc >= want && i + 1 >= MIN_SHOTS {
+            return i + 1;
+        }
+    }
+    shots.len()
+}
+
+#[cfg(test)]
+mod proportionality_tests {
+    use super::*;
+
+    // Built field-by-field rather than via `..Default::default()`: StrikeRow is
+    // a production type and does not derive Default, and adding one just to
+    // shorten a test invites a silently-wrong zero somewhere real.
+    fn row(dmg: f64) -> StrikeRow {
+        StrikeRow {
+            player: "p".into(),
+            player_id: None,
+            hd_index: None,
+            struct_id: "5-1".into(),
+            weapon: "primary".into(),
+            expected_dmg: dmg,
+            reachable: true,
+            att_ambit_bit: 4,
+            counter_exposure: 0,
+            score: dmg,
+            control: crate::mcp::combat::WeaponControl::Unguided,
+        }
+    }
+
+    #[test]
+    fn a_six_hp_target_does_not_summon_the_whole_roster() {
+        let rows: Vec<StrikeRow> = (0..1820).map(|_| row(2.0)).collect();
+        let refs: Vec<&StrikeRow> = rows.iter().collect();
+        // 6 HP x2 headroom = 12 damage = 6 shots at 2.0, not 1,820.
+        assert_eq!(shots_to_kill(&refs, 6.0), 6);
+    }
+
+    #[test]
+    fn a_floor_of_three_survives_a_miss() {
+        let rows = vec![row(50.0), row(50.0), row(50.0), row(50.0)];
+        let refs: Vec<&StrikeRow> = rows.iter().collect();
+        assert_eq!(shots_to_kill(&refs, 1.0), 3);
+    }
+
+    #[test]
+    fn everything_fires_when_everything_is_needed() {
+        let rows = vec![row(1.0), row(1.0), row(1.0)];
+        let refs: Vec<&StrikeRow> = rows.iter().collect();
+        assert_eq!(shots_to_kill(&refs, 100.0), 3);
+        assert_eq!(shots_to_kill(&[], 6.0), 0);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct StrikeParams {
     /// Enemy struct id to focus-fire (e.g. "5-2288").
@@ -152,9 +230,23 @@ pub async fn execute(
             .partial_cmp(&a.expected_dmg)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    if let Some(m) = params.max {
-        shots.truncate(m.max(1));
+    // ── Fire only as many guns as the target is worth ──────────────────────
+    //
+    // The default used to be EVERY reachable struct, one shot each. On a
+    // 1,820-player roster that planned 1,820 transactions and ~3,640 damage to
+    // kill a 6 HP Ore Bunker — a 300x overkill that resets 1,820 workers'
+    // charge to zero, stalling the whole economy for a full cycle to do six
+    // damage. Proportionality has to be the default; `max` still overrides in
+    // either direction for an operator who genuinely wants everything.
+    let planned_all = shots.len();
+    match params.max {
+        Some(m) => shots.truncate(m.max(1)),
+        None => {
+            let want = shots_to_kill(&shots, plan.tgt_hp);
+            shots.truncate(want);
+        }
     }
+    let held_back = planned_all - shots.len();
 
     let projected: f64 = shots.iter().map(|s| s.expected_dmg).sum();
 
@@ -165,11 +257,24 @@ pub async fn execute(
             "structs_strike [{}] PLAN → fire {} (HP {:.0}) — {} attacker(s), one best shot each:\n{}",
             phase, plan.target_label, plan.tgt_hp, shots.len(), note_line
         );
-        for s in &shots {
+        // A plan you cannot read is not a plan. Listing every shot produced a
+        // 79,000-character answer that overflowed the tool's own token budget,
+        // so the one output whose entire job is "check this before you fire"
+        // was the one you could not see.
+        for s in shots.iter().take(SHOT_PREVIEW) {
             out.push_str(&format!("  {} · {} [{}] → ~{:.1} dmg\n", s.player, s.struct_id, s.weapon, s.expected_dmg));
         }
+        if shots.len() > SHOT_PREVIEW {
+            out.push_str(&format!("  … and {} more like these\n", shots.len() - SHOT_PREVIEW));
+        }
+        if held_back > 0 {
+            out.push_str(&format!(
+                "  ({} further reachable struct(s) held back — this is enough to kill. `max` overrides.)\n",
+                held_back
+            ));
+        }
         out.push_str(&format!(
-            "Projected total ~{:.1} dmg vs {:.0} HP{}. Re-run without dry_run to fire.\n",
+            "Projected total ~{:.1} dmg vs {:.0} HP{}. Each shot resets that player's charge. Re-run without dry_run to fire.\n",
             projected,
             plan.tgt_hp,
             if projected >= plan.tgt_hp { " — KILL" } else { "" }
