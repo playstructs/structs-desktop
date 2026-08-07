@@ -1079,12 +1079,21 @@ async fn supervise(
         // present or the defender isn't vulnerable — the chain collapses both
         // into one value, so a zero after we've arrived means shields are back. ──
         if abort.is_none() {
-            let clock = client
+            // The shield comes back with the clock because the raid proof's
+            // difficulty decays over `planetaryShield` blocks — see
+            // `start_raid_proof`, which needs it as the decay RANGE.
+            let (clock, shield) = client
                 .query_entity("planet", &ex.target_planet)
                 .await
                 .ok()
-                .map(|e| crate::mcp::loop_util::read_u64_field(e.get("planetAttributes"), "blockStartRaid"))
-                .unwrap_or(0);
+                .map(|e| {
+                    let pa = e.get("planetAttributes");
+                    (
+                        crate::mcp::loop_util::read_u64_field(pa, "blockStartRaid"),
+                        crate::mcp::loop_util::read_u64_field(pa, "planetaryShield"),
+                    )
+                })
+                .unwrap_or((0, 0));
             if clock == 0 {
                 // Siege: the clock stays unset while the defender's Command Ship
                 // is up, so with `allow_siege` we spend the trip trying to take
@@ -1112,8 +1121,24 @@ async fn supervise(
                 }
             } else {
                 ex.ongoing_since_block = None;
+                // A proof that vanished without seizing the ore must be re-issued
+                // — see `proof_running`. The clock is still armed, so there is
+                // still a raid to win.
+                if ex.hashing && !proof_running(app, &ex.fleet_id) {
+                    ex.hashing = false;
+                    crate::mcp::telemetry::tlog(
+                        "auto_raid",
+                        crate::mcp::telemetry::Sev::Warn,
+                        format!(
+                            "{}: raid proof ended without seizing {} — re-issuing",
+                            ex.raider_player, ex.target_planet
+                        ),
+                    );
+                }
                 if !ex.hashing {
-                    match start_raid_proof(app, &ex, clock, cfg.raid_difficulty).await {
+                    let target =
+                        raid_difficulty_target(client, &ex.raider_player, &ex.fleet_id, shield).await;
+                    match start_raid_proof(app, &ex, clock, target).await {
                         Ok(()) => {
                             ex.hashing = true;
                             ex.note = "raid proof running".into();
@@ -1269,11 +1294,78 @@ async fn siege_round(
     }
 }
 
+/// Is a raid proof genuinely still running for this expedition?
+///
+/// `Expedition::hashing` is set optimistically the moment the task starts and
+/// was never checked again, so a proof that died — rejected by the chain,
+/// cancelled by the pool, dropped on a tuner reset — left the flag stuck `true`
+/// while `supervise`'s `if !ex.hashing` guard refused to re-issue it. The raid
+/// then sat in `shieldsVulnerable` until the wall-clock abort, doing nothing.
+/// Reconcile against the registry rather than trusting our own bookkeeping.
+///
+/// `start_hash_task_core` inserts into `registry.tasks` synchronously before it
+/// returns `Ok`, so there is no window where a live task reads as missing.
+fn proof_running(app: &tauri::AppHandle, fleet_id: &str) -> bool {
+    use crate::hasher::types::TaskRegistry;
+    use std::sync::Arc;
+    use tauri::Manager;
+    app.try_state::<Arc<TaskRegistry>>()
+        .map(|r| r.tasks.contains_key(fleet_id))
+        .unwrap_or(false)
+}
+
+/// The raid proof's `difficulty_target`, straight from the chain.
+///
+/// This is the DECAY RANGE, not a difficulty: the required difficulty is
+/// `64 − floor(log10(age)/log10(range) × 63)`, the same slot `MINE_TARGET` /
+/// `REFINE_TARGET` (14_000 / 28_000) fill. The chain publishes the raid's value
+/// on a `work` record, which is where the game's own client reads it
+/// (`TaskStateFactory.initTaskFromWork`) — so read it rather than derive it.
+///
+/// It matters that this is read and not computed from the live planet: the
+/// value is frozen when the raid arms, while `planetaryShield` keeps moving.
+/// The shield is only a fallback for when the feed is unavailable.
+async fn raid_difficulty_target(
+    client: &CosmosClient,
+    raider_player: &str,
+    fleet_id: &str,
+    fallback_shield: u64,
+) -> u64 {
+    let rows = client.guild.work_by_player(raider_player).await.ok();
+    let found = rows.as_ref().and_then(|v| v.as_array()).and_then(|arr| {
+        arr.iter()
+            .find(|w| {
+                w.get("category").and_then(|x| x.as_str()) == Some("RAID")
+                    && w.get("object_id").and_then(|x| x.as_str()) == Some(fleet_id)
+            })
+            .and_then(|w| crate::mcp::loop_util::parse_f64(w.get("difficulty_target")).into())
+    });
+    let target = found.filter(|v| *v >= 2.0).map(|v| v as u64).unwrap_or(fallback_shield);
+    // log10(1) = 0 would divide by zero in the decay formula.
+    target.max(2)
+}
+
+/// Start the proof-of-work that completes a raid.
+///
+/// `difficulty_target` is a decay RANGE — see [`raid_difficulty_target`]. This
+/// used to pass `cfg.raid_difficulty` (default **4**) into that slot, conflating
+/// a difficulty level with a range. With range 4 the app believes the
+/// requirement has decayed to 1 after four blocks — about twenty seconds — so it
+/// solved a trivial proof and submitted it immediately. The chain, whose `work`
+/// record said 238, still wanted difficulty ~48 and rejected every one:
+///
+/// ```text
+/// work failure for input (9-2136@2-6607RAID2007423NONCE6452945563)
+/// ```
+///
+/// Observed live on planet 2-6607: two proofs submitted seconds after the clock
+/// armed, both rejected, and the raid then sat in `shieldsVulnerable`
+/// indefinitely because `hashing` stayed `true`.
 async fn start_raid_proof(
     app: &tauri::AppHandle,
     ex: &Expedition,
     block_start_raid: u64,
-    difficulty: u64,
+    difficulty_target: u64,
 ) -> Result<(), String> {
     use crate::hasher::types::{TaskParams, TaskRegistry};
     use std::sync::Arc;
@@ -1282,7 +1374,12 @@ async fn start_raid_proof(
         .try_state::<Arc<TaskRegistry>>()
         .map(|r| r.inner().clone())
         .ok_or_else(|| "task registry unavailable".to_string())?;
-    let params = TaskParams::for_raid(&ex.fleet_id, &ex.target_planet, block_start_raid, difficulty);
+    let params = TaskParams::for_raid(
+        &ex.fleet_id,
+        &ex.target_planet,
+        block_start_raid,
+        difficulty_target,
+    );
     crate::hasher::start_hash_task_core(params, app.clone(), &registry)?;
     crate::hasher::register_vplayer_hash(ex.fleet_id.clone(), ex.raider_index, "RAID".to_string());
     Ok(())
@@ -1361,6 +1458,30 @@ mod tests {
         assert!(raid_ready_blocks(125, 8) < raid_ready_blocks(125, 1));
         // A bigger shield is a longer wait at the same difficulty.
         assert!(raid_ready_blocks(325, 4) > raid_ready_blocks(125, 4));
+    }
+
+    /// The raid proof's `difficulty_target` is a DECAY RANGE, not a difficulty.
+    /// Passing `cfg.raid_difficulty` (4) into that slot made the app think the
+    /// requirement had decayed to 1 after four blocks, so it submitted a trivial
+    /// proof seconds after the clock armed and the chain rejected every one with
+    /// "work failure". Pin the two apart.
+    #[test]
+    fn raid_proof_range_is_the_shield_not_the_difficulty() {
+        use crate::hasher::difficulty::calculate_difficulty;
+        const SHIELD: u64 = 238; // planet 2-6607, live
+        const BAD: u64 = 4; // the old value: cfg.raid_difficulty
+
+        // Four blocks in, the shield-ranged requirement is still brutal...
+        let real = calculate_difficulty(4, SHIELD);
+        assert!(real > 40, "chain still wants a hard proof at age 4, got {real}");
+        // ...while the mis-scaled range says "trivial, ship it".
+        assert_eq!(calculate_difficulty(4, BAD), 1);
+
+        // The range must also behave like MINE/REFINE's: bigger range = slower
+        // decay, so the requirement at a given age is strictly harder.
+        assert!(calculate_difficulty(100, SHIELD) > calculate_difficulty(100, BAD));
+        // And it does eventually decay to 1, once age reaches the shield.
+        assert_eq!(calculate_difficulty(SHIELD, SHIELD), 1);
     }
 
     #[test]
