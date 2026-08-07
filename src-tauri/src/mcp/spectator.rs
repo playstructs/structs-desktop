@@ -1366,6 +1366,10 @@ struct Watch {
     /// the poll never replays a fight the window has already animated. Seeded to
     /// `fresh_shot_cursor()` rather than 0 — see there for why.
     shot_cursor: f64,
+    /// Same idea as `shot_cursor`, for the BATTLE LOG. The log shows every
+    /// activity category, not just attacks, so it needs its own high-water mark
+    /// — the shot cursor only ever advances past `struct_attack` rows.
+    log_cursor: f64,
     generation: u64,
     /// Set by the GRASS fan-out when a fleet arrives or departs: the board's
     /// composition changed, so the next poll tick rebuilds the snapshot
@@ -1404,6 +1408,7 @@ pub fn attach(app: &tauri::AppHandle, target: &Target, window_label: &str) -> bo
                     Target::Fleet { .. } => None,
                 },
                 shot_cursor: fresh_shot_cursor(),
+                log_cursor: fresh_shot_cursor(),
                 generation: 0,
                 force_snapshot: false,
             }
@@ -1509,6 +1514,7 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                         if let Some(e) = w.get_mut(&key) {
                             e.planet_id = at.clone();
                             e.shot_cursor = fresh_shot_cursor();
+                            e.log_cursor = fresh_shot_cursor();
                             e.generation += 1;
                         }
                         last_snapshot = 0.0;
@@ -1570,6 +1576,34 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                     let payload = json!({ "generation": generation, "attacks": shots });
                     for label in &windows {
                         emit(&app, label, "raid-attacks", payload.clone());
+                    }
+                }
+
+                // ── Battle log ──────────────────────────────────────────────
+                // The log used to load ONCE — on open, or when a followed fleet
+                // re-targeted — and then never again, so a window left open
+                // showed a frozen log while the map animated live beside it.
+                // Only a reload brought it up to date.
+                //
+                // This page is the same one the shots came from and it carries
+                // every activity category, so live rows cost no extra request.
+                let log_cursor = WATCHES
+                    .lock()
+                    .unwrap()
+                    .get(&key)
+                    .map(|e| e.log_cursor)
+                    .unwrap_or(0.0);
+                let (log_rows, log_high) =
+                    crate::mcp::raid_view::collect_log_rows(&page.items, log_cursor);
+                if !log_rows.is_empty() {
+                    if let Ok(mut w) = WATCHES.lock() {
+                        if let Some(e) = w.get_mut(&key) {
+                            e.log_cursor = log_high;
+                        }
+                    }
+                    let payload = json!({ "generation": generation, "rows": log_rows });
+                    for label in &windows {
+                        emit(&app, label, "raid-log", payload.clone());
                     }
                 }
             }
@@ -1746,6 +1780,7 @@ pub fn debug_state() -> Value {
             "planet_id": v.planet_id,
             "windows": v.windows,
             "shot_cursor": v.shot_cursor,
+            "log_cursor": v.log_cursor,
         })).collect::<Vec<_>>(),
     })
 }

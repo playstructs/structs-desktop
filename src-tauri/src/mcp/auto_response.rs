@@ -158,6 +158,23 @@ const SEED_INTERVAL_MS: f64 = 5.0 * 60.0 * 1000.0;
 /// Last time the raid watch was reconciled, ms epoch. 0 = never.
 static LAST_SEED: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 
+/// Planets [`seed_raid_watch`] has already considered, so the periodic re-seed
+/// never re-adopts one the watch has since dropped.
+///
+/// Without this the two halves fight: the seed adopts a non-terminal raid row,
+/// the watch reads the planet, finds no raider still there, and stands down —
+/// then five minutes later the seed adopts the very same row again. Observed
+/// live on 2-7354 as an endless adopt/stand-down pair in the log. The raid feed
+/// keeps stale non-terminal rows (raids that ended without a closing event), so
+/// this is the normal case, not an edge one.
+///
+/// Dropping a planet from the seed's remit costs nothing: a genuinely new raid
+/// there announces itself with events, and the event path raises the alarm
+/// directly. Seeding only exists to recover raids already in flight when the
+/// process started.
+static SEEDED_PLANETS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
 static RAID_WATCH: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -860,13 +877,22 @@ async fn seed_raid_watch(client: &CosmosClient, owned: &crate::mcp::tools::event
             continue;
         }
         let Some(defender) = owned.player_by_planet.get(&r.planet_id).cloned() else { continue };
-        // Already watching it — this is a routine re-seed, not news.
-        let fresh = match RAID_WATCH.lock() {
-            Ok(mut w) => w.insert(r.planet_id.clone(), defender).is_none(),
+        // Considered once already — either it is still watched, or the watch
+        // looked and stood down. Either way the seed has nothing to add.
+        match SEEDED_PLANETS.lock() {
+            Ok(mut seen) => {
+                if !seen.insert(r.planet_id.clone()) {
+                    continue;
+                }
+            }
             Err(_) => continue,
-        };
-        if !fresh {
-            continue;
+        }
+        if RAID_WATCH
+            .lock()
+            .map(|mut w| w.insert(r.planet_id.clone(), defender).is_some())
+            .unwrap_or(true)
+        {
+            continue; // already watched — not news
         }
         adopted += 1;
         crate::mcp::telemetry::tlog(

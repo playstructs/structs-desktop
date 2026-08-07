@@ -2694,6 +2694,46 @@
     });
   }
 
+  /** How many log rows are kept in memory, for both the initial fetch and the
+   * live stream's ceiling. */
+  var LOG_LIMIT = 200;
+
+  /** Newest rows off the GRASS stream, prepended in place.
+   *
+   * The log used to load exactly once — on open, or when a followed fleet
+   * re-targeted — so a window left open showed a frozen log while the map
+   * animated live next to it. Only a reload caught it up.
+   *
+   * Rows arrive oldest-first (see `collect_log_rows`), so unshifting each in
+   * turn leaves the newest on top, which is the order `mcp_raid_log` serves.
+   * Kept even while the panel is collapsed: opening it should show what
+   * happened, not restart from the moment it was opened.
+   */
+  /** Identity of a log row, for the overlap check below. */
+  function logKey(r) {
+    return (r.date || '') + ' ' + (r.time || '') + '|' + (r.category || '') + '|' + (r.detail || '');
+  }
+
+  function applyLog(payload) {
+    if (!state.snapshot) return;
+    if (payload.generation !== state.generation) return;   // stale planet
+    var rows = payload.rows || [];
+    if (!rows.length) return;
+    // The initial fetch reads history up to NOW while the stream cursor starts
+    // 30s back, so the first poll after opening the log re-delivers rows the
+    // fetch already has. Check the newest slice rather than keeping a set: the
+    // overlap is bounded by that backfill window, so it is always near the top.
+    var recent = {};
+    logState.rows.slice(0, 60).forEach(function (r) { recent[logKey(r)] = true; });
+    rows.forEach(function (r) {
+      if (recent[logKey(r)]) return;
+      logState.rows.unshift(r);
+    });
+    // Same ceiling the initial fetch uses, so memory can't creep on a long watch.
+    if (logState.rows.length > LOG_LIMIT) logState.rows.length = LOG_LIMIT;
+    if (logState.open) renderLog();
+  }
+
   function refreshLog() {
     var planetId = state.snapshot && state.snapshot.planet_id;
     // Opened before the first snapshot arrived: remember that we still owe a
@@ -2703,7 +2743,7 @@
     if (logState.loading || !window.__TAURI__) return;
     logState.pending = false;
     logState.loading = true;
-    window.__TAURI__.core.invoke('mcp_raid_log', { planetId: planetId, limit: 200 })
+    window.__TAURI__.core.invoke('mcp_raid_log', { planetId: planetId, limit: LOG_LIMIT })
       .then(function (d) {
         logState.rows = (d && d.rows) || [];
         logState.planetId = planetId;
@@ -3030,6 +3070,7 @@
     T.event.listen(scoped('raid-snapshot'), function (e) { applySnapshot(e.payload || {}); });
     T.event.listen(scoped('raid-delta'), function (e) { applyDelta(e.payload || {}); });
     T.event.listen(scoped('raid-attacks'), function (e) { applyAttacks(e.payload || {}); });
+    T.event.listen(scoped('raid-log'), function (e) { applyLog(e.payload || {}); });
     T.event.listen(scoped('raid-target-moved'), function (e) {
       var p = e.payload || {};
       note('Fleet ' + p.fleet_id + (p.planet_id ? ' arrived at planet ' + p.planet_id : ' left orbit'),

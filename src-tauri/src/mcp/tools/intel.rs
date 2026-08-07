@@ -158,7 +158,16 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
     out.push_str("  • Each shot lands with probability numerator/denominator; total damage = Σ(landed shots × damage).\n");
     out.push_str("  • Counter: a counter-attack fires same-ambit at full value, cross-ambit at half. Defenders counter but take no counter-damage.\n");
     out.push_str("  • Block: a defender must share the target's ambit and the weapon must be blockable.\n");
-    out.push_str("  • A fleet AWAY from its home planet cannot defend planetary structs there.\n\n");
+    out.push_str("  • A fleet AWAY from its home planet cannot defend planetary structs there.\n");
+    // Measured on 2-7354 (2026-08-07), six shots, one cannon: every shot at the
+    // planet-borne Ore Bunker took 1 cannon damage back; every shot at the
+    // fleet-borne Command Ship took 0. The distinction is the TARGET's
+    // locationType, and it makes decapitation materially cheaper than the shot
+    // count suggests — you only pay the cannon while stripping planet blockers.
+    out.push_str("  • Planetary Defense Cannons fire back only when you hit a struct standing ON THE PLANET. \
+A struct on the defender's FLEET (their Command Ship included) draws no cannon fire.\n");
+    out.push_str("  • Each defensive struct brought online RAISES the planetary shield (observed 25→288 over eight structs); \
+destroying one drops it by 50. Shield is the raid proof's decay range, so stripping defences also speeds up the raid.\n\n");
     out.push_str("Weapon matrix\n");
 
     let mut types: Vec<_> = gs.struct_types.values().collect();
@@ -600,6 +609,8 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
     // Planet the target sits on, if any — its interceptor network is a second
     // evasion layer against guided ordnance.
     let mut target_planet: Option<String> = None;
+    // The target's owner never shoots at its own struct — see the `retain` below.
+    let mut target_owner: Option<String> = None;
     let (target_label, tgt_ambit_bit, tgt_hp, defense, target_is_planetary) =
         if let Some(tid) = args.get("target").and_then(|v| v.as_str()) {
             match client.query_entity("struct", tid).await {
@@ -641,6 +652,11 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
                             }),
                         _ => None,
                     };
+                    target_owner = st
+                        .and_then(|s| s.get("owner"))
+                        .and_then(|x| x.as_str())
+                        .filter(|o| !o.is_empty())
+                        .map(String::from);
                     let type_id = st.and_then(|s| s.get("type")).and_then(&num_or_str);
                     let ambit = st
                         .and_then(|s| s.get("operatingAmbit"))
@@ -820,6 +836,16 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
     }
 
     // ── Simulate each attacker's best reaching weapon against the target. ──
+    // A player never attacks its own struct. Co-location alone does not exclude
+    // the TARGET'S OWNER — they are by definition standing at their own planet —
+    // so when the owner is a teammate the planner happily proposed that they
+    // shoot their own blocker. Seen live: a strike on miner10's Command Ship
+    // listed "miner10 · 5-2421" as an attacker against miner10's own Ore Bunker.
+    // Invisible against real enemies, nonsense the moment the target is ours.
+    if let Some(owner) = target_owner.as_deref() {
+        attackers.retain(|(_, pid, ..)| pid.as_deref() != Some(owner));
+    }
+
     let mut rows: Vec<StrikeRow> = Vec::new();
     {
         let gs = GAME_STATE.read().unwrap();

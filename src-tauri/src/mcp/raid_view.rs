@@ -522,6 +522,36 @@ pub async fn mcp_raid_log(planet_id: String, limit: Option<usize>) -> Result<Val
     Ok(json!({ "planet_id": planet_id, "rows": rows }))
 }
 
+/// Activity rows newer than `cursor`, oldest-first, ready for the log to
+/// prepend — plus the new high-water mark.
+///
+/// Mirrors [`crate::mcp::spectator::collect_shots`], but keeps EVERY category
+/// rather than just `struct_attack`: the battle log's whole point is that
+/// shields, arrivals and status flags sit alongside the shooting.
+///
+/// Returned oldest-first so a caller prepending row by row ends up with the
+/// newest on top, matching the order `mcp_raid_log` serves.
+pub fn collect_log_rows(rows: &[Value], cursor: f64) -> (Vec<Value>, f64) {
+    let mut out: Vec<(f64, Value)> = Vec::new();
+    let mut high = cursor;
+    for item in rows {
+        let ts = text(item.get("time"))
+            .as_deref()
+            .and_then(parse_guild_time)
+            .unwrap_or(0.0);
+        // Strictly newer: `>=` would replay the newest row every poll.
+        if ts <= cursor {
+            continue;
+        }
+        if ts > high {
+            high = ts;
+        }
+        out.push((ts, log_row(item)));
+    }
+    out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    (out.into_iter().map(|(_, v)| v).collect(), high)
+}
+
 /// One activity row → `{time, category, detail}` ready to render.
 fn log_row(item: &Value) -> Value {
     let category = item
@@ -1040,6 +1070,36 @@ mod log_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The battle log streams from the same poll the shots do, so it needs the
+    /// same "strictly newer" cursor — a `>=` would replay the newest row every
+    /// tick — and it must keep EVERY category, not just attacks.
+    #[test]
+    fn collect_log_rows_is_incremental_and_keeps_all_categories() {
+        let row = |cat: &str, t: &str| {
+            json!({ "category": cat, "time": t, "detail": "{}" })
+        };
+        let rows = vec![
+            row("struct_attack", "2026-08-07 10:00:03.000000+00"),
+            row("shield_change", "2026-08-07 10:00:02.000000+00"),
+            row("fleet_arrive",  "2026-08-07 10:00:01.000000+00"),
+        ];
+        let (all, high) = collect_log_rows(&rows, 0.0);
+        assert_eq!(all.len(), 3, "every category belongs in the log, not just attacks");
+        // Oldest-first, so a caller unshifting each leaves the newest on top.
+        assert_eq!(all[0]["category"], "fleet_arrive");
+        assert_eq!(all[2]["category"], "struct_attack");
+
+        // Re-polling the same page at the new cursor yields nothing.
+        let (again, high2) = collect_log_rows(&rows, high);
+        assert!(again.is_empty(), "rows at the cursor must not replay");
+        assert_eq!(high2, high);
+
+        // A cursor mid-page returns only what is strictly newer.
+        let mid = parse_guild_time("2026-08-07 10:00:01.000000+00").unwrap();
+        let (fresh, _) = collect_log_rows(&rows, mid);
+        assert_eq!(fresh.len(), 2);
+    }
 
     #[test]
     fn label_is_prefixed_and_reversible_for_real_ids() {

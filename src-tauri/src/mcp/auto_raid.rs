@@ -130,6 +130,13 @@ pub struct AutoRaidConfig {
     pub evaluate_per_scan: usize,
     /// Difficulty the raid proof must decay to before we start hashing.
     pub raid_difficulty: u64,
+    /// Skip targets whose PLANET has this much ore or less left in the crust.
+    ///
+    /// Not the same prize as `min_ore` (the defender's *stored* pile). This one
+    /// is a survival check on the raid itself: an exhausted planet makes its
+    /// owner re-planet, which voids the raid outright. One unit of headroom is
+    /// enough to lose the race, so the default leaves two.
+    pub min_planet_ore: f64,
 
     pub dry_run: bool,
 }
@@ -168,6 +175,7 @@ impl Default for AutoRaidConfig {
             sweep_max_pages: 8,
             evaluate_per_scan: 25,
             raid_difficulty: 4,
+            min_planet_ore: 2.0,
             dry_run: false,
         };
         c.apply_posture(RaidPosture::Opportunist);
@@ -264,6 +272,9 @@ pub struct Candidate {
     pub fleet_id: String,
     /// The prize — a raid takes all of it.
     pub stored_ore: f64,
+    /// Ore left in the target PLANET's crust. A raid dies if the defender
+    /// re-planets, and a planet is exhaustible — see the `gate` that reads this.
+    pub planet_ore_remaining: f64,
     pub planetary_shield: u64,
     /// Minutes until the raid proof decays to `raid_difficulty`.
     pub raid_minutes: f64,
@@ -375,6 +386,24 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
     }
     if c.stored_ore < cfg.min_ore {
         return Some(format!("ore {:.0} < min_ore {:.0}", c.stored_ore, cfg.min_ore));
+    }
+    // A raid is void the moment the defender re-planets, and re-planeting is
+    // routine: a planet is exhaustible, and when its crust runs dry the owner
+    // explores onto a fresh one. That destroys every struct on the old planet
+    // AND ends any raid in progress as `demilitarized` with ZERO ore seized.
+    //
+    // Observed live 2026-08-07 on 2-6607: we killed the defender's Command
+    // Ship, armed the clock, and then its own extractor mined the planet's last
+    // ore. The owner explored, and our raid — clock running, proof in flight —
+    // was voided for nothing. The defender kept all 65 ore.
+    //
+    // So a nearly-dry planet is a trap: the closer it is to exhaustion, the more
+    // likely the prize evaporates before the proof lands.
+    if c.planet_ore_remaining <= cfg.min_planet_ore {
+        return Some(format!(
+            "planet has {:.0} ore left (<= min_planet_ore {:.0}) — defender re-planets and voids the raid",
+            c.planet_ore_remaining, cfg.min_planet_ore
+        ));
     }
     if cfg.require_vulnerable_now && !c.vulnerable {
         // The decisive gate: 0 of 50 non-vulnerable raids in the dataset ever
@@ -735,6 +764,8 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
 
     let planet = client.query_entity("planet", &planet_id).await.ok()?;
     let planetary_shield = crate::mcp::loop_util::read_u64_field(planet.get("planetAttributes"), "planetaryShield");
+    let planet_ore_remaining =
+        crate::mcp::loop_util::parse_f64(planet.get("gridAttributes").and_then(|g| g.get("ore")));
 
     // ── Vulnerability: the chain's IsDefenderCommandStructVulnerable(), which is
     // the single variable that decides whether a raid can complete at all. ──
@@ -799,6 +830,7 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
         planet_id,
         fleet_id,
         stored_ore,
+        planet_ore_remaining,
         planetary_shield,
         raid_minutes: raid_ready_minutes(planetary_shield, get().raid_difficulty),
         vulnerable,
@@ -1406,6 +1438,7 @@ mod tests {
             planet_id: "2-855".into(),
             fleet_id: "9-61".into(),
             stored_ore: 100.0,
+            planet_ore_remaining: 5.0,
             planetary_shield: 125,
             raid_minutes: 12.0,
             vulnerable: true,
@@ -1482,6 +1515,24 @@ mod tests {
         assert!(calculate_difficulty(100, SHIELD) > calculate_difficulty(100, BAD));
         // And it does eventually decay to 1, once age reaches the shield.
         assert_eq!(calculate_difficulty(SHIELD, SHIELD), 1);
+    }
+
+    /// A planet about to run dry is a trap: its owner re-planets when the crust
+    /// empties, which voids the raid as `demilitarized` with zero ore seized.
+    /// Observed live on 2-6607 — clock armed, proof in flight, prize gone.
+    #[test]
+    fn a_nearly_exhausted_planet_is_gated_out() {
+        isolate_lists();
+        let cfg = AutoRaidConfig::default();
+        let mut c = cand();
+        // Plenty of STORED ore — the prize looks great — but the crust is dry.
+        c.stored_ore = 500.0;
+        c.planet_ore_remaining = 1.0;
+        let why = gate(&c, &cfg, 0.0).expect("a dry planet must be gated out");
+        assert!(why.contains("voids the raid"), "unexpected reason: {why}");
+        // A planet with crust left is fine.
+        c.planet_ore_remaining = 5.0;
+        assert_eq!(gate(&c, &cfg, 0.0), None);
     }
 
     #[test]
