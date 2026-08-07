@@ -1024,6 +1024,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               primary_weapon_guaranteed_shots: pickNum(t, 'primary_weapon_guaranteed_shots', 'primaryWeaponGuaranteedShots'),
               primary_weapon_blockable: pickBool(t, 'primary_weapon_blockable', 'primaryWeaponBlockable'),
               primary_weapon_counterable: pickBool(t, 'primary_weapon_counterable', 'primaryWeaponCounterable'),
+              // Struct-level counter immunity (Mobile Artillery's
+              // indirectCombatModule). Overrides the per-weapon flags.
+              attack_counterable: pickBool(t, 'attack_counterable', 'attackCounterable'),
               secondary_weapon: pickStr(t, 'secondary_weapon', 'secondaryWeapon'),
               secondary_weapon_control: pickStr(t, 'secondary_weapon_control', 'secondaryWeaponControl'),
               secondary_weapon_shots: pickNum(t, 'secondary_weapon_shots', 'secondaryWeaponShots'),

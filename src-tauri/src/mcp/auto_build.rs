@@ -48,9 +48,45 @@ const LOADOUT: &[(&str, &str, &str)] = &[
     // the Starfighter, which is cheaper but has nothing that pierces.
     ("fleet", "space", "Battleship"),
     ("fleet", "land", "Tank"),
+    // A Cruiser earns its slot on its SECONDARY, not its primary: it is the only
+    // unguided weapon in the game that reaches AIR. Air is where Pursuit
+    // Fighters live, and a Pursuit Fighter's `signalJamming` evades guided
+    // ordnance two times in three — measured, 5 evades in 9 guided shots. Every
+    // other air-capable weapon we field is guided, so without a Cruiser we
+    // cannot efficiently shoot down the very hull this loadout builds (and that
+    // any competent opponent therefore also builds). Ahead of the Submersible,
+    // which duplicates water/space coverage we already have.
+    ("fleet", "water", "Cruiser"),
     ("fleet", "water", "Submersible"),
     ("fleet", "space", "Starfighter"),
     ("planet", "land", "Ore Bunker"),
+];
+
+/// Offence-first loadout for RAIDERS. Their job is to grind down a defended
+/// Command Ship and survive to do it again, which rewards a different set from
+/// the defensive filler above.
+///
+/// Leads with the two hulls that change the arithmetic of a siege:
+///   * **Mobile Artillery** cannot be countered at all (`attackCounterable:
+///     false` overrides its own weapon flag — measured: it shot a surviving
+///     same-ambit Tank and took nothing back, where a Tank doing the same took
+///     1). Counter damage is what kills raiders: a Command Ship returns 2 and
+///     defender counters STACK on top, so a Tank assault loses a hull every two
+///     or three shots while Mobile Artillery grinds for free.
+///   * **Battleship** pierces armour, doubling damage against the Tank and the
+///     armoured planetary hulls, from a space slot the defender is rarely
+///     contesting.
+///
+/// A Command Ship comes early because a raider without one is grounded — the
+/// chain refuses `MsgFleetMove` with "needs an online command struct".
+const RAIDER_LOADOUT: &[(&str, &str, &str)] = &[
+    ("fleet", "land", "Command Ship"),
+    ("fleet", "land", "Mobile Artillery"),
+    ("fleet", "space", "Battleship"),
+    ("planet", "land", "Ore Refinery"),
+    ("fleet", "water", "Cruiser"),
+    ("fleet", "land", "Tank"),
+    ("fleet", "space", "Starfighter"),
 ];
 
 /// Production-first loadout for PRODUCTIVE players: extractor + refinery (the
@@ -404,6 +440,7 @@ async fn scan(
                 // defensive fill. Bait never gets a refinery — that stays productive-only.
                 let loadout: &[(&str, &str, &str)] = match role {
                     Some(VPlayerRole::Productive) => PRODUCTIVE_LOADOUT,
+                    Some(VPlayerRole::Raider) => RAIDER_LOADOUT,
                     _ => LOADOUT,
                 };
                 // Type names the player already has (to skip 1-per-player duplicates).
@@ -677,6 +714,30 @@ mod tests {
             .filter(|(t, a, _)| *t == "fleet" && *a == "space").map(|(_, _, n)| *n).collect();
         assert_eq!(space.first(), Some(&"Battleship"), "Battleship must lead the fleet space slot");
         assert!(space.contains(&"Starfighter"));
+        // Only unguided weapon reaching AIR, and Pursuit Fighters evade guided
+        // 2-in-3 — without it we cannot answer the hull we ourselves field.
+        assert!(
+            LOADOUT.iter().any(|(_, _, n)| *n == "Cruiser"),
+            "need an unguided air answer to signalJamming"
+        );
+        // Raiders lead with the counter-immune hull, then the armour-piercing
+        // one — counter damage, not HP, is what kills a besieging fleet.
+        let raider_fleet: Vec<&str> = RAIDER_LOADOUT
+            .iter()
+            .filter(|(loc, _, _)| *loc == "fleet")
+            .map(|(_, _, n)| *n)
+            .collect();
+        assert_eq!(raider_fleet.first(), Some(&"Command Ship"), "grounded without one");
+        assert_eq!(
+            raider_fleet.get(1),
+            Some(&"Mobile Artillery"),
+            "the counter-immune siege hull must lead the offensive set"
+        );
+        assert!(
+            raider_fleet.iter().position(|n| *n == "Mobile Artillery")
+                < raider_fleet.iter().position(|n| *n == "Tank"),
+            "Mobile Artillery grinds for free; a Tank pays a counter every shot"
+        );
         assert!(PRODUCTIVE_LOADOUT.iter().any(|(_, _, n)| *n == "Battleship"));
         assert_eq!(PRODUCTIVE_LOADOUT[0].2, "Ore Extractor");
         assert_eq!(PRODUCTIVE_LOADOUT[1].2, "Ore Refinery");

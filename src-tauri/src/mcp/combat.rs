@@ -65,6 +65,10 @@ pub struct WeaponStats {
     pub control: WeaponControl,
     /// Armour-piercing weapons ignore the target's `attack_reduction`.
     pub armour_piercing: bool,
+    /// Charge this weapon costs to fire. Charge regenerates ~1 per block and a
+    /// player may act once per block, so cost sets the RATE OF FIRE: a 3-charge
+    /// hull shoots roughly every 3 blocks, a 5-charge one every 5.
+    pub charge: u64,
 }
 
 impl WeaponStats {
@@ -83,9 +87,13 @@ impl WeaponStats {
                 recoil: t.secondary_weapon_recoil_damage.unwrap_or(0),
                 ambits: t.secondary_weapon_ambits.unwrap_or(0),
                 blockable: t.secondary_weapon_blockable.unwrap_or(false),
-                counterable: t.secondary_weapon_counterable.unwrap_or(false),
+                // Struct-level immunity overrides the weapon flag — see
+                // `StructTypeInfo::attack_counterable`.
+                counterable: t.secondary_weapon_counterable.unwrap_or(false)
+                    && t.attack_counterable.unwrap_or(true),
                 control: WeaponControl::parse(t.secondary_weapon_control.as_deref()),
                 armour_piercing: t.secondary_weapon_armour_piercing.unwrap_or(false),
+                charge: t.secondary_weapon_charge.unwrap_or(0),
             }
         } else {
             Self {
@@ -97,9 +105,11 @@ impl WeaponStats {
                 recoil: t.primary_weapon_recoil_damage.unwrap_or(0),
                 ambits: t.primary_weapon_ambits.unwrap_or(0),
                 blockable: t.primary_weapon_blockable.unwrap_or(false),
-                counterable: t.primary_weapon_counterable.unwrap_or(false),
+                counterable: t.primary_weapon_counterable.unwrap_or(false)
+                    && t.attack_counterable.unwrap_or(true),
                 control: WeaponControl::parse(t.primary_weapon_control.as_deref()),
                 armour_piercing: t.primary_weapon_armour_piercing.unwrap_or(false),
+                charge: t.primary_weapon_charge.unwrap_or(0),
             }
         }
     }
@@ -335,6 +345,7 @@ pub fn shooter_score(
     interceptors: InterceptorNet,
     target_is_planetary: bool,
     counter_exposure: usize,
+    charge: u64,
 ) -> f64 {
     if !sim.reachable {
         return f64::MIN;
@@ -342,7 +353,21 @@ pub fn shooter_score(
     let dmg = sim.expected_damage * interceptors.hit_factor(control, target_is_planetary);
     // Each defender that can reach us costs roughly `counter_estimate` HP.
     let risk = sim.counter_estimate as f64 * counter_exposure as f64 + sim.recoil_to_attacker as f64;
-    dmg - 0.35 * risk
+    let per_shot = dmg - 0.35 * risk;
+    // ── Rate of fire ────────────────────────────────────────────────────────
+    // Every fleet weapon in the game does the same 2 damage in one shot, so
+    // per-shot value barely separates hulls. What separates them is how OFTEN
+    // they can shoot: charge regenerates about 1 per block and a player may act
+    // once per block, so a 3-charge hull fires roughly every 3 blocks and a
+    // 5-charge one every 5. Across a four-minute raid that is ~12 shots against
+    // ~7 — a 1.7× difference in delivered damage.
+    //
+    // Scoring per-shot therefore picked expensive hulls for sustained pressure.
+    // Damage per unit of charge is the honest metric, and it changes the answer:
+    // against an armoured target a Battleship's piercing 2 (2/5 = 0.40) beats a
+    // Tank's 1 (1/3 = 0.33), while against an unarmoured one the Tank's 2 in 3
+    // blocks (0.67) beats it comfortably.
+    per_shot / charge.max(1) as f64
 }
 
 #[cfg(test)]
@@ -362,6 +387,7 @@ mod tests {
             counterable: true,
             control: WeaponControl::Unguided,
             armour_piercing: false,
+            charge: 3,
         }
     }
     fn no_def() -> DefenseProfile {
@@ -407,6 +433,72 @@ mod tests {
         assert_eq!(same.counter_estimate, 8); // same-ambit → full
         let cross = simulate(&w(1, 1, 1, 1, 1), 16, 5.0, &DefenseProfile::basic(0, 8, 4), false);
         assert_eq!(cross.counter_estimate, 2); // cross → 4/2
+    }
+
+    /// Rate of fire decides sustained damage, because every fleet weapon in the
+    /// game does the same 2 per shot. Scoring per-shot made a 5-charge hull look
+    /// equal to a 3-charge one when it delivers barely half as much over a raid.
+    ///
+    /// The interesting case is that this genuinely FLIPS with armour: against an
+    /// armoured target a Battleship's piercing 2 beats a Tank's reduced 1, but
+    /// against an unarmoured one the Tank's faster 2 wins.
+    #[test]
+    fn cheaper_weapons_win_on_sustained_throughput() {
+        let n = InterceptorNet::default();
+        let sim = |dmg: f64| SimResult {
+            reachable: true,
+            target_hp: 6.0,
+            reduction: 0,
+            min_damage: dmg,
+            expected_damage: dmg,
+            max_damage: dmg,
+            kills_min: false,
+            kills_expected: false,
+            recoil_to_attacker: 0,
+            counter_estimate: 0,
+            evade_chance: 0.0,
+        };
+        // Unarmoured target: both land 2, so the 3-charge hull wins outright.
+        let tank = shooter_score(&sim(2.0), WeaponControl::Unguided, n, false, 0, 3);
+        let bship = shooter_score(&sim(2.0), WeaponControl::Unguided, n, false, 0, 5);
+        assert!(tank > bship, "3-charge should out-throughput 5-charge at equal damage");
+
+        // Armoured target: the Tank's 2 is reduced to 1, the Battleship pierces
+        // for the full 2 — and now the expensive hull is the better choice.
+        let tank_vs_armour = shooter_score(&sim(1.0), WeaponControl::Unguided, n, false, 0, 3);
+        let bship_pierce = shooter_score(&sim(2.0), WeaponControl::Unguided, n, false, 0, 5);
+        assert!(
+            bship_pierce > tank_vs_armour,
+            "armour-piercing should beat a cheaper hull whose damage armour halves"
+        );
+    }
+
+    /// Mobile Artillery's `indirectCombatModule`: the struct-level
+    /// `attackCounterable: false` overrides its weapon's
+    /// `primaryWeaponCounterable: true`. Measured live — it shot a SURVIVING
+    /// same-ambit Tank (which counters 1) and took no damage at all, where a
+    /// Tank making the same attack took 1 back. Without this the planner prices
+    /// counter risk into the one hull that has none, and under-ranks the best
+    /// siege unit in the game.
+    #[test]
+    fn struct_level_counter_immunity_overrides_the_weapon_flag() {
+        let mut t = crate::game_state::StructTypeInfo {
+            primary_weapon_counterable: Some(true),
+            primary_weapon_damage: Some(2),
+            primary_weapon_shots: Some(1),
+            primary_weapon_shot_success_numerator: Some(1),
+            primary_weapon_shot_success_denominator: Some(1),
+            ..Default::default()
+        };
+        // Ordinary hull: the weapon flag stands.
+        t.attack_counterable = Some(true);
+        assert!(WeaponStats::from_type(&t, false).counterable);
+        // Mobile Artillery: immune despite the weapon saying otherwise.
+        t.attack_counterable = Some(false);
+        assert!(!WeaponStats::from_type(&t, false).counterable);
+        // Absent (older sync payload): assume counterable, the safe default.
+        t.attack_counterable = None;
+        assert!(WeaponStats::from_type(&t, false).counterable);
     }
 
     /// The Battleship's signalJamming: guided 2/3, unguided 0/0. A guided volley
@@ -521,8 +613,8 @@ mod tests {
     fn shooter_score_prefers_the_counter_free_ambit() {
         let sim = simulate(&w(1, 1, 1, 1, 2), 16, 6.0, &DefenseProfile::basic(0, 2, 2), true);
         let n = InterceptorNet::default();
-        let exposed = shooter_score(&sim, WeaponControl::Unguided, n, false, 3);
-        let free = shooter_score(&sim, WeaponControl::Unguided, n, false, 0);
+        let exposed = shooter_score(&sim, WeaponControl::Unguided, n, false, 3, 3);
+        let free = shooter_score(&sim, WeaponControl::Unguided, n, false, 0, 3);
         assert!(free > exposed);
     }
 

@@ -211,6 +211,16 @@ pub struct StructTypeInfo {
     pub counter_attack_same_ambit: Option<u64>,
     #[serde(default)]
     pub attack_reduction: Option<u64>,
+    /// Can attacks made BY this struct be countered at all?
+    ///
+    /// Struct-level, and it OVERRIDES the per-weapon `*_counterable` flags.
+    /// Mobile Artillery declares `attackCounterable: false` while its primary
+    /// declares `primaryWeaponCounterable: true`; measured live, the struct-level
+    /// flag wins — it shot a surviving same-ambit Tank and took no counter at
+    /// all, where a Tank doing the same took 1. That makes it the only hull that
+    /// can grind a defended target without attrition (`indirectCombatModule`).
+    #[serde(default)]
+    pub attack_counterable: Option<bool>,
     #[serde(default)]
     pub post_destruction_damage: Option<u64>,
     #[serde(default)]

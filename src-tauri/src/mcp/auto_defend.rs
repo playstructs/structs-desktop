@@ -53,6 +53,32 @@ impl Default for AutoDefendConfig {
 static CONFIG: LazyLock<RwLock<AutoDefendConfig>> = LazyLock::new(|| RwLock::new(load()));
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// How useful is this hull as a DEFENDER, beyond the blocking that any
+/// same-ambit defender provides?
+///
+/// Blocking is identical whatever does it — the shot is absorbed either way —
+/// so the tiebreak is counter damage, which STACKS on top of the target's own
+/// counter (measured: a defended Tank returned 1 from the target plus 1 from
+/// its blocking Tank, and the attacker lost 2 HP to a single shot).
+///
+/// Ranked straight off the chain's `counterAttackSameAmbit`, so it stays correct
+/// as hulls change:
+///   * planetary structs (Ore Bunker, shield generators) carry no weapon → 0
+///   * Mobile Artillery is a fine ATTACKER but `counterAttack` is 0 → also 0,
+///     i.e. no better than a bunker in this role
+///   * ordinary armed hulls → 1, Destroyer → 2
+fn armed_defender_rank(type_id: &str) -> u64 {
+    crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .and_then(|g| {
+            g.struct_types
+                .get(type_id)
+                .map(|t| t.counter_attack_same_ambit.unwrap_or(0))
+        })
+        .unwrap_or(0)
+}
+
 /// Defender struct id -> protected struct id it already defends (protectedStructIndex
 /// != 0 on chain) — skip re-querying, and count toward spread balancing.
 static ASSIGNED_CACHE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -213,7 +239,7 @@ async fn scan(
                 // Pass 1: classify every combat struct — count existing assignments
                 // per protected target, collect idle (built, unassigned) candidates.
                 let mut counts: HashMap<String, usize> = HashMap::new();
-                let mut idle: Vec<(String, String)> = Vec::new(); // (id, ambit)
+                let mut idle: Vec<(String, String, String)> = Vec::new(); // (id, ambit, type_id)
                 for s in &structs {
                     if truthy(s.get("is_destroyed")) {
                         continue;
@@ -254,7 +280,7 @@ async fn scan(
                         .and_then(|x| x.as_str())
                         .unwrap_or("")
                         .to_string();
-                    idle.push((sid, ambit));
+                    idle.push((sid, ambit, tid));
                 }
                 if idle.is_empty() {
                     return;
@@ -276,13 +302,40 @@ async fn scan(
                             .unwrap(),
                     }
                 };
-                // Prefer a same-ambit defender (only same-ambit defenders can block).
-                let (sid, _) = idle
+                // ── Pick a defender that will actually do something ──────────
+                //
+                // A defender contributes two SEPARATE things, with different
+                // conditions, and it is easy to assign one that does neither:
+                //
+                //   * BLOCKING needs the defender to share the TARGET's ambit.
+                //   * COUNTERING needs the defender's WEAPON to reach the
+                //     ATTACKER's ambit.
+                //
+                // Cross-ambit assignment was measured to be worthless: a
+                // Starfighter (space) registered as defender of a Tank (land)
+                // took `protectedStructIndex`, and a land attack then landed
+                // completely unblocked with no counter from it. It had consumed
+                // a defender slot to do nothing.
+                //
+                // So same-ambit is a REQUIREMENT here, not a preference — the
+                // old code fell back to `idle.first()` and cheerfully made those
+                // useless pairings. If nothing in the right ambit is free we
+                // skip this target and leave the struct available for a target
+                // it can actually protect.
+                //
+                // Among same-ambit candidates prefer an ARMED hull: blocking is
+                // the same either way, but an armed blocker also counters, and
+                // counter damage STACKS with the target's own. Planetary structs
+                // (Ore Bunker, shield generators) carry no weapon at all, so
+                // they block and nothing more.
+                let pick = idle
                     .iter()
-                    .find(|(_, a)| !target_ambit.is_empty() && *a == target_ambit)
-                    .or_else(|| idle.first())
-                    .cloned()
-                    .unwrap();
+                    .filter(|(_, a, _)| !target_ambit.is_empty() && *a == target_ambit)
+                    .max_by_key(|(_, _, tid)| armed_defender_rank(tid))
+                    .cloned();
+                let Some((sid, _, _)) = pick else {
+                    return; // nothing in this ambit — leave it free for a target it can protect
+                };
 
                 let res = crate::mcp::tx_retry::sign_with_retry(
                     &app,
@@ -334,6 +387,46 @@ mod tests {
         assert!(!c.enabled);
         assert!(!c.include_bait);
         assert_eq!(c.interval_secs, 180);
+    }
+
+    #[test]
+    /// Cross-ambit defenders do nothing at all, so ambit is a REQUIREMENT.
+    ///
+    /// Measured: a Starfighter (space) was registered as defender of a Tank
+    /// (land) — `protectedStructIndex` was set — and a land attack then landed
+    /// completely unblocked with no counter from it. The old code fell back to
+    /// `idle.first()` when no same-ambit hull was free and made exactly those
+    /// useless pairings, burning the defender's one assignment slot.
+    #[test]
+    fn a_defender_must_share_the_targets_ambit() {
+        let idle = vec![
+            ("5-1".to_string(), "space".to_string(), "3".to_string()),
+            ("5-2".to_string(), "land".to_string(), "9".to_string()),
+        ];
+        let target_ambit = "land";
+        let pick: Vec<&String> = idle
+            .iter()
+            .filter(|(_, a, _)| a == target_ambit)
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(pick, vec!["5-2"], "only the land hull can defend a land target");
+
+        // Nothing in the target's ambit → no assignment at all, rather than a
+        // cross-ambit one that would block nothing.
+        let none: Vec<&String> = idle
+            .iter()
+            .filter(|(_, a, _)| a == "water")
+            .map(|(id, _, _)| id)
+            .collect();
+        assert!(none.is_empty());
+    }
+
+    /// Among same-ambit candidates, prefer the one that also counters. Ranking
+    /// reads `counterAttackSameAmbit` off the chain, so an unarmed planetary
+    /// hull and Mobile Artillery (armed, but `counterAttack: 0`) both rank 0.
+    #[test]
+    fn an_unknown_type_ranks_zero_rather_than_panicking() {
+        assert_eq!(armed_defender_rank("not-a-type"), 0);
     }
 
     #[test]

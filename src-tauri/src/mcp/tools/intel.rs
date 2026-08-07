@@ -267,6 +267,12 @@ genuinely shortens the proof you still have to grind.\n\n");
                 _ => None,
             }
         };
+        // Counter immunity is the single biggest thing a shooter can have and it
+        // is invisible in the weapon lines — Mobile Artillery's primary reads
+        // "counterable" while the hull itself cannot be countered.
+        if t.attack_counterable == Some(false) {
+            out.push_str("  CANNOT BE COUNTERED — attacks with this hull draw no return fire\n");
+        }
         let ev_g = rate(t.guided_defensive_success_rate_numerator, t.guided_defensive_success_rate_denominator);
         let ev_u = rate(t.unguided_defensive_success_rate_numerator, t.unguided_defensive_success_rate_denominator);
         if ev_g.is_some() || ev_u.is_some() {
@@ -915,7 +921,7 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
                 reachable: r.reachable,
                 att_ambit_bit: *att_ambit,
                 counter_exposure: exposure,
-                score: shooter_score(&r, w.control, interceptors, target_is_planetary, exposure),
+                score: shooter_score(&r, w.control, interceptors, target_is_planetary, exposure, w.charge),
                 control: w.control,
             });
         }
