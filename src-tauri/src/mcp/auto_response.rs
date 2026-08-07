@@ -334,15 +334,34 @@ async fn scan(
                 crate::mcp::loop_util::read_u64_field(e.get("planetAttributes"), "blockStartRaid")
             })
             .unwrap_or(0);
-        if armed == 0 {
-            // Clock cleared: the raid completed, was abandoned, or we ended it.
+        // A raid has TWO phases and the clock only covers the second one.
+        // `blockStartRaid` stays 0 for the whole `initiated` phase — the raider
+        // is parked at our planet working through the defences, and the clock
+        // arms only once our Command Ship dies.
+        //
+        // Standing down on `armed == 0` therefore did the opposite of the
+        // intent: the defence engaged only AFTER our CMD was destroyed, which
+        // is exactly when the defender has nothing left to fight with. Verified
+        // live — a raider sat at 2-6607 with `raid_status: initiated`,
+        // `block_start_raid: 0`, and the watch dropped it on the next scan.
+        //
+        // So keep fighting while EITHER the clock is running OR a hostile fleet
+        // is still parked here. Reading the fleet also re-identifies the
+        // attacker, which is what the event path fails to do once the shooting
+        // stops ("attacker not identifiable yet").
+        let still_here = if armed != 0 {
+            true
+        } else {
+            raiding_fleet(&client, &planet_id, None).await.is_some()
+        };
+        if !still_here {
             if let Ok(mut w) = RAID_WATCH.lock() {
                 w.remove(&planet_id);
             }
             crate::mcp::telemetry::tlog(
                 "auto_response",
                 crate::mcp::telemetry::Sev::Notice,
-                format!("{planet_id}: raid clock cleared — standing down"),
+                format!("{planet_id}: raider gone and clock clear — standing down"),
             );
             continue;
         }
@@ -365,8 +384,10 @@ async fn scan(
     crate::mcp::combat_lists::prune_expired();
 
     for (_, alarm) in alarms {
-        // Keep fighting this one until the clock clears, even if the raider
-        // never fires another shot.
+        // Keep fighting this one until the raider leaves, even if it never
+        // fires another shot. `is_raid` covers both phases: `classify` returns
+        // RaidArmed for any non-terminal raid_status on our planet, which
+        // includes `initiated`.
         if alarm.is_raid && !alarm.defender_player.is_empty() {
             if let Ok(mut w) = RAID_WATCH.lock() {
                 w.insert(alarm.planet_id.clone(), alarm.defender_player.clone());
