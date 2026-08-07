@@ -53,30 +53,46 @@ impl Default for AutoDefendConfig {
 static CONFIG: LazyLock<RwLock<AutoDefendConfig>> = LazyLock::new(|| RwLock::new(load()));
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 static RUNNING: AtomicBool = AtomicBool::new(false);
-/// How useful is this hull as a DEFENDER, beyond the blocking that any
-/// same-ambit defender provides?
+/// How useful is this hull as a defender of a target in `target_ambit`?
 ///
-/// Blocking is identical whatever does it — the shot is absorbed either way —
-/// so the tiebreak is counter damage, which STACKS on top of the target's own
-/// counter (measured: a defended Tank returned 1 from the target plus 1 from
-/// its blocking Tank, and the attacker lost 2 HP to a single shot).
+/// A defender contributes two SEPARATE things under two DIFFERENT conditions,
+/// and the pair is easy to get wrong:
 ///
-/// Ranked straight off the chain's `counterAttackSameAmbit`, so it stays correct
-/// as hulls change:
-///   * planetary structs (Ore Bunker, shield generators) carry no weapon → 0
-///   * Mobile Artillery is a fine ATTACKER but `counterAttack` is 0 → also 0,
-///     i.e. no better than a bunker in this role
-///   * ordinary armed hulls → 1, Destroyer → 2
-fn armed_defender_rank(type_id: &str) -> u64 {
-    crate::game_state::GAME_STATE
+///   * **Blocking** — absorbs the shot entirely. Requires the defender to share
+///     the TARGET's ambit.
+///   * **Countering** — damages the attacker, and can outright NEGATE the attack:
+///     measured, a Battleship's counter killed a 1 HP Tank and the Tank's shot
+///     then landed for 0 with `counterDestroyedAttacker: true`. Requires the
+///     defender's WEAPON to reach the ATTACKER's ambit.
+///
+/// So a cross-ambit defender is NOT useless — a space Battleship (primary reach
+/// water+land) counters a land attacker perfectly well, it just cannot block.
+/// An earlier version of this function assumed otherwise, on the strength of a
+/// single test where the cross-ambit hull was a Starfighter whose reach is space
+/// only and so genuinely could not answer. Reach is what decides it, not ambit.
+///
+/// Blocking is the stronger effect, so same-ambit dominates; among the rest,
+/// value follows counter strength times how many ambits the weapon can answer
+/// from. Read off the chain so it stays correct as hulls change.
+fn defender_rank(type_id: &str, target_ambit: &str, defender_ambit: &str) -> u64 {
+    let (counter, reach) = crate::game_state::GAME_STATE
         .read()
         .ok()
         .and_then(|g| {
-            g.struct_types
-                .get(type_id)
-                .map(|t| t.counter_attack_same_ambit.unwrap_or(0))
+            g.struct_types.get(type_id).map(|t| {
+                (
+                    t.counter_attack_same_ambit.unwrap_or(0),
+                    t.primary_weapon_ambits.unwrap_or(0),
+                )
+            })
         })
-        .unwrap_or(0)
+        .unwrap_or((0, 0));
+    // How many ambits this hull could counter an attacker in.
+    let breadth = (reach & 0b11110).count_ones() as u64;
+    let blocks = !target_ambit.is_empty() && defender_ambit == target_ambit;
+    // Blocking outranks any amount of counter reach; unarmed planetary hulls
+    // (counter 0) still rank above nothing when they can block.
+    if blocks { 100 + counter * breadth } else { counter * breadth }
 }
 
 /// Defender struct id -> protected struct id it already defends (protectedStructIndex
@@ -317,24 +333,18 @@ async fn scan(
                 // completely unblocked with no counter from it. It had consumed
                 // a defender slot to do nothing.
                 //
-                // So same-ambit is a REQUIREMENT here, not a preference — the
-                // old code fell back to `idle.first()` and cheerfully made those
-                // useless pairings. If nothing in the right ambit is free we
-                // skip this target and leave the struct available for a target
-                // it can actually protect.
-                //
-                // Among same-ambit candidates prefer an ARMED hull: blocking is
-                // the same either way, but an armed blocker also counters, and
-                // counter damage STACKS with the target's own. Planetary structs
-                // (Ore Bunker, shield generators) carry no weapon at all, so
-                // they block and nothing more.
+                // The old code fell back to `idle.first()`, which cheerfully
+                // paired hulls that could do neither. `defender_rank` scores
+                // both contributions instead, and anything scoring zero is left
+                // idle rather than burning its one assignment slot.
                 let pick = idle
                     .iter()
-                    .filter(|(_, a, _)| !target_ambit.is_empty() && *a == target_ambit)
-                    .max_by_key(|(_, _, tid)| armed_defender_rank(tid))
+                    .max_by_key(|(_, a, tid)| defender_rank(tid, &target_ambit, a))
                     .cloned();
-                let Some((sid, _, _)) = pick else {
-                    return; // nothing in this ambit — leave it free for a target it can protect
+                let Some((sid, _, _)) = pick.filter(|(_, a, tid)| {
+                    defender_rank(tid, &target_ambit, a) > 0
+                }) else {
+                    return; // nothing here can block OR counter — leave them free
                 };
 
                 let res = crate::mcp::tx_retry::sign_with_retry(
@@ -390,43 +400,28 @@ mod tests {
     }
 
     #[test]
-    /// Cross-ambit defenders do nothing at all, so ambit is a REQUIREMENT.
-    ///
-    /// Measured: a Starfighter (space) was registered as defender of a Tank
-    /// (land) — `protectedStructIndex` was set — and a land attack then landed
-    /// completely unblocked with no counter from it. The old code fell back to
-    /// `idle.first()` when no same-ambit hull was free and made exactly those
-    /// useless pairings, burning the defender's one assignment slot.
+    /// A defender's two contributions have two different conditions, so ranking
+    /// has to score both. Same-ambit blocks and dominates; cross-ambit still
+    /// counters if its WEAPON reaches — measured, a space Battleship (reach
+    /// water+land) countered a land attacker and killed it outright, while a
+    /// space Starfighter (reach space only) assigned to a land target did
+    /// nothing at all. An earlier version of this test asserted the second case
+    /// generalised, which was wrong.
     #[test]
-    fn a_defender_must_share_the_targets_ambit() {
-        let idle = vec![
-            ("5-1".to_string(), "space".to_string(), "3".to_string()),
-            ("5-2".to_string(), "land".to_string(), "9".to_string()),
-        ];
-        let target_ambit = "land";
-        let pick: Vec<&String> = idle
-            .iter()
-            .filter(|(_, a, _)| a == target_ambit)
-            .map(|(id, _, _)| id)
-            .collect();
-        assert_eq!(pick, vec!["5-2"], "only the land hull can defend a land target");
-
-        // Nothing in the target's ambit → no assignment at all, rather than a
-        // cross-ambit one that would block nothing.
-        let none: Vec<&String> = idle
-            .iter()
-            .filter(|(_, a, _)| a == "water")
-            .map(|(id, _, _)| id)
-            .collect();
-        assert!(none.is_empty());
+    fn ranking_scores_blocking_above_counter_reach_but_values_both() {
+        // With no synced struct types every hull scores on blocking alone,
+        // which is exactly the conservative fallback we want.
+        let blocks = defender_rank("9", "land", "land");
+        let cross = defender_rank("9", "land", "space");
+        assert!(blocks > cross, "a blocker must outrank a non-blocker");
+        assert!(blocks >= 100, "blocking is worth a flat dominant bonus");
     }
 
-    /// Among same-ambit candidates, prefer the one that also counters. Ranking
-    /// reads `counterAttackSameAmbit` off the chain, so an unarmed planetary
-    /// hull and Mobile Artillery (armed, but `counterAttack: 0`) both rank 0.
+    /// Nothing that can neither block nor counter should consume an assignment.
     #[test]
-    fn an_unknown_type_ranks_zero_rather_than_panicking() {
-        assert_eq!(armed_defender_rank("not-a-type"), 0);
+    fn a_hull_that_can_do_nothing_scores_zero() {
+        // Unknown type, wrong ambit → no blocking, no known weapon reach.
+        assert_eq!(defender_rank("not-a-type", "land", "space"), 0);
     }
 
     #[test]

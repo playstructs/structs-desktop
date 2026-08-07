@@ -239,14 +239,18 @@ genuinely shortens the proof you still have to grind.\n\n");
         if let Some(l) = weapon_line("primary", t.primary_weapon_ambits, &t.primary_weapon, &t.primary_weapon_control,
             t.primary_weapon_shots, t.primary_weapon_damage, t.primary_weapon_guaranteed_shots,
             t.primary_weapon_shot_success_numerator, t.primary_weapon_shot_success_denominator,
-            t.primary_weapon_blockable, t.primary_weapon_counterable,
+            t.primary_weapon_blockable,
+            // AND in the struct-level override so this line cannot contradict
+            // the "CANNOT BE COUNTERED" note below it.
+            t.primary_weapon_counterable.map(|c| c && t.attack_counterable.unwrap_or(true)),
             t.primary_weapon_armour_piercing) {
             out.push_str(&l);
         }
         if let Some(l) = weapon_line("secondary", t.secondary_weapon_ambits, &t.secondary_weapon, &t.secondary_weapon_control,
             t.secondary_weapon_shots, t.secondary_weapon_damage, t.secondary_weapon_guaranteed_shots,
             t.secondary_weapon_shot_success_numerator, t.secondary_weapon_shot_success_denominator,
-            t.secondary_weapon_blockable, t.secondary_weapon_counterable,
+            t.secondary_weapon_blockable,
+            t.secondary_weapon_counterable.map(|c| c && t.attack_counterable.unwrap_or(true)),
             t.secondary_weapon_armour_piercing) {
             out.push_str(&l);
         }
