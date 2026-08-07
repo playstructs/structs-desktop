@@ -142,6 +142,22 @@ static CONFIG: LazyLock<RwLock<AutoResponseConfig>> =
 /// there were no alarms, and the defence sat idle for the rest of the raid
 /// while the ore was taken. Once a raid is seen, the planet stays watched and
 /// re-alarms every scan until the clock clears or the raider's CMD is dead.
+/// How often [`seed_raid_watch`] reconciles against the chain's raid feed.
+///
+/// This used to be a one-shot `AtomicBool`, which fired on the FIRST scan —
+/// the single worst moment to ask. At startup `team_owned` is walking the whole
+/// registry serially against a cold `OWNED_CACHE`, and any query that fails
+/// under that burst silently drops its planet from `owned`. The seed then
+/// matched nothing, logged nothing, and never ran again, so a raid already in
+/// progress across a restart stayed unwatched for the rest of its life.
+///
+/// Re-seeding costs three pages of one guild-API feed, so just keep doing it:
+/// it also recovers raids the event path missed for any other reason.
+const SEED_INTERVAL_MS: f64 = 5.0 * 60.0 * 1000.0;
+
+/// Last time the raid watch was reconciled, ms epoch. 0 = never.
+static LAST_SEED: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
+
 static RAID_WATCH: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -255,6 +271,10 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     let run = crate::mcp::telemetry::LoopRun::start("auto_response");
     scan(app_handle, &cfg, &run).await;
     if RUN_GEN.load(Ordering::SeqCst) != gen {
+        // Invalidated by a watchdog reset mid-scan. Deliberately does NOT clear
+        // `RUNNING`: `force_reset_running` already cleared it when it bumped the
+        // generation, so a newer tick may own the guard by now. Record the row
+        // and touch nothing else.
         run.finish_stale(Some("invalidated by watchdog reset mid-scan".into()));
         return;
     }
@@ -315,6 +335,31 @@ async fn scan(
         entry.is_raid |= is_raid;
     }
     *EVENT_HW.lock().unwrap() = hw;
+
+    // ── Recover raids that were already running ───────────────────────────
+    // `RAID_WATCH` is in-memory and only ever populated by a NEW event, so a
+    // restart mid-raid leaves the raider parked at our planet and completely
+    // unopposed: nothing has shot recently, so nothing alarms, so the planet is
+    // never watched. Observed live — a raider sat on 2-6607 through a relaunch
+    // and the loop ran 162 times without raising a single incident.
+    //
+    // Same shape as auto_raid's `readopt_expeditions`: reconcile against
+    // reality rather than trying to persist our own bookkeeping. One paged
+    // guild-API read of the raid feed, no per-planet queries and no enrichment
+    // — we only need the planet ids, and `owned` already tells us which are
+    // ours. Runs on a timer rather than once, so a seed that lands during a
+    // cold start (when `owned` can still be incomplete) is not the only chance
+    // we get. See [`SEED_INTERVAL_MS`].
+    let due = LAST_SEED
+        .lock()
+        .map(|last| now_millis() - *last >= SEED_INTERVAL_MS)
+        .unwrap_or(false);
+    if due {
+        if let Ok(mut last) = LAST_SEED.lock() {
+            *last = now_millis();
+        }
+        seed_raid_watch(&client, &owned).await;
+    }
 
     // ── Sustained defence ────────────────────────────────────────────────
     // Re-raise an alarm for every planet whose raid clock is still running,
@@ -786,6 +831,59 @@ fn in_cooldown(key: &str, cooldown_secs: u64) -> bool {
         .unwrap_or(false)
 }
 
+/// Adopt any raid already in progress against one of our planets.
+///
+/// Called once per process. Reads the chain's raid feed and watches every
+/// non-terminal raid on a planet we own, so a restart cannot leave a raider
+/// unopposed simply because it has stopped shooting.
+async fn seed_raid_watch(client: &CosmosClient, owned: &crate::mcp::tools::events::Owned) {
+    let rows = match crate::mcp::guild_api::fetch_all_pages(
+        |page| client.guild.planet_activity_by_category("raid_status", page),
+        3,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            crate::mcp::telemetry::tlog(
+                "auto_response",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("could not seed raid watch: {e}"),
+            );
+            return;
+        }
+    };
+    let now = now_millis();
+    let mut adopted = 0usize;
+    for r in crate::mcp::raid_view::reduce_raids(&rows, now, crate::mcp::raid_view::STALE_AFTER_MS) {
+        if r.is_terminal() || !owned.planets.contains(&r.planet_id) {
+            continue;
+        }
+        let Some(defender) = owned.player_by_planet.get(&r.planet_id).cloned() else { continue };
+        // Already watching it — this is a routine re-seed, not news.
+        let fresh = match RAID_WATCH.lock() {
+            Ok(mut w) => w.insert(r.planet_id.clone(), defender).is_none(),
+            Err(_) => continue,
+        };
+        if !fresh {
+            continue;
+        }
+        adopted += 1;
+        crate::mcp::telemetry::tlog(
+            "auto_response",
+            crate::mcp::telemetry::Sev::Notice,
+            format!("adopted in-progress raid on {} ({})", r.planet_id, r.status),
+        );
+    }
+    if adopted > 0 {
+        crate::mcp::telemetry::tlog(
+            "auto_response",
+            crate::mcp::telemetry::Sev::Notice,
+            format!("raid watch seeded with {adopted} in-progress raid(s)"),
+        );
+    }
+}
+
 /// Should the per-attacker cooldown suppress this response?
 ///
 /// The cooldown exists so one skirmish does not produce dozens of incidents.
@@ -812,83 +910,116 @@ struct RaiderFleet {
     command_struct: Option<String>,
 }
 
+/// Is this fleet a raider we can actually shoot at `planet_id`?
+///
+/// Split out from [`raiding_fleet`] so the "keep looking" semantics below are
+/// testable without a chain to talk to.
+fn hostile_and_here(
+    owner: Option<&str>,
+    location: Option<&str>,
+    planet_id: &str,
+    is_team: fn(&str) -> bool,
+) -> bool {
+    // One of ours visiting is not a raider.
+    if owner.map(is_team).unwrap_or(false) {
+        return false;
+    }
+    // Combat is co-located: a Command Ship sitting at its own home planet is
+    // unreachable from ours, and firing at it would just burn the roster's
+    // charge on a guaranteed reject.
+    location == Some(planet_id)
+}
+
 /// Find the hostile fleet sitting at `planet_id` and resolve its Command Ship.
 ///
 /// Two routes, because each covers the other's blind spot:
 /// * If we already know who shot us, go straight to their fleet and confirm it
 ///   is parked here. This works even before a raid clock has armed.
-/// * Otherwise fall back to the planet's raid queue — `locationListStart` is
-///   the head, and the chain only arms `blockStartRaid` when it is non-empty.
+/// * Otherwise sweep every fleet parked at the planet and take the first
+///   hostile one.
+///
+/// That sweep used to read `locationListStart` alone — the HEAD of the planet's
+/// visitor list — and return `None` outright if that one fleet turned out to be
+/// friendly. The visitor list is a linked list, so a single friendly fleet
+/// ahead of the raider blinded the defence completely: no raider found means
+/// the watch stands down and the planet is left to be seized. Worse, it was
+/// self-inflicted — `auto_defend` sending a teammate's fleet to help is exactly
+/// what puts a friendly entry at the head of that list.
 async fn raiding_fleet(
     client: &CosmosClient,
     planet_id: &str,
     attacker_player: Option<&str>,
 ) -> Option<RaiderFleet> {
-    let mut fleet_id: Option<String> = None;
+    let is_team: fn(&str) -> bool = crate::mcp::virtual_players::is_team_player;
 
-    if let Some(atk) = attacker_player.filter(|p| !crate::mcp::virtual_players::is_team_player(p)) {
+    // Candidates, best first. A named attacker is the strongest signal, so try
+    // their fleet before paying for the visitor walk.
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(atk) = attacker_player.filter(|p| !is_team(p)) {
         if let Ok(pl) = client.query_entity("player", atk).await {
-            fleet_id = pl
+            if let Some(f) = pl
                 .get("Player")
                 .and_then(|p| p.get("fleetId"))
                 .and_then(|x| x.as_str())
                 .filter(|s| !s.is_empty())
-                .map(String::from);
+            {
+                candidates.push(f.to_string());
+            }
         }
     }
-    if fleet_id.is_none() {
-        let planet = client.query_entity("planet", planet_id).await.ok()?;
-        fleet_id = planet
-            .get("Planet")
-            .and_then(|p| p.get("locationListStart"))
+    if candidates.is_empty() {
+        // Reuses the spectator's walker: both list directions, with the same
+        // dangling-pointer guard. Sorted only so the pick is deterministic —
+        // `locations_at_planet` returns a set.
+        let mut visitors: Vec<String> = crate::mcp::spectator::locations_at_planet(client, planet_id)
+            .await
+            .into_iter()
+            .filter(|id| id != planet_id)
+            .collect();
+        visitors.sort();
+        candidates = visitors;
+    }
+
+    for fleet_id in candidates {
+        let Ok(fleet) = client.query_entity("fleet", &fleet_id).await else { continue };
+        let Some(f) = fleet.get("Fleet") else { continue };
+        let owner = f.get("owner").and_then(|x| x.as_str()).map(String::from);
+        if !hostile_and_here(
+            owner.as_deref(),
+            f.get("locationId").and_then(|x| x.as_str()),
+            planet_id,
+            is_team,
+        ) {
+            continue; // the raider may be further down the list
+        }
+        let command_struct = f
+            .get("commandStruct")
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
             .map(String::from);
-    }
-    let fleet_id = fleet_id?;
-
-    let fleet = client.query_entity("fleet", &fleet_id).await.ok()?;
-    let f = fleet.get("Fleet")?;
-    let owner = f.get("owner").and_then(|x| x.as_str()).map(String::from);
-    if owner
-        .as_deref()
-        .map(crate::mcp::virtual_players::is_team_player)
-        .unwrap_or(false)
-    {
-        return None; // one of ours visiting — not a raider
-    }
-    // The fleet must actually be HERE. Combat is co-located: a Command Ship
-    // sitting at its own home planet is unreachable from ours, and firing at it
-    // would just burn the roster's charge on a guaranteed reject.
-    if f.get("locationId").and_then(|x| x.as_str()) != Some(planet_id) {
-        return None;
-    }
-    let command_struct = f
-        .get("commandStruct")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    // A destroyed Command Ship is not a target.
-    let command_struct = match command_struct {
-        Some(cs) => {
-            let dead = client
-                .query_entity("struct", &cs)
-                .await
-                .map(|e| {
-                    crate::mcp::loop_util::parse_bool(
-                        e.get("structAttributes").and_then(|a| a.get("isDestroyed")),
-                    )
-                })
-                .unwrap_or(true);
-            if dead {
-                None
-            } else {
-                Some(cs)
+        // A destroyed Command Ship is not a target.
+        let command_struct = match command_struct {
+            Some(cs) => {
+                let dead = client
+                    .query_entity("struct", &cs)
+                    .await
+                    .map(|e| {
+                        crate::mcp::loop_util::parse_bool(
+                            e.get("structAttributes").and_then(|a| a.get("isDestroyed")),
+                        )
+                    })
+                    .unwrap_or(true);
+                if dead {
+                    None
+                } else {
+                    Some(cs)
+                }
             }
-        }
-        None => None,
-    };
-    Some(RaiderFleet { fleet_id, owner, command_struct })
+            None => None,
+        };
+        return Some(RaiderFleet { fleet_id, owner, command_struct });
+    }
+    None
 }
 
 /// Team players with structs AT `planet_id` — the only ones that can engage.
@@ -970,6 +1101,39 @@ mod tests {
         // A plain skirmish still gets the anti-spam cooldown.
         assert!(cooldown_gags_us(false, true));
         assert!(!cooldown_gags_us(false, false));
+    }
+
+    /// A friendly fleet parked at our planet must not hide the raider behind
+    /// it. `locationListStart` is the HEAD of a linked list, and the old code
+    /// tested only that one entry — so a teammate sent by `auto_defend` was
+    /// enough to make the raid invisible and stand the defence down.
+    #[test]
+    fn a_friendly_fleet_at_the_head_does_not_hide_the_raider() {
+        const HOME: &str = "2-6607";
+        let is_team: fn(&str) -> bool = |p: &str| p == "1-275" || p == "1-2136";
+        // (fleet, owner, location) in visitor-list order: ours first.
+        let visitors = [
+            ("9-2136", Some("1-2136"), Some(HOME)), // teammate helping out
+            ("9-61", Some("1-61"), Some(HOME)),     // the actual raider
+        ];
+        let picked = visitors
+            .iter()
+            .find(|(_, owner, loc)| hostile_and_here(*owner, *loc, HOME, is_team))
+            .map(|(f, ..)| *f);
+        assert_eq!(picked, Some("9-61"), "the raider behind a friendly must still be found");
+    }
+
+    /// The co-location rule still holds: a hostile fleet that has gone home is
+    /// unreachable, and shooting at it only burns charge on a certain reject.
+    #[test]
+    fn a_hostile_fleet_that_left_is_not_a_target() {
+        const HOME: &str = "2-6607";
+        let is_team: fn(&str) -> bool = |p: &str| p == "1-275";
+        assert!(hostile_and_here(Some("1-61"), Some(HOME), HOME, is_team));
+        assert!(!hostile_and_here(Some("1-61"), Some("2-9"), HOME, is_team));
+        assert!(!hostile_and_here(Some("1-275"), Some(HOME), HOME, is_team));
+        // Unknown owner is treated as hostile — better to check than to ignore.
+        assert!(hostile_and_here(None, Some(HOME), HOME, is_team));
     }
 
     /// Sizing check: a 6 HP Command Ship taking ~1 net damage per shot needs

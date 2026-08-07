@@ -1590,21 +1590,36 @@
         // act. All of it was computed and thrown away; a loop firing on time
         // and doing nothing looked identical to a healthy one.
         var lh = w.loop_health || [];
+        // `blocked_reason` is STICKY — it keeps the last reason a loop couldn't
+        // act, long after a later run acted fine. Reading it as current state
+        // painted a red BLOCKED banner on healthy loops (seen live: auto_response
+        // blocked at :396, then finished clean at :773). A block counts as
+        // current only if it happened during the run that is newest now.
+        var isBlocked = function (l) {
+          if (!l.blocked_reason) return false;
+          var started = l.last_started_ms || 0;
+          return !started || (l.blocked_at_ms || 0) >= started;
+        };
         var lbody = H.el('div');
         lh.slice().sort(function (a, b) {
           // Anything that needs attention first: blocked, then errors, then noise.
-          var rank = function (l) { return l.blocked_reason ? 0 : ((l.errors || 0) > 0 ? 1 : 2); };
+          var rank = function (l) { return isBlocked(l) ? 0 : ((l.errors || 0) > 0 ? 1 : 2); };
           return rank(a) - rank(b) || (b.runs || 0) - (a.runs || 0);
         }).forEach(function (l) {
-          var blocked = !!l.blocked_reason;
+          var blocked = isBlocked(l);
           var last = l.last_finished_ms || l.last_started_ms;
+          // A cleared block is still worth showing — it is the only trace of a
+          // loop that spent part of the hour unable to act — just not as an alarm.
+          var cleared = !blocked && l.blocked_reason
+            ? 'cleared ' + H.ago(l.blocked_at_ms) + ' — was: ' + l.blocked_reason
+            : null;
           lbody.appendChild(H.resultRow({
             icon: blocked ? 'icon-blocked' : ((l.errors || 0) > 0 ? 'icon-alert' : 'icon-success'),
             title: l.loop,
             subtitle: blocked ? 'BLOCKED — ' + l.blocked_reason
-              : ((l.unfinished_runs || 0) > 0
+              : (cleared || ((l.unfinished_runs || 0) > 0
                 ? (l.unfinished_runs + ' run(s) still in flight')
-                : 'running normally'),
+                : 'running normally')),
             chips: [
               statTile('runs', l.runs || 0),
               statTile('actions', l.actions || 0, null, (l.actions || 0) ? 'ok' : 'muted'),
