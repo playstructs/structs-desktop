@@ -456,11 +456,23 @@ async fn scan(
                 // struct before deploy" and planet builds require the Command Ship
                 // online. So when it's been destroyed, rebuilding it is the only
                 // useful (or even possible) initiate. Verified live on 1-396: a
-                // command-less fleet CAN initiate a replacement (no catch-22), the
-                // new ship registers in `commandStruct` immediately, and it does
-                // NOT occupy a fleet slot — but the initiate still wants a valid
-                // free slot, so pick the first free fleet ambit (CMD possibleAmbit
-                // covers all four).
+                // command-less fleet CAN initiate a replacement (no catch-22) and
+                // the new ship registers in `commandStruct` immediately.
+                //
+                // It also does not occupy a fleet slot — and, verified live on
+                // 1-280, the initiate does not even require the slot it names to
+                // be FREE. A Command Ship was built into land slot 0 while
+                // `5-2421` sat in that slot; the land slots came back unchanged
+                // and `commandStruct` was populated.
+                //
+                // That matters because this used to give up when every fleet slot
+                // was occupied, and a player with no Command Ship is INSTANTLY
+                // raidable — the loot clock arms the block a raider arrives, with
+                // no `initiated` phase to buy time. Four accounts (1-273, 1-275,
+                // 1-279, 1-280) were found stuck exactly there, re-logging the
+                // same warning every three minutes while sitting wide open. So
+                // prefer a genuinely free slot for tidiness, but never refuse to
+                // rebuild for want of one.
                 let cmd_alive = present.contains("Command Ship");
                 if !cmd_alive {
                     let (type_id, draw) = {
@@ -473,22 +485,20 @@ async fn scan(
                     if conn_cap > 0.0 && available <= draw {
                         return; // no headroom even for the CMD ship — wait for power
                     }
-                    let slot_pick = ["land", "water", "air", "space"].iter().find_map(|amb| {
-                        let key = ("fleet".to_string(), amb.to_string());
-                        let used = occ.get(&key).cloned().unwrap_or_default();
-                        if used.len() >= SLOTS_PER_AMBIT {
-                            return None;
-                        }
-                        first_free(&used).map(|slot| (*amb, slot))
-                    });
-                    let Some((amb, slot)) = slot_pick else {
-                        crate::mcp::telemetry::tlog(
-                            "auto_build",
-                            crate::mcp::telemetry::Sev::Warn,
-                            format!("{pid} lost its Command Ship and every fleet slot is full — can't rebuild (trash a fleet struct to free a slot)"),
-                        );
-                        return;
-                    };
+                    let (amb, slot) = ["land", "water", "air", "space"]
+                        .iter()
+                        .find_map(|amb| {
+                            let key = ("fleet".to_string(), amb.to_string());
+                            let used = occ.get(&key).cloned().unwrap_or_default();
+                            if used.len() >= SLOTS_PER_AMBIT {
+                                return None;
+                            }
+                            first_free(&used).map(|slot| (*amb, slot))
+                        })
+                        // Fleet full: name a valid slot anyway. The Command Ship
+                        // does not consume it, and being command-less is far more
+                        // dangerous than an untidy slot number.
+                        .unwrap_or(("land", 0));
                     let Some(idx) = idx_opt else { return };
                     let payload = json!({
                         "playerId": pid,
