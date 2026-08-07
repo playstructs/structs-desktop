@@ -181,7 +181,38 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
     };
     let app = app_handle.clone();
     let object_id = snap.object_id.clone();
+    let solved_anchor = snap.block_start;
+    let task_kind = task_type.clone();
     tauri::async_runtime::spawn(async move {
+        // ── Is the proof still anchored to a live cycle? ──────────────────
+        // The completion message carries only {structId, proof, nonce} — NO
+        // anchor. The chain verifies our nonce against ITS current
+        // blockStartOre*, so if the cycle restarted between solving and
+        // submitting, the proof is dead on arrival and the tx is wasted. That
+        // is the "work failure for input (…)" class: the input in the error is
+        // the CHAIN's reconstruction — its anchor, our nonce — which is why the
+        // block in it always looks correct.
+        //
+        // Measured 6 of 457 completions (1.3%). Cheap to avoid: one read turns
+        // a guaranteed chain rejection into a skip, and auto_harvest re-issues
+        // against the new anchor on its next pass.
+        if let Some(field) = anchor_field_for(&task_kind) {
+            let client = crate::mcp::cosmos_client::CosmosClient::new();
+            if let Ok(e) = client.query_entity("struct", &object_id).await {
+                let live = crate::mcp::loop_util::read_u64_field(e.get("structAttributes"), field);
+                if live != 0 && live != solved_anchor {
+                    crate::mcp::telemetry::tlog(
+                        "hasher",
+                        crate::mcp::telemetry::Sev::Notice,
+                        format!(
+                            "{task_kind} proof for {object_id} abandoned: solved against anchor \
+                             {solved_anchor}, chain is now at {live} (cycle restarted mid-solve)"
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
         // Route through tx_retry — NOT vplayer_bridge directly. This is the
         // most important tx class in the economy (every mine/refine/build/raid
         // payoff), and signing it raw meant success AND failure were reported
@@ -211,6 +242,34 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
             }
         }
     });
+}
+
+/// Which `structAttributes` field anchors this task type's proof.
+/// RAID anchors on the PLANET (`blockStartRaid`), not the struct, so it has no
+/// entry here and is left unchecked.
+fn anchor_field_for(task_type: &str) -> Option<&'static str> {
+    match task_type {
+        "MINE" => Some("blockStartOreMine"),
+        "REFINE" => Some("blockStartOreRefine"),
+        "BUILD" => Some("blockStartBuild"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::anchor_field_for;
+
+    #[test]
+    fn each_struct_task_type_knows_its_anchor() {
+        assert_eq!(anchor_field_for("MINE"), Some("blockStartOreMine"));
+        assert_eq!(anchor_field_for("REFINE"), Some("blockStartOreRefine"));
+        assert_eq!(anchor_field_for("BUILD"), Some("blockStartBuild"));
+        // RAID is anchored on the planet, so it must NOT be checked against a
+        // struct attribute — doing so would abandon every raid proof.
+        assert_eq!(anchor_field_for("RAID"), None);
+        assert_eq!(anchor_field_for("nonsense"), None);
+    }
 }
 
 pub fn ensure_gpu_init() -> bool {
