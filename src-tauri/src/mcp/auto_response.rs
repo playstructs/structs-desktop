@@ -445,6 +445,19 @@ async fn scan(
 
     crate::mcp::combat_lists::prune_expired();
 
+    // NOTE: this loop deliberately does NOT consult `combat_lists::is_vetoed`.
+    //
+    // Allies and protected players are vetoes on TARGET SELECTION — they stop
+    // `auto_raid` from picking a fight. They must never restrain the response to
+    // a fight somebody else picked. If a guild-mate raids us we fight back with
+    // everything available, exactly as we would anyone else; the alternative is
+    // standing still while an ally empties our ore, which is neither good
+    // defence nor good play.
+    //
+    // The only identity filter on this path is `raiding_fleet`'s
+    // `is_team_player` check, which exists so our own vplayers do not shoot each
+    // other. That one is about not fighting OURSELVES, not about diplomacy.
+
     for (_, alarm) in alarms {
         // Keep fighting this one until the raider leaves, even if it never
         // fires another shot. `is_raid` covers both phases: `classify` returns
@@ -539,6 +552,33 @@ async fn handle_alarm(
         // 30-minute cadence — the whole raid resolves in about four minutes.
         // Deliberately runs in `advise` mode too: it is purely defensive.
         crate::mcp::auto_harvest::request_priority_refine(app, &alarm.defender_player).await;
+    }
+
+    // ── 3b. Come home. ──────────────────────────────────────────────────────
+    // The cheapest defence in the game, and we were not using it.
+    //
+    // A planet is vulnerable while its owner's fleet is OFF STATION — not merely
+    // when the Command Ship is dead. Verified live on 2-7324: a raider arrived
+    // at a planet whose owner had gone raiding, and `blockStartRaid` armed on
+    // the arrival block with the owner's Command Ship alive and undamaged.
+    //
+    // The reverse is just as immediate. Bringing the fleet home cleared
+    // `blockStartRaid` (2015930 → 0) in a single block, dropped the raid from
+    // `shieldsVulnerable` back to `ongoing`, and preserved all 66 ore — with the
+    // raiding fleet still parked on the planet. One transaction, no combat, no
+    // charge, nothing lost.
+    //
+    // So whenever we are raided while our own fleet is away, recall it. This is
+    // deliberately not gated on `mode`: like `panic_refine` it is purely
+    // defensive and never fires a shot.
+    if alarm.is_raid && !alarm.defender_player.is_empty() && !cfg.dry_run {
+        if let Err(e) = recall_fleet(app, client, &alarm.defender_player).await {
+            crate::mcp::telemetry::tlog(
+                "auto_response",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("{}: could not recall fleet: {e}", alarm.planet_id),
+            );
+        }
     }
 
     // The cooldown exists so one skirmish does not produce dozens of incidents.
@@ -936,6 +976,83 @@ struct RaiderFleet {
     command_struct: Option<String>,
 }
 
+/// Is a recall both needed and possible?
+///
+/// Needed when the fleet is not on station at `home` — that, not Command Ship
+/// ownership, is what makes a planet raidable. Possible only with an ONLINE
+/// command struct: the chain rejects the move otherwise ("fleet (9-X) needs an
+/// online command struct before deploy"), so a player whose Command Ship is
+/// dead or still building cannot use this escape at all.
+fn should_recall(status: Option<&str>, at: &str, home: &str, cmd_online: bool) -> bool {
+    if home.is_empty() {
+        return false;
+    }
+    let on_station = status == Some("onStation") && at == home;
+    !on_station && cmd_online
+}
+
+/// Bring `player`'s fleet home if it is off station, restoring their shields.
+///
+/// Returns `Ok(())` when there is nothing to do as well as when the recall was
+/// signed — "already home" is the common case and is not an error.
+///
+/// See the call site for why this matters: on-station is what confers
+/// invulnerability, so a fleet that wandered off is the whole reason the planet
+/// is raidable, and the move undoes it in one block.
+async fn recall_fleet(
+    app: &tauri::AppHandle,
+    client: &CosmosClient,
+    player: &str,
+) -> Result<(), String> {
+    let pl = client.query_entity("player", player).await?;
+    let p = pl.get("Player");
+    let home = p.and_then(|x| x.get("planetId")).and_then(|x| x.as_str()).unwrap_or("");
+    let fleet = p.and_then(|x| x.get("fleetId")).and_then(|x| x.as_str()).unwrap_or("");
+    if home.is_empty() || fleet.is_empty() {
+        return Ok(());
+    }
+    let fl = client.query_entity("fleet", fleet).await?;
+    let f = fl.get("Fleet");
+    let at = f.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()).unwrap_or("");
+    let status = f.and_then(|x| x.get("status")).and_then(|x| x.as_str());
+    // A fleet cannot deploy without an ONLINE command struct, so a recall would
+    // be rejected outright while the Command Ship is dead or still building.
+    let cmd = f.and_then(|x| x.get("commandStruct")).and_then(|x| x.as_str()).unwrap_or("");
+    let cmd_online = if cmd.is_empty() {
+        false
+    } else {
+        let e = client.query_entity("struct", cmd).await?;
+        crate::mcp::loop_util::parse_bool(
+            e.get("structAttributes").and_then(|x| x.get("isOnline")),
+        )
+    };
+    if !should_recall(status, at, home, cmd_online) {
+        return Ok(());
+    }
+    let Some(index) = crate::mcp::virtual_players::REGISTRY.read().ok().and_then(|r| {
+        r.players
+            .iter()
+            .find(|v| v.player_id.as_deref() == Some(player))
+            .map(|v| v.index)
+    }) else {
+        return Ok(()); // the primary signs elsewhere; nothing to do here
+    };
+    crate::mcp::tx_retry::sign_with_retry(
+        app,
+        index,
+        "/structs.structs.MsgFleetMove",
+        json!({ "fleetId": fleet, "destinationLocationId": home }),
+        &format!("auto_response:{player}"),
+    )
+    .await?;
+    crate::mcp::telemetry::tlog(
+        "auto_response",
+        crate::mcp::telemetry::Sev::Notice,
+        format!("recalled {player}'s fleet {fleet} from {at} to {home} — shields restored"),
+    );
+    Ok(())
+}
+
 /// Is this fleet a raider we can actually shoot at `planet_id`?
 ///
 /// Split out from [`raiding_fleet`] so the "keep looking" semantics below are
@@ -1127,6 +1244,25 @@ mod tests {
         // A plain skirmish still gets the anti-spam cooldown.
         assert!(cooldown_gags_us(false, true));
         assert!(!cooldown_gags_us(false, false));
+    }
+
+    /// Recall is the cheapest defence we have — verified live on 2-7324, where
+    /// bringing the fleet home cleared `blockStartRaid` in one block with the
+    /// raider still parked. But it is only available with an ONLINE command
+    /// struct, which is exactly the case a freshly-decapitated player is NOT in.
+    #[test]
+    fn recall_only_when_away_and_able() {
+        const HOME: &str = "2-7324";
+        // Away with a working Command Ship: the whole point.
+        assert!(should_recall(Some("away"), "2-7354", HOME, true));
+        // On station already — nothing to do, and no wasted transaction.
+        assert!(!should_recall(Some("onStation"), HOME, HOME, true));
+        // "onStation" somewhere that is not home still counts as away.
+        assert!(should_recall(Some("onStation"), "2-7354", HOME, true));
+        // Command Ship dead or mid-rebuild: the chain would reject the move.
+        assert!(!should_recall(Some("away"), "2-7354", HOME, false));
+        // Unknown home: never guess a destination.
+        assert!(!should_recall(Some("away"), "2-7354", "", true));
     }
 
     /// A friendly fleet parked at our planet must not hide the raider behind

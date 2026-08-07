@@ -275,6 +275,8 @@ pub struct Candidate {
     /// Ore left in the target PLANET's crust. A raid dies if the defender
     /// re-planets, and a planet is exhaustible — see the `gate` that reads this.
     pub planet_ore_remaining: f64,
+    /// A fleet already parked at the target, if any. Someone else's raid.
+    pub occupied_by: Option<String>,
     pub planetary_shield: u64,
     /// Minutes until the raid proof decays to `raid_difficulty`.
     pub raid_minutes: f64,
@@ -404,6 +406,14 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
             "planet has {:.0} ore left (<= min_planet_ore {:.0}) — defender re-planets and voids the raid",
             c.planet_ore_remaining, cfg.min_planet_ore
         ));
+    }
+    // Someone is already parked here. A planet runs ONE raid at a time, and the
+    // second fleet to arrive is inert in both directions — it creates no raid,
+    // cannot attack, and cannot be attacked. Sending a raider is a pure loss:
+    // the trip buys nothing and the raider's OWN planet is raidable the whole
+    // time it is away.
+    if let Some(fid) = &c.occupied_by {
+        return Some(format!("fleet {fid} is already raiding here — a second fleet is inert"));
     }
     if cfg.require_vulnerable_now && !c.vulnerable {
         // The decisive gate: 0 of 50 non-vulnerable raids in the dataset ever
@@ -766,6 +776,34 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
     let planetary_shield = crate::mcp::loop_util::read_u64_field(planet.get("planetAttributes"), "planetaryShield");
     let planet_ore_remaining =
         crate::mcp::loop_util::parse_f64(planet.get("gridAttributes").and_then(|g| g.get("ore")));
+    // Is somebody else already raiding here? A planet hosts ONE raid: a second
+    // fleet that arrives is completely inert — it creates no raid, cannot
+    // attack, and cannot be attacked. Verified live on 2-7324, where a third
+    // party's Tank and the defender's Mobile Artillery each rejected the other
+    // as "unreachable" while both stood on the planet.
+    //
+    // The visitor list is left DANGLING when a fleet departs (`locationListLast`
+    // keeps naming it), so confirm the fleet is really still there rather than
+    // trusting the pointer.
+    let occupied_by = match planet
+        .get("Planet")
+        .and_then(|p| p.get("locationListStart"))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        Some(fid) => client
+            .query_entity("fleet", fid)
+            .await
+            .ok()
+            .filter(|f| {
+                f.get("Fleet")
+                    .and_then(|x| x.get("locationId"))
+                    .and_then(|x| x.as_str())
+                    == Some(planet_id.as_str())
+            })
+            .map(|_| fid.to_string()),
+        None => None,
+    };
 
     // ── Vulnerability: the chain's IsDefenderCommandStructVulnerable(), which is
     // the single variable that decides whether a raid can complete at all. ──
@@ -831,6 +869,7 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
         fleet_id,
         stored_ore,
         planet_ore_remaining,
+        occupied_by,
         planetary_shield,
         raid_minutes: raid_ready_minutes(planetary_shield, get().raid_difficulty),
         vulnerable,
@@ -946,6 +985,16 @@ async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(Str
             })
             .collect()
     };
+    // Eligible raiders with the ore they are carrying, so the pick can prefer the
+    // one with least to lose. Sending a fleet out makes its OWN planet instantly
+    // raidable — verified live on 2-7324: a raider arrived and `blockStartRaid`
+    // armed the same block, status straight to `shieldsVulnerable`, even though
+    // the absent player's Command Ship was alive and undamaged. Being on station
+    // is what protects you, not owning a Command Ship somewhere.
+    //
+    // So every dispatch trades our own exposure for the target's ore, and a
+    // raider sitting on a previous haul is the worst one to send.
+    let mut eligible: Vec<(String, u32, f64)> = Vec::new();
     for (pid, idx) in candidates {
         let Ok(pl) = client.query_entity("player", &pid).await else { continue };
         let p = pl.get("Player");
@@ -963,16 +1012,31 @@ async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(Str
         if cmd.is_empty() {
             continue;
         }
-        if let Ok(e) = client.query_entity("struct", cmd).await {
-            if crate::mcp::loop_util::parse_bool(
-                e.get("structAttributes").and_then(|x| x.get("isDestroyed")),
-            ) {
-                continue;
+        // ONLINE, not merely undestroyed. A Command Ship that has been rebuilt
+        // but whose BUILD proof has not landed sits at `status: 1`
+        // (materialized) — `commandStruct` is populated and `isDestroyed` is
+        // false, yet the chain refuses the move with "fleet (9-X) needs an
+        // online command struct before deploy". Checking only `isDestroyed`
+        // picked such a raider and burned a transaction on a certain reject.
+        match client.query_entity("struct", cmd).await {
+            Ok(e) => {
+                let sa = e.get("structAttributes");
+                if crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isDestroyed")))
+                    || !crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isOnline")))
+                {
+                    continue;
+                }
             }
+            Err(_) => continue,
         }
-        return Some((pid, idx));
+        let ore = crate::mcp::loop_util::parse_f64(
+            pl.get("gridAttributes").and_then(|g| g.get("ore")),
+        );
+        eligible.push((pid, idx, ore));
     }
-    None
+    // Least ore at risk first; ties keep registry order.
+    eligible.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    eligible.into_iter().next().map(|(pid, idx, _)| (pid, idx))
 }
 
 async fn raider_location(client: &CosmosClient, pid: &str) -> Option<(String, String)> {
@@ -1439,6 +1503,7 @@ mod tests {
             fleet_id: "9-61".into(),
             stored_ore: 100.0,
             planet_ore_remaining: 5.0,
+            occupied_by: None,
             planetary_shield: 125,
             raid_minutes: 12.0,
             vulnerable: true,
@@ -1532,6 +1597,24 @@ mod tests {
         assert!(why.contains("voids the raid"), "unexpected reason: {why}");
         // A planet with crust left is fine.
         c.planet_ore_remaining = 5.0;
+        assert_eq!(gate(&c, &cfg, 0.0), None);
+    }
+
+    /// A planet runs ONE raid. The second fleet to arrive is inert in both
+    /// directions — verified live on 2-7324, where a third party's Tank and the
+    /// defender's Mobile Artillery each rejected the other as "unreachable"
+    /// while both stood on the planet, and the arrival created no raid record.
+    /// Dispatching there costs a trip and exposes our own planet for nothing.
+    #[test]
+    fn a_planet_someone_else_is_raiding_is_gated_out() {
+        isolate_lists();
+        let cfg = AutoRaidConfig::default();
+        let mut c = cand();
+        c.occupied_by = Some("9-280".into());
+        let why = gate(&c, &cfg, 0.0).expect("an occupied planet must be gated out");
+        assert!(why.contains("inert"), "unexpected reason: {why}");
+        // Empty planet is fine.
+        c.occupied_by = None;
         assert_eq!(gate(&c, &cfg, 0.0), None);
     }
 

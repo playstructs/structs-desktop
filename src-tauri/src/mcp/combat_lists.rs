@@ -199,6 +199,12 @@ pub fn set_for_test(lists: CombatLists) {
 /// True when this target must never be attacked: our own team, an allied guild,
 /// or an explicitly protected player. Checked BEFORE scoring in both loops so no
 /// score can ever outvote it.
+/// Should we refrain from STARTING a fight with this player?
+///
+/// Offence only. `auto_raid` consults this before scoring a target; the
+/// defensive loop deliberately does not, because a veto is a decision about who
+/// we pick fights with, not about whether we defend ourselves. A guild-mate who
+/// raids us gets the full response.
 pub fn is_vetoed(player_id: &str, guild_id: Option<&str>) -> bool {
     if crate::mcp::virtual_players::is_team_player(player_id) {
         return true;
@@ -426,6 +432,29 @@ pub fn snapshot_json() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Defence must never be restrained by the ally/protected veto.
+    ///
+    /// Those lists say who we do not START fights with. Applying them to the
+    /// DEFENSIVE loop would mean standing still while an ally empties our ore.
+    /// The distinction is easy to lose — the two loops sit side by side and the
+    /// veto looks like something both should honour "for consistency" — so pin
+    /// it at the source level, which is the only place the absence of a call
+    /// can be asserted.
+    #[test]
+    fn the_defensive_loop_never_consults_the_veto() {
+        let src = include_str!("auto_response.rs");
+        let calls: Vec<&str> = src
+            .lines()
+            .filter(|l| l.contains("is_vetoed"))
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect();
+        assert!(
+            calls.is_empty(),
+            "auto_response must not gate defence on the ally veto — a guild-mate who \
+             raids us gets fought like anyone else. Offending line(s): {calls:?}"
+        );
+    }
 
     // These tests exercise the pure logic on hand-built values rather than the
     // global (which would touch the real config file and race across tests).

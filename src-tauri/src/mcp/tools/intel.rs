@@ -166,8 +166,14 @@ fn query_ruleset(args: &Value) -> Vec<Content> {
     // count suggests — you only pay the cannon while stripping planet blockers.
     out.push_str("  • Planetary Defense Cannons fire back only when you hit a struct standing ON THE PLANET. \
 A struct on the defender's FLEET (their Command Ship included) draws no cannon fire.\n");
-    out.push_str("  • Each defensive struct brought online RAISES the planetary shield (observed 25→288 over eight structs); \
-destroying one drops it by 50. Shield is the raid proof's decay range, so stripping defences also speeds up the raid.\n\n");
+    // The per-struct contribution is NOT flat — measured on 2-7354: an Orbital
+    // Shield Generator is worth 25 (238 → 213 destroying one), an Ore Bunker 50
+    // (288 → 238), and one struct in the build-up added only 13. An earlier
+    // draft of this line claimed a flat 50 and was wrong.
+    out.push_str("  • Each defensive struct brought online RAISES the planetary shield, by an amount that \
+depends on its TYPE (measured: Orbital Shield Generator 25, Ore Bunker 50); destroying one gives that back. \
+Shield is the raid proof's decay range and the chain tracks it LIVE, so stripping defences mid-raid \
+genuinely shortens the proof you still have to grind.\n\n");
     out.push_str("Weapon matrix\n");
 
     let mut types: Vec<_> = gs.struct_types.values().collect();
@@ -2190,7 +2196,14 @@ fn summarize_shot(s: &Value) -> String {
             None => out.push_str(": BLOCKED"),
         }
     } else {
-        let dmg = s.get("damageDealt").and_then(json_to_u64).unwrap_or(0);
+        // Roll minus armour — see raid_view::describe_activity for why neither
+        // `damage` nor `damageDealt` alone is right. `damage` is an accumulator
+        // that lands on one shot of a volley; `damageDealt` ignores armour.
+        let dmg = s
+            .get("damageDealt")
+            .and_then(json_to_u64)
+            .unwrap_or(0)
+            .saturating_sub(s.get("damageReduction").and_then(json_to_u64).unwrap_or(0));
         out.push_str(&format!(": {} dmg", dmg));
         if let (Some(b), Some(a)) = (
             s.get("targetHealthBefore").and_then(json_to_u64),
@@ -2202,10 +2215,28 @@ fn summarize_shot(s: &Value) -> String {
     if bval("targetDestroyed") {
         out.push_str(" · DESTROYED");
     }
-    if bval("targetCountered") {
-        match s.get("targetCounteredDamage").and_then(json_to_u64) {
-            Some(cd) if cd > 0 => out.push_str(&format!(" · countered {}", cd)),
-            _ => out.push_str(" · countered"),
+    // Counter damage stacks across the target AND every armed defender that
+    // blocked for it — see raid_view::describe_activity. Reporting only the
+    // target's share understates what the shot actually cost the attacker.
+    let defender_counters: u64 = s
+        .get("eventAttackDefenderCounterDetail")
+        .and_then(|v| v.as_array())
+        .map(|cs| {
+            cs.iter()
+                .filter_map(|c| c.get("counterDamage").and_then(json_to_u64))
+                .sum()
+        })
+        .unwrap_or(0);
+    let total_counter =
+        s.get("targetCounteredDamage").and_then(json_to_u64).unwrap_or(0) + defender_counters;
+    if bval("targetCountered") || defender_counters > 0 {
+        if total_counter > 0 {
+            out.push_str(&format!(" · countered {}", total_counter));
+            if defender_counters > 0 {
+                out.push_str(&format!(" ({} from defenders)", defender_counters));
+            }
+        } else {
+            out.push_str(" · countered");
         }
     }
     out

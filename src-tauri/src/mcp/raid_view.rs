@@ -668,9 +668,25 @@ fn describe_attack(d: &Value) -> String {
         };
     }
 
-    // Fold the volley. Damage is what LANDED, so blocked and evaded shots
-    // contribute nothing to it — reporting `damage` instead of `damageDealt`
-    // would credit a blocked shot with the hit it never made.
+    // Fold the volley.
+    //
+    // Neither damage field means what its name suggests, and it takes a
+    // multi-shot weapon to see why. A Starfighter attack-run (3 shots × 1 dmg
+    // at 1/3 each) against a 3 HP target that ended on 1 HP reported:
+    //
+    //     shot 1: damage 0, damageDealt 1, hp 3→3
+    //     shot 2: damage 0, damageDealt 1, hp 3→3
+    //     shot 3: damage 2, damageDealt 0, hp 3→1
+    //
+    // So `damageDealt` is the PER-SHOT roll, and `damage` is an ACCUMULATOR
+    // that appears on whichever shot the health change is applied to. Summing
+    // `damage` happens to give the right total, but reading it per shot reports
+    // the two hits as zero and the miss as two.
+    //
+    // The quantity that is meaningful in both places is the roll minus armour:
+    // 1 + 1 + 0 = 2 here, and 2 − 1 = 1 for a Tank (armour −1) taking a
+    // 2-damage round, which matches its 3 → 2 HP transition. Evaded and blocked
+    // shots roll 0, so they still contribute nothing.
     let num = |v: Option<&Value>| -> u64 {
         match v {
             Some(Value::String(x)) => x.parse().unwrap_or(0),
@@ -687,14 +703,26 @@ fn describe_attack(d: &Value) -> String {
     let mut countered = 0u64;
     let mut targets: Vec<String> = Vec::new();
     for shot in &shots {
-        dealt += num(shot.get("damageDealt"));
+        dealt += num(shot.get("damageDealt")).saturating_sub(num(shot.get("damageReduction")));
         if flag(shot.get("evaded")) {
             evaded += 1;
         }
         if flag(shot.get("blocked")) {
             blocked += 1;
         }
+        // Counter damage STACKS: the target counters, and so does every armed
+        // defender that blocked for it. Measured on a defended Tank — the
+        // target countered 1 and its blocking Tank countered 1, and the
+        // attacker went 3 → 1 HP. Reporting only `targetCounteredDamage` told
+        // you "countered 1" for a shot that cost two hit points, which
+        // understates the risk of hitting a well-defended struct exactly when
+        // it matters most.
         countered += num(shot.get("targetCounteredDamage"));
+        if let Some(cs) = shot.get("eventAttackDefenderCounterDetail").and_then(|v| v.as_array()) {
+            for c in cs {
+                countered += num(c.get("counterDamage"));
+            }
+        }
         let tid = shot.get("targetStructId").and_then(|v| v.as_str()).unwrap_or("");
         let ttype = shot.get("targetStructType").and_then(|v| v.as_str()).unwrap_or("");
         let label = if ttype.is_empty() { tid.to_string() } else { format!("{ttype} {tid}") };
@@ -909,18 +937,99 @@ mod log_tests {
     }
 
     #[test]
-    fn a_volley_that_all_missed_reports_zero_damage_not_the_rolled_damage() {
-        // `damage` is what the weapon would do; `damageDealt` is what landed.
-        // Reading the wrong one credits an evaded shot with a hit.
+    fn a_volley_that_all_missed_reports_zero_damage() {
+        // A real evaded shot carries BOTH fields at zero — measured live:
+        // `{"damage":"0","damageDealt":"0","evaded":true,"evadedCause":"signalJamming"}`.
+        // An earlier fixture here invented `damage: 5` alongside
+        // `damageDealt: 0` to encode "rolled vs landed"; that combination does
+        // not occur, and believing it is what put the wrong field in the fold.
         let d = json!({
             "attackerStructId": "5-1",
             "eventAttackShotDetail": [
-                {"damage": "5", "damageDealt": "0", "evaded": true, "targetStructId": "5-2"}
+                {"damage": "0", "damageDealt": "0", "evaded": true,
+                 "evadedCause": "signalJamming", "targetStructId": "5-2"}
             ]
         });
         let out = describe_activity("struct_attack", &d);
         assert!(out.contains("0 dmg"), "{out}");
         assert!(out.contains("1 evaded"), "{out}");
+    }
+
+    /// Counter damage stacks: the target counters AND every armed defender that
+    /// blocked for it. Real payload — a Tank shot at a defended Tank. The
+    /// target countered 1, its blocking Tank countered 1, and the attacker went
+    /// 3 → 1 HP. Reading only `targetCounteredDamage` reported half the cost.
+    #[test]
+    fn defender_counters_stack_with_the_targets() {
+        let d = json!({
+            "attackerStructId": "5-2869",
+            "attackerStructType": "Tank",
+            "eventAttackShotDetail": [{
+                "damage": "0", "damageDealt": "2", "evaded": false, "blocked": true,
+                "blockedByStructId": "5-6310", "blockedByStructType": "Tank",
+                "targetStructId": "5-2841", "targetStructType": "Tank",
+                "targetCountered": true, "targetCounteredDamage": "1",
+                "eventAttackDefenderCounterDetail": [
+                    {"counterDamage": "1", "counterByStructId": "5-6310",
+                     "counterByStructType": "Tank"}
+                ]
+            }]
+        });
+        let out = describe_activity("struct_attack", &d);
+        assert!(out.contains("countered for 2"), "target 1 + defender 1 = 2, got: {out}");
+    }
+
+    /// A multi-shot volley is the case that proves `damage` is an accumulator
+    /// rather than a per-shot net. Real Starfighter attack-run (3 × 1 dmg at
+    /// 1/3 each) whose target went 3 → 1 HP:
+    ///
+    ///     shot 1: damage 0, damageDealt 1
+    ///     shot 2: damage 0, damageDealt 1
+    ///     shot 3: damage 2, damageDealt 0
+    ///
+    /// Reading `damage` per shot calls the two hits zero and the miss a two.
+    #[test]
+    fn a_multi_shot_volley_folds_to_what_actually_landed() {
+        let d = json!({
+            "attackerStructId": "5-3015",
+            "attackerStructType": "Starfighter",
+            "weaponSystem": "secondaryWeapon",
+            "eventAttackShotDetail": [
+                {"damage": "0", "damageDealt": "1", "evaded": false, "blocked": false,
+                 "targetStructId": "5-3002", "targetStructType": "Starfighter"},
+                {"damage": "0", "damageDealt": "1", "evaded": false, "blocked": false,
+                 "targetStructId": "5-3002", "targetStructType": "Starfighter"},
+                {"damage": "2", "damageDealt": "0", "evaded": false, "blocked": false,
+                 "targetStructId": "5-3002", "targetStructType": "Starfighter",
+                 "targetHealthBefore": "3", "targetHealthAfter": "1"}
+            ]
+        });
+        let out = describe_activity("struct_attack", &d);
+        assert!(out.contains("2 dmg"), "volley landed 2, got: {out}");
+    }
+
+    /// The case that actually discriminates the two damage fields, and the only
+    /// one where they differ: armour.
+    ///
+    /// Measured on a Tank (armour −1) hit by a 2-damage Tank round —
+    /// `damageDealt: 2`, `damageReduction: 1`, `damage: 1`, target 3 → 2 HP.
+    /// So `damage` is the NET figure and `damageDealt` is the pre-armour roll,
+    /// which is the opposite of what the names suggest. Folding `damageDealt`
+    /// printed "2 dmg" for a hit that removed one hit point.
+    #[test]
+    fn armour_is_reported_net_not_as_the_pre_armour_roll() {
+        let d = json!({
+            "attackerStructId": "5-1",
+            "eventAttackShotDetail": [
+                {"damage": "1", "damageDealt": "2", "damageReduction": "1",
+                 "damageReductionCause": "armour", "evaded": false, "blocked": false,
+                 "targetStructId": "5-2", "targetStructType": "Tank",
+                 "targetHealthBefore": "3", "targetHealthAfter": "2"}
+            ]
+        });
+        let out = describe_activity("struct_attack", &d);
+        assert!(out.contains("1 dmg"), "should report what landed, got: {out}");
+        assert!(!out.contains("2 dmg"), "must not report the pre-armour roll: {out}");
     }
 
     #[test]
