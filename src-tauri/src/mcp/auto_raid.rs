@@ -136,9 +136,21 @@ pub struct AutoRaidConfig {
     /// is a survival check on the raid itself: an exhausted planet makes its
     /// owner re-planet, which voids the raid outright. One unit of headroom is
     /// enough to lose the race, so the default leaves two.
+    ///
+    /// `serde(default)` is not optional here: without it, adding this field
+    /// broke every EXISTING `auto_raid.json` on disk. `load_config` swallows a
+    /// parse failure and falls back to `Default`, whose `enabled` is false — so
+    /// the loop silently switched itself off, and the watchdog stayed quiet
+    /// because it reads `enabled` from that same poisoned config. Twenty-four
+    /// hours of zero raids with a config file that plainly said `true`.
+    #[serde(default = "default_min_planet_ore")]
     pub min_planet_ore: f64,
 
     pub dry_run: bool,
+}
+
+fn default_min_planet_ore() -> f64 {
+    2.0
 }
 
 impl Default for AutoRaidConfig {
@@ -1516,6 +1528,38 @@ mod tests {
             score: 0.0,
             blocked_by: None,
         }
+    }
+
+    /// A config written before a new field existed must still load, with the
+    /// loop's `enabled` intact.
+    ///
+    /// This is the regression that took auto_raid offline for a day: adding
+    /// `min_planet_ore` without a serde default made every existing
+    /// `auto_raid.json` unparseable, `load_config` fell back to `Default`
+    /// (`enabled: false`), and the watchdog read `enabled` from that same value
+    /// so it reported nothing wrong.
+    #[test]
+    fn an_older_config_file_still_loads_and_stays_enabled() {
+        // Exactly the shape on disk before the field was introduced.
+        let older = r#"{
+            "enabled": true, "autonomy": "auto", "interval_secs": 300,
+            "posture": "opportunist", "min_ore": 15.0, "min_score": 55.0,
+            "max_raid_minutes": 20, "max_defenders": 34,
+            "require_vulnerable_now": true, "allow_siege": true,
+            "siege_max_shots": 12, "skip_if_defender_active_mins": 30,
+            "raid_hours_utc": [], "w_ore": 1.0, "w_vulnerability": 1.0,
+            "w_weakness": 0.8, "w_grudge": 1.2, "w_guild": 0.5, "w_speed": 0.4,
+            "w_history": 0.6, "raider_players": [], "max_concurrent_raids": 1,
+            "target_cooldown_mins": 120, "abort_on_ongoing_blocks": 300,
+            "abort_cmd_hp_below": 0.0, "max_raid_wall_minutes": 90,
+            "return_home_after": true, "roster_ttl_secs": 21600,
+            "sweep_max_pages": 8, "evaluate_per_scan": 25,
+            "raid_difficulty": 4, "dry_run": false
+        }"#;
+        let cfg: AutoRaidConfig =
+            serde_json::from_str(older).expect("an older config must still deserialize");
+        assert!(cfg.enabled, "the operator's enabled flag must survive an upgrade");
+        assert_eq!(cfg.min_planet_ore, 2.0, "missing field takes the intended default");
     }
 
     #[test]
