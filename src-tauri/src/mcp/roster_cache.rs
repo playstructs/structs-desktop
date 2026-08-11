@@ -48,6 +48,11 @@ pub struct RosterRow {
     /// None if the player never set a portrait. The board composes the avatar
     /// from this — authoritative, so a player's real pfp always wins.
     pub pfp_attrs: Option<String>,
+    /// The display name the CHAIN carries (`Player.name` — the indexer and the
+    /// webapp API alias the same value as `username`). This is what the rest of
+    /// the galaxy sees, and it can drift from `name`, which is the registry's
+    /// local copy; the rename heal exists to close that gap.
+    pub chain_name: Option<String>,
     /// Undiscovered ore still buried on the player's planet (grams). None until
     /// the harvest-enrichment phase of the sweep fills it.
     pub planet_ore: Option<f64>,
@@ -110,6 +115,116 @@ fn heal_missing_pfp(app: tauri::AppHandle, index: u32, role: String, pid: String
     });
 }
 
+/// Player ids whose NAME is currently being rewritten, so overlapping sweeps
+/// never sign the same player twice.
+static NAME_HEALING: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+/// Renames allowed per sweep. Signing self-throttles, but a fleet of two
+/// thousand would still queue two thousand transactions the moment the feature
+/// is switched on — the same shape as the watchdog cascade. A budget spreads
+/// the rollout over ~20 sweeps and keeps every other loop responsive.
+const RENAME_BUDGET_PER_SWEEP: usize = 100;
+
+/// Fire-and-forget: bring a player's on-chain name in line with the configured
+/// style, then mirror it into the local registry so the board, the grass feed
+/// and the threat tags all follow.
+///
+/// Callers gate on `callsign::is_managed_name`, so a name the operator chose is
+/// never overwritten. Converges: the generated name is a pure function of the
+/// HD index, so once written the player stops matching and is never revisited.
+///
+/// Like the portrait heal, this is the ONLY rename path for existing players —
+/// there is no bespoke backfill verb to run.
+fn heal_stale_name(app: tauri::AppHandle, index: u32, pid: String, want: String) {
+    {
+        let mut inflight = NAME_HEALING.lock().unwrap_or_else(|e| e.into_inner());
+        if !inflight.insert(pid.clone()) {
+            return;
+        }
+    }
+    tauri::async_runtime::spawn(async move {
+        let res = crate::mcp::vplayer_bridge::sign_action(
+            &app,
+            index,
+            "/structs.structs.MsgPlayerUpdateName",
+            serde_json::json!({ "playerId": pid, "name": want }),
+            60,
+        )
+        .await;
+        match res {
+            Ok(_) => {
+                {
+                    let mut reg =
+                        virtual_players::REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(p) = reg.players.iter_mut().find(|p| p.index == index) {
+                        p.name = want.clone();
+                    }
+                    let _ = reg.save();
+                }
+                if let Some(row) = get_row(&pid) {
+                    let mut row = row;
+                    row.name = want.clone();
+                    row.chain_name = Some(want.clone());
+                    upsert(row);
+                }
+                crate::mcp::telemetry::tlog(
+                    "callsign",
+                    crate::mcp::telemetry::Sev::Info,
+                    format!("{pid} (idx {index}) renamed to {want}"),
+                );
+            }
+            Err(e) => {
+                // Left as-is on purpose: the next sweep retries it.
+                crate::mcp::telemetry::tlog(
+                    "callsign",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("{pid} (idx {index}) rename to {want} failed: {e}"),
+                );
+            }
+        }
+        NAME_HEALING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&pid);
+    });
+}
+
+/// Renames started so far in the current sweep; reset at the top of each one.
+static RENAMES_THIS_SWEEP: AtomicUsize = AtomicUsize::new(0);
+
+/// Decide whether this player's name should be rewritten, and start it if so.
+///
+/// Every condition here is a refusal to act, in cheapest-first order:
+/// the feature is off, the player isn't in our registry, the operator named it
+/// themselves, the chain already agrees, the name isn't one we minted, or this
+/// sweep has used its budget.
+fn maybe_heal_name(app: &tauri::AppHandle, index: u32, pid: &str, chain_name: Option<&str>) {
+    let cfg = crate::mcp::callsign::config();
+    if !cfg.rename_existing {
+        return;
+    }
+    let auto_named = virtual_players::REGISTRY
+        .read()
+        .ok()
+        .and_then(|r| r.players.iter().find(|p| p.index == index).map(|p| p.auto_name))
+        .unwrap_or(false);
+    if !auto_named {
+        return;
+    }
+    let want = crate::mcp::callsign::name_for(index);
+    let current = chain_name.unwrap_or("").trim();
+    if current == want {
+        return;
+    }
+    if !crate::mcp::callsign::is_managed_name(current) {
+        return;
+    }
+    if RENAMES_THIS_SWEEP.fetch_add(1, Ordering::Relaxed) >= RENAME_BUDGET_PER_SWEEP {
+        return;
+    }
+    heal_stale_name(app.clone(), index, pid.to_string(), want);
+}
+
 /// Progress event cadence (rows completed between board-roster-progress emits).
 const PROGRESS_EVERY: usize = 10;
 /// Background loop cadence while the board window exists.
@@ -155,6 +270,7 @@ fn parse_row(
         last_action_block: last_action,
         fetched_at_ms: now_ms,
         pfp_attrs: gets("pfpClientRenderAttributes"),
+        chain_name: gets("name"),
         planet_ore: None,
         mine_eta_s: None,
         refine_eta_s: None,
@@ -323,6 +439,7 @@ pub fn trigger_sweep(app: tauri::AppHandle, min_age_ms: f64) -> bool {
 }
 
 async fn run_sweep(app: &tauri::AppHandle) {
+    RENAMES_THIS_SWEEP.store(0, Ordering::Relaxed);
     let current_block = crate::game_state::GAME_STATE
         .read()
         .map(|g| g.current_block_height)
@@ -387,6 +504,7 @@ async fn run_sweep(app: &tauri::AppHandle) {
                             last_action_block: 0,
                             fetched_at_ms: 0.0,
                             pfp_attrs: None,
+                            chain_name: None,
                             planet_ore: None,
                             mine_eta_s: None,
                             refine_eta_s: None,
@@ -406,6 +524,14 @@ async fn run_sweep(app: &tauri::AppHandle) {
                     && row.pfp_attrs.as_deref().map_or(true, |s| s.trim().is_empty())
                 {
                     heal_missing_pfp(app.clone(), index.unwrap_or(0), row.role.clone(), pid.clone());
+                }
+                // Self-heal a stale NAME, under the same rules as the portrait:
+                // successful read, a managed vplayer (never the primary — that
+                // name is the operator's own), the feature switched on, and a
+                // name we are allowed to replace. `is_managed_name` is what
+                // protects a hand-picked name from ever being clobbered.
+                if row.err.is_none() && row.index.is_some() && row.role != "primary" {
+                    maybe_heal_name(&app, index.unwrap_or(0), &pid, row.chain_name.as_deref());
                 }
                 // Two-phase upsert: land the core row immediately (fast paint),
                 // then enrich with harvest context (planet ore + cycle ETAs —
@@ -436,6 +562,24 @@ async fn run_sweep(app: &tauri::AppHandle) {
         },
     )
     .await;
+
+    // Report renaming progress: a budgeted rollout takes many sweeps, and a
+    // silent one looks like nothing is happening.
+    let started = RENAMES_THIS_SWEEP.load(Ordering::Relaxed);
+    if started > 0 {
+        let capped = started > RENAME_BUDGET_PER_SWEEP;
+        let launched = started.min(RENAME_BUDGET_PER_SWEEP);
+        let msg = if capped {
+            format!(
+                "renamed {launched} this sweep ({} more still to go — budgeted, continues next sweep)",
+                started - RENAME_BUDGET_PER_SWEEP
+            )
+        } else {
+            format!("renamed {launched} player(s) this sweep; none left pending")
+        };
+        crate::mcp::telemetry::tlog("callsign", crate::mcp::telemetry::Sev::Info, msg.clone());
+        crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Info, "callsign", msg);
+    }
 
     let mut st = ROSTER.write().unwrap_or_else(|e| e.into_inner());
     st.refreshed_at_ms = now_millis();

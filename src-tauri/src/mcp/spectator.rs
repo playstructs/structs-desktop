@@ -935,11 +935,13 @@ async fn read_owner_hud(
         fmt_watts(total_capacity / 1000.0)
     ));
     let body = p.get("Player").unwrap_or(&p);
-    // `username` is the on-chain display name, and our own virtual players do
-    // not set one — so watching a planet belonging to `miner2` showed a bare
-    // "1-272" while the roster two windows over knew its name perfectly well.
-    // Fall back to what we know locally before giving up on naming a player.
-    let name = str_of(body.get("username")).or_else(|| local_player_name(pid));
+    // The LCD player entity spells the display name `name`; `username` is the
+    // INDEXER/webapp-API alias for the same value and is never present here, so
+    // reading it always missed and every player showed as a bare "1-272". Keep
+    // the local fallback for a player whose name we know but whose read failed.
+    let name = str_of(body.get("name"))
+        .or_else(|| str_of(body.get("username")))
+        .or_else(|| local_player_name(pid));
     // The pfp is LAYERED, not a URL: `pfpClientRenderAttributes` is a JSON
     // string of part indices that the renderer stacks as images, the same way
     // the game's PfpViewerComponent and the Team Ops roster do.

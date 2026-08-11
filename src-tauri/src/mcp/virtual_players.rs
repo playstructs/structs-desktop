@@ -77,6 +77,16 @@ pub struct VirtualPlayer {
     /// JSON without this field loads as `Bait`.
     #[serde(default)]
     pub role: VPlayerRole,
+    /// True when this tooling picked the name, which is what licenses the
+    /// roster sweep to rewrite it. False only when the operator passed one
+    /// explicitly. Defaults TRUE so the pre-existing `worker<N>` fleet — every
+    /// one of them auto-named — is adopted rather than frozen.
+    #[serde(default = "default_auto_name")]
+    pub auto_name: bool,
+}
+
+fn default_auto_name() -> bool {
+    true
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -275,15 +285,15 @@ mod tests {
     fn next_free_index_skips_used() {
         let mut s = VirtualPlayerStore::default();
         assert_eq!(s.next_free_index(), 1);
-        s.players.push(VirtualPlayer { index: 1, address: "a".into(), player_id: None, name: "x".into(), created_at: 0.0, role: VPlayerRole::Bait });
-        s.players.push(VirtualPlayer { index: 3, address: "c".into(), player_id: None, name: "z".into(), created_at: 0.0, role: VPlayerRole::Bait });
+        s.players.push(VirtualPlayer { index: 1, address: "a".into(), player_id: None, name: "x".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
+        s.players.push(VirtualPlayer { index: 3, address: "c".into(), player_id: None, name: "z".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
         assert_eq!(s.next_free_index(), 2);
     }
 
     #[test]
     fn find_by_index_address_or_player_id() {
         let mut s = VirtualPlayerStore::default();
-        s.players.push(VirtualPlayer { index: 2, address: "structs1abc".into(), player_id: Some("1-5".into()), name: "scout".into(), created_at: 0.0, role: VPlayerRole::Bait });
+        s.players.push(VirtualPlayer { index: 2, address: "structs1abc".into(), player_id: Some("1-5".into()), name: "scout".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
         assert!(s.find("2").is_some());
         assert!(s.find("structs1abc").is_some());
         assert!(s.find("1-5").is_some());

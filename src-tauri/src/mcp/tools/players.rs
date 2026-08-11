@@ -1048,11 +1048,9 @@ pub async fn execute(
         }
 
         "create" => {
-            let Some(name) = params.name.as_deref().filter(|n| !n.is_empty()) else {
-                return vec![Content::text(
-                    "Error: name required (3–20 chars: letters/digits/-/_).".to_string(),
-                )];
-            };
+            // An explicit name is the operator's, and the rename heal must never
+            // touch it; without one we mint a name from the HD index below.
+            let explicit_name = params.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
 
             // Pick the index + enforce the hard count cap (0 = unlimited), under a
             // short read lock. The guild-power soft gate below is the real limit.
@@ -1077,6 +1075,15 @@ pub async fn execute(
                     None => reg.next_free_index(),
                 }
             };
+
+            // Name resolution has to follow index selection, since a generated
+            // name IS a function of the index.
+            let auto_name = explicit_name.is_none();
+            let name_owned = match explicit_name {
+                Some(n) => n.to_string(),
+                None => crate::mcp::callsign::name_for(index),
+            };
+            let name = name_owned.as_str();
 
             // Soft power gate: the entry substation pool is shared, and every new
             // connection dilutes each player's share (connectionCapacity ==
@@ -1138,6 +1145,7 @@ pub async fn execute(
                                 .as_deref()
                                 .and_then(VPlayerRole::parse)
                                 .unwrap_or_default(),
+                            auto_name,
                         });
                         let _ = reg.save();
                     }

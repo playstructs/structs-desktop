@@ -1492,6 +1492,78 @@ pub async fn mcp_config_set_impl(
     }
 }
 
+// ── CALLSIGNS (generated player names) ─────────────────────────────────────
+
+/// The naming config, the styles to choose from, and a live preview against
+/// the operator's OWN fleet — the preview uses real HD indices so what they see
+/// is exactly what will be signed, not an abstract sample.
+#[tauri::command]
+pub async fn mcp_callsign_get() -> Value {
+    let cfg = crate::mcp::callsign::config();
+
+    // Real indices from the registry, so the preview names actual players.
+    let (indices, fleet): (Vec<u32>, usize) = {
+        let reg = crate::mcp::virtual_players::REGISTRY
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut idx: Vec<u32> = reg.players.iter().map(|p| p.index).collect();
+        idx.sort_unstable();
+        let n = idx.len();
+        idx.truncate(8);
+        (idx, n)
+    };
+    let indices = if indices.is_empty() { vec![1, 2, 3, 4, 5, 6, 7, 8] } else { indices };
+
+    let styles: Vec<Value> = crate::mcp::callsign::BUILTIN
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "label": s.label,
+                "capacity": crate::mcp::callsign::capacity(s),
+                "example": crate::mcp::callsign::preview_with(s, &cfg.prefix, &[1])
+                    .first().map(|(_, n)| n.clone()).unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    let active = crate::mcp::callsign::find_style(&cfg, &cfg.style);
+    let capacity = crate::mcp::callsign::capacity(&active);
+    json!({
+        "config": crate::mcp::callsign::config_json(),
+        "styles": styles,
+        "capacity": capacity,
+        "fleet": fleet,
+        // The operator's own legibility check: fewer slots than players means
+        // some colleagues would share a name.
+        "capacity_ok": capacity as usize >= fleet,
+        "preview": crate::mcp::callsign::preview(&indices)
+            .into_iter()
+            .map(|(i, n)| json!({ "index": i, "name": n }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Persist naming settings. Renaming itself is NOT done here — the roster sweep
+/// converges the fleet on its own, budgeted, exactly as portraits do. This just
+/// decides what the target names are and whether the sweep may write them.
+#[tauri::command]
+pub async fn mcp_callsign_set(
+    window: tauri::WebviewWindow,
+    config: Value,
+) -> Result<Value, String> {
+    require_board(&window)?;
+    mcp_callsign_set_impl(config).await
+}
+
+/// Body of `mcp_callsign_set` (see mcp_config_set_impl for the split rationale).
+pub async fn mcp_callsign_set_impl(config: Value) -> Result<Value, String> {
+    let next: crate::mcp::callsign::CallsignConfig =
+        serde_json::from_value(config).map_err(|e| format!("bad callsign config: {e}"))?;
+    crate::mcp::callsign::set_config(next)?;
+    Ok(mcp_callsign_get().await)
+}
+
 // ── ROLE APPEARANCE ────────────────────────────────────────────────────────
 
 const PFP_TYPE_URL: &str = "/structs.structs.MsgPlayerUpdatePfpClientRenderAttributes";

@@ -2913,6 +2913,99 @@
     if (body) body.insertBefore(H.alertLine(text, 'icon-alert'), body.firstChild);
   }
 
+  // ── Callsigns (generated player names) ────────────────────────────────────
+  // Identity's other half, next to the portraits. Everything here is a READ of
+  // what the backend would generate — the names are rendered in Rust and shown
+  // verbatim, so there is no second implementation to drift out of step with
+  // the one that actually signs.
+  var callsign = { data: null };
+
+  function renderCallsignCard() {
+    var d = callsign.data || {};
+    var cfg = d.config || {};
+    var body = H.el('div', 'cfg-section');
+
+    // What this actually does, in a sentence — the two switches below differ in
+    // consequence by three orders of magnitude and the labels alone won't say so.
+    body.appendChild(H.el('p', 'ops-muted',
+      'Virtual players are named from their HD index. New players are named as they are created; ' +
+      'renaming the ones you already have writes each name to the chain, one transaction per player.'));
+
+    // Style picker. Each option shows its own flavour so the choice can be made
+    // without switching to it first.
+    var styleOpts = (d.styles || []).map(function (s) {
+      return { value: s.id, label: s.label + ' — ' + s.example };
+    });
+    if (cfg.custom) styleOpts.push({ value: 'custom', label: 'Custom' });
+    body.appendChild(H.field('Naming style', H.selectBox(cfg.style, styleOpts, function (v) {
+      cfg.style = v; saveCallsign(cfg);
+    }), 'The word banks and shape used to build every generated name.'));
+
+    body.appendChild(H.field('Prefix (optional)', H.textBox(cfg.prefix || '', 'e.g. OH', function (v) {
+      cfg.prefix = v.trim(); saveCallsign(cfg);
+    }), 'Prepended as <prefix>-<name>. Letters and digits only.'));
+
+    // Capacity vs fleet: fewer slots than players means two colleagues share a
+    // name. The chain permits it; a roster you have to disambiguate by eye does
+    // not, so this is stated rather than silently tolerated.
+    var stats = H.el('div', 'hstrip');
+    stats.appendChild(statTile('distinct names', d.capacity == null ? '—' : String(d.capacity)));
+    stats.appendChild(statTile('players', d.fleet == null ? '—' : String(d.fleet),
+      null, d.capacity_ok === false ? 'bad' : null));
+    body.appendChild(stats);
+    if (d.capacity_ok === false) {
+      body.appendChild(H.alertLine(
+        'This style has fewer distinct names than you have players, so some will share one. Pick a style with more capacity.',
+        'icon-alert'));
+    }
+
+    body.appendChild(H.checkbox(cfg.name_new !== false, 'Name new players as they are created', function (v) {
+      cfg.name_new = v; saveCallsign(cfg);
+    }));
+    body.appendChild(H.checkbox(!!cfg.rename_existing, 'Rename existing players on-chain', function (v) {
+      cfg.rename_existing = v; saveCallsign(cfg);
+    }));
+    if (cfg.rename_existing) {
+      body.appendChild(H.el('p', 'ops-muted',
+        'The roster sweep renames up to 100 players at a time and picks up where it left off, ' +
+        'so a large fleet settles over a few sweeps. Names you set yourself are never touched.'));
+    }
+
+    // Preview against the operator's REAL indices, so what is shown is what
+    // will be signed.
+    var prevWrap = H.el('div', 'cs-preview');
+    (d.preview || []).forEach(function (p) {
+      prevWrap.appendChild(statTile('idx ' + p.index, p.name));
+    });
+    if ((d.preview || []).length) body.appendChild(prevWrap);
+
+    return H.card('CALLSIGNS', body);
+  }
+
+  function saveCallsign(cfg) {
+    Board.T.core.invoke('mcp_callsign_set', { config: cfg }).then(function (d) {
+      callsign.data = d;
+      rerenderCallsign();
+    }).catch(function (e) { alertInto('config-body', 'naming config rejected: ' + e); });
+  }
+
+  function rerenderCallsign() {
+    var host = document.getElementById('callsign-card');
+    if (!host) return;
+    var fresh = renderCallsignCard();
+    fresh.id = 'callsign-card';
+    host.parentNode.replaceChild(fresh, host);
+  }
+
+  function renderCallsigns(body) {
+    var host = H.el('div'); host.id = 'callsign-card';
+    body.appendChild(host);
+    Board.T.core.invoke('mcp_callsign_get').then(function (d) {
+      callsign.data = d;
+      rerenderCallsign();
+    }).catch(function (e) { host.appendChild(H.alertLine('naming unavailable: ' + e, 'icon-alert')); });
+  }
+
   // ── Role Appearance (per-role, per-layer pfp config) ──────────────────────
   // Mirror of Rust pfp.rs so the live preview equals what will be written.
   function jsFnv(s) { var x = 2166136261; for (var i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 16777619) >>> 0; } return x; }
@@ -3444,7 +3537,8 @@
       case 'policies': sectionPolicies(d, body); break;
       case 'engine': sectionEngine(d, body); break;
       case 'access': sectionAccess(d, body); break;
-      case 'appearance': renderRoleAppearance(body); break;
+      // Squad identity is a name AND a portrait; both live here.
+      case 'appearance': renderCallsigns(body); renderRoleAppearance(body); break;
       default: sectionDoctrine(d, body); break;
     }
     Board.stamp('updated ' + new Date().toLocaleTimeString());

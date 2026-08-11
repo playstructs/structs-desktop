@@ -98,6 +98,8 @@ fn main() {
             mcp::raid_view::mcp_raid_state,
             mcp::raid_view::mcp_raid_log,
             mcp::tools::board_pages::mcp_config_set,
+            mcp::tools::board_pages::mcp_callsign_get,
+            mcp::tools::board_pages::mcp_callsign_set,
             mcp::tools::board_pages::mcp_role_pfp_get,
             mcp::tools::board_pages::mcp_role_pfp_set,
             mcp::tools::board_pages::mcp_tx_snapshot,

@@ -1,3 +1,4 @@
+pub mod callsign;
 pub mod combat;
 pub mod combat_lists;
 pub mod auto_raid;

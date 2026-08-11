@@ -274,6 +274,12 @@
       font-family: 'DirectiveZero', sans-serif; text-transform: none;
       font-size: 11px; letter-spacing: 0;
     }
+    /* Callsigns config section — the preview wraps rather than scrolls, since
+       it is a sample rather than a list to scan through. */
+    .cs-preview { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 10px; }
+    .cs-preview .fstat { flex: 0 0 auto; align-items: flex-start; }
+    .cs-preview .fstat-v, .cs-preview .fstat-l { justify-content: flex-start; text-align: left; }
+    .cs-preview .fstat-v { font-size: 13px; }
     /* Role Appearance config section */
     .appear-role { display: flex; flex-direction: column; gap: 8px; }
     .appear-preview { display: flex; gap: 8px; margin-bottom: 4px; }

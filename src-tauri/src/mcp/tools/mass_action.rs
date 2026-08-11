@@ -343,12 +343,14 @@ async fn launch_players(app: tauri::AppHandle, request: MassActionRequest) -> Re
         .and_then(|v| v.as_str())
         .and_then(VPlayerRole::parse)
         .unwrap_or_default();
+    // No `name_prefix` means generated names (`Dave-Thompson`, `ONYX-7734`);
+    // an explicit one is the operator's own scheme and opts the batch out of
+    // the rename heal entirely.
     let prefix = request
         .args
         .get("name_prefix")
         .and_then(|v| v.as_str())
-        .unwrap_or("worker")
-        .to_string();
+        .map(str::to_string);
 
     // Substation-dilution estimate — the "what does launching N do to everyone's
     // power share" preview the button shows live as the count changes.
@@ -421,7 +423,11 @@ async fn launch_players(app: tauri::AppHandle, request: MassActionRequest) -> Re
             let prefix = prefix_c.clone();
             let (ok, failed, done, job) = (ok_c.clone(), failed_c.clone(), done_c.clone(), job_c.clone());
             async move {
-                let name = format!("{prefix}{index}");
+                let auto_name = prefix.is_none();
+                let name = match &prefix {
+                    Some(p) => format!("{p}{index}"),
+                    None => crate::mcp::callsign::name_for(index),
+                };
                 // Façade signup: derive index → sign guild-join → poll player id.
                 let result = vplayer_bridge::call(
                     &app,
@@ -447,6 +453,7 @@ async fn launch_players(app: tauri::AppHandle, request: MassActionRequest) -> Re
                                     name: name.clone(),
                                     created_at: now_millis(),
                                     role,
+                                    auto_name,
                                 });
                                 let _ = reg.save();
                             }
@@ -633,6 +640,7 @@ mod tests {
             last_action_block: 0,
             fetched_at_ms: 1.0,
             pfp_attrs: None,
+            chain_name: None,
             planet_ore: None,
             mine_eta_s: None,
             refine_eta_s: None,

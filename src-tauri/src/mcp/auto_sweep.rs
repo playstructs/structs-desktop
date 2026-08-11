@@ -369,6 +369,7 @@ mod tests {
             last_action_block: 0,
             fetched_at_ms: 0.0,
             pfp_attrs: None,
+            chain_name: None,
             planet_ore: None,
             mine_eta_s: None,
             refine_eta_s: None,
