@@ -495,6 +495,54 @@ pub async fn execute(params: EventParams) -> Vec<Content> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ids must never be matched against a subject by substring — anywhere.
+    ///
+    /// A chain id is a prefix of every longer id in its decade, so `1-195`
+    /// matches `1-1950`…`1-1959` and `2-422` matches `2-4228`. The failure is
+    /// invisible until somebody registers an id in the colliding range, and then
+    /// it silently attributes other players' events to you. It has now bitten
+    /// this codebase three times:
+    ///
+    ///   * `policy.rs`  — someone else's fight read as our combat (fixed).
+    ///   * `structs-config.js` — player 1-195 was notified "You sent 1 Alpha
+    ///     Matter" for an event belonging to 1-1957. Of 40 subjects the old
+    ///     filter matched for that player, 36 were other people's (fixed).
+    ///   * `event_buffer::get_recent` — a `subject_contains` filter nothing used
+    ///     yet, removed before it could (fixed).
+    ///
+    /// Rust matching goes through `event_tokens`/`refs_set`, which split on the
+    /// delimiter. The frontend has no such choke point, so guard it at the
+    /// source: subjects are dot-delimited and an id is always a whole segment,
+    /// so `split('.')` is the only correct test.
+    #[test]
+    fn the_frontend_never_substring_matches_an_id_against_a_subject() {
+        const FILES: [(&str, &str); 3] = [
+            ("structs-config.js", include_str!("../../../../frontend/structs-config.js")),
+            ("board-pages.js", include_str!("../../../../frontend/board-pages.js")),
+            ("board.js", include_str!("../../../../frontend/board.js")),
+        ];
+        for (name, src) in FILES {
+            for (n, line) in src.lines().enumerate() {
+                let l = line.trim();
+                if l.starts_with("//") || l.starts_with('*') || l.starts_with("/*") {
+                    continue; // the explanatory comments quote the bad pattern
+                }
+                // `split('.').indexOf(id)` is Array::indexOf — an exact whole-token
+                // test, and the correct form. Only a scan of the raw string is a bug.
+                let tokenised = l.contains("split('.')") || l.contains("split(\".\")");
+                let scans_subject = l.contains("subject")
+                    && (l.contains(".indexOf(") || l.contains(".includes("))
+                    && !tokenised;
+                assert!(
+                    !scans_subject,
+                    "{name}:{} matches an id against a subject by substring — split('.') and \
+                     compare whole tokens instead (see subjectRefersTo): {l}",
+                    n + 1
+                );
+            }
+        }
+    }
     use serde_json::json;
 
     fn ev(cat: &str, subject: &str, detail: Value) -> GameEvent {

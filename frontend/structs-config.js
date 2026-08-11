@@ -265,6 +265,29 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       return null;
     }
 
+    /* Does this GRASS subject name `id` as a WHOLE token?
+     *
+     * Subjects are dot-delimited, e.g.
+     *   structs.inventory.ualpha.0-1.1-1957.structs1wvqnnuhcd6g4up37km04vrqm6m9a7vtg5df9tl
+     * so testing with indexOf() matches any id that merely CONTAINS ours.
+     * Player 1-195 was notified "You sent 1 Alpha Matter" for an event that
+     * belonged to 1-1957, because "1-1957".indexOf("1-195") === 0. The entire
+     * 1-1950…1-1958 cohort collides with 1-195, and the same trap exists at
+     * every ten-fold boundary — 1-19 collides with 1-190…1-199, and so on. It
+     * stays invisible until someone registers an id in the colliding range.
+     *
+     * Splitting on the delimiter and comparing whole tokens is exact: ids never
+     * contain a dot, so a token is always a complete id.
+     */
+    function subjectRefersTo(subject, id) {
+      if (!subject || !id) return false;
+      var parts = String(subject).split('.');
+      for (var i = 0; i < parts.length; i++) {
+        if (parts[i] === String(id)) return true;
+      }
+      return false;
+    }
+
     // Helper: check if a struct ID belongs to us
     function isMyStruct(structId, ctx) {
       return ctx && ctx.structs && ctx.structs.hasOwnProperty(structId);
@@ -556,7 +579,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         },
         filter: function(d, ctx) {
           if (!ctx) return false;
-          return d.subject && d.subject.indexOf(ctx.playerId) !== -1;
+          return subjectRefersTo(d.subject, ctx.playerId);
         },
         debounce: 3000
       },
@@ -571,7 +594,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         },
         filter: function(d, ctx) {
           if (!ctx) return false;
-          return d.subject && d.subject.indexOf(ctx.playerId) !== -1;
+          return subjectRefersTo(d.subject, ctx.playerId);
         },
         debounce: 3000
       },
@@ -586,7 +609,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         filter: function(d, ctx) {
           if (!ctx) return false;
           // Only care about our own player's load changes
-          if (!(d.subject && d.subject.indexOf(ctx.playerId) !== -1)) return false;
+          if (!(subjectRefersTo(d.subject, ctx.playerId))) return false;
           // Only notify if this is actually an overload
           // (we'd need capacity info — for now, always notify on load changes to our player)
           return true;
@@ -602,7 +625,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         },
         filter: function(d, ctx) {
           if (!ctx) return false;
-          return d.subject && d.subject.indexOf(ctx.playerId) !== -1;
+          return subjectRefersTo(d.subject, ctx.playerId);
         },
         debounce: 10000
       }

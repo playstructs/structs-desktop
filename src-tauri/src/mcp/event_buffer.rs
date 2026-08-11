@@ -27,7 +27,15 @@ pub fn push_event(event: GameEvent) {
     buffer.push_back(event);
 }
 
-pub fn get_recent(count: usize, category: Option<&str>, subject_contains: Option<&str>) -> Vec<GameEvent> {
+/// Recent events, newest last.
+///
+/// `subject_token` matches a WHOLE dot-delimited segment of the subject, never a
+/// substring. This used to be `subject_contains` doing `subject.contains(sub)`,
+/// which is the trap that has bitten this codebase repeatedly: an id is a prefix
+/// of every longer id in its decade, so filtering on `1-195` also returns
+/// `1-1950`…`1-1959`, and filtering on `2-422` returns `2-4228`. No caller
+/// relied on the substring behaviour, so the semantics are simply exact now.
+pub fn get_recent(count: usize, category: Option<&str>, subject_token: Option<&str>) -> Vec<GameEvent> {
     let buffer = EVENT_BUFFER.read().unwrap();
     buffer
         .iter()
@@ -38,8 +46,8 @@ pub fn get_recent(count: usize, category: Option<&str>, subject_contains: Option
                     return false;
                 }
             }
-            if let Some(sub) = subject_contains {
-                if !e.subject.contains(sub) {
+            if let Some(tok) = subject_token {
+                if !e.subject.split('.').any(|seg| seg == tok) {
                     return false;
                 }
             }

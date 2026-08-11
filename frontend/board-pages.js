@@ -2168,6 +2168,22 @@
     if (key === 'action' && String(raw).toLowerCase() === String(ev.category || '').toLowerCase()) {
       return null;
     }
+    /* Is `id` already visible in the rendered text `shown`?
+     *
+     * `shown` is a resolved label like "worker783 (1-1075)" or a bare id. A
+     * substring test matches any LONGER id that happens to start with ours, so
+     * a chip for 1-1075 would be suppressed by a row showing 1-10750.
+     */
+    function grassIdAlreadyShown(shown, id) {
+      return shown === id || shown.slice(-(id.length + 2)) === '(' + id + ')';
+    }
+
+    /* Does a dot-delimited GRASS subject contain `value` as a whole token? */
+    function subjectHasToken(subject, value) {
+      if (!subject || value == null) return false;
+      return String(subject).split('.').indexOf(String(value)) >= 0;
+    }
+
     // An id whose RESOLVED twin is already on the row. `counterparty` renders
     // as "worker783 (1-1075)", so a `counterparty_player_id: 1-1075` chip beside
     // it is the same id a second time; likewise a counterparty guild that is
@@ -2176,7 +2192,10 @@
       // Compare against the RENDERED counterparty (an address resolves to
       // "worker783 (1-1075)"), not the raw bech32 it started as.
       var cp = grassVal(ev, det, 'counterparty', det.counterparty, 'new');
-      if (cp != null && String(cp).indexOf(String(raw)) >= 0) return null;
+      // Whole-id match, not substring: `indexOf` would treat "worker9 (1-10750)"
+      // as already showing 1-1075 and silently drop a chip for a DIFFERENT
+      // player. Same trap that made 1-195 receive 1-1957's notifications.
+      if (cp != null && grassIdAlreadyShown(String(cp), String(raw))) return null;
     }
     if (key === 'counterparty_guild_id' && det.guild_id != null
         && String(det.guild_id) === String(raw)) {
@@ -2325,7 +2344,9 @@
       // The subject already ends with the address on every inventory event, so
       // the chip repeated a 44-character bech32 string verbatim. Only dropped
       // when the subject genuinely contains it — nothing is hidden.
-      if (k === 'address' && String(ev.subject || '').indexOf(String(v)) >= 0) return;
+      // Whole-token match on the dot-delimited subject rather than a substring
+      // scan, for the same reason as `grassIdAlreadyShown`.
+      if (k === 'address' && subjectHasToken(ev.subject, v)) return;
       if (/_old$/.test(k) && keySet[k.replace(/_old$/, '')] && det[k.replace(/_old$/, '')] != null) {
         return; // folded into the new-value chip below
       }
