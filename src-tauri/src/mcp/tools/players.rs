@@ -1161,12 +1161,14 @@ pub async fn execute(
                             .and_then(VPlayerRole::parse)
                             .unwrap_or_default();
                         let attrs = crate::mcp::pfp::role_pfp_attrs(role.as_str(), index);
-                        let _ = vplayer_bridge::sign_action(
+                        // Ledgered so the attempt reaches the Tx page and the
+                        // failure ledger; still best-effort for the create.
+                        let _ = crate::mcp::tx_retry::sign_with_retry(
                             app_handle,
                             index,
                             "/structs.structs.MsgPlayerUpdatePfpClientRenderAttributes",
                             json!({ "playerId": pid, "pfpClientRenderAttributes": attrs }),
-                            60,
+                            &format!("pfp:{pid}"),
                         )
                         .await;
                     }

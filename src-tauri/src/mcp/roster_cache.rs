@@ -100,14 +100,22 @@ fn heal_missing_pfp(app: tauri::AppHandle, index: u32, role: String, pid: String
     }
     tauri::async_runtime::spawn(async move {
         let attrs = crate::mcp::pfp::role_pfp_attrs(&role, index);
-        let _ = crate::mcp::vplayer_bridge::sign_action(
+        // Ledgered, like every other write — see heal_stale_name.
+        if let Err(e) = crate::mcp::tx_retry::sign_with_retry(
             &app,
             index,
             "/structs.structs.MsgPlayerUpdatePfpClientRenderAttributes",
             serde_json::json!({ "playerId": pid, "pfpClientRenderAttributes": attrs }),
-            60,
+            &format!("pfp:{pid}"),
         )
-        .await;
+        .await
+        {
+            crate::mcp::telemetry::tlog(
+                "pfp",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("{pid} (idx {index}) portrait write failed: {e}"),
+            );
+        }
         PFP_HEALING
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -123,7 +131,7 @@ static NAME_HEALING: LazyLock<std::sync::Mutex<std::collections::HashSet<String>
 /// thousand would still queue two thousand transactions the moment the feature
 /// is switched on — the same shape as the watchdog cascade. A budget spreads
 /// the rollout over ~20 sweeps and keeps every other loop responsive.
-const RENAME_BUDGET_PER_SWEEP: usize = 100;
+pub const RENAME_BUDGET_PER_SWEEP: usize = 100;
 
 /// Fire-and-forget: bring a player's on-chain name in line with the configured
 /// style, then mirror it into the local registry so the board, the grass feed
@@ -143,12 +151,18 @@ fn heal_stale_name(app: tauri::AppHandle, index: u32, pid: String, want: String)
         }
     }
     tauri::async_runtime::spawn(async move {
-        let res = crate::mcp::vplayer_bridge::sign_action(
+        // Through tx_retry, NOT vplayer_bridge directly: the retry ledger is
+        // what puts an attempt on the Tx page and into `structs_system tx`, so
+        // signing straight at the bridge would make a thousand renames — and
+        // any failures among them — completely invisible. It also buys the
+        // tx_gate admission slot, so a burst of renames cannot crowd out a
+        // deadline-bound combat answer, plus sequence-mismatch retry.
+        let res = crate::mcp::tx_retry::sign_with_retry(
             &app,
             index,
             "/structs.structs.MsgPlayerUpdateName",
             serde_json::json!({ "playerId": pid, "name": want }),
-            60,
+            &format!("callsign:{pid}"),
         )
         .await;
         match res {

@@ -1527,9 +1527,43 @@ pub async fn mcp_callsign_get() -> Value {
         })
         .collect();
 
+    // Rollout progress. A budgeted rename takes many sweeps, and without a
+    // count on this card the only evidence it is working at all is the log —
+    // which is not where anyone looks after flipping a switch.
+    let (renamed, pending, operator_named) = {
+        let rows = crate::mcp::roster_cache::all_rows();
+        let reg = crate::mcp::virtual_players::REGISTRY
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let (mut done, mut todo, mut theirs) = (0usize, 0usize, 0usize);
+        for p in &reg.players {
+            let Some(pid) = p.player_id.as_deref() else { continue };
+            let want = crate::mcp::callsign::name_for(p.index);
+            let chain = rows
+                .iter()
+                .find(|r| r.player_id == pid)
+                .and_then(|r| r.chain_name.clone())
+                .unwrap_or_default();
+            if chain == want {
+                done += 1;
+            } else if p.auto_name && crate::mcp::callsign::is_managed_name(&chain) {
+                todo += 1;
+            } else {
+                theirs += 1;
+            }
+        }
+        (done, todo, theirs)
+    };
+
     let active = crate::mcp::callsign::find_style(&cfg, &cfg.style);
     let capacity = crate::mcp::callsign::capacity(&active);
     json!({
+        "renamed": renamed,
+        "pending": pending,
+        // Names the operator chose; reported so the count reconciles with the
+        // fleet size rather than looking like players went missing.
+        "operator_named": operator_named,
+        "per_sweep": crate::mcp::roster_cache::RENAME_BUDGET_PER_SWEEP,
         "config": crate::mcp::callsign::config_json(),
         "styles": styles,
         "capacity": capacity,
@@ -1649,14 +1683,24 @@ pub async fn mcp_role_pfp_set_impl(
                 let role = fr.clone();
                 async move {
                     let attrs = crate::mcp::pfp::role_pfp_attrs(&role, index);
-                    let _ = crate::mcp::vplayer_bridge::sign_action(
+                    // Ledgered: a batch restyle is the LARGEST burst of writes
+                    // this app makes, so it is the last one that should be
+                    // invisible to the Tx page and the failure ledger.
+                    if let Err(e) = crate::mcp::tx_retry::sign_with_retry(
                         &app,
                         index,
                         PFP_TYPE_URL,
                         json!({ "playerId": pid, "pfpClientRenderAttributes": attrs }),
-                        60,
+                        &format!("pfp:{pid}"),
                     )
-                    .await;
+                    .await
+                    {
+                        crate::mcp::telemetry::tlog(
+                            "pfp",
+                            crate::mcp::telemetry::Sev::Warn,
+                            format!("{pid} (idx {index}) restyle failed: {e}"),
+                        );
+                    }
                 }
             },
         )

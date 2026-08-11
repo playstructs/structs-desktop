@@ -2965,10 +2965,23 @@
     body.appendChild(H.checkbox(!!cfg.rename_existing, 'Rename existing players on-chain', function (v) {
       cfg.rename_existing = v; saveCallsign(cfg);
     }));
+    // Rollout progress. Without this the only evidence the switch did anything
+    // is the telemetry log, which is not where anyone looks after flipping it.
     if (cfg.rename_existing) {
+      var prog = H.el('div', 'hstrip');
+      prog.appendChild(statTile('renamed', d.renamed == null ? '—' : String(d.renamed), null, 'ok'));
+      prog.appendChild(statTile('still to go', d.pending == null ? '—' : String(d.pending)));
+      if (d.operator_named) prog.appendChild(statTile('named by you', String(d.operator_named), null, 'muted'));
+      body.appendChild(prog);
+      var per = d.per_sweep || 100;
+      var sweeps = d.pending ? Math.ceil(d.pending / per) : 0;
       body.appendChild(H.el('p', 'ops-muted',
-        'The roster sweep renames up to 100 players at a time and picks up where it left off, ' +
-        'so a large fleet settles over a few sweeps. Names you set yourself are never touched.'));
+        'The roster sweep renames up to ' + per + ' players at a time and picks up where it left off' +
+        (sweeps ? ' — about ' + sweeps + ' more sweep' + (sweeps === 1 ? '' : 's') + ' to go' : '') +
+        '. Each rename is a real transaction; watch them land on the Transactions page. ' +
+        'Names you set yourself are never touched.'));
+      body.appendChild(H.el('p', 'ops-muted',
+        'Renaming only runs while this window is open — the roster sweep is what drives it.'));
     }
 
     // Preview against the operator's REAL indices, so what is shown is what
