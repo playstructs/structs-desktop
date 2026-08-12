@@ -124,6 +124,14 @@ pub async fn execute(
             }
         }
 
+        // One charged action per player per BLOCK is a hard chain rule, so
+        // firing steps back-to-back guarantees the next one is rejected. Space
+        // them by a block up front — cheaper than a failed broadcast plus a
+        // retry, and it keeps the wait budget for genuine charge shortfalls.
+        if i > 0 {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+        }
+
         out.push_str(&format!("\nStep {}: {} ", i + 1, step.action));
 
         // Run the step, retrying on a charge-block until the budget is spent.
@@ -163,9 +171,29 @@ pub async fn execute(
                 .collect::<Vec<_>>()
                 .join(" ");
 
-            // Charge cooldown: action's own preflight reports it. Wait and retry.
-            let is_charge_block = text.contains("BLOCKED") && text.contains("charge");
-            if is_charge_block && waited < budget {
+            // Wait-and-retry covers TWO different refusals, and for a long time
+            // it only recognised the first:
+            //
+            //   1. The action's own PREFLIGHT ("BLOCKED … charge") — not enough
+            //      charge level yet for this weapon/ability.
+            //   2. The chain rejecting the broadcast for a PER-BLOCK limit:
+            //        · code 2022 "player has zero charge this block (already
+            //          discharged)" — one charged action per player per block,
+            //          regardless of how much charge is banked;
+            //        · code 2041 "exceeded CheckTx free-tx cap for this block"
+            //          — five free txs per address per block.
+            //
+            // Neither (2) message contains "BLOCKED", and 2041 does not even
+            // contain "charge", so both fell straight through to "failed" and
+            // the step was abandoned. Measured: a 7-step defend sequence landed
+            // ONE assignment and silently dropped six.
+            //
+            // Every one of these clears on the next block, so retrying is right.
+            let is_pacing_block = (text.contains("BLOCKED") && text.contains("charge"))
+                || text.contains("zero charge this block")
+                || text.contains("already discharged")
+                || text.contains("free-tx cap");
+            if is_pacing_block && waited < budget {
                 out.push_str("(waiting for charge…) ");
                 tokio::time::sleep(Duration::from_secs(6)).await;
                 waited += 6;
@@ -179,7 +207,7 @@ pub async fn execute(
                 continue;
             }
             out.push_str(&format!("→ {}", text.lines().next().unwrap_or("")));
-            if is_charge_block {
+            if is_pacing_block {
                 out.push_str(&format!(
                     "\n⏸ PAUSED at step {} — charge wait budget ({}s) exhausted. Re-run the remaining steps later.\n",
                     i + 1, budget

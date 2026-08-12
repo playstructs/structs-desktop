@@ -5,7 +5,9 @@
 //! and its 2/2 counter is the best attacker-killer), then the Ore Refinery and Ore
 //! Extractor, spreading defenders across targets instead of piling on one. A
 //! same-ambit defender is preferred (only same-ambit defenders can BLOCK; cross-ambit
-//! ones only counter). One assignment per player per scan (defend costs 1 charge).
+//! ones only counter), and among those a CO-LOCATED one wins — planetary structs do
+//! not travel, so they stop defending a fleet the moment it leaves home, which is
+//! exactly when it is raiding. One assignment per player per scan (defend costs 1 charge).
 //! Idempotent: a defender whose on-chain `protectedStructIndex` is already non-zero
 //! is cached (with its target) and never re-queried. Off by default (it auto-signs).
 //!
@@ -74,6 +76,8 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// Blocking is the stronger effect, so same-ambit dominates; among the rest,
 /// value follows counter strength times how many ambits the weapon can answer
 /// from. Read off the chain so it stays correct as hulls change.
+///
+/// Ambit is only half of it — see [`travels_with_target`] for the other half.
 fn defender_rank(type_id: &str, target_ambit: &str, defender_ambit: &str) -> u64 {
     let (counter, reach) = crate::game_state::GAME_STATE
         .read()
@@ -93,6 +97,24 @@ fn defender_rank(type_id: &str, target_ambit: &str, defender_ambit: &str) -> u64
     // Blocking outranks any amount of counter reach; unarmed planetary hulls
     // (counter 0) still rank above nothing when they can block.
     if blocks { 100 + counter * breadth } else { counter * breadth }
+}
+
+/// Does this pairing keep working when it is needed most?
+///
+/// Both block and counter require the two structs to be CO-LOCATED at the
+/// moment of the shot. Measured live (2026-08-12): a Command Ship raiding away
+/// from home was "defended" by three Ore Bunkers still sitting on its home
+/// planet — the attack landed completely unblocked, with no counter, and the
+/// relationship might as well not have existed.
+///
+/// A planetary defender is not useless: while the fleet is on station it blocks
+/// perfectly well (verified the same day, an Ore Bunker absorbing 2 damage for a
+/// fleet Command Ship). But planetary structs DO NOT TRAVEL, so they silently
+/// stop defending the instant the fleet leaves — which is exactly when it is
+/// raiding and most exposed. A fleet defender moves with what it guards and is
+/// therefore strictly better for anything that can leave home.
+fn travels_with_target(defender_loc: &str, target_loc: &str) -> bool {
+    !defender_loc.is_empty() && defender_loc == target_loc
 }
 
 /// Defender struct id -> protected struct id it already defends (protectedStructIndex
@@ -227,26 +249,24 @@ async fn scan(
 
                 // Protected targets in priority order: Command Ship (the shield
                 // gate) first, then Refinery, then Extractor. (id, ambit) pairs.
-                let find_type = |t: &str| -> Option<(String, String)> {
+                let find_type = |t: &str| -> Option<(String, String, String)> {
                     structs
                         .iter()
                         .filter(|s| !truthy(s.get("is_destroyed")))
                         .find(|s| type_id_of(s) == t)
                         .and_then(|s| {
                             s.get("id").and_then(|x| x.as_str()).map(|id| {
-                                let ambit = s
-                                    .get("operating_ambit")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                (id.to_string(), ambit)
+                                let field = |k: &str| {
+                                    s.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+                                };
+                                (id.to_string(), field("operating_ambit"), field("location_id"))
                             })
                         })
                 };
-                // (type, id, ambit), priority-ordered.
-                let protected: Vec<(&str, String, String)> = [COMMAND_SHIP_TYPE, REFINERY_TYPE, EXTRACTOR_TYPE]
+                // (type, id, ambit, location), priority-ordered.
+                let protected: Vec<(&str, String, String, String)> = [COMMAND_SHIP_TYPE, REFINERY_TYPE, EXTRACTOR_TYPE]
                     .iter()
-                    .filter_map(|t| find_type(t).map(|(id, ambit)| (*t, id, ambit)))
+                    .filter_map(|t| find_type(t).map(|(id, ambit, loc)| (*t, id, ambit, loc)))
                     .collect();
                 if protected.is_empty() {
                     return;
@@ -255,7 +275,8 @@ async fn scan(
                 // Pass 1: classify every combat struct — count existing assignments
                 // per protected target, collect idle (built, unassigned) candidates.
                 let mut counts: HashMap<String, usize> = HashMap::new();
-                let mut idle: Vec<(String, String, String)> = Vec::new(); // (id, ambit, type_id)
+                // (id, ambit, type_id, location_id)
+                let mut idle: Vec<(String, String, String, String)> = Vec::new();
                 for s in &structs {
                     if truthy(s.get("is_destroyed")) {
                         continue;
@@ -291,12 +312,10 @@ async fn scan(
                         ASSIGNED_CACHE.lock().unwrap().insert(sid, target);
                         continue;
                     }
-                    let ambit = s
-                        .get("operating_ambit")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    idle.push((sid, ambit, tid));
+                    let field = |k: &str| {
+                        s.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+                    };
+                    idle.push((sid, field("operating_ambit"), tid, field("location_id")));
                 }
                 if idle.is_empty() {
                     return;
@@ -305,16 +324,16 @@ async fn scan(
                 // Pick the target: the Command Ship until it has CMD_MIN_DEFENDERS,
                 // then whichever protected struct has the fewest defenders
                 // (ties break toward the higher-priority target).
-                let (target_id, target_ambit) = {
-                    let cmd = protected.iter().find(|(t, _, _)| *t == COMMAND_SHIP_TYPE);
+                let (target_id, target_ambit, target_loc) = {
+                    let cmd = protected.iter().find(|(t, _, _, _)| *t == COMMAND_SHIP_TYPE);
                     match cmd {
-                        Some((_, id, ambit)) if counts.get(id).copied().unwrap_or(0) < CMD_MIN_DEFENDERS => {
-                            (id.clone(), ambit.clone())
+                        Some((_, id, ambit, loc)) if counts.get(id).copied().unwrap_or(0) < CMD_MIN_DEFENDERS => {
+                            (id.clone(), ambit.clone(), loc.clone())
                         }
                         _ => protected
                             .iter()
-                            .min_by_key(|(_, id, _)| counts.get(id).copied().unwrap_or(0))
-                            .map(|(_, id, ambit)| (id.clone(), ambit.clone()))
+                            .min_by_key(|(_, id, _, _)| counts.get(id).copied().unwrap_or(0))
+                            .map(|(_, id, ambit, loc)| (id.clone(), ambit.clone(), loc.clone()))
                             .unwrap(),
                     }
                 };
@@ -337,11 +356,20 @@ async fn scan(
                 // paired hulls that could do neither. `defender_rank` scores
                 // both contributions instead, and anything scoring zero is left
                 // idle rather than burning its one assignment slot.
+                // Co-location outranks everything else: a defender that does not
+                // travel with its target stops defending the moment the target
+                // leaves home, and a raiding Command Ship is exactly the case
+                // where that happens. Within a location, `defender_rank` decides.
                 let pick = idle
                     .iter()
-                    .max_by_key(|(_, a, tid)| defender_rank(tid, &target_ambit, a))
+                    .max_by_key(|(_, a, tid, loc)| {
+                        (
+                            travels_with_target(loc, &target_loc),
+                            defender_rank(tid, &target_ambit, a),
+                        )
+                    })
                     .cloned();
-                let Some((sid, _, _)) = pick.filter(|(_, a, tid)| {
+                let Some((sid, _, _, _)) = pick.filter(|(_, a, tid, _)| {
                     defender_rank(tid, &target_ambit, a) > 0
                 }) else {
                     return; // nothing here can block OR counter — leave them free
@@ -390,6 +418,34 @@ async fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Co-location is the half of the pairing `defender_rank` cannot see.
+    /// Measured live: three Ore Bunkers left at home "defending" a Command Ship
+    /// that had gone raiding blocked nothing and countered nothing — the shot
+    /// landed clean. The same Ore Bunkers absorbed 2 damage for a Command Ship
+    /// that was still on station, so this is a preference, not a veto.
+    #[test]
+    fn a_defender_that_cannot_travel_loses_the_tie() {
+        // The failure mode: planetary hull, fleet target.
+        assert!(!travels_with_target("2-10813", "9-281"));
+        // A fleet hull guarding its own fleet goes where the fleet goes.
+        assert!(travels_with_target("9-281", "9-281"));
+        // Planet-to-planet is co-located too — nothing there ever moves.
+        assert!(travels_with_target("2-10813", "2-10813"));
+        // Unknown location: never claim it travels.
+        assert!(!travels_with_target("", "9-281"));
+
+        // Ordering: the pick is keyed on (travels, rank), so co-location wins
+        // a tie and rank still decides among equals. An Ore Bunker that CAN
+        // block (same ambit) but is stuck on the planet must lose to a fleet
+        // hull that travels, even one that can only counter.
+        let stranded_blocker = (true, 100u64); // same-ambit, wrong location
+        let travelling_counter = (true, 2u64);
+        assert!(
+            (true, travelling_counter.1) > (false, stranded_blocker.1),
+            "travelling beats stranded regardless of rank"
+        );
+    }
 
     #[test]
     fn default_off_productive_only() {

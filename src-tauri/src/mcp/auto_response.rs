@@ -572,6 +572,17 @@ async fn handle_alarm(
     // deliberately not gated on `mode`: like `panic_refine` it is purely
     // defensive and never fires a shot.
     if alarm.is_raid && !alarm.defender_player.is_empty() && !cfg.dry_run {
+        // Power first, then position. A Command Ship that is merely switched
+        // OFF arms `blockStartRaid` with the fleet still on station, and it is
+        // also the precondition the chain checks before allowing a recall — so
+        // doing this first fixes the standalone case and unblocks the other.
+        if let Err(e) = restore_command_ship(app, client, &alarm.defender_player).await {
+            crate::mcp::telemetry::tlog(
+                "auto_response",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("{}: could not reactivate Command Ship: {e}", alarm.planet_id),
+            );
+        }
         if let Err(e) = recall_fleet(app, client, &alarm.defender_player).await {
             crate::mcp::telemetry::tlog(
                 "auto_response",
@@ -978,17 +989,40 @@ struct RaiderFleet {
 
 /// Is a recall both needed and possible?
 ///
-/// Needed when the fleet is not on station at `home` — that, not Command Ship
-/// ownership, is what makes a planet raidable. Possible only with an ONLINE
-/// command struct: the chain rejects the move otherwise ("fleet (9-X) needs an
-/// online command struct before deploy"), so a player whose Command Ship is
-/// dead or still building cannot use this escape at all.
+/// Needed when the fleet is not on station at `home`. Possible only with an
+/// ONLINE command struct: the chain rejects the move otherwise ("fleet (9-X)
+/// needs an online command struct before deploy"), so a player whose Command
+/// Ship is dead or still building cannot use this escape at all.
+///
+/// NOTE: an off-station fleet is only ONE of the two ways to be raidable — see
+/// [`should_restore_command_ship`] for the other.
 fn should_recall(status: Option<&str>, at: &str, home: &str, cmd_online: bool) -> bool {
     if home.is_empty() {
         return false;
     }
     let on_station = status == Some("onStation") && at == home;
     !on_station && cmd_online
+}
+
+/// The OTHER way to be raidable: a Command Ship that is merely switched OFF.
+///
+/// Measured live (2026-08-12, planet 2-10784): `deactivate` on the Command Ship
+/// moved its status 7 → 3 and armed `blockStartRaid` in the same block **with
+/// the fleet still on station**; `activate` cleared it again. The gate is the
+/// ONLINE bit, not presence — so `should_recall` returning false because
+/// `cmd_online` is false is precisely the case where the planet is exposed and
+/// nothing was fixing it: the recall is skipped, and no loop anywhere ever
+/// called `MsgStructActivate`.
+///
+/// This matters at roster scale rather than as a curiosity. Substation 4-1
+/// carries ~1,283 connections and `connectionCapacity` dilutes as connections
+/// grow, so a capacity squeeze can drop many Command Ships offline at once and
+/// silently arm every one of those planets.
+///
+/// Reactivating is the cheapest possible defence: one transaction, no combat,
+/// and it also unblocks the recall path for a fleet that is genuinely away.
+fn should_restore_command_ship(cmd: &str, cmd_online: bool) -> bool {
+    !cmd.is_empty() && !cmd_online
 }
 
 /// Bring `player`'s fleet home if it is off station, restoring their shields.
@@ -1049,6 +1083,74 @@ async fn recall_fleet(
         "auto_response",
         crate::mcp::telemetry::Sev::Notice,
         format!("recalled {player}'s fleet {fleet} from {at} to {home} — shields restored"),
+    );
+    Ok(())
+}
+
+/// Switch `player`'s Command Ship back on if it is off, restoring their shields.
+///
+/// The companion to [`recall_fleet`] for the other route to raidability. Both
+/// are pure defence — no shot is fired — and both are one transaction. Returns
+/// `Ok(())` when there was nothing to do; "already online" is the common case
+/// and is not an error.
+///
+/// Deliberately runs BEFORE the recall: bringing the Command Ship back online
+/// both clears `blockStartRaid` on its own AND satisfies the chain's
+/// "needs an online command struct before deploy" precondition, so a player who
+/// is off-station *and* powered down can be rescued by the two calls in order.
+async fn restore_command_ship(
+    app: &tauri::AppHandle,
+    client: &CosmosClient,
+    player: &str,
+) -> Result<(), String> {
+    let pl = client.query_entity("player", player).await?;
+    let fleet = pl
+        .get("Player")
+        .and_then(|x| x.get("fleetId"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    if fleet.is_empty() {
+        return Ok(());
+    }
+    let fl = client.query_entity("fleet", fleet).await?;
+    let cmd = fl
+        .get("Fleet")
+        .and_then(|x| x.get("commandStruct"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    if cmd.is_empty() {
+        return Ok(()); // destroyed or never built — rebuilding is not our job
+    }
+    let e = client.query_entity("struct", cmd).await?;
+    let attrs = e.get("structAttributes");
+    let cmd_online = crate::mcp::loop_util::parse_bool(attrs.and_then(|x| x.get("isOnline")));
+    if !should_restore_command_ship(cmd, cmd_online) {
+        return Ok(());
+    }
+    // A half-built Command Ship cannot be switched on; leave it to auto_build.
+    if !crate::mcp::loop_util::parse_bool(attrs.and_then(|x| x.get("isBuilt"))) {
+        return Ok(());
+    }
+    let Some(index) = crate::mcp::virtual_players::REGISTRY.read().ok().and_then(|r| {
+        r.players
+            .iter()
+            .find(|v| v.player_id.as_deref() == Some(player))
+            .map(|v| v.index)
+    }) else {
+        return Ok(()); // the primary signs elsewhere; nothing to do here
+    };
+    crate::mcp::tx_retry::sign_with_retry(
+        app,
+        index,
+        "/structs.structs.MsgStructActivate",
+        json!({ "structId": cmd }),
+        &format!("auto_response:{player}"),
+    )
+    .await?;
+    crate::mcp::telemetry::tlog(
+        "auto_response",
+        crate::mcp::telemetry::Sev::Notice,
+        format!("reactivated {player}'s Command Ship {cmd} — shields restored"),
     );
     Ok(())
 }
@@ -1263,6 +1365,37 @@ mod tests {
         assert!(!should_recall(Some("away"), "2-7354", HOME, false));
         // Unknown home: never guess a destination.
         assert!(!should_recall(Some("away"), "2-7354", "", true));
+    }
+
+    /// The gap this closes. A planet is raidable by EITHER route — fleet off
+    /// station, or Command Ship merely switched off — and only the first had an
+    /// owner. Measured on 2-10784: `deactivate` armed `blockStartRaid` with the
+    /// fleet still on station, `activate` cleared it.
+    ///
+    /// Note the exact overlap with `should_recall`: where that returns false
+    /// *because* `cmd_online` is false, this returns true. The recall gives up
+    /// on precisely the player who is exposed, which is why nothing was fixing
+    /// it — and why this runs first.
+    #[test]
+    fn a_powered_down_command_ship_is_restored() {
+        const HOME: &str = "2-7324";
+        // Switched off — the case that had no owner.
+        assert!(should_restore_command_ship("5-2391", false));
+        // Already online: nothing to do, no wasted transaction.
+        assert!(!should_restore_command_ship("5-2391", true));
+        // Destroyed / never built: rebuilding belongs to auto_build, not here.
+        assert!(!should_restore_command_ship("", false));
+
+        // The two defences are complementary, never both idle when exposed.
+        let (status, at, cmd_online) = (Some("onStation"), HOME, false);
+        assert!(
+            !should_recall(status, at, HOME, cmd_online),
+            "recall correctly declines — the fleet is already home"
+        );
+        assert!(
+            should_restore_command_ship("5-2391", cmd_online),
+            "…so the reactivation must be the one to answer"
+        );
     }
 
     /// A friendly fleet parked at our planet must not hide the raider behind
