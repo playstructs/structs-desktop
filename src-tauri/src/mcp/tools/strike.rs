@@ -118,7 +118,13 @@ fn default_true() -> bool {
 /// the effective fire target becomes the first blocker (cross-ambit defenders
 /// only counter, they don't block, so they don't need stripping). Returns
 /// (effective_target, phase, note).
-async fn resolve_fire_target(
+///
+/// `pub(crate)`: `auto_response` and `auto_raid` share this walk — firing
+/// through a blocker wastes the whole volley (the blocker absorbs everything),
+/// and both loops used to do exactly that while only the manual strike tool
+/// stripped. Measured on 1-61's home: his Tank blocker ate seven straight
+/// Mobile Artillery shots aimed at his Command Ship before falling.
+pub(crate) async fn resolve_fire_target(
     client: &CosmosClient,
     target: &str,
 ) -> Result<(String, String, String), String> {

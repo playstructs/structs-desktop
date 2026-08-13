@@ -1,22 +1,36 @@
-//! Native auto-defense loop — assigns each productive vplayer's idle combat structs
-//! to DEFEND its key structs via `MsgStructDefenseSet`, so newly-built defenders
-//! actually intercept raids instead of sitting unassigned. Priority: the Command
-//! Ship first (it is the planetary-shield gate — if it dies the raid clock arms —
-//! and its 2/2 counter is the best attacker-killer), then the Ore Refinery and Ore
-//! Extractor, spreading defenders across targets instead of piling on one. A
-//! same-ambit defender is preferred (only same-ambit defenders can BLOCK; cross-ambit
-//! ones only counter), and among those a CO-LOCATED one wins — planetary structs do
-//! not travel, so they stop defending a fleet the moment it leaves home, which is
-//! exactly when it is raiding. One assignment per player per scan (defend costs 1 charge).
-//! Idempotent: a defender whose on-chain `protectedStructIndex` is already non-zero
-//! is cached (with its target) and never re-queried. Off by default (it auto-signs).
+//! Native auto-defense loop — builds and MAINTAINS each vplayer's on-chain
+//! defense web (`MsgStructDefenseSet` / `MsgStructDefenseClear`), modeled on the
+//! lattice the shard's strongest player (1-61 "JPEG") runs: his home has been
+//! cracked once in nine raid attempts, and the crack cost the attacker a
+//! counter-immune siege hull grinding through LAYERS of blockers.
 //!
-//! This is the "configure defensive relationships as new structs come online" piece:
-//! it runs every scan, so a freshly-built OSG/Tank/Starfighter gets a defender
-//! assignment on the next pass. Bait players are skipped by default (they're raid
-//! fodder — armor makes raids costly, but we don't shield their structs).
+//! The web, in priority order (see [`plan_web`]):
+//!   1. **Command Ship ← same-ambit armoured blocker** (Tank). The CMD is the
+//!      raid gate; a blocker absorbs shots INCLUDING counter-immune Mobile
+//!      Artillery fire — blocking is the only defense counter-immunity cannot
+//!      bypass (measured 2026-08-13: a Tank blocker ate 3 MA shots aimed at our
+//!      raider's CMD).
+//!   2. **Command Ship ← counter-guards** — hulls whose weapons cover many
+//!      ambits, so whatever ambit the attacker fires from, something answers.
+//!   3. **The blocker ← its own guards** — stripping the blocker must cost the
+//!      attacker (counter damage STACKS across every armed defender).
+//!   4. **Refinery / Extractor ← same-ambit blockers** (Ore Bunkers).
+//!   5. **Every remaining armed hull is wired in round-robin** — 1-61 wires his
+//!      ENTIRE fleet (15 edges); an idle charge bar defends nothing.
+//!
+//! Unlike the previous version this loop also CLEARS: a defender pointing at a
+//! dead or low-value target while a critical edge is unfilled gets a
+//! `MsgStructDefenseClear` (then re-assigned next scan). The chain auto-removes
+//! edges on destruction, but never re-points a survivor — that's our job, and
+//! it is exactly what 1-61 does by hand after every fight (6 re-adds within 20
+//! minutes of losing his CMD on 2026-08-13).
+//!
+//! One action per player per scan (defend costs charge), off by default.
+//! Covers ALL roles: raider fleets especially need webs — fleet defenders
+//! travel with the fleet, and a raider's CMD dying mid-raid ends the raid,
+//! strands the fleet, and opens its home planet.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, RwLock};
 
@@ -32,93 +46,262 @@ const REFINERY_TYPE: &str = "15";
 const EXTRACTOR_TYPE: &str = "14";
 /// Production / command types — PROTECTED targets, never used as defenders.
 const PROTECTED_TYPES: &[&str] = &["14", "15", "1"]; // extractor, refinery, command ship
-/// The Command Ship gets defenders before anything else, up to this many
-/// (ideally one blocker per ambit), before assignments spread to production.
-const CMD_MIN_DEFENDERS: usize = 4;
+/// Counter-guards assigned directly to the Command Ship (beyond its blocker).
+const CMD_GUARDS: usize = 2;
+/// Guards assigned to the Command Ship's blocker.
+const BLOCKER_GUARDS: usize = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoDefendConfig {
-    /// Master on/off. Off by default — it auto-signs defense-set txs.
+    /// Master on/off. Off by default — it auto-signs defense-set/clear txs.
     pub enabled: bool,
     /// Min seconds between scans.
     pub interval_secs: u64,
-    /// Also assign defenders on BAIT players (default false — bait are raid fodder).
+    /// Also web BAIT players (default true — bait carry real fleets, and a
+    /// blocked CMD turns a free decapitation into a grind).
     pub include_bait: bool,
+    /// Also web RAIDER players (default true). Fleet defenders TRAVEL with the
+    /// fleet: a raider's Tank blocker keeps absorbing counter-immune fire at
+    /// the target planet, which is where its CMD is most likely to die.
+    #[serde(default = "default_true")]
+    pub include_raiders: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AutoDefendConfig {
     fn default() -> Self {
-        Self { enabled: false, interval_secs: 180, include_bait: false }
+        Self { enabled: false, interval_secs: 180, include_bait: true, include_raiders: true }
     }
 }
 
 static CONFIG: LazyLock<RwLock<AutoDefendConfig>> = LazyLock::new(|| RwLock::new(load()));
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 static RUNNING: AtomicBool = AtomicBool::new(false);
-/// How useful is this hull as a defender of a target in `target_ambit`?
-///
-/// A defender contributes two SEPARATE things under two DIFFERENT conditions,
-/// and the pair is easy to get wrong:
-///
-///   * **Blocking** — absorbs the shot entirely. Requires the defender to share
-///     the TARGET's ambit.
-///   * **Countering** — damages the attacker, and can outright NEGATE the attack:
-///     measured, a Battleship's counter killed a 1 HP Tank and the Tank's shot
-///     then landed for 0 with `counterDestroyedAttacker: true`. Requires the
-///     defender's WEAPON to reach the ATTACKER's ambit.
-///
-/// So a cross-ambit defender is NOT useless — a space Battleship (primary reach
-/// water+land) counters a land attacker perfectly well, it just cannot block.
-/// An earlier version of this function assumed otherwise, on the strength of a
-/// single test where the cross-ambit hull was a Starfighter whose reach is space
-/// only and so genuinely could not answer. Reach is what decides it, not ambit.
-///
-/// Blocking is the stronger effect, so same-ambit dominates; among the rest,
-/// value follows counter strength times how many ambits the weapon can answer
-/// from. Read off the chain so it stays correct as hulls change.
-///
-/// Ambit is only half of it — see [`travels_with_target`] for the other half.
-fn defender_rank(type_id: &str, target_ambit: &str, defender_ambit: &str) -> u64 {
-    let (counter, reach) = crate::game_state::GAME_STATE
-        .read()
-        .ok()
-        .and_then(|g| {
-            g.struct_types.get(type_id).map(|t| {
-                (
-                    t.counter_attack_same_ambit.unwrap_or(0),
-                    t.primary_weapon_ambits.unwrap_or(0),
-                )
-            })
-        })
-        .unwrap_or((0, 0));
-    // How many ambits this hull could counter an attacker in.
-    let breadth = (reach & 0b11110).count_ones() as u64;
-    let blocks = !target_ambit.is_empty() && defender_ambit == target_ambit;
-    // Blocking outranks any amount of counter reach; unarmed planetary hulls
-    // (counter 0) still rank above nothing when they can block.
-    if blocks { 100 + counter * breadth } else { counter * breadth }
+
+/// A living, relevant struct of the player being planned.
+#[derive(Debug, Clone)]
+pub struct Hull {
+    pub id: String,
+    pub type_id: String,
+    pub ambit: String,
+    pub location_id: String,
+}
+
+/// The slice of the type catalog the planner needs. Kept separate from
+/// [`crate::game_state::StructTypeInfo`] so [`plan_web`] is a pure function
+/// tests can drive without a synced GAME_STATE.
+#[derive(Debug, Clone, Default)]
+pub struct TypeStats {
+    /// Cross-ambit counter damage.
+    pub counter: u64,
+    /// Same-ambit counter damage.
+    pub counter_same: u64,
+    /// Armour (attack_reduction) — what makes a hull a good BLOCKER.
+    pub armour: u64,
+    /// Union of primary|secondary weapon ambit masks (Water=2, Land=4, Air=8, Space=16).
+    pub reach: u64,
+}
+
+/// One desired edge of the defense web.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Edge {
+    pub defender: String,
+    pub protected: String,
+    pub why: &'static str,
+}
+
+fn breadth(reach: u64) -> u64 {
+    (reach & 0b11110).count_ones() as u64
 }
 
 /// Does this pairing keep working when it is needed most?
 ///
 /// Both block and counter require the two structs to be CO-LOCATED at the
-/// moment of the shot. Measured live (2026-08-12): a Command Ship raiding away
-/// from home was "defended" by three Ore Bunkers still sitting on its home
-/// planet — the attack landed completely unblocked, with no counter, and the
-/// relationship might as well not have existed.
-///
-/// A planetary defender is not useless: while the fleet is on station it blocks
-/// perfectly well (verified the same day, an Ore Bunker absorbing 2 damage for a
-/// fleet Command Ship). But planetary structs DO NOT TRAVEL, so they silently
-/// stop defending the instant the fleet leaves — which is exactly when it is
-/// raiding and most exposed. A fleet defender moves with what it guards and is
-/// therefore strictly better for anything that can leave home.
+/// moment of the shot. Planetary structs DO NOT TRAVEL, so they silently stop
+/// defending a fleet the instant it leaves home — which is exactly when it is
+/// raiding and most exposed. A fleet defender moves with what it guards.
 fn travels_with_target(defender_loc: &str, target_loc: &str) -> bool {
     !defender_loc.is_empty() && defender_loc == target_loc
 }
 
-/// Defender struct id -> protected struct id it already defends (protectedStructIndex
-/// != 0 on chain) — skip re-querying, and count toward spread balancing.
+/// How useful is this hull as a defender of a target in `target_ambit`?
+///
+/// A defender contributes two SEPARATE things under two DIFFERENT conditions:
+///   * **Blocking** — absorbs the shot entirely (even from counter-immune
+///     hulls). Requires the defender to share the TARGET's ambit.
+///   * **Countering** — damages the attacker, and can outright NEGATE the
+///     attack. Requires the defender's WEAPON to reach the ATTACKER's ambit —
+///     reach decides it, not the defender's own ambit.
+///
+/// Blocking is the stronger effect, so same-ambit dominates; among the rest,
+/// value follows counter strength times how many ambits the weapon can answer
+/// from. Reach is primary|secondary — the Cruiser's air answer lives on its
+/// SECONDARY and a primary-only read made it invisible here.
+fn rank(stats: &TypeStats, target_ambit: &str, defender_ambit: &str) -> u64 {
+    let blocks = !target_ambit.is_empty() && defender_ambit == target_ambit;
+    let counter_value = stats.counter_same.max(stats.counter) * breadth(stats.reach);
+    if blocks { 100 + counter_value } else { counter_value }
+}
+
+/// Compute the FULL desired defense web for one player's structs.
+///
+/// Pure: takes the living hulls and a type-stats view, returns priority-ordered
+/// edges. Every defender protects at most one struct (`protectedStructIndex` is
+/// singular), so this is a greedy allocation down the priority list; a hull
+/// whose best remaining assignment scores zero is left free.
+pub fn plan_web(hulls: &[Hull], stats: &HashMap<String, TypeStats>) -> Vec<Edge> {
+    let get = |tid: &str| stats.get(tid).cloned().unwrap_or_default();
+    let cmd = hulls.iter().find(|h| h.type_id == COMMAND_SHIP_TYPE);
+    let refinery = hulls.iter().find(|h| h.type_id == REFINERY_TYPE);
+    let extractor = hulls.iter().find(|h| h.type_id == EXTRACTOR_TYPE);
+
+    // The defender pool: everything that is not itself a protected production/
+    // command struct. Planetary hulls are eligible (an Ore Bunker blocking the
+    // refinery is a real edge) — the travels/rank ordering sorts out the rest.
+    let mut pool: Vec<&Hull> = hulls
+        .iter()
+        .filter(|h| !PROTECTED_TYPES.contains(&h.type_id.as_str()))
+        .collect();
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut take = |pool: &mut Vec<&Hull>, best: Option<usize>, protected: &Hull, why: &'static str, edges: &mut Vec<Edge>| {
+        if let Some(i) = best {
+            let d = pool.remove(i);
+            edges.push(Edge { defender: d.id.clone(), protected: protected.id.clone(), why });
+        }
+    };
+
+    let mut cmd_blocker: Option<Hull> = None;
+    if let Some(cmd) = cmd {
+        // 1. The blocker: same ambit (that is what blocking requires), travels
+        // with the CMD, and ARMOUR first — a blocker's job is absorbing, and
+        // armour halves what 2-damage weapons do to it. This is the Tank.
+        let best = pool
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.ambit == cmd.ambit)
+            .max_by_key(|(_, h)| {
+                let s = get(&h.type_id);
+                (travels_with_target(&h.location_id, &cmd.location_id), s.armour, s.counter_same, breadth(s.reach))
+            })
+            .map(|(i, _)| i);
+        if let Some(i) = best {
+            cmd_blocker = Some(pool[i].clone());
+        }
+        take(&mut pool, best, cmd, "blocks the Command Ship", &mut edges);
+
+        // 2. Counter-guards on the CMD: the attacker's ambit is unknown until
+        // the shot lands, so breadth of reach is what buys coverage; counter
+        // value is what makes each answer hurt.
+        for _ in 0..CMD_GUARDS {
+            let best = pool
+                .iter()
+                .enumerate()
+                .filter(|(_, h)| {
+                    let s = get(&h.type_id);
+                    rank(&s, &cmd.ambit, &h.ambit) > 0
+                })
+                .max_by_key(|(_, h)| {
+                    let s = get(&h.type_id);
+                    (travels_with_target(&h.location_id, &cmd.location_id), s.counter_same.max(s.counter) * breadth(s.reach), s.armour)
+                })
+                .map(|(i, _)| i);
+            take(&mut pool, best, cmd, "counters attacks on the Command Ship", &mut edges);
+        }
+    }
+
+    // 3. Guards on the blocker: stripping it has to cost the attacker.
+    if let Some(blocker) = &cmd_blocker {
+        for _ in 0..BLOCKER_GUARDS {
+            let best = pool
+                .iter()
+                .enumerate()
+                .filter(|(_, h)| {
+                    let s = get(&h.type_id);
+                    rank(&s, &blocker.ambit, &h.ambit) > 0
+                })
+                .max_by_key(|(_, h)| {
+                    let s = get(&h.type_id);
+                    (travels_with_target(&h.location_id, &blocker.location_id), s.counter_same.max(s.counter) * breadth(s.reach))
+                })
+                .map(|(i, _)| i);
+            take(&mut pool, best, blocker, "guards the Command Ship's blocker", &mut edges);
+        }
+    }
+
+    // 4. Production blockers: same ambit, co-located, armour first (this is
+    // where Ore Bunkers earn their keep — they can never counter, but a land
+    // bunker blocks every land shot at the refinery).
+    for (prod, why) in [(refinery, "blocks the Refinery"), (extractor, "blocks the Extractor")] {
+        let Some(prod) = prod else { continue };
+        let best = pool
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.ambit == prod.ambit && travels_with_target(&h.location_id, &prod.location_id))
+            .max_by_key(|(_, h)| {
+                let s = get(&h.type_id);
+                (s.armour, std::cmp::Reverse(s.counter_same.max(s.counter) * breadth(s.reach)))
+            })
+            .map(|(i, _)| i);
+        take(&mut pool, best, prod, why, &mut edges);
+    }
+
+    // 5. Wire every remaining useful hull round-robin across the key targets —
+    // counter damage stacks across ALL armed defenders, so mass is mass.
+    let mut targets: Vec<&Hull> = Vec::new();
+    if let Some(c) = cmd {
+        targets.push(c);
+    }
+    // (The blocker is in `edges`, not `pool`; find it among hulls.)
+    if let Some(b) = &cmd_blocker {
+        if let Some(h) = hulls.iter().find(|h| h.id == b.id) {
+            targets.push(h);
+        }
+    }
+    if let Some(r) = refinery {
+        targets.push(r);
+    }
+    if !targets.is_empty() {
+        let mut ti = 0usize;
+        // Drain by best-remaining-first so the strongest leftovers wire first.
+        loop {
+            // Next target (cycled), and the best leftover for it.
+            let mut placed = false;
+            for _ in 0..targets.len() {
+                let t = targets[ti % targets.len()];
+                ti += 1;
+                let best = pool
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, h)| {
+                        let s = get(&h.type_id);
+                        rank(&s, &t.ambit, &h.ambit) > 0
+                    })
+                    .max_by_key(|(_, h)| {
+                        let s = get(&h.type_id);
+                        (travels_with_target(&h.location_id, &t.location_id), rank(&s, &t.ambit, &h.ambit))
+                    })
+                    .map(|(i, _)| i);
+                if best.is_some() {
+                    take(&mut pool, best, t, "additional counter mass", &mut edges);
+                    placed = true;
+                    break;
+                }
+            }
+            if !placed {
+                break; // nothing left that can usefully defend anything
+            }
+        }
+    }
+    edges
+}
+
+/// Defender struct id -> protected struct id it defends on-chain (cached to
+/// avoid re-querying every struct every scan). Entries are EVICTED when either
+/// side dies or when we clear the edge — the old version never removed
+/// anything, so a defender whose target died was frozen out of the web forever.
 static ASSIGNED_CACHE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn path() -> Option<std::path::PathBuf> {
@@ -171,6 +354,25 @@ fn truthy(v: Option<&Value>) -> bool {
     matches!(v, Some(Value::Bool(true))) || matches!(v, Some(Value::String(s)) if s.eq_ignore_ascii_case("true"))
 }
 
+/// Build the planner's type-stats view from the synced game state.
+fn catalog() -> HashMap<String, TypeStats> {
+    let mut out = HashMap::new();
+    if let Ok(gs) = crate::game_state::GAME_STATE.read() {
+        for (tid, t) in gs.struct_types.iter() {
+            out.insert(
+                tid.clone(),
+                TypeStats {
+                    counter: t.counter_attack.unwrap_or(0),
+                    counter_same: t.counter_attack_same_ambit.unwrap_or(0),
+                    armour: t.attack_reduction.unwrap_or(0),
+                    reach: t.primary_weapon_ambits.unwrap_or(0) | t.secondary_weapon_ambits.unwrap_or(0),
+                },
+            );
+        }
+    }
+    out
+}
+
 pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     let cfg = get();
     if !cfg.enabled {
@@ -215,8 +417,10 @@ async fn scan(
     let client = CosmosClient::new();
     let targets = crate::mcp::virtual_players::collect_targets(false);
     let include_bait = cfg.include_bait;
+    let include_raiders = cfg.include_raiders;
     let app = app_handle.clone();
     let run_c = run.clone();
+    let stats = catalog();
 
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
@@ -225,178 +429,142 @@ async fn scan(
             let client = client.clone();
             let app = app.clone();
             let run = run_c.clone();
+            let stats = stats.clone();
             async move {
                 let Some(idx) = idx_opt else { return }; // vplayers only (façade signer)
                 run.players.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Raiders are deliberately expendable — their whole point is that
-                // losing a Command Ship costs a rebuild, not the economy. Never
-                // spend charge hardening them, even with include_bait on.
-                if role == Some(VPlayerRole::Raider) {
+                if !include_raiders && role == Some(VPlayerRole::Raider) {
                     return;
                 }
-                // Default: only defend productive workers; bait are deliberate raid fodder.
-                if !include_bait && role != Some(VPlayerRole::Productive) {
+                if !include_bait && role == Some(VPlayerRole::Bait) {
                     return;
                 }
                 // Resolve THIS player's structs from its planet + fleet slot arrays;
                 // the guild struct-LIST endpoints are broken (return a global page,
-                // not the owner's), which made auto_defend classify OTHER players'
-                // combat structs. See loop_util::player_structs.
+                // not the owner's). See loop_util::player_structs.
                 let structs = crate::mcp::loop_util::player_structs(&client, &pid).await;
                 if structs.is_empty() {
                     return;
                 }
-
-                // Protected targets in priority order: Command Ship (the shield
-                // gate) first, then Refinery, then Extractor. (id, ambit) pairs.
-                let find_type = |t: &str| -> Option<(String, String, String)> {
-                    structs
-                        .iter()
-                        .filter(|s| !truthy(s.get("is_destroyed")))
-                        .find(|s| type_id_of(s) == t)
-                        .and_then(|s| {
-                            s.get("id").and_then(|x| x.as_str()).map(|id| {
-                                let field = |k: &str| {
-                                    s.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
-                                };
-                                (id.to_string(), field("operating_ambit"), field("location_id"))
-                            })
-                        })
-                };
-                // (type, id, ambit, location), priority-ordered.
-                let protected: Vec<(&str, String, String, String)> = [COMMAND_SHIP_TYPE, REFINERY_TYPE, EXTRACTOR_TYPE]
+                let alive: Vec<&Value> = structs.iter().filter(|s| !truthy(s.get("is_destroyed"))).collect();
+                let alive_ids: HashSet<String> = alive
                     .iter()
-                    .filter_map(|t| find_type(t).map(|(id, ambit, loc)| (*t, id, ambit, loc)))
+                    .filter_map(|s| s.get("id").and_then(|x| x.as_str()).map(String::from))
                     .collect();
-                if protected.is_empty() {
-                    return;
+
+                // Evict cache entries invalidated by combat: the chain removes
+                // an edge when either side dies, so our mirror must too.
+                {
+                    let mut cache = ASSIGNED_CACHE.lock().unwrap();
+                    cache.retain(|d, t| {
+                        // Only judge entries belonging to this player's structs.
+                        let ours = alive_ids.contains(d)
+                            || structs.iter().any(|s| s.get("id").and_then(|x| x.as_str()) == Some(d.as_str()));
+                        if !ours {
+                            return true;
+                        }
+                        alive_ids.contains(d) && alive_ids.contains(t)
+                    });
                 }
 
-                // Pass 1: classify every combat struct — count existing assignments
-                // per protected target, collect idle (built, unassigned) candidates.
-                let mut counts: HashMap<String, usize> = HashMap::new();
-                // (id, ambit, type_id, location_id)
-                let mut idle: Vec<(String, String, String, String)> = Vec::new();
-                for s in &structs {
-                    if truthy(s.get("is_destroyed")) {
-                        continue;
-                    }
-                    let tid = type_id_of(s);
-                    if PROTECTED_TYPES.contains(&tid.as_str()) {
-                        continue; // never use a production/command struct as a defender
-                    }
-                    let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else {
-                        continue;
-                    };
+                // Current on-chain edges + built-ness for this player's hulls.
+                let mut current: HashMap<String, String> = HashMap::new();
+                let mut built: HashSet<String> = HashSet::new();
+                for s in &alive {
+                    let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else { continue };
                     if let Some(target) = ASSIGNED_CACHE.lock().unwrap().get(&sid).cloned() {
-                        *counts.entry(target).or_insert(0) += 1;
+                        current.insert(sid.clone(), target);
+                        built.insert(sid);
                         continue;
                     }
-                    // On-chain check: built + not already defending something.
                     let entity = match client.query_entity("struct", &sid).await {
                         Ok(e) => e,
                         Err(_) => continue,
                     };
                     let sa = entity.get("structAttributes");
                     if !truthy(sa.and_then(|x| x.get("isBuilt"))) {
-                        continue; // not online yet
+                        continue; // not online yet — neither defender nor edge target
                     }
+                    built.insert(sid.clone());
                     let prot_idx = sa
                         .and_then(|x| x.get("protectedStructIndex"))
                         .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|v| v.parse().ok())))
                         .unwrap_or(0);
                     if prot_idx != 0 {
-                        // Already defending — cache with its target (struct ids are "5-<index>").
                         let target = format!("5-{}", prot_idx);
-                        *counts.entry(target.clone()).or_insert(0) += 1;
-                        ASSIGNED_CACHE.lock().unwrap().insert(sid, target);
-                        continue;
+                        ASSIGNED_CACHE.lock().unwrap().insert(sid.clone(), target.clone());
+                        current.insert(sid, target);
                     }
-                    let field = |k: &str| {
-                        s.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
-                    };
-                    idle.push((sid, field("operating_ambit"), tid, field("location_id")));
                 }
-                if idle.is_empty() {
+
+                // Plan the full desired web over BUILT hulls only.
+                let hulls: Vec<Hull> = alive
+                    .iter()
+                    .filter_map(|s| {
+                        let id = s.get("id").and_then(|x| x.as_str())?.to_string();
+                        if !built.contains(&id) {
+                            return None;
+                        }
+                        let f = |k: &str| s.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        Some(Hull { id, type_id: type_id_of(s), ambit: f("operating_ambit"), location_id: f("location_id") })
+                    })
+                    .collect();
+                let desired = plan_web(&hulls, &stats);
+                if desired.is_empty() {
                     return;
                 }
 
-                // Pick the target: the Command Ship until it has CMD_MIN_DEFENDERS,
-                // then whichever protected struct has the fewest defenders
-                // (ties break toward the higher-priority target).
-                let (target_id, target_ambit, target_loc) = {
-                    let cmd = protected.iter().find(|(t, _, _, _)| *t == COMMAND_SHIP_TYPE);
-                    match cmd {
-                        Some((_, id, ambit, loc)) if counts.get(id).copied().unwrap_or(0) < CMD_MIN_DEFENDERS => {
-                            (id.clone(), ambit.clone(), loc.clone())
-                        }
-                        _ => protected
-                            .iter()
-                            .min_by_key(|(_, id, _, _)| counts.get(id).copied().unwrap_or(0))
-                            .map(|(_, id, ambit, loc)| (id.clone(), ambit.clone(), loc.clone()))
-                            .unwrap(),
-                    }
-                };
-                // ── Pick a defender that will actually do something ──────────
-                //
-                // A defender contributes two SEPARATE things, with different
-                // conditions, and it is easy to assign one that does neither:
-                //
-                //   * BLOCKING needs the defender to share the TARGET's ambit.
-                //   * COUNTERING needs the defender's WEAPON to reach the
-                //     ATTACKER's ambit.
-                //
-                // Cross-ambit assignment was measured to be worthless: a
-                // Starfighter (space) registered as defender of a Tank (land)
-                // took `protectedStructIndex`, and a land attack then landed
-                // completely unblocked with no counter from it. It had consumed
-                // a defender slot to do nothing.
-                //
-                // The old code fell back to `idle.first()`, which cheerfully
-                // paired hulls that could do neither. `defender_rank` scores
-                // both contributions instead, and anything scoring zero is left
-                // idle rather than burning its one assignment slot.
-                // Co-location outranks everything else: a defender that does not
-                // travel with its target stops defending the moment the target
-                // leaves home, and a raiding Command Ship is exactly the case
-                // where that happens. Within a location, `defender_rank` decides.
-                let pick = idle
+                // Diff → ONE action this scan, highest-priority first:
+                // the first desired edge not yet on chain. If its defender is
+                // currently wired to something else, CLEAR it (set happens next
+                // scan); otherwise SET it.
+                let missing = desired
                     .iter()
-                    .max_by_key(|(_, a, tid, loc)| {
-                        (
-                            travels_with_target(loc, &target_loc),
-                            defender_rank(tid, &target_ambit, a),
-                        )
-                    })
-                    .cloned();
-                let Some((sid, _, _, _)) = pick.filter(|(_, a, tid, _)| {
-                    defender_rank(tid, &target_ambit, a) > 0
-                }) else {
-                    return; // nothing here can block OR counter — leave them free
-                };
+                    .find(|e| current.get(&e.defender).map(|t| t != &e.protected).unwrap_or(true));
+                let Some(edge) = missing else { return }; // web complete
+                let needs_clear = current.contains_key(&edge.defender);
 
+                let (msg, payload, verb) = if needs_clear {
+                    (
+                        "/structs.structs.MsgStructDefenseClear",
+                        json!({ "defenderStructId": edge.defender }),
+                        "re-pointing (clear)",
+                    )
+                } else {
+                    (
+                        "/structs.structs.MsgStructDefenseSet",
+                        json!({ "defenderStructId": edge.defender, "protectedStructId": edge.protected }),
+                        "set",
+                    )
+                };
                 let res = crate::mcp::tx_retry::sign_with_retry(
                     &app,
                     idx,
-                    "/structs.structs.MsgStructDefenseSet",
-                    json!({ "defenderStructId": sid, "protectedStructId": target_id }),
+                    msg,
+                    payload,
                     &format!("auto_defend:{pid}"),
                 )
                 .await;
                 match res {
                     Ok(_) => {
-                        ASSIGNED_CACHE.lock().unwrap().insert(sid.clone(), target_id.clone());
+                        let mut cache = ASSIGNED_CACHE.lock().unwrap();
+                        if needs_clear {
+                            cache.remove(&edge.defender);
+                        } else {
+                            cache.insert(edge.defender.clone(), edge.protected.clone());
+                        }
+                        drop(cache);
                         run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         crate::mcp::telemetry::tlog(
                             "auto_defend",
                             crate::mcp::telemetry::Sev::Info,
-                            format!("{} defends {} (player {})", sid, target_id, pid),
+                            format!("{verb}: {} → {} [{}] (player {pid})", edge.defender, edge.protected, edge.why),
                         );
                         crate::mcp::board_feed::push(
                             &app,
                             crate::mcp::board_feed::Severity::Info,
                             "auto_defend",
-                            format!("{} now defends {} (player {})", sid, target_id, pid),
+                            format!("{pid}: {} {} → {} ({})", verb, edge.defender, edge.protected, edge.why),
                         );
                     }
                     Err(e) => {
@@ -404,11 +572,11 @@ async fn scan(
                         crate::mcp::telemetry::tlog(
                             "auto_defend",
                             crate::mcp::telemetry::Sev::Warn,
-                            format!("defense-set failed for {pid}: {e}"),
+                            format!("defense {verb} failed for {pid}: {e}"),
                         );
                     }
                 }
-                // One assignment per player per scan (charge-paced).
+                // One action per player per scan (charge-paced).
             }
         },
     )
@@ -419,71 +587,120 @@ async fn scan(
 mod tests {
     use super::*;
 
-    /// Co-location is the half of the pairing `defender_rank` cannot see.
-    /// Measured live: three Ore Bunkers left at home "defending" a Command Ship
-    /// that had gone raiding blocked nothing and countered nothing — the shot
-    /// landed clean. The same Ore Bunkers absorbed 2 damage for a Command Ship
-    /// that was still on station, so this is a preference, not a veto.
-    #[test]
-    fn a_defender_that_cannot_travel_loses_the_tie() {
-        // The failure mode: planetary hull, fleet target.
-        assert!(!travels_with_target("2-10813", "9-281"));
-        // A fleet hull guarding its own fleet goes where the fleet goes.
-        assert!(travels_with_target("9-281", "9-281"));
-        // Planet-to-planet is co-located too — nothing there ever moves.
-        assert!(travels_with_target("2-10813", "2-10813"));
-        // Unknown location: never claim it travels.
-        assert!(!travels_with_target("", "9-281"));
+    fn stats() -> HashMap<String, TypeStats> {
+        // A minimal but realistic catalog (values from the live chain table).
+        let mut m = HashMap::new();
+        m.insert("1".into(), TypeStats { counter: 2, counter_same: 2, armour: 1, reach: 32 }); // Command Ship
+        m.insert("2".into(), TypeStats { counter: 1, counter_same: 1, armour: 0, reach: 6 }); // Battleship (water|land, AP)
+        m.insert("9".into(), TypeStats { counter: 1, counter_same: 1, armour: 1, reach: 4 }); // Tank (armoured)
+        m.insert("8".into(), TypeStats { counter: 0, counter_same: 0, armour: 0, reach: 6 }); // Mobile Artillery
+        m.insert("11".into(), TypeStats { counter: 1, counter_same: 1, armour: 0, reach: 6 | 8 }); // Cruiser (secondary reaches air)
+        m.insert("12".into(), TypeStats { counter: 1, counter_same: 2, armour: 0, reach: 10 }); // Destroyer
+        m.insert("18".into(), TypeStats { counter: 0, counter_same: 0, armour: 0, reach: 0 }); // Ore Bunker
+        m.insert("15".into(), TypeStats::default()); // Refinery
+        m.insert("14".into(), TypeStats::default()); // Extractor
+        m
+    }
 
-        // Ordering: the pick is keyed on (travels, rank), so co-location wins
-        // a tie and rank still decides among equals. An Ore Bunker that CAN
-        // block (same ambit) but is stuck on the planet must lose to a fleet
-        // hull that travels, even one that can only counter.
-        let stranded_blocker = (true, 100u64); // same-ambit, wrong location
-        let travelling_counter = (true, 2u64);
-        assert!(
-            (true, travelling_counter.1) > (false, stranded_blocker.1),
-            "travelling beats stranded regardless of rank"
-        );
+    fn hull(id: &str, tid: &str, ambit: &str, loc: &str) -> Hull {
+        Hull { id: id.into(), type_id: tid.into(), ambit: ambit.into(), location_id: loc.into() }
     }
 
     #[test]
-    fn default_off_productive_only() {
+    fn default_off_covers_all_roles() {
         let c = AutoDefendConfig::default();
         assert!(!c.enabled);
-        assert!(!c.include_bait);
+        assert!(c.include_bait, "bait carry real fleets — web them");
+        assert!(c.include_raiders, "fleet defenders travel; raiders need their CMD blocked most");
         assert_eq!(c.interval_secs, 180);
     }
 
+    /// The heart of the lattice: the CMD gets a SAME-AMBIT ARMOURED blocker
+    /// first — blocking is the only defense counter-immune artillery cannot
+    /// bypass, so this edge outranks everything.
     #[test]
-    /// A defender's two contributions have two different conditions, so ranking
-    /// has to score both. Same-ambit blocks and dominates; cross-ambit still
-    /// counters if its WEAPON reaches — measured, a space Battleship (reach
-    /// water+land) countered a land attacker and killed it outright, while a
-    /// space Starfighter (reach space only) assigned to a land target did
-    /// nothing at all. An earlier version of this test asserted the second case
-    /// generalised, which was wrong.
-    #[test]
-    fn ranking_scores_blocking_above_counter_reach_but_values_both() {
-        // With no synced struct types every hull scores on blocking alone,
-        // which is exactly the conservative fallback we want.
-        let blocks = defender_rank("9", "land", "land");
-        let cross = defender_rank("9", "land", "space");
-        assert!(blocks > cross, "a blocker must outrank a non-blocker");
-        assert!(blocks >= 100, "blocking is worth a flat dominant bonus");
+    fn cmd_blocker_is_armoured_same_ambit_and_first() {
+        let hulls = vec![
+            hull("5-cmd", "1", "land", "9-1"),
+            hull("5-tank", "9", "land", "9-1"),
+            hull("5-ma", "8", "land", "9-1"),   // same ambit but no armour
+            hull("5-bb", "2", "space", "9-1"),  // cross-ambit
+        ];
+        let web = plan_web(&hulls, &stats());
+        assert_eq!(web[0].defender, "5-tank", "armoured same-ambit hull must be the blocker");
+        assert_eq!(web[0].protected, "5-cmd");
     }
 
-    /// Nothing that can neither block nor counter should consume an assignment.
+    /// Counter-guards then pile on the CMD, and the blocker itself gets guarded
+    /// — stripping the blocker has to cost the attacker.
     #[test]
-    fn a_hull_that_can_do_nothing_scores_zero() {
-        // Unknown type, wrong ambit → no blocking, no known weapon reach.
-        assert_eq!(defender_rank("not-a-type", "land", "space"), 0);
+    fn web_layers_guards_on_cmd_and_blocker() {
+        let hulls = vec![
+            hull("5-cmd", "1", "land", "9-1"),
+            hull("5-tank", "9", "land", "9-1"),
+            hull("5-bb", "2", "space", "9-1"),
+            hull("5-cruiser", "11", "water", "9-1"),
+            hull("5-destroyer", "12", "water", "9-1"),
+        ];
+        let web = plan_web(&hulls, &stats());
+        // Everything armed gets wired somewhere.
+        assert_eq!(web.len(), 4, "every useful hull is in the web: {web:?}");
+        let on_cmd = web.iter().filter(|e| e.protected == "5-cmd").count();
+        let on_blocker = web.iter().filter(|e| e.protected == "5-tank").count();
+        assert!(on_cmd >= 2, "CMD gets blocker + counter-guards");
+        assert!(on_blocker >= 1, "the blocker is itself guarded");
+    }
+
+    /// Ore Bunkers can never counter, but a same-ambit co-located bunker blocks
+    /// every shot at the refinery — production gets blocked, not guarded.
+    #[test]
+    fn production_gets_same_ambit_blockers() {
+        let hulls = vec![
+            hull("5-ref", "15", "land", "2-1"),
+            hull("5-bunker", "18", "land", "2-1"),
+        ];
+        let web = plan_web(&hulls, &stats());
+        assert_eq!(
+            web,
+            vec![Edge { defender: "5-bunker".into(), protected: "5-ref".into(), why: "blocks the Refinery" }]
+        );
+    }
+
+    /// A hull that can neither block nor counter its would-be target is left
+    /// free instead of burning its singular defender slot.
+    #[test]
+    fn useless_pairings_are_not_made() {
+        // A lone space bunker-analogue (no weapon, wrong ambit) with a land CMD.
+        let hulls = vec![
+            hull("5-cmd", "1", "land", "9-1"),
+            hull("5-osg", "18", "space", "2-1"),
+        ];
+        let web = plan_web(&hulls, &stats());
+        assert!(web.is_empty(), "no zero-value edges: {web:?}");
+    }
+
+    /// The Cruiser's air reach lives on its SECONDARY weapon; the planner's
+    /// stats view must include it (a primary-only read scored it lower than a
+    /// Battleship for guard duty despite broader coverage).
+    #[test]
+    fn reach_is_primary_or_secondary_union() {
+        let s = stats();
+        assert_eq!(breadth(s["11"].reach), 3, "Cruiser reaches water+land+air via secondary");
+        assert!(breadth(s["11"].reach) > breadth(s["2"].reach));
+    }
+
+    #[test]
+    fn travels_with_target_basics() {
+        assert!(!travels_with_target("2-10813", "9-281")); // planetary hull, fleet target
+        assert!(travels_with_target("9-281", "9-281"));
+        assert!(travels_with_target("2-10813", "2-10813"));
+        assert!(!travels_with_target("", "9-281"));
     }
 
     #[test]
     fn production_types_are_not_defenders() {
         assert!(PROTECTED_TYPES.contains(&REFINERY_TYPE));
         assert!(PROTECTED_TYPES.contains(&EXTRACTOR_TYPE));
-        assert!(PROTECTED_TYPES.contains(&"1")); // command ship
+        assert!(PROTECTED_TYPES.contains(&COMMAND_SHIP_TYPE));
     }
 }

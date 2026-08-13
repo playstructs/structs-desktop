@@ -91,6 +91,7 @@ impl GameStateSync {
                 | "continental power plant"
                 | "world engine"
                 | "planetary defense cannon"
+                | "jamming satellite"
         )
     }
 

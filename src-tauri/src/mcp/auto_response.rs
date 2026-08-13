@@ -646,6 +646,34 @@ async fn handle_alarm(
         return Ok(());
     };
 
+    // ── 4b. Walk the kill-chain. ──
+    // You cannot damage a struct through its living SAME-AMBIT blockers — the
+    // blocker absorbs every shot (including counter-immune artillery fire), so
+    // shooting the protected target directly wastes the entire response window.
+    // Redirect to the current blocker; re-alarms walk strip → kill over scans.
+    let (fire_target, target_kind) =
+        match crate::mcp::tools::strike::resolve_fire_target(client, &fire_target).await {
+            Ok((t, phase, note)) => {
+                if phase == "DOWN" {
+                    run.blocked("resolved attacker struct already destroyed");
+                    return Ok(());
+                }
+                if phase == "STRIP" {
+                    crate::mcp::telemetry::tlog(
+                        "auto_response",
+                        crate::mcp::telemetry::Sev::Info,
+                        format!("kill-chain: {}", note),
+                    );
+                    (t, "blocker (strip phase)")
+                } else {
+                    (t, target_kind)
+                }
+            }
+            // Resolution is best-effort — on a read failure fall back to the
+            // direct target rather than staying silent for the whole window.
+            Err(_) => (fire_target, target_kind),
+        };
+
     // ── 5. Who can actually reach it? ──
     // Combat is co-located: only structs at this planet can engage. Every other
     // vplayer's charge bar is useless here, however many we have.

@@ -26,40 +26,57 @@ const FILENAME: &str = "auto_build.json";
 const SLOTS_PER_AMBIT: usize = 4;
 const BUILD_CHARGE: u64 = 8;
 
-/// Priority-ordered defensive loadout: (target location_type, ambit, type name).
-/// Cheap/high-value first (shields, then evasive ships), heavy Ore Bunkers last so
-/// the power gate trims them rather than the cheaper structs. Each (target, ambit)
-/// fills up to SLOTS_PER_AMBIT. Planet air/water are left to 1-per-player types
-/// (PDC etc.) already placed, so they're not in the fill.
-const LOADOUT: &[(&str, &str, &str)] = &[
-    // Miner + core planetary defense first — these are 1-per-player, so they're
+/// Priority-ordered defensive loadout: (target location_type, ambit, type name,
+/// want-count). Cheap/high-value first (shields, then evasive ships), heavy Ore
+/// Bunkers last so the power gate trims them rather than the cheaper structs.
+///
+/// `want` is the TOTAL number of that type this loadout keeps in that
+/// (location, ambit) key. The old format had no count, and the walk filled all
+/// four slots with the FIRST entry per key — so `Submersible`, `Starfighter`
+/// and the raider `Tank` were dead letters that never built, and every fleet
+/// was a 4×-monoculture per ambit. The game is rock-paper-scissors across 13
+/// fleet hulls (guided vs unguided vs jamming vs armour vs counter-immunity);
+/// a monoculture has no answer to whole classes of opponent.
+///
+/// The template is the strongest player on the shard (1-61 "JPEG", 68
+/// successful raids, K/D 397:93, home cracked once in 9 attempts): his fleet
+/// fields ALL 13 hull types — a diverse line per ambit — and his planet stacks
+/// shield contributors (4× Ore Bunker, 3× OSG, Jamming Satellite, PDC).
+const LOADOUT: &[(&str, &str, &str, usize)] = &[
+    // Miner + core planetary defense first — the 1-per-player types are
     // skipped when already present, but get rebuilt after an explore (the old
     // planet's structs are destroyed on completion, freeing the limit).
-    ("planet", "land", "Ore Extractor"),
-    ("planet", "water", "Planetary Defense Cannon"),
-    ("planet", "space", "Orbital Shield Generator"),
-    ("fleet", "air", "Pursuit Fighter"),
+    ("planet", "land", "Ore Extractor", 1),
+    ("planet", "water", "Planetary Defense Cannon", 1),
+    ("planet", "space", "Orbital Shield Generator", 3),
+    // Second guided-evasion layer for every planet-borne struct (the
+    // interceptor net), +12 planetary shield — and we never fielded one.
+    ("planet", "space", "Jamming Satellite", 1),
+    ("fleet", "air", "Pursuit Fighter", 2),
     // A Battleship sits in a SPACE slot but its primary reaches [water, land]
-    // and is ARMOUR-PIERCING (verified on the live struct type: ambits 6,
-    // primaryWeaponArmourPiercing true). That is the answer to the fight we
-    // just lost: a raider's Command Ship is land and armoured, so every Tank
-    // shot we landed read "2 dmg, 1 blocked" while the Battleship would have
-    // hit for full — from an ambit the attacker was not contesting. Ahead of
-    // the Starfighter, which is cheaper but has nothing that pierces.
-    ("fleet", "space", "Battleship"),
-    ("fleet", "land", "Tank"),
-    // A Cruiser earns its slot on its SECONDARY, not its primary: it is the only
-    // unguided weapon in the game that reaches AIR. Air is where Pursuit
-    // Fighters live, and a Pursuit Fighter's `signalJamming` evades guided
-    // ordnance two times in three — measured, 5 evades in 9 guided shots. Every
-    // other air-capable weapon we field is guided, so without a Cruiser we
-    // cannot efficiently shoot down the very hull this loadout builds (and that
-    // any competent opponent therefore also builds). Ahead of the Submersible,
-    // which duplicates water/space coverage we already have.
-    ("fleet", "water", "Cruiser"),
-    ("fleet", "water", "Submersible"),
-    ("fleet", "space", "Starfighter"),
-    ("planet", "land", "Ore Bunker"),
+    // and is ARMOUR-PIERCING — the only piercing hull, the answer to armoured
+    // Tanks and the armoured planetary hulls.
+    ("fleet", "space", "Battleship", 2),
+    ("fleet", "land", "Tank", 2),
+    // A Cruiser earns its slot on its SECONDARY: the only unguided weapon in
+    // the game that reaches AIR, where signalJamming Pursuit Fighters (2/3
+    // evade vs guided) live. Without one we cannot answer that hull.
+    ("fleet", "water", "Cruiser", 2),
+    // Counter-immune siege: grinds a defended Command Ship with zero
+    // attrition. Every fleet needs at least one to decapitate a raider.
+    ("fleet", "land", "Mobile Artillery", 1),
+    ("fleet", "land", "SAM Launcher", 1),
+    // defensiveManeuver: the ONLY hull that evades UNGUIDED 2/3 — the mirror
+    // of the Pursuit Fighter, and the duelist vs Battleships/Tanks/artillery.
+    ("fleet", "air", "High Altitude Interceptor", 1),
+    ("fleet", "air", "Stealth Bomber", 1),
+    // Best counter in the game after the CMD: advancedCounterAttack 2 same /
+    // 1 cross, reach water+air.
+    ("fleet", "water", "Destroyer", 1),
+    ("fleet", "water", "Submersible", 1),
+    ("fleet", "space", "Starfighter", 1),
+    ("fleet", "space", "Frigate", 1),
+    ("planet", "land", "Ore Bunker", 3),
 ];
 
 /// Offence-first loadout for RAIDERS. Their job is to grind down a defended
@@ -79,29 +96,53 @@ const LOADOUT: &[(&str, &str, &str)] = &[
 ///
 /// A Command Ship comes early because a raider without one is grounded — the
 /// chain refuses `MsgFleetMove` with "needs an online command struct".
-const RAIDER_LOADOUT: &[(&str, &str, &str)] = &[
-    ("fleet", "land", "Command Ship"),
-    ("fleet", "land", "Mobile Artillery"),
-    ("fleet", "space", "Battleship"),
-    ("planet", "land", "Ore Refinery"),
-    ("fleet", "water", "Cruiser"),
-    ("fleet", "land", "Tank"),
-    ("fleet", "space", "Starfighter"),
+const RAIDER_LOADOUT: &[(&str, &str, &str, usize)] = &[
+    ("fleet", "land", "Command Ship", 1),
+    ("fleet", "land", "Mobile Artillery", 2),
+    ("fleet", "space", "Battleship", 2),
+    ("planet", "land", "Ore Refinery", 1),
+    // The Tank was a dead letter before (Mobile Artillery filled all four land
+    // slots first): now capped at 2 MA so the raider carries a same-ambit
+    // armoured BLOCKER for its own Command Ship. Measured 2026-08-13: our
+    // raider's Tank blocker absorbed three counter-immune Mobile Artillery
+    // shots aimed at the Command Ship before falling — blocking is the only
+    // defense counter-immunity cannot bypass.
+    ("fleet", "land", "Tank", 2),
+    ("fleet", "water", "Cruiser", 2),
+    ("fleet", "air", "High Altitude Interceptor", 1),
+    ("fleet", "air", "Stealth Bomber", 1),
+    ("fleet", "space", "Starfighter", 1),
+    ("fleet", "space", "Frigate", 1),
+    ("fleet", "water", "Destroyer", 1),
+    ("fleet", "water", "Submersible", 1),
+    ("fleet", "air", "Pursuit Fighter", 2),
+    // A raid dispatch opens the raider's own home for the whole trip; shield
+    // contributors lengthen the proof anyone grinds against it meanwhile.
+    ("planet", "space", "Orbital Shield Generator", 2),
 ];
 
 /// Production-first loadout for PRODUCTIVE players: extractor + refinery (the
 /// alpha pipeline) + a command ship (raid gate) + light defense. The 1-per-player
 /// types build only if absent (see ONE_PER_PLAYER); the rest fill by slot count.
-const PRODUCTIVE_LOADOUT: &[(&str, &str, &str)] = &[
-    ("planet", "land", "Ore Extractor"),
-    ("planet", "land", "Ore Refinery"),
-    ("fleet", "land", "Command Ship"),
-    ("planet", "space", "Orbital Shield Generator"),
+const PRODUCTIVE_LOADOUT: &[(&str, &str, &str, usize)] = &[
+    ("planet", "land", "Ore Extractor", 1),
+    ("planet", "land", "Ore Refinery", 1),
+    ("fleet", "land", "Command Ship", 1),
+    ("planet", "space", "Orbital Shield Generator", 3),
+    ("planet", "space", "Jamming Satellite", 1),
     // Same reasoning as LOADOUT: one armour-piercing hull that can answer a
     // land-based raider before the cheaper filler.
-    ("fleet", "space", "Battleship"),
-    ("fleet", "land", "Tank"),
-    ("fleet", "space", "Starfighter"),
+    ("fleet", "space", "Battleship", 2),
+    ("fleet", "land", "Tank", 2),
+    // Counter-immune decapitation — killing the raider's Command Ship ends a
+    // raid 17/17; Mobile Artillery does it with zero attrition.
+    ("fleet", "land", "Mobile Artillery", 1),
+    ("fleet", "water", "Cruiser", 1),
+    ("fleet", "air", "High Altitude Interceptor", 1),
+    ("fleet", "space", "Starfighter", 1),
+    // Workers hold the ore pile between sweeps; bunkers block the refinery and
+    // add +50 shield each (a longer raid proof for the attacker).
+    ("planet", "land", "Ore Bunker", 2),
 ];
 
 /// Struct types limited to one per player (buildLimit 1) — a loadout entry for
@@ -113,6 +154,9 @@ const ONE_PER_PLAYER: &[&str] = &[
     "Command Ship",
     "Field Generator",
     "Planetary Defense Cannon",
+    // buildLimit 1 on the chain type table (verified 2026-08-13); it was
+    // missing here AND from game_state::is_limited_type.
+    "Jamming Satellite",
 ];
 
 /// The chain OVERLOADS one error string — `cannot handle new load requirements
@@ -438,7 +482,7 @@ async fn scan(
                 // Productive players build a production-first loadout (extractor +
                 // refinery + light defense); bait players (and the primary) get the
                 // defensive fill. Bait never gets a refinery — that stays productive-only.
-                let loadout: &[(&str, &str, &str)] = match role {
+                let loadout: &[(&str, &str, &str, usize)] = match role {
                     Some(VPlayerRole::Productive) => PRODUCTIVE_LOADOUT,
                     Some(VPlayerRole::Raider) => RAIDER_LOADOUT,
                     _ => LOADOUT,
@@ -458,7 +502,7 @@ async fn scan(
                 // `type_name` read made `cmd_built` never match "Command Ship",
                 // so the gate `!cmd_built` returned for EVERY player → auto_build
                 // built nothing fleet-wide (workers stranded on empty planets).
-                let (present, cmd_built): (HashSet<String>, bool) = {
+                let (present, cmd_built, have): (HashSet<String>, bool, HashMap<(String, String, String), usize>) = {
                     let gs = crate::game_state::GAME_STATE.read().unwrap();
                     let name_of = |s: &Value| -> Option<String> {
                         if let Some(n) = s.get("type_name").and_then(|x| x.as_str()) {
@@ -483,7 +527,17 @@ async fn scan(
                             && parse_bool(s.get("is_built"))
                             && name_of(s).as_deref() == Some("Command Ship")
                     });
-                    (present, cmd_built)
+                    // Per-(location, ambit, type) counts, so a loadout can hold
+                    // a MIX per ambit (want-counts) instead of the first entry
+                    // monopolising all four slots.
+                    let mut have: HashMap<(String, String, String), usize> = HashMap::new();
+                    for s in structs.iter().filter(|s| !parse_bool(s.get("is_destroyed"))) {
+                        let Some(name) = name_of(s) else { continue };
+                        let lt = s.get("location_type").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let amb = s.get("operating_ambit").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        *have.entry((lt, amb, name)).or_insert(0) += 1;
+                    }
+                    (present, cmd_built, have)
                 };
 
                 // ── Command-struct-first gate ──
@@ -593,10 +647,18 @@ async fn scan(
                     return;
                 }
 
-                // Walk the loadout; build the first ripe (free slot + power + known type).
-                for (target, ambit, type_name) in loadout {
+                // Walk the loadout; build the first ripe (free slot + power + known
+                // type) entry whose want-count isn't met yet.
+                for (target, ambit, type_name, want) in loadout {
                     if ONE_PER_PLAYER.contains(type_name) && present.contains(*type_name) {
                         continue; // already have this 1-per-player struct
+                    }
+                    let have_n = have
+                        .get(&(target.to_string(), ambit.to_string(), type_name.to_string()))
+                        .copied()
+                        .unwrap_or(0);
+                    if have_n >= *want {
+                        continue; // this entry's share of the ambit is filled
                     }
                     let key = (target.to_string(), ambit.to_string());
                     let used = occ.get(&key).map(|s| s.len()).unwrap_or(0);
@@ -711,21 +773,21 @@ mod tests {
         // loadout, and ahead of the Starfighter that shares its slot — a
         // raider's Command Ship is armoured and nothing else we build pierces.
         let space: Vec<&str> = LOADOUT.iter()
-            .filter(|(t, a, _)| *t == "fleet" && *a == "space").map(|(_, _, n)| *n).collect();
+            .filter(|(t, a, _, _)| *t == "fleet" && *a == "space").map(|(_, _, n, _)| *n).collect();
         assert_eq!(space.first(), Some(&"Battleship"), "Battleship must lead the fleet space slot");
         assert!(space.contains(&"Starfighter"));
         // Only unguided weapon reaching AIR, and Pursuit Fighters evade guided
         // 2-in-3 — without it we cannot answer the hull we ourselves field.
         assert!(
-            LOADOUT.iter().any(|(_, _, n)| *n == "Cruiser"),
+            LOADOUT.iter().any(|(_, _, n, _)| *n == "Cruiser"),
             "need an unguided air answer to signalJamming"
         );
         // Raiders lead with the counter-immune hull, then the armour-piercing
         // one — counter damage, not HP, is what kills a besieging fleet.
         let raider_fleet: Vec<&str> = RAIDER_LOADOUT
             .iter()
-            .filter(|(loc, _, _)| *loc == "fleet")
-            .map(|(_, _, n)| *n)
+            .filter(|(loc, _, _, _)| *loc == "fleet")
+            .map(|(_, _, n, _)| *n)
             .collect();
         assert_eq!(raider_fleet.first(), Some(&"Command Ship"), "grounded without one");
         assert_eq!(
@@ -738,9 +800,65 @@ mod tests {
                 < raider_fleet.iter().position(|n| *n == "Tank"),
             "Mobile Artillery grinds for free; a Tank pays a counter every shot"
         );
-        assert!(PRODUCTIVE_LOADOUT.iter().any(|(_, _, n)| *n == "Battleship"));
+        assert!(
+            raider_fleet.contains(&"Tank"),
+            "the raider CMD needs a same-ambit armoured blocker — the only defense counter-immunity cannot bypass"
+        );
+        assert!(PRODUCTIVE_LOADOUT.iter().any(|(_, _, n, _)| *n == "Battleship"));
         assert_eq!(PRODUCTIVE_LOADOUT[0].2, "Ore Extractor");
         assert_eq!(PRODUCTIVE_LOADOUT[1].2, "Ore Refinery");
+    }
+
+    /// The rock-paper-scissors point: every fleet hull class has to actually be
+    /// buildable. The old walk let the first entry per (location, ambit) key
+    /// monopolise all four slots, so Submersible/Starfighter/raider-Tank were
+    /// dead letters. Want-counts make the mix explicit — verify the mix fits.
+    #[test]
+    fn loadouts_fit_slots_and_field_the_full_roster() {
+        for (label, lo) in [
+            ("LOADOUT", LOADOUT),
+            ("RAIDER_LOADOUT", RAIDER_LOADOUT),
+            ("PRODUCTIVE_LOADOUT", PRODUCTIVE_LOADOUT),
+        ] {
+            let mut per_key: HashMap<(&str, &str), usize> = HashMap::new();
+            for (loc, amb, name, want) in lo {
+                assert!(*want >= 1, "{label}: zero-want entry {name}");
+                // The Command Ship does not consume a fleet slot.
+                if *name != "Command Ship" {
+                    *per_key.entry((*loc, *amb)).or_insert(0) += want;
+                }
+                // No duplicate entries for the same (key, type): counts are totals.
+                assert_eq!(
+                    lo.iter().filter(|(l, a, n, _)| l == loc && a == amb && n == name).count(),
+                    1,
+                    "{label}: duplicate entry for {loc}/{amb}/{name}"
+                );
+            }
+            for ((loc, amb), total) in &per_key {
+                assert!(
+                    *total <= SLOTS_PER_AMBIT,
+                    "{label}: {loc}/{amb} wants {total} > {SLOTS_PER_AMBIT} slots"
+                );
+            }
+        }
+        // The default (bait) loadout must field ALL 13 fleet hull types — the
+        // strongest player on the shard does, and each answers a class the
+        // others cannot (1-61's fleet, measured 2026-08-13).
+        let fleet_types: HashSet<&str> = LOADOUT
+            .iter()
+            .filter(|(l, _, _, _)| *l == "fleet")
+            .map(|(_, _, n, _)| *n)
+            .collect();
+        for hull in [
+            "Battleship", "Starfighter", "Frigate", "Pursuit Fighter", "Stealth Bomber",
+            "High Altitude Interceptor", "Mobile Artillery", "Tank", "SAM Launcher",
+            "Cruiser", "Destroyer", "Submersible",
+        ] {
+            assert!(fleet_types.contains(hull), "LOADOUT missing fleet hull {hull}");
+        }
+        // Jamming Satellite is buildLimit 1 — the walk must know that or it
+        // will retry forever after the first one builds.
+        assert!(ONE_PER_PLAYER.contains(&"Jamming Satellite"));
     }
 
     #[test]

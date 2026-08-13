@@ -1267,6 +1267,15 @@ async fn supervise(
                             format!("{}: raid proof failed to start: {}", ex.raider_player, e),
                         ),
                     }
+                } else if cfg.allow_siege && ex.siege_shots < cfg.siege_max_shots {
+                    // Proof grinding: spend leftover siege budget on the
+                    // defender's planetary-shield structs — the raid difficulty
+                    // is a decay range tracking the LIVE shield, so every kill
+                    // shortens our own proof (and 1-61 does exactly this to us).
+                    let spent = shield_grind_round(app, client, cfg, &ex).await;
+                    if spent > 0 {
+                        ex.siege_shots += spent;
+                    }
                 }
             }
         }
@@ -1339,9 +1348,91 @@ async fn siege_round(
         return 0;
     }
 
+    // Kill-chain: you cannot damage the Command Ship through a living
+    // SAME-AMBIT blocker — the blocker absorbs everything, even counter-immune
+    // artillery fire. The doc used to CLAIM this walk happened; now it does.
+    // (1-61's Tank blocker ate seven straight MA shots aimed at his CMD.)
+    let fire_at = match crate::mcp::tools::strike::resolve_fire_target(client, cmd).await {
+        Ok((t, phase, note)) => {
+            if phase == "STRIP" {
+                crate::mcp::telemetry::tlog(
+                    "auto_raid",
+                    crate::mcp::telemetry::Sev::Info,
+                    format!("siege kill-chain for {}: {}", ex.raider_player, note),
+                );
+            }
+            t
+        }
+        Err(_) => cmd.to_string(),
+    };
+    fire_best_at(app, client, cfg, ex, &fire_at, "siege").await
+}
+
+/// While the raid proof is grinding, every planetary-shield contributor the
+/// defender loses shortens OUR OWN proof: the raid difficulty is a decay range
+/// tracking the LIVE `planetaryShield` (−50 per Ore Bunker, −25 per OSG, −13
+/// per PDC, −12 per Jamming Satellite). 1-61 does exactly this — 84 Tank shots
+/// at Ore Bunkers, 80 counter-immune artillery shots at Defense Cannons, 54 at
+/// Shield Generators. Costs the PDC's 1 damage per shot; shares the siege
+/// budget so it cannot run away.
+async fn shield_grind_round(
+    app: &tauri::AppHandle,
+    client: &CosmosClient,
+    cfg: &AutoRaidConfig,
+    ex: &Expedition,
+) -> usize {
+    let structs = crate::mcp::loop_util::player_structs(client, &ex.target_player).await;
+    let best_shield = {
+        let gs = crate::game_state::GAME_STATE.read().unwrap();
+        let mut candidates: Vec<(u64, String)> = structs
+            .iter()
+            .filter(|s| {
+                !crate::mcp::loop_util::parse_bool(s.get("is_destroyed"))
+                    && s.get("location_id").and_then(|x| x.as_str()) == Some(ex.target_planet.as_str())
+            })
+            .filter_map(|s| {
+                let id = s.get("id").and_then(|x| x.as_str())?.to_string();
+                let tid = s.get("type").map(|t| match t {
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::String(v) => v.clone(),
+                    _ => String::new(),
+                })?;
+                let contrib = gs
+                    .struct_types
+                    .get(&tid)
+                    .and_then(|t| t.planetary_shield_contribution)
+                    .unwrap_or(0);
+                (contrib > 0).then_some((contrib, id))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.into_iter().next()
+    };
+    let Some((contrib, target)) = best_shield else { return 0 };
+    crate::mcp::telemetry::tlog(
+        "auto_raid",
+        crate::mcp::telemetry::Sev::Info,
+        format!(
+            "shield grind: {} targeting {} (−{} planetary shield on kill → shorter proof)",
+            ex.raider_player, target, contrib
+        ),
+    );
+    fire_best_at(app, client, cfg, ex, &target, "shield-grind").await
+}
+
+/// Fire the raider's best co-located shooter (evasion-, armour- and
+/// counter-aware via `plan_strike`) once at `target`. Returns shots spent.
+async fn fire_best_at(
+    app: &tauri::AppHandle,
+    client: &CosmosClient,
+    cfg: &AutoRaidConfig,
+    ex: &Expedition,
+    target: &str,
+    label: &str,
+) -> usize {
     let Ok(plan) = crate::mcp::tools::intel::plan_strike(
         client,
-        &json!({ "target": cmd, "players": [ex.raider_player.clone()] }),
+        &json!({ "target": target, "players": [ex.raider_player.clone()] }),
     )
     .await
     else {
@@ -1373,7 +1464,7 @@ async fn siege_round(
         "/structs.structs.MsgStructAttack",
         json!({
             "operatingStructId": best.struct_id,
-            "targetStructId": [cmd],
+            "targetStructId": [target],
             "weaponSystem": wsys,
         }),
         &format!("auto_raid_siege:{}", ex.raider_player),
@@ -1385,8 +1476,8 @@ async fn siege_round(
                 "auto_raid",
                 crate::mcp::telemetry::Sev::Notice,
                 format!(
-                    "siege: {} fired {} at {}'s Command Ship {} (~{:.1} dmg, {} counter exposure)",
-                    ex.raider_player, best.struct_id, ex.target_player, cmd, best.expected_dmg, best.counter_exposure
+                    "{}: {} fired {} at {} (~{:.1} dmg, {} counter exposure)",
+                    label, ex.raider_player, best.struct_id, target, best.expected_dmg, best.counter_exposure
                 ),
             );
             1
@@ -1395,7 +1486,7 @@ async fn siege_round(
             crate::mcp::telemetry::tlog(
                 "auto_raid",
                 crate::mcp::telemetry::Sev::Warn,
-                format!("siege shot failed for {}: {}", ex.raider_player, e),
+                format!("{} shot failed for {}: {}", label, ex.raider_player, e),
             );
             0
         }
