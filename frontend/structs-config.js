@@ -2455,8 +2455,74 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       }, 100);
     }
 
+    /* Leaving Debug is only deliberate if the HUMAN leaves.
+     *
+     * Any click on another nav item (or the close button) means they chose to
+     * go elsewhere, so stop re-asserting. Delegated on the document because the
+     * webapp recreates the nav items whenever it re-renders, so listeners bound
+     * to the elements themselves would not survive.
+     */
+    document.addEventListener('click', function (e) {
+      if (!e.target || !e.target.closest) return;
+      var item = e.target.closest('.sui-screen-nav-item, #menu-page-nav-close');
+      if (item && item.id !== DEBUG_NAV_ID) debugActive = false;
+    }, true);
+
+    var reasserting = false;
+    var lastReassert = 0;
+    // Grass events arrive in bursts, and each redraw costs several Tauri
+    // invokes. One redraw per second is far faster than a human notices and
+    // keeps a storm of events from turning into a storm of renders.
+    var REASSERT_MIN_GAP_MS = 1000;
+
+    /* Put the Debug page back when something else wipes it.
+     *
+     * The webapp navigates the menu on its OWN schedule: a dozen grass
+     * listeners call `MenuPage.router.goto(...)` when an event arrives — a raid
+     * status change, a transfer, an alpha infusion — and every navigation
+     * rewrites `#menu-page-body-content`, which is the container this page draws
+     * into. The Debug tab therefore vanished seconds after being opened and the
+     * user landed back on the default page, over and over, with no visible
+     * cause. The more of the galaxy you can see, the more often it happens.
+     *
+     * We cannot change that behaviour (the webapp is a read-only submodule), so
+     * treat an explicit visit to Debug as sticky: if the user opened it and has
+     * not navigated away themselves, redraw it. `reasserting` guards the
+     * re-entry that our own `innerHTML` write would otherwise cause.
+     */
+    function reassertDebugPage() {
+      if (!debugActive || reasserting) return;
+      /* Closing the menu counts as leaving. The webapp only toggles `hidden` on
+       * the layout, so the Debug markup survives a close; without this the next
+       * open — from the HUD, not from a nav click we could see — would snap the
+       * user to Debug instead of the page they asked for. */
+      var layout = document.getElementById('menu-page-layout');
+      if (!layout || layout.classList.contains('hidden')) { debugActive = false; return; }
+      if (!document.getElementById('menu-page-body-content')) return;
+      if (document.getElementById('debug-engine')) return; // still ours — nothing to do
+      var now = Date.now();
+      if (now - lastReassert < REASSERT_MIN_GAP_MS) return;
+      lastReassert = now;
+      reasserting = true;
+      try {
+        renderDebugPage();
+        var tab = document.getElementById(DEBUG_NAV_ID);
+        if (tab) {
+          var nav = document.getElementById('menu-page-nav-items');
+          if (nav) {
+            nav.querySelectorAll('.sui-screen-nav-item').forEach(function (i) {
+              i.classList.remove('sui-mod-active');
+            });
+          }
+          tab.classList.add('sui-mod-active');
+        }
+      } finally {
+        reasserting = false;
+      }
+    }
+
     // Watch for the nav to render and inject our tab
-    var observer = new MutationObserver(function() {
+    function ensureDebugTab() {
       var navItems = document.getElementById('menu-page-nav-items');
       if (!navItems) return;
 
@@ -2485,6 +2551,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
       // Insert before the close button's parent
       navItems.appendChild(debugTab);
+    }
+
+    var observer = new MutationObserver(function() {
+      // Tab first: a webapp navigation rebuilds `menu-page-nav-items` wholesale,
+      // so the tab has to be back before the reassert can mark it active.
+      ensureDebugTab();
+      reassertDebugPage();
     });
 
     // Start observing
