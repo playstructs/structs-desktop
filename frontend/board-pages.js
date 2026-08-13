@@ -2157,6 +2157,28 @@
     return n ? id + ' (' + n + ')' : id;
   }
 
+  /* Is `id` already visible in the rendered text `shown`?
+   *
+   * `shown` is a resolved label like "worker783 (1-1075)" or a bare id. A
+   * substring test matches any LONGER id that happens to start with ours, so
+   * a chip for 1-1075 would be suppressed by a row showing 1-10750.
+   */
+  function grassIdAlreadyShown(shown, id) {
+    return shown === id || shown.slice(-(id.length + 2)) === '(' + id + ')';
+  }
+
+  /* Does a dot-delimited GRASS subject contain `value` as a whole token?
+   *
+   * Module scope on purpose: `grassRow` calls this as well as `grassVal`. It
+   * first shipped nested inside `grassVal`, so every row carrying an `address`
+   * detail — which is every inventory event — threw ReferenceError out of
+   * `grassRow` and the live feed stopped appending.
+   */
+  function subjectHasToken(subject, value) {
+    if (!subject || value == null) return false;
+    return String(subject).split('.').indexOf(String(value)) >= 0;
+  }
+
   // Format ONE detail value. `variant` picks the precise twin: 'new' prefers
   // det[key+'_p'], 'old' prefers det[key+'_old_p'] (falling back to the
   // legacy-scaled field). Returns a display string, or null to suppress.
@@ -2168,22 +2190,6 @@
     if (key === 'action' && String(raw).toLowerCase() === String(ev.category || '').toLowerCase()) {
       return null;
     }
-    /* Is `id` already visible in the rendered text `shown`?
-     *
-     * `shown` is a resolved label like "worker783 (1-1075)" or a bare id. A
-     * substring test matches any LONGER id that happens to start with ours, so
-     * a chip for 1-1075 would be suppressed by a row showing 1-10750.
-     */
-    function grassIdAlreadyShown(shown, id) {
-      return shown === id || shown.slice(-(id.length + 2)) === '(' + id + ')';
-    }
-
-    /* Does a dot-delimited GRASS subject contain `value` as a whole token? */
-    function subjectHasToken(subject, value) {
-      if (!subject || value == null) return false;
-      return String(subject).split('.').indexOf(String(value)) >= 0;
-    }
-
     // An id whose RESOLVED twin is already on the row. `counterparty` renders
     // as "worker783 (1-1075)", so a `counterparty_player_id: 1-1075` chip beside
     // it is the same id a second time; likewise a counterparty guild that is

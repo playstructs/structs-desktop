@@ -543,6 +543,45 @@ mod tests {
             }
         }
     }
+    /// A helper called from two functions must be declared at module scope.
+    ///
+    /// REGRESSION: `subjectHasToken` shipped nested inside `grassVal` but was
+    /// also called from `grassRow`, so every grass row carrying an `address`
+    /// detail — every inventory event — threw `ReferenceError` out of
+    /// `renderGrassList`'s render loop. The block tick ahead of it rendered and
+    /// nothing after it did: the live Stream tab froze on a single row.
+    ///
+    /// `node --check` cannot see this (it is scope, not syntax) and neither can
+    /// the substring guard above. This pins the two helpers involved; eslint's
+    /// `no-undef` is the general answer if the frontend ever grows a linter.
+    #[test]
+    fn shared_grass_helpers_are_declared_at_module_scope() {
+        const SRC: &str = include_str!("../../../../frontend/board-pages.js");
+        // Inside the file's single top-level IIFE, module scope is exactly two
+        // spaces of indentation; anything deeper is inside another function.
+        for helper in ["subjectHasToken", "grassIdAlreadyShown"] {
+            let decl = format!("function {helper}(");
+            let lines: Vec<&str> = SRC
+                .lines()
+                .filter(|l| l.contains(&decl) && !l.trim_start().starts_with("//"))
+                .collect();
+            assert_eq!(
+                lines.len(),
+                1,
+                "board-pages.js should declare {helper} exactly once, found {}",
+                lines.len()
+            );
+            let indent = lines[0].len() - lines[0].trim_start().len();
+            assert_eq!(
+                indent, 2,
+                "board-pages.js declares {helper} at indent {indent}, i.e. nested inside another \
+                 function. It is called from both grassVal and grassRow, so a nested declaration \
+                 is a ReferenceError at render time that freezes the Stream tab. Hoist it to \
+                 module scope."
+            );
+        }
+    }
+
     use serde_json::json;
 
     fn ev(cat: &str, subject: &str, detail: Value) -> GameEvent {
