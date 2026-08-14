@@ -292,6 +292,55 @@ pub fn counter_exposure(defender_weapon_masks: &[u64], attacker_ambit_bit: u64) 
         .count()
 }
 
+/// One registered defender (or the target itself) as a counter threat.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefenderThreat {
+    /// Weapon reach (primary|secondary union).
+    pub mask: u64,
+    /// The defender's own operating-ambit bit (decides same- vs cross-ambit
+    /// counter value against a given attacker).
+    pub ambit_bit: u64,
+    /// Cross-ambit counter damage.
+    pub counter: u64,
+    /// Same-ambit counter damage (Destroyer is the only hull where this
+    /// EXCEEDS the base — advancedCounterAttack 1 → 2).
+    pub counter_same: u64,
+}
+
+/// Total counter damage an attacker in `attacker_ambit_bit` eats per landed
+/// shot: the SUM over the target and every armed defender.
+///
+/// The gating is asymmetric, and the Command Ship is the proof:
+///   * **Same ambit** — counters fire regardless of weapon reach. The Command
+///     Ship's weapon mask (32) reaches no real ambit, yet it counters land
+///     attackers for 2 every time (measured repeatedly — it is the hardest
+///     counter in the game).
+///   * **Cross ambit** — gated on the counter-er's WEAPON reaching the
+///     attacker's ambit (a space Starfighter, reach space-only, defending a
+///     land target did nothing; a space Battleship, reach water+land, killed a
+///     land attacker with its counter).
+///
+/// Counter damage stacks across the target and every armed defender (measured:
+/// 2+1 killed a 3 HP Tank, 0+1+1 killed a 2 HP Battleship). The old model
+/// multiplied the TARGET's counter value by the defender COUNT, which both
+/// misprices mixed defender sets (a Command Ship counters 2, an escort Tank 1)
+/// and priced the CMD's same-ambit counter at zero.
+pub fn counter_risk(threats: &[DefenderThreat], attacker_ambit_bit: u64) -> u64 {
+    threats
+        .iter()
+        .map(|t| {
+            let same = t.ambit_bit != 0 && t.ambit_bit == attacker_ambit_bit;
+            if same {
+                t.counter_same
+            } else if attacker_ambit_bit == 0 || t.mask & attacker_ambit_bit != 0 {
+                t.counter
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
 // ───────────────────────── planetary interceptor layer ──────────────────────
 
 /// The planet's low-orbit ballistic interceptor network — a second evasion layer
@@ -344,15 +393,17 @@ pub fn shooter_score(
     control: WeaponControl,
     interceptors: InterceptorNet,
     target_is_planetary: bool,
-    counter_exposure: usize,
+    counter_risk: u64,
     charge: u64,
 ) -> f64 {
     if !sim.reachable {
         return f64::MIN;
     }
     let dmg = sim.expected_damage * interceptors.hit_factor(control, target_is_planetary);
-    // Each defender that can reach us costs roughly `counter_estimate` HP.
-    let risk = sim.counter_estimate as f64 * counter_exposure as f64 + sim.recoil_to_attacker as f64;
+    // `counter_risk` is the SUMMED per-defender counter damage for this
+    // shooter's ambit (0 when the attack is counter-immune — the caller zeroes
+    // it, since struct-level attackCounterable overrides everything).
+    let risk = counter_risk as f64 + sim.recoil_to_attacker as f64;
     let per_shot = dmg - 0.35 * risk;
     // ── Rate of fire ────────────────────────────────────────────────────────
     // Every fleet weapon in the game does the same 2 damage in one shot, so
@@ -607,6 +658,35 @@ mod tests {
         let net = InterceptorNet::from_planet_attributes(Some(&pa));
         assert_eq!(net.quantity, 1);
         assert_eq!((net.success_num, net.success_den), (1, 3));
+    }
+
+    /// Counter damage STACKS across the target and every armed defender, each
+    /// at its OWN same-/cross-ambit value (measured: 2+1 killed a 3 HP Tank).
+    /// The old model multiplied the target's value by the defender count.
+    #[test]
+    fn counter_risk_sums_each_defender_at_its_own_value() {
+        let land = 4u64;
+        let threats = [
+            // The target itself: a Command Ship on land (counters 2/2).
+            DefenderThreat { mask: 32, ambit_bit: land, counter: 2, counter_same: 2 },
+            // An escort Tank, land (1/1, reach land only).
+            DefenderThreat { mask: 4, ambit_bit: land, counter: 1, counter_same: 1 },
+            // A Destroyer in water — advancedCounterAttack: SAME-ambit 2 beats
+            // its cross value 1. Reach water|air.
+            DefenderThreat { mask: 10, ambit_bit: 2, counter: 1, counter_same: 2 },
+        ];
+        // Attacker on land: CMD counters SAME-ambit 2 despite its weapon mask
+        // (32) reaching nothing — same-ambit counters are not reach-gated
+        // (measured: every land attacker on a land CMD eats 2). Tank same-ambit
+        // 1. Destroyer can't reach land. Total 3.
+        assert_eq!(counter_risk(&threats, 4), 3);
+        // Attacker in water: Destroyer SAME-ambit (advanced) 2; others no.
+        assert_eq!(counter_risk(&threats, 2), 2);
+        // Attacker in air: only the Destroyer's weapon reaches, CROSS value 1.
+        assert_eq!(counter_risk(&threats, 8), 1);
+        // Attacker in space: nothing same-ambit, no weapon reaches space → free
+        // shot. (This is `prefer_counter_free_ambit` in one number.)
+        assert_eq!(counter_risk(&threats, 16), 0);
     }
 
     #[test]

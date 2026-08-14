@@ -63,6 +63,7 @@ mod proportionality_tests {
             reachable: true,
             att_ambit_bit: 4,
             counter_exposure: 0,
+            counter_risk: 0,
             score: dmg,
             control: crate::mcp::combat::WeaponControl::Unguided,
         }

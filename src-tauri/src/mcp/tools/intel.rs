@@ -578,10 +578,34 @@ pub struct StrikeRow {
     /// How many of the target's defenders can counter into this shooter's ambit.
     /// 0 is the free shot the docs call "the single biggest combat lever".
     pub counter_exposure: usize,
+    /// SUMMED counter damage this shooter eats per landed shot (target + every
+    /// armed defender reaching its ambit, each at its same-/cross-ambit value;
+    /// 0 when the attack is counter-immune). This is HP the shooter pays.
+    pub counter_risk: u64,
     /// Ranking score: expected damage after the planetary interceptor heuristic,
     /// penalised by counter risk. Ordering only — never shown as damage.
     pub score: f64,
     pub control: crate::mcp::combat::WeaponControl,
+}
+
+/// A shot is suicidal when the summed counter damage it would draw is enough
+/// to destroy the shooter. A counter can outright NEGATE the attack it answers
+/// (measured live: `counterDestroyedAttacker: true` resolved the dying
+/// attacker's shot for 0 damage), so a nearly-dead hull sent at a defended
+/// target dies for nothing. Reads the shooter's LIVE health — the cached
+/// struct lists only carry `health_max`, which is the gap the combat doctrine
+/// flagged as "not yet enforced in code".
+pub async fn shot_is_suicidal(client: &CosmosClient, row: &StrikeRow) -> bool {
+    if row.counter_risk == 0 {
+        return false;
+    }
+    let Ok(e) = client.query_entity("struct", &row.struct_id).await else {
+        return false; // can't read health — don't silently disarm the response
+    };
+    let hp = crate::mcp::loop_util::parse_f64(
+        e.get("structAttributes").and_then(|a| a.get("health")),
+    );
+    hp > 0.0 && hp <= row.counter_risk as f64
 }
 
 /// A computed team strike plan against a resolved target.
@@ -732,11 +756,13 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
     let reduction = defense.reduction;
 
     // ── Counter exposure: which ambits the target's registered defenders can
-    // reach. Firing from an uncovered ambit costs zero counter damage. ──
-    let defender_masks: Vec<u64> = match &target_id_arg {
-        Some(tid) => defender_weapon_masks(client, tid).await,
+    // reach, and how much summed counter damage each ambit eats — counters
+    // STACK across the target and every armed defender. ──
+    let threats: Vec<crate::mcp::combat::DefenderThreat> = match &target_id_arg {
+        Some(tid) => defender_threats(client, tid).await,
         None => vec![],
     };
+    let defender_masks: Vec<u64> = threats.iter().map(|t| t.mask).collect();
     // The planet's interceptor network only bites guided ordnance aimed at a
     // struct sitting on that planet. Its rate is chain-exposed (e.g. 1/3 per
     // interceptor), so this is real data, not a guess.
@@ -915,6 +941,15 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
                 }
             };
             let exposure = counter_exposure(&defender_masks, *att_ambit);
+            // Struct-level attackCounterable overrides everything (Mobile
+            // Artillery grinds defended targets with ZERO attrition) — a
+            // counter-immune weapon pays no counter risk however many
+            // defenders cover its ambit.
+            let risk = if w.counterable {
+                crate::mcp::combat::counter_risk(&threats, *att_ambit)
+            } else {
+                0
+            };
             rows.push(StrikeRow {
                 player: player.clone(),
                 player_id: player_id.clone(),
@@ -925,7 +960,8 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
                 reachable: r.reachable,
                 att_ambit_bit: *att_ambit,
                 counter_exposure: exposure,
-                score: shooter_score(&r, w.control, interceptors, target_is_planetary, exposure, w.charge),
+                counter_risk: risk,
+                score: shooter_score(&r, w.control, interceptors, target_is_planetary, risk, w.charge),
                 control: w.control,
             });
         }
@@ -950,10 +986,14 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
     })
 }
 
-/// Weapon-reach masks of every live struct registered to defend `target`, plus
-/// the target's own reach (it counters too). Feeds `counter_free_ambits` /
-/// `counter_exposure` so a shooter can be picked in an ambit nobody covers.
-pub async fn defender_weapon_masks(client: &CosmosClient, target: &str) -> Vec<u64> {
+/// Every live struct registered to defend `target` (plus the target itself —
+/// it counters too) as [`DefenderThreat`]s: weapon reach, own ambit, and BOTH
+/// counter values. Feeds `counter_free_ambits` / `counter_exposure` (via the
+/// masks) and `counter_risk` (summed per-defender damage — counters STACK).
+pub async fn defender_threats(
+    client: &CosmosClient,
+    target: &str,
+) -> Vec<crate::mcp::combat::DefenderThreat> {
     let mut ids: Vec<String> = vec![target.to_string()];
     if let Ok(page) = client.guild.struct_defender_by_protected(target, 1).await {
         for d in page.items.iter() {
@@ -962,7 +1002,7 @@ pub async fn defender_weapon_masks(client: &CosmosClient, target: &str) -> Vec<u
             }
         }
     }
-    let mut masks = Vec::new();
+    let mut threats = Vec::new();
     for id in ids {
         let Ok(e) = client.query_entity("struct", &id).await else { continue };
         if crate::mcp::loop_util::parse_bool(
@@ -978,21 +1018,33 @@ pub async fn defender_weapon_masks(client: &CosmosClient, target: &str) -> Vec<u
                 other => other.to_string(),
             })
             .unwrap_or_default();
+        let ambit_bit = e
+            .get("Struct")
+            .and_then(|s| s.get("operatingAmbit"))
+            .and_then(|x| x.as_str())
+            .map(crate::mcp::tools::format::ambit_bit)
+            .unwrap_or(0);
         let gs = GAME_STATE.read().unwrap();
         if let Some(t) = gs.struct_types.get(&type_id) {
+            let counter = t.counter_attack.unwrap_or(0);
+            let counter_same = t.counter_attack_same_ambit.unwrap_or(0);
             // A struct with no counter value can't punish anyone regardless of
             // reach (Mobile Artillery's indirectCombatModule, unarmed planetary
             // structs) — it must not make an ambit look covered.
-            if t.counter_attack.unwrap_or(0) == 0 && t.counter_attack_same_ambit.unwrap_or(0) == 0 {
+            if counter == 0 && counter_same == 0 {
                 continue;
             }
             let mask = t.primary_weapon_ambits.unwrap_or(0) | t.secondary_weapon_ambits.unwrap_or(0);
-            if mask != 0 {
-                masks.push(mask);
+            // Same-ambit counters are NOT weapon-reach-gated (the Command
+            // Ship's mask reaches nothing real, yet it counters same-ambit
+            // for 2 every time) — so a zero mask with a same-ambit value is
+            // still a threat.
+            if mask != 0 || counter_same > 0 {
+                threats.push(crate::mcp::combat::DefenderThreat { mask, ambit_bit, counter, counter_same });
             }
         }
     }
-    masks
+    threats
 }
 
 /// `intel.strike_options` — team-wide strike planner (display). Reports which of

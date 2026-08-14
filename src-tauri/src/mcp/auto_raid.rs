@@ -1006,7 +1006,7 @@ async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(Str
     //
     // So every dispatch trades our own exposure for the target's ore, and a
     // raider sitting on a previous haul is the worst one to send.
-    let mut eligible: Vec<(String, u32, f64)> = Vec::new();
+    let mut eligible: Vec<(String, u32, f64, bool)> = Vec::new();
     for (pid, idx) in candidates {
         let Ok(pl) = client.query_entity("player", &pid).await else { continue };
         let p = pl.get("Player");
@@ -1044,11 +1044,28 @@ async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(Str
         let ore = crate::mcp::loop_util::parse_f64(
             pl.get("gridAttributes").and_then(|g| g.get("ore")),
         );
-        eligible.push((pid, idx, ore));
+        // Does this raider actually carry the siege kit its doctrine assumes?
+        // Mobile Artillery (8) grinds a defended Command Ship with ZERO
+        // attrition (counter-immune); the Battleship (2) is the only
+        // armour-piercing hull. A raider without either pays 2+ HP per landed
+        // shot to stacked counters and loses Tanks every 2-3 shots — the
+        // dispatch itself is what should notice, not the siege after arrival.
+        let siege_kit = crate::mcp::loop_util::player_structs(client, &pid)
+            .await
+            .iter()
+            .filter(|s| !crate::mcp::loop_util::parse_bool(s.get("is_destroyed")))
+            .filter_map(|s| s.get("type").map(|t| t.to_string().trim_matches('"').to_string()))
+            .any(|t| t == "8" || t == "2");
+        eligible.push((pid, idx, ore, siege_kit));
     }
-    // Least ore at risk first; ties keep registry order.
-    eligible.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-    eligible.into_iter().next().map(|(pid, idx, _)| (pid, idx))
+    // Siege-equipped first, then least ore at risk; ties keep registry order.
+    // A preference rather than a hard gate so a young fleet still raids while
+    // auto_build converges it toward RAIDER_LOADOUT.
+    eligible.sort_by(|a, b| {
+        b.3.cmp(&a.3)
+            .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    eligible.into_iter().next().map(|(pid, idx, _, _)| (pid, idx))
 }
 
 async fn raider_location(client: &CosmosClient, pid: &str) -> Option<(String, String)> {
@@ -1444,14 +1461,33 @@ async fn fire_best_at(
     let mut shots: Vec<&crate::mcp::tools::intel::StrikeRow> =
         plan.rows.iter().filter(|r| r.reachable).collect();
     shots.sort_by(|a, b| {
-        a.counter_exposure
-            .cmp(&b.counter_exposure)
+        a.counter_risk
+            .cmp(&b.counter_risk)
             .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
     });
-    let Some(best) = shots.first() else { return 0 };
     if budget == 0 || cfg.dry_run {
         return 0;
     }
+    // Survivability gate: skip shooters whose remaining HP is within the
+    // summed counter damage — they die to the return fire and the counter can
+    // negate their shot outright. Falls through to the next-best shooter.
+    let mut best = None;
+    for s in &shots {
+        if crate::mcp::tools::intel::shot_is_suicidal(client, s).await {
+            crate::mcp::telemetry::tlog(
+                "auto_raid",
+                crate::mcp::telemetry::Sev::Notice,
+                format!(
+                    "{}: holding {} — {} counter damage would destroy it",
+                    label, s.struct_id, s.counter_risk
+                ),
+            );
+            continue;
+        }
+        best = Some(*s);
+        break;
+    }
+    let Some(best) = best else { return 0 };
 
     let wsys = if best.weapon.eq_ignore_ascii_case("secondary") {
         "secondaryWeapon"

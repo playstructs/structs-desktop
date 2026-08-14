@@ -708,7 +708,9 @@ async fn handle_alarm(
         }
         let e = best.entry(pid.to_string()).or_insert(r);
         let better = if cfg.prefer_counter_free_ambit {
-            (r.counter_exposure, -r.score) < (e.counter_exposure, -e.score)
+            // counter_risk is the honest number (it includes same-ambit
+            // counters that reach-based exposure misses — the CMD's 2/2).
+            (r.counter_risk, -r.score) < (e.counter_risk, -e.score)
         } else {
             r.score > e.score
         };
@@ -719,8 +721,8 @@ async fn handle_alarm(
     let mut shots: Vec<&crate::mcp::tools::intel::StrikeRow> = best.into_values().collect();
     shots.sort_by(|a, b| {
         if cfg.prefer_counter_free_ambit {
-            a.counter_exposure
-                .cmp(&b.counter_exposure)
+            a.counter_risk
+                .cmp(&b.counter_risk)
                 .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
         } else {
             b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
@@ -778,6 +780,20 @@ async fn handle_alarm(
             return Ok(());
         }
         for s in shots.iter().take(granted) {
+            // Survivability gate: a hull whose remaining HP is within the
+            // summed counter damage dies to the return fire AND its shot can
+            // be negated outright — hold it back rather than trade it for 0.
+            if crate::mcp::tools::intel::shot_is_suicidal(client, s).await {
+                crate::mcp::telemetry::tlog(
+                    "auto_response",
+                    crate::mcp::telemetry::Sev::Notice,
+                    format!(
+                        "holding {} — {} counter damage would destroy it (suicidal shot)",
+                        s.struct_id, s.counter_risk
+                    ),
+                );
+                continue;
+            }
             let ok = fire(app, s, &fire_target).await;
             if ok {
                 fired += 1;

@@ -420,7 +420,17 @@ pub fn health_snapshot() -> Value {
     let mut wedged = Vec::new();
     for (name, enabled, interval_ms) in loop_configs() {
         let stat = stats.get(name).copied().unwrap_or_default();
-        if stat.running && now - stat.last_started_ms > LOOP_STUCK_MS {
+        // Same progress-aware test as the findings pass: a guard held for a
+        // long time is NOT wedged while the scan keeps logging / signing txs.
+        // The duration-only version here reported auto_defend's first
+        // full-fleet wiring scan (30+ min, 1,200+ successful txs) as
+        // "wedged"/degraded the whole way through.
+        let last_life = stat.last_progress_ms.max(stat.last_started_ms);
+        if stat.running
+            && now - stat.last_started_ms > LOOP_STUCK_MS
+            && now - last_life > LOOP_STUCK_MS
+            && crate::mcp::tx_gate::in_flight_for(name) == 0
+        {
             wedged.push(name);
         } else if enabled
             && !stat.running
