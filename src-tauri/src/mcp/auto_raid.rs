@@ -1246,10 +1246,46 @@ async fn supervise(
                 }
             } else {
                 ex.ongoing_since_block = None;
+                // ── Slot ownership. A planet runs ONE raid, and the chain
+                // auto-promotes the next co-located fleet in the SAME block
+                // when the holder leaves — ignoring team. An armed clock does
+                // NOT mean it is OUR raid: if another fleet holds the slot our
+                // fleet is inert here (attacks rejected both directions) and
+                // any proof we grind can never land. Observed live 2026-08-13:
+                // an armed window transferred to a co-located sibling fleet
+                // with no proof running, which sat for 31 minutes and lost its
+                // Command Ship to the defender's response.
+                let slot_holder = client
+                    .guild
+                    .planet_raid_active_by_planet(&ex.target_planet)
+                    .await
+                    .ok()
+                    .and_then(|raid| {
+                        let r = raid.as_array().and_then(|a| a.first()).cloned().unwrap_or(raid);
+                        r.get("fleet_id").and_then(|x| x.as_str()).map(String::from)
+                    });
+                if let Some(holder) = slot_holder {
+                    if holder != ex.fleet_id {
+                        // Kill our proof if one is grinding — it can never land.
+                        if ex.hashing {
+                            use crate::hasher::types::TaskRegistry;
+                            use std::sync::Arc as StdArc;
+                            use tauri::Manager;
+                            if let Some(reg) = app.try_state::<StdArc<TaskRegistry>>() {
+                                if let Some((_, h)) = reg.tasks.remove(&ex.fleet_id) {
+                                    h.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                                }
+                            }
+                        }
+                        abort = Some(format!(
+                            "raid slot held by {holder} — our fleet is inert here"
+                        ));
+                    }
+                }
                 // A proof that vanished without seizing the ore must be re-issued
                 // — see `proof_running`. The clock is still armed, so there is
                 // still a raid to win.
-                if ex.hashing && !proof_running(app, &ex.fleet_id) {
+                if abort.is_none() && ex.hashing && !proof_running(app, &ex.fleet_id) {
                     ex.hashing = false;
                     crate::mcp::telemetry::tlog(
                         "auto_raid",
@@ -1260,7 +1296,7 @@ async fn supervise(
                         ),
                     );
                 }
-                if !ex.hashing {
+                if abort.is_none() && !ex.hashing {
                     let target =
                         raid_difficulty_target(client, &ex.raider_player, &ex.fleet_id, shield).await;
                     match start_raid_proof(app, &ex, clock, target).await {
@@ -1284,7 +1320,7 @@ async fn supervise(
                             format!("{}: raid proof failed to start: {}", ex.raider_player, e),
                         ),
                     }
-                } else if cfg.allow_siege && ex.siege_shots < cfg.siege_max_shots {
+                } else if abort.is_none() && cfg.allow_siege && ex.siege_shots < cfg.siege_max_shots {
                     // Proof grinding: spend leftover siege budget on the
                     // defender's planetary-shield structs — the raid difficulty
                     // is a decay range tracking the LIVE shield, so every kill
