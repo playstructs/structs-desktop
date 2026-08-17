@@ -24,6 +24,7 @@ pub mod pfp;
 pub mod policy;
 pub mod prompts;
 pub mod raid_view;
+pub mod readiness;
 pub mod spectator;
 pub mod resources;
 pub mod roster_cache;

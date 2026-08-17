@@ -85,6 +85,7 @@ pub async fn execute(
         "valid_targets" => query_valid_targets(client, &params.args).await,
         "strike_options" => query_strike_options(client, &params.args).await,
         "scout" => query_scout(client, &params.args).await,
+        "raid_readiness" => query_raid_readiness(client, &params.args).await,
         "battle_log" => query_battle_log(client, &params.args).await,
         "slot_map" => query_slot_map(client, &params.args).await,
         "is_active" => query_is_active(client, &params.args).await,
@@ -2832,4 +2833,163 @@ fn enrich_response(value: &mut Value) {
         }
         _ => {}
     }
+}
+
+// ── Raid readiness ───────────────────────────────────────────────────────────
+
+/// Default number of roster players to audit in one sweep. Each player costs a
+/// fleet read plus a (cached) struct-composition read, so an unbounded sweep
+/// across ~900 vplayers is thousands of requests. Bounded by default, raisable
+/// with `limit`, and `player` audits exactly one.
+const READINESS_DEFAULT_LIMIT: usize = 25;
+
+/// `raid_readiness` — for each ambit a raider's Command Ship could occupy, can
+/// this player's OWN fleet reach it? See `mcp::readiness` for why this matters
+/// and why the ambit set is read from the type rather than assumed.
+async fn query_raid_readiness(client: &CosmosClient, args: &Value) -> Vec<Content> {
+    use crate::mcp::readiness::{assess, command_ship_ambits, tally, Hull, Verdict};
+
+    let only_gaps = args.get("only_gaps").and_then(|v| v.as_bool()).unwrap_or(false);
+    let one = args.get("player").and_then(|v| v.as_str()).map(String::from);
+
+    // Roster rows carry planet/fleet/name/role already — no extra reads for those.
+    let mut rows: Vec<crate::mcp::roster_cache::RosterRow> = crate::mcp::roster_cache::all_rows();
+    if let Some(p) = one.as_deref() {
+        rows.retain(|r| r.player_id == p || r.name == p);
+        if rows.is_empty() {
+            return vec![Content::text(format!(
+                "raid_readiness: no roster player matches '{p}'. Pass a player id (1-1035) or registry name."
+            ))];
+        }
+    } else {
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(READINESS_DEFAULT_LIMIT);
+        rows.sort_by(|a, b| a.player_id.cmp(&b.player_id));
+        rows.truncate(limit);
+    }
+    let audited = rows.len();
+
+    // Read ONCE for the whole sweep: the ambits a Command Ship can occupy are a
+    // property of the type, not of any one player.
+    let cmd_ambits = command_ship_ambits();
+
+    let max = crate::mcp::loop_util::effective_max_concurrent();
+    let c = client.clone();
+    let results = crate::mcp::loop_util::map_concurrent(rows, max, move |row| {
+        let client = c.clone();
+        async move {
+            let pid = row.player_id.clone();
+            let fleet_id = row.fleet_id.clone().unwrap_or_default();
+
+            // On station? An armed fleet parked elsewhere is not a defence —
+            // the planet is raidable while it is away.
+            let mut fleet_home = false;
+            if !fleet_id.is_empty() {
+                if let Ok(fl) = client.query_entity("fleet", &fleet_id).await {
+                    let f = fl.get("Fleet");
+                    let loc = f.and_then(|x| x.get("locationId")).and_then(|x| x.as_str());
+                    let status = f.and_then(|x| x.get("status")).and_then(|x| x.as_str());
+                    fleet_home = status == Some("onStation")
+                        && loc.is_some()
+                        && loc == row.planet_id.as_deref();
+                }
+            }
+
+            // Only FLEET structs can answer a raid: planetary structs have no
+            // weapon reach (an Ore Bunker blocks, it does not shoot back).
+            let structs = crate::mcp::loop_util::player_structs_cached(
+                &client,
+                &pid,
+                crate::mcp::loop_util::STRUCTS_CACHE_TTL_MS,
+            )
+            .await;
+            let hulls: Vec<Hull> = {
+                let gs = crate::game_state::GAME_STATE.read().unwrap();
+                structs
+                    .iter()
+                    .filter(|s| {
+                        !crate::mcp::loop_util::parse_bool(s.get("is_destroyed"))
+                            && crate::mcp::loop_util::parse_bool(s.get("is_built"))
+                            && s.get("location_id").and_then(|x| x.as_str()) == Some(fleet_id.as_str())
+                    })
+                    .filter_map(|s| {
+                        let id = s.get("id").and_then(|x| x.as_str())?;
+                        let t = gs.struct_types.get(&crate::mcp::loop_util::extract_type_id(s))?;
+                        // The ambit the hull STANDS in decides same- vs
+                        // cross-ambit counters, which is the whole verdict.
+                        let stands = s
+                            .get("operating_ambit")
+                            .and_then(|x| x.as_str())
+                            .map(crate::mcp::tools::format::ambit_bit)
+                            .unwrap_or(0);
+                        Hull::from_type(id, stands, t)
+                    })
+                    .collect()
+            };
+
+            let r = assess(&hulls, cmd_ambits, fleet_home);
+            (row.player_id, row.name, row.role, r)
+        }
+    })
+    .await;
+
+    let counts = tally(results.iter().map(|(_, _, _, r)| r));
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Raid readiness — can each player's OWN fleet reach a raider's Command Ship?\n\
+         Command Ship can occupy: [{}] (read from the type, not assumed)\n\
+         Audited {} of {} roster player(s): {} READY · {} PARTIAL · {} BLIND\n\n",
+        crate::mcp::tools::format::decode_ambits(cmd_ambits),
+        audited,
+        crate::mcp::roster_cache::all_rows().len(),
+        counts.get("READY").copied().unwrap_or(0),
+        counts.get("PARTIAL").copied().unwrap_or(0),
+        counts.get("BLIND").copied().unwrap_or(0),
+    ));
+
+    let mut shown = 0usize;
+    for (pid, name, role, r) in results.iter() {
+        if only_gaps && r.verdict == Verdict::Ready && r.fleet_home {
+            continue;
+        }
+        shown += 1;
+        out.push_str(&format!("{} {} [{}] — {}\n", pid, name, role, r.summary()));
+        for a in &r.per_ambit {
+            let mark = if a.answered() { '✔' } else { '✘' };
+            match &a.best {
+                Some(b) => out.push_str(&format!(
+                    "    {:<5} {} {:<15} {}\n",
+                    a.ambit,
+                    mark,
+                    a.posture.as_str(),
+                    b
+                )),
+                // Reaching hulls but no viable posture is the scout1 case:
+                // say so explicitly rather than letting it read as "no reach".
+                None => out.push_str(&format!(
+                    "    {:<5} {} unreachable      no hull's weapons reach this ambit\n",
+                    a.ambit, mark
+                )),
+            }
+            if a.posture == crate::mcp::readiness::Posture::SameAmbit {
+                out.push_str(&format!(
+                    "          ↳ {} hull(s) reach it, all from within it — full counter value, \
+                     so the suicidal-shot gate will refuse these\n",
+                    a.reaching
+                ));
+            }
+        }
+    }
+    if shown == 0 {
+        out.push_str("Every audited player is READY with its fleet on station.\n");
+    }
+    out.push_str(
+        "\nA BLIND player can never answer a raid on its own. Fleet slots free only when a hull is\n\
+         DESTROYED (the chain has no decommission message), so composition changes through attrition\n\
+         alone — plan role and ore placement around this rather than expecting a refit.\n",
+    );
+    vec![Content::text(out)]
 }
