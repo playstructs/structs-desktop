@@ -212,6 +212,7 @@ fn loops_json() -> Value {
         "sweep": crate::mcp::auto_sweep::get(),
         "response": crate::mcp::auto_response::get(),
         "raid": crate::mcp::auto_raid::get(),
+        "delegation": crate::mcp::delegation::get(),
     })
 }
 
@@ -1278,6 +1279,17 @@ pub async fn mcp_config_set_impl(
                         c.max_sends_per_scan
                     );
                     crate::mcp::auto_sweep::set(c);
+                    s
+                }
+                "delegation" => {
+                    let c: crate::mcp::delegation::DelegationConfig =
+                        serde_json::from_value(cfg).map_err(|e| e.to_string())?;
+                    let s = format!(
+                        "delegation → {} ({} per scan)",
+                        if c.enabled { "ON" } else { "off" },
+                        c.max_grants_per_scan
+                    );
+                    crate::mcp::delegation::set(c);
                     s
                 }
                 "response" => {

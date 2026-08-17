@@ -26,6 +26,49 @@ fn client() -> &'static Client {
     })
 }
 
+/// A Cosmos `next_key` is base64, which contains '+', '/' and '=' — all of
+/// which change meaning inside a query string. Percent-encode them or page 2
+/// silently returns page 1 (or an error).
+fn encode_pagination_key(key: &str) -> String {
+    key.chars()
+        .map(|c| match c {
+            '+' => "%2B".to_string(),
+            '/' => "%2F".to_string(),
+            '=' => "%3D".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+/// Pull the `(object_id, mask)` pairs granting `player_id` out of one page of
+/// permission records. Pure — unit-tested.
+///
+/// A permission id is `{objectId}@{playerId}`. The id is split on `@` and the
+/// grantee compared as a WHOLE token, never by substring: `1-19` is a prefix of
+/// `1-194`, so a `contains` test here would silently credit one player with
+/// another's grants.
+fn parse_permission_page(v: &Value, player_id: &str) -> Vec<(String, u64)> {
+    let Some(recs) = v.get("permissionRecords").and_then(|r| r.as_array()) else {
+        return Vec::new();
+    };
+    recs.iter()
+        .filter_map(|rec| {
+            let (object_id, grantee) = rec
+                .get("permissionId")
+                .and_then(|x| x.as_str())?
+                .split_once('@')?;
+            if grantee != player_id {
+                return None;
+            }
+            let value = rec
+                .get("value")
+                .and_then(|x| x.as_str().and_then(|s| s.parse().ok()).or_else(|| x.as_u64()))
+                .unwrap_or(0);
+            Some((object_id.to_string(), value))
+        })
+        .collect()
+}
+
 /// One shared GET with a single jittered retry on transport errors, timeouts,
 /// 429s, and 5xx — safe because these are idempotent reads. Retried-and-still-
 /// failing pressure errors feed the AIMD loop-concurrency controller.
@@ -169,6 +212,72 @@ impl CosmosClient {
             .unwrap_or_default())
     }
 
+    /// The permission bitmask player `player_id` holds on object `object_id`.
+    ///
+    /// Permission records are keyed `{objectId}@{playerId}`, so this is a plain
+    /// by-id read — and a MISSING record answers `0` rather than 404, which is
+    /// exactly the "holds nothing" answer callers want. Bypasses `entity_path`:
+    /// the id carries an `@`, which is percent-encoded so it can never be read
+    /// as a userinfo separator.
+    pub async fn permission_value(&self, object_id: &str, player_id: &str) -> Result<u64, String> {
+        let base = self.reactor_api.read().unwrap().clone();
+        let url = format!(
+            "{}/structs/permission/{}%40{}",
+            base.trim_end_matches('/'),
+            object_id,
+            player_id
+        );
+        let v = get_json(&url).await?;
+        Ok(v.get("permissionRecord")
+            .and_then(|r| r.get("value"))
+            .and_then(|x| x.as_str().and_then(|s| s.parse().ok()).or_else(|| x.as_u64()))
+            .unwrap_or(0))
+    }
+
+    /// Every permission record naming `player_id` as the GRANTEE, as
+    /// `(object_id, value)` pairs, plus whether the scan hit `max_pages`.
+    ///
+    /// The LCD filter is applied AFTER pagination: each page is a slice of the
+    /// whole permission store that happens to be filtered down to the matches
+    /// inside it. An empty page therefore means "no matches in this slice", NOT
+    /// "no more matches" — the scan must follow `next_key` to exhaustion or it
+    /// silently reports far fewer grants than exist. `max_pages` bounds a
+    /// runaway store; hitting it is reported so the caller can say so.
+    pub async fn permissions_by_player(
+        &self,
+        player_id: &str,
+        max_pages: usize,
+    ) -> Result<(Vec<(String, u64)>, bool), String> {
+        let base = self.reactor_api.read().unwrap().clone();
+        let base = base.trim_end_matches('/').to_string();
+        let mut out: Vec<(String, u64)> = Vec::new();
+        let mut next_key: Option<String> = None;
+        for page in 0..max_pages {
+            let mut url = format!(
+                "{}/structs/permission/player/{}?pagination.limit=1000",
+                base, player_id
+            );
+            if let Some(k) = &next_key {
+                url.push_str(&format!("&pagination.key={}", encode_pagination_key(k)));
+            }
+            let v = get_json(&url).await?;
+            out.extend(parse_permission_page(&v, player_id));
+            next_key = v
+                .get("pagination")
+                .and_then(|p| p.get("next_key"))
+                .and_then(|k| k.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            if next_key.is_none() {
+                return Ok((out, false));
+            }
+            if page + 1 == max_pages {
+                return Ok((out, true));
+            }
+        }
+        Ok((out, true))
+    }
+
     /// Query a single entity by type and ID
     pub async fn query_entity(&self, entity_type: &str, id: &str) -> Result<Value, String> {
         let path = Self::entity_path(entity_type)?;
@@ -190,19 +299,7 @@ impl CosmosClient {
 
         let mut params = vec![];
         if let Some(key) = pagination_key {
-            // next_key is base64, which contains '+', '/' and '=' — all of
-            // which change meaning inside a query string. Percent-encode them
-            // or page 2 silently returns page 1 (or an error).
-            let encoded: String = key
-                .chars()
-                .map(|c| match c {
-                    '+' => "%2B".to_string(),
-                    '/' => "%2F".to_string(),
-                    '=' => "%3D".to_string(),
-                    other => other.to_string(),
-                })
-                .collect();
-            params.push(format!("pagination.key={}", encoded));
+            params.push(format!("pagination.key={}", encode_pagination_key(key)));
         }
         if let Some(limit) = limit {
             params.push(format!("pagination.limit={}", limit));
@@ -213,4 +310,48 @@ impl CosmosClient {
         get_json(&url).await
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Shape mirrors a live LCD page: `value` is a STRING, and the page is a
+    /// slice of the whole permission store, so it carries other players' rows.
+    fn page() -> Value {
+        json!({
+            "permissionRecords": [
+                { "permissionId": "1-2562@1-194", "value": "33554431" },
+                { "permissionId": "6-53@1-194", "value": "2062" },
+                { "permissionId": "1-300@1-1940", "value": "33554431" },
+                { "permissionId": "1-301@1-19", "value": "33554431" },
+                { "permissionId": "1-302@1-1", "value": "1" },
+                { "malformed": true }
+            ],
+            "pagination": { "next_key": "abc", "total": "0" }
+        })
+    }
+
+    #[test]
+    fn keeps_only_whole_token_grantee_matches() {
+        let got = parse_permission_page(&page(), "1-194");
+        assert_eq!(
+            got,
+            vec![("1-2562".to_string(), 33_554_431), ("6-53".to_string(), 2062)],
+            "1-1940 and 1-19 share a prefix with 1-194 and must not match"
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_matches_is_empty_not_an_error() {
+        assert!(parse_permission_page(&page(), "1-99999").is_empty());
+        assert!(parse_permission_page(&json!({}), "1-194").is_empty());
+    }
+
+    #[test]
+    fn pagination_key_is_query_safe() {
+        // A raw base64 next_key would break the query string at '+', '/', '='.
+        assert_eq!(encode_pagination_key("MS0xOTY0QDEtM+/="), "MS0xOTY0QDEtM%2B%2F%3D");
+    }
 }

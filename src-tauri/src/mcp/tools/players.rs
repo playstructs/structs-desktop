@@ -1149,6 +1149,14 @@ pub async fn execute(
                         });
                         let _ = reg.save();
                     }
+                    // Hand the primary full permissions on the new player, so it
+                    // is operable from the primary key alone and not only by
+                    // this app re-deriving its HD index. Best-effort — the
+                    // delegation backfill loop catches anything that misses,
+                    // including a signup whose player id is still pending.
+                    if let Some(pid) = player_id.as_deref() {
+                        crate::mcp::delegation::grant_on_create(app_handle, index, pid);
+                    }
                     // Give the new player its role-themed portrait so it lands
                     // in the roster already looking like its squad. Best-effort:
                     // needs the on-chain id (skip if signup is still pending —
@@ -1262,6 +1270,23 @@ pub async fn execute(
                     }
                 }
                 Err(e) => out.push_str(&format!("  Player data unavailable (LCD): {}\n", e)),
+            }
+
+            // Can the PRIMARY key operate this player directly, or only this app
+            // via its HD index? One cheap by-id read, and the answer is the
+            // difference between a recoverable player and a stranded one.
+            if let Some(primary) = crate::mcp::delegation::primary_player_id() {
+                match client.permission_value(&player_id, &primary).await {
+                    Ok(mask) if crate::mcp::delegation::has_full_control(mask) => {
+                        out.push_str(&format!("  Primary control: ✓ {} holds full permissions\n", primary));
+                    }
+                    Ok(mask) => out.push_str(&format!(
+                        "  Primary control: ✗ {} holds {} — the delegation loop will grant it\n",
+                        primary,
+                        crate::mcp::tools::format::decode_permissions(mask),
+                    )),
+                    Err(e) => out.push_str(&format!("  Primary control: unknown ({})\n", e)),
+                }
             }
 
             // Their structs via the Guild API (guild-wide read; uses the primary

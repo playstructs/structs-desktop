@@ -157,7 +157,7 @@ struct Finding {
 }
 
 /// The native loops: name → (enabled, interval_ms) from live config.
-fn loop_configs() -> [(&'static str, bool, f64); 7] {
+fn loop_configs() -> [(&'static str, bool, f64); 8] {
     let h = auto_harvest::get();
     let b = auto_build::get();
     let d = auto_defend::get();
@@ -165,6 +165,7 @@ fn loop_configs() -> [(&'static str, bool, f64); 7] {
     let sw = crate::mcp::auto_sweep::get();
     let r = crate::mcp::auto_response::get();
     let rd = crate::mcp::auto_raid::get();
+    let dg = crate::mcp::delegation::get();
     [
         ("auto_harvest", h.enabled, h.interval_secs as f64 * 1000.0),
         ("auto_build", b.enabled, b.interval_secs as f64 * 1000.0),
@@ -173,6 +174,7 @@ fn loop_configs() -> [(&'static str, bool, f64); 7] {
         ("auto_sweep", sw.enabled, sw.interval_secs as f64 * 1000.0),
         ("auto_response", r.enabled, r.interval_secs as f64 * 1000.0),
         ("auto_raid", rd.enabled, rd.interval_secs as f64 * 1000.0),
+        ("delegation", dg.enabled, dg.interval_secs as f64 * 1000.0),
     ]
 }
 
@@ -185,6 +187,7 @@ fn reset_loop_guard(name: &str) {
         "auto_sweep" => crate::mcp::auto_sweep::force_reset_running(),
         "auto_response" => crate::mcp::auto_response::force_reset_running(),
         "auto_raid" => crate::mcp::auto_raid::force_reset_running(),
+        "delegation" => crate::mcp::delegation::force_reset_running(),
         _ => {}
     }
 }

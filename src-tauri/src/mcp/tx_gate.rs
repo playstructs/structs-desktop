@@ -71,8 +71,11 @@ pub fn classify(context: &str) -> Priority {
     let head = context.split(':').next().unwrap_or(context);
     match head {
         "auto_response" => Priority::Critical,
+        // `delegation` is bulk on both its paths: the backfill signs in
+        // hundred-player batches, and the creation-time grant is
+        // fire-and-forget, so neither is anything a person is waiting on.
         "auto_build" | "auto_harvest" | "auto_defend" | "auto_sweep" | "auto_infuse"
-        | "auto_raid" => Priority::Bulk,
+        | "auto_raid" | "delegation" => Priority::Bulk,
         _ => Priority::Interactive,
     }
 }
@@ -213,6 +216,7 @@ mod tests {
         assert_eq!(classify("auto_build:1-1044"), Priority::Bulk);
         assert_eq!(classify("auto_harvest"), Priority::Bulk);
         assert_eq!(classify("auto_raid:2-855"), Priority::Bulk);
+        assert_eq!(classify("delegation:1-271"), Priority::Bulk);
         // Launch and tool traffic outrank bulk scans.
         assert_eq!(classify("launch:1-1230"), Priority::Interactive);
         assert_eq!(classify("structs_action"), Priority::Interactive);

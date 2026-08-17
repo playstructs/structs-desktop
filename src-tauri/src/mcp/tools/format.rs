@@ -63,8 +63,7 @@ pub fn decode_permissions(mask: u64) -> String {
     if mask == 0 {
         return "none".to_string();
     }
-    // PermAll = 2^25 - 1
-    if mask == 33_554_431 {
+    if mask == crate::mcp::delegation::PERM_ALL {
         return "ALL".to_string();
     }
     let set: Vec<&str> = NAMES

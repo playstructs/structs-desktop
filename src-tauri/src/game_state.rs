@@ -580,6 +580,14 @@ pub async fn sync_game_state(
         tokio::spawn(async move {
             crate::mcp::auto_sweep::tick(&app_s, false).await;
         });
+        // Backfill of primary control over the vplayers. Rides the sync tick
+        // rather than the roster sweep on purpose: the roster sweep only runs
+        // while the Team Ops window is open, and this grant needs to converge
+        // whether or not anyone is looking at the board.
+        let app_dg = app_handle.clone();
+        tokio::spawn(async move {
+            crate::mcp::delegation::tick(&app_dg, false).await;
+        });
         // Combat loops. auto_response deliberately rides the sync tick at its
         // own 20 s cadence — a raid resolves in about four minutes end to end,
         // and every defensive win on record fired back inside the first two.

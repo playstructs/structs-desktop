@@ -457,6 +457,14 @@ async fn launch_players(app: tauri::AppHandle, request: MassActionRequest) -> Re
                                 });
                                 let _ = reg.save();
                             }
+                            // Hand the primary full permissions on the new
+                            // player (best-effort; the delegation loop backfills
+                            // anything that misses). Started before the explore
+                            // rather than after: an explore that fails must not
+                            // leave the player unreachable from the primary key.
+                            if let Some(pid) = player_id.as_deref() {
+                                crate::mcp::delegation::grant_on_create(&app, index, pid);
+                            }
                             // Bootstrap explore — a fresh player owns NOTHING
                             // until this lands (no planet/fleet/CmdShip).
                             if let Some(pid) = player_id {

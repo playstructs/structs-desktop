@@ -3221,6 +3221,10 @@
       chips: [{ key: 'posture', label: 'posture' },
         { key: 'min_ore', label: 'min ore', icon: 'sui-icon-alpha-ore', unit: 'ore' }], war: true,
     },
+    delegation: {
+      label: 'delegation', icon: 'icon-key', short: 'every player grants the primary full control',
+      chips: [{ key: 'max_grants_per_scan', label: 'per scan' }],
+    },
   };
 
   // Per-field presentation. Anything not listed still renders — the type of the
@@ -3240,6 +3244,8 @@
       hint: 'sending resets charge to 0, so a low bar steals charge from mining' },
     max_sends_per_scan: { label: 'max players per scan', min: 1,
       hint: 'the cap that stops this becoming the burst it replaces' },
+    max_grants_per_scan: { label: 'max grants per scan', min: 1,
+      hint: 'paces the backfill so a big roster never queues thousands of txs at once' },
     min_ore: { label: 'min ore (the whole prize)', min: 0, unit: 'g' },
     min_score: { label: 'min score (0-100)', min: 0, max: 100 },
     max_raid_minutes: { label: 'max raid proof (min)', min: 1 },
