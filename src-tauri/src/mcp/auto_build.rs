@@ -52,30 +52,53 @@ const LOADOUT: &[(&str, &str, &str, usize)] = &[
     // Second guided-evasion layer for every planet-borne struct (the
     // interceptor net), +12 planetary shield — and we never fielded one.
     ("planet", "space", "Jamming Satellite", 1),
-    ("fleet", "air", "Pursuit Fighter", 2),
+    // FLEET ORDER IS COVERAGE ORDER. Slots free ONE AT A TIME through combat
+    // attrition (the chain has no decommission message), so whatever sits at
+    // the top of this list is what a rebuilding fleet actually gets — possibly
+    // for months. The old order led with Pursuit Fighter x2 and Tank x2, both
+    // of which reach ONLY the ambit they stand in: every shot they can ever
+    // offer is same-ambit, which eats the full counter and is refused by
+    // auto_response's suicidal-shot gate. Measured on the live roster
+    // 2026-08-18: under the old order a fleet was still BLIND after 2 rebuilt
+    // slots and PARTIAL after 8; under this one it is READY after 2.
+    //
+    // The two hulls that buy it, both from LAND slots:
+    //   * Mobile Artillery — counter-immune (pays nothing however defended the
+    //     target is) and reaches water+land.
+    //   * SAM Launcher — reaches AIR+SPACE from land, i.e. cross-ambit into the
+    //     two ambits nothing else in the list covers early. Air was blind
+    //     across every player audited on the live roster.
+    // A Command Ship can sit in ANY of the four ambits, so all four must be
+    // answerable — see `mcp::readiness`.
+    //
+    // Totals per ambit are UNCHANGED (land 4, water 4, air 4, space 4); this is
+    // purely priority. Same-ambit-only hulls (Tank, Pursuit Fighter,
+    // Starfighter) still build — they block and they add bulk — but last,
+    // once every ambit already has a viable answer.
+    ("fleet", "land", "Mobile Artillery", 1),
+    ("fleet", "land", "SAM Launcher", 1),
     // A Battleship sits in a SPACE slot but its primary reaches [water, land]
     // and is ARMOUR-PIERCING — the only piercing hull, the answer to armoured
     // Tanks and the armoured planetary hulls.
     ("fleet", "space", "Battleship", 2),
-    ("fleet", "land", "Tank", 2),
     // A Cruiser earns its slot on its SECONDARY: the only unguided weapon in
     // the game that reaches AIR, where signalJamming Pursuit Fighters (2/3
     // evade vs guided) live. Without one we cannot answer that hull.
     ("fleet", "water", "Cruiser", 2),
-    // Counter-immune siege: grinds a defended Command Ship with zero
-    // attrition. Every fleet needs at least one to decapitate a raider.
-    ("fleet", "land", "Mobile Artillery", 1),
-    ("fleet", "land", "SAM Launcher", 1),
-    // defensiveManeuver: the ONLY hull that evades UNGUIDED 2/3 — the mirror
-    // of the Pursuit Fighter, and the duelist vs Battleships/Tanks/artillery.
-    ("fleet", "air", "High Altitude Interceptor", 1),
-    ("fleet", "air", "Stealth Bomber", 1),
     // Best counter in the game after the CMD: advancedCounterAttack 2 same /
     // 1 cross, reach water+air.
     ("fleet", "water", "Destroyer", 1),
     ("fleet", "water", "Submersible", 1),
-    ("fleet", "space", "Starfighter", 1),
     ("fleet", "space", "Frigate", 1),
+    // defensiveManeuver: the ONLY hull that evades UNGUIDED 2/3 — the mirror
+    // of the Pursuit Fighter, and the duelist vs Battleships/Tanks/artillery.
+    ("fleet", "air", "High Altitude Interceptor", 1),
+    ("fleet", "air", "Stealth Bomber", 1),
+    // Same-ambit-only from here down: real value as blockers and bulk, no
+    // value as an answer to a raider's Command Ship.
+    ("fleet", "land", "Tank", 2),
+    ("fleet", "air", "Pursuit Fighter", 2),
+    ("fleet", "space", "Starfighter", 1),
     ("planet", "land", "Ore Bunker", 3),
 ];
 
@@ -99,6 +122,22 @@ const LOADOUT: &[(&str, &str, &str, usize)] = &[
 const RAIDER_LOADOUT: &[(&str, &str, &str, usize)] = &[
     ("fleet", "land", "Command Ship", 1),
     ("fleet", "land", "Mobile Artillery", 2),
+    // Ahead of the Battleship deliberately: the Battleship is 2 slots of
+    // armour-piercing damage, but the Frigate is the ONE hull that unlocks two
+    // whole ambits. Being able to reach the target at all precedes hitting it
+    // harder — a raider that cannot reach the ambit its target sits in has
+    // flown out for nothing.
+    // Moved up from 10th 2026-08-18: reaches AIR+SPACE from one space slot, so
+    // a raider can answer a Command Ship parked in either. Mobile Artillery
+    // and the Battleship already cover water+land, so this single hull is what
+    // completes all four — and a raider that cannot reach the ambit its target
+    // sits in has flown out for nothing.
+    ("fleet", "space", "Frigate", 1),
+    // The Frigate above buys AIR but not SPACE — it STANDS in space, so a
+    // space target is a same-ambit shot for it and the suicidal gate refuses
+    // that. This reaches space from an AIR slot, which is what actually closes
+    // the last ambit. Kept ahead of the rest of the filler for that reason.
+    ("fleet", "air", "High Altitude Interceptor", 1),
     ("fleet", "space", "Battleship", 2),
     ("planet", "land", "Ore Refinery", 1),
     // The Tank was a dead letter before (Mobile Artillery filled all four land
@@ -107,12 +146,12 @@ const RAIDER_LOADOUT: &[(&str, &str, &str, usize)] = &[
     // raider's Tank blocker absorbed three counter-immune Mobile Artillery
     // shots aimed at the Command Ship before falling — blocking is the only
     // defense counter-immunity cannot bypass.
-    ("fleet", "land", "Tank", 2),
+    // ONE, not two: land holds 4 and the Command Ship plus 2 Mobile Artillery
+    // already claim 3, so a `2` here was a slot that never existed.
+    ("fleet", "land", "Tank", 1),
     ("fleet", "water", "Cruiser", 2),
-    ("fleet", "air", "High Altitude Interceptor", 1),
     ("fleet", "air", "Stealth Bomber", 1),
     ("fleet", "space", "Starfighter", 1),
-    ("fleet", "space", "Frigate", 1),
     ("fleet", "water", "Destroyer", 1),
     ("fleet", "water", "Submersible", 1),
     ("fleet", "air", "Pursuit Fighter", 2),
@@ -130,15 +169,27 @@ const PRODUCTIVE_LOADOUT: &[(&str, &str, &str, usize)] = &[
     ("fleet", "land", "Command Ship", 1),
     ("planet", "space", "Orbital Shield Generator", 3),
     ("planet", "space", "Jamming Satellite", 1),
+    // Coverage order, same rationale as LOADOUT: a Command Ship can sit in any
+    // of the four ambits, and a hull that only reaches its OWN ambit can never
+    // offer a shot auto_response will take. Counter-immune decapitation first
+    // (killing the raider's Command Ship ends a raid 17/17, and Mobile
+    // Artillery does it with zero attrition), then the one hull that covers
+    // the two hard ambits at once.
+    ("fleet", "land", "Mobile Artillery", 1),
+    // Reaches AIR+SPACE from a space slot. Added 2026-08-18: without it a
+    // productive player was BLIND IN AIR outright — nothing in this list
+    // reached air cross-ambit, so a raider parking a Command Ship there was
+    // untouchable. Fits the one free space slot; nothing was displaced.
+    ("fleet", "space", "Frigate", 1),
     // Same reasoning as LOADOUT: one armour-piercing hull that can answer a
     // land-based raider before the cheaper filler.
-    ("fleet", "space", "Battleship", 2),
-    ("fleet", "land", "Tank", 2),
-    // Counter-immune decapitation — killing the raider's Command Ship ends a
-    // raid 17/17; Mobile Artillery does it with zero attrition.
-    ("fleet", "land", "Mobile Artillery", 1),
-    ("fleet", "water", "Cruiser", 1),
+    // Closes SPACE. The Frigate above stands IN space, so a space target is a
+    // same-ambit shot for it; this reaches space from an AIR slot.
     ("fleet", "air", "High Altitude Interceptor", 1),
+    ("fleet", "space", "Battleship", 2),
+    ("fleet", "water", "Cruiser", 1),
+    // Same-ambit-only: blockers and bulk, never an answer. Last.
+    ("fleet", "land", "Tank", 2),
     ("fleet", "space", "Starfighter", 1),
     // Workers hold the ore pile between sweeps; bunkers block the refinery and
     // add +50 shield each (a longer raid proof for the attacker).
@@ -368,6 +419,12 @@ async fn scan(
             let initiates = initiates_c.clone();
             let run = run_c.clone();
             async move {
+                // Stand down while this player is answering a raid: charge is
+                // one action per block and the response needs it. Deferral
+                // only — the work happens on the next scan.
+                if crate::mcp::combat_lists::is_held_for_combat(&pid) {
+                    return;
+                }
                 run.players.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Resolve THIS player's structs from its planet + fleet slot arrays.
                 // The guild struct-LIST endpoints are broken (ignore their filter,
@@ -761,6 +818,121 @@ async fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reach masks for every fleet hull, each confirmed from a live `scout`
+    /// on 2026-08-18 (chain values Water=2 Land=4 Air=8 Space=16). Test-only:
+    /// production reads these from the synced type catalog.
+    /// (type, ambit it STANDS in, ambits its weapons REACH, counter-immune)
+    const HULLS: &[(&str, u64, u64, bool)] = &[
+        ("Pursuit Fighter", 8, 8, false),
+        ("Battleship", 16, 2 | 4, false),
+        ("Tank", 4, 4, false),
+        ("Cruiser", 2, 2 | 4, false),
+        ("Mobile Artillery", 4, 2 | 4, true),
+        ("SAM Launcher", 4, 8 | 16, false),
+        ("High Altitude Interceptor", 8, 8 | 16, false),
+        ("Stealth Bomber", 8, 2 | 4, false),
+        ("Destroyer", 2, 2 | 8, false),
+        ("Submersible", 2, 2 | 16, false),
+        ("Starfighter", 16, 16, false),
+        ("Frigate", 16, 8 | 16, false),
+        ("Command Ship", 4, 0, false),
+    ];
+
+    /// Ambits still lacking a VIABLE shot after walking `loadout`'s fleet
+    /// entries in order and building the first `n` hulls. Viable = counter-
+    /// immune, or cross-ambit (counters halve); a same-ambit-only shot is
+    /// refused by auto_response's suicidal gate, so it does not count.
+    fn blind_after(loadout: &[(&str, &str, &str, usize)], n: usize) -> Vec<&'static str> {
+        let mut built: Vec<(u64, u64, bool)> = Vec::new();
+        let mut used: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        'outer: for (target, ambit, name, want) in loadout {
+            if *target != "fleet" {
+                continue;
+            }
+            let Some(h) = HULLS.iter().find(|(hn, ..)| hn == name) else {
+                panic!("loadout hull {name} missing from the test reach table");
+            };
+            for _ in 0..*want {
+                if built.len() >= n {
+                    break 'outer;
+                }
+                // Respect the 4-slot-per-ambit cap, exactly as the walk does.
+                let c = used.entry(ambit).or_insert(0);
+                if *c >= SLOTS_PER_AMBIT {
+                    break;
+                }
+                *c += 1;
+                built.push((h.1, h.2, h.3));
+            }
+        }
+        [("water", 2u64), ("land", 4), ("air", 8), ("space", 16)]
+            .into_iter()
+            .filter(|(_, bit)| {
+                !built.iter().any(|(stands, reach, immune)| {
+                    reach & bit != 0 && (*immune || *stands != *bit)
+                })
+            })
+            .map(|(n, _)| n)
+            .collect()
+    }
+
+    /// A Command Ship can occupy ANY of the four ambits, so a fully-built fleet
+    /// must be able to answer all four. Regression guard for 2026-08-17, when
+    /// scout1 held fire for three minutes against a land Command Ship.
+    #[test]
+    fn every_loadout_answers_all_four_ambits_when_fully_built() {
+        for (name, l) in [
+            ("LOADOUT", LOADOUT),
+            ("RAIDER_LOADOUT", RAIDER_LOADOUT),
+            ("PRODUCTIVE_LOADOUT", PRODUCTIVE_LOADOUT),
+        ] {
+            assert!(
+                blind_after(l, usize::MAX).is_empty(),
+                "{name} leaves {:?} with no viable shot when fully built",
+                blind_after(l, usize::MAX)
+            );
+        }
+    }
+
+    /// Slots free ONE AT A TIME through combat attrition, so the ORDER decides
+    /// what a rebuilding fleet gets. Coverage must come from the first handful
+    /// of builds, not the last. The old order was still blind in air+space
+    /// after eight.
+    #[test]
+    fn coverage_is_bought_early_not_late() {
+        assert!(
+            blind_after(LOADOUT, 2).is_empty(),
+            "LOADOUT must answer all four ambits within 2 builds (Mobile Artillery + SAM Launcher), still blind in {:?}",
+            blind_after(LOADOUT, 2)
+        );
+        for (name, l, budget) in [
+            ("RAIDER_LOADOUT", RAIDER_LOADOUT, 5),
+            ("PRODUCTIVE_LOADOUT", PRODUCTIVE_LOADOUT, 4),
+        ] {
+            assert!(
+                blind_after(l, budget).is_empty(),
+                "{name} still blind in {:?} after {budget} builds",
+                blind_after(l, budget)
+            );
+        }
+    }
+
+    /// The reorder must not change WHAT a fleet ends up as — same hulls, same
+    /// counts, only priority. Guards against a reorder quietly dropping a type.
+    #[test]
+    fn reorder_did_not_change_per_ambit_slot_totals() {
+        let mut per: std::collections::BTreeMap<&str, usize> = Default::default();
+        for (target, ambit, _, want) in LOADOUT {
+            if *target == "fleet" {
+                *per.entry(ambit).or_insert(0) += want;
+            }
+        }
+        assert_eq!(per.get("land"), Some(&4));
+        assert_eq!(per.get("water"), Some(&4));
+        assert_eq!(per.get("air"), Some(&4));
+        assert_eq!(per.get("space"), Some(&4));
+    }
 
     #[test]
     fn default_off_and_loadout_shape() {

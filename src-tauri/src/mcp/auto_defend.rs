@@ -113,6 +113,24 @@ pub struct Edge {
     pub why: &'static str,
 }
 
+/// The ambits this defender can COUNTER an attack from: everything its weapon
+/// reaches, plus the ambit it stands in.
+///
+/// Verified live 2026-08-18 (1-471): a defender standing in the attacker's
+/// ambit counters regardless of weapon reach. Scoring on `reach` alone
+/// under-counted every hull's real coverage.
+fn counter_ambits(stats: &TypeStats, defender_ambit: &str) -> u64 {
+    // No weapon, no counter — standing there is not enough. Ore Bunkers
+    // (`primary_weapon_ambits = 0`, `noActiveWeaponry`) protecting a land
+    // Command Ship were measured blocking EVERY land attack and countering
+    // none. Without this guard they would score as full-coverage counter
+    // guards and crowd out hulls that can actually shoot back.
+    if stats.reach == 0 {
+        return 0;
+    }
+    stats.reach | crate::mcp::tools::format::ambit_bit(defender_ambit)
+}
+
 fn breadth(reach: u64) -> u64 {
     (reach & 0b11110).count_ones() as u64
 }
@@ -133,8 +151,11 @@ fn travels_with_target(defender_loc: &str, target_loc: &str) -> bool {
 ///   * **Blocking** — absorbs the shot entirely (even from counter-immune
 ///     hulls). Requires the defender to share the TARGET's ambit.
 ///   * **Countering** — damages the attacker, and can outright NEGATE the
-///     attack. Requires the defender's WEAPON to reach the ATTACKER's ambit —
-///     reach decides it, not the defender's own ambit.
+///     attack. Happens when the defender's WEAPON reaches the attacker's ambit
+///     **OR** the defender simply STANDS in it. The second half was missing
+///     here and it is not academic: on 2026-08-18 vs 1-471, their
+///     space-standing Battleship countered our space attacker for 1 despite
+///     its weapon reaching only water|land. See [`counter_ambits`].
 ///
 /// Blocking is the stronger effect, so same-ambit dominates; among the rest,
 /// value follows counter strength times how many ambits the weapon can answer
@@ -193,8 +214,20 @@ pub fn plan_web(hulls: &[Hull], stats: &HashMap<String, TypeStats>) -> Vec<Edge>
         take(&mut pool, best, cmd, "blocks the Command Ship", &mut edges);
 
         // 2. Counter-guards on the CMD: the attacker's ambit is unknown until
-        // the shot lands, so breadth of reach is what buys coverage; counter
-        // value is what makes each answer hurt.
+        // the shot lands, so what matters is that SOMETHING answers from every
+        // ambit — and that is a property of the guard SET, not of any one hull.
+        //
+        // Scoring each candidate in isolation (counter x breadth) picked the two
+        // highest-breadth hulls, which are often the same TYPE and so cover the
+        // same two ambits twice while leaving the other two open. Greedy on
+        // MARGINAL coverage instead: each pick is the hull that answers the most
+        // ambits nothing already covers, and only then the hardest-hitting.
+        //
+        // This is what actually won the 2026-08-18 fight against 1-471: the
+        // guard set covered all four ambits, so their land, water AND space
+        // attacks were each countered, and twelve of their hulls died to the
+        // return fire without our Command Ship ever taking a point.
+        let mut covered: u64 = 0;
         for _ in 0..CMD_GUARDS {
             let best = pool
                 .iter()
@@ -205,9 +238,19 @@ pub fn plan_web(hulls: &[Hull], stats: &HashMap<String, TypeStats>) -> Vec<Edge>
                 })
                 .max_by_key(|(_, h)| {
                     let s = get(&h.type_id);
-                    (travels_with_target(&h.location_id, &cmd.location_id), s.counter_same.max(s.counter) * breadth(s.reach), s.armour)
+                    let gain = (counter_ambits(&s, &h.ambit) & !covered).count_ones() as u64;
+                    (
+                        travels_with_target(&h.location_id, &cmd.location_id),
+                        gain,
+                        s.counter_same.max(s.counter) * breadth(s.reach),
+                        s.armour,
+                    )
                 })
                 .map(|(i, _)| i);
+            if let Some(i) = best {
+                let s = get(&pool[i].type_id);
+                covered |= counter_ambits(&s, &pool[i].ambit);
+            }
             take(&mut pool, best, cmd, "counters attacks on the Command Ship", &mut edges);
         }
     }
@@ -522,6 +565,15 @@ async fn scan(
                     .iter()
                     .find(|e| current.get(&e.defender).map(|t| t != &e.protected).unwrap_or(true));
                 let Some(edge) = missing else { return }; // web complete
+
+                // One charged action per player per BLOCK, and auto_build /
+                // auto_harvest sweep the same roster concurrently. Racing them
+                // is a guaranteed code-2022 reject ("already discharged") that
+                // costs a signing slot and a transaction attempt — 24 of them
+                // in one hour, always the same players. Defer to the next scan.
+                if crate::mcp::loop_util::acted_this_block(&pid) {
+                    return;
+                }
                 let needs_clear = current.contains_key(&edge.defender);
 
                 let (msg, payload, verb) = if needs_clear {
@@ -585,6 +637,76 @@ async fn scan(
 
 #[cfg(test)]
 mod tests {
+
+    /// Guard selection must cover AMBITS, not maximise per-hull breadth.
+    ///
+    /// Two Battleships both answer water+land; picking both leaves air and
+    /// space open, which is a raider's free lane. The set that actually won on
+    /// 2026-08-18 was Battleship + High Altitude Interceptor — between them all
+    /// four ambits answer, which is why every incoming attack was countered.
+    #[test]
+    fn cmd_guards_cover_distinct_ambits_rather_than_doubling_up() {
+        const WATER: u64 = 2;
+        const LAND: u64 = 4;
+        const AIR: u64 = 8;
+        const SPACE: u64 = 16;
+        // Real type ids: 1 = Command Ship, 9 = Tank, 2 = Battleship,
+        // 6 = High Altitude Interceptor.
+        let mut st: HashMap<String, TypeStats> = HashMap::new();
+        st.insert("1".into(), TypeStats::default());
+        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..Default::default() });
+        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..Default::default() });
+        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..Default::default() });
+
+        let hulls = vec![
+            hull("5-cmd", "1", "land", "9-1"),
+            hull("5-tank", "9", "land", "9-1"),
+            hull("5-b1", "2", "space", "9-1"),
+            hull("5-b2", "2", "space", "9-1"),
+            hull("5-hai", "6", "air", "9-1"),
+        ];
+        let web = plan_web(&hulls, &st);
+        let guards: Vec<&str> = web
+            .iter()
+            .filter(|e| e.protected == "5-cmd" && e.why.contains("counters"))
+            .map(|e| e.defender.as_str())
+            .collect();
+        assert!(
+            guards.contains(&"5-hai"),
+            "the air/space answer must beat a second identical Battleship, got {guards:?} (web {web:?})"
+        );
+        let mut covered = 0u64;
+        for g in &guards {
+            let h = hulls.iter().find(|x| &x.id == g).unwrap();
+            covered |= counter_ambits(st.get(&h.type_id).unwrap(), &h.ambit);
+        }
+        assert_eq!(
+            covered & (WATER | LAND | AIR | SPACE),
+            WATER | LAND | AIR | SPACE,
+            "guard set leaves an ambit unanswered: covered={covered:b}"
+        );
+    }
+
+    /// A defender standing in the attacker's ambit counters even when its
+    /// weapon cannot reach there — their space Battleship countered our space
+    /// attacker for 1 on 2026-08-18 with reach water|land.
+    #[test]
+    fn counter_ambits_includes_the_ambit_the_defender_stands_in() {
+        let bship = TypeStats { reach: 2 | 4, ..Default::default() };
+        assert_eq!(counter_ambits(&bship, "space") & 16, 16, "standing in space must count");
+        assert_eq!(counter_ambits(&bship, "space") & 2, 2, "reach is still counted");
+    }
+
+    /// ...but a hull with NO weapon never counters, wherever it stands. Ore
+    /// Bunkers block every land attack on a land Command Ship and counter none
+    /// of them; crediting them with coverage would let them displace a real
+    /// counter-guard.
+    #[test]
+    fn a_weaponless_hull_counters_from_nowhere() {
+        let bunker = TypeStats { reach: 0, counter: 0, counter_same: 0, armour: 1, ..Default::default() };
+        assert_eq!(counter_ambits(&bunker, "land"), 0);
+    }
+
     use super::*;
 
     fn stats() -> HashMap<String, TypeStats> {

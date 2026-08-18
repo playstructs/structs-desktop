@@ -354,8 +354,111 @@ where
     out
 }
 
+
+// ── Per-block charge ledger ──────────────────────────────────────────────────
+//
+// A player may take ONE charged action per block. Our loops do not know about
+// each other, and `auto_build`/`auto_defend`/`auto_harvest` all start within
+// milliseconds and sweep the same roster concurrently for minutes — so two of
+// them routinely reach the same player inside one block. The loser gets
+// chain code **2022 "player has zero charge this block (already discharged)"**.
+//
+// Measured 2026-08-18: 24 such rejects in one hour from `auto_defend` alone,
+// always the same handful of players (1-635, 1-566, 1-571, 1-324, 1-1038) —
+// a guaranteed-loss race repeated every scan, each costing a signing slot and
+// a transaction attempt for nothing.
+//
+// So charged actions are recorded centrally as they succeed, and a loop can ask
+// whether a player has already spent this block before trying.
+
+/// A block is ~5.28 s; round up so a marginally slow read still suppresses the
+/// duplicate rather than letting it through to a certain reject.
+pub const BLOCK_WINDOW_MS: f64 = 6_000.0;
+
+/// Message types that consume a player's once-per-block charge. Deliberately a
+/// short allow-list of types confirmed to cost charge: being conservative means
+/// we occasionally fail to suppress a race, never that we wrongly withhold work.
+const CHARGED_TYPES: &[&str] = &[
+    "MsgStructBuildInitiate",
+    "MsgStructDefenseSet",
+    "MsgStructDefenseClear",
+    "MsgStructAttack",
+    "MsgFleetMove",
+    "MsgStructMove",
+];
+
+pub fn is_charged_type(type_url: &str) -> bool {
+    CHARGED_TYPES.iter().any(|t| type_url.ends_with(t))
+}
+
+static CHARGE_LEDGER: LazyLock<Mutex<HashMap<String, f64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Record that `player_id` has spent its charge for this block.
+pub fn note_charged_action(player_id: &str) {
+    if player_id.is_empty() {
+        return;
+    }
+    if let Ok(mut m) = CHARGE_LEDGER.lock() {
+        let now = crate::hasher::types::now_millis();
+        // Opportunistic sweep so a long-running process does not accumulate an
+        // entry per player forever.
+        if m.len() > 4096 {
+            m.retain(|_, at| now - *at < BLOCK_WINDOW_MS);
+        }
+        m.insert(player_id.to_string(), now);
+    }
+}
+
+/// Has this player already taken its one charged action this block?
+pub fn acted_this_block(player_id: &str) -> bool {
+    CHARGE_LEDGER
+        .lock()
+        .map(|m| {
+            m.get(player_id)
+                .is_some_and(|at| crate::hasher::types::now_millis() - *at < BLOCK_WINDOW_MS)
+        })
+        .unwrap_or(false)
+}
+
+/// The player id embedded in a telemetry context like `auto_defend:1-635`.
+pub fn player_from_context(context: &str) -> Option<&str> {
+    context.split_once(':').map(|(_, p)| p).filter(|p| !p.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// The live failure: auto_build and auto_defend sweep the same roster
+    /// concurrently, both reach one player inside a block, and the loser gets
+    /// chain code 2022 "already discharged". 24 rejects in an hour, always the
+    /// same players.
+    #[test]
+    fn a_player_that_spent_its_charge_is_skipped_until_the_next_block() {
+        assert!(!acted_this_block("1-571"));
+        note_charged_action("1-571");
+        assert!(acted_this_block("1-571"), "second loop must defer, not race");
+        assert!(!acted_this_block("1-999"), "per player, not global");
+    }
+
+    #[test]
+    fn only_charged_message_types_consume_the_block() {
+        assert!(is_charged_type("/structs.structs.MsgStructDefenseSet"));
+        assert!(is_charged_type("/structs.structs.MsgStructBuildInitiate"));
+        assert!(is_charged_type("/structs.structs.MsgFleetMove"));
+        // Free traffic must never suppress a later charged action.
+        assert!(!is_charged_type("/structs.structs.MsgPermissionGrantOnObject"));
+        assert!(!is_charged_type("/cosmos.bank.v1beta1.MsgSend"));
+    }
+
+    #[test]
+    fn player_id_is_read_from_the_telemetry_context() {
+        assert_eq!(player_from_context("auto_defend:1-635"), Some("1-635"));
+        assert_eq!(player_from_context("auto_raid_abort:1-2308"), Some("1-2308"));
+        assert_eq!(player_from_context("auto_harvest"), None);
+        assert_eq!(player_from_context("launch:"), None);
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;

@@ -189,6 +189,82 @@ pub fn seed_own_guild(guild_id: &str) {
 /// load from the operator's data directory, so any test touching a veto path is
 /// otherwise asserting against live machine state — which is exactly how the
 /// auto_raid gate tests began failing the day `0-1` was added as an ally.
+// ── Combat hold ──────────────────────────────────────────────────────────────
+//
+// CHARGE IS THE CONTESTED RESOURCE, NOT THE SIGNING QUEUE. A player may act
+// once per block and its charge regenerates ~1 per block, while a weapon costs
+// `primary_weapon_charge` (3 for most hulls) plus `min_charge_margin`. So a
+// single economy action — a build initiate, a mine, an alpha sweep — leaves the
+// defender unable to fire for roughly five blocks (~26 s).
+//
+// A raid resolves in about four minutes. Measured live 2026-08-18 while 1-61
+// raided `2-14676`: `auto_response` logged *"1 co-located shooter(s) at
+// 2-14676, none with charge ready (need weapon cost + 2 margin)"* — the
+// defender HAD a shooter and could not use it, because the economy loops had
+// spent its charge. `tx_gate` cannot help: it prioritises SIGNING, and this
+// resource is spent on-chain before any signing decision is reached.
+//
+// So the economy stands down for a player that is under attack. Purely a
+// deferral — the mine, build or sweep happens on the next scan.
+
+/// player id → epoch ms after which the economy may resume for that player.
+static COMBAT_HOLD: LazyLock<RwLock<std::collections::HashMap<String, f64>>> =
+    LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+
+/// How long a single alarm reserves a player's charge for combat. A raid's
+/// seize window is ~22 blocks (about two minutes) and re-alarms extend the
+/// hold, so this only needs to outlast one response cycle.
+pub const COMBAT_HOLD_MS: f64 = 180_000.0;
+
+/// Reserve `player_id`'s charge for combat. Called by `auto_response` the
+/// moment an alarm resolves to one of our players; safe to call repeatedly.
+pub fn hold_for_combat(player_id: &str) {
+    if player_id.is_empty() {
+        return;
+    }
+    if let Ok(mut m) = COMBAT_HOLD.write() {
+        m.insert(player_id.to_string(), now_millis() + COMBAT_HOLD_MS);
+    }
+}
+
+/// Is this player's charge reserved for combat right now?
+///
+/// Economy loops call this per player and skip when true. Expired entries are
+/// treated as absent and swept opportunistically, so a quiet roster costs
+/// nothing.
+pub fn is_held_for_combat(player_id: &str) -> bool {
+    let now = now_millis();
+    match COMBAT_HOLD.read() {
+        Ok(m) => m.get(player_id).is_some_and(|until| *until > now),
+        Err(_) => false,
+    }
+}
+
+/// Players currently holding charge for combat — surfaced by `structs_system`
+/// so a stalled economy is explainable rather than mysterious.
+pub fn combat_holds() -> Vec<String> {
+    let now = now_millis();
+    COMBAT_HOLD
+        .read()
+        .map(|m| {
+            let mut v: Vec<String> = m
+                .iter()
+                .filter(|(_, until)| **until > now)
+                .map(|(p, _)| p.clone())
+                .collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub fn clear_combat_holds() {
+    if let Ok(mut m) = COMBAT_HOLD.write() {
+        m.clear();
+    }
+}
+
 #[cfg(test)]
 pub fn set_for_test(lists: CombatLists) {
     if let Ok(mut l) = LISTS.write() {
@@ -510,5 +586,26 @@ mod tests {
     fn a_manual_grudge_with_no_history_still_has_heat() {
         let x = g(GrudgeSource::Manual, 0, 0, 0.0);
         assert!(x.heat() > 0.0);
+    }
+
+    /// The live failure this exists for: an economy action spends the charge a
+    /// defender needs, and `auto_response` then finds a shooter it cannot fire.
+    #[test]
+    fn a_player_under_attack_holds_its_charge() {
+        clear_combat_holds();
+        assert!(!is_held_for_combat("1-271"), "quiet player is free");
+        hold_for_combat("1-271");
+        assert!(is_held_for_combat("1-271"), "economy must stand down");
+        assert!(!is_held_for_combat("1-999"), "hold is per player, not global");
+        assert_eq!(combat_holds(), vec!["1-271".to_string()]);
+        clear_combat_holds();
+    }
+
+    #[test]
+    fn an_empty_player_id_is_never_held() {
+        clear_combat_holds();
+        hold_for_combat("");
+        assert!(!is_held_for_combat(""), "empty id must not block the whole roster");
+        assert!(combat_holds().is_empty());
     }
 }

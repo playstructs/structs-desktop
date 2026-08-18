@@ -70,7 +70,18 @@ impl Priority {
 pub fn classify(context: &str) -> Priority {
     let head = context.split(':').next().unwrap_or(context);
     match head {
+        // Both are deadline-bound and worthless late.
         "auto_response" => Priority::Critical,
+        // A raid ABORT is the retreat, not the attack: it fires when the
+        // raider's own Command Ship is nearly dead, and losing that strands the
+        // whole fleet (`fleet_move` is refused without an online command
+        // struct) until an ~8 minute rebuild. Weapons do 2 damage and a player
+        // acts once per block, so the abort has about two blocks to land.
+        // Classed as Bulk it queued behind every economy scan — and worse, the
+        // siege SHOTS used context `auto_raid_siege`, which matches nothing
+        // here and so fell through to Interactive. The retreat was slower than
+        // the attack it was retreating from.
+        "auto_raid_abort" => Priority::Critical,
         // `delegation` is bulk on both its paths: the backfill signs in
         // hundred-player batches, and the creation-time grant is
         // fire-and-forget, so neither is anything a person is waiting on.
@@ -216,6 +227,12 @@ mod tests {
         assert_eq!(classify("auto_build:1-1044"), Priority::Bulk);
         assert_eq!(classify("auto_harvest"), Priority::Bulk);
         assert_eq!(classify("auto_raid:2-855"), Priority::Bulk);
+        // The retreat must outrank the attack it is retreating from: an abort
+        // has ~2 blocks to land before the raider's Command Ship dies and
+        // strands the fleet. Regression guard — this was Bulk, queued behind
+        // every economy scan, while siege shots fell through to Interactive.
+        assert_eq!(classify("auto_raid_abort:1-2308"), Priority::Critical);
+        assert!(classify("auto_raid_abort:1-2308") < classify("auto_raid_siege:1-2308"));
         assert_eq!(classify("delegation:1-271"), Priority::Bulk);
         // Launch and tool traffic outrank bulk scans.
         assert_eq!(classify("launch:1-1230"), Priority::Interactive);

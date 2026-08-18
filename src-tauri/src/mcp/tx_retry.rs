@@ -244,6 +244,15 @@ pub async fn sign_with_retry(
         match record(context, type_url, attempt, started, &outcome) {
             None => {
                 if let AttemptResult::Success { value, .. } = outcome {
+                    // This player has now spent its once-per-block charge.
+                    // Recorded centrally so the OTHER loops sweeping the same
+                    // roster concurrently can skip it instead of racing into a
+                    // certain code-2022 reject. See loop_util::acted_this_block.
+                    if crate::mcp::loop_util::is_charged_type(type_url) {
+                        if let Some(pid) = crate::mcp::loop_util::player_from_context(context) {
+                            crate::mcp::loop_util::note_charged_action(pid);
+                        }
+                    }
                     return Ok(value);
                 }
                 unreachable!("success outcome without value");

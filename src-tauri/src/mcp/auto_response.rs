@@ -545,6 +545,15 @@ async fn handle_alarm(
         );
     }
 
+    // Reserve this defender's charge for combat before anything else can
+    // return early. The economy loops act once per block per player and a
+    // weapon costs several charge, so without this they spend exactly what the
+    // response needs — observed live at 2-14676, where auto_response found a
+    // co-located shooter with no charge ready while the raid ran.
+    if !alarm.defender_player.is_empty() {
+        crate::mcp::combat_lists::hold_for_combat(&alarm.defender_player);
+    }
+
     // ── 3. Hardening runs regardless of mode — it costs nothing offensive. ──
     if cfg.panic_refine && alarm.is_raid && !alarm.defender_player.is_empty() && !cfg.dry_run {
         // A raid seizes ALL stored ore; refining is the only thing that removes

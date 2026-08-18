@@ -279,6 +279,12 @@ async fn scan(
             let started = started_body.clone();
             let run = run_c.clone();
             async move {
+                // Stand down while this player is answering a raid: charge is
+                // one action per block and the response needs it. Deferral
+                // only — the work happens on the next scan.
+                if crate::mcp::combat_lists::is_held_for_combat(&pid) {
+                    return;
+                }
                 run.players.fetch_add(1, Ordering::Relaxed);
                 // Resolve THIS player's structs from its planet + fleet slot arrays.
                 // The guild struct-LIST endpoints (owner AND location) are broken —
@@ -291,6 +297,9 @@ async fn scan(
                 // Planet ore, read at most ONCE per player per scan (see the
                 // mined-out guard below).
                 let mut planet_ore_cache: Option<f64> = None;
+                // The PLAYER's stored ore, read at most once per player per scan
+                // (see the futile-refine guard below).
+                let mut player_ore_cache: Option<f64> = None;
                 for sid in sids.iter() {
                     // The struct ENTITY is the reliable source for type + location +
                     // online + anchors (the struct-LIST endpoints are unusable, above).
@@ -347,6 +356,29 @@ async fn scan(
                             }
                         }
                         if planet_ore_cache.unwrap_or(1.0) <= 0.0 {
+                            continue;
+                        }
+                    } else {
+                        // THE SAME TRAP, ON THE REFINE SIDE. The guard above is
+                        // extractor-only, so a refinery whose owner holds NO ore
+                        // kept issuing proofs: the GPU solves them, and the
+                        // completion is then rejected with "player (1-2136)
+                        // cannot afford refine: requires ore". Refine cycles
+                        // auto-restart, so the anchor never clears and the loop
+                        // re-issues forever.
+                        //
+                        // Measured 2026-08-18: 41 such rejects in two hours from
+                        // ONE player — the single largest error source in the
+                        // whole system, and every one of them paid for with
+                        // wasted proof-of-work.
+                        if player_ore_cache.is_none() {
+                            player_ore_cache = Some(match client.query_entity("player", &pid).await {
+                                Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
+                                // Unknown → don't block refining on a read failure.
+                                Err(_) => 1.0,
+                            });
+                        }
+                        if player_ore_cache.unwrap_or(1.0) <= 0.0 {
                             continue;
                         }
                     }

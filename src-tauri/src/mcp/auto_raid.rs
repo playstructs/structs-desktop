@@ -116,6 +116,14 @@ pub struct AutoRaidConfig {
     /// Give up if the defender restores shields (`ongoing`) for this many blocks.
     pub abort_on_ongoing_blocks: u64,
     /// Recall the raider when its own Command Ship drops below this HP.
+    ///
+    /// MARGIN, NOT A TRIPWIRE. Weapons do 2 damage and a player acts once per
+    /// block, so a Command Ship walks 6 -> 4 -> 2 -> dead in three blocks. The
+    /// old default of 3.0 fired at 2 HP — ONE block, about five seconds, to get
+    /// a recall signed and included. Losing it does not merely end the raid: it
+    /// STRANDS the fleet, because `fleet_move` is refused without an online
+    /// command struct, until an ~8 minute rebuild. 4.0 fires at 3 HP and buys a
+    /// second block.
     pub abort_cmd_hp_below: f64,
     /// Absolute wall-clock cap on one expedition.
     pub max_raid_wall_minutes: u32,
@@ -146,7 +154,23 @@ pub struct AutoRaidConfig {
     #[serde(default = "default_min_planet_ore")]
     pub min_planet_ore: f64,
 
+    /// Skip a target whose Command Ship sits in an ambit this raider cannot put
+    /// a VIABLE shot into.
+    ///
+    /// Viable means counter-immune or cross-ambit. A same-ambit shot eats the
+    /// full counter and is exactly what the survivability gate refuses, so a
+    /// fleet whose only reach into that ambit is same-ambit will fly out, sit
+    /// there, and never fire — while its OWN planet is raidable for the whole
+    /// trip. Measured on the live roster 2026-08-18: most fleets answer only
+    /// one or two of the four ambits, so this is the common case, not an edge.
+    #[serde(default = "default_true")]
+    pub require_reachable_command_ship: bool,
+
     pub dry_run: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_min_planet_ore() -> f64 {
@@ -180,7 +204,7 @@ impl Default for AutoRaidConfig {
             max_concurrent_raids: 1,
             target_cooldown_mins: 120,
             abort_on_ongoing_blocks: 30,
-            abort_cmd_hp_below: 3.0,
+            abort_cmd_hp_below: 4.0,
             max_raid_wall_minutes: 90,
             return_home_after: true,
             roster_ttl_secs: 21_600,
@@ -188,6 +212,7 @@ impl Default for AutoRaidConfig {
             evaluate_per_scan: 25,
             raid_difficulty: 4,
             min_planet_ore: 2.0,
+            require_reachable_command_ship: true,
             dry_run: false,
         };
         c.apply_posture(RaidPosture::Opportunist);
@@ -295,6 +320,10 @@ pub struct Candidate {
     pub vulnerable: bool,
     pub vulnerability_reason: String,
     pub command_struct: Option<String>,
+    /// The ambit the target's Command Ship STANDS in. A Command Ship may sit in
+    /// any of water/land/air/space, and a raider that cannot put a viable shot
+    /// into that ambit has flown out for nothing — see `dispatch`.
+    pub command_ambit: String,
     pub defenders_on_cmd: usize,
     /// Occupied fleet slots — a crude but effective measure of return fire.
     pub enemy_fleet_structs: usize,
@@ -821,6 +850,7 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
     // the single variable that decides whether a raid can complete at all. ──
     let mut reasons: Vec<&str> = Vec::new();
     let mut command_struct: Option<String> = None;
+    let mut command_ambit = String::new();
     let mut enemy_fleet_structs = 0usize;
     if fleet_id.is_empty() {
         reasons.push("no fleet");
@@ -846,6 +876,12 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
             Some(cs) => {
                 if let Ok(e) = client.query_entity("struct", cs).await {
                     let sa = e.get("structAttributes");
+                    command_ambit = e
+                        .get("Struct")
+                        .and_then(|x| x.get("operatingAmbit"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isDestroyed"))) {
                         reasons.push("Command Ship destroyed");
                     } else if !crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isOnline"))) {
@@ -891,6 +927,7 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
             "shields up (Command Ship online, fleet on station)".to_string()
         },
         command_struct,
+        command_ambit,
         defenders_on_cmd,
         enemy_fleet_structs,
         last_action_block: last_action,
@@ -924,6 +961,40 @@ fn current_hour_utc() -> u32 {
         .unwrap_or(0)
 }
 
+/// A raider's own combat hulls, reduced to what readiness needs. Fleet structs
+/// only: planetary structs have no weapon reach and cannot travel.
+async fn raider_hulls(
+    client: &CosmosClient,
+    raider_pid: &str,
+    fleet_id: &str,
+) -> Vec<crate::mcp::readiness::Hull> {
+    let structs = crate::mcp::loop_util::player_structs_cached(
+        client,
+        raider_pid,
+        crate::mcp::loop_util::STRUCTS_CACHE_TTL_MS,
+    )
+    .await;
+    let gs = crate::game_state::GAME_STATE.read().unwrap();
+    structs
+        .iter()
+        .filter(|s| {
+            !crate::mcp::loop_util::parse_bool(s.get("is_destroyed"))
+                && crate::mcp::loop_util::parse_bool(s.get("is_built"))
+                && s.get("location_id").and_then(|x| x.as_str()) == Some(fleet_id)
+        })
+        .filter_map(|s| {
+            let id = s.get("id").and_then(|x| x.as_str())?;
+            let t = gs.struct_types.get(&crate::mcp::loop_util::extract_type_id(s))?;
+            let stands = s
+                .get("operating_ambit")
+                .and_then(|x| x.as_str())
+                .map(crate::mcp::tools::format::ambit_bit)
+                .unwrap_or(0);
+            crate::mcp::readiness::Hull::from_type(id, stands, t)
+        })
+        .collect()
+}
+
 /// Send a raider to `target`. Phase C proper: pick an idle raider, move its
 /// fleet, and register the expedition for Phase D to supervise.
 async fn dispatch(
@@ -938,6 +1009,28 @@ async fn dispatch(
     let (fleet_id, home_planet) = raider_location(client, &raider_pid)
         .await
         .ok_or_else(|| format!("could not resolve {}'s fleet", raider_pid))?;
+
+    // Can this raider actually hurt the thing it is being sent to kill?
+    // Checked HERE rather than in `gate` because it depends on the raider that
+    // was picked, not on the target alone.
+    if cfg.require_reachable_command_ship && !target.command_ambit.is_empty() {
+        let bit = crate::mcp::tools::format::ambit_bit(&target.command_ambit);
+        if bit != 0 {
+            let hulls = raider_hulls(client, &raider_pid, &fleet_id).await;
+            let r = crate::mcp::readiness::assess(&hulls, bit, true);
+            if r.blind_mask & bit != 0 {
+                let posture = r
+                    .per_ambit
+                    .first()
+                    .map(|a| a.posture.as_str())
+                    .unwrap_or("unreachable");
+                return Err(format!(
+                    "{raider_pid} has no viable shot into {} where {}'s Command Ship sits ({posture}) —                      the trip would leave its own planet raidable and never land a hit",
+                    target.command_ambit, target.planet_id
+                ));
+            }
+        }
+    }
 
     crate::mcp::tx_retry::sign_with_retry(
         app,
@@ -1341,7 +1434,9 @@ async fn supervise(
                         ex.raider_index,
                         "/structs.structs.MsgFleetMove",
                         json!({ "fleetId": ex.fleet_id, "destinationLocationId": ex.home_planet }),
-                        &format!("auto_raid:{}", ex.raider_player),
+                        // NOT `auto_raid:` — this is the deadline-bound retreat.
+                        // See tx_gate::classify.
+                        &format!("auto_raid_abort:{}", ex.raider_player),
                     )
                     .await;
                 }
@@ -1684,6 +1779,7 @@ mod tests {
             vulnerable: true,
             vulnerability_reason: "VULNERABLE — fleet off-station".into(),
             command_struct: Some("5-14098".into()),
+            command_ambit: "land".into(),
             defenders_on_cmd: 1,
             enemy_fleet_structs: 4,
             last_action_block: 0,
@@ -1737,6 +1833,35 @@ mod tests {
     }
 
     /// Each posture must produce exactly the documented gate table.
+    /// A Command Ship can sit in ANY ambit, and most of our fleets answer only
+    /// one or two of the four. Sending a raider that can only manage a
+    /// same-ambit shot means it parks at the target, never fires (the
+    /// survivability gate refuses those), and leaves its OWN planet raidable
+    /// for the whole trip. Modelled directly on the live roster: a fleet whose
+    /// only land reach is Tanks standing in land.
+    #[test]
+    fn same_ambit_only_raider_is_not_a_viable_dispatch() {
+        use crate::mcp::readiness::{assess, Hull, Posture};
+        const LAND: u64 = 4;
+        let tanks = vec![
+            Hull { struct_id: "5-1".into(), type_name: "Tank".into(), reach: LAND,
+                   operating_ambit: LAND, counter_immune: false },
+        ];
+        let r = assess(&tanks, LAND, true);
+        assert_eq!(r.per_ambit[0].posture, Posture::SameAmbit);
+        assert!(r.blind_mask & LAND != 0, "dispatch must treat this as no viable shot");
+
+        // A Battleship standing in SPACE reaching land is the shot that worked
+        // live against 1-471 on 2026-08-18.
+        let bship = vec![
+            Hull { struct_id: "5-2".into(), type_name: "Battleship".into(), reach: 2 | LAND,
+                   operating_ambit: 16, counter_immune: false },
+        ];
+        let r2 = assess(&bship, LAND, true);
+        assert_eq!(r2.per_ambit[0].posture, Posture::CrossAmbit);
+        assert_eq!(r2.blind_mask & LAND, 0, "cross-ambit into land is a viable dispatch");
+    }
+
     #[test]
     fn postures_set_the_documented_gates() {
         isolate_lists();

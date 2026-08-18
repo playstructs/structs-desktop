@@ -247,6 +247,12 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
             let to = to_c.clone();
             let (ok, failed, swept) = (ok_c.clone(), failed_c.clone(), swept_c.clone());
             async move {
+                // Stand down while this player is answering a raid: charge is
+                // one action per block and the response needs it. Deferral
+                // only — the work happens on the next scan.
+                if crate::mcp::combat_lists::is_held_for_combat(&e.player_id) {
+                    return;
+                }
                 // The source address MUST come from the local vplayer registry —
                 // that is the structural guarantee that this loop can only ever
                 // move OUR OWN players' Alpha: a player we hold no HD key for
