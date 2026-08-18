@@ -121,7 +121,16 @@ fn worker_loop() {
         }
 
         match pop_ripest(&registry) {
-            Some(handle) => run_one(&app, &registry, handle),
+            Some(handle) => {
+                // Stamp the moment REAL work begins. Everything before this is
+                // queue wait, and folding that into "solve duration" is what
+                // drove the tuner into its concurrency collapse — see
+                // TaskProgress::work_start_time_ms.
+                if let Ok(mut p) = handle.progress.lock() {
+                    p.work_start_time_ms = Some(now_millis());
+                }
+                run_one(&app, &registry, handle)
+            }
             None => {
                 let pending = PENDING.lock().unwrap();
                 let _ = CV
@@ -284,5 +293,24 @@ mod tests {
 
         assert!(pop_ripest(&registry).is_none());
         assert_eq!(pending_len(), 0, "cancelled + superseded entries pruned");
+    }
+}
+#[cfg(test)]
+mod work_start_tests {
+    use super::*;
+    use crate::hasher::types::{TaskParams, TaskProgress};
+
+    /// A task's duration must measure the SOLVE, not the queue wait. Stamping
+    /// only at construction is what let a deep queue convince the tuner to
+    /// remove workers, deepening the queue further until it pinned at
+    /// MIN_CONCURRENT with a configured cap four times higher.
+    #[test]
+    fn work_start_is_unset_until_a_worker_picks_the_task_up() {
+        let p = TaskProgress::from_params(&TaskParams::for_ore("5-1", "REFINE", 0, 1));
+        assert!(
+            p.work_start_time_ms.is_none(),
+            "a queued task has not started work yet"
+        );
+        assert!(p.process_start_time_ms > 0.0, "creation time is still stamped");
     }
 }

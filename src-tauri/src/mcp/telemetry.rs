@@ -711,7 +711,13 @@ pub fn record_solve(snap: &crate::hasher::types::TaskStateSnapshot, engine: &'st
         return;
     }
     let end = snap.process_end_time.unwrap_or(snap.last_status_change_time);
-    let duration_ms = (end - snap.process_start_time).max(0.0);
+    // Measure the SOLVE, not the wait. `process_start_time` is stamped when the
+    // task is created, so using it folds queue depth into every sample — and
+    // the adaptive tuner treats that number as evidence to remove a worker,
+    // which deepens the queue that inflated it. Fall back only for tasks that
+    // somehow completed without a worker stamp.
+    let started = snap.work_start_time.unwrap_or(snap.process_start_time);
+    let duration_ms = (end - started).max(0.0);
     let struct_type = crate::game_state::GAME_STATE
         .read()
         .ok()

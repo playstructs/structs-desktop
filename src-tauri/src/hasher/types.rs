@@ -128,6 +128,22 @@ pub struct TaskProgress {
     pub result_hash: Option<String>,
     pub result_difficulty: u64,
     pub process_start_time_ms: f64,
+    /// When a POOL WORKER actually began grinding this task, as opposed to when
+    /// it was created and queued.
+    ///
+    /// `process_start_time_ms` is stamped at construction, so any duration
+    /// derived from it is **queue wait + solve**. The adaptive tuner lowers
+    /// `max_concurrent` when "solve durations" degrade — and with a queue-
+    /// inclusive measure that is a positive feedback loop: a deeper queue
+    /// inflates the number, the tuner removes a worker, throughput drops, the
+    /// queue deepens further. Observed 2026-08-18 pinned at the floor
+    /// (`MIN_CONCURRENT = 2`) with a configured cap of 8 and 544 tasks pending,
+    /// reporting a 68-minute "median solve". Recovery was impossible by
+    /// construction: raising requires the ratio to fall back under 1.2, which
+    /// requires draining the queue with the workers it had just taken away.
+    ///
+    /// `None` until a worker picks the task up.
+    pub work_start_time_ms: Option<f64>,
     pub last_status_change_time_ms: f64,
     pub process_end_time_ms: Option<f64>,
 }
@@ -154,6 +170,7 @@ impl TaskProgress {
             result_hash: params.result_hash.clone(),
             result_difficulty: params.result_difficulty,
             process_start_time_ms: now_ms,
+            work_start_time_ms: None,
             last_status_change_time_ms: now_ms,
             process_end_time_ms: None,
         }
@@ -192,6 +209,8 @@ pub struct TaskStateSnapshot {
     pub estimated_block_start_offset: u64,
     /// Sent as ms epoch — JS shim converts to Date
     pub process_start_time: f64,
+    /// See [`TaskProgress::work_start_time_ms`] — `None` until a worker starts.
+    pub work_start_time: Option<f64>,
     /// Sent as ms epoch — JS shim converts to Date
     pub last_status_change_time: f64,
     pub process_end_time: Option<f64>,
@@ -226,6 +245,7 @@ impl TaskStateSnapshot {
             estimated_hashrate: progress.estimated_hashrate,
             estimated_block_start_offset: params.estimated_block_start_offset,
             process_start_time: progress.process_start_time_ms,
+            work_start_time: progress.work_start_time_ms,
             last_status_change_time: progress.last_status_change_time_ms,
             process_end_time: progress.process_end_time_ms,
         }
