@@ -3607,64 +3607,94 @@
     profSet({ action: 'save', id: p.id, profile: p });
   }
 
-  function previewLine(pv) {
-    if (!pv) return H.el('div', 'ops-muted', 'no preview');
-    var ok = (pv.blind || []).length === 0;
+  function previewText(pv) {
+    if (!pv) return 'no preview';
     var txt = pv.verdict;
-    if (!ok) txt += ' — no viable shot into [' + pv.blind.join(', ') + ']';
+    if ((pv.blind || []).length) txt += ' — no viable shot into [' + pv.blind.join(', ') + ']';
     else if (pv.covered_after != null) txt += ' — all four ambits answered after ' + pv.covered_after + ' build(s)';
-    var line = H.el('div', ok ? 'ops-ok' : 'ops-warn', txt);
-    return line;
+    return txt;
   }
 
-  function profileCard(p, assignedCount) {
-    var wrap = H.el('div', 'cfg-section');
-    var head = H.el('div', 'ops-row-head');
-    head.appendChild(H.el('strong', null, p.id + (p.builtin ? '  (built-in)' : '')));
-    head.appendChild(H.el('span', 'ops-muted', '  ' + p.label));
-    wrap.appendChild(head);
-
-    // Consequences first: this is the whole reason the card exists.
-    wrap.appendChild(previewLine(p.preview));
-    if (p.preview && (p.preview.unknown_types || []).length) {
-      wrap.appendChild(H.alertLine('unknown struct type(s): ' + p.preview.unknown_types.join(', '), 'icon-alert'));
+  // One SUI result row per profile, with the consequence as chips. Clicking
+  // opens the editor in the standard drawer — the same shape the roster and the
+  // WAR lists use, rather than five stacked full-width blocks.
+  function profileRow(p, assignedCount) {
+    var chips = [{ label: (p.preview && p.preview.verdict) || '?' }];
+    if (p.preview && (p.preview.blind || []).length) {
+      chips.push({ label: 'blind: ' + p.preview.blind.join('/') });
+    } else if (p.preview && p.preview.covered_after != null) {
+      chips.push({ label: 'covered in ' + p.preview.covered_after });
     }
-    if (assignedCount) {
-      wrap.appendChild(H.el('div', 'ops-muted', assignedCount + ' player(s) use this profile'));
-    }
+    chips.push({ label: p.loadout.length + ' rows' });
+    chips.push({ label: p.temperament_label });
+    if (assignedCount) chips.push({ label: assignedCount + ' in use' });
+    if (p.builtin) chips.push({ label: 'built-in' });
 
-    // Capabilities — plain switches, disabled on built-ins.
-    var caps = H.el('div', 'cfg-grid');
-    ['raids', 'refines', 'sweeps_alpha', 'auto_defends', 'explore_when_drained_only'].forEach(function (k) {
-      var cb = H.checkbox(!!p.capabilities[k], function (v) {
-        if (p.builtin) return;
-        p.capabilities[k] = v;
-        profSet({ action: 'save', id: p.id, profile: p });
-      });
-      caps.appendChild(H.field(k.replace(/_/g, ' '), cb));
+    return H.resultRow({
+      title: p.id,
+      subtitle: p.label,
+      chips: chips,
+      onClick: function () { H.drawer(p.id, profileEditor(p)); },
     });
-    wrap.appendChild(caps);
+  }
 
-    // Loadout rows, in priority order.
-    var tbl = H.el('div', 'ops-table');
+  // The editor body, shown inside the drawer.
+  function profileEditor(p) {
+    var body = H.el('div', 'cfg-section');
+    body.appendChild(H.row('Preview', previewText(p.preview)));
+    if (p.preview && (p.preview.unknown_types || []).length) {
+      body.appendChild(H.alertLine('unknown struct type(s): ' + p.preview.unknown_types.join(', '), 'icon-alert'));
+    }
+    if (p.builtin) {
+      body.appendChild(H.el('p', 'ops-muted', 'Built-in profiles are read-only. Fork to make an editable copy.'));
+    }
+
+    // checkbox(checked, labelText, onChange) — it carries its own label.
+    var caps = H.el('div', 'hstrip');
+    [['raids', 'raids'], ['refines', 'refines'], ['sweeps_alpha', 'sweeps alpha'],
+     ['auto_defends', 'defends'], ['explore_when_drained_only', 'explore when drained']]
+      .forEach(function (pair) {
+        var cb = H.checkbox(!!p.capabilities[pair[0]], pair[1], function (v) {
+          if (p.builtin) { rerenderProfiles(); return; }
+          p.capabilities[pair[0]] = v;
+          profSet({ action: 'save', id: p.id, profile: p });
+        });
+        caps.appendChild(cb);
+      });
+    body.appendChild(H.field('Capabilities', caps));
+
+    body.appendChild(H.field('Temperature', H.stepper(
+      p.temperament.temperature,
+      { min: 0, max: p.limits.temperature_max, step: 0.05, width: '5em' },
+      function (v) {
+        if (p.builtin) { rerenderProfiles(); return; }
+        p.temperament.temperature = v;
+        profSet({ action: 'save', id: p.id, profile: p });
+      }
+    ), '0 = always the best move; higher samples among the good ones'));
+
+    // Loadout, in priority order.
+    var tbl = H.resultTable();
     p.loadout.forEach(function (e, i) {
-      var row = H.el('div', 'ops-row');
-      row.appendChild(H.el('span', 'ops-muted', String(i + 1).padStart(2, ' ')));
-      row.appendChild(H.el('span', null, e.type_name));
-      row.appendChild(H.el('span', 'ops-muted', e.target + '/' + e.ambit + ' x' + e.want));
+      var actions = null;
       if (!p.builtin) {
-        row.appendChild(iconBtn('icon-arrow-up', 'higher priority', function () { moveRow(p, i, -1); }));
-        row.appendChild(iconBtn('icon-arrow-down', 'lower priority', function () { moveRow(p, i, 1); }));
-        row.appendChild(iconBtn('icon-close', 'remove', function () {
+        actions = H.el('div');
+        actions.appendChild(iconBtn('icon-arrow-up', 'higher priority', function () { moveRow(p, i, -1); }));
+        actions.appendChild(iconBtn('icon-arrow-down', 'lower priority', function () { moveRow(p, i, 1); }));
+        actions.appendChild(iconBtn('icon-close', 'remove', function () {
           p.loadout.splice(i, 1);
           profSet({ action: 'save', id: p.id, profile: p });
         }));
       }
-      tbl.appendChild(row);
+      tbl.appendChild(H.resultRow({
+        title: (i + 1) + '. ' + e.type_name,
+        subtitle: e.target + ' / ' + e.ambit + '  \u00d7' + e.want,
+        action: actions,
+      }));
     });
-    wrap.appendChild(tbl);
+    body.appendChild(H.field('Loadout (order is priority)', tbl));
 
-    var actions = H.el('div', 'ops-actions');
+    var actions = H.el('div', 'cfg-actions');
     var forkB = massBtn('prof-fork-' + p.id, 'icon-add', 'Fork', 'sui-mod-secondary');
     forkB.addEventListener('click', function () {
       var id = prompt('New profile id (letters, digits, - or _):', p.id + '-copy');
@@ -3673,8 +3703,6 @@
     actions.appendChild(forkB);
     var expB = massBtn('prof-exp-' + p.id, 'icon-download', 'Export', 'sui-mod-secondary');
     expB.addEventListener('click', function () {
-      // Self-contained document; `schema` is what makes an import from a newer
-      // build fail loudly instead of silently half-loading.
       var doc = JSON.stringify(p, null, 2);
       navigator.clipboard && navigator.clipboard.writeText(doc);
       alertInto('profiles-card', 'profile "' + p.id + '" copied to clipboard');
@@ -3687,34 +3715,7 @@
       });
       actions.appendChild(delB);
     }
-    wrap.appendChild(actions);
-    return wrap;
-  }
-
-  function renderProfilesCard() {
-    var d = profiles.data || {};
-    var body = H.el('div', 'cfg-section');
-    body.appendChild(H.el('p', 'ops-muted',
-      'A profile decides what a player builds, whether it refines, raids, sweeps and defends, and how ' +
-      'much it varies. Built-ins cannot be edited — fork one. Loadout order is priority, and fleet slots ' +
-      'free only when a hull is destroyed, so a change here plays out over weeks.'));
-
-    var assigned = d.assigned || {};
-    (d.profiles || []).forEach(function (p) {
-      body.appendChild(profileCard(p, assigned[p.id] || 0));
-    });
-
-    var imp = H.el('div', 'ops-actions');
-    var impB = massBtn('prof-import', 'icon-upload', 'Import from clipboard', 'sui-mod-secondary');
-    impB.addEventListener('click', function () {
-      if (!navigator.clipboard) { alertInto('profiles-card', 'clipboard unavailable'); return; }
-      navigator.clipboard.readText().then(function (txt) {
-        var doc; try { doc = JSON.parse(txt); } catch (e) { alertInto('profiles-card', 'not valid JSON'); return; }
-        profSet({ action: 'save', id: doc.id, profile: doc });
-      });
-    });
-    imp.appendChild(impB);
-    body.appendChild(imp);
+    body.appendChild(actions);
     return body;
   }
 

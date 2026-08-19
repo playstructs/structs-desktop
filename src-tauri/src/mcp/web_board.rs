@@ -483,6 +483,7 @@ async fn board_invoke(
             _ => err_json("domain + payload required".into()),
         },
         "mcp_callsign_get" => ok_json(board_pages::mcp_callsign_get().await),
+        "mcp_profiles_get" => ok_json(board_pages::mcp_profiles_get().await),
         "mcp_callsign_set" => match body.get("config").cloned() {
             Some(c) => from_result(board_pages::mcp_callsign_set_impl(c).await),
             None => err_json("config required".into()),

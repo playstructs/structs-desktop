@@ -588,10 +588,20 @@ mod tests {
         assert!(x.heat() > 0.0);
     }
 
+    /// COMBAT_HOLD is ONE process-global map, so the two tests that assert on
+    /// its whole contents cannot run at the same time — `cargo test` is parallel
+    /// by default and each would see the other's writes. Poisoning is ignored:
+    /// a panic in one test should fail that test, not cascade.
+    static HOLD_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        HOLD_GATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The live failure this exists for: an economy action spends the charge a
     /// defender needs, and `auto_response` then finds a shooter it cannot fire.
     #[test]
     fn a_player_under_attack_holds_its_charge() {
+        let _gate = exclusive();
         clear_combat_holds();
         assert!(!is_held_for_combat("1-271"), "quiet player is free");
         hold_for_combat("1-271");
@@ -603,6 +613,7 @@ mod tests {
 
     #[test]
     fn an_empty_player_id_is_never_held() {
+        let _gate = exclusive();
         clear_combat_holds();
         hold_for_combat("");
         assert!(!is_held_for_combat(""), "empty id must not block the whole roster");
