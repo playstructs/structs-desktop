@@ -1258,6 +1258,12 @@ pub async fn mcp_config_set_impl(
                     pr::set(p)?;
                     format!("profile '{id}' forked from '{from}'")
                 }
+                "rename" => {
+                    let to = payload.get("new_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let label = payload.get("label").and_then(|v| v.as_str());
+                    let p = pr::rename(&id, to, label)?;
+                    format!("profile '{id}' renamed to '{}'", p.id)
+                }
                 "delete" => {
                     pr::remove(&id)?;
                     format!("profile '{id}' deleted")

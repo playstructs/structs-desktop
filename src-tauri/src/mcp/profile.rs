@@ -768,6 +768,55 @@ pub fn set(p: Profile) -> Result<Profile, String> {
     Ok(p)
 }
 
+/// Rename a profile, moving every assigned player with it.
+///
+/// `new_id` empty means "label only". Built-ins cannot be renamed, and a rename
+/// onto an existing id is refused rather than silently merging two profiles.
+pub fn rename(old_id: &str, new_id: &str, label: Option<&str>) -> Result<Profile, String> {
+    if BUILTIN.iter().any(|b| b.id == old_id) {
+        return Err(format!("'{old_id}' is a built-in profile — fork it instead of renaming it"));
+    }
+    let mut s = store();
+    let mut p = s
+        .custom
+        .get(old_id)
+        .cloned()
+        .ok_or_else(|| format!("no profile '{old_id}'"))?;
+
+    if let Some(l) = label {
+        p.label = l.trim().to_string();
+    }
+    let target = new_id.trim();
+    let changing_id = !target.is_empty() && target != old_id;
+    if changing_id {
+        if BUILTIN.iter().any(|b| b.id == target) {
+            return Err(format!("'{target}' is a built-in profile id"));
+        }
+        if s.custom.contains_key(target) {
+            return Err(format!("a profile called '{target}' already exists"));
+        }
+        p.id = target.to_string();
+    }
+
+    // Validate the finished document BEFORE touching stored state.
+    validate(&p)?;
+
+    if changing_id {
+        s.custom.remove(old_id);
+    }
+    s.custom.insert(p.id.clone(), p.clone());
+    if let Ok(mut w) = STORE.write() {
+        *w = s.clone();
+    }
+    crate::mcp::config_store::save_config(FILENAME, &s);
+
+    // Only after the profile itself is safely stored: carry the assignments.
+    if changing_id {
+        crate::mcp::virtual_players::repoint_profile(old_id, &p.id)?;
+    }
+    Ok(p)
+}
+
 pub fn remove(id: &str) -> Result<(), String> {
     if BUILTIN.iter().any(|b| b.id == id) {
         return Err(format!("'{id}' is a built-in profile and cannot be deleted"));
@@ -793,6 +842,15 @@ pub fn set_for_test(s: ProfileStore) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// STORE is ONE process-global map and these tests assert on its whole
+    /// contents, so they cannot run concurrently — `cargo test` is parallel by
+    /// default and a rename in one test removes a key another is asserting on.
+    /// Poisoning is ignored: a panic should fail that test, not cascade.
+    static STORE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        STORE_GATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// The shipped profiles must pass exactly the gate user input passes —
     /// otherwise the built-ins are privileged and the validator is untested
@@ -935,6 +993,7 @@ mod tests {
     /// Resolution must never fail — a loop with no profile is a loop that stops.
     #[test]
     fn resolution_is_total() {
+        let _gate = exclusive();
         set_for_test(ProfileStore::default());
         assert_eq!(find("bait").id, "bait");
         assert!(!find("no-such-profile").loadout.is_empty(), "unknown id must fall back");
@@ -942,6 +1001,7 @@ mod tests {
 
     #[test]
     fn a_player_without_a_profile_falls_back_to_its_role() {
+        let _gate = exclusive();
         set_for_test(ProfileStore::default());
         assert_eq!(for_player(None, Some(VPlayerRole::Raider)).id, "raider");
         assert_eq!(for_player(Some(""), Some(VPlayerRole::Productive)).id, "productive");
@@ -949,7 +1009,67 @@ mod tests {
     }
 
     #[test]
+    fn renaming_changes_the_label_without_touching_the_id() {
+        let _gate = exclusive();
+        set_for_test(ProfileStore::default());
+        set(sample()).unwrap();
+        let p = rename("vulture", "", Some("Carrion Bird")).unwrap();
+        assert_eq!(p.id, "vulture", "an empty new_id means label-only");
+        assert_eq!(p.label, "Carrion Bird");
+        assert!(store().custom.contains_key("vulture"));
+    }
+
+    #[test]
+    fn renaming_the_id_moves_the_profile_and_frees_the_old_key() {
+        let _gate = exclusive();
+        set_for_test(ProfileStore::default());
+        set(sample()).unwrap();
+        let p = rename("vulture", "carrion", None).unwrap();
+        assert_eq!(p.id, "carrion");
+        assert!(store().custom.contains_key("carrion"));
+        assert!(!store().custom.contains_key("vulture"), "old key must be freed");
+    }
+
+    /// A rename onto a name already in use would silently merge two profiles
+    /// into one — refuse instead.
+    #[test]
+    fn renaming_onto_an_existing_id_is_refused() {
+        let _gate = exclusive();
+        set_for_test(ProfileStore::default());
+        set(sample()).unwrap();
+        let mut other = sample();
+        other.id = "kestrel".into();
+        set(other).unwrap();
+        let e = rename("vulture", "kestrel", None).unwrap_err();
+        assert!(e.contains("already exists"), "{e}");
+        // Both survive untouched.
+        assert!(store().custom.contains_key("vulture"));
+        assert!(store().custom.contains_key("kestrel"));
+    }
+
+    #[test]
+    fn a_built_in_cannot_be_renamed() {
+        let _gate = exclusive();
+        set_for_test(ProfileStore::default());
+        let e = rename("raider", "my-raider", None).unwrap_err();
+        assert!(e.contains("fork it"), "{e}");
+    }
+
+    /// A rename that would produce an invalid profile must leave the stored
+    /// copy exactly as it was.
+    #[test]
+    fn an_invalid_rename_does_not_mutate_the_store() {
+        let _gate = exclusive();
+        set_for_test(ProfileStore::default());
+        set(sample()).unwrap();
+        let e = rename("vulture", "", Some("   ")).unwrap_err();
+        assert!(e.contains("needs a label"), "{e}");
+        assert_eq!(store().custom.get("vulture").unwrap().label, "Vulture", "label survived");
+    }
+
+    #[test]
     fn built_ins_cannot_be_shadowed_or_deleted() {
+        let _gate = exclusive();
         set_for_test(ProfileStore::default());
         let mut p = sample();
         p.id = "raider".into();
@@ -960,6 +1080,7 @@ mod tests {
     /// A rejected save must leave the stored set exactly as it was.
     #[test]
     fn a_rejected_save_does_not_mutate_the_store() {
+        let _gate = exclusive();
         set_for_test(ProfileStore::default());
         let before = store().custom.len();
         let mut bad = sample();

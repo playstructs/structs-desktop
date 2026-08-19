@@ -587,6 +587,67 @@ impl GuildApiClient {
         )
         .await
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Whole-game endpoints used by the Game Stats aggregator
+    // (`crate::mcp::game_stats`). Same thin-wrapper style as everything
+    // above; the aggregator owns pagination depth and cadence.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Guilds with at least one member, pre-ranked `members DESC, alpha DESC`.
+    /// Rows: `{guild_id, name, logo, alpha, members}` — numerics as strings.
+    pub async fn guild_directory(&self) -> Result<Value, String> {
+        self.get("/api/guild/directory").await
+    }
+    pub async fn guild_count(&self) -> Result<Value, String> {
+        self.get("/api/guild/count").await
+    }
+    /// `{guild_id, total_fuel, total_load, total_capacity, avg_connection_capacity}`.
+    pub async fn guild_power_stats(&self, guild_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/guild/{}/power/stats", guild_id))
+            .await
+    }
+    pub async fn guild_planet_complete_count(&self, guild_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/guild/{}/planet/complete/count", guild_id))
+            .await
+    }
+    /// Members with identity: `{id, username, pfp, pfp_client_render_attributes,
+    /// guild_name, tag, alpha}` — the only bulk source of usernames + alpha.
+    pub async fn guild_roster(&self, guild_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/guild/{}/roster", guild_id)).await
+    }
+    pub async fn guild_list_all(&self, page: u32) -> Result<GuildPage<Value>, String> {
+        self.get_page(&format!("/api/guild/list/all/page/{}", page), page)
+            .await
+    }
+    pub async fn player_list_all(&self, page: u32) -> Result<GuildPage<Value>, String> {
+        self.get_page(&format!("/api/player/list/all/page/{}", page), page)
+            .await
+    }
+    pub async fn planet_list_all(&self, page: u32) -> Result<GuildPage<Value>, String> {
+        self.get_page(&format!("/api/planet/list/all/page/{}", page), page)
+            .await
+    }
+    pub async fn fleet_list_all(&self, page: u32) -> Result<GuildPage<Value>, String> {
+        self.get_page(&format!("/api/fleet/list/all/page/{}", page), page)
+            .await
+    }
+    pub async fn struct_list_all(&self, page: u32) -> Result<GuildPage<Value>, String> {
+        self.get_page(&format!("/api/struct/list/all/page/{}", page), page)
+            .await
+    }
+    /// The full struct-type catalog (one page, ordered by id).
+    pub async fn struct_type_catalog(&self) -> Result<Value, String> {
+        self.get("/api/struct/type").await
+    }
+    /// All rows of the `setting` table (public route, no session needed).
+    pub async fn settings(&self) -> Result<Value, String> {
+        self.get("/api/setting").await
+    }
+    pub async fn work_all(&self, page: u32) -> Result<GuildPage<Value>, String> {
+        self.get_page(&format!("/api/work/all/page/{}", page), page)
+            .await
+    }
 }
 
 /// Walk a paginated endpoint until `has_more` is false or `max_pages` is hit.

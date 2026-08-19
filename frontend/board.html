@@ -680,11 +680,17 @@
        away with the rows. */
     html[data-solo] .ops-scroll { height: 100vh; max-height: 100vh; overflow: hidden;
                                   padding: 10px 12px; }
-    html[data-solo] #page-grass { display: flex; flex-direction: column;
+    /* Stream-only: display:flex would override the router's `hidden` toggle,
+       so it must never apply to a DIFFERENT solo view's window — that is how
+       the Game Stats pop-out got a 723px invisible grass page shoving its own
+       content below the fold. */
+    html[data-solo="stream"] #page-grass { display: flex; flex-direction: column;
                                   height: 100%; min-height: 0; }
-    html[data-solo] #grass-toolbar { flex: none; }
-    html[data-solo] #grass-list { flex: 1 1 auto; min-height: 0; max-height: none;
+    html[data-solo="stream"] #grass-toolbar { flex: none; }
+    html[data-solo="stream"] #grass-list { flex: 1 1 auto; min-height: 0; max-height: none;
                                   overflow-y: auto; }
+    /* Game Stats is a long dashboard, not a pinned log: the window scrolls. */
+    html[data-solo="gamestats"] .ops-scroll { overflow-y: auto; }
   </style>
 </head>
 <body>
@@ -840,6 +846,14 @@
                  now opens the live spectator window instead — same board,
                  drawn continuously, without borrowing the game view. -->
 
+            <!-- ═══ GAME STATS — whole-universe dashboard (pop-out only) ═══ -->
+            <div class="page" id="page-gamestats" hidden>
+              <div id="gamestats-body">
+                <div class="sui-message-inline-alert sui-mod-secondary"><i class="icon-in-progress"></i>
+                  <span class="sui-message-inline-alert-text">Universe survey loading…</span></div>
+              </div>
+            </div>
+
           </div>
         </div>
       </div>
@@ -873,5 +887,6 @@
   <script src="ui-telemetry.js"></script>
   <script src="board.js"></script>
   <script src="board-pages.js"></script>
+  <script src="board-gamestats.js"></script>
 </body>
 </html>

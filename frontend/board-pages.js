@@ -3656,6 +3656,15 @@
     return wrap;
   }
 
+  // `raider-copy`, then `raider-copy-2`, ... — first id not already taken.
+  function nextForkId(base) {
+    var taken = {};
+    ((profiles.data && profiles.data.profiles) || []).forEach(function (x) { taken[x.id] = true; });
+    var id = base + '-copy';
+    for (var n = 2; taken[id]; n++) id = base + '-copy-' + n;
+    return id;
+  }
+
   function profileEditor(p) {
     var body = H.el('div', 'cfg-section');
     var save = function () { profSet({ action: 'save', id: p.id, profile: p }); };
@@ -3674,6 +3683,20 @@
     }
     if (p.builtin) {
       body.appendChild(H.el('p', 'ops-muted', 'Built-in — read-only. Fork to make an editable copy.'));
+    }
+
+    // ── Identity: a fork lands as `<parent>-copy`, so renaming has to be
+    // reachable or every fork is stuck with a generated name. Renaming the ID
+    // re-points every player assigned to it (see profile::rename).
+    if (!p.builtin) {
+      body.appendChild(H.row('Name', H.textBox(p.label, 'display name', function (v) {
+        profSet({ action: 'rename', id: p.id, label: v });
+      })));
+      body.appendChild(H.row('Id', H.textBox(p.id, 'letters, digits, - or _', function (v) {
+        var next = (v || '').trim();
+        if (!next || next === p.id) return;
+        profSet({ action: 'rename', id: p.id, new_id: next });
+      })));
     }
 
     // ── Capabilities: one line each, switch on the right ──
@@ -3728,8 +3751,12 @@
     var actions = H.el('div', 'cfg-actions');
     var forkB = massBtn('prof-fork-' + p.id, 'icon-add', 'Fork', 'sui-mod-secondary');
     forkB.addEventListener('click', function () {
-      var id = prompt('New profile id (letters, digits, - or _):', p.id + '-copy');
-      if (id) profSet({ action: 'fork', from: p.id, id: id, label: id });
+      // Just do it. A fork costs nothing and is trivially deleted, so asking
+      // for a name up front is friction — rename by editing the copy.
+      //
+      // (It also cannot use window.prompt: the Tauri webview blocks native
+      // dialogs, which is why this button silently did nothing at first.)
+      profSet({ action: 'fork', from: p.id, id: nextForkId(p.id), label: p.label + ' (copy)' });
     });
     actions.appendChild(forkB);
     var expB = massBtn('prof-exp-' + p.id, 'icon-copy', 'Export', 'sui-mod-secondary');
@@ -3741,7 +3768,13 @@
     if (!p.builtin) {
       var delB = massBtn('prof-del-' + p.id, 'icon-close', 'Delete', 'sui-mod-secondary');
       delB.addEventListener('click', function () {
-        if (confirm('Delete profile "' + p.id + '"?')) profSet({ action: 'delete', id: p.id });
+        // Same reason as Fork: window.confirm is inert in the webview.
+        H.confirmModal(
+          'Delete ' + p.id + '?',
+          H.el('p', 'ops-muted', 'Players using it fall back to their role\u2019s built-in.'),
+          'Delete',
+          function () { profSet({ action: 'delete', id: p.id }); }
+        );
       });
       actions.appendChild(delB);
     }

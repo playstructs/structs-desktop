@@ -1,0 +1,12 @@
+{
+  "name": "board-harness-tests",
+  "private": true,
+  "description": "jsdom checks for the static board harness (scripts/make_harness.sh). Not part of the app build.",
+  "type": "module",
+  "scripts": {
+    "test": "node gamestats.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

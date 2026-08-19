@@ -928,7 +928,7 @@ pub async fn execute(
                     out.push_str(if custom.is_empty() { "\nCustom: none yet\n" } else { "\nCustom:\n" });
                     for p in custom { out.push_str(&line(p)); }
                     out.push_str(
-                        "\nprofile {action:'show'|'fork'|'set'|'delete'|'assign', id, ...}\n\
+                        "\nprofile {action:'show'|'fork'|'rename'|'set'|'delete'|'assign', id, ...}\n\
                          Assign with {action:'assign', player:'1-2136', id:'vulture'}.\n",
                     );
                     return vec![Content::text(out)];
@@ -966,6 +966,14 @@ pub async fn execute(
                     return match pr::set(p) {
                         Ok(p) => vec![Content::text(format!("saved\n{}", render(&p)))],
                         Err(e) => vec![Content::text(format!("profile rejected: {e}"))],
+                    };
+                }
+                "rename" => {
+                    let to = a.get("new_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let label = a.get("label").and_then(|v| v.as_str());
+                    return match pr::rename(&id, to, label) {
+                        Ok(p) => vec![Content::text(format!("renamed\n{}", render(&p)))],
+                        Err(e) => vec![Content::text(format!("rename rejected: {e}"))],
                     };
                 }
                 "delete" => {

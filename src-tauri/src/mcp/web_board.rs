@@ -79,7 +79,7 @@ pub static BOARD_BUS: LazyLock<broadcast::Sender<(String, Value)>> =
 /// Windows that render board content and therefore need board events. The
 /// pop-out Stream window runs the same board.html in a chrome-less mode, so it
 /// listens for exactly the same `grass-event` / `grass-lookups` traffic.
-pub const BOARD_WINDOWS: &[&str] = &["board", "stream"];
+pub const BOARD_WINDOWS: &[&str] = &["board", "stream", "gamestats"];
 
 /// Single choke point replacing every `emit_to("board", …)`. The broadcast
 /// always fires (web viewers may exist with no native window); the native emit

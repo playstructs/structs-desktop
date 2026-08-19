@@ -1879,6 +1879,14 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div id="debug-download-logs-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">7 days of activity as a zip · no wallet keys included</div>';
       html += '</div></div>';
 
+      // Game Stats door — second card, still above the fold, because it is a
+      // destination people come here to open, not a diagnostic they scroll to.
+      html += '<div class="sui-data-card">';
+      html += '<div class="sui-data-card-body" style="padding:6px;">';
+      html += '<div id="debug-gamestats" class="sui-button sui-mod-secondary" style="cursor:pointer; text-align:center; padding:6px 10px;">Game Stats</div>';
+      html += '<div id="debug-gamestats-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">whole-universe dashboard · opens in its own window</div>';
+      html += '</div></div>';
+
       // Identity
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-header sui-text-header">Identity</div>';
@@ -2004,6 +2012,22 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             copyToClipboard(walletAddress);
             addrEl.textContent = 'Copied!';
             setTimeout(function() { addrEl.textContent = walletAddress.substring(0, 20) + '...'; }, 1000);
+          });
+        }
+
+        // Game Stats door. Same direct-invoke shape as Team Ops below: no MCP
+        // server, no bearer token — works for a player who has never run an
+        // agent. Failures report in place; there is no other retry affordance.
+        var gameStatsEl = document.getElementById('debug-gamestats');
+        if (gameStatsEl) {
+          gameStatsEl.addEventListener('click', function() {
+            window.__TAURI__.core.invoke('open_game_stats_window').catch(function(e) {
+              var note = document.getElementById('debug-gamestats-note');
+              if (note) {
+                note.textContent = 'Could not open Game Stats: ' + e;
+                note.style.color = 'var(--text-enemy-primary)';
+              }
+            });
           });
         }
 

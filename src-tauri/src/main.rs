@@ -81,6 +81,8 @@ fn main() {
             mcp::tools::board_pages::mcp_work,
             mcp::board_feed::open_stream_window,
             mcp::board_feed::open_board_window,
+            mcp::game_stats::open_game_stats_window,
+            mcp::game_stats::mcp_game_stats_snapshot,
             mcp::tools::board_pages::mcp_health,
             mcp::tools::board_pages::mcp_allocations,
             mcp::tools::board_pages::mcp_allocation_preview,

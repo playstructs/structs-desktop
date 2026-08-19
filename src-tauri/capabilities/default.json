@@ -5,6 +5,7 @@
     "main",
     "board",
     "stream",
+    "gamestats",
     "raid-*"
   ],
   "permissions": [

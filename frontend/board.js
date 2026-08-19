@@ -36,6 +36,11 @@
     { key: 'command', label: 'Command', sections: [
       { key: 'overview', label: 'Overview', page: 'ops' },
       { key: 'stream', label: 'Stream', page: 'grass' },
+      // Whole-game stats. `hidden` keeps it out of the sub-nav: it is a
+      // pop-out-only page (opened from the game's Debug tab), not a Team Ops
+      // section — but the router still needs an area/section to resolve the
+      // solo view, and PAGE_NAMES needs the page div registered.
+      { key: 'universe', label: 'Universe', page: 'gamestats', hidden: true },
     ] },
     // "Armada", not "Fleet": a fleet is a specific game entity (9-xxx, the
     // thing that moves between planets). This is our roster of players.
@@ -106,7 +111,7 @@
   // `board.html?view=stream` runs this SAME page as a standalone window
   // showing one section and nothing else. One renderer, one set of event
   // listeners — a second implementation of the stream would drift immediately.
-  var SOLO_VIEWS = { stream: 'command/stream' };
+  var SOLO_VIEWS = { stream: 'command/stream', gamestats: 'command/universe' };
   function soloView() {
     var m = /[?&]view=([a-z]+)/.exec(location.search || '');
     return (m && SOLO_VIEWS[m[1]]) ? m[1] : null;
@@ -1146,8 +1151,10 @@
     var host = document.getElementById('board-subnav');
     if (!host) return;
     host.innerHTML = '';
-    if (Board.solo || area.sections.length < 2) return;
-    host.appendChild(navStrip(area.sections, section.key, null, function (k) {
+    // Hidden sections (pop-out-only pages) never render a nav entry.
+    var visible = area.sections.filter(function (s) { return !s.hidden; });
+    if (Board.solo || visible.length < 2) return;
+    host.appendChild(navStrip(visible, section.key, null, function (k) {
       return '#/' + area.key + '/' + k;
     }));
   }

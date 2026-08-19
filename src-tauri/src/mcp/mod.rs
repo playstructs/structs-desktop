@@ -15,6 +15,7 @@ pub mod auto_harvest;
 pub mod board_feed;
 pub mod auto_infuse;
 pub mod auto_sweep;
+pub mod game_stats;
 pub mod guild_api;
 pub mod guild_power;
 pub mod loop_util;

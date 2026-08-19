@@ -222,6 +222,30 @@ pub fn set_profile(player_key: &str, profile: Option<String>) -> Result<String, 
     Ok(name)
 }
 
+/// Re-point every player assigned to `old_id` at `new_id`. Returns how many
+/// moved.
+///
+/// A profile id is a KEY: `VirtualPlayer.profile` stores it by name, so
+/// renaming without this silently orphans every assigned player — they would
+/// fall back to their role's built-in and nobody would be told.
+pub fn repoint_profile(old_id: &str, new_id: &str) -> Result<usize, String> {
+    if old_id == new_id {
+        return Ok(0);
+    }
+    let mut reg = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+    let mut moved = 0usize;
+    for v in reg.players.iter_mut() {
+        if v.profile.as_deref() == Some(old_id) {
+            v.profile = Some(new_id.to_string());
+            moved += 1;
+        }
+    }
+    if moved > 0 {
+        reg.save()?;
+    }
+    Ok(moved)
+}
+
 pub fn is_team_player(player_id: &str) -> bool {
     if player_id.is_empty() {
         return false;
