@@ -165,6 +165,18 @@ pub fn collect_targets(include_primary: bool) -> Vec<(String, Option<u32>, Optio
 /// Is this player id one of ours — the primary, or any registered vplayer?
 /// The combat loops veto on this before anything else: friendly fire between
 /// our own accounts is never a legitimate target, however it scores.
+/// The role of one of our players, or `None` for the primary / an unknown id.
+///
+/// `collect_targets` already yields roles for a whole sweep; this is the
+/// single-player lookup for code that starts from an id (an incoming raid
+/// alarm, say) rather than from the roster.
+pub fn role_of(player_id: &str) -> Option<VPlayerRole> {
+    if player_id.is_empty() {
+        return None;
+    }
+    VirtualPlayerStore::load().find(player_id).map(|v| v.role)
+}
+
 pub fn is_team_player(player_id: &str) -> bool {
     if player_id.is_empty() {
         return false;

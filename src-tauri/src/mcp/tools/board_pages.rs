@@ -1262,6 +1262,27 @@ pub async fn mcp_config_set_impl(
                     auto_defend::set(c);
                     s
                 }
+                // Not a loop of its own — the behavioural profile every loop
+                // reads when it has a choice. Lives here so the generic config
+                // editor renders it with no bespoke UI.
+                "variance" => {
+                    let mut c: crate::mcp::variance::VarianceConfig =
+                        serde_json::from_value(cfg).map_err(|e| e.to_string())?;
+                    // Same ordering rule as `posture`: a preset rewrites every
+                    // temperament, so apply it FIRST and let explicit edits in
+                    // the same payload win.
+                    if payload.get("apply_preset").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let p = c.preset;
+                        c.apply_preset(p);
+                    }
+                    let s = format!(
+                        "variance → {} ({})",
+                        if c.enabled { "ON" } else { "off" },
+                        serde_json::to_string(&c.preset).unwrap_or_default().trim_matches('"')
+                    );
+                    crate::mcp::variance::set(c);
+                    s
+                }
                 "infuse" => {
                     let c: auto_infuse::AutoInfuseConfig =
                         serde_json::from_value(cfg).map_err(|e| e.to_string())?;

@@ -25,6 +25,7 @@ pub mod policy;
 pub mod prompts;
 pub mod raid_view;
 pub mod readiness;
+pub mod variance;
 pub mod spectator;
 pub mod resources;
 pub mod roster_cache;

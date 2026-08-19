@@ -327,6 +327,72 @@ fn first_free(occupied: &HashSet<u64>) -> Option<u64> {
     (0..SLOTS_PER_AMBIT as u64).find(|i| !occupied.contains(i))
 }
 
+/// One loadout entry that could be built right now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RipeEntry {
+    /// Position in the loadout — lower is higher priority.
+    pub idx: usize,
+    pub target: &'static str,
+    pub ambit: &'static str,
+    pub type_name: &'static str,
+    pub slot: u64,
+}
+
+/// Every loadout entry that is buildable for this player right now, in loadout
+/// order.
+///
+/// Extracted from the scan loop so PRODUCTION AND TESTS SHARE ONE WALK. The
+/// tests previously drove a private reimplementation of this logic, which meant
+/// that once selection became stochastic they would have kept passing while
+/// asserting nothing true about the running system — the worst kind of test.
+///
+/// Pure: every input is passed in. `buildable` answers "is this type known to
+/// the catalog and affordable on the current power budget", which is the only
+/// part that needs `GAME_STATE`.
+pub fn ripe_entries(
+    loadout: &[(&'static str, &'static str, &'static str, usize)],
+    present: &HashSet<String>,
+    have: &HashMap<(String, String, String), usize>,
+    occ: &HashMap<(String, String), HashSet<u64>>,
+    buildable: impl Fn(&str) -> bool,
+) -> Vec<RipeEntry> {
+    let empty = HashSet::new();
+    let mut out = Vec::new();
+    for (idx, (target, ambit, type_name, want)) in loadout.iter().enumerate() {
+        if ONE_PER_PLAYER.contains(type_name) && present.contains(*type_name) {
+            continue; // already have this 1-per-player struct
+        }
+        let have_n = have
+            .get(&(target.to_string(), ambit.to_string(), type_name.to_string()))
+            .copied()
+            .unwrap_or(0);
+        if have_n >= *want {
+            continue; // this entry's share of the ambit is filled
+        }
+        let key = (target.to_string(), ambit.to_string());
+        let occupied = occ.get(&key).unwrap_or(&empty);
+        if occupied.len() >= SLOTS_PER_AMBIT {
+            continue;
+        }
+        let Some(slot) = first_free(occupied) else { continue };
+        if !buildable(type_name) {
+            continue; // unknown type, or would push the player offline
+        }
+        out.push(RipeEntry { idx, target, ambit, type_name, slot });
+    }
+    out
+}
+
+/// Which ripe entry to build, honouring this player's temperament.
+///
+/// Scored by negated loadout position, so the deterministic path
+/// (`temperature 0`) picks the earliest entry — byte-for-byte the old
+/// "first ripe wins" walk. Warmer temperaments wander down the list, which is
+/// how a roster stops converging on one composition.
+pub fn choose_entry(ripe: &[RipeEntry], t: &crate::mcp::variance::Temperament) -> Option<usize> {
+    crate::mcp::variance::pick_now(ripe, |e| -(e.idx as f64), t)
+}
+
 pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     let cfg = get();
     if !cfg.enabled {
@@ -713,38 +779,34 @@ async fn scan(
                     return;
                 }
 
-                // Walk the loadout; build the first ripe (free slot + power + known
-                // type) entry whose want-count isn't met yet.
-                for (target, ambit, type_name, want) in loadout {
-                    if ONE_PER_PLAYER.contains(type_name) && present.contains(*type_name) {
-                        continue; // already have this 1-per-player struct
-                    }
-                    let have_n = have
-                        .get(&(target.to_string(), ambit.to_string(), type_name.to_string()))
-                        .copied()
-                        .unwrap_or(0);
-                    if have_n >= *want {
-                        continue; // this entry's share of the ambit is filled
-                    }
-                    let key = (target.to_string(), ambit.to_string());
-                    let used = occ.get(&key).map(|s| s.len()).unwrap_or(0);
-                    if used >= SLOTS_PER_AMBIT {
-                        continue;
-                    }
-                    let Some(slot) = first_free(occ.get(&key).unwrap_or(&HashSet::new())) else { continue };
-                    // Resolve type id + draw from the catalog.
-                    let (type_id, draw) = {
-                        let gs = crate::game_state::GAME_STATE.read().unwrap();
-                        match gs.struct_types.values().find(|t| t.name.eq_ignore_ascii_case(type_name)) {
-                            Some(t) => (t.id, t.passive_draw.unwrap_or(0.0)),
-                            None => continue,
-                        }
-                    };
-                    // `<=`: the chain rejects equality too ("cannot handle new
-                    // load requirements (required: 1, available: 1)" seen live).
+                // Resolve a loadout type name to (id, passive draw) from the
+                // catalog. `<=` on the budget: the chain rejects equality too
+                // ("cannot handle new load requirements (required: 1,
+                // available: 1)" seen live).
+                let resolve = |type_name: &str| -> Option<(u64, f64)> {
+                    let gs = crate::game_state::GAME_STATE.read().unwrap();
+                    let t = gs
+                        .struct_types
+                        .values()
+                        .find(|t| t.name.eq_ignore_ascii_case(type_name))?;
+                    let draw = t.passive_draw.unwrap_or(0.0);
                     if conn_cap > 0.0 && available <= draw {
-                        continue; // would push offline — skip this (heavier) type, try a cheaper one
+                        return None; // would push offline
                     }
+                    Some((t.id, draw))
+                };
+
+                // Everything buildable right now, then ONE pick weighted by this
+                // player's temperament. At temperature 0 this is the old
+                // "first ripe entry wins" walk exactly.
+                let mut ripe = ripe_entries(loadout, &present, &have, &occ, |tn| resolve(tn).is_some());
+                let temperament = crate::mcp::variance::for_role(role);
+                while !ripe.is_empty() {
+                    let Some(k) = choose_entry(&ripe, &temperament) else { break };
+                    let entry = ripe.remove(k);
+                    let (target, ambit, type_name, slot) =
+                        (entry.target, entry.ambit, entry.type_name, entry.slot);
+                    let Some((type_id, _draw)) = resolve(type_name) else { continue };
                     let payload = json!({
                         "playerId": pid,
                         "structTypeId": type_id,
@@ -852,29 +914,49 @@ mod tests {
     /// entries in order and building the first `n` hulls. Viable = counter-
     /// immune, or cross-ambit (counters halve); a same-ambit-only shot is
     /// refused by auto_response's suicidal gate, so it does not count.
-    fn blind_after(loadout: &[(&str, &str, &str, usize)], n: usize) -> Vec<&'static str> {
+    /// Ambits still lacking a VIABLE shot after `n` builds, driving the REAL
+    /// selection (`ripe_entries` + `choose_entry`) rather than a private copy
+    /// of the walk.
+    ///
+    /// This used to be a test-local reimplementation that consumed the loadout
+    /// in strict array order. Once selection became stochastic that would have
+    /// kept passing while asserting nothing true about the running system, so
+    /// it now shares production's code path and takes a `Temperament` — pass
+    /// the default for the deterministic ordering claim, or a warm one to make
+    /// a distributional claim.
+    fn blind_after_with(
+        loadout: &[(&'static str, &'static str, &'static str, usize)],
+        n: usize,
+        t: &crate::mcp::variance::Temperament,
+    ) -> Vec<&'static str> {
         let mut built: Vec<(u64, u64, bool)> = Vec::new();
-        let mut used: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        'outer: for (target, ambit, name, want) in loadout {
-            if *target != "fleet" {
-                continue;
+        let present: HashSet<String> = HashSet::new();
+        let mut have: HashMap<(String, String, String), usize> = HashMap::new();
+        let mut occ: HashMap<(String, String), HashSet<u64>> = HashMap::new();
+
+        while built.len() < n {
+            // Every hull in the test table is "known and affordable".
+            let ripe = ripe_entries(loadout, &present, &have, &occ, |tn| {
+                HULLS.iter().any(|(hn, ..)| *hn == tn)
+            });
+            let ripe: Vec<RipeEntry> = ripe.into_iter().filter(|e| e.target == "fleet").collect();
+            if ripe.is_empty() {
+                break;
             }
-            let Some(h) = HULLS.iter().find(|(hn, ..)| hn == name) else {
-                panic!("loadout hull {name} missing from the test reach table");
+            let Some(k) = choose_entry(&ripe, t) else { break };
+            let e = &ripe[k];
+            let Some(h) = HULLS.iter().find(|(hn, ..)| *hn == e.type_name) else {
+                panic!("loadout hull {} missing from the test reach table", e.type_name);
             };
-            for _ in 0..*want {
-                if built.len() >= n {
-                    break 'outer;
-                }
-                // Respect the 4-slot-per-ambit cap, exactly as the walk does.
-                let c = used.entry(ambit).or_insert(0);
-                if *c >= SLOTS_PER_AMBIT {
-                    break;
-                }
-                *c += 1;
-                built.push((h.1, h.2, h.3));
-            }
+            built.push((h.1, h.2, h.3));
+            *have
+                .entry((e.target.to_string(), e.ambit.to_string(), e.type_name.to_string()))
+                .or_insert(0) += 1;
+            occ.entry((e.target.to_string(), e.ambit.to_string()))
+                .or_default()
+                .insert(e.slot);
         }
+
         [("water", 2u64), ("land", 4), ("air", 8), ("space", 16)]
             .into_iter()
             .filter(|(_, bit)| {
@@ -884,6 +966,14 @@ mod tests {
             })
             .map(|(n, _)| n)
             .collect()
+    }
+
+    /// The deterministic walk: what `temperature 0` builds, in order.
+    fn blind_after(
+        loadout: &[(&'static str, &'static str, &'static str, usize)],
+        n: usize,
+    ) -> Vec<&'static str> {
+        blind_after_with(loadout, n, &crate::mcp::variance::Temperament::default())
     }
 
     /// A Command Ship can occupy ANY of the four ambits, so a fully-built fleet
@@ -924,6 +1014,57 @@ mod tests {
                 "{name} still blind in {:?} after {budget} builds",
                 blind_after(l, budget)
             );
+        }
+    }
+
+    /// The POINT of variance: two rebuilds must not produce the same fleet.
+    ///
+    /// A fixed order is why 1,876 of 2,238 players ended up with no viable shot
+    /// into water — every fleet walked the same list and converged on the same
+    /// composition. Sampling is the fix, so assert the diversity directly.
+    #[test]
+    fn a_warm_temperament_produces_different_fleets() {
+        let warm = crate::mcp::variance::Temperament {
+            temperature: 0.8,
+            ..Default::default()
+        };
+        let mut shapes = std::collections::HashSet::new();
+        for _ in 0..40 {
+            shapes.insert(blind_after_with(LOADOUT, 4, &warm));
+        }
+        assert!(
+            shapes.len() > 1,
+            "warm temperament still produced one fixed composition — no diversification"
+        );
+    }
+
+    /// ...but variance must not throw the coverage win away. The reordered
+    /// loadout front-loads Mobile Artillery + SAM Launcher; at the shipped
+    /// raider temperature most rebuilds should still reach all four ambits
+    /// quickly, even though individual ones wander.
+    #[test]
+    fn coverage_still_arrives_quickly_at_the_shipped_temperature() {
+        let mut cfg = crate::mcp::variance::VarianceConfig::default();
+        cfg.apply_preset(crate::mcp::variance::VariancePreset::Human);
+        let t = cfg.raider;
+        let trials = 200;
+        let covered = (0..trials)
+            .filter(|_| blind_after_with(LOADOUT, 6, &t).is_empty())
+            .count();
+        assert!(
+            covered * 2 > trials,
+            "only {covered}/{trials} rebuilds covered all four ambits within 6 builds — \
+             variance is costing more than it buys"
+        );
+    }
+
+    /// Temperature 0 must reproduce the old deterministic walk exactly, which
+    /// is what lets every ordering assertion in this file keep meaning something.
+    #[test]
+    fn temperature_zero_reproduces_the_fixed_order() {
+        let zero = crate::mcp::variance::Temperament::default();
+        for _ in 0..20 {
+            assert!(blind_after_with(LOADOUT, 2, &zero).is_empty());
         }
     }
 

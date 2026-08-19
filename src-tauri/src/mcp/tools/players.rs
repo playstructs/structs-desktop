@@ -854,6 +854,79 @@ pub async fn execute(
         }
 
         // ── Raid target-selection loop (offensive combat automation) ──
+        "variance" | "personality" => {
+            use crate::mcp::variance as vr;
+            let mut cfg = vr::get();
+            let a = &params.args;
+            // Preset first: it rewrites every temperament, so explicit edits in
+            // the same call must be applied after it and win. Same ordering
+            // rule as `posture` on the raid loop.
+            if let Some(v) = a.get("preset").and_then(|v| v.as_str()) {
+                let p = match v.to_ascii_lowercase().as_str() {
+                    "off" | "none" => vr::VariancePreset::Off,
+                    "measured" => vr::VariancePreset::Measured,
+                    "human" => vr::VariancePreset::Human,
+                    "wild" => vr::VariancePreset::Wild,
+                    other => {
+                        return vec![Content::text(format!(
+                            "variance: unknown preset '{other}' (off|measured|human|wild)"
+                        ))]
+                    }
+                };
+                cfg.apply_preset(p);
+            }
+            if let Some(v) = a.get("enabled").and_then(|v| v.as_bool()) {
+                cfg.enabled = v;
+            }
+            // Per-role overrides, e.g. {"raider": {"temperature": 0.6}}.
+            // Clamped: a temperature above ~2 is indistinguishable from uniform
+            // noise, and a hesitation longer than the raid window is a forfeit.
+            fn apply_overrides(t: &mut vr::Temperament, o: &serde_json::Value) {
+                if let Some(v) = o.get("temperature").and_then(|v| v.as_f64()) {
+                    t.temperature = v.clamp(0.0, 5.0);
+                }
+                if let Some(v) = o.get("mistake_rate").and_then(|v| v.as_f64()) {
+                    t.mistake_rate = v.clamp(0.0, 1.0);
+                }
+                if let Some(v) = o.get("hesitate_min_ms").and_then(|v| v.as_u64()) {
+                    t.hesitate_min_ms = v.min(30_000);
+                }
+                if let Some(v) = o.get("hesitate_max_ms").and_then(|v| v.as_u64()) {
+                    t.hesitate_max_ms = v.min(30_000);
+                }
+            }
+            for (key, slot) in [
+                ("raider", &mut cfg.raider),
+                ("bait", &mut cfg.bait),
+                ("productive", &mut cfg.productive),
+                ("primary", &mut cfg.primary),
+            ] {
+                if let Some(o) = a.get(key) {
+                    apply_overrides(slot, o);
+                }
+            }
+            vr::set(cfg.clone());
+            let line = |name: &str, t: &vr::Temperament| {
+                format!(
+                    "  {name:<11} temperature {:.2} · mistakes {:.0}% · hesitates {}-{}ms",
+                    t.temperature,
+                    t.mistake_rate * 100.0,
+                    t.hesitate_min_ms,
+                    t.hesitate_max_ms
+                )
+            };
+            return vec![Content::text(format!(
+                "variance {} — preset {}\n{}\n{}\n{}\n{}\n\nHard gates are never sampled: vetoed players, \
+                 closed raid windows, unreachable targets and useless defence pairings stay impossible \
+                 at every temperature.",
+                if cfg.enabled { "ON" } else { "off" },
+                serde_json::to_string(&cfg.preset).unwrap_or_default().trim_matches('"'),
+                line("raider", &cfg.raider),
+                line("bait", &cfg.bait),
+                line("productive", &cfg.productive),
+                line("primary", &cfg.primary),
+            ))];
+        }
         "autoraid" | "raid_loop" => {
             use crate::mcp::auto_raid as arl;
             let mut cfg = arl::get();

@@ -616,9 +616,26 @@ async fn scan(
     // that scored 25 candidates and dispatched nothing looked identical to a
     // healthy idle loop. Each one now says why (see telemetry::LoopRun::blocked).
     let scanned = board.len();
-    let best = board
+    // Every candidate that cleared the GATES and the score floor. The gates are
+    // absolute — vetoed players, occupied planets, exhausted crusts and closed
+    // windows never reach this list — so anything here is a legal raid, and the
+    // pick among them is a matter of taste rather than legality.
+    let eligible: Vec<&Candidate> = board
         .iter()
-        .find(|c| c.blocked_by.is_none() && c.score >= cfg.min_score)
+        .filter(|c| c.blocked_by.is_none() && c.score >= cfg.min_score)
+        .collect();
+    // Raiders choose with a raider's temperament. At temperature 0 this is the
+    // top-scoring candidate, exactly as before; warmer spreads our pressure
+    // across the board instead of hammering one planet into its cooldown.
+    let best = crate::mcp::variance::pick_now(
+        &eligible,
+        |c| c.score,
+        &crate::mcp::variance::for_role(Some(crate::mcp::virtual_players::VPlayerRole::Raider)),
+    )
+    .map(|i| eligible[i])
+    .or_else(|| board
+        .iter()
+        .find(|c| c.blocked_by.is_none() && c.score >= cfg.min_score))
         .cloned();
     let Some(target) = best else {
         if scanned == 0 {

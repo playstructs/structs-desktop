@@ -737,6 +737,34 @@ async fn handle_alarm(
             b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
         }
     });
+    // Reorder by temperament. The list is already filtered to reachable shots
+    // with charge ready, so every ordering here is legal — what varies is which
+    // legal shot we open with, and therefore how readable we are to an opponent
+    // watching two engagements in a row.
+    //
+    // Quality is the sort key inverted: lowest counter_risk and highest score
+    // first, so `-(position)` scores the sorted list and temperature 0 leaves it
+    // untouched.
+    let temperament = crate::mcp::variance::for_role(
+        crate::mcp::virtual_players::role_of(&alarm.defender_player),
+    );
+    if temperament.temperature > 0.0 || temperament.mistake_rate > 0.0 {
+        // Score by position in the already-sorted list: earlier is better, so
+        // temperature 0 is a no-op and warmer shuffles the near-equals.
+        let mut ranked: Vec<(f64, &crate::mcp::tools::intel::StrikeRow)> = shots
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (-(i as f64), *r))
+            .collect();
+        let mut reordered = Vec::with_capacity(ranked.len());
+        while !ranked.is_empty() {
+            let Some(k) = crate::mcp::variance::pick_now(&ranked, |(q, _)| *q, &temperament) else {
+                break;
+            };
+            reordered.push(ranked.remove(k).1);
+        }
+        shots = reordered;
+    }
     shots.truncate(cfg.max_shots_per_incident);
 
     let projected: f64 = shots.iter().map(|s| s.expected_dmg).sum();
@@ -802,6 +830,14 @@ async fn handle_alarm(
                     ),
                 );
                 continue;
+            }
+            // Hesitate. A defender that answers with identical latency every
+            // single time reads as a machine however well it aims; this is the
+            // cheapest part of looking human. Bounded well inside the ~2 minute
+            // seize window, and zero when the temperament is cold.
+            let pause = temperament.hesitation();
+            if !pause.is_zero() {
+                tokio::time::sleep(pause).await;
             }
             let ok = fire(app, s, &fire_target).await;
             if ok {

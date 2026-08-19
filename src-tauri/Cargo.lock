@@ -4737,6 +4737,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-user-notifications",
  "pollster",
+ "rand 0.8.5",
  "rayon",
  "reqwest 0.12.28",
  "rmcp",

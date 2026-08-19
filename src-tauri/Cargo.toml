@@ -15,6 +15,10 @@ base64 = "0.22"
 # Map rendering: decode captured PNG frames + encode animated GIF
 image = { version = "0.25", default-features = false, features = ["png", "gif"] }
 anyhow = "1"
+# Stochastic policy: the automation samples from weighted move distributions
+# instead of always taking the argmax (see mcp/variance.rs). Already present in
+# Cargo.lock transitively via wgpu/uuid/reqwest, so this adds no new download.
+rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "cookies"] }
 tokio = { version = "1", features = ["full"] }
 # Update awareness: compare app version to latest GitHub release, open releases page

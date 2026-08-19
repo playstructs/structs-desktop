@@ -174,6 +174,20 @@ fn rank(stats: &TypeStats, target_ambit: &str, defender_ambit: &str) -> u64 {
 /// singular), so this is a greedy allocation down the priority list; a hull
 /// whose best remaining assignment scores zero is left free.
 pub fn plan_web(hulls: &[Hull], stats: &HashMap<String, TypeStats>) -> Vec<Edge> {
+    plan_web_with(hulls, stats, &crate::mcp::variance::Temperament::default())
+}
+
+/// [`plan_web`] with an explicit temperament.
+///
+/// Kept pure (all state passed in) so tests can pin it. The hard filters —
+/// same-ambit for a blocker, `rank(..) > 0` for a guard — are applied exactly
+/// as before; only the CHOICE among eligible hulls is sampled, so a warm
+/// temperament can never produce a pairing that does nothing.
+pub fn plan_web_with(
+    hulls: &[Hull],
+    stats: &HashMap<String, TypeStats>,
+    temperament: &crate::mcp::variance::Temperament,
+) -> Vec<Edge> {
     let get = |tid: &str| stats.get(tid).cloned().unwrap_or_default();
     let cmd = hulls.iter().find(|h| h.type_id == COMMAND_SHIP_TYPE);
     let refinery = hulls.iter().find(|h| h.type_id == REFINERY_TYPE);
@@ -227,26 +241,38 @@ pub fn plan_web(hulls: &[Hull], stats: &HashMap<String, TypeStats>) -> Vec<Edge>
         // guard set covered all four ambits, so their land, water AND space
         // attacks were each countered, and twelve of their hulls died to the
         // return fire without our Command Ship ever taking a point.
+        //
+        // The BLOCKER above is chosen deterministically on purpose: it is the
+        // one hull whose job is to absorb, armour halves what it takes, and a
+        // worse blocker is a straight downgrade with no unpredictability worth
+        // buying. The GUARDS are where variety is free — several hulls answer
+        // an ambit adequately, so which one takes the slot is taste, and a web
+        // that differs per player is harder to read off-chain.
         let mut covered: u64 = 0;
         for _ in 0..CMD_GUARDS {
-            let best = pool
+            let eligible: Vec<(usize, &Hull)> = pool
                 .iter()
                 .enumerate()
                 .filter(|(_, h)| {
                     let s = get(&h.type_id);
                     rank(&s, &cmd.ambit, &h.ambit) > 0
                 })
-                .max_by_key(|(_, h)| {
-                    let s = get(&h.type_id);
-                    let gain = (counter_ambits(&s, &h.ambit) & !covered).count_ones() as u64;
-                    (
-                        travels_with_target(&h.location_id, &cmd.location_id),
-                        gain,
-                        s.counter_same.max(s.counter) * breadth(s.reach),
-                        s.armour,
-                    )
-                })
-                .map(|(i, _)| i);
+                .map(|(i, h)| (i, *h))
+                .collect();
+            // Same key as before, flattened to one scalar so it can be sampled:
+            // travels dominates, then newly-covered ambits, then raw counter
+            // value, then armour. At temperature 0 this is the old argmax.
+            let quality = |h: &Hull| -> f64 {
+                let s = get(&h.type_id);
+                let gain = (counter_ambits(&s, &h.ambit) & !covered).count_ones() as f64;
+                let travels = if travels_with_target(&h.location_id, &cmd.location_id) { 1.0 } else { 0.0 };
+                travels * 10_000.0
+                    + gain * 100.0
+                    + (s.counter_same.max(s.counter) * breadth(s.reach)) as f64
+                    + s.armour as f64 / 10.0
+            };
+            let best = crate::mcp::variance::pick_now(&eligible, |(_, h)| quality(h), temperament)
+                .map(|k| eligible[k].0);
             if let Some(i) = best {
                 let s = get(&pool[i].type_id);
                 covered |= counter_ambits(&s, &pool[i].ambit);
@@ -552,7 +578,14 @@ async fn scan(
                         Some(Hull { id, type_id: type_id_of(s), ambit: f("operating_ambit"), location_id: f("location_id") })
                     })
                     .collect();
-                let desired = plan_web(&hulls, &stats);
+                // The defence web varies by role: a raider's is loose, the
+                // economy's is tight. The blocker stays deterministic either
+                // way — only the guard slots are sampled.
+                let desired = plan_web_with(
+                    &hulls,
+                    &stats,
+                    &crate::mcp::variance::for_role(crate::mcp::virtual_players::role_of(&pid)),
+                );
                 if desired.is_empty() {
                     return;
                 }
@@ -685,6 +718,47 @@ mod tests {
             WATER | LAND | AIR | SPACE,
             "guard set leaves an ambit unanswered: covered={covered:b}"
         );
+    }
+
+    /// Warm temperaments must vary the WEB without ever producing a pairing
+    /// that does nothing — the eligibility filter (`rank(..) > 0`) is law at
+    /// every temperature, only the choice among eligible hulls is taste.
+    #[test]
+    fn a_warm_web_varies_but_never_wires_a_useless_pairing() {
+        const WATER: u64 = 2;
+        const LAND: u64 = 4;
+        const AIR: u64 = 8;
+        const SPACE: u64 = 16;
+        let mut st: HashMap<String, TypeStats> = HashMap::new();
+        st.insert("1".into(), TypeStats::default());
+        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..Default::default() });
+        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..Default::default() });
+        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..Default::default() });
+        // A hull that can neither block the land CMD nor counter anything.
+        st.insert("99".into(), TypeStats::default());
+
+        let hulls = vec![
+            hull("5-cmd", "1", "land", "9-1"),
+            hull("5-tank", "9", "land", "9-1"),
+            hull("5-b1", "2", "space", "9-1"),
+            hull("5-b2", "2", "space", "9-1"),
+            hull("5-hai", "6", "air", "9-1"),
+            hull("5-dud", "99", "space", "9-1"),
+        ];
+        let warm = crate::mcp::variance::Temperament { temperature: 1.2, ..Default::default() };
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..60 {
+            let web = plan_web_with(&hulls, &st, &warm);
+            for e in &web {
+                assert_ne!(e.defender, "5-dud", "a useless hull was wired in — filter was sampled");
+            }
+            // The blocker is deliberately NOT sampled: it absorbs, and armour
+            // halves what it takes, so a worse one is a pure downgrade.
+            assert_eq!(web[0].defender, "5-tank", "blocker must stay deterministic");
+            seen.insert(web.iter().map(|e| e.defender.clone()).collect::<Vec<_>>());
+        }
+        assert!(seen.len() > 1, "warm temperament produced one fixed web — no variation");
     }
 
     /// A defender standing in the attacker's ambit counters even when its
