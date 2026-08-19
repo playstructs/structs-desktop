@@ -123,7 +123,12 @@ pub(crate) fn build_sweep_plan(
             if !sel.contains(&r.player_id) {
                 continue;
             }
-        } else if r.role != "productive" && !(a.include_bait && r.role == "bait") {
+        } else if !crate::mcp::profile::capabilities_for(&r.player_id, &r.role).sweeps_alpha
+            && !(a.include_bait && r.role == "bait")
+        {
+            // Sweeping is a PROFILE capability now. This also fixes a real gap:
+            // the old string test made raiders unreachable by any sweep, with no
+            // flag to opt them in — a profile can simply say `sweeps_alpha`.
             continue;
         }
         let mut skip = |reason: &str| {
@@ -559,7 +564,7 @@ fn set_role(app: tauri::AppHandle, request: MassActionRequest) -> Result<Value, 
         .get("role")
         .and_then(|v| v.as_str())
         .and_then(VPlayerRole::parse)
-        .ok_or("set_role: role must be bait|productive")?;
+        .ok_or("set_role: role must be one of bait|productive|raider")?;
     let targets = request.players.ok_or("set_role: player selection required")?;
     if request.mode == "dry_run" {
         return Ok(json!({ "mode": "dry_run", "count": targets.len(), "role": format!("{:?}", role).to_lowercase() }));

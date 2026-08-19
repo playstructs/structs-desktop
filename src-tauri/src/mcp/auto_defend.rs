@@ -188,6 +188,23 @@ pub fn plan_web_with(
     stats: &HashMap<String, TypeStats>,
     temperament: &crate::mcp::variance::Temperament,
 ) -> Vec<Edge> {
+    plan_web_seeded(hulls, stats, temperament, "")
+}
+
+/// [`plan_web_with`], seeded from `key` so the choice is STABLE for that key.
+///
+/// The web is declarative state this loop reconciles toward, not a one-shot
+/// action. Re-sampling it every scan would mean a different target each time and
+/// therefore permanent clear/set churn — the loop could never converge, and each
+/// re-roll costs a charged transaction. Seeding from the player id keeps
+/// variance ACROSS players while letting each player's own web settle.
+pub fn plan_web_seeded(
+    hulls: &[Hull],
+    stats: &HashMap<String, TypeStats>,
+    temperament: &crate::mcp::variance::Temperament,
+    key: &str,
+) -> Vec<Edge> {
+    let mut rng = crate::mcp::variance::seeded_rng(key);
     let get = |tid: &str| stats.get(tid).cloned().unwrap_or_default();
     let cmd = hulls.iter().find(|h| h.type_id == COMMAND_SHIP_TYPE);
     let refinery = hulls.iter().find(|h| h.type_id == REFINERY_TYPE);
@@ -271,8 +288,9 @@ pub fn plan_web_with(
                     + (s.counter_same.max(s.counter) * breadth(s.reach)) as f64
                     + s.armour as f64 / 10.0
             };
-            let best = crate::mcp::variance::pick_now(&eligible, |(_, h)| quality(h), temperament)
-                .map(|k| eligible[k].0);
+            let best =
+                crate::mcp::variance::pick(&eligible, |(_, h)| quality(h), temperament, &mut rng)
+                    .map(|k| eligible[k].0);
             if let Some(i) = best {
                 let s = get(&pool[i].type_id);
                 covered |= counter_ambits(&s, &pool[i].ambit);
@@ -502,6 +520,18 @@ async fn scan(
             async move {
                 let Some(idx) = idx_opt else { return }; // vplayers only (façade signer)
                 run.players.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Whether this player maintains a web is a PROFILE capability.
+                // The loop-level include_bait / include_raiders flags remain as
+                // a roster-wide override on top, so an operator can still mute a
+                // whole role without editing every profile.
+                let caps = crate::mcp::profile::for_player(
+                    crate::mcp::virtual_players::profile_of(&pid).as_deref(),
+                    role,
+                )
+                .capabilities;
+                if !caps.auto_defends {
+                    return;
+                }
                 if !include_raiders && role == Some(VPlayerRole::Raider) {
                     return;
                 }
@@ -581,10 +611,11 @@ async fn scan(
                 // The defence web varies by role: a raider's is loose, the
                 // economy's is tight. The blocker stays deterministic either
                 // way — only the guard slots are sampled.
-                let desired = plan_web_with(
+                let desired = plan_web_seeded(
                     &hulls,
                     &stats,
                     &crate::mcp::variance::for_role(crate::mcp::virtual_players::role_of(&pid)),
+                    &pid,
                 );
                 if desired.is_empty() {
                     return;
@@ -747,9 +778,12 @@ mod tests {
         ];
         let warm = crate::mcp::variance::Temperament { temperature: 1.2, ..Default::default() };
 
+        // Variance lives BETWEEN players (see `plan_web_seeded`), so vary the
+        // key rather than re-rolling one player's web — re-rolling is the churn
+        // this design exists to prevent.
         let mut seen = std::collections::HashSet::new();
-        for _ in 0..60 {
-            let web = plan_web_with(&hulls, &st, &warm);
+        for i in 0..60 {
+            let web = plan_web_seeded(&hulls, &st, &warm, &format!("1-{i:04}"));
             for e in &web {
                 assert_ne!(e.defender, "5-dud", "a useless hull was wired in — filter was sampled");
             }
@@ -758,7 +792,49 @@ mod tests {
             assert_eq!(web[0].defender, "5-tank", "blocker must stay deterministic");
             seen.insert(web.iter().map(|e| e.defender.clone()).collect::<Vec<_>>());
         }
-        assert!(seen.len() > 1, "warm temperament produced one fixed web — no variation");
+        assert!(seen.len() > 1, "warm temperament produced one fixed web across all players");
+    }
+
+    /// The web must SETTLE. It is reconciled state, not a one-shot action: if
+    /// each scan sampled a different desired web, auto_defend would clear and
+    /// re-set defenders forever, burning a charged transaction every time.
+    #[test]
+    fn a_players_web_is_stable_across_scans_but_differs_between_players() {
+        const WATER: u64 = 2;
+        const LAND: u64 = 4;
+        const AIR: u64 = 8;
+        const SPACE: u64 = 16;
+        let mut st: HashMap<String, TypeStats> = HashMap::new();
+        st.insert("1".into(), TypeStats::default());
+        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..Default::default() });
+        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..Default::default() });
+        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..Default::default() });
+        let hulls = vec![
+            hull("5-cmd", "1", "land", "9-1"),
+            hull("5-tank", "9", "land", "9-1"),
+            hull("5-b1", "2", "space", "9-1"),
+            hull("5-b2", "2", "space", "9-1"),
+            hull("5-hai", "6", "air", "9-1"),
+        ];
+        let warm = crate::mcp::variance::Temperament { temperature: 1.2, ..Default::default() };
+        let web_of = |key: &str| {
+            plan_web_seeded(&hulls, &st, &warm, key)
+                .iter()
+                .map(|e| format!("{}->{}", e.defender, e.protected))
+                .collect::<Vec<_>>()
+        };
+        // Same player, ten scans: identical every time, so nothing to reconcile.
+        let first = web_of("1-2136");
+        for _ in 0..10 {
+            assert_eq!(web_of("1-2136"), first, "web churned between scans");
+        }
+        // Across a spread of players at least one web differs — variance lives
+        // BETWEEN players, which is where it cannot cost a transaction.
+        let ids = ["1-0271", "1-1035", "1-2308", "1-0400", "1-0365", "1-2464"];
+        assert!(
+            ids.iter().any(|k| web_of(k) != first),
+            "every player produced an identical web — no variance at all"
+        );
     }
 
     /// A defender standing in the attacker's ambit counters even when its

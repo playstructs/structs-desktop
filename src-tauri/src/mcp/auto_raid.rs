@@ -21,7 +21,7 @@
 //! * **Our own offensive record is the warning.** 22 raids: 2 wins, 11 retreats,
 //!   and **9 `attackerDefeated`** — a 41% rate against an ecosystem baseline of
 //!   5%, every one of them the primary's Command Ship dying in the field. That
-//!   is why only `VPlayerRole::Raider` accounts raid, never the primary.
+//!   is why only profiles granting `raids` fly them, never the primary.
 //!
 //! ## Shape
 //!
@@ -108,7 +108,8 @@ pub struct AutoRaidConfig {
     pub w_history: f64,
 
     // ── Fleet management ──
-    /// Explicit raider player ids; empty = every `VPlayerRole::Raider`.
+    /// Explicit raider player ids; empty = every player whose profile has
+    /// the `raids` capability.
     pub raider_players: Vec<String>,
     pub max_concurrent_raids: usize,
     /// Per-target planet cooldown after any attempt.
@@ -418,6 +419,18 @@ fn history_win_rate(planet_id: &str) -> f64 {
 
 /// Hard gates, evaluated BEFORE the score so nothing can outrank a veto.
 /// Returns `None` for GO, or the reason it's a NO-GO.
+/// Does this player's PROFILE let it fly raids?
+///
+/// Replaces three separate `role == Raider` literals. The built-in `raider`
+/// profile sets `raids: true` and nothing else does, so the reading is
+/// unchanged until an author says otherwise — but a player can now define, say,
+/// a productive profile that also raids, without a new enum variant.
+fn raids(p: &crate::mcp::virtual_players::VirtualPlayer) -> bool {
+    crate::mcp::profile::for_player(p.profile.as_deref(), Some(p.role))
+        .capabilities
+        .raids
+}
+
 pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -> Option<String> {
     // Friend-or-foe first: our own accounts, allied guilds and protected players
     // are never targets, whatever they're holding.
@@ -550,7 +563,7 @@ async fn scan(
     supervise(app, &client, cfg, run).await;
 
     // ── Is there anyone to send? ──
-    // Raids are flown by `VPlayerRole::Raider` accounts only. With none in the
+    // Raids are flown only by players whose profile grants `raids`. With none in the
     // registry the loop can never dispatch, whatever the target board says —
     // and it would still report the gate that stopped the most CANDIDATES
     // ("24 stopped at 'ore'"), sending you off to lower min_ore when the real
@@ -561,13 +574,13 @@ async fn scan(
         .map(|reg| {
             reg.players
                 .iter()
-                .filter(|p| p.role == crate::mcp::virtual_players::VPlayerRole::Raider)
+                .filter(|p| raids(p))
                 .count()
         })
         .unwrap_or(0);
     if raider_count == 0 {
         run.blocked(
-            "no raider players — raids are flown by VPlayerRole::Raider accounts only \
+            "no players with the `raids` capability — assign a profile that enables it \
              (Armada → select a player → Set role → raider, or Launch one)",
         );
         return;
@@ -631,6 +644,8 @@ async fn scan(
         &eligible,
         |c| c.score,
         &crate::mcp::variance::for_role(Some(crate::mcp::virtual_players::VPlayerRole::Raider)),
+        // TODO(profile): once dispatch resolves its raider before scoring, take
+        // the temperament from that player's own profile instead of the role.
     )
     .map(|i| eligible[i])
     .or_else(|| board
@@ -1021,7 +1036,7 @@ async fn dispatch(
     target: &Candidate,
 ) -> Result<String, String> {
     let (raider_pid, raider_idx) = pick_raider(client, cfg).await.ok_or_else(|| {
-        "no idle raider available (need a VPlayerRole::Raider with a live Command Ship, on station)".to_string()
+        "no idle raider available (need a profile with `raids`, a live Command Ship, and a fleet on station)".to_string()
     })?;
     let (fleet_id, home_planet) = raider_location(client, &raider_pid)
         .await
@@ -1099,7 +1114,7 @@ async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(Str
         let reg = crate::mcp::virtual_players::REGISTRY.read().ok()?;
         reg.players
             .iter()
-            .filter(|p| p.role == VPlayerRole::Raider)
+            .filter(|p| raids(p))
             .filter_map(|p| p.player_id.clone().map(|id| (id, p.index)))
             .filter(|(id, _)| {
                 !busy.contains(id)
@@ -1206,7 +1221,7 @@ async fn readopt_expeditions(client: &CosmosClient) {
         let Ok(reg) = crate::mcp::virtual_players::REGISTRY.read() else { return };
         reg.players
             .iter()
-            .filter(|p| p.role == VPlayerRole::Raider)
+            .filter(|p| raids(p))
             .filter_map(|p| p.player_id.clone().map(|id| (id, p.index)))
             .collect()
     };

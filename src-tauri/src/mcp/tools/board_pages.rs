@@ -1234,6 +1234,73 @@ pub async fn mcp_config_set_impl(
             );
             Ok(json!({ "ok": true }))
         }
+        // Row-scoped, like `combat_lists` — the loadout is an ordered table and
+        // two operators editing different rows must not clobber each other, so
+        // this takes ONE action at a time rather than a whole document.
+        "profile" => {
+            use crate::mcp::profile as pr;
+            let action = payload
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or("profile: action required")?;
+            let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+            let summary = match action {
+                "fork" => {
+                    let from = payload.get("from").and_then(|v| v.as_str()).unwrap_or("bait");
+                    let mut p = pr::find(from);
+                    p.id = id.clone();
+                    p.label = payload
+                        .get("label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&id)
+                        .to_string();
+                    pr::set(p)?;
+                    format!("profile '{id}' forked from '{from}'")
+                }
+                "delete" => {
+                    pr::remove(&id)?;
+                    format!("profile '{id}' deleted")
+                }
+                // Whole-profile replace, used by import and by the row editor
+                // after it has applied one change locally.
+                "save" => {
+                    let doc = payload.get("profile").cloned().ok_or("profile: document required")?;
+                    let p: pr::Profile =
+                        serde_json::from_value(doc).map_err(|e| format!("not readable: {e}"))?;
+                    let saved = pr::set(p)?;
+                    format!("profile '{}' saved ({} rows)", saved.id, saved.loadout.len())
+                }
+                "assign" => {
+                    let who = payload
+                        .get("player")
+                        .and_then(|v| v.as_str())
+                        .ok_or("profile assign: which player?")?;
+                    let next = if id.is_empty() { None } else { Some(id.clone()) };
+                    let mut store = crate::mcp::virtual_players::VirtualPlayerStore::load();
+                    let v = store
+                        .players
+                        .iter_mut()
+                        .find(|v| v.player_id.as_deref() == Some(who) || v.name == who)
+                        .ok_or_else(|| format!("no virtual player '{who}'"))?;
+                    v.profile = next.clone();
+                    let name = v.name.clone();
+                    store.save()?;
+                    match next {
+                        Some(p) => format!("{name} → profile '{p}'"),
+                        None => format!("{name} → cleared (falls back to its role)"),
+                    }
+                }
+                other => return Err(format!("profile: unknown action '{other}'")),
+            };
+            crate::mcp::board_feed::push(
+                &app,
+                crate::mcp::board_feed::Severity::Notice,
+                "config",
+                summary.clone(),
+            );
+            return Ok(serde_json::json!({ "ok": true, "summary": summary }));
+        }
         "loop" => {
             let which = payload
                 .get("loop")
@@ -1629,6 +1696,55 @@ pub async fn mcp_callsign_set_impl(config: Value) -> Result<Value, String> {
         serde_json::from_value(config).map_err(|e| format!("bad callsign config: {e}"))?;
     crate::mcp::callsign::set_config(next)?;
     Ok(mcp_callsign_get().await)
+}
+
+// ── BEHAVIOUR PROFILES ─────────────────────────────────────────────────────
+
+/// Everything the profile card needs: each profile plus a PREVIEW of what it
+/// would actually build, so the editor can show consequences before commit.
+#[tauri::command]
+pub async fn mcp_profiles_get() -> Value {
+    use crate::mcp::profile as pr;
+    let rows: Vec<Value> = pr::list()
+        .iter()
+        .map(|p| {
+            let pv = pr::preview(p, 8);
+            serde_json::json!({
+                "id": p.id,
+                "label": p.label,
+                "builtin": pr::BUILTIN.iter().any(|b| b.id == p.id),
+                "capabilities": p.capabilities,
+                "loadout": p.loadout,
+                "temperament": p.temperament,
+                "limits": p.limits,
+                "temperament_label": p.temperament_label(),
+                "preview": {
+                    "verdict": pv.verdict,
+                    "blind": pv.blind,
+                    "covered_after": pv.covered_after,
+                    "builds": pv.builds,
+                    "unknown_types": pv.unknown_types,
+                },
+            })
+        })
+        .collect();
+    // Assignment counts, so the card can warn before a profile is edited.
+    let reg = crate::mcp::virtual_players::REGISTRY
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut assigned: std::collections::HashMap<String, usize> = Default::default();
+    for v in reg.players.iter() {
+        if let Some(id) = &v.profile {
+            *assigned.entry(id.clone()).or_insert(0) += 1;
+        }
+    }
+    serde_json::json!({
+        "profiles": rows,
+        "assigned": assigned,
+        "targets": crate::mcp::profile::TARGET_NAMES,
+        "ambits": crate::mcp::profile::AMBIT_NAMES,
+        "schema": pr::SCHEMA,
+    })
 }
 
 // ── ROLE APPEARANCE ────────────────────────────────────────────────────────

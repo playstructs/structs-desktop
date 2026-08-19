@@ -854,6 +854,145 @@ pub async fn execute(
         }
 
         // ── Raid target-selection loop (offensive combat automation) ──
+        "profile" | "profiles" => {
+            fn yn(b: bool) -> &'static str { if b { "yes" } else { "no" } }
+            use crate::mcp::profile as pr;
+            let a = &params.args;
+            let action = a.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+            let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+            let render = |p: &pr::Profile| -> String {
+                let pv = pr::preview(p, 8);
+                let caps = &p.capabilities;
+                let mut out = format!(
+                    "{} — {}\n  capabilities: raids {} · refines {} · sweeps {} · defends {} · explore-when-drained {}\n                       temperament: temp {:.2} (max {:.2}) · mistakes {:.0}% (max {:.0}%)\n  loadout ({} rows):\n",
+                    p.id, p.label,
+                    yn(caps.raids), yn(caps.refines), yn(caps.sweeps_alpha),
+                    yn(caps.auto_defends), yn(caps.explore_when_drained_only),
+                    p.temperament.temperature, p.limits.temperature_max,
+                    p.temperament.mistake_rate * 100.0, p.limits.mistake_rate_max * 100.0,
+                    p.loadout.len(),
+                );
+                for (i, e) in p.loadout.iter().enumerate() {
+                    out.push_str(&format!(
+                        "    {:>2}. {:<7} {:<6} {:<26} x{}\n",
+                        i + 1, e.target, e.ambit, e.type_name, e.want
+                    ));
+                }
+                out.push_str(&format!(
+                    "  PREVIEW after 8 builds: {}{}{}\n",
+                    pv.verdict,
+                    if pv.blind.is_empty() { String::new() } else { format!(" — no viable shot into [{}]", pv.blind.join(", ")) },
+                    match pv.covered_after {
+                        Some(n) => format!(" · all four ambits answered after {n} build(s)"),
+                        None => " · never answers all four".to_string(),
+                    }
+                ));
+                if !pv.unknown_types.is_empty() {
+                    out.push_str(&format!(
+                        "  WARNING: unknown struct type(s): {}\n", pv.unknown_types.join(", ")
+                    ));
+                }
+                out
+            };
+
+            match action {
+                "list" => {
+                    let all = pr::list();
+                    let builtin: Vec<&pr::Profile> =
+                        all.iter().filter(|p| pr::BUILTIN.iter().any(|b| b.id == p.id)).collect();
+                    let custom: Vec<&pr::Profile> =
+                        all.iter().filter(|p| !pr::BUILTIN.iter().any(|b| b.id == p.id)).collect();
+                    let line = |p: &pr::Profile| {
+                        let pv = pr::preview(p, 8);
+                        format!("  {:<18} {:<10} {} row(s) — {}\n", p.id, p.temperament_label(), p.loadout.len(), pv.verdict)
+                    };
+                    let mut out = String::from("Behaviour profiles\n\nBuilt-in (fork these):\n");
+                    for p in builtin { out.push_str(&line(p)); }
+                    out.push_str(if custom.is_empty() { "\nCustom: none yet\n" } else { "\nCustom:\n" });
+                    for p in custom { out.push_str(&line(p)); }
+                    out.push_str(
+                        "\nprofile {action:'show'|'fork'|'set'|'delete'|'assign', id, ...}\n\
+                         Assign with {action:'assign', player:'1-2136', id:'vulture'}.\n",
+                    );
+                    return vec![Content::text(out)];
+                }
+                "show" | "preview" => {
+                    if id.is_empty() {
+                        return vec![Content::text("profile show: which id? (use action:'list')".to_string())];
+                    }
+                    return vec![Content::text(render(&pr::find(&id)))];
+                }
+                "fork" => {
+                    let from = a.get("from").and_then(|v| v.as_str()).unwrap_or("bait");
+                    if id.is_empty() {
+                        return vec![Content::text("profile fork: give the new profile an id".to_string())];
+                    }
+                    let mut p = pr::find(from);
+                    p.id = id.clone();
+                    p.label = a.get("label").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
+                    return match pr::set(p) {
+                        Ok(p) => vec![Content::text(format!("forked '{from}' →\n{}", render(&p)))],
+                        Err(e) => vec![Content::text(format!("profile rejected: {e}"))],
+                    };
+                }
+                "set" => {
+                    // Whole-document write; the board uses row-scoped edits.
+                    let Some(doc) = a.get("profile") else {
+                        return vec![Content::text(
+                            "profile set: pass the whole document as {profile:{...}}".to_string(),
+                        )];
+                    };
+                    let p: pr::Profile = match serde_json::from_value(doc.clone()) {
+                        Ok(p) => p,
+                        Err(e) => return vec![Content::text(format!("profile is not readable: {e}"))],
+                    };
+                    return match pr::set(p) {
+                        Ok(p) => vec![Content::text(format!("saved\n{}", render(&p)))],
+                        Err(e) => vec![Content::text(format!("profile rejected: {e}"))],
+                    };
+                }
+                "delete" => {
+                    return match pr::remove(&id) {
+                        Ok(()) => vec![Content::text(format!("deleted profile '{id}'"))],
+                        Err(e) => vec![Content::text(e)],
+                    };
+                }
+                "assign" => {
+                    let Some(who) = a.get("player").and_then(|v| v.as_str()) else {
+                        return vec![Content::text("profile assign: which player?".to_string())];
+                    };
+                    // An empty id clears the assignment, falling back to the
+                    // built-in named by the player's role.
+                    let next = if id.is_empty() { None } else { Some(id.clone()) };
+                    if let Some(want) = &next {
+                        if !pr::list().iter().any(|p| &p.id == want) {
+                            return vec![Content::text(format!("no profile '{want}' (action:'list')"))];
+                        }
+                    }
+                    let mut store = crate::mcp::virtual_players::VirtualPlayerStore::load();
+                    let Some(v) = store.players.iter_mut().find(|v| {
+                        v.player_id.as_deref() == Some(who) || v.name == who
+                    }) else {
+                        return vec![Content::text(format!("no virtual player '{who}'"))];
+                    };
+                    v.profile = next.clone();
+                    let name = v.name.clone();
+                    if let Err(e) = store.save() {
+                        return vec![Content::text(format!("could not save: {e}"))];
+                    }
+                    return vec![Content::text(match next {
+                        Some(p) => format!("{name} → profile '{p}'"),
+                        None => format!("{name} → cleared; falls back to its role's built-in"),
+                    })];
+                }
+                other => {
+                    return vec![Content::text(format!(
+                        "profile: unknown action '{other}' (list|show|fork|set|delete|assign)"
+                    ))]
+                }
+            }
+        }
         "variance" | "personality" => {
             use crate::mcp::variance as vr;
             let mut cfg = vr::get();

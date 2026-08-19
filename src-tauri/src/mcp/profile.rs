@@ -55,6 +55,11 @@ const FILENAME: &str = "profiles.json";
 const TARGETS: &[&str] = &["planet", "fleet"];
 const AMBITS: &[&str] = &["land", "water", "air", "space"];
 
+/// Same lists, exposed so the editor's dropdowns are generated from the
+/// validator's own vocabulary rather than a hand-copied duplicate.
+pub const TARGET_NAMES: &[&str] = TARGETS;
+pub const AMBIT_NAMES: &[&str] = AMBITS;
+
 /// What a profile is allowed to switch off.
 ///
 /// Every field defaults to the SAFEST reading rather than the most permissive,
@@ -391,6 +396,90 @@ pub fn unknown_types(p: &Profile) -> Vec<String> {
         .collect()
 }
 
+/// What a profile would actually achieve — the answer the editor shows before
+/// anything is committed.
+///
+/// This matters more here than in most config: fleet slots free only when a
+/// hull is DESTROYED, so a poor loadout persists for weeks. Seeing "blind in
+/// air" before assigning it is the difference between a cheap edit and an
+/// expensive one.
+#[derive(Debug, Clone, Serialize)]
+pub struct Preview {
+    /// Struct types built, in order, on an empty player.
+    pub builds: Vec<String>,
+    /// READY / PARTIAL / BLIND against every ambit a Command Ship may occupy.
+    pub verdict: String,
+    /// Ambits with no viable answer after these builds.
+    pub blind: Vec<String>,
+    /// Builds needed before all four ambits are answered; `None` if never.
+    pub covered_after: Option<usize>,
+    /// Struct types the synced catalog does not recognise.
+    pub unknown_types: Vec<String>,
+}
+
+/// Simulate `p` on an empty player and report what it achieves.
+///
+/// Runs at temperature 0 deliberately: the preview should show the author's
+/// INTENDED order, not one sample of it. Variance is a separate axis and would
+/// only make the preview unreproducible.
+pub fn preview(p: &Profile, builds: usize) -> Preview {
+    let cold = Temperament::default();
+    let built = crate::mcp::auto_build::simulate_builds(&p.loadout, builds, &cold, |_| true);
+
+    // Map what was built to readiness hulls, using the synced catalog.
+    let hulls: Vec<crate::mcp::readiness::Hull> = {
+        let Ok(gs) = crate::game_state::GAME_STATE.read() else {
+            return Preview {
+                builds: built.iter().map(|e| e.type_name.clone()).collect(),
+                verdict: "UNKNOWN (catalog unavailable)".into(),
+                blind: Vec::new(),
+                covered_after: None,
+                unknown_types: Vec::new(),
+            };
+        };
+        built
+            .iter()
+            .filter(|e| e.target == "fleet")
+            .filter_map(|e| {
+                let t = gs
+                    .struct_types
+                    .values()
+                    .find(|t| t.name.eq_ignore_ascii_case(&e.type_name))?;
+                crate::mcp::readiness::Hull::from_type(
+                    &e.type_name,
+                    crate::mcp::tools::format::ambit_bit(&e.ambit),
+                    t,
+                )
+            })
+            .collect()
+    };
+
+    let cmd_ambits = crate::mcp::readiness::command_ship_ambits();
+    let r = crate::mcp::readiness::assess(&hulls, cmd_ambits, true);
+
+    // How many builds until nothing is blind? Re-assess prefixes.
+    let mut covered_after = None;
+    for n in 1..=hulls.len() {
+        let sub = crate::mcp::readiness::assess(&hulls[..n], cmd_ambits, true);
+        if sub.blind_mask == 0 {
+            covered_after = Some(n);
+            break;
+        }
+    }
+
+    Preview {
+        builds: built.iter().map(|e| e.type_name.clone()).collect(),
+        verdict: r.verdict.as_str().to_string(),
+        blind: crate::mcp::tools::format::decode_ambits(r.blind_mask)
+            .split(", ")
+            .filter(|s| *s != "none")
+            .map(String::from)
+            .collect(),
+        covered_after,
+        unknown_types: unknown_types(p),
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileStore {
     /// id → profile. User-authored only; built-ins are code.
@@ -438,6 +527,43 @@ pub fn for_player(profile_id: Option<&str>, role: Option<VPlayerRole>) -> Profil
         Some(id) if !id.is_empty() => find(id),
         _ => find(role.unwrap_or_default().as_str()),
     }
+}
+
+impl Profile {
+    /// A one-word read of how varied this profile behaves, for list views.
+    pub fn temperament_label(&self) -> &'static str {
+        match self.temperament.temperature {
+            t if t <= 0.0 => "exact",
+            t if t < 0.35 => "steady",
+            t if t < 0.7 => "varied",
+            _ => "erratic",
+        }
+    }
+}
+
+/// Capabilities for a player whose ROLE is already known as a string — the
+/// shape the roster cache carries (`RosterRow.role`).
+///
+/// Prefers an explicit profile assignment; otherwise resolves the built-in named
+/// by the role. Needed because some callers work from a roster row rather than
+/// the registry, and `find` is total so an unknown string still answers.
+pub fn capabilities_for(player_id: &str, role_str: &str) -> Capabilities {
+    if let Some(id) = crate::mcp::virtual_players::profile_of(player_id) {
+        return find(&id).capabilities;
+    }
+    find(role_str).capabilities
+}
+
+/// The capabilities governing one of our players, by id.
+///
+/// The single entry point every loop uses instead of matching on `VPlayerRole`.
+/// Resolution is total, so a loop can never be left without an answer.
+pub fn capabilities_of(player_id: &str) -> Capabilities {
+    for_player(
+        crate::mcp::virtual_players::profile_of(player_id).as_deref(),
+        crate::mcp::virtual_players::role_of(player_id),
+    )
+    .capabilities
 }
 
 /// Every profile the operator can choose, built-ins first.

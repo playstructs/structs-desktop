@@ -3577,6 +3577,163 @@
     });
   }
 
+
+  // ── Behaviour Profiles ────────────────────────────────────────────────────
+  // A profile bundles a build loadout + capability switches + temperament, and
+  // replaces the hardcoded bait/productive/raider roles. loopEditor cannot be
+  // reused: it is flat-only, and a loadout is an ordered array of objects — it
+  // would render [object Object] and destroy the data on write. So this is a
+  // hand-written card, exactly as the naming card is for its nested Style.
+  var profiles = { data: null, open: null };
+
+  function profSet(payload) {
+    return Board.T.core.invoke('mcp_config_set', { domain: 'profile', payload: payload })
+      .then(function () {
+        return Board.T.core.invoke('mcp_profiles_get').then(function (d) {
+          profiles.data = d; rerenderProfiles();
+        });
+      })
+      .catch(function (e) { alertInto('profiles-card', 'rejected: ' + e); });
+  }
+
+  // ORDER IS PRIORITY, and slots free only when a hull dies — so a row moved is
+  // a decision that persists for weeks. Reorder writes the whole document
+  // because the order IS the data.
+  function moveRow(p, i, delta) {
+    var j = i + delta;
+    if (j < 0 || j >= p.loadout.length) return;
+    var row = p.loadout.splice(i, 1)[0];
+    p.loadout.splice(j, 0, row);
+    profSet({ action: 'save', id: p.id, profile: p });
+  }
+
+  function previewLine(pv) {
+    if (!pv) return H.el('div', 'ops-muted', 'no preview');
+    var ok = (pv.blind || []).length === 0;
+    var txt = pv.verdict;
+    if (!ok) txt += ' — no viable shot into [' + pv.blind.join(', ') + ']';
+    else if (pv.covered_after != null) txt += ' — all four ambits answered after ' + pv.covered_after + ' build(s)';
+    var line = H.el('div', ok ? 'ops-ok' : 'ops-warn', txt);
+    return line;
+  }
+
+  function profileCard(p, assignedCount) {
+    var wrap = H.el('div', 'cfg-section');
+    var head = H.el('div', 'ops-row-head');
+    head.appendChild(H.el('strong', null, p.id + (p.builtin ? '  (built-in)' : '')));
+    head.appendChild(H.el('span', 'ops-muted', '  ' + p.label));
+    wrap.appendChild(head);
+
+    // Consequences first: this is the whole reason the card exists.
+    wrap.appendChild(previewLine(p.preview));
+    if (p.preview && (p.preview.unknown_types || []).length) {
+      wrap.appendChild(H.alertLine('unknown struct type(s): ' + p.preview.unknown_types.join(', '), 'icon-alert'));
+    }
+    if (assignedCount) {
+      wrap.appendChild(H.el('div', 'ops-muted', assignedCount + ' player(s) use this profile'));
+    }
+
+    // Capabilities — plain switches, disabled on built-ins.
+    var caps = H.el('div', 'cfg-grid');
+    ['raids', 'refines', 'sweeps_alpha', 'auto_defends', 'explore_when_drained_only'].forEach(function (k) {
+      var cb = H.checkbox(!!p.capabilities[k], function (v) {
+        if (p.builtin) return;
+        p.capabilities[k] = v;
+        profSet({ action: 'save', id: p.id, profile: p });
+      });
+      caps.appendChild(H.field(k.replace(/_/g, ' '), cb));
+    });
+    wrap.appendChild(caps);
+
+    // Loadout rows, in priority order.
+    var tbl = H.el('div', 'ops-table');
+    p.loadout.forEach(function (e, i) {
+      var row = H.el('div', 'ops-row');
+      row.appendChild(H.el('span', 'ops-muted', String(i + 1).padStart(2, ' ')));
+      row.appendChild(H.el('span', null, e.type_name));
+      row.appendChild(H.el('span', 'ops-muted', e.target + '/' + e.ambit + ' x' + e.want));
+      if (!p.builtin) {
+        row.appendChild(iconBtn('icon-arrow-up', 'higher priority', function () { moveRow(p, i, -1); }));
+        row.appendChild(iconBtn('icon-arrow-down', 'lower priority', function () { moveRow(p, i, 1); }));
+        row.appendChild(iconBtn('icon-close', 'remove', function () {
+          p.loadout.splice(i, 1);
+          profSet({ action: 'save', id: p.id, profile: p });
+        }));
+      }
+      tbl.appendChild(row);
+    });
+    wrap.appendChild(tbl);
+
+    var actions = H.el('div', 'ops-actions');
+    var forkB = massBtn('prof-fork-' + p.id, 'icon-add', 'Fork', 'sui-mod-secondary');
+    forkB.addEventListener('click', function () {
+      var id = prompt('New profile id (letters, digits, - or _):', p.id + '-copy');
+      if (id) profSet({ action: 'fork', from: p.id, id: id, label: id });
+    });
+    actions.appendChild(forkB);
+    var expB = massBtn('prof-exp-' + p.id, 'icon-download', 'Export', 'sui-mod-secondary');
+    expB.addEventListener('click', function () {
+      // Self-contained document; `schema` is what makes an import from a newer
+      // build fail loudly instead of silently half-loading.
+      var doc = JSON.stringify(p, null, 2);
+      navigator.clipboard && navigator.clipboard.writeText(doc);
+      alertInto('profiles-card', 'profile "' + p.id + '" copied to clipboard');
+    });
+    actions.appendChild(expB);
+    if (!p.builtin) {
+      var delB = massBtn('prof-del-' + p.id, 'icon-close', 'Delete', 'sui-mod-secondary');
+      delB.addEventListener('click', function () {
+        if (confirm('Delete profile "' + p.id + '"?')) profSet({ action: 'delete', id: p.id });
+      });
+      actions.appendChild(delB);
+    }
+    wrap.appendChild(actions);
+    return wrap;
+  }
+
+  function renderProfilesCard() {
+    var d = profiles.data || {};
+    var body = H.el('div', 'cfg-section');
+    body.appendChild(H.el('p', 'ops-muted',
+      'A profile decides what a player builds, whether it refines, raids, sweeps and defends, and how ' +
+      'much it varies. Built-ins cannot be edited — fork one. Loadout order is priority, and fleet slots ' +
+      'free only when a hull is destroyed, so a change here plays out over weeks.'));
+
+    var assigned = d.assigned || {};
+    (d.profiles || []).forEach(function (p) {
+      body.appendChild(profileCard(p, assigned[p.id] || 0));
+    });
+
+    var imp = H.el('div', 'ops-actions');
+    var impB = massBtn('prof-import', 'icon-upload', 'Import from clipboard', 'sui-mod-secondary');
+    impB.addEventListener('click', function () {
+      if (!navigator.clipboard) { alertInto('profiles-card', 'clipboard unavailable'); return; }
+      navigator.clipboard.readText().then(function (txt) {
+        var doc; try { doc = JSON.parse(txt); } catch (e) { alertInto('profiles-card', 'not valid JSON'); return; }
+        profSet({ action: 'save', id: doc.id, profile: doc });
+      });
+    });
+    imp.appendChild(impB);
+    body.appendChild(imp);
+    return body;
+  }
+
+  function rerenderProfiles() {
+    var host = document.getElementById('profiles-card');
+    if (!host) return;
+    var fresh = renderProfilesCard();
+    fresh.id = 'profiles-card';
+    host.parentNode.replaceChild(fresh, host);
+  }
+
+  function renderProfiles(body) {
+    var host = H.el('div'); host.id = 'profiles-card';
+    body.appendChild(host);
+    Board.T.core.invoke('mcp_profiles_get').then(function (d) {
+      profiles.data = d; rerenderProfiles();
+    }).catch(function (e) { host.appendChild(H.alertLine('profiles unavailable: ' + e, 'icon-alert')); });
+  }
+
   function renderConfigBody() {
     var d = configState.data; if (!d) return;
     var body = document.getElementById('config-body');
@@ -3590,6 +3747,7 @@
       case 'access': sectionAccess(d, body); break;
       // Squad identity is a name AND a portrait; both live here.
       case 'appearance': renderCallsigns(body); renderRoleAppearance(body); break;
+      case 'profiles': renderProfiles(body); break;
       default: sectionDoctrine(d, body); break;
     }
     Board.stamp('updated ' + new Date().toLocaleTimeString());

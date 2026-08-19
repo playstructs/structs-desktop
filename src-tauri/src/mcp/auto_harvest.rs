@@ -248,15 +248,23 @@ async fn scan(
     }
     let client = CosmosClient::new();
 
-    // (player_id, Some(vplayer index) | None for primary, may_refine).
-    // Refining is PRODUCTIVE-only — bait players mine but never refine (their ore
-    // stays as raid bait). The primary may refine.
-    use crate::mcp::virtual_players::VPlayerRole;
-    let targets: Vec<(String, Option<u32>, bool)> =
+    // (player_id, Some(vplayer index) | None for primary, capabilities).
+    //
+    // Refining and the explore precondition come from the player's PROFILE
+    // rather than a role literal. The built-in profiles reproduce the old
+    // reading exactly — bait never refines, because its ore pile IS the lure —
+    // so nothing changes until an author says otherwise.
+    let targets: Vec<(String, Option<u32>, crate::mcp::profile::Capabilities)> =
         crate::mcp::virtual_players::collect_targets(cfg.include_primary)
             .into_iter()
-            // may_refine: productive vplayers and the primary refine; bait never does.
-            .map(|(pid, idx, role)| (pid, idx, !matches!(role, Some(VPlayerRole::Bait))))
+            .map(|(pid, idx, role)| {
+                let caps = crate::mcp::profile::for_player(
+                    crate::mcp::virtual_players::profile_of(&pid).as_deref(),
+                    role,
+                )
+                .capabilities;
+                (pid, idx, caps)
+            })
             .collect();
 
     // Fan out the per-player body with bounded concurrency so every player is
@@ -272,7 +280,7 @@ async fn scan(
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
         crate::mcp::loop_util::effective_max_concurrent(),
-        move |(pid, idx_opt, may_refine)| {
+        move |(pid, idx_opt, caps)| {
             let app = app.clone();
             let client = client.clone();
             let registry = registry.clone();
@@ -321,7 +329,7 @@ async fn scan(
                     }
                     // Refine only for productive players (and if the config allows it);
                     // bait players mine only.
-                    if !is_extractor && !(is_refinery && refine && may_refine) {
+                    if !is_extractor && !(is_refinery && refine && caps.refines) {
                         continue;
                     }
                     // Skip if a task for this struct is already in flight (completed ones
@@ -459,13 +467,13 @@ async fn scan(
                         // ore because its cycle looked "stale", and the leftover ore then
                         // blocked the explore. With refines completing, the ore drains to 0
                         // and the worker moves on.)
-                        let role_ready = if may_refine {
+                        let role_ready = if caps.explore_when_drained_only {
                             match client.query_entity("player", &pid).await {
                                 Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0,
                                 Err(_) => false, // unknown → don't explore
                             }
                         } else {
-                            true // bait: no refinery to protect
+                            true // no stored pile to protect — re-planet at once
                         };
                         if planet_ore <= 0.0 && role_ready {
                             let res = crate::mcp::tx_retry::sign_with_retry(

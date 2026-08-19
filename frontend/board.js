@@ -48,6 +48,9 @@
     { key: 'armada', label: 'Armada', sections: [
       { key: 'roster', label: 'Roster', page: 'armada' },
       { key: 'squads', label: 'Squads', page: 'config', view: 'appearance' },
+      // Behaviour profiles sit under Armada rather than Config: they describe
+      // what a squad DOES, which is a roster decision, not an app setting.
+      { key: 'profiles', label: 'Profiles', page: 'config', view: 'profiles' },
     ] },
     { key: 'industry', label: 'Industry', sections: [
       { key: 'power', label: 'Power', page: 'energy' },

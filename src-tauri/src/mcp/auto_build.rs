@@ -389,6 +389,41 @@ pub fn ripe_entries(
     out
 }
 
+/// Walk a loadout forward `n` builds on an EMPTY player, returning what gets
+/// built in order.
+///
+/// Production code path shared with the editor's preview and with the tests, so
+/// "what would this profile build?" is answered by the same walk that actually
+/// builds. `buildable` decides whether a type is known/affordable — pass
+/// `|_| true` to ask the pure ordering question.
+pub fn simulate_builds(
+    loadout: &[crate::mcp::profile::LoadoutEntry],
+    n: usize,
+    t: &crate::mcp::variance::Temperament,
+    buildable: impl Fn(&str) -> bool,
+) -> Vec<RipeEntry> {
+    let mut built: Vec<RipeEntry> = Vec::new();
+    let present: HashSet<String> = HashSet::new();
+    let mut have: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut occ: HashMap<(String, String), HashSet<u64>> = HashMap::new();
+    while built.len() < n {
+        let ripe = ripe_entries(loadout, &present, &have, &occ, &buildable);
+        if ripe.is_empty() {
+            break;
+        }
+        let Some(k) = choose_entry(&ripe, t) else { break };
+        let e = ripe[k].clone();
+        *have
+            .entry((e.target.clone(), e.ambit.clone(), e.type_name.clone()))
+            .or_insert(0) += 1;
+        occ.entry((e.target.clone(), e.ambit.clone()))
+            .or_default()
+            .insert(e.slot);
+        built.push(e);
+    }
+    built
+}
+
 /// Which ripe entry to build, honouring this player's temperament.
 ///
 /// Scored by negated loadout position, so the deterministic path
@@ -930,45 +965,30 @@ mod tests {
     /// it now shares production's code path and takes a `Temperament` — pass
     /// the default for the deterministic ordering claim, or a warm one to make
     /// a distributional claim.
+    /// Ambits still lacking a VIABLE shot after `n` builds, driving the REAL
+    /// walk via `simulate_builds` — production and tests share one path, so a
+    /// change to selection can never leave these assertions silently vacuous.
     fn blind_after_with(
         loadout: &[(&'static str, &'static str, &'static str, usize)],
         n: usize,
         t: &crate::mcp::variance::Temperament,
     ) -> Vec<&'static str> {
-        // Tests still declare tables as tuples for brevity; convert once to the
-        // profile representation the production walk now consumes.
         let loadout: Vec<crate::mcp::profile::LoadoutEntry> = loadout
             .iter()
             .map(crate::mcp::profile::LoadoutEntry::from_tuple)
             .collect();
-        let loadout = &loadout[..];
-        let mut built: Vec<(u64, u64, bool)> = Vec::new();
-        let present: HashSet<String> = HashSet::new();
-        let mut have: HashMap<(String, String, String), usize> = HashMap::new();
-        let mut occ: HashMap<(String, String), HashSet<u64>> = HashMap::new();
-
-        while built.len() < n {
-            // Every hull in the test table is "known and affordable".
-            let ripe = ripe_entries(loadout, &present, &have, &occ, |tn| {
-                HULLS.iter().any(|(hn, ..)| *hn == tn)
-            });
-            let ripe: Vec<RipeEntry> = ripe.into_iter().filter(|e| e.target == "fleet").collect();
-            if ripe.is_empty() {
-                break;
-            }
-            let Some(k) = choose_entry(&ripe, t) else { break };
-            let e = &ripe[k];
-            let Some(h) = HULLS.iter().find(|(hn, ..)| *hn == e.type_name.as_str()) else {
-                panic!("loadout hull {} missing from the test reach table", e.type_name);
-            };
-            built.push((h.1, h.2, h.3));
-            *have
-                .entry((e.target.clone(), e.ambit.clone(), e.type_name.clone()))
-                .or_insert(0) += 1;
-            occ.entry((e.target.clone(), e.ambit.clone()))
-                .or_default()
-                .insert(e.slot);
-        }
+        let built: Vec<(u64, u64, bool)> = simulate_builds(&loadout, n, t, |tn| {
+            HULLS.iter().any(|(hn, ..)| *hn == tn)
+        })
+        .iter()
+        .filter(|e| e.target == "fleet")
+        .filter_map(|e| {
+            HULLS
+                .iter()
+                .find(|(hn, ..)| *hn == e.type_name.as_str())
+                .map(|h| (h.1, h.2, h.3))
+        })
+        .collect();
 
         [("water", 2u64), ("land", 4), ("air", 8), ("space", 16)]
             .into_iter()

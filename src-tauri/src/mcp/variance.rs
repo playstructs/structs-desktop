@@ -152,6 +152,27 @@ pub fn pick<T, R: Rng + ?Sized>(
     Some(argmax_last(&scores))
 }
 
+/// A deterministic RNG seeded from `key`, for choices that must be STABLE.
+///
+/// Some loops reconcile toward a declared state rather than taking a one-shot
+/// action — `auto_defend` computes a desired defence web each scan and issues
+/// the clear/set transactions needed to reach it. Sampling that per scan would
+/// mean a different target every time and therefore permanent churn: the loop
+/// could never converge, and every re-roll costs a charged transaction.
+///
+/// For those, variance belongs ACROSS PLAYERS, not across time — one player's
+/// web differs from another's, but its own web settles. Seeding from the player
+/// id gives exactly that. FNV-1a, matching the house style in `pfp.rs`.
+pub fn seeded_rng(key: &str) -> rand::rngs::StdRng {
+    use rand::SeedableRng;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    rand::rngs::StdRng::seed_from_u64(h)
+}
+
 /// [`pick`] against the thread RNG — the production entry point.
 pub fn pick_now<T>(items: &[T], score: impl Fn(&T) -> f64, t: &Temperament) -> Option<usize> {
     pick(items, score, t, &mut rand::thread_rng())
@@ -414,6 +435,21 @@ mod tests {
             seen.insert(pick(&items, |x| *x, &t, &mut rng).unwrap());
         }
         assert_eq!(seen.len(), 4, "a flat distribution should reach every option");
+    }
+
+    /// Stable seeding: the same key must always produce the same sequence, and
+    /// different keys must diverge. This is what lets a reconciling loop settle
+    /// while still differing between players.
+    #[test]
+    fn a_seeded_choice_is_stable_per_key_and_varies_across_keys() {
+        let items = [1.0f64, 2.0, 3.0, 4.0, 5.0];
+        let t = Temperament { temperature: 1.0, ..Default::default() };
+        let draw = |key: &str| {
+            let mut r = seeded_rng(key);
+            (0..8).map(|_| pick(&items, |x| *x, &t, &mut r).unwrap()).collect::<Vec<_>>()
+        };
+        assert_eq!(draw("1-2136"), draw("1-2136"), "same player must settle, not churn");
+        assert_ne!(draw("1-2136"), draw("1-0271"), "different players should differ");
     }
 
     #[test]
