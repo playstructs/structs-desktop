@@ -704,6 +704,15 @@ async fn scan(
                     return;
                 }
 
+                // One charged action per player per BLOCK, and the other loops
+                // sweep the same roster concurrently. Racing them is a certain
+                // code-2022 reject — and here it costs more than the wasted
+                // attempt, because a generic Err also arms INITIATE_BACKOFF and
+                // sits the player out for minutes. Defer to the next scan.
+                if crate::mcp::loop_util::acted_this_block(&pid) {
+                    return;
+                }
+
                 // Walk the loadout; build the first ripe (free slot + power + known
                 // type) entry whose want-count isn't met yet.
                 for (target, ambit, type_name, want) in loadout {
