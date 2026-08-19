@@ -865,14 +865,30 @@ pub async fn execute(
                 let pv = pr::preview(p, 8);
                 let caps = &p.capabilities;
                 let mut out = format!(
-                    "{} — {}\n  capabilities: raids {} · refines {} · sweeps {} · defends {} · explore-when-drained {}\n                       temperament: temp {:.2} (max {:.2}) · mistakes {:.0}% (max {:.0}%)\n  loadout ({} rows):\n",
+                    "{} — {}\n  capabilities: raids {} · refines {} · sweeps {} · defends {} · explore-when-drained {}\n                       temperament: temp {:.2} (max {:.2}) · mistakes {:.0}% (max {:.0}%)\n",
                     p.id, p.label,
                     yn(caps.raids), yn(caps.refines), yn(caps.sweeps_alpha),
                     yn(caps.auto_defends), yn(caps.explore_when_drained_only),
                     p.temperament.temperature, p.limits.temperature_max,
                     p.temperament.mistake_rate * 100.0, p.limits.mistake_rate_max * 100.0,
-                    p.loadout.len(),
                 );
+                out.push_str(&format!(
+                    "  defends (priority order, {} guard(s) on primary, {} on its blocker):\n",
+                    p.capabilities.auto_defends.then_some(p.defence.guards_on_primary).unwrap_or(0),
+                    p.defence.guards_on_blocker,
+                ));
+                for (i, e) in p.defence.protect.iter().enumerate() {
+                    let by = match e {
+                        pr::ProtectEntry::Detailed { by, .. } if !by.is_empty() =>
+                            format!("  (only: {})", by.join(", ")),
+                        _ => String::new(),
+                    };
+                    out.push_str(&format!(
+                        "    {:>2}. {:<26} weight {:.1}{}\n",
+                        i + 1, e.type_name(), e.weight(), by
+                    ));
+                }
+                out.push_str(&format!("  loadout ({} rows):\n", p.loadout.len()));
                 for (i, e) in p.loadout.iter().enumerate() {
                     out.push_str(&format!(
                         "    {:>2}. {:<7} {:<6} {:<26} x{}\n",

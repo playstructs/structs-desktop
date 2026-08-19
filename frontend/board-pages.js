@@ -3599,14 +3599,6 @@
   // ORDER IS PRIORITY, and slots free only when a hull dies — so a row moved is
   // a decision that persists for weeks. Reorder writes the whole document
   // because the order IS the data.
-  function moveRow(p, i, delta) {
-    var j = i + delta;
-    if (j < 0 || j >= p.loadout.length) return;
-    var row = p.loadout.splice(i, 1)[0];
-    p.loadout.splice(j, 0, row);
-    profSet({ action: 'save', id: p.id, profile: p });
-  }
-
   function previewText(pv) {
     if (!pv) return 'no preview';
     var txt = pv.verdict;
@@ -3642,65 +3634,96 @@
   }
 
   // The editor body, shown inside the drawer.
+  //
+  // Everything is `H.row(label, value)` — a two-column `sui-data-card-row` that
+  // uses the drawer's width instead of stacking a caption above each control.
+  // The first cut used H.field + resultRow throughout, which turned one loadout
+  // entry into four wrapped lines and made a 17-row profile unreadable.
+  function actionBar(p, list, i, onChange) {
+    var wrap = H.el('span', 'prof-actions');
+    if (p.builtin) return wrap;
+    wrap.appendChild(iconBtn('icon-caret-up', 'higher priority', function () {
+      if (i === 0) return;
+      list.splice(i - 1, 0, list.splice(i, 1)[0]); onChange();
+    }));
+    wrap.appendChild(iconBtn('icon-caret-down', 'lower priority', function () {
+      if (i >= list.length - 1) return;
+      list.splice(i + 1, 0, list.splice(i, 1)[0]); onChange();
+    }));
+    wrap.appendChild(iconBtn('icon-close', 'remove', function () {
+      list.splice(i, 1); onChange();
+    }));
+    return wrap;
+  }
+
   function profileEditor(p) {
     var body = H.el('div', 'cfg-section');
-    body.appendChild(H.row('Preview', previewText(p.preview)));
-    if (p.preview && (p.preview.unknown_types || []).length) {
-      body.appendChild(H.alertLine('unknown struct type(s): ' + p.preview.unknown_types.join(', '), 'icon-alert'));
+    var save = function () { profSet({ action: 'save', id: p.id, profile: p }); };
+    var readOnly = function () { rerenderProfiles(); };
+
+    // ── What it achieves, first and compactly ──
+    var pv = p.preview || {};
+    body.appendChild(H.row('Coverage', pv.verdict || '?'));
+    if ((pv.blind || []).length) {
+      body.appendChild(H.row('No viable shot into', pv.blind.join(', ')));
+    } else if (pv.covered_after != null) {
+      body.appendChild(H.row('All four ambits after', pv.covered_after + ' build(s)'));
+    }
+    if ((pv.unknown_types || []).length) {
+      body.appendChild(H.alertLine('unknown struct type(s): ' + pv.unknown_types.join(', '), 'icon-alert'));
     }
     if (p.builtin) {
-      body.appendChild(H.el('p', 'ops-muted', 'Built-in profiles are read-only. Fork to make an editable copy.'));
+      body.appendChild(H.el('p', 'ops-muted', 'Built-in — read-only. Fork to make an editable copy.'));
     }
 
-    // checkbox(checked, labelText, onChange) — it carries its own label.
-    // `H.field(caption, control)` with a LABEL-LESS checkbox — the same pairing
-    // loopEditor uses for every loop config. Passing the caption to the
-    // checkbox instead leaves it in a fixed 40px inline-block that the text
-    // overflows, so five of them collide on one line.
-    [['raids', 'Flies raids', 'fly out and raid other players'],
-     ['refines', 'Runs refineries', 'off for bait — the ore pile is the lure'],
-     ['sweeps_alpha', 'Sweeps Alpha', 'sends Alpha to the primary'],
-     ['auto_defends', 'Maintains a defence web', null],
-     ['explore_when_drained_only', 'Explores only when drained', 'wait for the stored pile to clear before re-planeting']]
+    // ── Capabilities: one line each, switch on the right ──
+    body.appendChild(H.el('h4', null, 'Behaviour'));
+    [['raids', 'Flies raids'],
+     ['refines', 'Runs refineries'],
+     ['sweeps_alpha', 'Sweeps Alpha to the primary'],
+     ['auto_defends', 'Maintains a defence web'],
+     ['explore_when_drained_only', 'Explores only when drained']]
       .forEach(function (c) {
         var cb = H.checkbox(!!p.capabilities[c[0]], null, function (v) {
-          if (p.builtin) { rerenderProfiles(); return; }
-          p.capabilities[c[0]] = v;
-          profSet({ action: 'save', id: p.id, profile: p });
+          if (p.builtin) return readOnly();
+          p.capabilities[c[0]] = v; save();
         });
-        body.appendChild(H.field(c[1], cb, c[2]));
+        body.appendChild(H.row(c[1], cb));
       });
-
-    body.appendChild(H.field('Temperature', H.stepper(
+    body.appendChild(H.row('Temperature', H.stepper(
       p.temperament.temperature,
-      { min: 0, max: p.limits.temperature_max, step: 0.05, width: '5em' },
-      function (v) {
-        if (p.builtin) { rerenderProfiles(); return; }
-        p.temperament.temperature = v;
-        profSet({ action: 'save', id: p.id, profile: p });
-      }
-    ), '0 = always the best move; higher samples among the good ones'));
+      { min: 0, max: (p.limits && p.limits.temperature_max) || 5, step: 0.05, width: '4.5em' },
+      function (v) { if (p.builtin) return readOnly(); p.temperament.temperature = v; save(); }
+    )));
 
-    // Loadout, in priority order.
-    var tbl = H.resultTable();
-    p.loadout.forEach(function (e, i) {
-      var actions = null;
-      if (!p.builtin) {
-        actions = H.el('div');
-        actions.appendChild(iconBtn('icon-caret-up', 'higher priority', function () { moveRow(p, i, -1); }));
-        actions.appendChild(iconBtn('icon-caret-down', 'lower priority', function () { moveRow(p, i, 1); }));
-        actions.appendChild(iconBtn('icon-close', 'remove', function () {
-          p.loadout.splice(i, 1);
-          profSet({ action: 'save', id: p.id, profile: p });
-        }));
-      }
-      tbl.appendChild(H.resultRow({
-        title: (i + 1) + '. ' + e.type_name,
-        subtitle: e.target + ' / ' + e.ambit + '  \u00d7' + e.want,
-        action: actions,
-      }));
+    // ── Defends: priority order, first survivor takes the blocker ──
+    var d = p.defence || { protect: [], guards_on_primary: 0, guards_on_blocker: 0 };
+    body.appendChild(H.el('h4', null, 'Defends — priority order'));
+    (d.protect || []).forEach(function (e, i) {
+      var name = (typeof e === 'string') ? e : e.type_name;
+      var by = (typeof e === 'string') ? [] : (e.by || []);
+      var w = (typeof e === 'string') ? 1 : (e.weight == null ? 1 : e.weight);
+      var val = H.el('span');
+      val.appendChild(H.el('span', 'ops-muted',
+        'weight ' + w + (by.length ? '  ·  only ' + by.join(', ') : '') + '  '));
+      val.appendChild(actionBar(p, d.protect, i, save));
+      body.appendChild(H.row((i + 1) + '. ' + name + (i === 0 ? '  (primary)' : ''), val));
     });
-    body.appendChild(H.field('Loadout (order is priority)', tbl));
+    body.appendChild(H.row('Guards on primary', H.stepper(d.guards_on_primary,
+      { min: 0, max: 16, step: 1, width: '4em' },
+      function (v) { if (p.builtin) return readOnly(); p.defence.guards_on_primary = v; save(); })));
+    body.appendChild(H.row('Guards on its blocker', H.stepper(d.guards_on_blocker,
+      { min: 0, max: 16, step: 1, width: '4em' },
+      function (v) { if (p.builtin) return readOnly(); p.defence.guards_on_blocker = v; save(); })));
+
+    // ── Loadout: one line per entry ──
+    body.appendChild(H.el('h4', null, 'Builds — priority order'));
+    p.loadout.forEach(function (e, i) {
+      var val = H.el('span');
+      val.appendChild(H.el('span', 'ops-muted', e.target + '/' + e.ambit + '  \u00d7' + e.want + '  '));
+      val.appendChild(actionBar(p, p.loadout, i, save));
+      body.appendChild(H.row((i + 1) + '. ' + e.type_name, val));
+    });
 
     var actions = H.el('div', 'cfg-actions');
     var forkB = massBtn('prof-fork-' + p.id, 'icon-add', 'Fork', 'sui-mod-secondary');
@@ -3711,8 +3734,7 @@
     actions.appendChild(forkB);
     var expB = massBtn('prof-exp-' + p.id, 'icon-copy', 'Export', 'sui-mod-secondary');
     expB.addEventListener('click', function () {
-      var doc = JSON.stringify(p, null, 2);
-      navigator.clipboard && navigator.clipboard.writeText(doc);
+      navigator.clipboard && navigator.clipboard.writeText(JSON.stringify(p, null, 2));
       alertInto('profiles-card', 'profile "' + p.id + '" copied to clipboard');
     });
     actions.appendChild(expB);
@@ -3730,11 +3752,6 @@
   function renderProfilesCard() {
     var d = profiles.data || {};
     var body = H.el('div', 'cfg-section');
-    body.appendChild(H.el('p', 'ops-muted',
-      'A profile decides what a player builds, whether it refines, raids, sweeps and defends, and how ' +
-      'much it varies. Built-ins cannot be edited — fork one. Loadout order is priority, and fleet slots ' +
-      'free only when a hull is destroyed, so a change here plays out over weeks.'));
-
     var assigned = d.assigned || {};
     var list = H.resultTable();
     (d.profiles || []).forEach(function (p) {

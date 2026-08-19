@@ -1709,6 +1709,7 @@ pub async fn mcp_profiles_get() -> Value {
                 "builtin": pr::BUILTIN.iter().any(|b| b.id == p.id),
                 "capabilities": p.capabilities,
                 "loadout": p.loadout,
+                "defence": p.defence,
                 "temperament": p.temperament,
                 "limits": p.limits,
                 "temperament_label": p.temperament_label(),

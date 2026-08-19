@@ -162,6 +162,95 @@ impl Default for TemperamentLimits {
     }
 }
 
+/// The starting defensive stance: WHAT this profile protects, in priority order.
+///
+/// `auto_defend` used to hardcode Command Ship → Ore Refinery → Ore Extractor.
+/// That is a strategy, not a rule, and it is exactly the kind of thing a player
+/// should be able to state: a refinery-first economy profile and a
+/// decapitation-proof raider profile want different webs.
+///
+/// This is a STARTING stance. The loop keeps reconciling toward it, so when the
+/// primary dies the next surviving entry becomes the thing that gets blocked and
+/// guarded — which is the "protect one, then the other if it explodes" case —
+/// and `auto_response` remains free to re-point mid-fight.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProtectEntry {
+    /// Bare type name — weight 1, any defender. Kept so a hand-written or older
+    /// exported profile can just say `["Command Ship", "Ore Refinery"]`.
+    Name(String),
+    Detailed {
+        type_name: String,
+        /// Relative pull when a defender chooses what to cover. Position in the
+        /// list still sets priority for the mandatory blocker; this decides how
+        /// the REST of the hulls distribute themselves.
+        #[serde(default = "one")]
+        weight: f64,
+        /// Defender TYPE NAMES that may take this target. Empty = anything
+        /// eligible. This is what lets a profile say "Ore Bunkers cover the
+        /// Refinery, Tanks cover the Command Ship" without a rule in code.
+        #[serde(default)]
+        by: Vec<String>,
+    },
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+impl ProtectEntry {
+    pub fn type_name(&self) -> &str {
+        match self {
+            ProtectEntry::Name(n) => n,
+            ProtectEntry::Detailed { type_name, .. } => type_name,
+        }
+    }
+    pub fn weight(&self) -> f64 {
+        match self {
+            ProtectEntry::Name(_) => 1.0,
+            ProtectEntry::Detailed { weight, .. } => *weight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DefenceStance {
+    /// What to protect, highest priority first.
+    ///
+    /// The first entry this player owns is the PRIMARY and gets the mandatory
+    /// same-ambit blocker. Everything after that is a weighted field the
+    /// remaining hulls choose from — so two identical Tanks can end up covering
+    /// different structs rather than doubling up, and the split differs between
+    /// players.
+    #[serde(default = "default_protect")]
+    pub protect: Vec<ProtectEntry>,
+    #[serde(default = "default_guards")]
+    pub guards_on_primary: usize,
+    #[serde(default = "default_guards")]
+    pub guards_on_blocker: usize,
+}
+
+fn default_protect() -> Vec<ProtectEntry> {
+    // Exactly what the loop hardcoded before profiles existed.
+    ["Command Ship", "Ore Refinery", "Ore Extractor"]
+        .iter()
+        .map(|n| ProtectEntry::Name((*n).into()))
+        .collect()
+}
+fn default_guards() -> usize {
+    2
+}
+
+impl Default for DefenceStance {
+    fn default() -> Self {
+        Self {
+            protect: default_protect(),
+            guards_on_primary: default_guards(),
+            guards_on_blocker: default_guards(),
+        }
+    }
+}
+
 /// Optional avatar layer overrides. `None` keeps the role's existing look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AvatarLayers {
@@ -197,6 +286,9 @@ pub struct Profile {
     /// per profile — see [`TemperamentLimits`].
     #[serde(default)]
     pub limits: TemperamentLimits,
+    /// Starting defensive stance — see [`DefenceStance`].
+    #[serde(default)]
+    pub defence: DefenceStance,
     #[serde(default)]
     pub avatar: Option<AvatarLayers>,
 }
@@ -229,6 +321,13 @@ pub static BUILTIN: LazyLock<Vec<Profile>> = LazyLock::new(|| {
                 .collect(),
             temperament: v.bait,
             limits: TemperamentLimits::default(),
+            // Bait holds an ore pile it never refines, so the EXTRACTOR that
+            // feeds the lure outranks a refinery it does not run.
+            defence: DefenceStance {
+                protect: ["Command Ship", "Ore Extractor", "Ore Bunker"]
+                    .iter().map(|n| ProtectEntry::Name((*n).into())).collect(),
+                ..Default::default()
+            },
             avatar: None,
         },
         Profile {
@@ -245,6 +344,13 @@ pub static BUILTIN: LazyLock<Vec<Profile>> = LazyLock::new(|| {
             loadout: PRODUCTIVE_LOADOUT.iter().map(LoadoutEntry::from_tuple).collect(),
             temperament: v.productive,
             limits: TemperamentLimits::default(),
+            // The flywheel dies without the refinery, so it ranks above the
+            // extractor a fresh explore would replace anyway.
+            defence: DefenceStance {
+                protect: ["Command Ship", "Ore Refinery", "Ore Extractor"]
+                    .iter().map(|n| ProtectEntry::Name((*n).into())).collect(),
+                ..Default::default()
+            },
             avatar: None,
         },
         Profile {
@@ -261,6 +367,13 @@ pub static BUILTIN: LazyLock<Vec<Profile>> = LazyLock::new(|| {
             loadout: RAIDER_LOADOUT.iter().map(LoadoutEntry::from_tuple).collect(),
             temperament: v.raider,
             limits: TemperamentLimits::default(),
+            // A raider that loses its Command Ship is STRANDED — `fleet_move`
+            // is refused without one — so everything else is a distant second.
+            defence: DefenceStance {
+                protect: vec![ProtectEntry::Name("Command Ship".into())],
+                guards_on_primary: 3,
+                guards_on_blocker: 2,
+            },
             avatar: None,
         },
     ]
@@ -337,6 +450,31 @@ pub fn validate(p: &Profile) -> Result<(), String> {
     }
 
     // The profile's own declared range, then the arithmetic ceilings.
+    if p.defence.protect.is_empty() {
+        return Err(format!(
+            "profile '{}': defence.protect is empty — nothing would be defended",
+            p.id
+        ));
+    }
+    for e in &p.defence.protect {
+        if e.type_name().trim().is_empty() {
+            return Err(format!("profile '{}': a defence.protect row has no struct type", p.id));
+        }
+        if !(0.0..=100.0).contains(&e.weight()) {
+            return Err(format!(
+                "profile '{}': defence weight {} for '{}' is outside 0..100",
+                p.id, e.weight(), e.type_name()
+            ));
+        }
+    }
+    // A guard count beyond the slots a player can field is a typo, not a plan.
+    let guard_cap = SLOTS_PER_AMBIT * 4;
+    if p.defence.guards_on_primary > guard_cap || p.defence.guards_on_blocker > guard_cap {
+        return Err(format!(
+            "profile '{}': guard counts must be 0..{guard_cap} (a fleet holds {guard_cap} hulls)",
+            p.id
+        ));
+    }
     if !(0.0..=TEMPERATURE_CEILING).contains(&p.limits.temperature_max) {
         return Err(format!(
             "profile '{}': temperature_max {} is outside 0..{TEMPERATURE_CEILING} (beyond that the \
@@ -373,6 +511,38 @@ pub fn validate(p: &Profile) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve this profile's defensive stance to chain type IDS.
+///
+/// Names are what an author writes; ids are what the planner compares against.
+/// An entry the catalog does not know is DROPPED rather than fatal — a cold
+/// start must not leave a player undefended, and `validate` already warns about
+/// unknown names at edit time.
+pub fn resolved_protect(p: &Profile) -> Vec<crate::mcp::auto_defend::ProtectTarget> {
+    let Ok(gs) = crate::game_state::GAME_STATE.read() else {
+        return Vec::new();
+    };
+    let id_of = |name: &str| -> Option<String> {
+        gs.struct_types
+            .values()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
+            .map(|t| t.id.to_string())
+    };
+    p.defence
+        .protect
+        .iter()
+        .filter_map(|e| {
+            Some(crate::mcp::auto_defend::ProtectTarget {
+                type_id: id_of(e.type_name())?,
+                weight: e.weight().max(0.0),
+                by: match e {
+                    ProtectEntry::Detailed { by, .. } => by.iter().filter_map(|n| id_of(n)).collect(),
+                    ProtectEntry::Name(_) => Vec::new(),
+                },
+            })
+        })
+        .collect()
+}
+
 /// Struct type names in a profile that the synced catalog does not know.
 ///
 /// Deliberately NOT part of [`validate`]: the catalog is cold on a fresh start,
@@ -385,15 +555,29 @@ pub fn unknown_types(p: &Profile) -> Vec<String> {
     if gs.struct_types.is_empty() {
         return Vec::new(); // catalog not synced — cannot judge
     }
-    p.loadout
+    let known = |n: &str| gs.struct_types.values().any(|t| t.name.eq_ignore_ascii_case(n));
+    let mut out: Vec<String> = p
+        .loadout
         .iter()
-        .filter(|e| {
-            !gs.struct_types
-                .values()
-                .any(|t| t.name.eq_ignore_ascii_case(&e.type_name))
-        })
+        .filter(|e| !known(&e.type_name))
         .map(|e| e.type_name.clone())
-        .collect()
+        .collect();
+    // Defence names too — a typo there silently drops the target from the web.
+    for e in &p.defence.protect {
+        if !known(e.type_name()) {
+            out.push(e.type_name().to_string());
+        }
+        if let ProtectEntry::Detailed { by, .. } = e {
+            for b in by {
+                if !known(b) {
+                    out.push(b.clone());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// What a profile would actually achieve — the answer the editor shows before
@@ -516,6 +700,7 @@ pub fn find(id: &str) -> Profile {
             loadout: Vec::new(),
             temperament: Temperament::default(),
             limits: TemperamentLimits::default(),
+            defence: DefenceStance::default(),
             avatar: None,
         })
 }
@@ -652,6 +837,7 @@ mod tests {
             }],
             temperament: Temperament::default(),
             limits: TemperamentLimits::default(),
+            defence: DefenceStance::default(),
             avatar: None,
         }
     }
