@@ -3619,19 +3619,22 @@
   // opens the editor in the standard drawer — the same shape the roster and the
   // WAR lists use, rather than five stacked full-width blocks.
   function profileRow(p, assignedCount) {
-    var chips = [{ label: (p.preview && p.preview.verdict) || '?' }];
-    if (p.preview && (p.preview.blind || []).length) {
-      chips.push({ label: 'blind: ' + p.preview.blind.join('/') });
-    } else if (p.preview && p.preview.covered_after != null) {
-      chips.push({ label: 'covered in ' + p.preview.covered_after });
+    // `chips` are NODES, not descriptors — resultRow appendChild()s each one.
+    // statTile(label, value, iconName, cls) is the house chip.
+    var pv = p.preview || {};
+    var blind = pv.blind || [];
+    var chips = [statTile('coverage', pv.verdict || '?', null, blind.length ? 'bad' : 'ok')];
+    if (blind.length) {
+      chips.push(statTile('blind in', blind.join(', '), null, 'bad'));
+    } else if (pv.covered_after != null) {
+      chips.push(statTile('covered after', pv.covered_after + ' builds', null, 'ok'));
     }
-    chips.push({ label: p.loadout.length + ' rows' });
-    chips.push({ label: p.temperament_label });
-    if (assignedCount) chips.push({ label: assignedCount + ' in use' });
-    if (p.builtin) chips.push({ label: 'built-in' });
+    chips.push(statTile('loadout', p.loadout.length + ' rows'));
+    chips.push(statTile('varies', p.temperament_label || '?'));
+    if (assignedCount) chips.push(statTile('in use', assignedCount + ' player(s)'));
 
     return H.resultRow({
-      title: p.id,
+      title: p.id + (p.builtin ? '  (built-in)' : ''),
       subtitle: p.label,
       chips: chips,
       onClick: function () { H.drawer(p.id, profileEditor(p)); },
@@ -3650,18 +3653,23 @@
     }
 
     // checkbox(checked, labelText, onChange) — it carries its own label.
-    var caps = H.el('div', 'hstrip');
-    [['raids', 'raids'], ['refines', 'refines'], ['sweeps_alpha', 'sweeps alpha'],
-     ['auto_defends', 'defends'], ['explore_when_drained_only', 'explore when drained']]
-      .forEach(function (pair) {
-        var cb = H.checkbox(!!p.capabilities[pair[0]], pair[1], function (v) {
+    // `H.field(caption, control)` with a LABEL-LESS checkbox — the same pairing
+    // loopEditor uses for every loop config. Passing the caption to the
+    // checkbox instead leaves it in a fixed 40px inline-block that the text
+    // overflows, so five of them collide on one line.
+    [['raids', 'Flies raids', 'fly out and raid other players'],
+     ['refines', 'Runs refineries', 'off for bait — the ore pile is the lure'],
+     ['sweeps_alpha', 'Sweeps Alpha', 'sends Alpha to the primary'],
+     ['auto_defends', 'Maintains a defence web', null],
+     ['explore_when_drained_only', 'Explores only when drained', 'wait for the stored pile to clear before re-planeting']]
+      .forEach(function (c) {
+        var cb = H.checkbox(!!p.capabilities[c[0]], null, function (v) {
           if (p.builtin) { rerenderProfiles(); return; }
-          p.capabilities[pair[0]] = v;
+          p.capabilities[c[0]] = v;
           profSet({ action: 'save', id: p.id, profile: p });
         });
-        caps.appendChild(cb);
+        body.appendChild(H.field(c[1], cb, c[2]));
       });
-    body.appendChild(H.field('Capabilities', caps));
 
     body.appendChild(H.field('Temperature', H.stepper(
       p.temperament.temperature,
@@ -3679,8 +3687,8 @@
       var actions = null;
       if (!p.builtin) {
         actions = H.el('div');
-        actions.appendChild(iconBtn('icon-arrow-up', 'higher priority', function () { moveRow(p, i, -1); }));
-        actions.appendChild(iconBtn('icon-arrow-down', 'lower priority', function () { moveRow(p, i, 1); }));
+        actions.appendChild(iconBtn('icon-caret-up', 'higher priority', function () { moveRow(p, i, -1); }));
+        actions.appendChild(iconBtn('icon-caret-down', 'lower priority', function () { moveRow(p, i, 1); }));
         actions.appendChild(iconBtn('icon-close', 'remove', function () {
           p.loadout.splice(i, 1);
           profSet({ action: 'save', id: p.id, profile: p });
@@ -3701,7 +3709,7 @@
       if (id) profSet({ action: 'fork', from: p.id, id: id, label: id });
     });
     actions.appendChild(forkB);
-    var expB = massBtn('prof-exp-' + p.id, 'icon-download', 'Export', 'sui-mod-secondary');
+    var expB = massBtn('prof-exp-' + p.id, 'icon-copy', 'Export', 'sui-mod-secondary');
     expB.addEventListener('click', function () {
       var doc = JSON.stringify(p, null, 2);
       navigator.clipboard && navigator.clipboard.writeText(doc);
@@ -3716,6 +3724,35 @@
       actions.appendChild(delB);
     }
     body.appendChild(actions);
+    return body;
+  }
+
+  function renderProfilesCard() {
+    var d = profiles.data || {};
+    var body = H.el('div', 'cfg-section');
+    body.appendChild(H.el('p', 'ops-muted',
+      'A profile decides what a player builds, whether it refines, raids, sweeps and defends, and how ' +
+      'much it varies. Built-ins cannot be edited — fork one. Loadout order is priority, and fleet slots ' +
+      'free only when a hull is destroyed, so a change here plays out over weeks.'));
+
+    var assigned = d.assigned || {};
+    var list = H.resultTable();
+    (d.profiles || []).forEach(function (p) {
+      list.appendChild(profileRow(p, assigned[p.id] || 0));
+    });
+    body.appendChild(list);
+
+    var imp = H.el('div', 'cfg-actions');
+    var impB = massBtn('prof-import', 'icon-copy', 'Import from clipboard', 'sui-mod-secondary');
+    impB.addEventListener('click', function () {
+      if (!navigator.clipboard) { alertInto('profiles-card', 'clipboard unavailable'); return; }
+      navigator.clipboard.readText().then(function (txt) {
+        var doc; try { doc = JSON.parse(txt); } catch (e) { alertInto('profiles-card', 'not valid JSON'); return; }
+        profSet({ action: 'save', id: doc.id, profile: doc });
+      });
+    });
+    imp.appendChild(impB);
+    body.appendChild(imp);
     return body;
   }
 

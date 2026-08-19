@@ -970,21 +970,13 @@ pub async fn execute(
                             return vec![Content::text(format!("no profile '{want}' (action:'list')"))];
                         }
                     }
-                    let mut store = crate::mcp::virtual_players::VirtualPlayerStore::load();
-                    let Some(v) = store.players.iter_mut().find(|v| {
-                        v.player_id.as_deref() == Some(who) || v.name == who
-                    }) else {
-                        return vec![Content::text(format!("no virtual player '{who}'"))];
-                    };
-                    v.profile = next.clone();
-                    let name = v.name.clone();
-                    if let Err(e) = store.save() {
-                        return vec![Content::text(format!("could not save: {e}"))];
+                    return match crate::mcp::virtual_players::set_profile(who, next.clone()) {
+                        Ok(name) => vec![Content::text(match next {
+                            Some(p) => format!("{name} → profile '{p}'"),
+                            None => format!("{name} → cleared; falls back to its role's built-in"),
+                        })],
+                        Err(e) => vec![Content::text(e)],
                     }
-                    return vec![Content::text(match next {
-                        Some(p) => format!("{name} → profile '{p}'"),
-                        None => format!("{name} → cleared; falls back to its role's built-in"),
-                    })];
                 }
                 other => {
                     return vec![Content::text(format!(

@@ -107,7 +107,7 @@ pub fn pick<T, R: Rng + ?Sized>(
     if items.is_empty() {
         return None;
     }
-    let scores: Vec<f64> = items.iter().map(|i| score(i)).collect();
+    let scores: Vec<f64> = items.iter().map(&score).collect();
     if items.len() == 1 {
         return Some(0);
     }

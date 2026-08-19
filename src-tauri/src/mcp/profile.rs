@@ -554,18 +554,6 @@ pub fn capabilities_for(player_id: &str, role_str: &str) -> Capabilities {
     find(role_str).capabilities
 }
 
-/// The capabilities governing one of our players, by id.
-///
-/// The single entry point every loop uses instead of matching on `VPlayerRole`.
-/// Resolution is total, so a loop can never be left without an answer.
-pub fn capabilities_of(player_id: &str) -> Capabilities {
-    for_player(
-        crate::mcp::virtual_players::profile_of(player_id).as_deref(),
-        crate::mcp::virtual_players::role_of(player_id),
-    )
-    .capabilities
-}
-
 /// Every profile the operator can choose, built-ins first.
 pub fn list() -> Vec<Profile> {
     let mut out: Vec<Profile> = BUILTIN.clone();

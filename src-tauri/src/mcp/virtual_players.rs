@@ -179,7 +179,14 @@ pub fn role_of(player_id: &str) -> Option<VPlayerRole> {
     if player_id.is_empty() {
         return None;
     }
-    VirtualPlayerStore::load().find(player_id).map(|v| v.role)
+    // REGISTRY, not `load()`: this is called ONCE PER PLAYER PER SCAN by
+    // auto_build / auto_harvest / auto_defend, and `load()` reads and reparses
+    // the whole registry file every call. At 2,241 players across four loops
+    // that is tens of thousands of full-file JSON parses a minute.
+    REGISTRY
+        .read()
+        .ok()
+        .and_then(|r| r.find(player_id).map(|v| v.role))
 }
 
 /// The profile id assigned to one of our players, if any. `None` falls back to
@@ -188,10 +195,31 @@ pub fn profile_of(player_id: &str) -> Option<String> {
     if player_id.is_empty() {
         return None;
     }
-    VirtualPlayerStore::load()
-        .find(player_id)
-        .and_then(|v| v.profile.clone())
+    // In-memory for the same reason as `role_of` above.
+    REGISTRY
+        .read()
+        .ok()
+        .and_then(|r| r.find(player_id).and_then(|v| v.profile.clone()))
         .filter(|p| !p.is_empty())
+}
+
+/// Point a player at a profile (or clear it with `None`), updating the
+/// in-memory registry AND persisting.
+///
+/// `VirtualPlayerStore::save()` only writes the file — it does not refresh
+/// `REGISTRY`, which is what every loop actually reads. Mutating a loaded copy
+/// and saving it therefore looks successful and changes nothing until restart.
+pub fn set_profile(player_key: &str, profile: Option<String>) -> Result<String, String> {
+    let mut reg = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+    let v = reg
+        .players
+        .iter_mut()
+        .find(|v| v.player_id.as_deref() == Some(player_key) || v.name == player_key)
+        .ok_or_else(|| format!("no virtual player '{player_key}'"))?;
+    v.profile = profile;
+    let name = v.name.clone();
+    reg.save()?;
+    Ok(name)
 }
 
 pub fn is_team_player(player_id: &str) -> bool {

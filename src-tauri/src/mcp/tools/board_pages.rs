@@ -1277,15 +1277,9 @@ pub async fn mcp_config_set_impl(
                         .and_then(|v| v.as_str())
                         .ok_or("profile assign: which player?")?;
                     let next = if id.is_empty() { None } else { Some(id.clone()) };
-                    let mut store = crate::mcp::virtual_players::VirtualPlayerStore::load();
-                    let v = store
-                        .players
-                        .iter_mut()
-                        .find(|v| v.player_id.as_deref() == Some(who) || v.name == who)
-                        .ok_or_else(|| format!("no virtual player '{who}'"))?;
-                    v.profile = next.clone();
-                    let name = v.name.clone();
-                    store.save()?;
+                    // set_profile updates REGISTRY and persists; save() alone
+                    // would leave every loop reading the old value.
+                    let name = crate::mcp::virtual_players::set_profile(who, next.clone())?;
                     match next {
                         Some(p) => format!("{name} → profile '{p}'"),
                         None => format!("{name} → cleared (falls back to its role)"),
