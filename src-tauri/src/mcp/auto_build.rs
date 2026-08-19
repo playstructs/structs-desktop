@@ -23,7 +23,7 @@ use crate::hasher::types::{now_millis, TaskParams, TaskRegistry};
 use crate::mcp::cosmos_client::CosmosClient;
 
 const FILENAME: &str = "auto_build.json";
-const SLOTS_PER_AMBIT: usize = 4;
+pub(crate) const SLOTS_PER_AMBIT: usize = 4;
 const BUILD_CHARGE: u64 = 8;
 
 /// Priority-ordered defensive loadout: (target location_type, ambit, type name,
@@ -42,7 +42,7 @@ const BUILD_CHARGE: u64 = 8;
 /// successful raids, K/D 397:93, home cracked once in 9 attempts): his fleet
 /// fields ALL 13 hull types — a diverse line per ambit — and his planet stacks
 /// shield contributors (4× Ore Bunker, 3× OSG, Jamming Satellite, PDC).
-const LOADOUT: &[(&str, &str, &str, usize)] = &[
+pub(crate) const LOADOUT: &[(&str, &str, &str, usize)] = &[
     // Miner + core planetary defense first — the 1-per-player types are
     // skipped when already present, but get rebuilt after an explore (the old
     // planet's structs are destroyed on completion, freeing the limit).
@@ -119,7 +119,7 @@ const LOADOUT: &[(&str, &str, &str, usize)] = &[
 ///
 /// A Command Ship comes early because a raider without one is grounded — the
 /// chain refuses `MsgFleetMove` with "needs an online command struct".
-const RAIDER_LOADOUT: &[(&str, &str, &str, usize)] = &[
+pub(crate) const RAIDER_LOADOUT: &[(&str, &str, &str, usize)] = &[
     ("fleet", "land", "Command Ship", 1),
     ("fleet", "land", "Mobile Artillery", 2),
     // Ahead of the Battleship deliberately: the Battleship is 2 slots of
@@ -163,7 +163,7 @@ const RAIDER_LOADOUT: &[(&str, &str, &str, usize)] = &[
 /// Production-first loadout for PRODUCTIVE players: extractor + refinery (the
 /// alpha pipeline) + a command ship (raid gate) + light defense. The 1-per-player
 /// types build only if absent (see ONE_PER_PLAYER); the rest fill by slot count.
-const PRODUCTIVE_LOADOUT: &[(&str, &str, &str, usize)] = &[
+pub(crate) const PRODUCTIVE_LOADOUT: &[(&str, &str, &str, usize)] = &[
     ("planet", "land", "Ore Extractor", 1),
     ("planet", "land", "Ore Refinery", 1),
     ("fleet", "land", "Command Ship", 1),
@@ -199,7 +199,7 @@ const PRODUCTIVE_LOADOUT: &[(&str, &str, &str, usize)] = &[
 /// Struct types limited to one per player (buildLimit 1) — a loadout entry for
 /// one of these is skipped when the player already has it, instead of trying
 /// (and having the chain reject) a duplicate.
-const ONE_PER_PLAYER: &[&str] = &[
+pub(crate) const ONE_PER_PLAYER: &[&str] = &[
     "Ore Extractor",
     "Ore Refinery",
     "Command Ship",
@@ -332,9 +332,9 @@ fn first_free(occupied: &HashSet<u64>) -> Option<u64> {
 pub struct RipeEntry {
     /// Position in the loadout — lower is higher priority.
     pub idx: usize,
-    pub target: &'static str,
-    pub ambit: &'static str,
-    pub type_name: &'static str,
+    pub target: String,
+    pub ambit: String,
+    pub type_name: String,
     pub slot: u64,
 }
 
@@ -350,7 +350,7 @@ pub struct RipeEntry {
 /// the catalog and affordable on the current power budget", which is the only
 /// part that needs `GAME_STATE`.
 pub fn ripe_entries(
-    loadout: &[(&'static str, &'static str, &'static str, usize)],
+    loadout: &[crate::mcp::profile::LoadoutEntry],
     present: &HashSet<String>,
     have: &HashMap<(String, String, String), usize>,
     occ: &HashMap<(String, String), HashSet<u64>>,
@@ -358,27 +358,33 @@ pub fn ripe_entries(
 ) -> Vec<RipeEntry> {
     let empty = HashSet::new();
     let mut out = Vec::new();
-    for (idx, (target, ambit, type_name, want)) in loadout.iter().enumerate() {
-        if ONE_PER_PLAYER.contains(type_name) && present.contains(*type_name) {
+    for (idx, e) in loadout.iter().enumerate() {
+        if ONE_PER_PLAYER.contains(&e.type_name.as_str()) && present.contains(&e.type_name) {
             continue; // already have this 1-per-player struct
         }
         let have_n = have
-            .get(&(target.to_string(), ambit.to_string(), type_name.to_string()))
+            .get(&(e.target.clone(), e.ambit.clone(), e.type_name.clone()))
             .copied()
             .unwrap_or(0);
-        if have_n >= *want {
+        if have_n >= e.want {
             continue; // this entry's share of the ambit is filled
         }
-        let key = (target.to_string(), ambit.to_string());
+        let key = (e.target.clone(), e.ambit.clone());
         let occupied = occ.get(&key).unwrap_or(&empty);
         if occupied.len() >= SLOTS_PER_AMBIT {
             continue;
         }
         let Some(slot) = first_free(occupied) else { continue };
-        if !buildable(type_name) {
+        if !buildable(&e.type_name) {
             continue; // unknown type, or would push the player offline
         }
-        out.push(RipeEntry { idx, target, ambit, type_name, slot });
+        out.push(RipeEntry {
+            idx,
+            target: e.target.clone(),
+            ambit: e.ambit.clone(),
+            type_name: e.type_name.clone(),
+            slot,
+        });
     }
     out
 }
@@ -461,7 +467,6 @@ async fn scan(
     };
 
     // (player_id, vplayer index | None for primary, role | None for primary).
-    use crate::mcp::virtual_players::VPlayerRole;
     let targets = crate::mcp::virtual_players::collect_targets(cfg.include_primary);
 
     // Fan out the per-player body with bounded concurrency so every player is
@@ -602,14 +607,15 @@ async fn scan(
                     occ.entry((lt, amb)).or_default().insert(slot);
                 }
 
-                // Productive players build a production-first loadout (extractor +
-                // refinery + light defense); bait players (and the primary) get the
-                // defensive fill. Bait never gets a refinery — that stays productive-only.
-                let loadout: &[(&str, &str, &str, usize)] = match role {
-                    Some(VPlayerRole::Productive) => PRODUCTIVE_LOADOUT,
-                    Some(VPlayerRole::Raider) => RAIDER_LOADOUT,
-                    _ => LOADOUT,
-                };
+                // The loadout comes from this player's PROFILE. Built-ins are
+                // derived from the same const tables the three roles used, so a
+                // player with no explicit profile builds exactly what it did
+                // before; a player with one builds what its author specified.
+                let profile = crate::mcp::profile::for_player(
+                    crate::mcp::virtual_players::profile_of(&pid).as_deref(),
+                    role,
+                );
+                let loadout: &[crate::mcp::profile::LoadoutEntry] = &profile.loadout;
                 // Type names the player already has (to skip 1-per-player duplicates).
                 // The guild list response can omit `type_name` (occ works off
                 // `location_type`, but `type_name` came back absent → `present` was
@@ -806,11 +812,11 @@ async fn scan(
                     let entry = ripe.remove(k);
                     let (target, ambit, type_name, slot) =
                         (entry.target, entry.ambit, entry.type_name, entry.slot);
-                    let Some((type_id, _draw)) = resolve(type_name) else { continue };
+                    let Some((type_id, _draw)) = resolve(&type_name) else { continue };
                     let payload = json!({
                         "playerId": pid,
                         "structTypeId": type_id,
-                        "operatingAmbit": ambit_to_enum(ambit),
+                        "operatingAmbit": ambit_to_enum(&ambit),
                         "slot": slot,
                     });
                     // Only vplayers route through the façade signer; primary needs its own
@@ -929,6 +935,13 @@ mod tests {
         n: usize,
         t: &crate::mcp::variance::Temperament,
     ) -> Vec<&'static str> {
+        // Tests still declare tables as tuples for brevity; convert once to the
+        // profile representation the production walk now consumes.
+        let loadout: Vec<crate::mcp::profile::LoadoutEntry> = loadout
+            .iter()
+            .map(crate::mcp::profile::LoadoutEntry::from_tuple)
+            .collect();
+        let loadout = &loadout[..];
         let mut built: Vec<(u64, u64, bool)> = Vec::new();
         let present: HashSet<String> = HashSet::new();
         let mut have: HashMap<(String, String, String), usize> = HashMap::new();
@@ -945,14 +958,14 @@ mod tests {
             }
             let Some(k) = choose_entry(&ripe, t) else { break };
             let e = &ripe[k];
-            let Some(h) = HULLS.iter().find(|(hn, ..)| *hn == e.type_name) else {
+            let Some(h) = HULLS.iter().find(|(hn, ..)| *hn == e.type_name.as_str()) else {
                 panic!("loadout hull {} missing from the test reach table", e.type_name);
             };
             built.push((h.1, h.2, h.3));
             *have
-                .entry((e.target.to_string(), e.ambit.to_string(), e.type_name.to_string()))
+                .entry((e.target.clone(), e.ambit.clone(), e.type_name.clone()))
                 .or_insert(0) += 1;
-            occ.entry((e.target.to_string(), e.ambit.to_string()))
+            occ.entry((e.target.clone(), e.ambit.clone()))
                 .or_default()
                 .insert(e.slot);
         }

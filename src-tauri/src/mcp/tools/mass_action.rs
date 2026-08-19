@@ -447,6 +447,8 @@ async fn launch_players(app: tauri::AppHandle, request: MassActionRequest) -> Re
                             {
                                 let mut reg = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
                                 reg.players.push(VirtualPlayer {
+                            // New players inherit their role's built-in profile.
+                            profile: None,
                                     index,
                                     address,
                                     player_id: player_id.clone(),

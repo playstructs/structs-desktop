@@ -77,6 +77,11 @@ pub struct VirtualPlayer {
     /// JSON without this field loads as `Bait`.
     #[serde(default)]
     pub role: VPlayerRole,
+    /// Behaviour profile id. `None` means "use the built-in named by `role`",
+    /// which is what every pre-profile registry entry loads as — so adding
+    /// profiles migrated nothing.
+    #[serde(default)]
+    pub profile: Option<String>,
     /// True when this tooling picked the name, which is what licenses the
     /// roster sweep to rewrite it. False only when the operator passed one
     /// explicitly. Defaults TRUE so the pre-existing `worker<N>` fleet — every
@@ -175,6 +180,18 @@ pub fn role_of(player_id: &str) -> Option<VPlayerRole> {
         return None;
     }
     VirtualPlayerStore::load().find(player_id).map(|v| v.role)
+}
+
+/// The profile id assigned to one of our players, if any. `None` falls back to
+/// the built-in named by its role — see `profile::for_player`.
+pub fn profile_of(player_id: &str) -> Option<String> {
+    if player_id.is_empty() {
+        return None;
+    }
+    VirtualPlayerStore::load()
+        .find(player_id)
+        .and_then(|v| v.profile.clone())
+        .filter(|p| !p.is_empty())
 }
 
 pub fn is_team_player(player_id: &str) -> bool {
@@ -297,15 +314,15 @@ mod tests {
     fn next_free_index_skips_used() {
         let mut s = VirtualPlayerStore::default();
         assert_eq!(s.next_free_index(), 1);
-        s.players.push(VirtualPlayer { index: 1, address: "a".into(), player_id: None, name: "x".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
-        s.players.push(VirtualPlayer { index: 3, address: "c".into(), player_id: None, name: "z".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
+        s.players.push(VirtualPlayer { profile: None, index: 1, address: "a".into(), player_id: None, name: "x".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
+        s.players.push(VirtualPlayer { profile: None, index: 3, address: "c".into(), player_id: None, name: "z".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
         assert_eq!(s.next_free_index(), 2);
     }
 
     #[test]
     fn find_by_index_address_or_player_id() {
         let mut s = VirtualPlayerStore::default();
-        s.players.push(VirtualPlayer { index: 2, address: "structs1abc".into(), player_id: Some("1-5".into()), name: "scout".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
+        s.players.push(VirtualPlayer { profile: None, index: 2, address: "structs1abc".into(), player_id: Some("1-5".into()), name: "scout".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
         assert!(s.find("2").is_some());
         assert!(s.find("structs1abc").is_some());
         assert!(s.find("1-5").is_some());

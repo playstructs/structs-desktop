@@ -1208,6 +1208,8 @@ pub async fn execute(
                     {
                         let mut reg = REGISTRY.write().unwrap();
                         reg.players.push(VirtualPlayer {
+                            // New players inherit their role's built-in profile.
+                            profile: None,
                             index,
                             address: address.clone(),
                             player_id: player_id.clone(),
