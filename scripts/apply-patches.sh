@@ -151,7 +151,18 @@ SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, sign
     this.wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://'));
   let client = cache.get(signerAddress);
   if (!client) {
-    client = await SigningStargateClient.connectWithSigner(rpcUrl, wallet, { registry: this.registry });
+    // Bound the CONNECT too, not just the broadcast. This await used to be the
+    // one unbounded step in the whole signing path: a connect that never
+    // settles leaves the promise pending forever, so the Rust bridge times out
+    // at 60s, the caller is told "is the app signed in?", and the JS side keeps
+    // a zombie promise that can never resolve or reject. 20s is generous for a
+    // handshake against a node that answers /status in ~20ms.
+    client = await Promise.race([
+      SigningStargateClient.connectWithSigner(rpcUrl, wallet, { registry: this.registry }),
+      new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error('signing client connect timed out')); }, 20000);
+      }),
+    ]);
     cache.set(signerAddress, client);
   }
   try {

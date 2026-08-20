@@ -53,6 +53,18 @@ const HASH_STARVED_MS: f64 = 45.0 * 60_000.0;
 const SYNC_STALL_FACTOR: f64 = 3.0;
 /// Native notification threshold: same remedy failed this many checks in a row.
 const NOTIFY_AFTER_FAILURES: u32 = 2;
+/// Don't reload the webview more often than this. A reload is cheap for Rust
+/// (the GPU proofs and every loop live there) but it restarts the webapp's own
+/// state, so a reload LOOP would be worse than the fault it heals.
+const BRIDGE_RELOAD_COOLDOWN_MS: f64 = 5.0 * 60_000.0;
+/// Probe the bridge once it has been this quiet. Comfortably longer than a
+/// healthy sign round-trip (~5s) so a busy app never probes.
+const BRIDGE_PROBE_AFTER_MS: f64 = 120_000.0;
+/// Leave the bridge alone for this long after launch. Before the webapp has
+/// loaded there is legitimately nothing on the other end, and "never answered"
+/// is indistinguishable from "dead" — reloading a page that is still coming up
+/// would restart the very load being waited on.
+const BRIDGE_GRACE_MS: f64 = 180_000.0;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct LoopStat {
@@ -82,6 +94,8 @@ static HASH_PROGRESS: LazyLock<Mutex<HashMap<String, (u64, f64)>>> =
 /// condition survived a remediation attempt.
 static REMEDY_FAILS: LazyLock<Mutex<HashMap<String, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// When the last webview reload was requested (0 = never).
+static LAST_BRIDGE_RELOAD_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Lock a mutex, recovering from poisoning. The watchdog is the LAST line of
 /// defense — if some earlier panic poisoned a mutex, propagating that panic
@@ -273,6 +287,42 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
         }
     }
 
+    // The signing bridge: keys live in the webview, so EVERY write in the app
+    // goes through one Rust→JS round-trip. When the webview stops answering,
+    // nothing else notices — Rust keeps reading the chain, the sync tick keeps
+    // ticking, no loop wedges — and not one transaction lands. That is exactly
+    // how 2026-08-20 lost 18 minutes of writes while this very function
+    // reported "ok". A human ended it by hand with resync{hard}; the remedy
+    // below is that same page reload, applied automatically.
+    if now - app_start > BRIDGE_GRACE_MS && crate::mcp::vplayer_bridge::is_down() {
+        let h = crate::mcp::vplayer_bridge::health();
+        let silent_s = h["silent_ms"].as_u64().unwrap_or(0) / 1000;
+        let timeouts = h["consecutive_timeouts"].as_u64().unwrap_or(0);
+        let since_reload = now - LAST_BRIDGE_RELOAD_MS.load(Ordering::Relaxed) as f64;
+        findings.push(Finding {
+            key: "vplayer_bridge".into(),
+            severity: Sev::Error,
+            message: format!(
+                "signing bridge unresponsive: {timeouts} consecutive round-trips timed out, \
+                 silent for {silent_s}s — no transaction can land until it answers"
+            ),
+            remedy: if since_reload < BRIDGE_RELOAD_COOLDOWN_MS {
+                None // still inside the cooldown of the previous reload
+            } else {
+                Some(Box::new(|app: &tauri::AppHandle| {
+                    LAST_BRIDGE_RELOAD_MS.store(now_millis() as u64, Ordering::Relaxed);
+                    // Same event structs_action{resync, hard} sends: the webview
+                    // reloads, re-installs the bridge and reconnects its streams.
+                    let _ = app.emit("structs:force-resync", json!({ "hard": true }));
+                    // Judge the next window on its own evidence — the stale
+                    // counters would otherwise re-fire before the reload lands.
+                    crate::mcp::vplayer_bridge::note_remediated();
+                    "requested webview reload (structs:force-resync hard)".into()
+                }))
+            },
+        });
+    }
+
     // Hasher: a "running" task whose iteration counter stopped moving.
     if let Some(registry) = app.try_state::<Arc<TaskRegistry>>() {
         let mut progress = lock_recover(&HASH_PROGRESS);
@@ -360,6 +410,16 @@ pub fn check(app: &tauri::AppHandle) {
     // Adaptive PoW tuning rides the same cadence (no-op unless auto_tune is on).
     crate::hasher::tuner::maybe_tune();
 
+    // Probe the signing bridge whenever it has been quiet. Real sign traffic
+    // proves liveness for free, so this only fires in the gap where the app is
+    // idle — which is precisely when a dead bridge would otherwise go unseen
+    // until the next proof lands and pays 60s to discover it.
+    if now - *APP_START_MS > BRIDGE_GRACE_MS
+        && crate::mcp::vplayer_bridge::silent_ms() > BRIDGE_PROBE_AFTER_MS
+    {
+        crate::mcp::vplayer_bridge::spawn_liveness_probe(app);
+    }
+
     let findings = detect(app, now);
     let remediate = POLICY_ENGINE
         .read()
@@ -444,7 +504,14 @@ pub fn health_snapshot() -> Value {
     }
 
     let sync_stalled = sync_age_ms > SYNC_STALL_FACTOR * sync_interval;
-    let status = if sync_stalled || !wedged.is_empty() {
+    // A dead signing bridge is the most severe state the app can be in — every
+    // write is stopped — so it outranks a stalled sync in the summary. It used
+    // to be invisible here, which is why an 18-minute total write outage read
+    // as "ok".
+    let bridge = crate::mcp::vplayer_bridge::health();
+    let bridge_down =
+        bridge["down"].as_bool().unwrap_or(false) && now - app_start > BRIDGE_GRACE_MS;
+    let status = if bridge_down || sync_stalled || !wedged.is_empty() {
         "degraded"
     } else if !overdue.is_empty() {
         "warn"
@@ -453,6 +520,7 @@ pub fn health_snapshot() -> Value {
     };
     json!({
         "status": status,
+        "signing_bridge": bridge,
         "sync_age_ms": sync_age_ms as u64,
         "sync_interval_ms": sync_interval as u64,
         "loops_overdue": overdue,

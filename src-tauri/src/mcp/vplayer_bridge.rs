@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::{oneshot, Semaphore};
@@ -28,6 +29,130 @@ use tokio::sync::{oneshot, Semaphore};
 /// big batch (e.g. 116 workers ÷ 8 × ~6s ≈ 87s vs ~174s at 4) while staying gentle on the
 /// node. Reads still fan out wider (`loop_util::MAX_CONCURRENT_PLAYERS`).
 static SIGN_GATE: Semaphore = Semaphore::const_new(8);
+
+// ── Bridge liveness ──
+//
+// The signing bridge can die while every other health signal stays green: Rust
+// keeps reading the chain, the sync tick keeps ticking, loops keep scanning —
+// and not one transaction lands, because the webview on the other end of this
+// round-trip has stopped answering. That is not hypothetical: 2026-08-20 lost
+// 18 minutes of ALL writes (70 sign timeouts, every one at exactly the 60s
+// bound) while `structs_system status` reported "ok" the whole way through.
+//
+// So the bridge reports its own liveness. Any response — success OR error —
+// proves the webview is answering; only a full timeout counts against it.
+// `watchdog::detect` turns a sustained silence into a page reload, which is
+// what a human had to do by hand to end that outage.
+static LAST_RESPONSE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LAST_PROBE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CONSEC_TIMEOUTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Consecutive unanswered round-trips before the bridge counts as down. Three
+/// at 60s each is ~3 minutes of evidence — long enough that a slow node or one
+/// wedged account can't trip it, short enough to heal inside a mine cycle.
+const DOWN_AFTER_TIMEOUTS: u32 = 3;
+/// …and it must ALSO have been silent this long. A busy bridge answering other
+/// calls is not down, however many individual calls time out.
+const DOWN_SILENCE_MS: f64 = 90_000.0;
+/// While down, let exactly one call through this often to test for recovery.
+/// Without a probe the fail-fast below would be self-sealing: no requests, no
+/// responses, no way to ever notice the webview came back.
+const PROBE_EVERY_MS: f64 = 15_000.0;
+
+fn now_ms() -> f64 {
+    crate::hasher::types::now_millis()
+}
+
+/// A response arrived — including a late one for a call that already timed out,
+/// and including an error response. Either way the webview is alive and talking.
+fn note_response() {
+    LAST_RESPONSE_MS.store(now_ms() as u64, Ordering::Relaxed);
+    CONSEC_TIMEOUTS.store(0, Ordering::Relaxed);
+}
+
+fn note_timeout() {
+    CONSEC_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Is the bridge unresponsive? Requires BOTH sustained timeouts and silence.
+pub fn is_down() -> bool {
+    if CONSEC_TIMEOUTS.load(Ordering::Relaxed) < DOWN_AFTER_TIMEOUTS {
+        return false;
+    }
+    let last = LAST_RESPONSE_MS.load(Ordering::Relaxed) as f64;
+    last <= 0.0 || now_ms() - last > DOWN_SILENCE_MS
+}
+
+/// Liveness for `structs_system status` / the watchdog.
+pub fn health() -> serde_json::Value {
+    let last = LAST_RESPONSE_MS.load(Ordering::Relaxed) as f64;
+    serde_json::json!({
+        "down": is_down(),
+        "consecutive_timeouts": CONSEC_TIMEOUTS.load(Ordering::Relaxed),
+        "silent_ms": if last > 0.0 { (now_ms() - last) as u64 } else { 0 },
+        "ever_responded": last > 0.0,
+    })
+}
+
+/// Reset after a remediation so the next window is judged on its own evidence
+/// (a reload takes seconds; without this the stale count re-fires instantly).
+pub fn note_remediated() {
+    CONSEC_TIMEOUTS.store(0, Ordering::Relaxed);
+    LAST_RESPONSE_MS.store(now_ms() as u64, Ordering::Relaxed);
+}
+
+/// Timeout for the liveness probe. It performs no network I/O, so an answer is
+/// a few milliseconds of work — 10s is already an eternity.
+const PROBE_TIMEOUT_SECS: u64 = 10;
+static PROBE_INFLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Actively test the round-trip, so a bridge that dies while the app is IDLE is
+/// still noticed. Detection that rides only on real traffic is detection that
+/// arrives after the damage: the first mine to complete pays 60s to discover
+/// what a 5ms probe already knew.
+///
+/// Uses the `list` op deliberately — pure JS, no network, no signing, no keys.
+/// It answers one question and only one: is the webview listening and able to
+/// call back into Rust? That also draws the distinction the old error message
+/// fumbled ("is the app signed in?"): a façade that replies "unavailable" is an
+/// ANSWER, so the bridge counts as alive and no reload is triggered. Reloading
+/// the page because the human has not signed in yet would be a loop.
+pub fn spawn_liveness_probe(app: &tauri::AppHandle) {
+    if PROBE_INFLIGHT.swap(true, Ordering::SeqCst) {
+        return; // one at a time
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = call(&app, "list", serde_json::json!({}), PROBE_TIMEOUT_SECS).await;
+        PROBE_INFLIGHT.store(false, Ordering::SeqCst);
+    });
+}
+
+/// How long the bridge may stay silent before the watchdog probes it.
+pub fn silent_ms() -> f64 {
+    let last = LAST_RESPONSE_MS.load(Ordering::Relaxed) as f64;
+    if last <= 0.0 {
+        return f64::MAX;
+    }
+    now_ms() - last
+}
+
+/// One caller per `PROBE_EVERY_MS` wins the right to test a down bridge.
+fn claim_probe_slot() -> bool {
+    let now = now_ms();
+    let prev = LAST_PROBE_MS.load(Ordering::Relaxed) as f64;
+    if now - prev < PROBE_EVERY_MS {
+        return false;
+    }
+    LAST_PROBE_MS
+        .compare_exchange(
+            prev as u64,
+            now as u64,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+}
 
 /// Per-account (HD index) serialization. Two txs from the SAME vplayer must never be
 /// in flight together: the pooled `SigningStargateClient` caches the account sequence,
@@ -77,6 +202,21 @@ pub async fn call(
     args: Value,
     timeout_secs: u64,
 ) -> Result<Value, String> {
+    // Fail fast while the bridge is known dead — BEFORE taking the account lock or a
+    // SIGN_GATE permit. Waiting the full 60s on a webview that is not listening does
+    // not make the tx land; it just holds one of 8 permits hostage, so a dead bridge
+    // used to cap the whole app at 8 doomed signs per minute and kept every caller
+    // blocked for a minute apiece. One probe per PROBE_EVERY_MS still goes through, so
+    // recovery is noticed without anyone asking.
+    if matches!(op, "sign" | "signup") && is_down() && !claim_probe_slot() {
+        let h = health();
+        return Err(format!(
+            "virtual-player bridge is not answering ({} consecutive timeouts, silent {}s) \
+             — failing fast instead of queueing; the watchdog reloads the webview to recover",
+            h["consecutive_timeouts"], h["silent_ms"].as_u64().unwrap_or(0) / 1000
+        ));
+    }
+
     // Serialize per account FIRST (before the global gate, so a same-account tx waiting
     // its turn doesn't hold a scarce SIGN_GATE permit). Held for the whole round-trip so
     // one vplayer's txs never race their cached sequence.
@@ -115,6 +255,7 @@ pub async fn call(
 
     match tokio::time::timeout(Duration::from_secs(timeout_secs), rx).await {
         Ok(Ok(resp)) => {
+            note_response();
             if resp.success {
                 Ok(resp.data)
             } else {
@@ -127,6 +268,7 @@ pub async fn call(
         }
         Err(_) => {
             cleanup(&req_id).await;
+            note_timeout();
             Err(format!(
                 "virtual-player op '{}' timed out after {}s (is the app signed in?)",
                 op, timeout_secs
@@ -159,6 +301,10 @@ async fn cleanup(req_id: &str) {
 }
 
 pub async fn resolve(resp: VPlayerResponse) {
+    // Stamp liveness BEFORE the lookup: a response whose caller already gave up
+    // is still proof that the webview is answering, and it is exactly the signal
+    // that ends a fail-fast window early.
+    note_response();
     let sender = {
         let mut inflight = INFLIGHT.lock().await;
         inflight.remove(&resp.req_id)
@@ -176,4 +322,80 @@ pub async fn resolve(resp: VPlayerResponse) {
 pub async fn vplayer_response(response: VPlayerResponse) -> Result<(), String> {
     resolve(response).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+
+    /// These assertions drive process-global liveness statics, so they must not
+    /// interleave with each other.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset() {
+        CONSEC_TIMEOUTS.store(0, Ordering::SeqCst);
+        LAST_RESPONSE_MS.store(0, Ordering::SeqCst);
+        LAST_PROBE_MS.store(0, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn a_bridge_that_answers_is_never_down() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset();
+        // Even a long run of timeouts does not condemn a bridge that is also
+        // answering: a busy app times individual calls out while healthy.
+        for _ in 0..10 {
+            note_timeout();
+            note_response();
+        }
+        assert!(!is_down(), "responses must clear the timeout streak");
+        reset();
+    }
+
+    #[test]
+    fn sustained_timeouts_plus_silence_is_down() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset();
+        // Fresh silence (last response = now) is not yet down…
+        note_response();
+        for _ in 0..DOWN_AFTER_TIMEOUTS {
+            note_timeout();
+        }
+        assert!(!is_down(), "recent response means the silence test fails");
+
+        // …but the same streak with the last response well in the past is.
+        LAST_RESPONSE_MS.store((now_ms() - DOWN_SILENCE_MS - 1_000.0) as u64, Ordering::SeqCst);
+        assert!(is_down(), "sustained timeouts + silence = down");
+
+        // One late answer is enough to call it back.
+        note_response();
+        assert!(!is_down(), "a single response ends the outage");
+        reset();
+    }
+
+    #[test]
+    fn a_bridge_that_never_answered_needs_the_full_streak() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset();
+        note_timeout();
+        assert!(!is_down(), "one timeout is not evidence");
+        for _ in 1..DOWN_AFTER_TIMEOUTS {
+            note_timeout();
+        }
+        assert!(is_down(), "never-answered + full streak = down");
+        reset();
+    }
+
+    #[test]
+    fn probe_slot_is_rate_limited_but_always_reopens() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset();
+        assert!(claim_probe_slot(), "first probe goes through");
+        assert!(!claim_probe_slot(), "second is throttled");
+        // Backdate the last probe: the window must reopen, or a fail-fast
+        // bridge would never be retested and could never be seen to recover.
+        LAST_PROBE_MS.store((now_ms() - PROBE_EVERY_MS - 1_000.0) as u64, Ordering::SeqCst);
+        assert!(claim_probe_slot(), "window reopens after PROBE_EVERY_MS");
+        reset();
+    }
 }

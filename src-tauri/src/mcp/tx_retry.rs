@@ -78,8 +78,16 @@ impl ErrorClass {
     }
 
     /// Endpoint pressure (as opposed to per-account state) — feeds AIMD.
+    ///
+    /// `BridgeDown` is deliberately NOT pressure. It means our own webview
+    /// stopped answering the signing round-trip; the node may be answering in
+    /// 20ms. Counting it halved READ-loop concurrency (5 of a possible 24)
+    /// during the 2026-08-20 outage — throttling the one subsystem that still
+    /// worked, and slowing the scans needed to recover. Feeding AIMD from a
+    /// local failure makes the app punish itself for a fault the endpoint had
+    /// no part in.
     fn is_pressure(self) -> bool {
-        matches!(self, ErrorClass::RateLimited | ErrorClass::Timeout | ErrorClass::BridgeDown)
+        matches!(self, ErrorClass::RateLimited | ErrorClass::Timeout)
     }
 }
 
@@ -101,14 +109,23 @@ pub fn classify(raw: &str) -> ErrorClass {
         ErrorClass::InvalidTarget
     } else if l.contains("429") || l.contains("too many requests") || l.contains("rate limit") {
         ErrorClass::RateLimited
-    } else if l.contains("timed out") || l.contains("timeout") {
-        ErrorClass::Timeout
     } else if l.contains("channel closed")
         || l.contains("failed to emit")
         || l.contains("gate closed")
         || l.contains("bridge")
+        || l.contains("virtual-player op")
+        || l.contains("tx-queue op")
+        || l.contains("façade unavailable")
+        || l.contains("facade unavailable")
     {
+        // BEFORE the generic timeout test on purpose. The bridge's own message
+        // is "virtual-player op 'sign' timed out after 60s (is the app signed
+        // in?)" — it contains "timed out", so it used to classify as Timeout
+        // and feed endpoint AIMD. The distinction that matters is not "did we
+        // wait" but "who failed to answer": the node, or our own webview.
         ErrorClass::BridgeDown
+    } else if l.contains("timed out") || l.contains("timeout") {
+        ErrorClass::Timeout
     } else {
         ErrorClass::Other
     }
@@ -391,8 +408,14 @@ mod tests {
         assert_eq!(classify("code 7"), ErrorClass::InsufficientCharge);
         assert_eq!(classify("player halted"), ErrorClass::PlayerOffline);
         assert_eq!(classify("HTTP 429 Too Many Requests"), ErrorClass::RateLimited);
-        assert_eq!(classify("virtual-player op 'sign' timed out after 60s"), ErrorClass::Timeout);
+        // A bridge timeout is a BRIDGE failure, not endpoint slowness — even
+        // though its text says "timed out". Regression guard for the outage
+        // where this misread throttled the read loops instead of the webview.
+        assert_eq!(classify("virtual-player op 'sign' timed out after 60s"), ErrorClass::BridgeDown);
         assert_eq!(classify("virtual-player bridge channel closed"), ErrorClass::BridgeDown);
+        assert_eq!(classify("tx-queue op 'snapshot' timed out after 30s"), ErrorClass::BridgeDown);
+        // A genuine endpoint timeout still classifies as Timeout.
+        assert_eq!(classify("error sending request: operation timed out"), ErrorClass::Timeout);
         assert_eq!(classify("something novel"), ErrorClass::Other);
     }
 
@@ -416,6 +439,9 @@ mod tests {
         // Uncertain classes still count as pressure for the AIMD controller.
         assert!(ErrorClass::Timeout.is_pressure());
         assert!(ErrorClass::RateLimited.is_pressure());
+        // Our own webview failing is not the endpoint's fault: it must never
+        // throttle the read loops.
+        assert!(!ErrorClass::BridgeDown.is_pressure());
         assert!(!ErrorClass::SequenceMismatch.is_pressure());
     }
 
