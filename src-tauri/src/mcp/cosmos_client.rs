@@ -212,6 +212,29 @@ impl CosmosClient {
             .unwrap_or_default())
     }
 
+    /// How many of an entity type exist on-chain right now, via the LCD's
+    /// `pagination.count_total` (one request, no page walk). For structs this
+    /// counts LIVE objects only — the chain prunes destroyed structs, so it is
+    /// the honest "deployed" figure where the indexer's `struct` table keeps
+    /// every corpse (96k destroyed rows and counting).
+    pub async fn count_entities(&self, entity_type: &str) -> Result<u64, String> {
+        let path = Self::entity_path(entity_type)?;
+        let base = self.reactor_api.read().unwrap().clone();
+        let url = format!(
+            "{}/structs/{}?pagination.limit=1&pagination.count_total=true",
+            base.trim_end_matches('/'),
+            path
+        );
+        let v = get_json(&url).await?;
+        v.get("pagination")
+            .and_then(|p| p.get("total"))
+            .and_then(|t| {
+                t.as_u64()
+                    .or_else(|| t.as_str().and_then(|s| s.parse().ok()))
+            })
+            .ok_or_else(|| format!("LCD {} count: no pagination.total", entity_type))
+    }
+
     /// The permission bitmask player `player_id` holds on object `object_id`.
     ///
     /// Permission records are keyed `{objectId}@{playerId}`, so this is a plain

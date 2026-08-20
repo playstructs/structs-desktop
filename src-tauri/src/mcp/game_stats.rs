@@ -81,8 +81,6 @@ struct Cache {
     totals: Value,          // object; see `snapshot`
     guilds: Vec<Value>,     // ranked guild rows
     players_top: Value,     // {alpha:[rows], ore:[rows], structs_load:[rows]}
-    structs_by_type: Vec<Value>,
-    structs_by_ambit: Vec<Value>,
     guild_energy: Vec<Value>, // per-guild grid rollup: draw/load/capacity in mW
     series: VecDeque<Value>, // {height, events, combat, tx, raids, structs, fuel}
     counters: BlockCounters,
@@ -197,8 +195,6 @@ fn snapshot() -> Value {
             "totals": c.totals,
             "guilds": c.guilds,
             "players_top": c.players_top,
-            "structs_by_type": c.structs_by_type,
-            "structs_by_ambit": c.structs_by_ambit,
             "guild_energy": c.guild_energy,
             "series": c.series.iter().cloned().collect::<Vec<_>>(),
         })
@@ -447,9 +443,13 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
                     "alloc_load": load, "capacity": cap })
         })
         .collect();
+    // Ranked by structs draw: capacity concentrates in a handful of hub
+    // players (verified live: only 75 grid capacity rows exist), so most
+    // guilds legitimately show zero capacity — draw is the metric every
+    // guild actually competes on.
     guild_energy.sort_by(|a, b| {
-        num(b.get("capacity"))
-            .partial_cmp(&num(a.get("capacity")))
+        num(b.get("structs_draw"))
+            .partial_cmp(&num(a.get("structs_draw")))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -471,53 +471,57 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
         .filter(|r| text(r.get("status")) == "away")
         .count() as u64;
 
-    // Structs: the census, and the cost center.
-    let (struct_rows, cut) = walk_pages(|p| client.guild.struct_list_all(p)).await?;
-    truncated |= cut;
-    let type_catalog = client.guild.struct_type_catalog().await.unwrap_or(Value::Null);
-    let mut type_names: HashMap<String, String> = HashMap::new();
-    for row in type_catalog.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-        let id = text(row.get("id"));
-        let name = {
-            let t = text(row.get("type"));
-            if t.is_empty() { text(row.get("name")) } else { t }
-        };
-        if !id.is_empty() && !name.is_empty() {
-            type_names.insert(id, name);
+    // Structs. The indexer's `struct` table keeps every corpse (verified
+    // live: 138,849 rows, 96,253 destroyed) — orders of magnitude past any
+    // sane page walk, and a truncated walk silently reported 11,951 of
+    // 42,608 live structs. Two honest sources instead:
+    //  - deployed count: the LCD's pagination.total (the chain prunes
+    //    destroyed structs, so this IS the live count; one request);
+    //  - recent losses: the list orders `updated_at DESC`, so walk only
+    //    until rows age past 24h and count destructions inside the window
+    //    by `destroyed_block`.
+    let structs_total = client.count_entities("struct").await.unwrap_or(0);
+    let day_ago_ms = crate::hasher::types::now_millis() - 24.0 * 3600.0 * 1000.0;
+    // 24h of block time at 5.28s/block, against the grass-fed height.
+    let day_ago_block = with_cache(|c| c.block_height).saturating_sub(16_363) as f64;
+    let mut destroyed_24h: u64 = 0;
+    'day_walk: for page in 1..=80u32 {
+        let p = client.guild.struct_list_all(page).await?;
+        let done = !p.has_more;
+        for row in &p.items {
+            let fresh = crate::mcp::raid_view::parse_guild_time(&text(row.get("updated_at")))
+                .map(|ms| ms >= day_ago_ms)
+                .unwrap_or(false);
+            if !fresh {
+                break 'day_walk;
+            }
+            let destroyed = row
+                .get("is_destroyed")
+                .map(|v| v.as_bool().unwrap_or_else(|| num(Some(v)) != 0.0))
+                .unwrap_or(false);
+            if destroyed && num(row.get("destroyed_block")) >= day_ago_block {
+                destroyed_24h += 1;
+            }
+        }
+        if done {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(INTER_PAGE_DELAY_MS)).await;
+    }
+
+    // Who is actually playing: lastAction is a per-player block-height
+    // anchor, so "acted within the last 24h of blocks" is one grid walk.
+    let mut active_24h: u64 = 0;
+    {
+        let (rows, cut) =
+            walk_pages(|p| client.guild.grid_by_attribute_type("lastAction", p)).await?;
+        truncated |= cut;
+        for row in rows {
+            if text(row.get("object_type")) == "player" && num(row.get("val")) >= day_ago_block {
+                active_24h += 1;
+            }
         }
     }
-    let mut by_type: HashMap<String, (u64, u64)> = HashMap::new(); // (alive, destroyed)
-    let mut by_ambit: HashMap<String, u64> = HashMap::new();
-    let mut structs_destroyed: u64 = 0;
-    for row in &struct_rows {
-        let destroyed = row
-            .get("is_destroyed")
-            .map(|v| v.as_bool().unwrap_or_else(|| num(Some(v)) != 0.0))
-            .unwrap_or(false);
-        let raw_type = text(row.get("type"));
-        let name = type_names.get(&raw_type).cloned().unwrap_or(raw_type);
-        let slot = by_type.entry(name).or_insert((0, 0));
-        if destroyed {
-            slot.1 += 1;
-            structs_destroyed += 1;
-        } else {
-            slot.0 += 1;
-            *by_ambit.entry(text(row.get("operating_ambit"))).or_insert(0) += 1;
-        }
-    }
-    let structs_total = struct_rows.len() as u64 - structs_destroyed;
-    let mut structs_by_type: Vec<Value> = by_type
-        .into_iter()
-        .map(|(name, (alive, destroyed))| {
-            json!({ "type": name, "count": alive, "destroyed": destroyed })
-        })
-        .collect();
-    structs_by_type.sort_by(|a, b| (num(b.get("count")) as u64).cmp(&(num(a.get("count")) as u64)));
-    let mut structs_by_ambit: Vec<Value> = by_ambit
-        .into_iter()
-        .map(|(ambit, count)| json!({ "ambit": ambit, "count": count }))
-        .collect();
-    structs_by_ambit.sort_by(|a, b| (num(b.get("count")) as u64).cmp(&(num(a.get("count")) as u64)));
 
     // Work queue depth: page count is enough, no need to hold rows.
     let (work_rows, cut) = walk_pages(|p| client.guild.work_all(p)).await?;
@@ -551,8 +555,6 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
 
     with_cache(|c| {
         c.players_top = players_top;
-        c.structs_by_type = structs_by_type;
-        c.structs_by_ambit = structs_by_ambit;
         c.truncated = truncated;
         // Guild rows deliberately carry no power figures — the renderer joins
         // `guild_energy` by guild_id, so the fast tier rebuilding the rows
@@ -567,7 +569,8 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             m.insert("fleets_total".into(), json!(fleets_total));
             m.insert("fleets_away".into(), json!(fleets_away));
             m.insert("structs_total".into(), json!(structs_total));
-            m.insert("structs_destroyed".into(), json!(structs_destroyed));
+            m.insert("destroyed_24h".into(), json!(destroyed_24h));
+            m.insert("active_24h".into(), json!(active_24h));
             m.insert("work_queue".into(), json!(work_queue));
             m.insert("raids_active".into(), json!(raids_active));
             m.insert("stored_ore".into(), json!(stored_ore));

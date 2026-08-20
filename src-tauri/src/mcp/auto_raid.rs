@@ -175,7 +175,7 @@ fn default_true() -> bool {
 }
 
 fn default_min_planet_ore() -> f64 {
-    2.0
+    0.0
 }
 
 impl Default for AutoRaidConfig {
@@ -212,7 +212,7 @@ impl Default for AutoRaidConfig {
             sweep_max_pages: 8,
             evaluate_per_scan: 25,
             raid_difficulty: 4,
-            min_planet_ore: 2.0,
+            min_planet_ore: 0.0,
             require_reachable_command_ship: true,
             dry_run: false,
         };
@@ -453,11 +453,19 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
     // ore. The owner explored, and our raid — clock running, proof in flight —
     // was voided for nothing. The defender kept all 65 ore.
     //
-    // So a nearly-dry planet is a trap: the closer it is to exhaustion, the more
-    // likely the prize evaporates before the proof lands.
-    if c.planet_ore_remaining <= cfg.min_planet_ore {
+    // That is real, but it is a LOST RAID, not a lost war — the raider survives,
+    // the defender has burned its own planet and every struct on it to escape,
+    // and the new planet is a target like any other. Defaulting to a refusal
+    // priced that risk far too high: measured 2026-08-19, this one gate blocked
+    // 19 of 88 candidates, including the two most-wanted targets on the board,
+    // in a galaxy where exhausted crusts are the norm rather than the exception.
+    //
+    // So it is OFF by default (`min_planet_ore: 0` = no minimum). Raise it to
+    // decline the thin end of the risk — a value of N skips planets with fewer
+    // than N ore in the ground.
+    if c.planet_ore_remaining < cfg.min_planet_ore {
         return Some(format!(
-            "planet has {:.0} ore left (<= min_planet_ore {:.0}) — defender re-planets and voids the raid",
+            "planet has {:.0} ore left (< min_planet_ore {:.0}) — defender re-planets and voids the raid",
             c.planet_ore_remaining, cfg.min_planet_ore
         ));
     }
@@ -1850,7 +1858,37 @@ mod tests {
         let cfg: AutoRaidConfig =
             serde_json::from_str(older).expect("an older config must still deserialize");
         assert!(cfg.enabled, "the operator's enabled flag must survive an upgrade");
-        assert_eq!(cfg.min_planet_ore, 2.0, "missing field takes the intended default");
+        assert_eq!(cfg.min_planet_ore, 0.0, "missing field takes the intended default");
+    }
+
+    /// An exhausted crust is a raid we might LOSE, not a raid we should refuse.
+    /// The defender escapes by destroying its own planet and everything on it,
+    /// and the raider comes home to pick a new target — so the default is to
+    /// take the shot. Raising the floor is how an operator declines it.
+    #[test]
+    fn an_exhausted_planet_is_raided_by_default_and_skipped_only_on_request() {
+        isolate_lists();
+        let mut cfg = AutoRaidConfig::default();
+        assert_eq!(cfg.min_planet_ore, 0.0, "the crust guard ships OFF");
+
+        let mut c = cand();
+        c.planet_ore_remaining = 0.0;
+        assert!(
+            gate(&c, &cfg, 0.0).is_none(),
+            "a dry planet must be raidable by default, got {:?}",
+            gate(&c, &cfg, 0.0)
+        );
+
+        // Opting back in: N skips planets with fewer than N ore in the ground.
+        cfg.min_planet_ore = 2.0;
+        assert!(gate(&c, &cfg, 0.0).is_some(), "0 ore must be skipped at a floor of 2");
+        c.planet_ore_remaining = 1.0;
+        assert!(gate(&c, &cfg, 0.0).is_some(), "1 ore must be skipped at a floor of 2");
+        c.planet_ore_remaining = 2.0;
+        assert!(
+            gate(&c, &cfg, 0.0).is_none(),
+            "the floor is inclusive — exactly N must still be raidable"
+        );
     }
 
     #[test]
@@ -1946,13 +1984,16 @@ mod tests {
         assert_eq!(calculate_difficulty(SHIELD, SHIELD), 1);
     }
 
-    /// A planet about to run dry is a trap: its owner re-planets when the crust
-    /// empties, which voids the raid as `demilitarized` with zero ore seized.
-    /// Observed live on 2-6607 — clock armed, proof in flight, prize gone.
+    /// The shape the crust guard exists for, held onto for the operator who
+    /// turns it back on: a fat pile of STORED ore over a dry crust. Observed
+    /// live on 2-6607 — clock armed, proof in flight, owner re-planeted, prize
+    /// gone. The guard now ships off (see
+    /// `an_exhausted_planet_is_raided_by_default_and_skipped_only_on_request`),
+    /// so this asserts it still bites once asked for.
     #[test]
-    fn a_nearly_exhausted_planet_is_gated_out() {
+    fn a_nearly_exhausted_planet_is_gated_out_when_the_guard_is_enabled() {
         isolate_lists();
-        let cfg = AutoRaidConfig::default();
+        let cfg = AutoRaidConfig { min_planet_ore: 2.0, ..AutoRaidConfig::default() };
         let mut c = cand();
         // Plenty of STORED ore — the prize looks great — but the crust is dry.
         c.stored_ore = 500.0;

@@ -21,17 +21,21 @@
   var state = {
     booted: false,
     snap: null,
-    metric: { key: 'alpha', dir: -1 }, // sortControl contract
+    metric: { key: 'structs_load', dir: -1 }, // sortControl contract
     renderTimer: null,
     lastRender: 0,
   };
 
   var SERIES_CAP = 720; // mirror of the Rust ring
 
+  // Structs load first and default: it is the one metric the whole galaxy
+  // competes on (top ranks trade places between guilds). The live alpha
+  // distribution is one whale and a flat tail, and stored ore is a handful
+  // of grams — real but dull as a first impression.
   var METRICS = [
-    { key: 'alpha', label: 'alpha', icon: 'sui-icon-alpha-matter', fmt: function (v) { return H.fmtAlpha(v); } },
-    { key: 'ore', label: 'ore', icon: 'sui-icon-alpha-ore', fmt: function (v) { return H.fmtOre(v); } },
     { key: 'structs_load', label: 'structs load', icon: 'sui-icon-deployed-structs', fmt: function (v) { return H.fmtWatts(v); } },
+    { key: 'ore', label: 'ore', icon: 'sui-icon-alpha-ore', fmt: function (v) { return H.fmtOre(v); } },
+    { key: 'alpha', label: 'alpha', icon: 'sui-icon-alpha-matter', fmt: function (v) { return H.fmtAlpha(v); } },
   ];
   function metricDef(key) {
     for (var i = 0; i < METRICS.length; i++) if (METRICS[i].key === key) return METRICS[i];
@@ -98,14 +102,15 @@
     var strip = H.el('div', 'hstrip');
     strip.appendChild(H.statTile('Block', H.fmtInt(state.snap.block_height), null, 'ok'));
     strip.appendChild(H.statTile('Players', H.fmtInt(num(t.players)), 'sui-icon-players'));
+    strip.appendChild(H.statTile(['Active', 'last 24h'], H.fmtInt(num(t.active_24h)), null, 'ok'));
     strip.appendChild(H.statTile('Guilds', H.fmtInt(num(t.guilds))));
     strip.appendChild(H.statTile(['Planets', 'complete / found'],
       H.fmtInt(num(t.planets_complete)) + ' / ' + H.fmtInt(num(t.planets_total))));
     strip.appendChild(H.statTile('Structs', H.fmtInt(num(t.structs_total)), 'sui-icon-deployed-structs'));
-    // The indexer sweeps destroyed rows out after STRUCT_SWEEP_DELAY, so this
-    // is recent wreckage, not an all-time body count — the caption says so.
-    strip.appendChild(H.statTile(['Destroyed', 'recent'], H.fmtInt(num(t.structs_destroyed)), null,
-      num(t.structs_destroyed) > 0 ? 'muted' : null));
+    // A bounded recent-window count: the all-time figure (96k and counting)
+    // is history, not news.
+    strip.appendChild(H.statTile(['Destroyed', 'last 24h'], H.fmtInt(num(t.destroyed_24h)), null,
+      num(t.destroyed_24h) > 0 ? 'live' : 'muted'));
     strip.appendChild(H.statTile(['Fleets', 'away / total'],
       H.fmtInt(num(t.fleets_away)) + ' / ' + H.fmtInt(num(t.fleets_total))));
     strip.appendChild(H.statTile('Live Raids', H.fmtInt(num(t.raids_active)), 'icon-raid',
@@ -113,12 +118,13 @@
     strip.appendChild(H.statTile('Work Queue', H.fmtInt(num(t.work_queue)), 'icon-in-progress'));
     strip.appendChild(H.statTile(['Alpha Infused', 'all reactors'],
       H.fmtAlpha(num(t.total_alpha)), 'sui-icon-alpha-matter'));
-    // Same grid-rollup numbers as the ENERGY GRID card — one source of truth
-    // (the per-guild power/stats endpoint mixes units upstream; unused here).
+    // Same grid-rollup numbers as the ENERGY GRID card — one source of truth,
+    // and the same vocabulary: draw vs delivered, never draw+routed (which
+    // double-counts the re-export leg and reads as an over-capacity grid).
     var gridCap = num(t.player_capacity);
-    strip.appendChild(H.statTile(['Grid', 'load / capacity'],
+    strip.appendChild(H.statTile(['Grid', 'draw / delivered'],
       gridCap == null ? '—'
-        : H.fmtWatts((num(t.structs_draw) || 0) + (num(t.alloc_load) || 0)) + ' / ' + H.fmtWatts(gridCap),
+        : H.fmtWatts(num(t.structs_draw) || 0) + ' / ' + H.fmtWatts(gridCap),
       'sui-icon-energy'));
     strip.appendChild(H.statTile(['Stored Ore', 'stealable'], H.fmtOre(num(t.stored_ore)), 'sui-icon-alpha-ore'));
     strip.appendChild(H.statTile(['Ore In Ground', 'unmined'], H.fmtOre(num(t.ground_ore)), null, 'muted'));
@@ -243,35 +249,45 @@
     var t = state.snap.totals || {};
     var draw = num(t.structs_draw), alloc = num(t.alloc_load), cap = num(t.player_capacity);
 
+    // Vocabulary matters here: player-level grid `load` is power a hub player
+    // routes ONWARD (to substations), so adding it to structs draw and calling
+    // the sum "demand" double-counts the re-export leg — the live numbers made
+    // that plain (draw 10.8MW + routed 23.6MW vs 28.5MW delivered).
     var strip = H.el('div', 'hstrip');
     strip.style.marginBottom = '10px';
     strip.appendChild(H.statTile(['Structs Draw', 'deployed structs'],
       H.fmtWatts(draw), 'sui-icon-deployed-structs'));
-    strip.appendChild(H.statTile(['Allocations', 'non-struct load'], H.fmtWatts(alloc)));
-    strip.appendChild(H.statTile(['Capacity', 'delivered to players'],
+    strip.appendChild(H.statTile(['Routed Onward', 'hub allocations'], H.fmtWatts(alloc)));
+    strip.appendChild(H.statTile(['Delivered', 'direct-fed capacity'],
       H.fmtWatts(cap), 'sui-icon-energy'));
-    var util = cap > 0 ? (draw + alloc) / cap : null;
-    strip.appendChild(H.statTile('Utilization',
+    var util = cap > 0 && draw != null ? draw / cap : null;
+    strip.appendChild(H.statTile(['Structs Share', 'of delivered power'],
       util == null ? '—' : Math.round(util * 100) + '%', null,
       util == null ? 'muted' : (util > 0.9 ? 'live' : 'ok')));
     body.appendChild(strip);
 
+    // Guilds ranked by draw, bar relative to the leader. Capacity concentrates
+    // in a handful of hub players, so most guilds honestly have none — the
+    // figure is appended only where it exists.
     var rows = state.snap.guild_energy || [];
     if (!rows.length) {
       body.appendChild(H.stateBlock('info', 'Loading…'));
     } else {
+      var top = num(rows[0].structs_draw) || 1;
       rows.forEach(function (g) {
-        var gDraw = num(g.structs_draw) + num(g.alloc_load);
-        var gCap = num(g.capacity);
+        var gDraw = num(g.structs_draw) || 0;
+        var gCap = num(g.capacity) || 0;
         var line = H.el('div');
         line.style.cssText = 'display:grid;grid-template-columns:minmax(150px,1fr) minmax(60px,120px) auto;gap:8px;align-items:center;padding:2px 0;';
         var name = H.el('span', 'sui-text-hint', g.name || g.guild_id);
         name.style.textAlign = 'left';
         line.appendChild(name);
-        line.appendChild(H.progressBar(gCap > 0 ? gDraw / gCap : 0));
+        line.appendChild(H.progressBar(gDraw / top));
         var val = H.el('span', 'ops-val');
-        val.style.textAlign = 'right';
-        val.textContent = H.fmtWatts(gDraw) + ' / ' + H.fmtWatts(gCap);
+        val.style.cssText = 'text-align:right;white-space:nowrap;';
+        // draw · delivered — the tile captions above define the vocabulary,
+        // so the row doesn't repeat the word and wrap itself onto three lines.
+        val.textContent = H.fmtWatts(gDraw) + (gCap > 0 ? ' · ' + H.fmtWatts(gCap) : '');
         line.appendChild(val);
         body.appendChild(line);
       });

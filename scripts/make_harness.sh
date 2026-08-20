@@ -46,12 +46,15 @@ cat > "$FIX" <<'EOF'
         tx: 4 + (i % 7),
         raids: (i > n - 40) ? 2 : 1,
         structs: 5980 + Math.floor(i / 12),
-        draw: 2.6e12 + i * 2.2e8,
+        draw: 1.05e10 + i * 1.4e6,
       });
     }
     return out;
   }
   function mkPlayers(metric) {
+    // Values mirror the LIVE distributions (2026-08-19): alpha is one whale
+    // then a flat 1Kg tail, stored ore is a 544g leader over ~100g rows, and
+    // structs load is a competitive ~6-13KW band.
     var rows = [];
     for (var i = 1; i <= 25; i++) {
       rows.push({
@@ -62,22 +65,23 @@ cat > "$FIX" <<'EOF'
         // String-on-purpose: the Guild API sends numerics as strings and the
         // page must survive that end-to-end.
         pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":0,"background":3}',
-        guild_name: 'Guild ' + (1 + (i % 8)),
-        tag: 'G' + (1 + (i % 8)),
-        value: metric === 'alpha' ? (26 - i) * 1.7e9 : (metric === 'ore' ? (26 - i) * 137 : (26 - i) * 2.5e8),
+        guild_name: 'Guild ' + (1 + (i % 5)),
+        tag: 'G' + (1 + (i % 5)),
+        value: metric === 'alpha' ? (i === 1 ? 4.934e10 : (26 - i) * 4.2e7)
+          : (metric === 'ore' ? (i === 1 ? 544 : (26 - i) * 4) : 6.4e6 + (26 - i) * 2.7e5),
       });
     }
     return rows;
   }
   var GUILDS = [];
-  for (var g = 1; g <= 8; g++) {
+  for (var g = 1; g <= 5; g++) {
     GUILDS.push({
       guild_id: '0-' + g,
-      name: ['SN Corp', 'Oh Energy', 'Void Miners', 'Deep Anchor', 'Redline', 'Kessler', 'Farside', 'Nomad'][g - 1],
+      name: ['SN Corp', 'Oh Energy', 'Void Miners', 'Deep Anchor', 'Redline'][g - 1],
       logo: null,
-      members: 900 - g * 97,
-      alpha: String((9 - g) * 4.2e9),   // string numeric on purpose
-      planets_complete: (9 - g) * 31,
+      members: g === 1 ? 2489 : 200 - g * 30,
+      alpha: String((6 - g) * 6.6e8),   // string numeric on purpose
+      planets_complete: (6 - g) * 31,
     });
   }
   var SNAPSHOT = {
@@ -88,37 +92,26 @@ cat > "$FIX" <<'EOF'
     sweeping: false,
     truncated: false,
     totals: {
-      players: '2412',                 // string numeric on purpose
-      guilds: 11,
-      planets_total: 3120, planets_complete: 1893,
-      structs_total: 6041, structs_destroyed: 812,
-      fleets_total: 2380, fleets_away: 74,
-      raids_active: 2, work_queue: 137,
-      total_alpha: 3.4e10, stored_ore: 9304, ground_ore: 4841,
-      structs_draw: 2.65e12, alloc_load: 0.8e12, player_capacity: 1.19e13,
+      players: '2662',                 // string numeric on purpose
+      active_24h: 2310, guilds: 5,
+      planets_total: 16671, planets_complete: 14107,
+      structs_total: 42625, destroyed_24h: 2,
+      fleets_total: 2564, fleets_away: 3,
+      raids_active: 3, work_queue: 3976,
+      total_alpha: 3.301e9, stored_ore: 9304, ground_ore: 4841,
+      structs_draw: 1.079e10, alloc_load: 2.364e10, player_capacity: 2.855e10,
     },
     guilds: GUILDS,
     guild_energy: GUILDS.map(function (g, i) {
       return { guild_id: g.guild_id, name: g.name,
-        structs_draw: (8 - i) * 3.1e11, alloc_load: (8 - i) * 0.9e11,
-        capacity: (8 - i) * 1.45e12 };
+        structs_draw: (5 - i) * 2.1e9, alloc_load: i === 0 ? 2.3e10 : 0,
+        capacity: i === 0 ? 2.7e10 : (i === 1 ? 1.5e9 : 0) };
     }),
     players_top: {
       alpha: mkPlayers('alpha'),
       ore: mkPlayers('ore'),
       structs_load: mkPlayers('structs_load'),
     },
-    structs_by_type: [
-      { type: 'mobile_artillery', count: 812, destroyed: 145 },
-      { type: 'tank', count: 640, destroyed: 202 },
-      { type: 'high_altitude_interceptor', count: 512, destroyed: 60 },
-      { type: 'sam_launcher', count: 469, destroyed: 41 },
-      { type: 'command_ship', count: 402, destroyed: 77 },
-    ],
-    structs_by_ambit: [
-      { ambit: 'land', count: 2410 }, { ambit: 'air', count: 1620 },
-      { ambit: 'water', count: 1102 }, { ambit: 'space', count: 909 },
-    ],
     series: mkSeries(240),
   };
   if (variant === 'unauth') {
@@ -127,7 +120,7 @@ cat > "$FIX" <<'EOF'
   if (variant === 'coldboot') {
     SNAPSHOT = { auth_ok: null, block_height: 0, fast_updated_ms: 0, heavy_updated_ms: 0,
       sweeping: true, truncated: false, totals: {}, guilds: [], players_top: {},
-      structs_by_type: [], structs_by_ambit: [], series: [] };
+      guild_energy: [], series: [] };
   }
 
   // ── Behaviour profiles ───────────────────────────────────────────────────

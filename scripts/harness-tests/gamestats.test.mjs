@@ -61,18 +61,19 @@ async function until(fn, ms = 5000) {
   const first = rows.children[0];
   check('rank + name + tag on row 1', /#1\s/.test(first.textContent) && /\[G\d\]/.test(first.textContent),
     first.textContent.slice(0, 60));
-  check('string numerics format (players tile)', body.textContent.includes('2,412'));
-  check('alpha value formatted on the game ladder', /42\.5Kg/.test(first.textContent),
+  check('string numerics format (players tile)', body.textContent.includes('2,662'));
+  check('default metric is structs load, watts ladder', /structs load/.test(first.textContent) && /KW/.test(first.textContent),
     first.textContent.slice(0, 80));
   const guilds = body.querySelectorAll('.sui-result-rows')[1];
-  check('guild leaderboard renders', guilds && guilds.children.length === 8,
+  check('guild leaderboard renders', guilds && guilds.children.length === 5,
     'got ' + (guilds ? guilds.children.length : 'none'));
   check('guild order is the directory order', /SN Corp/.test(guilds.children[0].textContent));
   check('sparklines render', body.querySelectorAll('#gs-trends svg path').length >= 5);
   const energyHeader = [...body.querySelectorAll('.sui-data-card-header')].some((h) => h.textContent === 'ENERGY GRID');
   check('energy grid card renders', energyHeader);
-  check('energy tiles formatted on the watts ladder', /Structs Draw/.test(body.textContent) && /Utilization/.test(body.textContent));
-  check('per-guild energy bars render', body.textContent.includes('SN Corp') && body.querySelectorAll('.bar').length >= 8);
+  check('energy tiles formatted on the watts ladder', /Structs Draw/.test(body.textContent) && /Structs Share/.test(body.textContent));
+  check('per-guild energy bars render', body.textContent.includes('SN Corp') && body.querySelectorAll('.bar').length >= 5);
+  check('24h tiles render', /Active/.test(body.textContent) && /Destroyed/.test(body.textContent));
   const universe = [...body.querySelectorAll('.sui-data-card-header')].some((h) => h.textContent === 'UNIVERSE');
   check('totals live in a titled UNIVERSE card', universe);
   check('ore is split stored vs in-ground', /Stored Ore/.test(body.textContent) && /Ore In Ground/.test(body.textContent));
