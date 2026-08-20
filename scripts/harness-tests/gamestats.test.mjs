@@ -68,8 +68,14 @@ async function until(fn, ms = 5000) {
   check('guild leaderboard renders', guilds && guilds.children.length === 8,
     'got ' + (guilds ? guilds.children.length : 'none'));
   check('guild order is the directory order', /SN Corp/.test(guilds.children[0].textContent));
-  check('sparklines render', body.querySelectorAll('#gs-trends svg path').length >= 4);
-  check('census shows losses', /\(145 lost\)/.test(body.textContent));
+  check('sparklines render', body.querySelectorAll('#gs-trends svg path').length >= 5);
+  const energyHeader = [...body.querySelectorAll('.sui-data-card-header')].some((h) => h.textContent === 'ENERGY GRID');
+  check('energy grid card renders', energyHeader);
+  check('energy tiles formatted on the watts ladder', /Structs Draw/.test(body.textContent) && /Utilization/.test(body.textContent));
+  check('per-guild energy bars render', body.textContent.includes('SN Corp') && body.querySelectorAll('.bar').length >= 8);
+  const universe = [...body.querySelectorAll('.sui-data-card-header')].some((h) => h.textContent === 'UNIVERSE');
+  check('totals live in a titled UNIVERSE card', universe);
+  check('ore is split stored vs in-ground', /Stored Ore/.test(body.textContent) && /Ore In Ground/.test(body.textContent));
 
   // Synthetic block tick: height updates, no new invoke, series grows.
   const before = w.__HARNESS_CALLS__.length;
@@ -88,9 +94,14 @@ async function until(fn, ms = 5000) {
   // Sweep push: full re-render from the pushed snapshot, throttled.
   const snap = JSON.parse(JSON.stringify(await w.__TAURI__.core.invoke('mcp_game_stats_snapshot')));
   snap.totals.players = '31337';
+  // Keep the pull fixture in step with the push: the page's 30s cadence
+  // re-pulls the snapshot, and in the real app pull and push read the same
+  // Rust cache — a harness where they disagree flakes this check whenever
+  // the cadence timer lands inside the poll window.
+  w.__HARNESS_FIXTURES__.mcp_game_stats_snapshot = snap;
   w.__HARNESS_EMIT__('game-stats-update', { tier: 'fast', snapshot: snap });
   w.__HARNESS_EMIT__('game-stats-update', { tier: 'fast', snapshot: snap });
-  const rerendered = await until(() => body.textContent.includes('31,337'), 3000);
+  const rerendered = await until(() => body.textContent.includes('31,337'), 5000);
   check('sweep push re-renders totals', !!rerendered);
   w.close();
 }

@@ -40,14 +40,21 @@ pub const WINDOW_LABEL: &str = "gamestats";
 /// window's whole history in memory forever.
 const SERIES_CAP: usize = 720;
 const FAST_INTERVAL_MS: f64 = 60_000.0;
-const HEAVY_INTERVAL_MS: f64 = 180_000.0;
+/// Heavy sweeps walk ~500 pages at live table sizes (~75s of paced reads), so
+/// they run on a 5-minute cadence; per-block grass keeps the window feeling
+/// live in between.
+const HEAVY_INTERVAL_MS: f64 = 300_000.0;
 /// Cap for the aggregator's own table walks. Deliberately separate from
-/// `guild_api::MAX_PAGES` (which protects interactive intel queries); at 100
-/// rows/page this covers 12,000 structs before flagging `truncated`.
-const MAX_LIST_PAGES: u32 = 120;
+/// `guild_api::MAX_PAGES` (which protects interactive intel queries). Sized
+/// from live table counts (2026-08-19: ~12k planets, ~12k structs, ~19k grid
+/// ore rows ≈ 190 pages) with headroom — the first cap of 120 pages actually
+/// tripped, and a dashboard that silently reports 12,000 of 12,400 planets is
+/// worse than a slower sweep. `truncated` still flags the day the galaxy
+/// outgrows this.
+const MAX_LIST_PAGES: u32 = 250;
 /// Pause between list pages so a heavy sweep reads as a slow drip to the
 /// Guild API rather than a burst.
-const INTER_PAGE_DELAY_MS: u64 = 75;
+const INTER_PAGE_DELAY_MS: u64 = 50;
 /// Leaderboard depth. The window shows a podium, not a census.
 const TOP_N: usize = 25;
 /// While unauthenticated, only re-probe once a minute — the fast sweep's
@@ -76,6 +83,7 @@ struct Cache {
     players_top: Value,     // {alpha:[rows], ore:[rows], structs_load:[rows]}
     structs_by_type: Vec<Value>,
     structs_by_ambit: Vec<Value>,
+    guild_energy: Vec<Value>, // per-guild grid rollup: draw/load/capacity in mW
     series: VecDeque<Value>, // {height, events, combat, tx, raids, structs, fuel}
     counters: BlockCounters,
 }
@@ -111,6 +119,17 @@ fn is_auth_error(e: &str) -> bool {
     e.contains("requires login")
 }
 
+/// Guild-API "alpha" fields (`guild/directory` alpha, roster alpha — both
+/// backed by `view.player_inventory.balance` / `view.reactor.fuel`) are
+/// FLOORED DISPLAY GRAMS, not chain units: the webapp prints them raw with a
+/// thousands separator. Everything downstream of this module formats alpha on
+/// the ualpha ladder (`H.fmtAlpha`, 1 g = 1e6 ualpha), the same ladder Team
+/// Ops uses for `alpha_ualpha` — so convert at ingestion, or a 59,000 g
+/// balance renders as "59mg".
+fn display_alpha_to_ualpha(grams: f64) -> f64 {
+    grams * 1e6
+}
+
 // ── Tier 0: grass hook ──────────────────────────────────────────────────────
 
 /// Called from `push_game_event` for EVERY grass frame. Counter math only —
@@ -134,7 +153,7 @@ pub fn note_event(app: &tauri::AppHandle, event: &GameEvent) {
                 "tx": c.counters.tx,
                 "raids": num(c.totals.get("raids_active")) as u64,
                 "structs": num(c.totals.get("structs_total")) as u64,
-                "fuel": num(c.totals.get("total_fuel")),
+                "draw": num(c.totals.get("structs_draw")),
             });
             c.counters = BlockCounters::default();
             if c.series.len() >= SERIES_CAP {
@@ -180,6 +199,7 @@ fn snapshot() -> Value {
             "players_top": c.players_top,
             "structs_by_type": c.structs_by_type,
             "structs_by_ambit": c.structs_by_ambit,
+            "guild_energy": c.guild_energy,
             "series": c.series.iter().cloned().collect::<Vec<_>>(),
         })
     })
@@ -214,9 +234,6 @@ async fn fast_sweep(client: &CosmosClient) -> Result<(), String> {
     let dir_rows: Vec<Value> = directory.as_array().cloned().unwrap_or_default();
 
     let mut guilds = Vec::with_capacity(dir_rows.len());
-    let mut total_fuel = 0.0;
-    let mut total_load = 0.0;
-    let mut total_capacity = 0.0;
     let mut total_alpha = 0.0;
     let mut player_count = 0.0;
     for row in &dir_rows {
@@ -224,31 +241,25 @@ async fn fast_sweep(client: &CosmosClient) -> Result<(), String> {
         if gid.is_empty() {
             continue;
         }
-        // Two small reads per guild; the directory is tens of rows, so this
-        // stays well under a hundred requests a minute.
-        let power = client.guild.guild_power_stats(&gid).await.unwrap_or(Value::Null);
+        // One small read per guild; the directory is tens of rows, so this
+        // stays well under a hundred requests a minute. Deliberately NOT
+        // `/guild/{id}/power/stats`: its total_load/total_capacity inherit
+        // view.player's unit-mixing floor bug — the heavy sweep's grid rollup
+        // (`guild_energy`) is the single power source of truth instead.
         let planets = client
             .guild
             .guild_planet_complete_count(&gid)
             .await
             .unwrap_or(Value::Null);
-        let fuel = num(power.get("total_fuel"));
-        let load = num(power.get("total_load"));
-        let capacity = num(power.get("total_capacity"));
-        total_fuel += fuel;
-        total_load += load;
-        total_capacity += capacity;
-        total_alpha += num(row.get("alpha"));
+        let alpha_ualpha = display_alpha_to_ualpha(num(row.get("alpha")));
+        total_alpha += alpha_ualpha;
         player_count += num(row.get("members"));
         guilds.push(json!({
             "guild_id": gid,
             "name": text(row.get("name")),
             "logo": row.get("logo").cloned().unwrap_or(Value::Null),
             "members": num(row.get("members")) as u64,
-            "alpha": num(row.get("alpha")),
-            "total_fuel": fuel,
-            "total_load": load,
-            "total_capacity": capacity,
+            "alpha": alpha_ualpha,
             "planets_complete": num(planets.get("count")) as u64,
         }));
     }
@@ -264,18 +275,12 @@ async fn fast_sweep(client: &CosmosClient) -> Result<(), String> {
         let t = c.totals.as_object_mut().map(|m| {
             m.insert("guilds".into(), json!(guild_count));
             m.insert("players".into(), json!(player_count as u64));
-            m.insert("total_fuel".into(), json!(total_fuel));
-            m.insert("total_load".into(), json!(total_load));
-            m.insert("total_capacity".into(), json!(total_capacity));
             m.insert("total_alpha".into(), json!(total_alpha));
         });
         if t.is_none() {
             c.totals = json!({
                 "guilds": guild_count,
                 "players": player_count as u64,
-                "total_fuel": total_fuel,
-                "total_load": total_load,
-                "total_capacity": total_capacity,
                 "total_alpha": total_alpha,
             });
         }
@@ -343,6 +348,8 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
     };
     let mut identities: HashMap<String, Identity> = HashMap::new();
     let mut alpha_by_player: HashMap<String, f64> = HashMap::new();
+    // player id → (guild id, guild name); feeds the per-guild energy rollup.
+    let mut guild_of: HashMap<String, (String, String)> = HashMap::new();
     for gid in guild_ids.iter().filter(|g| !g.is_empty()) {
         let roster = client.guild.guild_roster(gid).await.unwrap_or(Value::Null);
         for row in roster.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
@@ -350,7 +357,9 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             if pid.is_empty() {
                 continue;
             }
-            alpha_by_player.insert(pid.clone(), num(row.get("alpha")));
+            // Roster alpha is floored display grams — see display_alpha_to_ualpha.
+            alpha_by_player.insert(pid.clone(), display_alpha_to_ualpha(num(row.get("alpha"))));
+            guild_of.insert(pid.clone(), (gid.clone(), text(row.get("guild_name"))));
             identities.insert(
                 pid,
                 Identity {
@@ -371,15 +380,23 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
     // every object in the game, filtered to players.
     let mut ore_by_player: HashMap<String, f64> = HashMap::new();
     let mut sload_by_player: HashMap<String, f64> = HashMap::new();
-    let mut total_ore = 0.0;
+    // Grid `ore` holds two distinct populations (verified live: ~16k planet
+    // rows = ore still in the ground, ~2.3k player rows = stored/stealable
+    // ore). Summing them together would print a number that is neither.
+    let mut stored_ore = 0.0;
+    let mut ground_ore = 0.0;
     {
         let (rows, cut) = walk_pages(|p| client.guild.grid_by_attribute_type("ore", p)).await?;
         truncated |= cut;
         for row in rows {
             let val = num(row.get("val"));
-            total_ore += val;
-            if text(row.get("object_type")) == "player" {
-                ore_by_player.insert(text(row.get("object_id")), val);
+            match text(row.get("object_type")).as_str() {
+                "player" => {
+                    stored_ore += val;
+                    ore_by_player.insert(text(row.get("object_id")), val);
+                }
+                "planet" => ground_ore += val,
+                _ => {}
             }
         }
     }
@@ -393,6 +410,48 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             }
         }
     }
+    // Energy picture, straight from the grid in raw milliwatts. Deliberately
+    // NOT the `/guild/{id}/power/stats` endpoint: that sums view.player's
+    // total_load/total_capacity, whose floor() has an operator-precedence bug
+    // upstream (`floor(a + b / 1000)`) that adds milliwatts to watts. The
+    // grid rows are the source those columns are derived from.
+    let mut load_by_player: HashMap<String, f64> = HashMap::new();
+    let mut cap_by_player: HashMap<String, f64> = HashMap::new();
+    for (attr, map) in [("load", &mut load_by_player), ("capacity", &mut cap_by_player)] {
+        let (rows, cut) = walk_pages(|p| client.guild.grid_by_attribute_type(attr, p)).await?;
+        truncated |= cut;
+        for row in rows {
+            if text(row.get("object_type")) == "player" {
+                map.insert(text(row.get("object_id")), num(row.get("val")));
+            }
+        }
+    }
+    let structs_draw: f64 = sload_by_player.values().sum();
+    let alloc_load: f64 = load_by_player.values().sum();
+    let player_capacity: f64 = cap_by_player.values().sum();
+    // Per-guild rollup over roster membership (every player belongs to a
+    // guild, so the rosters cover the galaxy).
+    let mut by_guild: HashMap<String, (String, f64, f64, f64)> = HashMap::new(); // gid → (name, draw, load, cap)
+    for (pid, (gid, gname)) in &guild_of {
+        let e = by_guild
+            .entry(gid.clone())
+            .or_insert_with(|| (gname.clone(), 0.0, 0.0, 0.0));
+        e.1 += sload_by_player.get(pid).copied().unwrap_or(0.0);
+        e.2 += load_by_player.get(pid).copied().unwrap_or(0.0);
+        e.3 += cap_by_player.get(pid).copied().unwrap_or(0.0);
+    }
+    let mut guild_energy: Vec<Value> = by_guild
+        .into_iter()
+        .map(|(gid, (name, draw, load, cap))| {
+            json!({ "guild_id": gid, "name": name, "structs_draw": draw,
+                    "alloc_load": load, "capacity": cap })
+        })
+        .collect();
+    guild_energy.sort_by(|a, b| {
+        num(b.get("capacity"))
+            .partial_cmp(&num(a.get("capacity")))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Planets: status breakdown.
     let (planet_rows, cut) = walk_pages(|p| client.guild.planet_list_all(p)).await?;
@@ -495,6 +554,10 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
         c.structs_by_type = structs_by_type;
         c.structs_by_ambit = structs_by_ambit;
         c.truncated = truncated;
+        // Guild rows deliberately carry no power figures — the renderer joins
+        // `guild_energy` by guild_id, so the fast tier rebuilding the rows
+        // every minute can't wash out the (heavy-tier) honest numbers.
+        c.guild_energy = guild_energy;
         if !c.totals.is_object() {
             c.totals = json!({});
         }
@@ -507,7 +570,11 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             m.insert("structs_destroyed".into(), json!(structs_destroyed));
             m.insert("work_queue".into(), json!(work_queue));
             m.insert("raids_active".into(), json!(raids_active));
-            m.insert("total_ore".into(), json!(total_ore));
+            m.insert("stored_ore".into(), json!(stored_ore));
+            m.insert("ground_ore".into(), json!(ground_ore));
+            m.insert("structs_draw".into(), json!(structs_draw));
+            m.insert("alloc_load".into(), json!(alloc_load));
+            m.insert("player_capacity".into(), json!(player_capacity));
         }
         c.heavy_updated_ms = crate::hasher::types::now_millis();
     });
@@ -631,6 +698,15 @@ pub fn mcp_game_stats_snapshot() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roster_alpha_grams_convert_to_ualpha() {
+        // A 59,000 g balance (the Guild API's floored display form) must land
+        // on the Kg rung of the shared alpha ladder, not the mg rung: 5.9e10
+        // ualpha renders as "59Kg" exactly like Team Ops' alpha_ualpha.
+        let row = json!({ "alpha": "59000" });
+        assert_eq!(display_alpha_to_ualpha(num(row.get("alpha"))), 5.9e10);
+    }
 
     #[test]
     fn num_reads_strings_and_numbers() {

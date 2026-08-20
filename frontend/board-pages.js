@@ -3596,6 +3596,87 @@
       .catch(function (e) { alertInto('profiles-card', 'rejected: ' + e); });
   }
 
+  // The webapp ships art for every struct type at
+  // img/structs/<slug>/<slug>-struct-base.png. The slug is the kebab-cased
+  // class name for most types, but nine are abbreviated — that map lives in
+  // StructTypeArtSetBuilder, which is submodule code we do not edit, so it is
+  // mirrored here (it is presentation, and it belongs on this side anyway).
+  // Two types (Continental Power Plant, World Engine) genuinely have no art;
+  // they fall back to a glyph rather than a broken image.
+  var STRUCT_ART = {
+    'command ship': 'cmd-ship',
+    'ore extractor': 'extractor',
+    'ore refinery': 'refinery',
+    'field generator': 'generator',
+    'high altitude interceptor': 'interceptor',
+    'jamming satellite': 'jamming-sat',
+    'orbital shield generator': 'orb-shield',
+    'planetary defense cannon': 'pdc',
+    'sam launcher': 'sam-launcher',
+  };
+
+  function artSlug(name) {
+    var k = String(name || '').toLowerCase();
+    return STRUCT_ART[k] || k.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
+
+  // A struct type as the framed 44px portrait SUI already uses for result rows.
+  // `src` is RELATIVE on purpose: the same board is served from the Tauri asset
+  // root and from /board over HTTP, and an absolute /img path 404s on the
+  // latter (see pfpPortrait, which is relative for the same reason).
+  function structPortrait(name) {
+    var box = H.el('div', 'sui-result-row-portrait');
+    var frame = H.el('div', 'sui-result-row-portrait-image prof-art');
+    var im = H.el('img');
+    im.src = 'img/structs/' + artSlug(name) + '/' + artSlug(name) + '-struct-base.png';
+    im.alt = '';
+    // No art for this type — show the generic deploy glyph instead of the
+    // browser's broken-image box.
+    im.addEventListener('error', function () {
+      frame.removeChild(im);
+      frame.appendChild(H.el('i', H.iconClass('icon-deploy', 'sui-icon-md')));
+    });
+    frame.appendChild(im);
+    box.appendChild(frame);
+    return box;
+  }
+
+  // SUI ships an icon per ambit (sui-icon-water/land/air/space); using them
+  // rather than the word makes an ambit readable at a glance in a 332px drawer.
+  function ambitChip(ambit) {
+    var w = H.el('span', 'prof-ambit');
+    w.appendChild(H.el('i', 'sui-icon sui-icon-sm sui-icon-' + ambit));
+    w.appendChild(H.el('span', null, ambit));
+    w.title = ambit;
+    return w;
+  }
+
+  // The four slots of one (target, ambit), drawn as pips. THIS is what makes
+  // the section legible: `want` is not a free number, it is a claim on four
+  // chain slots shared with every other row in the same ambit. So each row
+  // shows all four — the ones earlier rows already claimed, its own, and what
+  // is left — and clicking a pip sets `want` directly.
+  //
+  // One-per-player types get a single locked pip: the chain rejects a second.
+  function slotPips(taken, want, free, onSet) {
+    var w = H.el('span', 'prof-pips');
+    var total = taken + want + free;
+    for (var i = 0; i < total; i++) {
+      var mine = i >= taken && i < taken + want;
+      var cls = 'prof-pip' + (i < taken ? ' is-taken' : mine ? ' is-mine' : '');
+      var pip = H.el('span', cls);
+      if (onSet && i >= taken) {
+        (function (n) {
+          pip.classList.add('is-clickable');
+          pip.title = 'keep ' + n;
+          pip.addEventListener('click', function () { onSet(n); });
+        })(i - taken + 1);
+      }
+      w.appendChild(pip);
+    }
+    return w;
+  }
+
   // ORDER IS PRIORITY, and slots free only when a hull dies — so a row moved is
   // a decision that persists for weeks. Reorder writes the whole document
   // because the order IS the data.
@@ -3629,7 +3710,7 @@
       title: p.id + (p.builtin ? '  (built-in)' : ''),
       subtitle: p.label,
       chips: chips,
-      onClick: function () { H.drawer(p.id, profileEditor(p)); },
+      onClick: function () { profiles.open = p.id; H.drawer(p.id, profileEditor(p)); },
     });
   }
 
@@ -3665,8 +3746,228 @@
     return id;
   }
 
+  // ── The build order ─────────────────────────────────────────────────────
+  //
+  // auto_build walks this list top to bottom and builds the first row it can
+  // afford and has a slot for, so the ORDER is the strategy and `want` is a
+  // claim on the four chain slots that (target, ambit) has. The first version
+  // of this section rendered `1. Tank   planet/land ×2` as plain text, which
+  // showed neither of those facts and gave no way to add a row at all.
+  //
+  // Everything below is derived from the synced type catalog: `category` fixes
+  // the target and `possible_ambit` fixes the legal ambits, so an author picks
+  // a struct and the impossible combinations are never offered.
+
+  function slotsPerAmbit() {
+    return (profiles.data && profiles.data.slots_per_ambit) || 4;
+  }
+
+  function catalogList() {
+    return (profiles.data && profiles.data.catalog) || [];
+  }
+
+  function catalogType(name) {
+    var k = String(name || '').toLowerCase();
+    var all = catalogList();
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].name.toLowerCase() === k) return all[i];
+    }
+    return null;
+  }
+
+  // want totals per "target/ambit", plus what each row is preceded by — the
+  // two numbers every pip strip needs.
+  function slotUse(loadout) {
+    var total = {}, before = [];
+    loadout.forEach(function (e) {
+      var k = e.target + '/' + e.ambit;
+      before.push(total[k] || 0);
+      total[k] = (total[k] || 0) + e.want;
+    });
+    return { total: total, before: before };
+  }
+
+  // "how full is every ambit" — the reason to add a row, so it sits above the
+  // list. An ambit at 0/4 is the gap that leaves a fleet with no answer.
+  function slotSummary(p) {
+    var use = slotUse(p.loadout).total;
+    var cap = slotsPerAmbit();
+    var byTarget = {};
+    catalogList().forEach(function (t) {
+      (byTarget[t.target] = byTarget[t.target] || {});
+      t.ambits.forEach(function (a) { byTarget[t.target][a] = true; });
+    });
+    var out = H.el('div');
+    ['fleet', 'planet'].forEach(function (target) {
+      var ambits = byTarget[target];
+      if (!ambits) return;
+      var val = H.el('span', 'prof-slotbar');
+      ['water', 'land', 'air', 'space'].forEach(function (a) {
+        if (!ambits[a]) return;
+        var n = use[target + '/' + a] || 0;
+        var chip = H.el('span', 'prof-slot' + (n === 0 ? ' is-empty' : n >= cap ? ' is-full' : ''));
+        chip.appendChild(H.el('i', 'sui-icon sui-icon-sm sui-icon-' + a));
+        chip.appendChild(H.el('span', null, n + '/' + cap));
+        chip.title = target + ' ' + a + ': ' + n + ' of ' + cap + ' slots claimed';
+        val.appendChild(chip);
+      });
+      out.appendChild(H.row(target === 'fleet' ? 'Fleet slots' : 'Planet slots', val));
+    });
+    return out;
+  }
+
+  // One build row: priority, art, what and where, its slot claim, and the
+  // controls that move or drop it.
+  function buildRow(p, i, use, save) {
+    var e = p.loadout[i];
+    var t = catalogType(e.type_name);
+    var cap = slotsPerAmbit();
+    var one = !!(t && t.one_per_player);
+    var taken = use.before[i];
+    var free = one ? 0 : Math.max(0, cap - taken - e.want);
+
+    var pips = slotPips(taken, one ? 1 : e.want, free, (p.builtin || one) ? null : function (n) {
+      e.want = n; save();
+    });
+    pips.title = one ? 'the chain allows one per player' : e.want + ' of ' + cap + ' slots';
+
+    // Where and how many both live on the subtitle line. The drawer is 332px:
+    // putting the pips in the row's right-hand `chips` section alongside the
+    // reorder controls starved the label block, and with `overflow-wrap:
+    // anywhere` already set for the drawer that rendered the type name one
+    // CHARACTER per line.
+    var sub = H.el('span', 'prof-sub');
+    sub.appendChild(ambitChip(e.ambit));
+    sub.appendChild(H.el('span', 'ops-muted', e.target));
+    if (!t) sub.appendChild(H.el('i', H.iconClass('icon-alert', 'sui-icon-sm')));
+    sub.appendChild(pips);
+
+    return H.resultRow({
+      lead: H.el('span', 'prof-pri', String(i + 1)),
+      portrait: structPortrait(e.type_name),
+      title: e.type_name,
+      subtitle: sub,
+      action: actionBar(p, p.loadout, i, save),
+    });
+  }
+
+  // The picker. One row per legal (type, ambit) pair, so a choice is a single
+  // click and an impossible pairing is never on screen. Rows that would be
+  // rejected — the ambit is full, or the loadout already claims that type
+  // there — stay visible but disabled, because a silently missing entry reads
+  // as a bug rather than as a rule.
+  function buildPicker(p, save, close) {
+    var panel = H.el('div', 'prof-picker');
+    var cap = slotsPerAmbit();
+    var use = slotUse(p.loadout).total;
+    var have = {}, owned = {};
+    p.loadout.forEach(function (e) {
+      have[e.target + '/' + e.ambit + '/' + e.type_name.toLowerCase()] = true;
+      // A one-per-player type is capped across the WHOLE player, not per
+      // ambit — a second Command Ship in space is a row auto_build would skip
+      // forever, so the type is spent everywhere once it appears anywhere.
+      owned[e.type_name.toLowerCase()] = true;
+    });
+
+    var all = catalogList();
+    if (!all.length) {
+      panel.appendChild(H.alertLine('struct catalog has not synced yet — open the game window once', 'icon-alert'));
+      return panel;
+    }
+
+    // One row per legal (type, ambit), ordered by ambit within each target.
+    // The slot strip above names the ambit that is empty, so the picker is
+    // read as "what can go in air?" — scattering the air options between a
+    // Cruiser and a Battleship makes that the reader's job instead.
+    var AMBIT_ORDER = { water: 0, land: 1, air: 2, space: 3 };
+    var pairs = [];
+    all.forEach(function (t) { t.ambits.forEach(function (a) { pairs.push({ t: t, a: a }); }); });
+    pairs.sort(function (x, y) {
+      return (x.t.target === y.t.target ? 0 : x.t.target === 'fleet' ? -1 : 1)
+        || (AMBIT_ORDER[x.a] - AMBIT_ORDER[y.a])
+        || ((x.t.draw || 0) - (y.t.draw || 0))
+        || (x.t.name < y.t.name ? -1 : 1);
+    });
+
+    // Draws exist to be compared against each other here, so they share one
+    // unit — scaleSet is the house helper for exactly that. Per-value
+    // formatting produced "50W / 0.1KW / 0.11KW" down the same column.
+    var pw = H.scaleSet(all.map(function (t) { return t.draw; }), 'power');
+
+    var list = H.resultTable();
+    pairs.forEach(function (pair) {
+      var t = pair.t, a = pair.a;
+      (function () {
+        var key = t.target + '/' + a;
+        var used = use[key] || 0;
+        var here = have[key + '/' + t.name.toLowerCase()];
+        var elsewhere = !here && t.one_per_player && owned[t.name.toLowerCase()];
+        var dup = here || elsewhere;
+        var full = used >= cap;
+        var sub = H.el('span', 'prof-sub');
+        sub.appendChild(ambitChip(a));
+        sub.appendChild(H.el('span', 'ops-muted', t.target));
+        // Draw is what actually decides whether a hull can stay online, so it
+        // belongs on the choosing screen — as text, because a second stat tile
+        // costs the title the width it needs.
+        if (t.draw != null) sub.appendChild(H.el('span', 'ops-muted', pw.fmt(t.draw)));
+
+        var chips = [];
+        if (here) chips.push(H.statTile('already', 'in loadout', null, 'muted'));
+        else if (elsewhere) chips.push(H.statTile('limit', 'one per player', null, 'muted'));
+        else if (full) chips.push(H.statTile(a + ' slots', used + '/' + cap, null, 'bad'));
+        else chips.push(H.statTile('free', (cap - used) + ' of ' + cap, null, 'ok'));
+
+        var row = H.resultRow({
+          portrait: structPortrait(t.name),
+          title: t.name,
+          subtitle: sub,
+          chips: chips,
+          onClick: (dup || full) ? null : function () {
+            p.loadout.push({ target: t.target, ambit: a, type_name: t.name, want: 1 });
+            close();
+            save();
+          },
+        });
+        if (dup || full) row.classList.add('is-disabled');
+        list.appendChild(row);
+      })();
+    });
+    panel.appendChild(list);
+    return panel;
+  }
+
+  function buildsSection(p, save, readOnly) {
+    var wrap = H.el('div');
+    wrap.appendChild(H.el('h4', null, 'Builds — priority order'));
+    wrap.appendChild(slotSummary(p));
+
+    var use = slotUse(p.loadout);
+    var list = H.resultTable();
+    list.classList.add('prof-builds');
+    p.loadout.forEach(function (_, i) { list.appendChild(buildRow(p, i, use, save)); });
+    wrap.appendChild(list);
+
+    if (p.builtin) return wrap;
+
+    // The picker opens in place, below the list it adds to. A modal would have
+    // to stack over the drawer, and the drawer is already the detail surface.
+    var slot = H.el('div');
+    var actions = H.el('div', 'cfg-actions');
+    var addB = massBtn('prof-add-' + p.id, 'icon-add', 'Add a build', 'sui-mod-primary');
+    addB.addEventListener('click', function () {
+      if (slot.firstChild) { slot.innerHTML = ''; return; }
+      slot.appendChild(buildPicker(p, save, function () { slot.innerHTML = ''; }));
+      if (slot.scrollIntoView) slot.scrollIntoView({ block: 'nearest' });
+    });
+    actions.appendChild(addB);
+    wrap.appendChild(actions);
+    wrap.appendChild(slot);
+    return wrap;
+  }
+
   function profileEditor(p) {
-    var body = H.el('div', 'cfg-section');
+    var body = H.el('div', 'cfg-section prof-editor');
     var save = function () { profSet({ action: 'save', id: p.id, profile: p }); };
     var readOnly = function () { rerenderProfiles(); };
 
@@ -3695,6 +3996,9 @@
       body.appendChild(H.row('Id', H.textBox(p.id, 'letters, digits, - or _', function (v) {
         var next = (v || '').trim();
         if (!next || next === p.id) return;
+        // The open drawer is tracked BY id, so it has to follow the rename or
+        // the repaint would find no subject and silently stop updating.
+        profiles.open = next;
         profSet({ action: 'rename', id: p.id, new_id: next });
       })));
     }
@@ -3739,14 +4043,8 @@
       { min: 0, max: 16, step: 1, width: '4em' },
       function (v) { if (p.builtin) return readOnly(); p.defence.guards_on_blocker = v; save(); })));
 
-    // ── Loadout: one line per entry ──
-    body.appendChild(H.el('h4', null, 'Builds — priority order'));
-    p.loadout.forEach(function (e, i) {
-      var val = H.el('span');
-      val.appendChild(H.el('span', 'ops-muted', e.target + '/' + e.ambit + '  \u00d7' + e.want + '  '));
-      val.appendChild(actionBar(p, p.loadout, i, save));
-      body.appendChild(H.row((i + 1) + '. ' + e.type_name, val));
-    });
+    // ── Builds ──
+    body.appendChild(buildsSection(p, save, readOnly));
 
     var actions = H.el('div', 'cfg-actions');
     var forkB = massBtn('prof-fork-' + p.id, 'icon-add', 'Fork', 'sui-mod-secondary');
@@ -3812,6 +4110,38 @@
     var fresh = renderProfilesCard();
     fresh.id = 'profiles-card';
     host.parentNode.replaceChild(fresh, host);
+    repaintOpenProfile();
+  }
+
+  // Every edit happens INSIDE the drawer, and most of what the drawer shows is
+  // derived — slot totals, pips, the coverage verdict. Repainting only the card
+  // behind it left all of that stale until the drawer was closed and reopened,
+  // so adding a build appeared to do nothing. Write the fresh body straight
+  // into the open drawer instead of calling H.drawer again, which would
+  // re-run the open animation on every keystroke.
+  function repaintOpenProfile() {
+    if (!profiles.open) return;
+    // H.drawer targets SUI's offcanvas when the runtime is present and falls
+    // back to #detail-overlay when it is not (the jsdom harness takes that
+    // path). Repaint whichever one is actually on screen — handling only the
+    // offcanvas made this untestable and left the fallback stale.
+    var oc = document.getElementById('sui-offcanvas');
+    var host = (oc && !oc.classList.contains('hidden')) ? oc.querySelector('.sui-offcanvas-body') : null;
+    if (!host) {
+      var ov = document.getElementById('detail-overlay');
+      host = ov && ov.querySelector('.detail-panel');
+    }
+    if (!host) { profiles.open = null; return; }
+    var fresh = null;
+    ((profiles.data && profiles.data.profiles) || []).forEach(function (x) {
+      if (x.id === profiles.open) fresh = x;
+    });
+    // Renamed or deleted out from under us — the drawer no longer has a subject.
+    if (!fresh) { profiles.open = null; return; }
+    var editor = profileEditor(fresh);
+    var prev = host.querySelector('.prof-editor');
+    if (prev) prev.parentNode.replaceChild(editor, prev);
+    else { host.innerHTML = ''; host.appendChild(editor); }
   }
 
   function renderProfiles(body) {

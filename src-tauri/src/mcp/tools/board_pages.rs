@@ -1744,6 +1744,11 @@ pub async fn mcp_profiles_get() -> Value {
         "assigned": assigned,
         "targets": crate::mcp::profile::TARGET_NAMES,
         "ambits": crate::mcp::profile::AMBIT_NAMES,
+        // The build picker is generated from this rather than free text: the
+        // chain already knows which (target, ambit) pairs each type may take.
+        // Empty means "catalog not synced yet", NOT "nothing is buildable".
+        "catalog": pr::catalog(),
+        "slots_per_ambit": crate::mcp::auto_build::SLOTS_PER_AMBIT,
         "schema": pr::SCHEMA,
     })
 }

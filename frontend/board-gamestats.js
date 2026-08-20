@@ -90,26 +90,51 @@
   // ── Renderers ─────────────────────────────────────────────────────────────
   function num(v) { var n = Number(v); return isFinite(n) ? n : null; }
 
-  function totalsStrip(t) {
+  // The whole header lives in one titled card, mirroring Diagnostics'
+  // SYSTEM HEALTH container — a bare tile strip floating over the page read
+  // as unfinished next to the carded sections below it.
+  function universeCard(t) {
+    var body = H.el('div');
     var strip = H.el('div', 'hstrip');
-    strip.style.marginBottom = '6px';
     strip.appendChild(H.statTile('Block', H.fmtInt(state.snap.block_height), null, 'ok'));
     strip.appendChild(H.statTile('Players', H.fmtInt(num(t.players)), 'sui-icon-players'));
     strip.appendChild(H.statTile('Guilds', H.fmtInt(num(t.guilds))));
     strip.appendChild(H.statTile(['Planets', 'complete / found'],
       H.fmtInt(num(t.planets_complete)) + ' / ' + H.fmtInt(num(t.planets_total))));
     strip.appendChild(H.statTile('Structs', H.fmtInt(num(t.structs_total)), 'sui-icon-deployed-structs'));
-    strip.appendChild(H.statTile('Destroyed', H.fmtInt(num(t.structs_destroyed)), null,
+    // The indexer sweeps destroyed rows out after STRUCT_SWEEP_DELAY, so this
+    // is recent wreckage, not an all-time body count — the caption says so.
+    strip.appendChild(H.statTile(['Destroyed', 'recent'], H.fmtInt(num(t.structs_destroyed)), null,
       num(t.structs_destroyed) > 0 ? 'muted' : null));
     strip.appendChild(H.statTile(['Fleets', 'away / total'],
       H.fmtInt(num(t.fleets_away)) + ' / ' + H.fmtInt(num(t.fleets_total))));
     strip.appendChild(H.statTile('Live Raids', H.fmtInt(num(t.raids_active)), 'icon-raid',
       num(t.raids_active) > 0 ? 'live' : null));
     strip.appendChild(H.statTile('Work Queue', H.fmtInt(num(t.work_queue)), 'icon-in-progress'));
-    strip.appendChild(H.statTile('Total Fuel', H.fmtWatts(num(t.total_fuel)), 'sui-icon-energy'));
-    strip.appendChild(H.statTile('Total Alpha', H.fmtAlpha(num(t.total_alpha)), 'sui-icon-alpha-matter'));
-    strip.appendChild(H.statTile('Total Ore', H.fmtOre(num(t.total_ore)), 'sui-icon-alpha-ore'));
-    return strip;
+    strip.appendChild(H.statTile(['Alpha Infused', 'all reactors'],
+      H.fmtAlpha(num(t.total_alpha)), 'sui-icon-alpha-matter'));
+    // Same grid-rollup numbers as the ENERGY GRID card — one source of truth
+    // (the per-guild power/stats endpoint mixes units upstream; unused here).
+    var gridCap = num(t.player_capacity);
+    strip.appendChild(H.statTile(['Grid', 'load / capacity'],
+      gridCap == null ? '—'
+        : H.fmtWatts((num(t.structs_draw) || 0) + (num(t.alloc_load) || 0)) + ' / ' + H.fmtWatts(gridCap),
+      'sui-icon-energy'));
+    strip.appendChild(H.statTile(['Stored Ore', 'stealable'], H.fmtOre(num(t.stored_ore)), 'sui-icon-alpha-ore'));
+    strip.appendChild(H.statTile(['Ore In Ground', 'unmined'], H.fmtOre(num(t.ground_ore)), null, 'muted'));
+    body.appendChild(strip);
+    // No sweep/refresh chatter up here — "sweeping"/"swept Xm ago" is engine
+    // vocabulary, and a player reads it as something being wrong. Sections
+    // that have no data yet say Loading…; a hit table cap gets one quiet
+    // hint because an undercount presented as a total would be a lie.
+    if (state.snap.truncated) {
+      var hint = H.el('div', 'sui-text-hint', 'counts are still catching up to the full galaxy');
+      hint.style.marginTop = '6px';
+      body.appendChild(hint);
+    }
+    var c = H.card('UNIVERSE', body);
+    c.style.marginBottom = '10px';
+    return c;
   }
 
   function pfpNode(row) {
@@ -131,7 +156,7 @@
     body.appendChild(toolbar);
     var rows = (state.snap.players_top && state.snap.players_top[def.key]) || [];
     if (!rows.length) {
-      body.appendChild(H.stateBlock('info', 'Sweeping the universe — leaderboards land with the first full sweep.'));
+      body.appendChild(H.stateBlock('info', 'Loading…'));
     } else {
       var table = H.resultTable();
       // dir contract from sortControl: -1 = descending (rank 1 first).
@@ -152,11 +177,16 @@
   function guildsCard() {
     var body = H.el('div');
     var rows = state.snap.guilds || [];
+    // Power figures join in from the heavy tier's grid rollup — the guild
+    // rows themselves are fast-tier and deliberately carry none.
+    var energyByGuild = {};
+    (state.snap.guild_energy || []).forEach(function (e) { energyByGuild[e.guild_id] = e; });
     if (!rows.length) {
-      body.appendChild(H.stateBlock('info', 'Guild directory loading…'));
+      body.appendChild(H.stateBlock('info', 'Loading…'));
     } else {
       var table = H.resultTable();
       rows.forEach(function (g, i) {
+        var e = energyByGuild[g.guild_id];
         table.appendChild(H.resultRow({
           icon: 'sui-icon-players',
           title: '#' + (i + 1) + '  ' + (g.name || g.guild_id),
@@ -164,7 +194,7 @@
           chips: [
             H.statTile('Members', H.fmtInt(num(g.members))),
             H.statTile('Alpha', H.fmtAlpha(num(g.alpha)), 'sui-icon-alpha-matter'),
-            H.statTile('Capacity', H.fmtWatts(num(g.total_capacity)), 'sui-icon-energy'),
+            H.statTile('Capacity', e ? H.fmtWatts(num(e.capacity)) : '—', 'sui-icon-energy'),
             H.statTile('Planets', H.fmtInt(num(g.planets_complete))),
           ],
         }));
@@ -179,6 +209,9 @@
     { key: 'combat', label: 'combat / block', stroke: 'var(--text-enemy-primary)' },
     { key: 'tx', label: 'transactions / block', stroke: 'var(--accent-primary)' },
     { key: 'raids', label: 'live raids', stroke: 'var(--text-warning)' },
+    // Steps between heavy sweeps rather than moving per block — still the
+    // right place to see the galaxy powering up over an hour.
+    { key: 'draw', label: 'structs draw', stroke: 'var(--accent-secondary)', fmt: function (v) { return H.fmtWatts(v); } },
   ];
   function trendsCard() {
     var body = H.el('div', null);
@@ -195,56 +228,57 @@
       var cap = H.el('div');
       cap.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;';
       cap.appendChild(H.el('span', 'sui-text-hint', t.label));
-      cap.appendChild(H.el('span', 'ops-val', vals.length ? H.fmtNum(vals[vals.length - 1]) : '—'));
+      cap.appendChild(H.el('span', 'ops-val',
+        vals.length ? (t.fmt || H.fmtNum)(vals[vals.length - 1]) : '—'));
       line.appendChild(cap);
       line.appendChild(sparkline(vals, t.stroke));
       body.appendChild(line);
     });
   }
 
-  function censusCard() {
+  // Energy production vs draw, from the grid rollup (raw milliwatts). One
+  // tile row for the galaxy, then a utilization bar per guild.
+  function energyCard() {
     var body = H.el('div');
-    var ambits = state.snap.structs_by_ambit || [];
-    if (ambits.length) {
-      var chips = H.el('div');
-      chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;';
-      ambits.forEach(function (a) {
-        chips.appendChild(H.badge((a.ambit || '?') + ' ' + H.fmtInt(num(a.count))));
-      });
-      body.appendChild(chips);
-    }
-    var types = state.snap.structs_by_type || [];
-    if (!types.length) {
-      body.appendChild(H.stateBlock('info', 'Struct census lands with the first full sweep.'));
+    var t = state.snap.totals || {};
+    var draw = num(t.structs_draw), alloc = num(t.alloc_load), cap = num(t.player_capacity);
+
+    var strip = H.el('div', 'hstrip');
+    strip.style.marginBottom = '10px';
+    strip.appendChild(H.statTile(['Structs Draw', 'deployed structs'],
+      H.fmtWatts(draw), 'sui-icon-deployed-structs'));
+    strip.appendChild(H.statTile(['Allocations', 'non-struct load'], H.fmtWatts(alloc)));
+    strip.appendChild(H.statTile(['Capacity', 'delivered to players'],
+      H.fmtWatts(cap), 'sui-icon-energy'));
+    var util = cap > 0 ? (draw + alloc) / cap : null;
+    strip.appendChild(H.statTile('Utilization',
+      util == null ? '—' : Math.round(util * 100) + '%', null,
+      util == null ? 'muted' : (util > 0.9 ? 'live' : 'ok')));
+    body.appendChild(strip);
+
+    var rows = state.snap.guild_energy || [];
+    if (!rows.length) {
+      body.appendChild(H.stateBlock('info', 'Loading…'));
     } else {
-      types.forEach(function (row) {
-        var val = H.el('span');
-        val.appendChild(document.createTextNode(H.fmtInt(num(row.count))));
-        if (num(row.destroyed) > 0) {
-          val.appendChild(document.createTextNode(' '));
-          var d = H.el('span', 'sui-text-hint', '(' + H.fmtInt(num(row.destroyed)) + ' lost)');
-          val.appendChild(d);
-        }
-        body.appendChild(H.row(String(row.type || '?').replace(/_/g, ' '), val));
+      rows.forEach(function (g) {
+        var gDraw = num(g.structs_draw) + num(g.alloc_load);
+        var gCap = num(g.capacity);
+        var line = H.el('div');
+        line.style.cssText = 'display:grid;grid-template-columns:minmax(150px,1fr) minmax(60px,120px) auto;gap:8px;align-items:center;padding:2px 0;';
+        var name = H.el('span', 'sui-text-hint', g.name || g.guild_id);
+        name.style.textAlign = 'left';
+        line.appendChild(name);
+        line.appendChild(H.progressBar(gCap > 0 ? gDraw / gCap : 0));
+        var val = H.el('span', 'ops-val');
+        val.style.textAlign = 'right';
+        val.textContent = H.fmtWatts(gDraw) + ' / ' + H.fmtWatts(gCap);
+        line.appendChild(val);
+        body.appendChild(line);
       });
     }
-    return H.card('STRUCT CENSUS', body);
+    return H.card('ENERGY GRID', body);
   }
 
-  function statusLine() {
-    var s = state.snap;
-    var line = H.el('div');
-    line.style.cssText = 'display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-bottom:4px;';
-    if (s.truncated) {
-      line.appendChild(H.el('span', 'sui-text-hint', 'large tables truncated — totals are floors'));
-    }
-    var sweep = H.el('span', 'sui-text-hint');
-    sweep.id = 'gs-swept';
-    sweep.textContent = s.sweeping ? 'sweeping…'
-      : (s.heavy_updated_ms ? 'swept ' + H.ago(s.heavy_updated_ms) + ' ago' : 'first sweep pending');
-    line.appendChild(sweep);
-    return line;
-  }
 
   function render() {
     state.lastRender = Date.now();
@@ -258,15 +292,18 @@
           'The Guild API needs your game session — log in to Structs first, then this window recovers on its own.'));
         return;
       }
-      host.appendChild(statusLine());
-      host.appendChild(totalsStrip(state.snap.totals || {}));
+      host.appendChild(universeCard(state.snap.totals || {}));
 
       var cols = H.el('div');
       cols.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:10px;align-items:start;';
+      // Trends/census first: the leaderboards own inner scrollbars, and a
+      // mouse-wheel path down the page gets captured by them — the fixed-height
+      // cards go above so everything is reachable without threading past a
+      // scroll trap.
+      cols.appendChild(trendsCard());
+      cols.appendChild(energyCard());
       cols.appendChild(playersCard());
       cols.appendChild(guildsCard());
-      cols.appendChild(trendsCard());
-      cols.appendChild(censusCard());
       host.appendChild(cols);
     });
   }
@@ -333,11 +370,11 @@
       }
       if (p.tier === 'sweeping' || p.tier === 'idle') {
         state.snap.sweeping = p.tier === 'sweeping';
-        if (p.tier === 'idle' && typeof p.auth_ok === 'boolean') state.snap.auth_ok = p.auth_ok;
-        var el = document.getElementById('gs-swept');
-        if (el) {
-          el.textContent = state.snap.sweeping ? 'sweeping…'
-            : (state.snap.heavy_updated_ms ? 'swept ' + H.ago(state.snap.heavy_updated_ms) + ' ago' : 'first sweep pending');
+        // Auth recovering (or breaking) mid-session repaints; the sweep state
+        // itself is deliberately not surfaced — engine vocabulary.
+        if (p.tier === 'idle' && typeof p.auth_ok === 'boolean' && p.auth_ok !== state.snap.auth_ok) {
+          state.snap.auth_ok = p.auth_ok;
+          renderSoon();
         }
       }
     });

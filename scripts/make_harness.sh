@@ -46,7 +46,7 @@ cat > "$FIX" <<'EOF'
         tx: 4 + (i % 7),
         raids: (i > n - 40) ? 2 : 1,
         structs: 5980 + Math.floor(i / 12),
-        fuel: 9.1e12 + i * 3.1e8,
+        draw: 2.6e12 + i * 2.2e8,
       });
     }
     return out;
@@ -77,9 +77,6 @@ cat > "$FIX" <<'EOF'
       logo: null,
       members: 900 - g * 97,
       alpha: String((9 - g) * 4.2e9),   // string numeric on purpose
-      total_fuel: (9 - g) * 1.1e12,
-      total_load: (9 - g) * 0.4e12,
-      total_capacity: (9 - g) * 1.6e12,
       planets_complete: (9 - g) * 31,
     });
   }
@@ -97,10 +94,15 @@ cat > "$FIX" <<'EOF'
       structs_total: 6041, structs_destroyed: 812,
       fleets_total: 2380, fleets_away: 74,
       raids_active: 2, work_queue: 137,
-      total_fuel: 9.13e12, total_load: 3.4e12, total_capacity: 1.28e13,
-      total_alpha: 3.4e10, total_ore: 88410,
+      total_alpha: 3.4e10, stored_ore: 9304, ground_ore: 4841,
+      structs_draw: 2.65e12, alloc_load: 0.8e12, player_capacity: 1.19e13,
     },
     guilds: GUILDS,
+    guild_energy: GUILDS.map(function (g, i) {
+      return { guild_id: g.guild_id, name: g.name,
+        structs_draw: (8 - i) * 3.1e11, alloc_load: (8 - i) * 0.9e11,
+        capacity: (8 - i) * 1.45e12 };
+    }),
     players_top: {
       alpha: mkPlayers('alpha'),
       ore: mkPlayers('ore'),
@@ -128,18 +130,147 @@ cat > "$FIX" <<'EOF'
       structs_by_type: [], structs_by_ambit: [], series: [] };
   }
 
+  // ── Behaviour profiles ───────────────────────────────────────────────────
+  // The build picker is generated from `catalog`, which mirrors the chain's own
+  // type records: `target` is the type's category and `ambits` is its
+  // possible_ambit bitmask decoded. Trimmed to the types the fixture loadouts
+  // use plus enough spread to exercise every ambit, one-per-player clamping and
+  // the no-art fallback (World Engine has no image in the webapp).
+  var CATALOG = [
+    { name: 'Command Ship', target: 'fleet', ambits: ['water', 'land', 'air', 'space'], one_per_player: true, draw: 50000, max_health: 6 },
+    { name: 'Pursuit Fighter', target: 'fleet', ambits: ['air'], one_per_player: false, draw: 60000, max_health: 3 },
+    { name: 'Mobile Artillery', target: 'fleet', ambits: ['land'], one_per_player: false, draw: 75000, max_health: 3 },
+    { name: 'SAM Launcher', target: 'fleet', ambits: ['land'], one_per_player: false, draw: 75000, max_health: 3 },
+    { name: 'Tank', target: 'fleet', ambits: ['land'], one_per_player: false, draw: 75000, max_health: 3 },
+    { name: 'Frigate', target: 'fleet', ambits: ['space'], one_per_player: false, draw: 75000, max_health: 3 },
+    { name: 'Destroyer', target: 'fleet', ambits: ['water'], one_per_player: false, draw: 100000, max_health: 3 },
+    { name: 'Starfighter', target: 'fleet', ambits: ['space'], one_per_player: false, draw: 100000, max_health: 3 },
+    { name: 'Cruiser', target: 'fleet', ambits: ['water'], one_per_player: false, draw: 110000, max_health: 3 },
+    { name: 'Stealth Bomber', target: 'fleet', ambits: ['air'], one_per_player: false, draw: 125000, max_health: 3 },
+    { name: 'Submersible', target: 'fleet', ambits: ['water'], one_per_player: false, draw: 125000, max_health: 3 },
+    { name: 'Battleship', target: 'fleet', ambits: ['space'], one_per_player: false, draw: 135000, max_health: 3 },
+    { name: 'Orbital Shield Generator', target: 'planet', ambits: ['space'], one_per_player: false, draw: 200000, max_health: 3 },
+    { name: 'Ore Extractor', target: 'planet', ambits: ['water', 'land'], one_per_player: true, draw: 500000, max_health: 3 },
+    { name: 'Ore Refinery', target: 'planet', ambits: ['water', 'land'], one_per_player: true, draw: 500000, max_health: 3 },
+    { name: 'Field Generator', target: 'planet', ambits: ['water', 'land'], one_per_player: true, draw: 500000, max_health: 3 },
+    { name: 'Jamming Satellite', target: 'planet', ambits: ['space'], one_per_player: true, draw: 600000, max_health: 3 },
+    { name: 'Planetary Defense Cannon', target: 'planet', ambits: ['water', 'land'], one_per_player: true, draw: 600000, max_health: 3 },
+    { name: 'Ore Bunker', target: 'planet', ambits: ['land'], one_per_player: false, draw: 750000, max_health: 3 },
+    { name: 'World Engine', target: 'planet', ambits: ['water', 'land'], one_per_player: true, draw: 100000000, max_health: 3 },
+  ];
+
+  function profile(over) {
+    var base = {
+      id: 'x', label: 'X', builtin: false, schema: 1,
+      capabilities: { raids: false, refines: true, explore_when_drained_only: false,
+                      sweeps_alpha: true, auto_defends: true },
+      loadout: [],
+      defence: { protect: ['Command Ship', 'Ore Refinery'], guards_on_primary: 2, guards_on_blocker: 1 },
+      temperament: { temperature: 0, mistake_rate: 0, hesitate_min_ms: 0, hesitate_max_ms: 0 },
+      limits: { temperature_max: 5, mistake_rate_max: 1 },
+      temperament_label: 'steady',
+      preview: { verdict: 'READY', blind: [], covered_after: 4, builds: [], unknown_types: [] },
+    };
+    Object.keys(over || {}).forEach(function (k) { base[k] = over[k]; });
+    return base;
+  }
+
+  var PROFILES = {
+    profiles: [
+      profile({
+        id: 'bait', label: 'Bait — mines and holds ore as a lure', builtin: true,
+        capabilities: { raids: false, refines: false, explore_when_drained_only: false,
+                        sweeps_alpha: false, auto_defends: false },
+        loadout: [
+          { target: 'planet', ambit: 'land', type_name: 'Ore Extractor', want: 1 },
+          { target: 'planet', ambit: 'land', type_name: 'Ore Bunker', want: 2 },
+        ],
+        preview: { verdict: 'BLIND', blind: ['water', 'land', 'air', 'space'], covered_after: null, builds: [], unknown_types: [] },
+      }),
+      profile({
+        id: 'raider', label: 'Raider — expendable offensive arm', builtin: true,
+        capabilities: { raids: true, refines: false, explore_when_drained_only: false,
+                        sweeps_alpha: true, auto_defends: true },
+        temperament: { temperature: 0.7, mistake_rate: 0.08, hesitate_min_ms: 400, hesitate_max_ms: 2600 },
+        temperament_label: 'varied',
+        loadout: [
+          { target: 'fleet', ambit: 'land', type_name: 'Command Ship', want: 1 },
+          { target: 'fleet', ambit: 'land', type_name: 'Mobile Artillery', want: 2 },
+          { target: 'fleet', ambit: 'air', type_name: 'Stealth Bomber', want: 2 },
+          { target: 'fleet', ambit: 'water', type_name: 'Cruiser', want: 2 },
+          { target: 'fleet', ambit: 'space', type_name: 'Battleship', want: 4 },
+        ],
+      }),
+      profile({
+        id: 'productive', label: 'Productive — runs the mine → refine → sweep flywheel', builtin: true,
+        loadout: [
+          { target: 'planet', ambit: 'land', type_name: 'Ore Extractor', want: 1 },
+          { target: 'planet', ambit: 'land', type_name: 'Ore Refinery', want: 1 },
+          { target: 'fleet', ambit: 'land', type_name: 'Command Ship', want: 1 },
+          { target: 'fleet', ambit: 'land', type_name: 'Mobile Artillery', want: 2 },
+          { target: 'fleet', ambit: 'land', type_name: 'SAM Launcher', want: 1 },
+          { target: 'fleet', ambit: 'water', type_name: 'Cruiser', want: 2 },
+          { target: 'planet', ambit: 'space', type_name: 'Jamming Satellite', want: 1 },
+        ],
+        preview: { verdict: 'PARTIAL', blind: ['air'], covered_after: null, builds: [], unknown_types: [] },
+      }),
+      // A fork: editable, and the one that exercises rename, unknown types and
+      // a loadout whose land slots are already full.
+      profile({
+        id: 'vulture', label: 'Vulture — my own thing',
+        temperament: { temperature: 0.85, mistake_rate: 0.15, hesitate_min_ms: 250, hesitate_max_ms: 1800 },
+        temperament_label: 'varies',
+        capabilities: { raids: true, refines: true, explore_when_drained_only: true,
+                        sweeps_alpha: false, auto_defends: true },
+        defence: {
+          protect: [
+            { type_name: 'Command Ship', weight: 2, by: [] },
+            { type_name: 'Ore Refinery', weight: 1, by: ['Tank'] },
+          ],
+          guards_on_primary: 2, guards_on_blocker: 1,
+        },
+        loadout: [
+          { target: 'fleet', ambit: 'land', type_name: 'Command Ship', want: 1 },
+          { target: 'fleet', ambit: 'land', type_name: 'Mobile Artillery', want: 2 },
+          { target: 'fleet', ambit: 'land', type_name: 'Tank', want: 1 },
+          { target: 'fleet', ambit: 'air', type_name: 'Pursuit Fighter', want: 2 },
+          { target: 'planet', ambit: 'land', type_name: 'Tonk', want: 1 },
+        ],
+        preview: { verdict: 'PARTIAL', blind: ['water', 'space'], covered_after: null,
+                   builds: [], unknown_types: ['Tonk'] },
+      }),
+    ],
+    assigned: { productive: 166, bait: 16, raider: 4 },
+    targets: ['planet', 'fleet'],
+    ambits: ['land', 'water', 'air', 'space'],
+    catalog: CATALOG,
+    slots_per_ambit: 4,
+    schema: 1,
+  };
+
   var F = {
     mcp_game_stats_snapshot: SNAPSHOT,
     mcp_board_html: '<div class="sui-data-card-row">harness ops snapshot</div>',
     mcp_board_feed: [],
     mcp_health: { ok: true },
     mcp_grass_recent: [],
+    // renderConfig() fetches the bundle before ANY config section paints, so
+    // the profiles view needs it even though it reads nothing from it.
+    mcp_config_bundle: { loops: {}, policies: {}, doctrine: {}, engine: {}, access: {} },
+    mcp_profiles_get: PROFILES,
+    // Writes are accepted and echoed; assertions read __HARNESS_CALLS__ for the
+    // payload rather than expecting the fixture to apply it.
+    mcp_config_set: { ok: true },
   };
 
   var calls = [];
   var listeners = {};
   window.__HARNESS_CALLS__ = calls;
   window.__HARNESS_LISTENERS__ = listeners;
+  // Tests mutate this so a page's cadence re-pull returns the same data a
+  // synthetic push delivered — in the real app pull and push read one Rust
+  // cache and cannot disagree, so the harness must not either.
+  window.__HARNESS_FIXTURES__ = F;
   window.__HARNESS_EMIT__ = function (name, payload) {
     (listeners[name] || []).forEach(function (cb) { cb({ payload: payload }); });
   };

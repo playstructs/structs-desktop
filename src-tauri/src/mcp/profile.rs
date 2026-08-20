@@ -580,6 +580,83 @@ pub fn unknown_types(p: &Profile) -> Vec<String> {
     out
 }
 
+/// One buildable struct type, as the EDITOR needs to see it.
+///
+/// The editor used to make an author type a struct name and pick a target and
+/// an ambit by hand, with nothing to say which combinations are legal — so the
+/// only feedback on a typo or an impossible pairing was `validate` rejecting
+/// the save. Everything needed to prevent that is already on the chain's type
+/// record, so the picker is generated from it: `category` IS the target, and
+/// `possible_ambit` IS the set of ambits that type may occupy.
+///
+/// Same rule as [`TARGET_NAMES`]: the UI's vocabulary comes from the
+/// validator's own source, never a hand-copied duplicate that can drift.
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogType {
+    pub name: String,
+    /// "planet" or "fleet" — the chain's `category`, not an author's choice.
+    pub target: String,
+    /// Every ambit this type may occupy, decoded from `possible_ambit`.
+    pub ambits: Vec<String>,
+    /// Chain `buildLimit == 1`: `want` above 1 is a rejection, so the editor
+    /// clamps rather than letting the author discover it on save.
+    pub one_per_player: bool,
+    /// Passive draw in milliwatts, so the picker can show what a hull costs to
+    /// keep online — the constraint that actually decides a loadout.
+    pub draw: Option<f64>,
+    pub max_health: Option<f64>,
+}
+
+/// Decode the chain's ambit bitmask (Water=2, Land=4, Air=8, Space=16).
+fn ambits_of(mask: u64) -> Vec<String> {
+    [(2u64, "water"), (4, "land"), (8, "air"), (16, "space")]
+        .iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, n)| n.to_string())
+        .collect()
+}
+
+/// Every buildable struct type, ordered fleet-then-planet and then by draw.
+///
+/// Empty when the catalog has not synced yet — the caller must treat that as
+/// "not known yet", never as "nothing is buildable".
+pub fn catalog() -> Vec<CatalogType> {
+    let Ok(gs) = crate::game_state::GAME_STATE.read() else {
+        return Vec::new();
+    };
+    let mut out: Vec<CatalogType> = gs
+        .struct_types
+        .values()
+        .filter_map(|t| {
+            let target = t.category.clone()?;
+            if !TARGETS.contains(&target.as_str()) {
+                return None; // a category this build does not model
+            }
+            let ambits = ambits_of(t.possible_ambit.unwrap_or(0));
+            if ambits.is_empty() {
+                return None; // nowhere to put it
+            }
+            Some(CatalogType {
+                one_per_player: ONE_PER_PLAYER.contains(&t.name.as_str()),
+                name: t.name.clone(),
+                target,
+                ambits,
+                draw: t.passive_draw,
+                max_health: t.max_health,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        // Fleet first (it is where slots are scarce and order matters most),
+        // then cheapest-to-run first within each.
+        (a.target != "fleet")
+            .cmp(&(b.target != "fleet"))
+            .then(a.draw.unwrap_or(0.0).total_cmp(&b.draw.unwrap_or(0.0)))
+            .then(a.name.cmp(&b.name))
+    });
+    out
+}
+
 /// What a profile would actually achieve — the answer the editor shows before
 /// anything is committed.
 ///

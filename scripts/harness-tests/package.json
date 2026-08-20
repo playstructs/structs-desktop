@@ -4,7 +4,9 @@
   "description": "jsdom checks for the static board harness (scripts/make_harness.sh). Not part of the app build.",
   "type": "module",
   "scripts": {
-    "test": "node gamestats.test.mjs"
+    "test": "node gamestats.test.mjs",
+    "test:profiles": "node profiles.test.mjs",
+    "test:all": "node gamestats.test.mjs && node profiles.test.mjs"
   },
   "devDependencies": {
     "jsdom": "^24.0.0"

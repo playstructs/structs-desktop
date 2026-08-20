@@ -354,6 +354,95 @@
        H.stepper, H.selectBox and H.textBox now emit SUI's own markup, so
        sui.css styles them and an override would only fight it.) */
     .cfg-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+    /* ── PROFILES: the build order ────────────────────────────────────────
+       A loadout row is "keep N of this type in this (target, ambit)", and the
+       four slots it claims are shared with every other row in the same ambit.
+       All of the styling here exists to make those two facts visible: the art
+       says WHAT, the ambit icon says WHERE, the pips say HOW MANY OF FOUR.
+       Colours are SUI's own semantic tokens — nothing new is invented. */
+
+    /* Struct art, in SUI's own 44px portrait frame but scaled down: a 17-row
+       loadout at full size is a page and a half of scrolling in a 332px
+       drawer. `contain` because the source art is not square. */
+    #sui-offcanvas .sui-result-row-portrait-image.prof-art,
+    #board-layout .sui-result-row-portrait-image.prof-art {
+      width: 34px; height: 34px;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--surface-default);
+    }
+    .prof-art img { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+    /* Priority index. The number IS the strategy — auto_build takes the first
+       row it can afford — so it leads the row rather than hiding in the text. */
+    .prof-pri {
+      flex: none; min-width: 16px; text-align: right;
+      font-family: 'ExtremeHazard', sans-serif; font-size: 11px;
+      color: var(--text-hint);
+    }
+
+    .prof-sub { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .prof-ambit { display: inline-flex; align-items: center; gap: 3px; }
+    .prof-ambit > span { text-transform: uppercase; letter-spacing: .04em; }
+
+    /* Four pips = the four chain slots of one (target, ambit). Claimed by an
+       earlier row, claimed by this row, or free — and clicking a pip sets
+       `want` straight to it. */
+    .prof-pips { display: inline-flex; gap: 3px; align-items: center; }
+    .prof-pip {
+      width: 9px; height: 14px; box-sizing: border-box;
+      border: 1px solid var(--border-subtle); background: transparent;
+    }
+    .prof-pip.is-mine { background: var(--accent-primary); border-color: var(--accent-primary); }
+    .prof-pip.is-taken { background: var(--border-subtle); border-color: var(--border-subtle); }
+    .prof-pip.is-clickable { cursor: pointer; }
+    .prof-pip.is-clickable:hover { border-color: var(--accent-primary-active); }
+
+    /* Per-ambit fill, above the list: an ambit sitting at 0/4 is the gap that
+       leaves a fleet with no answer, so it is coloured like one. */
+    .prof-slotbar { display: inline-flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .prof-slot { display: inline-flex; align-items: center; gap: 3px; color: var(--text-body); }
+    .prof-slot.is-empty { color: var(--text-enemy-primary); }
+    .prof-slot.is-full { color: var(--text-player-primary); }
+
+    .prof-builds .sui-result-row { padding-top: 4px; padding-bottom: 4px; }
+    /* Two SUI defaults have to be relaxed for a result row to work inside the
+       332px drawer, and both need the #sui-offcanvas prefix to out-specify the
+       rules they are relaxing.
+
+       1. `.sui-result-row-right-section` reserves `min-width: 224px` — sized
+          for a roster row carrying five stat tiles across a full-width page.
+          In the drawer that leaves ~45px for the struct name.
+       2. The drawer sets `overflow-wrap: anywhere` so long ids can break. With
+          45px to work in, that rendered "Mobile Artillery" one CHARACTER per
+          line.
+
+       Scoped to these two lists rather than every drawer row: the same
+       squeeze exists elsewhere, but those rows have not been re-checked. */
+    #sui-offcanvas .prof-builds .sui-result-row-right-section,
+    #sui-offcanvas .prof-picker .sui-result-row-right-section,
+    #board-layout .prof-builds .sui-result-row-right-section,
+    #board-layout .prof-picker .sui-result-row-right-section {
+      min-width: 0; flex: 0 0 auto; gap: 6px;
+    }
+    #sui-offcanvas .prof-builds .sui-text-label-block,
+    #sui-offcanvas .prof-picker .sui-text-label-block,
+    #sui-offcanvas .prof-builds .prof-sub,
+    #sui-offcanvas .prof-picker .prof-sub {
+      overflow-wrap: normal; word-break: normal;
+    }
+    /* SUI pads the info block by --spacing-xl on the right, which is another
+       24px the name does not get. */
+    #sui-offcanvas .prof-builds .sui-result-row-player-info,
+    #sui-offcanvas .prof-picker .sui-result-row-player-info {
+      flex: 1 1 auto; padding-right: 6px;
+    }
+
+    /* The picker, opened in place under the list it adds to. Capped so the
+       Add button and the list above it stay on screen while choosing. */
+    .prof-picker { max-height: 46vh; overflow-y: auto; margin-top: 6px;
+                   border: 1px solid var(--border-subtle); }
+    .prof-picker .sui-result-row.is-disabled { opacity: .45; cursor: default; }
+
     /* WAR page: the list cards add free-text id inputs alongside the numeric
        ones, and each result row carries a couple of inline icon actions. */
     .cfg-row .sui-result-row-right-section .cfg-actions,
