@@ -93,6 +93,36 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
         note_failed_settlement(&app, &event);
     }
 
+    // ── Combat events preempt the response cadence. ──
+    // auto_response rides the sync tick at a 20 s internal cadence, so the
+    // WORST-case gap between a raid arming and the first defensive shot was a
+    // full scan interval — a tenth of the whole ~4-minute response window
+    // spent not knowing. The event that opens a fight is right here in our
+    // hands: force a tick the moment one arrives. `tick` self-collapses
+    // (RUNNING guard) and re-resolves everything from state, so a spurious
+    // nudge on someone else's battle costs one ~100 ms no-op scan. Debounced
+    // so a volley of health events during an exchange nudges once, not
+    // per-shot; the normal cadence remains as the floor underneath.
+    if matches!(
+        event.category.as_str(),
+        "raid_status" | "struct_attack" | "struct_health" | "fleet_arrive"
+    ) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_COMBAT_NUDGE_MS: AtomicU64 = AtomicU64::new(0);
+        let now = crate::hasher::types::now_millis() as u64;
+        let prev = LAST_COMBAT_NUDGE_MS.load(Ordering::Relaxed);
+        if now.saturating_sub(prev) > 2_000
+            && LAST_COMBAT_NUDGE_MS
+                .compare_exchange(prev, now, Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
+        {
+            let app_nudge = app.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::mcp::auto_response::tick(&app_nudge, true).await;
+            });
+        }
+    }
+
     // `block` ticks (~every 6s) are RELAY-ONLY: buffered they'd drown the
     // 1000-entry ring (and every policy/threat scan over it) within the hour,
     // but the GRASS page wants the heartbeat.

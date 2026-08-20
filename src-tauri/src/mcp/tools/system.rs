@@ -57,8 +57,35 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
             let tx = tokio::task::spawn_blocking(move || telemetry::tx_summary(window_ms))
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()));
+            // The combat loops' AUTONOMY, stated where anyone triaging looks
+            // first. On 2026-08-20 auto_response spent an entire raid in
+            // `advise` — planning perfect shots and firing none — and nothing
+            // on this page said so: the plans even counted as loop "actions",
+            // so status read as a HEALTHY defence while the defender burned.
+            // A posture that withholds fire must never be ambient.
+            let resp_cfg = crate::mcp::auto_response::get();
+            let raid_cfg = crate::mcp::auto_raid::get();
+            let combat_autonomy = json!({
+                "auto_response": {
+                    "enabled": resp_cfg.enabled,
+                    "autonomy": format!("{:?}", resp_cfg.autonomy),
+                    "dry_run": resp_cfg.dry_run,
+                    "WILL_NOT_FIRE": !resp_cfg.enabled
+                        || resp_cfg.dry_run
+                        || format!("{:?}", resp_cfg.autonomy).eq_ignore_ascii_case("advise"),
+                },
+                "auto_raid": {
+                    "enabled": raid_cfg.enabled,
+                    "autonomy": format!("{:?}", raid_cfg.autonomy),
+                    "dry_run": raid_cfg.dry_run,
+                    "WILL_NOT_DISPATCH": !raid_cfg.enabled
+                        || raid_cfg.dry_run
+                        || format!("{:?}", raid_cfg.autonomy).eq_ignore_ascii_case("advise"),
+                },
+            });
             text(json!({
                 "health": health,
+                "combat_autonomy": combat_autonomy,
                 "loops_last_hour": loops.unwrap_or_else(|e| vec![json!({"error": e})]),
                 "tx_last_hour": tx.unwrap_or_else(|e| json!({"error": e})),
                 "adaptive": {
