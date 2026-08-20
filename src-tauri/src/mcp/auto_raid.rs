@@ -1639,26 +1639,35 @@ async fn fire_best_at(
     if budget == 0 || cfg.dry_run {
         return 0;
     }
-    // Survivability gate: skip shooters whose remaining HP is within the
-    // summed counter damage — they die to the return fire and the counter can
-    // negate their shot outright. Falls through to the next-best shooter.
+    // Survival is a RANKING, not a filter: prefer a shooter that outlives its
+    // own shot, but when every reaching hull is doomed, the best doomed one
+    // fires anyway — a siege that stops shooting has already lost, and the
+    // hulls are the raid's budget (operator doctrine 2026-08-20: "doing
+    // nothing shouldn't be a result").
     let mut best = None;
+    let mut doomed_fallback = None;
     for s in &shots {
         if crate::mcp::tools::intel::shot_is_suicidal(client, s).await {
-            crate::mcp::telemetry::tlog(
-                "auto_raid",
-                crate::mcp::telemetry::Sev::Notice,
-                format!(
-                    "{}: holding {} — {} counter damage would destroy it",
-                    label, s.struct_id, s.counter_risk
-                ),
-            );
+            if doomed_fallback.is_none() {
+                doomed_fallback = Some(*s);
+            }
             continue;
         }
         best = Some(*s);
         break;
     }
-    let Some(best) = best else { return 0 };
+    let sacrificial = best.is_none() && doomed_fallback.is_some();
+    let Some(best) = best.or(doomed_fallback) else { return 0 };
+    if sacrificial {
+        crate::mcp::telemetry::tlog(
+            "auto_raid",
+            crate::mcp::telemetry::Sev::Notice,
+            format!(
+                "{}: every reaching shooter is doomed — firing {} anyway ({} counter damage will destroy it)",
+                label, best.struct_id, best.counter_risk
+            ),
+        );
+    }
 
     let wsys = if best.weapon.eq_ignore_ascii_case("secondary") {
         "secondaryWeapon"

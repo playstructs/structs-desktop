@@ -49,8 +49,8 @@ const AMBIT_ORDER: [(&str, u64); 4] = [("water", 2), ("land", 4), ("air", 8), ("
 ///
 /// REACH IS NOT ENOUGH, and this enum is the whole reason the audit exists in
 /// its current form. On 2026-08-17 `scout1` could reach a land Command Ship
-/// perfectly well — it had three Tanks. Every one of those shots was refused as
-/// suicidal, because a Tank standing in LAND attacking a target in LAND eats
+/// perfectly well — it had three Tanks. Every one of those shots was (then)
+/// refused as suicidal, because a Tank standing in LAND attacking LAND eats
 /// the full counter (2 from the Command Ship plus its defenders) against 3 HP.
 /// Meanwhile `1-1035` ended its raid in 27 seconds with a single Cruiser firing
 /// from WATER into land — cross-ambit, so every counter is halved, and its
@@ -80,8 +80,9 @@ impl Posture {
             Posture::None => "unreachable",
         }
     }
-    /// Is this a shot we would actually expect to take? `SameAmbit` is where
-    /// the suicidal-shot gate holds fire, so it does not count as an answer.
+    /// Is this a shot we would WANT to take? `SameAmbit` eats the full
+    /// counter, so the loops fire it only as a last-resort sacrifice — it is
+    /// an act of desperation, not an answer, and readiness must not count it.
     pub fn is_viable(self) -> bool {
         matches!(self, Posture::Immune | Posture::CrossAmbit)
     }
@@ -158,8 +159,8 @@ pub struct AmbitCoverage {
 }
 
 impl AmbitCoverage {
-    /// A shot we would actually take. `SameAmbit` reach is NOT an answer — that
-    /// is precisely what the suicidal-shot gate refuses.
+    /// A shot we would take AND expect to survive. `SameAmbit` reach is not an
+    /// answer — it fires only as a last-resort sacrifice, trading the hull.
     pub fn answered(&self) -> bool {
         self.posture.is_viable()
     }
@@ -328,8 +329,10 @@ mod tests {
 
     /// THE regression. scout1 (1-271) on 2026-08-17: three Tanks standing in
     /// land, reaching land. It could reach the raider's land Command Ship all
-    /// day — and `auto_response` refused every shot as suicidal, because a
-    /// same-ambit attack eats the full counter. Three minutes, zero shots.
+    /// day — and `auto_response` (as then configured) refused every shot as
+    /// suicidal, because a same-ambit attack eats the full counter. Three
+    /// minutes, zero shots. Doomed hulls now fire as a last resort, but a
+    /// fleet whose only answer is sacrifice is still not READY.
     ///
     /// A reach-only audit grades this READY. It must not.
     #[test]

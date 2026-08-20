@@ -816,20 +816,32 @@ async fn handle_alarm(
             alert(app, alarm, "hourly shot budget exhausted — no response fired");
             return Ok(());
         }
-        for s in shots.iter().take(granted) {
-            // Survivability gate: a hull whose remaining HP is within the
-            // summed counter damage dies to the return fire AND its shot can
-            // be negated outright — hold it back rather than trade it for 0.
-            if crate::mcp::tools::intel::shot_is_suicidal(client, s).await {
+        // Survival is a RANKING, not a filter (operator doctrine 2026-08-20:
+        // "doing nothing shouldn't be a result"). The old gate held every
+        // doomed hull back, which on a fleet with no cross-ambit reach meant
+        // zero shots for the whole raid — 1-274 sat silent for 8 minutes while
+        // holding 41 ore. And the gate's own premise ("dies for 0") is only
+        // sometimes true: in the manual override that ended that raid, the
+        // doomed Tank landed its damage BEFORE dying, and the raider withdrew.
+        // So: survivors keep priority (their trade is strictly better), doomed
+        // hulls fire after them rather than never, each logged as the trade it
+        // is. The existing order within each class — counter-risk, score,
+        // temperament — is preserved.
+        let mut doomed: Vec<bool> = Vec::with_capacity(shots.len());
+        for s in shots.iter() {
+            doomed.push(crate::mcp::tools::intel::shot_is_suicidal(client, s).await);
+        }
+        for &i in fire_order(&doomed).iter().take(granted) {
+            let s = &shots[i];
+            if doomed[i] {
                 crate::mcp::telemetry::tlog(
                     "auto_response",
                     crate::mcp::telemetry::Sev::Notice,
                     format!(
-                        "holding {} — {} counter damage would destroy it (suicidal shot)",
+                        "firing {} knowing {} counter damage will destroy it — trading the hull for pressure",
                         s.struct_id, s.counter_risk
                     ),
                 );
-                continue;
             }
             // Hesitate. A defender that answers with identical latency every
             // single time reads as a machine however well it aims; this is the
@@ -1412,8 +1424,37 @@ fn weapon_cost(struct_id: &str, weapon: &str) -> u64 {
         .unwrap_or(3)
 }
 
+/// Firing order over an already-ranked shot list: survivors first, doomed
+/// hulls AFTER them — never dropped. Stable, so the caller's ranking
+/// (counter-risk, score, temperament) is preserved within each class.
+///
+/// This encodes the 2026-08-20 doctrine change: survival is a ranking, not a
+/// filter. The predecessor `continue`d over doomed shooters, and a fleet with
+/// no cross-ambit reach therefore fired NOTHING for an entire raid.
+fn fire_order(doomed: &[bool]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..doomed.len()).collect();
+    order.sort_by_key(|&i| doomed[i]);
+    order
+}
+
 #[cfg(test)]
 mod tests {
+    /// Doomed shooters are DEPRIORITISED, never dropped: every index survives
+    /// into the firing order, survivors lead, and the caller's ranking holds
+    /// within each class. If someone reintroduces a filter here, this fails.
+    #[test]
+    fn doomed_shooters_fire_last_but_always_fire() {
+        // ranked: s0 (survivor), s1 (doomed), s2 (survivor), s3 (doomed)
+        let order = super::fire_order(&[false, true, false, true]);
+        assert_eq!(order, vec![0, 2, 1, 3], "survivors first, stable within class");
+
+        // The scout1 / 1-274 case: EVERY reaching shooter is doomed. The old
+        // gate fired nothing for the whole raid; now the ranking stands as-is.
+        assert_eq!(super::fire_order(&[true, true, true]), vec![0, 1, 2]);
+
+        assert_eq!(super::fire_order(&[]), Vec::<usize>::new());
+    }
+
     use super::*;
 
     #[test]

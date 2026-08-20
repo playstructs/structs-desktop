@@ -590,12 +590,19 @@ pub struct StrikeRow {
 }
 
 /// A shot is suicidal when the summed counter damage it would draw is enough
-/// to destroy the shooter. A counter can outright NEGATE the attack it answers
-/// (measured live: `counterDestroyedAttacker: true` resolved the dying
-/// attacker's shot for 0 damage), so a nearly-dead hull sent at a defended
-/// target dies for nothing. Reads the shooter's LIVE health — the cached
+/// to destroy the shooter. Reads the shooter's LIVE health — the cached
 /// struct lists only carry `health_max`, which is the gap the combat doctrine
 /// flagged as "not yet enforced in code".
+///
+/// This is a RANKING SIGNAL, not a gate (operator doctrine 2026-08-20). It
+/// used to hard-refuse the shot, and on a fleet with no cross-ambit reach
+/// that meant "zero shots for the whole raid" — 1-274 held 41 ore in silence
+/// for 8 minutes. The outcome record cuts both ways, which is exactly why
+/// this is a preference and not a law: a counter CAN negate the dying
+/// attacker's shot outright (`counterDestroyedAttacker: true` resolved one
+/// for 0 damage, measured live), but the shot that ended the 2-15945 raid
+/// landed its damage BEFORE the counter killed the shooter. Callers order
+/// doomed shooters last and fire them when nothing better reaches.
 pub async fn shot_is_suicidal(client: &CosmosClient, row: &StrikeRow) -> bool {
     if row.counter_risk == 0 {
         return false;
@@ -2977,7 +2984,7 @@ async fn query_raid_readiness(client: &CosmosClient, args: &Value) -> Vec<Conten
             if a.posture == crate::mcp::readiness::Posture::SameAmbit {
                 out.push_str(&format!(
                     "          ↳ {} hull(s) reach it, all from within it — full counter value, \
-                     so the suicidal-shot gate will refuse these\n",
+                     so these fire only as last-resort sacrifices\n",
                     a.reaching
                 ));
             }
