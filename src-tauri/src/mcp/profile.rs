@@ -929,6 +929,38 @@ mod tests {
         STORE_GATE.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The picker offers exactly the (target, ambit) pairs the chain allows, so
+    /// this decode is what stands between an author and a row auto_build can
+    /// never satisfy. Values are the chain's own: Water=2, Land=4, Air=8,
+    /// Space=16, and a Command Ship's 30 is all four (the fact that every CMD
+    /// observed in combat happened to sit in land is a sampling artefact).
+    #[test]
+    fn the_ambit_bitmask_decodes_to_the_chain_s_own_values() {
+        assert_eq!(ambits_of(4), vec!["land"]);
+        assert_eq!(ambits_of(2), vec!["water"]);
+        assert_eq!(ambits_of(8), vec!["air"]);
+        assert_eq!(ambits_of(16), vec!["space"]);
+        // Ore Extractor / Ore Refinery / PDC / Field Generator.
+        assert_eq!(ambits_of(6), vec!["water", "land"]);
+        // Command Ship.
+        assert_eq!(ambits_of(30), vec!["water", "land", "air", "space"]);
+        // A type with no legal ambit has nowhere to go, and `catalog` drops it
+        // rather than offering a row that could never be built.
+        assert!(ambits_of(0).is_empty());
+        // Unknown high bits are ignored, not guessed at.
+        assert_eq!(ambits_of(4 | 64), vec!["land"]);
+    }
+
+    /// A cold catalog must read as "not known yet", never as "nothing is
+    /// buildable" — the editor shows a sync warning on an empty list, and
+    /// silently offering zero types would look like a broken picker instead.
+    #[test]
+    fn a_cold_catalog_yields_no_types_rather_than_a_wrong_guess() {
+        // GAME_STATE is empty in the test process, which is exactly the cold
+        // case production hits before the first sync.
+        assert!(catalog().is_empty());
+    }
+
     /// The shipped profiles must pass exactly the gate user input passes —
     /// otherwise the built-ins are privileged and the validator is untested
     /// against anything real.
