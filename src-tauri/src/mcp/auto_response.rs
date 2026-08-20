@@ -630,6 +630,28 @@ async fn handle_alarm(
         return Ok(());
     }
 
+    // ── 3b. Command Ship triage, in parallel with the response. ──
+    // A defender whose command struct died is INSTANTLY raidable and stays
+    // that way until a replacement is BUILT — ~15 minutes of proof decay at
+    // best, so every minute the initiate waits is a minute added to the
+    // vulnerable window. The roster walk rebuilds it eventually; an incident
+    // is the moment we KNOW, so start it now. Spawned so it never consumes
+    // the response window, and idempotent against the walk doing it first.
+    let defender_index = {
+        let reg = crate::mcp::virtual_players::REGISTRY
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        reg.find(&alarm.defender_player).map(|p| p.index)
+    };
+    if let Some(idx) = defender_index {
+        let app2 = app.clone();
+        let pid = alarm.defender_player.clone();
+        tauri::async_runtime::spawn(async move {
+            let client = crate::mcp::cosmos_client::CosmosClient::new();
+            crate::mcp::auto_build::ensure_command_ship(&app2, &client, &pid, idx).await;
+        });
+    }
+
     // ── 4. Pick what to shoot. ──
     // Decapitate: the raider's Command Ship. Killing it while its fleet is away
     // sets `attackerDefeated` and sends the fleet home — 16/16 in the data, and
@@ -637,7 +659,7 @@ async fn handle_alarm(
     let (fire_target, target_kind) = match cfg.mode {
         ResponseMode::Decapitate => match raider_fleet.as_ref().and_then(|f| f.command_struct.clone()) {
             Some(cmd) => (Some(cmd), "raider_command_ship"),
-            // No reachable Command Ship (fleet already left, or it is a plain
+            // No live Command Ship (fleet already left, or it is a plain
             // attack rather than a raid) — fall back to the shooter.
             None => (
                 attack.as_ref().and_then(|a| a.attacker_struct_id.clone()),
@@ -649,8 +671,20 @@ async fn handle_alarm(
             "attacking_struct",
         ),
     };
+    // Still nothing? A hostile fleet parked on our planet IS a target list —
+    // "the attack record hasn't resolved yet" used to stand the loop down
+    // entirely, which meant the first response always waited on event
+    // plumbing while the seize clock ran. Any hull of the raiding fleet is a
+    // legal, useful thing to be shooting while the picture sharpens.
+    let (fire_target, target_kind) = match fire_target {
+        Some(t) => (Some(t), target_kind),
+        None => (
+            raider_fleet.as_ref().and_then(|f| f.hulls.first().cloned()),
+            "raider_fleet_hull",
+        ),
+    };
     let Some(fire_target) = fire_target else {
-        run.blocked("attacker not identifiable yet (no resolved attack record)");
+        run.blocked("attacker not identifiable yet (no attack record, no visiting fleet)");
         alert(app, alarm, "attacker not yet identifiable — no shot taken");
         return Ok(());
     };
@@ -664,9 +698,21 @@ async fn handle_alarm(
         match crate::mcp::tools::strike::resolve_fire_target(client, &fire_target).await {
             Ok((t, phase, note)) => {
                 if phase == "DOWN" {
-                    run.blocked("resolved attacker struct already destroyed");
-                    return Ok(());
-                }
+                    // The CHOSEN target is dead — but mid-raid the fleet it
+                    // came from is still here and still shooting. Standing
+                    // down here surrendered the rest of the window; hand the
+                    // first live hull to the attrition path instead and only
+                    // stop when the fleet has nothing left to shoot at.
+                    match raider_fleet.as_ref().and_then(|f| {
+                        f.hulls.iter().find(|h| **h != fire_target).cloned()
+                    }) {
+                        Some(next) => (next, "attrition (prior target destroyed)"),
+                        None => {
+                            run.blocked("resolved attacker struct already destroyed, no other hulls known");
+                            return Ok(());
+                        }
+                    }
+                } else
                 if phase == "STRIP" {
                     crate::mcp::telemetry::tlog(
                         "auto_response",
@@ -696,11 +742,62 @@ async fn handle_alarm(
         return Ok(());
     }
 
-    let plan = crate::mcp::tools::intel::plan_strike(
+    let mut plan = crate::mcp::tools::intel::plan_strike(
         client,
         &json!({ "target": fire_target, "players": shooters }),
     )
     .await?;
+    // ── 5b. Attrition fallback. ──
+    // The kill-chain above picks ONE target (Command Ship, or its blocker).
+    // When that target sits in an ambit none of our surviving hulls can reach,
+    // the old behaviour was to stand down for the rest of the raid — which is
+    // how the 2026-08-20 defence of 2-15535 ended up fought BY HAND: our land
+    // reach died with two Tanks, the loop had nothing to say about the enemy
+    // Battleship greasing our Command Ship from space, and a human made four
+    // kills with the Starfighters the loop was ignoring. A raid is a fleet,
+    // and a fleet is a TARGET LIST: when the head is out of reach, shoot the
+    // body — active shooters die too, and every kill is a permanent slot.
+    let mut fire_target = fire_target;
+    let mut target_kind = target_kind;
+    if !plan.rows.iter().any(|r| r.reachable) {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seen.insert(fire_target.clone());
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(a) = attack.as_ref().and_then(|a| a.attacker_struct_id.clone()) {
+            candidates.push(a);
+        }
+        if let Some(f) = raider_fleet.as_ref() {
+            candidates.extend(f.hulls.iter().cloned());
+        }
+        candidates.retain(|c| seen.insert(c.clone()));
+        // Bounded: each probe is a full strike plan. Six candidates covers a
+        // 16-slot fleet's distinct ambits with room to spare.
+        for cand in candidates.into_iter().take(6) {
+            let Ok(p2) = crate::mcp::tools::intel::plan_strike(
+                client,
+                &json!({ "target": cand, "players": shooters }),
+            )
+            .await
+            else {
+                continue;
+            };
+            // A dead hull resolves with 0 HP — shooting it is a wasted tx.
+            if p2.tgt_hp > 0.0 && p2.rows.iter().any(|r| r.reachable) {
+                crate::mcp::telemetry::tlog(
+                    "auto_response",
+                    crate::mcp::telemetry::Sev::Notice,
+                    format!(
+                        "{} unreachable by every surviving hull — attrition fallback to {}",
+                        fire_target, cand
+                    ),
+                );
+                plan = p2;
+                fire_target = cand;
+                target_kind = "attrition (primary unreachable)";
+                break;
+            }
+        }
+    }
 
     // One shot per player (any action zeroes that player's charge bar), best
     // first, and only from players whose charge is actually ready.
@@ -708,12 +805,19 @@ async fn handle_alarm(
     let mut best: HashMap<String, &crate::mcp::tools::intel::StrikeRow> = HashMap::new();
     for r in plan.rows.iter().filter(|r| r.reachable) {
         let Some(pid) = r.player_id.as_deref() else { continue };
-        if !charge_ready
-            .get(pid)
-            .map(|c| *c >= weapon_cost(&r.struct_id, &r.weapon) + cfg.min_charge_margin)
-            .unwrap_or(false)
-        {
-            continue;
+        // Charge gate — but ONLY when we actually know the charge. The map is
+        // fed by the roster cache, which is EMPTY for up to a full sweep
+        // (~18 min) after an app restart, and `.unwrap_or(false)` read that
+        // absence as "broke": on 2026-08-20 a defender with ~11,000 blocks of
+        // banked charge was refused for an entire raid while the loop reported
+        // "none with charge ready". Absent evidence is not evidence of
+        // absence; the chain arbitrates an uncharged shot with a clean
+        // insufficient-charge reject that costs one ledgered tx — the raid
+        // costs the fleet. Skip only on a KNOWN-low reading.
+        if let Some(c) = charge_ready.get(pid) {
+            if *c < weapon_cost(&r.struct_id, &r.weapon) + cfg.min_charge_margin {
+                continue;
+            }
         }
         let e = best.entry(pid.to_string()).or_insert(r);
         let better = if cfg.prefer_counter_free_ambit {
@@ -771,13 +875,15 @@ async fn handle_alarm(
     let planned = shots.len();
 
     if planned == 0 {
-        // The live failure mode: the loop is on, the target is right, and every
-        // shooter's charge has been spent by the economy loops.
+        // With the attrition fallback and the unknown-charge fix above, this
+        // now means what it says: nothing we still own reaches ANY hull of the
+        // raiding force, or every reaching hull has KNOWN-insufficient charge.
+        // Both are chain facts, not policy timidity.
         run.blocked(format!(
-            "{} co-located shooter(s) at {}, none with charge ready (need weapon cost + {} margin)",
-            shooters.len(), alarm.planet_id, cfg.min_charge_margin
+            "{} co-located shooter(s) at {} — none reaches any raiding hull with charge for the shot",
+            shooters.len(), alarm.planet_id
         ));
-        alert(app, alarm, "co-located shooters exist but none have charge ready");
+        alert(app, alarm, "no shooter reaches any raiding hull with charge ready");
         return Ok(());
     }
 
@@ -1086,6 +1192,10 @@ struct RaiderFleet {
     fleet_id: String,
     owner: Option<String>,
     command_struct: Option<String>,
+    /// Every hull in the fleet's four ambit rows — the attrition-fallback
+    /// candidate list for when the Command Ship sits in an ambit nothing of
+    /// ours can viably reach (see the fallback below step 5).
+    hulls: Vec<String>,
 }
 
 /// Is a recall both needed and possible?
@@ -1363,7 +1473,18 @@ async fn raiding_fleet(
             }
             None => None,
         };
-        return Some(RaiderFleet { fleet_id, owner, command_struct });
+        let mut hulls: Vec<String> = Vec::new();
+        for row in ["water", "land", "air", "space"] {
+            if let Some(arr) = f.get(row).and_then(|x| x.as_array()) {
+                hulls.extend(
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .filter(|id| !id.is_empty())
+                        .map(String::from),
+                );
+            }
+        }
+        return Some(RaiderFleet { fleet_id, owner, command_struct, hulls });
     }
     None
 }

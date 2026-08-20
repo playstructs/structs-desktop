@@ -309,6 +309,96 @@ pub fn force_reset_running() {
     RUNNING.store(false, Ordering::SeqCst);
 }
 
+/// Rebuild a player's Command Ship the moment it is known dead — callable from
+/// ANY loop, not just this one's roster walk.
+///
+/// The in-scan command-first gate above does the same thing, but it only runs
+/// when the sweep REACHES the player: on 2026-08-20, 1-1040 lost its Command
+/// Ship to a raid at 19:49 and sat instantly-raidable for 50+ minutes because
+/// the walk was still in the 1-2xx range. A Command Ship death is an EVENT,
+/// and the answer to an event cannot be "wait for the tour to come around".
+/// auto_response calls this the moment it works an incident whose defender
+/// has no living command struct.
+///
+/// Idempotent by the chain's own registration: an initiate registers in
+/// `commandStruct` immediately (verified live on 1-396), so a fleet whose
+/// commandStruct exists and is not destroyed — built OR mid-build — is left
+/// alone. Insufficient charge just after a fight is expected: the reject is
+/// ledgered and the next incident (or the roster walk) retries.
+pub(crate) async fn ensure_command_ship(
+    app: &tauri::AppHandle,
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    pid: &str,
+    index: u32,
+) -> Option<String> {
+    use crate::mcp::loop_util::parse_bool;
+    let fleet_id = format!("9-{}", pid.split('-').nth(1)?);
+    let fleet = client.query_entity("fleet", &fleet_id).await.ok()?;
+    let f = fleet.get("Fleet")?;
+    let cmd = f.get("commandStruct").and_then(|x| x.as_str()).unwrap_or("");
+    if !cmd.is_empty() {
+        let alive = client
+            .query_entity("struct", cmd)
+            .await
+            .map(|e| !parse_bool(e.get("structAttributes").and_then(|a| a.get("isDestroyed"))))
+            .unwrap_or(true); // unreadable = assume alive; the walk re-checks
+        if alive {
+            return None;
+        }
+    }
+    let type_id = {
+        let gs = crate::game_state::GAME_STATE.read().ok()?;
+        gs.struct_types
+            .values()
+            .find(|t| t.name.eq_ignore_ascii_case("Command Ship"))?
+            .id
+    };
+    // Prefer a genuinely free fleet slot; the initiate names one but does not
+    // consume it (verified live on 1-280), so a full fleet still rebuilds.
+    let (amb, slot) = ["land", "water", "air", "space"]
+        .iter()
+        .find_map(|amb| {
+            let arr = f.get(*amb)?.as_array()?;
+            arr.iter()
+                .position(|x| x.as_str().map(|s| s.is_empty()).unwrap_or(true))
+                .map(|i| (*amb, i as u64))
+        })
+        .unwrap_or(("land", 0));
+    let payload = serde_json::json!({
+        "playerId": pid,
+        "structTypeId": type_id,
+        "operatingAmbit": ambit_to_enum(amb),
+        "slot": slot,
+    });
+    match crate::mcp::tx_retry::sign_with_retry(
+        app,
+        index,
+        "/structs.structs.MsgStructBuildInitiate",
+        payload,
+        &format!("cmd_rebuild:{pid}"),
+    )
+    .await
+    {
+        Ok(_) => {
+            crate::mcp::telemetry::tlog_feed(
+                app,
+                "auto_build",
+                crate::mcp::telemetry::Sev::Notice,
+                format!("{pid}: Command Ship destroyed — rebuild initiated immediately ({amb} slot {slot})"),
+            );
+            Some(format!("rebuild initiated ({amb} slot {slot})"))
+        }
+        Err(e) => {
+            crate::mcp::telemetry::tlog(
+                "auto_build",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("{pid}: immediate Command Ship rebuild failed ({e}) — the roster walk retries"),
+            );
+            None
+        }
+    }
+}
+
 fn ambit_to_enum(a: &str) -> i64 {
     match a {
         "water" => 1,
