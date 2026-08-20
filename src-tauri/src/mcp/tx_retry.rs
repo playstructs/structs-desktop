@@ -117,6 +117,14 @@ pub fn classify(raw: &str) -> ErrorClass {
         || l.contains("tx-queue op")
         || l.contains("façade unavailable")
         || l.contains("facade unavailable")
+        // The webview's own signing client failing to CONNECT (the 20s bound
+        // added 2026-08-20) is a saturation of the webview's per-host fetch
+        // pool, not node slowness — the node kept answering native LCD reads
+        // throughout the 100-minute outage where this string was 100% of
+        // failures. Classified as Timeout it fed endpoint AIMD and throttled
+        // the read loops: the exact self-harm this branch exists to prevent,
+        // introduced the same morning as the branch. Keep them in sync.
+        || l.contains("signing client connect")
     {
         // BEFORE the generic timeout test on purpose. The bridge's own message
         // is "virtual-player op 'sign' timed out after 60s (is the app signed
@@ -414,6 +422,11 @@ mod tests {
         assert_eq!(classify("virtual-player op 'sign' timed out after 60s"), ErrorClass::BridgeDown);
         assert_eq!(classify("virtual-player bridge channel closed"), ErrorClass::BridgeDown);
         assert_eq!(classify("tx-queue op 'snapshot' timed out after 30s"), ErrorClass::BridgeDown);
+        // The webview's signing client failing to CONNECT is the same family:
+        // OUR side is saturated, the node may be fine. During the 2026-08-20
+        // crash this string was 1,400+ failures classified as endpoint
+        // pressure, halving read concurrency while the endpoint was healthy.
+        assert_eq!(classify("signing client connect timed out"), ErrorClass::BridgeDown);
         // A genuine endpoint timeout still classifies as Timeout.
         assert_eq!(classify("error sending request: operation timed out"), ErrorClass::Timeout);
         assert_eq!(classify("something novel"), ErrorClass::Other);

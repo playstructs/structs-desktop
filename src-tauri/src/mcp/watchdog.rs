@@ -95,6 +95,12 @@ static HASH_PROGRESS: LazyLock<Mutex<HashMap<String, (u64, f64)>>> =
 static REMEDY_FAILS: LazyLock<Mutex<HashMap<String, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// When the last webview reload was requested (0 = never).
+/// Soft (event-based) reload attempts since the bridge was last healthy. The
+/// first attempt of an outage is soft; once one full cooldown passes with the
+/// bridge still down, the soft rung has provably failed and remediation
+/// escalates to a NATIVE `Webview::reload()`, which recovers even a crashed
+/// WebContent process (the black-window state the event rung cannot touch).
+static BRIDGE_SOFT_RELOADS: AtomicU64 = AtomicU64::new(0);
 static LAST_BRIDGE_RELOAD_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Lock a mutex, recovering from poisoning. The watchdog is the LAST line of
@@ -294,6 +300,10 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
     // how 2026-08-20 lost 18 minutes of writes while this very function
     // reported "ok". A human ended it by hand with resync{hard}; the remedy
     // below is that same page reload, applied automatically.
+    if !crate::mcp::vplayer_bridge::is_down() {
+        // Healthy bridge re-arms the ladder at the soft rung.
+        BRIDGE_SOFT_RELOADS.store(0, Ordering::Relaxed);
+    }
     if now - app_start > BRIDGE_GRACE_MS && crate::mcp::vplayer_bridge::is_down() {
         let h = crate::mcp::vplayer_bridge::health();
         let silent_s = h["silent_ms"].as_u64().unwrap_or(0) / 1000;
@@ -311,13 +321,83 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
             } else {
                 Some(Box::new(|app: &tauri::AppHandle| {
                     LAST_BRIDGE_RELOAD_MS.store(now_millis() as u64, Ordering::Relaxed);
-                    // Same event structs_action{resync, hard} sends: the webview
-                    // reloads, re-installs the bridge and reconnects its streams.
-                    let _ = app.emit("structs:force-resync", json!({ "hard": true }));
-                    // Judge the next window on its own evidence — the stale
-                    // counters would otherwise re-fire before the reload lands.
+                    // Escalation ladder, because the two rungs fail differently:
+                    //
+                    //  1. `structs:force-resync` is an EVENT — JS inside the
+                    //     webview hears it and reloads itself. Cheap, preserves
+                    //     nothing it shouldn't, and completely inert when the
+                    //     WebContent process is DEAD (black window): an event
+                    //     delivered into a dead page reaches nobody. On
+                    //     2026-08-20 this rung was requested three times over
+                    //     100 minutes against a dead webview, and none landed.
+                    //
+                    //  2. `Webview::reload()` is NATIVE — WKWebView spawns a
+                    //     fresh WebContent process for the load even when the
+                    //     old one crashed. This is the only rung that recovers
+                    //     a black window without human hands.
+                    //
+                    // First attempt in an outage takes rung 1 (a merely-wedged
+                    // page keeps its in-flight state where possible); if the
+                    // bridge is STILL down a full cooldown later, the soft rung
+                    // demonstrably failed and every further attempt is native.
+                    let soft_failed = BRIDGE_SOFT_RELOADS.fetch_add(1, Ordering::Relaxed) >= 1;
                     crate::mcp::vplayer_bridge::note_remediated();
-                    "requested webview reload (structs:force-resync hard)".into()
+                    if soft_failed {
+                        let did = app
+                            .get_webview_window("main")
+                            .map(|w| match w.reload() {
+                                Ok(()) => "native webview reload (soft resync did not land)".to_string(),
+                                Err(e) => format!("native webview reload FAILED: {e}"),
+                            })
+                            .unwrap_or_else(|| "native reload skipped: no main window".into());
+                        // A reloaded page needs the fresh-boot grace before the
+                        // event rung makes sense again.
+                        did
+                    } else {
+                        let _ = app.emit("structs:force-resync", json!({ "hard": true }));
+                        "requested webview reload (structs:force-resync hard)".into()
+                    }
+                }))
+            },
+        });
+    }
+
+    // The signing CLIENT (inside a perfectly responsive webview) unable to
+    // reach the node — the saturation state that killed the webview on
+    // 2026-08-20 after 100 minutes. The bridge's own fail-fast is the first
+    // responder (it stops the inflow so the pool can drain); this finding
+    // exists for the case where draining alone does not recover it, in which
+    // case a page reload rebuilds the pool from nothing. Same ladder and
+    // cooldown as the bridge-down remedy: soft event first, native second.
+    if now - app_start > BRIDGE_GRACE_MS
+        && !crate::mcp::vplayer_bridge::is_down()
+        && crate::mcp::vplayer_bridge::is_saturated()
+    {
+        let since_reload = now - LAST_BRIDGE_RELOAD_MS.load(Ordering::Relaxed) as f64;
+        findings.push(Finding {
+            key: "vplayer_client_saturated".into(),
+            severity: Sev::Error,
+            message: "signing client saturated: the webview answers but cannot reach the node — \
+                      signs are failing fast while the connection pool drains"
+                .into(),
+            remedy: if since_reload < BRIDGE_RELOAD_COOLDOWN_MS {
+                None // give fail-fast + the previous reload their chance first
+            } else {
+                Some(Box::new(|app: &tauri::AppHandle| {
+                    LAST_BRIDGE_RELOAD_MS.store(now_millis() as u64, Ordering::Relaxed);
+                    let soft_failed = BRIDGE_SOFT_RELOADS.fetch_add(1, Ordering::Relaxed) >= 1;
+                    crate::mcp::vplayer_bridge::note_remediated();
+                    if soft_failed {
+                        app.get_webview_window("main")
+                            .map(|w| match w.reload() {
+                                Ok(()) => "native webview reload (client saturated, soft resync did not clear it)".to_string(),
+                                Err(e) => format!("native webview reload FAILED: {e}"),
+                            })
+                            .unwrap_or_else(|| "native reload skipped: no main window".into())
+                    } else {
+                        let _ = app.emit("structs:force-resync", json!({ "hard": true }));
+                        "requested webview reload (client saturated)".into()
+                    }
                 }))
             },
         });

@@ -91,6 +91,11 @@ pub fn health() -> serde_json::Value {
         "consecutive_timeouts": CONSEC_TIMEOUTS.load(Ordering::Relaxed),
         "silent_ms": if last > 0.0 { (now_ms() - last) as u64 } else { 0 },
         "ever_responded": last > 0.0,
+        // The bridge can be perfectly alive while unable to LAND anything:
+        // see the saturation notes above. Reported separately because during
+        // the 2026-08-20 outage this page showed "ok" for 100 minutes.
+        "client_saturated": is_saturated(),
+        "consecutive_client_failures": CONSEC_CLIENT_FAILURES.load(Ordering::Relaxed),
     })
 }
 
@@ -99,6 +104,49 @@ pub fn health() -> serde_json::Value {
 pub fn note_remediated() {
     CONSEC_TIMEOUTS.store(0, Ordering::Relaxed);
     LAST_RESPONSE_MS.store(now_ms() as u64, Ordering::Relaxed);
+}
+
+// ── Signing-client saturation ────────────────────────────────────────────────
+//
+// A SECOND failure mode, disjoint from bridge death, found 2026-08-20: the
+// webview ANSWERS every round-trip — so `is_down()` stays false and
+// consecutive_timeouts stays 0 — but every answer is "signing client connect
+// timed out": its per-host fetch pool is saturated, and each raced-out connect
+// leaves its abandoned attempt QUEUED in that same pool. The state is
+// metastable: our own 43-signs/min inflow re-saturates the pool faster than it
+// drains, so it held for 100 minutes at exactly ~20.3s per failure and ended
+// only when the WebContent process died (the black window). The only exit is
+// to STOP THE INFLOW: fail fast for a cooldown so the pool drains, and probe
+// for recovery on the same cadence the down-state uses.
+static CONSEC_CLIENT_FAILURES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Consecutive in-webview signing-client failures before signs fail fast.
+/// Five at ~20s each is ~100s of one-sided evidence; a mixed stream (some
+/// succeed) resets on every success and never trips this.
+const SATURATED_AFTER_FAILURES: u32 = 5;
+
+/// The webview answered a sign with an error that means ITS OWN network stack
+/// could not reach the node (pool saturation), not that the tx was rejected.
+fn is_client_stack_error(err: &str) -> bool {
+    err.contains("signing client connect timed out") || err.contains("signAndBroadcast timed out (WS)")
+}
+
+fn note_client_result(err: Option<&str>) {
+    match err {
+        Some(e) if is_client_stack_error(e) => {
+            CONSEC_CLIENT_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {
+            CONSEC_CLIENT_FAILURES.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Is the webview's signing client saturated? (The bridge itself is ALIVE —
+/// that is what makes this invisible to `is_down`.)
+pub fn is_saturated() -> bool {
+    CONSEC_CLIENT_FAILURES.load(Ordering::Relaxed) >= SATURATED_AFTER_FAILURES
 }
 
 /// Timeout for the liveness probe. It performs no network I/O, so an answer is
@@ -216,6 +264,18 @@ pub async fn call(
             h["consecutive_timeouts"], h["silent_ms"].as_u64().unwrap_or(0) / 1000
         ));
     }
+    // Saturation fail-fast: the bridge answers, but its signing client cannot
+    // reach the node and every queued attempt DEEPENS the saturation (each
+    // 20s-raced-out connect stays in the webview's fetch pool). Stopping the
+    // inflow is the cure, not a concession: the pool drains in seconds once we
+    // stop feeding it, and the probe slot notices recovery on its own.
+    if matches!(op, "sign" | "signup") && is_saturated() && !claim_probe_slot() {
+        return Err(format!(
+            "signing client saturated ({} consecutive in-webview connect/broadcast failures) \
+             — failing fast so the webview's connection pool can drain; probing for recovery",
+            CONSEC_CLIENT_FAILURES.load(Ordering::Relaxed)
+        ));
+    }
 
     // Serialize per account FIRST (before the global gate, so a same-account tx waiting
     // its turn doesn't hold a scarce SIGN_GATE permit). Held for the whole round-trip so
@@ -257,9 +317,16 @@ pub async fn call(
         Ok(Ok(resp)) => {
             note_response();
             if resp.success {
+                if op == "sign" {
+                    note_client_result(None);
+                }
                 Ok(resp.data)
             } else {
-                Err(resp.error.unwrap_or_else(|| "virtual-player op failed".to_string()))
+                let err = resp.error.unwrap_or_else(|| "virtual-player op failed".to_string());
+                if op == "sign" {
+                    note_client_result(Some(&err));
+                }
+                Err(err)
             }
         }
         Ok(Err(_)) => {

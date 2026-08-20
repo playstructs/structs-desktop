@@ -157,13 +157,42 @@ SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, sign
     // at 60s, the caller is told "is the app signed in?", and the JS side keeps
     // a zombie promise that can never resolve or reject. 20s is generous for a
     // handshake against a node that answers /status in ~20ms.
-    client = await Promise.race([
-      SigningStargateClient.connectWithSigner(rpcUrl, wallet, { registry: this.registry }),
-      new Promise(function (_, reject) {
-        setTimeout(function () { reject(new Error('signing client connect timed out')); }, 20000);
-      }),
-    ]);
-    cache.set(signerAddress, client);
+    //
+    // TWO LESSONS FROM THE 2026-08-20 CRASH, when losing this race was the
+    // app's entire output for 100 minutes:
+    //
+    //  1. SINGLE-FLIGHT. Promise.race abandons the connect but does not ABORT
+    //     it — the attempt stays queued in WebKit's small per-host fetch pool.
+    //     Racing a fresh connect per retry meant every timeout queued another
+    //     doomed attempt behind the one that caused it, which is how the pool
+    //     saturated and STAYED saturated until the WebContent process died.
+    //     One in-flight connect per signer, shared by every caller.
+    //
+    //  2. SALVAGE THE STRAGGLER. A connect that loses the race is not garbage
+    //     — when it eventually lands, cache it, so the next sign for this
+    //     signer starts from a working client instead of connect #3.
+    const inflight = SigningClientManager.prototype._vpConnects
+      || (SigningClientManager.prototype._vpConnects = new Map());
+    let pending = inflight.get(signerAddress);
+    if (!pending) {
+      pending = SigningStargateClient.connectWithSigner(rpcUrl, wallet, { registry: this.registry });
+      inflight.set(signerAddress, pending);
+      pending.then(
+        function (c) { inflight.delete(signerAddress); cache.set(signerAddress, c); },
+        function () { inflight.delete(signerAddress); }
+      );
+    }
+    let connectTimer;
+    try {
+      client = await Promise.race([
+        pending,
+        new Promise(function (_, reject) {
+          connectTimer = setTimeout(function () { reject(new Error('signing client connect timed out')); }, 20000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(connectTimer);
+    }
   }
   try {
     const type = this.registry.lookupType(typeUrl);
@@ -185,10 +214,18 @@ SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, sign
     ]);
     return { code: res.code, transactionHash: res.transactionHash, height: res.height, rawLog: res.rawLog || null };
   } catch (e) {
-    // A failed/hung client is suspect — evict + close it so the next call for this
-    // address reconnects fresh (successful signs keep the pooled client open).
-    cache.delete(signerAddress);
-    try { client.disconnect(); } catch (_) { /* ignore */ }
+    // A failed/hung client is suspect — evict + close it so the next call for
+    // this address reconnects fresh (successful signs keep the pooled client
+    // open). Chain-level REJECTIONS are not client faults: the round-trip
+    // worked, so tearing the client down just forces a pointless reconnect —
+    // and during pool saturation those reconnects are exactly the inflow that
+    // keeps the pool saturated. Evict only when the transport itself failed.
+    const msg = String((e && e.message) || e);
+    const chainReject = /code \d|failed to execute message|account sequence/.test(msg);
+    if (!chainReject && cache.get(signerAddress) === client) {
+      cache.delete(signerAddress);
+      try { client.disconnect(); } catch (_) { /* ignore */ }
+    }
     throw e;
   }
 };
