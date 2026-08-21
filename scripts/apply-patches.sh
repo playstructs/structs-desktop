@@ -17,7 +17,11 @@ verify_patched() {
 }
 
 echo "    Patching GuildAPI.js..."
-sed -i.bak "s|this.apiUrl = '/api';|this.apiUrl = window.__STRUCTS_CONFIG__?.guildApi \|\| '/api';|" \
+# The trailing-slash trim is real defense: a configured base like
+# "https://host/api/" turns every call into "/api//setting", which the server
+# 404s (seen live 2026-08-21). Rust normalizes persisted configs too; this
+# guards overrides that bypass it. new RegExp avoids sed-vs-JS backslash soup.
+sed -i.bak "s|this.apiUrl = '/api';|this.apiUrl = (window.__STRUCTS_CONFIG__?.guildApi \|\| '/api').replace(new RegExp('/+\$'), '');|" \
   "$BUILD_DIR/js/api/GuildAPI.js"
 verify_patched "$BUILD_DIR/js/api/GuildAPI.js" '__STRUCTS_CONFIG__?.guildApi' "GuildAPI.js apiUrl override"
 

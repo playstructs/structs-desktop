@@ -78,7 +78,12 @@ impl From<&GuildConfig> for FrontendConfig {
             guild_id: gc.guild_id.clone(),
             name: gc.name.clone(),
             guild_tag: gc.guild_tag.clone(),
-            guild_api: gc.guild_api.clone(),
+            // Choke point for everything the webapp ever sees (init script AND
+            // the guild-switch sessionStorage handoff): the webapp's client
+            // appends "/setting" etc., so a trailing slash here becomes
+            // "/api//setting" and 404s. Persisted configs are healed on load
+            // too; this guards values that haven't round-tripped disk yet.
+            guild_api: gc.guild_api.trim_end_matches('/').to_string(),
             reactor_api: gc.reactor_api.clone(),
             client_ws: gc.client_ws.clone(),
             grass_nats_ws: gc.grass_nats_ws.clone(),
@@ -122,7 +127,7 @@ fn default_configs() -> Vec<GuildConfig> {
             guild_id: DEFAULT_GUILD_ID.into(),
             name: "SN Corp".into(),
             guild_tag: "SN".into(),
-            guild_api: "https://beta.playstructs.com/api/".into(),
+            guild_api: "https://beta.playstructs.com/api".into(),
             reactor_api: PUBLIC_REACTOR_API.into(),
             client_ws: PUBLIC_CLIENT_WS.into(),
             grass_nats_ws: "wss://beta.playstructs.com:1443".into(),
@@ -301,6 +306,17 @@ fn migrate_stale_urls(configs: &mut [GuildConfig]) -> bool {
                 changed = true;
             }
         }
+        // A trailing slash on guild_api produces `/api//setting`-style URLs in
+        // the webapp (its client does `apiUrl + '/setting'`), which the server
+        // 404s. The original SN Corp seed shipped with one and it persisted to
+        // disk on existing installs; discovery already trims
+        // (guild_directory.rs), so this heals the remaining sources — seeds,
+        // legacy persists, hand-edited configs.
+        let trimmed = c.guild_api.trim_end_matches('/');
+        if trimmed.len() != c.guild_api.len() {
+            c.guild_api = trimmed.to_string();
+            changed = true;
+        }
     }
     changed
 }
@@ -431,6 +447,19 @@ mod tests {
             }]"#,
         )
         .expect("legacy shape parses via serde defaults")
+    }
+
+    #[test]
+    fn migrate_trims_trailing_slash_on_guild_api() {
+        // The original seed shipped "https://beta.playstructs.com/api/" and
+        // persisted it; the webapp appends "/setting" and the double slash
+        // 404s. Loading must heal it (and report changed so it re-persists).
+        let mut configs = default_configs();
+        configs[0].guild_api = "https://beta.playstructs.com/api/".into();
+        assert!(migrate_stale_urls(&mut configs));
+        assert_eq!(configs[0].guild_api, "https://beta.playstructs.com/api");
+        // Idempotent: a clean config reports no change.
+        assert!(!migrate_stale_urls(&mut configs));
     }
 
     #[test]

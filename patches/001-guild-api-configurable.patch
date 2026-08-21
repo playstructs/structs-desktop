@@ -4,7 +4,7 @@
 
    constructor() {
 -    this.apiUrl = '/api';
-+    this.apiUrl = window.__STRUCTS_CONFIG__?.guildApi || '/api';
++    this.apiUrl = (window.__STRUCTS_CONFIG__?.guildApi || '/api').replace(new RegExp('/+$'), '');
      this.ajax = new JsonAjaxer();
      this.guildAPIResponseFactory = new GuildAPIResponseFactory();
      this.guildFactory = new GuildFactory();
