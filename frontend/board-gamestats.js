@@ -21,21 +21,21 @@
   var state = {
     booted: false,
     snap: null,
-    metric: { key: 'structs_load', dir: -1 }, // sortControl contract
+    metric: { key: 'alpha', dir: -1 }, // sortControl contract
     renderTimer: null,
     lastRender: 0,
   };
 
   var SERIES_CAP = 720; // mirror of the Rust ring
 
-  // Structs load first and default: it is the one metric the whole galaxy
-  // competes on (top ranks trade places between guilds). The live alpha
-  // distribution is one whale and a flat tail, and stored ore is a handful
-  // of grams — real but dull as a first impression.
+  // Alpha is the default board (wealth is the game's headline score). The
+  // values come from the BANK module (denom_owners), never the Guild API's
+  // roster/search "alpha" columns — those sum every denom, so guild-token
+  // holders masquerade as alpha whales there.
   var METRICS = [
+    { key: 'alpha', label: 'alpha', icon: 'sui-icon-alpha-matter', fmt: function (v) { return H.fmtAlpha(v); } },
     { key: 'structs_load', label: 'structs load', icon: 'sui-icon-deployed-structs', fmt: function (v) { return H.fmtWatts(v); } },
     { key: 'ore', label: 'ore', icon: 'sui-icon-alpha-ore', fmt: function (v) { return H.fmtOre(v); } },
-    { key: 'alpha', label: 'alpha', icon: 'sui-icon-alpha-matter', fmt: function (v) { return H.fmtAlpha(v); } },
   ];
   function metricDef(key) {
     for (var i = 0; i < METRICS.length; i++) if (METRICS[i].key === key) return METRICS[i];
@@ -47,7 +47,7 @@
   // single-path inline SVG. Colors are semantic tokens only.
   var SVG_NS = 'http://www.w3.org/2000/svg';
   function sparkline(values, strokeVar) {
-    var w = 600, h = 44;
+    var w = 900, h = 56;
     var svg = document.createElementNS(SVG_NS, 'svg');
     svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
     svg.setAttribute('preserveAspectRatio', 'none');
@@ -242,58 +242,6 @@
     });
   }
 
-  // Energy production vs draw, from the grid rollup (raw milliwatts). One
-  // tile row for the galaxy, then a utilization bar per guild.
-  function energyCard() {
-    var body = H.el('div');
-    var t = state.snap.totals || {};
-    var draw = num(t.structs_draw), alloc = num(t.alloc_load), cap = num(t.player_capacity);
-
-    // Vocabulary matters here: player-level grid `load` is power a hub player
-    // routes ONWARD (to substations), so adding it to structs draw and calling
-    // the sum "demand" double-counts the re-export leg — the live numbers made
-    // that plain (draw 10.8MW + routed 23.6MW vs 28.5MW delivered).
-    var strip = H.el('div', 'hstrip');
-    strip.style.marginBottom = '10px';
-    strip.appendChild(H.statTile(['Structs Draw', 'deployed structs'],
-      H.fmtWatts(draw), 'sui-icon-deployed-structs'));
-    strip.appendChild(H.statTile(['Routed Onward', 'hub allocations'], H.fmtWatts(alloc)));
-    strip.appendChild(H.statTile(['Delivered', 'direct-fed capacity'],
-      H.fmtWatts(cap), 'sui-icon-energy'));
-    var util = cap > 0 && draw != null ? draw / cap : null;
-    strip.appendChild(H.statTile(['Structs Share', 'of delivered power'],
-      util == null ? '—' : Math.round(util * 100) + '%', null,
-      util == null ? 'muted' : (util > 0.9 ? 'live' : 'ok')));
-    body.appendChild(strip);
-
-    // Guilds ranked by draw, bar relative to the leader. Capacity concentrates
-    // in a handful of hub players, so most guilds honestly have none — the
-    // figure is appended only where it exists.
-    var rows = state.snap.guild_energy || [];
-    if (!rows.length) {
-      body.appendChild(H.stateBlock('info', 'Loading…'));
-    } else {
-      var top = num(rows[0].structs_draw) || 1;
-      rows.forEach(function (g) {
-        var gDraw = num(g.structs_draw) || 0;
-        var gCap = num(g.capacity) || 0;
-        var line = H.el('div');
-        line.style.cssText = 'display:grid;grid-template-columns:minmax(150px,1fr) minmax(60px,120px) auto;gap:8px;align-items:center;padding:2px 0;';
-        var name = H.el('span', 'sui-text-hint', g.name || g.guild_id);
-        name.style.textAlign = 'left';
-        line.appendChild(name);
-        line.appendChild(H.progressBar(gDraw / top));
-        var val = H.el('span', 'ops-val');
-        val.style.cssText = 'text-align:right;white-space:nowrap;';
-        // draw · delivered — the tile captions above define the vocabulary,
-        // so the row doesn't repeat the word and wrap itself onto three lines.
-        val.textContent = H.fmtWatts(gDraw) + (gCap > 0 ? ' · ' + H.fmtWatts(gCap) : '');
-        line.appendChild(val);
-        body.appendChild(line);
-      });
-    }
-    return H.card('ENERGY GRID', body);
-  }
 
 
   function render() {
@@ -310,14 +258,14 @@
       }
       host.appendChild(universeCard(state.snap.totals || {}));
 
+      // Trends stretch the full row — the sparklines are the best thing on
+      // the page and cramped in a half column. They also sit above the
+      // leaderboards so the scroll path never threads through the boards'
+      // inner scrollbars.
+      host.appendChild(trendsCard());
+
       var cols = H.el('div');
       cols.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:10px;align-items:start;';
-      // Trends/census first: the leaderboards own inner scrollbars, and a
-      // mouse-wheel path down the page gets captured by them — the fixed-height
-      // cards go above so everything is reachable without threading past a
-      // scroll trap.
-      cols.appendChild(trendsCard());
-      cols.appendChild(energyCard());
       cols.appendChild(playersCard());
       cols.appendChild(guildsCard());
       host.appendChild(cols);

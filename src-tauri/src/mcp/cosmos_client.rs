@@ -257,6 +257,64 @@ impl CosmosClient {
             .unwrap_or(0))
     }
 
+    /// Every address holding `denom`, as `(address, base_units)` pairs,
+    /// straight from the bank module — the only denom-scoped bulk balance
+    /// read anywhere in the stack. The Guild API's roster/search "alpha"
+    /// columns sum EVERY denom (no `denom=` filter in their SQL), so guild
+    /// tokens masquerade as alpha there; this is the honest source.
+    pub async fn denom_owners(
+        &self,
+        denom: &str,
+        max_pages: usize,
+    ) -> Result<(Vec<(String, f64)>, bool), String> {
+        let base = self.reactor_api.read().unwrap().clone();
+        let base = base.trim_end_matches('/').to_string();
+        let mut out: Vec<(String, f64)> = Vec::new();
+        let mut next_key: Option<String> = None;
+        for page in 0..max_pages {
+            let mut url = format!(
+                "{}/cosmos/bank/v1beta1/denom_owners/{}?pagination.limit=1000",
+                base, denom
+            );
+            if let Some(k) = &next_key {
+                url.push_str(&format!("&pagination.key={}", encode_pagination_key(k)));
+            }
+            let v = get_json(&url).await?;
+            for row in v
+                .get("denom_owners")
+                .and_then(|d| d.as_array())
+                .map(|a| a.as_slice())
+                .unwrap_or(&[])
+            {
+                let addr = row.get("address").and_then(|a| a.as_str()).unwrap_or("");
+                let amount = row
+                    .get("balance")
+                    .and_then(|b| b.get("amount"))
+                    .and_then(|x| {
+                        x.as_f64()
+                            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+                    })
+                    .unwrap_or(0.0);
+                if !addr.is_empty() && amount > 0.0 {
+                    out.push((addr.to_string(), amount));
+                }
+            }
+            next_key = v
+                .get("pagination")
+                .and_then(|p| p.get("next_key"))
+                .and_then(|k| k.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            if next_key.is_none() {
+                return Ok((out, false));
+            }
+            if page + 1 == max_pages {
+                return Ok((out, true));
+            }
+        }
+        Ok((out, false))
+    }
+
     /// Every permission record naming `player_id` as the GRANTEE, as
     /// `(object_id, value)` pairs, plus whether the scan hit `max_pages`.
     ///

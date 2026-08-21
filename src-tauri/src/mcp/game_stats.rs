@@ -117,13 +117,12 @@ fn is_auth_error(e: &str) -> bool {
     e.contains("requires login")
 }
 
-/// Guild-API "alpha" fields (`guild/directory` alpha, roster alpha — both
-/// backed by `view.player_inventory.balance` / `view.reactor.fuel`) are
-/// FLOORED DISPLAY GRAMS, not chain units: the webapp prints them raw with a
-/// thousands separator. Everything downstream of this module formats alpha on
-/// the ualpha ladder (`H.fmtAlpha`, 1 g = 1e6 ualpha), the same ladder Team
-/// Ops uses for `alpha_ualpha` — so convert at ingestion, or a 59,000 g
-/// balance renders as "59mg".
+/// Guild-API "alpha" fields (`guild/directory` alpha, backed by
+/// `view.reactor.fuel`) are FLOORED DISPLAY GRAMS, not chain units: the
+/// webapp prints them raw with a thousands separator. Everything downstream
+/// of this module formats alpha on the ualpha ladder (`H.fmtAlpha`,
+/// 1 g = 1e6 ualpha), the same ladder Team Ops uses for `alpha_ualpha` — so
+/// convert at ingestion, or a 59,000 g balance renders as "59mg".
 fn display_alpha_to_ualpha(grams: f64) -> f64 {
     grams * 1e6
 }
@@ -342,8 +341,13 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
                 .unwrap_or_default()
         }
     };
+    // NOTE: the roster's `alpha` column is unusable — its SQL sums
+    // view.player_inventory over EVERY denom with no `denom='alpha'` filter,
+    // so a player holding 2M uguild tokens tops an "alpha" ranking at 40× the
+    // real whale (verified live: 1-404, alpha 0, guild.0-5 2,050,000). The
+    // alpha leaderboard is built from the bank module instead (below); the
+    // guild Alpha figure is fine (different query, reactor fuel).
     let mut identities: HashMap<String, Identity> = HashMap::new();
-    let mut alpha_by_player: HashMap<String, f64> = HashMap::new();
     // player id → (guild id, guild name); feeds the per-guild energy rollup.
     let mut guild_of: HashMap<String, (String, String)> = HashMap::new();
     for gid in guild_ids.iter().filter(|g| !g.is_empty()) {
@@ -353,8 +357,6 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             if pid.is_empty() {
                 continue;
             }
-            // Roster alpha is floored display grams — see display_alpha_to_ualpha.
-            alpha_by_player.insert(pid.clone(), display_alpha_to_ualpha(num(row.get("alpha"))));
             guild_of.insert(pid.clone(), (gid.clone(), text(row.get("guild_name"))));
             identities.insert(
                 pid,
@@ -369,6 +371,35 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
                     tag: text(row.get("tag")),
                 },
             );
+        }
+    }
+
+    // Honest alpha, straight from the bank: `denom_owners(ualpha)` returns
+    // every holder in base units (912 addresses ≈ one LCD page), joined to
+    // players via `primary_address` from the player list. Addresses that
+    // aren't a player's primary (guild banks, device keys) simply don't
+    // chart, which is the right answer for a PLAYER leaderboard.
+    let mut alpha_by_player: HashMap<String, f64> = HashMap::new();
+    {
+        let (players, cut) = walk_pages(|p| client.guild.player_list_all(p)).await?;
+        truncated |= cut;
+        let mut pid_by_addr: HashMap<String, String> = HashMap::new();
+        for row in players {
+            let addr = text(row.get("primary_address"));
+            let pid = text(row.get("id"));
+            if !addr.is_empty() && !pid.is_empty() {
+                pid_by_addr.insert(addr, pid);
+            }
+        }
+        let (owners, hit_cap) = client
+            .denom_owners("ualpha", 10)
+            .await
+            .unwrap_or((Vec::new(), false));
+        truncated |= hit_cap;
+        for (addr, ualpha) in owners {
+            if let Some(pid) = pid_by_addr.get(&addr) {
+                *alpha_by_player.entry(pid.clone()).or_insert(0.0) += ualpha;
+            }
         }
     }
 
@@ -545,8 +576,7 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
     .filter(|r| r.live)
     .count() as u64;
 
-    // Leaderboards. Alpha comes from rosters (the grid has no alpha type);
-    // ore and structs-load come from the grid walks above.
+    // Leaderboards: alpha from the bank, ore and structs-load from the grid.
     let players_top = json!({
         "alpha": leaderboard(&alpha_by_player, &identities),
         "ore": leaderboard(&ore_by_player, &identities),
@@ -703,7 +733,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roster_alpha_grams_convert_to_ualpha() {
+    fn display_alpha_grams_convert_to_ualpha() {
         // A 59,000 g balance (the Guild API's floored display form) must land
         // on the Kg rung of the shared alpha ladder, not the mg rung: 5.9e10
         // ualpha renders as "59Kg" exactly like Team Ops' alpha_ualpha.

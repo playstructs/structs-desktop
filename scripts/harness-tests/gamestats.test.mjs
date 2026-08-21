@@ -62,17 +62,19 @@ async function until(fn, ms = 5000) {
   check('rank + name + tag on row 1', /#1\s/.test(first.textContent) && /\[G\d\]/.test(first.textContent),
     first.textContent.slice(0, 60));
   check('string numerics format (players tile)', body.textContent.includes('2,662'));
-  check('default metric is structs load, watts ladder', /structs load/.test(first.textContent) && /KW/.test(first.textContent),
+  check('default metric is alpha, Kg ladder', /alpha/.test(first.textContent) && /49\.34Kg/.test(first.textContent),
     first.textContent.slice(0, 80));
   const guilds = body.querySelectorAll('.sui-result-rows')[1];
   check('guild leaderboard renders', guilds && guilds.children.length === 5,
     'got ' + (guilds ? guilds.children.length : 'none'));
   check('guild order is the directory order', /SN Corp/.test(guilds.children[0].textContent));
   check('sparklines render', body.querySelectorAll('#gs-trends svg path').length >= 5);
-  const energyHeader = [...body.querySelectorAll('.sui-data-card-header')].some((h) => h.textContent === 'ENERGY GRID');
-  check('energy grid card renders', energyHeader);
-  check('energy tiles formatted on the watts ladder', /Structs Draw/.test(body.textContent) && /Structs Share/.test(body.textContent));
-  check('per-guild energy bars render', body.textContent.includes('SN Corp') && body.querySelectorAll('.bar').length >= 5);
+  check('energy card is gone, grid tile remains', ![...body.querySelectorAll('.sui-data-card-header')].some((h) => h.textContent === 'ENERGY GRID')
+    && /draw \/ delivered/i.test(body.textContent));
+  check('trends card is full-width (not inside the column grid)',
+    (function () { var tr = [...body.querySelectorAll('.sui-data-card-header')].find((h) => /TRENDS/.test(h.textContent));
+      return tr && !tr.closest('div[style*="grid-template-columns"]'); })());
+  check('all three metrics offered', [...body.querySelectorAll('select option')].length === 3);
   check('24h tiles render', /Active/.test(body.textContent) && /Destroyed/.test(body.textContent));
   const universe = [...body.querySelectorAll('.sui-data-card-header')].some((h) => h.textContent === 'UNIVERSE');
   check('totals live in a titled UNIVERSE card', universe);
