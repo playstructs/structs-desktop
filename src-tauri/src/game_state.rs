@@ -161,6 +161,11 @@ pub struct StructTypeInfo {
     // Combat targeting bitmasks (Water=2, Land=4, Air=8, Space=16).
     #[serde(default)]
     pub possible_ambit: Option<u64>,
+    /// v0.21.0: may this type be REGISTERED as a defender (block/counter)?
+    /// Fleet types ship true, planetary types false. Optional so a pre-0.21
+    /// sync degrades to the category heuristic instead of breaking.
+    #[serde(default)]
+    pub can_defend: Option<bool>,
     #[serde(default)]
     pub primary_weapon_ambits: Option<u64>,
     #[serde(default)]

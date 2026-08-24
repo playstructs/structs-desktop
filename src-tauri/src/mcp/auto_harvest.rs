@@ -332,6 +332,22 @@ async fn scan(
                     if !is_extractor && !(is_refinery && refine && caps.refines) {
                         continue;
                     }
+                    // Chain v0.21.0: a planet under raid can neither mine nor
+                    // refine — the chain rejects the completion, so issuing the
+                    // task burns real GPU time on a proof that cannot land, and
+                    // the completion sign spends the defender's once-per-block
+                    // action mid-fight (see economy_steals_combat_charge; this
+                    // is the same theft with a new mechanism). Difficulty keeps
+                    // decaying while paused, so skipping costs nothing: the
+                    // proof is CHEAPER when the raid ends and this loop
+                    // re-issues on its next pass. Explore is deliberately NOT
+                    // gated — re-planeting mid-raid is the defender's escape
+                    // hatch, not a casualty of the pause.
+                    if let Some(loc) = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) {
+                        if crate::mcp::auto_response::planet_under_raid(loc) {
+                            continue;
+                        }
+                    }
                     // Skip if a task for this struct is already in flight (completed ones
                     // linger in the registry — those we DO allow to re-issue).
                     if let Some(t) = registry.tasks.get(sid) {

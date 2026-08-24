@@ -138,7 +138,7 @@ pub struct Hull {
 /// The slice of the type catalog the planner needs. Kept separate from
 /// [`crate::game_state::StructTypeInfo`] so [`plan_web`] is a pure function
 /// tests can drive without a synced GAME_STATE.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TypeStats {
     /// Cross-ambit counter damage.
     pub counter: u64,
@@ -148,6 +148,22 @@ pub struct TypeStats {
     pub armour: u64,
     /// Union of primary|secondary weapon ambit masks (Water=2, Land=4, Air=8, Space=16).
     pub reach: u64,
+    /// v0.21.0: only types the chain flags `canDefend` may be registered as
+    /// defenders — fleet hulls yes, planetary structs no. The whole "Ore
+    /// Bunker blocks the refinery" edge class died with that release
+    /// (measured: 155 of 188 auto_defend txs rejected `cannot defend` in the
+    /// first two hours it was live).
+    pub can_defend: bool,
+}
+
+/// Default is PERMISSIVE (`can_defend: true`): a type missing from the synced
+/// catalog fails open and the chain arbitrates with a clean, ledgered reject —
+/// the same doctrine as the unknown-charge rule. Fleet hulls are the common
+/// case, so open is also usually correct.
+impl Default for TypeStats {
+    fn default() -> Self {
+        Self { counter: 0, counter_same: 0, armour: 0, reach: 0, can_defend: true }
+    }
 }
 
 /// One desired edge of the defense web.
@@ -288,11 +304,15 @@ pub fn plan_web_stance(
         owned.iter().map(|(h, p)| (h.id.clone(), p.by.clone())).collect();
 
     // The defender pool: everything that is not itself a protected production/
-    // command struct. Planetary hulls are eligible (an Ore Bunker blocking the
-    // refinery is a real edge) — the travels/rank ordering sorts out the rest.
+    // command struct AND that the chain will accept as a defender. Until
+    // v0.21.0 planetary hulls were eligible and "an Ore Bunker blocking the
+    // refinery" was a real, load-bearing edge; the CanDefend flag ended that —
+    // only fleet hulls defend now, and a planetary DefenseSet is a guaranteed
+    // `cannot defend` reject.
     let mut pool: Vec<&Hull> = hulls
         .iter()
         .filter(|h| !PROTECTED_TYPES.contains(&h.type_id.as_str()))
+        .filter(|h| get(&h.type_id).can_defend)
         .collect();
     let mut edges: Vec<Edge> = Vec::new();
     let mut take = |pool: &mut Vec<&Hull>, best: Option<usize>, protected: &Hull, why: &'static str, edges: &mut Vec<Edge>| {
@@ -551,6 +571,12 @@ fn catalog() -> HashMap<String, TypeStats> {
                     counter_same: t.counter_attack_same_ambit.unwrap_or(0),
                     armour: t.attack_reduction.unwrap_or(0),
                     reach: t.primary_weapon_ambits.unwrap_or(0) | t.secondary_weapon_ambits.unwrap_or(0),
+                    // Pre-0.21 sync payloads lack the flag; fall back to the
+                    // category (fleet defends, planetary does not — exactly
+                    // the ship rule the flag encodes).
+                    can_defend: t
+                        .can_defend
+                        .unwrap_or_else(|| t.category.as_deref() == Some("fleet")),
                 },
             );
         }
@@ -797,12 +823,33 @@ async fn scan(
                         );
                     }
                     Err(e) => {
-                        run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        crate::mcp::telemetry::tlog(
-                            "auto_defend",
-                            crate::mcp::telemetry::Sev::Warn,
-                            format!("defense {verb} failed for {pid}: {e}"),
-                        );
+                        // Two rejects are CONVERGENCE, not failure — the chain
+                        // is telling us the desired end-state already holds:
+                        //  · "is not_defending … for defense_clear": the
+                        //    registration we wanted gone is already gone (the
+                        //    v0.21.0 upgrade wiped every planetary-defender
+                        //    registration wholesale; our cache lagged it).
+                        //  · "cannot defend": the defender is a type the chain
+                        //    no longer accepts — un-cache it so the planner
+                        //    stops re-proposing a doomed edge on stale state.
+                        let benign = e.contains("not_defending");
+                        if benign || e.contains("cannot defend") {
+                            ASSIGNED_CACHE.lock().unwrap().remove(&edge.defender);
+                        }
+                        if benign {
+                            crate::mcp::telemetry::tlog(
+                                "auto_defend",
+                                crate::mcp::telemetry::Sev::Debug,
+                                format!("defense {verb} for {pid}: already converged ({e})"),
+                            );
+                        } else {
+                            run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            crate::mcp::telemetry::tlog(
+                                "auto_defend",
+                                crate::mcp::telemetry::Sev::Warn,
+                                format!("defense {verb} failed for {pid}: {e}"),
+                            );
+                        }
                     }
                 }
                 // One action per player per scan (charge-paced).
@@ -831,7 +878,7 @@ mod tests {
         // 6 = High Altitude Interceptor.
         let mut st: HashMap<String, TypeStats> = HashMap::new();
         st.insert("1".into(), TypeStats::default());
-        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1 });
+        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..Default::default() });
         st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..Default::default() });
         st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..Default::default() });
 
@@ -875,7 +922,7 @@ mod tests {
         const SPACE: u64 = 16;
         let mut st: HashMap<String, TypeStats> = HashMap::new();
         st.insert("1".into(), TypeStats::default());
-        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1 });
+        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..Default::default() });
         st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..Default::default() });
         st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..Default::default() });
         // A hull that can neither block the land CMD nor counter anything.
@@ -919,7 +966,7 @@ mod tests {
         const SPACE: u64 = 16;
         let mut st: HashMap<String, TypeStats> = HashMap::new();
         st.insert("1".into(), TypeStats::default());
-        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1 });
+        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..Default::default() });
         st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..Default::default() });
         st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..Default::default() });
         let hulls = vec![
@@ -1053,15 +1100,20 @@ mod tests {
     fn stats() -> HashMap<String, TypeStats> {
         // A minimal but realistic catalog (values from the live chain table).
         let mut m = HashMap::new();
-        m.insert("1".into(), TypeStats { counter: 2, counter_same: 2, armour: 1, reach: 32 }); // Command Ship
-        m.insert("2".into(), TypeStats { counter: 1, counter_same: 1, armour: 0, reach: 6 }); // Battleship (water|land, AP)
-        m.insert("9".into(), TypeStats { counter: 1, counter_same: 1, armour: 1, reach: 4 }); // Tank (armoured)
-        m.insert("8".into(), TypeStats { counter: 0, counter_same: 0, armour: 0, reach: 6 }); // Mobile Artillery
-        m.insert("11".into(), TypeStats { counter: 1, counter_same: 1, armour: 0, reach: 6 | 8 }); // Cruiser (secondary reaches air)
-        m.insert("12".into(), TypeStats { counter: 1, counter_same: 2, armour: 0, reach: 10 }); // Destroyer
-        m.insert("18".into(), TypeStats { counter: 0, counter_same: 0, armour: 0, reach: 0 }); // Ore Bunker
-        m.insert("15".into(), TypeStats::default()); // Refinery
-        m.insert("14".into(), TypeStats::default()); // Extractor
+        let fleet = |counter, counter_same, armour, reach| TypeStats {
+            counter, counter_same, armour, reach, can_defend: true
+        };
+        // v0.21.0: planetary types carry canDefend=false on the chain.
+        let planetary = TypeStats { can_defend: false, ..Default::default() };
+        m.insert("1".into(), fleet(2, 2, 1, 32)); // Command Ship
+        m.insert("2".into(), fleet(1, 1, 0, 6)); // Battleship (water|land, AP)
+        m.insert("9".into(), fleet(1, 1, 1, 4)); // Tank (armoured)
+        m.insert("8".into(), fleet(0, 0, 0, 6)); // Mobile Artillery
+        m.insert("11".into(), fleet(1, 1, 0, 6 | 8)); // Cruiser (secondary reaches air)
+        m.insert("12".into(), fleet(1, 2, 0, 10)); // Destroyer
+        m.insert("18".into(), planetary.clone()); // Ore Bunker
+        m.insert("15".into(), planetary.clone()); // Refinery
+        m.insert("14".into(), planetary); // Extractor
         m
     }
 
@@ -1118,14 +1170,28 @@ mod tests {
     /// every shot at the refinery — production gets blocked, not guarded.
     #[test]
     fn production_gets_same_ambit_blockers() {
+        // v0.21.0 (chain): only canDefend types may register as defenders, and
+        // every planetary type ships canDefend=false. The Ore Bunker → Refinery
+        // block was a real, load-bearing edge before that release; wiring it
+        // now is a guaranteed `cannot defend` reject (measured: 155 of 188
+        // auto_defend txs failed in the first two hours v0.21.0 was live).
         let hulls = vec![
             hull("5-ref", "15", "land", "2-1"),
             hull("5-bunker", "18", "land", "2-1"),
         ];
         let web = plan_web(&hulls, &stats());
+        assert!(web.is_empty(), "a planetary hull must never be wired as a defender: {web:?}");
+
+        // A same-ambit FLEET hull still takes the job.
+        let hulls = vec![
+            hull("5-ref", "15", "land", "2-1"),
+            hull("5-bunker", "18", "land", "2-1"),
+            hull("5-tank", "9", "land", "9-1"),
+        ];
+        let web = plan_web(&hulls, &stats());
         assert_eq!(
             web,
-            vec![Edge { defender: "5-bunker".into(), protected: "5-ref".into(), why: "blocks the Refinery" }]
+            vec![Edge { defender: "5-tank".into(), protected: "5-ref".into(), why: "blocks the Refinery" }]
         );
     }
 

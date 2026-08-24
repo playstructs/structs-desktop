@@ -1030,6 +1030,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               primary_weapon_charge: pickNum(t, 'primary_weapon_charge', 'primaryWeaponCharge'),
               secondary_weapon_charge: pickNum(t, 'secondary_weapon_charge', 'secondaryWeaponCharge'),
               possible_ambit: pickNum(t, 'possible_ambit', 'possibleAmbit'),
+              // v0.21.0: only canDefend types may be registered as defenders
+              // (fleet true, planetary false). Absent on older chains.
+              can_defend: pickBool(t, 'can_defend', 'canDefend'),
               primary_weapon_ambits: pickNum(t, 'primary_weapon_ambits', 'primaryWeaponAmbits'),
               secondary_weapon_ambits: pickNum(t, 'secondary_weapon_ambits', 'secondaryWeaponAmbits'),
               // Combat math fields (ruleset matrix + damage simulator).

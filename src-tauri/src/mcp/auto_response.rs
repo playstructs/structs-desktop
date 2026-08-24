@@ -178,6 +178,18 @@ static SEEDED_PLANETS: LazyLock<Mutex<HashSet<String>>> =
 static RAID_WATCH: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Is this planet currently under a WATCHED raid? Exposed for the other loops:
+/// chain v0.21.0 pauses all mining/refining on a raided planet, so issuing a
+/// harvest task against one wastes GPU time on a proof whose completion the
+/// chain will refuse. The watch is event-fed and re-seeded from the chain's
+/// raid feed, so it is exactly as fresh as the response loop itself.
+pub fn planet_under_raid(planet_id: &str) -> bool {
+    RAID_WATCH
+        .lock()
+        .map(|w| w.contains_key(planet_id))
+        .unwrap_or(false)
+}
+
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static RUN_GEN: AtomicU64 = AtomicU64::new(0);
@@ -554,14 +566,18 @@ async fn handle_alarm(
         crate::mcp::combat_lists::hold_for_combat(&alarm.defender_player);
     }
 
-    // ── 3. Hardening runs regardless of mode — it costs nothing offensive. ──
-    if cfg.panic_refine && alarm.is_raid && !alarm.defender_player.is_empty() && !cfg.dry_run {
-        // A raid seizes ALL stored ore; refining is the only thing that removes
-        // it from the pot. Fire immediately rather than waiting out auto_harvest's
-        // 30-minute cadence — the whole raid resolves in about four minutes.
-        // Deliberately runs in `advise` mode too: it is purely defensive.
-        crate::mcp::auto_harvest::request_priority_refine(app, &alarm.defender_player).await;
-    }
+    // ── 3. Hardening. ──
+    // TOMBSTONE (chain v0.21.0, 2026-08-24): `panic_refine` is dead mechanics.
+    // It fired an immediate refine when a raid landed — "refining is the only
+    // thing that removes ore from the pot" — and that was true for as long as
+    // refining DURING a raid was legal. v0.21.0 pauses all mining and refining
+    // on a planet under raid, so the panic refine is now a guaranteed reject
+    // that spends the defender's once-per-block action — the exact action the
+    // response loop needs for its first shot. The config flag stays (an older
+    // config file must still parse) but it no longer does anything. Ore on a
+    // raided planet is defended by WINNING now: kill the raider's Command
+    // Ship, or recall the fleet (3b below) — there is no launder-it-mid-raid
+    // escape hatch any more.
 
     // ── 3b. Come home. ──────────────────────────────────────────────────────
     // The cheapest defence in the game, and we were not using it.

@@ -469,11 +469,13 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
             c.planet_ore_remaining, cfg.min_planet_ore
         ));
     }
-    // Someone is already parked here. A planet runs ONE raid at a time, and the
-    // second fleet to arrive is inert in both directions — it creates no raid,
-    // cannot attack, and cannot be attacked. Sending a raider is a pure loss:
-    // the trip buys nothing and the raider's OWN planet is raidable the whole
-    // time it is away.
+    // Someone is already parked here. A planet runs ONE raid at a time — and
+    // as of chain v0.21.0 the enemy-fleet queue is CAPPED at one: a second
+    // arrival is turned around and sent home by the chain itself (before 0.21
+    // it parked inert). The gate stays because the trip is still a pure loss —
+    // travel out and back with the raider's OWN planet exposed the whole time —
+    // but the old conscription hazard (a parked fleet auto-promoted into the
+    // raid slot when the first raider left) died with the queue.
     if let Some(fid) = &c.occupied_by {
         return Some(format!("fleet {fid} is already raiding here — a second fleet is inert"));
     }
