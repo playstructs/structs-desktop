@@ -540,6 +540,13 @@ pub async fn mcp_transfer_execute_impl(
     let (_pid, index, name, address) = resolve_player(&who)?;
     let amount_str = format!("{}", amount.round() as i128);
 
+    // Hard gate on the exact strings about to be signed — the preview's shape
+    // check plus this means a malformed destination can never reach a signer
+    // (the chain does NOT validate MsgPlayerSend's toAddress; a bad one is a
+    // silent burn, not a reject).
+    crate::mcp::send_guard::validate_send(&address, &to, &amount_str)
+        .map_err(|e| format!("refused: {e}"))?;
+
     let result = match index {
         // A vplayer signs through the same bridge every loop uses.
         Some(i) => {

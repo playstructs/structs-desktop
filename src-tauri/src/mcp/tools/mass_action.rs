@@ -159,22 +159,18 @@ pub(crate) fn build_sweep_plan(
     (entries, skipped)
 }
 
-pub(crate) fn primary_send_target() -> Result<(String, String), String> {
-    let gs = crate::game_state::GAME_STATE
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    let addr = gs
-        .wallet_address
-        .clone()
-        .filter(|s| !s.is_empty())
-        .ok_or("primary wallet address not synced yet")?;
-    let pid = gs.player_id.clone().unwrap_or_default();
-    Ok((addr, pid))
-}
+// NOTE: the old `primary_send_target()` (destination = locally synced
+// wallet_address) was removed deliberately: that address is the SIGNING key,
+// which on a second-device install is not where the player's balance lives.
+// Use `send_guard::verified_primary_send_target()` — chain-verified — instead.
 
 async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Result<Value, String> {
     let a = sweep_args(&request.args);
-    let (to_address, _primary_pid) = primary_send_target()?;
+    // Chain-verified destination (player.primaryAddress), never the local
+    // signing address — on a second-device install those differ and the
+    // signing address holds no player balance (the null-counterparty burn).
+    let (to_address, _primary_pid) =
+        crate::mcp::send_guard::verified_primary_send_target().await?;
     let rows = roster_cache::all_rows();
     let (entries, skipped) = build_sweep_plan(&rows, request.players.as_ref(), a);
     let total_alpha: f64 = entries
@@ -253,8 +249,19 @@ async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Resul
                 let (ok, failed, done, swept, job) =
                     (ok_c.clone(), failed_c.clone(), done_c.clone(), swept_c.clone(), job_c.clone());
                 async move {
+                    // A missing registry entry must refuse, never sign a
+                    // malformed transfer (registry_address defaults to "").
+                    let from = registry_address(e.index);
+                    if let Err(err) =
+                        crate::mcp::send_guard::validate_send(&from, &to, &e.amount_ualpha)
+                    {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        done.fetch_add(1, Ordering::Relaxed);
+                        tlog("sweep", Sev::Warn, format!("{} refused: {err}", e.player_id));
+                        return;
+                    }
                     let payload = json!({
-                        "fromAddress": registry_address(e.index),
+                        "fromAddress": from,
                         "toAddress": to,
                         "amount": [{ "denom": "ualpha", "amount": e.amount_ualpha }],
                     });

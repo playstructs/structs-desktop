@@ -31,6 +31,7 @@ pub mod variance;
 pub mod spectator;
 pub mod resources;
 pub mod roster_cache;
+pub mod send_guard;
 pub mod server;
 pub mod telemetry;
 pub mod tools;

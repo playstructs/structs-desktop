@@ -1295,13 +1295,35 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
           // ── Transfer ── (alpha send via MsgPlayerSend; queueMsgBankSend never
           //    existed — amount is a Coin[] in ualpha, matching AlphaManager.)
-          case 'bank_send':
+          case 'bank_send': {
+            // Last stop before the signing queue. The chain does NOT validate
+            // MsgPlayerSend's toAddress (a malformed one silently burns the
+            // funds at the empty address), so a bad send must die HERE. This
+            // also catches undefined args from any caller using the wrong key
+            // spelling — String(undefined) is 'undefined', not an address.
+            var bsFrom = String(args.from_address || '');
+            var bsTo = String(args.to_address || '');
+            // "1000000" or "1000000ualpha" or "500uguild.1" — the old
+            // digits-only strip turned "500uguild.1" into 5001 ualpha.
+            var bsParsed = /^([0-9]+)\s*([a-z][a-z0-9./_-]*)?$/.exec(String(args.amount || '').trim());
+            var bsAmt = bsParsed ? bsParsed[1] : '';
+            var bsDenom = (bsParsed && bsParsed[2]) || 'ualpha';
+            var bsBad = null;
+            if (!/^structs1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38,80}$/.test(bsFrom)) bsBad = 'from_address "' + bsFrom + '" is not a structs1 address';
+            else if (!/^structs1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38,80}$/.test(bsTo)) bsBad = 'to_address "' + bsTo + '" is not a structs1 address';
+            else if (bsFrom === bsTo) bsBad = 'from and to are the same address';
+            else if (!bsAmt || !/[1-9]/.test(bsAmt)) bsBad = 'amount "' + String(args.amount) + '" is not a positive integer amount (with optional denom suffix)';
+            if (bsBad) {
+              respondTx(requestId, false, null, 'bank_send refused: ' + bsBad);
+              return;
+            }
             promise = scm.queueMsgPlayerSend(
-              args.from_address,
-              args.to_address,
-              [{ denom: 'ualpha', amount: String(args.amount).replace(/[^0-9]/g, '') }]
+              bsFrom,
+              bsTo,
+              [{ denom: bsDenom, amount: bsAmt }]
             );
             break;
+          }
 
           // ── Generator ──
           case 'struct_generator_infuse':

@@ -164,10 +164,14 @@ pub async fn tick(app: &tauri::AppHandle, force: bool) {
 }
 
 async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
-    let to_address = match crate::mcp::tools::mass_action::primary_send_target() {
+    // Chain-verified destination — NOT the local signing address. A desktop
+    // install acting as a second device signs with a key whose address holds
+    // no game balance; sweeping there burned a player's alpha (see
+    // send_guard's module docs). Unverifiable ⇒ no sweep this scan.
+    let to_address = match crate::mcp::send_guard::verified_primary_send_target().await {
         Ok((addr, _pid)) => addr,
         Err(e) => {
-            run.blocked(format!("no primary destination: {e}"));
+            run.blocked(format!("no verified primary destination: {e}"));
             return;
         }
     };
@@ -277,6 +281,20 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
                         return;
                     }
                 };
+                // Final gate on the EXACT strings being signed. Refusing a
+                // malformed send beats letting the chain burn it — PlayerSend
+                // does not validate its destination.
+                if let Err(err) =
+                    crate::mcp::send_guard::validate_send(&from, &to, &e.amount_ualpha)
+                {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    tlog(
+                        "auto_sweep",
+                        Sev::Warn,
+                        format!("{} refused: {err}", e.player_id),
+                    );
+                    return;
+                }
                 let payload = json!({
                     "fromAddress": from,
                     "toAddress": to,

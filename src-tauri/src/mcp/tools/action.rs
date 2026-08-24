@@ -562,6 +562,15 @@ async fn action_transfer(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Con
         gs.wallet_address.clone().unwrap_or_default()
     };
 
+    // Both addresses must be well-formed before anything reaches a signer:
+    // the chain does not validate MsgPlayerSend's toAddress, so a malformed
+    // destination is a silent burn, not a reject.
+    if let Err(e) = crate::mcp::send_guard::validate_addr("sender", &from_address)
+        .and_then(|_| crate::mcp::send_guard::validate_addr("destination", to_address))
+    {
+        return vec![Content::text(format!("Transfer refused: {e}"))];
+    }
+
     let tx_args = json!({
         "action_type": "bank_send",
         "from_address": from_address,

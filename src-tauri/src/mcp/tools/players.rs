@@ -1940,6 +1940,10 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
                 .ok_or("player_send: couldn't resolve this player's address")?;
             let to = s("to").ok_or("player_send: 'to' (recipient address) required")?;
             let amount = s("amount").ok_or("player_send: 'amount' in ualpha (e.g. \"1000000\") required")?;
+            // The chain does not validate MsgPlayerSend's toAddress — a
+            // malformed destination burns the funds rather than rejecting.
+            crate::mcp::send_guard::validate_send(&from, &to, &amount)
+                .map_err(|e| format!("player_send refused: {e}"))?;
             Ok((
                 "/structs.structs.MsgPlayerSend".into(),
                 json!({
