@@ -147,6 +147,25 @@ pub fn register_vplayer_hash(object_id: String, index: u32, task_type: String) {
     VPLAYER_HASHES.insert(object_id, (index, task_type));
 }
 
+/// Completions that have been dispatched but not yet resolved, as
+/// `object_id -> the anchor the proof was solved against`.
+///
+/// The signing façade is serial, so a completion can sit in the admission gate
+/// for the best part of an hour when a backlog drains. For that whole time the
+/// chain's clock still reads the OLD anchor — the cycle has not been closed
+/// yet — so the harvest loop saw a ripe struct and re-issued the very same
+/// proof. Measured over six hours: 3,076 of 3,233 structs were solved TWICE,
+/// and 693 sent a second completion. The wasted GPU barely matters at
+/// difficulty 1; the wasted QUEUE SLOTS do, because that is the scarce serial
+/// resource the whole economy is throttled by.
+static PENDING_COMPLETIONS: std::sync::LazyLock<dashmap::DashMap<String, u64>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+/// The anchor this object already has a completion in flight for, if any.
+pub fn completion_in_flight(object_id: &str) -> Option<u64> {
+    PENDING_COMPLETIONS.get(object_id).map(|v| *v)
+}
+
 /// If the completed task belongs to a virtual player, sign+broadcast its
 /// completion tx (mine/refine/build/raid) as that player. No-op otherwise.
 pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) {
@@ -196,6 +215,10 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         // Measured 6 of 457 completions (1.3%). Cheap to avoid: one read turns
         // a guaranteed chain rejection into a skip, and auto_harvest re-issues
         // against the new anchor on its next pass.
+        // The ore planet is also remembered, so the SAME check can be repeated
+        // after the admission gate — the wait there is where most staleness is
+        // actually introduced (see tx_retry::FreshAnchor).
+        let mut ore_planet: Option<String> = None;
         if let Some(anchor) = anchor_field_for(&task_kind) {
             let client = crate::mcp::cosmos_client::CosmosClient::new();
             if let Ok(e) = client.query_entity("struct", &object_id).await {
@@ -214,10 +237,15 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
                         .and_then(|s| s.get("locationId"))
                         .and_then(|l| l.as_str())
                     {
-                        Some(planet_id) => match client.query_entity("planet", planet_id).await {
-                            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), &task_kind),
-                            Err(_) => 0,
-                        },
+                        Some(planet_id) => {
+                            ore_planet = Some(planet_id.to_string());
+                            match client.query_entity("planet", planet_id).await {
+                                Ok(p) => {
+                                    crate::mcp::loop_util::planet_ore_anchor(Some(&p), &task_kind)
+                                }
+                                Err(_) => 0,
+                            }
+                        }
                         None => 0,
                     },
                 };
@@ -234,6 +262,12 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
                 }
             }
         }
+        // Re-tested once the gate slot is won, immediately before broadcast.
+        let guard = ore_planet.map(|planet_id| crate::mcp::tx_retry::FreshAnchor {
+            planet_id,
+            task_type: task_kind.clone(),
+            solved_anchor,
+        });
         // Route through tx_retry — NOT vplayer_bridge directly. This is the
         // most important tx class in the economy (every mine/refine/build/raid
         // payoff), and signing it raw meant success AND failure were reported
@@ -242,7 +276,16 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         // undetected precisely because of that blind spot. Now every completion
         // is ledgered like any other tx (sequence-mismatch retry only).
         let context = format!("pow_complete:{}", object_id);
-        match crate::mcp::tx_retry::sign_with_retry(&app, index, type_url, payload, &context).await
+        // Claim this cycle so the harvest loop doesn't re-issue the same proof
+        // while this one waits its turn at the gate. Released below, on every
+        // path, so a struct is never locked out of its next cycle.
+        PENDING_COMPLETIONS.insert(object_id.clone(), solved_anchor);
+        let signed = crate::mcp::tx_retry::sign_with_retry_guarded(
+            &app, index, type_url, payload, &context, guard,
+        )
+        .await;
+        PENDING_COMPLETIONS.remove(&object_id);
+        match signed
         {
             Ok(_) => {
                 crate::mcp::telemetry::tlog(
@@ -286,6 +329,32 @@ fn anchor_field_for(task_type: &str) -> Option<Anchor> {
         "MINE" | "REFINE" => Some(Anchor::PlanetOreClock),
         "BUILD" => Some(Anchor::StructField("blockStartBuild")),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::{completion_in_flight, PENDING_COMPLETIONS};
+
+    /// The re-issue loop this prevents: a completion waits at the serial signing
+    /// gate, the chain's clock therefore still reads the old anchor, the struct
+    /// still looks ripe, and the harvest loop grinds the identical proof again.
+    /// The claim must be keyed by ANCHOR, not merely by struct: releasing it on
+    /// the next cycle is what lets the struct keep earning.
+    #[test]
+    fn a_queued_completion_claims_only_its_own_cycle() {
+        PENDING_COMPLETIONS.insert("5-161258".to_string(), 2_303_353);
+
+        // Same cycle → the loop must not re-issue.
+        assert_eq!(completion_in_flight("5-161258"), Some(2_303_353));
+        // A struct with nothing in flight is untouched.
+        assert_eq!(completion_in_flight("5-999999"), None);
+        // The NEXT cycle has a different anchor, so the guard cannot match it
+        // and the struct is free to earn again.
+        assert_ne!(completion_in_flight("5-161258"), Some(2_303_400));
+
+        PENDING_COMPLETIONS.remove("5-161258");
+        assert_eq!(completion_in_flight("5-161258"), None);
     }
 }
 

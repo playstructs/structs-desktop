@@ -379,6 +379,14 @@ async fn scan(
                     if anchor == 0 {
                         continue; // planet's clock is clear — nothing to hash against
                     }
+                    // A proof for this exact cycle is already solved and waiting
+                    // to be signed. The chain's clock stays put until it lands,
+                    // so the struct still looks ripe and we would grind the very
+                    // same proof again and queue a second, doomed completion
+                    // behind the first. See hasher::PENDING_COMPLETIONS.
+                    if crate::hasher::completion_in_flight(sid) == Some(anchor) {
+                        continue;
+                    }
                     let age = current_block.saturating_sub(anchor);
                     // Refines do NOT expire. An aged refine anchor is simply a LOW-difficulty
                     // (cheap) proof — exactly like an aged mine — so it completes instantly

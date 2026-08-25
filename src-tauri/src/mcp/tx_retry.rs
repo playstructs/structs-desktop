@@ -233,12 +233,81 @@ pub async fn sign_with_retry(
     payload: Value,
     context: &str,
 ) -> Result<Value, String> {
+    sign_with_retry_guarded(app, index, type_url, payload, context, None).await
+}
+
+/// A proof-of-work completion's precondition, re-tested immediately before the
+/// message is broadcast.
+///
+/// A completion carries `{structId, proof, nonce}` and NO anchor: the chain
+/// rebuilds the hashed input from ITS OWN current clock, so the proof is valid
+/// only while that clock still reads what we solved against. Checking that at
+/// dispatch proves nothing, because the admission gate then holds the message
+/// for as long as the backlog takes to drain — measured at 29 to 94 minutes
+/// (avg 61) while ~2,400 simultaneously-ripe proofs queued behind a façade that
+/// signs about one per block. The planet's shared ore clock moves during that
+/// wait, so 22% of completions arrived stale and were spent on a certain
+/// rejection. Re-testing here turns each of those into a free skip that also
+/// hands the slot straight back, which drains the backlog faster.
+pub struct FreshAnchor {
+    /// The planet carrying the shared ore clock (resolved off the hot path).
+    pub planet_id: String,
+    /// "MINE" or "REFINE".
+    pub task_type: String,
+    /// The anchor the proof was actually solved against.
+    pub solved_anchor: u64,
+}
+
+impl FreshAnchor {
+    /// True when the chain's clock has moved away from what we solved against.
+    /// A read failure or a 0 reads as "unknown" and never blocks — this guard
+    /// may only ever cancel a send it is certain is already dead.
+    async fn is_stale(&self) -> bool {
+        let client = crate::mcp::cosmos_client::CosmosClient::new();
+        let Ok(p) = client.query_entity("planet", &self.planet_id).await else {
+            return false;
+        };
+        let live = crate::mcp::loop_util::planet_ore_anchor(Some(&p), &self.task_type);
+        live != 0 && live != self.solved_anchor
+    }
+}
+
+pub async fn sign_with_retry_guarded(
+    app: &tauri::AppHandle,
+    index: u32,
+    type_url: &str,
+    payload: Value,
+    context: &str,
+    guard: Option<FreshAnchor>,
+) -> Result<Value, String> {
     let mut last_err = String::new();
     for attempt in 1..=MAX_ATTEMPTS {
         // Admission gate: keeps the signing façade's own FIFO shallow so a
         // deadline-bound combat answer isn't stuck behind hundreds of bulk
         // builds. Held for the attempt; released on success, failure or cancel.
         let _slot = crate::mcp::tx_gate::acquire(context).await;
+        let slot_won = now_millis();
+        // The wait above can be an hour deep. Re-test the proof's anchor now
+        // that we hold the slot, so a message the chain is guaranteed to reject
+        // is dropped here instead of costing a full sign round-trip.
+        if let Some(g) = &guard {
+            if g.is_stale().await {
+                telemetry::record_tx_attempt(TxAttemptRow {
+                    ts_ms: now_millis(),
+                    context: context.to_string(),
+                    action: type_url.to_string(),
+                    player_id: player_from_context(context),
+                    attempt,
+                    outcome: "skipped",
+                    tx_hash: None,
+                    code: None,
+                    raw_error: Some("ore clock moved while this proof waited to be signed".to_string()),
+                    translated: None,
+                    duration_ms: now_millis() - slot_won,
+                });
+                return Err("stale: the planet's ore clock moved while this proof waited to be signed".into());
+            }
+        }
         let started = now_millis();
         log_build(context, type_url, attempt, Some(&payload));
         let res = vplayer_bridge::sign_action(app, index, type_url, payload.clone(), 60).await;
