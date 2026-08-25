@@ -29,6 +29,47 @@ fn http() -> &'static Client {
     shared_client()
 }
 
+// ── Request accounting ──────────────────────────────────────────────────────
+// How hard is THIS client hitting the shared Guild API? The infra team can
+// see aggregate load but not who causes it; these counters make our own
+// contribution observable (structs_system status → guild_api_requests) so
+// "are we hammering the API" is a lookup, not a debate.
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+static REQ_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REQ_WINDOW: std::sync::Mutex<(u64, u64, u64)> = std::sync::Mutex::new((0, 0, 0)); // (minute, current, previous)
+
+fn note_request() {
+    REQ_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+    let minute = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 60)
+        .unwrap_or(0);
+    let mut w = REQ_WINDOW.lock().unwrap();
+    if w.0 != minute {
+        w.2 = if w.0 + 1 == minute { w.1 } else { 0 };
+        w.0 = minute;
+        w.1 = 0;
+    }
+    w.1 += 1;
+}
+
+/// (total since launch, this minute so far, the last full minute).
+pub fn request_stats() -> (u64, u64, u64) {
+    let minute = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 60)
+        .unwrap_or(0);
+    let w = REQ_WINDOW.lock().unwrap();
+    let (cur, prev) = if w.0 == minute {
+        (w.1, w.2)
+    } else if w.0 + 1 == minute {
+        (0, w.1)
+    } else {
+        (0, 0)
+    };
+    (REQ_TOTAL.load(AtomicOrdering::Relaxed), cur, prev)
+}
+
 /// Envelope returned by every Guild API endpoint.
 ///
 /// `errors` is `[]` on success but can be an `{...}` object on failure
@@ -110,6 +151,7 @@ impl GuildApiClient {
 
     /// Low-level GET: returns the unwrapped `data` field, validating the envelope.
     async fn get(&self, path: &str) -> Result<Value, String> {
+        note_request();
         let url = self.build_url(path);
         let resp = http()
             .get(&url)

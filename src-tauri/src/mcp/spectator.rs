@@ -1457,6 +1457,11 @@ const SNAPSHOT_INTERVAL_MS: u64 = 20_000;
 /// bursts; the response window in this game is measured in minutes, so a few
 /// seconds of lag on the animation is imperceptible next to the fight itself.
 const SHOT_POLL_MS: u64 = 4_000;
+/// Shot-poll cadence while the planet is QUIET (no raider present, no live
+/// raid status, no shots landing). A spectator window left open on a peaceful
+/// planet was 15 requests/minute against the shared Guild API for nothing;
+/// combat re-heats the poll the moment a snapshot or shot says so.
+const SHOT_POLL_QUIET_MS: u64 = 20_000;
 
 /// How much combat history a freshly-attached window is allowed to animate.
 ///
@@ -1481,6 +1486,9 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
     tauri::async_runtime::spawn(async move {
         let client = crate::mcp::cosmos_client::CosmosClient::new();
         let mut last_snapshot = 0f64;
+        // Start hot: a freshly-opened window should feel live immediately;
+        // the first snapshot then decides whether the planet is actually quiet.
+        let mut raid_hot = true;
         loop {
             // Exit as soon as nobody is looking, or the feature was disabled.
             let (target, windows, planet_id, generation) = {
@@ -1554,6 +1562,13 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
             if forced || now - last_snapshot >= SNAPSHOT_INTERVAL_MS as f64 {
                 last_snapshot = now;
                 let snap = enriched_snapshot(&client, &pid).await;
+                // A raider on the planet (or a non-terminal raid status) keeps
+                // the shot poll hot; a quiet planet drops to the slow cadence.
+                raid_hot = snap.raiding_fleet.is_some()
+                    || matches!(
+                        snap.raid_status.as_deref(),
+                        Some("initiated") | Some("ongoing") | Some("shieldsVulnerable")
+                    );
                 let payload = json!({ "generation": generation, "snapshot": snap });
                 for label in &windows {
                     emit(&app, label, "raid-snapshot", payload.clone());
@@ -1570,6 +1585,8 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                     .unwrap_or(0.0);
                 let (shots, high) = collect_shots(&page.items, cursor);
                 if !shots.is_empty() {
+                    // Shots landing = combat, whatever the last snapshot said.
+                    raid_hot = true;
                     if let Ok(mut w) = WATCHES.lock() {
                         if let Some(e) = w.get_mut(&key) {
                             e.shot_cursor = high;
@@ -1610,7 +1627,10 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(SHOT_POLL_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(
+                if raid_hot { SHOT_POLL_MS } else { SHOT_POLL_QUIET_MS },
+            ))
+            .await;
         }
     });
 }

@@ -607,6 +607,13 @@ pub fn health_snapshot() -> Value {
         "loops_wedged": wedged,
         "uptime_s": ((now - app_start) / 1000.0) as u64,
         "telemetry_dropped": crate::mcp::telemetry::dropped_count(),
+        // Our own pressure on the shared Guild API — total since launch plus
+        // a per-minute rate, so "is this client hammering /api" is a lookup.
+        "guild_api_requests": {
+            "total": crate::mcp::guild_api::request_stats().0,
+            "this_minute": crate::mcp::guild_api::request_stats().1,
+            "last_minute": crate::mcp::guild_api::request_stats().2,
+        },
     })
 }
 

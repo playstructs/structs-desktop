@@ -475,6 +475,17 @@ async fn board_invoke(
              not in this browser. Open Team Ops on that machine to watch a raid."
                 .into(),
         ),
+        // Game Stats over the web: the pull works (a browser at ?view=gamestats
+        // renders from the same cache), but the sweeps that FILL that cache run
+        // only while the native window exists — a web-only viewer sees whatever
+        // the host's window last gathered.
+        "mcp_game_stats_snapshot" => from_result(crate::mcp::game_stats::mcp_game_stats_snapshot()),
+        "open_game_stats_window" => err_json(
+            "The Game Stats window is native — it opens on the machine running \
+             Structs. Open it there (Debug → Game Stats), or browse this \
+             dashboard at /board?view=gamestats."
+                .into(),
+        ),
         "mcp_config_bundle" => from_result(board_pages::mcp_config_bundle().await),
         "mcp_config_set" => match (s("domain"), body.get("payload").cloned()) {
             (Some(d), Some(p)) => {
