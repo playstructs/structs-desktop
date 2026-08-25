@@ -53,10 +53,11 @@ impl TaskParams {
             .unwrap_or(0)
             % 10_000_000_000) as u64;
         // The difficulty checkpoint must be the CURRENT chain block, distinct
-        // from block_start (the proof anchor: blockStartOreMine/Refine/Build/Raid).
+        // from block_start (the proof anchor: the PLANET's blockStartOreMine /
+        // blockStartOreRefine since chain v0.21.0, else blockStartBuild/Raid).
         // age = checkpoint − block_start drives difficulty decay; if the anchor is
-        // old (e.g. the miner went online long ago) the proof is already at trivial
-        // difficulty, so seeding checkpoint=block_start would make the worker WAIT
+        // old (e.g. the planet's clock started long ago) the proof is already at
+        // trivial difficulty, so seeding checkpoint=block_start would make it WAIT
         // hours for its fake age to grow. Use the live block height (clamped so a
         // fresh anchor still yields age 0). Falls back to block_height pre-sync.
         let checkpoint = crate::game_state::GAME_STATE

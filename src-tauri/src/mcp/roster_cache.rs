@@ -293,12 +293,12 @@ fn parse_row(
 }
 
 /// Harvest-cycle context for one player, from ONE planet read (buried ore +
-/// planetary slot ids) plus a read per occupied planetary slot (extractor /
-/// refinery anchors). Returns (planet_ore, mine_eta_s, refine_eta_s).
+/// planetary slot ids), which also carries both ore clocks. Returns
+/// (planet_ore, mine_eta_s, refine_eta_s).
 ///
 /// ETA model: a cycle completes once its PoW difficulty decays to the
-/// auto-harvest threshold — anchors are set at activation, cycles never
-/// expire, and completion auto-restarts the next cycle. ETA = blocks until
+/// auto-harvest threshold — the planet's clock starts when a rig activates,
+/// cycles never expire, and completion auto-restarts the next. ETA = blocks until
 /// `ripe_age` minus the current anchor age, at ~6 s/block. 0 = ripe now
 /// (grinding or about to); None = no active cycle / no struct.
 async fn harvest_enrich(
@@ -313,21 +313,6 @@ async fn harvest_enrich(
     let planet_ore = Some(parse_f64(
         planet.get("gridAttributes").and_then(|g| g.get("ore")),
     ));
-    // Occupied planetary slots — extractor/refinery are planetary structs.
-    let mut sids: Vec<String> = Vec::new();
-    if let Some(p) = planet.get("Planet") {
-        for ambit in ["land", "water", "air", "space"] {
-            if let Some(arr) = p.get(ambit).and_then(|a| a.as_array()) {
-                for v in arr {
-                    if let Some(s) = v.as_str() {
-                        if !s.is_empty() {
-                            sids.push(s.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
     let threshold = crate::mcp::auto_harvest::get().difficulty_threshold;
     let eta = |anchor: u64, target: u64| -> Option<i64> {
         if anchor == 0 {
@@ -337,29 +322,19 @@ async fn harvest_enrich(
         let ripe = crate::mcp::auto_harvest::ripe_age(target, threshold);
         Some(((ripe.saturating_sub(age)) as f64 * BLOCK_SECS) as i64)
     };
-    let (mut mine, mut refine) = (None, None);
-    for sid in sids {
-        if mine.is_some() && refine.is_some() {
-            break;
-        }
-        let Ok(entity) = client.query_entity("struct", &sid).await else {
-            continue;
-        };
-        let s = entity.get("Struct");
-        let sa = entity.get("structAttributes");
-        let type_id = loop_util::extract_type_id(s.unwrap_or(&entity));
-        if type_id == crate::mcp::auto_harvest::EXTRACTOR_TYPE && mine.is_none() {
-            mine = eta(
-                loop_util::read_u64_field(sa, "blockStartOreMine"),
-                crate::mcp::auto_harvest::MINE_TARGET,
-            );
-        } else if type_id == crate::mcp::auto_harvest::REFINERY_TYPE && refine.is_none() {
-            refine = eta(
-                loop_util::read_u64_field(sa, "blockStartOreRefine"),
-                crate::mcp::auto_harvest::REFINE_TARGET,
-            );
-        }
-    }
+    // Chain v0.21.0: both ore clocks belong to the PLANET, shared by every rig
+    // standing on it, so the single planet read above already holds them. This
+    // used to walk every occupied planetary slot and read each struct entity to
+    // find the anchors — on a multi-thousand-player roster sweep that was up to
+    // 16 extra chain reads per player for two numbers we now already have.
+    let mine = eta(
+        loop_util::planet_ore_anchor(Some(&planet), "MINE"),
+        crate::mcp::auto_harvest::MINE_TARGET,
+    );
+    let refine = eta(
+        loop_util::planet_ore_anchor(Some(&planet), "REFINE"),
+        crate::mcp::auto_harvest::REFINE_TARGET,
+    );
     (planet_ore, mine, refine)
 }
 

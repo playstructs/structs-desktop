@@ -1655,11 +1655,12 @@ pub async fn execute(
             if matches!(action, "mine" | "refine" | "raid") {
                 let s = |k: &str| params.args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
                 let dt = |k: &str, d: u64| params.args.get(k).and_then(|v| v.as_u64()).unwrap_or(d);
-                // mine/refine proofs anchor on the struct's blockStart*, set when the
-                // miner/refinery went online and reset after each successful cycle —
-                // NOT the current block (docs hashing.md: input {structId} kWINE{blockStart}NONCE).
-                // Read it from the chain like complete_build reads blockStartBuild;
-                // using current_block_height yields a proof the chain rejects (→ 0 ore).
+                // mine/refine proofs anchor on the PLANET's shared ore clock — NOT
+                // the current block, and since chain v0.21.0 no longer the struct's
+                // own blockStartOre*, which now permanently reads 0 (docs
+                // hashing.md: input {structId}MINE{blockStart}NONCE). Read it from
+                // the chain like complete_build reads blockStartBuild; anything else
+                // yields a proof the chain rejects (→ 0 ore).
                 let read_anchor_in = |entity: &Value, container: &str, field: &str| -> u64 {
                     entity
                         .get(container)
@@ -1667,8 +1668,16 @@ pub async fn execute(
                         .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
                         .unwrap_or(0)
                 };
-                let read_anchor = |entity: &Value, field: &str| read_anchor_in(entity, "structAttributes", field);
                 let read_anchor_planet = |entity: &Value, field: &str| read_anchor_in(entity, "planetAttributes", field);
+                // A planetary rig's locationId IS its planet id, and the planet is
+                // where both ore clocks now live.
+                let planet_of = |entity: &Value| -> Option<String> {
+                    entity
+                        .get("Struct")
+                        .and_then(|s| s.get("locationId"))
+                        .and_then(|l| l.as_str())
+                        .map(str::to_string)
+                };
                 let (object_id, task_type, task_params) = match action {
                     "mine" => {
                         let Some(sid) = s("struct_id") else {
@@ -1678,9 +1687,15 @@ pub async fn execute(
                             Ok(v) => v,
                             Err(e) => return vec![Content::text(format!("mine: struct {} lookup failed: {}", sid, e))],
                         };
-                        let block = read_anchor(&entity, "blockStartOreMine");
+                        let Some(planet_id) = planet_of(&entity) else {
+                            return vec![Content::text(format!("mine: {} has no planet location — only a planetary extractor can mine.", sid))];
+                        };
+                        let block = match client.query_entity("planet", &planet_id).await {
+                            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "MINE"),
+                            Err(e) => return vec![Content::text(format!("mine: planet {} lookup failed: {}", planet_id, e))],
+                        };
                         if block == 0 {
-                            return vec![Content::text(format!("mine: {} has blockStartOreMine=0 — the extractor isn't mining (bring it online/activate first; mining starts on going online).", sid))];
+                            return vec![Content::text(format!("mine: planet {} has no mine clock running (blockStartOreMine=0) — bring an extractor online there to start one.", planet_id))];
                         }
                         (sid.clone(), "MINE", TaskParams::for_ore(&sid, "MINE", block, dt("difficulty_target", 14000)))
                     }
@@ -1692,9 +1707,15 @@ pub async fn execute(
                             Ok(v) => v,
                             Err(e) => return vec![Content::text(format!("refine: struct {} lookup failed: {}", sid, e))],
                         };
-                        let block = read_anchor(&entity, "blockStartOreRefine");
+                        let Some(planet_id) = planet_of(&entity) else {
+                            return vec![Content::text(format!("refine: {} has no planet location — only a planetary refinery can refine.", sid))];
+                        };
+                        let block = match client.query_entity("planet", &planet_id).await {
+                            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "REFINE"),
+                            Err(e) => return vec![Content::text(format!("refine: planet {} lookup failed: {}", planet_id, e))],
+                        };
                         if block == 0 {
-                            return vec![Content::text(format!("refine: {} has blockStartOreRefine=0 — the refinery isn't refining (needs stored ore + online).", sid))];
+                            return vec![Content::text(format!("refine: planet {} has no refine clock running (blockStartOreRefine=0) — needs an online refinery and stored ore.", planet_id))];
                         }
                         (sid.clone(), "REFINE", TaskParams::for_ore(&sid, "REFINE", block, dt("difficulty_target", 28000)))
                     }
@@ -1720,7 +1741,7 @@ pub async fn execute(
                     Ok(()) => {
                         hasher::register_vplayer_hash(object_id.clone(), index, task_type.to_string());
                         return vec![Content::text(format!(
-                            "[vplayer {}] {} hashing started on {} (proof anchored at the struct's blockStart*). The completion tx will be auto-signed as this player when the proof is found. Track with structs_hash list.",
+                            "[vplayer {}] {} hashing started on {} (mine/refine anchor on the planet's shared ore clock; build on the struct). The completion tx will be auto-signed as this player when the proof is found. Track with structs_hash list.",
                             index, action, object_id
                         ))];
                     }

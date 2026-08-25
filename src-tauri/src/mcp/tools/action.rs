@@ -139,30 +139,44 @@ async fn action_mine(
         }
     };
 
-    // The mine proof anchors on the extractor's blockStartOreMine (set when it
-    // went online, reset after each successful mine) — NOT the current block.
-    // Read it from the chain; current_block_height yields a proof the chain
-    // rejects ({structId}MINE{blockStartOreMine}NONCE — see docs hashing.md).
+    // The mine proof anchors on the PLANET's shared mine clock — NOT the current
+    // block, and (since chain v0.21.0) no longer the extractor's own attribute,
+    // which now permanently reads 0. Read it from the chain; anything else
+    // yields a proof the chain rejects ({structId}MINE{blockStartOreMine}NONCE
+    // — see docs hashing.md).
     let block_start = {
         let client = crate::mcp::cosmos_client::CosmosClient::new();
-        match client.query_entity("struct", struct_id).await {
+        let planet_id = match client.query_entity("struct", struct_id).await {
+            // A planetary rig's locationId IS its planet id.
             Ok(v) => v
-                .get("structAttributes")
-                .and_then(|x| x.get("blockStartOreMine"))
-                .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
-                .unwrap_or(0),
+                .get("Struct")
+                .and_then(|s| s.get("locationId"))
+                .and_then(|l| l.as_str())
+                .map(str::to_string),
             Err(e) => return vec![Content::text(format!("mine: struct {} lookup failed: {}", struct_id, e))],
+        };
+        let Some(planet_id) = planet_id else {
+            return vec![Content::text(format!(
+                "mine: {} has no planet location — only a planetary extractor can mine.",
+                struct_id
+            ))];
+        };
+        match client.query_entity("planet", &planet_id).await {
+            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "MINE"),
+            Err(e) => {
+                return vec![Content::text(format!("mine: planet {} lookup failed: {}", planet_id, e))]
+            }
         }
     };
     if block_start == 0 {
         return vec![Content::text(format!(
-            "mine: {} has blockStartOreMine=0 — the extractor isn't in a mining cycle (it starts on going online; re-activate it to begin one).",
+            "mine: {}'s planet has no mine clock running (blockStartOreMine=0) — bring an extractor online there to start one.",
             struct_id
         ))];
     }
 
-    // Start hash task — proof anchored at blockStartOreMine. No initiation tx:
-    // going online already started the cycle; we only compute + submit the proof.
+    // Start hash task — proof anchored at the planet's mine clock. No initiation
+    // tx: going online already started the cycle; we only compute + submit it.
     let block_height = block_start;
     let task_params = TaskParams::for_ore(struct_id, "MINE", block_start, difficulty_target);
 
@@ -226,22 +240,36 @@ async fn action_refine(
         }
     };
 
-    // Anchor the refine proof on blockStartOreRefine (set when refining began,
-    // reset after each cycle), read from the chain — not the current block.
+    // Anchor the refine proof on the PLANET's shared refine clock, read from the
+    // chain — not the current block, and (since chain v0.21.0) not the
+    // refinery's own attribute, which now permanently reads 0.
     let block_height = {
         let client = crate::mcp::cosmos_client::CosmosClient::new();
-        match client.query_entity("struct", struct_id).await {
+        let planet_id = match client.query_entity("struct", struct_id).await {
+            // A planetary rig's locationId IS its planet id.
             Ok(v) => v
-                .get("structAttributes")
-                .and_then(|x| x.get("blockStartOreRefine"))
-                .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
-                .unwrap_or(0),
+                .get("Struct")
+                .and_then(|s| s.get("locationId"))
+                .and_then(|l| l.as_str())
+                .map(str::to_string),
             Err(e) => return vec![Content::text(format!("refine: struct {} lookup failed: {}", struct_id, e))],
+        };
+        let Some(planet_id) = planet_id else {
+            return vec![Content::text(format!(
+                "refine: {} has no planet location — only a planetary refinery can refine.",
+                struct_id
+            ))];
+        };
+        match client.query_entity("planet", &planet_id).await {
+            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "REFINE"),
+            Err(e) => {
+                return vec![Content::text(format!("refine: planet {} lookup failed: {}", planet_id, e))]
+            }
         }
     };
     if block_height == 0 {
         return vec![Content::text(format!(
-            "refine: {} has blockStartOreRefine=0 — the refinery isn't in a refining cycle yet.",
+            "refine: {}'s planet has no refine clock running (blockStartOreRefine=0) — bring a refinery online there with ore to refine.",
             struct_id
         ))];
     }

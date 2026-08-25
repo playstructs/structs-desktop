@@ -64,16 +64,67 @@ pub async fn execute(
                 return vec![Content::text("Error: task_type (MINE/REFINE/BUILD/RAID) required for start command")];
             };
 
-            // Auto-fill from synced gameState if not provided
-            let gs = crate::game_state::GAME_STATE.read().unwrap();
-            let current_block = gs.current_block_height;
-            let block_start = params.block_start.unwrap_or(current_block);
-            let difficulty_target = params.difficulty_target.unwrap_or_else(|| {
-                gs.get_difficulty_for_struct(task_id, task_type)
-                    .unwrap_or(700) // fallback default
-            });
-            let struct_type_name = gs.get_struct_type_name(task_id);
-            drop(gs);
+            // Auto-fill from synced gameState if not provided. Scoped so the
+            // (non-Send) read guard is released before any await below.
+            let (current_block, difficulty_target, struct_type_name) = {
+                let gs = crate::game_state::GAME_STATE.read().unwrap();
+                let difficulty_target = params.difficulty_target.unwrap_or_else(|| {
+                    gs.get_difficulty_for_struct(task_id, task_type)
+                        .unwrap_or(700) // fallback default
+                });
+                (
+                    gs.current_block_height,
+                    difficulty_target,
+                    gs.get_struct_type_name(task_id),
+                )
+            };
+
+            // An omitted block_start used to default to the CURRENT block, which
+            // is never a valid anchor for any task type: the chain rebuilds the
+            // prefix from its own stored anchor, so the proof is refused however
+            // long we grind for it. Resolve the real one instead — for MINE and
+            // REFINE that is the planet's shared ore clock (chain v0.21.0).
+            let block_start = match params.block_start {
+                Some(b) => b,
+                None if matches!(task_type.as_str(), "MINE" | "REFINE") => {
+                    let client = crate::mcp::cosmos_client::CosmosClient::new();
+                    let planet_id = match client.query_entity("struct", task_id).await {
+                        Ok(v) => v
+                            .get("Struct")
+                            .and_then(|s| s.get("locationId"))
+                            .and_then(|l| l.as_str())
+                            .map(str::to_string),
+                        Err(e) => {
+                            return vec![Content::text(format!(
+                                "Error: {} lookup failed while resolving the ore anchor: {}",
+                                task_id, e
+                            ))]
+                        }
+                    };
+                    let Some(planet_id) = planet_id else {
+                        return vec![Content::text(format!(
+                            "Error: {} has no planet location, so it has no ore clock to anchor on.",
+                            task_id
+                        ))];
+                    };
+                    match client.query_entity("planet", &planet_id).await {
+                        Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), task_type),
+                        Err(e) => {
+                            return vec![Content::text(format!(
+                                "Error: planet {} lookup failed: {}",
+                                planet_id, e
+                            ))]
+                        }
+                    }
+                }
+                // BUILD/RAID anchors aren't derivable here — ask rather than guess.
+                None => {
+                    return vec![Content::text(format!(
+                        "Error: block_start is required for {} — it anchors the proof, and guessing it (the current block) produces a proof the chain always rejects.",
+                        task_type
+                    ))]
+                }
+            };
             // Difficulty checkpoint = CURRENT block, distinct from block_start (the
             // proof anchor). If the anchor is old, age = current − anchor is large →
             // difficulty already low; seeding checkpoint=block_start would make the
@@ -81,7 +132,10 @@ pub async fn execute(
             let block_checkpoint = if current_block > block_start { current_block } else { block_start };
 
             if block_start == 0 {
-                return vec![Content::text("Error: block_start is 0 — gameState may not be synced yet. Wait a few seconds or provide block_start manually.")];
+                return vec![Content::text(format!(
+                    "Error: {} has no {} cycle running on chain (anchor 0), so there is nothing to prove yet.",
+                    task_id, task_type
+                ))];
             }
 
             // Build the prefix matching TaskStateFactory conventions

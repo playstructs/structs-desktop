@@ -196,10 +196,31 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         // Measured 6 of 457 completions (1.3%). Cheap to avoid: one read turns
         // a guaranteed chain rejection into a skip, and auto_harvest re-issues
         // against the new anchor on its next pass.
-        if let Some(field) = anchor_field_for(&task_kind) {
+        if let Some(anchor) = anchor_field_for(&task_kind) {
             let client = crate::mcp::cosmos_client::CosmosClient::new();
             if let Ok(e) = client.query_entity("struct", &object_id).await {
-                let live = crate::mcp::loop_util::read_u64_field(e.get("structAttributes"), field);
+                let live = match anchor {
+                    Anchor::StructField(field) => {
+                        crate::mcp::loop_util::read_u64_field(e.get("structAttributes"), field)
+                    }
+                    // Chain v0.21.0: the ore clock hangs off the PLANET the rig
+                    // stands on, so reach it through the struct's locationId. A
+                    // planetary struct's locationId IS its planet id. Reading the
+                    // struct here instead would always see 0 and, because 0 means
+                    // "unknown, don't block", would wave through every stale ore
+                    // proof this guard exists to catch.
+                    Anchor::PlanetOreClock => match e
+                        .get("Struct")
+                        .and_then(|s| s.get("locationId"))
+                        .and_then(|l| l.as_str())
+                    {
+                        Some(planet_id) => match client.query_entity("planet", planet_id).await {
+                            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), &task_kind),
+                            Err(_) => 0,
+                        },
+                        None => 0,
+                    },
+                };
                 if live != 0 && live != solved_anchor {
                     crate::mcp::telemetry::tlog(
                         "hasher",
@@ -244,29 +265,48 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
     });
 }
 
-/// Which `structAttributes` field anchors this task type's proof.
-/// RAID anchors on the PLANET (`blockStartRaid`), not the struct, so it has no
-/// entry here and is left unchecked.
-fn anchor_field_for(task_type: &str) -> Option<&'static str> {
+/// Where a task type's proof anchor lives on chain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Anchor {
+    /// A field on the struct's own `structAttributes`.
+    StructField(&'static str),
+    /// The shared ore clock on the PLANET the struct stands on.
+    PlanetOreClock,
+}
+
+/// Which on-chain value anchors this task type's proof.
+///
+/// Chain v0.21.0 moved the mine/refine clocks off the struct and onto the
+/// planet, so MINE and REFINE resolve through the struct's location. BUILD is
+/// still a struct attribute. RAID anchors on the planet too, but its object_id
+/// is a FLEET rather than a struct, so it has no entry here and is left
+/// unchecked.
+fn anchor_field_for(task_type: &str) -> Option<Anchor> {
     match task_type {
-        "MINE" => Some("blockStartOreMine"),
-        "REFINE" => Some("blockStartOreRefine"),
-        "BUILD" => Some("blockStartBuild"),
+        "MINE" | "REFINE" => Some(Anchor::PlanetOreClock),
+        "BUILD" => Some(Anchor::StructField("blockStartBuild")),
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod anchor_tests {
-    use super::anchor_field_for;
+    use super::{anchor_field_for, Anchor};
 
     #[test]
     fn each_struct_task_type_knows_its_anchor() {
-        assert_eq!(anchor_field_for("MINE"), Some("blockStartOreMine"));
-        assert_eq!(anchor_field_for("REFINE"), Some("blockStartOreRefine"));
-        assert_eq!(anchor_field_for("BUILD"), Some("blockStartBuild"));
-        // RAID is anchored on the planet, so it must NOT be checked against a
-        // struct attribute — doing so would abandon every raid proof.
+        // Chain v0.21.0: the ore clocks live on the PLANET, shared by every rig
+        // on it. Resolving these against the struct reads a permanent 0, which
+        // this guard treats as "unknown" and waves through — so pointing them
+        // back at a struct field silently disables the staleness check.
+        assert_eq!(anchor_field_for("MINE"), Some(Anchor::PlanetOreClock));
+        assert_eq!(anchor_field_for("REFINE"), Some(Anchor::PlanetOreClock));
+        assert_eq!(
+            anchor_field_for("BUILD"),
+            Some(Anchor::StructField("blockStartBuild"))
+        );
+        // RAID's object_id is a fleet, not a struct, so it must NOT be checked
+        // here — doing so would abandon every raid proof.
         assert_eq!(anchor_field_for("RAID"), None);
         assert_eq!(anchor_field_for("nonsense"), None);
     }

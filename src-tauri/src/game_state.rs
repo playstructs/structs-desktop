@@ -678,17 +678,20 @@ pub async fn notify_hash_complete(
             }
         }
 
-        // Anchor the proof on the refinery's on-chain blockStartOreRefine, read
-        // fresh from the chain. The current block height is NOT a valid anchor —
-        // the prefix is {structId}REFINE{blockStartOreRefine}NONCE and the chain
-        // rejects anything else (mirrors tools::action::action_refine).
+        // Anchor the proof on the PLANET's shared refine clock, read fresh from
+        // the chain. The current block height is NOT a valid anchor — the prefix
+        // is {structId}REFINE{blockStartOreRefine}NONCE and the chain rejects
+        // anything else. Since chain v0.21.0 that clock belongs to the planet,
+        // not the refinery, whose own field now permanently reads 0 (mirrors
+        // tools::action::action_refine).
         let client = crate::mcp::cosmos_client::CosmosClient::new();
-        let block_height = match client.query_entity("struct", &req.struct_id).await {
+        let planet_id = match client.query_entity("struct", &req.struct_id).await {
+            // A planetary rig's locationId IS its planet id.
             Ok(v) => v
-                .get("structAttributes")
-                .and_then(|x| x.get("blockStartOreRefine"))
-                .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
-                .unwrap_or(0),
+                .get("Struct")
+                .and_then(|s| s.get("locationId"))
+                .and_then(|l| l.as_str())
+                .map(str::to_string),
             Err(e) => {
                 eprintln!(
                     "[Structs Auto] auto_refine lookup failed for {}: {}",
@@ -697,10 +700,27 @@ pub async fn notify_hash_complete(
                 return Ok(());
             }
         };
+        let Some(planet_id) = planet_id else {
+            eprintln!(
+                "[Structs Auto] auto_refine skipped {} — no planet location",
+                req.struct_id
+            );
+            return Ok(());
+        };
+        let block_height = match client.query_entity("planet", &planet_id).await {
+            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "REFINE"),
+            Err(e) => {
+                eprintln!(
+                    "[Structs Auto] auto_refine planet lookup failed for {}: {}",
+                    planet_id, e
+                );
+                return Ok(());
+            }
+        };
         if block_height == 0 {
             eprintln!(
-                "[Structs Auto] auto_refine skipped {} — blockStartOreRefine=0 (not in a refining cycle yet)",
-                req.struct_id
+                "[Structs Auto] auto_refine skipped {} — planet {} has no refine clock running",
+                req.struct_id, planet_id
             );
             return Ok(());
         }

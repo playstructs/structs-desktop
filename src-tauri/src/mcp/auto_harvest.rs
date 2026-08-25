@@ -1,6 +1,6 @@
 //! Native auto-harvest loop — periodically re-mines (and optionally re-refines)
 //! the team's structs WITHOUT the agent having to ask. The key efficiency idea:
-//! after each mine/refine the struct's PoW anchor resets and the next proof is
+//! after each mine/refine the PoW anchor resets and the next proof is
 //! expensive until it re-ages, so we only kick off a task once a struct's
 //! CURRENT difficulty has decayed to ≤ a configurable threshold. The threshold
 //! is the aggressiveness knob — higher = harvest sooner (cheaper-but-not-free
@@ -114,7 +114,7 @@ pub fn ripe_age(difficulty_target: u64, threshold: u64) -> u64 {
     (difficulty_target as f64).powf(exp).ceil() as u64
 }
 
-use crate::mcp::loop_util::{extract_type_id, parse_bool, parse_f64, read_u64_field};
+use crate::mcp::loop_util::{extract_type_id, parse_bool, parse_f64};
 
 /// Invoked each sync tick (cheap when throttled). Scans owned extractors (and
 /// refineries if enabled) and kicks off a PoW task for each ripe struct that
@@ -161,67 +161,13 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
 /// liveness (a newer scan owns them).
 static RUN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Start a REFINE proof for `player_id` RIGHT NOW, ignoring both the loop's
-/// cadence and its difficulty threshold.
-///
-/// Called by `auto_response` when a raid alarm fires. A raid seizes **all** of a
-/// player's stored ore in one go, and refining is the only thing that converts
-/// it into Alpha, which cannot be stolen — so during a raid the usual "wait for
-/// the anchor to age into a cheap proof" economics are irrelevant. Even an
-/// expensive proof beats losing the pile.
-///
-/// Independent of `AutoHarvestConfig::enabled`: hardening under fire must not
-/// depend on the economy loop being switched on. No-ops when the player has no
-/// online refinery, no ore, or a refine already in flight.
-pub async fn request_priority_refine(app_handle: &tauri::AppHandle, player_id: &str) -> bool {
-    let Some(registry) = app_handle.try_state::<Arc<TaskRegistry>>().map(|r| r.inner().clone()) else {
-        return false;
-    };
-    let client = CosmosClient::new();
-    let idx = crate::mcp::virtual_players::REGISTRY
-        .read()
-        .ok()
-        .and_then(|r| {
-            r.players
-                .iter()
-                .find(|p| p.player_id.as_deref() == Some(player_id))
-                .map(|p| p.index)
-        });
-
-    for sid in crate::mcp::loop_util::player_struct_ids(&client, player_id).await {
-        let Ok(entity) = client.query_entity("struct", &sid).await else { continue };
-        let s = entity.get("Struct");
-        let sa = entity.get("structAttributes");
-        if s.map(extract_type_id).unwrap_or_default() != REFINERY_TYPE {
-            continue;
-        }
-        if !parse_bool(sa.and_then(|x| x.get("isOnline"))) {
-            continue;
-        }
-        if let Some(t) = registry.tasks.get(&sid) {
-            if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
-                return true; // already refining — nothing more to do
-            }
-        }
-        let anchor = read_u64_field(sa, "blockStartOreRefine");
-        if anchor == 0 {
-            continue; // refinery isn't in a cycle, so there's nothing to complete
-        }
-        let params = TaskParams::for_ore(&sid, "REFINE", anchor, REFINE_TARGET);
-        if crate::hasher::start_hash_task_core(params, app_handle.clone(), &registry).is_ok() {
-            if let Some(i) = idx {
-                crate::hasher::register_vplayer_hash(sid.clone(), i, "REFINE".to_string());
-            }
-            crate::mcp::telemetry::tlog(
-                "auto_harvest",
-                crate::mcp::telemetry::Sev::Notice,
-                format!("priority REFINE {} for {} (under attack — ore is seizable)", sid, player_id),
-            );
-            return true;
-        }
-    }
-    false
-}
+// PANIC-REFINE IS GONE, AND CANNOT COME BACK. It used to fire on a raid alarm
+// to convert a seizable ore pile into unstealable Alpha before the raider took
+// it. Chain v0.21.0 removed the opening: a planet under raid can neither mine
+// nor refine, so a proof started on the alarm is refused no matter how fast we
+// solve it. The call site was already retired; the body followed it here rather
+// than sit around as a working-looking answer to "we're being raided".
+// The defence that remains is combat, not economics — see auto_response.
 
 /// Watchdog remediation: invalidate the wedged scan and clear the
 /// single-flight guard so the next tick can scan again.
@@ -302,9 +248,12 @@ async fn scan(
                 // fired, the whole fleet froze). See loop_util::player_struct_ids.
                 let sids = crate::mcp::loop_util::player_struct_ids(&client, &pid).await;
                 let mut extractor_planet: Option<String> = None;
-                // Planet ore, read at most ONCE per player per scan (see the
-                // mined-out guard below).
-                let mut planet_ore_cache: Option<f64> = None;
+                // The planet ENTITY, read at most ONCE per player per scan. It
+                // carries BOTH the mined-out guard's ore reserve and — since
+                // chain v0.21.0 — the shared ore clock this player's rigs
+                // anchor their proofs on, so one read serves both.
+                let mut planet_cache: Option<serde_json::Value> = None;
+                let mut planet_fetched = false;
                 // The PLAYER's stored ore, read at most once per player per scan
                 // (see the futile-refine guard below).
                 let mut player_ore_cache: Option<f64> = None;
@@ -358,28 +307,33 @@ async fn scan(
                     if !parse_bool(sa.and_then(|x| x.get("isOnline"))) {
                         continue;
                     }
+                    // The planet backs BOTH guards below and the proof anchor, so
+                    // read it once here — a planetary rig's `locationId` IS its
+                    // planet id. Fetched at most once per player per scan, and
+                    // only ONCE even on failure, so a planet the LCD refuses
+                    // can't spin a retry per struct.
+                    if !planet_fetched {
+                        planet_fetched = true;
+                        if let Some(loc) = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) {
+                            if let Ok(p) = client.query_entity("planet", loc).await {
+                                planet_cache = Some(p);
+                            }
+                        }
+                    }
+                    let planet = planet_cache.as_ref();
                     // MINED-OUT GUARD. An extractor on a planet with no undiscovered
                     // ore can never complete: the chain rejects the completion, the
                     // anchor never resets, and this loop re-issues the task forever.
                     // Measured on 2026-07-30: one struct burned 448 solves in 16h
                     // (difficulty decaying 7→1 the whole time — proof of a frozen
                     // anchor), and 19 of 25 sampled fleet planets were drained, which
-                    // accounted for ~95% of ALL GPU work. Read the planet once per
-                    // player; the auto-explore block below relocates the player.
+                    // accounted for ~95% of ALL GPU work.
                     if is_extractor {
-                        if planet_ore_cache.is_none() {
-                            if let Some(planet_id) = extractor_planet.as_deref() {
-                                planet_ore_cache =
-                                    Some(match client.query_entity("planet", planet_id).await {
-                                        Ok(p) => parse_f64(
-                                            p.get("gridAttributes").and_then(|g| g.get("ore")),
-                                        ),
-                                        // Unknown → don't block mining on a read failure.
-                                        Err(_) => 1.0,
-                                    });
-                            }
-                        }
-                        if planet_ore_cache.unwrap_or(1.0) <= 0.0 {
+                        // Unknown → don't block mining on a read failure.
+                        let planet_ore = planet
+                            .map(|p| parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))))
+                            .unwrap_or(1.0);
+                        if planet_ore <= 0.0 {
                             continue;
                         }
                     } else {
@@ -406,13 +360,24 @@ async fn scan(
                             continue;
                         }
                     }
-                    let (task_type, target, anchor) = if is_extractor {
-                        ("MINE", MINE_TARGET, read_u64_field(sa, "blockStartOreMine"))
+                    let (task_type, target) = if is_extractor {
+                        ("MINE", MINE_TARGET)
                     } else {
-                        ("REFINE", REFINE_TARGET, read_u64_field(sa, "blockStartOreRefine"))
+                        ("REFINE", REFINE_TARGET)
                     };
+                    // CHAIN v0.21.0: THE ORE CLOCK LIVES ON THE PLANET. It used to
+                    // be a struct attribute; now one clock per planet is shared by
+                    // every eligible rig standing on it, and the struct's own
+                    // `blockStartOre*` fields survive for wire compatibility only,
+                    // permanently reading 0. Reading the struct therefore returned
+                    // anchor 0 for every extractor and refinery in the game and this
+                    // loop skipped all of them — 28,812 player-scans an hour, ZERO
+                    // tasks started, for 38 hours. That silence starved the whole
+                    // flywheel downstream: no proofs, so no Alpha (auto_sweep idle
+                    // for want of a single holder), and no ore for auto_raid to want.
+                    let anchor = crate::mcp::loop_util::planet_ore_anchor(planet, task_type);
                     if anchor == 0 {
-                        continue; // not in a cycle (extractor between mines / refinery idle)
+                        continue; // planet's clock is clear — nothing to hash against
                     }
                     let age = current_block.saturating_sub(anchor);
                     // Refines do NOT expire. An aged refine anchor is simply a LOW-difficulty

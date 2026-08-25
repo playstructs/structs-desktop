@@ -33,10 +33,11 @@ pub struct PolicyEvent {
 /// A refinery the auto_refine policy wants to start a REFINE task on.
 ///
 /// Deliberately carries NO block anchor. A refine proof must be anchored on the
-/// refinery's on-chain `blockStartOreRefine` (the chain rejects any other
-/// prefix — see `tools::action::action_refine`), and that field is not in
-/// `StructInfo`, so it can only be read with an async chain query. The caller
-/// resolves it before launching.
+/// PLANET's on-chain `blockStartOreRefine` — the clock every rig on it shares
+/// since chain v0.21.0 (the chain rejects any other prefix — see
+/// `tools::action::action_refine`). That lives two hops from `StructInfo`, so it
+/// can only be read with async chain queries. The caller resolves it before
+/// launching.
 #[derive(Debug, Clone)]
 pub struct AutoRefine {
     pub struct_id: String,

@@ -43,6 +43,25 @@ pub fn read_u64_field(v: Option<&Value>, field: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Read a PLANET entity's shared ore clock — the block a MINE or REFINE proof
+/// anchors on. Zero means the clock is clear and there is nothing to hash.
+///
+/// Chain v0.21.0 moved these clocks off the struct and onto the planet: one
+/// clock per planet, shared by every eligible rig standing on it. The struct's
+/// own `blockStartOre*` fields survive for wire compatibility and permanently
+/// read 0, so a reader still pointed at the struct anchors on 0 and silently
+/// does no work — which is exactly how the harvest leg went dark for 38 hours
+/// after the upgrade. Route every ore anchor read through here so there is one
+/// place to change if the clock ever moves again.
+pub fn planet_ore_anchor(planet: Option<&Value>, task_type: &str) -> u64 {
+    let field = match task_type {
+        "MINE" => "blockStartOreMine",
+        "REFINE" => "blockStartOreRefine",
+        _ => return 0,
+    };
+    read_u64_field(planet.and_then(|p| p.get("planetAttributes")), field)
+}
+
 /// Struct type id as a string, from `"type"` or the `"struct_type"` fallback,
 /// accepting either a JSON number or string. Empty when neither is present.
 pub fn extract_type_id(s: &Value) -> String {
@@ -428,6 +447,46 @@ pub fn player_from_context(context: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Chain v0.21.0 moved the ore clocks from the struct to the planet. The
+    /// struct's fields survive and read 0 forever, so a reader left pointed at
+    /// them anchors on 0 — and every caller treats 0 as "no cycle, skip". That
+    /// is silent: no error, no rejected tx, just a harvest loop scanning 28,812
+    /// players an hour and starting nothing, for 38 hours before anyone noticed.
+    /// These assertions pin the container so the regression can't come back
+    /// wearing the same disguise.
+    #[test]
+    fn ore_anchor_comes_from_the_planet_not_the_struct() {
+        use super::planet_ore_anchor;
+        let planet = serde_json::json!({
+            "planetAttributes": {
+                "blockStartOreMine": "2273508",
+                "blockStartOreRefine": "2275440",
+            }
+        });
+        // Numeric strings are what the LCD actually returns for these.
+        assert_eq!(planet_ore_anchor(Some(&planet), "MINE"), 2_273_508);
+        assert_eq!(planet_ore_anchor(Some(&planet), "REFINE"), 2_275_440);
+
+        // A STRUCT entity must never satisfy an ore anchor read, even though it
+        // still carries the retired fields — this is the exact shape the chain
+        // returns for a live, online, actively-refining rig.
+        let struct_entity = serde_json::json!({
+            "structAttributes": {
+                "blockStartOreMine": "0",
+                "blockStartOreRefine": "0",
+                "isOnline": true,
+            }
+        });
+        assert_eq!(planet_ore_anchor(Some(&struct_entity), "MINE"), 0);
+        assert_eq!(planet_ore_anchor(Some(&struct_entity), "REFINE"), 0);
+
+        // Non-ore task types have their anchors elsewhere and must not be
+        // silently answered with an ore clock.
+        assert_eq!(planet_ore_anchor(Some(&planet), "BUILD"), 0);
+        assert_eq!(planet_ore_anchor(Some(&planet), "RAID"), 0);
+        assert_eq!(planet_ore_anchor(None, "MINE"), 0);
+    }
 
     /// The live failure: auto_build and auto_defend sweep the same roster
     /// concurrently, both reach one player inside a block, and the loser gets

@@ -840,8 +840,19 @@ fn describe_activity(category: &str, d: &Value) -> String {
             s("struct_id"), s("ambit"), n("slot"), s("location_id")
         ),
         "struct_block_build_start" => format!("{} build started", s("struct_id")),
-        "struct_block_ore_mine_start" => format!("{} mining started", s("struct_id")),
-        "struct_block_ore_refine_start" => format!("{} refining started", s("struct_id")),
+        // Chain v0.21.0 moved the ore clocks onto the planet, so these events
+        // now name a PLANET and cover every rig on it at once. Older events
+        // (and legacy per-struct replays) still name a struct, so prefer
+        // whichever id the event actually carries rather than rendering a
+        // subject-less "  mining started".
+        "struct_block_ore_mine_start" => {
+            let who = if s("planet_id").is_empty() { s("struct_id") } else { s("planet_id") };
+            format!("{} mining started", who)
+        }
+        "struct_block_ore_refine_start" => {
+            let who = if s("planet_id").is_empty() { s("struct_id") } else { s("planet_id") };
+            format!("{} refining started", who)
+        }
         // Unknown category: show the payload rather than nothing, so a new
         // chain event type is still readable the day it appears.
         _ => {
