@@ -121,6 +121,17 @@
     }
     .rv-focus-ring.rv-friendly { background-image: url("img/focus/focus-friendly.png"); }
     .rv-focus-ring.rv-enemy    { background-image: url("img/focus/focus-enemy.png"); }
+    /* Defence web: selection-scoped lines from defenders to their ward.
+       Inside #rv-map so it zooms with the board; under the focus ring (515)
+       and above tiles. Dot marks the DEFENDING end. */
+    .rv-defweb { position: absolute; left: 0; top: 0; z-index: 510; pointer-events: none; }
+    .rv-defweb line {
+      stroke: var(--text-player-primary, #59d999); stroke-width: 2;
+      stroke-dasharray: 6 4; opacity: .85;
+    }
+    .rv-defweb circle { fill: var(--text-player-primary, #59d999); opacity: .9; }
+    .rv-defweb.rv-defweb-enemy line { stroke: var(--text-enemy-primary, #ee7d69); }
+    .rv-defweb.rv-defweb-enemy circle { fill: var(--text-enemy-primary, #ee7d69); }
     /* Portrait hover. sui.css hides the pfp on hover and reveals an icon in its
        place — but it reveals `icon-menu` under the PLAYER theme and `icon-info`
        only under the ENEMY one. This window uses `icon-info` on BOTH portraits

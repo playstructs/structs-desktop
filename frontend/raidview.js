@@ -912,8 +912,12 @@
     // everything, offline additionally requires the struct to be BUILT, and
     // both defence icons are suppressed on wreckage.
     if (vis.destroyed && s.destroyed) out.push('sui-icon-destroyed');
+    // The game splits two conditions we used to conflate: energy-deactivated
+    // = this struct is switched off; no-power = the OWNER's whole grid is
+    // overloaded. A spectator can't read a foreign player's power budget, so
+    // only the first is shown (the game's own icon for exactly this state).
     if (vis.offline && !s.destroyed && s.built !== false && s.online === false) {
-      out.push('sui-icon-no-power');
+      out.push('sui-icon-energy-deactivated');
     }
     if (vis.defended && !s.destroyed && s.defended) out.push('sui-icon-defended');
     if (vis.defending && !s.destroyed && !!s.protects) out.push('sui-icon-defending');
@@ -937,6 +941,67 @@
     Object.keys(state.structsById).forEach(function (id) {
       paintBadges(state.structsById[id]);
     });
+  }
+
+  /* ── Defence web overlay ──────────────────────────────────────────────────
+   * The game expresses defend relations as paired badges gated on selection;
+   * we keep that, and additionally DRAW the web: select a struct and lines
+   * connect it to its defenders and to the struct it protects. Spectators
+   * read a defence layout at a glance instead of hunting badge pairs.
+   *
+   * The SVG lives INSIDE #rv-map, so it inherits the board zoom and its
+   * coordinates are plain layout pixels — no rescale on zoom or scroll. It is
+   * rebuilt on selection change and after every grid rebuild (applySelection
+   * runs in both paths). */
+  function tileCenter(structId, map) {
+    var node = document.getElementById(domId('slot', structId));
+    // Membership by contains(), not by requiring the offsetParent walk to end
+    // at the map: the map IS an offsetParent ancestor in a real browser
+    // (position:relative), but jsdom has no layout and its chain is null —
+    // this way the overlay stays assertable in the harness.
+    if (!node || !map.contains(node)) return null;
+    var x = node.offsetWidth / 2, y = node.offsetHeight / 2;
+    var n = node;
+    while (n && n !== map) {
+      x += n.offsetLeft; y += n.offsetTop;
+      n = n.offsetParent;
+    }
+    return { x: x, y: y };
+  }
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  function renderDefendWeb(s) {
+    var old = document.getElementById('rv-defweb');
+    if (old) old.remove();
+    if (!s || s.destroyed) return;
+    var map = document.getElementById('rv-map');
+    if (!map) return;
+    var links = [];
+    defendersOf(s).forEach(function (id) {
+      links.push({ from: id, to: s.id });        // defenders → selected
+    });
+    if (s.protects && state.structsById[s.protects]) {
+      links.push({ from: s.id, to: s.protects }); // selected → its ward
+    }
+    if (!links.length) return;
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('id', 'rv-defweb');
+    svg.setAttribute('class', 'rv-defweb' + (s.side === 'attacker' ? ' rv-defweb-enemy' : ''));
+    svg.setAttribute('width', map.scrollWidth);
+    svg.setAttribute('height', map.scrollHeight);
+    links.forEach(function (l) {
+      var a = tileCenter(l.from, map), b = tileCenter(l.to, map);
+      if (!a || !b) return;
+      var line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('x1', a.x); line.setAttribute('y1', a.y);
+      line.setAttribute('x2', b.x); line.setAttribute('y2', b.y);
+      svg.appendChild(line);
+      // A dot marks the DEFENDING end, so direction reads without arrowheads.
+      var dot = document.createElementNS(SVG_NS, 'circle');
+      dot.setAttribute('cx', a.x); dot.setAttribute('cy', a.y);
+      dot.setAttribute('r', 5);
+      svg.appendChild(dot);
+    });
+    if (svg.childNodes.length) map.appendChild(svg);
   }
 
   /* ── Selection ─────────────────────────────────────────────────────────── */
@@ -968,6 +1033,7 @@
     }
 
     var s = id ? state.structsById[id] : null;
+    renderDefendWeb(s);
     if (!s) {
       state.selectedId = null;
       repaintAllBadges();
@@ -2005,6 +2071,12 @@
   function pipRequestHide() {
     var el = pipEl();
     if (el) el.classList.remove('rv-vis');
+    // Forget the struct NOW, not after the 320ms slide-out: a scroll/resize
+    // inside that window calls pipUpdateVisibility, which re-showed the
+    // bubble — with the PREVIOUS fight's struct in it — because structId was
+    // still set. The node keeps its contents until pipClear so the slide-out
+    // has something to slide.
+    pip.structId = null;
     if (pip.swapTimer) { clearTimeout(pip.swapTimer); pip.swapTimer = null; }
     pip.swapTimer = setTimeout(function () { pip.swapTimer = null; pipClear(); }, 320);
   }
@@ -2086,6 +2158,48 @@
     if (still) still.classList.toggle('rv-invisible', !!hidden);
   }
 
+  /* Swap the struct's own art into a loaded lottie SVG — the game's
+   * MapStructLottieAnimationSVG.configStructImages(), which we never
+   * replicated. The type-agnostic bundles (deployment_*, destroy_*, move_*,
+   * shake_*) are TEMPLATES: they ship with placeholder struct art baked into
+   * tagged layers (`g.struct_init` in destroy_water is literally the
+   * Destroyer hull), and the game replaces those images after the SVG builds.
+   * Playing the bundle raw is why a Destroyer appeared whenever any water
+   * struct was destroyed.
+   *
+   * Layer semantics, from StructStillBuilder/configStructImages: `init` shows
+   * the struct's CURRENT state (dmg art unless at full health), `dmg` always
+   * the damaged art, top/bottom layers the detail PNGs. A slot the struct has
+   * no art for is emptied — the webapp's falsy-src branch clears the group
+   * rather than leaving the placeholder. */
+  var ANIM_ART_LAYERS = ['struct_init', 'struct_dmg',
+    'struct_top_layer_1', 'struct_top_layer_2', 'struct_bottom_layer_1'];
+  function injectStructArt(box, s, hp) {
+    if (!box || !s) return;
+    var art = ART[s.type_slug];
+    var atFull = s.max_health > 0 && hp != null && hp >= s.max_health;
+    var srcs = {
+      struct_init: art ? artPath(art.dir, atFull ? 'struct-base' : 'struct-dmg') : null,
+      struct_dmg: art ? artPath(art.dir, 'struct-dmg') : null,
+      struct_top_layer_1: art && art.top && art.top[0] ? artPath(art.dir, art.top[0]) : null,
+      struct_top_layer_2: art && art.top && art.top[1] ? artPath(art.dir, art.top[1]) : null,
+      struct_bottom_layer_1: art && art.bottom && art.bottom[0] ? artPath(art.dir, art.bottom[0]) : null,
+    };
+    ANIM_ART_LAYERS.forEach(function (cls) {
+      var g = box.querySelector('.' + cls);
+      if (!g) return;                       // template has no such layer
+      var img = g.querySelector('image');
+      if (!img) return;
+      if (srcs[cls]) {
+        // Lottie writes xlink:href; new browsers read href. Set both.
+        img.setAttribute('href', srcs[cls]);
+        img.setAttribute('xlink:href', srcs[cls]);
+      } else {
+        img.parentNode.removeChild(img);
+      }
+    });
+  }
+
   /* Play one queue event over a struct, then hand back control.
    *
    * ALL of the event's names play SIMULTANEOUSLY — impact and shake are two
@@ -2109,6 +2223,11 @@
         if (still) renderStill(still, s, ev.healthAfter);
         if (hud) renderHud(hud, s, ev.healthAfter);
         if (ev.healthAfter === 0 && still) still.innerHTML = '';
+        // Mark wreckage in STATE, not just the DOM: the tile then shows the
+        // destroyed badge (previously unreachable — snapshots drop destroyed
+        // structs, so `destroyed` was never true) until the next snapshot
+        // removes it, and nothing can resurrect the sprite meanwhile.
+        if (ev.healthAfter === 0) s.destroyed = true;
       }
       // Restore the still unless this was a destroy — and never resurrect a
       // struct the sequence just emptied.
@@ -2157,6 +2276,12 @@
           path: lottiePath(name, ev.typeSlug),
         });
       } catch (e) { oneDone(); return; }
+      // Once the SVG exists, replace the template's baked placeholder struct
+      // with this struct's own art (the game does this for every animation;
+      // for the per-type bundles it is a no-op swap of identical art).
+      anim.addEventListener('DOMLoaded', function () {
+        injectStructArt(box, s, ev.healthAfter != null ? ev.healthAfter : currentHealth(s));
+      });
       var cleanup = function () {
         try { anim.destroy(); } catch (e2) {}
         oneDone();
@@ -2188,6 +2313,11 @@
       idleAnims[s.id] = window.lottie.loadAnimation({
         container: mount, renderer: 'svg', loop: true, autoplay: true,
         path: lottiePath('ACTIVE_LOOP', s.type_slug),
+      });
+      // Loop templates carry struct art layers too — swap in current-state
+      // art so a damaged extractor doesn't idle at full health.
+      idleAnims[s.id].addEventListener('DOMLoaded', function () {
+        injectStructArt(mount, s, currentHealth(s));
       });
       // The loop bundle CONTAINS the struct art — the still must hide or the
       // sprite doubles (hideStructStill/showStructStill do exactly this).
@@ -3027,10 +3157,20 @@
       // Bit 32 is the destroyed flag.
       var sid = detail.struct_id || detail.structId;
       var status = numOf(detail.status);
-      if (sid && status != null && (status & 32) !== 0 && !playing) {
-        stopIdle(sid);
-        var node = document.getElementById(domId('struct', sid));
-        if (node) node.innerHTML = '';
+      if (sid && status != null && (status & 32) !== 0) {
+        // ALWAYS update state, even mid-sequence: emptying only the DOM node
+        // let syncStill/renderStill resurrect the sprite until the next
+        // snapshot. The visual clear still waits for the queue (its own
+        // destroy event owns the frames while playing).
+        var ds = state.structsById[sid];
+        if (ds) ds.destroyed = true;
+        state.liveHealth[sid] = 0;
+        if (!playing) {
+          stopIdle(sid);
+          var node = document.getElementById(domId('struct', sid));
+          if (node) node.innerHTML = '';
+          if (ds) paintBadges(ds);
+        }
       }
     }
     renderHeader();
@@ -3151,6 +3291,10 @@
     _pipOnAnimation: pipOnAnimation,
     _pipOffscreen: pipOffscreen,
     _pipUpdateVisibility: pipUpdateVisibility,
+    _pipRequestHide: pipRequestHide,
+    injectStructArt: injectStructArt,
+    renderDefendWeb: renderDefendWeb,
+    selectStruct: selectStruct,
   };
 
   boot();

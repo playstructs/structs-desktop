@@ -45,3 +45,5 @@ src-tauri/gen/
 
 # Icon source (keep generated sizes, not the 1024px source)
 src-tauri/icons/Structs Icon.png
+frontend/_harness_raid.html
+frontend/_fixtures_raid.js
