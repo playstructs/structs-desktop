@@ -411,6 +411,57 @@ async fn board_invoke(
                 body.get("powerMw").and_then(|v| v.as_f64()).unwrap_or(0.0),
             ).await,
         ),
+        // ── Infusions (Industry → Production) ──
+        "mcp_infusions" => from_result(crate::mcp::tools::infusions::mcp_infusions().await),
+        "mcp_infusion_preview" => from_result(
+            crate::mcp::tools::infusions::mcp_infusion_preview(
+                s("op").unwrap_or_default(),
+                s("address").unwrap_or_default(),
+                s("destinationId").unwrap_or_default(),
+                s("targetId"),
+                body.get("amountUalpha").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            ).await,
+        ),
+        "mcp_infusion_infuse" => from_result(
+            crate::mcp::tools::infusions::mcp_infusion_infuse_impl(
+                st.app.clone(),
+                s("address").unwrap_or_default(),
+                s("reactorId").unwrap_or_default(),
+                body.get("amountUalpha").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            ).await,
+        ),
+        "mcp_infusion_defuse" => from_result(
+            crate::mcp::tools::infusions::mcp_infusion_defuse_impl(
+                st.app.clone(),
+                s("address").unwrap_or_default(),
+                s("reactorId").unwrap_or_default(),
+                body.get("amountUalpha").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            ).await,
+        ),
+        "mcp_infusion_migrate" => from_result(
+            crate::mcp::tools::infusions::mcp_infusion_migrate_impl(
+                st.app.clone(),
+                s("address").unwrap_or_default(),
+                s("fromReactorId").unwrap_or_default(),
+                s("toReactorId").unwrap_or_default(),
+                body.get("amountUalpha").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            ).await,
+        ),
+        "mcp_infusion_cancel_defusion" => from_result(
+            crate::mcp::tools::infusions::mcp_infusion_cancel_defusion_impl(
+                st.app.clone(),
+                s("address").unwrap_or_default(),
+                s("validator").unwrap_or_default(),
+                body.get("amountUalpha").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                s("creationHeight").unwrap_or_default(),
+            ).await,
+        ),
+        "mcp_infusion_restart" => from_result(
+            crate::mcp::tools::infusions::mcp_infusion_restart_impl(
+                st.app.clone(),
+                s("reactorId").unwrap_or_default(),
+            ).await,
+        ),
         "mcp_inventory" => from_result(
             board_pages::mcp_inventory(s("player")).await,
         ),

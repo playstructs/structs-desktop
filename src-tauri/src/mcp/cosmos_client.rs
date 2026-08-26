@@ -188,6 +188,11 @@ impl CosmosClient {
             "provider" => Ok("provider"),
             "agreement" => Ok("agreement"),
             "allocation" => Ok("allocation"),
+            // Keyed `{destinationId}/{address}`, not by a single id — so a
+            // by-id read passes both segments as one `id` string. The LIST
+            // endpoint is a full scan, but the whole galaxy holds a few dozen
+            // infusions, so one page covers it.
+            "infusion" => Ok("infusion"),
             other => Err(format!("Unknown entity type: {}", other)),
         }
     }
@@ -210,6 +215,19 @@ impl CosmosClient {
             .and_then(|b| b.as_array())
             .cloned()
             .unwrap_or_default())
+    }
+
+    /// Raw LCD GET for endpoints that are NOT Structs entities — the Cosmos SDK
+    /// modules the game abstracts over. Reactor infusion IS staking delegation,
+    /// so the in-flight state of a defusion (unbonding) or a migration
+    /// (redelegation) exists only in `/cosmos/staking/...`: the Infusion record
+    /// carries a `defusing` total but neither the creation height that
+    /// `MsgReactorCancelDefusion` requires nor the completion time.
+    ///
+    /// `path` is absolute-from-root, e.g. "/cosmos/staking/v1beta1/params".
+    pub async fn lcd_get(&self, path: &str) -> Result<Value, String> {
+        let base = self.reactor_api.read().unwrap().clone();
+        get_json(&format!("{}{}", base.trim_end_matches('/'), path)).await
     }
 
     /// How many of an entity type exist on-chain right now, via the LCD's

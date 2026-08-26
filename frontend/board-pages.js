@@ -573,7 +573,7 @@
   });
 
   // ═══════════════════════════ ENERGY ═══════════════════════════════════════
-  var energyState = { data: null };
+  var energyState = { data: null, view: 'distribution' };
   // ── Allocations ───────────────────────────────────────────────────────────
   // An allocation routes YOUR capacity into a substation. Two facts shape this
   // panel: raising one raises your own load (it is not free), and if load ever
@@ -860,7 +860,513 @@
     });
   }
 
-  function renderEnergyBody() {
+  // ── Production: infusions ─────────────────────────────────────────────────
+  // The other half of the grid. An allocation ROUTES capacity; an infusion
+  // MAKES it, by staking Alpha into a reactor — which is a validator, so these
+  // three controls are a delegation, an undelegation and a redelegation wearing
+  // game words. Three facts shape every control here:
+  //
+  //   · `ratio` can be 0. A jailed or unbonded validator earns NOTHING from the
+  //     fuel staked in it, and nothing else on screen would say so.
+  //   · Defusing takes the capacity NOW and returns the Alpha in four days. If
+  //     that capacity was carrying allocations the chain brownouts and destroys
+  //     them, so every removal is priced against the holder's live load.
+  //   · Generator infusions cannot be undone at all, so they are listed apart
+  //     and have no buttons.
+  var infuState = { data: null, busy: false };
+
+  function loadInfusions() {
+    return Board.T.core.invoke('mcp_infusions').then(function (d) {
+      infuState.data = d;
+    }).catch(function (e) {
+      infuState.data = { _err: String(e) };
+    });
+  }
+
+  // What each op's preview is worth reading, per op. The backend returns one
+  // `facts` object; this decides which of it a human needs and in what unit.
+  var PREVIEW_FIELDS = {
+    infuse: [
+      { label: ['capacity gained', 'yours to keep'], key: 'gained_mw', kind: 'power', tone: 'ok' },
+      { label: 'reactor commission', key: 'commission_mw', kind: 'power', tone: 'muted' },
+      { label: 'capacity after', key: 'capacity_after_mw', kind: 'power' },
+      { label: 'alpha left liquid', key: 'balance_after_ualpha', kind: 'alpha', tone: 'muted' },
+    ],
+    defuse: [
+      { label: ['capacity removed', 'immediately'], key: 'capacity_lost_mw', kind: 'power', tone: 'live' },
+      { label: 'capacity after', key: 'capacity_after_mw', kind: 'power' },
+      { label: ['headroom after', 'over allocated load'], key: 'headroom_after_mw', kind: 'power', sign: true },
+      { label: ['alpha returns in', 'cooldown'], key: 'cooldown_secs', kind: 'duration', tone: 'muted' },
+    ],
+    migrate: [
+      { label: 'leaves the source', key: 'capacity_lost_mw', kind: 'power', tone: 'muted' },
+      { label: 'arrives at the target', key: 'capacity_gained_mw', kind: 'power', tone: 'muted' },
+      { label: ['net capacity', 'what the move costs'], key: 'net_mw', kind: 'power', sign: true },
+      { label: 'capacity after', key: 'capacity_after_mw', kind: 'power' },
+    ],
+  };
+
+  function previewStrip(op, facts) {
+    var strip = H.el('div', 'hstrip');
+    (PREVIEW_FIELDS[op] || []).forEach(function (f) {
+      var raw = facts[f.key];
+      if (raw == null) return;
+      var txt;
+      if (f.kind === 'duration') txt = H.duration(raw, { zero: 'now' });
+      else if (f.kind === 'alpha') txt = alpha(raw);
+      else txt = kw(Math.abs(raw));
+      // A signed field is the one that can go NEGATIVE and mean "you are now
+      // over-committed" — print the sign and colour it, never a bare figure.
+      var tone = f.tone || null;
+      if (f.sign) {
+        txt = (raw < 0 ? '−' : '+') + txt;
+        tone = raw < 0 ? 'bad' : 'ok';
+      }
+      strip.appendChild(statTile(f.label, txt, null, tone));
+    });
+    return strip;
+  }
+
+  function reactorOptions(d, opts) {
+    opts = opts || {};
+    return (d.reactors || []).filter(function (r) {
+      return !opts.exclude || r.id !== opts.exclude;
+    }).map(function (r) {
+      // Everything that decides which reactor to pick, in the option itself:
+      // whose guild it is, what it takes, and whether it is producing at all.
+      var bits = [r.id];
+      if (r.moniker) bits.push(r.moniker);
+      var tail = (r.commission * 100).toFixed(1).replace(/\.0$/, '') + '% commission';
+      if (r.is_our_guild) tail += ' · your guild';
+      var bond = bondText(r);
+      if (bond) tail += ' · ' + bond;
+      if (r.our_fuel_ualpha > 0) tail += ' · you hold ' + alpha(r.our_fuel_ualpha);
+      return { value: r.id, label: bits.join(' · ') + ' — ' + tail };
+    });
+  }
+
+  function holderOptions(d) {
+    return (d.candidates || []).map(function (c) {
+      return { value: c.address, label: c.name + ' · ' + c.player_id + ' — ' + alpha(c.alpha_ualpha) + ' liquid' };
+    });
+  }
+
+  // The chain's own words for a validator that isn't earning. `BOND_STATUS_
+  // UNBONDED` in a subtitle tells an operator nothing about what it costs them.
+  function bondText(r) {
+    if (r.jailed) return 'JAILED — earns nothing';
+    if (r.status && r.status !== 'BOND_STATUS_BONDED') return 'not bonded — earns nothing';
+    return null;
+  }
+
+  function holderByAddress(d, addr) {
+    return (d.candidates || []).find(function (c) { return c.address === addr; }) || null;
+  }
+
+  // One drawer for all three ops. They differ only in which pickers appear, the
+  // ceiling on the amount and the confirmation wording — writing three of these
+  // guaranteed the guard rails would drift between them.
+  //
+  // `o`: { op, address, destinationId, targetId?, max, title, cta, ctaIcon,
+  //        pickHolder?, pickReactor?, pickTarget?, danger? }
+  function infusionDrawer(d, o) {
+    var st = {
+      address: o.address, dest: o.destinationId, target: o.targetId || null,
+      amount: 0, max: o.max || 0, preview: null,
+    };
+    var form = H.el('div');
+    var out = H.el('div');
+    var cta = H.el('div', 'drawer-cta');
+    var timer = null;
+
+    function ceiling() {
+      if (o.op !== 'infuse') return st.max;
+      var h = holderByAddress(d, st.address);
+      return h ? h.alpha_ualpha : st.max;
+    }
+
+    function refresh() {
+      out.innerHTML = '';
+      cta.innerHTML = '';
+      if (!st.amount || !st.dest || (o.op === 'migrate' && !st.target)) return;
+      out.appendChild(H.stateBlock('loading', 'checking…'));
+      Board.T.core.invoke('mcp_infusion_preview', {
+        op: o.op, address: st.address, destinationId: st.dest,
+        targetId: st.target, amountUalpha: Math.round(st.amount),
+      }).then(function (p) {
+        st.preview = p;
+        out.innerHTML = '';
+        (p.warnings || []).forEach(function (w) {
+          out.appendChild(H.stateBlock('warning', w));
+        });
+        if (!p.ok) { out.appendChild(H.stateBlock('error', p.refusal)); return; }
+        out.appendChild(previewStrip(o.op, p.facts || {}));
+        if (p.facts && p.facts.online_after === false) {
+          out.appendChild(H.stateBlock('error',
+            'This leaves the player drawing more than it can supply — its structs go offline.'));
+        }
+        var go = massBtn('', o.ctaIcon, o.cta, o.danger ? 'sui-mod-destructive' : 'sui-mod-primary');
+        go.addEventListener('click', function () { commit(p); });
+        cta.appendChild(go);
+      }).catch(function (e) {
+        out.innerHTML = '';
+        out.appendChild(H.stateBlock('error', String(e)));
+      });
+    }
+    // The preview is a chain read per keystroke otherwise.
+    function schedule() {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(refresh, 250);
+    }
+
+    function commit(p) {
+      if (infuState.busy) return;
+      var body = H.el('div');
+      body.appendChild(H.row('Player', p.player_name + ' · ' + p.player_id));
+      body.appendChild(H.row('Amount', alpha(st.amount)));
+      body.appendChild(H.row(o.op === 'migrate' ? 'From' : 'Reactor', st.dest));
+      if (o.op === 'migrate') body.appendChild(H.row('To', st.target));
+      var f = p.facts || {};
+      if (o.op === 'infuse') body.appendChild(H.row('Capacity gained', kw(f.gained_mw)));
+      if (o.op === 'defuse') {
+        body.appendChild(H.row('Capacity removed now', kw(f.capacity_lost_mw)));
+        body.appendChild(H.row('Alpha returns in', H.duration(f.cooldown_secs, { zero: 'now' })));
+      }
+      if (o.op === 'migrate') {
+        body.appendChild(H.row('Net capacity',
+          (f.net_mw < 0 ? '−' : '+') + kw(Math.abs(f.net_mw))));
+      }
+      H.confirmModal(o.confirm, body, o.cta, function () {
+        infuState.busy = true;
+        var cmd = { infuse: 'mcp_infusion_infuse', defuse: 'mcp_infusion_defuse',
+                    migrate: 'mcp_infusion_migrate' }[o.op];
+        var args = o.op === 'migrate'
+          ? { address: st.address, fromReactorId: st.dest, toReactorId: st.target,
+              amountUalpha: Math.round(st.amount) }
+          : { address: st.address, reactorId: st.dest, amountUalpha: Math.round(st.amount) };
+        Board.T.core.invoke(cmd, args).then(function () {
+          infuState.busy = false;
+          close();
+          loadInfusions().then(renderEnergyBody);
+        }).catch(function (e) {
+          infuState.busy = false;
+          out.appendChild(H.stateBlock('error', String(e)));
+        });
+      });
+    }
+
+    if (o.pickHolder) {
+      form.appendChild(H.field('Infuse as', H.selectBox(st.address, holderOptions(d), function (v) {
+        st.address = v;
+        renderAmount();
+        schedule();
+      })));
+    } else {
+      var h = holderByAddress(d, st.address);
+      form.appendChild(formFact('Player', (o.playerName || (h && h.name) || st.address)
+        + (o.playerId ? ' · ' + o.playerId : '')));
+    }
+
+    if (o.pickReactor) {
+      form.appendChild(H.field('Reactor', H.selectBox(st.dest, reactorOptions(d), function (v) {
+        st.dest = v; schedule();
+      })));
+    } else {
+      form.appendChild(formFact(o.op === 'migrate' ? 'Moving out of' : 'Reactor', o.destLabel || st.dest));
+    }
+    if (o.pickTarget) {
+      form.appendChild(H.field('Move to', H.selectBox(st.target,
+        reactorOptions(d, { exclude: st.dest }), function (v) { st.target = v; schedule(); })));
+    }
+
+    // The amount field is rebuilt when the holder changes, because MAX is that
+    // holder's balance — a stale ceiling is how you sign an amount the chain
+    // will reject.
+    var amountHost = H.el('div');
+    function renderAmount() {
+      amountHost.innerHTML = '';
+      amountHost.appendChild(H.amountField(o.amountLabel || 'Amount', {
+        kind: 'alpha', max: ceiling(),
+        hint: o.hint,
+        onChange: function (u) { st.amount = u; schedule(); },
+      }));
+      var ceil = H.el('div', 'hstrip');
+      ceil.appendChild(statTile(o.maxLabel || 'available', alpha(ceiling()), null, 'muted'));
+      amountHost.appendChild(ceil);
+    }
+    renderAmount();
+    form.appendChild(amountHost);
+    form.appendChild(out);
+    form.appendChild(cta);
+    var close = H.drawer(o.title, form);
+  }
+
+  function openInfuse(d, seed) {
+    seed = seed || {};
+    var addr = seed.address || (d.candidates && d.candidates[0] && d.candidates[0].address) || d.address;
+    var reactor = seed.reactorId
+      || (d.reactors && d.reactors[0] && d.reactors[0].id) || '';
+    infusionDrawer(d, {
+      op: 'infuse', address: addr, destinationId: reactor,
+      pickHolder: !seed.address, pickReactor: true,
+      title: 'Infuse Alpha', cta: 'Infuse', ctaIcon: 'icon-send-alpha',
+      confirm: 'Stake this Alpha into the reactor?',
+      amountLabel: 'Alpha to stake', maxLabel: 'liquid alpha',
+      hint: 'You keep power × (1 − commission) as your own capacity, forever, and can defuse it back after a cooldown.',
+    });
+  }
+
+  function openDefuse(d, r) {
+    infusionDrawer(d, {
+      op: 'defuse', address: r.address, destinationId: r.destination_id,
+      destLabel: r.destination_label,
+      playerName: r.player_name, playerId: r.player_id,
+      max: Math.max(0, r.fuel_ualpha - r.defusing_ualpha),
+      title: 'Defuse Alpha', cta: 'Start defusing', ctaIcon: 'icon-subtract',
+      danger: true, confirm: 'Remove this Alpha from the reactor?',
+      amountLabel: 'Alpha to remove', maxLabel: 'still removable',
+      hint: 'The capacity goes immediately; the Alpha comes back after the chain cooldown.',
+    });
+  }
+
+  function openMigrate(d, r) {
+    var first = (d.reactors || []).find(function (x) { return x.id !== r.destination_id; });
+    infusionDrawer(d, {
+      op: 'migrate', address: r.address, destinationId: r.destination_id,
+      targetId: first ? first.id : null, destLabel: r.destination_label,
+      playerName: r.player_name, playerId: r.player_id,
+      max: Math.max(0, r.fuel_ualpha - r.defusing_ualpha),
+      pickTarget: true,
+      title: 'Migrate infusion', cta: 'Migrate', ctaIcon: 'icon-transfers',
+      danger: true, confirm: 'Move this stake to another reactor?',
+      amountLabel: 'Alpha to move', maxLabel: 'movable',
+      hint: 'No cooldown — but the moved fuel is repriced at the destination’s commission.',
+    });
+  }
+
+  function cancelDefusion(row) {
+    var body = H.el('div');
+    body.appendChild(H.row('Player', row.player_name));
+    body.appendChild(H.row('Amount', alpha(row.amount_ualpha)));
+    body.appendChild(H.row('Reactor', row.reactor_id || row.validator));
+    body.appendChild(H.row('Re-stakes at', 'block ' + row.creation_height));
+    H.confirmModal('Cancel this defusion and re-stake?', body, 'Re-stake', function () {
+      Board.T.core.invoke('mcp_infusion_cancel_defusion', {
+        address: row.address, validator: row.validator,
+        amountUalpha: Math.round(row.amount_ualpha),
+        creationHeight: String(row.creation_height),
+      }).then(function () {
+        loadInfusions().then(renderEnergyBody);
+      }).catch(function (e) {
+        alertInto('energy-body', 'cancel failed: ' + e);
+      });
+    });
+  }
+
+  function restartReactor(id) {
+    var body = H.el('div');
+    body.appendChild(H.row('Reactor', id));
+    body.appendChild(H.el('div', null,
+      'Resyncs the reactor from live staking. Permissionless, and the fix for a validator that '
+      + 'was unjailed but never rebonded — which leaves every infusion in it earning nothing.'));
+    H.confirmModal('Restart this reactor?', body, 'Restart', function () {
+      Board.T.core.invoke('mcp_infusion_restart', { reactorId: id }).then(function () {
+        loadInfusions().then(renderEnergyBody);
+      }).catch(function (e) {
+        alertInto('energy-body', 'restart failed: ' + e);
+      });
+    });
+  }
+
+  function infusionRow(d, r) {
+    var act = H.el('div', 'cfg-actions');
+    if (r.reversible) {
+      var add = massBtn('', 'icon-add', 'Add', 'sui-mod-secondary');
+      add.addEventListener('click', function () {
+        openInfuse(d, { address: r.address, reactorId: r.destination_id });
+      });
+      act.appendChild(add);
+      var out = massBtn('', 'icon-subtract', 'Defuse', 'sui-mod-secondary');
+      out.addEventListener('click', function () { openDefuse(d, r); });
+      act.appendChild(out);
+      var mv = massBtn('', 'icon-transfers', 'Migrate', 'sui-mod-secondary');
+      mv.addEventListener('click', function () { openMigrate(d, r); });
+      act.appendChild(mv);
+      // Only offered where it can actually help: the reactor produces nothing
+      // and its validator is NOT jailed, which is exactly the unjailed-but-
+      // never-rebonded case MsgReactorRestart exists for.
+      if (r.dead && !r.validator_jailed) {
+        var rs = massBtn('', 'icon-refresh-12', 'Restart', 'sui-mod-primary');
+        rs.addEventListener('click', function () { restartReactor(r.destination_id); });
+        act.appendChild(rs);
+      }
+    }
+    var chips = [
+      statTile(r.dead ? ['capacity', 'earning nothing'] : 'capacity',
+        kw(r.capacity_mw), null, r.dead ? 'bad' : 'ok'),
+      statTile('commission', (r.commission * 100).toFixed(1).replace(/\.0$/, '') + '%', null, 'muted'),
+    ];
+    if (r.ratio !== 1) chips.push(statTile('ratio', r.ratio + '×', null, r.dead ? 'bad' : 'live'));
+    if (r.defusing_ualpha > 0) chips.push(statTile('defusing', alpha(r.defusing_ualpha), null, 'live'));
+    var sub = r.player_name + (r.player_id ? ' · ' + r.player_id : '');
+    if (r.dead) {
+      sub += r.validator_jailed ? ' · validator JAILED' : ' · validator not producing';
+    }
+    return H.resultRow({
+      icon: r.dead ? 'sui-icon-no-power' : 'sui-icon-energy',
+      title: alpha(r.fuel_ualpha) + ' → ' + r.destination_label,
+      subtitle: sub,
+      chips: chips,
+      action: r.reversible ? act : null,
+    });
+  }
+
+  function renderProductionBody() {
+    var body = document.getElementById('energy-body');
+    body.innerHTML = '';
+    var d = infuState.data;
+    if (!d) { body.appendChild(H.stateBlock('loading', 'reading infusions…')); return; }
+    if (d._err) { body.appendChild(H.alertLine('infusions unavailable: ' + d._err, 'icon-alert')); return; }
+
+    var t = d.totals || {};
+    var rows = d.infusions || [];
+    var reactorRows = rows.filter(function (r) { return r.reversible; });
+    var genRows = rows.filter(function (r) { return !r.reversible; });
+
+    // ── Headline ──
+    // One shared power scale so "capacity" and "commission" are comparable;
+    // staked and dead share the alpha scale for the same reason.
+    var cbody = H.el('div');
+    var pw = H.scaleSet([t.capacity_mw, t.commission_mw], 'power');
+    var head = H.el('div', 'hstrip alloc-budget');
+    head.appendChild(statTile(['staked', 'alpha in reactors + generators'], alpha(t.fuel_ualpha), null, 'ok'));
+    head.appendChild(statTile(['capacity made', 'yours'], pw.fmt(t.capacity_mw), null, 'ok'));
+    head.appendChild(statTile(['commission', 'kept by reactors'], pw.fmt(t.commission_mw), null, 'muted'));
+    head.appendChild(statTile('defusing', alpha(t.defusing_ualpha), null,
+      t.defusing_ualpha > 0 ? 'live' : 'muted'));
+    head.appendChild(statTile(['earning nothing', 'ratio 0'], alpha(t.dead_fuel_ualpha), null,
+      t.dead_fuel_ualpha > 0 ? 'bad' : 'muted'));
+    cbody.appendChild(head);
+    if (t.dead_fuel_ualpha > 0) {
+      cbody.appendChild(H.stateBlock('warning',
+        alpha(t.dead_fuel_ualpha) + ' of staked Alpha is producing no energy at all — its '
+        + 'reactor’s validator is jailed or unbonded. Migrate it to a live reactor, or '
+        + 'restart the reactor if the validator is already back.'));
+    }
+    if (d.auto_infuse && d.auto_infuse.enabled) {
+      cbody.appendChild(H.stateBlock('info',
+        'auto_infuse is on: the primary keeps ' + d.auto_infuse.keep_grams
+        + ' g liquid and stakes the rest every '
+        + H.duration(d.auto_infuse.interval_secs) + '.'));
+    }
+    body.appendChild(H.card('INFUSION SUMMARY', cbody));
+
+    // ── Reactor infusions (the actionable list) ──
+    var ibody = H.el('div');
+    if (!reactorRows.length) {
+      ibody.appendChild(H.stateBlock('empty',
+        'No reactor infusions. Staking Alpha into a reactor is the simplest way to raise '
+        + 'capacity: you keep ~96% of it as your own, and can defuse it back.'));
+    }
+    reactorRows.forEach(function (r) { ibody.appendChild(infusionRow(d, r)); });
+    var create = H.el('div', 'alloc-create');
+    var open = massBtn('', 'icon-send-alpha', 'New infusion', 'sui-mod-secondary');
+    open.addEventListener('click', function () { openInfuse(d); });
+    create.appendChild(open);
+    ibody.appendChild(create);
+    body.appendChild(H.card('REACTOR INFUSIONS', ibody));
+
+    // ── In flight ──
+    var pend = d.pending || [];
+    var migs = d.migrations || [];
+    if (pend.length || migs.length) {
+      var fbody = H.el('div');
+      pend.forEach(function (p) {
+        var act = H.el('div', 'cfg-actions');
+        var undo = massBtn('', 'icon-close', 'Cancel', 'sui-mod-secondary');
+        undo.addEventListener('click', function () { cancelDefusion(p); });
+        act.appendChild(undo);
+        fbody.appendChild(H.resultRow({
+          icon: 'icon-in-progress',
+          title: alpha(p.amount_ualpha) + ' leaving ' + (p.reactor_id || p.moniker || p.validator),
+          subtitle: p.player_name + ' · re-stakes at block ' + p.creation_height,
+          chips: [statTile('alpha back in', H.duration(p.eta_secs, { zero: 'now' }), null, 'live')],
+          action: act,
+        }));
+      });
+      migs.forEach(function (m) {
+        fbody.appendChild(H.resultRow({
+          icon: 'icon-transfers',
+          title: alpha(m.amount_ualpha) + ' · ' + (m.src_reactor_id || m.src_moniker)
+            + ' → ' + (m.dst_reactor_id || m.dst_moniker),
+          subtitle: m.player_name + ' · migration in progress',
+          chips: [statTile('settles in', H.duration(m.eta_secs, { zero: 'now' }), null, 'live')],
+        }));
+      });
+      body.appendChild(H.card('IN FLIGHT', fbody));
+    }
+
+    // ── Generators (one-way, so read-only) ──
+    if (genRows.length) {
+      var gbody2 = H.el('div');
+      gbody2.appendChild(H.stateBlock('warning',
+        'Generator infusions cannot be defused — the Alpha is annihilated on success, and a '
+        + 'destroyed generator takes it with it. They convert far better than a reactor, so '
+        + 'they belong only on a struct you can defend.'));
+      genRows.forEach(function (r) {
+        gbody2.appendChild(H.resultRow({
+          icon: r.destroyed ? 'icon-wreckage' : 'sui-icon-inert-alpha',
+          title: alpha(r.fuel_ualpha) + ' → ' + r.destination_label,
+          subtitle: r.player_name + (r.destroyed ? ' · DESTROYED — the Alpha is gone' : ' · one-way'),
+          chips: [
+            statTile('capacity', kw(r.capacity_mw), null, r.destroyed ? 'bad' : 'ok'),
+            statTile('rate', r.ratio + ' kW/g', null, 'muted'),
+          ],
+        }));
+      });
+      body.appendChild(H.card('GENERATOR INFUSIONS', gbody2));
+    }
+
+    // ── The directory ──
+    // Every legal destination, ours first then cheapest — which is the standing
+    // advice ("infuse your guild's reactor; pick the lowest commission") as an
+    // ordering rather than a paragraph.
+    var rbody = H.el('div');
+    (d.reactors || []).forEach(function (r) {
+      var down = r.jailed || (r.status && r.status !== 'BOND_STATUS_BONDED');
+      var act = H.el('div', 'cfg-actions');
+      var go = massBtn('', 'icon-send-alpha', 'Infuse', down ? 'sui-mod-disabled' : 'sui-mod-secondary');
+      if (!down) {
+        go.addEventListener('click', function () { openInfuse(d, { reactorId: r.id }); });
+      }
+      act.appendChild(go);
+      if (down && !r.jailed) {
+        var rs2 = massBtn('', 'icon-refresh-12', 'Restart', 'sui-mod-secondary');
+        rs2.addEventListener('click', function () { restartReactor(r.id); });
+        act.appendChild(rs2);
+      }
+      rbody.appendChild(H.resultRow({
+        icon: down ? 'sui-icon-no-power' : 'sui-icon-energy',
+        title: r.id + (r.moniker ? ' · ' + r.moniker : ''),
+        subtitle: (r.is_our_guild ? 'your guild' : (r.guild_id ? 'guild ' + r.guild_id : 'unaffiliated'))
+          + (bondText(r) ? ' · ' + bondText(r) : ''),
+        chips: [
+          statTile('commission', (r.commission * 100).toFixed(1).replace(/\.0$/, '') + '%', null,
+            r.commission <= 0.04 ? 'ok' : 'muted'),
+          // A zero here means "you hold nothing there", which reads as an em
+          // dash; "0µg" looks like a rounding artefact of a real holding.
+          statTile('your stake', r.our_fuel_ualpha > 0 ? alpha(r.our_fuel_ualpha) : '—', null,
+            r.our_fuel_ualpha > 0 ? 'ok' : 'muted'),
+          statTile('infusers', H.fmtInt(r.infusers), null, 'muted'),
+        ],
+        action: act,
+      }));
+    });
+    body.appendChild(H.card('REACTORS', rbody));
+    Board.stamp('updated ' + new Date().toLocaleTimeString());
+  }
+
+  function renderDistributionBody() {
     var d = energyState.data; if (!d) return;
     var body = document.getElementById('energy-body');
     body.innerHTML = '';
@@ -949,7 +1455,21 @@
     body.appendChild(H.card('PLAYER MARGINS · roster ' + H.ago(d.roster_refreshed_at_ms) + ' old', pbody));
     Board.stamp('updated ' + new Date().toLocaleTimeString());
   }
+  // Both Industry sections are this one page div; the section decides which
+  // half renders. Every existing `loadAllocations().then(renderEnergyBody)`
+  // call therefore still lands on the right body.
+  function renderEnergyBody() {
+    if (energyState.view === 'production') return renderProductionBody();
+    return renderDistributionBody();
+  }
+
   function renderEnergy() {
+    // Fetch only what the visible section reads: Production makes no substation
+    // reads, Distribution makes no staking reads, and the cadence tick would
+    // otherwise pay for both every 30s.
+    if (energyState.view === 'production') {
+      return loadInfusions().then(renderEnergyBody);
+    }
     return Promise.all([
       Board.T.core.invoke('mcp_energy'),
       loadAllocations(),
@@ -961,7 +1481,14 @@
       body.appendChild(H.alertLine('energy unavailable: ' + e, 'icon-alert'));
     });
   }
-  Board.registerPage('energy', { refresh: renderEnergy, cadenceMs: 30000, onEnter: renderEnergy });
+  Board.registerPage('energy', {
+    refresh: renderEnergy,
+    cadenceMs: 30000,
+    onEnter: function (params, view) {
+      if (view) energyState.view = view;
+      return renderEnergy();
+    },
+  });
 
   // ═══════════════════════════ WORK ═════════════════════════════════════════
   var workState = { data: null, sort: { key: 'progress', dir: -1 }, built: false, lv: null };

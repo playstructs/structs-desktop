@@ -6,6 +6,7 @@ pub mod doctrine;
 pub mod events;
 pub mod format;
 pub mod hasher;
+pub mod infusions;
 pub mod intel;
 pub mod map;
 pub mod mass_action;

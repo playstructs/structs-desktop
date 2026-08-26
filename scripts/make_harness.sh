@@ -241,6 +241,156 @@ cat > "$FIX" <<'EOF'
     schema: 1,
   };
 
+  // ── Energy / allocations (Industry → Distribution) ───────────────────────
+  // Enough of the real shapes to prove the Production/Distribution split did
+  // not break the half that already worked. Figures are the live primary's.
+  var ENERGY = {
+    guild: {
+      reactor_fuel_mw: 471167189, reactor_commission: 0.04,
+      sub_capacity_mw: 1512960000, sub_load_mw: 0, sub_connection_count: 220,
+      sub_connection_capacity_mw: 6877091, share_if_one_more_mw: 6845973,
+      supportable_more: 158,
+    },
+    players: [
+      { role: 'primary', name: 'Marklifer', ok: true, err: null,
+        load_mw: 123000000000, capacity_mw: 144201281295, margin_pct: 14.7 },
+      { role: 'productive', name: 'worker-182', ok: true, err: null,
+        load_mw: 0, capacity_mw: 0, margin_pct: 100 },
+    ],
+    roster_refreshed_at_ms: Date.now() - 45000,
+  };
+  var ALLOCATIONS = {
+    player_id: '1-194',
+    allocations: [
+      { id: '6-53', type: 'dynamic', source_object_id: '1-194', destination_id: '4-1',
+        controller: '1-194', creator: 'structs12wll0un', locked: false,
+        power_mw: 123000000000 },
+    ],
+    budget: {
+      capacity_mw: 144201281295, load_mw: 123000000000, structs_load_mw: 6530000,
+      capacity_secondary_mw: 0, allocatable_mw: 21201281295,
+      available_mw: 21194751295, online: true,
+    },
+    substations: [
+      { id: '4-1', name: 'Orbital Hydro', capacity_mw: 1512960000, load_mw: 0,
+        connection_count: 220, connection_capacity_mw: 6877091 },
+      { id: '4-9', name: '', capacity_mw: 15529000, load_mw: 0,
+        connection_count: 3, connection_capacity_mw: 5176333 },
+    ],
+    mw_per_kw: 1000000,
+  };
+
+  // ── Infusions (Industry → Production) ────────────────────────────────────
+  // Modelled on the LIVE galaxy (2026-08-26): 42 infusions chain-wide, 35 into
+  // reactors and 7 into generators, four of them stuck at ratio 0 behind a
+  // jailed validator. The primary's own two rows are the real ones — a
+  // 13,318.001349 g reactor stake at 4% and a 65,708 g ratio-2 generator stake
+  // — because their arithmetic is what the capacity split is checked against.
+  var INFUSIONS = {
+    player_id: '1-194',
+    address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne',
+    guild_id: '0-1',
+    unbonding_secs: 345600,
+    max_entries: 7,
+    ualpha_per_gram: 1000000,
+    auto_infuse: { enabled: true, keep_grams: 10, interval_secs: 600 },
+    totals: {
+      fuel_ualpha: 13318001349 + 65708000000 + 46070000,
+      capacity_mw: 12785281295 + 131416000000,
+      commission_mw: 13318001349 - 12785281295,
+      defusing_ualpha: 2000000,
+      dead_fuel_ualpha: 46070000,
+      holders: 3,
+    },
+    infusions: [
+      // Dead rows sort first: staked Alpha earning literally nothing.
+      { key: '3-11|structs1dead', destination_type: 'reactor', destination_id: '3-11',
+        destination_label: '3-11 · driftwood', guild_id: '', validator: 'structsvaloper1nmduafz',
+        moniker: 'driftwood', validator_jailed: false, validator_status: 'BOND_STATUS_UNBONDED',
+        player_id: '1-182', player_name: 'worker-182', hd_index: 12,
+        address: 'structs1dead', fuel_ualpha: 46070000, power_mw: 0, capacity_mw: 0,
+        commission: 0.04, commission_mw: 0, ratio: 0, defusing_ualpha: 0,
+        dead: true, reversible: true, destroyed: false,
+        holder_grid: { capacity_mw: 0, load_mw: 0, structs_load_mw: 2500000,
+                       capacity_secondary_mw: 6877091, allocatable_mw: 0 } },
+      { key: '3-1|structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne', destination_type: 'reactor',
+        destination_id: '3-1', destination_label: '3-1 · sn-corp-1', guild_id: '0-1',
+        validator: 'structsvaloper1ul8sd7n', moniker: 'sn-corp-1',
+        validator_jailed: false, validator_status: 'BOND_STATUS_BONDED',
+        player_id: '1-194', player_name: 'Marklifer', hd_index: 0,
+        address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne',
+        fuel_ualpha: 13318001349, power_mw: 13318001349, capacity_mw: 12785281295,
+        commission: 0.04, commission_mw: 532720054, ratio: 1, defusing_ualpha: 2000000,
+        dead: false, reversible: true, destroyed: false,
+        holder_grid: { capacity_mw: 144201281295, load_mw: 123000000000,
+                       structs_load_mw: 6530000, capacity_secondary_mw: 0,
+                       allocatable_mw: 21201281295 } },
+      // Generator: one-way, ratio 2, and rendered in its own card with no
+      // buttons at all.
+      { key: '5-2300|structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne', destination_type: 'struct',
+        destination_id: '5-2300', destination_label: '5-2300 · Field Generator', guild_id: '',
+        validator: '', moniker: '', validator_jailed: false, validator_status: '',
+        player_id: '1-194', player_name: 'Marklifer', hd_index: 0,
+        address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne',
+        fuel_ualpha: 65708000000, power_mw: 131416000000, capacity_mw: 131416000000,
+        commission: 0, commission_mw: 0, ratio: 2, defusing_ualpha: 0,
+        dead: false, reversible: false, destroyed: false,
+        holder_grid: { capacity_mw: 144201281295, load_mw: 123000000000,
+                       structs_load_mw: 6530000, capacity_secondary_mw: 0,
+                       allocatable_mw: 21201281295 } },
+    ],
+    pending: [
+      { address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne', player_id: '1-194',
+        player_name: 'Marklifer', hd_index: 0, validator: 'structsvaloper1ul8sd7n',
+        reactor_id: '3-1', moniker: 'sn-corp-1', amount_ualpha: 2000000,
+        creation_height: '2236401', completion_time: '2026-08-30T00:00:00Z',
+        eta_secs: 300000 },
+    ],
+    migrations: [
+      { address: 'structs1dead', player_id: '1-182', player_name: 'worker-182', hd_index: 12,
+        src_validator: 'structsvaloper1nmduafz', dst_validator: 'structsvaloper1ul8sd7n',
+        src_reactor_id: '3-11', dst_reactor_id: '3-1', src_moniker: 'driftwood',
+        dst_moniker: 'sn-corp-1', amount_ualpha: 1000000,
+        completion_time: '2026-08-30T00:00:00Z', eta_secs: 300000 },
+    ],
+    reactors: [
+      { id: '3-1', validator: 'structsvaloper1ul8sd7n', guild_id: '0-1', is_our_guild: true,
+        commission: 0.04, moniker: 'sn-corp-1', jailed: false, status: 'BOND_STATUS_BONDED',
+        stake_commission: 0.11, our_fuel_ualpha: 13318001349, infusers: 15 },
+      { id: '3-15', validator: 'structsvaloper1pa4ch99', guild_id: '0-5', is_our_guild: false,
+        commission: 0.04, moniker: 'sn-corp', jailed: false, status: 'BOND_STATUS_BONDED',
+        stake_commission: 0.11, our_fuel_ualpha: 0, infusers: 4 },
+      { id: '3-11', validator: 'structsvaloper1nmduafz', guild_id: '', is_our_guild: false,
+        commission: 0.04, moniker: 'driftwood', jailed: false, status: 'BOND_STATUS_UNBONDED',
+        stake_commission: 0.1, our_fuel_ualpha: 46070000, infusers: 1 },
+      { id: '3-3', validator: 'structsvaloper1jailed', guild_id: '0-2', is_our_guild: false,
+        commission: 0.1, moniker: 'nodesafe', jailed: true, status: 'BOND_STATUS_UNBONDING',
+        stake_commission: 0.15, our_fuel_ualpha: 0, infusers: 5 },
+    ],
+    candidates: [
+      { player_id: '1-194', name: 'Marklifer', address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne',
+        hd_index: 0, alpha_ualpha: 49340000000, capacity_mw: 144201281295, load_mw: 123000000000 },
+      { player_id: '1-182', name: 'worker-182', address: 'structs1dead', hd_index: 12,
+        alpha_ualpha: 4500000, capacity_mw: 0, load_mw: 0 },
+    ],
+  };
+  // One preview shape covering every field the three ops read. Tests that need
+  // a refusal swap this entry on window.__HARNESS_FIXTURES__.
+  var INFUSION_PREVIEW = {
+    ok: true, refusal: null, warnings: [], op: 'infuse',
+    player_id: '1-194', player_name: 'Marklifer', hd_index: 0,
+    address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne',
+    validator: 'structsvaloper1ul8sd7n', amount_ualpha: 1000000,
+    facts: {
+      balance_ualpha: 49340000000, balance_after_ualpha: 48340000000,
+      gained_mw: 960000, commission_mw: 40000, commission: 0.04,
+      capacity_mw: 144201281295, capacity_after_mw: 144202241295,
+      load_mw: 123000000000, headroom_after_mw: 21202241295, online_after: true,
+      capacity_lost_mw: 960000, capacity_gained_mw: 900000, net_mw: -60000,
+      cooldown_secs: 345600, staked_ualpha: 13318001349, already_defusing_ualpha: 2000000,
+    },
+  };
+
   var F = {
     mcp_game_stats_snapshot: SNAPSHOT,
     mcp_board_html: '<div class="sui-data-card-row">harness ops snapshot</div>',
@@ -254,12 +404,32 @@ cat > "$FIX" <<'EOF'
     // Writes are accepted and echoed; assertions read __HARNESS_CALLS__ for the
     // payload rather than expecting the fixture to apply it.
     mcp_config_set: { ok: true },
+    mcp_energy: ENERGY,
+    mcp_allocations: ALLOCATIONS,
+    mcp_infusions: INFUSIONS,
+    mcp_infusion_preview: INFUSION_PREVIEW,
+    mcp_infusion_infuse: { ok: true, tx: 'HARNESSTX' },
+    mcp_infusion_defuse: { ok: true, tx: 'HARNESSTX' },
+    mcp_infusion_migrate: { ok: true, tx: 'HARNESSTX' },
+    mcp_infusion_cancel_defusion: { ok: true, tx: 'HARNESSTX' },
+    mcp_infusion_restart: { ok: true, tx: 'HARNESSTX' },
   };
 
   var calls = [];
   var listeners = {};
   window.__HARNESS_CALLS__ = calls;
   window.__HARNESS_LISTENERS__ = listeners;
+  // Uncaught errors and rejections, captured from the first line of the page.
+  // The board boots asynchronously and paints into persistent page divs, so a
+  // throw during boot looks exactly like "still loading" — this is the only
+  // way to tell the two apart from outside.
+  window.__HARNESS_ERRORS__ = [];
+  window.addEventListener('error', function (e) {
+    window.__HARNESS_ERRORS__.push(String((e && (e.message || e.error)) || e));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    window.__HARNESS_ERRORS__.push('rejection: ' + String(e && e.reason));
+  });
   // Tests mutate this so a page's cadence re-pull returns the same data a
   // synthetic push delivered — in the real app pull and push read one Rust
   // cache and cannot disagree, so the harness must not either.

@@ -57,8 +57,14 @@
       // what a squad DOES, which is a roster decision, not an app setting.
       { key: 'profiles', label: 'Profiles', page: 'config', view: 'profiles' },
     ] },
+    // Power splits along the line the game itself draws: an infusion CREATES
+    // capacity (staking Alpha into a reactor), an allocation ROUTES capacity
+    // you already have. They were one page while infusions had no UI at all;
+    // as soon as infusions got controls, the combined page was two unrelated
+    // grids of numbers under one heading.
     { key: 'industry', label: 'Industry', sections: [
-      { key: 'power', label: 'Power', page: 'energy' },
+      { key: 'production', label: 'Production', page: 'energy', view: 'production' },
+      { key: 'distribution', label: 'Distribution', page: 'energy', view: 'distribution' },
       { key: 'work', label: 'Work', page: 'work' },
       { key: 'inventory', label: 'Inventory', page: 'inventory' },
       { key: 'transactions', label: 'Transactions', page: 'tx' },
@@ -99,13 +105,19 @@
     // The Map page is gone; its bookmarks and any `#/map?p=…` the Rust side
     // still emits land on the Roster, which is where the spectator is opened
     // from now. A dead route would 404 an old link for no reason.
-    map: 'armada/roster', energy: 'industry/power', work: 'industry/work',
+    map: 'armada/roster', energy: 'industry/distribution', work: 'industry/work',
     tx: 'industry/transactions', grass: 'command/stream', config: 'system/loops',
   };
   // Sections that have moved between areas. Same job as LEGACY_ROUTES, one
   // level down — without it `#/system/stream` would silently land on
   // System's first section instead of the page you bookmarked.
-  var LEGACY_SECTIONS = { 'system/stream': 'command/stream' };
+  // `industry/power` is where every existing bookmark and the Rust side's own
+  // deep links point; allocations are what that page was used FOR, so it lands
+  // on Distribution rather than on the new Production section.
+  var LEGACY_SECTIONS = {
+    'system/stream': 'command/stream',
+    'industry/power': 'industry/distribution',
+  };
 
   // ── Pop-out mode ────────────────────────────────────────────────────────
   // `board.html?view=stream` runs this SAME page as a standalone window
@@ -659,7 +671,13 @@
       max.href = 'javascript:void(0)';
       max.title = 'Use the whole available balance';
       max.addEventListener('click', function () {
-        input.value = String(trim2(Number(opts.max) / div));
+        // EXACTLY the ceiling, at full precision — not a rounded rendering of
+        // it. `trim2` rounds half-up, so a 13.316001349 Kg ceiling displayed as
+        // "13.32" emitted 13.32 Kg: ~4 g ABOVE the real balance, and the chain
+        // rejects the whole message. Every use of MAX here is "all of it"
+        // against a hard limit (liquid Alpha, allocatable headroom, removable
+        // stake), so the exact figure is the only correct one.
+        input.value = String(Number(opts.max) / div);
         emit();
       });
       row.appendChild(max);
@@ -1469,9 +1487,21 @@
   function boot() {
     var T = window.__TAURI__;
     if (!T || !T.event || !T.core) { setTimeout(boot, 150); return; }
-    // Defer one tick: if __TAURI__ existed at parse time this would otherwise
-    // run BEFORE board-pages.js parses and registers its pages (classic
-    // scripts execute in order; a 0ms timeout lands after both).
+    // Wait for the rest of the document's scripts. The page modules register
+    // themselves from their own <script> tags further down the body, and a 0ms
+    // timeout is NOT enough to guarantee they have run: while board-pages.js is
+    // still being FETCHED the parser is blocked but the event loop is not, so
+    // the timer fires in that gap. route() then finds `Board.pages` empty,
+    // unhides the right page div and calls no onEnter at all — a board that
+    // sits on "…loading" forever with no error anywhere. Reproduced over HTTP
+    // in the harness, roughly one load in three.
+    //
+    // DOMContentLoaded is the event that actually means "every classic script
+    // in this document has executed".
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () { init(T); }, { once: true });
+      return;
+    }
     setTimeout(function () { init(T); }, 0);
   }
   function init(T) {
