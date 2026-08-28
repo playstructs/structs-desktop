@@ -1528,6 +1528,16 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           case 'list':   data = vp.list(); break;
           case 'render_map': data = await vp.renderMapPng(args.planet_id, args.player_id); break;
           case 'render_map_frames': data = await vp.renderMapFrames(args.planet_id, args.player_id, args.count, args.interval_ms); break;
+          // Comms (Matrix chat) rides this same transport — it is the bridge
+          // for "Rust needs something only the key-holder can do" — but
+          // dispatches to its OWN façade, which can only sign the guild login
+          // message and never an arbitrary payload.
+          case 'login_signature': {
+            var comms = window.__STRUCTS_COMMS__;
+            if (!comms) { respond(false, {}, 'comms façade unavailable (patch not built / not signed in)'); return; }
+            data = await comms.loginSignature(args.guild_id, args.timestamp);
+            break;
+          }
           default: respond(false, {}, 'unknown vplayer op: ' + op); return;
         }
         respond(true, data, null);
@@ -1916,8 +1926,19 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
       var html = '<div style="padding: 4px; display:flex; flex-direction:column; gap:8px; width:100%;">';
 
-      // Support bundle — first thing in the panel, because when someone needs
-      // it they are already having a bad time and shouldn't have to hunt.
+      // Comms — first thing in the panel. Federated chat over the guild's
+      // Matrix homeserver (structs-tel). Deliberately parked here rather than
+      // in the game's own menu: the feature is real but unannounced, and this
+      // panel is where unannounced things live until they are ready to be
+      // found on purpose.
+      html += '<div class="sui-data-card">';
+      html += '<div class="sui-data-card-body" style="padding:6px;">';
+      html += '<div id="debug-comms" class="sui-button sui-mod-secondary" style="cursor:pointer; text-align:center; padding:6px 10px;">Comms</div>';
+      html += '<div id="debug-comms-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">federated guild chat · opens in its own window</div>';
+      html += '</div></div>';
+
+      // Support bundle — because when someone needs it they are already having
+      // a bad time and shouldn't have to hunt.
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-body" style="padding:6px;">';
       html += '<div id="debug-download-logs" class="sui-button sui-mod-secondary" style="cursor:pointer; text-align:center; padding:6px 10px;">Download logs</div>';
@@ -2057,6 +2078,22 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             copyToClipboard(walletAddress);
             addrEl.textContent = 'Copied!';
             setTimeout(function() { addrEl.textContent = walletAddress.substring(0, 20) + '...'; }, 1000);
+          });
+        }
+
+        // Comms door. Same direct-invoke shape as the others: no MCP server,
+        // no bearer token. Opening the window does NOT sign in — the window
+        // asks first — so this button is safe to press out of curiosity.
+        var commsEl = document.getElementById('debug-comms');
+        if (commsEl) {
+          commsEl.addEventListener('click', function() {
+            window.__TAURI__.core.invoke('open_chat_window').catch(function(e) {
+              var note = document.getElementById('debug-comms-note');
+              if (note) {
+                note.textContent = 'Could not open Comms: ' + e;
+                note.style.color = 'var(--text-enemy-primary)';
+              }
+            });
           });
         }
 

@@ -6,6 +6,7 @@
     "board",
     "stream",
     "gamestats",
+    "chat",
     "raid-*"
   ],
   "permissions": [

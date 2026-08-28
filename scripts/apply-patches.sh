@@ -518,6 +518,45 @@ VP_EOF
 grep -q "__STRUCTS_VPLAYERS__" "$BUILD_DIR/js/index.js" \
   || { echo "ERROR: vplayers façade patch did not apply"; exit 1; }
 
+echo "    Patching index.js (expose __STRUCTS_COMMS__ chat-login façade)..."
+# Comms (Matrix chat) signs in to the guild webapp with the SAME message the
+# game's own login uses, because that webapp is the OIDC provider the guild's
+# homeserver trusts. The key never leaves JS, so Rust asks for the signature
+# through the bridge instead.
+#
+# Deliberately NOT a generic signing oracle: this takes (guild_id, timestamp)
+# and builds the login message itself. It cannot be asked to sign an arbitrary
+# string, so nothing reachable from the bridge can be turned into a signer for
+# a chain payload.
+cat >> "$BUILD_DIR/js/index.js" <<'COMMS_EOF'
+
+// [structs-universe patch] Comms chat-login façade.
+try {
+  window.__STRUCTS_COMMS__ = {
+    // Returns only what the guild's POST /auth/login needs. Same call path as
+    // AuthManager.buildLoginRequest — if the game can log in, so can this.
+    async loginSignature(guildId, timestamp) {
+      if (!gameState.signingAccount || !gameState.signingAccount.privkey) {
+        throw new Error('not signed in to the game yet');
+      }
+      if (!guildId || !timestamp) {
+        throw new Error('loginSignature needs a guild id and a timestamp');
+      }
+      const address = gameState.signingAccount.address;
+      const message = guildAPI.buildLoginMessage(guildId, address, String(timestamp));
+      const signature = await walletManager.createSignatureForProxyMessage(
+        message,
+        gameState.signingAccount.privkey
+      );
+      return { address: address, pubkey: gameState.pubkey, signature: signature };
+    },
+  };
+  console.info('[structs-universe] __STRUCTS_COMMS__ ready');
+} catch (e) { console.warn('[structs-universe] comms façade failed', e); }
+COMMS_EOF
+grep -q "__STRUCTS_COMMS__" "$BUILD_DIR/js/index.js" \
+  || { echo "ERROR: comms façade patch did not apply"; exit 1; }
+
 echo "    Patching index.js (expose __STRUCTS_TXQ__ signing-queue façade)..."
 # Read/mutate surface over the primary's SigningQueueManager for the Team Ops
 # TX page. Pure in-memory ops — never signs or broadcasts itself. The queue's

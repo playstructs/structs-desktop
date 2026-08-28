@@ -1,0 +1,225 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Structs — Comms</title>
+  <link rel="stylesheet" href="css/normalize.css" />
+  <link rel="stylesheet" href="css/structicons.css" />
+  <link rel="stylesheet" href="css/sui/sui.css" />
+  <!-- The GAME's own stylesheet. Loaded on purpose, and the ids below are the
+       game's own menu-page ids on purpose: main.css frames #menu-page-layout
+       and drives its integer pixel-art scaling (scale(2) at >=1152px,
+       scale(4) at >=2304px, with the matching 50vw/25vw box). Reusing the ids
+       is how this window gets the SAME chrome and the SAME scaling as the
+       in-game menu without re-deriving either.
+
+       Unlike raidview.html there is no map here, so nothing competes with
+       that scaler. This document loads no game bundle — it shares an origin
+       with the game (tauri://localhost), so booting index.html here would
+       share the localStorage holding the mnemonic. Nothing below can sign,
+       mine, or broadcast; every write goes through a Rust command. -->
+  <link rel="stylesheet" href="css/main.css" />
+  <style>
+    /* ── Comms ────────────────────────────────────────────────────────────
+       Composition only. Every colour, font and spacing value below is a SUI
+       token or a SUI class — no invented palette, no emoji-as-icon. The
+       classes that do the visual work (.sui-panel, .sui-screen,
+       .sui-result-row, .sui-page-header, .sui-badge, .sui-input-text) come
+       from the shipped webapp; these rules only place them. */
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body {
+      background: var(--page-background);
+      color: var(--text-body);
+      font-family: 'DirectiveZero', sans-serif;
+    }
+    .hidden { display: none !important; }
+
+    /* The nav's right-hand cluster: page icons + window close. Sits where
+       #menu-page-nav-close sits in the game, so the bar keeps its silhouette. */
+    #chat-nav-actions {
+      display: flex; align-items: stretch; align-self: stretch; gap: 0;
+    }
+    #chat-nav-actions a {
+      display: flex; align-items: center;
+      padding: var(--spacing-sm) var(--spacing-md);
+      text-decoration: none; color: var(--accent-primary);
+    }
+    #chat-nav-actions a.sui-mod-active { border-bottom: 2px solid var(--accent-primary-active); }
+    #chat-nav-actions a:hover { color: var(--accent-primary-active); }
+
+    /* A page fills the body content box and scrolls in its middle band only,
+       so the header and the composer stay put. */
+    .chat-page {
+      display: flex; flex-direction: column;
+      width: 100%; height: 100%; min-height: 0;
+    }
+    .chat-scroll {
+      flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
+      padding: var(--spacing-sm) var(--spacing-md);
+      display: flex; flex-direction: column; gap: var(--spacing-md);
+      /* .sui-page-body-screen centres its content for the game's short menu
+         copy. Prose in a chat log is read left-to-right down a ragged right
+         edge, so this band opts out. */
+      text-align: left;
+    }
+
+    /* Section chip ("LOCAL NET" / "GALAXY NET"). The filled variant of
+       .sui-text-label — same font and case, inverted onto the accent. */
+    .chat-net-label {
+      align-self: flex-start;
+      padding: 2px var(--spacing-sm);
+      background: var(--accent-primary);
+      color: var(--text-player-inverted);
+      font-family: 'ExtremeHazard', sans-serif;
+      font-size: 8px; line-height: 16px; text-transform: uppercase;
+    }
+    .chat-net-group { display: flex; flex-direction: column; gap: var(--spacing-xs); }
+
+    /* Rows are .sui-result-row; only the icon well needs placing, because the
+       roster's portrait well expects a rendered PFP rather than a glyph. */
+    .sui-result-row.chat-room-row { cursor: pointer; }
+    .chat-room-icon {
+      display: flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px; flex: 0 0 32px;
+    }
+    /* The roster's right section is space-between because it carries a row of
+       resource chips AND a trailing button. These rows carry only an unread
+       badge and a Join button, so the default leaves them stranded at the
+       start of a 224px-min box instead of against the row's right edge. */
+    .chat-page .sui-result-row-right-section {
+      justify-content: flex-end;
+      gap: var(--spacing-md);
+    }
+    .chat-room-unread { flex: 0 0 auto; }
+
+    /* ── Timeline ──────────────────────────────────────────────────────── */
+    .chat-msg { display: flex; flex-direction: column; gap: 2px; }
+    .chat-msg-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: var(--spacing-sm);
+    }
+    .chat-msg-sender {
+      font-family: 'ExtremeHazard', sans-serif;
+      font-size: 8px; line-height: 16px; text-transform: uppercase;
+      color: var(--accent-secondary);
+    }
+    .chat-msg-sender.chat-mod-self { color: var(--text-player-primary); }
+    .chat-msg-tag { color: var(--text-hint); }
+    /* A same-sender run drops the header, the way the mockup's stacked
+       paragraphs from one speaker do. */
+    .chat-msg.chat-mod-cont .chat-msg-head { display: none; }
+    .chat-msg.chat-mod-cont { margin-top: calc(-1 * var(--spacing-sm)); }
+    .chat-msg-body { white-space: pre-wrap; word-break: break-word; }
+    .chat-msg-body.chat-mod-notice { color: var(--text-hint); }
+    .chat-msg-body.chat-mod-emote { color: var(--text-neutral-primary); font-style: italic; }
+    /* An event we have no renderer for still shows its type rather than
+       vanishing — a silently dropped message reads as a broken client. */
+    .chat-msg-body.chat-mod-unknown { color: var(--text-hint); }
+    .chat-msg-pending { opacity: .55; }
+    .chat-msg-failed .chat-msg-body { color: var(--text-enemy-primary); }
+
+    /* ── Composer ─────────────────────────────────────────────────────── */
+    #chat-composer {
+      flex: 0 0 auto;
+      display: flex; align-items: stretch; gap: var(--spacing-sm);
+      padding: var(--spacing-sm) var(--spacing-md);
+    }
+    #chat-composer-portrait {
+      flex: 0 0 auto; width: 48px; height: 48px;
+      display: flex; align-items: center; justify-content: center;
+      border: 2px solid var(--border-subtle);
+      background: var(--surface-player-body);
+      overflow: hidden;
+    }
+    #chat-composer-portrait img,
+    #chat-composer-portrait svg { width: 100%; height: 100%; image-rendering: pixelated; }
+    #chat-composer-field { flex: 1 1 auto; min-width: 0; display: flex; }
+    #chat-composer-field label.sui-input-text { width: 100%; }
+    #chat-composer-field input[type=text] { width: 100%; }
+    #chat-composer-send { flex: 0 0 auto; display: flex; align-items: stretch; }
+
+    /* ── Notices ──────────────────────────────────────────────────────── */
+    .chat-notice {
+      display: flex; flex-direction: column; gap: var(--spacing-sm);
+      padding: var(--spacing-md);
+      color: var(--text-hint);
+      align-self: stretch; text-align: left;
+    }
+    .chat-notice .chat-notice-title { color: var(--text-body); }
+    .chat-notice.chat-mod-error .chat-notice-title { color: var(--text-enemy-primary); }
+
+    /* Connection ladder: one row per step of the sign-in chain, so a failure
+       says WHICH hop failed instead of "login failed". */
+    /* .sui-data-card-body is a flex column with align-items:flex-start, so a
+       child shrinks to its content unless it says otherwise. Both row types
+       below need the card's full width to justify against. */
+    .chat-step { display: flex; align-items: center; gap: var(--spacing-sm);
+      align-self: stretch; }
+    .chat-step-state { flex: 0 0 auto; width: 16px; text-align: center; }
+    .chat-step-label { line-height: 16px; }
+    /* The mark carries the same colour as its label — at 16px the glyphs alone
+       are too close to read apart at a glance. */
+    .chat-step.chat-mod-done .chat-step-label,
+    .chat-step.chat-mod-done .chat-step-state { color: var(--text-player-primary); }
+    .chat-step.chat-mod-active .chat-step-label,
+    .chat-step.chat-mod-active .chat-step-state { color: var(--text-warning); }
+    .chat-step.chat-mod-todo .chat-step-label,
+    .chat-step.chat-mod-todo .chat-step-state { color: var(--text-hint); opacity: .5; }
+    .chat-step.chat-mod-failed .chat-step-label,
+    .chat-step.chat-mod-failed .chat-step-state { color: var(--text-enemy-primary); }
+    .chat-step-detail { color: var(--text-hint); word-break: break-all; }
+
+    .chat-kv { display: flex; justify-content: space-between; gap: var(--spacing-md);
+      padding: 2px 0; align-self: stretch; }
+    .chat-kv > :first-child { color: var(--text-hint); white-space: nowrap; }
+    .chat-kv > :last-child { color: var(--text-body); text-align: right; word-break: break-all; }
+  </style>
+</head>
+<body>
+
+<div id="menu-page-layout">
+
+  <div id="menu-page-panel" class="sui-panel sui-theme-player">
+    <div class="sui-panel-top-fill-background"></div>
+    <div class="sui-panel-bottom-fill-background"></div>
+    <div class="sui-panel-edge-left"></div>
+    <div id="menu-page-panel-chunk" class="sui-panel-chunk sui-mod-grow sui-mod-shrink">
+
+      <div id="menu-page-nav" class="sui-screen sui-screen-full-width">
+        <div class="sui-screen-nav">
+          <!-- Left: the networks this player can reach. In the game these are
+               the menu's sections; here they are the federated homeservers,
+               which is the same "where am I" job in the same slot. -->
+          <div id="menu-page-nav-items" class="sui-screen-nav-items"></div>
+
+          <div id="chat-nav-actions">
+            <a id="chat-nav-comms" href="javascript:void(0)" title="Channels">
+              <i class="sui-icon-sm icon-phone"></i>
+            </a>
+            <a id="chat-nav-settings" href="javascript:void(0)" title="Connection">
+              <i class="sui-icon-sm icon-menu"></i>
+            </a>
+            <a id="menu-page-nav-close" class="sui-screen-nav-close" href="javascript:void(0)" title="Close">
+              <i class="sui-icon-sm icon-close"></i>
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <div class="height-100 sui-screen sui-screen-full-width sui-screen-shrink">
+        <div id="menu-page-screen-body" class="height-100 sui-page-body-screen">
+          <div id="menu-page-body-content"></div>
+        </div>
+      </div>
+
+    </div>
+    <div class="sui-panel-edge-right"></div>
+  </div>
+
+</div>
+
+<script src="chat.js"></script>
+</body>
+</html>

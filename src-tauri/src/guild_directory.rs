@@ -99,6 +99,10 @@ struct GuildServices {
     client_websocket: String,
     #[serde(default, alias = "grassNatsWebsocket")]
     grass_nats_websocket: String,
+    /// Federated chat homeserver (structs-tel: Synapse + MAS). Absent for
+    /// every guild that has not stood one up, which is most of them.
+    #[serde(default)]
+    matrix: String,
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────
@@ -196,6 +200,21 @@ fn validate_guild_doc(chain: &ChainGuild, body: &[u8]) -> Result<GuildConfig, St
         last_refreshed: Some(now_secs()),
         // Same sanitising as name/tag: this is guild-authored text that ends
         // up rendered next to real balances.
+        // Optional, and validated on the same terms as the rest (https/http,
+        // no loopback — it is fetched by Rust and its issuer drives an OAuth
+        // redirect chain). A guild that declares a bad one loses chat, not its
+        // whole directory entry, so this warns instead of returning Err.
+        matrix_url: {
+            let m = s.matrix.trim();
+            if m.is_empty() {
+                None
+            } else if let Err(e) = validate_service_url(m, &["http", "https"], "matrix") {
+                eprintln!("[Guild Directory] {} declares an unusable matrix URL: {}", chain.id, e);
+                None
+            } else {
+                Some(m.trim_end_matches('/').to_string())
+            }
+        },
         denoms: doc
             .guild
             .denom
@@ -352,6 +371,10 @@ fn upsert_discovered(existing: &mut Vec<GuildConfig>, found: Vec<GuildConfig>) -
                 if !f.denoms.is_empty() {
                     c.denoms = f.denoms;
                 }
+                // Assigned unconditionally, not merged: a guild that removes
+                // `matrix` from its guild.json has retired its homeserver, and
+                // keeping a stale URL would leave Comms pointed at nothing.
+                c.matrix_url = f.matrix_url;
                 c.endpoint = f.endpoint;
                 c.source = ConfigSource::Chain;
                 c.last_refreshed = f.last_refreshed;
@@ -590,6 +613,81 @@ mod tests {
         .into_bytes()
     }
 
+    /// Verbatim `services` block from https://beta.playstructs.com/guild.json
+    /// (2026-08-28), so this asserts the shape guilds ACTUALLY publish rather
+    /// than one invented here.
+    #[test]
+    fn matrix_service_is_picked_up_from_a_live_guild_json() {
+        let body = br#"{"guild":{"id":"0-5","name":"SN Corp","tag":"SN.C",
+            "denom":{"6":"snack","0":"ack"},
+            "services":{
+              "guild_api":"https://beta.playstructs.com/api/",
+              "reactor_api":"https://public.testnet.structs.network/",
+              "client_websocket":"wss://public.testnet.structs.network:26657/websocket",
+              "grass_nats_websocket":"wss://beta.playstructs.com:1443",
+              "matrix":"https://matrix.beta.playstructs.com",
+              "explorer":""}}}"#;
+        let cfg = validate_guild_doc(&chain("0-5"), body).unwrap();
+        assert_eq!(
+            cfg.matrix_url.as_deref(),
+            Some("https://matrix.beta.playstructs.com")
+        );
+    }
+
+    /// Most guilds publish no `matrix` key at all (crab.la's live document is
+    /// exactly this). That is a normal guild, not a broken one.
+    #[test]
+    fn a_guild_without_matrix_still_validates() {
+        let body = doc_json("0-5", "https://beta.playstructs.com/api/", "wss://beta.playstructs.com:1443");
+        let cfg = validate_guild_doc(&chain("0-5"), &body).unwrap();
+        assert!(cfg.matrix_url.is_none());
+    }
+
+    /// Chat is optional; the directory entry is not. A guild that declares an
+    /// unusable homeserver must lose only its chat.
+    #[test]
+    fn a_bad_matrix_url_costs_chat_not_the_whole_guild() {
+        for bad in [
+            r#""http://127.0.0.1:8008""#,   // loopback would alias the IPC origin
+            r#""ws://matrix.example""#,     // wrong scheme for a client base URL
+            r#""not a url""#,
+        ] {
+            let body = format!(
+                r#"{{"guild":{{"id":"0-5","name":"T","tag":"T","services":{{
+                    "guild_api":"https://beta.playstructs.com/api/",
+                    "grass_nats_websocket":"wss://beta.playstructs.com:1443",
+                    "matrix":{bad}}}}}}}"#
+            )
+            .into_bytes();
+            let cfg = validate_guild_doc(&chain("0-5"), &body)
+                .unwrap_or_else(|e| panic!("{} sank the whole entry: {}", bad, e));
+            assert!(cfg.matrix_url.is_none(), "{} was accepted", bad);
+        }
+    }
+
+    /// A guild retiring its homeserver must not leave Comms pointed at a
+    /// server that is no longer there.
+    #[test]
+    fn dropping_matrix_from_guild_json_clears_the_stored_url() {
+        let mut existing = vec![validate_guild_doc(
+            &chain("0-5"),
+            br#"{"guild":{"id":"0-5","name":"T","tag":"T","services":{
+                "guild_api":"https://beta.playstructs.com/api/",
+                "grass_nats_websocket":"wss://beta.playstructs.com:1443",
+                "matrix":"https://matrix.beta.playstructs.com"}}}"#,
+        )
+        .unwrap()];
+        assert!(existing[0].matrix_url.is_some());
+
+        let without = validate_guild_doc(
+            &chain("0-5"),
+            &doc_json("0-5", "https://beta.playstructs.com/api/", "wss://beta.playstructs.com:1443"),
+        )
+        .unwrap();
+        upsert_discovered(&mut existing, vec![without]);
+        assert!(existing[0].matrix_url.is_none());
+    }
+
     /// The `denom` block is guild-authored text rendered next to real
     /// balances, so it is parsed with the same sanitising as name/tag —
     /// non-numeric exponents and empty labels are dropped, not shown.
@@ -695,6 +793,7 @@ mod tests {
             source: ConfigSource::User,
             last_refreshed: None,
             denoms: Default::default(),
+            matrix_url: None,
         }];
         let body = doc_json("0-5", "https://beta.playstructs.com/api/", "wss://beta.playstructs.com:1443");
         let found = validate_guild_doc(&chain("0-5"), &body).unwrap();

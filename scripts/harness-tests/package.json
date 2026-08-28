@@ -6,9 +6,10 @@
   "scripts": {
     "test": "node gamestats.test.mjs",
     "test:profiles": "node profiles.test.mjs",
-    "test:all": "node gamestats.test.mjs && node profiles.test.mjs && node raidview.test.mjs && node infusions.test.mjs",
+    "test:all": "node gamestats.test.mjs && node profiles.test.mjs && node raidview.test.mjs && node infusions.test.mjs && node chat.test.mjs",
     "test:raidview": "node raidview.test.mjs",
-    "test:infusions": "node infusions.test.mjs"
+    "test:infusions": "node infusions.test.mjs",
+    "test:chat": "node chat.test.mjs"
   },
   "devDependencies": {
     "jsdom": "^24.0.0"

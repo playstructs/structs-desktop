@@ -47,3 +47,5 @@ src-tauri/gen/
 src-tauri/icons/Structs Icon.png
 frontend/_harness_raid.html
 frontend/_fixtures_raid.js
+frontend/_harness_chat.html
+frontend/_fixtures_chat.js

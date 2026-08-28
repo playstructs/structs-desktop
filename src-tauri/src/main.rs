@@ -7,6 +7,7 @@ mod guild_directory;
 mod hasher;
 mod http_proxy;
 mod macos_keepalive;
+mod matrix;
 mod mcp;
 mod menu;
 mod notifications;
@@ -82,6 +83,18 @@ fn main() {
             mcp::board_feed::open_stream_window,
             mcp::board_feed::open_board_window,
             mcp::game_stats::open_game_stats_window,
+            // Comms (federated Matrix chat). Reachable only from the Debug
+            // panel for now — see src/matrix/mod.rs.
+            matrix::open_chat_window,
+            matrix::matrix_status,
+            matrix::matrix_select,
+            matrix::matrix_connect,
+            matrix::matrix_disconnect,
+            matrix::matrix_rooms,
+            matrix::matrix_timeline,
+            matrix::matrix_send,
+            matrix::matrix_join,
+            matrix::matrix_leave,
             mcp::game_stats::mcp_game_stats_snapshot,
             mcp::tools::board_pages::mcp_health,
             mcp::tools::board_pages::mcp_allocations,
@@ -488,6 +501,11 @@ try {{
             // is authoritative at boot). Keeps guild infra URLs fresh and
             // re-applies the active config if its URLs changed on-chain.
             guild_directory::startup_refresh(app.handle().clone());
+
+            // Resume chat sync for guilds already signed in. A player who has
+            // never opened Comms has no stored session, so this is a no-op and
+            // the feature stays entirely dormant for them.
+            matrix::boot(app.handle().clone());
 
             // Rust-side update check — webview-independent, so a build that
             // breaks its own frontend can still download + stage its replacement

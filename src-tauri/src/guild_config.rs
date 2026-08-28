@@ -57,6 +57,13 @@ pub struct GuildConfig {
     /// existed; parsed and kept only since the Inventory work.
     #[serde(default)]
     pub denoms: std::collections::BTreeMap<u32, String>,
+    /// The guild's Matrix homeserver, from guild.json's `services.matrix`.
+    /// Optional and expected to stay that way: federated chat is opt-in per
+    /// guild, and most guilds publish no `matrix` key at all. `None` means
+    /// "this guild runs no comms server", which is a normal state, not an
+    /// error — the Comms window says so rather than retrying.
+    #[serde(default)]
+    pub matrix_url: Option<String>,
 }
 
 /// The shape exposed to the frontend as window.__STRUCTS_CONFIG__
@@ -137,6 +144,7 @@ fn default_configs() -> Vec<GuildConfig> {
             last_refreshed: None,
             // Left empty on purpose: discovery fills these from guild.json.
             denoms: Default::default(),
+            matrix_url: None,
         },
         // Kept (inactive) so players on Orbital Hydro can switch back and still
         // reach their own guild_api — only the active guild's config is exposed.
@@ -156,6 +164,7 @@ fn default_configs() -> Vec<GuildConfig> {
             last_refreshed: None,
             // Left empty on purpose: discovery fills these from guild.json.
             denoms: Default::default(),
+            matrix_url: None,
         },
     ]
 }
