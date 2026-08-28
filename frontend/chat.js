@@ -729,10 +729,12 @@
     var close = byId('menu-page-nav-close');
     if (close) {
       close.addEventListener('click', function () {
-        if (T.window && T.window.getCurrent) {
-          try { T.window.getCurrent().close(); return; } catch (e) { /* fall through */ }
-        }
-        window.close();
+        // Rust closes it, for the same reason Rust opened it. The JS window
+        // API is a trap here: `getCurrent()` is the Tauri v1 spelling and is
+        // simply absent on v2, so the button would silently do nothing.
+        invoke('close_chat_window').catch(function () {
+          try { window.close(); } catch (e) { /* nothing else to try */ }
+        });
       });
     }
     var comms = byId('chat-nav-comms');

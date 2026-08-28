@@ -686,6 +686,7 @@ cat > "$CFIX" <<'EOF'
     matrix_select: { ok: true },
     matrix_connect: { ok: true, steps: STEPS_OK },
     matrix_disconnect: { ok: true },
+    close_chat_window: null,
   };
 
   var calls = [];
@@ -719,7 +720,9 @@ cat > "$CFIX" <<'EOF'
       (listeners[name] = listeners[name] || []).push(cb);
       return Promise.resolve(function () {});
     } },
-    window: { getCurrent: function () { return { label: 'chat', close: function () {} }; } },
+    // Mirrors Tauri 2: getCurrentWindow, NOT the v1 getCurrent. A stub that
+    // offers an API the real runtime lacks hides the bug it should catch.
+    window: { getCurrentWindow: function () { return { label: 'chat' }; } },
   };
 })();
 EOF

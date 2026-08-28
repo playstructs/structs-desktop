@@ -307,6 +307,19 @@ pub fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Close it again. The nav's X goes through Rust rather than the JS window
+/// API for two reasons: the v1 `getCurrent()` spelling silently no-ops on
+/// Tauri 2, and closing from JS depends on a window ACL this capability set
+/// does not obviously grant. The window is opened from Rust; closing it from
+/// Rust is one mechanism instead of two.
+#[tauri::command]
+pub fn close_chat_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("chat") {
+        w.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Restore sync for guilds already signed in. Called once at startup.
 ///
 /// Only touches guilds with a STORED session — a player who has never opened

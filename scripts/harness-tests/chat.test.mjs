@@ -96,6 +96,31 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     JSON.stringify(joinCall && joinCall.args));
 }
 
+// ── The window's own chrome ─────────────────────────────────────────────────
+{
+  console.log('\n— nav chrome');
+  const { w, d } = await open();
+  // Closing goes through Rust: the JS window API's v1 `getCurrent()` does not
+  // exist on Tauri 2, so a button wired to it would silently do nothing.
+  d.getElementById('menu-page-nav-close').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('the X asks Rust to close the window',
+    w.__HARNESS_CALLS__.some((c) => c.cmd === 'close_chat_window'));
+
+  // The two page icons swap views and mark themselves active.
+  d.getElementById('chat-nav-settings').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('the gear opens the connection page', w.Chat._state.view === 'connection', w.Chat._state.view);
+  check('…and is marked active',
+    d.getElementById('chat-nav-settings').className.includes('sui-mod-active'));
+  check('…while the comms icon is not',
+    !d.getElementById('chat-nav-comms').className.includes('sui-mod-active'));
+
+  d.getElementById('chat-nav-comms').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('the comms icon goes back to the channels', w.Chat._state.view === 'channels', w.Chat._state.view);
+}
+
 // ── The timeline ────────────────────────────────────────────────────────────
 {
   console.log('\n— room timeline');

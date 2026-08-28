@@ -86,6 +86,7 @@ fn main() {
             // Comms (federated Matrix chat). Reachable only from the Debug
             // panel for now — see src/matrix/mod.rs.
             matrix::open_chat_window,
+            matrix::close_chat_window,
             matrix::matrix_status,
             matrix::matrix_select,
             matrix::matrix_connect,
