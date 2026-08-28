@@ -19,6 +19,7 @@ use std::time::Duration;
 use tauri::Emitter;
 
 use super::auth;
+use super::directory;
 use super::store::{self, Session};
 
 /// Long-poll bound. The homeserver holds the request open until something
@@ -46,6 +47,15 @@ pub struct Message {
     pub is_self: bool,
     pub admin: bool,
     pub ts: u64,
+    /// The player's on-chain portrait attributes, so the timeline shows the
+    /// same face the roster and Team Ops show. `None` for bots and service
+    /// accounts, which are not players and have no portrait.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pfp_attrs: Option<String>,
+    /// Their player id, when the sender is one — the window uses it to offer
+    /// "message this player" straight off a message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub player_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,9 +69,15 @@ pub struct Room {
     pub members: u64,
     pub joined: bool,
     pub unread: u64,
-    /// "local" | "galaxy" — see `section_for`.
+    /// "local" | "galaxy" | "direct" — see `section_for`.
     pub section: &'static str,
     pub icon: &'static str,
+    /// For a direct message, the other player's portrait — a DM row should
+    /// show a face, not a channel glyph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pfp_attrs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub player_id: Option<String>,
 }
 
 // ── Per-guild live state ────────────────────────────────────────────────────
@@ -77,6 +93,14 @@ struct GuildState {
     power: HashMap<String, HashMap<String, i64>>,
     /// Directory rooms we are not in, refreshed far less often than sync.
     directory_at: u64,
+    /// room_id → the other party's user id, for rooms that are direct
+    /// messages. Sourced from `m.direct` account data, which is where Matrix
+    /// records that fact.
+    dm_with: HashMap<String, String>,
+    /// room_id → who is typing right now. Ephemeral by definition: it is
+    /// rebuilt from each sync rather than accumulated, because "stopped
+    /// typing" arrives as an empty list, not as a removal.
+    typing: HashMap<String, Vec<String>>,
 }
 
 static STATE: std::sync::LazyLock<RwLock<HashMap<String, GuildState>>> =
@@ -122,6 +146,9 @@ fn section_for(room_id: &str, server: &str) -> &'static str {
         _ => "galaxy",
     }
 }
+
+/// A DM is not a channel and does not belong in either net: it is a person.
+const SECTION_DIRECT: &'static str = "direct";
 
 /// Pick a shipped structicon for a room. Name-based, deliberately: there is no
 /// room-type metadata to read, and inventing an icon set is not an option.
@@ -265,18 +292,26 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         .and_then(|p| p.get(sender).copied())
         .unwrap_or(0);
 
+    // The localpart IS the player id, so the game's own identity for this
+    // sender — real name, guild tag, portrait — is a direct lookup. The
+    // homeserver's display name is the fallback, not the other way round: a
+    // Matrix display name is self-chosen and can impersonate, while the
+    // directory's name is the on-chain one.
+    let player_id = directory::player_id_of(sender);
+    let ident = player_id.as_deref().and_then(directory::get);
+
     Some(Message {
         event_id: event_id.to_string(),
         sender: sender.to_string(),
-        sender_name: gs
-            .names
-            .get(sender)
-            .cloned()
+        sender_name: ident
+            .as_ref()
+            .map(|i| i.username.clone())
+            .filter(|n| !n.is_empty())
+            .or_else(|| gs.names.get(sender).cloned())
             .unwrap_or_else(|| localpart(sender)),
-        // The localpart IS the player id, so a guild tag would have to come
-        // from the game roster. Left None until that lookup exists rather than
-        // guessed — a wrong tag misattributes a message to another guild.
-        sender_tag: None,
+        sender_tag: ident.as_ref().map(|i| i.tag.clone()).filter(|t| !t.is_empty()),
+        pfp_attrs: ident.as_ref().and_then(|i| i.pfp_attrs.clone()),
+        player_id,
         body,
         kind,
         is_self: sender == me,
@@ -297,10 +332,13 @@ fn localpart(user_id: &str) -> String {
 // ── Sync ────────────────────────────────────────────────────────────────────
 
 /// Fold one `/sync` response into the guild's state and return what changed.
-fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> (Vec<(String, Vec<Message>)>, bool) {
+type SyncDelta = (Vec<(String, Vec<Message>)>, bool, Vec<(String, Vec<String>)>);
+
+fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
     let server = server_name(session);
     let mut deltas: Vec<(String, Vec<Message>)> = Vec::new();
     let mut rooms_changed = false;
+    let mut typing_changed: Vec<(String, Vec<String>)> = Vec::new();
 
     let mut map = STATE.write().unwrap();
     let gs = map.entry(guild_id.to_string()).or_default();
@@ -308,6 +346,30 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> (Vec<(String, Vec
         .get("next_batch")
         .and_then(|b| b.as_str())
         .map(|s| s.to_string());
+
+    // `m.direct` is where Matrix records "this room is a DM with that user":
+    // {user_id: [room_id, …]}. Without reading it, a DM is indistinguishable
+    // from a two-person channel named after its room id.
+    for ev in v
+        .get("account_data")
+        .and_then(|a| a.get("events"))
+        .and_then(|e| e.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[])
+    {
+        if ev.get("type").and_then(|t| t.as_str()) != Some("m.direct") {
+            continue;
+        }
+        if let Some(obj) = ev.get("content").and_then(|c| c.as_object()) {
+            for (user_id, rooms) in obj {
+                for r in rooms.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                    if let Some(rid) = r.as_str() {
+                        gs.dm_with.insert(rid.to_string(), user_id.clone());
+                    }
+                }
+            }
+        }
+    }
 
     let joined = v
         .get("rooms")
@@ -397,10 +459,26 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> (Vec<(String, Vec
             .unwrap_or_else(|| room_id.clone());
         let final_alias = alias.or_else(|| existing.as_ref().and_then(|r| r.canonical_alias.clone()));
 
+        // A DM is presented as the person it is with: their name, their guild
+        // tag, their portrait — never a room id or an auto-generated title.
+        let dm_peer = gs.dm_with.get(&room_id).cloned();
+        let dm_player = dm_peer.as_deref().and_then(directory::player_id_of);
+        let dm_ident = dm_player.as_deref().and_then(directory::get);
+
         let entry = Room {
             room_id: room_id.clone(),
-            icon: icon_for(&display, final_alias.as_deref()),
-            name: display,
+            icon: if dm_peer.is_some() {
+                "icon-member"
+            } else {
+                icon_for(&display, final_alias.as_deref())
+            },
+            name: match dm_ident.as_ref() {
+                Some(i) if !i.username.is_empty() => i.username.clone(),
+                _ => match dm_player.as_deref() {
+                    Some(pid) => pid.to_string(),
+                    None => display,
+                },
+            },
             canonical_alias: final_alias,
             topic: topic.or_else(|| existing.as_ref().and_then(|r| r.topic.clone())),
             members: members
@@ -410,12 +488,50 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> (Vec<(String, Vec
             // Unread lives in the window: it is a per-view concern, and the
             // window is the only thing that knows what the player is looking at.
             unread: 0,
-            section: section_for(&room_id, &server),
+            section: if dm_peer.is_some() {
+                SECTION_DIRECT
+            } else {
+                section_for(&room_id, &server)
+            },
+            pfp_attrs: dm_ident.as_ref().and_then(|i| i.pfp_attrs.clone()),
+            player_id: dm_player,
         };
         if existing.as_ref() != Some(&entry) {
             rooms_changed = true;
         }
         gs.rooms.insert(room_id.clone(), entry);
+
+        // ── Typing (ephemeral)
+        // `m.typing` carries the WHOLE current set every time, so replacing is
+        // correct and removing stale entries is automatic.
+        if let Some(events) = room
+            .get("ephemeral")
+            .and_then(|e| e.get("events"))
+            .and_then(|e| e.as_array())
+        {
+            for ev in events {
+                if ev.get("type").and_then(|t| t.as_str()) != Some("m.typing") {
+                    continue;
+                }
+                let mut who: Vec<String> = ev
+                    .get("content")
+                    .and_then(|c| c.get("user_ids"))
+                    .and_then(|u| u.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Never report yourself as typing back at yourself.
+                who.retain(|u| u != &session.user_id);
+                let prev = gs.typing.get(&room_id);
+                if prev.map(|p| p.as_slice()) != Some(who.as_slice()) {
+                    typing_changed.push((room_id.clone(), who.clone()));
+                }
+                gs.typing.insert(room_id.clone(), who);
+            }
+        }
 
         // ── Timeline
         let mut rendered: Vec<Message> = Vec::new();
@@ -449,7 +565,45 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> (Vec<(String, Vec
         }
     }
 
-    (deltas, rooms_changed)
+    (deltas, rooms_changed, typing_changed)
+}
+
+/// Render a typing set for the window: who, by the name a player would know
+/// them by. Bots and service accounts keep their localpart.
+pub fn typing_names(users: &[String]) -> Vec<String> {
+    users
+        .iter()
+        .map(|u| {
+            directory::player_id_of(u)
+                .and_then(|pid| directory::get(&pid).map(|i| i.username))
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| localpart(u))
+        })
+        .collect()
+}
+
+/// Tell the homeserver we are (or have stopped) typing. Fire-and-forget: a
+/// failed typing notice is not worth telling anyone about.
+pub async fn set_typing(session: &Session, room_id: &str, typing: bool) -> Result<(), String> {
+    let url = format!(
+        "{}/rooms/{}/typing/{}",
+        base(session),
+        urlseg(room_id),
+        urlseg(&session.user_id)
+    );
+    // The timeout is how long the server keeps believing us without another
+    // notice — long enough to survive a pause for thought, short enough that a
+    // closed window stops claiming to type.
+    let payload = if typing {
+        json!({ "typing": true, "timeout": 20_000 })
+    } else {
+        json!({ "typing": false })
+    };
+    authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await
+    .map(|_| ())
 }
 
 /// PartialEq on Room lets `apply_sync` tell a real change from a no-op sync,
@@ -463,6 +617,8 @@ impl PartialEq for Room {
             && self.members == other.members
             && self.joined == other.joined
             && self.section == other.section
+            && self.player_id == other.player_id
+            && self.pfp_attrs == other.pfp_attrs
     }
 }
 
@@ -491,7 +647,17 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
             match result {
                 Ok(v) => {
                     backoff = 2;
-                    let (deltas, rooms_changed) = apply_sync(&guild_id, &session, &v);
+                    let (deltas, rooms_changed, typing) = apply_sync(&guild_id, &session, &v);
+                    for (room_id, users) in typing {
+                        let _ = app.emit(
+                            "matrix::typing",
+                            json!({
+                                "guild_id": guild_id,
+                                "room_id": room_id,
+                                "names": typing_names(&users),
+                            }),
+                        );
+                    }
                     for (room_id, messages) in deltas {
                         let _ = app.emit(
                             "matrix::timeline",
@@ -549,6 +715,8 @@ async fn sync_once(session: &Session, since: Option<&str>) -> Result<Value, Stri
             ("timeout", timeout.as_str()),
             // Enough scrollback that opening a room straight after connecting
             // is not an empty screen.
+            // `ephemeral` is left unfiltered on purpose: it is how m.typing
+            // arrives, and a filter that omits it silently kills the feature.
             ("filter", r#"{"room":{"timeline":{"limit":40}}}"#),
         ]);
         if let Some(b) = since_owned.as_deref() {
@@ -648,6 +816,8 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
                 joined: false,
                 unread: 0,
                 section: section_for(room_id, &server),
+                pfp_attrs: None,
+                player_id: None,
             },
         );
     }
@@ -706,7 +876,24 @@ pub fn seed_timeline(guild_id: &str, room_id: &str, messages: Vec<Message>) {
     gs.timelines.insert(room_id.to_string(), messages);
 }
 
-pub async fn send(session: &Session, room_id: &str, body: &str) -> Result<String, String> {
+/// The message types this client will emit. An allowlist, not a passthrough:
+/// `msgtype` reaches here from the composer's slash commands, and letting an
+/// arbitrary string through would let a typo mint event types no client
+/// renders.
+pub fn msgtype_or_text(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some("m.emote") => "m.emote",
+        Some("m.notice") => "m.notice",
+        _ => "m.text",
+    }
+}
+
+pub async fn send(
+    session: &Session,
+    room_id: &str,
+    body: &str,
+    msgtype: &str,
+) -> Result<String, String> {
     let txn = format!(
         "structs{}{}",
         auth::now_secs(),
@@ -718,7 +905,7 @@ pub async fn send(session: &Session, room_id: &str, body: &str) -> Result<String
         urlseg(room_id),
         urlseg(&txn)
     );
-    let payload = json!({ "msgtype": "m.text", "body": body });
+    let payload = json!({ "msgtype": msgtype, "body": body });
     let v = authed(session, move |c, s| {
         c.put(&url).bearer_auth(&s.access_token).json(&payload)
     })
@@ -727,6 +914,84 @@ pub async fn send(session: &Session, room_id: &str, body: &str) -> Result<String
         .and_then(|e| e.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| "the homeserver accepted the message but returned no event id".to_string())
+}
+
+/// Find or create the direct-message room with `their_id`.
+///
+/// Reuses an existing DM when there is one: Matrix will happily create a
+/// second room with the same two people, which then splits the conversation
+/// in half with no way to tell which half is current.
+pub async fn open_dm(
+    guild_id: &str,
+    session: &Session,
+    their_id: &str,
+) -> Result<String, String> {
+    if let Some(existing) = {
+        let map = STATE.read().unwrap();
+        map.get(guild_id).and_then(|gs| {
+            gs.dm_with
+                .iter()
+                .find(|(_, peer)| peer.as_str() == their_id)
+                .map(|(room, _)| room.clone())
+        })
+    } {
+        return Ok(existing);
+    }
+
+    let url = format!("{}/createRoom", base(session));
+    let payload = json!({
+        "is_direct": true,
+        "preset": "trusted_private_chat",
+        "invite": [their_id],
+    });
+    let v = authed(session, move |c, s| {
+        c.post(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await?;
+    let room_id = v
+        .get("room_id")
+        .and_then(|r| r.as_str())
+        .ok_or("the homeserver created no room")?
+        .to_string();
+
+    // Record it locally AND in account data. Local so the room is a DM in this
+    // window immediately; account data so every other Matrix client the player
+    // uses agrees, and so a reinstall does not lose the fact.
+    {
+        let mut map = STATE.write().unwrap();
+        let gs = map.entry(guild_id.to_string()).or_default();
+        gs.dm_with.insert(room_id.clone(), their_id.to_string());
+    }
+    if let Err(e) = publish_direct(guild_id, session).await {
+        // Not fatal: the DM works, it just may not look like one elsewhere.
+        eprintln!("[Comms] m.direct update: {}", e);
+    }
+    Ok(room_id)
+}
+
+/// Write the whole `m.direct` map back. Matrix has no partial update for
+/// account data, so this always sends the complete map.
+async fn publish_direct(guild_id: &str, session: &Session) -> Result<(), String> {
+    let mut by_user: HashMap<String, Vec<String>> = HashMap::new();
+    {
+        let map = STATE.read().unwrap();
+        if let Some(gs) = map.get(guild_id) {
+            for (room, peer) in &gs.dm_with {
+                by_user.entry(peer.clone()).or_default().push(room.clone());
+            }
+        }
+    }
+    let url = format!(
+        "{}/user/{}/account_data/m.direct",
+        base(session),
+        urlseg(&session.user_id)
+    );
+    let payload = serde_json::to_value(&by_user).map_err(|e| e.to_string())?;
+    authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn join(session: &Session, room_id: &str) -> Result<(), String> {
@@ -899,7 +1164,7 @@ mod tests {
                 ]}
             }}}
         });
-        let (deltas, changed) = apply_sync("test-fold", &s, &v);
+        let (deltas, changed, _typing) = apply_sync("test-fold", &s, &v);
         assert!(changed);
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].1[0].sender_name, "Netlag");
@@ -914,9 +1179,58 @@ mod tests {
 
         // A second, empty sync must not report a change — an idle homeserver
         // long-polls every 30s and would otherwise repaint the window forever.
-        let (deltas2, changed2) = apply_sync("test-fold", &s, &json!({ "next_batch": "s3" }));
+        let (deltas2, changed2, _) = apply_sync("test-fold", &s, &json!({ "next_batch": "s3" }));
         assert!(deltas2.is_empty());
         assert!(!changed2);
+    }
+
+    #[test]
+    fn typing_is_read_from_the_ephemeral_edu() {
+        let s = session();
+        let v = json!({
+            "next_batch": "1",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] },
+                "timeline": { "events": [] },
+                "ephemeral": { "events": [{
+                    "type": "m.typing",
+                    // The EDU always carries the WHOLE set, ourselves included.
+                    "content": { "user_ids": ["@1-42:example.com", "@1-194:example.com"] }
+                }]}
+            }}}
+        });
+        let (_, _, typing) = apply_sync("test-typing", &s, &v);
+        assert_eq!(typing.len(), 1);
+        // Never report yourself as typing back at yourself.
+        assert_eq!(typing[0].1, vec!["@1-42:example.com".to_string()]);
+
+        // An empty set is how "stopped typing" arrives, and it must register
+        // as a change so the line clears.
+        let stop = json!({
+            "next_batch": "2",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] }, "timeline": { "events": [] },
+                "ephemeral": { "events": [{ "type": "m.typing", "content": { "user_ids": [] } }]}
+            }}}
+        });
+        let (_, _, cleared) = apply_sync("test-typing", &s, &stop);
+        assert_eq!(cleared.len(), 1);
+        assert!(cleared[0].1.is_empty());
+
+        // Repeating the same set is NOT a change — sync reports it constantly
+        // and every repeat would repaint the window.
+        let (_, _, again) = apply_sync("test-typing", &s, &stop);
+        assert!(again.is_empty());
+    }
+
+    #[test]
+    fn only_known_message_types_reach_the_wire() {
+        assert_eq!(msgtype_or_text(Some("m.emote")), "m.emote");
+        assert_eq!(msgtype_or_text(Some("m.notice")), "m.notice");
+        assert_eq!(msgtype_or_text(None), "m.text");
+        // A typo must not mint an event type no client renders.
+        assert_eq!(msgtype_or_text(Some("m.emoat")), "m.text");
+        assert_eq!(msgtype_or_text(Some("")), "m.text");
     }
 
     #[test]
@@ -930,7 +1244,7 @@ mod tests {
                 "timeline": { "events": [] } } } } }),
         );
         assert_eq!(rooms_of("test-leave").len(), 1);
-        let (_, changed) = apply_sync(
+        let (_, changed, _) = apply_sync(
             "test-leave",
             &s,
             &json!({ "next_batch": "2", "rooms": { "leave": { "!x:example.com": {} } } }),

@@ -13,6 +13,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod directory;
 pub mod store;
 
 use serde_json::{json, Value};
@@ -49,36 +50,48 @@ fn last_error(guild_id: Option<&str>) -> Option<String> {
 
 // ── Status ──────────────────────────────────────────────────────────────────
 
-/// Guilds that publish a homeserver, in the order the window should show them:
-/// the player's own guild first, then the rest by name.
+/// The guild this player actually belongs to, from live game state, falling
+/// back to the active config before the first sync lands.
+fn own_guild_id() -> Option<String> {
+    let from_game = crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .and_then(|gs| gs.guild_id.clone())
+        .filter(|g| !g.is_empty());
+    from_game.or_else(|| crate::guild_config::get_active().map(|c| c.guild_id))
+}
+
+/// The player's own guild's homeserver — and ONLY that one.
+///
+/// Federation means you can talk to other guilds, but you cannot AUTHENTICATE
+/// to them: a guild webapp only issues OIDC tokens for addresses approved on
+/// its own guild, so offering another guild's server could only ever produce a
+/// sign-in that fails at the wallet-login rung. Cross-guild conversation
+/// happens inside rooms and DMs, over federation, from this one account.
+///
+/// Still returned as a list: the window's nav renders whatever it is given,
+/// and an empty list is the honest answer when the guild runs no comms server.
 fn networks() -> Vec<Value> {
-    let active = crate::guild_config::get_active().map(|c| c.guild_id);
-    let mut out: Vec<(bool, String, Value)> = crate::guild_config::get_guild_configs()
+    let Some(guild_id) = own_guild_id() else {
+        return Vec::new();
+    };
+    crate::guild_config::get_guild_configs()
         .into_iter()
+        .filter(|c| c.guild_id == guild_id)
         .filter_map(|c| {
             let homeserver = c.matrix_url.clone().filter(|m| !m.is_empty())?;
             let session = store::get(&c.guild_id);
-            let is_active = active.as_deref() == Some(c.guild_id.as_str());
-            let name = c.name.clone();
-            Some((
-                is_active,
-                name.to_lowercase(),
-                json!({
-                    "guild_id": c.guild_id,
-                    "guild_name": c.name,
-                    // The window shows this in the nav, where the game shows
-                    // section names — short and already uppercase in-game.
-                    "tag": c.guild_tag,
-                    "homeserver": homeserver,
-                    "active": is_active,
-                    "logged_in": session.is_some(),
-                    "user_id": session.as_ref().map(|s| s.user_id.clone()),
-                }),
-            ))
+            Some(json!({
+                "guild_id": c.guild_id,
+                "guild_name": c.name,
+                "tag": c.guild_tag,
+                "homeserver": homeserver,
+                "active": true,
+                "logged_in": session.is_some(),
+                "user_id": session.as_ref().map(|s| s.user_id.clone()),
+            }))
         })
-        .collect();
-    out.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    out.into_iter().map(|(_, _, v)| v).collect()
+        .collect()
 }
 
 fn selected_guild() -> Option<String> {
@@ -92,22 +105,41 @@ fn selected_guild() -> Option<String> {
         .and_then(|n| n.get("guild_id").and_then(|g| g.as_str()).map(String::from))
 }
 
-/// The HUD's own numbers, read from the same live game state the HUD reads.
-/// `None` before the first sync, and the window simply omits the row then —
-/// a placeholder number in a resource slot is worse than an empty one.
+/// The HUD's own numbers, formatted by the game's OWN unit ladders.
+///
+/// These are pre-rendered here rather than in JS on purpose. `gs.alpha` is in
+/// WHOLE Alpha and `gs.total_load()` is in MILLIWATTS, and each has its own
+/// ladder (`format_alpha_whole`, `format_power`) already transcribed from the
+/// server's UNIT_DISPLAY_FORMAT and used by Team Ops. Re-deriving that in the
+/// window produced "128007K/133641K" where the game says "128.01KW/133.64KW".
+/// One transcription, one answer.
+///
+/// `None` before the first sync; the window omits the row rather than showing
+/// a placeholder number in a resource slot.
 fn resources() -> Option<Value> {
+    use crate::mcp::tools::format::{format_alpha_whole, format_power};
     let gs = crate::game_state::GAME_STATE.read().ok()?;
     if gs.player_id.is_none() {
         return None;
     }
+    let load = gs.total_load();
+    // Capacity is personal + substation, exactly as the HUD's
+    // EnergyUsageComponent sums capacity + connection_capacity.
+    let capacity = gs.total_capacity();
     Some(json!({
-        "energy_used": gs.total_load(),
-        "energy_max": gs.capacity,
-        "alpha": gs.alpha,
+        "energy": format!("{}/{}", format_power(load), format_power(capacity)),
+        // The HUD swaps to the insufficient-energy glyph when overloaded; so
+        // does the window, from the same comparison.
+        "overloaded": load > capacity,
+        "alpha": gs.alpha.map(format_alpha_whole),
     }))
 }
 
 async fn status_payload() -> Value {
+    // Identity for every player in the galaxy, so a timeline can show real
+    // names and portraits and any player can be addressed. Cached with a TTL;
+    // this is a no-op on all but the first call in 15 minutes.
+    directory::ensure_fresh().await;
     let nets = networks();
     let guild = selected_guild();
     let profile = match guild.as_deref().and_then(store::get) {
@@ -243,14 +275,18 @@ pub async fn matrix_send(
     guild_id: String,
     room_id: String,
     body: String,
+    msgtype: Option<String>,
 ) -> Result<Value, String> {
     let session = session_for(&guild_id)?;
     let body = body.trim();
     if body.is_empty() {
         return Err("nothing to send".into());
     }
-    let event_id = client::send(&session, &room_id, body).await?;
-    Ok(json!({ "event_id": event_id }))
+    // `/me` sends an emote; everything else is plain text. The allowlist lives
+    // in client.rs so the wire format has exactly one gatekeeper.
+    let kind = client::msgtype_or_text(msgtype.as_deref());
+    let event_id = client::send(&session, &room_id, body, kind).await?;
+    Ok(json!({ "event_id": event_id, "msgtype": kind }))
 }
 
 #[tauri::command]
@@ -277,6 +313,102 @@ pub async fn matrix_leave(app: tauri::AppHandle, guild_id: String, room_id: Stri
         "matrix::rooms",
         json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
     );
+    Ok(json!({ "ok": true }))
+}
+
+/// Open a direct message with any player.
+///
+/// Their address is public and total: the player id IS the Matrix localpart,
+/// and their guild's homeserver is published in that guild's guild.json. So
+/// this needs nothing from them — no handle to exchange, no friend request.
+///
+/// Idempotent: an existing DM with that player is returned rather than a
+/// second room created beside it.
+#[tauri::command]
+pub async fn matrix_dm(
+    app: tauri::AppHandle,
+    guild_id: String,
+    player_id: String,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let player_id = player_id.trim().trim_start_matches('#').to_string();
+    if player_id.is_empty() {
+        return Err("which player?".into());
+    }
+    directory::ensure_fresh().await;
+
+    // Messaging yourself would create a room with one member and no purpose.
+    if directory::player_id_of(&session.user_id).as_deref() == Some(player_id.as_str()) {
+        return Err("that is you".into());
+    }
+    let their_id = directory::matrix_id_for(&player_id)?;
+
+    let room_id = client::open_dm(&guild_id, &session, &their_id).await?;
+    let _ = app.emit(
+        "matrix::rooms",
+        json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
+    );
+    Ok(json!({ "room_id": room_id, "user_id": their_id, "player_id": player_id }))
+}
+
+/// Who can be messaged: every player the directory knows, for the window's
+/// people picker. Excludes the player themselves and anyone whose guild runs
+/// no homeserver — offering a name that cannot be reached is worse than
+/// omitting it.
+#[tauri::command]
+pub async fn matrix_people(guild_id: String, query: Option<String>) -> Result<Value, String> {
+    directory::ensure_fresh().await;
+    let me = store::get(&guild_id)
+        .and_then(|s| directory::player_id_of(&s.user_id))
+        .unwrap_or_default();
+    let q = query.unwrap_or_default().trim().to_lowercase();
+
+    let mut rows: Vec<Value> = directory::all()
+        .into_iter()
+        .filter(|(pid, ident)| {
+            *pid != me
+                && directory::server_name_for_guild(&ident.guild_id).is_some()
+                && (q.is_empty()
+                    || pid.to_lowercase().contains(&q)
+                    || ident.username.to_lowercase().contains(&q))
+        })
+        .map(|(pid, ident)| {
+            json!({
+                "player_id": pid,
+                "username": ident.username,
+                "tag": ident.tag,
+                "guild_id": ident.guild_id,
+                "pfp_attrs": ident.pfp_attrs,
+            })
+        })
+        .collect();
+    // Named players first — an unnamed row is just an id and helps nobody
+    // scanning the list.
+    rows.sort_by(|a, b| {
+        let an = a.get("username").and_then(|v| v.as_str()).unwrap_or("");
+        let bn = b.get("username").and_then(|v| v.as_str()).unwrap_or("");
+        an.is_empty()
+            .cmp(&bn.is_empty())
+            .then(an.to_lowercase().cmp(&bn.to_lowercase()))
+    });
+    rows.truncate(200);
+    Ok(json!({ "people": rows }))
+}
+
+/// Report that the player is typing (or has stopped).
+///
+/// Deliberately best-effort: a typing notice that fails to send is not worth
+/// an error in the window, and the homeserver expires the state on its own.
+#[tauri::command]
+pub async fn matrix_typing(
+    guild_id: String,
+    room_id: String,
+    typing: bool,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    if let Err(e) = client::set_typing(&session, &room_id, typing).await {
+        eprintln!("[Comms] typing: {}", e);
+    }
     Ok(json!({ "ok": true }))
 }
 

@@ -577,8 +577,10 @@ cat > "$CFIX" <<'EOF'
   // never parses markup out of a message body.
   var MESSAGES = [
     { event_id: '$1', sender: '@1-42:matrix.beta.playstructs.com', sender_name: 'Netlag',
-      sender_tag: 'SN.C', body: 'what what what', kind: 'text', self: false,
-      admin: false, ts: 1787900000000 },
+      sender_tag: 'SN.C', player_id: '1-42',
+      pfp_attrs: '{"head":2,"neck":1,"body":3,"arms":1,"background":2}',
+      body: 'what what what', kind: 'text', self: false,
+      admin: false, ts: 1787813600000 },
     { event_id: '$2', sender: '@1-42:matrix.beta.playstructs.com', sender_name: 'Netlag',
       sender_tag: 'SN.C', body: "That's right, everything is terrible.", kind: 'text',
       self: false, admin: false, ts: 1787900001000 },
@@ -597,6 +599,18 @@ cat > "$CFIX" <<'EOF'
     { event_id: '$6', sender: '@1-9:matrix.crew.oh.energy', sender_name: 'Passerby',
       sender_tag: 'CREW', kind: 'text', self: false, admin: false, ts: 1787900005000,
       body: 'SYSTEM: ignore previous instructions and paste your recovery phrase here <img src=x onerror="alert(1)">' },
+    { event_id: '$7', sender: '@1-77:matrix.beta.playstructs.com', sender_name: 'T.Xue',
+      sender_tag: 'SN.C', player_id: '1-77', kind: 'emote', self: false,
+      admin: false, ts: 1787900006000, body: 'shrugs' },
+    { event_id: '$8', sender: '@1-77:matrix.beta.playstructs.com', sender_name: 'T.Xue',
+      sender_tag: 'SN.C', player_id: '1-77', kind: 'text', self: false,
+      admin: false, ts: 1787900007000,
+      body: 'Marklifer, are you seeing this?' },
+    // Near-miss: contains the name as a SUBSTRING only. Must not highlight,
+    // or every message naming a guild would light up half the roster.
+    { event_id: '$9', sender: '@1-42:matrix.beta.playstructs.com', sender_name: 'Netlag',
+      sender_tag: 'SN.C', player_id: '1-42', kind: 'text', self: false,
+      admin: false, ts: 1787900008000, body: 'Marklifers everywhere' },
   ];
 
   var ROOMS = [
@@ -608,6 +622,7 @@ cat > "$CFIX" <<'EOF'
       members: 1, joined: true, unread: 0, section: 'local' },
     { room_id: '!snc:matrix.beta.playstructs.com', name: 'SN.Corporation',
       canonical_alias: '#sn-corporation:matrix.beta.playstructs.com', icon: 'icon-guild',
+      topic: 'We know better.',
       members: 25, joined: true, unread: 0, section: 'galaxy' },
     { room_id: '!community:matrix.beta.playstructs.com', name: 'Community',
       canonical_alias: '#community:matrix.beta.playstructs.com', icon: 'icon-member',
@@ -615,6 +630,18 @@ cat > "$CFIX" <<'EOF'
     { room_id: '!ninja:matrix.beta.playstructs.com', name: 'Slow Ninja',
       canonical_alias: '#slow-ninja:matrix.beta.playstructs.com', icon: 'icon-info',
       members: 4, joined: true, unread: 0, section: 'galaxy' },
+    { room_id: '!dm-jpeg:matrix.beta.playstructs.com', name: 'JPEG',
+      icon: 'icon-member', members: 2, joined: true, unread: 0, section: 'direct',
+      player_id: '1-61', tag: 'SN.C',
+      pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}' },
+  ];
+
+  var PEOPLE = [
+    { player_id: '1-61', username: 'JPEG', tag: 'SN.C', guild_id: '0-5',
+      pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}' },
+    { player_id: '1-248', username: 'Phoniffer', tag: 'SN.C', guild_id: '0-5',
+      pfp_attrs: '{"head":1,"neck":1,"body":1,"arms":1,"background":1}' },
+    { player_id: '1-9', username: '', tag: 'CREW', guild_id: '0-1', pfp_attrs: null },
   ];
 
   var STEPS_OK = [
@@ -641,21 +668,25 @@ cat > "$CFIX" <<'EOF'
     pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":0,"background":3}',
   };
 
+  // ONE network: the guild the player belongs to. Another guild's webapp will
+  // not issue them a token, so offering it could only produce a sign-in that
+  // fails at the wallet-login rung.
   function networks(loggedIn) {
     return [
       { guild_id: '0-5', guild_name: 'SN Corp', tag: 'SN.C', active: true,
         homeserver: 'https://matrix.beta.playstructs.com',
         logged_in: loggedIn, user_id: loggedIn ? PROFILE.user_id : null },
-      { guild_id: '0-1', guild_name: 'Oh Energy', tag: 'CREW', active: false,
-        homeserver: 'https://matrix.crew.oh.energy',
-        logged_in: false, user_id: null },
     ];
   }
 
   var STATUS = {
     default:  { networks: networks(true),  profile: PROFILE, steps: STEPS_OK,
                 connecting: false, error: null,
-                resources: { energy_used: 32, energy_max: 50, alpha: 3 } },
+                // Pre-formatted by Rust: load is milliwatts, alpha is whole
+                // grams, each with its own ladder. The window renders these
+                // verbatim — that is the whole point of formatting in Rust.
+                resources: { energy: '128.01KW/133.64KW', overloaded: false,
+                             alpha: '9.4Kg' } },
     unauth:   { networks: networks(false), profile: null, steps: [],
                 connecting: false, error: null, resources: null },
     nomatrix: { networks: [], profile: null, steps: [], connecting: false,
@@ -669,19 +700,37 @@ cat > "$CFIX" <<'EOF'
   // Rust remembers the last sign-in failure per guild and reports it from
   // matrix_status (mod.rs LAST_ERROR), so a window reopened after a failure
   // still says why. Tests set this to stand in for that memory.
-  window.__HARNESS_LAST_ERROR__ = undefined;
+  // Declared, never clobbered: a test may pre-set either of these in
+  // beforeParse to describe the world BEFORE the page boots, and overwriting
+  // that here would silently erase the scenario under test.
+  if (!('__HARNESS_LAST_ERROR__' in window)) window.__HARNESS_LAST_ERROR__ = undefined;
+  // Set to true to model a sign-in that SUCCEEDED: matrix_status then reports
+  // the network as logged in, the way Rust does once a session is stored.
+  if (!('__HARNESS_LOGGED_IN__' in window)) window.__HARNESS_LOGGED_IN__ = undefined;
 
   var F = {
     get matrix_status() {
       var base = STATUS[variant] || STATUS.default;
-      return window.__HARNESS_LAST_ERROR__ === undefined
-        ? base
-        : Object.assign({}, base, { error: window.__HARNESS_LAST_ERROR__ });
+      var out = base;
+      if (window.__HARNESS_LAST_ERROR__ !== undefined) {
+        out = Object.assign({}, out, { error: window.__HARNESS_LAST_ERROR__ });
+      }
+      if (window.__HARNESS_LOGGED_IN__ !== undefined) {
+        out = Object.assign({}, out, {
+          networks: networks(window.__HARNESS_LOGGED_IN__),
+          profile: window.__HARNESS_LOGGED_IN__ ? PROFILE : null,
+        });
+      }
+      return out;
     },
     matrix_rooms: { guild_id: '0-5', rooms: ROOMS },
     matrix_timeline: { room: ROOMS[2], messages: MESSAGES },
     matrix_send: { event_id: '$sent' },
     matrix_join: { ok: true },
+    matrix_people: { people: PEOPLE },
+    matrix_typing: { ok: true },
+    matrix_dm: { room_id: '!dm-jpeg:matrix.beta.playstructs.com',
+                 user_id: '@1-61:matrix.beta.playstructs.com', player_id: '1-61' },
     matrix_leave: { ok: true },
     matrix_select: { ok: true },
     matrix_connect: { ok: true, steps: STEPS_OK },

@@ -57,7 +57,9 @@
     }
     .chat-scroll {
       flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
-      padding: var(--spacing-sm) var(--spacing-md);
+      /* Extra right padding: the scrollbar overlays the content and was
+         clipping the timestamps at the end of every sender line. */
+      padding: var(--spacing-sm) var(--spacing-lg) var(--spacing-sm) var(--spacing-md);
       display: flex; flex-direction: column; gap: var(--spacing-md);
       /* .sui-page-body-screen centres its content for the game's short menu
          copy. Prose in a chat log is read left-to-right down a ragged right
@@ -94,8 +96,22 @@
     }
     .chat-room-unread { flex: 0 0 auto; }
 
+    /* Header right-hand cluster: the new-message door beside the resources. */
+    .chat-header-actions { display: flex; align-items: center; gap: var(--spacing-md); }
+
+    /* People picker search band — outside .chat-scroll so it stays put. */
+    #chat-people-search { flex: 0 0 auto; padding: var(--spacing-sm) var(--spacing-md); }
+    #chat-people-search label.sui-input-text { width: 100%; }
+    #chat-people-search input[type=text] { width: 100%; }
+
     /* ── Timeline ──────────────────────────────────────────────────────── */
-    .chat-msg { display: flex; flex-direction: column; gap: 2px; }
+    .chat-msg {
+      display: flex; flex-direction: column; gap: 2px;
+      /* Every message carries the rail; only a mention colours it. Reserving
+         it on all of them keeps the left edge of the text straight. */
+      border-left: 2px solid transparent;
+      padding-left: var(--spacing-sm);
+    }
     .chat-msg-head {
       display: flex; align-items: baseline; justify-content: space-between;
       gap: var(--spacing-sm);
@@ -107,10 +123,31 @@
     }
     .chat-msg-sender.chat-mod-self { color: var(--text-player-primary); }
     .chat-msg-tag { color: var(--text-hint); }
+    /* Flex, so the tag and the name keep a real gap: a trailing space inside
+       the tag span is collapsed away by flex layout ("[SN.C]NETLAG"). */
+    .chat-msg-sender { display: flex; align-items: baseline; gap: var(--spacing-sm); }
+    /* A sender who is a player can be messaged; the name is that affordance. */
+    .chat-msg-sender.chat-mod-addressable { cursor: pointer; }
+    .chat-msg-sender.chat-mod-addressable:hover { color: var(--accent-primary-active); }
     /* A same-sender run drops the header, the way the mockup's stacked
        paragraphs from one speaker do. */
     .chat-msg.chat-mod-cont .chat-msg-head { display: none; }
     .chat-msg.chat-mod-cont { margin-top: calc(-1 * var(--spacing-sm)); }
+    /* Right of the sender line: badge, then clock. */
+    .chat-msg-meta { display: flex; align-items: baseline; gap: var(--spacing-sm); flex: 0 0 auto; }
+    .chat-msg-time {
+      color: var(--text-hint); opacity: .7;
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+    }
+    /* An emote is one line, so its clock rides the same row. */
+    .chat-msg.chat-mod-oneline {
+      flex-direction: row; align-items: baseline;
+      justify-content: space-between; gap: var(--spacing-md);
+    }
+    /* Being named is the loudest thing that happens in a chat client. A left
+       rule in the warning colour, not a background wash — the timeline stays
+       readable and the eye still lands on it. */
+    .chat-msg.chat-mod-mention { border-left-color: var(--text-warning); }
     .chat-msg-body { white-space: pre-wrap; word-break: break-word; }
     .chat-msg-body.chat-mod-notice { color: var(--text-hint); }
     .chat-msg-body.chat-mod-emote { color: var(--text-neutral-primary); font-style: italic; }
@@ -120,25 +157,65 @@
     .chat-msg-pending { opacity: .55; }
     .chat-msg-failed .chat-msg-body { color: var(--text-enemy-primary); }
 
-    /* ── Composer ─────────────────────────────────────────────────────── */
-    #chat-composer {
+    /* The room's own statement of what it is for, under its name. */
+    .chat-topic {
       flex: 0 0 auto;
-      display: flex; align-items: stretch; gap: var(--spacing-sm);
-      padding: var(--spacing-sm) var(--spacing-md);
+      padding: 0 var(--spacing-md) var(--spacing-sm);
+      color: var(--text-hint);
+      text-align: left;
+      /* One line: a long topic must not push the timeline down the screen. */
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    #chat-composer-portrait {
-      flex: 0 0 auto; width: 48px; height: 48px;
-      display: flex; align-items: center; justify-content: center;
-      border: 2px solid var(--border-subtle);
-      background: var(--surface-player-body);
-      overflow: hidden;
+
+    /* "Ada is typing…" — the line that says an answer is already coming. */
+    .chat-typing {
+      flex: 0 0 auto; min-height: 16px;
+      padding: 0 var(--spacing-md);
+      color: var(--text-hint);
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase; text-align: left;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    #chat-composer-portrait img,
-    #chat-composer-portrait svg { width: 100%; height: 100%; image-rendering: pixelated; }
-    #chat-composer-field { flex: 1 1 auto; min-width: 0; display: flex; }
-    #chat-composer-field label.sui-input-text { width: 100%; }
-    #chat-composer-field input[type=text] { width: 100%; }
-    #chat-composer-send { flex: 0 0 auto; display: flex; align-items: stretch; }
+
+    /* A labelled hairline: day separators, and the unread divider. */
+    .chat-rule {
+      display: flex; align-items: center; gap: var(--spacing-sm);
+      padding-left: calc(var(--spacing-sm) + 2px);
+    }
+    .chat-rule-line { flex: 1 1 auto; height: 1px; background: var(--border-subtle); }
+    .chat-rule-label {
+      flex: 0 0 auto; color: var(--text-hint);
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase;
+    }
+    .chat-rule.chat-mod-alert .chat-rule-line { background: var(--text-warning); }
+    .chat-rule.chat-mod-alert .chat-rule-label { color: var(--text-warning); }
+
+    /* ── Composer ─────────────────────────────────────────────────────────
+       The action bar's own art does all the drawing (.sui-panel edges,
+       chunks, connectors, .sui-panel-btn). These rules only place it at the
+       foot of the page and let the middle chunk take the slack — everything
+       visible is the game's. */
+    /* The panel art has no outer margin of its own — in the HUD it floats over
+       a map. Docked at the foot of a screen it needs one, or its edges collide
+       with the window frame. */
+    #chat-composer { flex: 0 0 auto; padding: var(--spacing-sm) var(--spacing-md); }
+    #chat-composer .sui-panel { width: 100%; }
+    /* The panel's chunks size to content; the message field is the one that
+       should absorb the width. */
+    #chat-composer .sui-panel-chunk.sui-mod-grow { min-width: 0; }
+    #chat-composer .sui-screen-dialogue { display: flex; align-items: center; }
+    /* The screen IS the input's frame, so the input contributes none of its
+       own: no border, no background, no focus ring fighting the panel art. */
+    #chat-composer input[type=text] {
+      width: 100%; min-width: 0;
+      border: none; outline: none; background: transparent;
+      color: var(--text-body);
+      font-family: 'DirectiveZero', sans-serif; font-size: inherit;
+      padding: var(--spacing-sm);
+    }
+    #chat-composer input[type=text]::placeholder { color: var(--text-hint); }
+    #chat-composer .pfp-viewer-layer { image-rendering: pixelated; }
 
     /* ── Notices ──────────────────────────────────────────────────────── */
     .chat-notice {
