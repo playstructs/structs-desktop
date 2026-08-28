@@ -144,10 +144,12 @@ fn default_configs() -> Vec<GuildConfig> {
             guild_id: "0-1".into(),
             name: "Orbital Hydro".into(),
             guild_tag: "OH".into(),
-            guild_api: "http://crew.oh.energy/api".into(),
+            // TLS since 2026-08-28 (the guild's own guild.json lagged the
+            // migration; migrate_stale_urls heals older persisted configs).
+            guild_api: "https://crew.oh.energy/api".into(),
             reactor_api: PUBLIC_REACTOR_API.into(),
             client_ws: PUBLIC_CLIENT_WS.into(),
-            grass_nats_ws: "ws://crew.oh.energy:1443".into(),
+            grass_nats_ws: "wss://crew.oh.energy:1443".into(),
             is_active: false,
             endpoint: None,
             source: ConfigSource::Seed,
@@ -292,6 +294,14 @@ fn migrate_stale_urls(configs: &mut [GuildConfig]) -> bool {
             "http://public.testnet.structs.network:1317",
             "https://public.testnet.structs.network",
         ),
+        // Orbital Hydro moved behind TLS on 2026-08-28 (Caddy 308s all HTTP)
+        // but its published guild.json still declares the plaintext URLs, so
+        // discovery keeps re-serving them to fresh installs. Plain ws:// on
+        // 1443 no longer handshakes — grass died, block ticks froze, and
+        // every charge-gated loop went idle. is_downgrade() protects these
+        // once migrated (same host, secure→insecure is refused).
+        ("http://crew.oh.energy/api", "https://crew.oh.energy/api"),
+        ("ws://crew.oh.energy:1443", "wss://crew.oh.energy:1443"),
     ];
 
     let mut changed = false;
@@ -303,6 +313,14 @@ fn migrate_stale_urls(configs: &mut [GuildConfig]) -> bool {
             }
             if c.reactor_api == *old {
                 c.reactor_api = (*new).into();
+                changed = true;
+            }
+            if c.guild_api == *old {
+                c.guild_api = (*new).into();
+                changed = true;
+            }
+            if c.grass_nats_ws == *old {
+                c.grass_nats_ws = (*new).into();
                 changed = true;
             }
         }
@@ -447,6 +465,20 @@ mod tests {
             }]"#,
         )
         .expect("legacy shape parses via serde defaults")
+    }
+
+    #[test]
+    fn migrate_upgrades_oh_energy_to_tls() {
+        // 2026-08-28: oh.energy went TLS-only but its guild.json still says
+        // http/ws — plain-ws grass stopped handshaking and the fleet idled.
+        let mut configs = default_configs();
+        // Find (or model) the OH entry with the pre-migration values.
+        let c = &mut configs[1];
+        c.guild_api = "http://crew.oh.energy/api".into();
+        c.grass_nats_ws = "ws://crew.oh.energy:1443".into();
+        assert!(migrate_stale_urls(&mut configs));
+        assert_eq!(configs[1].guild_api, "https://crew.oh.energy/api");
+        assert_eq!(configs[1].grass_nats_ws, "wss://crew.oh.energy:1443");
     }
 
     #[test]

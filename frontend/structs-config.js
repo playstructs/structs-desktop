@@ -673,8 +673,28 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     var OriginalWebSocket = window.WebSocket;
     window.WebSocket = new Proxy(OriginalWebSocket, {
       construct: function(target, args) {
-        var ws = new target(...args);
         var url = args[0] || '';
+
+        // TLS self-heal for grass. A guild that moves its NATS port behind
+        // TLS keeps publishing ws:// until its guild.json catches up (live
+        // case: oh.energy, 2026-08-28 — grass died and every charge-gated
+        // loop idled). If plain-ws grass keeps closing without EVER
+        // delivering a message, upgrade the connection attempts to wss://;
+        // once an upgrade works the flag keeps later reconnects on wss too.
+        if (url.indexOf('ws://') === 0 && url.indexOf('1443') !== -1
+            && window.__STRUCTS_CONN__ && window.__STRUCTS_CONN__.grass) {
+          var gconn = window.__STRUCTS_CONN__.grass;
+          if (gconn.tlsUpgraded || (gconn.closeCount >= 3 && !gconn.lastMessageAt)) {
+            url = 'wss://' + url.slice('ws://'.length);
+            args = [url].concat([].slice.call(args, 1));
+            if (!gconn.tlsUpgraded) {
+              gconn.tlsUpgraded = true;
+              console.warn('[Structs Notify] grass ws:// fails without ever delivering — retrying as', url);
+            }
+          }
+        }
+
+        var ws = new target(...args);
 
         // Only hook NATS WebSocket connections (port 1443 / grassNatsWs)
         var grassUrl = (window.__STRUCTS_CONFIG__ && window.__STRUCTS_CONFIG__.grassNatsWs) || ':1443';
