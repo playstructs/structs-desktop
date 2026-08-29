@@ -96,9 +96,16 @@
 
   // The game's five-layer portrait, composed exactly as the webapp's
   // PfpViewerComponent does. Asset paths are the contract; do not invent art.
+  //
+  // The LAYERS are separate from the FRAME on purpose. Each layer is a fixed
+  // 72px image positioned by main.css and cropped to a head-and-shoulders by
+  // whatever frame contains it — and the game has two frames with different
+  // crops: `.sui-result-row-portrait-image` (44px, rosters) and
+  // `.sui-screen-portrait-image` (the action bar, cropped 4px higher). Putting
+  // one inside the other, or inside a box of my own with `overflow: hidden`,
+  // clips the clip: that is what mangled both portraits.
   var PFP_LAYERS = ['background', 'arms', 'body', 'neck', 'head'];
-  function pfpPortrait(attrsJson) {
-    var img = el('div', 'sui-result-row-portrait-image pfp-frame');
+  function fillPfp(frame, attrsJson) {
     var pfp = null;
     if (attrsJson) { try { pfp = JSON.parse(attrsJson); } catch (e) { pfp = null; } }
     if (pfp && typeof pfp === 'object' && pfp.head != null) {
@@ -108,15 +115,21 @@
         var im = el('img', 'pfp-viewer-layer');
         im.src = 'img/pfp/' + part + '/pfp_' + part + '_' + idx + '.png';
         im.alt = '';
-        img.appendChild(im);
+        frame.appendChild(im);
       });
     } else {
       var ph = el('img', 'pfp-viewer-layer');
       ph.src = 'img/portrait-placeholder.png';
       ph.alt = '';
-      img.appendChild(ph);
+      frame.appendChild(ph);
     }
-    return img;
+    return frame;
+  }
+
+  // The roster frame: a 44px head-and-shoulders, as every list in the game
+  // draws a player.
+  function pfpPortrait(attrsJson) {
+    return fillPfp(el('div', 'sui-result-row-portrait-image pfp-frame'), attrsJson);
   }
 
   // ── Who am I ──────────────────────────────────────────────────────────────
@@ -220,31 +233,37 @@
   // The card itself: the same title / subtitle / label-value shape Team Ops
   // and the dashboard use, built from .sui-data-card.
   function refCard(card) {
-    var box = el('div', 'sui-data-card chat-ref');
+    // ONE frame, not three. The card used to nest a bordered header, a
+    // bordered body and bordered buttons inside a bordered card — four
+    // competing rectangles for one summary. Now: a single surface with a
+    // coloured left edge, which is both the "this is an embed" signal and the
+    // type at a glance, the way a quote or attachment reads everywhere else.
+    var box = el('div', 'chat-ref chat-kind-' + (card.kind || 'thing'));
 
-    // NOT .sui-data-card-header: that is a filled label chip (the "IDENTITY"
-    // and "SIGN-IN" captions), and a title plus portrait inverted onto the
-    // accent is unreadable. The identity row is the roster's own idiom.
     var head = el('div', 'chat-ref-head');
+    // The portrait uses the ROSTER's frame at its natural 44px — it is a
+    // fixed-size crop of fixed-size art and cannot be squeezed.
     if (card.pfp_attrs) {
-      var portrait = el('div', 'chat-ref-portrait');
+      var portrait = el('div', 'sui-result-row-portrait chat-ref-portrait');
       portrait.appendChild(pfpPortrait(card.pfp_attrs));
       head.appendChild(portrait);
     } else {
-      head.appendChild(icon(card.icon || 'icon-info', 'sui-icon-md'));
+      var well = el('div', 'chat-ref-glyph');
+      well.appendChild(icon(card.icon || 'icon-info', 'sui-icon-md'));
+      head.appendChild(well);
     }
     var names = el('div', 'chat-ref-names');
-    names.appendChild(el('div', 'sui-text-header', card.title || card.id));
-    if (card.subtitle) names.appendChild(el('div', 'sui-text-hint', card.subtitle));
+    names.appendChild(el('div', 'chat-ref-title', card.title || card.id));
+    if (card.subtitle) names.appendChild(el('div', 'chat-ref-sub', card.subtitle));
     head.appendChild(names);
     box.appendChild(head);
 
-    var body = el('div', 'sui-data-card-body');
+    // Facts as a two-column grid rather than a bordered table: the label and
+    // the value line up down the card without a box around them.
+    var body = el('div', 'chat-ref-facts');
     (card.rows || []).forEach(function (r) {
-      var row = el('div', 'chat-kv');
-      row.appendChild(el('div', null, r.label));
-      row.appendChild(el('div', null, r.value));
-      body.appendChild(row);
+      body.appendChild(el('div', 'chat-ref-label', r.label));
+      body.appendChild(el('div', 'chat-ref-value', r.value));
     });
     box.appendChild(body);
 
@@ -256,7 +275,10 @@
     if (acts.length) {
       var bar = el('div', 'chat-ref-actions');
       acts.forEach(function (a) {
-        var b = el('button', 'sui-screen-btn sui-mod-secondary chat-ref-action');
+        // Affordances, not content: small, quiet, and on one line. Full-size
+        // buttons wrapped onto two rows and dominated the summary they belong
+        // to.
+        var b = el('button', 'chat-ref-action');
         b.appendChild(icon(a.icon || 'icon-info', 'sui-icon-sm'));
         b.appendChild(el('span', null, a.label));
         b.addEventListener('click', function (ev) {
@@ -1193,9 +1215,10 @@
     var pScreen = el('div', 'sui-screen');
     var portrait = el('div', 'sui-screen-portrait');
     portrait.id = 'chat-composer-portrait';
-    var pImg = el('div', 'sui-screen-portrait-image');
-    pImg.appendChild(pfpPortrait(S.profile && S.profile.pfp_attrs));
-    portrait.appendChild(pImg);
+    // `.sui-screen-portrait-image` is the action bar's own frame, with its own
+    // crop. Nesting the roster frame inside it cropped the portrait twice.
+    portrait.appendChild(fillPfp(el('div', 'sui-screen-portrait-image'),
+      S.profile && S.profile.pfp_attrs));
     pScreen.appendChild(portrait);
     pChunk.appendChild(pScreen);
     panel.appendChild(pChunk);

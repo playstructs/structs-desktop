@@ -223,35 +223,112 @@
     .chat-id.chat-mod-openable { cursor: pointer; }
     .chat-id.chat-mod-openable:hover { color: var(--text-player-highlight); }
 
-    /* Reference cards — the same .sui-data-card shape Team Ops and the
-       dashboard use for a small summary. */
+    /* ── Reference cards ──────────────────────────────────────────────────
+       A summary of an object someone named. Design rules, in order of how
+       much they matter:
+
+       1. ONE frame. The card used to nest a bordered header, a bordered fact
+          table and bordered buttons inside a bordered card — four rectangles
+          arguing about one small summary. Now a single surface.
+       2. A coloured LEFT EDGE instead of a chip or a badge. It says "this is
+          an embed" and says which KIND at a glance, costs no vertical space,
+          and is the same idiom a quote or an attachment uses everywhere else.
+       3. Hierarchy by weight, not by boxes: title bright, labels dim, values
+          bright, actions quiet.
+       4. Everything on one left margin, so the eye has a single edge to run
+          down. */
     .chat-refs {
       display: flex; flex-direction: column; gap: var(--spacing-sm);
       margin-top: var(--spacing-sm);
-      /* Indented under the message that named them, and never full width: a
-         summary is an aside, not the content. */
-      max-width: 320px;
+      /* An aside, never the width of the conversation. */
+      max-width: 340px;
     }
+    .chat-ref {
+      border: 1px solid var(--border-subtle);
+      border-left: 2px solid var(--accent-primary);
+      background: var(--surface-player-body);
+      text-align: left;
+    }
+
+    /* The kind, as colour — on the edge AND on the glyph, so the two agree and
+       the type is legible from either. Each hue is an existing token; none is
+       invented for this. */
+    .chat-ref.chat-kind-player { border-left-color: var(--accent-secondary); }
+    .chat-ref.chat-kind-player .chat-ref-glyph { color: var(--accent-secondary); }
+    .chat-ref.chat-kind-planet { border-left-color: var(--text-player-primary); }
+    .chat-ref.chat-kind-planet .chat-ref-glyph { color: var(--text-player-primary); }
+    .chat-ref.chat-kind-struct { border-left-color: var(--text-warning); }
+    .chat-ref.chat-kind-struct .chat-ref-glyph { color: var(--text-warning); }
+    .chat-ref.chat-kind-fleet { border-left-color: var(--accent-primary); }
+    .chat-ref.chat-kind-fleet .chat-ref-glyph { color: var(--accent-primary); }
+    .chat-ref.chat-kind-provider { border-left-color: var(--text-neutral-primary); }
+    .chat-ref.chat-kind-provider .chat-ref-glyph { color: var(--text-neutral-primary); }
+    .chat-ref.chat-kind-guild { border-left-color: var(--accent-primary); }
+    .chat-ref.chat-kind-guild .chat-ref-glyph { color: var(--accent-primary); }
+    .chat-ref.chat-kind-substation { border-left-color: var(--accent-disabled); }
+    .chat-ref.chat-kind-substation .chat-ref-glyph { color: var(--accent-disabled); }
+
     .chat-ref-head {
       display: flex; align-items: center; gap: var(--spacing-sm);
-      text-align: left;
-      padding: var(--spacing-sm) var(--spacing-sm) 0;
+      padding: var(--spacing-sm);
     }
-    .chat-ref-head .sui-text-header { line-height: 16px; }
-    .chat-ref-names { min-width: 0; }
-    .chat-ref-portrait { width: 32px; height: 32px; flex: 0 0 32px; overflow: hidden; }
+    /* 44px is the portrait's OWN size — the art is a fixed crop of fixed
+       layers and shrinking the frame clips the clip. */
+    .chat-ref-portrait { flex: 0 0 44px; }
     .chat-ref-portrait .pfp-viewer-layer { image-rendering: pixelated; }
-    .chat-ref .chat-kv { padding: 1px 0; }
+    .chat-ref-glyph {
+      flex: 0 0 24px; display: flex; align-items: center; justify-content: center;
+      color: var(--text-hint);
+    }
+    .chat-ref-names { min-width: 0; }
+    .chat-ref-title {
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase; color: var(--text-body);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .chat-ref-sub {
+      color: var(--text-hint);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
 
-    /* What a card lets you DO. A row of the game's own screen buttons, sized
-       down to belong to a summary rather than to compete with it. */
+    /* Facts: a two-column grid, so labels and values align down the card with
+       no table borders to draw them. */
+    .chat-ref-facts {
+      display: grid; grid-template-columns: auto 1fr;
+      /* A little air between rows: at 16px line-height four facts read as a
+         solid block rather than as four separate readings. */
+      gap: 2px var(--spacing-md);
+      padding: 0 var(--spacing-sm) var(--spacing-sm);
+      line-height: 18px;
+    }
+    .chat-ref-label { color: var(--text-hint); white-space: nowrap; }
+    .chat-ref-value {
+      color: var(--text-body); text-align: right;
+      word-break: normal; overflow-wrap: anywhere;
+    }
+
+    /* Actions are affordances, not content: quiet until hovered, and on one
+       line. Full-size screen buttons wrapped onto two rows and outweighed the
+       summary they belonged to. */
     .chat-ref-actions {
-      display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
+      display: flex; gap: var(--spacing-xs);
       padding: 0 var(--spacing-sm) var(--spacing-sm);
     }
     .chat-ref-action {
       display: inline-flex; align-items: center; gap: var(--spacing-xs);
+      padding: 2px var(--spacing-sm);
+      border: 1px solid var(--border-subtle);
+      background: transparent;
+      color: var(--text-hint);
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase; cursor: pointer;
     }
+    .chat-ref-action:hover {
+      border-color: var(--accent-primary);
+      color: var(--text-player-primary);
+    }
+    .chat-ref-action:disabled { opacity: .4; cursor: default; }
+
     .chat-ref-portrait.chat-mod-clickable { cursor: pointer; }
     .chat-ref-portrait.chat-mod-clickable:hover { outline: 1px solid var(--accent-primary); }
 
@@ -277,11 +354,7 @@
       font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
       text-transform: uppercase;
     }
-
-    .chat-ref.chat-room-row { cursor: pointer; }
-
-    /* The top of the log: load more, or the beginning of the room. */
-    .chat-history { display: flex; justify-content: center; padding: var(--spacing-xs) 0; }
+    .chat-rent .chat-ref-actions { padding: 0; }
 
     /* A labelled hairline: day separators, and the unread divider. */
     .chat-rule {

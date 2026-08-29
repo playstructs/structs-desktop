@@ -154,11 +154,13 @@ fn player_card(id: &str, v: &Value) -> Value {
         // The portrait the roster and Team Ops render, so a player looks the
         // same everywhere in the app.
         "pfp_attrs": text(p.get("pfpClientRenderAttributes")),
+        // Two facts, not four. Planet and Fleet were listed AND given buttons
+        // — the card said the same thing twice and read as a dump rather than
+        // a summary. What is left is what you cannot get from an action:
+        // how rich they are, and whether they are holding their power.
         "rows": [
             row("Alpha", format_alpha(alpha)),
             row("Energy", format!("{}/{}", format_power(load), format_power(capacity))),
-            row("Planet", text(p.get("planetId"))),
-            row("Fleet", text(p.get("fleetId"))),
         ],
         "actions": actions,
         "planet_id": text(p.get("planetId")),

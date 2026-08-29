@@ -469,6 +469,17 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('and it is the first one named',
     text(cards[0]).includes('Shield') && text(cards[0]).includes('25'), text(cards[0]));
 
+  // Design contract: ONE frame per card, typed by a class. The card used to
+  // nest a bordered header, a bordered fact table and bordered buttons inside
+  // a bordered card — four rectangles arguing about one small summary.
+  check('a card is typed by its kind',
+    cards[0].className.includes('chat-kind-planet'), cards[0].className);
+  check('…and is a single frame, not nested data-cards',
+    cards[0].querySelectorAll('.sui-data-card').length === 0);
+  check('facts are a grid, not a bordered table',
+    cards[0].querySelector('.chat-ref-facts') !== null);
+
+
   // The rest are chips that open theirs.
   const openable = Array.from(msg.querySelectorAll('.chat-id.chat-mod-openable'));
   check('later references are openable', openable.length === 3, String(openable.length));
@@ -503,6 +514,14 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('a player card carries their portrait',
     playerCard.querySelectorAll('.pfp-viewer-layer').length === 5,
     String(playerCard.querySelectorAll('.pfp-viewer-layer').length));
+  // The layers are a fixed 72px crop positioned by main.css; the FRAME does
+  // the cropping. Wrapping them in a smaller box of our own clipped the clip
+  // and cut every portrait off-centre.
+  check('…in the roster\'s own frame',
+    playerCard.querySelector('.sui-result-row-portrait-image') !== null);
+  check('…with nothing nested inside it',
+    playerCard.querySelectorAll('.sui-result-row-portrait-image').length === 1,
+    String(playerCard.querySelectorAll('.sui-result-row-portrait-image').length));
   // A card is not a single button any more — it offers named actions.
   const actions = Array.from(playerCard.querySelectorAll('.chat-ref-action'))
     .map((b) => text(b));

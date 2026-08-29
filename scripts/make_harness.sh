@@ -645,8 +645,7 @@ cat > "$CFIX" <<'EOF'
                 { key: 'watch_fleet', label: 'Fleet', icon: 'icon-fleet-tile' },
                 { key: 'message', label: 'Message', icon: 'icon-phone' }],
       rows: [{ label: 'Alpha', value: '9.4Kg' },
-             { label: 'Energy', value: '128.01KW/133.64KW' },
-             { label: 'Planet', value: '2-223' }, { label: 'Fleet', value: '9-61' }] },
+             { label: 'Energy', value: '128.01KW/133.64KW' }] },
     // An offer you can close from the conversation that mentioned it.
     '10-1': { id: '10-1', kind: 'provider', icon: 'icon-transfers',
       title: 'Provider 10-1', subtitle: 'From [OH] Someone',
