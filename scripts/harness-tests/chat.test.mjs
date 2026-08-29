@@ -218,7 +218,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     text(d.querySelector('.sui-page-header')));
 
   const msgs = all(d, '.chat-msg');
-  check('every event renders', msgs.length === 11, String(msgs.length));
+  check('every event renders', msgs.length === 12, String(msgs.length));
 
   // A run from one sender drops the repeated header, as the mockup does —
   // but $1 and $2 are a day apart, so that run is deliberately broken.
@@ -259,7 +259,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await tick();
 
   const times = all(d, '.chat-msg-time').map(text);
-  check('every message is stamped', times.length === 11, String(times.length));
+  check('every message is stamped', times.length === 12, String(times.length));
   check('stamps are fixed-width 24h', times.every((t) => /^\d{2}:\d{2}$/.test(t)),
     times.join(','));
 
@@ -340,7 +340,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
       { event_id: '$new', sender: '@1-42:matrix.beta.playstructs.com',
         sender_name: 'Netlag', sender_tag: 'SN.C', player_id: '1-42',
         body: 'while you were out', kind: 'text', self: false, admin: false,
-        ts: 1787900011000 },
+        ts: 1787900013000 },
     ]),
   };
   await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
@@ -433,6 +433,13 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   // Plumbing types get no card — mirrors refs.rs::is_referenceable.
   check('an allocation id is ignored', ids('6-1') === '', ids('6-1'));
   check('a reactor id is ignored', ids('3-1') === '', ids('3-1'));
+  check('a provider id IS referenced', ids('10-1') === '10-1', ids('10-1'));
+  // The set exists in Rust too. Adding a type in one place and not the other
+  // means the id is marked but never carded, or carded but never marked.
+  check('the referenceable set matches Rust',
+    Object.keys(w.Chat.REF_KINDS).map(Number).sort((a, b) => a - b).join(',')
+      === '0,1,2,4,5,9,10',
+    Object.keys(w.Chat.REF_KINDS).join(','));
   check('a date is not an id', ids('2026-08') === '', ids('2026-08'));
 }
 
@@ -496,11 +503,46 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('a player card carries their portrait',
     playerCard.querySelectorAll('.pfp-viewer-layer').length === 5,
     String(playerCard.querySelectorAll('.pfp-viewer-layer').length));
-  playerCard.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  // A card is not a single button any more — it offers named actions.
+  const actions = Array.from(playerCard.querySelectorAll('.chat-ref-action'))
+    .map((b) => text(b));
+  check('a player card offers what the player has',
+    actions.join(',') === 'Planet,Fleet,Message', actions.join(','));
+
+  Array.from(playerCard.querySelectorAll('.chat-ref-action'))
+    .find((b) => text(b) === 'Message')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick();
   const dm = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_dm').pop();
-  check('clicking a player card messages them', !!dm && dm.args.playerId === '1-61',
+  check('Message opens a DM with them', !!dm && dm.args.playerId === '1-61',
     JSON.stringify(dm && dm.args));
+
+  // Watching opens the SAME spectator window Team Ops opens.
+  Array.from(playerCard.querySelectorAll('.chat-ref-action'))
+    .find((b) => text(b) === 'Planet')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const watch = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'mcp_raid_view_open').pop();
+  check('Planet opens the map viewer for their planet',
+    !!watch && watch.args.planetId === '2-223' && watch.args.fleetId === null,
+    JSON.stringify(watch && watch.args));
+
+  Array.from(playerCard.querySelectorAll('.chat-ref-action'))
+    .find((b) => text(b) === 'Fleet')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const wf = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'mcp_raid_view_open').pop();
+  check('Fleet opens it for their fleet',
+    !!wf && wf.args.fleetId === '9-61' && wf.args.planetId === null,
+    JSON.stringify(wf && wf.args));
+
+  // The portrait is the shortest path to the same place.
+  playerCard.querySelector('.chat-ref-portrait')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('the portrait watches their planet too',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'mcp_raid_view_open').pop()
+      .args.planetId === '2-223');
 
   // One round trip for a message naming several things, and never a repeat
   // for an id already known.
@@ -605,7 +647,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const marks = () => w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_mark_read');
 
   check('reading a room tells the homeserver', marks().length >= 1, String(marks().length));
-  check('…up to the newest event', marks().pop().args.eventId === '$11',
+  check('…up to the newest event', marks().pop().args.eventId === '$12',
     JSON.stringify(marks().pop().args));
 
   // render() runs constantly; the homeserver does not need to hear it twice.
@@ -652,6 +694,100 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     text(all(d, '.chat-msg').pop()));
 }
 
+// ── Renting capacity from a card ────────────────────────────────────────────
+// A provider is an offer; the point of putting it in the conversation is to be
+// able to close it there. It is also a PURCHASE, so the quote comes first.
+{
+  console.log('\n— provider agreements');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await until(() => d.querySelectorAll('.chat-ref').length > 0);
+
+  const msg = all(d, '.chat-msg').find((n) => text(n).includes('renting from'));
+  const card = msg.querySelector('.chat-ref');
+  check('a provider gets a card', !!card, text(msg));
+  check('…priced in the provider\'s own denom',
+    text(card).includes('1 ack / W / block'), text(card));
+
+  const rent = Array.from(card.querySelectorAll('.chat-ref-action'))
+    .find((b) => text(b) === 'Rent capacity');
+  check('…and offers to rent', !!rent);
+  rent.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+
+  const form = card.querySelector('.chat-rent');
+  check('the form opens in the card', !!form);
+  const cap = form.querySelector('#rent-capacityw');
+  const dur = form.querySelector('#rent-durationblocks');
+  check('it starts at the provider\'s minimums',
+    cap.value === '1000' && dur.value === '100', cap.value + '/' + dur.value);
+
+  // The cost is the whole thing, debited at open — so it is stated before the
+  // button that spends it.
+  const quote = () => text(form.querySelector('.chat-rent-quote'));
+  check('the quote prices the minimums', quote().includes('100K') && quote().includes('ack'),
+    quote());
+  cap.value = '2000';
+  cap.dispatchEvent(new w.Event('input', { bubbles: true }));
+  check('and re-prices as you type', quote().includes('200K'), quote());
+
+  cap.value = '0';
+  cap.dispatchEvent(new w.Event('input', { bubbles: true }));
+  const confirm = Array.from(form.querySelectorAll('.sui-screen-btn'))
+    .find((b) => text(b) === 'Confirm');
+  check('a zero order cannot be confirmed', confirm.disabled === true);
+
+  cap.value = '5000';
+  cap.dispatchEvent(new w.Event('input', { bubbles: true }));
+  confirm.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const tx = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_agreement_open').pop();
+  check('confirming sends the numbers on screen',
+    !!tx && tx.args.providerId === '10-1' && tx.args.capacity === 5000
+      && tx.args.duration === 100,
+    JSON.stringify(tx && tx.args));
+  check('and the card reports the result',
+    text(card).includes('Agreement opened') && text(card).includes('ABCD1234'),
+    text(card));
+  check('…with the form closed', !card.querySelector('.chat-rent'));
+}
+
+// ── Room events are not conversation ────────────────────────────────────────
+{
+  console.log('\n— room events');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [
+      { event_id: '$e1', sender: '@1-42:matrix.beta.playstructs.com',
+        sender_name: 'Netlag', body: 'joined', kind: 'event', ts: 1787900020000 },
+      { event_id: '$e2', sender: '@1-77:matrix.beta.playstructs.com',
+        sender_name: 'T.Xue', body: 'left', kind: 'event', ts: 1787900021000 },
+    ],
+  });
+  await tick();
+
+  const events = all(d, '.chat-event');
+  check('events render as their own compact line', events.length === 2,
+    String(events.length));
+  check('naming who did it',
+    text(events[0].querySelector('.chat-event-who')) === 'Netlag',
+    text(events[0].querySelector('.chat-event-who')));
+  check('…and what they did',
+    text(events[0].querySelector('.chat-event-what')) === 'joined',
+    text(events[0].querySelector('.chat-event-what')));
+  check('…and carrying their own time',
+    /\d{2}:\d{2}/.test(text(events[0].querySelector('.chat-event-time'))),
+    text(events[0]));
+  // They are not messages: no sender header, no body block, no mention rail.
+  check('an event is not a message', events[0].querySelector('.chat-msg-head') === null);
+  check('and does not count as one',
+    all(d, '.chat-msg').every((m) => !text(m).endsWith('joined')));
+}
+
 // ── Sending ─────────────────────────────────────────────────────────────────
 {
   console.log('\n— sending');
@@ -664,7 +800,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 
   // The echo is on screen before the command resolves — that is the point.
-  const base = 11;
+  const base = 12;
   let msgs = all(d, '.chat-msg');
   check('local echo appears immediately', msgs.length === base + 1, String(msgs.length));
   const echo = () => all(d, '.chat-msg')[base];

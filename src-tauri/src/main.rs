@@ -105,6 +105,7 @@ fn main() {
             matrix::matrix_typing,
             matrix::matrix_badge,
             matrix::matrix_refs,
+            matrix::matrix_agreement_open,
             matrix::matrix_message_player,
             matrix::matrix_take_pending_room,
             mcp::game_stats::mcp_game_stats_snapshot,

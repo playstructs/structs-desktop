@@ -157,10 +157,14 @@
   // The boundary is strict on BOTH sides: `1-194` and `1-1945` are different
   // objects, and a loose match attributes one to the other.
   var ID_RE = /(^|[^0-9A-Za-z_-])(\d{1,2}-\d{1,9})(?![0-9-])/g;
-  // Only types a reader cares about. Mirrors refs.rs::is_referenceable —
-  // allocations and infusions are plumbing, and a card that says nothing is
-  // worse than plain text.
-  var REF_KINDS = { 0: 1, 1: 1, 2: 1, 4: 1, 5: 1, 9: 1 };
+  // Only types a reader cares about. MIRRORS refs.rs::is_referenceable and
+  // must be changed with it — allocations and infusions are plumbing, and a
+  // card that says nothing is worse than plain text. A provider (10) earns one
+  // because it is an offer you can act on.
+  //
+  // Exposed so the tests can hold both copies to the same list.
+  var REF_KINDS = { 0: 1, 1: 1, 2: 1, 4: 1, 5: 1, 9: 1, 10: 1 };
+  Chat.REF_KINDS = REF_KINDS;
 
   // id → card, or `false` while a lookup is in flight, or null when the chain
   // had nothing. Shared across the whole timeline: a room arguing about one
@@ -244,13 +248,158 @@
     });
     box.appendChild(body);
 
-    // A player card is also a way to reach them.
-    if (card.kind === 'player') {
-      box.classList.add('chat-room-row');
-      box.title = 'Message ' + (card.title || card.id);
-      box.addEventListener('click', function () { startDm(card.id); });
+    // ── Actions ──
+    // What makes a card more than a lookup. Watch the planet someone named,
+    // message its owner, rent the capacity a provider advertised — without
+    // leaving the conversation that mentioned it.
+    var acts = card.actions || [];
+    if (acts.length) {
+      var bar = el('div', 'chat-ref-actions');
+      acts.forEach(function (a) {
+        var b = el('button', 'sui-screen-btn sui-mod-secondary chat-ref-action');
+        b.appendChild(icon(a.icon || 'icon-info', 'sui-icon-sm'));
+        b.appendChild(el('span', null, a.label));
+        b.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          runCardAction(card, a.key, box);
+        });
+        bar.appendChild(b);
+      });
+      box.appendChild(bar);
+    }
+    // The portrait is the shortest path to "look at this player's world".
+    var portraitEl = box.querySelector('.chat-ref-portrait');
+    if (portraitEl && card.planet_id) {
+      portraitEl.classList.add('chat-mod-clickable');
+      portraitEl.title = 'Watch ' + card.planet_id;
+      portraitEl.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        runCardAction(card, 'watch_planet', box);
+      });
     }
     return box;
+  }
+
+  // A card reports its own outcome, in place. A toast would land in another
+  // window and a dialogue would cover the conversation the card belongs to.
+  function cardNote(box, text, isError) {
+    var old = box.querySelector('.chat-ref-note');
+    if (old) old.parentNode.removeChild(old);
+    var note = el('div', 'chat-ref-note' + (isError ? ' chat-mod-error' : ''), text);
+    box.appendChild(note);
+    return note;
+  }
+
+  function runCardAction(card, key, box) {
+    if (key === 'message') { startDm(card.id); return; }
+    if (key === 'watch_planet' || key === 'watch_fleet') {
+      var isPlanet = key === 'watch_planet';
+      var target = isPlanet ? card.planet_id : card.fleet_id;
+      if (!target) { cardNote(box, 'nothing to watch', true); return; }
+      // The same spectator window Team Ops opens — one map viewer, reached
+      // from wherever the thing was named.
+      invoke('mcp_raid_view_open', {
+        planetId: isPlanet ? target : null,
+        fleetId: isPlanet ? null : target,
+      }).catch(function (e) { cardNote(box, String(e), true); });
+      return;
+    }
+    if (key === 'agreement') { rentForm(card, box); return; }
+  }
+
+  // ── Renting capacity ──────────────────────────────────────────────────────
+  // The whole cost is debited AT OPEN, in the provider's own denom — which is
+  // often a guild token rather than Alpha. So the quote is shown before the
+  // commit, and the button says the number it is about to spend.
+  function rentForm(card, box) {
+    if (box.querySelector('.chat-rent')) return;      // already open
+    var p = card.provider || {};
+    var form = el('div', 'chat-rent');
+
+    var cap = numberField('Capacity (W)', p.capacity_min || 0);
+    var dur = numberField('Duration (blocks)', p.duration_min || 0);
+    form.appendChild(cap.wrap);
+    form.appendChild(dur.wrap);
+
+    var quote = el('div', 'chat-rent-quote');
+    form.appendChild(quote);
+
+    var go = el('button', 'sui-screen-btn sui-mod-primary', 'Confirm');
+    var cancel = el('button', 'sui-screen-btn sui-mod-secondary', 'Cancel');
+    var bar = el('div', 'chat-ref-actions');
+    bar.appendChild(cancel);
+    bar.appendChild(go);
+    form.appendChild(bar);
+
+    function cost() {
+      var c = Number(cap.input.value) || 0;
+      var d = Number(dur.input.value) || 0;
+      return (Number(p.rate_amount) || 0) * c * d;
+    }
+    function reprice() {
+      var total = cost();
+      quote.textContent = total > 0
+        ? 'Costs ' + fmtCount(total) + ' ' + (p.denom_label || '') + ' now, in full'
+        : 'Enter a capacity and duration';
+      go.disabled = !(total > 0);
+      go.classList.toggle('sui-mod-disabled', !(total > 0));
+    }
+    cap.input.addEventListener('input', reprice);
+    dur.input.addEventListener('input', reprice);
+    reprice();
+
+    cancel.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      form.parentNode.removeChild(form);
+    });
+    go.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (go.disabled) return;
+      go.disabled = true;
+      go.textContent = 'Signing…';
+      invoke('matrix_agreement_open', {
+        providerId: card.id,
+        capacity: Math.round(Number(cap.input.value) || 0),
+        duration: Math.round(Number(dur.input.value) || 0),
+      })
+        .then(function (res) {
+          form.parentNode.removeChild(form);
+          cardNote(box, 'Agreement opened · ' + ((res && res.tx) || ''));
+        })
+        .catch(function (e) {
+          go.disabled = false;
+          go.textContent = 'Confirm';
+          cardNote(box, String(e), true);
+        });
+    });
+    box.appendChild(form);
+    cap.input.focus();
+  }
+
+  function numberField(label, initial) {
+    var wrap = el('div', 'chat-rent-field');
+    var lab = el('label', 'sui-input-text');
+    var id = 'rent-' + label.replace(/[^a-z]/gi, '').toLowerCase();
+    lab.setAttribute('for', id);
+    lab.appendChild(el('span', null, label));
+    var input = el('input');
+    // TEXT, not number: SUI styles `label.sui-input-text input[type=text]`, so
+    // a number input falls outside the game's art entirely and renders as a
+    // raw browser box. `inputmode` still brings up a numeric keypad, and the
+    // spinner arrows are no loss.
+    input.type = 'text';
+    input.setAttribute('inputmode', 'numeric');
+    input.id = id;
+    input.value = String(initial || '');
+    input.addEventListener('input', function () {
+      // Keep it a number without fighting the caret: strip anything that is
+      // not a digit, in place.
+      var clean = input.value.replace(/[^0-9]/g, '');
+      if (clean !== input.value) input.value = clean;
+    });
+    lab.appendChild(input);
+    wrap.appendChild(lab);
+    return { wrap: wrap, input: input };
   }
 
   // ── Time ──────────────────────────────────────────────────────────────────
@@ -731,6 +880,17 @@
     if (m.pending) wrap.classList.add('chat-msg-pending');
     if (m.failed) wrap.classList.add('chat-msg-failed');
 
+    // A room event — joined, left, renamed — is not conversation. One dim
+    // line naming who did what, and no sender header: the six-line burst every
+    // room emits at creation used to open every timeline.
+    if ((m.kind || 'text') === 'event') {
+      var ev = el('div', 'chat-event');
+      ev.appendChild(el('span', 'chat-event-who', m.sender_name || m.sender));
+      ev.appendChild(el('span', 'chat-event-what', m.body || ''));
+      ev.appendChild(el('span', 'chat-event-time', fmtTime(m.ts)));
+      return ev;
+    }
+
     // An emote is one line, IRC's way: "* Netlag waves". A header above it
     // would say the name twice.
     if ((m.kind || 'text') === 'emote') {
@@ -971,7 +1131,10 @@
 
         // Day separator: a timeline with no dates is a timeline you cannot
         // date. Only between days, never above the first message.
-        if (prev && dayKey(m.ts) !== dayKey(prev.ts)) {
+        // An event line carries its own time, so a date rule between two of
+        // them is noise on noise.
+        if (prev && dayKey(m.ts) !== dayKey(prev.ts)
+            && !((m.kind === 'event') && (prev.kind === 'event'))) {
           scroll.appendChild(ruleNode(dayLabel(m.ts)));
         }
 
@@ -1005,7 +1168,11 @@
     if (!S.typing.length) typing.classList.add('hidden');
     page.appendChild(typing);
 
-    page.appendChild(composer());
+    // The composer is mounted OUTSIDE the page, in its own host at the foot of
+    // the panel — see chat.html. Rendering it into the page would put it back
+    // inside the screen's border.
+    var host = byId('chat-composer-host');
+    if (host) { clear(host); host.appendChild(composer()); }
     return page;
   }
 
@@ -1597,13 +1764,6 @@
       scroll.appendChild(actions);
     }
 
-    scroll.appendChild(noticeBlock(
-      'How this signs in',
-      'Comms uses the same address and key as play, automatically. The app ' +
-      'signs the guild login message, the guild issues an OpenID token for ' +
-      'it, and the homeserver trusts the guild. No password, and no key ever ' +
-      'leaves this machine.'));
-
     page.appendChild(scroll);
     return page;
   }
@@ -1672,6 +1832,12 @@
     else if (S.view === 'browse') node = renderBrowse();
     else node = renderChannels();
     host.appendChild(node);
+    // Every view except a room is composer-less; the host is emptied here so
+    // no stale action bar survives a view change.
+    if (S.view !== 'room') {
+      var bar = byId('chat-composer-host');
+      if (bar) clear(bar);
+    }
     restoreDraft(draft);
     keepPlace(prevTop);
     renderNav();

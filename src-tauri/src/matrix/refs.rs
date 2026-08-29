@@ -30,7 +30,15 @@ static CACHE: std::sync::LazyLock<RwLock<HashMap<String, (u64, Value)>>> =
 /// are plumbing — a player saying "6-1" means nothing to a reader, and a card
 /// that says nothing is worse than plain text.
 pub fn is_referenceable(kind: u8) -> bool {
-    matches!(kind, 0 | 1 | 2 | 4 | 5 | 9)
+    matches!(kind, 0 | 1 | 2 | 4 | 5 | 9 | 10)
+}
+
+/// One thing a card lets you DO. A summary that only reads is a lookup; the
+/// point of putting an object in the conversation is to act on it there —
+/// watch the planet someone just named, message its owner, rent the capacity
+/// a provider just advertised.
+fn action(key: &str, label: &str, icon: &str) -> Value {
+    json!({ "key": key, "label": label, "icon": icon })
 }
 
 /// Split `5-2184` into its type code and index, rejecting anything that is not
@@ -129,6 +137,16 @@ fn player_card(id: &str, v: &Value) -> Value {
     let load = num(grid.get("load")) + num(grid.get("structsLoad"));
     let capacity = num(grid.get("capacity")) + num(grid.get("connectionCapacity"));
 
+    // Somebody named in chat is somebody you may want to look at or talk to.
+    let mut actions = Vec::new();
+    if !text(p.get("planetId")).is_empty() {
+        actions.push(action("watch_planet", "Planet", "icon-planet"));
+    }
+    if !text(p.get("fleetId")).is_empty() {
+        actions.push(action("watch_fleet", "Fleet", "icon-fleet-tile"));
+    }
+    actions.push(action("message", "Message", "icon-phone"));
+
     json!({
         "id": id, "kind": "player", "icon": "icon-member",
         "title": if name.is_empty() { id.to_string() } else { name },
@@ -142,6 +160,9 @@ fn player_card(id: &str, v: &Value) -> Value {
             row("Planet", text(p.get("planetId"))),
             row("Fleet", text(p.get("fleetId"))),
         ],
+        "actions": actions,
+        "planet_id": text(p.get("planetId")),
+        "fleet_id": text(p.get("fleetId")),
     })
 }
 
@@ -175,6 +196,8 @@ fn planet_card(id: &str, v: &Value) -> Value {
             row("Structs", format!("{}/{}", filled, total)),
             row("Status", if status.is_empty() { "—".to_string() } else { status }),
         ],
+        "actions": [action("watch_planet", "Watch", "icon-planet")],
+        "planet_id": id,
     })
 }
 
@@ -233,6 +256,9 @@ fn struct_card(id: &str, v: &Value) -> Value {
             row("Ambit", if ambit.is_empty() { "—".to_string() } else { ambit }),
             row("Location", text(st.get("locationId"))),
         ],
+        // A struct is somewhere; watching that somewhere is the useful verb.
+        "actions": [action("watch_planet", "Watch", "icon-planet")],
+        "planet_id": text(st.get("locationId")),
     })
 }
 
@@ -265,6 +291,8 @@ fn fleet_card(id: &str, v: &Value) -> Value {
             row("Location", text(f.get("locationId"))),
             row("Structs", format!("{}/{}", filled, total)),
         ],
+        "actions": [action("watch_fleet", "Watch", "icon-fleet-tile")],
+        "fleet_id": id,
     })
 }
 
@@ -311,6 +339,83 @@ fn guild_card(id: &str, v: &Value) -> Value {
     })
 }
 
+/// A provider is an OFFER: someone renting energy capacity at a price. It is
+/// the one object in the game whose card should let you close the deal where
+/// you read about it — which is why chat is a good place for it.
+fn provider_card(id: &str, v: &Value) -> Value {
+    let p = v.get("Provider").unwrap_or(&Value::Null);
+    let rate = p.get("rate").cloned().unwrap_or(Value::Null);
+    let rate_amount = num(rate.get("amount"));
+    let rate_denom = text(rate.get("denom"));
+    let policy = text(p.get("accessPolicy"));
+
+    // `openMarket` is the only policy any player can act on: `guildMarket`
+    // needs a permission from that guild and `closedMarket` refuses everyone.
+    // Offering a button that will certainly be rejected is worse than none.
+    let open = policy == "openMarket";
+    let actions = if open {
+        vec![action("agreement", "Rent capacity", "icon-transfers")]
+    } else {
+        Vec::new()
+    };
+
+    json!({
+        "id": id, "kind": "provider", "icon": "icon-transfers",
+        "title": format!("Provider {}", id),
+        "subtitle": format!("From {}", player_label(&text(p.get("owner")))),
+        "rows": [
+            row("Rate", format!("{} {} / W / block", rate_amount as i64, denom_label(&rate_denom))),
+            row("Capacity", format!("{} – {}",
+                format_power(num(p.get("capacityMinimum"))),
+                format_power(num(p.get("capacityMaximum"))))),
+            row("Duration", format!("{} – {} blocks",
+                compact(num(p.get("durationMinimum"))),
+                compact(num(p.get("durationMaximum"))))),
+            row("Market", if policy.is_empty() { "—".to_string() } else { policy.clone() }),
+        ],
+        "actions": actions,
+        // Everything the rent form needs, so it can price a deal without a
+        // second round trip.
+        "provider": {
+            "rate_amount": rate_amount,
+            "rate_denom": rate_denom,
+            "denom_label": denom_label(&text(rate.get("denom"))),
+            "capacity_min": num(p.get("capacityMinimum")),
+            "capacity_max": num(p.get("capacityMaximum")),
+            "duration_min": num(p.get("durationMinimum")),
+            "duration_max": num(p.get("durationMaximum")),
+            "open": open,
+        },
+    })
+}
+
+/// A plain count, short enough for a card: `1000000` → `1M`. Block counts run
+/// to seven digits and a card is 320px wide.
+fn compact(n: f64) -> String {
+    let n = n.max(0.0);
+    if n >= 1e9 {
+        format!("{}B", (n / 1e9).round() as i64)
+    } else if n >= 1e6 {
+        format!("{}M", (n / 1e6).round() as i64)
+    } else if n >= 10_000.0 {
+        format!("{}K", (n / 1e3).round() as i64)
+    } else {
+        format!("{}", n.round() as i64)
+    }
+}
+
+/// A guild token's cosmetic name — `uguild.0-1` is displayed as whatever that
+/// guild calls it. Never invent one: an unknown denom keeps its chain name.
+fn denom_label(chain_denom: &str) -> String {
+    if chain_denom.is_empty() {
+        return "—".into();
+    }
+    crate::guild_config::denom_registry()
+        .get(chain_denom)
+        .map(|d| d.base_name.clone())
+        .unwrap_or_else(|| chain_denom.to_string())
+}
+
 // ── Resolution ──────────────────────────────────────────────────────────────
 
 /// Look one id up and render its card. `None` when the id is not a type worth
@@ -337,6 +442,7 @@ pub async fn resolve(id: &str) -> Option<Value> {
         4 => "substation",
         5 => "struct",
         9 => "fleet",
+        10 => "provider",
         _ => return None,
     };
     let client = crate::mcp::cosmos_client::CosmosClient::new();
@@ -351,6 +457,7 @@ pub async fn resolve(id: &str) -> Option<Value> {
         4 => substation_card(id, &v),
         5 => struct_card(id, &v),
         9 => fleet_card(id, &v),
+        10 => provider_card(id, &v),
         _ => return None,
     };
     if let Ok(mut cache) = CACHE.write() {
@@ -385,12 +492,13 @@ mod tests {
     #[test]
     fn only_types_a_reader_cares_about_get_a_card() {
         // Guild, player, planet, substation, struct, fleet.
-        for k in [0u8, 1, 2, 4, 5, 9] {
+        // …and a provider, which is an offer you can act on.
+        for k in [0u8, 1, 2, 4, 5, 9, 10] {
             assert!(is_referenceable(k), "type {} should be referenceable", k);
         }
         // Plumbing: an allocation or infusion id tells a reader nothing, and a
         // card that says nothing is worse than plain text.
-        for k in [3u8, 6, 7, 8, 10, 11] {
+        for k in [3u8, 6, 7, 8, 11] {
             assert!(!is_referenceable(k), "type {} should not be", k);
         }
     }
@@ -434,6 +542,62 @@ mod tests {
         let d = struct_card("5-3", &dead);
         assert_eq!(d["rows"][0]["value"], "Destroyed");
         assert_eq!(d["icon"], "icon-wreckage");
+    }
+
+    #[test]
+    fn only_an_open_market_offers_to_rent() {
+        // Shape transcribed from the live provider 10-1 (2026-08-29).
+        let base = |policy: &str| json!({
+            "Provider": {
+                "owner": "1-170", "substationId": "4-4",
+                "rate": { "denom": "uguild.0-1", "amount": "1" },
+                "accessPolicy": policy,
+                "capacityMinimum": "1000", "capacityMaximum": "1000000000",
+                "durationMinimum": "100", "durationMaximum": "1000000"
+            }
+        });
+        let open = provider_card("10-1", &base("openMarket"));
+        assert_eq!(open["actions"].as_array().unwrap().len(), 1);
+        assert_eq!(open["actions"][0]["key"], "agreement");
+        assert_eq!(open["provider"]["open"], true);
+
+        // A guild or closed market would reject the transaction, so the card
+        // must not offer a button that is certain to fail.
+        for policy in ["guildMarket", "closedMarket", ""] {
+            let c = provider_card("10-1", &base(policy));
+            assert!(c["actions"].as_array().unwrap().is_empty(), "{}", policy);
+            assert_eq!(c["provider"]["open"], false, "{}", policy);
+        }
+    }
+
+    #[test]
+    fn big_counts_stay_short_enough_for_a_card() {
+        assert_eq!(compact(100.0), "100");
+        assert_eq!(compact(9999.0), "9999");
+        assert_eq!(compact(1_000_000.0), "1M");
+        assert_eq!(compact(1_000_000_000.0), "1B");
+        // A raw 1000000 pushed "blocks" onto its own line in a 320px card.
+        assert!(compact(1_000_000.0).len() <= 3);
+    }
+
+    #[test]
+    fn a_player_card_offers_what_the_player_has() {
+        let with_both = json!({
+            "Player": { "name": "JPEG", "planetId": "2-21740", "fleetId": "9-61" },
+            "gridAttributes": {}, "playerInventory": {}
+        });
+        let keys: Vec<String> = player_card("1-61", &with_both)["actions"]
+            .as_array().unwrap().iter()
+            .map(|a| a["key"].as_str().unwrap().to_string()).collect();
+        assert_eq!(keys, vec!["watch_planet", "watch_fleet", "message"]);
+
+        // A player with no planet must not offer to watch one.
+        let homeless = json!({ "Player": { "name": "X", "fleetId": "9-1" },
+                               "gridAttributes": {}, "playerInventory": {} });
+        let keys: Vec<String> = player_card("1-2", &homeless)["actions"]
+            .as_array().unwrap().iter()
+            .map(|a| a["key"].as_str().unwrap().to_string()).collect();
+        assert_eq!(keys, vec!["watch_fleet", "message"]);
     }
 
     #[test]

@@ -276,6 +276,21 @@ fn base(session: &Session) -> String {
 
 // ── Event rendering ─────────────────────────────────────────────────────────
 
+/// The state a room sets up with. Emitted in a burst at creation, meaningless
+/// to a reader, and never worth a line in the timeline.
+const SETUP_EVENTS: &[&str] = &[
+    "m.room.create",
+    "m.room.power_levels",
+    "m.room.join_rules",
+    "m.room.history_visibility",
+    "m.room.guest_access",
+    "m.room.server_acl",
+    "m.room.encryption",
+    "m.room.canonical_alias",
+    "m.space.child",
+    "m.space.parent",
+];
+
 fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<Message> {
     let etype = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let sender = ev.get("sender").and_then(|s| s.as_str()).unwrap_or("");
@@ -318,16 +333,31 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
             .and_then(|m| m.as_str())
             .unwrap_or("");
         match membership {
-            "join" => ("notice", "joined".to_string()),
-            "leave" => ("notice", "left".to_string()),
-            "ban" => ("notice", "was banned".to_string()),
+            "join" => ("event", "joined".to_string()),
+            "leave" => ("event", "left".to_string()),
+            "ban" => ("event", "was banned".to_string()),
+            "invite" => ("event", "was invited".to_string()),
             // A membership change with nothing to say (a profile edit) is the
             // one event genuinely worth dropping.
             _ => return None,
         }
+    } else if SETUP_EVENTS.contains(&etype) {
+        // Room plumbing. Every room ever created emits this burst — "changed
+        // create", "changed power_levels", "changed join_rules",
+        // "changed history_visibility", "changed guest_access" — and not one
+        // of them is something a player wants to read. They were the first
+        // six lines of every room in the client.
+        return None;
+    } else if etype == "m.room.name" {
+        let n = content.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        ("event", if n.is_empty() { "removed the room name".into() }
+                  else { format!("named the room “{}”", n) })
+    } else if etype == "m.room.topic" {
+        ("event", "changed the topic".to_string())
     } else if etype.starts_with("m.room.") {
-        // State changes we have no dedicated rendering for still get a line.
-        ("unknown", format!("changed {}", etype.trim_start_matches("m.room.")))
+        // Anything else that IS state but has no rendering of its own: still
+        // worth a line, because a silently dropped event looks like a bug.
+        ("event", format!("changed {}", etype.trim_start_matches("m.room.")))
     } else {
         return None;
     };
@@ -1476,11 +1506,17 @@ pub async fn profile(session: &Session) -> Result<Value, String> {
     let v = authed(session, move |c, s| c.get(&url).bearer_auth(&s.access_token))
         .await
         .unwrap_or(Value::Null);
+    // The composer shows YOUR face, so the profile has to carry it. The
+    // homeserver knows nothing about game portraits — the on-chain attributes
+    // come from the same galaxy directory every other portrait uses.
+    let ident = directory::player_id_of(&session.user_id).and_then(|pid| directory::get(&pid));
     Ok(json!({
         "user_id": session.user_id,
         "display_name": v.get("displayname").and_then(|d| d.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| localpart(&session.user_id)),
+        "pfp_attrs": ident.as_ref().and_then(|i| i.pfp_attrs.clone()),
+        "tag": ident.as_ref().map(|i| i.tag.clone()).unwrap_or_default(),
     }))
 }
 
@@ -1580,12 +1616,54 @@ mod tests {
     fn an_unhandled_state_change_is_summarised_not_dropped() {
         let gs = GuildState::default();
         let ev = json!({
-            "type": "m.room.server_acl", "event_id": "$1", "sender": "@a:h",
-            "origin_server_ts": 1, "content": { "deny": ["evil.example"] }
+            "type": "m.room.pinned_events", "event_id": "$1", "sender": "@a:h",
+            "origin_server_ts": 1, "content": { "pinned": ["$x"] }
         });
         let m = render_event(&ev, &gs, "!r:h", "@me:h").unwrap();
-        assert_eq!(m.kind, "unknown");
-        assert!(m.body.contains("server_acl"));
+        assert_eq!(m.kind, "event");
+        assert!(m.body.contains("pinned_events"), "{}", m.body);
+    }
+
+    /// Every room emits this burst when it is created. It opened every
+    /// timeline in the client with six lines of "changed create",
+    /// "changed power_levels", "changed join_rules"… none of which is
+    /// something a player reads.
+    #[test]
+    fn room_setup_events_never_reach_the_timeline() {
+        let gs = GuildState::default();
+        for t in [
+            "m.room.create", "m.room.power_levels", "m.room.join_rules",
+            "m.room.history_visibility", "m.room.guest_access",
+            "m.room.canonical_alias", "m.room.server_acl", "m.room.encryption",
+        ] {
+            let ev = json!({
+                "type": t, "event_id": "$1", "sender": "@a:h",
+                "origin_server_ts": 1, "content": {}
+            });
+            assert!(render_event(&ev, &gs, "!r:h", "@me:h").is_none(), "{} leaked", t);
+        }
+    }
+
+    #[test]
+    fn membership_and_renames_are_events_not_chat() {
+        let gs = GuildState::default();
+        let join = json!({
+            "type": "m.room.member", "event_id": "$1", "sender": "@a:h",
+            "origin_server_ts": 1, "content": { "membership": "join" }
+        });
+        let m = render_event(&join, &gs, "!r:h", "@me:h").unwrap();
+        // Its own kind, so the window can render it as a dim one-liner rather
+        // than as something someone said.
+        assert_eq!(m.kind, "event");
+        assert_eq!(m.body, "joined");
+
+        let rename = json!({
+            "type": "m.room.name", "event_id": "$2", "sender": "@a:h",
+            "origin_server_ts": 1, "content": { "name": "Guild Lobby" }
+        });
+        let r = render_event(&rename, &gs, "!r:h", "@me:h").unwrap();
+        assert_eq!(r.kind, "event");
+        assert!(r.body.contains("Guild Lobby"), "{}", r.body);
     }
 
     #[test]

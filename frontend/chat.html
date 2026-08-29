@@ -110,6 +110,26 @@
     #chat-people-search label.sui-input-text { width: 100%; }
     #chat-people-search input[type=text] { width: 100%; }
 
+    /* ── Room events ───────────────────────────────────────────────────────
+       Joins, leaves, renames. Real, but not conversation: one dim line, no
+       sender header, and consecutive ones packed tight so a room's whole
+       history of comings and goings costs a few lines rather than a screen. */
+    .chat-event {
+      display: flex; align-items: baseline; gap: var(--spacing-sm);
+      color: var(--text-hint); opacity: .65;
+      padding-left: calc(var(--spacing-sm) + 2px);
+    }
+    .chat-event + .chat-event { margin-top: -2px; }
+    .chat-event-who {
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase; flex: 0 0 auto;
+    }
+    .chat-event-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .chat-event-time {
+      margin-left: auto; flex: 0 0 auto;
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+    }
+
     /* ── Timeline ──────────────────────────────────────────────────────── */
     .chat-msg {
       display: flex; flex-direction: column; gap: 2px;
@@ -222,6 +242,42 @@
     .chat-ref-portrait { width: 32px; height: 32px; flex: 0 0 32px; overflow: hidden; }
     .chat-ref-portrait .pfp-viewer-layer { image-rendering: pixelated; }
     .chat-ref .chat-kv { padding: 1px 0; }
+
+    /* What a card lets you DO. A row of the game's own screen buttons, sized
+       down to belong to a summary rather than to compete with it. */
+    .chat-ref-actions {
+      display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
+      padding: 0 var(--spacing-sm) var(--spacing-sm);
+    }
+    .chat-ref-action {
+      display: inline-flex; align-items: center; gap: var(--spacing-xs);
+    }
+    .chat-ref-portrait.chat-mod-clickable { cursor: pointer; }
+    .chat-ref-portrait.chat-mod-clickable:hover { outline: 1px solid var(--accent-primary); }
+
+    /* A card's own outcome line — in place, because the card is where the
+       action was taken. */
+    .chat-ref-note {
+      padding: 0 var(--spacing-sm) var(--spacing-sm);
+      color: var(--text-player-primary);
+    }
+    .chat-ref-note.chat-mod-error { color: var(--text-enemy-primary); }
+
+    /* Renting capacity: two numbers and the price they come to. */
+    .chat-rent {
+      display: flex; flex-direction: column; gap: var(--spacing-sm);
+      padding: var(--spacing-sm);
+      border-top: 1px solid var(--border-subtle);
+    }
+    .chat-rent-field label.sui-input-text { width: 100%; }
+    .chat-rent-field input { width: 100%; }
+    /* The number about to be spent, stated before the button that spends it. */
+    .chat-rent-quote {
+      color: var(--text-warning); text-align: left;
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase;
+    }
+
     .chat-ref.chat-room-row { cursor: pointer; }
 
     /* The top of the log: load more, or the beginning of the room. */
@@ -246,10 +302,17 @@
        chunks, connectors, .sui-panel-btn). These rules only place it at the
        foot of the page and let the middle chunk take the slack — everything
        visible is the game's. */
-    /* The panel art has no outer margin of its own — in the HUD it floats over
-       a map. Docked at the foot of a screen it needs one, or its edges collide
-       with the window frame. */
-    #chat-composer { flex: 0 0 auto; padding: var(--spacing-sm) var(--spacing-md); }
+    /* Full-bleed: the action bar is the bottom edge of the panel, exactly as
+       it is in the game's HUD, so it runs to the frame with nothing between. */
+    /* `.sui-panel-chunk` lays its children out with `align-items: flex-start`,
+       so the host has to opt into full width; and
+       `.sui-panel-wrapper-fit-content` is `display: inline-block`, which sizes
+       the bar to its own contents. Both have to be overridden or the action
+       bar stops short of the frame on the right. */
+    #chat-composer-host { flex: 0 0 auto; align-self: stretch; width: 100%; }
+    #chat-composer-host:empty { display: none; }
+    #chat-composer { display: block; width: 100%; padding: 0; }
+    #chat-composer .sui-panel { width: 100%; }
     #chat-composer .sui-panel { width: 100%; }
     /* The panel's chunks size to content; the message field is the one that
        should absorb the width. */
@@ -264,7 +327,16 @@
       font-family: 'DirectiveZero', sans-serif; font-size: inherit;
       padding: var(--spacing-sm);
     }
-    #chat-composer input[type=text]::placeholder { color: var(--text-hint); }
+    /* A placeholder should read as an invitation, not as content. SUI's own
+       is `--text-hint` (#A7C0C6) against `--text-body` (#C5D7D9) — barely a
+       shade apart, so "Message, or /help" looked like something already
+       typed. Same hue, just receding: no new colour, only less of it. */
+    #chat-composer input::placeholder,
+    #chat-people-search input::placeholder,
+    .chat-rent input::placeholder {
+      color: var(--text-hint);
+      opacity: .45;
+    }
     #chat-composer .pfp-viewer-layer { image-rendering: pixelated; }
 
     /* ── Notices ──────────────────────────────────────────────────────── */
@@ -301,7 +373,13 @@
     .chat-kv { display: flex; justify-content: space-between; gap: var(--spacing-md);
       padding: 2px 0; align-self: stretch; }
     .chat-kv > :first-child { color: var(--text-hint); white-space: nowrap; }
-    .chat-kv > :last-child { color: var(--text-body); text-align: right; word-break: break-all; }
+    /* Break between words, not inside them: `word-break: break-all` split
+       "blocks" across two lines as "bloc / ks". Long unbroken tokens (ids,
+       hashes) still wrap, via overflow-wrap. */
+    .chat-kv > :last-child {
+      color: var(--text-body); text-align: right;
+      word-break: normal; overflow-wrap: anywhere;
+    }
   </style>
 </head>
 <body>
@@ -340,6 +418,13 @@
           <div id="menu-page-body-content"></div>
         </div>
       </div>
+
+      <!-- The composer lives HERE, a sibling of the screen rather than a child
+           of it — which is where the game puts its HUD action bars. Inside the
+           screen it sat behind that screen's 2px border and the panel chunk's
+           8px frame, leaving a dark band under the bar. Out here it is the
+           bottom edge of the panel, flush to the frame. -->
+      <div id="chat-composer-host"></div>
 
     </div>
     <div class="sui-panel-edge-right"></div>

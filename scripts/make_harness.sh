@@ -623,6 +623,9 @@ cat > "$CFIX" <<'EOF'
       sender_tag: 'SN.C', player_id: '1-42', kind: 'text', self: false,
       admin: false, ts: 1787900010000,
       body: 'see https://playstructs.com/docs. also javascript:alert(1) and https://beta.playstructs.com/planet/2-15361' },
+    { event_id: '$12', sender: '@1-61:matrix.beta.playstructs.com', sender_name: 'JPEG',
+      sender_tag: 'SN.C', player_id: '1-61', kind: 'text', self: false,
+      admin: false, ts: 1787900011000, body: 'renting from 10-1 if anyone needs power' },
   ];
 
   var REFS = {
@@ -637,9 +640,24 @@ cat > "$CFIX" <<'EOF'
     '1-61': { id: '1-61', kind: 'player', icon: 'icon-member',
       title: 'JPEG', subtitle: '[SN.C] PID #1-61',
       pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}',
+      planet_id: '2-223', fleet_id: '9-61',
+      actions: [{ key: 'watch_planet', label: 'Planet', icon: 'icon-planet' },
+                { key: 'watch_fleet', label: 'Fleet', icon: 'icon-fleet-tile' },
+                { key: 'message', label: 'Message', icon: 'icon-phone' }],
       rows: [{ label: 'Alpha', value: '9.4Kg' },
              { label: 'Energy', value: '128.01KW/133.64KW' },
              { label: 'Planet', value: '2-223' }, { label: 'Fleet', value: '9-61' }] },
+    // An offer you can close from the conversation that mentioned it.
+    '10-1': { id: '10-1', kind: 'provider', icon: 'icon-transfers',
+      title: 'Provider 10-1', subtitle: 'From [OH] Someone',
+      actions: [{ key: 'agreement', label: 'Rent capacity', icon: 'icon-transfers' }],
+      provider: { rate_amount: 1, rate_denom: 'uguild.0-1', denom_label: 'ack',
+                  capacity_min: 1000, capacity_max: 1000000000,
+                  duration_min: 100, duration_max: 1000000, open: true },
+      rows: [{ label: 'Rate', value: '1 ack / W / block' },
+             { label: 'Capacity', value: '1KW – 1MW' },
+             { label: 'Duration', value: '100 – 1M blocks' },
+             { label: 'Market', value: 'openMarket' }] },
   };
 
   var ROOMS = [
@@ -780,6 +798,8 @@ cat > "$CFIX" <<'EOF'
     },
     matrix_badge: null,
     matrix_open_url: null,
+    mcp_raid_view_open: null,
+    matrix_agreement_open: { ok: true, tx: 'ABCD1234' },
     matrix_mark_read: { ok: true },
     // Answers only for ids the chain knows; 1-1945 is absent on purpose.
     matrix_refs: null,

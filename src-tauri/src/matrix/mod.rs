@@ -536,6 +536,80 @@ pub async fn matrix_mark_read(
     Ok(json!({ "ok": true }))
 }
 
+/// Rent capacity from a provider, straight from the card that advertised it.
+///
+/// The whole cost — `rate × capacity × duration` — is debited AT OPEN in the
+/// provider's own denom, not metered per block and not necessarily in Alpha.
+/// So this reports the quote it is about to commit to, and the window shows it
+/// before the player confirms: an agreement is a purchase, and a purchase made
+/// by accident from a chat message would be indefensible.
+#[tauri::command]
+pub async fn matrix_agreement_open(
+    app: tauri::AppHandle,
+    provider_id: String,
+    capacity: u64,
+    duration: u64,
+) -> Result<Value, String> {
+    let provider_id = provider_id.trim().to_string();
+    if refs::parse_id(&provider_id).map(|(k, _)| k) != Some(10) {
+        return Err(format!("{} is not a provider", provider_id));
+    }
+    if capacity == 0 || duration == 0 {
+        return Err("capacity and duration are both required".into());
+    }
+
+    // Re-read the provider rather than trusting numbers that came back from
+    // the window: the card may be minutes old and the bounds are the chain's.
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let v = client
+        .query_entity("provider", &provider_id)
+        .await
+        .map_err(|e| format!("provider {}: {}", provider_id, e))?;
+    let p = v.get("Provider").cloned().unwrap_or(Value::Null);
+    let n = |k: &str| -> u64 {
+        p.get(k)
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    };
+    let (cmin, cmax) = (n("capacityMinimum"), n("capacityMaximum"));
+    let (dmin, dmax) = (n("durationMinimum"), n("durationMaximum"));
+    if cmax > 0 && (capacity < cmin || capacity > cmax) {
+        return Err(format!("capacity must be between {} and {}", cmin, cmax));
+    }
+    if dmax > 0 && (duration < dmin || duration > dmax) {
+        return Err(format!("duration must be between {} and {} blocks", dmin, dmax));
+    }
+
+    let creator = crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .and_then(|gs| gs.wallet_address.clone())
+        .ok_or("not signed in to the game")?;
+
+    let payload = json!({
+        "creator": creator,
+        "providerId": provider_id,
+        "capacity": capacity.to_string(),
+        "duration": duration.to_string(),
+    });
+    // Index 0 is the primary — the player themselves, not a virtual worker.
+    let res = crate::mcp::tx_retry::sign_with_retry(
+        &app,
+        0,
+        "/structs.structs.MsgAgreementOpen",
+        payload,
+        &format!("comms agreement {}", provider_id),
+    )
+    .await?;
+
+    Ok(json!({
+        "ok": true,
+        "provider_id": provider_id,
+        "tx": res.get("transactionHash").and_then(|h| h.as_str()).unwrap_or("(pending)"),
+    }))
+}
+
 // ── The window ──────────────────────────────────────────────────────────────
 
 /// Idempotent: a second request raises the window already open rather than
