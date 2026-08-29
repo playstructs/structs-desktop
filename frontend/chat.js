@@ -50,6 +50,9 @@
     people: [],
     peopleQuery: '',
     peopleLoading: false,
+    browse: [],
+    browseQuery: '',
+    browseLoading: false,
     // roomId → ts of the newest message the reader has actually seen. Feeds
     // the unread divider, the way every IRC client since ircII has marked it.
     lastRead: {},
@@ -59,6 +62,9 @@
     // Who is typing in the room being watched. Ephemeral: replaced wholesale
     // by each m.typing, never accumulated.
     typing: [],
+    // Object ids whose card the reader has opened by hand. The first
+    // reference in a message opens itself; these are the rest.
+    openRefs: {},
   };
 
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
@@ -134,6 +140,112 @@
     return false;
   }
   Chat.mentionsMe = mentionsMe;
+
+  // ── Object references ─────────────────────────────────────────────────────
+  // Every noun in Structs is a `<type>-<index>` id and players already talk in
+  // them. Finding those in a message and showing a small summary is the single
+  // biggest thing chat can do for a game whose whole vocabulary is ids.
+  //
+  // The boundary is strict on BOTH sides: `1-194` and `1-1945` are different
+  // objects, and a loose match attributes one to the other.
+  var ID_RE = /(^|[^0-9A-Za-z_-])(\d{1,2}-\d{1,9})(?![0-9-])/g;
+  // Only types a reader cares about. Mirrors refs.rs::is_referenceable —
+  // allocations and infusions are plumbing, and a card that says nothing is
+  // worse than plain text.
+  var REF_KINDS = { 0: 1, 1: 1, 2: 1, 4: 1, 5: 1, 9: 1 };
+
+  function idsIn(body) {
+    var out = [];
+    if (!body) return out;
+    ID_RE.lastIndex = 0;
+    var m;
+    while ((m = ID_RE.exec(body)) !== null) {
+      var id = m[2];
+      if (!REF_KINDS[parseInt(id.split('-')[0], 10)]) continue;
+      if (out.indexOf(id) === -1) out.push(id);
+      // The regex consumes the leading boundary char, so back up one to let
+      // two adjacent ids ("2-1 5-2") both match.
+      ID_RE.lastIndex = m.index + m[0].length;
+    }
+    return out;
+  }
+  Chat.idsIn = idsIn;
+
+  // id → card, or `false` while a lookup is in flight, or null when the chain
+  // had nothing. Shared across the whole timeline: a room arguing about one
+  // raid names it in every other line.
+  var refCards = {};
+  var refQueue = [];
+  var refTimer = null;
+
+  function wantRefs(ids) {
+    var fresh = ids.filter(function (id) {
+      return !Object.prototype.hasOwnProperty.call(refCards, id);
+    });
+    if (!fresh.length) return;
+    fresh.forEach(function (id) { refCards[id] = false; refQueue.push(id); });
+    // Batched: one message with six ids should be one round trip, not six.
+    if (refTimer) return;
+    refTimer = setTimeout(flushRefs, 30);
+  }
+
+  function flushRefs() {
+    refTimer = null;
+    var batch = refQueue.splice(0, 8);
+    if (!batch.length) return;
+    invoke('matrix_refs', { ids: batch })
+      .then(function (res) {
+        (res && res.refs || []).forEach(function (card) { refCards[card.id] = card; });
+        // Anything the chain did not know stays null so it is never retried
+        // in a loop; it simply renders as plain text.
+        batch.forEach(function (id) { if (!refCards[id]) refCards[id] = null; });
+        if (refQueue.length) refTimer = setTimeout(flushRefs, 30);
+        render();
+      })
+      .catch(function () {
+        batch.forEach(function (id) { refCards[id] = null; });
+      });
+  }
+
+  // The card itself: the same title / subtitle / label-value shape Team Ops
+  // and the dashboard use, built from .sui-data-card.
+  function refCard(card) {
+    var box = el('div', 'sui-data-card chat-ref');
+
+    // NOT .sui-data-card-header: that is a filled label chip (the "IDENTITY"
+    // and "SIGN-IN" captions), and a title plus portrait inverted onto the
+    // accent is unreadable. The identity row is the roster's own idiom.
+    var head = el('div', 'chat-ref-head');
+    if (card.pfp_attrs) {
+      var portrait = el('div', 'chat-ref-portrait');
+      portrait.appendChild(pfpPortrait(card.pfp_attrs));
+      head.appendChild(portrait);
+    } else {
+      head.appendChild(icon(card.icon || 'icon-info', 'sui-icon-md'));
+    }
+    var names = el('div', 'chat-ref-names');
+    names.appendChild(el('div', 'sui-text-header', card.title || card.id));
+    if (card.subtitle) names.appendChild(el('div', 'sui-text-hint', card.subtitle));
+    head.appendChild(names);
+    box.appendChild(head);
+
+    var body = el('div', 'sui-data-card-body');
+    (card.rows || []).forEach(function (r) {
+      var row = el('div', 'chat-kv');
+      row.appendChild(el('div', null, r.label));
+      row.appendChild(el('div', null, r.value));
+      body.appendChild(row);
+    });
+    box.appendChild(body);
+
+    // A player card is also a way to reach them.
+    if (card.kind === 'player') {
+      box.classList.add('chat-room-row');
+      box.title = 'Message ' + (card.title || card.id);
+      box.addEventListener('click', function () { startDm(card.id); });
+    }
+    return box;
+  }
 
   // ── Time ──────────────────────────────────────────────────────────────────
   // 24-hour, zero-padded: this is a HUD, not prose, and a stable width keeps
@@ -252,7 +364,7 @@
     { key: 'galaxy', label: 'Galaxy Net' },
   ];
 
-  function roomRow(r) {
+  function roomRow(r, browsing) {
     var row = el('div', 'sui-result-row chat-room-row');
 
     var left = el('div', 'sui-result-row-left-section');
@@ -272,11 +384,13 @@
     block.appendChild(el('span', null, r.name || r.canonical_alias || r.room_id));
     block.appendChild(el('br'));
     // A DM's subtitle is who it is with; a channel's is how many are in it.
+    // Browsing adds the topic, because that is the whole basis for choosing.
     var sub = r.player_id
       ? el('span', 'sui-text-hint',
           (r.tag ? '[' + r.tag + '] ' : '') + 'PID #' + r.player_id)
       : el('span', 'sui-text-hint',
-          fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players'));
+          fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')
+          + (browsing && r.topic ? ' · ' + r.topic : ''));
     block.appendChild(sub);
     info.appendChild(block);
     left.appendChild(info);
@@ -292,6 +406,9 @@
       if (r.mention) b.title = 'You were mentioned';
       right.appendChild(b);
     }
+    if (browsing && r.joined) {
+      right.appendChild(el('div', 'sui-badge sui-mod-default', 'Joined'));
+    }
     if (!r.joined) {
       var join = el('button', 'sui-screen-btn sui-mod-secondary', 'Join');
       join.addEventListener('click', function (ev) {
@@ -300,7 +417,12 @@
         join.classList.add('sui-mod-disabled');
         join.textContent = 'Joining';
         invoke('matrix_join', { guildId: S.guildId, roomId: r.room_id })
-          .then(function () { return refreshRooms(); })
+          .then(function () {
+            return refreshRooms().then(function () {
+              // Joining from the directory is a decision to go there.
+              if (browsing) openRoom(r.room_id);
+            });
+          })
           .catch(function (e) {
             join.textContent = 'Join';
             join.disabled = false;
@@ -327,6 +449,14 @@
     // beside them, because starting a conversation is the one action this
     // page has that is not "open a thing already on it".
     var right = el('div', 'chat-header-actions');
+    var browse = el('a', 'sui-nav-btn');
+    browse.id = 'chat-browse';
+    browse.href = 'javascript:void(0)';
+    browse.title = 'Browse channels';
+    browse.appendChild(icon('icon-guild-directory sui-text-secondary'));
+    browse.addEventListener('click', function () { go('browse'); });
+    right.appendChild(browse);
+
     var newMsg = el('a', 'sui-nav-btn');
     newMsg.id = 'chat-new-message';
     newMsg.href = 'javascript:void(0)';
@@ -342,14 +472,18 @@
     var scroll = el('div', 'chat-scroll');
 
     if (S.loading) {
-      scroll.appendChild(noticeBlock('Loading', 'Reading the channel directory.'));
-    } else if (!S.rooms.length) {
+      scroll.appendChild(noticeBlock('Loading', 'Reading your channels.'));
+    } else if (!S.rooms.filter(function (r) { return r.joined; }).length) {
       scroll.appendChild(noticeBlock(
-        'No channels',
-        'This network has no rooms you can see yet.'));
+        'No channels yet',
+        'You have not joined anything. Browse the directory to find rooms.'));
     } else {
+      // Only rooms you are IN. What else exists lives in Browse — a list that
+      // mixes "your channels" with "every channel on the server" answers
+      // neither question well.
+      var mine = S.rooms.filter(function (r) { return r.joined; });
       SECTIONS.forEach(function (sec) {
-        var rows = S.rooms.filter(function (r) { return (r.section || 'galaxy') === sec.key; });
+        var rows = mine.filter(function (r) { return (r.section || 'galaxy') === sec.key; });
         if (!rows.length) return;
         var group = el('div', 'chat-net-group');
         group.appendChild(el('div', 'chat-net-label', sec.label));
@@ -364,6 +498,73 @@
 
     page.appendChild(scroll);
     return page;
+  }
+
+  // ── Browse ────────────────────────────────────────────────────────────────
+  // IRC's `/list`: everything public on the homeserver, searched server-side
+  // because a busy server only ever hands us a page and filtering locally
+  // would filter the wrong set.
+  function renderBrowse() {
+    var page = el('div', 'chat-page');
+    page.appendChild(pageHeader('Browse Channels', function () { go('channels'); }, null));
+
+    var search = el('div');
+    search.id = 'chat-people-search';
+    var label = el('label', 'sui-input-text');
+    label.setAttribute('for', 'chat-browse-query');
+    var input = el('input');
+    input.type = 'text';
+    input.id = 'chat-browse-query';
+    input.name = 'chat-browse-query';
+    input.placeholder = 'Search channels';
+    input.autocomplete = 'off';
+    input.value = S.browseQuery || '';
+    label.appendChild(input);
+    search.appendChild(label);
+    page.appendChild(search);
+
+    var scroll = el('div', 'chat-scroll');
+    if (S.browseLoading) {
+      scroll.appendChild(noticeBlock('Loading', 'Reading the channel directory.'));
+    } else if (!S.browse.length) {
+      scroll.appendChild(noticeBlock(
+        'Nothing found',
+        S.browseQuery
+          ? 'No channel matches “' + S.browseQuery + '”.'
+          : 'This homeserver publishes no public channels.'));
+    } else {
+      var table = el('div', 'sui-result-table');
+      var list = el('div', 'sui-result-rows');
+      S.browse.forEach(function (r) { list.appendChild(roomRow(r, true)); });
+      table.appendChild(list);
+      scroll.appendChild(table);
+    }
+    page.appendChild(scroll);
+
+    input.addEventListener('input', function () {
+      S.browseQuery = input.value;
+      if (browseTimer) clearTimeout(browseTimer);
+      browseTimer = setTimeout(loadBrowse, 250);
+    });
+    return page;
+  }
+
+  var browseTimer = null;
+
+  function loadBrowse() {
+    browseTimer = null;
+    S.browseLoading = true;
+    return invoke('matrix_browse', { guildId: S.guildId, query: S.browseQuery || null })
+      .then(function (res) {
+        S.browse = (res && res.rooms) || [];
+        S.browseLoading = false;
+        if (S.view === 'browse') render();
+      })
+      .catch(function (e) {
+        S.browseLoading = false;
+        S.browse = [];
+        showError(String(e));
+      });
   }
 
   // ── People ────────────────────────────────────────────────────────────────
@@ -544,9 +745,69 @@
     if (kind === 'emote') body.classList.add('chat-mod-emote');
     else if (kind === 'notice') body.classList.add('chat-mod-notice');
     else if (kind === 'unknown') body.classList.add('chat-mod-unknown');
-    body.textContent = m.body || '';
+    fillBody(body, m.body || '', m.local);
     wrap.appendChild(body);
+
+    // Cards for whatever the message named, under it. Local system lines are
+    // the window talking to itself and never get them.
+    //
+    // Only the FIRST reference expands on its own. A message naming four
+    // objects would otherwise bury itself under four cards, and the point of a
+    // summary is to be an aside. The rest are chips you can open.
+    if (!m.local) {
+      var ids = idsIn(m.body);
+      if (ids.length) {
+        wantRefs(ids);
+        var cards = el('div', 'chat-refs');
+        ids.forEach(function (id, i) {
+          if (i > 0 && !S.openRefs[id]) return;
+          var card = refCards[id];
+          if (card) cards.appendChild(refCard(card));
+        });
+        if (cards.childNodes.length) wrap.appendChild(cards);
+      }
+    }
     return wrap;
+  }
+
+  // Write a message body, marking the object ids inside it.
+  //
+  // Still textContent for every character: the body is split on id boundaries
+  // and each piece is set as text, so no markup from a federated homeserver is
+  // ever parsed. The only nodes added are ones this function creates.
+  function fillBody(node, body, isLocal) {
+    if (isLocal) { node.textContent = body; return; }
+    var ids = idsIn(body);
+    if (!ids.length) { node.textContent = body; return; }
+
+    var at = 0;
+    ID_RE.lastIndex = 0;
+    var m;
+    while ((m = ID_RE.exec(body)) !== null) {
+      var id = m[2];
+      if (!REF_KINDS[parseInt(id.split('-')[0], 10)]) continue;
+      var start = m.index + m[1].length;
+      if (start > at) node.appendChild(document.createTextNode(body.slice(at, start)));
+      // Built in a helper so each chip's handler closes over ITS id: `var` in
+      // this while-loop is function-scoped, so inline closures would every one
+      // of them capture the last id in the message.
+      node.appendChild(idChip(id, ids[0] === id));
+      at = start + id.length;
+    }
+    if (at < body.length) node.appendChild(document.createTextNode(body.slice(at)));
+  }
+
+  function idChip(id, isFirst) {
+    var chip = el('span', 'chat-id', id);
+    if (isFirst) { chip.title = id; return chip; }
+    chip.classList.add('chat-mod-openable');
+    chip.title = (S.openRefs[id] ? 'Hide ' : 'Show ') + id;
+    chip.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (S.openRefs[id]) delete S.openRefs[id]; else S.openRefs[id] = 1;
+      render();
+    });
+    return chip;
   }
 
   // A labelled hairline across the timeline. `alert` makes it the unread
@@ -849,6 +1110,7 @@
       local: true, failed: !!isError, body: body, ts: Date.now(),
     });
     if (S.messages.length > 500) S.messages = S.messages.slice(-500);
+    wasAtBottom = true;                  // an answer to something you typed
     render();
     scrollToEnd();
   }
@@ -941,6 +1203,8 @@
     };
     S.messages.push(msg);
     stopTyping();
+    // Your own message always wins the scroll — you just wrote it.
+    wasAtBottom = true;
     render();
     scrollToEnd();
 
@@ -962,10 +1226,36 @@
       });
   }
 
+  // ── Scroll anchoring ──────────────────────────────────────────────────────
+  // Follow the conversation only while the reader is AT the conversation.
+  // Yanking someone to the bottom because a message arrived while they were
+  // reading scrollback is the single most annoying thing a chat client does.
+  var STICK_SLACK_PX = 48;
+
+  function atBottom() {
+    var t = byId('chat-timeline');
+    if (!t) return true;
+    // jsdom has no layout — every measurement is 0, which reads as "at the
+    // bottom", which is the right default for a fresh room.
+    return t.scrollHeight - t.scrollTop - t.clientHeight <= STICK_SLACK_PX;
+  }
+
   function scrollToEnd() {
     var t = byId('chat-timeline');
-    // jsdom has no layout; scrollHeight is 0 there and this is a no-op.
     if (t) t.scrollTop = t.scrollHeight;
+  }
+
+  // Called before a re-render decides whether to follow.
+  var wasAtBottom = true;
+  function noteScrollPosition() { wasAtBottom = atBottom(); }
+
+  function keepPlace(prevTop) {
+    var t = byId('chat-timeline');
+    if (!t) return;
+    if (wasAtBottom) { t.scrollTop = t.scrollHeight; return; }
+    // Hold the reader where they were. Not perfect across a height change,
+    // but vastly better than jumping to either end.
+    t.scrollTop = prevTop;
   }
 
   // ── Connection view ───────────────────────────────────────────────────────
@@ -1099,19 +1389,44 @@
     }
   }
 
+  // ── The dock signal ───────────────────────────────────────────────────────
+  // The window knows what is actually being read; Rust owns the title bar. A
+  // count in the title is the oldest unread signal there is and still the one
+  // you can see without switching to the app.
+  var badgeShown = '';
+  function updateBadge() {
+    var count = 0;
+    var mention = false;
+    S.rooms.forEach(function (r) {
+      count += Number(r.unread) || 0;
+      if (r.mention) mention = true;
+    });
+    var key = count + ':' + mention;
+    if (key === badgeShown) return;      // the title bar is not a hot path
+    badgeShown = key;
+    invoke('matrix_badge', { count: count, mention: mention }).catch(function () {});
+  }
+
   function render() {
+    updateBadge();
     var host = byId('menu-page-body-content');
     if (!host) return;
     // Both text inputs the window has; only one exists at a time.
-    var draft = draftOf('chat-input') || draftOf('chat-people-query');
+    var draft = draftOf('chat-input') || draftOf('chat-people-query')
+      || draftOf('chat-browse-query');
+    var timeline = byId('chat-timeline');
+    var prevTop = timeline ? timeline.scrollTop : 0;
+    noteScrollPosition();
     clear(host);
     var node;
     if (S.view === 'room') node = renderRoom();
     else if (S.view === 'connection') node = renderConnection();
     else if (S.view === 'people') node = renderPeople();
+    else if (S.view === 'browse') node = renderBrowse();
     else node = renderChannels();
     host.appendChild(node);
     restoreDraft(draft);
+    keepPlace(prevTop);
     renderNav();
   }
   Chat.render = render;
@@ -1122,6 +1437,7 @@
     render();
     if (view === 'channels') refreshRooms();
     if (view === 'people') loadPeople();
+    if (view === 'browse') loadBrowse();
   }
   Chat.go = go;
 
@@ -1206,6 +1522,7 @@
         if (S.roomId !== roomId) return;   // the user moved on while we waited
         if (res && res.room) S.room = res.room;
         S.messages = (res && res.messages) || [];
+        wasAtBottom = true;              // a room you just opened starts at the end
         render();
         scrollToEnd();
       })
@@ -1230,6 +1547,21 @@
   }
   Chat.selectNetwork = selectNetwork;
 
+  // Open what the rest of the app asked for. Also polled once at boot, because
+  // the request usually arrives while this window is still starting up and
+  // there is nothing listening yet.
+  function showRequestedRoom(target) {
+    if (!target || !target.room_id) return;
+    if (target.guild_id && target.guild_id !== S.guildId) return;
+    refreshRooms().then(function () { openRoom(target.room_id); });
+  }
+
+  function claimPendingRoom() {
+    return invoke('matrix_take_pending_room')
+      .then(showRequestedRoom)
+      .catch(function () {});
+  }
+
   function connect() {
     S.connecting = true;
     S.error = null;
@@ -1248,7 +1580,7 @@
           S.loading = true;
           S.view = 'channels';
           render();
-          return refreshRooms();
+          return refreshRooms().then(claimPendingRoom);
         }
         render();
       })
@@ -1312,11 +1644,14 @@
     }
     var incoming = payload.messages || [];
     if (!incoming.length) return;
+    var following = atBottom();
     S.messages = dropEcho(S.messages, incoming).concat(incoming);
     // Keep the retained timeline bounded; scrollback is re-fetched on demand.
     if (S.messages.length > 500) S.messages = S.messages.slice(-500);
     render();
-    scrollToEnd();
+    // Only follow if they were already following. Otherwise the new messages
+    // wait below, which is what the unread divider is for.
+    if (following) scrollToEnd();
   }
   Chat.onTimeline = onTimeline;
 
@@ -1386,6 +1721,9 @@
 
     listen('matrix::timeline', function (e) { onTimeline(e && e.payload); });
     listen('matrix::typing', function (e) { onTyping(e && e.payload); });
+    // Somewhere else in the app asked for a conversation — a message icon in
+    // Team Ops, a raid window, anywhere a player is listed.
+    listen('matrix::show_room', function (e) { showRequestedRoom(e && e.payload); });
     listen('matrix::rooms', function (e) { onRooms(e && e.payload); });
     listen('matrix::status', function (e) { onStatus(e && e.payload); });
 
@@ -1398,7 +1736,7 @@
           S.view = 'channels';
           S.loading = true;
           render();
-          return refreshRooms();
+          return refreshRooms().then(claimPendingRoom);
         }
         S.loading = false;
         if (!net) {

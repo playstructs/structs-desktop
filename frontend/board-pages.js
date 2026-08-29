@@ -274,6 +274,31 @@
   // outcome is that refusal is worse than not offering it.
   function canSpectate() { return !window.__BOARD_WEB__; }
 
+  // Talk to this player. Every player id in the app is a working address —
+  // their Matrix id is that id at their guild's homeserver — so anywhere a
+  // player is listed can also be a way to reach them.
+  //
+  // Deliberately quiet: it fails in place on the icon rather than throwing a
+  // dialogue, because Comms may simply not be signed in yet.
+  function messageLink(r) {
+    if (!r || !r.player_id) return null;
+    var a = H.el('a', 'ops-refresh-btn');
+    a.href = 'javascript:void(0)';
+    a.title = 'Message ' + (r.player_name || r.player_id);
+    a.appendChild(H.el('i', 'sui-icon-md icon-phone'));
+    a.addEventListener('click', function (e) {
+      // The row itself opens the detail drawer; this must not also do that
+      // behind the Comms window.
+      e.stopPropagation();
+      Board.T.core.invoke('matrix_message_player', { playerId: r.player_id })
+        .catch(function (err) {
+          a.classList.add('err');
+          a.title = 'could not message ' + r.player_id + ': ' + err;
+        });
+    });
+    return a;
+  }
+
   function spectatorLinks(r) {
     if (!canSpectate()) return null;
     var wrap = H.el('span', 'ops-spectate');
@@ -341,13 +366,16 @@
       // the planet · time to next mine completion · time to next refine.
       var trio = harvestTrio(r);
       if (trio) { sub.appendChild(H.el('br')); sub.appendChild(trio); }
-      // Watch this player's planet / fleet. On the subtitle line rather than
-      // in the stat tiles: tiles are readings, these are actions.
+      // Watch this player's planet / fleet, and talk to them. On the subtitle
+      // line rather than in the stat tiles: tiles are readings, these are
+      // actions.
       var spectate = spectatorLinks(r);
-      if (spectate) {
+      var message = messageLink(r);
+      if (spectate || message) {
         if (!trio) sub.appendChild(H.el('br'));
         else sub.appendChild(document.createTextNode(' '));
-        sub.appendChild(spectate);
+        if (spectate) sub.appendChild(spectate);
+        if (message) sub.appendChild(message);
       }
       // Charge: battery + a clear Ready/n so "what is this number" is answered.
       var chargeVal = H.el('span');

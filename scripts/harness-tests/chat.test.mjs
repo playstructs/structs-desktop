@@ -62,8 +62,14 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('sections are DIRECT, LOCAL NET, GALAXY NET',
     labels.join('|') === 'Direct|Local Net|Galaxy Net', labels.join('|'));
 
+  // Only rooms you are IN. Alpha Base and Community are public but unjoined,
+  // and live in Browse — a list that mixes "your channels" with "every
+  // channel on the server" answers neither question.
   const rows = all(d, '.sui-result-row');
-  check('every room gets a row', rows.length === 6, String(rows.length));
+  check('only joined rooms are listed', rows.length === 4, String(rows.length));
+  check('an unjoined room is not here',
+    !rows.some((r) => text(r).startsWith('Alpha Base')),
+    rows.map((r) => text(r)).join(' | '));
 
   // Grouping follows the fixture's `section`, not row order. People first.
   const groups = all(d, '.chat-net-group');
@@ -78,19 +84,19 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     String(dmRows[0].querySelectorAll('.pfp-viewer-layer').length));
 
   const localRows = groups[1].querySelectorAll('.sui-result-row');
-  check('local net holds Alpha Base + Raid', localRows.length === 2, String(localRows.length));
-  check('room names render', text(localRows[0]).indexOf('Alpha Base') === 0, text(localRows[0]));
-  check('member count is pluralised', text(localRows[0]).includes('0 Players'), text(localRows[0]));
-  check('a single member is singular', text(localRows[1]).includes('1 Player'), text(localRows[1]));
-  const community = rows.find((r) => text(r).startsWith('Community'));
-  check('3.1K is abbreviated', text(community).includes('3.1K Players'), text(community));
+  check('local net holds the one joined room', localRows.length === 1, String(localRows.length));
+  check('room names render', text(localRows[0]).indexOf('Raid') === 0, text(localRows[0]));
+  check('a single member is singular', text(localRows[0]).includes('1 Player'), text(localRows[0]));
+  const snc = rows.find((r) => text(r).startsWith('SN.Corporation'));
+  check('member count is pluralised', text(snc).includes('25 Players'), text(snc));
   check('a channel row shows its glyph, not a portrait',
     localRows[0].querySelector('.chat-room-icon') !== null);
 
-  // JOIN is the affordance for rooms you are NOT in; joined rooms open instead.
-  const joins = all(d, '.sui-result-row button');
-  check('JOIN shows only on unjoined rooms', joins.length === 2, String(joins.length));
-  check('joined rooms are clickable', all(d, '.chat-room-row').length === 4,
+  // Nothing here needs joining — that is what Browse is for.
+  check('no JOIN buttons in your own channel list',
+    all(d, '.sui-result-row button').length === 0,
+    String(all(d, '.sui-result-row button').length));
+  check('every listed room is clickable', all(d, '.chat-room-row').length === 4,
     String(all(d, '.chat-room-row').length));
 
   // Only the player's OWN guild is offered — no other guild will authenticate them.
@@ -105,14 +111,54 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('alpha renders on the game\'s own ladder', res.includes('9.4Kg'), res);
   check('no K-per-thousand abbreviation leaks in', !/\d+K\//.test(res), res);
 
-  // Joining calls through with the ids the Rust command expects.
-  joins[0].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+}
+
+// ── The channel directory ───────────────────────────────────────────────────
+// IRC's /list: what else is out there, as opposed to where you already are.
+{
+  console.log('\n— browse channels');
+  const { w, d } = await open();
+  d.getElementById('chat-browse').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('the directory icon opens Browse', w.Chat._state.view === 'browse', w.Chat._state.view);
+  check('it asks the homeserver, not the local list',
+    w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_browse'));
+
+  const rows = all(d, '.sui-result-row');
+  check('every public channel is listed', rows.length === 5, String(rows.length));
+  check('including ones you are already in',
+    rows.some((r) => text(r).startsWith('SN.Corporation')),
+    rows.map((r) => text(r)).join(' | '));
+  check('a room you are in says so instead of offering Join',
+    rows.find((r) => text(r).startsWith('SN.Corporation')).querySelector('.sui-badge') !== null);
+  check('a room you are not in offers Join',
+    rows.find((r) => text(r).startsWith('Alpha Base')).querySelector('button') !== null);
+  check('3.1K is abbreviated',
+    text(rows.find((r) => text(r).startsWith('Community'))).includes('3.1K Players'));
+
+  // Searching goes to the server: a busy homeserver only ever hands us a
+  // page, so filtering locally would filter the wrong set.
+  const q = d.getElementById('chat-browse-query');
+  q.value = 'raid';
+  q.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 350));
+  const search = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_browse').pop();
+  check('the query reaches the homeserver', search.args.query === 'raid',
+    JSON.stringify(search.args));
+
+  // Joining from the directory is a decision to go there.
+  all(d, '.sui-result-row').find((r) => text(r).startsWith('Alpha Base'))
+    .querySelector('button').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick();
   const joinCall = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_join').pop();
   check('JOIN invokes matrix_join with guild + room',
     !!joinCall && joinCall.args.guildId === '0-5'
       && joinCall.args.roomId === '!alpha:matrix.beta.playstructs.com',
     JSON.stringify(joinCall && joinCall.args));
+  await tick();
+  check('and lands you in the room you joined',
+    w.Chat._state.roomId === '!alpha:matrix.beta.playstructs.com',
+    String(w.Chat._state.roomId));
 }
 
 // ── The window's own chrome ─────────────────────────────────────────────────
@@ -153,7 +199,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     text(d.querySelector('.sui-page-header')));
 
   const msgs = all(d, '.chat-msg');
-  check('every event renders', msgs.length === 9, String(msgs.length));
+  check('every event renders', msgs.length === 10, String(msgs.length));
 
   // A run from one sender drops the repeated header, as the mockup does —
   // but $1 and $2 are a day apart, so that run is deliberately broken.
@@ -194,7 +240,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await tick();
 
   const times = all(d, '.chat-msg-time').map(text);
-  check('every message is stamped', times.length === 9, String(times.length));
+  check('every message is stamped', times.length === 10, String(times.length));
   check('stamps are fixed-width 24h', times.every((t) => /^\d{2}:\d{2}$/.test(t)),
     times.join(','));
 
@@ -226,10 +272,16 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
 }
 
 // Matching rules, checked directly — the regex is the whole feature.
+//
+// This table is mirrored in Rust (matrix/client.rs, mentions_match_on_word_
+// boundaries) because the rule exists twice: Rust decides whether to interrupt
+// you with a notification, the window decides whether to highlight. Two
+// implementations of one rule are a liability unless both are pinned here.
 {
   console.log('\n— mention matching');
   const { w } = await open();
   const cases = [
+    ['nothing to see', false, 'no mention at all'],
     ['Marklifer, are you seeing this?', true, 'name followed by a comma'],
     ['hey Marklifer', true, 'name at the end'],
     ['ping 1-194 please', true, 'player id counts too'],
@@ -262,7 +314,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
       { event_id: '$new', sender: '@1-42:matrix.beta.playstructs.com',
         sender_name: 'Netlag', sender_tag: 'SN.C', player_id: '1-42',
         body: 'while you were out', kind: 'text', self: false, admin: false,
-        ts: 1787900009000 },
+        ts: 1787900011000 },
     ]),
   };
   await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
@@ -313,6 +365,144 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('…and its mention flag', !raid.mention, String(raid.mention));
 }
 
+// ── Object references ───────────────────────────────────────────────────────
+// Every noun in Structs is a `<type>-<index>` id and players talk in them, so
+// a chat client that leaves them as plain text makes everyone look them up by
+// hand.
+{
+  console.log('\n— id detection');
+  const { w } = await open();
+  const ids = (s) => w.Chat.idsIn(s).join(',');
+
+  check('an id is found', ids('hitting 2-15361 now') === '2-15361');
+  check('several are found in order',
+    ids('2-1 and 5-2 and 1-3') === '2-1,5-2,1-3', ids('2-1 and 5-2 and 1-3'));
+  check('adjacent ids both match', ids('2-1 5-2') === '2-1,5-2', ids('2-1 5-2'));
+  check('duplicates collapse', ids('2-1 then 2-1') === '2-1', ids('2-1 then 2-1'));
+
+  // THE rule. 1-194 and 1-1945 are different players, and a loose match
+  // attributes one's card to the other.
+  check('a longer id is not a shorter one', ids('1-1945') === '1-1945', ids('1-1945'));
+  check('…and does not also yield the prefix',
+    ids('1-1945').indexOf('1-194,') === -1, ids('1-1945'));
+  check('an id inside a word is not an id', ids('x2-1') === '', ids('x2-1'));
+  check('a trailing hyphen is not a boundary', ids('2-1-3') === '', ids('2-1-3'));
+
+  // Plumbing types get no card — mirrors refs.rs::is_referenceable.
+  check('an allocation id is ignored', ids('6-1') === '', ids('6-1'));
+  check('a reactor id is ignored', ids('3-1') === '', ids('3-1'));
+  check('a date is not an id', ids('2026-08') === '', ids('2026-08'));
+}
+
+{
+  console.log('\n— reference cards');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await until(() => d.querySelectorAll('.chat-ref').length > 0);
+
+  const msg = all(d, '.chat-msg').find((n) => text(n).includes('hitting'));
+  const chips = msg.querySelectorAll('.chat-id');
+  check('ids are marked inline', chips.length === 4,
+    Array.from(chips).map((c) => text(c)).join(','));
+  check('…and 1-1945 is marked as itself, not as 1-194',
+    Array.from(chips).some((c) => text(c) === '1-1945')
+      && !Array.from(chips).some((c) => text(c) === '1-194'),
+    Array.from(chips).map((c) => text(c)).join(','));
+  check('a plumbing id is left as plain text',
+    !Array.from(chips).some((c) => text(c) === '6-1'));
+  check('the surrounding words survive intact',
+    text(msg).includes('hitting') && text(msg).includes('not'), text(msg));
+
+  // Only the FIRST reference opens itself. A message naming four objects would
+  // otherwise bury itself under four cards.
+  let cards = msg.querySelectorAll('.chat-ref');
+  check('only the first reference opens itself', cards.length === 1, String(cards.length));
+  check('and it is the first one named',
+    text(cards[0]).includes('Shield') && text(cards[0]).includes('25'), text(cards[0]));
+
+  // The rest are chips that open theirs.
+  const openable = Array.from(msg.querySelectorAll('.chat-id.chat-mod-openable'));
+  check('later references are openable', openable.length === 3, String(openable.length));
+  check('the first is not a control',
+    !msg.querySelector('.chat-id').className.includes('chat-mod-openable'));
+
+  openable.find((c) => text(c) === '5-2184')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const opened = Array.from(
+    all(d, '.chat-msg').find((n) => text(n).includes('hitting')).querySelectorAll('.chat-ref'));
+  check('opening one shows its card', opened.length === 2, String(opened.length));
+  check('a struct card carries the work it is doing',
+    opened.some((c) => text(c).includes('Mining')),
+    opened.map((c) => text(c)).join(' | '));
+
+  // Clicking again closes it — the chip is a toggle, not a one-way door.
+  all(d, '.chat-msg').find((n) => text(n).includes('hitting'))
+    .querySelectorAll('.chat-id.chat-mod-openable')[0]
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+
+  // A player card is also a way to reach them.
+  const msgNow = all(d, '.chat-msg').find((n) => text(n).includes('hitting'));
+  Array.from(msgNow.querySelectorAll('.chat-id.chat-mod-openable'))
+    .find((c) => text(c) === '1-61')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const playerCard = Array.from(
+    all(d, '.chat-msg').find((n) => text(n).includes('hitting')).querySelectorAll('.chat-ref'))
+    .find((c) => c.querySelector('.pfp-viewer-layer'));
+  check('a player card carries their portrait',
+    playerCard.querySelectorAll('.pfp-viewer-layer').length === 5,
+    String(playerCard.querySelectorAll('.pfp-viewer-layer').length));
+  playerCard.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const dm = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_dm').pop();
+  check('clicking a player card messages them', !!dm && dm.args.playerId === '1-61',
+    JSON.stringify(dm && dm.args));
+
+  // One round trip for a message naming several things, and never a repeat
+  // for an id already known.
+  const lookups = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_refs');
+  check('ids are looked up in one batch', lookups.length === 1, String(lookups.length));
+  check('an unresolvable id is not retried',
+    lookups[0].args.ids.indexOf('1-1945') !== -1
+      && !d.querySelector('.chat-ref') === false,
+    JSON.stringify(lookups[0].args.ids));
+
+  w.Chat.render();
+  await tick();
+  check('re-rendering does not re-fetch',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_refs').length === 1);
+}
+
+// ── Opened from elsewhere in the app ────────────────────────────────────────
+// Every player id in the app is a working address, so anywhere a player is
+// listed can be a way to reach them. Team Ops asks; this window answers.
+{
+  console.log('\n— opened from elsewhere');
+  const { w } = await open();
+  check('the window asks what it was opened for',
+    w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_take_pending_room'));
+
+  w.__HARNESS_EMIT__('matrix::show_room', {
+    guild_id: '0-5', room_id: '!dm-jpeg:matrix.beta.playstructs.com',
+  });
+  await tick();
+  await tick();
+  check('a request opens that conversation',
+    w.Chat._state.roomId === '!dm-jpeg:matrix.beta.playstructs.com',
+    String(w.Chat._state.roomId));
+
+  // A request for another network must not yank this one somewhere else.
+  const stay = w.Chat._state.roomId;
+  w.__HARNESS_EMIT__('matrix::show_room', {
+    guild_id: '0-1', room_id: '!elsewhere:matrix.crew.oh.energy',
+  });
+  await tick();
+  check('a request for another network is ignored',
+    w.Chat._state.roomId === stay, String(w.Chat._state.roomId));
+}
+
 // ── Sending ─────────────────────────────────────────────────────────────────
 {
   console.log('\n— sending');
@@ -325,7 +515,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 
   // The echo is on screen before the command resolves — that is the point.
-  const base = 9;
+  const base = 10;
   let msgs = all(d, '.chat-msg');
   check('local echo appears immediately', msgs.length === base + 1, String(msgs.length));
   const echo = () => all(d, '.chat-msg')[base];
@@ -570,6 +760,105 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await tick();
   check('a command announces nothing', notices().length === before + 1,
     String(notices().length));
+}
+
+// ── The dock signal ─────────────────────────────────────────────────────────
+// A count you can see without switching to the app — the oldest unread signal
+// there is, and still the one that works.
+{
+  console.log('\n— unread badge');
+  const { w } = await open();
+  const badges = () => w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_badge');
+  const last = () => badges().pop().args;
+
+  check('an empty inbox reports zero', last().count === 0, JSON.stringify(last()));
+
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com',
+    messages: [{ event_id: '$a', sender: '@1-9:h', sender_name: 'Scout', body: 'contact', kind: 'text', ts: 1 }],
+  });
+  await tick();
+  check('traffic raises the count', last().count === 1, JSON.stringify(last()));
+  check('…without the mention marker', last().mention === false, JSON.stringify(last()));
+
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!ninja:matrix.beta.playstructs.com',
+    messages: [{ event_id: '$b', sender: '@1-9:h', sender_name: 'Scout', body: 'Marklifer?', kind: 'text', ts: 2 }],
+  });
+  await tick();
+  check('counts add across rooms', last().count === 2, JSON.stringify(last()));
+  check('and a mention anywhere raises the marker', last().mention === true,
+    JSON.stringify(last()));
+
+  // The title bar is not a hot path: an unchanged count must not re-send.
+  const before = badges().length;
+  w.Chat.render();
+  w.Chat.render();
+  await tick();
+  check('an unchanged badge is not re-sent', badges().length === before,
+    String(badges().length - before));
+
+  await w.Chat.openRoom('!raid:matrix.beta.playstructs.com');
+  await tick();
+  check('reading a room lowers the count', last().count === 1, JSON.stringify(last()));
+}
+
+// ── Scroll anchoring ────────────────────────────────────────────────────────
+// Yanking someone to the bottom because a message arrived while they were
+// reading scrollback is the single most annoying thing a chat client does.
+//
+// jsdom has no layout, so the timeline's metrics are stubbed to describe a
+// scrollable box; that is the whole input the anchoring logic reads.
+{
+  console.log('\n— scroll anchoring');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  // Make every div look like a 300px window onto 1000px of history. Stubbed on
+  // the PROTOTYPE, not the node: render() replaces the timeline element, and a
+  // per-instance stub would vanish with it.
+  Object.defineProperty(w.HTMLDivElement.prototype, 'scrollHeight',
+    { get: () => 1000, configurable: true });
+  Object.defineProperty(w.HTMLDivElement.prototype, 'clientHeight',
+    { get: () => 300, configurable: true });
+  const shape = (scrollTop) => {
+    const t = d.getElementById('chat-timeline');
+    t.scrollTop = scrollTop;
+    return t;
+  };
+  const arrive = (id, body) => {
+    w.__HARNESS_EMIT__('matrix::timeline', {
+      guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+      messages: [{ event_id: id, sender: '@1-42:matrix.beta.playstructs.com',
+        sender_name: 'Netlag', body: body, kind: 'text', ts: 1787900020000 }],
+    });
+  };
+
+  // Reading scrollback: a new message must NOT move them.
+  shape(120);
+  arrive('$scroll1', 'while you were reading');
+  await tick();
+  check('a message arriving mid-scrollback does not move the reader',
+    d.getElementById('chat-timeline').scrollTop === 120,
+    String(d.getElementById('chat-timeline').scrollTop));
+
+  // Already at the bottom: follow the conversation.
+  shape(700);
+  arrive('$scroll2', 'following along');
+  await tick();
+  check('but at the bottom it follows',
+    d.getElementById('chat-timeline').scrollTop >= 700,
+    String(d.getElementById('chat-timeline').scrollTop));
+
+  // Your own message always wins the scroll — you just wrote it.
+  shape(120);
+  d.getElementById('chat-input').value = 'mine';
+  d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('sending always scrolls to your own message',
+    d.getElementById('chat-timeline').scrollTop >= 700,
+    String(d.getElementById('chat-timeline').scrollTop));
 }
 
 // ── The draft survives ──────────────────────────────────────────────────────
@@ -840,10 +1129,12 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   // A sender with no player id (a bot) must not offer a DM that cannot exist.
   const bot = msgs.find((n) => !n.querySelector('.chat-mod-addressable'));
   check('a non-player sender is not addressable', !!bot);
-  // No portrait belongs on a message line — see chat.js for why.
-  check('no portrait is squeezed onto a message line',
-    d.querySelectorAll('.chat-msg .pfp-viewer-layer').length === 0,
-    String(d.querySelectorAll('.chat-msg .pfp-viewer-layer').length));
+  // No portrait belongs on the SENDER line — the art needs ~40px and would be
+  // a sliver of scalp there. Reference cards are a different matter: they have
+  // the room, and a player card shows the same face the roster does.
+  check('no portrait is squeezed onto a sender line',
+    d.querySelectorAll('.chat-msg-head .pfp-viewer-layer').length === 0,
+    String(d.querySelectorAll('.chat-msg-head .pfp-viewer-layer').length));
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');

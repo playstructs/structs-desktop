@@ -568,6 +568,132 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
     (deltas, rooms_changed, typing_changed)
 }
 
+// ── Being contacted ─────────────────────────────────────────────────────────
+//
+// ICQ's whole personality was telling you someone wanted you. The sync loop
+// runs whether or not the Comms window is open, so this decision belongs here
+// rather than in the window: Rust knows the message, knows whether the room is
+// a direct message, and can ask whether anyone is actually looking.
+
+/// The names that count as "me" in a message body: the on-chain username and
+/// the player id. Matched at word boundaries — see `is_mention`.
+fn my_names(session: &Session) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(pid) = directory::player_id_of(&session.user_id) {
+        if let Some(ident) = directory::get(&pid) {
+            if !ident.username.is_empty() {
+                out.push(ident.username);
+            }
+        }
+        out.push(pid);
+    }
+    out.retain(|n| n.chars().count() >= 2);
+    out
+}
+
+/// Word-boundary match, treating anything that is not a letter, digit,
+/// underscore or hyphen as a boundary. A plain `contains` would fire
+/// "Marklifer" on "Marklifers", and `\b` alone does not hold for ids like
+/// `1-194` because the hyphen is itself a word boundary.
+fn is_mention(body: &str, names: &[String]) -> bool {
+    let hay: Vec<char> = body.to_lowercase().chars().collect();
+    for name in names {
+        let needle: Vec<char> = name.to_lowercase().chars().collect();
+        if needle.is_empty() || needle.len() > hay.len() {
+            continue;
+        }
+        let boundary = |c: char| !(c.is_alphanumeric() || c == '_' || c == '-');
+        for start in 0..=(hay.len() - needle.len()) {
+            if hay[start..start + needle.len()] != needle[..] {
+                continue;
+            }
+            let before_ok = start == 0 || boundary(hay[start - 1]);
+            let after = start + needle.len();
+            let after_ok = after == hay.len() || boundary(hay[after]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Never more than one notification per room per this long. A room that is
+/// mid-argument would otherwise produce a notification per line.
+const NOTIFY_COOLDOWN_SECS: u64 = 45;
+static NOTIFIED_AT: std::sync::LazyLock<RwLock<HashMap<String, u64>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn claim_notify_slot(room_id: &str) -> bool {
+    let now = auth::now_secs();
+    let mut map = NOTIFIED_AT.write().unwrap();
+    match map.get(room_id) {
+        Some(at) if now.saturating_sub(*at) < NOTIFY_COOLDOWN_SECS => false,
+        _ => {
+            map.insert(room_id.to_string(), now);
+            true
+        }
+    }
+}
+
+/// True when nobody is looking at the Comms window — closed, minimised, or
+/// simply behind something else. Notifying someone about a message they are
+/// already reading is the fastest way to get notifications turned off.
+fn window_is_watched(app: &tauri::AppHandle) -> bool {
+    use tauri::Manager;
+    match app.get_webview_window("chat") {
+        Some(w) => w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Decide and send. Only a direct message or a mention earns one: everything
+/// else is traffic, and traffic that interrupts is noise.
+fn maybe_notify(
+    app: &tauri::AppHandle,
+    guild_id: &str,
+    room_id: &str,
+    messages: &[Message],
+    session: &Session,
+) {
+    if window_is_watched(app) {
+        return;
+    }
+    let is_dm = {
+        let map = STATE.read().unwrap();
+        map.get(guild_id)
+            .map(|gs| gs.dm_with.contains_key(room_id))
+            .unwrap_or(false)
+    };
+    let names = my_names(session);
+    let hit = messages.iter().find(|m| {
+        !m.is_self && m.kind != "unknown" && (is_dm || is_mention(&m.body, &names))
+    });
+    let Some(m) = hit else { return };
+    if !claim_notify_slot(room_id) {
+        return;
+    }
+
+    let room_name = {
+        let map = STATE.read().unwrap();
+        map.get(guild_id)
+            .and_then(|gs| gs.rooms.get(room_id).map(|r| r.name.clone()))
+            .unwrap_or_else(|| room_id.to_string())
+    };
+    // A DM is already titled by the person, so repeating their name in the
+    // body would say it twice.
+    let title = if is_dm {
+        room_name
+    } else {
+        format!("{} — {}", m.sender_name, room_name)
+    };
+    let mut body = m.body.replace('\n', " ");
+    if body.chars().count() > 140 {
+        body = body.chars().take(139).collect::<String>() + "…";
+    }
+    crate::notifications::notify(&title, &body);
+}
+
 /// Render a typing set for the window: who, by the name a player would know
 /// them by. Bots and service accounts keep their localpart.
 pub fn typing_names(users: &[String]) -> Vec<String> {
@@ -659,6 +785,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                         );
                     }
                     for (room_id, messages) in deltas {
+                        maybe_notify(&app, &guild_id, &room_id, &messages, &session);
                         let _ = app.emit(
                             "matrix::timeline",
                             json!({
@@ -822,6 +949,91 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
         );
     }
     Ok(())
+}
+
+/// Search the homeserver's public room directory — IRC's `/list`.
+///
+/// A live query rather than a filter over the cached page: a homeserver with
+/// hundreds of rooms only ever hands us the first hundred, so searching
+/// locally would search the wrong set. Federated servers can be searched too
+/// once the `server` argument is wired; for now this is the guild's own.
+pub async fn browse(
+    guild_id: &str,
+    session: &Session,
+    query: Option<&str>,
+) -> Result<Vec<Room>, String> {
+    let url = format!("{}/publicRooms", base(session));
+    let term = query.unwrap_or("").trim().to_string();
+    let mut body = json!({ "limit": 60 });
+    if !term.is_empty() {
+        body["filter"] = json!({ "generic_search_term": term });
+    }
+    // POST, not GET: the search term goes in a filter object, which the GET
+    // form has no way to carry.
+    let v = authed(session, move |c, s| {
+        c.post(&url).bearer_auth(&s.access_token).json(&body)
+    })
+    .await?;
+
+    let server = server_name(session);
+    let joined: std::collections::HashSet<String> = {
+        let map = STATE.read().unwrap();
+        map.get(guild_id)
+            .map(|gs| {
+                gs.rooms
+                    .iter()
+                    .filter(|(_, r)| r.joined)
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut out = Vec::new();
+    for chunk in v
+        .get("chunk")
+        .and_then(|c| c.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[])
+    {
+        let Some(room_id) = chunk.get("room_id").and_then(|r| r.as_str()) else {
+            continue;
+        };
+        let alias = chunk
+            .get("canonical_alias")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string());
+        let name = chunk
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| alias.clone())
+            .unwrap_or_else(|| room_id.to_string());
+        out.push(Room {
+            room_id: room_id.to_string(),
+            icon: icon_for(&name, alias.as_deref()),
+            name,
+            canonical_alias: alias,
+            topic: chunk.get("topic").and_then(|t| t.as_str()).map(|s| s.to_string()),
+            members: chunk
+                .get("num_joined_members")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0),
+            joined: joined.contains(room_id),
+            unread: 0,
+            section: section_for(room_id, &server),
+            pfp_attrs: None,
+            player_id: None,
+        });
+    }
+    // Busiest first: on a directory, population is the best proxy for "worth
+    // looking at", and alphabetical order buries every active room.
+    out.sort_by(|a, b| {
+        b.members
+            .cmp(&a.members)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(out)
 }
 
 pub fn timeline_of(guild_id: &str, room_id: &str) -> (Option<Room>, Vec<Message>) {
@@ -1221,6 +1433,44 @@ mod tests {
         // and every repeat would repaint the window.
         let (_, _, again) = apply_sync("test-typing", &s, &stop);
         assert!(again.is_empty());
+    }
+
+    /// The SAME cases the window's own matcher is held to
+    /// (scripts/harness-tests/chat.test.mjs, "mention matching"). Two
+    /// implementations of one rule is a liability unless both are pinned to
+    /// the same table — Rust decides whether to interrupt you, the window
+    /// decides whether to highlight, and they must never disagree.
+    #[test]
+    fn mentions_match_on_word_boundaries() {
+        let names = vec!["Marklifer".to_string(), "1-194".to_string()];
+        for (body, want, why) in [
+            ("Marklifer, are you seeing this?", true, "name followed by a comma"),
+            ("hey Marklifer", true, "name at the end"),
+            ("ping 1-194 please", true, "player id counts too"),
+            ("Marklifers everywhere", false, "a longer word that starts with it"),
+            ("xMarklifer", false, "a longer word that ends with it"),
+            ("1-1944 is not me", false, "a longer id"),
+            ("MARKLIFER", true, "case does not matter"),
+            ("", false, "an empty body"),
+            ("nothing to see", false, "no mention at all"),
+        ] {
+            assert_eq!(is_mention(body, &names), want, "{}: {:?}", why, body);
+        }
+    }
+
+    #[test]
+    fn a_short_name_is_not_matched_at_all() {
+        // A one-character username would fire on almost every message; better
+        // to miss those mentions than to interrupt constantly.
+        let s = Session { user_id: "@1-1:example.com".into(), ..session() };
+        assert!(!my_names(&s).iter().any(|n| n.chars().count() < 2));
+    }
+
+    #[test]
+    fn a_room_is_notified_about_at_most_once_per_cooldown() {
+        let room = "!cooldown-test:example.com";
+        assert!(claim_notify_slot(room), "first notification should go out");
+        assert!(!claim_notify_slot(room), "a second within the cooldown must not");
     }
 
     #[test]

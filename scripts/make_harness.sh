@@ -611,7 +611,30 @@ cat > "$CFIX" <<'EOF'
     { event_id: '$9', sender: '@1-42:matrix.beta.playstructs.com', sender_name: 'Netlag',
       sender_tag: 'SN.C', player_id: '1-42', kind: 'text', self: false,
       admin: false, ts: 1787900008000, body: 'Marklifers everywhere' },
+    // Object references. 1-1945 is deliberately adjacent to 1-194 — a loose
+    // match would attribute one player's card to the other.
+    { event_id: '$10', sender: '@1-61:matrix.beta.playstructs.com', sender_name: 'JPEG',
+      sender_tag: 'SN.C', player_id: '1-61', kind: 'text', self: false,
+      admin: false, ts: 1787900009000,
+      body: 'hitting 2-15361 with 5-2184, ask 1-61 — not 1-1945 or 6-1' },
   ];
+
+  var REFS = {
+    '2-15361': { id: '2-15361', kind: 'planet', icon: 'icon-planet',
+      title: 'Planet 2-15361', subtitle: 'Owned by [SN.C] Phoniffer',
+      rows: [{ label: 'Shield', value: '25' }, { label: 'Ore', value: '0g' },
+             { label: 'Structs', value: '3/16' }, { label: 'Status', value: 'complete' }] },
+    '5-2184': { id: '5-2184', kind: 'struct', icon: 'icon-cmd-post',
+      title: 'Ore Mining Rig', subtitle: '5-2184 · [SN.C] Marklifer',
+      rows: [{ label: 'Work', value: 'Mining · 42m' }, { label: 'Health', value: '6' },
+             { label: 'Ambit', value: 'space' }, { label: 'Location', value: '2-223' }] },
+    '1-61': { id: '1-61', kind: 'player', icon: 'icon-member',
+      title: 'JPEG', subtitle: '[SN.C] PID #1-61',
+      pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}',
+      rows: [{ label: 'Alpha', value: '9.4Kg' },
+             { label: 'Energy', value: '128.01KW/133.64KW' },
+             { label: 'Planet', value: '2-223' }, { label: 'Fleet', value: '9-61' }] },
+  };
 
   var ROOMS = [
     { room_id: '!alpha:matrix.beta.playstructs.com', name: 'Alpha Base',
@@ -729,6 +752,13 @@ cat > "$CFIX" <<'EOF'
     matrix_join: { ok: true },
     matrix_people: { people: PEOPLE },
     matrix_typing: { ok: true },
+    // The directory: everything public, joined or not — a superset of the
+    // channel list, which is only what you are in.
+    matrix_browse: { rooms: ROOMS.filter(function (r) { return r.section !== 'direct'; }) },
+    matrix_badge: null,
+    // Answers only for ids the chain knows; 1-1945 is absent on purpose.
+    matrix_refs: null,
+    matrix_take_pending_room: null,
     matrix_dm: { room_id: '!dm-jpeg:matrix.beta.playstructs.com',
                  user_id: '@1-61:matrix.beta.playstructs.com', player_id: '1-61' },
     matrix_leave: { ok: true },
@@ -761,6 +791,11 @@ cat > "$CFIX" <<'EOF'
       calls.push({ cmd: cmd, args: args });
       if (window.__HARNESS_REJECT__[cmd]) {
         return Promise.reject(window.__HARNESS_REJECT__[cmd]);
+      }
+      if (cmd === 'matrix_refs') {
+        return Promise.resolve({
+          refs: (args.ids || []).map(function (id) { return REFS[id]; }).filter(Boolean),
+        });
       }
       return Object.prototype.hasOwnProperty.call(F, cmd)
         ? Promise.resolve(F[cmd]) : Promise.reject('harness: no fixture for ' + cmd);

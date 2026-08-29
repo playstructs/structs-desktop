@@ -14,6 +14,7 @@
 pub mod auth;
 pub mod client;
 pub mod directory;
+pub mod refs;
 pub mod store;
 
 use serde_json::{json, Value};
@@ -239,6 +240,19 @@ pub async fn matrix_rooms(guild_id: String) -> Result<Value, String> {
     Ok(json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }))
 }
 
+/// The homeserver's channel directory — everything public, not just what you
+/// are already in. The channel list answers "where am I"; this answers "what
+/// else is there", and conflating the two makes both worse.
+#[tauri::command]
+pub async fn matrix_browse(
+    guild_id: String,
+    query: Option<String>,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let rooms = client::browse(&guild_id, &session, query.as_deref()).await?;
+    Ok(json!({ "guild_id": guild_id, "rooms": rooms }))
+}
+
 #[tauri::command]
 pub async fn matrix_timeline(
     guild_id: String,
@@ -412,6 +426,53 @@ pub async fn matrix_typing(
     Ok(json!({ "ok": true }))
 }
 
+/// Put the unread count in the window title — the MSN/ICQ taskbar signal.
+///
+/// The window is the only thing that knows what the player is actually looking
+/// at, so it owns the count and tells Rust; Rust owns the title bar.
+#[tauri::command]
+pub fn matrix_badge(app: tauri::AppHandle, count: u32, mention: bool) -> Result<(), String> {
+    let Some(w) = app.get_webview_window("chat") else {
+        return Ok(());
+    };
+    // A bare count reads as noise; the marker makes "someone wants you"
+    // distinguishable from "the room is busy" at a glance in the dock.
+    let title = match (count, mention) {
+        (0, _) => "Structs — Comms".to_string(),
+        (n, true) => format!("({}!) Structs — Comms", n),
+        (n, false) => format!("({}) Structs — Comms", n),
+    };
+    w.set_title(&title).map_err(|e| e.to_string())
+}
+
+/// Summarise the object ids a message mentioned.
+///
+/// Players talk in ids — "raid 2-15361", "5-2184 is stuck", "ask 1-61". The
+/// window sends the ids it found; this answers with a card for each one it can
+/// resolve, in the same shape Team Ops and the dashboard use. Unknown or
+/// uninteresting ids simply come back absent and stay plain text.
+#[tauri::command]
+pub async fn matrix_refs(ids: Vec<String>) -> Result<Value, String> {
+    // Bounded per call: a pasted log could otherwise name hundreds of objects
+    // and turn one message into a burst of chain reads.
+    const MAX: usize = 8;
+    directory::ensure_fresh().await;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in ids.into_iter().take(MAX * 4) {
+        if out.len() >= MAX {
+            break;
+        }
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(card) = refs::resolve(&id).await {
+            out.push(card);
+        }
+    }
+    Ok(json!({ "refs": out }))
+}
+
 // ── The window ──────────────────────────────────────────────────────────────
 
 /// Idempotent: a second request raises the window already open rather than
@@ -450,6 +511,62 @@ pub fn close_chat_window(app: tauri::AppHandle) -> Result<(), String> {
         w.close().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Message a player from ANYWHERE in the app.
+///
+/// Team Ops lists players constantly — the roster, the war board, raid
+/// windows — and every one of those is a place where "talk to this person" is
+/// the obvious next thought. This is the one call that turns a player id into
+/// an open conversation: raise the window, resolve the DM, and tell the window
+/// to show it.
+#[tauri::command]
+pub async fn matrix_message_player(
+    app: tauri::AppHandle,
+    player_id: String,
+) -> Result<Value, String> {
+    open_chat_window(app.clone())?;
+
+    let guild_id = selected_guild()
+        .ok_or("no guild you belong to runs a comms server")?;
+    // The window signs in by itself when it boots, but this call may arrive
+    // before that has happened — say so plainly rather than failing obscurely.
+    let session = store::get(&guild_id).ok_or(
+        "Comms is still signing in — try again in a moment",
+    )?;
+    directory::ensure_fresh().await;
+    let their_id = directory::matrix_id_for(player_id.trim())?;
+    let room_id = client::open_dm(&guild_id, &session, &their_id).await?;
+
+    // The window may still be booting, so this is also replayed: chat.js asks
+    // for any pending target once it is ready.
+    set_pending_room(&guild_id, &room_id);
+    let _ = app.emit(
+        "matrix::show_room",
+        json!({ "guild_id": guild_id, "room_id": room_id }),
+    );
+    Ok(json!({ "room_id": room_id, "player_id": player_id }))
+}
+
+/// A room the app has asked the window to show but which the window may not
+/// have been alive to hear about. Claimed once, then forgotten.
+static PENDING_ROOM: RwLock<Option<(String, String)>> = RwLock::new(None);
+
+fn set_pending_room(guild_id: &str, room_id: &str) {
+    if let Ok(mut p) = PENDING_ROOM.write() {
+        *p = Some((guild_id.to_string(), room_id.to_string()));
+    }
+}
+
+/// Take whatever the window was asked to show, if anything. Deliberately
+/// consuming: a target already opened must not reopen on every status poll.
+#[tauri::command]
+pub fn matrix_take_pending_room() -> Result<Value, String> {
+    let taken = PENDING_ROOM.write().ok().and_then(|mut p| p.take());
+    Ok(match taken {
+        Some((guild_id, room_id)) => json!({ "guild_id": guild_id, "room_id": room_id }),
+        None => Value::Null,
+    })
 }
 
 /// Restore sync for guilds already signed in. Called once at startup.
