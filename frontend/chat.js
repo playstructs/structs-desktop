@@ -65,6 +65,14 @@
     // Object ids whose card the reader has opened by hand. The first
     // reference in a message opens itself; these are the rest.
     openRefs: {},
+    // Scrollback: whether the room has more history, and whether a page is
+    // already in flight.
+    moreHistory: true,
+    loadingHistory: false,
+    // What you have sent, newest last — recalled with Up, as every IRC client
+    // and every shell has done forever.
+    sent: [],
+    sentAt: -1,
   };
 
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
@@ -154,29 +162,26 @@
   // worse than plain text.
   var REF_KINDS = { 0: 1, 1: 1, 2: 1, 4: 1, 5: 1, 9: 1 };
 
-  function idsIn(body) {
-    var out = [];
-    if (!body) return out;
-    ID_RE.lastIndex = 0;
-    var m;
-    while ((m = ID_RE.exec(body)) !== null) {
-      var id = m[2];
-      if (!REF_KINDS[parseInt(id.split('-')[0], 10)]) continue;
-      if (out.indexOf(id) === -1) out.push(id);
-      // The regex consumes the leading boundary char, so back up one to let
-      // two adjacent ids ("2-1 5-2") both match.
-      ID_RE.lastIndex = m.index + m[0].length;
-    }
-    return out;
-  }
-  Chat.idsIn = idsIn;
-
   // id → card, or `false` while a lookup is in flight, or null when the chain
   // had nothing. Shared across the whole timeline: a room arguing about one
   // raid names it in every other line.
   var refCards = {};
   var refQueue = [];
   var refTimer = null;
+  // Bounded like the Rust cache it mirrors. A long session in busy rooms names
+  // a great many objects, and none of this is worth keeping forever.
+  var REF_CACHE_MAX = 400;
+
+  function trimRefCache() {
+    var keys = Object.keys(refCards);
+    if (keys.length <= REF_CACHE_MAX) return;
+    // Oldest-first by insertion, which is the order Object.keys gives for
+    // string keys that are not array indices. Anything currently open by hand
+    // is kept: it is on screen.
+    keys.slice(0, keys.length - REF_CACHE_MAX).forEach(function (k) {
+      if (!S.openRefs[k]) delete refCards[k];
+    });
+  }
 
   function wantRefs(ids) {
     var fresh = ids.filter(function (id) {
@@ -199,6 +204,7 @@
         // Anything the chain did not know stays null so it is never retried
         // in a loop; it simply renders as plain text.
         batch.forEach(function (id) { if (!refCards[id]) refCards[id] = null; });
+        trimRefCache();
         if (refQueue.length) refTimer = setTimeout(flushRefs, 30);
         render();
       })
@@ -364,6 +370,31 @@
     { key: 'galaxy', label: 'Galaxy Net' },
   ];
 
+  // Which homeserver a room lives on, from its alias or its id.
+  function serverOf(r) {
+    var src = r.canonical_alias || r.room_id || '';
+    var at = src.lastIndexOf(':');
+    return at === -1 ? '' : src.slice(at + 1);
+  }
+  Chat.serverOf = serverOf;
+
+  function ownServer() {
+    var uid = (S.profile && S.profile.user_id) || '';
+    var at = uid.lastIndexOf(':');
+    return at === -1 ? '' : uid.slice(at + 1);
+  }
+
+  // Label a room's home only when it is somewhere ELSE. Browse spans every
+  // guild in the galaxy, but most rows are from your own server and stamping
+  // that on all of them is noise, not information. The `matrix.` prefix is
+  // dropped because every one of these hosts has it.
+  function foreignServerLabel(r) {
+    var host = serverOf(r);
+    if (!host || host === ownServer()) return '';
+    return host.replace(/^matrix\./, '');
+  }
+  Chat.foreignServerLabel = foreignServerLabel;
+
   function roomRow(r, browsing) {
     var row = el('div', 'sui-result-row chat-room-row');
 
@@ -384,13 +415,21 @@
     block.appendChild(el('span', null, r.name || r.canonical_alias || r.room_id));
     block.appendChild(el('br'));
     // A DM's subtitle is who it is with; a channel's is how many are in it.
-    // Browsing adds the topic, because that is the whole basis for choosing.
-    var sub = r.player_id
-      ? el('span', 'sui-text-hint',
-          (r.tag ? '[' + r.tag + '] ' : '') + 'PID #' + r.player_id)
-      : el('span', 'sui-text-hint',
-          fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')
-          + (browsing && r.topic ? ' · ' + r.topic : ''));
+    // Browsing adds where it lives and what it is for: the directory spans
+    // every guild's homeserver, so "which server" is part of choosing.
+    var sub;
+    if (r.player_id) {
+      sub = el('span', 'sui-text-hint',
+        (r.tag ? '[' + r.tag + '] ' : '') + 'PID #' + r.player_id);
+    } else {
+      var parts = [fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')];
+      if (browsing) {
+        var host = foreignServerLabel(r);
+        if (host) parts.push(host);
+        if (r.topic) parts.push(r.topic);
+      }
+      sub = el('span', 'sui-text-hint', parts.join(' · '));
+    }
     block.appendChild(sub);
     info.appendChild(block);
     left.appendChild(info);
@@ -748,14 +787,14 @@
     fillBody(body, m.body || '', m.local);
     wrap.appendChild(body);
 
-    // Cards for whatever the message named, under it. Local system lines are
-    // the window talking to itself and never get them.
+    // Cards for whatever the message named, under it. Local lines get them too
+    // — /whois is exactly "show me this card".
     //
     // Only the FIRST reference expands on its own. A message naming four
     // objects would otherwise bury itself under four cards, and the point of a
     // summary is to be an aside. The rest are chips you can open.
-    if (!m.local) {
-      var ids = idsIn(m.body);
+    {
+      var ids = refIdsIn(m.body);
       if (ids.length) {
         wantRefs(ids);
         var cards = el('div', 'chat-refs');
@@ -770,31 +809,95 @@
     return wrap;
   }
 
-  // Write a message body, marking the object ids inside it.
-  //
-  // Still textContent for every character: the body is split on id boundaries
-  // and each piece is set as text, so no markup from a federated homeserver is
-  // ever parsed. The only nodes added are ones this function creates.
-  function fillBody(node, body, isLocal) {
-    if (isLocal) { node.textContent = body; return; }
-    var ids = idsIn(body);
-    if (!ids.length) { node.textContent = body; return; }
+  // Links. Only http/https are even looked for — Rust refuses anything else,
+  // but not offering it in the first place is the better half of that.
+  var URL_RE = /https?:\/\/[^\s<>"'`]+/g;
+  // Trailing punctuation is almost always the sentence, not the link:
+  // "see https://example.com." should not open ".com."
+  function trimUrl(u) {
+    return u.replace(/[.,;:!?)\]}'"]+$/, '');
+  }
 
-    var at = 0;
-    ID_RE.lastIndex = 0;
+  // Everything in a body worth marking, in the order it appears.
+  // The ids a message REFERENCES — spans of kind 'id', deduped in order.
+  // Not `idsIn`: that one does not know about links, and an id inside a URL is
+  // part of the URL. Using different answers for "mark it" and "card it" made
+  // a linked planet id produce a card it had no visible chip for.
+  function refIdsIn(body) {
+    var out = [];
+    spansIn(body).forEach(function (sp) {
+      if (sp.kind === 'id' && out.indexOf(sp.text) === -1) out.push(sp.text);
+    });
+    return out;
+  }
+  Chat.refIdsIn = refIdsIn;
+
+  function spansIn(body) {
+    var out = [];
     var m;
+    URL_RE.lastIndex = 0;
+    while ((m = URL_RE.exec(body)) !== null) {
+      var url = trimUrl(m[0]);
+      if (url) out.push({ at: m.index, len: url.length, kind: 'url', text: url });
+    }
+    ID_RE.lastIndex = 0;
     while ((m = ID_RE.exec(body)) !== null) {
       var id = m[2];
+      var at = m.index + m[1].length;
       if (!REF_KINDS[parseInt(id.split('-')[0], 10)]) continue;
-      var start = m.index + m[1].length;
-      if (start > at) node.appendChild(document.createTextNode(body.slice(at, start)));
-      // Built in a helper so each chip's handler closes over ITS id: `var` in
-      // this while-loop is function-scoped, so inline closures would every one
-      // of them capture the last id in the message.
-      node.appendChild(idChip(id, ids[0] === id));
-      at = start + id.length;
+      // An id inside a URL is part of the URL, not a reference.
+      var inUrl = out.some(function (s) {
+        return s.kind === 'url' && at >= s.at && at < s.at + s.len;
+      });
+      if (!inUrl) out.push({ at: at, len: id.length, kind: 'id', text: id });
     }
+    out.sort(function (a, b) { return a.at - b.at; });
+    return out;
+  }
+  Chat.spansIn = spansIn;
+
+  // Write a message body, marking the ids and links inside it.
+  //
+  // Still textContent for every character: the body is split on span
+  // boundaries and each piece is set as text, so no markup from a federated
+  // homeserver is ever parsed. The only nodes added are ones this function
+  // creates.
+  function fillBody(node, body, isLocal) {
+    if (isLocal) { node.textContent = body; return; }
+    var spans = spansIn(body);
+    if (!spans.length) { node.textContent = body; return; }
+
+    var ids = refIdsIn(body);
+    var at = 0;
+    spans.forEach(function (sp) {
+      if (sp.at < at) return;                    // overlapped by an earlier span
+      if (sp.at > at) node.appendChild(document.createTextNode(body.slice(at, sp.at)));
+      node.appendChild(sp.kind === 'url'
+        ? linkChip(sp.text)
+        // Built in a helper so each chip's handler closes over ITS id: `var`
+        // in a loop is function-scoped, and inline closures would every one of
+        // them capture the last id in the message.
+        : idChip(sp.text, ids[0] === sp.text));
+      at = sp.at + sp.len;
+    });
     if (at < body.length) node.appendChild(document.createTextNode(body.slice(at)));
+  }
+
+  // A link opens in the SYSTEM browser, never in the app. The full target is
+  // the tooltip, because the text of a link in a chat message is written by a
+  // stranger and the destination is the only thing worth trusting.
+  function linkChip(url) {
+    var a = el('a', 'chat-link', url);
+    a.href = 'javascript:void(0)';
+    a.title = url;
+    a.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      invoke('matrix_open_url', { url: url }).catch(function (e) {
+        a.classList.add('chat-mod-refused');
+        a.title = String(e);
+      });
+    });
+    return a;
   }
 
   function idChip(id, isFirst) {
@@ -808,6 +911,17 @@
       render();
     });
     return chip;
+  }
+
+  // Scrolling up loads history on its own; this is for anyone who would rather
+  // ask, and it doubles as the marker saying more exists.
+  function historyButton() {
+    var wrap = el('div', 'chat-history');
+    var btn = el('button', 'sui-screen-btn sui-mod-secondary', 'Load earlier');
+    btn.id = 'chat-load-earlier';
+    btn.addEventListener('click', loadHistory);
+    wrap.appendChild(btn);
+    return wrap;
   }
 
   // A labelled hairline across the timeline. `alert` makes it the unread
@@ -840,6 +954,14 @@
 
     var scroll = el('div', 'chat-scroll');
     scroll.id = 'chat-timeline';
+    scroll.addEventListener('scroll', maybeLoadHistory);
+    if (S.messages.length) {
+      // The top of the log says what is above it: more to come, or the
+      // beginning of the room. Silence at the top reads as a broken client.
+      scroll.appendChild(S.loadingHistory
+        ? ruleNode('Loading')
+        : (S.moreHistory ? historyButton() : ruleNode('Beginning')));
+    }
     if (!S.messages.length) {
       scroll.appendChild(noticeBlock('Quiet', 'Nothing has been said here yet.'));
     } else {
@@ -867,9 +989,12 @@
     }
     page.appendChild(scroll);
 
-    // Everything on screen counts as read from here on.
+    // Everything on screen counts as read from here on — locally, and on the
+    // homeserver so the player's other Matrix clients agree.
     if (S.messages.length) {
-      S.lastRead[S.roomId] = Number(S.messages[S.messages.length - 1].ts) || 0;
+      var newest = S.messages[S.messages.length - 1];
+      S.lastRead[S.roomId] = Number(newest.ts) || 0;
+      markRead(S.roomId, newest.event_id);
     }
 
     // Between the log and the composer, where MSN put it: the one line that
@@ -949,7 +1074,16 @@
 
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); return; }
-      if (e.key === 'Tab') { e.preventDefault(); complete(input, e.shiftKey); }
+      if (e.key === 'Tab') { e.preventDefault(); complete(input, e.shiftKey); return; }
+      // Up/Down walk what you have already sent — every IRC client and every
+      // shell does this, and it is the fastest way to fix a typo or repeat a
+      // command. Only from the ends of the line, so it never fights editing.
+      if (e.key === 'ArrowUp' && input.selectionStart === 0) {
+        e.preventDefault(); recall(input, -1); return;
+      }
+      if (e.key === 'ArrowDown' && input.selectionStart === input.value.length) {
+        e.preventDefault(); recall(input, 1);
+      }
     });
     send.addEventListener('click', submit);
     return wrap;
@@ -1032,12 +1166,57 @@
 
   function resetCompletion() { cycle = null; }
 
+  // ── Input history ─────────────────────────────────────────────────────────
+  // `sentAt` is an index into S.sent, or -1 meaning "on a fresh line". Walking
+  // past the newest returns to the draft that was in progress, so recalling by
+  // accident costs nothing.
+  var draftBeforeRecall = '';
+
+  function recall(input, dir) {
+    if (!S.sent.length) return;
+    if (S.sentAt === -1) {
+      if (dir > 0) return;                       // nothing newer than a fresh line
+      draftBeforeRecall = input.value;
+      S.sentAt = S.sent.length - 1;
+    } else {
+      S.sentAt += dir;
+      if (S.sentAt < 0) S.sentAt = 0;
+      if (S.sentAt >= S.sent.length) {
+        S.sentAt = -1;
+        input.value = draftBeforeRecall;
+        moveCaretToEnd(input);
+        return;
+      }
+    }
+    input.value = S.sent[S.sentAt];
+    moveCaretToEnd(input);
+  }
+  Chat.recall = recall;
+
+  function moveCaretToEnd(input) {
+    var end = input.value.length;
+    try { input.setSelectionRange(end, end); } catch (e) {}
+  }
+
+  function rememberSent(text) {
+    // No consecutive duplicates: sending the same thing twice should not make
+    // Up press twice to get past it.
+    if (S.sent[S.sent.length - 1] !== text) S.sent.push(text);
+    if (S.sent.length > 100) S.sent = S.sent.slice(-100);
+    S.sentAt = -1;
+    draftBeforeRecall = '';
+  }
+
   // ── Announcing that we are typing ────────────────────────────────────────
   // Throttled hard. The homeserver keeps believing a notice for 20 seconds, so
   // one every 8 is plenty — sending on every keystroke would put a request on
   // the wire per character.
   var typingSentAt = 0;
   var typingStopTimer = null;
+  // WHICH room we told we were typing. Not S.roomId at retraction time: leaving
+  // a room mid-sentence would otherwise retract in the room you arrived at and
+  // leave you shown as typing, for twenty seconds, in the one you left.
+  var typingRoom = null;
   var TYPING_REFRESH_MS = 8000;
   var TYPING_IDLE_MS = 5000;
 
@@ -1052,7 +1231,8 @@
     var now = Date.now();
     if (now - typingSentAt > TYPING_REFRESH_MS) {
       typingSentAt = now;
-      invoke('matrix_typing', { guildId: S.guildId, roomId: S.roomId, typing: true })
+      typingRoom = S.roomId;
+      invoke('matrix_typing', { guildId: S.guildId, roomId: typingRoom, typing: true })
         .catch(function () {});
     }
     // Stop claiming to type once the keyboard goes quiet, rather than waiting
@@ -1062,12 +1242,15 @@
 
   function stopTyping() {
     if (typingStopTimer) { clearTimeout(typingStopTimer); typingStopTimer = null; }
-    if (!typingSentAt || !S.roomId) return;
+    if (!typingSentAt || !typingRoom) return;
+    var room = typingRoom;
     typingSentAt = 0;
-    invoke('matrix_typing', { guildId: S.guildId, roomId: S.roomId, typing: false })
+    typingRoom = null;
+    invoke('matrix_typing', { guildId: S.guildId, roomId: room, typing: false })
       .catch(function () {});
   }
   Chat.noteTyping = noteTyping;
+  Chat.stopTyping = stopTyping;
 
   // ── Commands ──────────────────────────────────────────────────────────────
   // IRC's best idea: the composer is also the command line. No new UI, no menu
@@ -1082,6 +1265,7 @@
     { name: 'leave', args: '', help: 'Leave the room you are in' },
     { name: 'topic', args: '', help: 'Show what this room is about' },
     { name: 'who', args: '', help: 'Who has spoken here' },
+    { name: 'whois', args: '<player>', help: 'Look a player up' },
     { name: 'help', args: '', help: 'This list' },
   ];
 
@@ -1093,6 +1277,8 @@
     if (!text) return;
     input.value = '';
     resetCompletion();
+
+    rememberSent(text);
 
     // "//foo" → send the literal "/foo".
     if (text.indexOf('//') === 0) { sendMessage(text.slice(1)); return; }
@@ -1161,6 +1347,23 @@
       case 'topic':
         say((S.room && S.room.topic) || 'This room has no topic.');
         return;
+
+      case 'whois': {
+        if (!rest) { say('/whois needs a player id.', true); return; }
+        var pid = rest.split(/\s+/)[0].replace(/^[@#]/, '');
+        // Reuses the reference machinery: the card /whois wants is exactly the
+        // card an id in a message already produces.
+        invoke('matrix_refs', { ids: [pid] })
+          .then(function (res) {
+            var card = (res && res.refs || [])[0];
+            if (!card) { say('No ' + pid + ' on the chain.', true); return; }
+            refCards[card.id] = card;
+            S.openRefs[card.id] = 1;
+            say(pid);
+          })
+          .catch(function (e) { say(String(e), true); });
+        return;
+      }
 
       case 'who': {
         var seen = {};
@@ -1244,6 +1447,50 @@
     var t = byId('chat-timeline');
     if (t) t.scrollTop = t.scrollHeight;
   }
+
+  // Near the top means "show me what came before". 120px of lead-in so the
+  // page is already arriving by the time the reader gets there.
+  var HISTORY_TRIGGER_PX = 120;
+
+  function maybeLoadHistory() {
+    var t = byId('chat-timeline');
+    if (!t || S.view !== 'room' || !S.roomId) return;
+    if (S.loadingHistory || !S.moreHistory) return;
+    if (t.scrollTop > HISTORY_TRIGGER_PX) return;
+    loadHistory();
+  }
+
+  function loadHistory() {
+    var room = S.roomId;
+    S.loadingHistory = true;
+    render();
+    var t = byId('chat-timeline');
+    // Anchor on the distance from the BOTTOM: prepending changes scrollHeight,
+    // and holding scrollTop would drop the reader wherever the new content
+    // happened to push their line.
+    var fromBottom = t ? t.scrollHeight - t.scrollTop : 0;
+
+    return invoke('matrix_backfill', { guildId: S.guildId, roomId: room, limit: 40 })
+      .then(function (res) {
+        if (S.roomId !== room) return;          // they moved on while we waited
+        var older = (res && res.messages) || [];
+        S.moreHistory = !!(res && res.more);
+        S.loadingHistory = false;
+        if (older.length) S.messages = older.concat(S.messages);
+        wasAtBottom = false;                     // reading history, not following
+        render();
+        var back = byId('chat-timeline');
+        if (back) back.scrollTop = back.scrollHeight - fromBottom;
+      })
+      .catch(function () {
+        S.loadingHistory = false;
+        // Stop asking: a failing page will fail again on the next scroll and
+        // the reader would get a stutter instead of a log.
+        S.moreHistory = false;
+        render();
+      });
+  }
+  Chat.loadHistory = loadHistory;
 
   // Called before a re-render decides whether to follow.
   var wasAtBottom = true;
@@ -1431,9 +1678,25 @@
   }
   Chat.render = render;
 
+  // One marker per room per event: render() runs constantly and the homeserver
+  // does not need to hear the same thing twice.
+  var marked = {};
+  function markRead(roomId, eventId) {
+    if (!roomId || !eventId) return;
+    // Local echoes and the window's own notices are not server events.
+    if (String(eventId).charAt(0) !== '$') return;
+    if (marked[roomId] === eventId) return;
+    marked[roomId] = eventId;
+    invoke('matrix_mark_read', { guildId: S.guildId, roomId: roomId, eventId: eventId })
+      .catch(function () {});
+  }
+
   function go(view) {
     S.view = view;
-    if (view === 'channels') { S.roomId = null; S.room = null; S.messages = []; }
+    if (view === 'channels') {
+      stopTyping();
+      S.roomId = null; S.room = null; S.messages = [];
+    }
     render();
     if (view === 'channels') refreshRooms();
     if (view === 'people') loadPeople();
@@ -1485,12 +1748,31 @@
     });
   }
 
+  // Unread counts and mention flags live in the WINDOW — Rust always reports
+  // them as zero, because only the window knows what is being looked at. So a
+  // fresh room list has to be merged onto the old one, not swapped for it:
+  // swapping wiped every unread count whenever a room was renamed, joined, or
+  // otherwise re-pushed.
+  function adoptRooms(rooms) {
+    var was = {};
+    S.rooms.forEach(function (r) {
+      was[r.room_id] = { unread: Number(r.unread) || 0, mention: !!r.mention };
+    });
+    S.rooms = (rooms || []).map(function (r) {
+      var prev = was[r.room_id];
+      if (!prev) return r;
+      r.unread = prev.unread;
+      r.mention = prev.mention;
+      return r;
+    });
+  }
+
   function refreshRooms() {
     var net = activeNetwork();
     if (!net || !net.logged_in) { S.loading = false; return Promise.resolve(); }
     return invoke('matrix_rooms', { guildId: S.guildId })
       .then(function (res) {
-        S.rooms = (res && res.rooms) || [];
+        adoptRooms(res && res.rooms);
         S.loading = false;
         if (S.view === 'channels') render();
       })
@@ -1509,7 +1791,11 @@
     // Frozen at open: the divider marks where this visit STARTED reading, so
     // it must not slide down as messages below it are read.
     S.dividerTs = Number(S.lastRead[roomId]) || 0;
+    // Whatever we were mid-sentence in, we are not any more.
+    stopTyping();
     S.typing = [];
+    S.moreHistory = true;
+    S.loadingHistory = false;
     S.rooms.forEach(function (r) {
       if (r.room_id === roomId) { r.unread = 0; r.mention = false; }
     });
@@ -1683,7 +1969,7 @@
   function onRooms(payload) {
     if (!payload) return;
     if (payload.guild_id && payload.guild_id !== S.guildId) return;
-    S.rooms = payload.rooms || [];
+    adoptRooms(payload.rooms);
     S.loading = false;
     if (S.view === 'channels') render();
   }
@@ -1706,6 +1992,7 @@
     var close = byId('menu-page-nav-close');
     if (close) {
       close.addEventListener('click', function () {
+        stopTyping();
         // Rust closes it, for the same reason Rust opened it. The JS window
         // API is a trap here: `getCurrent()` is the Tauri v1 spelling and is
         // simply absent on v2, so the button would silently do nothing.
@@ -1714,6 +2001,15 @@
         });
       });
     }
+    // Escape backs out one level, from anywhere. The one key every window in
+    // every OS agrees on.
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') return;
+      if (S.view === 'channels') return;         // already at the top level
+      e.preventDefault();
+      go('channels');
+    });
+
     var comms = byId('chat-nav-comms');
     if (comms) comms.addEventListener('click', function () { go('channels'); });
     var settings = byId('chat-nav-settings');

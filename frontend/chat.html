@@ -82,6 +82,12 @@
     /* Rows are .sui-result-row; only the icon well needs placing, because the
        roster's portrait well expects a rendered PFP rather than a glyph. */
     .sui-result-row.chat-room-row { cursor: pointer; }
+    /* A subtitle is a subtitle: two lines at most, then it ellipsises. A long
+       topic must not make one row as tall as three. */
+    .sui-result-row .sui-text-hint {
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
     .chat-room-icon {
       display: flex; align-items: center; justify-content: center;
       width: 32px; height: 32px; flex: 0 0 32px;
@@ -183,6 +189,16 @@
       color: var(--text-player-primary);
       border-bottom: 1px dotted var(--text-player-primary);
     }
+    /* A link in a message. Opens in the system browser; the tooltip carries
+       the real destination, because the visible text is a stranger's. */
+    .chat-link {
+      color: var(--accent-secondary);
+      text-decoration: underline;
+      word-break: break-all; cursor: pointer;
+    }
+    .chat-link:hover { color: var(--accent-secondary-active); }
+    .chat-link.chat-mod-refused { color: var(--text-enemy-primary); }
+
     /* A reference past the first is closed; the chip opens it. */
     .chat-id.chat-mod-openable { cursor: pointer; }
     .chat-id.chat-mod-openable:hover { color: var(--text-player-highlight); }
@@ -207,6 +223,9 @@
     .chat-ref-portrait .pfp-viewer-layer { image-rendering: pixelated; }
     .chat-ref .chat-kv { padding: 1px 0; }
     .chat-ref.chat-room-row { cursor: pointer; }
+
+    /* The top of the log: load more, or the beginning of the room. */
+    .chat-history { display: flex; justify-content: center; padding: var(--spacing-xs) 0; }
 
     /* A labelled hairline: day separators, and the unread divider. */
     .chat-rule {

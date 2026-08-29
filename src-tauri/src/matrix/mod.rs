@@ -14,6 +14,7 @@
 pub mod auth;
 pub mod client;
 pub mod directory;
+pub mod discovery;
 pub mod refs;
 pub mod store;
 
@@ -188,8 +189,10 @@ pub async fn matrix_connect(app: tauri::AppHandle, guild_id: String) -> Result<V
     let steps = ladder.steps();
 
     match result {
-        Ok(_) => {
+        Ok(connected) => {
             clear_error(&guild_id);
+            // A real id from this homeserver settles what it is called.
+            directory::learn_server_name(&guild_id, &connected.user_id);
             client::start_sync(app.clone(), guild_id.clone());
             let _ = app.emit(
                 "matrix::status",
@@ -282,6 +285,21 @@ pub async fn matrix_timeline(
         }
     };
     Ok(json!({ "room": room, "messages": messages }))
+}
+
+/// Older history, one page at a time — what every chat log does when you
+/// scroll up. `more` says whether the room has further back to go, so the
+/// window stops asking at the beginning instead of retrying forever.
+#[tauri::command]
+pub async fn matrix_backfill(
+    guild_id: String,
+    room_id: String,
+    limit: Option<u32>,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let want = limit.unwrap_or(40).min(100);
+    let (messages, more) = client::backfill(&guild_id, &session, &room_id, want).await?;
+    Ok(json!({ "messages": messages, "more": more }))
 }
 
 #[tauri::command]
@@ -471,6 +489,51 @@ pub async fn matrix_refs(ids: Vec<String>) -> Result<Value, String> {
         }
     }
     Ok(json!({ "refs": out }))
+}
+
+/// Open a link found in a chat message, in the SYSTEM browser.
+///
+/// Deliberately not the app's existing `updater::open_url`: that one opens
+/// whatever it is handed, and this one is fed by federated strangers. Only
+/// http and https pass — `javascript:`, `file:`, `tauri:` and every custom
+/// scheme a host might have registered are refused here rather than trusted to
+/// the OS. Opening externally is also the point: nothing in a chat message can
+/// navigate the app itself.
+#[tauri::command]
+pub async fn matrix_open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let parsed = reqwest::Url::parse(url.trim())
+        .map_err(|_| format!("not a link: {}", url))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("refusing to open a {} link", parsed.scheme()));
+    }
+    app.opener()
+        .open_url(parsed.to_string(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Tell the homeserver how far you have read.
+///
+/// Without this, every other Matrix client the player uses still shows the
+/// room as unread — and the desktop window's own notion of "read" would be
+/// private to this machine.
+#[tauri::command]
+pub async fn matrix_mark_read(
+    guild_id: String,
+    room_id: String,
+    event_id: String,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    // A local echo has no server event id; marking one would be a 400.
+    if !event_id.starts_with('$') {
+        return Ok(json!({ "ok": false }));
+    }
+    if let Err(e) = client::mark_read(&session, &room_id, &event_id).await {
+        // Read markers are a courtesy to your other clients; failing to set
+        // one must never surface as an error over the conversation.
+        eprintln!("[Comms] read marker: {}", e);
+    }
+    Ok(json!({ "ok": true }))
 }
 
 // ── The window ──────────────────────────────────────────────────────────────

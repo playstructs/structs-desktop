@@ -125,10 +125,29 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_browse'));
 
   const rows = all(d, '.sui-result-row');
-  check('every public channel is listed', rows.length === 5, String(rows.length));
+  check('every public channel is listed', rows.length === 6, String(rows.length));
   check('including ones you are already in',
     rows.some((r) => text(r).startsWith('SN.Corporation')),
     rows.map((r) => text(r)).join(' | '));
+
+  // The directory spans every guild's homeserver — the public room directory
+  // is empty on all of them, so these are found by alias (discovery.rs).
+  const crabla = rows.find((r) => text(r).includes('Kilgore Crabla'));
+  check('another guild\'s channel is discoverable', !!crabla,
+    rows.map((r) => text(r)).join(' | '));
+  // Labelled because it is somewhere ELSE. Rows on your own homeserver are
+  // not stamped with it — that would be noise on most of the list.
+  check('…and says which server it is on',
+    text(crabla).includes('crab.la'), text(crabla));
+  const own = rows.find((r) => text(r).startsWith('Community'));
+  check('a room on your own server is not labelled with it',
+    !text(own).includes('playstructs.com'), text(own));
+  check('the matrix. prefix is dropped',
+    w.Chat.foreignServerLabel({ canonical_alias: '#lobby:matrix.crab.la' }) === 'crab.la',
+    w.Chat.foreignServerLabel({ canonical_alias: '#lobby:matrix.crab.la' }));
+  check('…and what it is for',
+    text(crabla).includes('AI-native guild'), text(crabla));
+  check('…and offers to join it', crabla.querySelector('button') !== null);
   check('a room you are in says so instead of offering Join',
     rows.find((r) => text(r).startsWith('SN.Corporation')).querySelector('.sui-badge') !== null);
   check('a room you are not in offers Join',
@@ -199,7 +218,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     text(d.querySelector('.sui-page-header')));
 
   const msgs = all(d, '.chat-msg');
-  check('every event renders', msgs.length === 10, String(msgs.length));
+  check('every event renders', msgs.length === 11, String(msgs.length));
 
   // A run from one sender drops the repeated header, as the mockup does —
   // but $1 and $2 are a day apart, so that run is deliberately broken.
@@ -240,16 +259,23 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await tick();
 
   const times = all(d, '.chat-msg-time').map(text);
-  check('every message is stamped', times.length === 10, String(times.length));
+  check('every message is stamped', times.length === 11, String(times.length));
   check('stamps are fixed-width 24h', times.every((t) => /^\d{2}:\d{2}$/.test(t)),
     times.join(','));
 
   // $1 is a day earlier than the rest, so exactly one date rule belongs here.
   const rules = all(d, '.chat-rule').map(text);
   check('a day separator marks the boundary', rules.length === 1, rules.join('|'));
-  check('and it is not above the first message',
-    d.querySelector('.chat-scroll').firstChild.className.includes('chat-msg'),
-    d.querySelector('.chat-scroll').firstChild.className);
+  // Never above the first message — the only thing above it is the scrollback
+  // control, which is not part of the conversation.
+  const kids = Array.from(d.querySelector('.chat-scroll').children);
+  check('the log opens with the scrollback control',
+    kids[0].className.includes('chat-history') || kids[0].className.includes('chat-rule'),
+    kids[0].className);
+  check('and no date rule sits above the first message',
+    kids.findIndex((n) => n.className.includes('chat-rule') && text(n) !== 'Loading')
+      > kids.findIndex((n) => n.className.includes('chat-msg')),
+    kids.map((n) => n.className).join(' | '));
 
   // An emote is one line, IRC-style, and never repeats the name in a header.
   const emote = all(d, '.chat-msg').find((n) => text(n).includes('shrugs'));
@@ -357,6 +383,20 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('plain traffic stays the default colour',
     !quiet.className.includes('sui-mod-warning'), quiet.className);
 
+  // A fresh room list must MERGE, not replace. Rust always reports unread as
+  // zero — only the window knows what is being looked at — so a room being
+  // renamed or joined used to wipe every count on screen.
+  w.__HARNESS_EMIT__('matrix::rooms', {
+    guild_id: '0-5',
+    rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms.map((r) => Object.assign({}, r)),
+  });
+  await tick();
+  const raidAfter = w.Chat._state.rooms.find(
+    (r) => r.room_id === '!raid:matrix.beta.playstructs.com');
+  check('a room-list push keeps unread counts', raidAfter.unread === 2,
+    String(raidAfter.unread));
+  check('…and mention flags', raidAfter.mention === true, String(raidAfter.mention));
+
   // Opening the room clears both.
   await w.Chat.openRoom('!raid:matrix.beta.playstructs.com');
   await tick();
@@ -372,7 +412,9 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
 {
   console.log('\n— id detection');
   const { w } = await open();
-  const ids = (s) => w.Chat.idsIn(s).join(',');
+  // refIdsIn is what BOTH the inline marking and the cards use — testing a
+  // second detector would be testing something the window does not run.
+  const ids = (s) => w.Chat.refIdsIn(s).join(',');
 
   check('an id is found', ids('hitting 2-15361 now') === '2-15361');
   check('several are found in order',
@@ -503,6 +545,113 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     w.Chat._state.roomId === stay, String(w.Chat._state.roomId));
 }
 
+// ── Links ───────────────────────────────────────────────────────────────────
+// A link in a chat message is written by a stranger, so the destination is the
+// only part worth trusting and it opens in the system browser, never in-app.
+{
+  console.log('\n— links');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  const msg = all(d, '.chat-msg').find((n) => text(n).includes('playstructs.com/docs'));
+  const links = Array.from(msg.querySelectorAll('.chat-link'));
+  check('http links are marked', links.length === 2,
+    links.map((l) => text(l)).join(' | '));
+
+  // "see https://example.com." must not open ".com." — the full stop is the
+  // sentence, not the link.
+  check('trailing punctuation is not part of the link',
+    text(links[0]) === 'https://playstructs.com/docs', text(links[0]));
+  check('and the tooltip carries the real destination',
+    links[0].title === 'https://playstructs.com/docs', links[0].title);
+
+  // Only http/https are even offered; Rust refuses the rest, but not offering
+  // it is the better half of that.
+  check('a javascript: scheme is not a link',
+    !links.some((l) => text(l).indexOf('javascript:') === 0),
+    links.map((l) => text(l)).join(' | '));
+  check('…and survives as plain text', text(msg).includes('javascript:alert(1)'));
+
+  // An id inside a URL is part of the URL, not a reference — and that answer
+  // has to hold for the CARD too. Marking and carding using different rules
+  // produced a card with no visible chip to explain it.
+  check('an id inside a link is not marked as a reference',
+    !Array.from(msg.querySelectorAll('.chat-id')).some((c) => text(c) === '2-15361'),
+    Array.from(msg.querySelectorAll('.chat-id')).map((c) => text(c)).join(','));
+  check('…and gets no card either', msg.querySelector('.chat-ref') === null);
+  check('the two rules agree', w.Chat.refIdsIn(
+    'see https://beta.playstructs.com/planet/2-15361 and 5-1').join(',') === '5-1');
+
+  links[0].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const opened = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_open_url').pop();
+  check('clicking asks Rust to open it externally',
+    !!opened && opened.args.url === 'https://playstructs.com/docs',
+    JSON.stringify(opened && opened.args));
+
+  // Nothing in a message may navigate the window itself.
+  check('no anchor carries a real href',
+    !Array.from(d.querySelectorAll('.chat-msg a[href]'))
+      .some((a) => a.getAttribute('href') !== 'javascript:void(0)'));
+}
+
+// ── Read markers ────────────────────────────────────────────────────────────
+{
+  console.log('\n— read markers');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const marks = () => w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_mark_read');
+
+  check('reading a room tells the homeserver', marks().length >= 1, String(marks().length));
+  check('…up to the newest event', marks().pop().args.eventId === '$11',
+    JSON.stringify(marks().pop().args));
+
+  // render() runs constantly; the homeserver does not need to hear it twice.
+  const before = marks().length;
+  w.Chat.render();
+  w.Chat.render();
+  await tick();
+  check('an unchanged position is not re-sent', marks().length === before,
+    String(marks().length - before));
+
+  // A local echo has no server event id and would be a 400.
+  d.getElementById('chat-input').value = 'mine';
+  d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('a local echo is never marked',
+    marks().every((c) => String(c.args.eventId).charAt(0) === '$'),
+    marks().map((c) => c.args.eventId).join(','));
+}
+
+// ── /whois ──────────────────────────────────────────────────────────────────
+{
+  console.log('\n— whois');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  d.getElementById('chat-input').value = '/whois 1-61';
+  d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  await tick();
+
+  const last = all(d, '.chat-msg').pop();
+  check('the answer carries the player card',
+    last.querySelector('.chat-ref') !== null);
+  check('…with their name and holdings',
+    text(last).includes('JPEG') && text(last).includes('9.4Kg'), text(last));
+  check('and nothing was sent to the room',
+    !w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_send' && /whois/.test(c.args.body)));
+
+  d.getElementById('chat-input').value = '/whois';
+  d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('and it asks for a player when given none',
+    text(all(d, '.chat-msg').pop()).includes('needs a player id'),
+    text(all(d, '.chat-msg').pop()));
+}
+
 // ── Sending ─────────────────────────────────────────────────────────────────
 {
   console.log('\n— sending');
@@ -515,7 +664,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 
   // The echo is on screen before the command resolves — that is the point.
-  const base = 10;
+  const base = 11;
   let msgs = all(d, '.chat-msg');
   check('local echo appears immediately', msgs.length === base + 1, String(msgs.length));
   const echo = () => all(d, '.chat-msg')[base];
@@ -762,6 +911,45 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     String(notices().length));
 }
 
+// Leaving a room mid-sentence must retract in the room you LEFT. Retracting
+// against the current room would leave you shown as typing, for twenty
+// seconds, somewhere you are no longer looking.
+{
+  console.log('\n— typing follows you out of a room');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const notices = () => w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_typing');
+
+  const n = d.getElementById('chat-input');
+  n.value = 'half a thought';
+  n.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick();
+  check('typing is announced in the room you are in',
+    notices().pop().args.roomId === '!snc:matrix.beta.playstructs.com',
+    JSON.stringify(notices().pop().args));
+
+  await w.Chat.openRoom('!raid:matrix.beta.playstructs.com');
+  await tick();
+  const retraction = notices().filter((c) => c.args.typing === false).pop();
+  check('leaving retracts it', !!retraction, JSON.stringify(retraction && retraction.args));
+  check('…in the room you left, not the one you arrived at',
+    retraction.args.roomId === '!snc:matrix.beta.playstructs.com',
+    retraction.args.roomId);
+
+  // And going back to the channel list retracts too.
+  const before = notices().filter((c) => c.args.typing === false).length;
+  const m = d.getElementById('chat-input');
+  m.value = 'again';
+  m.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick();
+  w.Chat.go('channels');
+  await tick();
+  check('leaving for the channel list also retracts',
+    notices().filter((c) => c.args.typing === false).length === before + 1,
+    String(notices().filter((c) => c.args.typing === false).length - before));
+}
+
 // ── The dock signal ─────────────────────────────────────────────────────────
 // A count you can see without switching to the app — the oldest unread signal
 // there is, and still the one that works.
@@ -859,6 +1047,130 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('sending always scrolls to your own message',
     d.getElementById('chat-timeline').scrollTop >= 700,
     String(d.getElementById('chat-timeline').scrollTop));
+}
+
+// ── Scrollback ──────────────────────────────────────────────────────────────
+// A chat log that only goes back as far as the sync window is not a log.
+{
+  console.log('\n— scrollback');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  check('the log says more exists', !!d.getElementById('chat-load-earlier'));
+  const before = all(d, '.chat-msg').length;
+
+  d.getElementById('chat-load-earlier').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_backfill').pop();
+  check('it asks Rust for a page',
+    !!call && call.args.roomId === '!snc:matrix.beta.playstructs.com',
+    JSON.stringify(call && call.args));
+
+  const after = all(d, '.chat-msg');
+  check('older messages are prepended', after.length === before + 1,
+    before + ' → ' + after.length);
+  check('…above everything else', text(after[0]).includes('earlier than the rest'),
+    text(after[0]));
+
+  // The fixture says there is no more, so the log must say so and stop asking.
+  check('the beginning of the room is marked',
+    Array.from(d.querySelectorAll('.chat-rule')).some((r) => text(r) === 'Beginning'));
+  check('and the load control is gone', !d.getElementById('chat-load-earlier'));
+
+  const asks = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_backfill').length;
+  d.getElementById('chat-timeline').dispatchEvent(new w.Event('scroll', { bubbles: true }));
+  await tick();
+  check('scrolling up again does not re-ask',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_backfill').length === asks,
+    String(w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_backfill').length));
+
+  // Re-entering a room starts over: its history is available again.
+  await w.Chat.openRoom('!raid:matrix.beta.playstructs.com');
+  await tick();
+  check('a freshly opened room offers history again',
+    !!d.getElementById('chat-load-earlier'));
+}
+
+// ── Input history ───────────────────────────────────────────────────────────
+// Up recalls what you sent — every IRC client and every shell.
+{
+  console.log('\n— input history');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const inp = () => d.getElementById('chat-input');
+  const send = async (t) => {
+    inp().value = t;
+    d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await tick();
+  };
+  const key = (k) => {
+    const n = inp();
+    n.setSelectionRange(k === 'ArrowUp' ? 0 : n.value.length, k === 'ArrowUp' ? 0 : n.value.length);
+    n.dispatchEvent(new w.KeyboardEvent('keydown', { key: k, bubbles: true }));
+  };
+
+  await send('first thing');
+  await send('/me waves');
+  await send('third thing');
+
+  key('ArrowUp');
+  check('Up recalls the newest', inp().value === 'third thing', JSON.stringify(inp().value));
+  key('ArrowUp');
+  check('again goes further back — commands included',
+    inp().value === '/me waves', JSON.stringify(inp().value));
+  key('ArrowDown');
+  check('Down comes back', inp().value === 'third thing', JSON.stringify(inp().value));
+  key('ArrowDown');
+  check('and past the newest is a fresh line', inp().value === '', JSON.stringify(inp().value));
+
+  // A draft in progress survives an accidental recall.
+  inp().value = 'half written';
+  key('ArrowUp');
+  check('recall stashes the draft', inp().value === 'third thing', JSON.stringify(inp().value));
+  key('ArrowDown');
+  check('…and gives it back', inp().value === 'half written', JSON.stringify(inp().value));
+
+  // Consecutive duplicates collapse: sending twice should not need two presses.
+  await send('same');
+  await send('same');
+  key('ArrowUp');
+  key('ArrowUp');
+  check('a repeated message is stored once',
+    inp().value === 'third thing', JSON.stringify(inp().value));
+}
+
+// ── Escape ──────────────────────────────────────────────────────────────────
+{
+  console.log('\n— escape');
+  const { w, d } = await open();
+  const esc = () => d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  esc();
+  await tick();
+  check('Escape leaves a room', w.Chat._state.view === 'channels', w.Chat._state.view);
+
+  w.Chat.go('people');
+  await tick();
+  esc();
+  await tick();
+  check('Escape leaves the people picker', w.Chat._state.view === 'channels', w.Chat._state.view);
+
+  w.Chat.go('browse');
+  await tick();
+  esc();
+  await tick();
+  check('Escape leaves Browse', w.Chat._state.view === 'channels', w.Chat._state.view);
+
+  // At the top level it does nothing rather than closing the window.
+  esc();
+  await tick();
+  check('at the channel list it does nothing',
+    w.Chat._state.view === 'channels'
+      && !w.__HARNESS_CALLS__.some((c) => c.cmd === 'close_chat_window'));
 }
 
 // ── The draft survives ──────────────────────────────────────────────────────

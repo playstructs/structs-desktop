@@ -144,8 +144,6 @@ pub struct AuthMetadata {
     pub token_endpoint: String,
     #[serde(default)]
     pub registration_endpoint: Option<String>,
-    #[serde(default)]
-    pub account_management_uri: Option<String>,
 }
 
 // ── PKCE ────────────────────────────────────────────────────────────────────
@@ -481,7 +479,10 @@ async fn guild_login(
 // ── Full sign-in ────────────────────────────────────────────────────────────
 
 pub struct Connected {
-    pub session: Session,
+    /// The Matrix id this sign-in produced — `@1-194:matrix.crew.oh.energy`.
+    /// Reported so the caller can say who it signed in as without going back
+    /// to the store for it.
+    pub user_id: String,
 }
 
 /// Run the whole chain. `emit` is called after every state change so the
@@ -663,8 +664,9 @@ where
         client_id,
         token_endpoint: meta.token_endpoint.clone(),
     };
-    store::put(session.clone());
-    Ok(Connected { session })
+    let user_id = session.user_id.clone();
+    store::put(session);
+    Ok(Connected { user_id })
 }
 
 /// The SPA's continue hook: `/?oidc=<request_id>` (OidcContinueManager reads

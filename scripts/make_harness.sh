@@ -617,6 +617,12 @@ cat > "$CFIX" <<'EOF'
       sender_tag: 'SN.C', player_id: '1-61', kind: 'text', self: false,
       admin: false, ts: 1787900009000,
       body: 'hitting 2-15361 with 5-2184, ask 1-61 — not 1-1945 or 6-1' },
+    // A link, plus one that is only punctuation away from the sentence, plus a
+    // scheme nothing should ever open.
+    { event_id: '$11', sender: '@1-42:matrix.beta.playstructs.com', sender_name: 'Netlag',
+      sender_tag: 'SN.C', player_id: '1-42', kind: 'text', self: false,
+      admin: false, ts: 1787900010000,
+      body: 'see https://playstructs.com/docs. also javascript:alert(1) and https://beta.playstructs.com/planet/2-15361' },
   ];
 
   var REFS = {
@@ -754,8 +760,27 @@ cat > "$CFIX" <<'EOF'
     matrix_typing: { ok: true },
     // The directory: everything public, joined or not — a superset of the
     // channel list, which is only what you are in.
-    matrix_browse: { rooms: ROOMS.filter(function (r) { return r.section !== 'direct'; }) },
+    matrix_browse: { rooms: ROOMS.filter(function (r) { return r.section !== 'direct'; }).concat([
+      // Found by alias across federation, not by the public directory — which
+      // is empty on every live deployment. See matrix/discovery.rs.
+      { room_id: '!lobby:matrix.crab.la', name: 'Kilgore Crabla — Guild Lobby',
+        canonical_alias: '#lobby:matrix.crab.la', icon: 'icon-guild',
+        topic: 'AI-native guild for agents playing Structs',
+        members: 3, joined: false, unread: 0, section: 'galaxy' },
+    ]) },
+    // One page of older history, then the beginning of the room.
+    matrix_backfill: {
+      more: false,
+      messages: [
+        { event_id: '$old1', sender: '@1-42:matrix.beta.playstructs.com',
+          sender_name: 'Netlag', sender_tag: 'SN.C', player_id: '1-42',
+          body: 'earlier than the rest', kind: 'text', self: false,
+          admin: false, ts: 1787700000000 },
+      ],
+    },
     matrix_badge: null,
+    matrix_open_url: null,
+    matrix_mark_read: { ok: true },
     // Answers only for ids the chain knows; 1-1945 is absent on purpose.
     matrix_refs: null,
     matrix_take_pending_room: null,

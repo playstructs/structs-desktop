@@ -101,6 +101,10 @@ struct GuildState {
     /// rebuilt from each sync rather than accumulated, because "stopped
     /// typing" arrives as an empty list, not as a removal.
     typing: HashMap<String, Vec<String>>,
+    /// room_id → the pagination token for the NEXT page of older messages.
+    /// Absent means "never paged"; `None` inside means the room has been read
+    /// back to its beginning and there is nothing more to ask for.
+    back_token: HashMap<String, Option<String>>,
 }
 
 static STATE: std::sync::LazyLock<RwLock<HashMap<String, GuildState>>> =
@@ -149,6 +153,52 @@ fn section_for(room_id: &str, server: &str) -> &'static str {
 
 /// A DM is not a channel and does not belong in either net: it is a person.
 const SECTION_DIRECT: &'static str = "direct";
+
+/// `#orbital-hydro:matrix.crew.oh.energy` → `Orbital Hydro`. An alias is a
+/// routing detail; its localpart is what someone actually named the room.
+fn pretty_alias(alias: &str) -> Option<String> {
+    let local = alias.trim_start_matches('#').split(':').next()?;
+    if local.is_empty() {
+        return None;
+    }
+    let words: Vec<String> = local
+        .split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+/// Name a room after the people in it, the way every client does for a room
+/// with no name of its own.
+fn name_heroes(heroes: &[String]) -> String {
+    let names: Vec<String> = heroes
+        .iter()
+        .take(3)
+        .map(|u| {
+            directory::player_id_of(u)
+                .and_then(|pid| directory::get(&pid).map(|i| i.username))
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| localpart(u))
+        })
+        .collect();
+    match names.len() {
+        0 => String::new(),
+        1 => names[0].clone(),
+        2 => format!("{} and {}", names[0], names[1]),
+        _ => format!("{}, {} and others", names[0], names[1]),
+    }
+}
 
 /// Pick a shipped structicon for a room. Name-based, deliberately: there is no
 /// room-type metadata to read, and inventing an icon set is not an option.
@@ -450,18 +500,55 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             .get("summary")
             .and_then(|s| s.get("m.joined_member_count"))
             .and_then(|c| c.as_u64());
+        // `m.heroes` is the spec's answer for a room with no name: the other
+        // people in it. Without reading it, an unnamed room has nothing to be
+        // called except its own id.
+        let heroes: Vec<String> = room
+            .get("summary")
+            .and_then(|s| s.get("m.heroes"))
+            .and_then(|h| h.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .filter(|u| u != &session.user_id)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let existing = gs.rooms.get(&room_id).cloned();
+        let final_alias = alias
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|r| r.canonical_alias.clone()));
         let display = name
             .clone()
             .or_else(|| existing.as_ref().map(|r| r.name.clone()).filter(|n| !n.is_empty()))
-            .or_else(|| alias.clone())
-            .unwrap_or_else(|| room_id.clone());
-        let final_alias = alias.or_else(|| existing.as_ref().and_then(|r| r.canonical_alias.clone()));
+            // An alias reads far better as its localpart: "#orbital-hydro:host"
+            // is plumbing, "Orbital Hydro" is a name.
+            .or_else(|| final_alias.as_deref().and_then(pretty_alias))
+            // Then whoever is in it — the spec's own fallback.
+            .or_else(|| {
+                let named = name_heroes(&heroes);
+                if named.is_empty() { None } else { Some(named) }
+            })
+            // NEVER a raw `!room_id`. A room we know nothing about is still
+            // better described as "a conversation" than as an opaque handle.
+            .unwrap_or_else(|| "Untitled room".to_string());
 
         // A DM is presented as the person it is with: their name, their guild
         // tag, their portrait — never a room id or an auto-generated title.
-        let dm_peer = gs.dm_with.get(&room_id).cloned();
+        //
+        // `m.direct` is authoritative when present, but it is routinely ABSENT:
+        // a DM created by another client, or by the guild's own tooling, never
+        // writes it into our account data. So an unnamed two-person room counts
+        // as a direct message on its own evidence.
+        let dm_peer = gs.dm_with.get(&room_id).cloned().or_else(|| {
+            let two_or_fewer = members.map(|m| m <= 2).unwrap_or(false);
+            if name.is_none() && final_alias.is_none() && two_or_fewer {
+                heroes.first().cloned()
+            } else {
+                None
+            }
+        });
         let dm_player = dm_peer.as_deref().and_then(directory::player_id_of);
         let dm_ident = dm_player.as_deref().and_then(directory::get);
 
@@ -474,8 +561,15 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             },
             name: match dm_ident.as_ref() {
                 Some(i) if !i.username.is_empty() => i.username.clone(),
-                _ => match dm_player.as_deref() {
-                    Some(pid) => pid.to_string(),
+                // Not in the game directory (a bot, or another guild's service
+                // account): the homeserver's own display name beats the id.
+                _ => match dm_peer.as_deref() {
+                    Some(peer) => gs
+                        .names
+                        .get(peer)
+                        .cloned()
+                        .or_else(|| dm_player.clone())
+                        .unwrap_or_else(|| localpart(peer)),
                     None => display,
                 },
             },
@@ -757,6 +851,13 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
             return;
         }
     }
+    // Our own user id is a REAL id from this guild's homeserver, so it settles
+    // what that server is actually called — better than inferring it from the
+    // client URL, which a deploy is free to make differ. Everything addressed
+    // to this guild (every DM) depends on getting that right.
+    if let Some(session) = store::get(&guild_id) {
+        directory::learn_server_name(&guild_id, &session.user_id);
+    }
     tauri::async_runtime::spawn(async move {
         let mut backoff = 2u64;
         loop {
@@ -1026,6 +1127,33 @@ pub async fn browse(
             player_id: None,
         });
     }
+    // ── Federated discovery ──
+    // The public directory is empty on these deployments and cross-server
+    // directory queries are refused, so the directory ALONE shows nothing. The
+    // aliases every guild actually uses do resolve — see discovery.rs.
+    if term.is_empty() {
+        let known: std::collections::HashSet<String> =
+            out.iter().map(|r| r.room_id.clone()).collect();
+        for s in super::discovery::federated_rooms(session).await {
+            if known.contains(&s.room_id) {
+                continue;
+            }
+            out.push(Room {
+                room_id: s.room_id.clone(),
+                icon: icon_for(&s.name, Some(&s.alias)),
+                name: s.name,
+                canonical_alias: Some(s.alias),
+                topic: s.topic,
+                members: s.members,
+                joined: joined.contains(&s.room_id),
+                unread: 0,
+                section: section_for(&s.room_id, &server),
+                pfp_attrs: None,
+                player_id: None,
+            });
+        }
+    }
+
     // Busiest first: on a directory, population is the best proxy for "worth
     // looking at", and alphabetical order buries every active room.
     out.sort_by(|a, b| {
@@ -1055,18 +1183,52 @@ pub async fn fetch_messages(
     room_id: &str,
     limit: u32,
 ) -> Result<Vec<Message>, String> {
+    page_back(guild_id, session, room_id, limit, None).await
+}
+
+/// One page of history, walking backwards.
+///
+/// `from` is the token a previous page returned; `None` starts at the live
+/// end. The token for the NEXT page is recorded per room, and recorded as
+/// `None` once the room has been read back to its beginning — that is what
+/// stops the window asking forever at the top of a short room.
+async fn page_back(
+    guild_id: &str,
+    session: &Session,
+    room_id: &str,
+    limit: u32,
+    from: Option<String>,
+) -> Result<Vec<Message>, String> {
     let url = format!("{}/rooms/{}/messages", base(session), urlseg(room_id));
     let limit_s = limit.to_string();
     let v = authed(session, move |c, s| {
-        c.get(&url)
+        let mut req = c
+            .get(&url)
             .bearer_auth(&s.access_token)
-            .query(&[("dir", "b"), ("limit", limit_s.as_str())])
+            .query(&[("dir", "b"), ("limit", limit_s.as_str())]);
+        if let Some(tok) = from.as_deref() {
+            req = req.query(&[("from", tok)]);
+        }
+        req
     })
     .await?;
 
-    let map = STATE.read().unwrap();
-    let empty = GuildState::default();
-    let gs = map.get(guild_id).unwrap_or(&empty);
+    let chunk_len = v
+        .get("chunk")
+        .and_then(|c| c.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    // Synapse omits `end` at the start of the room. An empty chunk means the
+    // same thing, and is the more reliable signal of the two.
+    let next = v
+        .get("end")
+        .and_then(|e| e.as_str())
+        .map(|s| s.to_string())
+        .filter(|_| chunk_len > 0);
+
+    let mut map = STATE.write().unwrap();
+    let gs = map.entry(guild_id.to_string()).or_default();
+    gs.back_token.insert(room_id.to_string(), next);
     let mut out: Vec<Message> = v
         .get("chunk")
         .and_then(|c| c.as_array())
@@ -1079,6 +1241,56 @@ pub async fn fetch_messages(
     // `dir=b` returns newest-first; the window renders oldest-first.
     out.reverse();
     Ok(out)
+}
+
+/// The next page of older messages, prepended to what is already cached.
+///
+/// Returns the page and whether more remain, so the window can stop offering
+/// to load history that does not exist.
+pub async fn backfill(
+    guild_id: &str,
+    session: &Session,
+    room_id: &str,
+    limit: u32,
+) -> Result<(Vec<Message>, bool), String> {
+    let token = {
+        let map = STATE.read().unwrap();
+        match map.get(guild_id).and_then(|gs| gs.back_token.get(room_id)) {
+            // Read back to the beginning already; nothing to ask for.
+            Some(None) => return Ok((Vec::new(), false)),
+            Some(Some(t)) => Some(t.clone()),
+            // Never paged: the caller wants older than the live end.
+            None => None,
+        }
+    };
+    let older = page_back(guild_id, session, room_id, limit, token).await?;
+    let more = {
+        let map = STATE.read().unwrap();
+        matches!(
+            map.get(guild_id).and_then(|gs| gs.back_token.get(room_id)),
+            Some(Some(_))
+        )
+    };
+
+    if !older.is_empty() {
+        let mut map = STATE.write().unwrap();
+        let gs = map.entry(guild_id.to_string()).or_default();
+        let buf = gs.timelines.entry(room_id.to_string()).or_default();
+        // Prepend, skipping anything already held: a page can overlap the
+        // live tail, and a duplicated message reads as the room repeating
+        // itself.
+        let have: std::collections::HashSet<String> =
+            buf.iter().map(|m| m.event_id.clone()).collect();
+        let mut merged: Vec<Message> = older
+            .into_iter()
+            .filter(|m| !have.contains(&m.event_id))
+            .collect();
+        let fresh = merged.len();
+        merged.extend(buf.drain(..));
+        *buf = merged;
+        return Ok((buf[..fresh].to_vec(), more));
+    }
+    Ok((Vec::new(), more))
 }
 
 /// Replace the cached timeline with a server-authoritative backfill.
@@ -1212,6 +1424,25 @@ pub async fn join(session: &Session, room_id: &str) -> Result<(), String> {
     let url = format!("{}/join/{}", base(session), urlseg(room_id));
     authed(session, move |c, s| {
         c.post(&url).bearer_auth(&s.access_token).json(&json!({}))
+    })
+    .await
+    .map(|_| ())
+}
+
+/// Set both the private read marker and the public read receipt, which is
+/// what other clients actually read.
+pub async fn mark_read(
+    session: &Session,
+    room_id: &str,
+    event_id: &str,
+) -> Result<(), String> {
+    let url = format!("{}/rooms/{}/read_markers", base(session), urlseg(room_id));
+    let payload = json!({
+        "m.fully_read": event_id,
+        "m.read": event_id,
+    });
+    authed(session, move |c, s| {
+        c.post(&url).bearer_auth(&s.access_token).json(&payload)
     })
     .await
     .map(|_| ())
@@ -1481,6 +1712,86 @@ mod tests {
         // A typo must not mint an event type no client renders.
         assert_eq!(msgtype_or_text(Some("m.emoat")), "m.text");
         assert_eq!(msgtype_or_text(Some("")), "m.text");
+    }
+
+    /// Transcribed from the LIVE crew.oh.energy account (2026-08-29): a real
+    /// DM with `chatrbocks` that has no name, no alias, and NO `m.direct`
+    /// entry — the homeserver simply never wrote one. It was rendering as its
+    /// own room id.
+    #[test]
+    fn an_unnamed_two_person_room_is_a_direct_message() {
+        let s = session();
+        let v = json!({
+            "next_batch": "1",
+            "rooms": { "join": { "!LXmKAaU5h6gPr6VMuqsHXI2BiDUs:example.com": {
+                "summary": {
+                    "m.joined_member_count": 2,
+                    "m.heroes": ["@1-3076:example.com", "@1-194:example.com"]
+                },
+                "state": { "events": [
+                    { "type": "m.room.member", "state_key": "@1-3076:example.com",
+                      "content": { "displayname": "chatrbocks", "membership": "join" } }
+                ]},
+                "timeline": { "events": [] }
+            }}}
+        });
+        apply_sync("test-dm-heroes", &s, &v);
+        let rooms = rooms_of("test-dm-heroes");
+        assert_eq!(rooms.len(), 1);
+        // Named after the person, filed under Direct — not a nameless channel.
+        assert_eq!(rooms[0].name, "chatrbocks");
+        assert_eq!(rooms[0].section, "direct");
+        // Ourselves must never be the hero the room is named after.
+        assert_ne!(rooms[0].name, "1-194");
+    }
+
+    /// A room id is never a name. This was the actual symptom: a real room
+    /// showing as `!LXmKAaU5h6gPr6VMuqsHXI2BiDUs-FXky-w4gxDPUSk`.
+    #[test]
+    fn a_room_is_never_called_by_its_id() {
+        let s = session();
+        // No name, no alias, no heroes, and more than two people — nothing to
+        // go on at all, which is exactly when the id used to leak through.
+        let v = json!({
+            "next_batch": "1",
+            "rooms": { "join": { "!opaque:example.com": {
+                "summary": { "m.joined_member_count": 9 },
+                "state": { "events": [] }, "timeline": { "events": [] }
+            }}}
+        });
+        apply_sync("test-noname", &s, &v);
+        let rooms = rooms_of("test-noname");
+        assert_eq!(rooms[0].name, "Untitled room");
+        assert!(!rooms[0].name.starts_with('!'));
+    }
+
+    #[test]
+    fn an_alias_reads_as_a_name() {
+        // Live aliases from both homeservers.
+        assert_eq!(pretty_alias("#orbital-hydro:matrix.crew.oh.energy").as_deref(),
+            Some("Orbital Hydro"));
+        assert_eq!(pretty_alias("#sn-corp:matrix.beta.playstructs.com").as_deref(),
+            Some("Sn Corp"));
+        assert_eq!(pretty_alias("#lobby:matrix.crab.la").as_deref(), Some("Lobby"));
+        assert_eq!(pretty_alias("#:host").as_deref(), None);
+    }
+
+    #[test]
+    fn a_named_room_keeps_its_own_name() {
+        // The alias must never override a name the room actually set.
+        let s = session();
+        let v = json!({
+            "next_batch": "1",
+            "rooms": { "join": { "!x:example.com": {
+                "state": { "events": [
+                    { "type": "m.room.name", "content": { "name": "Kilgore Crabla — Guild Lobby" } },
+                    { "type": "m.room.canonical_alias", "content": { "alias": "#lobby:example.com" } }
+                ]},
+                "timeline": { "events": [] }
+            }}}
+        });
+        apply_sync("test-named", &s, &v);
+        assert_eq!(rooms_of("test-named")[0].name, "Kilgore Crabla — Guild Lobby");
     }
 
     #[test]
