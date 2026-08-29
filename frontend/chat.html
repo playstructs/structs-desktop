@@ -36,6 +36,32 @@
     }
     .hidden { display: none !important; }
 
+    /* ── Tabs ──────────────────────────────────────────────────────────────
+       The conversations you have open, in the slot the game uses for its menu
+       sections. `.sui-screen-nav-item` already supplies the type, the case and
+       the active underline; these rules only add the close affordance and stop
+       a long room name from pushing the strip apart. */
+    .chat-tab { max-width: 140px; }
+    .chat-tab-label {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0;
+    }
+    /* A dot, not a count — the strip is for switching, and the number is
+       already on the row in the channel list. */
+    .chat-tab-dot {
+      flex: 0 0 auto; width: 4px; height: 4px;
+      background: var(--accent-primary);
+    }
+    .chat-tab-dot.chat-mod-mention { background: var(--text-warning); }
+    /* Quiet until wanted: an × on every tab, always lit, turns the strip into
+       a row of buttons rather than a row of places. */
+    .chat-tab-close {
+      flex: 0 0 auto; display: inline-flex; align-items: center;
+      opacity: .35;
+    }
+    .chat-tab-close:hover { opacity: 1; color: var(--text-enemy-primary); }
+    .chat-tab.sui-mod-active .chat-tab-close { opacity: .6; }
+
     /* The nav's right-hand cluster: page icons + window close. Sits where
        #menu-page-nav-close sits in the game, so the bar keeps its silhouette. */
     #chat-nav-actions {

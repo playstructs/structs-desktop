@@ -770,7 +770,19 @@ cat > "$CFIX" <<'EOF'
       return out;
     },
     matrix_rooms: { guild_id: '0-5', rooms: ROOMS },
+    // Answers for the room ACTUALLY asked for. A fixture that returns one
+    // room whatever you request hides every bug where the view and the header
+    // disagree about where you are.
     matrix_timeline: { room: ROOMS[2], messages: MESSAGES },
+    __timelineFor: function (roomId) {
+      var room = ROOMS.filter(function (r) { return r.room_id === roomId; })[0] || ROOMS[2];
+      // Only the guild room carries the scripted conversation; the others are
+      // quiet, which is also worth being able to see.
+      return {
+        room: room,
+        messages: roomId === '!snc:matrix.beta.playstructs.com' ? MESSAGES : [],
+      };
+    },
     matrix_send: { event_id: '$sent' },
     matrix_join: { ok: true },
     matrix_people: { people: PEOPLE },
@@ -835,6 +847,24 @@ cat > "$CFIX" <<'EOF'
       calls.push({ cmd: cmd, args: args });
       if (window.__HARNESS_REJECT__[cmd]) {
         return Promise.reject(window.__HARNESS_REJECT__[cmd]);
+      }
+      // Tests can hold matrix_status open to inspect the very first paint —
+      // the window in which "no comms server" used to flash.
+      if (cmd === 'matrix_status' && window.__HARNESS_HOLD_STATUS__) {
+        var answer = F.matrix_status;
+        return new Promise(function (resolve) {
+          window.__HARNESS_RELEASE_STATUS__ = function () {
+            window.__HARNESS_HOLD_STATUS__ = false;
+            resolve(answer);
+          };
+        });
+      }
+      if (cmd === 'matrix_timeline') {
+        // A test can pin an exact answer when the SCENARIO is the timeline
+        // itself (scrollback, the unread divider); otherwise the room asked
+        // for is the room answered.
+        if (window.__HARNESS_TIMELINE__) return Promise.resolve(window.__HARNESS_TIMELINE__);
+        return Promise.resolve(F.__timelineFor(args && args.roomId));
       }
       if (cmd === 'matrix_refs') {
         return Promise.resolve({

@@ -334,7 +334,8 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   // Leave, miss something, come back.
   w.Chat.go('channels');
   await tick();
-  w.__HARNESS_FIXTURES__.matrix_timeline = {
+  // The scenario IS the timeline here, so pin the exact answer.
+  w.__HARNESS_TIMELINE__ = {
     room: w.__HARNESS_FIXTURES__.matrix_timeline.room,
     messages: w.__HARNESS_FIXTURES__.matrix_timeline.messages.concat([
       { event_id: '$new', sender: '@1-42:matrix.beta.playstructs.com',
@@ -567,10 +568,11 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   // for an id already known.
   const lookups = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_refs');
   check('ids are looked up in one batch', lookups.length === 1, String(lookups.length));
-  check('an unresolvable id is not retried',
-    lookups[0].args.ids.indexOf('1-1945') !== -1
-      && !d.querySelector('.chat-ref') === false,
-    JSON.stringify(lookups[0].args.ids));
+  // An id the chain does not know is asked about ONCE and then left alone —
+  // never retried on every repaint.
+  check('an unresolvable id is asked about',
+    lookups[0].args.ids.indexOf('1-1945') !== -1, JSON.stringify(lookups[0].args.ids));
+  check('…and gets no card', !msg.querySelector('.chat-ref[data-id="1-1945"]'));
 
   w.Chat.render();
   await tick();
@@ -1480,6 +1482,35 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_rooms'));
 }
 
+// ── The first paint ─────────────────────────────────────────────────────────
+// "We have not asked yet" is not "there is nothing there". The window used to
+// open by announcing a failure it had no evidence for, then correct itself a
+// moment later.
+{
+  console.log('\n— first paint');
+  const dom = await JSDOM.fromFile(harness, {
+    url: pathToFileURL(harness).href + '?fixture=nomatrix',
+    runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
+    beforeParse(window) {
+      // Hold matrix_status open so the very first frame can be inspected —
+      // this is exactly the window in which the flash happened.
+      window.__HARNESS_HOLD_STATUS__ = true;
+    },
+  });
+  const w = dom.window;
+  await until(() => w.Chat && w.Chat._state && text(w.document.body).length > 0);
+  const seen = text(w.document.body);
+  check('the first paint says it is connecting', seen.includes('Connecting'), seen.slice(0, 120));
+  check('…and does NOT claim there is no comms server',
+    !seen.includes('No comms server'), seen.slice(0, 160));
+
+  // Let the answer through; only now may it report the truth.
+  w.__HARNESS_RELEASE_STATUS__();
+  const settled = await until(() => text(w.document.body).includes('No comms server'), 3000);
+  check('once asked, it reports what it found', !!settled,
+    text(w.document.body).slice(0, 160));
+}
+
 // ── No guild publishes a matrix service ─────────────────────────────────────
 {
   console.log('\n— nomatrix fixture');
@@ -1508,6 +1539,108 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('steps after the failure read as not-yet-run',
     steps.filter((s) => s.className.includes('chat-mod-todo')).length === 3,
     String(steps.filter((s) => s.className.includes('chat-mod-todo')).length));
+}
+
+// ── Tabs ────────────────────────────────────────────────────────────────────
+// The conversations you have open, in the slot the game uses for menu
+// sections. A tab is a VIEW, not a membership.
+{
+  console.log('\n— tabs');
+  const { w, d } = await open();
+  const tabs = () => all(d, '#menu-page-nav-items .chat-tab');
+
+  check('nothing open shows the network, not a tab',
+    tabs().length === 0 && text(d.querySelector('#menu-page-nav-items')) === 'SN.C',
+    text(d.querySelector('#menu-page-nav-items')));
+
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  check('opening a room opens a tab', tabs().length === 1, String(tabs().length));
+  check('…named after the room', text(tabs()[0]).includes('SN.Corporation'), text(tabs()[0]));
+  check('…and marked active', tabs()[0].className.includes('sui-mod-active'));
+
+  await w.Chat.openRoom('!raid:matrix.beta.playstructs.com');
+  await tick();
+  check('a second room opens beside it, not over it', tabs().length === 2, String(tabs().length));
+  check('the new one is active', tabs()[1].className.includes('sui-mod-active'));
+  check('…and the first is not', !tabs()[0].className.includes('sui-mod-active'));
+
+  // Clicking a tab switches back.
+  tabs()[0].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('clicking a tab switches to it',
+    w.Chat._state.roomId === '!snc:matrix.beta.playstructs.com', String(w.Chat._state.roomId));
+  check('and does not open a third', tabs().length === 2, String(tabs().length));
+
+  // The × closes the view. It must NOT leave the room.
+  const leaves = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_leave').length;
+  tabs()[1].querySelector('.chat-tab-close')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('the × closes the tab', tabs().length === 1, String(tabs().length));
+  check('…without leaving the room',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_leave').length === leaves);
+  check('…and without switching to it',
+    w.Chat._state.roomId === '!snc:matrix.beta.playstructs.com', String(w.Chat._state.roomId));
+
+  // Closing the tab you are LOOKING at hands you the neighbour.
+  await w.Chat.openRoom('!ninja:matrix.beta.playstructs.com');
+  await tick();
+  check('two open again', tabs().length === 2, String(tabs().length));
+  tabs()[1].querySelector('.chat-tab-close')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('closing the active tab falls back to its neighbour',
+    w.Chat._state.roomId === '!snc:matrix.beta.playstructs.com', String(w.Chat._state.roomId));
+
+  // Closing the last one has nowhere to fall back to.
+  tabs()[0].querySelector('.chat-tab-close')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('closing the last tab returns to the channel list',
+    w.Chat._state.view === 'channels', w.Chat._state.view);
+  check('and the strip names the network again',
+    text(d.querySelector('#menu-page-nav-items')) === 'SN.C',
+    text(d.querySelector('#menu-page-nav-items')));
+}
+
+{
+  console.log('\n— tab unread + bounds');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  await w.Chat.openRoom('!raid:matrix.beta.playstructs.com');
+  await tick();
+
+  // Traffic in a tab you are not looking at marks it.
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{ event_id: '$t1', sender: '@1-9:h', sender_name: 'Scout',
+      body: 'over here', kind: 'text', ts: 1787900030000 }],
+  });
+  await tick();
+  const tabs = () => all(d, '#menu-page-nav-items .chat-tab');
+  check('an unread tab gets a dot',
+    tabs()[0].querySelector('.chat-tab-dot') !== null);
+  check('…and a plain one does not',
+    tabs()[1].querySelector('.chat-tab-dot') === null);
+
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{ event_id: '$t2', sender: '@1-9:h', sender_name: 'Scout',
+      body: 'Marklifer look', kind: 'text', ts: 1787900031000 }],
+  });
+  await tick();
+  check('being named colours the dot',
+    tabs()[0].querySelector('.chat-tab-dot').className.includes('chat-mod-mention'));
+
+  // The strip is bounded: a long session must not become a scrollbar.
+  for (let i = 0; i < 12; i++) w.Chat.openTab('!filler' + i + ':h');
+  check('the strip is capped', w.Chat._state.tabs.length <= 8,
+    String(w.Chat._state.tabs.length));
+  check('…and keeps the room you are in',
+    w.Chat._state.tabs.indexOf('!raid:matrix.beta.playstructs.com') !== -1
+      || w.Chat._state.roomId !== '!raid:matrix.beta.playstructs.com');
 }
 
 // ── Only the player's own guild ─────────────────────────────────────────────

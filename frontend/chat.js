@@ -46,10 +46,17 @@
     connecting: false,
     error: null,
     loading: true,
+    // False until the FIRST matrix_status answers. Distinguishes "we have not
+    // asked yet" from "we asked and there is nothing" — without it the window
+    // opens by announcing a failure it has no evidence for.
+    started: false,
     resources: null,          // pre-formatted {energy, overloaded, alpha}
     people: [],
     peopleQuery: '',
     peopleLoading: false,
+    // Conversations you have open, in the order you opened them. A tab is a
+    // view, not a membership — see openTab/closeTab.
+    tabs: [],
     browse: [],
     browseQuery: '',
     browseLoading: false,
@@ -465,20 +472,99 @@
   // Left slot = the networks this player can reach. In the game this slot
   // holds the menu's sections; here it answers the same "where am I" question
   // for a federated client that can be on more than one homeserver.
+  // ── Tabs ──────────────────────────────────────────────────────────────────
+  // The conversations you have open, in the slot the game uses for its menu
+  // sections. It replaces the network name, which was a single inert word
+  // once only your own guild could be signed into.
+  //
+  // A tab is a VIEW, not a membership: closing one puts the conversation away,
+  // it does not leave the room. Leaving is `/leave`, and it should stay that
+  // way — a stray click on an × must never remove you from a channel.
+  var MAX_TABS = 8;
+
+  function openTab(roomId) {
+    if (!roomId) return;
+    if (S.tabs.indexOf(roomId) === -1) S.tabs.push(roomId);
+    // Bounded: a long session opening every room would otherwise turn the
+    // strip into a scrollbar. Oldest tab goes first — but never the one being
+    // opened, and never the room currently on screen, which would leave the
+    // strip disagreeing with the view.
+    while (S.tabs.length > MAX_TABS) {
+      var victim = null;
+      for (var i = 0; i < S.tabs.length; i++) {
+        if (S.tabs[i] !== roomId && S.tabs[i] !== S.roomId) { victim = S.tabs[i]; break; }
+      }
+      if (!victim) break;                 // everything left is in use
+      S.tabs.splice(S.tabs.indexOf(victim), 1);
+    }
+  }
+  Chat.openTab = openTab;
+
+  function closeTab(roomId) {
+    var at = S.tabs.indexOf(roomId);
+    if (at === -1) return;
+    S.tabs.splice(at, 1);
+    if (S.roomId !== roomId) { render(); return; }
+    // Closing the one you are looking at hands you the neighbour, the way
+    // every tabbed thing does — falling back to the channel list.
+    var next = S.tabs[at] || S.tabs[at - 1];
+    if (next) openRoom(next); else go('channels');
+  }
+  Chat.closeTab = closeTab;
+
+  function tabLabel(roomId) {
+    for (var i = 0; i < S.rooms.length; i++) {
+      if (S.rooms[i].room_id === roomId) return S.rooms[i].name || roomId;
+    }
+    if (S.roomId === roomId && S.room) return S.room.name || roomId;
+    return roomId;
+  }
+
+  function unreadFor(roomId) {
+    for (var i = 0; i < S.rooms.length; i++) {
+      if (S.rooms[i].room_id === roomId) return S.rooms[i];
+    }
+    return null;
+  }
+
   function renderNav() {
     var box = byId('menu-page-nav-items');
     if (!box) return;
     clear(box);
 
-    if (!S.networks.length) {
-      box.appendChild(el('a', 'sui-screen-nav-item sui-mod-active', 'COMMS'));
+    if (!S.tabs.length) {
+      // Nothing open yet: name the network, as the slot did before.
+      var net = activeNetwork();
+      box.appendChild(el('a', 'sui-screen-nav-item sui-mod-active',
+        (net && (net.tag || net.guild_name)) || 'COMMS'));
     } else {
-      S.networks.forEach(function (n) {
-        var a = el('a', 'sui-screen-nav-item' + (n.guild_id === S.guildId ? ' sui-mod-active' : ''));
+      S.tabs.forEach(function (roomId) {
+        var active = S.view === 'room' && S.roomId === roomId;
+        var a = el('a', 'sui-screen-nav-item chat-tab' + (active ? ' sui-mod-active' : ''));
         a.href = 'javascript:void(0)';
-        // Guild tag is short and already uppercase in-game; fall back to name.
-        a.textContent = n.tag || n.guild_name || n.guild_id;
-        a.addEventListener('click', function () { selectNetwork(n.guild_id); });
+        a.title = tabLabel(roomId);
+
+        var room = unreadFor(roomId);
+        if (room && room.unread) {
+          // A dot, not a count: the strip is for switching, and the number is
+          // already on the row in the channel list.
+          a.appendChild(el('span',
+            'chat-tab-dot' + (room.mention ? ' chat-mod-mention' : '')));
+        }
+        a.appendChild(el('span', 'chat-tab-label', tabLabel(roomId)));
+
+        var x = el('span', 'chat-tab-close');
+        x.title = 'Close';
+        x.appendChild(icon('icon-close', 'sui-icon-xs'));
+        x.addEventListener('click', function (ev) {
+          // Without this the tab underneath would also fire and re-open what
+          // was just closed.
+          ev.stopPropagation();
+          closeTab(roomId);
+        });
+        a.appendChild(x);
+
+        a.addEventListener('click', function () { openRoom(roomId); });
         box.appendChild(a);
       });
     }
@@ -1137,9 +1223,11 @@
     var scroll = el('div', 'chat-scroll');
     scroll.id = 'chat-timeline';
     scroll.addEventListener('scroll', maybeLoadHistory);
-    if (S.messages.length) {
-      // The top of the log says what is above it: more to come, or the
-      // beginning of the room. Silence at the top reads as a broken client.
+    // The top of the log says what is above it: more to come, or the beginning
+    // of the room. Shown even when the visible log is EMPTY — a room whose
+    // recent window happens to be quiet may still have history, and offering
+    // no way to reach it is indistinguishable from having none.
+    if (S.messages.length || S.moreHistory || S.loadingHistory) {
       scroll.appendChild(S.loadingHistory
         ? ruleNode('Loading')
         : (S.moreHistory ? historyButton() : ruleNode('Beginning')));
@@ -1736,6 +1824,15 @@
     var scroll = el('div', 'chat-scroll');
     var net = activeNetwork();
 
+    // Nothing is known until the first status reply lands, and "nothing known"
+    // is not the same as "nothing there". Reporting no comms server before
+    // asking made every launch flash a failure it had no evidence for.
+    if (!S.started) {
+      scroll.appendChild(noticeBlock('Connecting', 'Reaching your guild’s comms server.'));
+      page.appendChild(scroll);
+      return page;
+    }
+
     if (!S.networks.length) {
       scroll.appendChild(noticeBlock(
         'No comms server',
@@ -1931,10 +2028,17 @@
   }
 
   function refreshStatus() {
-    return invoke('matrix_status').then(function (st) {
-      applyStatus(st);
-      return st;
-    });
+    return invoke('matrix_status')
+      .then(function (st) {
+        S.started = true;
+        applyStatus(st);
+        return st;
+      })
+      .catch(function (e) {
+        // Even a failed ask is an answer: we asked, and now we can say so.
+        S.started = true;
+        throw e;
+      });
   }
 
   // Unread counts and mention flags live in the WINDOW — Rust always reports
@@ -1980,6 +2084,7 @@
     // Frozen at open: the divider marks where this visit STARTED reading, so
     // it must not slide down as messages below it are read.
     S.dividerTs = Number(S.lastRead[roomId]) || 0;
+    openTab(roomId);
     // Whatever we were mid-sentence in, we are not any more.
     stopTyping();
     S.typing = [];
@@ -2114,7 +2219,10 @@
           if (mine) r.mention = true;
         }
       });
-      if (S.view === 'channels') render();
+      // The channel list is not the only place unread shows any more — the tab
+      // strip is visible from inside a room, so traffic in a background tab
+      // has to light it up while you are reading another one.
+      if (S.view === 'channels' || S.view === 'room') render();
       return;
     }
     var incoming = payload.messages || [];
