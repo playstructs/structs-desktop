@@ -45,6 +45,13 @@ struct StoreFile {
     /// signed out — re-registering on every connect is pure noise for MAS.
     #[serde(default)]
     clients: BTreeMap<String, String>,
+    /// What portrait we last published for a user, as `<attrs>|<mxc>`.
+    ///
+    /// Persisted so the self-heal is a no-op on every launch after the first.
+    /// Without it the app would re-upload the same picture each time it
+    /// started, which is rude to the homeserver and pointless.
+    #[serde(default)]
+    avatars: BTreeMap<String, String>,
 }
 
 const VERSION: u32 = 1;
@@ -83,6 +90,7 @@ impl StoreFile {
             version: self.version,
             sessions: self.sessions.clone(),
             clients: self.clients.clone(),
+            avatars: self.avatars.clone(),
         }
     }
 }
@@ -131,6 +139,18 @@ pub fn remove(guild_id: &str) {
         file.version = VERSION;
         save(&file);
     }
+}
+
+/// The portrait stamp last published for this user, if any.
+pub fn avatar_for(user_id: &str) -> Option<String> {
+    load().avatars.get(user_id).cloned()
+}
+
+pub fn put_avatar(user_id: &str, stamp: &str) {
+    let mut file = load();
+    file.version = VERSION;
+    file.avatars.insert(user_id.to_string(), stamp.to_string());
+    save(&file);
 }
 
 /// A previously registered OAuth client for this homeserver, if any.

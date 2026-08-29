@@ -201,6 +201,24 @@
        readable and the eye still lands on it. */
     .chat-msg.chat-mod-mention { border-left-color: var(--text-warning); }
     .chat-msg-body { white-space: pre-wrap; word-break: break-word; }
+
+    /* A picture someone posted. Bounded so one image cannot take the whole
+       timeline, and its box is reserved from the event's own dimensions so
+       the log does not jump when the bytes land. */
+    .chat-image {
+      max-width: 320px; margin-top: 2px;
+      border: 1px solid var(--border-subtle);
+      background: var(--surface-player-body);
+      overflow: hidden;
+    }
+    .chat-image-img { display: block; width: 100%; height: auto; }
+    .chat-image-loading, .chat-image-failed {
+      padding: var(--spacing-sm); color: var(--text-hint);
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .chat-image-failed { color: var(--text-enemy-primary); }
     .chat-msg-body.chat-mod-notice { color: var(--text-hint); }
     .chat-msg-body.chat-mod-emote { color: var(--text-neutral-primary); font-style: italic; }
     /* An event we have no renderer for still shows its type rather than

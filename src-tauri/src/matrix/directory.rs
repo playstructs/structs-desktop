@@ -96,6 +96,112 @@ pub fn get(player_id: &str) -> Option<Ident> {
     PLAYERS.read().ok()?.get(player_id).cloned()
 }
 
+/// Players the chain says do not exist, so a bad id is asked about once
+/// rather than on every repaint.
+static MISSING: std::sync::LazyLock<RwLock<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| RwLock::new(std::collections::HashSet::new()));
+
+/// Identity for ONE player, from the chain.
+///
+/// The bulk roster (`/api/guild/{id}/roster`) is a webapp route behind a login
+/// session and it serves only its OWN guild — measured live on 2026-08-29, it
+/// answers `authentication_error: Login required` for every guild including
+/// the caller's. When it gives nothing the whole directory is empty, and the
+/// window degrades to bare player ids and placeholder portraits everywhere:
+/// no names, no tags, no faces, and no DMs at all, because addressing needs
+/// the guild.
+///
+/// `structs/player/{id}` needs no session, serves every guild, and carries the
+/// name, the guild and the portrait attributes. It is the reliable source; the
+/// roster is only a bulk shortcut when it happens to work.
+pub async fn resolve(player_id: &str) -> Option<Ident> {
+    if let Some(known) = get(player_id) {
+        return Some(known);
+    }
+    if MISSING.read().ok()?.contains(player_id) {
+        return None;
+    }
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let v = match client.query_entity("player", player_id).await {
+        Ok(v) => v,
+        Err(_) => {
+            // A destroyed or invented id answers 500; remember so the next
+            // repaint does not ask again.
+            if let Ok(mut m) = MISSING.write() {
+                m.insert(player_id.to_string());
+            }
+            return None;
+        }
+    };
+    let p = v.get("Player")?;
+    let guild_id = text(p.get("guildId"));
+    let attrs = text(p.get("pfpClientRenderAttributes"));
+    let ident = Ident {
+        username: text(p.get("name")),
+        // The chain has no guild TAG — that is the guild's own cosmetic name,
+        // which the directory config already carries.
+        tag: crate::guild_config::get_guild_configs()
+            .into_iter()
+            .find(|c| c.guild_id == guild_id)
+            .map(|c| c.guild_tag)
+            .unwrap_or_default(),
+        guild_id,
+        pfp_attrs: if attrs.trim().is_empty() { None } else { Some(attrs) },
+    };
+    if let Ok(mut m) = PLAYERS.write() {
+        m.insert(player_id.to_string(), ident.clone());
+    }
+    Some(ident)
+}
+
+/// Resolve a batch, skipping everything already known. Bounded per call: a
+/// backfilled page can name a great many distinct senders.
+pub async fn resolve_many(player_ids: &[String]) {
+    const MAX: usize = 24;
+    let mut done = 0;
+    for id in player_ids {
+        if done >= MAX {
+            break;
+        }
+        if get(id).is_some() {
+            continue;
+        }
+        resolve(id).await;
+        done += 1;
+    }
+}
+
+/// Every player id mentioned as a SENDER in a sync or messages response, so
+/// they can be resolved before the timeline is rendered against them.
+pub fn senders_in(v: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_senders(v, &mut out);
+    out
+}
+
+fn collect_senders(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            if let Some(Value::String(sender)) = map.get("sender") {
+                if let Some(pid) = player_id_of(sender) {
+                    if !out.contains(&pid) {
+                        out.push(pid);
+                    }
+                }
+            }
+            for child in map.values() {
+                collect_senders(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                collect_senders(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Everyone the directory knows, for the people picker.
 pub fn all() -> Vec<(String, Ident)> {
     PLAYERS
@@ -158,6 +264,13 @@ pub fn learn_server_name(guild_id: &str, user_id: &str) {
     }
 }
 
+/// The Matrix id for a player, resolving them from the chain if the directory
+/// has never heard of them. The async twin of `matrix_id_for`.
+pub async fn matrix_id_resolving(player_id: &str) -> Result<String, String> {
+    resolve(player_id).await;
+    matrix_id_for(player_id)
+}
+
 /// The Matrix id for a player: their player id at their own guild's server.
 pub fn matrix_id_for(player_id: &str) -> Result<String, String> {
     let ident = get(player_id)
@@ -208,6 +321,36 @@ mod tests {
             server_name_for_guild("test-guild").as_deref(),
             Some("actual.example")
         );
+    }
+
+    #[test]
+    fn senders_are_pulled_out_of_a_sync_response() {
+        // The shape /sync actually returns: senders buried under
+        // rooms → join → <room> → timeline → events.
+        let v = serde_json::json!({
+            "rooms": { "join": { "!r:h": {
+                "timeline": { "events": [
+                    { "sender": "@1-61:matrix.crew.oh.energy" },
+                    { "sender": "@1-194:matrix.crew.oh.energy" },
+                    { "sender": "@1-61:matrix.crew.oh.energy" }
+                ]},
+                "state": { "events": [{ "sender": "@1-9:matrix.crew.oh.energy" }] }
+            }}}
+        });
+        let mut found = senders_in(&v);
+        found.sort();
+        assert_eq!(found, vec!["1-194", "1-61", "1-9"]);
+    }
+
+    #[test]
+    fn non_players_are_not_collected_as_senders() {
+        // Bots and service accounts share the timeline and are not players.
+        let v = serde_json::json!({ "events": [
+            { "sender": "@guild-bot:matrix.crew.oh.energy" },
+            { "sender": "@crabla-ai:matrix.crab.la" },
+            { "sender": "@1-61:matrix.crew.oh.energy" }
+        ]});
+        assert_eq!(senders_in(&v), vec!["1-61"]);
     }
 
     #[test]

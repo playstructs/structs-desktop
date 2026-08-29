@@ -479,6 +479,23 @@
     syncFitToggle();
     setBoardScale({ keepCentre: true });
   }
+  /* Hand what you are watching to Comms.
+   *
+   * Shares the id alone. Chat turns an id into a card with the live figures
+   * on it, so a sentence typed here would only go stale — and the player is
+   * about to add their own words anyway. */
+  function wireShare() {
+    var a = document.getElementById('rv-share');
+    if (!a) return;
+    if (!TARGET) { a.classList.add('hidden'); return; }
+    a.addEventListener('click', function () {
+      window.__TAURI__.core.invoke('matrix_share', { text: TARGET.id })
+        .catch(function (err) {
+          a.setAttribute('data-sui-tooltip', 'Could not open Comms: ' + err);
+        });
+    });
+  }
+
   function syncFitToggle() {
     var a = document.getElementById('rv-fit-toggle');
     if (a) a.textContent = fitMode() === 'full' ? 'zoom in' : 'fit all';
@@ -2802,6 +2819,7 @@
     // The zoom toggle shares this bar; wire it here so both controls in the
     // strip are set up in one place.
     observeBoardViewport();
+    wireShare();
     var fit = document.getElementById('rv-fit-toggle');
     if (fit) {
       syncFitToggle();

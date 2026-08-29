@@ -45,12 +45,16 @@
     steps: [],                // connection ladder
     connecting: false,
     error: null,
+    // Text handed over from the game, waiting for a room to put it in.
+    draft: null,
     loading: true,
     // False until the FIRST matrix_status answers. Distinguishes "we have not
     // asked yet" from "we asked and there is nothing" — without it the window
     // opens by announcing a failure it has no evidence for.
     started: false,
     resources: null,          // pre-formatted {energy, overloaded, alpha}
+    members: [],
+    membersLoading: false,
     people: [],
     peopleQuery: '',
     peopleLoading: false,
@@ -168,6 +172,42 @@
     return false;
   }
   Chat.mentionsMe = mentionsMe;
+
+  // ── Mentions ──────────────────────────────────────────────────────────────
+  // Everyone this window can address by name: whoever has spoken in the room,
+  // plus its member list once loaded. Exact — each name maps to the Matrix id
+  // the message will actually notify.
+  function addressBook() {
+    var by = {};
+    S.messages.forEach(function (m) {
+      if (m.local || !m.sender_name || !m.sender) return;
+      by[m.sender_name.toLowerCase()] = { name: m.sender_name, user_id: m.sender };
+    });
+    (S.members || []).forEach(function (p) {
+      if (p.name && p.user_id) by[p.name.toLowerCase()] = { name: p.name, user_id: p.user_id };
+    });
+    return by;
+  }
+
+  // The `@Name` runs in a body that resolve to real people. Longest name
+  // first, so "@T.Xue" is not matched as "@T".
+  function mentionsIn(body) {
+    var book = addressBook();
+    var names = Object.keys(book).sort(function (a, b) { return b.length - a.length; });
+    var out = [];
+    var lower = String(body || '').toLowerCase();
+    names.forEach(function (key) {
+      var at = lower.indexOf('@' + key);
+      if (at === -1) return;
+      // A boundary after the name, so "@Net" does not match inside "@Netlag".
+      var after = lower.charAt(at + key.length + 1);
+      if (after && /[a-z0-9_.-]/.test(after)) return;
+      var who = book[key];
+      if (!out.some(function (m) { return m.user_id === who.user_id; })) out.push(who);
+    });
+    return out;
+  }
+  Chat.mentionsIn = mentionsIn;
 
   // ── Object references ─────────────────────────────────────────────────────
   // Every noun in Structs is a `<type>-<index>` id and players already talk in
@@ -767,6 +807,13 @@
 
     var scroll = el('div', 'chat-scroll');
 
+    // A share arrived with nowhere to go yet. Say so where the choice is.
+    if (S.draft) {
+      scroll.appendChild(noticeBlock(
+        'Ready to share ' + S.draft,
+        'Open a conversation and it will be waiting in the message box.'));
+    }
+
     if (S.loading) {
       scroll.appendChild(noticeBlock('Loading', 'Reading your channels.'));
     } else if (!S.rooms.filter(function (r) { return r.joined; }).length) {
@@ -794,6 +841,96 @@
 
     page.appendChild(scroll);
     return page;
+  }
+
+  // ── Who is here ───────────────────────────────────────────────────────────
+  // The most basic question a room raises, and the window could not answer it
+  // at all. Doubles as the address book: a name seen here is a name the
+  // composer can complete and a person you can message.
+  function renderMembers() {
+    var page = el('div', 'chat-page');
+    var name = (S.room && (S.room.name || S.room.canonical_alias)) || S.roomId || '';
+    page.appendChild(pageHeader(name + ' · People', function () {
+      // Back to the conversation, not to the channel list.
+      if (S.roomId) { S.view = 'room'; render(); } else { go('channels'); }
+    }, null));
+
+    var scroll = el('div', 'chat-scroll');
+    if (S.membersLoading) {
+      scroll.appendChild(noticeBlock('Loading', 'Asking who is in this room.'));
+    } else if (!S.members.length) {
+      scroll.appendChild(noticeBlock('Empty', 'Nobody else is here.'));
+    } else {
+      var table = el('div', 'sui-result-table');
+      var list = el('div', 'sui-result-rows');
+      S.members.forEach(function (p) { list.appendChild(memberRow(p)); });
+      table.appendChild(list);
+      scroll.appendChild(table);
+    }
+    page.appendChild(scroll);
+    return page;
+  }
+
+  function memberRow(p) {
+    var row = el('div', 'sui-result-row' + (p.player_id ? ' chat-room-row' : ''));
+
+    var left = el('div', 'sui-result-row-left-section');
+    var portrait = el('div', 'sui-result-row-portrait');
+    if (p.player_id) {
+      portrait.appendChild(pfpPortrait(p.pfp_attrs));
+    } else {
+      // Not a player: a bot or a service account. Its own glyph, so the list
+      // does not imply a person who is not one.
+      var well = el('div', 'chat-room-icon');
+      well.appendChild(icon('icon-computer', 'sui-icon-md'));
+      portrait.appendChild(well);
+    }
+    left.appendChild(portrait);
+
+    var info = el('div', 'sui-result-row-player-info');
+    var block = el('div', 'sui-text-label-block');
+    if (p.tag) block.appendChild(el('span', 'chat-msg-tag', '[' + p.tag + '] '));
+    block.appendChild(el('span', null, p.name + (p.is_self ? ' (you)' : '')));
+    block.appendChild(el('br'));
+    block.appendChild(el('span', 'sui-text-hint',
+      p.player_id ? 'PID #' + p.player_id : p.user_id));
+    info.appendChild(block);
+    left.appendChild(info);
+    row.appendChild(left);
+
+    // A player can be messaged; a bot cannot.
+    if (p.player_id && !p.is_self) {
+      var right = el('div', 'sui-result-row-right-section');
+      var btn = el('button', 'chat-ref-action');
+      btn.appendChild(icon('icon-phone', 'sui-icon-sm'));
+      btn.appendChild(el('span', null, 'Message'));
+      btn.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        startDm(p.player_id);
+      });
+      right.appendChild(btn);
+      row.appendChild(right);
+      row.addEventListener('click', function () { startDm(p.player_id); });
+    }
+    return row;
+  }
+
+  function loadMembers() {
+    if (!S.roomId) return Promise.resolve();
+    var room = S.roomId;
+    S.membersLoading = true;
+    return invoke('matrix_members', { guildId: S.guildId, roomId: room })
+      .then(function (res) {
+        if (S.roomId !== room) return;
+        S.members = (res && res.members) || [];
+        S.membersLoading = false;
+        if (S.view === 'members') render();
+      })
+      .catch(function (e) {
+        S.membersLoading = false;
+        S.members = [];
+        if (S.view === 'members') showError(String(e));
+      });
   }
 
   // ── Browse ────────────────────────────────────────────────────────────────
@@ -1019,7 +1156,11 @@
         && Math.abs(Number(m.ts) - Number(prev.ts)) < RUN_GAP_MS) {
       wrap.classList.add('chat-mod-cont');
     }
-    if (!m.self && mentionsMe(m.body)) wrap.classList.add('chat-mod-mention');
+    // `mentions_me` is the sender saying so via `m.mentions` — exact. The
+    // word-boundary guess is only for clients that do not send it.
+    if (!m.self && (m.mentions_me || mentionsMe(m.body))) {
+      wrap.classList.add('chat-mod-mention');
+    }
 
     var head = el('div', 'chat-msg-head');
     var who = el('div', 'chat-msg-sender' + (m.self ? ' chat-mod-self' : ''));
@@ -1048,6 +1189,14 @@
     wrap.appendChild(head);
 
     var kind = m.kind || 'text';
+
+    // A picture is shown, not described. The filename stays as the alt text
+    // and the tooltip, so it is still knowable.
+    if (kind === 'image' && m.mxc) {
+      wrap.appendChild(imageNode(m));
+      return wrap;
+    }
+
     var body = el('div', 'chat-msg-body');
     if (kind === 'emote') body.classList.add('chat-mod-emote');
     else if (kind === 'notice') body.classList.add('chat-mod-notice');
@@ -1192,6 +1341,50 @@
     return wrap;
   }
 
+  // ── Pictures ──────────────────────────────────────────────────────────────
+  // Media is authenticated on a modern homeserver, so the bytes come through
+  // Rust (which holds the token) as a data URI. The element is laid out from
+  // the event's own dimensions BEFORE they arrive, so the timeline does not
+  // jump when each picture lands.
+  var mediaCache = {};
+
+  function imageNode(m) {
+    var box = el('div', 'chat-image');
+    var img = el('img', 'chat-image-img');
+    img.alt = m.body || 'image';
+    img.title = m.body || '';
+    // Reserve the space the picture will take, scaled into the column.
+    var w = Number(m.width) || 0;
+    var h = Number(m.height) || 0;
+    if (w > 0 && h > 0) {
+      var shown = Math.min(w, 320);
+      box.style.width = shown + 'px';
+      box.style.aspectRatio = w + ' / ' + h;
+    }
+
+    var have = mediaCache[m.mxc];
+    if (have && have.data_url) {
+      img.src = have.data_url;
+      box.appendChild(img);
+    } else if (have && have.error) {
+      box.appendChild(el('div', 'chat-image-failed', have.error));
+    } else {
+      box.appendChild(el('div', 'chat-image-loading', m.body || 'image'));
+      if (!have) {
+        mediaCache[m.mxc] = { pending: true };
+        invoke('matrix_media', { guildId: S.guildId, mxc: m.mxc, size: 320 })
+          .then(function (res) { mediaCache[m.mxc] = res; render(); })
+          .catch(function (e) {
+            // Refused (an SVG, something oversized) or simply unreachable:
+            // say so in place rather than leaving an empty frame.
+            mediaCache[m.mxc] = { error: String(e) };
+            render();
+          });
+      }
+    }
+    return box;
+  }
+
   // A labelled hairline across the timeline. `alert` makes it the unread
   // divider rather than a date.
   function ruleNode(label, alert) {
@@ -1206,13 +1399,24 @@
     var page = el('div', 'chat-page');
     var name = (S.room && (S.room.name || S.room.canonical_alias)) || S.roomId || '';
 
+    var right = el('div', 'chat-header-actions');
+
+    var who = el('a', 'sui-nav-btn');
+    who.id = 'chat-room-people';
+    who.href = 'javascript:void(0)';
+    who.title = 'Who is here';
+    who.appendChild(icon('icon-member sui-text-secondary'));
+    who.addEventListener('click', function () { go('members'); });
+    right.appendChild(who);
+
     var gear = el('a', 'sui-nav-btn');
     gear.href = 'javascript:void(0)';
     gear.title = 'Connection';
     gear.appendChild(icon('icon-menu sui-text-secondary'));
     gear.addEventListener('click', function () { go('connection'); });
+    right.appendChild(gear);
 
-    page.appendChild(pageHeader(name, function () { go('channels'); }, gear));
+    page.appendChild(pageHeader(name, function () { go('channels'); }, right));
 
     // IRC has shown the topic since the beginning: it is the room's own
     // statement of what it is for, and hiding it behind a command wastes it.
@@ -1307,6 +1511,15 @@
     // crop. Nesting the roster frame inside it cropped the portrait twice.
     portrait.appendChild(fillPfp(el('div', 'sui-screen-portrait-image'),
       S.profile && S.profile.pfp_attrs));
+    // Your face always renders in HERE. Whether anyone else can see it is a
+    // different question — other clients read the homeserver's avatar, which
+    // the app publishes for you. Say which state you are in, on the one
+    // element that is already the subject.
+    portrait.setAttribute('data-sui-mod-placement', 'top');
+    portrait.setAttribute('data-sui-tooltip',
+      S.profile && S.profile.avatar_published
+        ? 'Your portrait is published — other clients see this face'
+        : 'Your portrait is not published yet; it will be shortly');
     pScreen.appendChild(portrait);
     pChunk.appendChild(pScreen);
     panel.appendChild(pChunk);
@@ -1396,9 +1609,11 @@
 
   function applyCompletion(input, c) {
     var pick = c.matches[c.at];
-    // IRC convention: a name completed at the start of a line gets a comma, so
-    // "net<Tab>" becomes "Netlag, " ready to be addressed.
-    var suffix = (!c.isCommand && c.start === 0) ? ', ' : ' ';
+    // A completed NAME becomes `@Name`: it is the universal convention, and it
+    // is what lets the message carry a real mention when it is sent — without
+    // the marker there is nothing to match and nobody gets notified.
+    if (!c.isCommand && pick.charAt(0) !== '@') pick = '@' + pick;
+    var suffix = ' ';
     var text = pick + suffix;
     input.value = c.head + text + c.tail;
     var caret = c.start + text.length;
@@ -1426,7 +1641,8 @@
     var start = head.lastIndexOf(' ') + 1;
     var word = head.slice(start);
     var isCommand = start === 0 && word.charAt(0) === '/';
-    var stem = isCommand ? word.slice(1) : word;
+    // `@ne<Tab>` and `ne<Tab>` complete the same person.
+    var stem = isCommand ? word.slice(1) : word.replace(/^@/, '');
     // A bare "/" and Tab walks the whole command list, the way it does in
     // every IRC client. A bare word does not — completing "everyone" off an
     // empty stem is noise, not help.
@@ -1691,6 +1907,9 @@
 
     invoke('matrix_send', {
       guildId: S.guildId, roomId: S.roomId, body: text, msgtype: msgtype || null,
+      // Who this message is FOR. Without it the recipient's client never
+      // notifies them, however clearly the text names them.
+      mentions: mentionsIn(text),
     })
       .then(function (res) {
         // Keep the local echo until sync delivers the real event; just stop
@@ -1950,6 +2169,7 @@
     else if (S.view === 'connection') node = renderConnection();
     else if (S.view === 'people') node = renderPeople();
     else if (S.view === 'browse') node = renderBrowse();
+    else if (S.view === 'members') node = renderMembers();
     else node = renderChannels();
     host.appendChild(node);
     // Every view except a room is composer-less; the host is emptied here so
@@ -1987,6 +2207,7 @@
     if (view === 'channels') refreshRooms();
     if (view === 'people') loadPeople();
     if (view === 'browse') loadBrowse();
+    if (view === 'members') loadMembers();
   }
   Chat.go = go;
 
@@ -2088,6 +2309,7 @@
     // Whatever we were mid-sentence in, we are not any more.
     stopTyping();
     S.typing = [];
+    S.members = [];
     S.moreHistory = true;
     S.loadingHistory = false;
     S.rooms.forEach(function (r) {
@@ -2105,6 +2327,9 @@
         wasAtBottom = true;              // a room you just opened starts at the end
         render();
         scrollToEnd();
+        // Something was shared while no room was open; this is the room it
+        // was waiting for.
+        if (S.draft) putDraft(S.draft);
       })
       .catch(function (e) { showError(String(e)); });
   }
@@ -2142,6 +2367,45 @@
       .catch(function () {});
   }
 
+  // ── Shared from the game ──────────────────────────────────────────────────
+  // An object handed over from a raid window or Team Ops. It lands as a draft:
+  // the player chooses the room and presses send. A share is one click from a
+  // game window, and one click must never put a message in front of other
+  // people.
+  function acceptDraft(payload) {
+    var text = payload && payload.text;
+    if (!text) return;
+    S.draft = text;
+    if (S.view === 'room') {
+      putDraft(text);
+    } else {
+      // No room open yet — say what is waiting, and hold it until one is.
+      S.view = 'channels';
+      render();
+    }
+  }
+  Chat.acceptDraft = acceptDraft;
+
+  function putDraft(text) {
+    render();
+    var input = byId('chat-input');
+    if (!input) return;
+    // Append rather than replace: a draft already being written is the
+    // player's, and sharing into the middle of it must not destroy it.
+    var head = input.value ? input.value.replace(/\s*$/, '') + ' ' : '';
+    input.value = head + text + ' ';
+    input.focus();
+    moveCaretToEnd(input);
+    S.draft = null;
+    render();
+  }
+
+  function claimPendingDraft() {
+    return invoke('matrix_take_pending_draft')
+      .then(acceptDraft)
+      .catch(function () {});
+  }
+
   function connect() {
     S.connecting = true;
     S.error = null;
@@ -2160,7 +2424,7 @@
           S.loading = true;
           S.view = 'channels';
           render();
-          return refreshRooms().then(claimPendingRoom);
+          return refreshRooms().then(claimPendingRoom).then(claimPendingDraft);
         }
         render();
       })
@@ -2210,7 +2474,9 @@
     // A room we are not looking at only bumps its unread count.
     if (payload.room_id !== S.roomId) {
       var msgs = payload.messages || [];
-      var mine = msgs.some(function (m) { return !m.self && mentionsMe(m.body); });
+      var mine = msgs.some(function (m) {
+        return !m.self && (m.mentions_me || mentionsMe(m.body));
+      });
       S.rooms.forEach(function (r) {
         if (r.room_id === payload.room_id) {
           r.unread = (Number(r.unread) || 0) + msgs.length;
@@ -2317,6 +2583,8 @@
     // Somewhere else in the app asked for a conversation — a message icon in
     // Team Ops, a raid window, anywhere a player is listed.
     listen('matrix::show_room', function (e) { showRequestedRoom(e && e.payload); });
+    // Something in the game was shared into chat.
+    listen('matrix::compose', function (e) { acceptDraft(e && e.payload); });
     listen('matrix::rooms', function (e) { onRooms(e && e.payload); });
     listen('matrix::status', function (e) { onStatus(e && e.payload); });
 
@@ -2329,7 +2597,7 @@
           S.view = 'channels';
           S.loading = true;
           render();
-          return refreshRooms().then(claimPendingRoom);
+          return refreshRooms().then(claimPendingRoom).then(claimPendingDraft);
         }
         S.loading = false;
         if (!net) {

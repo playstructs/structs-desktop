@@ -11,6 +11,7 @@
 //! `boot()` restores sync only for guilds the player has ALREADY signed into,
 //! so an install that has never used chat makes no chat requests at all.
 
+pub mod avatar;
 pub mod auth;
 pub mod client;
 pub mod directory;
@@ -308,6 +309,7 @@ pub async fn matrix_send(
     room_id: String,
     body: String,
     msgtype: Option<String>,
+    mentions: Option<Vec<Value>>,
 ) -> Result<Value, String> {
     let session = session_for(&guild_id)?;
     let body = body.trim();
@@ -317,8 +319,27 @@ pub async fn matrix_send(
     // `/me` sends an emote; everything else is plain text. The allowlist lives
     // in client.rs so the wire format has exactly one gatekeeper.
     let kind = client::msgtype_or_text(msgtype.as_deref());
-    let event_id = client::send(&session, &room_id, body, kind).await?;
-    Ok(json!({ "event_id": event_id, "msgtype": kind }))
+
+    // `@Name` runs the window matched to real people. Both halves matter:
+    // `m.mentions` is what NOTIFIES them and the pill is what Element renders,
+    // so a message addressed to someone reached them as neither until now.
+    let pairs: Vec<(String, String)> = mentions
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| {
+            let name = m.get("name")?.as_str()?.to_string();
+            let user_id = m.get("user_id")?.as_str()?.to_string();
+            // Only ever a real Matrix id: the pill becomes a link, and a
+            // malformed one would be a link to nothing.
+            if name.is_empty() || !user_id.starts_with('@') || !user_id.contains(':') {
+                return None;
+            }
+            Some((name, user_id))
+        })
+        .collect();
+
+    let event_id = client::send_with_mentions(&session, &room_id, body, kind, &pairs).await?;
+    Ok(json!({ "event_id": event_id, "msgtype": kind, "mentioned": pairs.len() }))
 }
 
 #[tauri::command]
@@ -373,7 +394,9 @@ pub async fn matrix_dm(
     if directory::player_id_of(&session.user_id).as_deref() == Some(player_id.as_str()) {
         return Err("that is you".into());
     }
-    let their_id = directory::matrix_id_for(&player_id)?;
+    // Resolves from the chain when the directory has never met them — the
+    // normal case now that the bulk roster route needs a login session.
+    let their_id = directory::matrix_id_resolving(&player_id).await?;
 
     let room_id = client::open_dm(&guild_id, &session, &their_id).await?;
     let _ = app.emit(
@@ -475,6 +498,15 @@ pub async fn matrix_refs(ids: Vec<String>) -> Result<Value, String> {
     // and turn one message into a burst of chain reads.
     const MAX: usize = 8;
     directory::ensure_fresh().await;
+    // Player ids among the request resolve directly; owners named INSIDE a
+    // card (a planet's owner, a struct's) come through the same cache.
+    let players: Vec<String> = ids
+        .iter()
+        .filter(|id| refs::parse_id(id).map(|(k, _)| k) == Some(1))
+        .cloned()
+        .collect();
+    directory::resolve_many(&players).await;
+
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for id in ids.into_iter().take(MAX * 4) {
@@ -610,6 +642,43 @@ pub async fn matrix_agreement_open(
     }))
 }
 
+/// The bytes of an image someone posted. Cached per (mxc, size) — a room
+/// scrolled up and down would otherwise re-download every picture in it.
+#[tauri::command]
+pub async fn matrix_media(
+    guild_id: String,
+    mxc: String,
+    size: Option<u32>,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let size = size.unwrap_or(320);
+    let key = format!("{}@{}", mxc, size);
+    if let Some(hit) = MEDIA_CACHE.read().ok().and_then(|c| c.get(&key).cloned()) {
+        return Ok(hit);
+    }
+    let (data_url, mime) = client::media_data_url(&session, &mxc, size).await?;
+    let out = json!({ "data_url": data_url, "mime": mime });
+    if let Ok(mut c) = MEDIA_CACHE.write() {
+        // A handful of pictures, not a session's worth: these are base64 and
+        // each is measured in tens of KB.
+        if c.len() > 24 {
+            c.clear();
+        }
+        c.insert(key, out.clone());
+    }
+    Ok(out)
+}
+
+static MEDIA_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<String, Value>>> =
+    std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+
+/// Who is in this room.
+#[tauri::command]
+pub async fn matrix_members(guild_id: String, room_id: String) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    Ok(json!({ "members": client::members(&session, &room_id).await? }))
+}
+
 // ── The window ──────────────────────────────────────────────────────────────
 
 /// Idempotent: a second request raises the window already open rather than
@@ -671,8 +740,7 @@ pub async fn matrix_message_player(
     let session = store::get(&guild_id).ok_or(
         "Comms is still signing in — try again in a moment",
     )?;
-    directory::ensure_fresh().await;
-    let their_id = directory::matrix_id_for(player_id.trim())?;
+    let their_id = directory::matrix_id_resolving(player_id.trim()).await?;
     let room_id = client::open_dm(&guild_id, &session, &their_id).await?;
 
     // The window may still be booting, so this is also replayed: chat.js asks
@@ -683,6 +751,50 @@ pub async fn matrix_message_player(
         json!({ "guild_id": guild_id, "room_id": room_id }),
     );
     Ok(json!({ "room_id": room_id, "player_id": player_id }))
+}
+
+/// Bring something from the game into a conversation.
+///
+/// The game is full of moments worth saying something about — a raid on your
+/// planet, a provider selling cheap, a player who just took a fleet apart —
+/// and chat sat beside all of it. This is the bridge: anywhere in the app can
+/// hand Comms an object, and it arrives as a DRAFT.
+///
+/// Deliberately a draft and not a post. Sharing is one click from a game
+/// window, and one click must never put a message in front of other people:
+/// the player picks the room and presses send, and gets to say why first.
+#[tauri::command]
+pub async fn matrix_share(app: tauri::AppHandle, text: String) -> Result<Value, String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("nothing to share".into());
+    }
+    open_chat_window(app.clone())?;
+    set_pending_draft(&text);
+    let _ = app.emit("matrix::compose", json!({ "text": text }));
+    Ok(json!({ "ok": true, "text": text }))
+}
+
+/// A draft the app handed Comms before the window was listening. Same
+/// replay problem as a pending room: the share usually OPENS the window, so
+/// the event fires into nothing.
+static PENDING_DRAFT: RwLock<Option<String>> = RwLock::new(None);
+
+fn set_pending_draft(text: &str) {
+    if let Ok(mut d) = PENDING_DRAFT.write() {
+        *d = Some(text.to_string());
+    }
+}
+
+/// Take whatever the app asked to be composed, if anything. Consuming: a
+/// draft already delivered must not reappear on the next status poll.
+#[tauri::command]
+pub fn matrix_take_pending_draft() -> Result<Value, String> {
+    let taken = PENDING_DRAFT.write().ok().and_then(|mut d| d.take());
+    Ok(match taken {
+        Some(text) => json!({ "text": text }),
+        None => Value::Null,
+    })
 }
 
 /// A room the app has asked the window to show but which the window may not

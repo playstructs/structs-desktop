@@ -516,6 +516,7 @@ cat > "$RFIX" <<'EOF'
   var F = {
     mcp_raid_state: { snapshot: SNAP },
     mcp_raid_log: { rows: [] },
+    matrix_share: { ok: true },
   };
   var calls = [];
   var listeners = {};
@@ -626,6 +627,17 @@ cat > "$CFIX" <<'EOF'
     { event_id: '$12', sender: '@1-61:matrix.beta.playstructs.com', sender_name: 'JPEG',
       sender_tag: 'SN.C', player_id: '1-61', kind: 'text', self: false,
       admin: false, ts: 1787900011000, body: 'renting from 10-1 if anyone needs power' },
+    // A picture. Live rooms carry these; the client used to print the
+    // filename and nothing else.
+    { event_id: '$13', sender: '@1-42:matrix.beta.playstructs.com', sender_name: 'Netlag',
+      sender_tag: 'SN.C', player_id: '1-42', kind: 'image', self: false, admin: false,
+      ts: 1787900012000, body: 'raid-map.gif',
+      mxc: 'mxc://matrix.beta.playstructs.com/abc123', width: 480, height: 480 },
+    // An EXACT mention via m.mentions — no word-matching involved, and the
+    // body deliberately does NOT contain the player's name.
+    { event_id: '$14', sender: '@1-77:matrix.beta.playstructs.com', sender_name: 'T.Xue',
+      sender_tag: 'SN.C', player_id: '1-77', kind: 'text', self: false, admin: false,
+      ts: 1787900013000, body: 'you around?', mentions_me: true },
   ];
 
   var REFS = {
@@ -712,6 +724,9 @@ cat > "$CFIX" <<'EOF'
     user_id: '@1-194:matrix.beta.playstructs.com', display_name: 'Marklifer',
     tag: 'SN.C',
     pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":0,"background":3}',
+    // Whether other Matrix clients can see this face. Tests flip it, since
+    // the difference is invisible from inside this window.
+    get avatar_published() { return !window.__HARNESS_AVATAR_UNPUBLISHED__; },
   };
 
   // ONE network: the guild the player belongs to. Another guild's webapp will
@@ -787,6 +802,18 @@ cat > "$CFIX" <<'EOF'
     matrix_join: { ok: true },
     matrix_people: { people: PEOPLE },
     matrix_typing: { ok: true },
+    // Who is in the room: players resolve to names and portraits, bots and
+    // service accounts do not and must not pretend to.
+    matrix_members: { members: [
+      { user_id: '@1-194:matrix.beta.playstructs.com', name: 'Marklifer',
+        player_id: '1-194', tag: 'SN.C', is_self: true,
+        pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":0,"background":3}' },
+      { user_id: '@1-61:matrix.beta.playstructs.com', name: 'JPEG',
+        player_id: '1-61', tag: 'SN.C', is_self: false,
+        pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}' },
+      { user_id: '@guild-bot:matrix.beta.playstructs.com', name: 'SN Corp Bot',
+        player_id: null, tag: '', is_self: false, pfp_attrs: null },
+    ] },
     // The directory: everything public, joined or not — a superset of the
     // channel list, which is only what you are in.
     matrix_browse: { rooms: ROOMS.filter(function (r) { return r.section !== 'direct'; }).concat([
@@ -809,12 +836,22 @@ cat > "$CFIX" <<'EOF'
     },
     matrix_badge: null,
     matrix_open_url: null,
+    // A real (tiny) picture, so the frame can be SEEN to work. A
+    // transparent pixel renders as an empty box and proves nothing.
+    matrix_media: { data_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAGUlEQVR4nGMQNnVzPrsNk2TAKgokGQalDgAHu0qB1ZgbGgAAAABJRU5ErkJggg==',
+                    mime: 'image/png' },
     mcp_raid_view_open: null,
     matrix_agreement_open: { ok: true, tx: 'ABCD1234' },
     matrix_mark_read: { ok: true },
     // Answers only for ids the chain knows; 1-1945 is absent on purpose.
     matrix_refs: null,
     matrix_take_pending_room: null,
+    // A share the app handed over before the window was listening. Null by
+    // default; a test sets __HARNESS_PENDING_DRAFT__ to exercise the replay.
+    get matrix_take_pending_draft() {
+      return window.__HARNESS_PENDING_DRAFT__
+        ? { text: window.__HARNESS_PENDING_DRAFT__ } : null;
+    },
     matrix_dm: { room_id: '!dm-jpeg:matrix.beta.playstructs.com',
                  user_id: '@1-61:matrix.beta.playstructs.com', player_id: '1-61' },
     matrix_leave: { ok: true },

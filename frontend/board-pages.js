@@ -299,6 +299,26 @@
     return a;
   }
 
+  // Talk ABOUT a player rather than TO them. `messageLink` opens a DM;
+  // this hands the id to whatever conversation the player picks, where it
+  // renders as a card. Two different verbs, so two different controls.
+  function shareLink(r) {
+    if (!r || !r.player_id) return null;
+    var a = H.el('a', 'ops-refresh-btn');
+    a.href = 'javascript:void(0)';
+    a.title = 'Share ' + (r.player_name || r.player_id) + ' in Comms';
+    a.appendChild(H.el('i', 'sui-icon-md icon-outgoing'));
+    a.addEventListener('click', function (e) {
+      e.stopPropagation();
+      Board.T.core.invoke('matrix_share', { text: r.player_id })
+        .catch(function (err) {
+          a.classList.add('err');
+          a.title = 'could not share ' + r.player_id + ': ' + err;
+        });
+    });
+    return a;
+  }
+
   function spectatorLinks(r) {
     if (!canSpectate()) return null;
     var wrap = H.el('span', 'ops-spectate');
@@ -371,11 +391,13 @@
       // actions.
       var spectate = spectatorLinks(r);
       var message = messageLink(r);
-      if (spectate || message) {
+      var share = shareLink(r);
+      if (spectate || message || share) {
         if (!trio) sub.appendChild(H.el('br'));
         else sub.appendChild(document.createTextNode(' '));
         if (spectate) sub.appendChild(spectate);
         if (message) sub.appendChild(message);
+        if (share) sub.appendChild(share);
       }
       // Charge: battery + a clear Ready/n so "what is this number" is answered.
       var chargeVal = H.el('span');

@@ -112,6 +112,21 @@ RV._pip.structId = '5-1';
 RV._pipRequestHide();
 check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pip.structId === null);
 
+// ── Talking about what you are watching ─────────────────────────────────────
+// A spectator window is where you notice something worth telling the guild.
+// Sharing hands the id to Comms as a draft; it must never post by itself.
+{
+  console.log('\n— share to comms');
+  const d = w.document;
+  const btn = d.getElementById('rv-share');
+  check('the raid window offers a share control', !!btn && !btn.classList.contains('hidden'));
+  btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 20));
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_share').pop();
+  check('…which hands the planet under raid to Comms',
+    !!call && call.args.text === '2-1', JSON.stringify(call && call.args));
+}
+
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');
 w.close();
 process.exit(failures ? 1 : 0);

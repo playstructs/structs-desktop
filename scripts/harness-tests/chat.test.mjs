@@ -218,7 +218,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     text(d.querySelector('.sui-page-header')));
 
   const msgs = all(d, '.chat-msg');
-  check('every event renders', msgs.length === 12, String(msgs.length));
+  check('every event renders', msgs.length === 14, String(msgs.length));
 
   // A run from one sender drops the repeated header, as the mockup does —
   // but $1 and $2 are a day apart, so that run is deliberately broken.
@@ -259,7 +259,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await tick();
 
   const times = all(d, '.chat-msg-time').map(text);
-  check('every message is stamped', times.length === 12, String(times.length));
+  check('every message is stamped', times.length === 14, String(times.length));
   check('stamps are fixed-width 24h', times.every((t) => /^\d{2}:\d{2}$/.test(t)),
     times.join(','));
 
@@ -341,7 +341,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
       { event_id: '$new', sender: '@1-42:matrix.beta.playstructs.com',
         sender_name: 'Netlag', sender_tag: 'SN.C', player_id: '1-42',
         body: 'while you were out', kind: 'text', self: false, admin: false,
-        ts: 1787900013000 },
+        ts: 1787900015000 },
     ]),
   };
   await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
@@ -608,6 +608,179 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     w.Chat._state.roomId === stay, String(w.Chat._state.roomId));
 }
 
+// ── Pictures ────────────────────────────────────────────────────────────────
+// Live rooms carry images. The client used to print the filename and nothing
+// else, which is the least useful possible rendering of a picture.
+{
+  console.log('\n— images');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await until(() => d.querySelector('.chat-image img') !== null, 3000);
+
+  const box = d.querySelector('.chat-image');
+  check('a picture renders as a picture', !!box);
+  check('…fetched through Rust, which holds the token',
+    w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_media'
+      && c.args.mxc === 'mxc://matrix.beta.playstructs.com/abc123'),
+    JSON.stringify(w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_media').map((c) => c.args)));
+
+  const img = box.querySelector('img');
+  check('…as bytes, not a URL the webview cannot authenticate',
+    img.src.indexOf('data:image/') === 0, img.src.slice(0, 40));
+  check('the filename survives as alt text', img.alt === 'raid-map.gif', img.alt);
+  // The box is sized from the event before the bytes land, so the log does
+  // not jump underneath the reader.
+  check('the frame is reserved from the event\'s own dimensions',
+    box.style.width === '320px' && box.style.aspectRatio.replace(/\s/g, '') === '480/480',
+    box.style.width + ' ' + box.style.aspectRatio);
+
+  // One fetch per picture, however many times the timeline repaints.
+  const before = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_media').length;
+  w.Chat.render(); w.Chat.render();
+  await tick();
+  check('a repaint does not re-download it',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_media').length === before,
+    String(w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_media').length - before));
+}
+
+{
+  console.log('\n— a refused image says so');
+  const { w, d } = await open();
+  w.__HARNESS_REJECT__.matrix_media = 'refusing to render image/svg+xml';
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await until(() => d.querySelector('.chat-image-failed') !== null, 3000);
+  check('a refused picture reports in place, not as an empty frame',
+    text(d.querySelector('.chat-image-failed')).includes('svg'),
+    text(d.querySelector('.chat-image-failed')));
+}
+
+// ── Sending a mention ───────────────────────────────────────────────────────
+// Reading `m.mentions` is only half of it. A message typed here that names
+// somebody has to NOTIFY them, or it reaches their client as ordinary text.
+{
+  console.log('\n— outgoing mentions');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const send = async (t) => {
+    d.getElementById('chat-input').value = t;
+    d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await tick();
+    return w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').pop();
+  };
+
+  let call = await send('@Netlag are you there');
+  check('a named person is carried as a mention',
+    call.args.mentions.length === 1, JSON.stringify(call.args.mentions));
+  check('…with the Matrix id that will notify them',
+    call.args.mentions[0].user_id === '@1-42:matrix.beta.playstructs.com',
+    JSON.stringify(call.args.mentions[0]));
+  check('…and the body is unchanged',
+    call.args.body === '@Netlag are you there', call.args.body);
+
+  call = await send('nobody in particular');
+  check('an ordinary message mentions nobody',
+    call.args.mentions.length === 0, JSON.stringify(call.args.mentions));
+
+  // A name that is a prefix of another must not match the wrong person.
+  call = await send('@T.Xue and @Netlag both');
+  check('two names are both carried', call.args.mentions.length === 2,
+    JSON.stringify(call.args.mentions.map((m) => m.name)));
+
+  // Matching is on the address book, not on anything that looks like a handle.
+  call = await send('@nosuchperson hello');
+  check('an unknown handle is not invented',
+    call.args.mentions.length === 0, JSON.stringify(call.args.mentions));
+
+  // Checked directly — the matcher is the whole feature.
+  check('a name inside a longer one is not a match',
+    w.Chat.mentionsIn('@Netlagger').length === 0,
+    JSON.stringify(w.Chat.mentionsIn('@Netlagger')));
+  check('punctuation ends a name',
+    w.Chat.mentionsIn('@Netlag, hi').length === 1,
+    JSON.stringify(w.Chat.mentionsIn('@Netlag, hi')));
+  check('case does not matter',
+    w.Chat.mentionsIn('@netlag hi').length === 1,
+    JSON.stringify(w.Chat.mentionsIn('@netlag hi')));
+}
+
+// ── Who is here ─────────────────────────────────────────────────────────────
+{
+  console.log('\n— member list');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  d.getElementById('chat-room-people').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('the room header opens the member list',
+    w.Chat._state.view === 'members', w.Chat._state.view);
+  check('it asks Rust who is in THIS room',
+    w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_members'
+      && c.args.roomId === '!snc:matrix.beta.playstructs.com'));
+
+  const rows = all(d, '.sui-result-row');
+  check('everyone is listed', rows.length === 3, String(rows.length));
+  check('a player shows their portrait',
+    rows[0].querySelectorAll('.pfp-viewer-layer').length === 5,
+    String(rows[0].querySelectorAll('.pfp-viewer-layer').length));
+  check('…and you are marked as you', text(rows[0]).includes('(you)'), text(rows[0]));
+  // A bot is not a person and must not pretend to be one.
+  const bot = rows.find((r) => text(r).includes('SN Corp Bot'));
+  check('a bot gets a glyph, not a portrait',
+    bot.querySelector('.chat-room-icon') !== null
+      && bot.querySelectorAll('.pfp-viewer-layer').length === 0);
+  check('…and cannot be messaged', bot.querySelector('button') === null);
+
+  const jpeg = rows.find((r) => text(r).includes('JPEG'));
+  check('another player can be messaged', jpeg.querySelector('button') !== null);
+  jpeg.querySelector('button').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const dm = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_dm').pop();
+  check('…and messaging them uses their player id',
+    !!dm && dm.args.playerId === '1-61', JSON.stringify(dm && dm.args));
+
+  // Back goes to the conversation, not out to the channel list.
+  const { w: w2, d: d2 } = await open();
+  await w2.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w2.Chat.go('members');
+  await tick();
+  d2.querySelector('.sui-page-header .sui-nav-btn')
+    .dispatchEvent(new w2.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('back returns to the room', w2.Chat._state.view === 'room', w2.Chat._state.view);
+}
+
+// ── Exact mentions ──────────────────────────────────────────────────────────
+// `m.mentions` is the sender saying who they meant. It is exact, and it works
+// when the body does not contain the name at all.
+{
+  console.log('\n— m.mentions');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  const aimed = all(d, '.chat-msg').find((n) => text(n).includes('you around?'));
+  check('a declared mention is marked',
+    aimed.className.includes('chat-mod-mention'), aimed.className);
+  check('…even though the body never says my name',
+    !text(aimed).includes('Marklifer') && w.Chat.mentionsMe('you around?') === false,
+    text(aimed));
+
+  // And it counts as a mention for the room badge, same as a name match.
+  w.Chat.go('channels');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com',
+    messages: [{ event_id: '$m1', sender: '@1-9:h', sender_name: 'Scout',
+      body: 'no name here', kind: 'text', ts: 1787900050000, mentions_me: true }],
+  });
+  await tick();
+  const raid = w.Chat._state.rooms.find((r) => r.room_id === '!raid:matrix.beta.playstructs.com');
+  check('a declared mention lights the room badge', raid.mention === true, String(raid.mention));
+}
+
 // ── Links ───────────────────────────────────────────────────────────────────
 // A link in a chat message is written by a stranger, so the destination is the
 // only part worth trusting and it opens in the system browser, never in-app.
@@ -668,7 +841,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const marks = () => w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_mark_read');
 
   check('reading a room tells the homeserver', marks().length >= 1, String(marks().length));
-  check('…up to the newest event', marks().pop().args.eventId === '$12',
+  check('…up to the newest event', marks().pop().args.eventId === '$14',
     JSON.stringify(marks().pop().args));
 
   // render() runs constantly; the homeserver does not need to hear it twice.
@@ -821,7 +994,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 
   // The echo is on screen before the command resolves — that is the point.
-  const base = 12;
+  const base = 14;
   let msgs = all(d, '.chat-msg');
   check('local echo appears immediately', msgs.length === base + 1, String(msgs.length));
   const echo = () => all(d, '.chat-msg')[base];
@@ -951,9 +1124,15 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     n.dispatchEvent(new w.Event('input', { bubbles: true }));
   };
 
+  // A completed name becomes `@Name` — the convention, and what makes the
+  // message carry a real mention when it is sent.
   put('net');
   tab();
-  check('a name completes from the room', inp().value === 'Netlag, ', JSON.stringify(inp().value));
+  check('a name completes to an @mention', inp().value === '@Netlag ', JSON.stringify(inp().value));
+  put('@net');
+  tab();
+  check('…and completes the same with the @ already typed',
+    inp().value === '@Netlag ', JSON.stringify(inp().value));
 
   put('/jo');
   tab();
@@ -963,7 +1142,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   put('ping t.x');
   tab();
   check('completion respects the rest of the line',
-    inp().value === 'ping T.Xue ', JSON.stringify(inp().value));
+    inp().value === 'ping @T.Xue ', JSON.stringify(inp().value));
 
   // Repeated Tab cycles the matches rather than re-matching the same one.
   put('/');
@@ -1735,6 +1914,113 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('no portrait is squeezed onto a sender line',
     d.querySelectorAll('.chat-msg-head .pfp-viewer-layer').length === 0,
     String(d.querySelectorAll('.chat-msg-head .pfp-viewer-layer').length));
+}
+
+// ── Shared from the game ────────────────────────────────────────────────────
+// A raid window or a roster row can hand an object to Comms. It must arrive as
+// a DRAFT: sharing is one click from a game window, and one click must never
+// put a message in front of other people.
+{
+  console.log('\n— share from the game');
+  const { w, d } = await open();
+
+  // Arriving while a room is open: straight into the message box, unsent.
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const before = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').length;
+  w.__HARNESS_EMIT__('matrix::compose', { text: '2-15361' });
+  await tick();
+  const input = d.getElementById('chat-input');
+  check('a shared id lands in the message box', input.value.trim() === '2-15361',
+    JSON.stringify(input.value));
+  check('…and nothing is sent without the player',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').length === before);
+  check('…with the caret after it, ready to type',
+    input.selectionStart === input.value.length,
+    input.selectionStart + '/' + input.value.length);
+
+  // A draft already being written is the player's. Sharing appends.
+  input.value = 'look at';
+  input.dispatchEvent(new w.Event('input', { bubbles: true }));
+  w.__HARNESS_EMIT__('matrix::compose', { text: '1-61' });
+  await tick();
+  check('sharing into a half-written line keeps what was typed',
+    d.getElementById('chat-input').value.trim() === 'look at 1-61',
+    JSON.stringify(d.getElementById('chat-input').value));
+
+  // Arriving with no room open: hold it, say so, and deliver on the next open.
+  w.Chat.go('channels');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::compose', { text: '2-15361' });
+  await tick();
+  check('with no room open it waits on the channel list',
+    text(d.querySelector('.chat-scroll')).includes('Ready to share 2-15361'),
+    text(d.querySelector('.chat-scroll')).slice(0, 80));
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  check('…and is waiting in the box once a room is picked',
+    d.getElementById('chat-input').value.trim() === '2-15361',
+    JSON.stringify(d.getElementById('chat-input').value));
+  check('…and is not offered a second time', !w.Chat._state.draft,
+    String(w.Chat._state.draft));
+
+  // The shared id must actually render as a card once sent — a share that
+  // arrives as bare text would be no better than retyping it.
+  check('a shared id is a referenceable kind',
+    w.Chat.refIdsIn('2-15361').indexOf('2-15361') >= 0,
+    JSON.stringify(w.Chat.refIdsIn('2-15361')));
+}
+
+// A share that reached Rust before the window was listening is replayed.
+{
+  console.log('\n— share replayed into a cold window');
+  const dom = await JSDOM.fromFile(harness, {
+    url: pathToFileURL(harness).href,
+    runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
+    beforeParse(window) { window.__HARNESS_PENDING_DRAFT__ = '2-15361'; },
+  });
+  const w = dom.window;
+  await until(() => w.Chat && w.Chat._state && !w.Chat._state.loading);
+  await tick();
+  check('the window claims the share it was opened for',
+    w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_take_pending_draft'));
+  check('…and holds it until a room is chosen',
+    w.Chat._state.draft === '2-15361', String(w.Chat._state.draft));
+}
+
+// ── The face other clients see ──────────────────────────────────────────────
+// The portrait always renders in here, composed from on-chain layer indices.
+// Every OTHER Matrix client reads a single avatar_url and nothing else, so a
+// player with no published avatar is a grey initial in Element and has no way
+// to find that out from inside this window.
+{
+  console.log('\n— portrait publication');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const p = d.getElementById('chat-composer-portrait');
+  check('the composer shows your own portrait, not a placeholder',
+    p && !!p.querySelector('img[src*="pfp_head_1.png"]'),
+    p && p.innerHTML.slice(0, 120));
+  check('…and says the face is one other clients can see',
+    (p.getAttribute('data-sui-tooltip') || '').includes('published'),
+    p.getAttribute('data-sui-tooltip'));
+}
+
+{
+  const dom = await JSDOM.fromFile(harness, {
+    url: pathToFileURL(harness).href,
+    runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
+    beforeParse(window) { window.__HARNESS_AVATAR_UNPUBLISHED__ = true; },
+  });
+  const w = dom.window;
+  await until(() => w.Chat && w.Chat._state && !w.Chat._state.loading);
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const tip = w.document.getElementById('chat-composer-portrait')
+    .getAttribute('data-sui-tooltip');
+  check('an unpublished portrait says so without alarming anyone',
+    tip.includes('not published') && tip.includes('shortly'), tip);
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');

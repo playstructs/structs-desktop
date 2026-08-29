@@ -19,6 +19,7 @@ use std::time::Duration;
 use tauri::Emitter;
 
 use super::auth;
+use super::avatar;
 use super::directory;
 use super::store::{self, Session};
 
@@ -47,6 +48,17 @@ pub struct Message {
     pub is_self: bool,
     pub admin: bool,
     pub ts: u64,
+    /// The sender said so explicitly, via `m.mentions`. Exact, unlike the
+    /// window's word-boundary fallback.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub mentions_me: bool,
+    /// `mxc://server/id` for an image message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mxc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u64>,
     /// The player's on-chain portrait attributes, so the timeline shows the
     /// same face the roster and Team Ops show. `None` for bots and service
     /// accounts, which are not players and have no portrait.
@@ -320,9 +332,10 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         match msgtype {
             "m.emote" => ("emote", text),
             "m.notice" => ("notice", text),
-            // Attachments are not rendered yet; naming the file is better than
-            // an empty bubble the player cannot explain.
-            "m.image" | "m.file" | "m.audio" | "m.video" => {
+            // An image is shown, not described. The rest still name the file:
+            // better than an empty bubble the player cannot explain.
+            "m.image" => ("image", text),
+            "m.file" | "m.audio" | "m.video" => {
                 ("notice", format!("sent an attachment: {}", text))
             }
             _ => ("text", text),
@@ -372,6 +385,25 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         .and_then(|p| p.get(sender).copied())
         .unwrap_or(0);
 
+    // `m.mentions` is the spec's own answer to "was this aimed at me", and it
+    // is EXACT — the word-boundary guess in the window is only a fallback for
+    // clients that do not send it. The live Orbital Hydro room already
+    // contains messages carrying it.
+    let mentions_me = content
+        .get("m.mentions")
+        .and_then(|m| m.get("user_ids"))
+        .and_then(|u| u.as_array())
+        .map(|a| a.iter().any(|v| v.as_str() == Some(me)))
+        .unwrap_or(false);
+
+    // Where the picture lives, for the ones that have one.
+    let media = if kind == "image" {
+        content.get("url").and_then(|u| u.as_str()).map(|s| s.to_string())
+    } else {
+        None
+    };
+    let info = content.get("info");
+
     // The localpart IS the player id, so the game's own identity for this
     // sender — real name, guild tag, portrait — is a direct lookup. The
     // homeserver's display name is the fallback, not the other way round: a
@@ -397,6 +429,13 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         is_self: sender == me,
         admin: level >= 100,
         ts,
+        mentions_me,
+        // The window asks for the bytes separately (media needs the access
+        // token, which never leaves Rust); these are what it needs to lay the
+        // picture out before they arrive.
+        mxc: media,
+        width: info.and_then(|i| i.get("w")).and_then(|w| w.as_u64()),
+        height: info.and_then(|i| i.get("h")).and_then(|h| h.as_u64()),
     })
 }
 
@@ -419,6 +458,9 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
     let mut deltas: Vec<(String, Vec<Message>)> = Vec::new();
     let mut rooms_changed = false;
     let mut typing_changed: Vec<(String, Vec<String>)> = Vec::new();
+    // Players a room is named after but the directory has not met. Collected
+    // under the lock, resolved after it — `apply_sync` cannot await.
+    let mut needs_identity: Vec<String> = Vec::new();
 
     let mut map = STATE.write().unwrap();
     let gs = map.entry(guild_id.to_string()).or_default();
@@ -581,6 +623,14 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         });
         let dm_player = dm_peer.as_deref().and_then(directory::player_id_of);
         let dm_ident = dm_player.as_deref().and_then(directory::get);
+        if let Some(pid) = dm_player.as_deref() {
+            if dm_ident.is_none() {
+                // Not known yet — remember to look them up after this pass, so
+                // the next sync titles the conversation with their name rather
+                // than their id.
+                needs_identity.push(pid.to_string());
+            }
+        }
 
         let entry = Room {
             room_id: room_id.clone(),
@@ -689,7 +739,24 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         }
     }
 
+    if !needs_identity.is_empty() {
+        // Not awaited here (this function is sync and holds the lock); the
+        // sync loop picks them up and the next pass renders the name.
+        PENDING_IDENTITY.write().unwrap().extend(needs_identity);
+    }
     (deltas, rooms_changed, typing_changed)
+}
+
+/// Players a fold wanted identity for but could not await. Drained by the sync
+/// loop between passes.
+static PENDING_IDENTITY: std::sync::LazyLock<RwLock<Vec<String>>> =
+    std::sync::LazyLock::new(|| RwLock::new(Vec::new()));
+
+fn drain_pending_identity() -> Vec<String> {
+    PENDING_IDENTITY
+        .write()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default()
 }
 
 // ── Being contacted ─────────────────────────────────────────────────────────
@@ -874,6 +941,57 @@ impl PartialEq for Room {
 
 /// Start the long-poll for one guild. Idempotent: a second call while the loop
 /// is alive is a no-op, so reconnecting cannot double the traffic.
+/// Publish the player's portrait as their Matrix avatar, if it is not already.
+///
+/// Self-healing rather than a button, because the thing it fixes is invisible
+/// from inside this app: the portrait renders correctly in every Structs
+/// window whether or not the homeserver knows about it. The player would only
+/// find out they were a grey initial by asking someone in Element.
+///
+/// Re-runs when either side moves — a portrait changed on chain, or an avatar
+/// cleared from another client — and does nothing at all when they agree,
+/// which is every launch after the first.
+pub async fn heal_avatar(app: &tauri::AppHandle, guild_id: &str) {
+    let Some(session) = store::get(guild_id) else { return };
+    // `@1-42:server` — the localpart IS the player id.
+    let Some(player_id) = session
+        .user_id
+        .strip_prefix('@')
+        .and_then(|r| r.split(':').next())
+        .filter(|p| !p.is_empty())
+    else {
+        return;
+    };
+    let Some(ident) = directory::resolve(player_id).await else { return };
+    let Some(attrs) = ident.pfp_attrs.filter(|a| !a.trim().is_empty()) else {
+        return; // no portrait on chain yet; nothing to publish
+    };
+
+    // What the homeserver believes, read rather than assumed: an avatar can be
+    // cleared elsewhere, and trusting our own last write would never notice.
+    let live = match my_avatar(&session).await {
+        Ok(v) => v,
+        Err(_) => return, // a homeserver that will not answer is not an error worth surfacing
+    };
+    let stamp = store::avatar_for(&session.user_id);
+    if let (Some(stamp), Some(live)) = (stamp.as_deref(), live.as_deref()) {
+        if let Some((was_attrs, was_mxc)) = stamp.split_once('|') {
+            if was_attrs == attrs && was_mxc == live {
+                return; // both sides agree; the common case
+            }
+        }
+    }
+
+    let Some(png) = avatar::compose_png(app, &attrs) else { return };
+    match upload_avatar(&session, png).await {
+        Ok(mxc) => {
+            store::put_avatar(&session.user_id, &format!("{}|{}", attrs, mxc));
+            eprintln!("[Comms] published portrait for {} as {}", session.user_id, mxc);
+        }
+        Err(e) => eprintln!("[Comms] could not publish portrait: {}", e),
+    }
+}
+
 pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
     {
         let mut running = RUNNING.write().unwrap();
@@ -887,6 +1005,13 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
     // to this guild (every DM) depends on getting that right.
     if let Some(session) = store::get(&guild_id) {
         directory::learn_server_name(&guild_id, &session.user_id);
+    }
+    // Make sure other clients can see who this is. Runs once per sync start,
+    // off the sync loop so a slow homeserver cannot delay the first messages.
+    {
+        let app = app.clone();
+        let guild_id = guild_id.clone();
+        tauri::async_runtime::spawn(async move { heal_avatar(&app, &guild_id).await });
     }
     tauri::async_runtime::spawn(async move {
         let mut backoff = 2u64;
@@ -904,7 +1029,19 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
             match result {
                 Ok(v) => {
                     backoff = 2;
+                    // Identity first: `apply_sync` renders names, tags and
+                    // portraits from the directory, and anything not yet in it
+                    // renders as a bare player id — permanently, because the
+                    // rendered message is cached. Resolving up front is what
+                    // makes a sender look like a person.
+                    directory::resolve_many(&directory::senders_in(&v)).await;
                     let (deltas, rooms_changed, typing) = apply_sync(&guild_id, &session, &v);
+                    // Anyone a room is named after who was unknown a moment
+                    // ago; the next pass renders their name.
+                    let pending = drain_pending_identity();
+                    if !pending.is_empty() {
+                        directory::resolve_many(&pending).await;
+                    }
                     for (room_id, users) in typing {
                         let _ = app.emit(
                             "matrix::typing",
@@ -1243,6 +1380,10 @@ async fn page_back(
     })
     .await?;
 
+    // Same reason as the sync loop: resolve who these people are before the
+    // page is rendered against the directory.
+    directory::resolve_many(&directory::senders_in(&v)).await;
+
     let chunk_len = v
         .get("chunk")
         .and_then(|c| c.as_array())
@@ -1342,11 +1483,67 @@ pub fn msgtype_or_text(requested: Option<&str>) -> &'static str {
     }
 }
 
+/// Escape text for the HTML body a mention has to carry. Small and exact:
+/// the only markup we ever emit is our own anchor tags, and everything the
+/// player typed goes through here first.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Turn `@Name` runs into matrix.to pills, given the users they resolve to.
+///
+/// Both halves are required by the spec and by other clients: `m.mentions`
+/// is what actually notifies someone, and the `formatted_body` pill is what
+/// Element renders. Sending neither — which is what this client did until now
+/// — means a message addressed to somebody never reaches them as a mention.
+fn formatted_with_pills(body: &str, mentions: &[(String, String)]) -> Option<String> {
+    if mentions.is_empty() {
+        return None;
+    }
+    let mut html = html_escape(body);
+    let mut changed = false;
+    for (name, user_id) in mentions {
+        let needle = html_escape(&format!("@{}", name));
+        if !html.contains(&needle) {
+            continue;
+        }
+        let pill = format!(
+            "<a href=\"https://matrix.to/#/{}\">{}</a>",
+            html_escape(user_id),
+            html_escape(name)
+        );
+        html = html.replace(&needle, &pill);
+        changed = true;
+    }
+    if changed { Some(html) } else { None }
+}
+
 pub async fn send(
     session: &Session,
     room_id: &str,
     body: &str,
     msgtype: &str,
+) -> Result<String, String> {
+    send_with_mentions(session, room_id, body, msgtype, &[]).await
+}
+
+pub async fn send_with_mentions(
+    session: &Session,
+    room_id: &str,
+    body: &str,
+    msgtype: &str,
+    mentions: &[(String, String)],
 ) -> Result<String, String> {
     let txn = format!(
         "structs{}{}",
@@ -1359,7 +1556,15 @@ pub async fn send(
         urlseg(room_id),
         urlseg(&txn)
     );
-    let payload = json!({ "msgtype": msgtype, "body": body });
+    let mut payload = json!({ "msgtype": msgtype, "body": body });
+    if !mentions.is_empty() {
+        let ids: Vec<String> = mentions.iter().map(|(_, id)| id.clone()).collect();
+        payload["m.mentions"] = json!({ "user_ids": ids });
+        if let Some(html) = formatted_with_pills(body, mentions) {
+            payload["format"] = json!("org.matrix.custom.html");
+            payload["formatted_body"] = json!(html);
+        }
+    }
     let v = authed(session, move |c, s| {
         c.put(&url).bearer_auth(&s.access_token).json(&payload)
     })
@@ -1500,6 +1705,225 @@ fn urlseg(s: &str) -> String {
         .collect()
 }
 
+/// Fetch an image someone posted, as a data URI the window can render.
+///
+/// Media is AUTHENTICATED on a modern homeserver — the legacy unauthenticated
+/// path 404s (verified against crew.oh.energy, spec v1.12) — so the webview
+/// cannot simply point an `<img>` at the URL. Rust holds the token, fetches
+/// the thumbnail, and hands back bytes.
+///
+/// SECURITY: this is a file chosen by a federated stranger.
+///   * Only raster image types are accepted. **SVG is refused**: it is a
+///     document that can carry script, and a data: URI would run it in the
+///     window's own origin.
+///   * The body is capped, so a hostile or careless upload cannot be turned
+///     into an enormous string in the renderer.
+///   * A thumbnail is requested rather than the original, which bounds the
+///     common case to a few dozen KB.
+const MEDIA_CAP_BYTES: usize = 2 * 1024 * 1024;
+const MEDIA_OK_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// What the app is willing to PUT ON a homeserver.
+///
+/// The only thing this app uploads is the player's own portrait, composed
+/// locally from the layers that ship in the bundle. It is never a file the
+/// player picked: this window is a game client, not a file-sharing tool, and
+/// an accidental drop of the wrong picture onto other people's servers is not
+/// something an apology takes back.
+const UPLOAD_CAP_BYTES: usize = 2 * 1024 * 1024;
+
+/// Publish the player's portrait as their Matrix avatar.
+///
+/// Federated clients render `avatar_url` and nothing else — Element shows a
+/// grey initial for every Structs player today, because the portrait only
+/// exists as on-chain layer indices that no other client can read. Composing
+/// it here and uploading the result is what makes a player recognisable
+/// everywhere their guild talks, not just inside this window.
+///
+/// Upload and profile-set are one act for the same reason a picture message
+/// is: a successful upload followed by a failed profile write leaves a file
+/// nothing references and the player cannot see or retry.
+pub async fn upload_avatar(session: &Session, png: Vec<u8>) -> Result<String, String> {
+    if png.is_empty() {
+        return Err("the portrait came out empty".into());
+    }
+    if png.len() > UPLOAD_CAP_BYTES {
+        return Err(format!(
+            "the portrait is {:.1} MB, which is larger than this app will upload",
+            png.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    let url = format!(
+        "{}/_matrix/media/v3/upload?filename=portrait.png",
+        session.homeserver.trim_end_matches('/')
+    );
+    let v = authed(session, move |c, s| {
+        c.post(&url)
+            .bearer_auth(&s.access_token)
+            .header(reqwest::header::CONTENT_TYPE, "image/png")
+            .body(png.clone())
+    })
+    .await?;
+    let mxc = v
+        .get("content_uri")
+        .and_then(|u| u.as_str())
+        .filter(|u| u.starts_with("mxc://"))
+        .ok_or("the homeserver accepted the portrait but returned no media URL")?
+        .to_string();
+
+    let profile = format!(
+        "{}/profile/{}/avatar_url",
+        base(session),
+        urlseg(&session.user_id)
+    );
+    let payload = json!({ "avatar_url": mxc });
+    authed(session, move |c, s| {
+        c.put(&profile).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await?;
+    Ok(mxc)
+}
+
+/// What the homeserver currently believes this player looks like.
+///
+/// Read rather than assumed: the avatar can be cleared from another client,
+/// or lost with the account, and a self-heal that trusts its own last write
+/// would never notice.
+pub async fn my_avatar(session: &Session) -> Result<Option<String>, String> {
+    let url = format!(
+        "{}/profile/{}/avatar_url",
+        base(session),
+        urlseg(&session.user_id)
+    );
+    let v = match authed(session, move |c, s| c.get(&url).bearer_auth(&s.access_token)).await {
+        Ok(v) => v,
+        // A profile with no avatar answers 404 on some homeservers and an
+        // empty object on others. Neither is an error worth surfacing.
+        Err(e) if e.contains("404") || e.contains("M_NOT_FOUND") => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(v.get("avatar_url")
+        .and_then(|u| u.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| s.starts_with("mxc://")))
+}
+
+pub async fn media_data_url(
+    session: &Session,
+    mxc: &str,
+    size: u32,
+) -> Result<(String, String), String> {
+    // mxc://server/media_id
+    let rest = mxc.strip_prefix("mxc://").ok_or("not a matrix media URL")?;
+    let (server, media_id) = rest.split_once('/').ok_or("malformed matrix media URL")?;
+    if server.is_empty() || media_id.is_empty() {
+        return Err("malformed matrix media URL".into());
+    }
+    let size = size.clamp(64, 800);
+    let url = format!(
+        "{}/_matrix/client/v1/media/thumbnail/{}/{}?width={}&height={}&method=scale",
+        session.homeserver.trim_end_matches('/'),
+        urlseg(server),
+        urlseg(media_id),
+        size,
+        size
+    );
+
+    let client = http()?;
+    let resp = client
+        .get(&url)
+        .bearer_auth(&session.access_token)
+        .send()
+        .await
+        .map_err(|e| format!("media: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("media: HTTP {}", resp.status().as_u16()));
+    }
+    let mime = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !MEDIA_OK_TYPES.contains(&mime.as_str()) {
+        return Err(format!("refusing to render {}", if mime.is_empty() { "an untyped file" } else { &mime }));
+    }
+    if let Some(len) = resp.content_length() {
+        if len as usize > MEDIA_CAP_BYTES {
+            return Err("image too large".into());
+        }
+    }
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() > MEDIA_CAP_BYTES {
+        return Err("image too large".into());
+    }
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok((format!("data:{};base64,{}", mime, b64), mime))
+}
+
+/// Everyone in a room, as people rather than ids.
+///
+/// The window had no way to answer "who is here" at all — the most basic
+/// question a chat room raises, and the one that makes a name in the composer
+/// completable and a stranger addressable.
+pub async fn members(session: &Session, room_id: &str) -> Result<Vec<Value>, String> {
+    let url = format!("{}/rooms/{}/joined_members", base(session), urlseg(room_id));
+    let v = authed(session, move |c, s| c.get(&url).bearer_auth(&s.access_token)).await?;
+    let joined = v
+        .get("joined")
+        .and_then(|j| j.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    // Resolve the players among them before building rows, so the list shows
+    // names and portraits rather than ids.
+    let player_ids: Vec<String> = joined
+        .keys()
+        .filter_map(|u| directory::player_id_of(u))
+        .collect();
+    directory::resolve_many(&player_ids).await;
+
+    let mut out: Vec<Value> = joined
+        .into_iter()
+        .map(|(user_id, info)| {
+            let pid = directory::player_id_of(&user_id);
+            let ident = pid.as_deref().and_then(directory::get);
+            let display = info
+                .get("display_name")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
+            json!({
+                "user_id": user_id,
+                // A player's on-chain name beats the self-chosen Matrix one;
+                // for a bot the Matrix name is all there is.
+                "name": ident
+                    .as_ref()
+                    .map(|i| i.username.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| if display.is_empty() { localpart(&user_id) } else { display }),
+                "player_id": pid,
+                "tag": ident.as_ref().map(|i| i.tag.clone()).unwrap_or_default(),
+                "pfp_attrs": ident.as_ref().and_then(|i| i.pfp_attrs.clone()),
+                "is_self": user_id == session.user_id,
+            })
+        })
+        .collect();
+
+    // Players first, then bots and service accounts; alphabetical within each.
+    out.sort_by(|a, b| {
+        let ap = a.get("player_id").map(|v| v.is_null()).unwrap_or(true);
+        let bp = b.get("player_id").map(|v| v.is_null()).unwrap_or(true);
+        ap.cmp(&bp).then_with(|| {
+            let an = a.get("name").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+            let bn = b.get("name").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+            an.cmp(&bn)
+        })
+    });
+    Ok(out)
+}
+
 /// The player's Matrix profile, for the composer portrait.
 pub async fn profile(session: &Session) -> Result<Value, String> {
     let url = format!("{}/profile/{}", base(session), urlseg(&session.user_id));
@@ -1517,6 +1941,11 @@ pub async fn profile(session: &Session) -> Result<Value, String> {
             .unwrap_or_else(|| localpart(&session.user_id)),
         "pfp_attrs": ident.as_ref().and_then(|i| i.pfp_attrs.clone()),
         "tag": ident.as_ref().map(|i| i.tag.clone()).unwrap_or_default(),
+        // Whether OTHER clients can see this face. The portrait always renders
+        // in here; `avatar_url` is the only thing Element and the rest read,
+        // and the difference is invisible from inside this window.
+        "avatar_published": v.get("avatar_url").and_then(|a| a.as_str())
+            .map(|s| s.starts_with("mxc://")).unwrap_or(false),
     }))
 }
 
