@@ -10,6 +10,7 @@
 // Tauri converts JS camelCase arguments to Rust snake_case, so `roomId` in
 // the window must be `room_id` in the signature.
 import { readFileSync, readdirSync } from 'fs';
+import { topLevelKeys, nestedObject, rustFiles } from './_parse.mjs';
 
 let failures = 0;
 const check = (label, ok, detail) => {
@@ -21,14 +22,6 @@ const check = (label, ok, detail) => {
 const root = process.cwd();
 const rustDir = root + '/src-tauri/src';
 
-function rustFiles(dir) {
-  const out = [];
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    if (e.isDirectory()) out.push(...rustFiles(dir + '/' + e.name));
-    else if (e.name.endsWith('.rs')) out.push(dir + '/' + e.name);
-  }
-  return out;
-}
 
 // ── What Rust offers ────────────────────────────────────────────────────────
 // A command is `#[tauri::command]` followed by a fn, whose parameters are the
@@ -50,6 +43,52 @@ for (const f of rustFiles(rustDir)) {
 }
 check('Rust exposes commands to find', commands.size > 40, String(commands.size));
 
+// ── Structs an argument can carry ───────────────────────────────────────────
+//
+// Tauri renames top-level command arguments from camelCase to snake_case. It
+// does NOT touch the fields inside a struct one of them carries — those are
+// plain serde, so they need `rename_all` or the window must send them exactly
+// as Rust spells them.
+//
+// This check exists because the version without it passed while a real reply
+// was failing in the app with "missing field event_id". Checking only the
+// outer names is checking the easy half.
+const structs = new Map();
+for (const f of rustFiles(rustDir)) {
+  const src = readFileSync(f, 'utf8');
+  const re = /#\[derive\([^)]*Deserialize[^)]*\)\]\s*((?:#\[[^\]]*\]\s*)*)pub struct\s+([A-Za-z0-9_]+)\s*\{([\s\S]*?)\n\}/g;
+  let m;
+  while ((m = re.exec(src))) {
+    const camel = /rename_all\s*=\s*"camelCase"/.test(m[1]);
+    const fields = new Set(
+      (m[3].match(/^\s*pub\s+([a-z0-9_]+)\s*:/gm) || [])
+        .map((x) => x.replace(/^\s*pub\s+/, '').replace(/\s*:$/, '').trim())
+        .map((x) => (camel ? x.replace(/_([a-z])/g, (_, c) => c.toUpperCase()) : x))
+    );
+    if (fields.size) structs.set(m[2], { fields, camel });
+  }
+}
+
+const structArgs = new Map();
+for (const f of rustFiles(rustDir)) {
+  const src = readFileSync(f, 'utf8');
+  const re = /#\[tauri::command\][\s\S]{0,200}?fn\s+([a-z0-9_]+)\s*\(([\s\S]*?)\)\s*(?:->|\{)/g;
+  let m;
+  while ((m = re.exec(src))) {
+    for (const p of m[2].split(',')) {
+      const bits = p.split(':');
+      if (bits.length < 2) continue;
+      const arg = bits[0].trim().replace(/^mut\s+/, '');
+      const ty = bits.slice(1).join(':').trim().replace(/^Option</, '').replace(/>$/, '');
+      if (!structs.has(ty)) continue;
+      if (!structArgs.has(m[1])) structArgs.set(m[1], new Map());
+      structArgs.get(m[1]).set(arg, ty);
+    }
+  }
+}
+check('command arguments carrying structs are found',
+  structArgs.size > 0, [...structArgs.keys()].join(', '));
+
 // ── What main.rs actually registers ─────────────────────────────────────────
 // A command that exists but is never handed to the handler list is not
 // callable: the window gets "command not found" at runtime.
@@ -69,41 +108,12 @@ const front = readdirSync(root + '/frontend')
   .filter((f) => f.endsWith('.js') && !f.startsWith('_'))
   .map((f) => 'frontend/' + f);
 
-// The keys of the object literal starting at `open`, ignoring anything nested
-// inside it. Brace-and-bracket depth, with strings skipped so a `{` in a
-// message body cannot throw the count off.
-function topLevelKeys(src, open) {
-  const keys = [];
-  let depth = 0, i = open, str = null, keyStart = -1;
-  for (; i < src.length; i++) {
-    const ch = src[i];
-    if (str) {
-      if (ch === '\\') i++;
-      else if (ch === str) str = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === '`') { str = ch; continue; }
-    if (ch === '{' || ch === '[' || ch === '(') {
-      depth++;
-      if (depth === 1) keyStart = i + 1;
-      continue;
-    }
-    if (ch === '}' || ch === ']' || ch === ')') {
-      depth--;
-      if (depth === 0) break;
-      continue;
-    }
-    if (depth !== 1) continue;
-    if (ch === ':' && keyStart >= 0) {
-      const k = src.slice(keyStart, i).trim();
-      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) keys.push(k);
-      keyStart = -1;
-    } else if (ch === ',') {
-      keyStart = i + 1;
-    }
-  }
-  return keys;
+
+// Rust spells the argument snake_case; the window spells it camelCase.
+function camelOf(snake) {
+  return snake.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
+
 
 const calls = [];
 for (const f of front) {
@@ -138,8 +148,38 @@ for (const c of calls) {
   }
 }
 
+// The nested half: for a struct-carrying argument, the object the window
+// sends must use the field names serde will actually look for.
+const badNested = [];
+const nestedChecked = [];
+for (const f of front) {
+  const src = readFileSync(root + '/' + f, 'utf8');
+  const re = /invoke\(\s*'([a-z0-9_]+)'\s*,\s*\{/g;
+  let m;
+  while ((m = re.exec(src))) {
+    const wants = structArgs.get(m[1]);
+    if (!wants) continue;
+    for (const [arg, ty] of wants) {
+      const at = nestedObject(src, re.lastIndex - 1, camelOf(arg));
+      if (at === -1) continue;                 // sent as null, or not sent here
+      nestedChecked.push(m[1] + '.' + camelOf(arg));
+      const expect = structs.get(ty).fields;
+      for (const k of topLevelKeys(src, at)) {
+        if (!expect.has(k)) {
+          badNested.push(m[1] + '.' + camelOf(arg) + '.' + k +
+            ' → ' + ty + ' wants [' + [...expect].join(', ') + ']');
+        }
+      }
+    }
+  }
+}
+
 check('every command the window calls exists in Rust',
   unknown.length === 0, unknown.join('; '));
+check('…and objects inside an argument use the field names serde expects',
+  badNested.length === 0, [...new Set(badNested)].slice(0, 6).join('; '));
+console.log('  · nested-checked: ' +
+  ([...new Set(nestedChecked)].sort().join(', ') || 'none'));
 check('…and every one is registered in the handler list',
   unregistered.length === 0, unregistered.join('; '));
 check('…and every argument matches its parameter name',

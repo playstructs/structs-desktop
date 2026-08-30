@@ -68,6 +68,51 @@ export function topLevelKeys(src, open) {
   return keys;
 }
 
+// The `{` opening the value of `key` in the object literal starting at
+// `open`, or -1 when that key is absent or is not an object.
+//
+// Comment-aware for the same reason as `topLevelKeys`, and it matters more
+// here: an apostrophe in a comment ("the recipient's client") opens a string
+// that never closes, and the rest of the call is swallowed. That is exactly
+// how this check came to skip `matrix_send.replyTo` — the one call that was
+// failing in the app — while reporting six others as fine.
+export function nestedObject(src, open, key) {
+  let depth = 0, str = null, keyStart = -1, want = false;
+  for (let i = open; i < src.length; i++) {
+    const ch = src[i];
+    if (str) {
+      if (ch === '\\') i++;
+      else if (ch === str) str = null;
+      continue;
+    }
+    if (ch === '/' && src[i + 1] === '/') {
+      i = src.indexOf('\n', i);
+      if (i === -1) break;
+      continue;
+    }
+    if (ch === '/' && src[i + 1] === '*') {
+      i = src.indexOf('*/', i + 2);
+      if (i === -1) break;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { str = ch; continue; }
+    if (ch === '{' || ch === '[' || ch === '(') {
+      if (want && ch === '{' && depth === 1) return i;
+      depth++;
+      if (depth === 1) keyStart = i + 1;
+      continue;
+    }
+    if (ch === '}' || ch === ']' || ch === ')') { depth--; if (depth === 0) break; continue; }
+    if (depth !== 1) continue;
+    if (ch === ':' && keyStart >= 0) {
+      want = src.slice(keyStart, i).trim() === key;
+      keyStart = -1;
+    } else if (ch === ',') { keyStart = i + 1; want = false; }
+  }
+  return -1;
+}
+
 import { readdirSync } from 'fs';
 export function rustFiles(dir) {
   const out = [];

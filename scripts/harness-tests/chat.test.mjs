@@ -3464,5 +3464,70 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     String(w.Chat._state.roomId));
 }
 
+// ── Finding out what the window can do ─────────────────────────────────────
+// Four keyboard affordances were added and none of them was discoverable.
+// A shortcut nobody can find is a shortcut nobody uses.
+{
+  console.log('\n— help');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const input = d.getElementById('chat-input');
+  input.value = '/help';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  const out = text(all(d, '.chat-msg').pop());
+
+  check('help lists the commands', out.includes('/whois') && out.includes('/msg'), out.slice(0, 80));
+  check('…and the keys', out.includes('Ctrl/Cmd-K') && out.includes('Ctrl/Cmd-F'),
+    out.slice(-160));
+  check('…including the ones with no visible control',
+    out.includes('Tab') && out.includes('Escape'), out.slice(-160));
+
+  // The handler runs from the same table /help prints, so a shortcut cannot
+  // exist without being documented or be documented without existing.
+  for (const k of w.Chat.SHORTCUTS) {
+    check('help documents ' + k.keys, out.includes(k.keys), out.slice(-200));
+  }
+
+  // And the ones with a `run` really are bound window-wide.
+  const bound = w.Chat.SHORTCUTS.filter((k) => k.run);
+  check('every runnable shortcut is bound', bound.length >= 2, String(bound.length));
+  d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+  await tick();
+  check('…and Ctrl-K still does what it says',
+    w.Chat._state.view === 'channels', w.Chat._state.view);
+}
+
+// A line the window says to you is not a message you can react to.
+{
+  console.log('\n— local lines carry no controls');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const input = d.getElementById('chat-input');
+  input.value = '/help';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+
+  const local = all(d, '#chat-timeline .chat-msg').pop();
+  check('the help output is the last line', text(local).includes('Ctrl/Cmd-K'),
+    text(local).slice(0, 60));
+  // `S.reactPicker` is null when no picker is open, and a local line has no
+  // server id — so a plain equality made `null === null` true and opened the
+  // picker on every notice, error and in-flight message.
+  check('a system notice offers no reactions',
+    !local.querySelector('.chat-reaction'), local.innerHTML.slice(-200));
+  check('…and no reaction picker',
+    !local.querySelector('.chat-reaction.chat-mod-offer'));
+  check('…nor anything else to click',
+    !local.querySelector('.chat-react-btn') && !local.querySelector('.chat-pin-btn'),
+    local.innerHTML.slice(-160));
+
+  // A real message still does.
+  const real = all(d, '#chat-timeline .chat-msg').find((n) => n.getAttribute('data-event') === '$14');
+  check('a real message still offers them', !!real.querySelector('.chat-react-btn'));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

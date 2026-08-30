@@ -1958,7 +1958,12 @@
 
   function reactionRow(m) {
     var list = m.reactions || [];
-    var open = S.reactPicker === serverIdOf(m);
+    // Both sides must be a REAL event id. `S.reactPicker` is null when no
+    // picker is open and `serverIdOf` is null for a local line — so a plain
+    // equality made `null === null` true and opened the picker on every
+    // system notice, every error and every message still in flight.
+    var id = serverIdOf(m);
+    var open = !!id && S.reactPicker === id;
     if (!list.length && !open) return null;
 
     var row = el('div', 'chat-reactions');
@@ -3048,6 +3053,30 @@
   //
   // A leading "//" escapes, so a message that genuinely starts with a slash is
   // still sendable — the same escape ircII shipped in 1990.
+  // Every key this window answers to, in one place — the handler runs from
+  // this table and /help prints it, so a shortcut cannot exist without being
+  // documented or be documented without existing.
+  //
+  // Entries with no `run` are handled where their context lives (inside the
+  // composer, inside a field) and appear here only so the list is complete.
+  var SHORTCUTS = [
+    { keys: 'Ctrl/Cmd-K', help: 'Jump to a channel',
+      match: function (e) { return (e.metaKey || e.ctrlKey) && /^k$/i.test(e.key); },
+      run: function () {
+        S.roomFilter = '';
+        S.filterWanted = true;
+        go('channels');
+      } },
+    { keys: 'Ctrl/Cmd-F', help: 'Search what was said',
+      match: function (e) { return (e.metaKey || e.ctrlKey) && /^f$/i.test(e.key); },
+      run: function () { openSearch(S.view === 'room'); } },
+    { keys: 'Tab', help: 'Complete a name, an id or a command' },
+    { keys: 'Up / Down', help: 'Walk back through what you have sent' },
+    { keys: 'Enter', help: 'Send — or open the top match when filtering' },
+    { keys: 'Escape', help: 'Back out one step: reply, edit, filter, then room' },
+  ];
+  Chat.SHORTCUTS = SHORTCUTS;
+
   var COMMANDS = [
     { name: 'me', args: '<action>', help: 'Send an action: * you wave' },
     { name: 'msg', args: '<player> [message]', help: 'Open a direct message' },
@@ -3105,7 +3134,11 @@
       case 'help':
         say('Commands:\n' + COMMANDS.map(function (c) {
           return '  /' + c.name + (c.args ? ' ' + c.args : '') + '  —  ' + c.help;
-        }).join('\n') + '\nStart a message with // to send a literal slash.');
+        }).join('\n') +
+          '\nStart a message with // to send a literal slash.' +
+          '\n\nKeys:\n' + SHORTCUTS.map(function (k) {
+            return '  ' + k.keys + '  —  ' + k.help;
+          }).join('\n'));
         return;
 
       case 'me':
@@ -3934,22 +3967,14 @@
       });
     }
     document.addEventListener('keydown', function (e) {
-      // Ctrl/Cmd-K jumps to a channel, the way every chat client of the last
-      // decade does. Goes to the list and focuses the filter, so the next
-      // three keystrokes are the search.
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+      // The window-wide keys come from SHORTCUTS, which is the same table
+      // /help prints. A shortcut nobody can find is a shortcut nobody uses,
+      // and two lists — one that works and one that describes — drift.
+      for (var si = 0; si < SHORTCUTS.length; si++) {
+        var sc = SHORTCUTS[si];
+        if (!sc.run || !sc.match(e)) continue;
         e.preventDefault();
-        S.roomFilter = '';
-        S.filterWanted = true;
-        go('channels');
-        return;
-      }
-      // Ctrl/Cmd-F opens search, scoped to whatever you are reading. The key
-      // every application has agreed on for thirty years, and a search only
-      // reachable from a header icon is a search most people never find.
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
-        e.preventDefault();
-        openSearch(S.view === 'room');
+        sc.run();
         return;
       }
       // Escape backs out one level, from anywhere. The one key every window in

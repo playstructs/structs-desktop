@@ -310,7 +310,15 @@ pub async fn matrix_backfill(
 /// What a reply is answering. The window already has all three on the
 /// message being replied to, so asking for them costs nothing and saves a
 /// fetch per reply on this side.
+///
+/// `rename_all` is load-bearing. Tauri converts the camelCase names of
+/// top-level command ARGUMENTS to snake_case; it does nothing to the fields
+/// INSIDE a struct one of them carries. Without this, the window's `eventId`
+/// never became `event_id` and every reply failed with "missing field
+/// event_id" — at send time, in front of the player, on a message they had
+/// already written.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReplyTarget {
     pub event_id: String,
     pub sender: String,
