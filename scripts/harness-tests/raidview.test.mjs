@@ -160,9 +160,56 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   // Which room it was said in is the part you cannot infer.
   check('…and where', rows[0].textContent.includes('SN.Corporation'), rows[0].textContent);
 
-  // Read-only: sending would need a room to send TO, and guessing is worse
-  // than handing the player to Comms with the id already in the box.
-  check('there is no composer here', !d.querySelector('#rv-chat-body input'));
+  // ── Answering from here ───────────────────────────────────────────────
+  // The panel used to be read-only because sending "would mean guessing a
+  // room". The guess was the problem, not the sending: the room is now shown
+  // and picked, defaulting to wherever this object was actually discussed.
+  const compose = d.getElementById('rv-chat-compose');
+  check('the rail can answer, not just listen', !!compose);
+  check('…once Comms answered with a guild and rooms',
+    !compose.classList.contains('hidden'));
+  const sel = d.getElementById('rv-chat-room');
+  check('…offering every room, not one guessed for you',
+    sel.options.length === 2, String(sel.options.length));
+  // The fixture lists General FIRST and the discussed room second, so taking
+  // the head of the list would pass by accident.
+  check('…defaulting to where this object was actually discussed',
+    sel.value === '!snc:h', sel.value);
+
+  const input = d.getElementById('rv-chat-input');
+  input.value = '  they are down to one shield  ';
+  d.getElementById('rv-chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 60));
+  const sent = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').pop();
+  check('sending goes to the chosen room',
+    !!sent && sent.args.roomId === '!snc:h', JSON.stringify(sent && sent.args));
+  check('…in the guild the read came from, not one inferred again',
+    !!sent && sent.args.guildId === '0-5', JSON.stringify(sent && sent.args));
+  check('…trimmed', !!sent && sent.args.body === 'they are down to one shield',
+    JSON.stringify(sent && sent.args.body));
+  check('…and the box is cleared so it cannot be sent twice', input.value === '');
+
+  // A composer that cannot send is worse than none: it invites a message the
+  // player will lose.
+  {
+    const before = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').length;
+    input.value = '   ';
+    d.getElementById('rv-chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    check('whitespace sends nothing',
+      w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').length === before);
+  }
+
+  // The map steers on keystrokes. A composer that pans the board while you
+  // type is unusable.
+  {
+    let escaped = false;
+    d.addEventListener('keydown', () => { escaped = true; });
+    const ev = new w.KeyboardEvent('keydown', { key: 'a', bubbles: true });
+    input.dispatchEvent(ev);
+    check('typing does not reach the map', !escaped);
+  }
+
   d.getElementById('rv-chat-discuss')
     .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 120));

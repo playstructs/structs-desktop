@@ -488,7 +488,11 @@
   // Beside what HAPPENED to it. The battle log is the chain's account; this
   // is the guild's. Together they are the whole story of a raid.
   var chatState = { rows: [], open: false, loading: false, connected: false,
-                    fresh: false };
+                    fresh: false,
+                    // The composer's room. `rooms` is what the player may pick
+                    // from; `roomId` is the pick. Never inferred silently — see
+                    // syncComposer.
+                    rooms: [], roomId: null, sending: false, guildId: null };
 
   // Does this text name THIS object, and not one whose id merely starts the
   // same way?
@@ -561,7 +565,10 @@
       .then(function (res) {
         chatState.loading = false;
         chatState.connected = !!(res && res.connected);
+        chatState.guildId = (res && res.guild_id) || null;
         chatState.rows = (res && res.hits) || [];
+        loadRooms();
+        syncComposer();
         renderChat();
       })
       .catch(function () {
@@ -615,11 +622,106 @@
       var room = document.createElement('span');
       room.className = 'rv-chat-room';
       room.textContent = h.room_name || '';
-      row.appendChild(who);
+      // Speaker and room on one line, the message under it. In a rail there
+      // is not width for all three side by side.
+      var meta = document.createElement('div');
+      meta.className = 'rv-chat-meta';
+      meta.appendChild(who);
+      meta.appendChild(room);
+      row.appendChild(meta);
       row.appendChild(text);
-      row.appendChild(room);
       body.appendChild(row);
     });
+  }
+
+  // Which room a message from here goes to.
+  //
+  // This window is about an OBJECT, not a room, which is why it had no
+  // composer: `wireChat` said sending "would mean guessing a room". The guess
+  // is what was wrong, not the sending. So the room is chosen — defaulted to
+  // wherever this object was last actually discussed, which is nearly always
+  // the room the player meant, and left visible and changeable when it is not.
+  function defaultRoomId() {
+    for (var i = 0; i < chatState.rows.length; i++) {
+      var id = chatState.rows[i].room_id;
+      if (id && chatState.rooms.some(function (r) { return r.room_id === id; })) return id;
+    }
+    return chatState.rooms.length ? chatState.rooms[0].room_id : null;
+  }
+
+  function loadRooms() {
+    if (!chatState.connected || chatState.rooms.length || !chatState.guildId) return;
+    window.__TAURI__.core.invoke('matrix_rooms', { guildId: chatState.guildId })
+      .then(function (res) {
+        chatState.rooms = (res && res.rooms) || [];
+        syncComposer();
+      })
+      .catch(function () { chatState.rooms = []; syncComposer(); });
+  }
+
+  function syncComposer() {
+    var box = document.getElementById('rv-chat-compose');
+    var sel = document.getElementById('rv-chat-room');
+    if (!box || !sel) return;
+    // A composer that cannot send is worse than no composer: it invites a
+    // message the player will lose.
+    var usable = chatState.connected && chatState.guildId && chatState.rooms.length > 0;
+    box.classList.toggle('hidden', !usable);
+    if (!usable) return;
+    if (!chatState.roomId
+        || !chatState.rooms.some(function (r) { return r.room_id === chatState.roomId; })) {
+      chatState.roomId = defaultRoomId();
+    }
+    sel.textContent = '';
+    chatState.rooms.forEach(function (r) {
+      var o = document.createElement('option');
+      o.value = r.room_id;
+      // textContent, never innerHTML: a room name is somebody else's text.
+      o.textContent = r.name || r.room_id;
+      if (r.room_id === chatState.roomId) o.selected = true;
+      sel.appendChild(o);
+    });
+  }
+
+  function sendChat() {
+    var input = document.getElementById('rv-chat-input');
+    var err = document.getElementById('rv-chat-error');
+    if (!input || chatState.sending) return;
+    var text = input.value.trim();
+    if (!text || !chatState.roomId) return;
+    chatState.sending = true;
+    if (err) err.textContent = '';
+    window.__TAURI__.core.invoke('matrix_send', {
+      guildId: chatState.guildId, roomId: chatState.roomId, body: text,
+    }).then(function () {
+      chatState.sending = false;
+      input.value = '';
+      // The panel reads by SEARCH, and a just-sent message is not indexed the
+      // instant it lands. Re-reading immediately would usually show nothing
+      // new and read as a failed send, so the refresh is deferred one beat.
+      setTimeout(function () { chatState.loading = false; loadChat(); }, 1200);
+    }).catch(function (e) {
+      chatState.sending = false;
+      if (err) err.textContent = String(e).slice(0, 120);
+    });
+  }
+
+  function wireComposer() {
+    var sel = document.getElementById('rv-chat-room');
+    var send = document.getElementById('rv-chat-send');
+    var input = document.getElementById('rv-chat-input');
+    if (sel) {
+      sel.addEventListener('change', function () { chatState.roomId = sel.value; });
+    }
+    if (send) send.addEventListener('click', sendChat);
+    if (input) {
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+        // The map reads arrow keys and letters as controls. A composer that
+        // steers the board while you type is unusable, so keys stop here.
+        e.stopPropagation();
+      });
+    }
   }
 
   function syncFitToggle() {
@@ -2953,6 +3055,7 @@
     // strip are set up in one place.
     observeBoardViewport();
     wireChat();
+    wireComposer();
     var fit = document.getElementById('rv-fit-toggle');
     if (fit) {
       syncFitToggle();

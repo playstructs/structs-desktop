@@ -231,13 +231,17 @@ pub fn forget_for_test(player_id: &str) {
 }
 
 pub fn name_belongs_to_a_player(name: &str) -> bool {
-    let needle = name.trim().to_lowercase();
+    // Folded, not merely lowercased. An exact comparison misses every attack
+    // worth running: `Marklifer` with a Cyrillic `а` is a different string and
+    // an identical picture, so a lowercase match reported "no collision" and
+    // the imitation rendered with no player id beside it.
+    let needle = super::identity::fold(name);
     if needle.is_empty() {
         return false;
     }
     PLAYERS
         .read()
-        .map(|m| m.values().any(|i| i.username.trim().to_lowercase() == needle))
+        .map(|m| m.values().any(|i| super::identity::fold(&i.username) == needle))
         .unwrap_or(false)
 }
 

@@ -558,15 +558,24 @@ cat > "$RFIX" <<'EOF'
     // __HARNESS_COMMS_OFF__ for a raid window opened without Comms signed in
     // — which must say so rather than reading as "nobody spoke".
     get matrix_object_chatter() {
+      // The guild is answered by the read, so the rail replies into the same
+      // guild it was read from rather than inferring one of its own.
       return window.__HARNESS_COMMS_OFF__
-        ? { connected: false, hits: [] }
-        : { connected: true, hits: [
+        ? { connected: false, hits: [], guild_id: '0-5' }
+        : { connected: true, guild_id: '0-5', hits: [
             { room_id: '!snc:h', room_name: 'SN.Corporation',
               message: { event_id: '$c1', sender: '@1-61:h', sender_name: 'JPEG',
                          sender_tag: 'SN.C', kind: 'text', ts: 1,
                          body: 'shield on 2-1 is down to 25' } },
           ] };
     },
+    // Two rooms, with the discussed one SECOND, so a composer that simply
+    // takes the first room fails the default-room test.
+    matrix_rooms: { guild_id: '0-5', rooms: [
+      { room_id: '!general:h', name: 'General' },
+      { room_id: '!snc:h', name: 'SN.Corporation' },
+    ] },
+    matrix_send: { ok: true, event_id: '$sent' },
   };
   var calls = [];
   var listeners = {};

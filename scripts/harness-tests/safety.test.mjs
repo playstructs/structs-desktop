@@ -183,7 +183,20 @@ for (const file of FEDERATED) {
   check('chat sends only a player id to the transfer hand-off',
     /invoke\('matrix_open_transfer', \{ playerId: card\.id \}\)/.test(call), call);
 
-  // 4. And it does not invoke the executing command at all. Comments are
+  // 4. The hand-off has to ARRIVE. `Board.T` is assigned inside board.js's
+  //    init() on DOMContentLoaded, after board-pages.js has executed, so a
+  //    listener registered at module load is silently never registered — and
+  //    the `if (Board.T && ...)` guard that makes that look safe is precisely
+  //    what hides it. It must be wired from onBoot.
+  const boardPages = readFileSync(root + '/frontend/board-pages.js', 'utf8');
+  const listenAt = boardPages.indexOf("'board-transfer'");
+  const bootAt = boardPages.lastIndexOf('onBoot:', listenAt);
+  const registerAt = boardPages.lastIndexOf('Board.registerPage(', listenAt);
+  check('the transfer hand-off is wired from onBoot, not module load',
+    listenAt > 0 && bootAt > registerAt && bootAt > 0,
+    'a listener registered before Board.T exists never fires');
+
+  // 5. And it does not invoke the executing command at all. Comments are
   //    stripped first: this file NAMES that command in prose explaining why it
   //    stays out of reach, and the prose must not be what satisfies the check.
   const chatCode = chat

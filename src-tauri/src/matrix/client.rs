@@ -545,11 +545,19 @@ fn sender_display(sender: &str, ident: Option<&directory::Ident>, gs: &GuildStat
     if let Some(name) = ident.map(|i| i.username.clone()).filter(|n| !n.is_empty()) {
         return name;                    // on-chain, and nobody else's to take
     }
-    let claimed = gs.names.get(sender).cloned().unwrap_or_default();
+    // Everything below is SELF-CHOSEN: any account may set any string, and
+    // federation means the account need not even be on our homeserver. It is
+    // sanitized before it is looked at, so an invisible or reordering
+    // character cannot make the checks below disagree with the screen.
+    let claimed = super::identity::sanitize(&gs.names.get(sender).cloned().unwrap_or_default());
     if claimed.is_empty() {
         return localpart(sender);
     }
-    if directory::name_belongs_to_a_player(&claimed) {
+    // Two ways a claimed name reaches for an identity it does not own: wearing
+    // a real player's name, or painting a guild badge the window renders from
+    // the CHAIN. Both answer the same way — the player id, which cannot be
+    // taken, travels with the name.
+    if directory::name_belongs_to_a_player(&claimed) || super::identity::claims_a_guild_tag(&claimed) {
         return format!("{} ({})", claimed, localpart(sender));
     }
     claimed

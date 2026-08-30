@@ -1926,6 +1926,19 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       }).catch(function() {});
     }
 
+    /* The live-refresh timers, owned OUTSIDE the render.
+     *
+     * Both used to be created inside `renderDebugPage`, which the sticky
+     * re-assert calls every time the webapp wipes the page. Each was written to
+     * clear itself once `#debug-engine` disappeared — but the redraw that
+     * created the replacement also put that element straight back, so the old
+     * timer never met its exit condition and simply kept running beside the new
+     * one. Every re-assert therefore ADDED a poller: a burst of grass events
+     * left the tab refreshing several times a second and climbing. Holding the
+     * ids here means a redraw replaces its timer instead of racing it. */
+    var hashTickId = null;
+    var energyTickId = null;
+
     function renderDebugPage() {
       debugActive = true;
       var gs = window.gameState || {};
@@ -2356,9 +2369,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
         // Live-refresh while the debug tab is active. The `debugActive` flag
         // gates execution so we stop polling when the user navigates away.
-        var hashTick = setInterval(function() {
+        if (hashTickId) clearInterval(hashTickId);
+        hashTickId = setInterval(function() {
           if (!debugActive || !document.getElementById('debug-engine')) {
-            clearInterval(hashTick);
+            clearInterval(hashTickId);
+            hashTickId = null;
             return;
           }
           refreshHashEngine();
@@ -2528,9 +2543,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         // Energy data (especially infusions + allocations via Guild API) doesn't
         // change quickly — refresh every 5 minutes. Use the in-card Refresh
         // button for on-demand updates.
-        var energyTick = setInterval(function() {
+        if (energyTickId) clearInterval(energyTickId);
+        energyTickId = setInterval(function() {
           if (!debugActive || !document.getElementById('debug-energy')) {
-            clearInterval(energyTick);
+            clearInterval(energyTickId);
+            energyTickId = null;
             return;
           }
           refreshEnergy();
@@ -2567,11 +2584,17 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     document.addEventListener('click', function (e) {
       if (!e.target || !e.target.closest) return;
       var item = e.target.closest('.sui-screen-nav-item, #menu-page-nav-close');
-      if (item && item.id !== DEBUG_NAV_ID) debugActive = false;
+      if (item && item.id !== DEBUG_NAV_ID) {
+        debugActive = false;
+        // A catch-up scheduled before this click would otherwise fire after
+        // the user has deliberately left, dragging them back to Debug.
+        if (reassertTimer) { clearTimeout(reassertTimer); reassertTimer = null; }
+      }
     }, true);
 
     var reasserting = false;
     var lastReassert = 0;
+    var reassertTimer = null;
     // Grass events arrive in bursts, and each redraw costs several Tauri
     // invokes. One redraw per second is far faster than a human notices and
     // keeps a storm of events from turning into a storm of renders.
@@ -2599,11 +2622,40 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
        * open — from the HUD, not from a nav click we could see — would snap the
        * user to Debug instead of the page they asked for. */
       var layout = document.getElementById('menu-page-layout');
-      if (!layout || layout.classList.contains('hidden')) { debugActive = false; return; }
+      if (!layout || layout.classList.contains('hidden')) {
+        debugActive = false;
+        if (reassertTimer) { clearTimeout(reassertTimer); reassertTimer = null; }
+        return;
+      }
       if (!document.getElementById('menu-page-body-content')) return;
       if (document.getElementById('debug-engine')) return; // still ours — nothing to do
+      /* THROTTLE WITH A TRAILING EDGE — and the trailing edge is the whole
+       * point, not a refinement.
+       *
+       * This used to `return` when a redraw came too soon after the last one.
+       * That drops the redraw instead of deferring it, and the only thing that
+       * would ever call this function again is another DOM mutation. So a
+       * second wipe arriving inside the gap — which is the NORMAL case, because
+       * grass events arrive in bursts — left the user on the page the webapp
+       * navigated to, and once the burst went quiet nothing was left to put
+       * Debug back. Stranded, not flickering: the symptom was "it switched
+       * panels and stayed there".
+       *
+       * Coalescing is still worth doing (a burst must not mean a redraw per
+       * event), so a throttled call now schedules ONE catch-up at the end of
+       * the gap instead of being discarded. */
       var now = Date.now();
-      if (now - lastReassert < REASSERT_MIN_GAP_MS) return;
+      var since = now - lastReassert;
+      if (since < REASSERT_MIN_GAP_MS) {
+        if (!reassertTimer) {
+          reassertTimer = setTimeout(function () {
+            reassertTimer = null;
+            reassertDebugPage();
+          }, REASSERT_MIN_GAP_MS - since);
+        }
+        return;
+      }
+      if (reassertTimer) { clearTimeout(reassertTimer); reassertTimer = null; }
       lastReassert = now;
       reasserting = true;
       try {

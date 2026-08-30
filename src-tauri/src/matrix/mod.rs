@@ -11,6 +11,7 @@
 //! `boot()` restores sync only for guilds the player has ALREADY signed into,
 //! so an install that has never used chat makes no chat requests at all.
 
+pub mod identity;
 pub mod avatar;
 pub mod work;
 pub mod auth;
@@ -1042,13 +1043,17 @@ pub async fn matrix_object_chatter(
     // Not signed in, or no homeserver: silence, not an error. A raid window
     // must open and work whether or not Comms is connected.
     let Ok(session) = session_for(&guild) else {
-        return Ok(json!({ "connected": false, "hits": [] }));
+        return Ok(json!({ "connected": false, "hits": [], "guild_id": guild }));
     };
     if refs::parse_id(&object_id).is_none() {
         return Err(format!("{} is not an object id", object_id));
     }
     let hits = client::search(&session, &object_id, None, limit.unwrap_or(12).min(50)).await?;
-    Ok(json!({ "connected": true, "hits": hits }))
+    // The guild is ANSWERED, not just accepted. A caller that passed None got
+    // the selected guild, and a window that wants to reply into what it just
+    // read must send to the same guild it was read from — inferring it a
+    // second time on the JS side is how the two drift apart.
+    Ok(json!({ "connected": true, "hits": hits, "guild_id": guild }))
 }
 
 /// The line this player would publish about themselves, or None.

@@ -2227,6 +2227,17 @@
   }
   Board.registerPage('inventory', {
     onEnter: renderInventory, refresh: renderInventory, cadenceMs: 30000,
+    // onBoot, NOT module load. `Board.T` is assigned inside board.js's init(),
+    // which runs on DOMContentLoaded — after this file has finished executing.
+    // Wiring the listener at module load therefore silently never registered
+    // it, and the guard that made that "safe" is exactly what hid it: Comms
+    // parked an intent, the window opened, and nothing ever claimed it.
+    onBoot: function () {
+      Board.T.event.listen('board-transfer', function () { Board.claimTransfer(); });
+      // The hand-off usually OPENS this window, so the event fired before
+      // anyone was listening. Boot claims whatever was already parked.
+      Board.claimTransfer();
+    },
   });
 
   // ── Comms → Team Ops hand-off ────────────────────────────────────────────
@@ -2247,12 +2258,7 @@
       return intent;
     }).catch(function () { return null; });
   };
-  if (Board.T && Board.T.event) {
-    Board.T.event.listen('board-transfer', function () { Board.claimTransfer(); });
-  }
-  // The hand-off usually OPENS this window, so the event fires before the
-  // listener exists. Boot claims whatever was parked.
-  Board.claimTransfer();
+
 
   // ═══════════════════════════ DIAGNOSTICS ══════════════════════════════════
   // Is the machine itself healthy? Command carries the one-line strip; this is

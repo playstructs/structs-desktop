@@ -37,7 +37,9 @@
       background: var(--page-background, #1A2029);
       color: var(--text-body, #C5D7D9);
       font-family: 'DirectiveZero', sans-serif;
-      display: flex; flex-direction: column;
+      /* ROW now: the left column holds map + battle log, and Comms is a rail
+         down the right at full window height. */
+      display: flex; flex-direction: row;
       /* The HUD is absolutely positioned against the window, the way the
          game's is — this is its containing block. */
       position: relative;
@@ -53,6 +55,12 @@
     /* The stage is map + HUD. Giving the HUD its own containing block means
        the battle log docks BELOW it rather than covering the action bars —
        the HUD stays pinned to the map it describes, at any log height. */
+    /* min-width:0 matters: without it the left column refuses to shrink below
+       its map's intrinsic width and the rail is pushed off-window. */
+    #rv-left {
+      flex: 1 1 auto; min-width: 0; min-height: 0;
+      display: flex; flex-direction: column;
+    }
     #rv-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
     #rv-hud {
       position: absolute; inset: 0; z-index: 40;
@@ -231,16 +239,67 @@
        its header, leaving "…cuss  hide" showing and the label hidden. */
     #rv-chat {
       position: relative; z-index: 45;
-      border-top: 1px solid var(--border, #345);
+      border-left: 1px solid var(--border, #345);
+      /* A rail, not a strip: fixed width, full height, its body taking the
+         slack so the newest line sits at the bottom like any chat. */
+      flex: 0 0 clamp(240px, 26vw, 340px);
+      display: flex; flex-direction: column; min-height: 0;
     }
-    #rv-chat.rv-collapsed #rv-chat-body { display: none; }
+    /* Collapsed must not leave a 300px empty column. The rail shrinks to the
+       header's own width and the header sheds everything but the icon, the
+       unread count and the way back open. */
+    #rv-chat.rv-collapsed { flex: 0 0 auto; }
+    #rv-chat.rv-collapsed #rv-chat-body,
+    #rv-chat.rv-collapsed #rv-chat-compose,
+    #rv-chat.rv-collapsed .rv-chat-title,
+    #rv-chat.rv-collapsed #rv-chat-discuss,
+    #rv-chat.rv-collapsed .rv-spacer { display: none; }
     #rv-chat-head { display: flex; align-items: baseline; gap: 8px;
-      padding: 6px 12px; flex-wrap: nowrap; }
-    #rv-chat-body { overflow: auto; max-height: 22vh; padding: 0 12px 8px; }
+      padding: 6px 12px; flex-wrap: nowrap; flex: 0 0 auto; }
+    #rv-chat-body {
+      overflow: auto; padding: 0 12px 8px;
+      flex: 1 1 auto; min-height: 0;
+      /* Newest line sits next to the composer, not stranded at the top of a
+         tall empty rail — the reading order every chat client has. */
+      display: flex; flex-direction: column; justify-content: flex-end;
+    }
+    /* Rows STACK in a rail. Who/text/where inline was right for a wide strip
+       along the bottom; at 280px it wraps mid-sentence and the room name
+       collides with the message it labels. */
+    /* text-align comes in CENTRED from the game stylesheet. It went unnoticed
+       while the message was an inline span beside the speaker; a full-width
+       block in a rail shows it immediately. */
+    .rv-chat-row { display: flex; flex-direction: column; gap: 1px; text-align: left; }
+    .rv-chat-meta { display: flex; align-items: baseline; gap: 6px; }
+    .rv-chat-meta .rv-chat-room {
+      margin-left: auto; flex: 0 1 auto; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .rv-chat-body-text { overflow-wrap: anywhere; }
+    /* ── Composer ───────────────────────────────────────────────────────── */
+    #rv-chat-compose {
+      flex: 0 0 auto; padding: 6px 12px 8px;
+      border-top: 1px solid var(--border-subtle, #24343a);
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    #rv-chat-compose.hidden { display: none; }
+    #rv-chat-room { width: 100%; min-width: 0; }
+    #rv-chat-entry { display: flex; align-items: center; gap: 8px; }
+    #rv-chat-input {
+      flex: 1 1 auto; min-width: 0;
+      background: var(--input-background, #131A21);
+      border: 1px solid var(--border, #345);
+      color: var(--text-body, #C5D7D9);
+      font-family: inherit; padding: 4px 6px;
+    }
+    #rv-chat-input:focus { outline: 1px solid var(--accent-primary, #4FD1C5); }
+    #rv-chat-send { flex: 0 0 auto; }
+    #rv-chat-error:empty { display: none; }
+    #rv-chat-error { color: var(--text-error, #E2686A); }
     .rv-chat-row { padding: 3px 0; border-bottom: 1px solid var(--border-subtle, #24343a); }
     .rv-chat-row:last-child { border-bottom: none; }
-    .rv-chat-who { color: var(--accent-secondary, #8FB8FF); margin-right: 6px; }
-    .rv-chat-room { color: var(--text-hint, #A7C0C6); margin-left: 6px; }
+    .rv-chat-who { color: var(--accent-secondary, #8FB8FF); }
+    .rv-chat-room { color: var(--text-hint, #A7C0C6); }
     .rv-chat-body-text { color: var(--text-body, #C5D7D9); }
     /* Something was said while the panel was closed. */
     #rv-chat-head.rv-chat-fresh .rv-log-count { color: var(--text-warning, #E8B24A); }
@@ -515,6 +574,11 @@
        right — so the same panels carry the same meaning here.
        `data-sui-tooltip` is live: it is pure information, which is exactly
        what a spectator wants. -->
+  <!-- Map and battle log share the left column; Comms is a full-height rail
+       beside them. A conversation wants VERTICAL room, and the map wants
+       horizontal room — stacking chat under the map took the axis the map
+       needed and gave the conversation the one it could not use. -->
+  <div id="rv-left">
   <div id="rv-stage">
   <div id="rv-hud">
     <div id="rv-hud-tl" class="sui-status-bar-panel status-bar-panel-top-left sui-theme-player">
@@ -652,22 +716,36 @@
     <div id="rv-log-body" class="sui-text-tiny"><div class="rv-log-empty sui-text-tiny">No recorded activity for this planet yet.</div></div>
   </div>
 
+  </div><!-- /#rv-left -->
+
   <!-- What people have SAID about this planet, beside what happened to it.
        A spectator window is where you are already looking at the thing, so
-       "has anyone mentioned this" is the question that belongs here. Read
-       only: sending would need a room to send TO, and guessing which is
-       worse than handing the player to Comms with the id already in the box.
-  -->
+       "has anyone mentioned this" is the question that belongs here.
+       You can now answer from here too. The room is CHOSEN, never guessed:
+       it defaults to wherever this object was last discussed and is a plain
+       selector otherwise, which is the honest way to send from a window that
+       is about an object rather than about a room. -->
   <div id="rv-chat" class="rv-collapsed">
     <div id="rv-chat-head" class="sui-text-label">
       <i class="icon-phone"></i>
-      <span>Comms</span>
+      <span class="rv-chat-title">Comms</span>
       <span id="rv-chat-count" class="rv-log-count"></span>
       <span class="rv-spacer"></span>
       <a href="javascript: void(0)" id="rv-chat-discuss" class="rv-log-toggle">discuss</a>
       <a href="javascript: void(0)" id="rv-chat-toggle" class="rv-log-toggle">show</a>
     </div>
     <div id="rv-chat-body" class="sui-text-tiny"><div class="rv-log-empty sui-text-tiny">Nothing said about this planet yet.</div></div>
+    <!-- Hidden until Comms is connected AND a room is known: a composer that
+         cannot send is worse than no composer. -->
+    <div id="rv-chat-compose" class="hidden">
+      <select id="rv-chat-room" class="sui-text-tiny"></select>
+      <div id="rv-chat-entry">
+        <input id="rv-chat-input" class="sui-text-tiny" type="text"
+               maxlength="900" placeholder="Say something…">
+        <a href="javascript: void(0)" id="rv-chat-send" class="rv-log-toggle">send</a>
+      </div>
+      <div id="rv-chat-error" class="sui-text-tiny"></div>
+    </div>
   </div>
 
   <script src="js/vendor/lottie-5.12.2.min.js"></script>
