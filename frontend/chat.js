@@ -45,6 +45,38 @@
     steps: [],                // connection ladder
     connecting: false,
     error: null,
+    // Which message has its reaction picker open, if any. One at a time: a
+    // row of pickers down a conversation is a conversation you cannot read.
+    reactPicker: null,
+    // Who has seen your latest message here: {event_id, names}. Null until
+    // somebody has.
+    seen: null,
+    // The message currently being rewritten, if any.
+    editing: null,
+    // A delete waiting for its second click. One at a time, and cleared by
+    // moving away — an armed control left behind is a trap.
+    deleteArmed: null,
+    // Whether the picker is showing the struct art as well as the intents.
+    reactStructs: false,
+    // The message being answered, while one is. Cleared on send, on Escape,
+    // and on leaving the room — a reply target that outlives the room it was
+    // in would attach to the wrong conversation.
+    replyTo: null,
+    // The room's own shortlist. `pinsOpen` is per-room: a strip that reopens
+    // itself every time you switch rooms is a strip you close constantly.
+    pins: [],
+    pinsLoading: false,
+    pinsOpen: {},
+    // The player's own objects, for completing an id. Asked once per session:
+    // your planet does not change while you are typing.
+    myIds: [],
+    // Finding something that was said. `searchRoom` is null for everywhere,
+    // or a room id to stay inside one conversation.
+    searchQuery: '',
+    searchRoom: null,
+    searchHits: [],
+    searchLoading: false,
+    searchRan: false,
     // Text handed over from the game, waiting for a room to put it in.
     draft: null,
     loading: true,
@@ -279,6 +311,16 @@
 
   // The card itself: the same title / subtitle / label-value shape Team Ops
   // and the dashboard use, built from .sui-data-card.
+  // Actions a card carries from Rust, plus the ones only the window can
+  // decide. Asking for help is one of those: it depends on being in a room.
+  function cardActions(card) {
+    var actions = (card.actions || []).slice();
+    if (card.kind === 'struct' && card.work_task && S.roomId) {
+      actions.push({ key: 'ask_help', label: 'Ask for help', icon: 'icon-computer' });
+    }
+    return actions;
+  }
+
   function refCard(card) {
     // ONE frame, not three. The card used to nest a bordered header, a
     // bordered body and bordered buttons inside a bordered card — four
@@ -318,7 +360,7 @@
     // What makes a card more than a lookup. Watch the planet someone named,
     // message its owner, rent the capacity a provider advertised — without
     // leaving the conversation that mentioned it.
-    var acts = card.actions || [];
+    var acts = cardActions(card);
     if (acts.length) {
       var bar = el('div', 'chat-ref-actions');
       acts.forEach(function (a) {
@@ -374,6 +416,26 @@
       return;
     }
     if (key === 'agreement') { rentForm(card, box); return; }
+    if (key === 'ask_help') { askForHelp(card, box); return; }
+  }
+
+  // Ask the room to grind the cycle this struct is running.
+  //
+  // The anchor comes from the CHAIN, never from the card: it is what the
+  // proof is verified against, and an offer carrying a guessed one would have
+  // every solver grinding a string that can never be accepted.
+  function askForHelp(card, box) {
+    cardNote(box, 'reading the cycle\u2026');
+    return invoke('matrix_work_params', { objectId: card.id, task: card.work_task })
+      .then(function (p) {
+        return invoke('matrix_work_offer', {
+          guildId: S.guildId, roomId: S.roomId,
+          objectId: p.object, task: p.task,
+          blockStart: p.block_start, difficulty: p.difficulty, targetId: null,
+        });
+      })
+      .then(function () { cardNote(box, 'asked'); })
+      .catch(function (e) { cardNote(box, String(e), true); });
   }
 
   // ── Renting capacity ──────────────────────────────────────────────────────
@@ -733,11 +795,20 @@
     row.appendChild(left);
 
     var right = el('div', 'sui-result-row-right-section');
+    // A silenced room still shows its count — it is unread, it just does not
+    // interrupt. The marker is what explains why it never rang.
+    if (r.muted) {
+      var q = icon('icon-disabled', 'sui-icon-xs chat-room-muted');
+      q.title = 'Silenced';
+      right.appendChild(q);
+    }
     if (r.unread) {
       // Warning colour when you were named in it — the one badge in the list
-      // that should pull the eye.
+      // that should pull the eye. Never for a silenced room: the whole point
+      // of muting is that being named there stops pulling the eye.
       var b = el('div',
-        'sui-badge chat-room-unread ' + (r.mention ? 'sui-mod-warning' : 'sui-mod-default'),
+        'sui-badge chat-room-unread ' +
+        (r.mention && !r.muted ? 'sui-mod-warning' : 'sui-mod-default'),
         fmtCount(r.unread));
       if (r.mention) b.title = 'You were mentioned';
       right.appendChild(b);
@@ -1034,6 +1105,135 @@
     return row;
   }
 
+  // ── Search ────────────────────────────────────────────────────────────────
+  // The homeserver does the searching. This window keeps a few hundred
+  // messages of one room, and the thing worth finding is almost never in that
+  // window — see `client::search`.
+  function renderSearch() {
+    var page = el('div', 'chat-page');
+    var scope = S.searchRoom ? roomNameOf(S.searchRoom) : 'Everywhere';
+    page.appendChild(pageHeader('Search · ' + scope, function () {
+      if (S.roomId) { S.view = 'room'; render(); } else { go('channels'); }
+    }, searchScopeToggle()));
+
+    var box = el('div');
+    box.id = 'chat-search-box';
+    var label = el('label', 'sui-input-text');
+    label.setAttribute('for', 'chat-search-query');
+    var input = el('input');
+    input.type = 'text';
+    input.id = 'chat-search-query';
+    input.name = 'chat-search-query';
+    input.placeholder = 'What was said';
+    input.autocomplete = 'off';
+    input.value = S.searchQuery || '';
+    // On Enter, not on every keystroke. A search is a round trip to the
+    // homeserver over the whole history of every room — typing "raid" would
+    // fire four of them, and the first three answer a question nobody asked.
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); runSearch(input.value); }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (S.roomId) { S.view = 'room'; render(); } else { go('channels'); }
+      }
+    });
+    label.appendChild(input);
+    box.appendChild(label);
+    page.appendChild(box);
+
+    var scroll = el('div', 'chat-scroll');
+    if (S.searchLoading) {
+      scroll.appendChild(noticeBlock('Searching', 'Asking the homeserver.'));
+    } else if (!S.searchRan) {
+      scroll.appendChild(noticeBlock('Search',
+        S.searchRoom
+          ? 'Looking in this conversation. Press Enter to search.'
+          : 'Looking everywhere you are joined. Press Enter to search.'));
+    } else if (!S.searchHits.length) {
+      scroll.appendChild(noticeBlock('Nothing found',
+        'No message matching ' + JSON.stringify(S.searchQuery) + '.'));
+    } else {
+      S.searchHits.forEach(function (h) { scroll.appendChild(searchHit(h)); });
+    }
+    page.appendChild(scroll);
+    return page;
+  }
+
+  // Two scopes, one control: this conversation, or everywhere. Only offered
+  // when there IS a conversation to be narrower than.
+  function searchScopeToggle() {
+    if (!S.roomId) return null;
+    var wrap = el('div', 'chat-header-actions');
+    var a = el('a', 'sui-nav-btn');
+    a.href = 'javascript:void(0)';
+    a.title = S.searchRoom ? 'Search everywhere instead' : 'Search only this conversation';
+    a.appendChild(icon((S.searchRoom ? 'icon-guild-directory' : 'icon-guild') +
+      ' sui-text-secondary'));
+    a.addEventListener('click', function () {
+      S.searchRoom = S.searchRoom ? null : S.roomId;
+      if (S.searchQuery) runSearch(S.searchQuery); else render();
+    });
+    wrap.appendChild(a);
+    return wrap;
+  }
+
+  function roomNameOf(roomId) {
+    var r = unreadFor(roomId);
+    return (r && (r.name || r.canonical_alias)) || roomId;
+  }
+
+  // A hit reads as the message it is, with the room it was in above it — the
+  // room is the part you cannot infer, and it is what makes a hit worth
+  // clicking.
+  function searchHit(h) {
+    var wrap = el('div', 'chat-search-hit');
+    var head = el('a', 'chat-search-hit-room');
+    head.href = 'javascript:void(0)';
+    // No icon. The room name is already the whole of what this line says, and
+    // the guild glyph at this size is a mark the eye has to decode for nothing.
+    head.appendChild(el('span', null, h.room_name || h.room_id));
+    head.addEventListener('click', function () { openRoom(h.room_id); });
+    wrap.appendChild(head);
+    wrap.appendChild(messageNode(h.message));
+    return wrap;
+  }
+
+  function runSearch(query) {
+    S.searchQuery = query;
+    if (!String(query || '').trim()) { S.searchRan = false; S.searchHits = []; render(); return; }
+    S.searchLoading = true;
+    S.searchRan = true;
+    render();
+    var args = { guildId: S.guildId, query: query };
+    if (S.searchRoom) args.roomId = S.searchRoom;
+    return invoke('matrix_search', args)
+      .then(function (res) {
+        // A slow answer to an old question must not paint over a newer one.
+        // Compared against the CURRENT query, not against the one this call
+        // asked — that always matches, which is no guard at all.
+        if (String(query).trim() !== String(S.searchQuery).trim()) return;
+        S.searchHits = (res && res.hits) || [];
+        S.searchLoading = false;
+        render();
+      })
+      .catch(function (e) {
+        S.searchLoading = false;
+        S.searchHits = [];
+        render();
+        showError(String(e));
+      });
+  }
+  Chat.runSearch = runSearch;
+
+  // Open search, scoped to wherever the player is standing.
+  function openSearch(scoped) {
+    S.searchRoom = scoped && S.roomId ? S.roomId : null;
+    S.searchRan = false;
+    S.searchHits = [];
+    go('search');
+  }
+  Chat.openSearch = openSearch;
+
   function renderPeople() {
     var page = el('div', 'chat-page');
     page.appendChild(pageHeader('New Message', function () { go('channels'); }, null));
@@ -1122,6 +1322,8 @@
   // ── Room view ─────────────────────────────────────────────────────────────
   function messageNode(m, prev) {
     var wrap = el('div', 'chat-msg');
+    // So a reply's quote line can find what it answers.
+    if (m.event_id) wrap.setAttribute('data-event', m.event_id);
     if (m.pending) wrap.classList.add('chat-msg-pending');
     if (m.failed) wrap.classList.add('chat-msg-failed');
 
@@ -1184,9 +1386,45 @@
     // client answers "when was this said" without being asked.
     var meta = el('div', 'chat-msg-meta');
     if (m.admin) meta.appendChild(el('div', 'sui-badge sui-mod-warning', 'Admin'));
+    // Shown, never hidden: a message that quietly becomes different text is
+    // how a conversation gets rewritten under the people reading it.
+    if (m.edited) meta.appendChild(el('span', 'chat-msg-edited', 'edited'));
+    // Pinning lives on the message, revealed on hover — always visible it
+    // would be a column of beacons down a conversation nobody is pinning.
+    // Only in the timeline: the strip has its own unpin, and a local echo has
+    // no event id to pin yet.
+    // The id the SERVER knows this by. A message you just sent still carries
+    // its local echo id, but the send already came back with the real one —
+    // and without this, the message you most want to take back (the one you
+    // just regretted) was the one message with no controls at all.
+    var serverId = serverIdOf(m);
+    if (S.view === 'room' && !m.pending && serverId) {
+      meta.appendChild(reactButton(m, serverId));
+      meta.appendChild(replyButton(m));
+      meta.appendChild(pinToggle(m, isPinned(serverId), serverId));
+      // Your own only. A moderator could redact anyone's, but offering that
+      // to everybody is an invitation to click and be refused.
+      if (m.self && m.kind !== 'notice') {
+        meta.appendChild(editButton(m, serverId));
+        meta.appendChild(deleteButton(m, serverId));
+      }
+    }
     meta.appendChild(el('div', 'chat-msg-time', fmtTime(m.ts)));
     head.appendChild(meta);
     wrap.appendChild(head);
+
+    // What this answers. One line, above the message: a pointer back, not a
+    // copy — the full text is already up there in the room.
+    if (m.reply_to) {
+      var q = el('a', 'chat-reply-quote');
+      q.href = 'javascript:void(0)';
+      q.appendChild(el('span', 'chat-reply-who', replyWho(m)));
+      q.appendChild(el('span', 'chat-reply-text', m.reply_excerpt || '…'));
+      q.title = 'Go to the message this answers';
+      q.addEventListener('click', function () { jumpTo(m.reply_to); });
+      wrap.insertBefore(q, wrap.firstChild);
+      wrap.classList.add('chat-mod-reply');
+    }
 
     var kind = m.kind || 'text';
 
@@ -1194,6 +1432,8 @@
     // and the tooltip, so it is still knowable.
     if (kind === 'image' && m.mxc) {
       wrap.appendChild(imageNode(m));
+      var imgReacts = reactionRow(m);
+      if (imgReacts) wrap.appendChild(imgReacts);
       return wrap;
     }
 
@@ -1223,6 +1463,14 @@
         if (cards.childNodes.length) wrap.appendChild(cards);
       }
     }
+
+    var work = workCard(m);
+    if (work) wrap.appendChild(work);
+
+    // Last, under everything: reactions are about the message, so they belong
+    // below all of it rather than between the text and its cards.
+    var reacts = reactionRow(m);
+    if (reacts) wrap.appendChild(reacts);
     return wrap;
   }
 
@@ -1395,6 +1643,738 @@
     return rule;
   }
 
+  // ── Pinned ────────────────────────────────────────────────────────────────
+  // The handful of things everyone in the room needs: the current target, the
+  // standing rules. Collapsed to one line by default — a room with six pins
+  // must not push the conversation off the screen — and the count is enough to
+  // say there is something worth opening.
+  function pinnedStrip() {
+    var count = pinCount();
+    if (!count) return null;
+    var open = !!S.pinsOpen[S.roomId];
+
+    var wrap = el('div', 'chat-pins');
+    var head = el('a', 'chat-pins-head');
+    head.href = 'javascript:void(0)';
+    head.appendChild(icon('icon-beacon sui-text-secondary', 'sui-icon-xs'));
+    head.appendChild(el('span', 'chat-pins-label',
+      count === 1 ? 'Pinned message' : count + ' pinned messages'));
+    head.appendChild(icon((open ? 'icon-chevron-up' : 'icon-chevron-down') +
+      ' sui-text-secondary', 'sui-icon-xs'));
+    head.addEventListener('click', function () {
+      S.pinsOpen[S.roomId] = !open;
+      render();
+      if (!open) loadPins();
+    });
+    wrap.appendChild(head);
+
+    if (open) {
+      var body = el('div', 'chat-pins-body');
+      if (S.pinsLoading) {
+        body.appendChild(el('div', 'chat-pins-note', 'Reading them.'));
+      } else if (!S.pins.length) {
+        // The state names ids; the events behind them can be gone.
+        body.appendChild(el('div', 'chat-pins-note',
+          'Nothing readable — the pinned messages are no longer available.'));
+      } else {
+        S.pins.forEach(function (m) {
+          var row = el('div', 'chat-pin');
+          // No unpin control of its own. `messageNode` already carries one,
+          // and inside the strip it is showing the pinned state — a second
+          // button beside it did the same job twice.
+          row.appendChild(messageNode(m));
+          body.appendChild(row);
+        });
+      }
+      wrap.appendChild(body);
+    }
+    return wrap;
+  }
+
+  // The same room reaches this window twice — as `S.room` from opening it, and
+  // as an entry in `S.rooms` from the live room-list push. Either can be the
+  // one carrying the pins, so ask both rather than picking a favourite and
+  // being silently wrong when the other one is fresher.
+  function pinsOf(roomId) {
+    var a = (S.roomId === roomId && S.room && S.room.pinned) || null;
+    var b = (unreadFor(roomId) || {}).pinned || null;
+    if (a && b) return a.length >= b.length ? a : b;
+    return a || b || [];
+  }
+
+  // Who was answered, by the name a player knows them by. The quote carries a
+  // Matrix id; the timeline and the directory carry the real one.
+  function replyWho(m) {
+    if (!m.reply_sender) return 'a message';
+    for (var i = 0; i < S.messages.length; i++) {
+      if (S.messages[i].sender === m.reply_sender) return S.messages[i].sender_name;
+    }
+    var local = String(m.reply_sender).replace(/^@/, '').split(':')[0];
+    var ident = S.addressBook && S.addressBook[local];
+    return (ident && ident.name) || local;
+  }
+
+  function excerpt(text) {
+    var one = String(text || '').replace(/\s+/g, ' ').trim();
+    return one.length > 120 ? one.slice(0, 119) + '…' : one;
+  }
+
+  // Scroll to a message that is already loaded, and mark it so the eye can
+  // find it. A message NOT loaded stays where it is — jumping to scrollback
+  // the window does not hold would mean a fetch and a guess at position, and
+  // saying nothing is better than moving to the wrong place.
+  function jumpTo(eventId) {
+    var node = document.querySelector('[data-event="' + cssEscape(eventId) + '"]');
+    if (!node) { say('That message is further back than this window holds.'); return; }
+    // Mark first, scroll second. The mark is the part that answers "which
+    // one"; a scroll that cannot happen must not cost the highlight too.
+    node.classList.add('chat-mod-found');
+    if (node.scrollIntoView) node.scrollIntoView({ block: 'center' });
+    setTimeout(function () { node.classList.remove('chat-mod-found'); }, 1600);
+  }
+
+  function cssEscape(s) { return String(s).replace(/["\\]/g, '\\$&'); }
+
+  // ── Reaction vocabulary ───────────────────────────────────────────────────
+  // A Matrix reaction key is an arbitrary string, which means it does not have
+  // to be an emoji. Structs has its own icon set and its own struct art, and a
+  // guild agreeing to a raid with the raid glyph says more than a thumb does.
+  //
+  // The keys are `:shortcode:` so they stay READABLE somewhere else: a player
+  // on Element sees `:raid:`, not a broken box. Emoji arriving from those
+  // clients still render as emoji — that is content this window receives, not
+  // chrome it chose.
+  var REACTION_ICONS = {
+    okay: 'icon-okay', blocked: 'icon-blocked', detected: 'icon-detected',
+    alert: 'icon-alert', raid: 'icon-raid', defend: 'icon-defend',
+    mine: 'icon-mine', wreckage: 'icon-wreckage',
+  };
+  // Agree, refuse, watching, careful — then the four things a guild room is
+  // usually talking about.
+  var QUICK_REACTIONS = [':okay:', ':blocked:', ':detected:', ':alert:',
+                         ':raid:', ':defend:', ':mine:', ':wreckage:'];
+
+  // The struct art that ships with the game, one picture per hull. Offered
+  // behind a toggle: twenty of them open by default would be a wall.
+  var REACTION_STRUCTS = [
+    'cmd-ship', 'destroyer', 'battleship', 'cruiser', 'frigate', 'interceptor',
+    'starfighter', 'stealth-bomber', 'pursuit-fighter', 'submersible', 'tank',
+    'mobile-artillery', 'sam-launcher', 'pdc', 'jamming-sat', 'orb-shield',
+    'extractor', 'refinery', 'generator', 'ore-bunker',
+  ];
+
+  // Render one key. Falls through to plain text, which is what makes a key
+  // from any other client — an emoji, a word, a shortcode we do not know —
+  // still show as itself rather than as nothing.
+  function reactionGlyph(key) {
+    var m = /^:struct\/([a-z0-9-]+):$/.exec(key);
+    if (m && REACTION_STRUCTS.indexOf(m[1]) !== -1) {
+      var im = el('img', 'chat-reaction-struct');
+      im.src = 'img/structs/' + m[1] + '/' + m[1] + '-struct-base.png';
+      im.alt = m[1];
+      return im;
+    }
+    m = /^:([a-z0-9-]+):$/.exec(key);
+    if (m && REACTION_ICONS[m[1]]) {
+      return icon(REACTION_ICONS[m[1]], 'sui-icon-xs');
+    }
+    return el('span', 'chat-reaction-key', key);
+  }
+  Chat.reactionGlyph = reactionGlyph;
+
+  function reactionRow(m) {
+    var list = m.reactions || [];
+    var open = S.reactPicker === serverIdOf(m);
+    if (!list.length && !open) return null;
+
+    var row = el('div', 'chat-reactions');
+    list.forEach(function (r) {
+      var chip = el('a', 'sui-badge chat-reaction' +
+        (r.mine ? ' sui-mod-warning' : ' sui-mod-default'));
+      chip.href = 'javascript:void(0)';
+      chip.appendChild(reactionGlyph(r.key));
+      chip.appendChild(el('span', 'chat-reaction-count', String(r.count)));
+      // Who agreed is the whole point in a guild room, and it is the one
+      // thing a count throws away.
+      chip.title = (r.who || []).join(', ') || r.key;
+      chip.addEventListener('click', function (e) {
+        e.stopPropagation();
+        react(m, r.key, !r.mine);
+      });
+      row.appendChild(chip);
+    });
+
+    if (open) {
+      var offer = function (key) {
+        var already = list.some(function (r) { return r.key === key && r.mine; });
+        var b = el('a', 'chat-reaction chat-mod-offer' + (already ? ' chat-mod-mine' : ''));
+        b.href = 'javascript:void(0)';
+        b.title = key;
+        b.appendChild(reactionGlyph(key));
+        b.addEventListener('click', function (e) {
+          e.stopPropagation();
+          // Picking closes the picker, and closing forgets the sheet — the
+          // same as dismissing it, so the next message does not open with
+          // twenty hulls already showing.
+          S.reactPicker = null;
+          S.reactStructs = false;
+          react(m, key, !already);
+        });
+        row.appendChild(b);
+      };
+      QUICK_REACTIONS.forEach(offer);
+
+      // Twenty hulls open by default would be a wall across the message.
+      var more = el('a', 'chat-reaction chat-mod-offer chat-mod-more');
+      more.href = 'javascript:void(0)';
+      more.title = S.reactStructs ? 'Hide the hulls' : 'React with a struct';
+      more.appendChild(icon(S.reactStructs ? 'icon-chevron-left' : 'icon-cmd-post',
+        'sui-icon-xs'));
+      more.addEventListener('click', function (e) {
+        e.stopPropagation();
+        S.reactStructs = !S.reactStructs;
+        render();
+      });
+      row.appendChild(more);
+
+      if (S.reactStructs) {
+        REACTION_STRUCTS.forEach(function (name) { offer(':struct/' + name + ':'); });
+      }
+    }
+    return row;
+  }
+
+  function reactButton(m, serverId) {
+    var a = el('a', 'chat-react-btn');
+    a.href = 'javascript:void(0)';
+    a.title = 'React to this message';
+    a.appendChild(icon('icon-add sui-text-secondary', 'sui-icon-xs'));
+    a.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var id = serverId || serverIdOf(m);
+      S.reactPicker = S.reactPicker === id ? null : id;
+      if (!S.reactPicker) S.reactStructs = false;
+      render();
+    });
+    return a;
+  }
+
+  // Applied locally at once, then corrected by the answer. A reaction that
+  // waits for a round trip before appearing feels like a click that missed.
+  function react(m, key, on) {
+    var before = (m.reactions || []).map(function (r) {
+      return { key: r.key, count: r.count, mine: r.mine, who: r.who };
+    });
+    m.reactions = optimistic(before, key, on);
+    render();
+    return invoke('matrix_react', {
+      guildId: S.guildId, roomId: S.roomId, eventId: serverIdOf(m), key: key, on: on,
+    })
+      .then(function (res) {
+        if (res && res.reactions) applyReactions(m.event_id, res.reactions);
+      })
+      .catch(function (e) {
+        m.reactions = before;                    // put it back; it did not happen
+        render();
+        showError(String(e));
+      });
+  }
+  Chat.react = react;
+
+  function optimistic(list, key, on) {
+    var out = [];
+    var found = false;
+    list.forEach(function (r) {
+      if (r.key !== key) { out.push(r); return; }
+      found = true;
+      var count = r.count + (on ? 1 : -1);
+      // A key nobody holds any more is gone, not a chip reading zero.
+      if (count > 0) out.push({ key: key, count: count, mine: on, who: r.who });
+    });
+    if (!found && on) out.push({ key: key, count: 1, mine: true, who: [] });
+    return out.sort(function (a, b) {
+      return b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+    });
+  }
+  Chat.optimistic = optimistic;
+
+  // A reaction landed on some message — repaint that one, not the timeline.
+  function applyReactions(eventId, reactions) {
+    var hit = false;
+    S.messages.forEach(function (m) {
+      if (m.event_id === eventId || m.echo_of === eventId) {
+        m.reactions = reactions || [];
+        hit = true;
+      }
+    });
+    S.pins.forEach(function (m) {
+      if (m.event_id === eventId) m.reactions = reactions || [];
+    });
+    if (hit || S.pins.length) render();
+  }
+
+  function onReactions(payload) {
+    if (!payload) return;
+    if (payload.guild_id && payload.guild_id !== S.guildId) return;
+    if (payload.room_id !== S.roomId) return;
+    applyReactions(payload.event_id, payload.reactions);
+  }
+  Chat.onReactions = onReactions;
+
+  // Changing what you already said.
+  //
+  // The message goes back into the composer, which is the only place in this
+  // window that knows how to write one — a second editor would need its own
+  // completion, its own mention matching and its own history.
+  function editButton(m, serverId) {
+    var a = el('a', 'chat-edit-btn');
+    a.href = 'javascript:void(0)';
+    a.title = 'Change this message';
+    a.appendChild(icon('icon-edit sui-text-secondary', 'sui-icon-xs'));
+    a.addEventListener('click', function (e) {
+      e.stopPropagation();
+      S.editing = { event_id: serverId, body: m.body, msgtype: m.kind };
+      S.replyTo = null;                  // one intent at a time
+      render();
+      var input = byId('chat-input');
+      if (!input) return;
+      input.value = m.body || '';
+      input.focus();
+      moveCaretToEnd(input);
+    });
+    return a;
+  }
+
+  // The chip above the bar, so it is never a mystery why Enter is about to
+  // rewrite something instead of sending it.
+  function editChip() {
+    if (!S.editing) return null;
+    var chip = el('div', 'chat-reply-chip chat-mod-editing');
+    chip.id = 'chat-edit-chip';
+    chip.appendChild(icon('icon-edit sui-text-secondary', 'sui-icon-xs'));
+    chip.appendChild(el('span', 'chat-reply-who', 'Editing'));
+    chip.appendChild(el('span', 'chat-reply-text', excerpt(S.editing.body)));
+    var x = el('a', 'chat-reply-cancel');
+    x.href = 'javascript:void(0)';
+    x.title = 'Keep it as it was';
+    x.appendChild(icon('icon-close sui-text-secondary', 'sui-icon-xs'));
+    x.addEventListener('click', function () { cancelEdit(); });
+    chip.appendChild(x);
+    return chip;
+  }
+
+  function cancelEdit() {
+    S.editing = null;
+    render();
+    var input = byId('chat-input');
+    if (input) { input.value = ''; input.focus(); }
+  }
+  Chat.cancelEdit = cancelEdit;
+
+  function commitEdit(text) {
+    var target = S.editing;
+    S.editing = null;
+    return invoke('matrix_edit', {
+      guildId: S.guildId, roomId: S.roomId, eventId: target.event_id,
+      body: text, msgtype: target.msgtype === 'emote' ? 'm.emote' : null,
+    })
+      .then(function () { applyEdit(target.event_id, text); })
+      .catch(function (e) { showError(String(e)); });
+  }
+
+  // Somebody rewrote a message — including us, a moment ago or on another
+  // device.
+  function applyEdit(eventId, body) {
+    var hit = false;
+    S.messages.forEach(function (m) {
+      if (serverIdOf(m) !== eventId) return;
+      m.body = body;
+      m.edited = true;
+      hit = true;
+    });
+    S.pins.forEach(function (m) {
+      if (m.event_id === eventId) { m.body = body; m.edited = true; }
+    });
+    if (hit || S.pins.length) render();
+  }
+
+  function onEdited(payload) {
+    if (!payload) return;
+    if (payload.guild_id && payload.guild_id !== S.guildId) return;
+    if (payload.room_id !== S.roomId) return;
+    applyEdit(payload.event_id, payload.body);
+  }
+  Chat.onEdited = onEdited;
+
+  // Taking a message back.
+  //
+  // Two clicks, not one. It cannot be undone and the control sits in a row of
+  // others that are all harmless — a misfire on a neighbouring icon would
+  // otherwise destroy something. The second click is the confirmation, and
+  // moving the mouse away cancels it.
+  // What the homeserver calls this message: its own id once sync has
+  // delivered it, or the id the send came back with while the local echo is
+  // still on screen. Null for a message that has not been accepted yet.
+  function serverIdOf(m) {
+    if (m.event_id && m.event_id.charAt(0) === '$') return m.event_id;
+    if (m.echo_of && String(m.echo_of).charAt(0) === '$') return m.echo_of;
+    return null;
+  }
+  Chat.serverIdOf = serverIdOf;
+
+  function deleteButton(m, serverId) {
+    var armed = S.deleteArmed === serverId;
+    var a = el('a', 'chat-delete-btn' + (armed ? ' chat-mod-armed' : ''));
+    a.href = 'javascript:void(0)';
+    a.title = armed ? 'Click again to remove this message' : 'Remove this message';
+    a.appendChild(icon('icon-close' + (armed ? ' sui-text-enemy-primary' : ' sui-text-secondary'),
+      'sui-icon-xs'));
+    a.addEventListener('mouseleave', function () {
+      if (S.deleteArmed === serverId) { S.deleteArmed = null; render(); }
+    });
+    a.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (!armed) { S.deleteArmed = serverId; render(); return; }
+      S.deleteArmed = null;
+      redactMessage(m, serverId);
+    });
+    return a;
+  }
+
+  function redactMessage(m, serverId) {
+    return invoke('matrix_redact', {
+      guildId: S.guildId, roomId: S.roomId, eventId: serverId || serverIdOf(m),
+    })
+      .then(function () {
+        // Sync delivers the redaction and rewrites it properly; this is so the
+        // click has an effect now rather than in a second's time.
+        m.kind = 'notice';
+        m.body = 'message removed';
+        m.mxc = null;
+        m.reactions = [];
+        m.reply_to = null;
+        render();
+      })
+      .catch(function (e) { showError(String(e)); });
+  }
+  Chat.redactMessage = redactMessage;
+
+  // Somebody took a message back — including us, on another device.
+  function onRedacted(payload) {
+    if (!payload) return;
+    if (payload.guild_id && payload.guild_id !== S.guildId) return;
+    if (payload.room_id !== S.roomId) return;
+    var hit = false;
+    S.messages.forEach(function (m) {
+      if (m.event_id !== payload.event_id) return;
+      m.kind = 'notice';
+      m.body = 'message removed';
+      m.mxc = null;
+      m.reactions = [];
+      m.reply_to = null;
+      hit = true;
+    });
+    if (hit) render();
+  }
+  Chat.onRedacted = onRedacted;
+
+  // ── Shared proof-of-work ──────────────────────────────────────────────────
+  // A task's grinding input is public — object, kind, anchor. Anyone can
+  // compute it; only its owner can submit the answer. That asymmetry is what
+  // makes asking a room for help safe.
+  var WORK_LABEL = {
+    MINE: 'Mining', REFINE: 'Refining', BUILD: 'Building', RAID: 'Raid',
+  };
+  var WORK_ICON = {
+    MINE: 'icon-mine', REFINE: 'icon-refine', BUILD: 'icon-cmd-post', RAID: 'icon-raid',
+  };
+
+  // Whether an offer's cycle is still the one the chain is running, keyed by
+  // object and anchor. Cached because a busy room is a column of cards and
+  // each check is a chain read — and because the answer cannot change for a
+  // given anchor: either the chain still holds it or it never will again.
+  var workFresh = {};
+
+  function workKey(w) { return w.object + '|' + w.task + '|' + w.block_start; }
+
+  function checkWorkFresh(w) {
+    var key = workKey(w);
+    if (Object.prototype.hasOwnProperty.call(workFresh, key)) return;
+    workFresh[key] = null;                 // asked; don't ask again
+    invoke('matrix_work_status', {
+      objectId: w.object, task: w.task, blockStart: w.block_start,
+    })
+      .then(function (res) {
+        // Unknown stays unknown. A card must never be greyed out on a guess:
+        // being offline would otherwise make every live offer look dead.
+        if (!res || !res.known) return;
+        workFresh[key] = !!res.live;
+        if (S.view === 'room') render();
+      })
+      .catch(function () {});
+  }
+
+  function workCard(m) {
+    var w = m.work;
+    if (!w) return null;
+    var offer = w.kind === 'offer';
+    checkWorkFresh(w);
+    var stale = workFresh[workKey(w)] === false;
+    var card = el('div', 'chat-ref chat-work chat-kind-' + (offer ? 'offer' : 'result')
+      + (stale ? ' chat-mod-stale' : ''));
+
+    var head = el('div', 'chat-ref-head');
+    head.appendChild(icon(WORK_ICON[w.task] || 'icon-computer', 'sui-icon-xs'));
+    head.appendChild(el('span', 'chat-ref-title',
+      (offer ? 'Work wanted \u00b7 ' : 'Solved \u00b7 ') + (WORK_LABEL[w.task] || w.task)));
+    card.appendChild(head);
+
+    var facts = el('div', 'chat-ref-facts');
+    var fact = function (k, v) {
+      facts.appendChild(el('span', 'chat-ref-key', k));
+      facts.appendChild(el('span', 'chat-ref-val', v));
+    };
+    fact(w.task === 'RAID' ? 'Fleet' : 'Struct', w.object);
+    if (w.target) fact('Target', w.target);
+    // The anchor is the whole reason a proof goes stale: it is the cycle the
+    // nonce is valid against, and the chain checks against its own current
+    // one. Showing it is what lets a player see a dead offer as dead.
+    fact('Anchor', 'block ' + w.block_start);
+    if (w.difficulty) fact('Difficulty', String(w.difficulty));
+    if (w.nonce) fact('Nonce', w.nonce);
+    card.appendChild(facts);
+
+    // A dead cycle cannot be proved against. Say so where the buttons were,
+    // rather than leaving controls that can only fail.
+    if (stale) {
+      var gone = el('div', 'chat-work-verdict chat-mod-bad');
+      gone.textContent = 'That cycle has turned over — this can no longer be proved.';
+      card.appendChild(gone);
+      return card;
+    }
+
+    var actions = el('div', 'chat-ref-actions');
+    if (offer) {
+      var help = el('a', 'sui-panel-btn sui-mod-default chat-ref-action');
+      help.href = 'javascript:void(0)';
+      help.appendChild(icon('icon-computer', 'sui-icon-xs'));
+      help.appendChild(el('span', null, 'Help'));
+      help.addEventListener('click', function () { acceptWork(m, w, card); });
+      actions.appendChild(help);
+    } else {
+      var check = el('a', 'sui-panel-btn sui-mod-default chat-ref-action');
+      check.href = 'javascript:void(0)';
+      check.appendChild(icon('icon-okay', 'sui-icon-xs'));
+      check.appendChild(el('span', null, 'Check'));
+      check.addEventListener('click', function () { verifyWork(w, card); });
+      actions.appendChild(check);
+    }
+    card.appendChild(actions);
+    return card;
+  }
+
+  // Take on somebody else's task.
+  //
+  // Nothing here can submit anything: the completion tx names its signer as
+  // `creator` and only the owner's is accepted. This spends GPU and posts a
+  // number back — that is the whole of it.
+  function acceptWork(m, w, card) {
+    var line = card.querySelector('.chat-work-verdict');
+    if (!line) { line = el('div', 'chat-work-verdict'); card.appendChild(line); }
+    line.className = 'chat-work-verdict';
+    line.textContent = 'Working on it\u2026';
+    return invoke('matrix_work_accept', {
+      guildId: S.guildId, roomId: S.roomId, offerEvent: serverIdOf(m),
+      objectId: w.object, task: w.task, blockStart: w.block_start,
+      difficulty: w.difficulty, targetId: w.target || null,
+    })
+      .then(function (res) {
+        line.className = 'chat-work-verdict chat-mod-good';
+        line.textContent = res && res.already
+          ? 'Already working on this one.'
+          : 'Working on it. The nonce will be posted here when it lands \u2014 '
+            + 'only the owner can submit it.';
+      })
+      .catch(function (e) {
+        line.className = 'chat-work-verdict chat-mod-bad';
+        line.textContent = String(e);
+      });
+  }
+  Chat.acceptWork = acceptWork;
+
+  // Verify before anything else. A result arriving over federation is a
+  // CLAIM: everything but the number is rebuilt from what this side knows,
+  // and the hash is recomputed. A forged one otherwise costs the owner a
+  // failed transaction and its charge.
+  function verifyWork(w, card) {
+    return invoke('matrix_work_verify', {
+      objectId: w.object, task: w.task, blockStart: w.block_start,
+      difficulty: w.difficulty, nonce: w.nonce, targetId: w.target || null,
+    })
+      .then(function (res) {
+        var line = card.querySelector('.chat-work-verdict');
+        if (!line) { line = el('div', 'chat-work-verdict'); card.appendChild(line); }
+        if (res && res.ok) {
+          line.className = 'chat-work-verdict chat-mod-good';
+          line.textContent = 'Checks out. Valid only while block ' + w.block_start
+            + ' is still the live cycle.';
+          offerSubmit(w, card);
+        } else {
+          line.className = 'chat-work-verdict chat-mod-bad';
+          line.textContent = 'That nonce does not solve this task.';
+        }
+      })
+      .catch(function (e) { showError(String(e)); });
+  }
+  Chat.verifyWork = verifyWork;
+
+  // Submitting is the owner's act and costs them charge, so it is a separate
+  // click from checking — and it only appears once the proof has been
+  // checked. A button that both verifies and spends would make the check
+  // invisible at exactly the moment it matters.
+  function offerSubmit(w, card) {
+    if (card.querySelector('.chat-work-submit')) return;
+    var b = el('a', 'sui-panel-btn sui-mod-default chat-ref-action chat-work-submit');
+    b.href = 'javascript:void(0)';
+    b.appendChild(icon('icon-send-alpha', 'sui-icon-xs'));
+    b.appendChild(el('span', null, 'Submit'));
+    b.title = 'Submit this proof yourself — it costs your charge, not theirs';
+    b.addEventListener('click', function () {
+      var line = card.querySelector('.chat-work-verdict');
+      line.className = 'chat-work-verdict';
+      line.textContent = 'Submitting\u2026';
+      invoke('matrix_work_submit', {
+        objectId: w.object, task: w.task, blockStart: w.block_start,
+        difficulty: w.difficulty, nonce: w.nonce, targetId: w.target || null,
+      })
+        .then(function () {
+          line.className = 'chat-work-verdict chat-mod-good';
+          line.textContent = 'Submitted.';
+          b.remove();
+        })
+        .catch(function (e) {
+          line.className = 'chat-work-verdict chat-mod-bad';
+          line.textContent = String(e);
+        });
+    });
+    var bar = card.querySelector('.chat-ref-actions');
+    if (bar) bar.appendChild(b);
+  }
+
+  // "Did they see it".
+  //
+  // One line under the log, about YOUR latest message — not a marker beside
+  // every message in the room, which is decoration rather than an answer.
+  // Sits with the typing line: both are about what other people are doing
+  // right now, and neither is part of the conversation.
+  function seenLine() {
+    if (!S.seen || !S.seen.names || !S.seen.names.length) return null;
+    var names = S.seen.names;
+    var line = el('div', 'chat-seen');
+    // Three names is a sentence; ten is a list nobody reads.
+    var text = names.length <= 3
+      ? 'Seen by ' + names.join(', ')
+      : 'Seen by ' + names.slice(0, 2).join(', ') + ' and ' + (names.length - 2) + ' more';
+    line.appendChild(el('span', null, text));
+    line.title = names.join(', ');
+    return line;
+  }
+
+  function onSeen(payload) {
+    if (!payload) return;
+    if (payload.guild_id && payload.guild_id !== S.guildId) return;
+    if (payload.room_id !== S.roomId) return;
+    S.seen = payload.seen || null;
+    if (S.view === 'room') render();
+  }
+  Chat.onSeen = onSeen;
+
+  function replyButton(m) {
+    var a = el('a', 'chat-reply-btn');
+    a.href = 'javascript:void(0)';
+    a.title = 'Reply to ' + (m.sender_name || m.sender);
+    a.appendChild(icon('icon-incoming sui-text-secondary', 'sui-icon-xs'));
+    a.addEventListener('click', function (e) {
+      e.stopPropagation();
+      S.replyTo = m;
+      render();
+      var input = byId('chat-input');
+      if (input) { input.focus(); moveCaretToEnd(input); }
+    });
+    return a;
+  }
+
+  // Silence a room without leaving it. Unread still counts; it simply stops
+  // interrupting — that distinction is the whole point of muting.
+  function setMuted(muted) {
+    if (!S.roomId) return;
+    return invoke('matrix_mute', {
+      guildId: S.guildId, roomId: S.roomId, muted: muted,
+    })
+      .then(function () {
+        if (S.room) S.room.muted = muted;
+        S.rooms.forEach(function (r) { if (r.room_id === S.roomId) r.muted = muted; });
+        render();
+      })
+      .catch(function (e) { showError(String(e)); });
+  }
+  Chat.setMuted = setMuted;
+
+  function pinCount() { return pinsOf(S.roomId).length; }
+
+  function isPinned(eventId) {
+    return pinsOf(S.roomId).indexOf(eventId) !== -1;
+  }
+
+  // Whether this account MAY pin is the homeserver's call. Offering the
+  // control to everyone and reporting a refusal beats keeping a copy of its
+  // power-level rules in here that can only drift.
+  function pinToggle(m, pinned, serverId) {
+    var a = el('a', 'chat-pin-btn');
+    a.href = 'javascript:void(0)';
+    a.title = pinned ? 'Unpin this message' : 'Pin this message';
+    a.appendChild(icon('icon-beacon' + (pinned ? ' sui-text-warning' : ' sui-text-secondary'),
+      'sui-icon-xs'));
+    a.addEventListener('click', function (e) {
+      e.stopPropagation();
+      setPin(serverId || serverIdOf(m), !pinned);
+    });
+    return a;
+  }
+
+  function setPin(eventId, pin) {
+    if (!eventId || eventId.charAt(0) !== '$') return;   // a local echo has no id yet
+    return invoke('matrix_pin', {
+      guildId: S.guildId, roomId: S.roomId, eventId: eventId, pin: pin,
+    })
+      .then(function (res) {
+        var list = (res && res.pinned) || [];
+        if (S.room) S.room.pinned = list;
+        S.rooms.forEach(function (r) { if (r.room_id === S.roomId) r.pinned = list; });
+        S.pinsOpen[S.roomId] = list.length > 0;
+        render();
+        if (list.length) loadPins();
+        else S.pins = [];
+      })
+      .catch(function (e) { showError(String(e)); });
+  }
+  Chat.setPin = setPin;
+
+  function loadPins() {
+    if (!S.roomId) return Promise.resolve();
+    S.pinsLoading = true;
+    var forRoom = S.roomId;
+    return invoke('matrix_pinned', { guildId: S.guildId, roomId: forRoom })
+      .then(function (res) {
+        if (S.roomId !== forRoom) return;      // moved on while it was loading
+        S.pins = (res && res.messages) || [];
+        S.pinsLoading = false;
+        render();
+      })
+      .catch(function () { S.pinsLoading = false; S.pins = []; render(); });
+  }
+  Chat.loadPins = loadPins;
+
   function renderRoom() {
     var page = el('div', 'chat-page');
     var name = (S.room && (S.room.name || S.room.canonical_alias)) || S.roomId || '';
@@ -1408,6 +2388,25 @@
     who.appendChild(icon('icon-member sui-text-secondary'));
     who.addEventListener('click', function () { go('members'); });
     right.appendChild(who);
+
+    var muted = !!(S.room && S.room.muted);
+    var quiet = el('a', 'sui-nav-btn');
+    quiet.id = 'chat-room-mute';
+    quiet.href = 'javascript:void(0)';
+    quiet.title = muted ? 'This room is silenced — let it speak again'
+                        : 'Silence this room';
+    quiet.appendChild(icon((muted ? 'icon-disabled sui-text-warning'
+                                  : 'icon-alert sui-text-secondary')));
+    quiet.addEventListener('click', function () { setMuted(!muted); });
+    right.appendChild(quiet);
+
+    var find = el('a', 'sui-nav-btn');
+    find.id = 'chat-room-search';
+    find.href = 'javascript:void(0)';
+    find.title = 'Search this conversation';
+    find.appendChild(icon('icon-guild-directory sui-text-secondary'));
+    find.addEventListener('click', function () { openSearch(true); });
+    right.appendChild(find);
 
     var gear = el('a', 'sui-nav-btn');
     gear.href = 'javascript:void(0)';
@@ -1423,6 +2422,9 @@
     if (S.room && S.room.topic) {
       page.appendChild(el('div', 'chat-topic', S.room.topic));
     }
+
+    var pins = pinnedStrip();
+    if (pins) page.appendChild(pins);
 
     var scroll = el('div', 'chat-scroll');
     scroll.id = 'chat-timeline';
@@ -1482,6 +2484,12 @@
     if (!S.typing.length) typing.classList.add('hidden');
     page.appendChild(typing);
 
+    // Below it: who has seen what you last said. Both lines are about what
+    // other people are doing right now, and neither is part of the
+    // conversation — so neither belongs in the log itself.
+    var seen = seenLine();
+    if (seen) page.appendChild(seen);
+
     // The composer is mounted OUTSIDE the page, in its own host at the foot of
     // the panel — see chat.html. Rendering it into the page would put it back
     // inside the screen's border.
@@ -1496,9 +2504,37 @@
   // chunk — exactly as ActionBarComponent assembles the HUD's bottom bars.
   // The metal frame, the inset screen and the button face are all the panel's
   // own art; nothing here draws a control of its own.
+  // A chip above the bar naming what is being answered, with a way out. A
+  // reply target you cannot see is one you forget you set, and the next
+  // message goes somewhere surprising.
+  function replyChip() {
+    if (!S.replyTo) return null;
+    var m = S.replyTo;
+    var chip = el('div', 'chat-reply-chip');
+    chip.id = 'chat-reply-chip';
+    chip.appendChild(icon('icon-incoming sui-text-secondary', 'sui-icon-xs'));
+    chip.appendChild(el('span', 'chat-reply-who', m.sender_name || m.sender));
+    chip.appendChild(el('span', 'chat-reply-text', excerpt(m.body)));
+    var x = el('a', 'chat-reply-cancel');
+    x.href = 'javascript:void(0)';
+    x.title = 'Stop replying';
+    x.appendChild(icon('icon-close sui-text-secondary', 'sui-icon-xs'));
+    x.addEventListener('click', function () { S.replyTo = null; render(); });
+    chip.appendChild(x);
+    return chip;
+  }
+
   function composer() {
     var wrap = el('div', 'sui-panel-wrapper-fit-content');
     wrap.id = 'chat-composer';
+    var chip = editChip() || replyChip();
+    if (chip) wrap.appendChild(chip);
+    // Filled in by `applyCompletion` while Tab is cycling. Written to
+    // directly rather than through render(), which would rebuild the field
+    // and throw away the caret mid-completion.
+    var hint = el('div', 'chat-complete-hint');
+    hint.id = 'chat-complete-hint';
+    wrap.appendChild(hint);
     var panel = el('div', 'sui-panel sui-theme-player');
     panel.appendChild(el('div', 'sui-panel-edge-left'));
 
@@ -1539,6 +2575,7 @@
     input.maxLength = 4000;
     input.addEventListener('input', function () {
       resetCompletion();
+      clearCompletionHint();
       noteTyping(input.value);
     });
     field.appendChild(input);
@@ -1565,6 +2602,20 @@
 
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); return; }
+      // Escape drops the reply first. Only once there is none does Escape
+      // mean "leave the room" — the usual innermost-thing-first rule.
+      if (e.key === 'Escape' && S.editing) {
+        e.preventDefault(); e.stopPropagation();
+        cancelEdit();
+        return;
+      }
+      if (e.key === 'Escape' && S.replyTo) {
+        e.preventDefault(); e.stopPropagation();
+        S.replyTo = null; render();
+        var again = byId('chat-input');
+        if (again) again.focus();
+        return;
+      }
       if (e.key === 'Tab') { e.preventDefault(); complete(input, e.shiftKey); return; }
       // Up/Down walk what you have already sent — every IRC client and every
       // shell does this, and it is the fastest way to fix a typo or repeat a
@@ -1588,12 +2639,18 @@
   // completing the empty space it left behind.
   var cycle = null;
 
+  // An id stem: `2-`, `2-15`, or a bare type number followed by the dash.
+  // Deliberately requires the dash — a bare `2` is far more likely to be a
+  // quantity than the start of an id, and completing it would fight typing.
+  var ID_STEM = /^\d{1,2}-\d*$/;
+
   function completionsFor(word, isCommand) {
     var lower = word.toLowerCase();
     if (isCommand) {
       return COMMANDS.map(function (c) { return '/' + c.name; })
         .filter(function (n) { return n.toLowerCase().indexOf('/' + lower) === 0; });
     }
+    if (ID_STEM.test(word)) return idCompletions(word);
     var seen = {};
     S.messages.forEach(function (m) {
       if (m.local || m.self || !m.sender_name) return;
@@ -1607,12 +2664,41 @@
       .sort();
   }
 
+  // Every id worth offering, nearest first.
+  //
+  // Two sources, and the order is the point. What this ROOM has already talked
+  // about comes first: "what was that planet again" is a question the
+  // conversation itself answers, and the id is almost always one somebody just
+  // said. Your own objects come after — you know those, they are here so they
+  // are never mistyped.
+  function idCompletions(stem) {
+    var out = [];
+    var seen = {};
+    var push = function (id) {
+      if (!id || seen[id] || id.indexOf(stem) !== 0) return;
+      seen[id] = 1;
+      out.push(id);
+    };
+    // Most recent first: the id being asked about is usually the last one said.
+    for (var i = S.messages.length - 1; i >= 0; i--) {
+      refIdsIn(S.messages[i].body).forEach(push);
+    }
+    (S.myIds || []).forEach(function (o) { push(o.id); });
+    return out;
+  }
+  Chat.idCompletions = idCompletions;
+
   function applyCompletion(input, c) {
     var pick = c.matches[c.at];
     // A completed NAME becomes `@Name`: it is the universal convention, and it
     // is what lets the message carry a real mention when it is sent — without
-    // the marker there is nothing to match and nobody gets notified.
-    if (!c.isCommand && pick.charAt(0) !== '@') pick = '@' + pick;
+    // the marker there is nothing to match and nobody gets notified. An ID is
+    // already in the form the game and this window both read; prefixing it
+    // would turn a reference into a mention of nobody.
+    if (!c.isCommand && !ID_STEM.test(pick) && !/^\d{1,2}-\d+$/.test(pick)
+        && pick.charAt(0) !== '@') {
+      pick = '@' + pick;
+    }
     var suffix = ' ';
     var text = pick + suffix;
     input.value = c.head + text + c.tail;
@@ -1620,6 +2706,42 @@
     try { input.setSelectionRange(caret, caret); } catch (e) {}
     c.value = input.value;
     c.caret = caret;
+    showCompletionHint(c);
+  }
+
+  // "Which one is 2-15361" is the question Tab-cycling raises, and the card
+  // for that id is usually already resolved — it was mentioned in this room,
+  // which is how it got into the list.
+  function showCompletionHint(c) {
+    var box = byId('chat-complete-hint');
+    if (!box) return;
+    box.textContent = '';
+    var pick = c && c.matches && c.matches[c.at];
+    if (!pick || !/^\d{1,2}-\d+$/.test(pick)) return;
+
+    var card = refCards[pick];
+    var mine = (S.myIds || []).filter(function (o) { return o.id === pick; })[0];
+    var what = card ? (card.title || '') : '';
+    var sub = card ? (card.subtitle || '') : (mine ? mine.label : '');
+    if (!what && !sub) {
+      // Not resolved yet. Ask, and say so meanwhile rather than showing an
+      // id with nothing beside it — silence reads as "no such object".
+      wantRefs([pick]);
+      box.appendChild(el('span', 'chat-complete-id', pick));
+      box.appendChild(el('span', 'chat-complete-what', 'looking it up…'));
+      return;
+    }
+    box.appendChild(el('span', 'chat-complete-id', pick));
+    box.appendChild(el('span', 'chat-complete-what', [what, sub].filter(Boolean).join(' · ')));
+    if (c.matches.length > 1) {
+      box.appendChild(el('span', 'chat-complete-of',
+        (c.at + 1) + '/' + c.matches.length));
+    }
+  }
+
+  function clearCompletionHint() {
+    var box = byId('chat-complete-hint');
+    if (box) box.textContent = '';
   }
 
   function complete(input, backwards) {
@@ -1775,6 +2897,10 @@
     rememberSent(text);
 
     // "//foo" → send the literal "/foo".
+    // Editing takes the line before anything else does. A slash command typed
+    // while editing would otherwise run instead of correcting the message,
+    // which is a surprising way to lose a correction.
+    if (S.editing) { commitEdit(text); return; }
     if (text.indexOf('//') === 0) { sendMessage(text.slice(1)); return; }
     if (text.charAt(0) === '/') { runCommand(text.slice(1)); return; }
     sendMessage(text);
@@ -1888,6 +3014,10 @@
   var pendingSeq = 0;
   function sendMessage(text, msgtype) {
     var localId = 'pending-' + (++pendingSeq);
+    // Taken now, not read at the end: the field is cleared as part of sending
+    // and a slow round trip must not lose what this was answering.
+    var answering = S.replyTo;
+    S.replyTo = null;
     var msg = {
       event_id: localId,
       sender: (S.profile && S.profile.user_id) || 'me',
@@ -1897,6 +3027,11 @@
       kind: msgtype === 'm.emote' ? 'emote' : 'text',
       self: true, pending: true,
       ts: Date.now(),
+      // The echo shows the quote too, so a reply looks like a reply the
+      // instant it is written rather than when sync catches up.
+      reply_to: answering ? answering.event_id : undefined,
+      reply_sender: answering ? answering.sender : undefined,
+      reply_excerpt: answering ? excerpt(answering.body) : undefined,
     };
     S.messages.push(msg);
     stopTyping();
@@ -1910,6 +3045,11 @@
       // Who this message is FOR. Without it the recipient's client never
       // notifies them, however clearly the text names them.
       mentions: mentionsIn(text),
+      replyTo: answering ? {
+        eventId: answering.event_id,
+        sender: answering.sender,
+        body: answering.body,
+      } : null,
     })
       .then(function (res) {
         // Keep the local echo until sync delivers the real event; just stop
@@ -2170,6 +3310,7 @@
     else if (S.view === 'people') node = renderPeople();
     else if (S.view === 'browse') node = renderBrowse();
     else if (S.view === 'members') node = renderMembers();
+    else if (S.view === 'search') node = renderSearch();
     else node = renderChannels();
     host.appendChild(node);
     // Every view except a room is composer-less; the host is emptied here so
@@ -2208,6 +3349,10 @@
     if (view === 'people') loadPeople();
     if (view === 'browse') loadBrowse();
     if (view === 'members') loadMembers();
+    if (view === 'search') {
+      var q = byId('chat-search-query');
+      if (q) { q.focus(); moveCaretToEnd(q); }
+    }
   }
   Chat.go = go;
 
@@ -2262,21 +3407,18 @@
       });
   }
 
-  // Unread counts and mention flags live in the WINDOW — Rust always reports
-  // them as zero, because only the window knows what is being looked at. So a
-  // fresh room list has to be merged onto the old one, not swapped for it:
-  // swapping wiped every unread count whenever a room was renamed, joined, or
-  // otherwise re-pushed.
+  // Unread comes from the HOMESERVER, which maintains it against the read
+  // receipts this app sends. That is what makes it survive this window
+  // closing, survive a restart, and agree with the same account open in
+  // Element on a phone — none of which a count kept in here could do.
+  //
+  // One exception, and it is about latency rather than truth: the room on
+  // screen is being read right now, and its receipt is in flight. Letting the
+  // server's stale count paint over that would flash a badge on the room you
+  // are looking at. Everything else takes the server's word.
   function adoptRooms(rooms) {
-    var was = {};
-    S.rooms.forEach(function (r) {
-      was[r.room_id] = { unread: Number(r.unread) || 0, mention: !!r.mention };
-    });
     S.rooms = (rooms || []).map(function (r) {
-      var prev = was[r.room_id];
-      if (!prev) return r;
-      r.unread = prev.unread;
-      r.mention = prev.mention;
+      if (r.room_id === S.roomId) { r.unread = 0; r.mention = false; }
       return r;
     });
   }
@@ -2324,12 +3466,19 @@
         if (S.roomId !== roomId) return;   // the user moved on while we waited
         if (res && res.room) S.room = res.room;
         S.messages = (res && res.messages) || [];
+        S.seen = (res && res.seen) || null;
         wasAtBottom = true;              // a room you just opened starts at the end
         render();
         scrollToEnd();
         // Something was shared while no room was open; this is the room it
         // was waiting for.
         if (S.draft) putDraft(S.draft);
+        S.pins = [];
+        S.replyTo = null;
+        S.deleteArmed = null;
+        S.editing = null;
+        S.seen = null;
+        if (S.pinsOpen[roomId] && pinCount()) loadPins();
       })
       .catch(function (e) { showError(String(e)); });
   }
@@ -2359,6 +3508,14 @@
     if (!target || !target.room_id) return;
     if (target.guild_id && target.guild_id !== S.guildId) return;
     refreshRooms().then(function () { openRoom(target.room_id); });
+  }
+
+  // The player's own objects, for completing an id. Asked once: your planet
+  // does not change while you are typing.
+  function loadMyIds() {
+    return invoke('matrix_id_suggestions')
+      .then(function (res) { S.myIds = (res && res.ids) || []; })
+      .catch(function () {});
   }
 
   function claimPendingRoom() {
@@ -2424,6 +3581,7 @@
           S.loading = true;
           S.view = 'channels';
           render();
+          loadMyIds();
           return refreshRooms().then(claimPendingRoom).then(claimPendingDraft);
         }
         render();
@@ -2471,20 +3629,13 @@
   function onTimeline(payload) {
     if (!payload) return;
     if (payload.guild_id && payload.guild_id !== S.guildId) return;
-    // A room we are not looking at only bumps its unread count.
+    // A room we are not looking at only needs a repaint.
     if (payload.room_id !== S.roomId) {
-      var msgs = payload.messages || [];
-      var mine = msgs.some(function (m) {
-        return !m.self && (m.mentions_me || mentionsMe(m.body));
-      });
-      S.rooms.forEach(function (r) {
-        if (r.room_id === payload.room_id) {
-          r.unread = (Number(r.unread) || 0) + msgs.length;
-          // Sticky until read: being named is not the same as traffic, and a
-          // count of 40 hides the one message that was actually for you.
-          if (mine) r.mention = true;
-        }
-      });
+      // No counting here. The same sync that delivered these messages also
+      // carried the homeserver's own unread figures, and they arrive as a
+      // room-list push a moment later. Adding to them as well double-counted
+      // every message.
+      //
       // The channel list is not the only place unread shows any more — the tab
       // strip is visible from inside a room, so traffic in a background tab
       // has to light it up while you are reading another one.
@@ -2534,7 +3685,12 @@
     if (payload.guild_id && payload.guild_id !== S.guildId) return;
     adoptRooms(payload.rooms);
     S.loading = false;
-    if (S.view === 'channels') render();
+    // Both views, not just the channel list: unread now ARRIVES on this push
+    // rather than being counted when a message lands, and the tab strip is
+    // visible from inside a room. Repainting only the channel list left every
+    // background tab dark for as long as you stayed in the room you were
+    // reading — which is exactly when you want to see one light up.
+    if (S.view === 'channels' || S.view === 'room') render();
   }
   Chat.onRooms = onRooms;
 
@@ -2564,11 +3720,23 @@
         });
       });
     }
-    // Escape backs out one level, from anywhere. The one key every window in
-    // every OS agrees on.
     document.addEventListener('keydown', function (e) {
+      // Ctrl/Cmd-F opens search, scoped to whatever you are reading. The key
+      // every application has agreed on for thirty years, and a search only
+      // reachable from a header icon is a search most people never find.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        openSearch(S.view === 'room');
+        return;
+      }
+      // Escape backs out one level, from anywhere. The one key every window in
+      // every OS agrees on.
       if (e.key !== 'Escape') return;
       if (S.view === 'channels') return;         // already at the top level
+      // The search field handles its own Escape — back to the conversation it
+      // was searching, not all the way out to the channel list.
+      if (S.view === 'search' && document.activeElement
+          && document.activeElement.id === 'chat-search-query') return;
       e.preventDefault();
       go('channels');
     });
@@ -2585,6 +3753,10 @@
     listen('matrix::show_room', function (e) { showRequestedRoom(e && e.payload); });
     // Something in the game was shared into chat.
     listen('matrix::compose', function (e) { acceptDraft(e && e.payload); });
+    listen('matrix::reactions', function (e) { onReactions(e && e.payload); });
+    listen('matrix::redacted', function (e) { onRedacted(e && e.payload); });
+    listen('matrix::edited', function (e) { onEdited(e && e.payload); });
+    listen('matrix::seen', function (e) { onSeen(e && e.payload); });
     listen('matrix::rooms', function (e) { onRooms(e && e.payload); });
     listen('matrix::status', function (e) { onStatus(e && e.payload); });
 
@@ -2597,6 +3769,7 @@
           S.view = 'channels';
           S.loading = true;
           render();
+          loadMyIds();
           return refreshRooms().then(claimPendingRoom).then(claimPendingDraft);
         }
         S.loading = false;

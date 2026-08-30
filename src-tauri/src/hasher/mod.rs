@@ -147,6 +147,111 @@ pub fn register_vplayer_hash(object_id: String, index: u32, task_type: String) {
     VPLAYER_HASHES.insert(object_id, (index, task_type));
 }
 
+// ── Borrowed proof-of-work ──
+// A task somebody else owns, offered in chat, being ground here on their
+// behalf. On completion we do NOT submit: the completion tx carries the
+// signer as `creator` and only the owner's is accepted. The nonce goes back
+// as a message and they submit it themselves.
+//
+// Keyed by object id, like the virtual-player registry above, and for the
+// same reason: the worker only knows which object it solved.
+#[derive(Debug, Clone)]
+pub struct BorrowedWork {
+    pub guild_id: String,
+    pub room_id: String,
+    /// The offer this answers, so the result threads under it.
+    pub offer_event: String,
+    pub task: String,
+    pub target: Option<String>,
+    pub block_start: u64,
+    pub difficulty: u64,
+}
+
+static BORROWED_HASHES: std::sync::LazyLock<dashmap::DashMap<String, BorrowedWork>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+pub fn register_borrowed_hash(object_id: String, work: BorrowedWork) {
+    BORROWED_HASHES.insert(object_id, work);
+}
+
+pub fn forget_borrowed_hash(object_id: &str) {
+    BORROWED_HASHES.remove(object_id);
+}
+
+pub fn borrowed_hash(object_id: &str) -> Option<BorrowedWork> {
+    BORROWED_HASHES.get(object_id).map(|v| v.clone())
+}
+
+/// Whether a solved borrowed task is worth posting back.
+///
+/// Split out so the decision can be tested without a running app: the report
+/// itself spawns a task and needs a live Matrix session, but the judgement
+/// is arithmetic.
+pub fn borrowed_report_is_worth_sending(
+    solved_anchor: u64,
+    offered_anchor: u64,
+    nonce: Option<&str>,
+) -> bool {
+    // A nonce is only valid against the cycle it was ground for. If the
+    // cycle turned over mid-grind the proof is already dead, and posting it
+    // would only invite the owner to spend a transaction discovering that.
+    solved_anchor == offered_anchor && nonce.is_some_and(|n| !n.is_empty())
+}
+
+/// A task ground for somebody else: report the nonce, never submit it.
+///
+/// Deliberately a sibling of `maybe_complete_virtual` rather than a branch
+/// inside it. The two do opposite things with the same result — one spends
+/// the player's charge, the other spends nothing — and a shared code path
+/// with a flag is one edit away from submitting a stranger's proof as
+/// yourself.
+pub fn maybe_report_borrowed(app_handle: &AppHandle, snap: &TaskStateSnapshot) {
+    if !snap.result_exists {
+        return;
+    }
+    let Some((_k, work)) = BORROWED_HASHES.remove(&snap.object_id) else {
+        return;
+    };
+    let Some(nonce) = snap.result_nonce.clone().filter(|n| !n.is_empty()) else {
+        return;
+    };
+    let proof = snap.result_hash.clone().unwrap_or_default();
+
+    if !borrowed_report_is_worth_sending(snap.block_start, work.block_start, Some(&nonce)) {
+        eprintln!(
+            "[Comms] borrowed {} solved against anchor {} but the offer said {}; not reporting",
+            snap.object_id, snap.block_start, work.block_start
+        );
+        return;
+    }
+
+    let object_id = snap.object_id.clone();
+    let app = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let body = format!(
+            "Solved {} {} @{}: nonce {}",
+            object_id, work.task, work.block_start, nonce
+        );
+        let payload = serde_json::json!({
+            "v": 1, "kind": "result",
+            "task": work.task, "object": object_id,
+            "target": work.target,
+            "block_start": work.block_start,
+            "difficulty": work.difficulty,
+            "nonce": nonce, "proof": proof,
+        });
+        match crate::matrix::post_work_result(
+            &work.guild_id, &work.room_id, &body, payload, &work.offer_event,
+        )
+        .await
+        {
+            Ok(_) => eprintln!("[Comms] reported borrowed proof for {}", object_id),
+            Err(e) => eprintln!("[Comms] could not report borrowed proof: {}", e),
+        }
+        let _ = &app;
+    });
+}
+
 /// Completions that have been dispatched but not yet resolved, as
 /// `object_id -> the anchor the proof was solved against`.
 ///
@@ -360,6 +465,24 @@ mod completion_tests {
 
 #[cfg(test)]
 mod anchor_tests {
+    /// A borrowed proof is only worth posting while its cycle is still live.
+    #[test]
+    fn a_proof_from_a_turned_over_cycle_is_not_reported() {
+        use super::borrowed_report_is_worth_sending as ok;
+
+        assert!(ok(812004, 812004, Some("918273645")), "same anchor, real nonce");
+
+        // The cycle turned over mid-grind. The nonce is already dead: the
+        // chain verifies against ITS current anchor, so posting this would
+        // only invite the owner to spend a transaction finding that out.
+        assert!(!ok(812010, 812004, Some("918273645")), "cycle moved on");
+        assert!(!ok(812004, 812010, Some("918273645")), "…in either direction");
+
+        // A completion with no nonce is not a completion.
+        assert!(!ok(812004, 812004, None));
+        assert!(!ok(812004, 812004, Some("")));
+    }
+
     use super::{anchor_field_for, Anchor};
 
     #[test]

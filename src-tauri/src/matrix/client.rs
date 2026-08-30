@@ -52,6 +52,31 @@ pub struct Message {
     /// window's word-boundary fallback.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub mentions_me: bool,
+    /// A shared proof-of-work offer or result riding on this message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work: Option<Value>,
+    /// Somebody changed this after sending it. Shown, never hidden: a message
+    /// that quietly becomes different text is how a conversation gets
+    /// rewritten under the people reading it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
+    pub edited: bool,
+    /// Filled in when the timeline is served, not when the message is
+    /// rendered — see `timeline_of`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
+    /// The event this message answers, when it is a reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    /// Who was answered, and roughly what they said — lifted from the rich
+    /// reply fallback the sender already put in the body. Enough to render a
+    /// quote line without a round trip per reply, which in a busy room would
+    /// be one fetch per message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_sender: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_excerpt: Option<String>,
     /// `mxc://server/id` for an image message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mxc: Option<String>,
@@ -70,6 +95,24 @@ pub struct Message {
     pub player_id: Option<String>,
 }
 
+/// One person's reaction: who, and the annotation event that says so.
+#[derive(Debug, Clone, PartialEq)]
+struct Reactor {
+    user_id: String,
+    event_id: String,
+}
+
+/// A reaction as the window shows it: the key, how many, whether you are one
+/// of them, and who — the last because "who agreed to the plan" is the whole
+/// point in a guild room.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Reaction {
+    pub key: String,
+    pub count: usize,
+    pub mine: bool,
+    pub who: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Room {
     pub room_id: String,
@@ -80,7 +123,24 @@ pub struct Room {
     pub topic: Option<String>,
     pub members: u64,
     pub joined: bool,
+    /// Silenced: still counted as unread, never allowed to interrupt.
+    #[serde(default)]
+    pub muted: bool,
+    /// Event ids the room has pinned, newest last, as the room itself states
+    /// them. Ids only — the events are fetched on demand.
+    #[serde(default)]
+    pub pinned: Vec<String>,
+    /// Straight from the homeserver's `unread_notifications`, not counted here.
+    ///
+    /// Synapse already maintains this against the read receipts this app
+    /// sends, which makes it the only version that survives the window
+    /// closing, survives a restart, and agrees with the same account open in
+    /// Element on a phone. Counting locally could do none of those.
     pub unread: u64,
+    /// `highlight_count` — messages that named you, by the server's push
+    /// rules. Being named is not the same as traffic: a count of 40 hides the
+    /// one message that was actually for you.
+    pub mention: bool,
     /// "local" | "galaxy" | "direct" — see `section_for`.
     pub section: &'static str,
     pub icon: &'static str,
@@ -113,6 +173,23 @@ struct GuildState {
     /// rebuilt from each sync rather than accumulated, because "stopped
     /// typing" arrives as an empty list, not as a removal.
     typing: HashMap<String, Vec<String>>,
+    /// Rooms the player has silenced, from `m.push_rules`.
+    muted: std::collections::HashSet<String>,
+    /// room_id → user → the last event they have read.
+    ///
+    /// A receipt names ONE event: the newest thing that person has seen.
+    /// Whether they have read any particular message is a question about
+    /// order, answered against the timeline — see `seen_state`.
+    receipts: HashMap<String, HashMap<String, String>>,
+    /// room_id → target event → reaction key → who sent it.
+    ///
+    /// Senders, not a count: "did I already react" and "who agreed" are both
+    /// questions a count cannot answer, and un-reacting means finding YOUR
+    /// annotation event to redact.
+    reactions: HashMap<String, HashMap<String, HashMap<String, Vec<Reactor>>>>,
+    /// Every annotation seen, by its own event id, so a redaction can undo
+    /// the right one. A redaction names only the event it removes.
+    annotations: HashMap<String, (String, String, String, String)>,
     /// room_id → the pagination token for the NEXT page of older messages.
     /// Absent means "never paged"; `None` inside means the room has been read
     /// back to its beginning and there is nothing more to ask for.
@@ -303,6 +380,317 @@ const SETUP_EVENTS: &[&str] = &[
     "m.space.parent",
 ];
 
+/// Read the silenced rooms out of an `m.push_rules` event.
+///
+/// A room rule's `rule_id` IS the room id. It counts as muted when its
+/// actions contain no notification — historically `["dont_notify"]`, and in
+/// current Synapse simply `[]`. Both are in the wild, so this asks what the
+/// actions DO rather than matching a spelling.
+fn muted_rooms(ev: &Value) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Some(rules) = ev
+        .get("content")
+        .and_then(|c| c.get("global"))
+        .and_then(|g| g.get("room"))
+        .and_then(|r| r.as_array())
+    else {
+        return out;
+    };
+    for rule in rules {
+        if rule.get("enabled").and_then(|e| e.as_bool()) == Some(false) {
+            continue;
+        }
+        let Some(id) = rule.get("rule_id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let notifies = rule
+            .get("actions")
+            .and_then(|a| a.as_array())
+            .map(|acts| {
+                acts.iter().any(|a| {
+                    a.as_str() == Some("notify")
+                        || a.get("set_tweak").and_then(|t| t.as_str()) == Some("sound")
+                })
+            })
+            .unwrap_or(true);
+        if !notifies {
+            out.insert(id.to_string());
+        }
+    }
+    out
+}
+
+/// Record who has read what. Returns whether anything moved.
+///
+/// Stores everyone, including us. Filtering "me" out belongs to `seen_state`,
+/// which is where the identity that decides whose messages these ARE lives —
+/// doing it here as well meant two notions of "me" that could disagree, and
+/// did.
+fn apply_receipts(gs: &mut GuildState, room_id: &str, ev: &Value) -> bool {
+    let Some(content) = ev.get("content").and_then(|c| c.as_object()) else {
+        return false;
+    };
+    let mut changed = false;
+    for (event_id, kinds) in content {
+        let Some(read) = kinds.get("m.read").and_then(|r| r.as_object()) else {
+            continue;
+        };
+        for user_id in read.keys() {
+            let slot = gs
+                .receipts
+                .entry(room_id.to_string())
+                .or_default()
+                .entry(user_id.clone());
+            match slot {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    if e.get() != event_id {
+                        e.insert(event_id.clone());
+                        changed = true;
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(event_id.clone());
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// Who has seen your most recent message, and which one that is.
+///
+/// Deliberately only your OWN latest: "did they see it" is a question about
+/// something you said, and a receipt marker beside every message in a busy
+/// room is decoration rather than an answer.
+///
+/// A receipt names the newest event that person has read, so "have they read
+/// message X" is a question about ORDER — anyone whose marker sits at or
+/// after X has seen it. That ordering only exists in the timeline buffer,
+/// which is why this lives here and not beside the receipt map.
+fn seen_state(gs: &GuildState, room_id: &str, me: &str) -> Option<Value> {
+    let buf = gs.timelines.get(room_id)?;
+    let markers = gs.receipts.get(room_id)?;
+
+    // Where each event sits in the log this window holds.
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    for (i, m) in buf.iter().enumerate() {
+        at.insert(m.event_id.as_str(), i);
+    }
+    let mine = buf.iter().rposition(|m| m.sender == me)?;
+
+    let mut names: Vec<String> = markers
+        .iter()
+        // Never yourself: this answers "did THEY see it", and telling a player
+        // they have read their own message is noise dressed as information.
+        .filter(|(user_id, _)| user_id.as_str() != me)
+        .filter(|(_, event_id)| at.get(event_id.as_str()).is_some_and(|i| *i >= mine))
+        .map(|(user_id, _)| {
+            directory::player_id_of(user_id)
+                .and_then(|pid| directory::get(&pid).map(|i| i.username))
+                .filter(|n| !n.is_empty())
+                .or_else(|| gs.names.get(user_id).cloned())
+                .unwrap_or_else(|| localpart(user_id))
+        })
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+    Some(json!({ "event_id": buf[mine].event_id, "names": names }))
+}
+
+/// The event this one replaces, if it is an edit.
+fn replaces(content: &Value) -> Option<String> {
+    let r = content.get("m.relates_to")?;
+    if r.get("rel_type").and_then(|t| t.as_str()) != Some("m.replace") {
+        return None;
+    }
+    r.get("event_id").and_then(|e| e.as_str()).map(String::from)
+}
+
+/// The text an edit is replacing it WITH.
+///
+/// `m.new_content` is the authoritative version. The top-level body is the
+/// fallback for clients that cannot edit — it is the new text with a `*`
+/// stuck on the front, which is not what anyone wants stored.
+fn edited_body(content: &Value) -> Option<String> {
+    if let Some(b) = content
+        .get("m.new_content")
+        .and_then(|n| n.get("body"))
+        .and_then(|b| b.as_str())
+    {
+        return Some(b.to_string());
+    }
+    content
+        .get("body")
+        .and_then(|b| b.as_str())
+        .map(|b| b.strip_prefix("* ").unwrap_or(b).to_string())
+}
+
+/// Apply an edit to the message it replaces. Returns whether one was found.
+///
+/// Only the sender may rewrite their own words. The homeserver enforces this
+/// too, but a client that displayed somebody else's "edit" of your message
+/// would be putting words in your mouth on the strength of an unchecked
+/// field.
+fn apply_edit(gs: &mut GuildState, room_id: &str, ev: &Value) -> Option<String> {
+    let content = ev.get("content")?;
+    let target = replaces(content)?;
+    let sender = ev.get("sender").and_then(|s| s.as_str())?;
+    let body = edited_body(content)?;
+
+    let buf = gs.timelines.get_mut(room_id)?;
+    let mut hit = false;
+    for m in buf.iter_mut() {
+        if m.event_id != target {
+            continue;
+        }
+        if m.sender != sender {
+            continue; // not theirs to rewrite
+        }
+        m.body = body.clone();
+        m.edited = true;
+        hit = true;
+    }
+    if hit { Some(target) } else { None }
+}
+
+/// The event a redaction removes. Top-level in older room versions, inside
+/// content in newer ones; both are in the wild.
+fn redacted_id(ev: &Value) -> Option<String> {
+    ev.get("redacts")
+        .and_then(|r| r.as_str())
+        .or_else(|| ev.get("content").and_then(|c| c.get("redacts")).and_then(|r| r.as_str()))
+        .map(|s| s.to_string())
+}
+
+/// Rewrite a message that has been taken back. Returns whether one was found.
+///
+/// "message removed" rather than dropping the row: a message that silently
+/// vanishes from a conversation reads as a bug in the client, and the gap it
+/// leaves is the one thing everyone else can still see.
+fn redact_message(gs: &mut GuildState, room_id: &str, event_id: &str) -> bool {
+    let Some(buf) = gs.timelines.get_mut(room_id) else { return false };
+    let mut hit = false;
+    for m in buf.iter_mut() {
+        if m.event_id == event_id {
+            m.kind = "notice";
+            m.body = "message removed".to_string();
+            m.mxc = None;
+            m.reply_to = None;
+            m.reply_sender = None;
+            m.reply_excerpt = None;
+            m.mentions_me = false;
+            hit = true;
+        }
+    }
+    hit
+}
+
+/// What an annotation is annotating.
+fn reaction_target(ev: &Value) -> Option<String> {
+    let r = ev.get("content")?.get("m.relates_to")?;
+    if r.get("rel_type").and_then(|t| t.as_str()) != Some("m.annotation") {
+        return None;
+    }
+    r.get("event_id").and_then(|e| e.as_str()).map(String::from)
+}
+
+/// Record one reaction. Returns whether anything changed.
+fn apply_reaction(gs: &mut GuildState, room_id: &str, ev: &Value) -> bool {
+    let Some(target) = reaction_target(ev) else { return false };
+    let Some(key) = ev
+        .get("content")
+        .and_then(|c| c.get("m.relates_to"))
+        .and_then(|r| r.get("key"))
+        .and_then(|k| k.as_str())
+    else {
+        return false;
+    };
+    let (Some(sender), Some(event_id)) = (
+        ev.get("sender").and_then(|s| s.as_str()),
+        ev.get("event_id").and_then(|e| e.as_str()),
+    ) else {
+        return false;
+    };
+    // A key is other people's text arriving over federation. Bound it before
+    // it becomes a chip in this window.
+    let key: String = key.chars().take(32).collect();
+    if key.trim().is_empty() {
+        return false;
+    }
+
+    let who = gs
+        .reactions
+        .entry(room_id.to_string())
+        .or_default()
+        .entry(target.clone())
+        .or_default()
+        .entry(key.clone())
+        .or_default();
+    // The same person reacting twice with the same key is one reaction. Sync
+    // replays events on reconnect, so this is the normal case, not an edge.
+    if who.iter().any(|r| r.user_id == sender) {
+        return false;
+    }
+    who.push(Reactor { user_id: sender.to_string(), event_id: event_id.to_string() });
+    gs.annotations.insert(
+        event_id.to_string(),
+        (room_id.to_string(), target.clone(), key, sender.to_string()),
+    );
+    true
+}
+
+/// Undo a reaction a redaction removes. Returns the message it was on.
+fn undo_reaction(gs: &mut GuildState, ev: &Value) -> Option<String> {
+    // `redacts` is a top-level field on the event, and in newer room versions
+    // also inside content. Accept both.
+    let redacts = ev
+        .get("redacts")
+        .and_then(|r| r.as_str())
+        .or_else(|| ev.get("content").and_then(|c| c.get("redacts")).and_then(|r| r.as_str()))?
+        .to_string();
+    let (room_id, target, key, _sender) = gs.annotations.remove(&redacts)?;
+    let keys = gs.reactions.get_mut(&room_id)?.get_mut(&target)?;
+    let who = keys.get_mut(&key)?;
+    who.retain(|r| r.event_id != redacts);
+    // A key nobody holds any more is not a zero chip; it is gone.
+    if who.is_empty() {
+        keys.remove(&key);
+    }
+    Some(target)
+}
+
+/// The reactions on one message, as the window shows them.
+fn reactions_for(gs: &GuildState, room_id: &str, event_id: &str, me: &str) -> Vec<Reaction> {
+    let Some(keys) = gs.reactions.get(room_id).and_then(|r| r.get(event_id)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Reaction> = keys
+        .iter()
+        .map(|(key, who)| Reaction {
+            key: key.clone(),
+            count: who.len(),
+            mine: who.iter().any(|r| r.user_id == me),
+            who: who
+                .iter()
+                .map(|r| {
+                    directory::player_id_of(&r.user_id)
+                        .and_then(|pid| directory::get(&pid).map(|i| i.username))
+                        .filter(|n| !n.is_empty())
+                        .or_else(|| gs.names.get(&r.user_id).cloned())
+                        .unwrap_or_else(|| localpart(&r.user_id))
+                })
+                .collect(),
+        })
+        .collect();
+    // Most-agreed first, then by key so the order does not shuffle between
+    // renders when two are level.
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
+    out
+}
+
 fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<Message> {
     let etype = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let sender = ev.get("sender").and_then(|s| s.as_str()).unwrap_or("");
@@ -317,6 +705,28 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
     // is more honest than a blank line.
     let redacted = ev.get("unsigned").and_then(|u| u.get("redacted_because")).is_some();
 
+    // An edit is not a message. It arrives as a full `m.room.message` whose
+    // relation says "replace that one", and a client that does not understand
+    // the relation shows it as a second message beginning with `*`. Rendering
+    // it that way would double every corrected line.
+    if replaces(&content).is_some() {
+        return None;
+    }
+
+    // `m.in_reply_to` is how Matrix says "this answers that".
+    let reply_to = content
+        .get("m.relates_to")
+        .and_then(|r| r.get("m.in_reply_to"))
+        .and_then(|r| r.get("event_id"))
+        .and_then(|e| e.as_str())
+        .map(|s| s.to_string());
+    let (reply_sender, reply_excerpt) = match reply_to.as_ref() {
+        Some(_) => quoted_from_fallback(
+            content.get("body").and_then(|b| b.as_str()).unwrap_or(""),
+        ),
+        None => (None, None),
+    };
+
     let (kind, body): (&'static str, String) = if redacted {
         ("notice", "message removed".to_string())
     } else if etype == "m.room.message" {
@@ -329,6 +739,11 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
             .and_then(|b| b.as_str())
             .unwrap_or("")
             .to_string();
+        // A rich reply repeats what it answers INSIDE its own body, as
+        // `> <@who> what\n\n` lines. That is the fallback for clients with no
+        // reply rendering; this one has, so leaving it in would print the
+        // quote twice — once as the quote line and once as the message.
+        let text = if reply_to.is_some() { strip_reply_fallback(&text) } else { text };
         match msgtype {
             "m.emote" => ("emote", text),
             "m.notice" => ("notice", text),
@@ -414,6 +829,12 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
 
     Some(Message {
         event_id: event_id.to_string(),
+        work: super::work::parse(&content),
+        edited: false,
+        reactions: Vec::new(),
+        reply_to,
+        reply_sender,
+        reply_excerpt,
         sender: sender.to_string(),
         sender_name: ident
             .as_ref()
@@ -451,13 +872,46 @@ fn localpart(user_id: &str) -> String {
 // ── Sync ────────────────────────────────────────────────────────────────────
 
 /// Fold one `/sync` response into the guild's state and return what changed.
-type SyncDelta = (Vec<(String, Vec<Message>)>, bool, Vec<(String, Vec<String>)>);
+/// Deltas, whether the room list moved, who is typing, and which messages had
+/// their reactions change — the last so the window can repaint one message
+/// rather than the whole timeline.
+/// Everything one sync pass changed.
+///
+/// A struct rather than a tuple: this began as three elements and reached six,
+/// and each addition silently renumbered every destructuring in the file. The
+/// compiler catches an arity change; it cannot catch two fields of the same
+/// type swapping places.
+#[derive(Default)]
+struct SyncDelta {
+    /// (room, new messages) — what to append to a timeline.
+    deltas: Vec<(String, Vec<Message>)>,
+    /// Whether the room list itself moved.
+    rooms_changed: bool,
+    /// (room, who is typing) — the whole current set, not a diff.
+    typing: Vec<(String, Vec<String>)>,
+    /// Messages whose reactions moved, so one message repaints.
+    reacted: Vec<(String, String)>,
+    /// Messages somebody took back.
+    redacted: Vec<(String, String)>,
+    /// Messages somebody rewrote.
+    edited: Vec<(String, String)>,
+    /// Rooms where somebody's read marker moved.
+    receipts: Vec<String>,
+}
 
 fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
     let server = server_name(session);
     let mut deltas: Vec<(String, Vec<Message>)> = Vec::new();
     let mut rooms_changed = false;
     let mut typing_changed: Vec<(String, Vec<String>)> = Vec::new();
+    // (room_id, event_id) for every message whose reactions moved this sync.
+    let mut reaction_changes: Vec<(String, String)> = Vec::new();
+    // …and for every message somebody took back.
+    let mut redactions: Vec<(String, String)> = Vec::new();
+    // …and for every one they rewrote.
+    let mut edits: Vec<(String, String)> = Vec::new();
+    // Rooms where somebody's read marker moved.
+    let mut receipts_changed: Vec<String> = Vec::new();
     // Players a room is named after but the directory has not met. Collected
     // under the lock, resolved after it — `apply_sync` cannot await.
     let mut needs_identity: Vec<String> = Vec::new();
@@ -479,6 +933,14 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         .map(|a| a.as_slice())
         .unwrap_or(&[])
     {
+        // Which rooms the player has silenced. Matrix models this as a push
+        // rule per room whose actions do not include a notification — the
+        // same state Element writes, so muting here mutes on their phone too.
+        if ev.get("type").and_then(|t| t.as_str()) == Some("m.push_rules") {
+            gs.muted = muted_rooms(ev);
+            rooms_changed = true;
+            continue;
+        }
         if ev.get("type").and_then(|t| t.as_str()) != Some("m.direct") {
             continue;
         }
@@ -519,6 +981,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         let mut name: Option<String> = None;
         let mut alias: Option<String> = None;
         let mut topic: Option<String> = None;
+        let mut pinned: Option<Vec<String>> = None;
 
         for ev in state_events.iter().chain(timeline_events.iter()) {
             let etype = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -541,6 +1004,22 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                         .and_then(|c| c.get("topic"))
                         .and_then(|t| t.as_str())
                         .map(|s| s.to_string());
+                }
+                // The room's own shortlist: the current target, the standing
+                // rules — the handful of things everyone in here needs. Ids
+                // only; the events themselves are fetched on demand, because a
+                // pin can point at something said a year ago that no sync
+                // window will ever carry.
+                "m.room.pinned_events" => {
+                    pinned = content
+                        .and_then(|c| c.get("pinned"))
+                        .and_then(|p| p.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|e| e.as_str())
+                                .map(|s| s.to_string())
+                                .collect::<Vec<_>>()
+                        });
                 }
                 "m.room.member" => {
                     if let (Some(uid), Some(c)) =
@@ -587,7 +1066,18 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             })
             .unwrap_or_default();
 
+        // What the homeserver says is unread in this room. Present on every
+        // joined room in a sync response; absent only in fixtures and in
+        // incremental syncs that touched nothing, where the previous value
+        // stands rather than resetting to zero.
+        let notifs = room.get("unread_notifications");
+        let count_of = |key: &str| notifs.and_then(|n| n.get(key)).and_then(|c| c.as_u64());
         let existing = gs.rooms.get(&room_id).cloned();
+        let notif_count = count_of("notification_count")
+            .unwrap_or_else(|| existing.as_ref().map(|r| r.unread).unwrap_or(0));
+        let highlight_count = count_of("highlight_count").unwrap_or_else(|| {
+            u64::from(existing.as_ref().map(|r| r.mention).unwrap_or(false))
+        });
         let final_alias = alias
             .clone()
             .or_else(|| existing.as_ref().and_then(|r| r.canonical_alias.clone()));
@@ -659,9 +1149,14 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 .or_else(|| existing.as_ref().map(|r| r.members))
                 .unwrap_or(0),
             joined: true,
-            // Unread lives in the window: it is a per-view concern, and the
-            // window is the only thing that knows what the player is looking at.
-            unread: 0,
+            muted: gs.muted.contains(&room_id),
+            // Absent means "this sync did not mention pins", never "there are
+            // none" — the same trap as the unread counts above.
+            pinned: pinned
+                .or_else(|| existing.as_ref().map(|r| r.pinned.clone()))
+                .unwrap_or_default(),
+            unread: notif_count,
+            mention: highlight_count > 0,
             section: if dm_peer.is_some() {
                 SECTION_DIRECT
             } else {
@@ -684,6 +1179,12 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             .and_then(|e| e.as_array())
         {
             for ev in events {
+                if ev.get("type").and_then(|t| t.as_str()) == Some("m.receipt") {
+                    if apply_receipts(gs, &room_id, ev) {
+                        receipts_changed.push(room_id.clone());
+                    }
+                    continue;
+                }
                 if ev.get("type").and_then(|t| t.as_str()) != Some("m.typing") {
                     continue;
                 }
@@ -704,6 +1205,43 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                     typing_changed.push((room_id.clone(), who.clone()));
                 }
                 gs.typing.insert(room_id.clone(), who);
+            }
+        }
+
+        // ── Reactions and redactions
+        //
+        // Taken BEFORE rendering, in the order they arrived: an annotation and
+        // the redaction that removes it can land in the same sync, and applying
+        // them out of order leaves a reaction nobody sent.
+        for ev in &timeline_events {
+            match ev.get("type").and_then(|t| t.as_str()) {
+                Some("m.reaction") => {
+                    if apply_reaction(gs, &room_id, ev) {
+                        if let Some(t) = reaction_target(ev) {
+                            reaction_changes.push((room_id.clone(), t));
+                        }
+                    }
+                }
+                Some("m.room.message") => {
+                    if let Some(target) = apply_edit(gs, &room_id, ev) {
+                        edits.push((room_id.clone(), target));
+                    }
+                }
+                Some("m.room.redaction") => {
+                    if let Some(target) = undo_reaction(gs, ev) {
+                        reaction_changes.push((room_id.clone(), target));
+                    // A redaction that is not undoing a reaction is somebody
+                    // taking a MESSAGE back. Rewriting it here is what makes
+                    // that happen on screen; without this the message stayed
+                    // up until the window was reloaded, which is the one
+                    // outcome an unsend must not have.
+                    } else if let Some(id) = redacted_id(ev) {
+                        if redact_message(gs, &room_id, &id) {
+                            redactions.push((room_id.clone(), id));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -744,7 +1282,15 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         // sync loop picks them up and the next pass renders the name.
         PENDING_IDENTITY.write().unwrap().extend(needs_identity);
     }
-    (deltas, rooms_changed, typing_changed)
+    SyncDelta {
+        deltas,
+        rooms_changed,
+        typing: typing_changed,
+        reacted: reaction_changes,
+        redacted: redactions,
+        edited: edits,
+        receipts: receipts_changed,
+    }
 }
 
 /// Players a fold wanted identity for but could not await. Drained by the sync
@@ -850,6 +1396,15 @@ fn maybe_notify(
     if window_is_watched(app) {
         return;
     }
+    // Silenced rooms still count as unread; they are simply not allowed to
+    // interrupt. That distinction is the whole point of muting rather than
+    // leaving.
+    {
+        let map = STATE.read().unwrap();
+        if map.get(guild_id).is_some_and(|gs| gs.muted.contains(room_id)) {
+            return;
+        }
+    }
     let is_dm = {
         let map = STATE.read().unwrap();
         map.get(guild_id)
@@ -883,6 +1438,39 @@ fn maybe_notify(
         body = body.chars().take(139).collect::<String>() + "…";
     }
     crate::notifications::notify(&title, &body);
+}
+
+/// Unread across every network the player is signed in to.
+///
+/// Deliberately not per-guild: the surfaces that ask this question — the door
+/// into Comms, a dock badge — are asking "is there anything waiting", and a
+/// player who has to work out which guild it was in has been given a puzzle
+/// rather than an answer.
+///
+/// Rooms that are merely visible do not count. Only joined ones can be
+/// unread; a public room in the directory is not a message to you.
+pub fn unread_totals() -> (u64, bool) {
+    let map = STATE.read().unwrap();
+    sum_unread(map.values().flat_map(|gs| gs.rooms.values()))
+}
+
+/// The summing itself, split out so it can be tested.
+///
+/// `unread_totals` reads a process-wide static that every other test in this
+/// file also writes, so asserting on it directly measures whatever else
+/// happened to run first.
+fn sum_unread<'a>(rooms: impl Iterator<Item = &'a Room>) -> (u64, bool) {
+    let mut count = 0u64;
+    let mut mention = false;
+    for room in rooms {
+        // A room merely visible in the directory is not a message to anyone.
+        if !room.joined {
+            continue;
+        }
+        count = count.saturating_add(room.unread);
+        mention |= room.mention;
+    }
+    (count, mention)
 }
 
 /// Render a typing set for the window: who, by the name a player would know
@@ -1035,14 +1623,14 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     // rendered message is cached. Resolving up front is what
                     // makes a sender look like a person.
                     directory::resolve_many(&directory::senders_in(&v)).await;
-                    let (deltas, rooms_changed, typing) = apply_sync(&guild_id, &session, &v);
+                    let d = apply_sync(&guild_id, &session, &v);
                     // Anyone a room is named after who was unknown a moment
                     // ago; the next pass renders their name.
                     let pending = drain_pending_identity();
                     if !pending.is_empty() {
                         directory::resolve_many(&pending).await;
                     }
-                    for (room_id, users) in typing {
+                    for (room_id, users) in d.typing {
                         let _ = app.emit(
                             "matrix::typing",
                             json!({
@@ -1052,7 +1640,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                             }),
                         );
                     }
-                    for (room_id, messages) in deltas {
+                    for (room_id, messages) in d.deltas {
                         maybe_notify(&app, &guild_id, &room_id, &messages, &session);
                         let _ = app.emit(
                             "matrix::timeline",
@@ -1063,10 +1651,76 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                             }),
                         );
                     }
-                    if rooms_changed {
+                    for room in &d.receipts {
+                        let payload = {
+                            let map = STATE.read().unwrap();
+                            map.get(&guild_id).and_then(|gs| {
+                                seen_state(gs, room, &session.user_id).map(|seen| {
+                                    json!({ "guild_id": guild_id, "room_id": room, "seen": seen })
+                                })
+                            })
+                        };
+                        if let Some(p) = payload {
+                            let _ = app.emit("matrix::seen", p);
+                        }
+                    }
+                    // An edit carries the new text, so the window does not
+                    // have to ask for the message again.
+                    for (room, event_id) in &d.edited {
+                        let body = {
+                            let map = STATE.read().unwrap();
+                            map.get(&guild_id)
+                                .and_then(|gs| gs.timelines.get(room))
+                                .and_then(|buf| buf.iter().find(|m| &m.event_id == event_id))
+                                .map(|m| m.body.clone())
+                        };
+                        if let Some(body) = body {
+                            let _ = app.emit(
+                                "matrix::edited",
+                                json!({
+                                    "guild_id": guild_id, "room_id": room,
+                                    "event_id": event_id, "body": body,
+                                }),
+                            );
+                        }
+                    }
+                    for (room, event_id) in &d.redacted {
+                        let _ = app.emit(
+                            "matrix::redacted",
+                            json!({ "guild_id": guild_id, "room_id": room, "event_id": event_id }),
+                        );
+                    }
+                    // One message's worth each, so a reaction repaints that
+                    // message rather than the whole timeline.
+                    for (room, event_id) in &d.reacted {
+                        let payload = {
+                            let map = STATE.read().unwrap();
+                            map.get(&guild_id).map(|gs| {
+                                json!({
+                                    "guild_id": guild_id,
+                                    "room_id": room,
+                                    "event_id": event_id,
+                                    "reactions": reactions_for(gs, room, event_id, &session.user_id),
+                                })
+                            })
+                        };
+                        if let Some(p) = payload {
+                            let _ = app.emit("matrix::reactions", p);
+                        }
+                    }
+                    if d.rooms_changed {
                         let _ = app.emit(
                             "matrix::rooms",
                             json!({ "guild_id": guild_id, "rooms": rooms_of(&guild_id) }),
+                        );
+                        // …and the one-line version, for surfaces that are not
+                        // the Comms window. The full room list is a large
+                        // payload aimed at a window that may not be open; this
+                        // is two numbers any part of the app can consume.
+                        let (count, mention) = unread_totals();
+                        let _ = app.emit(
+                            "matrix::unread",
+                            json!({ "count": count, "mention": mention }),
                         );
                     }
                 }
@@ -1210,6 +1864,9 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
                     .unwrap_or(0),
                 joined: false,
                 unread: 0,
+                mention: false,
+                pinned: Vec::new(),
+                muted: false,
                 section: section_for(room_id, &server),
                 pfp_attrs: None,
                 player_id: None,
@@ -1289,6 +1946,9 @@ pub async fn browse(
                 .unwrap_or(0),
             joined: joined.contains(room_id),
             unread: 0,
+            mention: false,
+            pinned: Vec::new(),
+            muted: false,
             section: section_for(room_id, &server),
             pfp_attrs: None,
             player_id: None,
@@ -1314,6 +1974,9 @@ pub async fn browse(
                 members: s.members,
                 joined: joined.contains(&s.room_id),
                 unread: 0,
+                mention: false,
+                pinned: Vec::new(),
+                muted: false,
                 section: section_for(&s.room_id, &server),
                 pfp_attrs: None,
                 player_id: None,
@@ -1331,15 +1994,49 @@ pub async fn browse(
     Ok(out)
 }
 
-pub fn timeline_of(guild_id: &str, room_id: &str) -> (Option<Room>, Vec<Message>) {
+/// Who has seen your latest message in this room, for a window just opening it.
+/// Note a mute locally so the room list changes on the click rather than on
+/// the next sync.
+pub fn note_muted(guild_id: &str, room_id: &str, muted: bool) {
+    if let Ok(mut map) = STATE.write() {
+        if let Some(gs) = map.get_mut(guild_id) {
+            if muted {
+                gs.muted.insert(room_id.to_string());
+            } else {
+                gs.muted.remove(room_id);
+            }
+            if let Some(room) = gs.rooms.get_mut(room_id) {
+                room.muted = muted;
+            }
+        }
+    }
+}
+
+pub fn seen_of(guild_id: &str, room_id: &str, me: &str) -> Option<Value> {
+    let map = STATE.read().unwrap();
+    seen_state(map.get(guild_id)?, room_id, me)
+}
+
+pub fn timeline_of(guild_id: &str, room_id: &str, me: &str) -> (Option<Room>, Vec<Message>) {
     let map = STATE.read().unwrap();
     let Some(gs) = map.get(guild_id) else {
         return (None, Vec::new());
     };
-    (
-        gs.rooms.get(room_id).cloned(),
-        gs.timelines.get(room_id).cloned().unwrap_or_default(),
-    )
+    // Reactions are attached HERE rather than when the message was rendered:
+    // a reaction almost always arrives after the message it is on, so a copy
+    // taken at render time would be permanently empty.
+    let messages = gs
+        .timelines
+        .get(room_id)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut m| {
+            m.reactions = reactions_for(gs, room_id, &m.event_id, me);
+            m
+        })
+        .collect();
+    (gs.rooms.get(room_id).cloned(), messages)
 }
 
 /// Backfill from the server when the in-memory timeline is thin — right after
@@ -1545,6 +2242,28 @@ pub async fn send_with_mentions(
     msgtype: &str,
     mentions: &[(String, String)],
 ) -> Result<String, String> {
+    send_full(session, room_id, body, msgtype, mentions, None).await
+}
+
+/// A reply carries the message it answers.
+///
+/// `reply_to` is the answered event; the quote block other clients need is
+/// built here from `quote_sender` / `quote_body` rather than by the window,
+/// so the fallback's exact shape has one author.
+pub struct Reply<'a> {
+    pub event_id: &'a str,
+    pub sender: &'a str,
+    pub body: &'a str,
+}
+
+pub async fn send_full(
+    session: &Session,
+    room_id: &str,
+    body: &str,
+    msgtype: &str,
+    mentions: &[(String, String)],
+    reply: Option<Reply<'_>>,
+) -> Result<String, String> {
     let txn = format!(
         "structs{}{}",
         auth::now_secs(),
@@ -1556,7 +2275,27 @@ pub async fn send_with_mentions(
         urlseg(room_id),
         urlseg(&txn)
     );
+    // The fallback goes in the BODY, because a client with no reply rendering
+    // shows the body and nothing else — without it, "yes, do it" arrives over
+    // there with no indication of what it answers.
+    let body = match reply.as_ref() {
+        Some(r) => {
+            // First line names who is being quoted, the rest are plain `> `
+            // lines, then one blank line. That exact shape is what other
+            // clients strip back off — see `strip_reply_fallback`.
+            let mut lines = r.body.lines();
+            let mut quote = vec![format!("> <{}> {}", r.sender, lines.next().unwrap_or(""))];
+            quote.extend(lines.map(|l| format!("> {}", l)));
+            format!("{}\n\n{}", quote.join("\n"), body)
+        }
+        None => body.to_string(),
+    };
+    let body = body.as_str();
+
     let mut payload = json!({ "msgtype": msgtype, "body": body });
+    if let Some(r) = reply.as_ref() {
+        payload["m.relates_to"] = json!({ "m.in_reply_to": { "event_id": r.event_id } });
+    }
     if !mentions.is_empty() {
         let ids: Vec<String> = mentions.iter().map(|(_, id)| id.clone()).collect();
         payload["m.mentions"] = json!({ "user_ids": ids });
@@ -1666,6 +2405,502 @@ pub async fn join(session: &Session, room_id: &str) -> Result<(), String> {
 
 /// Set both the private read marker and the public read receipt, which is
 /// what other clients actually read.
+/// Silence a room, or let it speak again.
+///
+/// Written as a push rule, which is where Matrix keeps this — so muting here
+/// also mutes the same account in Element on a phone, and a room silenced
+/// there arrives silenced here. A local "muted" flag would have been half a
+/// feature.
+pub async fn set_muted(session: &Session, room_id: &str, muted: bool) -> Result<(), String> {
+    let url = format!(
+        "{}/pushrules/global/room/{}",
+        base(session),
+        urlseg(room_id)
+    );
+    if muted {
+        // An empty action list is how current Synapse spells "no
+        // notification"; `dont_notify` is the older name for the same thing
+        // and is still accepted.
+        let payload = json!({ "actions": [] });
+        authed(session, move |c, s| {
+            c.put(&url).bearer_auth(&s.access_token).json(&payload)
+        })
+        .await
+        .map(|_| ())
+    } else {
+        // Unmuting is removing the rule, not writing an opposite one: the
+        // default is to notify, and a second rule saying so would be state
+        // nobody else's client knows to clean up.
+        match authed(session, move |c, s| c.delete(&url).bearer_auth(&s.access_token)).await {
+            Ok(_) => Ok(()),
+            // No rule to remove is the state we wanted.
+            Err(e) if e.contains("404") || e.contains("M_NOT_FOUND") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Post a work offer or result into a room.
+///
+/// The `body` is what every other client shows — a player on Element must
+/// still be able to read what was asked, even though only Structs can act on
+/// it.
+pub async fn send_work(
+    session: &Session,
+    room_id: &str,
+    body: &str,
+    work: Value,
+    reply_to: Option<&str>,
+) -> Result<String, String> {
+    let txn = format!("structs{}{}", auth::now_secs(), TXN.fetch_add(1, Ordering::Relaxed));
+    let url = format!(
+        "{}/rooms/{}/send/m.room.message/{}",
+        base(session),
+        urlseg(room_id),
+        urlseg(&txn)
+    );
+    let mut payload = json!({
+        "msgtype": "m.text",
+        "body": body,
+        "structs.work": work,
+    });
+    if let Some(target) = reply_to {
+        payload["m.relates_to"] = json!({ "m.in_reply_to": { "event_id": target } });
+    }
+    let v = authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await?;
+    v.get("event_id")
+        .and_then(|e| e.as_str())
+        .map(String::from)
+        .ok_or_else(|| "the homeserver accepted it but returned no event id".into())
+}
+
+/// Rewrite a message that has already been sent.
+///
+/// The fallback body — `* new text` — is what clients with no edit support
+/// show, and leaving it out means they keep displaying the mistake forever.
+pub async fn edit(
+    session: &Session,
+    room_id: &str,
+    event_id: &str,
+    body: &str,
+    msgtype: &str,
+) -> Result<String, String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("an edit needs something to say".into());
+    }
+    if !event_id.starts_with('$') {
+        return Err("that message has not been sent yet".into());
+    }
+    let txn = format!("structs{}{}", auth::now_secs(), TXN.fetch_add(1, Ordering::Relaxed));
+    let url = format!(
+        "{}/rooms/{}/send/m.room.message/{}",
+        base(session),
+        urlseg(room_id),
+        urlseg(&txn)
+    );
+    let payload = json!({
+        "msgtype": msgtype,
+        "body": format!("* {}", body),
+        "m.new_content": { "msgtype": msgtype, "body": body },
+        "m.relates_to": { "rel_type": "m.replace", "event_id": event_id },
+    });
+    let v = authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await
+    .map_err(|e| {
+        if e.contains("M_FORBIDDEN") {
+            "you can only change your own messages".to_string()
+        } else {
+            e
+        }
+    })?;
+    v.get("event_id")
+        .and_then(|e| e.as_str())
+        .map(String::from)
+        .ok_or_else(|| "the homeserver accepted the change but returned no event id".into())
+}
+
+/// Take a message back.
+///
+/// The homeserver decides whether this account may: your own message always,
+/// somebody else's only with the power level for it. Asking beats keeping a
+/// copy of those rules here.
+pub async fn redact(session: &Session, room_id: &str, event_id: &str) -> Result<(), String> {
+    if !event_id.starts_with('$') {
+        return Err("that message has not been sent yet".into());
+    }
+    let txn = format!("structs{}{}", auth::now_secs(), TXN.fetch_add(1, Ordering::Relaxed));
+    let url = format!(
+        "{}/rooms/{}/redact/{}/{}",
+        base(session),
+        urlseg(room_id),
+        urlseg(event_id),
+        urlseg(&txn)
+    );
+    authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&json!({}))
+    })
+    .await
+    .map_err(|e| {
+        if e.contains("M_FORBIDDEN") {
+            "you do not have permission to remove that message".to_string()
+        } else {
+            e
+        }
+    })
+    .map(|_| ())
+}
+
+/// React to a message, or take your reaction back.
+///
+/// Un-reacting is a redaction of YOUR OWN annotation event, which is why the
+/// store keeps senders rather than counts: there is nothing else to redact.
+pub async fn react(
+    session: &Session,
+    room_id: &str,
+    event_id: &str,
+    key: &str,
+    on: bool,
+) -> Result<(), String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("a reaction needs a key".into());
+    }
+    if on {
+        // Already reacted is a no-op, not a second annotation. Sending two
+        // would leave one un-redactable behind after the first is removed.
+        let existing = {
+            let map = STATE.read().unwrap();
+            map.get(&session.guild_id)
+                .and_then(|gs| gs.reactions.get(room_id))
+                .and_then(|r| r.get(event_id))
+                .and_then(|k| k.get(key))
+                .map(|who| who.iter().any(|r| r.user_id == session.user_id))
+                .unwrap_or(false)
+        };
+        if existing {
+            return Ok(());
+        }
+        let txn = format!("structs{}{}", auth::now_secs(), TXN.fetch_add(1, Ordering::Relaxed));
+        let url = format!(
+            "{}/rooms/{}/send/m.reaction/{}",
+            base(session),
+            urlseg(room_id),
+            urlseg(&txn)
+        );
+        let payload = json!({
+            "m.relates_to": {
+                "rel_type": "m.annotation", "event_id": event_id, "key": key
+            }
+        });
+        authed(session, move |c, s| {
+            c.put(&url).bearer_auth(&s.access_token).json(&payload)
+        })
+        .await?;
+        return Ok(());
+    }
+
+    // Off: find the annotation this account sent and redact it.
+    let mine = {
+        let map = STATE.read().unwrap();
+        map.get(&session.guild_id)
+            .and_then(|gs| gs.reactions.get(room_id))
+            .and_then(|r| r.get(event_id))
+            .and_then(|k| k.get(key))
+            .and_then(|who| {
+                who.iter()
+                    .find(|r| r.user_id == session.user_id)
+                    .map(|r| r.event_id.clone())
+            })
+    };
+    // Nothing of ours to remove is success, not an error: the button and the
+    // truth simply agreed already.
+    let Some(annotation) = mine else { return Ok(()) };
+    let txn = format!("structs{}{}", auth::now_secs(), TXN.fetch_add(1, Ordering::Relaxed));
+    let url = format!(
+        "{}/rooms/{}/redact/{}/{}",
+        base(session),
+        urlseg(room_id),
+        urlseg(&annotation),
+        urlseg(&txn)
+    );
+    authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&json!({}))
+    })
+    .await
+    .map(|_| ())
+}
+
+/// The reactions on one message, for the window.
+pub fn reactions_of(session: &Session, room_id: &str, event_id: &str) -> Vec<Reaction> {
+    let map = STATE.read().unwrap();
+    match map.get(&session.guild_id) {
+        Some(gs) => reactions_for(gs, room_id, event_id, &session.user_id),
+        None => Vec::new(),
+    }
+}
+
+/// Drop the `> …` quote block a rich reply carries at the top of its body.
+///
+/// The spec's fallback is a run of `> ` lines followed by one blank line, then
+/// the actual message. Only that leading run: a reply whose own text starts
+/// with a quote after the blank line keeps it.
+fn strip_reply_fallback(body: &str) -> String {
+    let mut rest = body;
+    let mut saw_quote = false;
+    loop {
+        let (line, tail) = match rest.split_once('\n') {
+            Some((l, t)) => (l, t),
+            None => break,
+        };
+        if line.starts_with('>') {
+            saw_quote = true;
+            rest = tail;
+            continue;
+        }
+        // The blank line that closes the fallback belongs to it too.
+        if saw_quote && line.trim().is_empty() {
+            rest = tail;
+        }
+        break;
+    }
+    if saw_quote { rest.to_string() } else { body.to_string() }
+}
+
+/// Read who was answered, and what they said, out of that same fallback.
+///
+/// Its first line is `> <@user:server> their text`. Worth mining because it
+/// means a quote line costs nothing: the alternative is fetching the answered
+/// event once per reply, which in a busy room is a fetch per message.
+fn quoted_from_fallback(body: &str) -> (Option<String>, Option<String>) {
+    let mut who = None;
+    let mut said: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let Some(q) = line.strip_prefix('>') else { break };
+        let q = q.trim_start();
+        if who.is_none() {
+            if let Some(rest) = q.strip_prefix('<') {
+                if let Some((user, text)) = rest.split_once('>') {
+                    who = Some(user.to_string());
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        said.push(text.to_string());
+                    }
+                    continue;
+                }
+            }
+        }
+        said.push(q.to_string());
+    }
+    if who.is_none() && said.is_empty() {
+        return (None, None);
+    }
+    let mut excerpt = said.join(" ");
+    // One line's worth. The quote is a pointer to the message, not a copy.
+    if excerpt.chars().count() > 120 {
+        excerpt = excerpt.chars().take(119).collect::<String>() + "…";
+    }
+    (who, Some(excerpt).filter(|e| !e.is_empty()))
+}
+
+/// Fetch the messages a room has pinned.
+///
+/// On demand rather than from sync: a pin can point at something said a year
+/// ago, which no sync window will ever carry. Bounded, because a room is free
+/// to pin a hundred things and this is a strip at the top of a conversation,
+/// not a second timeline.
+const MAX_PINS: usize = 10;
+
+pub async fn pinned(session: &Session, room_id: &str) -> Result<Vec<Message>, String> {
+    let ids: Vec<String> = {
+        let map = STATE.read().unwrap();
+        map.get(&session.guild_id)
+            .and_then(|gs| gs.rooms.get(room_id))
+            .map(|r| r.pinned.clone())
+            .unwrap_or_default()
+    };
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    // Newest first: the most recent pin is nearly always the live one.
+    for id in ids.iter().rev().take(MAX_PINS) {
+        let url = format!(
+            "{}/rooms/{}/event/{}",
+            base(session),
+            urlseg(room_id),
+            urlseg(id)
+        );
+        // A pin can outlive what it points at — redacted, or in history this
+        // account cannot see. One unreachable pin must not empty the strip.
+        let Ok(ev) = authed(session, move |c, s| c.get(&url).bearer_auth(&s.access_token)).await
+        else {
+            continue;
+        };
+        let map = STATE.read().unwrap();
+        let Some(gs) = map.get(&session.guild_id) else { continue };
+        if let Some(m) = render_event(&ev, gs, room_id, &session.user_id) {
+            if m.kind == "text" || m.kind == "emote" || m.kind == "notice" || m.kind == "image" {
+                out.push(m);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Pin or unpin one message.
+///
+/// Read-modify-write of the room's own `m.room.pinned_events`, which is how
+/// the spec models it — there is no per-message pin. Whether this account is
+/// allowed is the homeserver's call: asking it beats keeping a copy of its
+/// power-level rules here that can only ever drift.
+pub async fn set_pinned(
+    session: &Session,
+    room_id: &str,
+    event_id: &str,
+    pin: bool,
+) -> Result<Vec<String>, String> {
+    let url = format!(
+        "{}/rooms/{}/state/m.room.pinned_events/",
+        base(session),
+        urlseg(room_id)
+    );
+    // Re-read from the server rather than trusting local state: two people
+    // pinning at once would otherwise have the slower write drop the faster
+    // one's pin.
+    let current: Vec<String> = match authed(session, {
+        let url = url.clone();
+        move |c, s| c.get(&url).bearer_auth(&s.access_token)
+    })
+    .await
+    {
+        Ok(v) => v
+            .get("pinned")
+            .and_then(|p| p.as_array())
+            .map(|a| a.iter().filter_map(|e| e.as_str()).map(String::from).collect())
+            .unwrap_or_default(),
+        // No pinned-events state yet is the normal case for most rooms.
+        Err(_) => Vec::new(),
+    };
+
+    let mut next: Vec<String> = current.into_iter().filter(|e| e != event_id).collect();
+    if pin {
+        next.push(event_id.to_string());
+    }
+    let payload = json!({ "pinned": next });
+    authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await
+    .map_err(|e| {
+        if e.contains("M_FORBIDDEN") {
+            "you do not have permission to pin in this room".to_string()
+        } else {
+            e
+        }
+    })?;
+
+    // Reflect it locally at once. The sync that confirms it is a round trip
+    // away, and a pin that does not appear until then reads as a failure.
+    if let Ok(mut map) = STATE.write() {
+        if let Some(room) = map
+            .get_mut(&session.guild_id)
+            .and_then(|gs| gs.rooms.get_mut(room_id))
+        {
+            room.pinned = next.clone();
+        }
+    }
+    Ok(next)
+}
+
+/// Search the log.
+///
+/// Server-side, because it has to be: this window keeps the last few hundred
+/// messages of the room you are looking at, and the thing worth finding — who
+/// agreed to what, which planet somebody flagged a week ago — is almost never
+/// in that window. Synapse indexes the full history of every room you are in.
+///
+/// Scoped to one room when `room_id` is given, otherwise across everything the
+/// account is joined to. Both are useful and they answer different questions:
+/// "what did we decide in here" versus "where was that mentioned".
+pub async fn search(
+    session: &Session,
+    query: &str,
+    room_id: Option<&str>,
+    limit: u32,
+) -> Result<Vec<SearchHit>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!("{}/search", base(session));
+    let mut criteria = json!({
+        "search_term": query,
+        "keys": ["content.body"],
+        // Newest first. A chat search is nearly always "what was that recent
+        // thing", and rank order buries it under a year of chatter.
+        "order_by": "recent",
+        "event_context": { "before_limit": 0, "after_limit": 0 },
+    });
+    if let Some(id) = room_id {
+        criteria["filter"] = json!({ "rooms": [id], "limit": limit });
+    } else {
+        criteria["filter"] = json!({ "limit": limit });
+    }
+    let payload = json!({ "search_categories": { "room_events": criteria } });
+    let v = authed(session, move |c, s| {
+        c.post(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await?;
+
+    let results = v
+        .get("search_categories")
+        .and_then(|c| c.get("room_events"))
+        .and_then(|r| r.get("results"))
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let map = STATE.read().unwrap();
+    let gs = map.get(&session.guild_id);
+    let mut out = Vec::new();
+    for hit in results.iter().take(limit as usize) {
+        let Some(ev) = hit.get("result") else { continue };
+        let hit_room = text_of(ev.get("room_id"));
+        // A hit in a room this app has never synced still has to be readable,
+        // so fall back to the room id rather than dropping the result.
+        let room_name = gs
+            .and_then(|g| g.rooms.get(&hit_room).map(|r| r.name.clone()))
+            .unwrap_or_else(|| hit_room.clone());
+        let Some(gs) = gs else { continue };
+        let Some(m) = render_event(ev, gs, &hit_room, &session.user_id) else { continue };
+        // Joins, topic changes and the rest are not what anyone is looking
+        // for, and they crowd out the messages that are.
+        if m.kind != "text" && m.kind != "emote" && m.kind != "notice" {
+            continue;
+        }
+        out.push(SearchHit { room_id: hit_room, room_name, message: m });
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchHit {
+    pub room_id: String,
+    pub room_name: String,
+    pub message: Message,
+}
+
+fn text_of(v: Option<&Value>) -> String {
+    v.and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
 pub async fn mark_read(
     session: &Session,
     room_id: &str,
@@ -2095,6 +3330,506 @@ mod tests {
         assert!(r.body.contains("Guild Lobby"), "{}", r.body);
     }
 
+    /// Unread is the homeserver's answer, not ours.
+    ///
+    /// It is maintained against the read receipts this app already sends, so
+    /// it is the only version that survives the Comms window closing, that
+    /// survives a restart, and that agrees with the same account open in
+    /// Element on a phone. The window used to count locally, which could do
+    /// none of those things: closing the window read every room.
+    #[test]
+    fn unread_comes_from_the_homeserver() {
+        let s = session();
+        let room = |notif: u64, high: u64| {
+            json!({
+                "next_batch": "s1",
+                "rooms": { "join": { "!r:example.com": {
+                    "unread_notifications": {
+                        "notification_count": notif, "highlight_count": high
+                    },
+                    "state": { "events": [
+                        { "type": "m.room.name", "content": { "name": "Lobby" } }
+                    ] },
+                    "timeline": { "events": [] }
+                } } }
+            })
+        };
+        apply_sync("g", &s, &room(7, 0));
+        let get = || {
+            STATE.read().unwrap().get("g").unwrap().rooms.get("!r:example.com").cloned().unwrap()
+        };
+        assert_eq!(get().unread, 7);
+        assert!(!get().mention, "traffic is not a mention");
+
+        // Being named is sticky and separate: a count of 40 hides the one
+        // message that was actually for you.
+        apply_sync("g", &s, &room(41, 1));
+        assert_eq!(get().unread, 41);
+        assert!(get().mention);
+
+        // Read elsewhere — on a phone, say. The server says zero and this
+        // app must believe it.
+        apply_sync("g", &s, &room(0, 0));
+        assert_eq!(get().unread, 0);
+        assert!(!get().mention);
+
+        // An incremental sync that touched nothing carries no counts at all.
+        // Absent must mean "unchanged", never "zero", or every quiet sync
+        // would silently mark the room read.
+        apply_sync("g", &s, &room(5, 1));
+        let quiet = json!({
+            "next_batch": "s5",
+            "rooms": { "join": { "!r:example.com": { "timeline": { "events": [] } } } }
+        });
+        apply_sync("g", &s, &quiet);
+        assert_eq!(get().unread, 5, "a quiet sync must not clear unread");
+        assert!(get().mention, "nor forget that you were named");
+
+        STATE.write().unwrap().remove("g");
+    }
+
+    /// A muted room is one whose push rule does not notify.
+    ///
+    /// Asked as "do these actions notify" rather than matched against a
+    /// spelling: `["dont_notify"]` is the historical form and `[]` is what
+    /// current Synapse writes, and both are in the wild.
+    #[test]
+    fn muted_rooms_are_read_from_the_push_rules() {
+        let ev = |rules: Value| json!({
+            "type": "m.push_rules",
+            "content": { "global": { "room": rules } }
+        });
+
+        let got = muted_rooms(&ev(json!([
+            { "rule_id": "!old:h", "actions": ["dont_notify"], "enabled": true },
+            { "rule_id": "!new:h", "actions": [], "enabled": true },
+            { "rule_id": "!loud:h", "actions": ["notify"], "enabled": true },
+            { "rule_id": "!sound:h",
+              "actions": ["notify", { "set_tweak": "sound", "value": "default" }],
+              "enabled": true }
+        ])));
+        assert!(got.contains("!old:h"), "the historical spelling still means muted");
+        assert!(got.contains("!new:h"), "an empty action list means muted");
+        assert!(!got.contains("!loud:h"));
+        assert!(!got.contains("!sound:h"));
+
+        // A disabled rule is not in force, whatever it says.
+        let got = muted_rooms(&ev(json!([
+            { "rule_id": "!off:h", "actions": [], "enabled": false }
+        ])));
+        assert!(got.is_empty(), "{:?}", got);
+
+        // Nothing at all is not everything muted.
+        assert!(muted_rooms(&json!({ "type": "m.push_rules", "content": {} })).is_empty());
+    }
+
+    /// "Did they see it" is a question about ORDER, not about equality.
+    ///
+    /// A receipt names the newest event a person has read. Anyone whose
+    /// marker sits at or after your message has seen it — matching the two
+    /// event ids would answer "did they stop reading exactly there", which is
+    /// almost never true and would report nobody.
+    #[test]
+    fn a_receipt_after_your_message_still_counts_as_seen() {
+        let s = session();
+        let v = json!({
+            "next_batch": "s1",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] },
+                "timeline": { "events": [
+                    { "type": "m.room.message", "event_id": "$mine", "sender": "@me:h",
+                      "origin_server_ts": 1,
+                      "content": { "msgtype": "m.text", "body": "raid at dawn" } },
+                    { "type": "m.room.message", "event_id": "$later", "sender": "@a:h",
+                      "origin_server_ts": 2,
+                      "content": { "msgtype": "m.text", "body": "ok" } }
+                ] }
+            } } }
+        });
+        apply_sync("seen", &s, &v);
+
+        let receipt = |user: &str, at: &str| {
+            json!({
+                "next_batch": "s2",
+                "rooms": { "join": { "!r:example.com": {
+                    "state": { "events": [] }, "timeline": { "events": [] },
+                    "ephemeral": { "events": [ {
+                        "type": "m.receipt",
+                        "content": { at: { "m.read": { user: { "ts": 1 } } } }
+                    } ] }
+                } } }
+            })
+        };
+        let seen = || {
+            let map = STATE.read().unwrap();
+            seen_state(map.get("seen").unwrap(), "!r:example.com", "@me:h")
+        };
+        assert!(seen().is_none(), "nobody has read anything yet");
+
+        // Their marker is PAST my message, which is the normal case.
+        let d = apply_sync("seen", &s, &receipt("@a:h", "$later"));
+        assert_eq!(d.receipts, vec!["!r:example.com".to_string()]);
+        let got = seen().unwrap();
+        assert_eq!(got["event_id"], "$mine", "reported against MY latest message");
+        assert_eq!(got["names"][0], "a");
+
+        // Somebody stopped one short: not seen.
+        apply_sync("seen", &s, &receipt("@b:h", "$mine"));
+        let names = seen().unwrap()["names"].as_array().unwrap().len();
+        assert_eq!(names, 2, "a marker exactly at the message counts too");
+
+        // Our own receipt is noise dressed as information.
+        apply_sync("seen", &s, &receipt("@me:h", "$later"));
+        let names: Vec<String> = seen().unwrap()["names"].as_array().unwrap()
+            .iter().map(|n| n.as_str().unwrap().to_string()).collect();
+        assert!(!names.contains(&"me".to_string()), "{:?}", names);
+
+        // An unchanged marker is not a change worth telling the window about.
+        let d = apply_sync("seen", &s, &receipt("@a:h", "$later"));
+        assert!(d.receipts.is_empty(), "a repeated receipt is not news");
+
+        STATE.write().unwrap().remove("seen");
+    }
+
+    /// An edit rewrites a message; it is not a second message.
+    #[test]
+    fn an_edit_replaces_rather_than_appends() {
+        let s = session();
+        let said = json!({
+            "next_batch": "s1",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] },
+                "timeline": { "events": [
+                    { "type": "m.room.message", "event_id": "$orig", "sender": "@a:h",
+                      "origin_server_ts": 1,
+                      "content": { "msgtype": "m.text", "body": "raid 2-15631" } }
+                ] }
+            } } }
+        });
+        apply_sync("ed", &s, &said);
+        let msgs = || STATE.read().unwrap().get("ed").unwrap()
+            .timelines["!r:example.com"].clone();
+        assert_eq!(msgs().len(), 1);
+
+        let fix = json!({
+            "next_batch": "s2",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] },
+                "timeline": { "events": [
+                    { "type": "m.room.message", "event_id": "$edit", "sender": "@a:h",
+                      "origin_server_ts": 2, "content": {
+                        "msgtype": "m.text",
+                        "body": "* raid 2-15361",
+                        "m.new_content": { "msgtype": "m.text", "body": "raid 2-15361" },
+                        "m.relates_to": { "rel_type": "m.replace", "event_id": "$orig" }
+                      } }
+                ] }
+            } } }
+        });
+        let d = apply_sync("ed", &s, &fix);
+        assert_eq!(d.edited, vec![("!r:example.com".to_string(), "$orig".to_string())]);
+        // One message, not two: a client that does not understand the relation
+        // shows the edit as a second line beginning with `*`.
+        assert_eq!(msgs().len(), 1, "{:?}", msgs());
+        // …and the stored text is `m.new_content`, never the `* ` fallback.
+        assert_eq!(msgs()[0].body, "raid 2-15361");
+        assert!(msgs()[0].edited, "the change is shown, not hidden");
+        assert!(d.deltas.is_empty(), "an edit is not new traffic");
+
+        // Only the sender may rewrite their own words. The homeserver enforces
+        // this, but a client that trusted the field would put words in
+        // somebody's mouth on the strength of an unchecked value.
+        let forged = json!({
+            "next_batch": "s3",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] },
+                "timeline": { "events": [
+                    { "type": "m.room.message", "event_id": "$bad", "sender": "@villain:h",
+                      "origin_server_ts": 3, "content": {
+                        "msgtype": "m.text", "body": "* I surrender",
+                        "m.new_content": { "msgtype": "m.text", "body": "I surrender" },
+                        "m.relates_to": { "rel_type": "m.replace", "event_id": "$orig" }
+                      } }
+                ] }
+            } } }
+        });
+        let d = apply_sync("ed", &s, &forged);
+        assert!(d.edited.is_empty(), "somebody else cannot rewrite it");
+        assert_eq!(msgs()[0].body, "raid 2-15361");
+
+        STATE.write().unwrap().remove("ed");
+    }
+
+    #[test]
+    fn the_edit_fallback_is_never_what_gets_stored() {
+        // `m.new_content` is authoritative. The top-level body is the version
+        // for clients that cannot edit — the new text with a `*` stuck on.
+        let with_new = json!({
+            "body": "* fixed", "m.new_content": { "body": "fixed" }
+        });
+        assert_eq!(edited_body(&with_new).as_deref(), Some("fixed"));
+
+        // An older client may send only the fallback; strip the marker.
+        let fallback_only = json!({ "body": "* fixed" });
+        assert_eq!(edited_body(&fallback_only).as_deref(), Some("fixed"));
+
+        // A message whose own text begins with `* ` and is NOT an edit keeps
+        // it — this only ever runs on something already known to be an edit.
+        let starred = json!({ "body": "* not really an edit" });
+        assert_eq!(edited_body(&starred).as_deref(), Some("not really an edit"));
+    }
+
+    /// A message taken back has to change on screen.
+    ///
+    /// Before this, a redaction only ever undid a reaction — a deleted
+    /// MESSAGE stayed up until the window was reloaded, which is the one
+    /// outcome an unsend must not have.
+    #[test]
+    fn a_redacted_message_is_rewritten_in_place() {
+        let s = session();
+        let said = json!({
+            "next_batch": "s1",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] },
+                "timeline": { "events": [
+                    { "type": "m.room.message", "event_id": "$keep", "sender": "@a:h",
+                      "origin_server_ts": 1, "content": { "msgtype": "m.text", "body": "stays" } },
+                    { "type": "m.room.message", "event_id": "$gone", "sender": "@a:h",
+                      "origin_server_ts": 2, "content": { "msgtype": "m.text", "body": "regrets" } }
+                ] }
+            } } }
+        });
+        apply_sync("red", &s, &said);
+        let body = |id: &str| {
+            STATE.read().unwrap().get("red").unwrap().timelines["!r:example.com"]
+                .iter().find(|m| m.event_id == id).map(|m| (m.kind, m.body.clone()))
+        };
+        assert_eq!(body("$gone"), Some(("text", "regrets".to_string())));
+
+        let taken = json!({
+            "next_batch": "s2",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] },
+                "timeline": { "events": [
+                    { "type": "m.room.redaction", "event_id": "$r", "sender": "@a:h",
+                      "origin_server_ts": 3, "redacts": "$gone" }
+                ] }
+            } } }
+        });
+        let d = apply_sync("red", &s, &taken);
+        assert_eq!(d.redacted, vec![("!r:example.com".to_string(), "$gone".to_string())]);
+        // Rewritten, not dropped: a message that silently vanishes reads as a
+        // bug in the client, and the gap is what everyone else still sees.
+        assert_eq!(body("$gone"), Some(("notice", "message removed".to_string())));
+        assert_eq!(body("$keep"), Some(("text", "stays".to_string())),
+                   "only the redacted message changes");
+
+        STATE.write().unwrap().remove("red");
+    }
+
+    /// Reactions are counted by WHO, not how many.
+    ///
+    /// "Have I already reacted" and "who agreed" are both questions a count
+    /// cannot answer — and un-reacting means finding your own annotation
+    /// event to redact, which a count has thrown away.
+    #[test]
+    fn reactions_aggregate_by_sender() {
+        let mut gs = GuildState::default();
+        let react = |id: &str, sender: &str, key: &str| {
+            json!({
+                "type": "m.reaction", "event_id": id, "sender": sender,
+                "content": { "m.relates_to": {
+                    "rel_type": "m.annotation", "event_id": "$msg", "key": key
+                } }
+            })
+        };
+        let up = "UP";
+        let eye = "EYE";
+
+        assert!(apply_reaction(&mut gs, "!r:h", &react("$a", "@1-61:h", up)));
+        assert!(apply_reaction(&mut gs, "!r:h", &react("$b", "@me:h", up)));
+        assert!(apply_reaction(&mut gs, "!r:h", &react("$c", "@1-42:h", eye)));
+
+        let out = reactions_for(&gs, "!r:h", "$msg", "@me:h");
+        assert_eq!(out.len(), 2);
+        // Most-agreed first.
+        assert_eq!(out[0].key, up);
+        assert_eq!(out[0].count, 2);
+        assert!(out[0].mine, "my own reaction is marked as mine");
+        assert!(!out[1].mine);
+
+        // Sync replays events on reconnect, so the same person reacting twice
+        // with the same key is the normal case, not an edge.
+        assert!(!apply_reaction(&mut gs, "!r:h", &react("$d", "@1-61:h", up)));
+        assert_eq!(reactions_for(&gs, "!r:h", "$msg", "@me:h")[0].count, 2);
+
+        // Un-reacting redacts one annotation, and only that one.
+        let redaction = json!({ "type": "m.room.redaction", "redacts": "$b" });
+        assert_eq!(undo_reaction(&mut gs, &redaction).as_deref(), Some("$msg"));
+        let out = reactions_for(&gs, "!r:h", "$msg", "@me:h");
+        assert_eq!(out[0].count, 1);
+        assert!(!out[0].mine);
+
+        // A key nobody holds any more is gone, not a chip reading zero.
+        let redaction = json!({ "type": "m.room.redaction", "redacts": "$c" });
+        undo_reaction(&mut gs, &redaction);
+        let out = reactions_for(&gs, "!r:h", "$msg", "@me:h");
+        assert_eq!(out.len(), 1, "the emptied key is removed: {:?}", out);
+    }
+
+    #[test]
+    fn a_reaction_key_from_federation_is_bounded() {
+        let mut gs = GuildState::default();
+        let huge = "x".repeat(500);
+        let ev = json!({
+            "type": "m.reaction", "event_id": "$a", "sender": "@x:h",
+            "content": { "m.relates_to": {
+                "rel_type": "m.annotation", "event_id": "$msg", "key": huge
+            } }
+        });
+        apply_reaction(&mut gs, "!r:h", &ev);
+        // It becomes a chip in this window; a remote server does not get to
+        // decide how wide.
+        assert_eq!(reactions_for(&gs, "!r:h", "$msg", "@me:h")[0].key.chars().count(), 32);
+
+        // An empty key is not a reaction at all.
+        let blank = json!({
+            "type": "m.reaction", "event_id": "$b", "sender": "@x:h",
+            "content": { "m.relates_to": {
+                "rel_type": "m.annotation", "event_id": "$other", "key": "   "
+            } }
+        });
+        assert!(!apply_reaction(&mut gs, "!r:h", &blank));
+    }
+
+    /// A reply repeats what it answers inside its own body, for clients with
+    /// no reply rendering. This one HAS reply rendering, so it has to take
+    /// that block back off — and the two halves must agree exactly, or every
+    /// reply prints its quote twice.
+    #[test]
+    fn the_reply_fallback_round_trips() {
+        let quoted = "the refinery is ours\nsecond line";
+        let mut lines = quoted.lines();
+        let mut quote = vec![format!("> <{}> {}", "@1-61:h", lines.next().unwrap())];
+        quote.extend(lines.map(|l| format!("> {}", l)));
+        let wire = format!("{}\n\n{}", quote.join("\n"), "agreed");
+
+        assert_eq!(strip_reply_fallback(&wire), "agreed");
+        let (who, said) = quoted_from_fallback(&wire);
+        assert_eq!(who.as_deref(), Some("@1-61:h"));
+        assert_eq!(said.as_deref(), Some("the refinery is ours second line"));
+    }
+
+    #[test]
+    fn a_reply_whose_own_text_quotes_keeps_it() {
+        // Only the LEADING fallback block is the fallback. A reply that itself
+        // begins with a quotation is quoting on purpose.
+        let wire = "> <@a:h> original\n\n> and this is my own quote";
+        assert_eq!(strip_reply_fallback(wire), "> and this is my own quote");
+    }
+
+    #[test]
+    fn a_plain_message_is_left_alone() {
+        assert_eq!(strip_reply_fallback("just talking"), "just talking");
+        assert_eq!(quoted_from_fallback("just talking"), (None, None));
+    }
+
+    #[test]
+    fn a_reply_relation_is_read_off_the_event() {
+        let s = session();
+        let mut gs = GuildState::default();
+        gs.names.insert("@1-61:h".into(), "JPEG".into());
+        let ev = json!({
+            "type": "m.room.message", "event_id": "$r1", "sender": "@1-42:h",
+            "origin_server_ts": 1,
+            "content": {
+                "msgtype": "m.text",
+                "body": "> <@1-61:h> take 2-15361\n\nagreed",
+                "m.relates_to": { "m.in_reply_to": { "event_id": "$q1" } }
+            }
+        });
+        let m = render_event(&ev, &gs, "!r:h", "@me:h").unwrap();
+        assert_eq!(m.reply_to.as_deref(), Some("$q1"));
+        assert_eq!(m.reply_sender.as_deref(), Some("@1-61:h"));
+        assert_eq!(m.reply_excerpt.as_deref(), Some("take 2-15361"));
+        // …and the quote is NOT left in the message itself.
+        assert_eq!(m.body, "agreed");
+        let _ = s;
+    }
+
+    /// A room states its own shortlist, and an unmentioned one is unchanged.
+    #[test]
+    fn pinned_events_follow_the_room_state() {
+        let s = session();
+        let with = |pins: Option<Vec<&str>>| {
+            let mut events = vec![json!({
+                "type": "m.room.name", "content": { "name": "Lobby" }
+            })];
+            if let Some(p) = pins {
+                events.push(json!({
+                    "type": "m.room.pinned_events", "content": { "pinned": p }
+                }));
+            }
+            let state = json!({ "events": events });
+            json!({
+                "next_batch": "s1",
+                "rooms": { "join": { "!p:example.com": {
+                    "state": state, "timeline": { "events": [] }
+                } } }
+            })
+        };
+        let pins = || {
+            STATE.read().unwrap().get("pin").unwrap()
+                .rooms.get("!p:example.com").unwrap().pinned.clone()
+        };
+
+        apply_sync("pin", &s, &with(Some(vec!["$a", "$b"])));
+        assert_eq!(pins(), vec!["$a".to_string(), "$b".to_string()]);
+
+        // A sync that does not mention pins has not unpinned anything — the
+        // same trap as the unread counts: absent is "unchanged", not "none".
+        apply_sync("pin", &s, &with(None));
+        assert_eq!(pins(), vec!["$a".to_string(), "$b".to_string()]);
+
+        // Emptying the list IS a statement, and has to be obeyed.
+        apply_sync("pin", &s, &with(Some(vec![])));
+        assert!(pins().is_empty());
+
+        STATE.write().unwrap().remove("pin");
+    }
+
+    /// The one-line version, for the door into Comms.
+    #[test]
+    fn unread_totals_sum_only_joined_rooms() {
+        let room = |unread: u64, mention: bool, joined: bool| Room {
+            room_id: "!r:h".into(),
+            name: "r".into(),
+            canonical_alias: None,
+            topic: None,
+            members: 0,
+            joined,
+            pinned: Vec::new(),
+            muted: false,
+            unread,
+            mention,
+            icon: "icon-guild".into(),
+            section: "local".into(),
+            pfp_attrs: None,
+            player_id: None,
+        };
+
+        // Across every network, not one: a player asking "is anything waiting"
+        // should not have to work out which guild it was on.
+        let rooms = vec![room(3, false, true), room(4, true, true)];
+        assert_eq!(sum_unread(rooms.iter()), (7, true));
+
+        // A room merely visible in the directory is not a message to anyone.
+        let rooms = vec![room(3, false, true), room(4, true, false)];
+        assert_eq!(sum_unread(rooms.iter()), (3, false));
+
+        assert_eq!(sum_unread([].iter()), (0, false));
+    }
+
     #[test]
     fn sync_folds_rooms_and_timelines() {
         let s = session();
@@ -2114,10 +3849,10 @@ mod tests {
                 ]}
             }}}
         });
-        let (deltas, changed, _typing) = apply_sync("test-fold", &s, &v);
-        assert!(changed);
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0].1[0].sender_name, "Netlag");
+        let d = apply_sync("test-fold", &s, &v);
+        assert!(d.rooms_changed);
+        assert_eq!(d.deltas.len(), 1);
+        assert_eq!(d.deltas[0].1[0].sender_name, "Netlag");
 
         let rooms = rooms_of("test-fold");
         assert_eq!(rooms.len(), 1);
@@ -2129,9 +3864,9 @@ mod tests {
 
         // A second, empty sync must not report a change — an idle homeserver
         // long-polls every 30s and would otherwise repaint the window forever.
-        let (deltas2, changed2, _) = apply_sync("test-fold", &s, &json!({ "next_batch": "s3" }));
-        assert!(deltas2.is_empty());
-        assert!(!changed2);
+        let d2 = apply_sync("test-fold", &s, &json!({ "next_batch": "s3" }));
+        assert!(d2.deltas.is_empty());
+        assert!(!d2.rooms_changed);
     }
 
     #[test]
@@ -2149,10 +3884,10 @@ mod tests {
                 }]}
             }}}
         });
-        let (_, _, typing) = apply_sync("test-typing", &s, &v);
-        assert_eq!(typing.len(), 1);
+        let d = apply_sync("test-typing", &s, &v);
+        assert_eq!(d.typing.len(), 1);
         // Never report yourself as typing back at yourself.
-        assert_eq!(typing[0].1, vec!["@1-42:example.com".to_string()]);
+        assert_eq!(d.typing[0].1, vec!["@1-42:example.com".to_string()]);
 
         // An empty set is how "stopped typing" arrives, and it must register
         // as a change so the line clears.
@@ -2163,14 +3898,14 @@ mod tests {
                 "ephemeral": { "events": [{ "type": "m.typing", "content": { "user_ids": [] } }]}
             }}}
         });
-        let (_, _, cleared) = apply_sync("test-typing", &s, &stop);
-        assert_eq!(cleared.len(), 1);
-        assert!(cleared[0].1.is_empty());
+        let dc = apply_sync("test-typing", &s, &stop);
+        assert_eq!(dc.typing.len(), 1);
+        assert!(dc.typing[0].1.is_empty());
 
         // Repeating the same set is NOT a change — sync reports it constantly
         // and every repeat would repaint the window.
-        let (_, _, again) = apply_sync("test-typing", &s, &stop);
-        assert!(again.is_empty());
+        let da = apply_sync("test-typing", &s, &stop);
+        assert!(da.typing.is_empty());
     }
 
     /// The SAME cases the window's own matcher is held to
@@ -2312,12 +4047,12 @@ mod tests {
                 "timeline": { "events": [] } } } } }),
         );
         assert_eq!(rooms_of("test-leave").len(), 1);
-        let (_, changed, _) = apply_sync(
+        let d = apply_sync(
             "test-leave",
             &s,
             &json!({ "next_batch": "2", "rooms": { "leave": { "!x:example.com": {} } } }),
         );
-        assert!(changed);
+        assert!(d.rooms_changed);
         assert!(rooms_of("test-leave").is_empty());
     }
 

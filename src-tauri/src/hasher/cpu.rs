@@ -278,4 +278,5 @@ fn emit_complete(app_handle: &tauri::AppHandle, handle: &TaskHandle, _pid: &str)
     crate::mcp::telemetry::record_solve(&snapshot, "cpu");
     // If this hash belongs to a virtual player, sign its completion tx.
     crate::hasher::maybe_complete_virtual(app_handle, &snapshot);
+    crate::hasher::maybe_report_borrowed(app_handle, &snapshot);
 }

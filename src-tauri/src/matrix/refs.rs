@@ -252,6 +252,17 @@ fn struct_card(id: &str, v: &Value) -> Value {
         "icon": icon,
         "title": type_name,
         "subtitle": format!("{} · {}", id, player_label(&text(st.get("owner")))),
+        // Asking a room for help is only meaningful while a cycle is actually
+        // running — an offer against no cycle is a puzzle with no answer.
+        "work_task": if !built && build_at > 0.0 {
+            Some("BUILD")
+        } else if mine_at > 0.0 {
+            Some("MINE")
+        } else if refine_at > 0.0 {
+            Some("REFINE")
+        } else {
+            None
+        },
         "rows": [
             row("Work", work),
             row("Health", format!("{}", health as i64)),
@@ -260,6 +271,7 @@ fn struct_card(id: &str, v: &Value) -> Value {
         ],
         // A struct is somewhere; watching that somewhere is the useful verb.
         "actions": [action("watch_planet", "Watch", "icon-planet")],
+        "owner": text(st.get("owner")),
         "planet_id": text(st.get("locationId")),
     })
 }

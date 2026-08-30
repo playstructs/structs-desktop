@@ -456,6 +456,233 @@
     }
     #chat-composer .pfp-viewer-layer { image-rendering: pixelated; }
 
+    /* The bar is taller than any one control in it, and the chunks stack their
+       contents from the top — so the portrait and the send button both hung
+       from the top of a 70px bar with dead space beneath them. In the game's
+       own action bars the panel is exactly as tall as its contents, so the
+       question never arises; here the message field sets the height and
+       everything else has to meet it in the middle.
+
+       `justify-content`, not `align-items`: a `.sui-panel-chunk` is a COLUMN
+       flex container, so its main axis is the vertical one. `align-items` (and
+       `align-self` on the children) is the horizontal axis here, and setting
+       it changed nothing at all — twice — before the direction was checked. */
+    #chat-composer .sui-panel-chunk { justify-content: center; }
+
+    /* The portrait well is 40px by default, against a 48px send button — the
+       two flanking controls read as different weights. Matching them makes
+       the bar symmetrical, and gives the art the few extra pixels it wants:
+       the layers are 72px and cropped, so a bigger well is more of the same
+       picture rather than an enlargement of it. */
+    #chat-composer .sui-screen-portrait,
+    #chat-composer .sui-screen-portrait-image { width: 48px; height: 48px; }
+
+    /* SUI hides the portrait on hover to reveal an action icon underneath —
+       right for the HUD, where the portrait is a button that opens a menu.
+       Here it is your own face and nothing else, and it carries the tooltip
+       saying whether other clients can see it. Without this it vanished at
+       exactly the moment someone hovered to read that. */
+    #chat-composer .sui-screen-portrait:hover .sui-screen-portrait-image {
+      display: block;
+    }
+
+    /* ── Shared work ──────────────────────────────────────────────────── */
+    /* Reuses the reference-card frame: a work offer IS a card about an object,
+       and giving it its own chrome would make the same thing look like two. */
+    .chat-work.chat-kind-offer { border-left-color: var(--text-warning); }
+    /* A dead cycle: still readable as a record of what was asked, visibly not
+       something to act on. */
+    .chat-work.chat-mod-stale { opacity: .55; border-left-color: var(--border-subtle); }
+    .chat-work.chat-kind-result { border-left-color: var(--accent-primary); }
+    .chat-work-verdict {
+      padding: var(--spacing-sm) var(--spacing-md) 0;
+      font-size: 11px; line-height: 16px;
+    }
+    .chat-work-verdict.chat-mod-good { color: var(--text-player-primary); }
+    .chat-work-verdict.chat-mod-bad { color: var(--text-enemy-primary); }
+
+    /* ── Muted ────────────────────────────────────────────────────────── */
+    .chat-room-muted { color: var(--text-hint); margin-right: var(--spacing-sm); }
+
+    /* ── Seen ─────────────────────────────────────────────────────────── */
+    /* Quieter than the typing line above it: "someone is answering" is news,
+       "someone has read it" is reassurance. */
+    .chat-seen {
+      flex: 0 0 auto; align-self: stretch; text-align: right;
+      padding: 0 var(--spacing-md) var(--spacing-sm);
+      color: var(--text-hint); font-size: 10px; line-height: 14px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* ── Edit ─────────────────────────────────────────────────────────── */
+    .chat-msg .chat-edit-btn { opacity: 0; transition: opacity .1s; }
+    .chat-msg:hover .chat-edit-btn,
+    .chat-msg .chat-edit-btn:focus { opacity: 1; }
+    /* Always visible, unlike the controls: this is a fact about the message,
+       not an action on it. */
+    .chat-msg-edited { color: var(--text-hint); font-size: 10px; }
+    .chat-reply-chip.chat-mod-editing .chat-reply-who { color: var(--text-warning); }
+
+    /* ── Delete ───────────────────────────────────────────────────────── */
+    .chat-msg .chat-delete-btn { opacity: 0; transition: opacity .1s; }
+    .chat-msg:hover .chat-delete-btn,
+    .chat-msg .chat-delete-btn:focus { opacity: 1; }
+    /* Armed: visible whether or not the pointer is on the message, because a
+       control waiting for a second click must not be able to hide. */
+    .chat-msg .chat-delete-btn.chat-mod-armed {
+      opacity: 1;
+      outline: 1px solid var(--text-enemy-primary);
+      outline-offset: 1px;
+    }
+
+    /* ── Completion hint ──────────────────────────────────────────────── */
+    /* One line, above the bar, while Tab is cycling. Empty most of the time,
+       so it must take no space when it has nothing to say. */
+    .chat-complete-hint {
+      display: flex; align-items: center; gap: var(--spacing-md);
+      padding: var(--spacing-sm) var(--spacing-md);
+      background: var(--surface-player-body);
+      border-bottom: 1px solid var(--border-subtle);
+      color: var(--text-hint); font-size: 11px; line-height: 16px;
+      text-align: left;
+    }
+    .chat-complete-hint:empty { display: none; }
+    .chat-complete-id { color: var(--accent-secondary); flex: 0 0 auto; }
+    .chat-complete-what {
+      flex: 1 1 auto; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .chat-complete-of { flex: 0 0 auto; }
+
+    /* ── Reactions ────────────────────────────────────────────────────── */
+    .chat-reactions {
+      display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
+      margin-top: var(--spacing-sm); align-self: stretch;
+    }
+    .chat-reaction {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 1px 6px; line-height: 16px;
+    }
+    /* A key this window does not know is other people's text — an emoji from
+       Element, a word from a bot. Give it a font that can render either, since
+       the game's own face has no emoji coverage. */
+    .chat-reaction-key {
+      font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji',
+                   'DirectiveZero', sans-serif;
+      font-size: 12px;
+    }
+    /* The game's own hulls, at chip size.
+       NOT `pixelated`, though this is pixel art and the portrait compositor
+       deliberately is. That one ENLARGES 72px art, where nearest-neighbour
+       keeps the edges hard. This REDUCES 128px art to 20, where the same
+       filter keeps one pixel in six and throws the rest away — a destroyer
+       came out as three unrelated dots. Downscaling wants the average. */
+    .chat-reaction-struct {
+      width: 20px; height: 20px;
+      image-rendering: auto;
+      display: block;
+    }
+    /* The struct sheet wraps to several rows; keep it from crowding the
+       message it belongs to. */
+    .chat-reactions { max-height: 30vh; overflow-y: auto; }
+    .chat-reaction-count { font-size: 11px; }
+    /* The picker's own offers read as outlines until taken, so the ones
+       already on the message stay the ones that look filled in. */
+    .chat-reaction.chat-mod-offer {
+      border: 1px dashed var(--border-subtle);
+      color: var(--text-hint);
+    }
+    .chat-reaction.chat-mod-offer:hover { border-color: var(--accent-primary); }
+    .chat-reaction.chat-mod-offer.chat-mod-mine { border-style: solid; }
+
+    .chat-msg .chat-react-btn { opacity: 0; transition: opacity .1s; }
+    .chat-msg:hover .chat-react-btn,
+    .chat-msg .chat-react-btn:focus { opacity: 1; }
+
+    /* ── Replies ──────────────────────────────────────────────────────── */
+    /* A pointer back, not a copy: the message it answers is already up there.
+       One line, clipped, dimmer than the message it belongs to. */
+    .chat-reply-quote {
+      display: flex; align-items: baseline; gap: var(--spacing-sm);
+      margin: 0 0 2px 0; padding-left: var(--spacing-sm);
+      border-left: 2px solid var(--border-subtle);
+      color: var(--text-hint); font-size: 11px; line-height: 16px;
+      overflow: hidden;
+    }
+    .chat-reply-quote:hover { border-left-color: var(--accent-primary); }
+    .chat-reply-who { color: var(--accent-secondary); flex: 0 0 auto; }
+    .chat-reply-text {
+      flex: 1 1 auto; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    /* Where a jump lands. Brief on purpose — it answers "which one" and then
+       gets out of the way. */
+    .chat-msg.chat-mod-found { background: var(--surface-player-body); }
+
+    .chat-reply-chip {
+      display: flex; align-items: center; gap: var(--spacing-sm);
+      padding: var(--spacing-sm) var(--spacing-md);
+      background: var(--surface-player-body);
+      border-bottom: 1px solid var(--border-subtle);
+      color: var(--text-hint); font-size: 11px; line-height: 16px;
+      text-align: left;
+    }
+    .chat-reply-chip .chat-reply-text { flex: 1 1 auto; min-width: 0; }
+    .chat-reply-cancel { flex: 0 0 auto; }
+
+    .chat-msg .chat-reply-btn { opacity: 0; transition: opacity .1s; }
+    .chat-msg:hover .chat-reply-btn,
+    .chat-msg .chat-reply-btn:focus { opacity: 1; }
+
+    /* ── Pinned ───────────────────────────────────────────────────────── */
+    .chat-pins {
+      align-self: stretch; text-align: left;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--surface-player-body);
+    }
+    .chat-pins-head {
+      display: flex; align-items: center; gap: var(--spacing-sm);
+      padding: var(--spacing-sm) var(--spacing-md);
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase; color: var(--text-hint);
+    }
+    .chat-pins-head:hover { color: var(--accent-primary); }
+    .chat-pins-label { flex: 1 1 auto; }
+    /* Bounded: a room is free to pin ten things, and this sits above the
+       conversation rather than replacing it. */
+    .chat-pins-body { max-height: 30vh; overflow-y: auto; }
+    .chat-pins-note { padding: var(--spacing-md); color: var(--text-hint); }
+    .chat-pin { align-self: stretch; }
+
+    /* On hover, not always: a column of beacons down a conversation nobody is
+       pinning is noise. Kept visible once a message IS pinned — that is state,
+       and state you can only see by hovering is state you do not know. */
+    .chat-msg .chat-pin-btn { opacity: 0; transition: opacity .1s; }
+    .chat-msg:hover .chat-pin-btn,
+    .chat-msg .chat-pin-btn:focus { opacity: 1; }
+    .chat-msg .chat-pin-btn .sui-text-warning { opacity: 1; }
+    .chat-msg:has(.sui-text-warning) .chat-pin-btn { opacity: 1; }
+
+    /* ── Search ───────────────────────────────────────────────────────── */
+    #chat-search-box { padding: var(--spacing-md); align-self: stretch; }
+    #chat-search-box .sui-input-text { width: 100%; }
+    .chat-search-hit {
+      align-self: stretch; text-align: left;
+      padding: var(--spacing-sm) 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .chat-search-hit:last-child { border-bottom: none; }
+    /* The room is the part of a hit you cannot infer from the message, and it
+       is what makes the result worth clicking. Small and above, so it labels
+       the message rather than competing with it. */
+    .chat-search-hit-room {
+      display: flex; align-items: center; gap: var(--spacing-sm);
+      padding: 0 var(--spacing-md);
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase; color: var(--text-hint);
+    }
+    .chat-search-hit-room:hover { color: var(--accent-primary); }
+
     /* ── Notices ──────────────────────────────────────────────────────── */
     .chat-notice {
       display: flex; flex-direction: column; gap: var(--spacing-sm);

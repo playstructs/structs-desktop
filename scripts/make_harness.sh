@@ -845,6 +845,43 @@ cat > "$CFIX" <<'EOF'
     matrix_mark_read: { ok: true },
     // Answers only for ids the chain knows; 1-1945 is absent on purpose.
     matrix_refs: null,
+    // A room's pinned messages, fetched on demand. Tests set
+    // __HARNESS_PINS__ to control what comes back.
+    get matrix_pinned() {
+      return { messages: window.__HARNESS_PINS__ || [] };
+    },
+    // The homeserver's answer. Echoes the query back so a stale reply can be
+    // told from a current one.
+    matrix_search: null,
+    // The player's own objects, for completing an id.
+    matrix_id_suggestions: { ids: [
+      { id: '1-194', label: 'you' },
+      { id: '2-9001', label: 'your planet' },
+      { id: '9-77', label: 'your fleet' },
+    ] },
+    matrix_mute: { ok: true },
+    matrix_redact: { ok: true },
+    // Verification is the safety-critical half: a result arriving over
+    // federation is a claim, not a fact.
+    get matrix_work_verify() {
+      return window.__HARNESS_WORK_OK__ === false
+        ? { ok: false } : { ok: true, proof: '00000abc' };
+    },
+    matrix_work_offer: { ok: true, event_id: '$offer1' },
+    matrix_work_accept: { ok: true, object: '5-2184', task: 'MINE' },
+    matrix_work_params: { object: '5-2184', task: 'MINE',
+                          block_start: 812004, difficulty: 5 },
+    matrix_work_submit: { ok: true },
+    // Whether an offer's cycle is still live. Tests set __HARNESS_WORK_STALE__
+    // to make one dead, and __HARNESS_WORK_UNKNOWN__ to make the chain
+    // unreadable — which must NOT grey a card out.
+    get matrix_work_status() {
+      if (window.__HARNESS_WORK_UNKNOWN__) return { known: false };
+      return window.__HARNESS_WORK_STALE__
+        ? { known: true, live: false, current: 999999 }
+        : { known: true, live: true, current: 812004 };
+    },
+    matrix_edit: { ok: true, event_id: '$editevent' },
     matrix_take_pending_room: null,
     // A share the app handed over before the window was listening. Null by
     // default; a test sets __HARNESS_PENDING_DRAFT__ to exercise the replay.
@@ -895,6 +932,48 @@ cat > "$CFIX" <<'EOF'
             resolve(answer);
           };
         });
+      }
+      if (cmd === 'matrix_react') {
+        // The server owns the aggregate; it answers with the new one.
+        var key = 'react:' + args.eventId;
+        var cur = window[key] || [];
+        var next = [];
+        var seen = false;
+        cur.forEach(function (r) {
+          if (r.key !== args.key) { next.push(r); return; }
+          seen = true;
+          var n = r.count + (args.on ? 1 : -1);
+          if (n > 0) next.push({ key: r.key, count: n, mine: args.on, who: r.who || [] });
+        });
+        if (!seen && args.on) next.push({ key: args.key, count: 1, mine: true, who: ['You'] });
+        window[key] = next;
+        return Promise.resolve({ ok: true, reactions: next });
+      }
+      if (cmd === 'matrix_pin') {
+        // The server owns the list; it answers with the new one.
+        var list = (window.__HARNESS_PINNED_IDS__ || []).filter(function (e) {
+          return e !== args.eventId;
+        });
+        if (args.pin) list.push(args.eventId);
+        window.__HARNESS_PINNED_IDS__ = list;
+        return Promise.resolve({ ok: true, pinned: list });
+      }
+      if (cmd === 'matrix_search') {
+        var q = String((args && args.query) || '').trim();
+        var hits = (window.__HARNESS_HITS__ || []).filter(function (h) {
+          return !args.roomId || h.room_id === args.roomId;
+        });
+        var answer = { query: q, hits: q ? hits : [] };
+        // A test can hold ONE search open to prove that a slow answer to an
+        // old question cannot paint over a newer one. One-shot: the whole
+        // point is that a LATER search still answers while this one waits.
+        if (window.__HARNESS_HOLD_SEARCH__) {
+          window.__HARNESS_HOLD_SEARCH__ = false;
+          return new Promise(function (resolve) {
+            window.__HARNESS_RELEASE_SEARCH__ = function () { resolve(answer); };
+          });
+        }
+        return Promise.resolve(answer);
       }
       if (cmd === 'matrix_timeline') {
         // A test can pin an exact answer when the SCENARIO is the timeline

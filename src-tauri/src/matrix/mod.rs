@@ -12,6 +12,7 @@
 //! so an install that has never used chat makes no chat requests at all.
 
 pub mod avatar;
+pub mod work;
 pub mod auth;
 pub mod client;
 pub mod directory;
@@ -264,7 +265,7 @@ pub async fn matrix_timeline(
     limit: Option<u32>,
 ) -> Result<Value, String> {
     let session = session_for(&guild_id)?;
-    let (room, cached) = client::timeline_of(&guild_id, &room_id);
+    let (room, cached) = client::timeline_of(&guild_id, &room_id, &session.user_id);
     let want = limit.unwrap_or(60).min(200);
 
     // Sync only carries what arrived since we connected. Opening a room the
@@ -285,7 +286,10 @@ pub async fn matrix_timeline(
             }
         }
     };
-    Ok(json!({ "room": room, "messages": messages }))
+    // Computed after any backfill: it is answered against the timeline this
+    // window holds, and a moment ago that timeline may have been empty.
+    let seen = client::seen_of(&guild_id, &room_id, &session.user_id);
+    Ok(json!({ "room": room, "messages": messages, "seen": seen }))
 }
 
 /// Older history, one page at a time — what every chat log does when you
@@ -303,6 +307,16 @@ pub async fn matrix_backfill(
     Ok(json!({ "messages": messages, "more": more }))
 }
 
+/// What a reply is answering. The window already has all three on the
+/// message being replied to, so asking for them costs nothing and saves a
+/// fetch per reply on this side.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ReplyTarget {
+    pub event_id: String,
+    pub sender: String,
+    pub body: String,
+}
+
 #[tauri::command]
 pub async fn matrix_send(
     guild_id: String,
@@ -310,6 +324,7 @@ pub async fn matrix_send(
     body: String,
     msgtype: Option<String>,
     mentions: Option<Vec<Value>>,
+    reply_to: Option<ReplyTarget>,
 ) -> Result<Value, String> {
     let session = session_for(&guild_id)?;
     let body = body.trim();
@@ -338,7 +353,15 @@ pub async fn matrix_send(
         })
         .collect();
 
-    let event_id = client::send_with_mentions(&session, &room_id, body, kind, &pairs).await?;
+    // Replying carries what is being answered, so the fallback other clients
+    // rely on can be built in one place — see `client::send_full`.
+    let reply = reply_to.as_ref().map(|r| client::Reply {
+        event_id: r.event_id.as_str(),
+        sender: r.sender.as_str(),
+        body: r.body.as_str(),
+    });
+    let event_id =
+        client::send_full(&session, &room_id, body, kind, &pairs, reply).await?;
     Ok(json!({ "event_id": event_id, "msgtype": kind, "mentioned": pairs.len() }))
 }
 
@@ -484,6 +507,516 @@ pub fn matrix_badge(app: tauri::AppHandle, count: u32, mention: bool) -> Result<
         (n, false) => format!("({}) Structs — Comms", n),
     };
     w.set_title(&title).map_err(|e| e.to_string())
+}
+
+/// Post a solved nonce back to the room that asked for it.
+///
+/// Called from the hasher when a borrowed task completes. Lives here rather
+/// than there because it is a Comms concern; the hasher should not know what
+/// a Matrix room is.
+pub async fn post_work_result(
+    guild_id: &str,
+    room_id: &str,
+    body: &str,
+    work: Value,
+    reply_to: &str,
+) -> Result<String, String> {
+    let session = session_for(guild_id)?;
+    client::send_work(&session, room_id, body, work, Some(reply_to)).await
+}
+
+/// Ask a room for help with a proof.
+///
+/// The anchor comes from the CHAIN, never from the caller: a proof is
+/// verified against the chain's own `blockStart*`, so an offer carrying a
+/// guessed anchor would have every solver grinding a string that can never
+/// be accepted.
+#[tauri::command]
+pub async fn matrix_work_offer(
+    guild_id: String,
+    room_id: String,
+    object_id: String,
+    task: String,
+    block_start: u64,
+    difficulty: u64,
+    target_id: Option<String>,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let task = task.to_uppercase();
+    if !client_work_kind(&task) {
+        return Err(format!("{} is not a kind of work the chain issues proofs for", task));
+    }
+    if block_start == 0 {
+        return Err("that object has no cycle running, so there is nothing to prove yet".into());
+    }
+    if task == "RAID" && target_id.as_deref().unwrap_or("").is_empty() {
+        return Err("a raid proof is anchored to its target planet".into());
+    }
+    let work = json!({
+        "v": 1, "kind": "offer", "task": task, "object": object_id,
+        "target": target_id, "block_start": block_start, "difficulty": difficulty,
+    });
+    let body = match target_id.as_deref() {
+        Some(t) => format!("Work wanted: {} on {} against {} (anchor {})", task, object_id, t, block_start),
+        None => format!("Work wanted: {} on {} (anchor {})", task, object_id, block_start),
+    };
+    let event_id = client::send_work(&session, &room_id, &body, work, None).await?;
+    Ok(json!({ "ok": true, "event_id": event_id }))
+}
+
+fn client_work_kind(task: &str) -> bool {
+    work::KINDS.contains(&task)
+}
+
+/// Silence a room, or let it speak again.
+#[tauri::command]
+pub async fn matrix_mute(
+    app: tauri::AppHandle,
+    guild_id: String,
+    room_id: String,
+    muted: bool,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    client::set_muted(&session, &room_id, muted).await?;
+    client::note_muted(&guild_id, &room_id, muted);
+    // The room list carries the flag, so push the new one rather than making
+    // the window wait for a sync to tell it what it just did.
+    let _ = app.emit(
+        "matrix::rooms",
+        json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
+    );
+    Ok(json!({ "ok": true, "muted": muted }))
+}
+
+/// The anchor the chain is currently running for this object, or 0.
+///
+/// Factored out of `matrix_work_params` because three different callers need
+/// the same answer: making an offer, deciding whether one is still worth
+/// grinding, and telling a reader that a card has gone dead.
+async fn live_anchor(object_id: &str, task: &str) -> Result<u64, String> {
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    match task {
+        // Since chain v0.21.0 the ore clock lives on the PLANET, not the
+        // struct. Reading the struct's own field returns 0 forever, which
+        // reads as "no cycle" rather than as a bug.
+        "MINE" | "REFINE" => {
+            let v = client.query_entity("struct", object_id).await?;
+            let planet_id = v
+                .get("Struct")
+                .and_then(|s| s.get("locationId"))
+                .and_then(|l| l.as_str())
+                .map(str::to_string)
+                .ok_or("that struct has no location, so it has no ore clock")?;
+            let p = client.query_entity("planet", &planet_id).await?;
+            Ok(crate::mcp::loop_util::planet_ore_anchor(Some(&p), task))
+        }
+        "BUILD" => {
+            let v = client.query_entity("struct", object_id).await?;
+            Ok(v.get("structAttributes")
+                .and_then(|a| a.get("blockStartBuild"))
+                .and_then(num_of)
+                .unwrap_or(0))
+        }
+        // A raid's anchor lives on the fleet's own work record, which this
+        // path cannot read. Unknown, never "dead".
+        _ => Ok(0),
+    }
+}
+
+/// Is an offer still worth anything?
+///
+/// `live` is false only when the chain is certainly running a DIFFERENT
+/// cycle. A read failure, or a kind whose anchor this path cannot see, comes
+/// back unknown — a card must never be greyed out on a guess.
+#[tauri::command]
+pub async fn matrix_work_status(
+    object_id: String,
+    task: String,
+    block_start: u64,
+) -> Result<Value, String> {
+    let task = task.to_uppercase();
+    let live = match live_anchor(&object_id, &task).await {
+        Ok(a) => a,
+        Err(_) => return Ok(json!({ "known": false })),
+    };
+    if live == 0 {
+        return Ok(json!({ "known": false }));
+    }
+    Ok(json!({ "known": true, "live": live == block_start, "current": live }))
+}
+
+/// Everything an offer needs, resolved from the chain rather than guessed.
+///
+/// The window knows an object id and nothing else. The anchor in particular
+/// must come from the chain: it is what the proof is verified against, and an
+/// offer carrying a guessed one would have every solver grinding a string
+/// that can never be accepted.
+#[tauri::command]
+pub async fn matrix_work_params(object_id: String, task: String) -> Result<Value, String> {
+    let task = task.to_uppercase();
+    if !work::KINDS.contains(&task.as_str()) {
+        return Err(format!("{} is not a kind of work the chain issues proofs for", task));
+    }
+    let difficulty = {
+        let gs = crate::game_state::GAME_STATE
+            .read()
+            .map_err(|_| "game state unavailable")?;
+        gs.get_difficulty_for_struct(&object_id, &task).unwrap_or(0)
+    };
+
+    let block_start = live_anchor(&object_id, &task).await?;
+    if block_start == 0 {
+        return Err(format!(
+            "{} has no {} cycle running, so there is nothing to prove yet",
+            object_id, task
+        ));
+    }
+    Ok(json!({ "object": object_id, "task": task,
+               "block_start": block_start, "difficulty": difficulty }))
+}
+
+fn num_of(v: &Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+        .or_else(|| v.as_f64().map(|f| f as u64))
+}
+
+/// Submit a proof somebody else found.
+///
+/// Verified here first, from fields THIS side rebuilds — a result arriving
+/// over federation is a claim, and submitting an unchecked one costs a
+/// transaction and its charge to discover it was nonsense.
+#[tauri::command]
+pub async fn matrix_work_submit(
+    app: tauri::AppHandle,
+    object_id: String,
+    task: String,
+    block_start: u64,
+    difficulty: u64,
+    nonce: String,
+    target_id: Option<String>,
+) -> Result<Value, String> {
+    let task = task.to_uppercase();
+    let Some(proof) = work::verify(
+        &object_id, &task, block_start, target_id.as_deref(), &nonce, difficulty,
+    ) else {
+        return Err("that nonce does not solve this task".into());
+    };
+
+    let (type_url, payload) = match task.as_str() {
+        "MINE" => (
+            "/structs.structs.MsgStructOreMinerComplete",
+            json!({ "structId": object_id, "proof": proof, "nonce": nonce }),
+        ),
+        "REFINE" => (
+            "/structs.structs.MsgStructOreRefineryComplete",
+            json!({ "structId": object_id, "proof": proof, "nonce": nonce }),
+        ),
+        "BUILD" => (
+            "/structs.structs.MsgStructBuildComplete",
+            json!({ "structId": object_id, "proof": proof, "nonce": nonce }),
+        ),
+        "RAID" => (
+            "/structs.structs.MsgPlanetRaidComplete",
+            json!({ "fleetId": object_id, "proof": proof, "nonce": nonce }),
+        ),
+        _ => return Err(format!("{} is not a kind of work with a completion", task)),
+    };
+
+    // The chain rebuilds the hashed input from its OWN clock, so the proof is
+    // valid only while that clock still reads what was solved against. This
+    // guard re-tests at broadcast, which is the only moment that counts —
+    // and a proof that came over chat has waited longer than a local one.
+    let guard = match task.as_str() {
+        "MINE" | "REFINE" => {
+            let client = crate::mcp::cosmos_client::CosmosClient::new();
+            client
+                .query_entity("struct", &object_id)
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.get("Struct")
+                        .and_then(|s| s.get("locationId"))
+                        .and_then(|l| l.as_str())
+                        .map(str::to_string)
+                })
+                .map(|planet_id| crate::mcp::tx_retry::FreshAnchor {
+                    planet_id,
+                    task_type: task.clone(),
+                    solved_anchor: block_start,
+                })
+        }
+        _ => None,
+    };
+
+    // Index 0 is the primary's key: this is the owner submitting their own
+    // work, whoever ground it.
+    let res = crate::mcp::tx_retry::sign_with_retry_guarded(
+        &app, 0, type_url, payload, "comms shared proof", guard,
+    )
+    .await?;
+    Ok(json!({ "ok": true, "result": res }))
+}
+
+/// Take on somebody else's task.
+///
+/// Starts a local grind against the offer's own parameters and registers it
+/// so that, on completion, the nonce is REPORTED rather than submitted — the
+/// completion tx names its signer as `creator`, and only the owner's is
+/// accepted.
+#[tauri::command]
+pub async fn matrix_work_accept(
+    app: tauri::AppHandle,
+    guild_id: String,
+    room_id: String,
+    offer_event: String,
+    object_id: String,
+    task: String,
+    block_start: u64,
+    difficulty: u64,
+    target_id: Option<String>,
+) -> Result<Value, String> {
+    let task = task.to_uppercase();
+    if !work::KINDS.contains(&task.as_str()) {
+        return Err(format!("{} is not a kind of work the chain issues proofs for", task));
+    }
+    if block_start == 0 {
+        return Err("that offer names no cycle to prove against".into());
+    }
+    if refs::parse_id(&object_id).is_none() {
+        return Err(format!("{} is not an object id", object_id));
+    }
+    if task == "RAID" && target_id.as_deref().unwrap_or("").is_empty() {
+        return Err("a raid proof is anchored to its target planet".into());
+    }
+    // Already grinding this one. Starting a second would spend a worker on a
+    // nonce somebody here is about to find anyway.
+    if crate::hasher::borrowed_hash(&object_id).is_some() {
+        return Ok(json!({ "ok": true, "already": true }));
+    }
+
+    // An offer whose cycle has turned over is already worthless: the nonce
+    // would be ground against an anchor the chain no longer holds. Checked
+    // BEFORE a worker is spent rather than discovered an hour later — and
+    // only refused when the chain certainly disagrees, never on a read
+    // failure, which would make a working feature look broken offline.
+    if let Ok(live) = live_anchor(&object_id, &task).await {
+        if live != 0 && live != block_start {
+            return Err(format!(
+                "that offer is stale — {} is now on cycle {}, not {}",
+                object_id, live, block_start
+            ));
+        }
+    }
+
+    let prefix = work::prefix(&object_id, &task, block_start, target_id.as_deref());
+    let now_ms = crate::hasher::types::now_millis();
+    let nonce_start = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos()
+        % 10_000_000_000) as u64;
+
+    let params = crate::hasher::types::TaskParams {
+        object_id: object_id.clone(),
+        target_id: target_id.clone(),
+        object_type: Some(if task == "RAID" { "fleet" } else { "struct" }.to_string()),
+        task_type: Some(task.clone()),
+        identity: None,
+        prefix,
+        postfix: String::new(),
+        nonce_start,
+        nonce_current: nonce_start,
+        iterations: 0,
+        iterations_since_last_start: 0,
+        difficulty_start: None,
+        difficulty_target: difficulty,
+        block_start,
+        block_checkpoint: block_start,
+        block_checkpoint_time: now_ms,
+        block_current_estimated: Some(block_start),
+        result_exists: false,
+        result_message: None,
+        result_nonce: None,
+        result_hash: None,
+        result_difficulty: 0,
+        estimated_hashrate: 300.0,
+        estimated_block_start_offset: 0,
+        status: "starting".to_string(),
+    };
+
+    crate::hasher::register_borrowed_hash(
+        object_id.clone(),
+        crate::hasher::BorrowedWork {
+            guild_id: guild_id.clone(),
+            room_id: room_id.clone(),
+            offer_event,
+            task: task.clone(),
+            target: target_id,
+            block_start,
+            difficulty,
+        },
+    );
+    use tauri::Manager;
+    let registry = app
+        .state::<std::sync::Arc<crate::hasher::types::TaskRegistry>>()
+        .inner()
+        .clone();
+    if let Err(e) = crate::hasher::start_hash_task_core(params, app.clone(), &registry) {
+        // Never leave a registration behind for a task that is not running:
+        // the next completion for this object would report a proof nobody
+        // here ground.
+        crate::hasher::forget_borrowed_hash(&object_id);
+        return Err(e);
+    }
+    Ok(json!({ "ok": true, "object": object_id, "task": task }))
+}
+
+/// Check a nonce somebody sent back.
+///
+/// Never trust the result's own account of what it solved. Everything except
+/// the number is rebuilt from what the OFFER said, and the hash is recomputed
+/// here — a forged result otherwise costs the owner a failed transaction and
+/// its charge.
+#[tauri::command]
+pub async fn matrix_work_verify(
+    object_id: String,
+    task: String,
+    block_start: u64,
+    difficulty: u64,
+    nonce: String,
+    target_id: Option<String>,
+) -> Result<Value, String> {
+    let proof = work::verify(
+        &object_id,
+        &task.to_uppercase(),
+        block_start,
+        target_id.as_deref(),
+        &nonce,
+        difficulty,
+    );
+    Ok(match proof {
+        Some(hash) => json!({ "ok": true, "proof": hash }),
+        None => json!({ "ok": false }),
+    })
+}
+
+/// Rewrite a message that has already been sent.
+#[tauri::command]
+pub async fn matrix_edit(
+    guild_id: String,
+    room_id: String,
+    event_id: String,
+    body: String,
+    msgtype: Option<String>,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let kind = client::msgtype_or_text(msgtype.as_deref());
+    let id = client::edit(&session, &room_id, &event_id, &body, kind).await?;
+    Ok(json!({ "ok": true, "event_id": id }))
+}
+
+/// Take a message back.
+#[tauri::command]
+pub async fn matrix_redact(
+    guild_id: String,
+    room_id: String,
+    event_id: String,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    client::redact(&session, &room_id, &event_id).await?;
+    Ok(json!({ "ok": true }))
+}
+
+/// Ids worth offering while someone is typing one.
+///
+/// Players talk in ids — "raid 2-15361", "5-2184 is stuck" — and typing one
+/// from memory is how you end up referring to somebody else's planet. These
+/// are the player's OWN objects, which is what they say most often; the
+/// window adds whatever the room itself has already mentioned, which is the
+/// other half of the answer and does not need Rust to know it.
+#[tauri::command]
+pub fn matrix_id_suggestions() -> Result<Value, String> {
+    let gs = crate::game_state::GAME_STATE
+        .read()
+        .map_err(|_| "game state unavailable")?;
+    let mut out: Vec<Value> = Vec::new();
+    let mut add = |id: &Option<String>, what: &str| {
+        if let Some(id) = id.as_ref().filter(|i| !i.trim().is_empty()) {
+            out.push(json!({ "id": id, "label": what }));
+        }
+    };
+    add(&gs.player_id, "you");
+    add(&gs.planet_id, "your planet");
+    add(&gs.fleet_id, "your fleet");
+    add(&gs.guild_id, "your guild");
+    Ok(json!({ "ids": out }))
+}
+
+/// React to a message, or take the reaction back.
+#[tauri::command]
+pub async fn matrix_react(
+    guild_id: String,
+    room_id: String,
+    event_id: String,
+    key: String,
+    on: bool,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    client::react(&session, &room_id, &event_id, &key, on).await?;
+    // Sync confirms it a round trip away; the window needs an answer now.
+    Ok(json!({ "ok": true, "reactions": client::reactions_of(&session, &room_id, &event_id) }))
+}
+
+/// The messages a room has pinned.
+#[tauri::command]
+pub async fn matrix_pinned(guild_id: String, room_id: String) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let messages = client::pinned(&session, &room_id).await?;
+    Ok(json!({ "room_id": room_id, "messages": messages }))
+}
+
+/// Pin or unpin one message.
+///
+/// Whether this account may is the homeserver's call — see `client::set_pinned`
+/// for why that is not decided here.
+#[tauri::command]
+pub async fn matrix_pin(
+    guild_id: String,
+    room_id: String,
+    event_id: String,
+    pin: bool,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let pinned = client::set_pinned(&session, &room_id, &event_id, pin).await?;
+    Ok(json!({ "ok": true, "pinned": pinned }))
+}
+
+/// Find something that was said.
+///
+/// `room_id` narrows it to one conversation; omitted, it looks everywhere the
+/// account is joined. The homeserver does the searching — see `client::search`
+/// for why that is not optional.
+#[tauri::command]
+pub async fn matrix_search(
+    guild_id: String,
+    query: String,
+    room_id: Option<String>,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let hits = client::search(&session, &query, room_id.as_deref(), 50).await?;
+    Ok(json!({ "hits": hits, "query": query.trim() }))
+}
+
+/// Is anything waiting in Comms?
+///
+/// For surfaces outside the Comms window — the door into it, most obviously.
+/// The window pushes `matrix::unread` as it changes; this is the cold read
+/// for anything that renders before the first sync of a session lands.
+#[tauri::command]
+pub fn matrix_unread() -> Result<Value, String> {
+    let (count, mention) = client::unread_totals();
+    Ok(json!({ "count": count, "mention": mention }))
 }
 
 /// Summarise the object ids a message mentioned.

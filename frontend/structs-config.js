@@ -1465,6 +1465,36 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   // The MCP's structs_action {action:"resync"} emits 'structs:force-resync'.
   // Soft: re-run the sync + grass-resume path (re-fetches state, re-subscribes).
   // Hard: full page reload — the nuclear option for a badly stale map.
+  // ── Comms unread ──
+  // How many messages are waiting behind the Comms door. The count is the
+  // homeserver's own, so it is still true when that window has been closed for
+  // a day — which is exactly when this badge is the only thing that would say
+  // so. Kept here, outside the Debug panel, because the panel is rebuilt from
+  // scratch every time it opens and would otherwise show nothing until the
+  // next message arrived.
+  var COMMS_UNREAD = { count: 0, mention: false };
+
+  function paintCommsUnread() {
+    var el = document.getElementById('debug-comms-unread');
+    if (!el) return;                       // panel not open; state is still kept
+    if (!COMMS_UNREAD.count) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    // Warning, not default, when someone actually named you: a count of 40
+    // hides the one message that was for you.
+    el.className = 'sui-badge ' +
+      (COMMS_UNREAD.mention ? 'sui-mod-warning' : 'sui-mod-default');
+    el.textContent = COMMS_UNREAD.count > 99 ? '99+' : String(COMMS_UNREAD.count);
+  }
+
+  (function setupCommsUnread() {
+    if (!window.__TAURI__ || !window.__TAURI__.event) return;
+    window.__TAURI__.event.listen('matrix::unread', function (event) {
+      var p = (event && event.payload) || {};
+      COMMS_UNREAD = { count: Number(p.count) || 0, mention: !!p.mention };
+      paintCommsUnread();
+    });
+  })();
+
   (function setupForceResync() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
     window.__TAURI__.event.listen('structs:force-resync', function(event) {
@@ -1933,7 +1963,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // found on purpose.
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-body" style="padding:6px;">';
-      html += '<div id="debug-comms" class="sui-button sui-mod-secondary" style="cursor:pointer; text-align:center; padding:6px 10px;">Comms</div>';
+      html += '<div id="debug-comms" class="sui-button sui-mod-secondary" style="cursor:pointer; text-align:center; padding:6px 10px;">Comms<span id="debug-comms-unread" class="sui-badge sui-mod-default" style="display:none; margin-left:6px;"></span></div>';
       html += '<div id="debug-comms-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">federated guild chat · opens in its own window</div>';
       html += '</div></div>';
 
@@ -2084,6 +2114,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         // Comms door. Same direct-invoke shape as the others: no MCP server,
         // no bearer token. Opening the window does NOT sign in — the window
         // asks first — so this button is safe to press out of curiosity.
+        // Anything waiting behind that door. Unread is the homeserver's own
+        // figure, so it is still true when the Comms window has been closed
+        // for a day — which is exactly when this badge is the only thing that
+        // would tell you.
+        paintCommsUnread();
+        // …and ask, in case no sync has pushed since this session started.
+        if (window.__TAURI__ && window.__TAURI__.core) {
+          window.__TAURI__.core.invoke('matrix_unread').then(function (u) {
+            COMMS_UNREAD = { count: Number(u && u.count) || 0, mention: !!(u && u.mention) };
+            paintCommsUnread();
+          }).catch(function () {});
+        }
         var commsEl = document.getElementById('debug-comms');
         if (commsEl) {
           commsEl.addEventListener('click', function() {
@@ -2261,68 +2303,22 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
             html += row('Active Tasks', String(data.active_tasks || 0));
 
-            // ── Per-task detail ──
+            // Count only — the per-task list used to render here, and at
+            // fleet scale it made the debug page a scroll marathon just to
+            // reach the sections below. The full task detail lives where it
+            // belongs: Team Ops → Industry → Work. One aggregate hashrate row
+            // keeps the at-a-glance "is the engine actually grinding" signal.
             if (data.tasks && data.tasks.length > 0) {
-              // Format helpers
-              var fmtHashrate = function(hashesPerMs) {
-                // estimated_hashrate is in hashes/millisecond. Convert to h/s.
-                var hps = (hashesPerMs || 0) * 1000;
-                if (hps >= 1e9) return (hps / 1e9).toFixed(2) + ' Gh/s';
-                if (hps >= 1e6) return (hps / 1e6).toFixed(1) + ' Mh/s';
-                if (hps >= 1e3) return (hps / 1e3).toFixed(1) + ' Kh/s';
-                return Math.round(hps) + ' h/s';
-              };
-              var fmtElapsed = function(startMs) {
-                if (!startMs) return '?';
-                var s = Math.max(0, (Date.now() - startMs) / 1000);
-                if (s < 60) return s.toFixed(0) + 's';
-                if (s < 3600) return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
-                return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
-              };
-              var fmtNum = function(n) {
-                if (n == null) return '—';
-                if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-                if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-                if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-                return String(n);
-              };
-
+              var totalHps = 0;
               for (var i = 0; i < data.tasks.length; i++) {
-                var t = data.tasks[i];
-
-                // Per-task sub-card with a header row + detail rows
-                var headerLabel = (t.task_type || '?') + ' ' + t.task_id +
-                  (t.target_id ? ' → ' + t.target_id : '');
-                var statusColor = t.status === 'completed' ? 'var(--accent-primary)'
-                  : (t.status === 'waiting' ? 'var(--text-hint)' : 'var(--text-body)');
-
-                // Box padding: left-only so labels visually indent under the
-                // task header (groups them) while values stay flush-right with
-                // the rest of the card's rows.
-                html += '<div style="margin-top:8px; padding:4px 0 4px 10px; border-left:2px solid var(--accent-primary); background:rgba(0,0,0,0.15);">';
-                html += '<div style="display:flex; justify-content:space-between; align-items:center; padding-bottom:4px;">';
-                html += '<div style="color:var(--text-body); font-weight:bold;">' + headerLabel + '</div>';
-                html += '<div style="color:' + statusColor + ';">' + (t.status || '?') + '</div>';
-                html += '</div>';
-
-                html += row('Hashrate', fmtHashrate(t.hashrate));
-                html += row('Iterations', fmtNum(t.iterations) +
-                  (t.iterations_since_last_start ? ' (this session: ' + fmtNum(t.iterations_since_last_start) + ')' : ''));
-                html += row('Difficulty', 'target ' + t.difficulty_target +
-                  (t.result_difficulty ? ', best found ' + t.result_difficulty : ''));
-                html += row('Block range', 'started ' + t.block_start +
-                  (t.block_current_estimated && t.block_current_estimated !== t.block_start
-                    ? ' → est ' + t.block_current_estimated + ' (' + (t.block_current_estimated - t.block_start) + ' blocks)'
-                    : ''));
-                html += row('Elapsed', fmtElapsed(t.process_start_time));
-                if (t.object_type) html += row('Object', t.object_type);
-                if (t.result_exists) {
-                  html += row('Result', 'found! nonce=' + (t.result_nonce || '?') +
-                    ' difficulty=' + t.result_difficulty);
-                }
-
-                html += '</div>';
+                totalHps += (data.tasks[i].hashrate || 0) * 1000;
               }
+              var hpsText = totalHps >= 1e9 ? (totalHps / 1e9).toFixed(2) + ' Gh/s'
+                : totalHps >= 1e6 ? (totalHps / 1e6).toFixed(1) + ' Mh/s'
+                : totalHps >= 1e3 ? (totalHps / 1e3).toFixed(1) + ' Kh/s'
+                : Math.round(totalHps) + ' h/s';
+              html += row('Hashrate', hpsText);
+              html += row('Detail', '<span style="color:var(--text-hint);">per-task view: Team Ops → Work</span>');
             } else {
               html += row('Queue', 'No active tasks');
             }

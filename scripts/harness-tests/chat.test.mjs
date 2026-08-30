@@ -358,9 +358,38 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
 }
 
 // ── Being named while looking elsewhere ─────────────────────────────────────
+// Unread is the HOMESERVER's figure, arriving as a room-list push. It is
+// maintained against the read receipts this app sends, which is what makes it
+// survive the window closing and agree with the same account open elsewhere.
 {
   console.log('\n— mention badge');
   const { w, d } = await open();
+  const push = (counts) => {
+    w.__HARNESS_EMIT__('matrix::rooms', {
+      guild_id: '0-5',
+      rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms.map((r) =>
+        Object.assign({}, r, counts[r.room_id] || {})),
+    });
+    return tick();
+  };
+
+  await push({
+    '!raid:matrix.beta.playstructs.com': { unread: 2, mention: true },
+    '!ninja:matrix.beta.playstructs.com': { unread: 1, mention: false },
+  });
+  const badge = d.querySelector('.chat-room-unread');
+  check('the badge shows what the server says is unread', text(badge) === '2',
+    text(badge));
+  check('and turns warning when I was named',
+    badge.className.includes('sui-mod-warning'), badge.className);
+
+  const quiet = all(d, '.chat-room-unread').find((b) => text(b) === '1');
+  check('plain traffic stays the default colour',
+    !quiet.className.includes('sui-mod-warning'), quiet.className);
+
+  // Messages arriving is NOT a second source of truth. The sync that
+  // delivered them also carried the server's count; adding to it here as well
+  // double-counted every message.
   w.__HARNESS_EMIT__('matrix::timeline', {
     guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com',
     messages: [
@@ -369,41 +398,33 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     ],
   });
   await tick();
-  const badge = d.querySelector('.chat-room-unread');
-  check('the badge counts the traffic', text(badge) === '2', text(badge));
-  check('and turns warning when I was named',
-    badge.className.includes('sui-mod-warning'), badge.className);
-
-  // Traffic with no mention must stay quiet.
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-5', room_id: '!ninja:matrix.beta.playstructs.com',
-    messages: [{ event_id: '$c', sender: '@1-9:h', sender_name: 'Scout', body: 'hello', kind: 'text', ts: 3 }],
-  });
-  await tick();
-  const quiet = all(d, '.chat-room-unread').find((b) => text(b) === '1');
-  check('plain traffic stays the default colour',
-    !quiet.className.includes('sui-mod-warning'), quiet.className);
-
-  // A fresh room list must MERGE, not replace. Rust always reports unread as
-  // zero — only the window knows what is being looked at — so a room being
-  // renamed or joined used to wipe every count on screen.
-  w.__HARNESS_EMIT__('matrix::rooms', {
-    guild_id: '0-5',
-    rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms.map((r) => Object.assign({}, r)),
-  });
-  await tick();
-  const raidAfter = w.Chat._state.rooms.find(
+  const still = w.Chat._state.rooms.find(
     (r) => r.room_id === '!raid:matrix.beta.playstructs.com');
-  check('a room-list push keeps unread counts', raidAfter.unread === 2,
-    String(raidAfter.unread));
-  check('…and mention flags', raidAfter.mention === true, String(raidAfter.mention));
+  check('arriving messages do not add to the server count', still.unread === 2,
+    String(still.unread));
 
-  // Opening the room clears both.
+  // Read somewhere else — on a phone, say. The server says zero, and this
+  // window has to believe it rather than keeping its own tally alive.
+  await push({ '!raid:matrix.beta.playstructs.com': { unread: 0, mention: false } });
+  const cleared = w.Chat._state.rooms.find(
+    (r) => r.room_id === '!raid:matrix.beta.playstructs.com');
+  check('reading elsewhere clears it here', cleared.unread === 0 && !cleared.mention,
+    cleared.unread + '/' + cleared.mention);
+
+  // Opening a room clears it locally at once — the receipt is in flight, and
+  // a stale server count must not flash a badge on the room being read.
+  await push({ '!raid:matrix.beta.playstructs.com': { unread: 9, mention: true } });
   await w.Chat.openRoom('!raid:matrix.beta.playstructs.com');
   await tick();
   const raid = w.Chat._state.rooms.find((r) => r.room_id === '!raid:matrix.beta.playstructs.com');
   check('opening a room clears its unread count', raid.unread === 0, String(raid.unread));
   check('…and its mention flag', !raid.mention, String(raid.mention));
+
+  // …and a push that still carries the old count must not undo that.
+  await push({ '!raid:matrix.beta.playstructs.com': { unread: 9, mention: true } });
+  const open2 = w.Chat._state.rooms.find((r) => r.room_id === '!raid:matrix.beta.playstructs.com');
+  check('a stale count cannot re-badge the room on screen',
+    open2.unread === 0 && !open2.mention, open2.unread + '/' + open2.mention);
 }
 
 // ── Object references ───────────────────────────────────────────────────────
@@ -768,17 +789,14 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     !text(aimed).includes('Marklifer') && w.Chat.mentionsMe('you around?') === false,
     text(aimed));
 
-  // And it counts as a mention for the room badge, same as a name match.
-  w.Chat.go('channels');
-  await tick();
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com',
-    messages: [{ event_id: '$m1', sender: '@1-9:h', sender_name: 'Scout',
-      body: 'no name here', kind: 'text', ts: 1787900050000, mentions_me: true }],
-  });
-  await tick();
-  const raid = w.Chat._state.rooms.find((r) => r.room_id === '!raid:matrix.beta.playstructs.com');
-  check('a declared mention lights the room badge', raid.mention === true, String(raid.mention));
+  // The ROOM badge is a different question, and no longer this window's to
+  // answer: the homeserver's push rules already understand `m.mentions`, and
+  // its `highlight_count` is what lights the badge. See the mention-badge
+  // block. What is tested here is the per-message marking, which is the one
+  // part the window still decides.
+  const plain = all(d, '.chat-msg').find((n) => text(n).includes('hitting 2-15361'));
+  check('a message that names nobody is not marked',
+    plain && !plain.className.includes('chat-mod-mention'), plain && plain.className);
 }
 
 // ── Links ───────────────────────────────────────────────────────────────────
@@ -1295,21 +1313,25 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const badges = () => w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_badge');
   const last = () => badges().pop().args;
 
+  const push = (counts) => {
+    w.__HARNESS_EMIT__('matrix::rooms', {
+      guild_id: '0-5',
+      rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms.map((r) =>
+        Object.assign({}, r, counts[r.room_id] || {})),
+    });
+    return tick();
+  };
+
   check('an empty inbox reports zero', last().count === 0, JSON.stringify(last()));
 
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com',
-    messages: [{ event_id: '$a', sender: '@1-9:h', sender_name: 'Scout', body: 'contact', kind: 'text', ts: 1 }],
-  });
-  await tick();
+  await push({ '!raid:matrix.beta.playstructs.com': { unread: 1 } });
   check('traffic raises the count', last().count === 1, JSON.stringify(last()));
   check('…without the mention marker', last().mention === false, JSON.stringify(last()));
 
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-5', room_id: '!ninja:matrix.beta.playstructs.com',
-    messages: [{ event_id: '$b', sender: '@1-9:h', sender_name: 'Scout', body: 'Marklifer?', kind: 'text', ts: 2 }],
+  await push({
+    '!raid:matrix.beta.playstructs.com': { unread: 1 },
+    '!ninja:matrix.beta.playstructs.com': { unread: 1, mention: true },
   });
-  await tick();
   check('counts add across rooms', last().count === 2, JSON.stringify(last()));
   check('and a mention anywhere raises the marker', last().mention === true,
     JSON.stringify(last()));
@@ -1562,26 +1584,29 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
 {
   console.log('\n— unread');
   const { w, d } = await open();
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com',
-    messages: [{ event_id: '$x', sender: '@1-9:h', sender_name: 'Scout',
-      body: 'contact', kind: 'text', ts: 1 },
-      { event_id: '$y', sender: '@1-9:h', sender_name: 'Scout',
-        body: 'two of them', kind: 'text', ts: 2 }],
+  const rooms = (counts) => w.__HARNESS_FIXTURES__.matrix_rooms.rooms.map((r) =>
+    Object.assign({}, r, counts[r.room_id] || {}));
+
+  w.__HARNESS_EMIT__('matrix::rooms', {
+    guild_id: '0-5',
+    rooms: rooms({ '!raid:matrix.beta.playstructs.com': { unread: 2 } }),
   });
   await tick();
-  const raid = w.Chat._state.rooms.find((r) => r.room_id === '!raid:matrix.beta.playstructs.com');
-  check('background traffic bumps unread', raid.unread === 2, String(raid.unread));
+  const raidOf = () => w.Chat._state.rooms.find(
+    (r) => r.room_id === '!raid:matrix.beta.playstructs.com');
+  check('a background room carries the server count', raidOf().unread === 2,
+    String(raidOf().unread));
   const badge = all(d, '.chat-room-unread').map(text);
   check('unread badge renders', badge.join(',') === '2', badge.join(','));
 
-  // Traffic for another network must not touch this one's rooms.
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-1', room_id: '!raid:matrix.beta.playstructs.com',
-    messages: [{ event_id: '$z', sender: '@x:y', body: 'elsewhere', kind: 'text', ts: 3 }],
+  // Another network's push must not touch this one's rooms.
+  w.__HARNESS_EMIT__('matrix::rooms', {
+    guild_id: '0-1',
+    rooms: rooms({ '!raid:matrix.beta.playstructs.com': { unread: 99 } }),
   });
   await tick();
-  check('another network cannot bump this one', raid.unread === 2, String(raid.unread));
+  check('another network cannot overwrite this one', raidOf().unread === 2,
+    String(raidOf().unread));
 }
 
 // ── Partial status pushes ───────────────────────────────────────────────────
@@ -1792,10 +1817,11 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await tick();
 
   // Traffic in a tab you are not looking at marks it.
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
-    messages: [{ event_id: '$t1', sender: '@1-9:h', sender_name: 'Scout',
-      body: 'over here', kind: 'text', ts: 1787900030000 }],
+  w.__HARNESS_EMIT__('matrix::rooms', {
+    guild_id: '0-5',
+    rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms.map((r) =>
+      Object.assign({}, r,
+        r.room_id === '!snc:matrix.beta.playstructs.com' ? { unread: 1 } : {})),
   });
   await tick();
   const tabs = () => all(d, '#menu-page-nav-items .chat-tab');
@@ -1804,10 +1830,12 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('…and a plain one does not',
     tabs()[1].querySelector('.chat-tab-dot') === null);
 
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
-    messages: [{ event_id: '$t2', sender: '@1-9:h', sender_name: 'Scout',
-      body: 'Marklifer look', kind: 'text', ts: 1787900031000 }],
+  w.__HARNESS_EMIT__('matrix::rooms', {
+    guild_id: '0-5',
+    rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms.map((r) =>
+      Object.assign({}, r,
+        r.room_id === '!snc:matrix.beta.playstructs.com'
+          ? { unread: 2, mention: true } : {})),
   });
   await tick();
   check('being named colours the dot',
@@ -2021,6 +2049,1060 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     .getAttribute('data-sui-tooltip');
   check('an unpublished portrait says so without alarming anyone',
     tip.includes('not published') && tip.includes('shortly'), tip);
+}
+
+// ── The action bar's geometry ───────────────────────────────────────────────
+// jsdom does no layout, so this cannot measure alignment. What it CAN do is
+// hold onto the three rules that were arrived at by measuring a real render —
+// each one fixes something that looked wrong on screen and looks fine in the
+// markup, which is exactly the kind of rule that gets tidied away later.
+{
+  console.log('\n— composer action bar');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  const rules = Array.from(d.styleSheets)
+    .flatMap((s) => { try { return Array.from(s.cssRules); } catch (e) { return []; } })
+    .filter((r) => r.selectorText);
+  const ruleFor = (sel) => rules.find((r) => r.selectorText === sel);
+
+  // A `.sui-panel-chunk` is a COLUMN flex container, so the vertical axis is
+  // `justify-content`. Setting `align-items` here changed nothing at all.
+  const chunk = ruleFor('#chat-composer .sui-panel-chunk');
+  check('the bar centres its controls on the vertical axis',
+    chunk && chunk.style.getPropertyValue('justify-content') === 'center',
+    chunk && chunk.style.cssText);
+
+  // The portrait well defaults to 40px against a 48px send button; matching
+  // them is what makes the two ends of the bar read as one row.
+  const well = rules.find((r) =>
+    r.selectorText.includes('#chat-composer .sui-screen-portrait') &&
+    r.style.height);
+  check('the portrait matches the send button at 48px',
+    well && well.style.height === '48px', well && well.style.cssText);
+
+  // SUI hides the portrait on hover to reveal an action icon. Here the
+  // portrait is the player's own face carrying the publication tooltip, so it
+  // vanished at the moment someone hovered to read it.
+  const hover = ruleFor('#chat-composer .sui-screen-portrait:hover .sui-screen-portrait-image');
+  check('the portrait does not vanish when hovered for its tooltip',
+    hover && hover.style.display === 'block', hover && hover.style.cssText);
+
+  // The bar's three controls: one portrait, one field, one send.
+  const bar = d.getElementById('chat-composer');
+  check('the bar is the portrait, the field and send — nothing else',
+    bar.querySelectorAll('.sui-panel-chunk').length === 3,
+    String(bar.querySelectorAll('.sui-panel-chunk').length));
+}
+
+// ── Finding something that was said ─────────────────────────────────────────
+// The window keeps a few hundred messages of one room. What is worth finding —
+// who agreed to what, which planet somebody flagged a week ago — is almost
+// never in that window, so the homeserver does the searching.
+{
+  console.log('\n— search');
+  const { w, d } = await open();
+  w.__HARNESS_HITS__ = [
+    { room_id: '!snc:matrix.beta.playstructs.com', room_name: 'SN.Corporation',
+      message: { event_id: '$s1', sender: '@1-61:h', sender_name: 'JPEG',
+        body: 'the refinery on 2-15361 is ours', kind: 'text', ts: 1787000000000 } },
+    { room_id: '!raid:matrix.beta.playstructs.com', room_name: 'Raid',
+      message: { event_id: '$s2', sender: '@1-42:h', sender_name: 'Netlag',
+        body: 'hitting 2-15361 at dawn', kind: 'text', ts: 1787000100000 } },
+  ];
+
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  // Ctrl-F is how most people will ever find this. Scoped to what they are
+  // reading, because that is where they are standing.
+  d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true }));
+  await tick();
+  check('ctrl-F opens search', w.Chat._state.view === 'search', w.Chat._state.view);
+  check('…scoped to the conversation being read',
+    w.Chat._state.searchRoom === '!snc:matrix.beta.playstructs.com',
+    String(w.Chat._state.searchRoom));
+  check('…with the field focused', d.activeElement.id === 'chat-search-query',
+    d.activeElement.id);
+  check('…and nothing searched yet',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_search').length === 0);
+
+  // On Enter, not per keystroke: a search is a round trip over the whole
+  // history of every room, and typing "raid" would fire four of them.
+  const field = d.getElementById('chat-search-query');
+  field.value = 'refin';
+  field.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick();
+  check('typing alone does not search',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_search').length === 0);
+
+  field.value = '2-15361';
+  field.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_search').pop();
+  check('Enter searches', !!call && call.args.query === '2-15361',
+    JSON.stringify(call && call.args));
+  check('…inside the room, when scoped there',
+    call.args.roomId === '!snc:matrix.beta.playstructs.com', String(call.args.roomId));
+  const hits = all(d, '.chat-search-hit');
+  check('a scoped search shows only that room', hits.length === 1, String(hits.length));
+  check('…and names the room it was in',
+    text(hits[0].querySelector('.chat-search-hit-room')) === 'SN.Corporation',
+    text(hits[0].querySelector('.chat-search-hit-room')));
+  check('…and shows the message itself',
+    text(hits[0]).includes('the refinery on 2-15361 is ours'), text(hits[0]));
+
+  // Widening is one control, and it re-runs rather than making you retype.
+  const before = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_search').length;
+  d.querySelector('.chat-page .chat-header-actions a')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('widening the scope re-runs the search',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_search').length === before + 1);
+  check('…without the room filter',
+    !w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_search').pop().args.roomId);
+  check('…and finds it everywhere', all(d, '.chat-search-hit').length === 2,
+    String(all(d, '.chat-search-hit').length));
+
+  // A hit is worth clicking because it says where it was.
+  all(d, '.chat-search-hit-room')[1].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('clicking a hit opens that conversation',
+    w.Chat._state.roomId === '!raid:matrix.beta.playstructs.com',
+    String(w.Chat._state.roomId));
+}
+
+// A slow answer to an old question must not paint over a newer one.
+{
+  console.log('\n— stale search answers');
+  const { w, d } = await open();
+  w.__HARNESS_HITS__ = [
+    { room_id: '!snc:matrix.beta.playstructs.com', room_name: 'SN.Corporation',
+      message: { event_id: '$old', sender: '@1-61:h', sender_name: 'JPEG',
+        body: 'the slow answer', kind: 'text', ts: 1 } },
+  ];
+  w.Chat.openSearch(false);
+  await tick();
+  w.__HARNESS_HOLD_SEARCH__ = true;
+  w.Chat.runSearch('first');
+  await tick();
+  w.__HARNESS_HITS__ = [
+    { room_id: '!raid:matrix.beta.playstructs.com', room_name: 'Raid',
+      message: { event_id: '$new', sender: '@1-42:h', sender_name: 'Netlag',
+        body: 'the current answer', kind: 'text', ts: 2 } },
+  ];
+  await w.Chat.runSearch('second');
+  await tick();
+  w.__HARNESS_RELEASE_SEARCH__();
+  await tick();
+  check('the stale answer is discarded',
+    text(d.querySelector('.chat-scroll')).includes('the current answer') &&
+    !text(d.querySelector('.chat-scroll')).includes('the slow answer'),
+    text(d.querySelector('.chat-scroll')).slice(0, 120));
+}
+
+// ── The room's shortlist ────────────────────────────────────────────────────
+// Search finds what you remember. A room also needs a place for the handful of
+// things everyone in it needs — the current target, the standing rules.
+{
+  console.log('\n— pinned messages');
+  const { w, d } = await open();
+  w.__HARNESS_PINS__ = [
+    { event_id: '$p1', sender: '@1-61:h', sender_name: 'JPEG',
+      body: 'target for tonight is 2-15361', kind: 'text', ts: 1787000000000 },
+  ];
+  w.__HARNESS_PINNED_IDS__ = ['$p1'];
+
+  // Arriving in a room with pins: one line, not a second timeline.
+  w.__HARNESS_EMIT__('matrix::rooms', {
+    guild_id: '0-5',
+    rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms.map((r) =>
+      Object.assign({}, r,
+        r.room_id === '!snc:matrix.beta.playstructs.com' ? { pinned: ['$p1'] } : {})),
+  });
+  await tick();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  const strip = d.querySelector('.chat-pins');
+  check('a room with pins says so', !!strip);
+  check('…as one collapsed line', text(strip).includes('Pinned message') &&
+    !d.querySelector('.chat-pins-body'), text(strip));
+  check('…and has not fetched them yet',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_pinned').length === 0);
+
+  d.querySelector('.chat-pins-head').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('opening it fetches them',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_pinned').length === 1);
+  check('…and shows the message',
+    text(d.querySelector('.chat-pins-body')).includes('target for tonight is 2-15361'),
+    text(d.querySelector('.chat-pins-body')));
+
+  // Pinning is a per-message action in the timeline.
+  const msgs = all(d, '#chat-timeline .chat-msg');
+  const target = msgs.find((n) => text(n).includes('you around?'));
+  const btn = target.querySelector('.chat-pin-btn');
+  check('a message offers a pin', !!btn, target.innerHTML.slice(0, 100));
+  btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_pin').pop();
+  check('clicking it pins that event', !!call && call.args.pin === true,
+    JSON.stringify(call && call.args));
+  check('…and the room now holds both',
+    w.Chat._state.room.pinned.length === 2,
+    JSON.stringify(w.Chat._state.room.pinned));
+
+  // Unpinning from the strip, where the pins actually are.
+  const unpin = d.querySelector('.chat-pin .chat-pin-btn');
+  unpin.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const off = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_pin').pop();
+  check('the strip can unpin', off.args.pin === false, JSON.stringify(off.args));
+
+  // A local echo has no server event id, so it cannot be pinned at all.
+  check('a pending message offers no pin',
+    w.Chat.setPin(undefined, true) === undefined &&
+    w.Chat.setPin('local-1', true) === undefined);
+}
+
+// A room with no pins says nothing at all.
+{
+  console.log('\n— no pins');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  check('an unpinned room shows no strip', d.querySelector('.chat-pins') === null);
+  check('…and does not ask for pins it has not got',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_pinned').length === 0);
+}
+
+// ── Replies ────────────────────────────────────────────────────────────────
+// In a busy guild room, "yes, do it" three messages after the question is
+// genuinely ambiguous. A reply says which question.
+{
+  console.log('\n— replies');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  const msgs = all(d, '#chat-timeline .chat-msg');
+  const question = msgs.find((n) => text(n).includes('you around?'));
+  check('a message offers a reply', !!question.querySelector('.chat-reply-btn'));
+
+  question.querySelector('.chat-reply-btn')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('replying names what is being answered', !!d.getElementById('chat-reply-chip'));
+  check('…by sender and text',
+    text(d.getElementById('chat-reply-chip')).includes('T.Xue') &&
+    text(d.getElementById('chat-reply-chip')).includes('you around?'),
+    text(d.getElementById('chat-reply-chip')));
+  check('…and the composer is focused', d.activeElement.id === 'chat-input',
+    d.activeElement.id);
+
+  // Escape drops the reply before it means "leave the room".
+  const input = d.getElementById('chat-input');
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await tick();
+  check('escape cancels the reply', !w.Chat._state.replyTo);
+  check('…without leaving the room',
+    w.Chat._state.roomId === '!snc:matrix.beta.playstructs.com',
+    String(w.Chat._state.roomId));
+
+  // Re-arm and send.
+  question.querySelector('.chat-reply-btn')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  d.getElementById('chat-input').value = 'agreed';
+  d.getElementById('chat-input')
+    .dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  const sent = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').pop();
+  check('the reply carries what it answers',
+    !!sent.args.replyTo && sent.args.replyTo.eventId === '$14',
+    JSON.stringify(sent.args.replyTo));
+  check('…with the sender and body Rust needs for the fallback',
+    sent.args.replyTo.sender === '@1-77:matrix.beta.playstructs.com' &&
+    sent.args.replyTo.body === 'you around?',
+    JSON.stringify(sent.args.replyTo));
+  check('…and the target is cleared once sent', !w.Chat._state.replyTo);
+  check('…and the chip is gone', !d.getElementById('chat-reply-chip'));
+
+  // The echo shows the quote at once, not when sync catches up.
+  const echo = all(d, '#chat-timeline .chat-msg').pop();
+  check('your own reply renders as a reply',
+    !!echo.querySelector('.chat-reply-quote'), echo.innerHTML.slice(0, 120));
+  check('…naming who it answers',
+    text(echo.querySelector('.chat-reply-who')) === 'T.Xue',
+    text(echo.querySelector('.chat-reply-who')));
+}
+
+// An incoming reply renders its quote, and the quote is a way back.
+{
+  console.log('\n— incoming replies');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$reply1', sender: '@1-61:h', sender_name: 'JPEG',
+      body: 'on my way', kind: 'text', ts: 1787900099000,
+      reply_to: '$14', reply_sender: '@1-77:matrix.beta.playstructs.com',
+      reply_excerpt: 'you around?',
+    }],
+  });
+  await tick();
+  const reply = all(d, '#chat-timeline .chat-msg').pop();
+  const quote = reply.querySelector('.chat-reply-quote');
+  check('an incoming reply shows what it answers', !!quote);
+  check('…by the name a player knows, not a matrix id',
+    text(quote.querySelector('.chat-reply-who')) === 'T.Xue',
+    text(quote.querySelector('.chat-reply-who')));
+  check('…and the quote is not the whole message twice',
+    !text(reply).includes('> '), text(reply));
+
+  // Clicking the quote goes to the message it answers.
+  const answered = d.querySelector('[data-event="$14"]');
+  check('the answered message is addressable', !!answered);
+  quote.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('clicking the quote marks what it answers',
+    answered.className.includes('chat-mod-found'), answered.className);
+
+  // A quote pointing at scrollback this window does not hold says so rather
+  // than jumping somewhere wrong.
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$reply2', sender: '@1-61:h', sender_name: 'JPEG',
+      body: 'as we said', kind: 'text', ts: 1787900100000,
+      reply_to: '$ancient', reply_sender: '@1-42:h', reply_excerpt: 'long ago',
+    }],
+  });
+  await tick();
+  all(d, '.chat-reply-quote').pop()
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('a quote pointing past the window says so',
+    text(d.querySelector('#chat-timeline')).includes('further back than this window holds'),
+    text(d.querySelector('#chat-timeline')).slice(-120));
+}
+
+// ── Reactions ──────────────────────────────────────────────────────────────
+// A raid plan gets six "ack" messages that push the plan off the screen. One
+// glyph answers the same question and costs a line nobody has to read.
+{
+  console.log('\n— reactions');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  // Arriving from someone else, on a message already on screen.
+  w.__HARNESS_EMIT__('matrix::reactions', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com', event_id: '$14',
+    reactions: [{ key: 'ACK', count: 2, mine: false, who: ['JPEG', 'Netlag'] }],
+  });
+  await tick();
+  const msg = d.querySelector('[data-event="$14"]');
+  const chip = msg.querySelector('.chat-reaction');
+  check('a reaction shows on its message', !!chip, msg.innerHTML.slice(0, 140));
+  check('…with its count', text(chip) === 'ACK2', text(chip));
+  check('…and names who agreed, which a count cannot',
+    chip.title === 'JPEG, Netlag', chip.title);
+  check('…and is not marked as mine',
+    !chip.className.includes('sui-mod-warning'), chip.className);
+
+  // Clicking joins it.
+  chip.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_react').pop();
+  check('clicking a reaction joins it',
+    call.args.on === true && call.args.key === 'ACK' && call.args.eventId === '$14',
+    JSON.stringify(call.args));
+
+  // A reaction for another room must not paint this one.
+  const wasCount = all(d, '[data-event="$14"] .chat-reaction').length;
+  w.__HARNESS_EMIT__('matrix::reactions', {
+    guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com', event_id: '$14',
+    reactions: [{ key: 'NO', count: 9, mine: false, who: [] }],
+  });
+  await tick();
+  check('another room cannot repaint this one',
+    all(d, '[data-event="$14"] .chat-reaction').length === wasCount,
+    String(all(d, '[data-event="$14"] .chat-reaction').length));
+
+  // The picker offers a short set, one message at a time.
+  const other = d.querySelector('[data-event="$13"]') || all(d, '.chat-msg')[0];
+  const add = other.querySelector('.chat-react-btn');
+  check('a message offers a reaction control', !!add);
+  add.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  // Eight intents plus the control that reveals the struct art.
+  check('the picker opens on that message',
+    all(d, '.chat-reaction.chat-mod-offer').length === 9,
+    String(all(d, '.chat-reaction.chat-mod-offer').length));
+  check('…and only on that one', w.Chat._state.reactPicker === other.getAttribute('data-event'),
+    String(w.Chat._state.reactPicker));
+
+  // The offers are the game's own icons, not text.
+  const first = d.querySelector('.chat-reaction.chat-mod-offer');
+  check('an offer renders as a game icon',
+    !!first.querySelector('i.icon-okay'), first.innerHTML);
+
+  // Twenty hulls open by default would be a wall across the message.
+  d.querySelector('.chat-reaction.chat-mod-more')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const hulls = all(d, '.chat-reaction-struct');
+  check('the struct sheet opens on request', hulls.length === 20, String(hulls.length));
+  check('…as real struct art from the bundle',
+    hulls[0].getAttribute('src') === 'img/structs/cmd-ship/cmd-ship-struct-base.png',
+    hulls[0].getAttribute('src'));
+
+  // Picking one sends the shortcode, which is what stays readable elsewhere.
+  hulls[1].parentElement.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const struck = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_react').pop();
+  check('a struct reaction sends its shortcode',
+    struck.args.key === ':struct/destroyer:', JSON.stringify(struck.args));
+  check('…and closing the picker forgets the sheet', !w.Chat._state.reactStructs);
+}
+
+// The glyph vocabulary, which is what makes a key game-native or not.
+{
+  console.log('\n— reaction glyphs');
+  const { w } = await open();
+  const g = w.Chat.reactionGlyph;
+
+  check('a known shortcode becomes a SUI icon',
+    g(':raid:').tagName === 'I' && g(':raid:').className.includes('icon-raid'),
+    g(':raid:').outerHTML);
+  check('a struct shortcode becomes its picture',
+    g(':struct/tank:').tagName === 'IMG' &&
+    g(':struct/tank:').src.includes('tank-struct-base.png'),
+    g(':struct/tank:').outerHTML);
+
+  // Anything else is somebody else's content and must still show as itself —
+  // an emoji from Element, a word from a bot, a shortcode we do not know.
+  check('an emoji from another client still renders',
+    g('\uD83D\uDC4D').tagName === 'SPAN' && g('\uD83D\uDC4D').textContent === '\uD83D\uDC4D',
+    g('\uD83D\uDC4D').outerHTML);
+  check('a plain word still renders',
+    g('ack').textContent === 'ack', g('ack').outerHTML);
+  check('an unknown shortcode is shown, not swallowed',
+    g(':nosuchicon:').textContent === ':nosuchicon:', g(':nosuchicon:').outerHTML);
+  // A key naming a struct that does not ship must not become a broken image.
+  check('an unknown hull is not a broken image',
+    g(':struct/nothing:').tagName === 'SPAN', g(':struct/nothing:').outerHTML);
+}
+
+// The optimistic update, which is what the click actually feels like.
+{
+  console.log('\n— reaction arithmetic');
+  const { w } = await open();
+  const o = w.Chat.optimistic;
+
+  check('a new key starts at one and is mine',
+    JSON.stringify(o([], 'ACK', true)) ===
+      JSON.stringify([{ key: 'ACK', count: 1, mine: true, who: [] }]));
+
+  const two = [{ key: 'ACK', count: 2, mine: false, who: ['a', 'b'] }];
+  check('joining raises the count', o(two, 'ACK', true)[0].count === 3);
+  check('…and marks it mine', o(two, 'ACK', true)[0].mine === true);
+
+  const mine = [{ key: 'ACK', count: 2, mine: true, who: ['a', 'You'] }];
+  check('leaving lowers it', o(mine, 'ACK', false)[0].count === 1);
+  check('…and unmarks it', o(mine, 'ACK', false)[0].mine === false);
+
+  // A key nobody holds any more is gone, not a chip reading zero.
+  const one = [{ key: 'ACK', count: 1, mine: true, who: ['You'] }];
+  check('the last one leaving removes the key', o(one, 'ACK', false).length === 0,
+    JSON.stringify(o(one, 'ACK', false)));
+
+  // Most-agreed first, and stable when level so the row does not shuffle.
+  const many = [
+    { key: 'B', count: 1, mine: false, who: [] },
+    { key: 'A', count: 1, mine: false, who: [] },
+    { key: 'C', count: 5, mine: false, who: [] },
+  ];
+  check('ordered by agreement, then by key',
+    o(many, 'Z', false).map((r) => r.key).join('') === 'CAB',
+    o(many, 'Z', false).map((r) => r.key).join(''));
+}
+
+// ── Completing an id ───────────────────────────────────────────────────────
+// Players talk in ids, and typing one from memory is how you end up naming
+// somebody else's planet. Tab completes them like it completes names.
+{
+  console.log('\n— id completion');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  // What the ROOM has said comes first: "what was that planet again" is a
+  // question the conversation itself answers.
+  const hits = w.Chat.idCompletions('2-');
+  check('ids said in this room are completable', hits.indexOf('2-15361') !== -1,
+    JSON.stringify(hits));
+
+  // Your own objects are there too, so they are never mistyped.
+  check('your own planet is completable',
+    w.Chat.idCompletions('2-9').indexOf('2-9001') !== -1,
+    JSON.stringify(w.Chat.idCompletions('2-9')));
+  check('…and your own fleet', w.Chat.idCompletions('9-').indexOf('9-77') !== -1,
+    JSON.stringify(w.Chat.idCompletions('9-')));
+
+  // A stem matching nothing offers nothing rather than everything.
+  check('an unmatched stem completes to nothing',
+    w.Chat.idCompletions('7-999').length === 0,
+    JSON.stringify(w.Chat.idCompletions('7-999')));
+
+  // Tab in the composer completes it, and — the part that matters — does NOT
+  // prefix it with @. That would turn a reference into a mention of nobody.
+  const input = d.getElementById('chat-input');
+  input.value = 'hitting 2-1';
+  input.dispatchEvent(new w.Event('input', { bubbles: true }));
+  input.selectionStart = input.value.length;
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+  await tick();
+  check('Tab completes an id in the composer',
+    input.value.indexOf('2-15361') !== -1, JSON.stringify(input.value));
+  check('…without turning it into a mention',
+    input.value.indexOf('@2-') === -1, JSON.stringify(input.value));
+
+  // The hint answers "which one is that", which is the question cycling asks.
+  const hint = d.getElementById('chat-complete-hint');
+  check('the hint names the object being offered',
+    text(hint).includes('2-15361'), text(hint));
+
+  // Typing again clears it — a stale hint describes the wrong thing.
+  input.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick();
+  check('typing clears the hint', text(hint) === '', text(hint));
+
+  // Names still complete as mentions; the id path must not have eaten them.
+  input.value = 'Netl';
+  input.selectionStart = input.value.length;
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+  await tick();
+  check('a name still completes as a mention',
+    input.value.indexOf('@Netlag') === 0, JSON.stringify(input.value));
+}
+
+// ── Taking a message back ──────────────────────────────────────────────────
+// You can always re-send a corrected message. You cannot unsay one.
+{
+  console.log('\n— unsend');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  // Offered on your own messages only. A moderator could redact anyone's, but
+  // offering that to everybody is an invitation to click and be refused.
+  const mine = all(d, '.chat-msg').find((n) => n.className.includes('chat-mod-self')) ||
+    all(d, '#chat-timeline .chat-msg').find((n) => n.querySelector('.chat-delete-btn'));
+  const theirs = all(d, '#chat-timeline .chat-msg')
+    .find((n) => text(n).includes('you around?'));
+  check('somebody else\'s message offers no delete',
+    !theirs.querySelector('.chat-delete-btn'));
+
+  // Send one, so there is something of ours to take back.
+  const input = d.getElementById('chat-input');
+  input.value = 'wrong id, sorry';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  await tick();
+  const own = all(d, '#chat-timeline .chat-msg').pop();
+  const del = own.querySelector('.chat-delete-btn');
+  check('your own message offers a delete', !!del, own.innerHTML.slice(0, 160));
+
+  // One click arms, it does not delete. The control sits in a row of harmless
+  // neighbours and this cannot be undone.
+  del.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('the first click only arms it',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_redact').length === 0);
+  check('…and says so', w.Chat._state.deleteArmed !== null,
+    String(w.Chat._state.deleteArmed));
+
+  // Moving away cancels: an armed control left behind is a trap.
+  all(d, '#chat-timeline .chat-msg').pop().querySelector('.chat-delete-btn')
+    .dispatchEvent(new w.MouseEvent('mouseleave', { bubbles: true }));
+  await tick();
+  check('moving away disarms it', w.Chat._state.deleteArmed === null);
+
+  // Arm and confirm.
+  const again = () => all(d, '#chat-timeline .chat-msg').pop().querySelector('.chat-delete-btn');
+  again().dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  again().dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_redact').pop();
+  check('the second click removes it', !!call, JSON.stringify(call && call.args));
+  check('…and it reads as removed at once',
+    text(all(d, '#chat-timeline .chat-msg').pop()).includes('message removed'),
+    text(all(d, '#chat-timeline .chat-msg').pop()));
+}
+
+// Somebody else taking one back has to land here too.
+{
+  console.log('\n— redaction from elsewhere');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const before = d.querySelector('[data-event="$14"]');
+  check('the message is there to begin with',
+    text(before).includes('you around?'), text(before));
+
+  w.__HARNESS_EMIT__('matrix::redacted', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com', event_id: '$14',
+  });
+  await tick();
+  const after = d.querySelector('[data-event="$14"]');
+  // Rewritten, not dropped: a message that silently vanishes reads as a bug,
+  // and the gap is what everyone else still sees.
+  check('it is rewritten in place', !!after && text(after).includes('message removed'),
+    after && text(after));
+  check('…and its text is gone', !text(after).includes('you around?'), text(after));
+
+  // A redaction for another room must not touch this one.
+  const other = all(d, '#chat-timeline .chat-msg').length;
+  w.__HARNESS_EMIT__('matrix::redacted', {
+    guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com', event_id: '$13',
+  });
+  await tick();
+  check('another room is left alone',
+    all(d, '#chat-timeline .chat-msg').length === other &&
+    !text(d.querySelector('[data-event="$13"]') || d.body).includes('message removed'),
+    String(all(d, '#chat-timeline .chat-msg').length));
+}
+
+// ── Changing what you already said ─────────────────────────────────────────
+// The other half of "I got that wrong", and the half that does not require
+// deleting and re-typing the whole line.
+{
+  console.log('\n— editing');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  const input = d.getElementById('chat-input');
+  input.value = 'raid 2-15631';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick(); await tick();
+
+  const own = () => all(d, '#chat-timeline .chat-msg').pop();
+  check("somebody else's message offers no edit",
+    !all(d, '#chat-timeline .chat-msg')
+      .find((n) => text(n).includes('you around?')).querySelector('.chat-edit-btn'));
+
+  own().querySelector('.chat-edit-btn').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('editing says so above the bar', !!d.getElementById('chat-edit-chip'));
+  // The message goes back into the composer — the only place in this window
+  // that knows how to write one.
+  check('…and puts the text back in the composer',
+    d.getElementById('chat-input').value === 'raid 2-15631',
+    JSON.stringify(d.getElementById('chat-input').value));
+
+  // Escape keeps it as it was.
+  d.getElementById('chat-input')
+    .dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await tick();
+  check('escape abandons the edit', !w.Chat._state.editing);
+  check('…and does not leave the room',
+    w.Chat._state.roomId === '!snc:matrix.beta.playstructs.com');
+
+  // Re-arm and commit.
+  own().querySelector('.chat-edit-btn').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const field = d.getElementById('chat-input');
+  field.value = 'raid 2-15361';
+  field.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_edit').pop();
+  check('Enter rewrites rather than sends',
+    !!call && call.args.body === 'raid 2-15361', JSON.stringify(call && call.args));
+  check('…and no second message was sent',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').length === 1,
+    String(w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').length));
+  check('…the message now reads the new way',
+    text(own()).includes('raid 2-15361') && !text(own()).includes('2-15631'),
+    text(own()));
+  check('…and says it was changed', !!own().querySelector('.chat-msg-edited'),
+    own().innerHTML.slice(-160));
+
+  // A slash command typed while editing must not run instead of correcting —
+  // that is a surprising way to lose a correction.
+  own().querySelector('.chat-edit-btn').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const before = w.__HARNESS_CALLS__.length;
+  const f2 = d.getElementById('chat-input');
+  f2.value = '/me waves';
+  f2.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  const last = w.__HARNESS_CALLS__.slice(before).map((c) => c.cmd);
+  check('a slash command while editing is the new text, not a command',
+    last.indexOf('matrix_edit') !== -1 && last.indexOf('matrix_send') === -1,
+    JSON.stringify(last));
+}
+
+// An edit made somewhere else has to land here too.
+{
+  console.log('\n— edits from elsewhere');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::edited', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    event_id: '$14', body: 'you around? (fixed)',
+  });
+  await tick();
+  const n = d.querySelector('[data-event="$14"]');
+  check('the message is rewritten in place', text(n).includes('you around? (fixed)'),
+    text(n));
+  check('…and marked as changed', !!n.querySelector('.chat-msg-edited'));
+  check('…without adding a second message',
+    all(d, '[data-event="$14"]').length === 1,
+    String(all(d, '[data-event="$14"]').length));
+
+  // Another room must not be repainted by it.
+  w.__HARNESS_EMIT__('matrix::edited', {
+    guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com',
+    event_id: '$13', body: 'should not appear',
+  });
+  await tick();
+  check('another room is left alone',
+    !text(d.querySelector('#chat-timeline')).includes('should not appear'));
+}
+
+// ── Did they see it ────────────────────────────────────────────────────────
+// The app has always SENT read receipts — that is what makes the unread
+// counts work — but never showed anyone else's, so the question was
+// unanswerable from in here.
+{
+  console.log('\n— read receipts');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  check('a room nobody has read shows no line', !d.querySelector('.chat-seen'));
+
+  w.__HARNESS_EMIT__('matrix::seen', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    seen: { event_id: '$mine', names: ['JPEG', 'Netlag'] },
+  });
+  await tick();
+  const line = d.querySelector('.chat-seen');
+  check('who has read it is shown', !!line);
+  check('…by name', text(line) === 'Seen by JPEG, Netlag', text(line));
+
+  // Three names is a sentence; ten is a list nobody reads.
+  w.__HARNESS_EMIT__('matrix::seen', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    seen: { event_id: '$mine', names: ['JPEG', 'Netlag', 'T.Xue', 'Phoniffer', 'Crabla'] },
+  });
+  await tick();
+  check('a crowd is summarised',
+    text(d.querySelector('.chat-seen')) === 'Seen by JPEG, Netlag and 3 more',
+    text(d.querySelector('.chat-seen')));
+  check('…with the full list still available',
+    d.querySelector('.chat-seen').title.includes('Crabla'),
+    d.querySelector('.chat-seen').title);
+
+  // Another room's receipts must not be reported here.
+  w.__HARNESS_EMIT__('matrix::seen', {
+    guild_id: '0-5', room_id: '!raid:matrix.beta.playstructs.com',
+    seen: { event_id: '$x', names: ['Somebody Else'] },
+  });
+  await tick();
+  check('another room cannot claim this one',
+    !text(d.querySelector('.chat-seen')).includes('Somebody Else'),
+    text(d.querySelector('.chat-seen')));
+
+  // Leaving takes it with you: a stale "seen by" under a different
+  // conversation is a straight lie.
+  await w.Chat.openRoom('!raid:matrix.beta.playstructs.com');
+  await tick();
+  check('changing rooms clears it', !d.querySelector('.chat-seen'),
+    String(d.querySelector('.chat-seen') && text(d.querySelector('.chat-seen'))));
+}
+
+// ── Shared proof-of-work ───────────────────────────────────────────────────
+// A task's grinding input is public — object, kind, anchor — so anyone can
+// compute it. Only its owner can submit the answer. That asymmetry is what
+// makes asking a room for help safe.
+{
+  console.log('\n— shared work');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$w1', sender: '@1-61:h', sender_name: 'JPEG',
+      body: 'Work wanted: MINE on 5-2184 (anchor 812004)', kind: 'text', ts: 1,
+      work: { kind: 'offer', task: 'MINE', object: '5-2184', target: null,
+              block_start: 812004, difficulty: 5 },
+    }],
+  });
+  await tick();
+  const card = d.querySelector('.chat-work');
+  check('an offer renders as a card', !!card);
+  check('…naming the work', text(card).includes('Work wanted') && text(card).includes('Mining'),
+    text(card));
+  check('…and the struct', text(card).includes('5-2184'), text(card));
+  // The anchor is the whole reason a proof goes stale. Showing it is what
+  // lets a player see a dead offer as dead.
+  check('…and the anchor it is valid against',
+    text(card).includes('block 812004'), text(card));
+
+  // A result, and the check that must happen before anything else.
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$w2', sender: '@1-42:h', sender_name: 'Netlag',
+      body: 'Solved 5-2184 MINE @812004: nonce 918273645', kind: 'text', ts: 2,
+      work: { kind: 'result', task: 'MINE', object: '5-2184', target: null,
+              block_start: 812004, difficulty: 5, nonce: '918273645' },
+    }],
+  });
+  await tick();
+  const result = all(d, '.chat-work').pop();
+  check('a result renders too', text(result).includes('Solved'), text(result));
+  check('…showing the nonce', text(result).includes('918273645'), text(result));
+
+  // Taking on the offer grinds locally. It cannot submit anything: the
+  // completion tx names its signer as `creator`, and only the owner's counts.
+  card.querySelector('.chat-ref-action')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const accept = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_accept').pop();
+  check('helping starts a local grind', !!accept, JSON.stringify(accept && accept.args));
+  check('…against the offer\'s own anchor, not a guessed one',
+    accept.args.blockStart === 812004 && accept.args.objectId === '5-2184',
+    JSON.stringify(accept.args));
+  check('…threaded to the offer it answers', accept.args.offerEvent === '$w1',
+    String(accept.args.offerEvent));
+  check('…and says the owner still has to submit',
+    text(card.querySelector('.chat-work-verdict')).includes('only the owner can submit'),
+    text(card.querySelector('.chat-work-verdict')));
+
+  result.querySelector('.chat-ref-action')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_verify').pop();
+  check('checking it recomputes the hash', !!call, JSON.stringify(call && call.args));
+  // Everything but the number is rebuilt from what THIS side knows — a
+  // forged result otherwise costs the owner a failed transaction.
+  check('…from the task, not from the claim',
+    call.args.objectId === '5-2184' && call.args.blockStart === 812004 &&
+    call.args.nonce === '918273645',
+    JSON.stringify(call.args));
+  check('…and says it checks out',
+    text(result.querySelector('.chat-work-verdict')).includes('Checks out'),
+    text(result.querySelector('.chat-work-verdict')));
+  check('…and that the anchor still has to be live',
+    text(result.querySelector('.chat-work-verdict')).includes('812004'),
+    text(result.querySelector('.chat-work-verdict')));
+
+  // Submitting is a SEPARATE click from checking: it costs the OWNER charge,
+  // and one button that both verifies and spends would hide the check at
+  // exactly the moment it matters.
+  check('a checked proof then offers to be submitted',
+    !!result.querySelector('.chat-work-submit'));
+  result.querySelector('.chat-work-submit')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const sub = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_submit').pop();
+  check('submitting sends the nonce and the task it solves',
+    !!sub && sub.args.nonce === '918273645' && sub.args.objectId === '5-2184' &&
+    sub.args.blockStart === 812004,
+    JSON.stringify(sub && sub.args));
+  check('…and reports it landed',
+    text(result.querySelector('.chat-work-verdict')) === 'Submitted.',
+    text(result.querySelector('.chat-work-verdict')));
+}
+
+// An unchecked result must not offer a submit button at all.
+{
+  console.log('\n— submit follows checking');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$w9', sender: '@1-42:h', sender_name: 'Netlag',
+      body: 'Solved it', kind: 'text', ts: 9,
+      work: { kind: 'result', task: 'MINE', object: '5-2184', target: null,
+              block_start: 812004, difficulty: 5, nonce: '918273645' },
+    }],
+  });
+  await tick();
+  const card = all(d, '.chat-work').pop();
+  check('an unchecked result offers no submit',
+    !card.querySelector('.chat-work-submit'), card.innerHTML.slice(-200));
+  check('…and no submission has been attempted',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_submit').length === 0);
+}
+
+// A nonce that does not solve the task must be refused, plainly.
+{
+  console.log('\n— a bad result');
+  const { w, d } = await open();
+  w.__HARNESS_WORK_OK__ = false;
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$w3', sender: '@1-9:h', sender_name: 'Scout',
+      body: 'Solved it', kind: 'text', ts: 3,
+      work: { kind: 'result', task: 'MINE', object: '5-2184', target: null,
+              block_start: 812004, difficulty: 5, nonce: '1' },
+    }],
+  });
+  await tick();
+  const card = all(d, '.chat-work').pop();
+  card.querySelector('.chat-ref-action')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('a nonce that does not solve it is refused',
+    text(card.querySelector('.chat-work-verdict')).includes('does not solve'),
+    text(card.querySelector('.chat-work-verdict')));
+  check('…and is not dressed up as a success',
+    card.querySelector('.chat-work-verdict').className.includes('chat-mod-bad'),
+    card.querySelector('.chat-work-verdict').className);
+}
+
+// ── A dead offer ───────────────────────────────────────────────────────────
+// A nonce is only valid against the cycle it was ground for. Once that cycle
+// turns over the offer is worthless, and a card that still looks live is an
+// invitation to spend an hour of GPU on nothing.
+{
+  console.log('\n— stale work');
+  const { w, d } = await open();
+  w.__HARNESS_WORK_STALE__ = true;
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$ws', sender: '@1-61:h', sender_name: 'JPEG',
+      body: 'Work wanted', kind: 'text', ts: 1,
+      work: { kind: 'offer', task: 'MINE', object: '5-2184', target: null,
+              block_start: 812004, difficulty: 5 },
+    }],
+  });
+  await tick(); await tick();
+  const card = all(d, '.chat-work').pop();
+  check('a dead offer is marked', card.className.includes('chat-mod-stale'),
+    card.className);
+  check('…and says why', text(card).includes('turned over'), text(card));
+  // Controls that can only fail are worse than no controls.
+  check('…and offers nothing to click', !card.querySelector('.chat-ref-action'),
+    card.innerHTML.slice(-160));
+
+  // The check is cached: a busy room is a column of cards and each check is a
+  // chain read, and the answer cannot change for a given anchor.
+  const asked = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_status').length;
+  w.Chat.render();
+  w.Chat.render();
+  await tick();
+  check('the freshness check is asked once, not per render',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_status').length === asked,
+    String(w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_status').length));
+}
+
+// An unreadable chain is not a dead offer.
+{
+  console.log('\n— unknown is not dead');
+  const { w, d } = await open();
+  w.__HARNESS_WORK_UNKNOWN__ = true;
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$wu', sender: '@1-61:h', sender_name: 'JPEG',
+      body: 'Work wanted', kind: 'text', ts: 1,
+      work: { kind: 'offer', task: 'MINE', object: '5-2184', target: null,
+              block_start: 812004, difficulty: 5 },
+    }],
+  });
+  await tick(); await tick();
+  const card = all(d, '.chat-work').pop();
+  // Being offline would otherwise make every live offer in the room look
+  // dead — a far worse failure than showing one stale card as live.
+  check('an unreadable chain leaves the card alone',
+    !card.className.includes('chat-mod-stale'), card.className);
+  check('…and still offers to help', !!card.querySelector('.chat-ref-action'));
+}
+
+// ── Silencing a room ───────────────────────────────────────────────────────
+// A noisy room you cannot silence is a room you eventually leave. Muting is
+// the alternative: still unread, just not interrupting.
+{
+  console.log('\n— mute');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const control = () => d.getElementById('chat-room-mute');
+  check('a room offers to be silenced', !!control());
+  check('…and is not silenced to begin with',
+    control().title === 'Silence this room', control().title);
+
+  control().dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_mute').pop();
+  check('clicking silences it', !!call && call.args.muted === true,
+    JSON.stringify(call && call.args));
+  check('…and the control now offers the way back',
+    control().title.includes('let it speak again'), control().title);
+
+  control().dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('clicking again lets it speak',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_mute').pop().args.muted === false);
+}
+
+// In the list, a silenced room reads differently from a quiet one.
+{
+  console.log('\n— a silenced room in the list');
+  const { w, d } = await open();
+  w.__HARNESS_EMIT__('matrix::rooms', {
+    guild_id: '0-5',
+    rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms.map((r) =>
+      Object.assign({}, r,
+        r.room_id === '!raid:matrix.beta.playstructs.com'
+          ? { unread: 4, mention: true, muted: true }
+          : (r.room_id === '!ninja:matrix.beta.playstructs.com'
+              ? { unread: 2, mention: true } : {}))),
+  });
+  await tick();
+
+  const rows = all(d, '.sui-result-row');
+  const muted = rows.find((n) => n.querySelector('.chat-room-muted'));
+  check('a silenced room is marked', !!muted);
+  // It is still unread — muting is not reading.
+  check('…and still shows its count',
+    text(muted.querySelector('.chat-room-unread')) === '4',
+    text(muted.querySelector('.chat-room-unread')));
+  // …but being named in it no longer pulls the eye, which is the whole point.
+  check('…without the mention colour',
+    !muted.querySelector('.chat-room-unread').className.includes('sui-mod-warning'),
+    muted.querySelector('.chat-room-unread').className);
+
+  // An unmuted room with a mention still does.
+  const loud = rows.find((n) => !n.querySelector('.chat-room-muted') &&
+    n.querySelector('.chat-room-unread'));
+  check('an unsilenced mention still pulls the eye',
+    loud.querySelector('.chat-room-unread').className.includes('sui-mod-warning'),
+    loud.querySelector('.chat-room-unread').className);
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
