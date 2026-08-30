@@ -722,43 +722,54 @@ async fn consent(
     body: String,
 ) -> Result<reqwest::Url, String> {
     let issuer = reqwest::Url::parse(&meta.issuer).map_err(|e| e.to_string())?;
-    if url.host_str() != issuer.host_str() {
-        return Err(format!(
-            "the authorization chain stopped at {}, which is neither the callback nor the auth service",
-            redact(&url)
-        ));
+    // MAS may interpose more than one form in a row (e.g. a consent screen
+    // followed by a device/scope confirmation). Post each in turn — always
+    // only to the issuer the homeserver named — until we reach the callback.
+    let (mut cur_url, mut cur_body) = (url, body);
+    for _ in 0..6 {
+        if cur_url.host_str() != issuer.host_str() {
+            return Err(format!(
+                "the authorization chain stopped at {}, which is neither the callback nor the auth service",
+                redact(&cur_url)
+            ));
+        }
+        let (action, fields) = parse_form(&cur_body, &cur_url)
+            .ok_or_else(|| format!("{} needs a browser to continue", redact(&cur_url)))?;
+        if action.host_str() != issuer.host_str() {
+            return Err(format!("consent form targets {}, not the auth service", redact(&action)));
+        }
+        let resp = http
+            .post(action.clone())
+            .form(&fields)
+            .send()
+            .await
+            .map_err(|e| format!("consent: {}", e))?;
+        let next = if resp.status().is_redirection() {
+            let loc = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("consent redirected without a Location")?;
+            action.join(loc).map_err(|e| e.to_string())?
+        } else {
+            return Err(format!(
+                "consent returned {} instead of continuing",
+                resp.status().as_u16()
+            ));
+        };
+        match follow(http, next).await? {
+            Landing::Callback(u) => return Ok(u),
+            // Another interstitial form — post it too on the next pass.
+            Landing::Page { url, body } => {
+                cur_url = url;
+                cur_body = body;
+            }
+        }
     }
-    let (action, fields) = parse_form(&body, &url)
-        .ok_or_else(|| format!("{} needs a browser to continue", redact(&url)))?;
-    if action.host_str() != issuer.host_str() {
-        return Err(format!("consent form targets {}, not the auth service", redact(&action)));
-    }
-    let resp = http
-        .post(action.clone())
-        .form(&fields)
-        .send()
-        .await
-        .map_err(|e| format!("consent: {}", e))?;
-    let next = if resp.status().is_redirection() {
-        let loc = resp
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or("consent redirected without a Location")?;
-        action.join(loc).map_err(|e| e.to_string())?
-    } else {
-        return Err(format!(
-            "consent returned {} instead of continuing",
-            resp.status().as_u16()
-        ));
-    };
-    match follow(http, next).await? {
-        Landing::Callback(u) => Ok(u),
-        Landing::Page { url, .. } => Err(format!(
-            "the authorization chain stopped at {} instead of returning a code",
-            redact(&url)
-        )),
-    }
+    Err(format!(
+        "the authorization chain stopped at {} instead of returning a code (too many consent hops)",
+        redact(&cur_url)
+    ))
 }
 
 async fn exchange_code(

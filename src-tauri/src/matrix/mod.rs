@@ -109,6 +109,19 @@ fn selected_guild() -> Option<String> {
         .and_then(|n| n.get("guild_id").and_then(|g| g.as_str()).map(String::from))
 }
 
+/// Best guess at the guild a headless caller (the MCP `structs_comms` tool)
+/// means when it does not name one: the UI's current selection first, then a
+/// connected homeserver, then the guild the game itself is signed in to. Lets
+/// the tool be called with no `guild_id` in the common single-guild case.
+pub fn default_guild() -> Option<String> {
+    selected_guild().or_else(|| {
+        crate::game_state::GAME_STATE
+            .read()
+            .ok()
+            .and_then(|gs| gs.guild_id.clone())
+    })
+}
+
 /// The HUD's own numbers, formatted by the game's OWN unit ladders.
 ///
 /// These are pre-rendered here rather than in JS on purpose. `gs.alpha` is in
