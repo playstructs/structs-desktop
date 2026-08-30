@@ -130,6 +130,35 @@ for (const file of FEDERATED) {
   }
 }
 
+// ── The windows that must never assign innerHTML at all ────────────────────
+//
+// These render text written by federated strangers — message bodies, display
+// names, room names, topics — and they are safe by CONSTRUCTION rather than by
+// escaping: they build every node with textContent. That is a much stronger
+// property than "we remembered to escape", but it is invisible, so nothing
+// stops a later edit from reaching for innerHTML "just here". This is what
+// stops it. A CLEAR (`= ''`) is allowed: it writes no markup.
+{
+  console.log('\n— windows that never build markup');
+  for (const file of ['frontend/chat.js', 'frontend/transfer.js']) {
+    const code = readFileSync(root + '/' + file, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+    const sinks = [];
+    const re = /\.(innerHTML|outerHTML)\s*=([^;\n]*)/g;
+    let m;
+    while ((m = re.exec(code))) {
+      if (m[1] === 'innerHTML' && EMPTY_ASSIGN.test(m[2])) continue;
+      sinks.push(m[0].trim().slice(0, 60));
+    }
+    check(file + ' assigns no innerHTML', sinks.length === 0, sinks.join(' | '));
+    // insertAdjacentHTML and document.write are the same sink wearing a
+    // different name.
+    check('…nor reaches the same sink another way',
+      !/insertAdjacentHTML|document\.write\(/.test(code));
+  }
+}
+
 // The one window that deliberately paints server-built HTML should still not
 // be building any of its OWN from string literals.
 {
@@ -160,12 +189,20 @@ for (const file of FEDERATED) {
   const pages = readFileSync(root + '/src-tauri/src/mcp/tools/board_pages.rs', 'utf8');
   const chat = readFileSync(root + '/frontend/chat.js', 'utf8');
 
-  // 1. The board-only gate on the command that actually moves funds. This is
-  //    the guard the chat hand-off was designed AROUND rather than through.
+  // 1. The gate on the command that actually moves funds. It is an explicit
+  //    allowlist of window labels — the hand-off was designed AROUND it rather
+  //    than through it. Two things must hold: the gate is still there, and
+  //    Comms is not on it. The second is the one that matters; the list may
+  //    legitimately grow (the focused Pay window is on it) but never to
+  //    include a window that renders text written by strangers.
   const exec = pages.slice(pages.indexOf('pub async fn mcp_transfer_execute'));
-  check('mcp_transfer_execute is still gated to the board window',
-    /require_board\(&window\)\?/.test(exec.slice(0, 400)),
+  const gate = exec.slice(0, 800).match(/require_window\(&window,\s*&\[([^\]]*)\]/);
+  check('mcp_transfer_execute is still gated by a window allowlist', !!gate,
     'the gate chat was designed around is gone');
+  const allowed = gate ? gate[1].match(/"[^"]+"/g).map((x) => x.slice(1, -1)) : [];
+  check('…which does not include Comms', !allowed.includes('chat'), allowed.join(', '));
+  check('…and is a real list, not a wildcard',
+    allowed.length > 0 && allowed.every((l) => /^[a-z]+$/.test(l)), allowed.join(', '));
 
   // 2. Comms hands over an ID, never a destination. If this command ever grew
   //    an address parameter, a crafted card could name where funds go.
@@ -183,18 +220,23 @@ for (const file of FEDERATED) {
   check('chat sends only a player id to the transfer hand-off',
     /invoke\('matrix_open_transfer', \{ playerId: card\.id \}\)/.test(call), call);
 
-  // 4. The hand-off has to ARRIVE. `Board.T` is assigned inside board.js's
-  //    init() on DOMContentLoaded, after board-pages.js has executed, so a
-  //    listener registered at module load is silently never registered — and
-  //    the `if (Board.T && ...)` guard that makes that look safe is precisely
-  //    what hides it. It must be wired from onBoot.
-  const boardPages = readFileSync(root + '/frontend/board-pages.js', 'utf8');
-  const listenAt = boardPages.indexOf("'board-transfer'");
-  const bootAt = boardPages.lastIndexOf('onBoot:', listenAt);
-  const registerAt = boardPages.lastIndexOf('Board.registerPage(', listenAt);
-  check('the transfer hand-off is wired from onBoot, not module load',
-    listenAt > 0 && bootAt > registerAt && bootAt > 0,
-    'a listener registered before Board.T exists never fires');
+  // 4. The hand-off has to ARRIVE. The focused window claims the parked intent
+  //    on boot AND listens for a re-address, because the ask usually OPENS the
+  //    window and an event fired at a window that is still booting reaches
+  //    nobody. An earlier version wired this on the board at module load —
+  //    before `Board.T` existed — so it silently never registered and Pay
+  //    appeared to do nothing at all.
+  const tx = readFileSync(root + '/frontend/transfer.js', 'utf8');
+  check('the Pay window claims whatever was parked for it',
+    /invoke\('matrix_take_pending_transfer'\)/.test(tx));
+  check('…and also answers a re-address while already open',
+    /listen\('transfer-intent'/.test(tx));
+  // The recipient is chain-resolved before it ever reaches this window; the
+  // window must not offer a way to type one.
+  check('the Pay window never lets a destination be typed',
+    !/id="tx-to"/.test(readFileSync(root + '/frontend/transfer.html', 'utf8')));
+  check('…it spends only what the SERVER previewed',
+    /to: S\.preview\.to/.test(tx) && /amount: S\.preview\.amount/.test(tx));
 
   // 5. And it does not invoke the executing command at all. Comments are
   //    stripped first: this file NAMES that command in prose explaining why it
@@ -204,6 +246,61 @@ for (const file of FEDERATED) {
     .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
   check('chat never invokes mcp_transfer_execute',
     !/mcp_transfer_execute/.test(chatCode));
+}
+
+// ── Remote media a stranger can point us at ────────────────────────────────
+// An avatar_url or an image message is a URL chosen by whoever sent it. Three
+// properties keep that from becoming a rendering hole, and all three are one
+// edit away from being lost.
+{
+  console.log('\n— media from strangers');
+  const client = readFileSync(root + '/src-tauri/src/matrix/client.rs', 'utf8');
+  const types = client.match(/const MEDIA_OK_TYPES[^=]*=\s*&\[([^\]]*)\]/);
+  check('media is restricted to an allowlist of types', !!types);
+  const list = types ? types[1].match(/"[^"]+"/g).map((x) => x.slice(1, -1)) : [];
+  // SVG is the one image type that carries script. An <img> will not run it
+  // today, but the same data URL in a link or a frame would.
+  check('…which excludes SVG', !list.includes('image/svg+xml'), list.join(', '));
+  check('…and every entry is a raster image type',
+    list.length > 0 && list.every((t) => /^image\/(png|jpeg|gif|webp|avif)$/.test(t)),
+    list.join(', '));
+
+  // The bytes are fetched by US and re-encoded, so the webview never resolves
+  // a remote URL a stranger chose. Returning the mxc→http URL directly would
+  // be the easy "simplification" that undoes this.
+  const media = client.slice(client.indexOf('pub async fn media_data_url'));
+  const body = media.slice(0, media.indexOf('\n}\n'));
+  check('…and the window is handed re-encoded bytes, never a remote URL',
+    /data:\{\};base64/.test(body.replace(/\s+/g, '')) || /format!\("data:\{\};base64/.test(body),
+    'a remote URL reaching the webview is a fetch we did not make');
+}
+
+// ── A face is not something you can put on ─────────────────────────────────
+// Matrix lets any account set any avatar, so if this client rendered the
+// avatar_url of whoever sent a message, wearing a guildmate's face would be
+// trivial. It does not: a portrait is drawn ONLY from the chain's
+// pfpClientRenderAttributes, and anyone without an on-chain identity gets a
+// placeholder that looks nothing like a person's portrait.
+//
+// That is a property held by construction, which makes it invisible — the
+// obvious "improvement" is to fall back to the avatar we could easily fetch.
+{
+  console.log('\n— portraits');
+  const client = readFileSync(root + '/src-tauri/src/matrix/client.rs', 'utf8');
+  const assigns = [...client.matchAll(/pfp_attrs:\s*([^,\n]+)/g)].map((m) => m[1].trim());
+  const sourced = assigns.filter((a) => a !== 'None' && !a.startsWith('Option<'));
+  check('every portrait comes from an on-chain identity or from nothing',
+    sourced.length > 0 && sourced.every((a) => /ident\.as_ref\(\)/.test(a)),
+    sourced.join(' | '));
+
+  const chat = readFileSync(root + '/frontend/chat.js', 'utf8');
+  const srcs = [...chat.matchAll(/\.src\s*=\s*([^;\n]+)/g)].map((m) => m[1].trim());
+  // Everything the window points an <img> at is either a bundled path built
+  // from a literal, or bytes we fetched and re-encoded ourselves. A bare
+  // field off a message would be a URL a stranger chose.
+  const remote = srcs.filter((x) => !x.startsWith("'img/") && !/data_url/.test(x));
+  check('…and no image is pointed at a URL from message data',
+    remote.length === 0, remote.join(' | '));
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');

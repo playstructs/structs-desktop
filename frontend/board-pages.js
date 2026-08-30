@@ -1854,11 +1854,7 @@
     return a.length > 20 ? a.slice(0, 12) + '…' + a.slice(-6) : a;
   }
 
-  // `seed` is an optional {to, name} pre-fill handed over by Comms. It only
-  // ever addresses the form: the preview still runs, the confirm still names
-  // the recipient, and `mcp_transfer_execute` still re-checks everything
-  // server-side. Nothing about arriving from chat shortens the path to spent.
-  function openTransfer(denom, seed) {
+  function openTransfer(denom) {
     var reg = invDenoms();
     var unit = H.denomName(denom, reg, { tag: false });
     // Alpha and Ore are the two denoms the game has a display ladder for, so
@@ -1870,7 +1866,7 @@
     var scale = Math.pow(10, info.exponent || 0);
     var available = balanceOf(denom);
     var form = H.el('div');
-    var to = (seed && seed.to) || '', amountBase = 0, preview = null;
+    var to = '', amountBase = 0, preview = null;
 
     // FROM and ASSET are facts, not fields — they were rendered as labelled
     // inputs, so a 44-character address sat in a 332px two-column row and
@@ -1885,14 +1881,6 @@
       to = v.trim();
       schedule();
     })));
-    // Provenance, not decoration. The player asked to pay someone they saw in
-    // chat; the address was resolved from the CHAIN, not read out of the
-    // message. Saying so is what lets them notice a wrong name before paying.
-    if (seed && seed.to) {
-      form.appendChild(H.stateBlock('info',
-        'Addressed from Comms: ' + (seed.name || seed.playerId || 'a player')
-        + ' — address resolved on chain, not taken from the message.'));
-    }
 
     if (kind) {
       form.appendChild(H.amountField('Amount', {
@@ -2207,14 +2195,6 @@
         return renderInventoryBody();
       })
       .then(function () {
-        // A Comms hand-off waits here rather than firing on the event, because
-        // the form reads `invState.data.player` for its From row: opening it
-        // the moment the event lands would race the first inventory load.
-        if (invState.pendingTransfer) {
-          var seed = invState.pendingTransfer;
-          invState.pendingTransfer = null;
-          openTransfer('ualpha', seed);
-        }
         if (!invState.history && !invState.loadingHistory) {
           return loadHistory(invState.page).then(renderInventoryBody);
         }
@@ -2227,38 +2207,7 @@
   }
   Board.registerPage('inventory', {
     onEnter: renderInventory, refresh: renderInventory, cadenceMs: 30000,
-    // onBoot, NOT module load. `Board.T` is assigned inside board.js's init(),
-    // which runs on DOMContentLoaded — after this file has finished executing.
-    // Wiring the listener at module load therefore silently never registered
-    // it, and the guard that made that "safe" is exactly what hid it: Comms
-    // parked an intent, the window opened, and nothing ever claimed it.
-    onBoot: function () {
-      Board.T.event.listen('board-transfer', function () { Board.claimTransfer(); });
-      // The hand-off usually OPENS this window, so the event fired before
-      // anyone was listening. Boot claims whatever was already parked.
-      Board.claimTransfer();
-    },
   });
-
-  // ── Comms → Team Ops hand-off ────────────────────────────────────────────
-  // Chat cannot spend: `mcp_transfer_execute` is board-only on purpose. So a
-  // "Send Alpha" on a player card in Comms parks an intent in the backend and
-  // wakes this window, which navigates here and pre-fills the form. The claim
-  // is consuming on the Rust side, so a delivered hand-off cannot reappear and
-  // silently re-address a form the player has since retyped.
-  Board.claimTransfer = function () {
-    if (!Board.T || !Board.T.core) return Promise.resolve(null);
-    return Board.T.core.invoke('matrix_take_pending_transfer').then(function (intent) {
-      if (!intent || !intent.to) return null;
-      invState.pendingTransfer = intent;
-      // Already on Inventory? The hash never changes, so no route event fires
-      // and nothing would re-render — ask for it directly.
-      if (location.hash.indexOf('/inventory') >= 0) renderInventory();
-      else location.hash = '#/industry/inventory';
-      return intent;
-    }).catch(function () { return null; });
-  };
-
 
   // ═══════════════════════════ DIAGNOSTICS ══════════════════════════════════
   // Is the machine itself healthy? Command carries the one-line strip; this is

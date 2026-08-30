@@ -20,14 +20,36 @@ use crate::mcp::{auto_build, auto_defend, auto_harvest, auto_infuse, board_feed,
 /// window and anything it loads); nothing else in the app enforces caller
 /// identity, so this is the fence around the signing/config surface.
 pub(crate) fn require_board(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() == "board" {
-        Ok(())
-    } else {
-        Err(format!(
-            "command restricted to the Team Ops window (called from '{}')",
-            window.label()
-        ))
+    require_window(window, &["board"])
+}
+
+/// The gate, as an explicit ALLOWLIST of window labels.
+///
+/// Kept per-command rather than widened globally. When the focused Pay window
+/// arrived it needed to run one command — the transfer — and adding its label
+/// to `require_board` itself would have handed it every mass action, every
+/// config write and every roster command as a side effect. A window earns one
+/// capability at a time.
+///
+/// The rule this encodes is not "not chat". It is that a window which renders
+/// text written by federated strangers is never on one of these lists, and
+/// membership is stated at the command it protects.
+pub(crate) fn require_window(
+    window: &tauri::WebviewWindow,
+    allowed: &[&str],
+) -> Result<(), String> {
+    if allowed.contains(&window.label()) {
+        return Ok(());
     }
+    Err(format!(
+        "command restricted to {} (called from '{}')",
+        allowed
+            .iter()
+            .map(|l| format!("'{l}'"))
+            .collect::<Vec<_>>()
+            .join(" or "),
+        window.label()
+    ))
 }
 
 // ── FLEET ────────────────────────────────────────────────────────────────────
@@ -508,7 +530,11 @@ pub async fn mcp_transfer_execute(
     denom: String,
     amount: f64,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    // The focused Pay window is a SINGLE-PURPOSE surface: one recipient, one
+    // amount, one button. That makes it a narrower place to sign from than the
+    // six-area console, not a wider one — but it is named explicitly here, and
+    // it gets nothing else that `require_board` protects.
+    require_window(&window, &["board", "transfer"])?;
     mcp_transfer_execute_impl(app, from, to, denom, amount).await
 }
 

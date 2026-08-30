@@ -125,10 +125,61 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_browse'));
 
   const rows = all(d, '.sui-result-row');
-  check('every public channel is listed', rows.length === 6, String(rows.length));
+  check('every public channel is listed', rows.length === 7, String(rows.length));
   check('including ones you are already in',
     rows.some((r) => text(r).startsWith('SN.Corporation')),
     rows.map((r) => text(r)).join(' | '));
+
+  // ── Two rooms, one name ────────────────────────────────────────────────
+  // Anyone may publish a public room under any name, so the directory can
+  // legitimately show the guild's room and a forgery of it side by side. The
+  // address is the only thing on the row that cannot be taken, so it has to be
+  // on screen — otherwise the two rows are identical and the player picks by
+  // coin flip.
+  {
+    const named = rows.filter((r) => text(r).indexOf('SN.Corporation') === 0);
+    check('a forged room can share a display name', named.length === 2,
+      String(named.length));
+    const addrs = named.map((r) => text(r));
+    check('…and each row still shows which room it actually is',
+      addrs.some((t) => t.includes('#sn-corp-official'))
+      && addrs.every((t, i) => t !== addrs[1 - i]),
+      addrs.join(' | '));
+  }
+
+  // ── Portraits ──────────────────────────────────────────────────────────
+  // `pfpClientRenderAttributes` is a free-form on-chain string chosen by the
+  // player it depicts, so it is attacker-influenced even though it is not
+  // attacker-authored. A layer index has to be a number or the frame is built
+  // from a path this window never meant to request.
+  {
+    const frame = w.Chat._fillPfp(d.createElement('div'),
+      JSON.stringify({ head: 4, neck: 2, body: 1, arms: 3, background: 1 }));
+    const srcs = Array.from(frame.querySelectorAll('img')).map((i) => i.getAttribute('src'));
+    check('a real portrait draws its five layers', srcs.length === 5, String(srcs.length));
+    check('…all from the bundle',
+      srcs.every((x) => /^img\/pfp\/[a-z]+\/pfp_[a-z]+_\d+\.png$/.test(x)), srcs.join(' '));
+
+    for (const bad of [
+      { head: '../../../../etc/passwd', neck: 1 },
+      { head: 'https://evil.example/x', neck: 1 },
+      { head: '4', neck: 1 },          // a string that merely looks like one
+      { head: 1.5, neck: 1 },
+      { head: -1, neck: 1 },
+    ]) {
+      const f = w.Chat._fillPfp(d.createElement('div'), JSON.stringify(bad));
+      const got = Array.from(f.querySelectorAll('img')).map((i) => i.getAttribute('src'));
+      check('a junk head index falls back to the placeholder rather than a path: '
+        + JSON.stringify(bad.head),
+        got.length === 1 && got[0] === 'img/portrait-placeholder.png', got.join(' '));
+    }
+
+    // No attributes at all is the ordinary case for anyone with no on-chain
+    // identity, and it must look DIFFERENT rather than borrowed.
+    const none = w.Chat._fillPfp(d.createElement('div'), null);
+    check('no on-chain portrait means the placeholder, never someone else\'s',
+      none.querySelector('img').getAttribute('src') === 'img/portrait-placeholder.png');
+  }
 
   // The directory spans every guild's homeserver — the public room directory
   // is empty on all of them, so these are found by alias (discovery.rs).
@@ -148,8 +199,12 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('…and what it is for',
     text(crabla).includes('AI-native guild'), text(crabla));
   check('…and offers to join it', crabla.querySelector('button') !== null);
+  // Picked by ADDRESS, not by name: the directory now contains a forgery
+  // sharing this room's display name, so selecting by name here would be a
+  // coin flip — the same coin flip the address exists to spare the player.
   check('a room you are in says so instead of offering Join',
-    rows.find((r) => text(r).startsWith('SN.Corporation')).querySelector('.sui-badge') !== null);
+    rows.find((r) => text(r).includes('#sn-corporation'))
+      .querySelector('.sui-badge') !== null);
   check('a room you are not in offers Join',
     rows.find((r) => text(r).startsWith('Alpha Base')).querySelector('button') !== null);
   check('3.1K is abbreviated',

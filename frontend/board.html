@@ -47,6 +47,12 @@
     .board-navaside { display: flex; align-items: center; gap: 6px; flex: none; padding: 0 4px; }
     .board-navaside #board-updated { font-size: 10px; white-space: nowrap; }
     .board-navaside .is-busy { opacity: .4; pointer-events: none; }
+    .board-navaside #board-comms.hidden { display: none; }
+    .board-navaside #board-comms span { margin-left: 4px; font-size: 10px; }
+    /* A mention is not the same event as unread traffic — it is addressed to
+       you — so it gets the warning colour the rest of the console reserves for
+       things that want a decision. */
+    .board-navaside #board-comms.board-mod-mention { color: var(--text-warning, #E8B24A); }
     /* The five area tabs need ~394px in the game font. Below that the
        timestamp was stealing 170px and scrolling Command and System out of
        the bar entirely — the nav is not the place to lose. The stamp is
@@ -816,6 +822,13 @@
                  wrote to #board-updated and the refresh handler bound to
                  #board-refresh — neither element existed until now. -->
             <div class="board-navaside">
+              <!-- Is the guild talking? Team Ops is where a player spends the
+                   most time, and until now it could not tell them that they
+                   had been named in a room. Hidden entirely when there is
+                   nothing to say: a console full of zeroes teaches people to
+                   stop reading it. -->
+              <a id="board-comms" class="ops-refresh-btn hidden" href="javascript:void(0)"
+                 title="Open Comms"><i class="icon-phone"></i><span id="board-comms-count"></span></a>
               <span id="board-updated" class="sui-text-hint"></span>
               <a id="board-refresh" class="ops-refresh-btn" href="javascript:void(0)"
                  title="Refresh this page now"><i class="icon-refresh-12"></i></a>

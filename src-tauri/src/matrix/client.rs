@@ -1337,10 +1337,14 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             let content = ev.get("content");
             match etype {
                 "m.room.name" => {
+                    // Sanitized at INGESTION so nothing downstream has to
+                    // remember. A room name is set by whoever can send state in
+                    // that room — on a federated server, not necessarily anyone
+                    // we know — and it renders beside the guild's own rooms.
                     name = content
                         .and_then(|c| c.get("name"))
                         .and_then(|n| n.as_str())
-                        .map(|s| s.to_string());
+                        .map(|s| super::identity::sanitize(s));
                 }
                 "m.room.canonical_alias" => {
                     alias = content
@@ -1683,11 +1687,12 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 let content = ev.get("content");
                 match etype {
                     "m.room.name" => {
-                        name = content
-                            .and_then(|c| c.get("name"))
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                        name = super::identity::sanitize(
+                            content
+                                .and_then(|c| c.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or(""),
+                        );
                     }
                     "m.room.canonical_alias" => {
                         alias = content
@@ -2379,10 +2384,16 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
             .get("canonical_alias")
             .and_then(|a| a.as_str())
             .map(|s| s.to_string());
+        // Anyone may publish a public room under any name, so this list is
+        // the easiest place in the app to hang a convincing forgery beside the
+        // real thing. Sanitizing kills the invisible tricks; the NAMES can
+        // still legitimately collide, which is why the window prints each
+        // row's alias — see `renderRoomRow` in chat.js.
         let name = chunk
             .get("name")
             .and_then(|n| n.as_str())
-            .map(|s| s.to_string())
+            .map(|s| super::identity::sanitize(s))
+            .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
         gs.rooms.insert(
@@ -2470,10 +2481,16 @@ pub async fn browse(
             .get("canonical_alias")
             .and_then(|a| a.as_str())
             .map(|s| s.to_string());
+        // Anyone may publish a public room under any name, so this list is
+        // the easiest place in the app to hang a convincing forgery beside the
+        // real thing. Sanitizing kills the invisible tricks; the NAMES can
+        // still legitimately collide, which is why the window prints each
+        // row's alias — see `renderRoomRow` in chat.js.
         let name = chunk
             .get("name")
             .and_then(|n| n.as_str())
-            .map(|s| s.to_string())
+            .map(|s| super::identity::sanitize(s))
+            .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
         out.push(Room {
@@ -2481,7 +2498,10 @@ pub async fn browse(
             icon: icon_for(&name, alias.as_deref()),
             name,
             canonical_alias: alias,
-            topic: chunk.get("topic").and_then(|t| t.as_str()).map(|s| s.to_string()),
+            topic: chunk
+                .get("topic")
+                .and_then(|t| t.as_str())
+                .map(|s| super::identity::sanitize(s)),
             members: chunk
                 .get("num_joined_members")
                 .and_then(|n| n.as_u64())
@@ -3963,6 +3983,27 @@ mod tests {
             });
             assert!(render_event(&ev, &gs, "!r:h", "@me:h").is_none(), "{} leaked", t);
         }
+    }
+
+    #[test]
+    fn a_room_cannot_wear_hidden_characters() {
+        // Room names come from whoever can send state in that room, and on a
+        // federated server that is not necessarily anyone we know. The public
+        // directory is worse still: anyone may publish a room under any name,
+        // right beside the guild's own in the same list.
+        //
+        // Sanitizing at ingestion means the name in `Room.name` is the name on
+        // the screen — no zero-width character splitting it for a comparison
+        // the reader cannot make, and no bidi override repainting it.
+        let sneaky = "SN.Corpo\u{200B}ration";
+        assert_eq!(super::super::identity::sanitize(sneaky), "SN.Corporation");
+
+        // And it folds onto the real one, so a caller that wants to ask "is
+        // this pretending to be that?" gets a straight answer.
+        assert_eq!(
+            super::super::identity::fold("SN.Corp\u{043E}ration"),
+            super::super::identity::fold("SN.Corporation"),
+        );
     }
 
     #[test]

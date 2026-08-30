@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Structs — Send Alpha</title>
+  <!-- The same four the raid window loads, in the same order. main.css alone
+       gets you the colours but not the FONT or any SUI component, so a window
+       linking only that one renders as a plain web form beside a pixel-art
+       game. -->
+  <link rel="stylesheet" href="css/normalize.css">
+  <link rel="stylesheet" href="css/structicons.css">
+  <link rel="stylesheet" href="css/sui/sui.css">
+  <link rel="stylesheet" href="css/main.css">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--page-background, #1A2029);
+      color: var(--text-body, #C5D7D9);
+      font-family: 'DirectiveZero', sans-serif;
+      display: flex; flex-direction: column;
+      padding: 14px; gap: 12px;
+      /* main.css centres body text for the game's own screens. Every label and
+         fact in this window is a left-hand column, so it has to be undone
+         here — the same inherited rule that centred the raid rail's messages. */
+      text-align: left;
+    }
+    h1 { font-size: 15px; margin: 0; letter-spacing: .04em; }
+    .tx-sub { color: var(--text-hint, #A7C0C6); font-size: 11px; }
+    .tx-facts { display: flex; flex-direction: column; gap: 4px; }
+    .tx-fact { display: flex; gap: 10px; align-items: baseline; font-size: 12px; }
+    .tx-fact-label { flex: 0 0 74px; color: var(--text-hint, #A7C0C6); }
+    .tx-fact-value { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+    /* SUI fields want a minimum width wider than this window; letting that
+       through would push a horizontal scrollbar onto a 420px pane. */
+    label.sui-input-text { min-width: 0; }
+    #tx-out { flex: 1 1 auto; min-height: 0; overflow: auto;
+              display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+    .tx-msg { padding: 6px 8px; border-left: 2px solid var(--border, #345); }
+    .tx-msg.tx-error { border-left-color: var(--text-error, #E2686A);
+                       color: var(--text-error, #E2686A); }
+    .tx-msg.tx-warn { border-left-color: var(--text-warning, #E8B24A);
+                      color: var(--text-warning, #E8B24A); }
+    .tx-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .sui-screen-btn.tx-disabled { opacity: .4; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div>
+    <h1 id="tx-title" class="sui-text-label">Send Alpha</h1>
+    <div class="tx-sub sui-text-tiny" id="tx-who">…</div>
+  </div>
+
+  <div class="tx-facts" id="tx-facts"></div>
+
+  <!-- SUI's own field: `.sui-input-text` is the LABEL wrapper, and the input
+       inside it is styled by descendant rules. Putting the class on the input
+       itself got a bare white browser box beside pixel-art buttons. -->
+  <label class="sui-input-text" for="tx-amount">
+    <span>Amount (Alpha)</span>
+    <input id="tx-amount" type="text" inputmode="decimal" placeholder="0" autocomplete="off">
+  </label>
+
+  <div id="tx-out"></div>
+
+  <div class="tx-actions">
+    <a href="javascript:void(0)" id="tx-cancel" class="sui-screen-btn sui-mod-secondary">
+      <i class="icon-close"></i><span> Cancel</span></a>
+    <a href="javascript:void(0)" id="tx-send" class="sui-screen-btn sui-mod-primary tx-disabled">
+      <i class="icon-send-alpha"></i><span id="tx-send-label"> Send</span></a>
+  </div>
+
+  <script src="transfer.js"></script>
+</body>
+</html>

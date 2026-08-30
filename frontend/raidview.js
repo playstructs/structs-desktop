@@ -3035,9 +3035,18 @@
     window.addEventListener('blur', hide, { passive: true });
   }
 
+  /* Escapes BOTH quote characters, not just the double.
+   *
+   * Its one caller puts the result in element content, where a bare `'` is
+   * harmless — so this is not a live hole. It is completed anyway because the
+   * next caller is the dangerous one: a helper that is safe in element context
+   * and unsafe in a single-quoted attribute is a trap for whoever reuses it,
+   * and the Rust `html_escape()` this mirrors already covers both. */
   function esc(s) {
-    return String(s).replace(/[&<>"]/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return {
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c];
     });
   }
 

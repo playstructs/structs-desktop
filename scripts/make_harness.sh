@@ -396,6 +396,8 @@ cat > "$FIX" <<'EOF'
     // Nothing parked. The board claims a Comms hand-off on every boot, so the
     // quiet answer is the normal one and must not reject into the console.
     matrix_take_pending_transfer: null,
+    // The guild is talking, and one of the messages named you.
+    matrix_unread: { count: 3, mention: true },
     // Comms reaching into the board: who is around, and the two ways to
     // reach them. Absent from this table, the leaderboard would silently
     // lose its social half and the tests would not notice.
@@ -888,6 +890,12 @@ cat > "$CFIX" <<'EOF'
         canonical_alias: '#lobby:matrix.crab.la', icon: 'icon-guild',
         topic: 'AI-native guild for agents playing Structs',
         members: 3, joined: false, unread: 0, section: 'galaxy' },
+      // A forgery: same display name as the guild's own room, published by
+      // anyone who wants to. Nothing but the address separates them.
+      { room_id: '!fake:matrix.beta.playstructs.com', name: 'SN.Corporation',
+        canonical_alias: '#sn-corp-official:matrix.beta.playstructs.com',
+        icon: 'icon-guild', members: 1, joined: false, unread: 0,
+        section: 'galaxy' },
     ]) },
     // One page of older history, then the beginning of the room.
     matrix_backfill: {

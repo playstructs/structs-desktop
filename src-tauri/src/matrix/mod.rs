@@ -1498,16 +1498,29 @@ pub async fn matrix_open_transfer(
         .cloned()
         .unwrap_or_else(|| player_id.clone());
 
-    if app.get_webview_window("board").is_none() {
-        crate::mcp::board_feed::build_board_window(&app)
-            .map_err(|e| format!("couldn't open Team Ops: {e}"))?;
-    } else if let Some(w) = app.get_webview_window("board") {
-        let _ = w.set_focus();
-    }
-
     let intent = json!({ "to": address, "playerId": player_id, "name": name });
     set_pending_transfer(&intent);
-    crate::mcp::web_board::emit_board(&app, "board-transfer", intent.clone());
+
+    // A SMALL window that does this one thing, rather than the six-area
+    // console. Team Ops was the first home for this only because that is where
+    // the transfer command was gated; a one-line payment does not belong
+    // behind a dashboard, and a single-purpose surface is a narrower place to
+    // sign from than a general one.
+    if let Some(w) = app.get_webview_window("transfer") {
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        // Already open: re-address it instead of stacking a second window. The
+        // parked intent is the fallback for a window still booting.
+        let _ = w.emit("transfer-intent", intent.clone());
+    } else {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+        WebviewWindowBuilder::new(&app, "transfer", WebviewUrl::App("transfer.html".into()))
+            .title(format!("Send Alpha — {name}"))
+            .inner_size(420.0, 460.0)
+            .resizable(true)
+            .build()
+            .map_err(|e| format!("couldn't open the transfer window: {e}"))?;
+    }
     Ok(intent)
 }
 

@@ -1206,6 +1206,56 @@
   }
 
   // Manual Refresh button = refresh the CURRENT page.
+  /* Is the guild talking?
+   *
+   * Team Ops is where a player spends the most time, and it had no way to say
+   * that they had been named in a room — the two halves of the app ran side by
+   * side without either knowing the other was busy.
+   *
+   * Polled rather than pushed. `matrix_unread` is a synchronous read of state
+   * the sync loop already maintains, and that loop runs app-wide from boot for
+   * any guild with a stored session — it does NOT depend on the Comms window
+   * being open, which is the whole reason this indicator can mean anything.
+   *
+   * Silent when there is nothing: the control hides itself at zero rather than
+   * sitting there showing a zero, because a console full of zeroes is a console
+   * people stop reading.
+   */
+  var COMMS_POLL_MS = 15000;
+
+  function paintComms(d) {
+    var btn = document.getElementById('board-comms');
+    if (!btn) return;
+    var count = (d && Number(d.count)) || 0;
+    var mention = !!(d && d.mention);
+    btn.classList.toggle('hidden', count === 0 && !mention);
+    btn.classList.toggle('board-mod-mention', mention);
+    var label = document.getElementById('board-comms-count');
+    if (label) label.textContent = count > 99 ? '99+' : (count ? String(count) : '');
+    btn.title = mention
+      ? 'You were mentioned in Comms'
+      : (count === 1 ? '1 unread message in Comms'
+                     : count + ' unread messages in Comms');
+  }
+  Board.paintComms = paintComms;
+
+  function wireComms() {
+    var btn = document.getElementById('board-comms');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      Board.T.core.invoke('open_chat_window').catch(function () {});
+    });
+    var tick = function () {
+      Board.T.core.invoke('matrix_unread')
+        // Comms not signed in is the ordinary case, not an error: the whole
+        // feature stays hidden for a player who has never opened it.
+        .then(paintComms)
+        .catch(function () { paintComms(null); });
+    };
+    tick();
+    setInterval(tick, COMMS_POLL_MS);
+  }
+
   function wireRefreshButton() {
     var btn = document.getElementById('board-refresh');
     if (!btn) return;
@@ -1513,6 +1563,7 @@
     // place for a prompt the operator might never see.
     if (!Board.solo) setupAgentUi();
     wireRefreshButton();
+    wireComms();
     // Page modules (board-pages.js) have registered by now — script order +
     // the async boot poll guarantee it. Let them do Tauri-dependent setup.
     Object.keys(Board.pages).forEach(function (name) {

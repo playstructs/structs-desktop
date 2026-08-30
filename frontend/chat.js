@@ -166,13 +166,27 @@
   // one inside the other, or inside a box of my own with `overflow: hidden`,
   // clips the clip: that is what mangled both portraits.
   var PFP_LAYERS = ['background', 'arms', 'body', 'neck', 'head'];
+  // A portrait layer index: a small non-negative integer and nothing else.
+  // `'01'`, `1.5`, `-1` and `'../x'` are all rejected — the last is the reason
+  // this exists, the others are why it is stricter than a range check.
+  function isLayer(v) {
+    return typeof v === 'number' && isFinite(v) && v >= 0 && v < 1000
+      && Math.floor(v) === v;
+  }
+
   function fillPfp(frame, attrsJson) {
     var pfp = null;
     if (attrsJson) { try { pfp = JSON.parse(attrsJson); } catch (e) { pfp = null; } }
-    if (pfp && typeof pfp === 'object' && pfp.head != null) {
+    if (pfp && typeof pfp === 'object' && isLayer(pfp.head)) {
       PFP_LAYERS.forEach(function (part) {
         var idx = pfp[part];
-        if (idx == null) return;
+        // A layer index is a NUMBER, and it is checked because this value is
+        // chosen by the player it depicts: `pfpClientRenderAttributes` is a
+        // free-form on-chain string, so anyone can put anything in it. It ends
+        // up interpolated into a path, and while an <img> makes the usual
+        // tricks inert, a junk value still means a burst of failed loads and a
+        // path this window never meant to ask for.
+        if (!isLayer(idx)) return;
         var im = el('img', 'pfp-viewer-layer');
         im.src = 'img/pfp/' + part + '/pfp_' + part + '_' + idx + '.png';
         im.alt = '';
@@ -186,6 +200,8 @@
     }
     return frame;
   }
+
+  Chat._fillPfp = fillPfp;
 
   // The roster frame: a 44px head-and-shoulders, as every list in the game
   // draws a player.
@@ -830,6 +846,17 @@
         ? [r.invited_by ? 'Invited by ' + r.invited_by : 'You have been invited']
         : [fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')];
       if (browsing) {
+        // The ADDRESS — the one thing about a room that cannot be taken.
+        // Anyone may publish a public room under any name, so two rows here
+        // can legitimately carry the SAME display name; without an address
+        // there is nothing on screen that tells them apart.
+        //
+        // Only the alias's localpart, not the whole thing: the server half is
+        // shown separately and only when the room is somewhere else, because
+        // stamping every own-server row with its own server is noise on most
+        // of the list.
+        var addr = String(r.canonical_alias || '').split(':')[0];
+        parts.push(addr || r.room_id);
         var host = foreignServerLabel(r);
         if (host) parts.push(host);
         if (r.topic) parts.push(r.topic);
