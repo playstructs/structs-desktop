@@ -261,6 +261,24 @@ impl StructsMcpHandler {
                     "required": ["command"]
                 })),
             ),
+            Tool::new(
+                "structs_comms",
+                "Guild chat over Matrix, as the signed-in player (headless — the app signs in with the in-app wallet, no key or token leaves the app). Actions: 'status' (networks + which guild is connected + your profile); 'connect' (sign in to the guild homeserver — run this first); 'disconnect'; 'rooms' (joined rooms with unread counts); 'browse' {query?} (discoverable rooms in the guild directory); 'people' {query?} (players you can DM); 'timeline' {room_id, limit?} (recent messages, newest last); 'backfill' {room_id, limit?} (older history, one page up); 'send' {room_id, body, msgtype?, mentions?, reply_to?} (post a message — msgtype '/me'-style emote via msgtype:\"m.emote\"; mentions:[{name,user_id}]; reply_to:{event_id,sender,body}); 'join' {room_id}; 'leave' {room_id}; 'dm' {player_id} (open/return a direct room with a player id like '1-42'); 'react' {room_id, event_id, key, on?}. guild_id defaults to the active guild; pass it only to target another.",
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["status", "connect", "disconnect", "rooms", "browse", "people", "timeline", "backfill", "send", "join", "leave", "dm", "react"]
+                        },
+                        "args": {
+                            "type": "object",
+                            "description": "Action args. guild_id? (defaults to active guild). rooms/status/connect/disconnect: none. browse/people: {query?}. timeline/backfill: {room_id, limit?}. send: {room_id, body, msgtype?, mentions?:[{name,user_id}], reply_to?:{event_id,sender,body}}. join/leave: {room_id}. dm: {player_id}. react: {room_id, event_id, key, on?}."
+                        }
+                    },
+                    "required": ["action"]
+                })),
+            ),
         ]
     }
 }
@@ -483,6 +501,13 @@ impl ServerHandler for StructsMcpHandler {
                             McpError::invalid_params(format!("Invalid params: {}", e), None)
                         })?;
                     tools::system::execute(params).await
+                }
+                "structs_comms" => {
+                    let params: tools::comms::CommsParams =
+                        serde_json::from_value(args).map_err(|e| {
+                            McpError::invalid_params(format!("Invalid params: {}", e), None)
+                        })?;
+                    tools::comms::execute(&self.app_handle, params).await
                 }
                 // Retired tools, absorbed elsewhere — point old prompts/workflows home.
                 "structs_query" => vec![Content::text(

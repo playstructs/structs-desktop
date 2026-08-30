@@ -129,6 +129,7 @@ structs-universe/
 │               ├── system.rs     # structs_system tool (health, logs, self-tuning)
 │               ├── players.rs    # structs_players tool (virtual players: create/list/roster/state/act)
 │               ├── policy.rs     # Standing order management
+│               ├── comms.rs      # structs_comms tool (headless Matrix guild chat over the in-app client)
 │               └── format.rs     # Shared formatting utilities
 ├── .mcp.json                 # Claude Code MCP server config
 ├── .github/workflows/        # CI/CD
@@ -139,7 +140,7 @@ structs-universe/
 
 ## MCP Server
 
-The app runs an MCP server on `localhost:8420` with bearer token authentication (plus an unauthenticated `GET /health` liveness probe for external monitors). AI agents interact with the game through 13 tools, built-in prompts, and compendium resources.
+The app runs an MCP server on `localhost:8420` with bearer token authentication (plus an unauthenticated `GET /health` liveness probe for external monitors). AI agents interact with the game through 14 tools, built-in prompts, and compendium resources.
 
 ### Tools
 
@@ -158,6 +159,7 @@ The app runs an MCP server on `localhost:8420` with bearer token authentication 
 | `structs_map` | Render a planet map to PNG/GIF using the game's own renderer |
 | `structs_doctrine` | Standing rules of engagement + per-tick executor (advise/auto autonomy) |
 | `structs_strike` | Coordinated team attack + kill-chain (strip blockers → kill → raid window) |
+| `structs_comms` | Headless guild chat over Matrix, as the player already signed in: `status`, `connect`, `rooms`, `browse`, `timeline`/`backfill`, `send`, `join`/`leave`, `dm`, `react`, `people`. Sign-in is the in-app wallet signature, so no key or token ever leaves the app |
 
 ### Prompts
 
@@ -202,6 +204,26 @@ The bearer token is generated on first launch and stored in `~/Library/Applicati
 ### Security
 
 The MCP server requires a bearer token on every request. Without it, requests return `400 Bad Request`. This prevents unauthorized access from other processes or websites on the same machine.
+
+### Guild Comms (Matrix)
+
+The `structs_comms` tool re-exposes the app's built-in Matrix client (`src-tauri/src/matrix/`) over MCP, so an agent can read and post to guild chat rooms **as the player it is already signed in as** — the same identity a human sees in the Comms window. It never opens a browser and never touches a private key.
+
+**How sign-in works.** `structs_comms {action:"connect"}` runs the full guild → Matrix login chain headlessly:
+
+1. Resolve the guild's declared homeserver and OAuth metadata (`matrix_url`, issuer).
+2. Register an ephemeral OAuth client and start an authorization-code + PKCE request.
+3. Prove identity to the guild: fetch the guild's server timestamp, ask the in-app signer to sign the `LOGIN_GUILD{guild}…{timestamp}` message with the player's key (via `vplayer_bridge`, which **only** signs that fixed login string — never an arbitrary payload), and POST it to `{guild_api}/auth/login`.
+4. Resume the parked OAuth request and auto-post any MAS consent form(s) back to the issuer, following the redirect chain until it yields an authorization code. MAS may interpose more than one interstitial form in a row; the consent handler posts each in turn, always only to the issuer the homeserver named.
+5. Redeem the code for a Matrix access token and persist the session.
+
+The resulting identity is `@<player-id>:<homeserver>` (e.g. `@1-471:matrix.beta.playstructs.com`). All arguments default `guild_id` to the active guild, so the single-guild case needs none.
+
+**Actions.** `status` (login state, networks, profile) · `rooms` / `browse` (directory, with optional `query`) · `timeline` / `backfill` (`{room_id, limit?}`) · `send` (`{room_id, body, mentions?, reply_to?}`) · `join` / `leave` (`{room_id}`) · `dm` (`{player_id}`) · `react` (`{room_id, event_id, key, on?}`) · `people` · `disconnect`. Arguments are passed nested under an `args` object.
+
+**Safety.** Only the fixed guild-login message is ever signed, so the bridge can never be turned into a generic signing oracle. Consent forms are only posted back to the issuer the homeserver named, so a hijacked page cannot turn the flow into a blind form submitter.
+
+> **Provenance.** This `structs_comms` tool, the consent-handler fix, and these docs were AI-generated (Claude) and tested end-to-end against a live guild account — connected as a real player, joined a guild room, and read/posted messages over Matrix before submission.
 
 ## GPU Hashing
 

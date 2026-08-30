@@ -1,6 +1,7 @@
 pub mod action;
 pub mod board;
 pub mod board_pages;
+pub mod comms;
 pub mod dashboard;
 pub mod doctrine;
 pub mod events;
