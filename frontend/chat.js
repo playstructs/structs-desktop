@@ -48,6 +48,12 @@
     // Which message has its reaction picker open, if any. One at a time: a
     // row of pickers down a conversation is a conversation you cannot read.
     reactPicker: null,
+    // Set by Ctrl-K so the filter appears even on a short list — otherwise
+    // the shortcut would focus something that is not there.
+    filterWanted: false,
+    // Narrowing a long channel list. Kept across renders so typing into it
+    // does not fight the room-list pushes arriving underneath.
+    roomFilter: '',
     // Who has seen your latest message here: {event_id, names}. Null until
     // somebody has.
     seen: null,
@@ -849,6 +855,54 @@
     return row;
   }
 
+  // What a channel list is FOR is finding the thing that wants you. Within a
+  // section: what named you, then what is unread, then the rest by name.
+  //
+  // A silenced room never jumps the queue, however much traffic it has —
+  // muting means "stop pulling my eye", and sorting it to the top would undo
+  // exactly that.
+  function roomOrder(a, b) {
+    var rank = function (r) {
+      if (r.muted) return 2;
+      if (r.mention) return 0;
+      if (r.unread) return 1;
+      return 2;
+    };
+    var ra = rank(a), rb = rank(b);
+    if (ra !== rb) return ra - rb;
+    // Within a rank, busier first — but only for rooms that are actually
+    // waiting. Ordering read rooms by a count they all share at zero would
+    // just be an unstable alphabetical.
+    if (ra < 2 && (b.unread || 0) !== (a.unread || 0)) {
+      return (b.unread || 0) - (a.unread || 0);
+    }
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  }
+  Chat.roomOrder = roomOrder;
+
+  // The rooms a filter is currently showing, in the order they are shown.
+  // Enter opens the first of these, so it has to be the SAME list and the
+  // same order the eye is reading — deriving it twice is how the top row and
+  // the one that opens come to disagree.
+  function filteredRooms() {
+    var mine = S.rooms.filter(function (r) { return r.joined; }).filter(matchesFilter);
+    var out = [];
+    SECTIONS.forEach(function (sec) {
+      mine.filter(function (r) { return (r.section || 'galaxy') === sec.key; })
+        .slice().sort(roomOrder)
+        .forEach(function (r) { out.push(r); });
+    });
+    return out;
+  }
+  Chat.filteredRooms = filteredRooms;
+
+  function matchesFilter(r) {
+    var q = String(S.roomFilter || '').trim().toLowerCase();
+    if (!q) return true;
+    return String(r.name || '').toLowerCase().indexOf(q) !== -1 ||
+      String(r.canonical_alias || '').toLowerCase().indexOf(q) !== -1;
+  }
+
   function renderChannels() {
     var page = el('div', 'chat-page');
 
@@ -876,6 +930,69 @@
 
     page.appendChild(pageHeader('Channels', null, right));
 
+    // Only once the list is long enough to need it. A filter box above four
+    // rooms is a control that costs more attention than it saves.
+    var joined = S.rooms.filter(function (r) { return r.joined; });
+    // Long lists get it unasked; a short list only shows it once you have
+    // gone looking for it — but then it must be there, or Ctrl-K would put
+    // the cursor nowhere.
+    if (joined.length > 8 || S.roomFilter || S.filterWanted) {
+      var box = el('div');
+      box.id = 'chat-room-filter';
+      var label = el('label', 'sui-input-text');
+      label.setAttribute('for', 'chat-room-filter-q');
+      var fi = el('input');
+      fi.type = 'text';
+      fi.id = 'chat-room-filter-q';
+      fi.name = 'chat-room-filter-q';
+      fi.placeholder = 'Find a channel';
+      fi.autocomplete = 'off';
+      fi.value = S.roomFilter || '';
+      fi.addEventListener('input', function () {
+        S.roomFilter = fi.value;
+        render();
+      });
+      fi.addEventListener('keydown', function (e) {
+        // Enter opens the best match. Typing three letters and pressing
+        // Enter is the whole point of a filter; reaching for the mouse to
+        // finish the job wastes it.
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          var best = filteredRooms()[0];
+          if (best) { S.roomFilter = ''; openRoom(best.room_id); }
+          return;
+        }
+        if (e.key !== 'Escape') return;
+        e.preventDefault(); e.stopPropagation();
+        S.roomFilter = '';
+        render();
+        var again = byId('chat-room-filter-q');
+        if (again) again.focus();
+      });
+      label.appendChild(fi);
+      box.appendChild(label);
+      page.appendChild(box);
+      // Ctrl-K asks for this box; `go('channels')` then refreshes the room
+      // list, which re-renders and throws the focus away. Re-asserting it
+      // here means the cursor survives however many pushes land underneath.
+      //
+      // Only when nothing else has taken it: a room-list push must not yank
+      // the caret out of wherever the player has since clicked.
+      if (S.filterWanted) {
+        var active = document.activeElement;
+        if (!active || active === document.body ||
+            active.id === 'chat-room-filter-q') {
+          setTimeout(function () {
+            var live = byId('chat-room-filter-q');
+            if (live && document.activeElement !== live) {
+              live.focus();
+              moveCaretToEnd(live);
+            }
+          }, 0);
+        }
+      }
+    }
+
     var scroll = el('div', 'chat-scroll');
 
     // A share arrived with nowhere to go yet. Say so where the choice is.
@@ -895,10 +1012,15 @@
       // Only rooms you are IN. What else exists lives in Browse — a list that
       // mixes "your channels" with "every channel on the server" answers
       // neither question well.
-      var mine = S.rooms.filter(function (r) { return r.joined; });
+      var mine = S.rooms.filter(function (r) { return r.joined; }).filter(matchesFilter);
+      if (!mine.length) {
+        scroll.appendChild(noticeBlock('Nothing matches',
+          'No channel of yours is called ' + JSON.stringify(S.roomFilter) + '.'));
+      }
       SECTIONS.forEach(function (sec) {
         var rows = mine.filter(function (r) { return (r.section || 'galaxy') === sec.key; });
         if (!rows.length) return;
+        rows = rows.slice().sort(roomOrder);
         var group = el('div', 'chat-net-group');
         group.appendChild(el('div', 'chat-net-label', sec.label));
         var table = el('div', 'sui-result-table');
@@ -3339,6 +3461,7 @@
   }
 
   function go(view) {
+    if (view !== 'channels') S.filterWanted = false;
     S.view = view;
     if (view === 'channels') {
       stopTyping();
@@ -3475,6 +3598,7 @@
         if (S.draft) putDraft(S.draft);
         S.pins = [];
         S.replyTo = null;
+        S.filterWanted = false;
         S.deleteArmed = null;
         S.editing = null;
         S.seen = null;
@@ -3721,6 +3845,16 @@
       });
     }
     document.addEventListener('keydown', function (e) {
+      // Ctrl/Cmd-K jumps to a channel, the way every chat client of the last
+      // decade does. Goes to the list and focuses the filter, so the next
+      // three keystrokes are the search.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        S.roomFilter = '';
+        S.filterWanted = true;
+        go('channels');
+        return;
+      }
       // Ctrl/Cmd-F opens search, scoped to whatever you are reading. The key
       // every application has agreed on for thirty years, and a search only
       // reachable from a header icon is a search most people never find.

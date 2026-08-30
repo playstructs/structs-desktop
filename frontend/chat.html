@@ -447,12 +447,15 @@
     /* A placeholder should read as an invitation, not as content. SUI's own
        is `--text-hint` (#A7C0C6) against `--text-body` (#C5D7D9) — barely a
        shade apart, so "Message, or /help" looked like something already
-       typed. Same hue, just receding: no new colour, only less of it. */
-    #chat-composer input::placeholder,
-    #chat-people-search input::placeholder,
-    .chat-rent input::placeholder {
+       typed. Same hue, just receding: no new colour, only less of it.
+
+       Every text input in this window, not a list of ids. The list version
+       named three and was already wrong twice: the channel filter and the
+       message search were both added later and neither was added here, so
+       each shipped with a placeholder brighter than the text it invites. */
+    input::placeholder {
       color: var(--text-hint);
-      opacity: .45;
+      opacity: 0.45;
     }
     #chat-composer .pfp-viewer-layer { image-rendering: pixelated; }
 
@@ -500,6 +503,10 @@
     }
     .chat-work-verdict.chat-mod-good { color: var(--text-player-primary); }
     .chat-work-verdict.chat-mod-bad { color: var(--text-enemy-primary); }
+
+    /* ── Channel filter ───────────────────────────────────────────────── */
+    #chat-room-filter { padding: var(--spacing-md); align-self: stretch; }
+    #chat-room-filter .sui-input-text { width: 100%; }
 
     /* ── Muted ────────────────────────────────────────────────────────── */
     .chat-room-muted { color: var(--text-hint); margin-right: var(--spacing-sm); }

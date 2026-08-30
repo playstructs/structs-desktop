@@ -3105,5 +3105,171 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     loud.querySelector('.chat-room-unread').className);
 }
 
+// ── A channel list worth reading ───────────────────────────────────────────
+// What a channel list is FOR is finding the thing that wants you. In arrival
+// order, a room with twelve unread sits below one with none.
+{
+  console.log('\n— channel order');
+  const { w } = await open();
+  const order = w.Chat.roomOrder;
+  const room = (name, o) => Object.assign({ name: name, unread: 0, mention: false,
+    muted: false }, o || {});
+  const sort = (list) => list.slice().sort(order).map((r) => r.name).join(',');
+
+  check('being named comes first',
+    sort([room('quiet'), room('busy', { unread: 9 }), room('named', { mention: true })])
+      === 'named,busy,quiet');
+  check('busier before quieter, among what is waiting',
+    sort([room('a', { unread: 1 }), room('b', { unread: 9 })]) === 'b,a');
+  // Muting means "stop pulling my eye". Sorting a silenced room to the top
+  // would undo exactly that, however much traffic it has.
+  check('a silenced room never jumps the queue',
+    sort([room('loud', { unread: 99, mention: true, muted: true }),
+          room('normal', { unread: 1 })]) === 'normal,loud');
+  // Read rooms all share a count of zero, so ordering them by it would be an
+  // unstable alphabetical pretending to be a ranking.
+  check('read rooms are alphabetical',
+    sort([room('Zulu'), room('Alpha'), room('Mike')]) === 'Alpha,Mike,Zulu');
+}
+
+// Finding one channel among many.
+{
+  console.log('\n— channel filter');
+  const { w, d } = await open();
+  const many = [];
+  for (let i = 0; i < 14; i++) {
+    many.push({ room_id: '!r' + i + ':h', name: 'Room ' + i, icon: 'icon-guild',
+      members: 3, joined: true, unread: 0, mention: false, muted: false,
+      section: 'local', pinned: [] });
+  }
+  many.push({ room_id: '!ops:h', name: 'Logistics', icon: 'icon-guild', members: 9,
+    joined: true, unread: 0, mention: false, muted: false, section: 'local', pinned: [] });
+  w.__HARNESS_EMIT__('matrix::rooms', { guild_id: '0-5', rooms: many });
+  await tick();
+
+  const filter = () => d.getElementById('chat-room-filter-q');
+  check('a long list offers a filter', !!filter());
+
+  filter().value = 'logi';
+  filter().dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick();
+  const rows = all(d, '.sui-result-row');
+  check('typing narrows it to one', rows.length === 1, String(rows.length));
+  check('…the right one', text(rows[0]).includes('Logistics'), text(rows[0]));
+
+  // A filter matching nothing must say so, not show an empty page.
+  filter().value = 'zzzz';
+  filter().dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick();
+  check('a filter matching nothing says so',
+    text(d.querySelector('.chat-scroll')).includes('Nothing matches'),
+    text(d.querySelector('.chat-scroll')).slice(0, 80));
+
+  // Escape clears it rather than backing out of the view underneath.
+  filter().dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await tick();
+  check('escape clears the filter', w.Chat._state.roomFilter === '',
+    JSON.stringify(w.Chat._state.roomFilter));
+  check('…and the list comes back', all(d, '.sui-result-row').length === 15,
+    String(all(d, '.sui-result-row').length));
+}
+
+// A short list needs no filter at all.
+{
+  console.log('\n— no filter when it would not help');
+  const { d } = await open();
+  await tick();
+  check('a handful of channels offers no filter box',
+    !d.getElementById('chat-room-filter-q'));
+}
+
+// ── Jumping to a channel ───────────────────────────────────────────────────
+// Typing three letters and pressing Enter is the whole point of a filter;
+// reaching for the mouse to finish the job wastes it.
+{
+  console.log('\n— quick switch');
+  const { w, d } = await open();
+  const many = [];
+  for (let i = 0; i < 12; i++) {
+    many.push({ room_id: '!r' + i + ':h', name: 'Room ' + i, icon: 'icon-guild',
+      members: 3, joined: true, unread: 0, mention: false, muted: false,
+      section: 'local', pinned: [] });
+  }
+  many.push({ room_id: '!ops:h', name: 'Logistics', icon: 'icon-guild', members: 9,
+    joined: true, unread: 0, mention: false, muted: false, section: 'local', pinned: [] });
+  w.__HARNESS_EMIT__('matrix::rooms', { guild_id: '0-5', rooms: many });
+  await tick();
+
+  const filter = () => d.getElementById('chat-room-filter-q');
+  filter().value = 'logi';
+  filter().dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick();
+  filter().dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  check('Enter opens the match', w.Chat._state.roomId === '!ops:h',
+    String(w.Chat._state.roomId));
+  check('…and clears the filter behind it', w.Chat._state.roomFilter === '',
+    JSON.stringify(w.Chat._state.roomFilter));
+
+  // Enter must open the room the EYE sees at the top. Deriving that list
+  // twice is how the top row and the one that opens come to disagree.
+  w.Chat.go('channels');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::rooms', {
+    guild_id: '0-5',
+    rooms: many.map((r) => Object.assign({}, r,
+      r.room_id === '!r7:h' ? { unread: 5, mention: true } : {})),
+  });
+  await tick();
+  const firstShown = all(d, '.sui-result-row')[0];
+  check('the first row is the one that wants you',
+    text(firstShown).includes('Room 7'), text(firstShown));
+  check('…and it is what Enter would open',
+    w.Chat.filteredRooms()[0].room_id === '!r7:h',
+    w.Chat.filteredRooms()[0].room_id);
+}
+
+// Ctrl-K from anywhere, including from inside a room.
+{
+  console.log('\n— ctrl-K');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+  await tick();
+  check('ctrl-K goes to the channel list', w.Chat._state.view === 'channels',
+    w.Chat._state.view);
+  // The fixture has only a handful of rooms, so the filter would normally be
+  // hidden — but the shortcut must not focus something that is not there.
+  check('…and the filter is there even on a short list',
+    !!d.getElementById('chat-room-filter-q'));
+  check('…with the cursor already in it',
+    d.activeElement.id === 'chat-room-filter-q', d.activeElement.id);
+
+  // Leaving forgets that it was asked for.
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w.Chat.go('channels');
+  await tick();
+  check('a short list goes back to having no filter',
+    !d.getElementById('chat-room-filter-q'));
+}
+
+// Every placeholder in the window recedes, not an enumerated few.
+{
+  console.log('\n— placeholders');
+  const { d } = await open();
+  const rules = Array.from(d.styleSheets)
+    .flatMap((s) => { try { return Array.from(s.cssRules); } catch (e) { return []; } })
+    .filter((r) => r.selectorText === 'input::placeholder');
+  check('one rule covers every input', rules.length === 1,
+    String(rules.length));
+  // The enumerated version named three ids and was already wrong twice: the
+  // channel filter and the message search were both added later.
+  check('…and it is the receding one',
+    rules[0].style.getPropertyValue('opacity') === '0.45',
+    rules[0].style.cssText);
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);
