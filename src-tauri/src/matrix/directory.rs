@@ -203,6 +203,44 @@ fn collect_senders(v: &Value, out: &mut Vec<String>) {
 }
 
 /// Everyone the directory knows, for the people picker.
+/// Is this the on-chain name of some player?
+///
+/// A Matrix display name is self-chosen and unverified; a player's name comes
+/// from the chain and cannot be taken. So a non-player calling themselves
+/// "Marklifer" is impersonation, and the client has to notice — people
+/// negotiate raids and agreements in these rooms.
+///
+/// A scan rather than an index: it only runs for senders who are NOT players,
+/// which is a small minority (bots and service accounts), and a few thousand
+/// string compares is nothing beside the network call that delivered the
+/// message.
+/// Put a player into the directory directly. Tests only — the real path is a
+/// chain lookup, which a unit test has no business making.
+#[cfg(test)]
+pub fn remember_for_test(player_id: &str, ident: Ident) {
+    if let Ok(mut m) = PLAYERS.write() {
+        m.insert(player_id.to_string(), ident);
+    }
+}
+
+#[cfg(test)]
+pub fn forget_for_test(player_id: &str) {
+    if let Ok(mut m) = PLAYERS.write() {
+        m.remove(player_id);
+    }
+}
+
+pub fn name_belongs_to_a_player(name: &str) -> bool {
+    let needle = name.trim().to_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    PLAYERS
+        .read()
+        .map(|m| m.values().any(|i| i.username.trim().to_lowercase() == needle))
+        .unwrap_or(false)
+}
+
 pub fn all() -> Vec<(String, Ident)> {
     PLAYERS
         .read()

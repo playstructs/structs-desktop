@@ -484,6 +484,144 @@
    * Shares the id alone. Chat turns an id into a card with the live figures
    * on it, so a sentence typed here would only go stale — and the player is
    * about to add their own words anyway. */
+  // ── What people have said about this planet ───────────────────────────────
+  // Beside what HAPPENED to it. The battle log is the chain's account; this
+  // is the guild's. Together they are the whole story of a raid.
+  var chatState = { rows: [], open: false, loading: false, connected: false,
+                    fresh: false };
+
+  // Does this text name THIS object, and not one whose id merely starts the
+  // same way?
+  //
+  // `2-1` is a prefix of `2-15361`. Substring-matching chain ids has caused
+  // real misattribution in this codebase before — a whole class of bug — so
+  // the id must be bounded by something that cannot continue it: not a digit,
+  // not a hyphen, not a letter.
+  function mentionsObject(body, id) {
+    var text = String(body || '');
+    var at = -1;
+    for (;;) {
+      at = text.indexOf(id, at + 1);
+      if (at === -1) return false;
+      var before = at === 0 ? '' : text.charAt(at - 1);
+      var after = text.charAt(at + id.length);
+      var boundedLeft = !before || !/[0-9A-Za-z-]/.test(before);
+      var boundedRight = !after || !/[0-9A-Za-z-]/.test(after);
+      if (boundedLeft && boundedRight) return true;
+    }
+  }
+
+  function wireChat() {
+    var head = document.getElementById('rv-chat-toggle');
+    var discuss = document.getElementById('rv-chat-discuss');
+    if (discuss) {
+      discuss.addEventListener('click', function () {
+        if (!TARGET) return;
+        // Hands the id to Comms as a draft — the player picks the room and
+        // presses send. Sending from here would mean guessing a room.
+        window.__TAURI__.core.invoke('matrix_share', { text: TARGET.id })
+          .catch(function (e) { discuss.textContent = String(e).slice(0, 40); });
+      });
+    }
+    if (!head) return;
+    head.addEventListener('click', function () {
+      chatState.open = !chatState.open;
+      document.getElementById('rv-chat').classList.toggle('rv-collapsed', !chatState.open);
+      head.textContent = chatState.open ? 'hide' : 'show';
+      if (chatState.open) { chatState.fresh = false; loadChat(); }
+      else renderChat();
+    });
+
+    // Live, because a raid is live. The panel used to load once on open and
+    // then go stale during exactly the event it exists for.
+    //
+    // Only messages that name THIS object: a raid window is one planet, and
+    // repainting it for every message in the guild would be a busy panel
+    // saying nothing.
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      window.__TAURI__.event.listen('matrix::timeline', function (e) {
+        var p = (e && e.payload) || {};
+        if (!TARGET || !p.messages) return;
+        var hit = p.messages.some(function (m) {
+          return m && !m.self && mentionsObject(m.body, TARGET.id);
+        });
+        if (!hit) return;
+        if (chatState.open) loadChat();
+        // Closed: say that something was said rather than silently changing
+        // a count nobody is looking at.
+        else { chatState.fresh = true; renderChat(); }
+      });
+    }
+  }
+
+  function loadChat() {
+    if (!TARGET || chatState.loading) return;
+    chatState.loading = true;
+    window.__TAURI__.core.invoke('matrix_object_chatter', { objectId: TARGET.id })
+      .then(function (res) {
+        chatState.loading = false;
+        chatState.connected = !!(res && res.connected);
+        chatState.rows = (res && res.hits) || [];
+        renderChat();
+      })
+      .catch(function () {
+        chatState.loading = false;
+        chatState.rows = [];
+        renderChat();
+      });
+  }
+
+  function renderChat() {
+    var body = document.getElementById('rv-chat-body');
+    var count = document.getElementById('rv-chat-count');
+    var head = document.getElementById('rv-chat-head');
+    if (!body) return;
+    body.textContent = '';
+    if (count) {
+      // A closed panel with something new says so; an open one just shows it.
+      count.textContent = chatState.fresh && !chatState.open
+        ? 'new'
+        : (chatState.rows.length ? String(chatState.rows.length) : '');
+    }
+    if (head) head.classList.toggle('rv-chat-fresh', chatState.fresh && !chatState.open);
+
+    if (!chatState.connected) {
+      // A raid window opens whether or not Comms is signed in, and must say
+      // which of "nobody spoke" and "we did not look" is true.
+      var off = document.createElement('div');
+      off.className = 'rv-log-empty sui-text-tiny';
+      off.textContent = 'Comms is not connected, so nothing can be read.';
+      body.appendChild(off);
+      return;
+    }
+    if (!chatState.rows.length) {
+      var none = document.createElement('div');
+      none.className = 'rv-log-empty sui-text-tiny';
+      none.textContent = 'Nothing said about this planet yet.';
+      body.appendChild(none);
+      return;
+    }
+    chatState.rows.forEach(function (h) {
+      var m = h.message || {};
+      var row = document.createElement('div');
+      row.className = 'rv-chat-row';
+      var who = document.createElement('span');
+      who.className = 'rv-chat-who';
+      who.textContent = (m.sender_tag ? '[' + m.sender_tag + '] ' : '') +
+        (m.sender_name || m.sender || '');
+      var text = document.createElement('span');
+      text.className = 'rv-chat-body-text';
+      text.textContent = m.body || '';
+      var room = document.createElement('span');
+      room.className = 'rv-chat-room';
+      room.textContent = h.room_name || '';
+      row.appendChild(who);
+      row.appendChild(text);
+      row.appendChild(room);
+      body.appendChild(row);
+    });
+  }
+
   function wireShare() {
     var a = document.getElementById('rv-share');
     if (!a) return;
@@ -2751,8 +2889,15 @@
         // must not be `static` — the same guard the game applies.
         if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
         host.appendChild(bubble);
-        // Newlines in the data attribute become real line breaks; the text is
-        // ours (never user content), so this cannot inject markup.
+        // Newlines in the data attribute become real line breaks.
+        //
+        // `esc` is what makes this safe, and it is NOT belt-and-braces: this
+        // comment used to say the text was "ours (never user content)", which
+        // is false — the defender portrait's tooltip carries a player's
+        // on-chain NAME, and players choose those. Escaping each segment
+        // before joining is the only thing standing between a name of
+        // `<img src=x onerror=…>` and script running in somebody else's raid
+        // window. Do not remove it as redundant.
         bubble.innerHTML = String(trigger.dataset.suiTooltip || '')
           .split('\n').map(esc).join('<br>');
         bubble.classList.add('sui-mod-show');
@@ -2820,6 +2965,7 @@
     // strip are set up in one place.
     observeBoardViewport();
     wireShare();
+    wireChat();
     var fit = document.getElementById('rv-fit-toggle');
     if (fit) {
       syncFitToggle();
@@ -3276,6 +3422,8 @@
   // Exported for the jsdom harness: the pure pieces are worth asserting on
   // without a signed rebuild.
   window.RaidView = {
+    // Bounded id matching — the prefix-collision guard the comms panel needs.
+    mentionsObject: mentionsObject,
     resolveShotAnimation: resolveShotAnimation,
     lottiePath: lottiePath,
     tileUrl: tileUrl,

@@ -41,11 +41,18 @@ const HOST_TTL_SECS: u64 = 3600;
 static HOSTS: std::sync::LazyLock<RwLock<HashMap<String, (u64, Option<String>)>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
-fn http() -> Option<reqwest::Client> {
+/// Built once. Probing is a cold path, so this matters less than it does for
+/// the sync client — but a `reqwest::Client` owns a connection pool and a TLS
+/// stack either way, and rebuilding it per probe buys nothing.
+static PROBE: std::sync::LazyLock<Option<reqwest::Client>> = std::sync::LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
         .build()
         .ok()
+});
+
+fn http() -> Option<reqwest::Client> {
+    PROBE.clone()
 }
 
 /// `shell.crab.la` → [`matrix.shell.crab.la`, `matrix.crab.la`].

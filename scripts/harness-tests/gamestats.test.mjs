@@ -134,5 +134,76 @@ async function until(fn, ms = 5000) {
   w.close();
 }
 
+// ── A leaderboard is a list of people ──────────────────────────────────────
+// Who is actually around, and a way to reach them, is what turns a table of
+// rivals into something you can act on. The same two affordances the roster
+// carries, on the same players.
+{
+  console.log('\n— leaderboard is social');
+  const dom = await load('?view=gamestats');
+  const w = dom.window;
+  const d = w.document;
+  await until(() => d.getElementById('gamestats-body')?.querySelector('.fstat'));
+  // Presence arrives on its own promise and repaints, so wait for the row to
+  // actually carry it rather than racing the first paint.
+  await until(() => d.querySelector('.ops-presence') || d.querySelector('.ops-reach'));
+  const rows = [...d.querySelectorAll('.sui-result-row')];
+  const player = rows.find((n) => n.querySelector('.ops-presence') ||
+    n.querySelector('.ops-reach'));
+  check('a leaderboard row carries the social affordances', !!player,
+    rows.length ? rows[0].textContent.slice(0, 60) : 'no rows');
+
+  if (player) {
+    check('…whether they are around', !!player.querySelector('.ops-presence'),
+      player.innerHTML.slice(0, 200));
+    const reach = player.querySelector('.ops-reach');
+    check('…and both ways to reach them',
+      reach && reach.querySelectorAll('a').length === 2,
+      reach ? String(reach.querySelectorAll('a').length) : 'none');
+    check('…one of which is a direct message',
+      !!player.querySelector('.icon-phone'), player.innerHTML.slice(0, 200));
+  }
+
+  // A guild row is not a person and must offer neither.
+  const guild = rows.find((n) => /^#\d+\s+\S/.test(n.textContent.trim()) &&
+    !n.querySelector('.ops-reach') && n.textContent.includes('Members'));
+  if (guild) {
+    check('a guild row offers no message link', !guild.querySelector('.icon-phone'),
+      guild.textContent.slice(0, 40));
+  }
+}
+
+// ── When Comms is not connected ────────────────────────────────────────────
+// The common case for anyone who has not signed in yet. These affordances
+// used to put the reason in a `title` and nothing else, so the click did
+// nothing a player could see.
+{
+  console.log('\n— reaching out with Comms off');
+  const dom = await load('?view=gamestats');
+  const w = dom.window;
+  const d = w.document;
+  await until(() => d.getElementById('gamestats-body')?.querySelector('.fstat'));
+  await until(() => d.querySelector('.ops-reach'));
+
+  // Every matrix call refuses, the way it does when nothing is signed in.
+  w.__HARNESS_REJECT__ = w.__HARNESS_REJECT__ || {};
+  w.__HARNESS_REJECT__.matrix_message_player =
+    'Comms is not connected — open Comms to sign in';
+
+  const link = d.querySelector('.ops-reach a');
+  link.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 120));
+
+  check('a failed click changes the glyph', !!link.querySelector('.icon-alert'),
+    link.innerHTML.slice(0, 80));
+  check('…so the click visibly landed', link.className.includes('err'),
+    link.className);
+  // The reason has to be one a player can act on, not an internal id.
+  check('…and says what to do about it',
+    link.title.includes('open Comms'), link.title);
+  check('…naming the player, not their id alone',
+    /could not message \S/.test(link.title), link.title);
+}
+
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');
 process.exit(failures ? 1 : 0);

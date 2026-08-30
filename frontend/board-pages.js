@@ -280,6 +280,74 @@
   //
   // Deliberately quiet: it fails in place on the icon rather than throwing a
   // dialogue, because Comms may simply not be signed in yet.
+  // ── Who is actually here ──────────────────────────────────────────────────
+  // The same signal Comms shows, on the roster that lists the same people.
+  // A guild's roster answers "who exists"; this answers "who is around", and
+  // those are different questions with the same rows.
+  var PRESENCE = { known: false, by: {} };
+
+  function loadPresence() {
+    if (!Board.T || !Board.T.core) return Promise.resolve();
+    return Board.T.core.invoke('matrix_presence', {})
+      .then(function (res) {
+        PRESENCE = { known: !!(res && res.known), by: (res && res.presence) || {} };
+      })
+      // Comms not signed in, or no homeserver: the roster is still a roster.
+      .catch(function () { PRESENCE = { known: false, by: {} }; });
+  }
+  Board.loadPresence = loadPresence;
+
+  function presenceDot(playerId) {
+    // Nothing at all when the homeserver does not run presence. A column of
+    // grey dots implying an empty guild is worse than no column.
+    if (!PRESENCE.known || !playerId) return null;
+    var p = PRESENCE.by[playerId];
+    if (!p) return null;
+    var cls = p.state === 'online' ? 'ops-mod-online'
+      : p.state === 'unavailable' ? 'ops-mod-idle' : 'ops-mod-away';
+    var dot = H.el('span', 'ops-presence ' + cls);
+    dot.title = p.state === 'online' ? 'Online in Comms'
+      : p.state === 'unavailable' ? 'Idle' : 'Away';
+    return dot;
+  }
+  Board.presenceDot = presenceDot;
+
+  // Any page listing players wants this, not only the roster — Game Stats is
+  // a different window's worth of the same people.
+  Board.ensurePresence = function (then) {
+    if (PRESENCE.known) { if (then) then(); return Promise.resolve(); }
+    return loadPresence().then(function () { if (then) then(); });
+  };
+
+  // Message a player, or talk about them — the pair of social affordances,
+  // shared so every list of people in this app offers the same two.
+  //
+  // Returns nothing when there is nobody to reach: a row for a guild, or for
+  // yourself, has no use for either.
+  function reachLinks(r) {
+    if (!r || !r.player_id) return null;
+    var wrap = H.el('span', 'ops-reach');
+    var msg = messageLink(r);
+    var share = shareLink(r);
+    if (msg) wrap.appendChild(msg);
+    if (share) wrap.appendChild(share);
+    return wrap.childNodes.length ? wrap : null;
+  }
+  Board.reachLinks = reachLinks;
+
+  // A click that fails has to LOOK like it failed.
+  //
+  // These used to put the reason in a `title` and nothing else, so pressing
+  // message with Comms signed out did nothing a player could see — the most
+  // common case for anyone who has not connected yet. The glyph changes, so
+  // the click visibly landed, and the reason is there for whoever hovers.
+  function reachFailed(anchor, verb, r, err) {
+    anchor.classList.add('err');
+    anchor.title = 'could not ' + verb + ' ' + (r.name || r.player_id) + ': ' + err;
+    var icon = anchor.querySelector('i');
+    if (icon) icon.className = 'sui-icon-md icon-alert';
+  }
+
   function messageLink(r) {
     if (!r || !r.player_id) return null;
     var a = H.el('a', 'ops-refresh-btn');
@@ -291,10 +359,7 @@
       // behind the Comms window.
       e.stopPropagation();
       Board.T.core.invoke('matrix_message_player', { playerId: r.player_id })
-        .catch(function (err) {
-          a.classList.add('err');
-          a.title = 'could not message ' + r.player_id + ': ' + err;
-        });
+        .catch(function (err) { reachFailed(a, 'message', r, err); });
     });
     return a;
   }
@@ -311,10 +376,7 @@
     a.addEventListener('click', function (e) {
       e.stopPropagation();
       Board.T.core.invoke('matrix_share', { text: r.player_id })
-        .catch(function (err) {
-          a.classList.add('err');
-          a.title = 'could not share ' + r.player_id + ': ' + err;
-        });
+        .catch(function (err) { reachFailed(a, 'share', r, err); });
     });
     return a;
   }
@@ -360,7 +422,12 @@
       }
       // Title: name + role badge (the avatar frame already signals role, the
       // badge names it in words).
-      var title = H.el('span', r.err ? 'err' : null, r.name + ' ');
+      var title = H.el('span', r.err ? 'err' : null);
+      // Before the name, the way Comms does it: whether this player is
+      // actually around right now, not merely on the roster.
+      var here = presenceDot(r.player_id);
+      if (here) title.appendChild(here);
+      title.appendChild(document.createTextNode(r.name + ' '));
       // Every role gets its own badge. `raider` used to fall through to BAIT
       // here as well as in the backend's role_str, so a player you had just
       // assigned to the war machine still read as bait in the roster.
@@ -580,6 +647,9 @@
   }
 
   function loadRoster(kickIfOlderMs) {
+    // Presence alongside the roster, not before it: the roster must render
+    // whether or not Comms is signed in, so this can only ever add a dot.
+    loadPresence().then(function () { if (armada.built) renderArmadaRows(); });
     return Board.T.core.invoke('mcp_roster', { refreshIfOlderMs: kickIfOlderMs == null ? 120000 : kickIfOlderMs })
       .then(function (snap) {
         armada.rows = snap.rows || [];

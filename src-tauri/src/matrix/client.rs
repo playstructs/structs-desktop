@@ -29,6 +29,10 @@ const SYNC_TIMEOUT_MS: u64 = 30_000;
 /// Slightly longer than the server's hold, so a healthy long-poll is never
 /// killed by our own client timeout.
 const HTTP_TIMEOUT_SECS: u64 = 45;
+/// Everything that is NOT a long-poll: sending, reacting, marking read.
+/// These are ordinary requests and should fail fast enough that the player
+/// can do something about it — a send has an echo on screen waiting on it.
+const REQUEST_TIMEOUT_SECS: u64 = 15;
 /// Events kept per room in memory. Scrollback beyond this is re-fetched.
 const TIMELINE_CAP: usize = 500;
 
@@ -66,6 +70,11 @@ pub struct Message {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     pub reactions: Vec<Reaction>,
+    /// The thread this message belongs to, when it is in one. Threads are a
+    /// grouping this window does not draw, but saying a message is part of
+    /// one is honest where showing a fabricated quote is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_root: Option<String>,
     /// The event this message answers, when it is a reply.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
@@ -93,6 +102,25 @@ pub struct Message {
     /// "message this player" straight off a message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player_id: Option<String>,
+}
+
+/// How present somebody is, as Matrix models it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Presence {
+    /// "online" | "unavailable" | "offline". `unavailable` is idle — the
+    /// spec's word, not a friendly one, so the window translates it.
+    pub state: String,
+    /// Milliseconds since they last did anything, when the server says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_active_ago: Option<u64>,
+    /// The server's own claim that they are active right now, which is more
+    /// reliable than arithmetic on `last_active_ago`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub currently_active: bool,
+    /// What they say they are doing, if they have chosen to say. Opt-in on
+    /// our side, and never assumed to be present on anyone else's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_msg: Option<String>,
 }
 
 /// One person's reaction: who, and the annotation event that says so.
@@ -130,6 +158,18 @@ pub struct Room {
     /// Who asked, by the name a player would know them by.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invited_by: Option<String>,
+    /// Where this room's conversation continued, when it has been upgraded.
+    ///
+    /// A room is not deleted by an upgrade — it stays joinable and stays in
+    /// the list. Without following the pointer a player goes on talking into
+    /// a room everyone else has left.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<String>,
+    /// The room turns on end-to-end encryption. This client has none, so
+    /// everything sent here by a crypto-capable client is unreadable — worth
+    /// saying once at the top rather than only line by line.
+    #[serde(default)]
+    pub encrypted: bool,
     /// Silenced: still counted as unread, never allowed to interrupt.
     #[serde(default)]
     pub muted: bool,
@@ -182,6 +222,14 @@ struct GuildState {
     typing: HashMap<String, Vec<String>>,
     /// Rooms the player has silenced, from `m.push_rules`.
     muted: std::collections::HashSet<String>,
+    /// user → how present they are, from `m.presence`.
+    ///
+    /// Only users the homeserver has actually told us about. An absent entry
+    /// means UNKNOWN, never offline — many Synapse deployments turn presence
+    /// off entirely because it is expensive at scale, and a client that reads
+    /// silence as "nobody is here" would show a dead guild to everyone on
+    /// those servers.
+    presence: HashMap<String, Presence>,
     /// room_id → user → the last event they have read.
     ///
     /// A receipt names ONE event: the newest thing that person has seen.
@@ -212,12 +260,35 @@ static RUNNING: std::sync::LazyLock<RwLock<std::collections::HashSet<String>>> =
 
 static TXN: AtomicU64 = AtomicU64::new(1);
 
-fn http() -> Result<reqwest::Client, String> {
+/// Two clients, built once each.
+///
+/// Once, because a `reqwest::Client` OWNS the connection pool: building one
+/// per request — which is what this did — throws the pool away every time and
+/// pays a fresh TLS handshake for every message, receipt and reaction.
+///
+/// Two, because the long-poll and everything else want opposite timeouts. A
+/// `/sync` is meant to hang for 30 seconds; a send that hangs for 45 leaves
+/// the player watching a dimmed message for most of a minute before it can
+/// even offer to retry.
+fn build_client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .timeout(timeout)
         .user_agent("StructsDesktop/comms")
         .build()
-        .map_err(|e| e.to_string())
+        // A client that will not build means no TLS stack at all; nothing
+        // this module does can proceed, and a default one is honest about
+        // that rather than papering over it.
+        .unwrap_or_default()
+}
+
+static HTTP: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(|| build_client(Duration::from_secs(REQUEST_TIMEOUT_SECS)));
+
+static LONG_POLL: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(|| build_client(Duration::from_secs(HTTP_TIMEOUT_SECS)));
+
+fn http() -> Result<reqwest::Client, String> {
+    Ok(HTTP.clone())                    // cheap: an Arc around the shared pool
 }
 
 /// The homeserver's own name, taken from our user id (`@1-42:server`) rather
@@ -321,21 +392,82 @@ fn icon_for(name: &str, alias: Option<&str>) -> &'static str {
 
 // ── Requests ────────────────────────────────────────────────────────────────
 
+/// The longest this will sit waiting out a rate limit before giving the
+/// failure back to the caller.
+///
+/// A homeserver under load can ask for a minute or more. Honouring that
+/// silently would freeze a click for a minute with no explanation, which is
+/// worse than saying so — the player can send again.
+const MAX_RATE_LIMIT_WAIT_MS: u64 = 5_000;
+
+/// How long the server says to wait, if it is asking us to.
+///
+/// `M_LIMIT_EXCEEDED` is Synapse's normal answer to a burst — several
+/// messages in a row, a handful of reactions, a search while syncing — and it
+/// always names a delay. Ignoring it turns an ordinary "slow down" into a
+/// message that simply does not send.
+fn rate_limited_for(status: u16, v: &Value) -> Option<u64> {
+    if status != 429 && v.get("errcode").and_then(|e| e.as_str()) != Some("M_LIMIT_EXCEEDED") {
+        return None;
+    }
+    // Absent means the server did not say; a short wait is the spec's own
+    // suggestion and is better than giving up immediately.
+    Some(
+        v.get("retry_after_ms")
+            .and_then(|r| r.as_u64())
+            .unwrap_or(1_000),
+    )
+}
+
 /// Every authenticated call goes through here so that exactly one place knows
 /// how to react to an expired token: refresh once, retry once, and only then
 /// give up. Without this an expiring session would look like a random failure
 /// somewhere in the middle of the UI.
+///
+/// The same place handles being rate limited, for the same reason: a burst of
+/// sends is ordinary, the server tells us exactly how long to wait, and every
+/// caller doing that itself would be six versions of the same loop.
 async fn authed(
     session: &Session,
     build: impl Fn(&reqwest::Client, &Session) -> reqwest::RequestBuilder,
 ) -> Result<Value, String> {
-    let client = http()?;
-    let resp = build(&client, session)
+    authed_on(&HTTP, session, build).await
+}
+
+/// The same, on a named client — so `/sync` can use the long-poll one without
+/// every other request inheriting its 45-second patience.
+async fn authed_on(
+    client: &reqwest::Client,
+    session: &Session,
+    build: impl Fn(&reqwest::Client, &Session) -> reqwest::RequestBuilder,
+) -> Result<Value, String> {
+    let client = client.clone();
+    let mut resp = build(&client, session)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    let status = resp.status();
-    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    let mut status = resp.status();
+    let mut v: Value = resp.json().await.unwrap_or(Value::Null);
+
+    // Once, not in a loop: a server still refusing after it told us when to
+    // come back is not going to be talked round by asking faster.
+    if let Some(wait) = rate_limited_for(status.as_u16(), &v) {
+        if wait <= MAX_RATE_LIMIT_WAIT_MS {
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+            resp = build(&client, session)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            status = resp.status();
+            v = resp.json().await.unwrap_or(Value::Null);
+        } else {
+            return Err(format!(
+                "the homeserver is rate limiting this; try again in {}s",
+                wait.div_ceil(1000)
+            ));
+        }
+    }
+
     if status.is_success() {
         return Ok(v);
     }
@@ -357,6 +489,14 @@ async fn authed(
 }
 
 fn matrix_error(status: u16, v: &Value) -> String {
+    // The one error a player is likely to meet, so it says what to do rather
+    // than naming a spec constant at them.
+    if let Some(wait) = rate_limited_for(status, v) {
+        return format!(
+            "the homeserver is rate limiting this; try again in {}s",
+            wait.div_ceil(1000)
+        );
+    }
     let code = v.get("errcode").and_then(|e| e.as_str());
     let msg = v.get("error").and_then(|e| e.as_str());
     match (code, msg) {
@@ -390,6 +530,69 @@ const SETUP_EVENTS: &[&str] = &[
     "m.space.child",
     "m.space.parent",
 ];
+
+/// What to call whoever sent this.
+///
+/// A player's name comes from the chain and is theirs. Everyone else has only
+/// a Matrix display name, which is self-chosen, unverified, and changeable at
+/// will — so if a non-player is using a player's name, the name alone is a
+/// lie and the id has to be shown beside it.
+///
+/// This is the convention Element uses for ambiguous names, for the same
+/// reason. It matters more here: people agree to raids and to trades in these
+/// rooms, and "Marklifer said it was fine" needs to mean Marklifer.
+fn sender_display(sender: &str, ident: Option<&directory::Ident>, gs: &GuildState) -> String {
+    if let Some(name) = ident.map(|i| i.username.clone()).filter(|n| !n.is_empty()) {
+        return name;                    // on-chain, and nobody else's to take
+    }
+    let claimed = gs.names.get(sender).cloned().unwrap_or_default();
+    if claimed.is_empty() {
+        return localpart(sender);
+    }
+    if directory::name_belongs_to_a_player(&claimed) {
+        return format!("{} ({})", claimed, localpart(sender));
+    }
+    claimed
+}
+
+/// A break in the record, for the window to draw across the timeline.
+///
+/// Carried as a message rather than a flag on the room because a gap happens
+/// at a POINT in the conversation — a room-level "something is missing" could
+/// not say where, and where is the whole of the information.
+fn gap_marker(room_id: &str, room: &Value) -> Message {
+    // The batch token names this exact discontinuity, so re-processing the
+    // same sync cannot produce two markers for one gap.
+    let token = room
+        .get("timeline")
+        .and_then(|t| t.get("prev_batch"))
+        .and_then(|b| b.as_str())
+        .unwrap_or("");
+    Message {
+        event_id: format!("gap:{}:{}", room_id, token),
+        thread_root: None,
+        work: None,
+        edited: false,
+        reactions: Vec::new(),
+        reply_to: None,
+        reply_sender: None,
+        reply_excerpt: None,
+        sender: String::new(),
+        sender_name: String::new(),
+        sender_tag: None,
+        pfp_attrs: None,
+        player_id: None,
+        body: "some messages are missing".to_string(),
+        kind: "gap",
+        is_self: false,
+        admin: false,
+        ts: 0,
+        mentions_me: false,
+        mxc: None,
+        width: None,
+        height: None,
+    }
+}
 
 /// Read the silenced rooms out of an `m.push_rules` event.
 ///
@@ -724,13 +927,41 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         return None;
     }
 
-    // `m.in_reply_to` is how Matrix says "this answers that".
-    let reply_to = content
-        .get("m.relates_to")
-        .and_then(|r| r.get("m.in_reply_to"))
+    // `m.in_reply_to` is how Matrix says "this answers that" — but not always.
+    //
+    // A THREADED message (`rel_type: m.thread`, which Element uses heavily)
+    // also carries an `m.in_reply_to`, purely so clients that do not
+    // understand threads still show something. The spec marks it
+    // `is_falling_back: true`, and it points at whoever spoke last in the
+    // thread rather than at anything the sender chose to answer.
+    //
+    // Rendering that as a reply puts a quote in somebody's mouth: "JPEG
+    // replying to Netlag" when JPEG did no such thing. So a falling-back
+    // reference is read as thread membership and nothing more.
+    let relates = content.get("m.relates_to");
+    let thread_root = relates
+        .filter(|r| r.get("rel_type").and_then(|t| t.as_str()) == Some("m.thread"))
         .and_then(|r| r.get("event_id"))
         .and_then(|e| e.as_str())
         .map(|s| s.to_string());
+    let in_reply = relates.and_then(|r| r.get("m.in_reply_to"));
+    // `is_falling_back` sits beside `rel_type` in `m.relates_to`, NOT inside
+    // `m.in_reply_to` — reading it from the inner object finds nothing and
+    // every threaded message becomes a reply again. Both places are accepted
+    // because implementations in the wild have put it in either.
+    let falling_back = relates
+        .and_then(|r| r.get("is_falling_back"))
+        .or_else(|| in_reply.and_then(|r| r.get("is_falling_back")))
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    let reply_to = if falling_back {
+        None
+    } else {
+        in_reply
+            .and_then(|r| r.get("event_id"))
+            .and_then(|e| e.as_str())
+            .map(|s| s.to_string())
+    };
     let (reply_sender, reply_excerpt) = match reply_to.as_ref() {
         Some(_) => quoted_from_fallback(
             content.get("body").and_then(|b| b.as_str()).unwrap_or(""),
@@ -754,7 +985,10 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         // `> <@who> what\n\n` lines. That is the fallback for clients with no
         // reply rendering; this one has, so leaving it in would print the
         // quote twice — once as the quote line and once as the message.
-        let text = if reply_to.is_some() { strip_reply_fallback(&text) } else { text };
+        // Stripped whenever a relation put it there, reply or thread: the
+        // quote block is compatibility scaffolding either way, and leaving it
+        // in prints the same words twice.
+        let text = if in_reply.is_some() { strip_reply_fallback(&text) } else { text };
         match msgtype {
             "m.emote" => ("emote", text),
             "m.notice" => ("notice", text),
@@ -771,13 +1005,50 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
             .get("membership")
             .and_then(|m| m.as_str())
             .unwrap_or("");
-        match membership {
-            "join" => ("event", "joined".to_string()),
-            "leave" => ("event", "left".to_string()),
-            "ban" => ("event", "was banned".to_string()),
-            "invite" => ("event", "was invited".to_string()),
-            // A membership change with nothing to say (a profile edit) is the
-            // one event genuinely worth dropping.
+        // What this was BEFORE. Without it every profile edit reads as a
+        // join: changing a display name or a picture is an `m.room.member`
+        // event with `membership: "join"`, exactly like arriving. An active
+        // guild produced a steady drip of "X joined" for people who had been
+        // there all day.
+        let prev = ev.get("unsigned").and_then(|u| u.get("prev_content"));
+        let was = prev
+            .and_then(|p| p.get("membership"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        // Who it happened TO, versus who did it. A `leave` somebody else
+        // caused is a removal, not a departure, and calling it "left" gets
+        // the story wrong in the one case people care about.
+        let subject = ev.get("state_key").and_then(|k| k.as_str()).unwrap_or("");
+        let by_someone_else = !subject.is_empty() && subject != sender;
+
+        match (was, membership) {
+            ("join", "join") => {
+                let old_name = prev
+                    .and_then(|p| p.get("displayname"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                let new_name = content
+                    .get("displayname")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                if old_name != new_name && !new_name.is_empty() {
+                    ("event", format!("is now known as {}", new_name))
+                } else {
+                    // A new picture, or nothing this client can see. Not a
+                    // line anyone wants in a conversation.
+                    return None;
+                }
+            }
+            (_, "join") => ("event", "joined".to_string()),
+            // BEFORE the leave arms. An unban is `ban → leave` performed by a
+            // moderator, so the "somebody else did this" test below would
+            // otherwise call lifting a ban a removal — the opposite of what
+            // happened.
+            ("ban", "leave") => ("event", "was unbanned".to_string()),
+            (_, "leave") if by_someone_else => ("event", "was removed".to_string()),
+            (_, "leave") => ("event", "left".to_string()),
+            (_, "ban") => ("event", "was banned".to_string()),
+            (_, "invite") => ("event", "was invited".to_string()),
             _ => return None,
         }
     } else if SETUP_EVENTS.contains(&etype) {
@@ -793,6 +1064,19 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
                   else { format!("named the room “{}”", n) })
     } else if etype == "m.room.topic" {
         ("event", "changed the topic".to_string())
+    } else if etype == "m.room.tombstone" {
+        // The room has been replaced — a normal thing for an admin to do when
+        // changing room version. Without this it rendered as "changed
+        // tombstone" and the room became a dead end: still listed, still
+        // open, nobody reading it.
+        ("notice", "this room has been replaced — the conversation continues elsewhere".to_string())
+    } else if etype == "m.room.encrypted" {
+        // An encrypted message. This client has no crypto, and pretending
+        // otherwise is not an option — but the generic branch below rendered
+        // these as "changed encrypted", so an Element DM (which is encrypted
+        // by DEFAULT) came through as a stream of nonsense with no hint that
+        // encryption was the reason.
+        ("notice", "encrypted message — this app cannot read it".to_string())
     } else if etype.starts_with("m.room.") {
         // Anything else that IS state but has no rendering of its own: still
         // worth a line, because a silently dropped event looks like a bug.
@@ -840,6 +1124,7 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
 
     Some(Message {
         event_id: event_id.to_string(),
+        thread_root,
         work: super::work::parse(&content),
         edited: false,
         reactions: Vec::new(),
@@ -847,12 +1132,7 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         reply_sender,
         reply_excerpt,
         sender: sender.to_string(),
-        sender_name: ident
-            .as_ref()
-            .map(|i| i.username.clone())
-            .filter(|n| !n.is_empty())
-            .or_else(|| gs.names.get(sender).cloned())
-            .unwrap_or_else(|| localpart(sender)),
+        sender_name: sender_display(sender, ident.as_ref(), gs),
         sender_tag: ident.as_ref().map(|i| i.tag.clone()).filter(|t| !t.is_empty()),
         pfp_attrs: ident.as_ref().and_then(|i| i.pfp_attrs.clone()),
         player_id,
@@ -908,6 +1188,8 @@ struct SyncDelta {
     edited: Vec<(String, String)>,
     /// Rooms where somebody's read marker moved.
     receipts: Vec<String>,
+    /// Whether anyone's presence moved this pass.
+    presence: bool,
 }
 
 fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
@@ -923,6 +1205,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
     let mut edits: Vec<(String, String)> = Vec::new();
     // Rooms where somebody's read marker moved.
     let mut receipts_changed: Vec<String> = Vec::new();
+    let mut presence_changed = false;
     // Players a room is named after but the directory has not met. Collected
     // under the lock, resolved after it — `apply_sync` cannot await.
     let mut needs_identity: Vec<String> = Vec::new();
@@ -933,6 +1216,51 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         .get("next_batch")
         .and_then(|b| b.as_str())
         .map(|s| s.to_string());
+
+    // ── Presence
+    //
+    // Who is actually here right now — the most social signal Matrix carries,
+    // and one this app discarded entirely. It arrives top-level, not per room,
+    // because it is a property of a person rather than of a conversation.
+    for ev in v
+        .get("presence")
+        .and_then(|p| p.get("events"))
+        .and_then(|e| e.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[])
+    {
+        if ev.get("type").and_then(|t| t.as_str()) != Some("m.presence") {
+            continue;
+        }
+        let Some(user_id) = ev.get("sender").and_then(|s| s.as_str()) else { continue };
+        let content = ev.get("content");
+        let state = content
+            .and_then(|c| c.get("presence"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("offline")
+            .to_string();
+        let entry = Presence {
+            state,
+            last_active_ago: content
+                .and_then(|c| c.get("last_active_ago"))
+                .and_then(|l| l.as_u64()),
+            currently_active: content
+                .and_then(|c| c.get("currently_active"))
+                .and_then(|a| a.as_bool())
+                .unwrap_or(false),
+            // Other people's text, arriving over federation and going onto a
+            // roster row. Bounded before it gets there.
+            status_msg: content
+                .and_then(|c| c.get("status_msg"))
+                .and_then(|m| m.as_str())
+                .map(|m| m.chars().take(80).collect::<String>())
+                .filter(|m| !m.trim().is_empty()),
+        };
+        if gs.presence.get(user_id) != Some(&entry) {
+            gs.presence.insert(user_id.to_string(), entry);
+            presence_changed = true;
+        }
+    }
 
     // `m.direct` is where Matrix records "this room is a DM with that user":
     // {user_id: [room_id, …]}. Without reading it, a DM is indistinguishable
@@ -993,6 +1321,8 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         let mut alias: Option<String> = None;
         let mut topic: Option<String> = None;
         let mut pinned: Option<Vec<String>> = None;
+        let mut encrypted = false;
+        let mut replaced_by: Option<String> = None;
 
         for ev in state_events.iter().chain(timeline_events.iter()) {
             let etype = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -1031,6 +1361,17 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                                 .map(|s| s.to_string())
                                 .collect::<Vec<_>>()
                         });
+                }
+                // Setup noise everywhere else, but the one bit of it a reader
+                // needs: it explains why the room is unreadable.
+                "m.room.encryption" => {
+                    encrypted = true;
+                }
+                "m.room.tombstone" => {
+                    replaced_by = content
+                        .and_then(|c| c.get("replacement_room"))
+                        .and_then(|r| r.as_str())
+                        .map(str::to_string);
                 }
                 "m.room.member" => {
                     if let (Some(uid), Some(c)) =
@@ -1162,6 +1503,14 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             joined: true,
             invited: false,
             invited_by: None,
+            // Sticky: the state event arrives once, in the sync that turned
+            // it on, and a later sync mentioning nothing must not read as
+            // "encryption was switched off" — Matrix has no such thing.
+            encrypted: encrypted || existing.as_ref().is_some_and(|r| r.encrypted),
+            // Sticky for the same reason encryption is: the tombstone arrives
+            // once, and a room does not come back to life.
+            replaced_by: replaced_by
+                .or_else(|| existing.as_ref().and_then(|r| r.replaced_by.clone())),
             muted: gs.muted.contains(&room_id),
             // Absent means "this sync did not mention pins", never "there are
             // none" — the same trap as the unread counts above.
@@ -1259,6 +1608,19 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         }
 
         // ── Timeline
+        //
+        // `limited` is the server saying "I truncated this batch": messages
+        // exist between what we already hold and what just arrived. It
+        // happens after any reconnect and during any busy stretch. Appending
+        // regardless stitched two ends of a conversation together as though
+        // nothing were missing — a history that reads as continuous and is
+        // not, which is the one kind of wrong a log must never be.
+        let limited = room
+            .get("timeline")
+            .and_then(|t| t.get("limited"))
+            .and_then(|l| l.as_bool())
+            .unwrap_or(false);
+
         let mut rendered: Vec<Message> = Vec::new();
         for ev in &timeline_events {
             if let Some(m) = render_event(ev, gs, &room_id, &session.user_id) {
@@ -1267,6 +1629,12 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         }
         if !rendered.is_empty() {
             let buf = gs.timelines.entry(room_id.clone()).or_default();
+            // Only when there is something to be discontinuous WITH. A
+            // limited first batch is not a gap; it is simply where our view
+            // of the room starts, and the scrollback control already says so.
+            if limited && !buf.is_empty() {
+                buf.push(gap_marker(&room_id, &room));
+            }
             buf.extend(rendered.iter().cloned());
             if buf.len() > TIMELINE_CAP {
                 let cut = buf.len() - TIMELINE_CAP;
@@ -1369,6 +1737,8 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 invited: true,
                 invited_by: by,
                 muted: false,
+                encrypted: false,
+                replaced_by: None,
                 pinned: Vec::new(),
                 unread: 0,
                 mention: false,
@@ -1411,6 +1781,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         redacted: redactions,
         edited: edits,
         receipts: receipts_changed,
+        presence: presence_changed,
     }
 }
 
@@ -1724,6 +2095,8 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
     }
     tauri::async_runtime::spawn(async move {
         let mut backoff = 2u64;
+        // Consecutive failures, so a blip can be told from a stall.
+        let mut failures = 0u32;
         loop {
             let Some(session) = store::get(&guild_id) else {
                 break; // signed out
@@ -1737,6 +2110,15 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
             let result = sync_once(&session, since.as_deref()).await;
             match result {
                 Ok(v) => {
+                    // Back from a stall we announced. Nothing to say if we
+                    // never said anything.
+                    if failures >= 2 {
+                        let _ = app.emit(
+                            "matrix::sync_health",
+                            json!({ "guild_id": guild_id, "ok": true }),
+                        );
+                    }
+                    failures = 0;
                     backoff = 2;
                     // Identity first: `apply_sync` renders names, tags and
                     // portraits from the directory, and anything not yet in it
@@ -1769,6 +2151,15 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                                 "guild_id": guild_id,
                                 "room_id": room_id,
                                 "messages": messages,
+                            }),
+                        );
+                    }
+                    if d.presence {
+                        let _ = app.emit(
+                            "matrix::presence",
+                            json!({
+                                "guild_id": guild_id,
+                                "presence": presence_by_player(&guild_id),
                             }),
                         );
                     }
@@ -1861,6 +2252,24 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                         break;
                     }
                     eprintln!("[Comms] {} sync: {} (retry in {}s)", guild_id, e, backoff);
+                    // Say so, once, when it stops being a blip.
+                    //
+                    // The loop recovers on its own — but until it does, a
+                    // window with nothing arriving looks exactly like a quiet
+                    // guild. A stall that presents as calm is the worst
+                    // failure a chat client has, and this codebase has had it
+                    // before.
+                    //
+                    // On the SECOND consecutive failure, not the first: a
+                    // single dropped long-poll is ordinary and announcing it
+                    // would make an ordinary thing look broken.
+                    failures += 1;
+                    if failures == 2 {
+                        let _ = app.emit(
+                            "matrix::sync_health",
+                            json!({ "guild_id": guild_id, "ok": false, "reason": e }),
+                        );
+                    }
                     tokio::time::sleep(Duration::from_secs(backoff)).await;
                     backoff = (backoff * 2).min(60);
                 }
@@ -1880,7 +2289,7 @@ async fn sync_once(session: &Session, since: Option<&str>) -> Result<Value, Stri
     let url = format!("{}/sync", base(session));
     let timeout = SYNC_TIMEOUT_MS.to_string();
     let since_owned = since.map(|s| s.to_string());
-    authed(session, move |c, s| {
+    authed_on(&LONG_POLL, session, move |c, s| {
         let mut req = c.get(&url).bearer_auth(&s.access_token).query(&[
             ("timeout", timeout.as_str()),
             // Enough scrollback that opening a room straight after connecting
@@ -1988,6 +2397,8 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
                 mention: false,
                 pinned: Vec::new(),
                 muted: false,
+                encrypted: false,
+                replaced_by: None,
                 invited: false,
                 invited_by: None,
                 section: section_for(room_id, &server),
@@ -2072,6 +2483,8 @@ pub async fn browse(
             mention: false,
             pinned: Vec::new(),
             muted: false,
+            encrypted: false,
+            replaced_by: None,
             invited: false,
             invited_by: None,
             section: section_for(room_id, &server),
@@ -2102,6 +2515,8 @@ pub async fn browse(
                 mention: false,
                 pinned: Vec::new(),
                 muted: false,
+                encrypted: false,
+                replaced_by: None,
                 invited: false,
                 invited_by: None,
                 section: section_for(&s.room_id, &server),
@@ -2119,6 +2534,51 @@ pub async fn browse(
             .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(out)
+}
+
+fn presence_of(user_id: &str) -> Value {
+    let map = STATE.read().unwrap();
+    for gs in map.values() {
+        if let Some(p) = gs.presence.get(user_id) {
+            return serde_json::to_value(p).unwrap_or(Value::Null);
+        }
+    }
+    Value::Null
+}
+
+/// Who is here, by PLAYER id rather than Matrix id.
+///
+/// Player id is the identifier every other window in this app already speaks —
+/// Team Ops, the roster, the raid views. Handing them Matrix ids would make
+/// each one learn a second naming scheme for the same people.
+///
+/// Absent means UNKNOWN, and callers must render it as nothing rather than as
+/// offline: presence is off by default on many Synapse deployments, and a
+/// client that reads silence as "nobody is here" shows a dead guild.
+pub fn presence_by_player(guild_id: &str) -> Value {
+    let map = STATE.read().unwrap();
+    let Some(gs) = map.get(guild_id) else { return json!({}) };
+    let mut out = serde_json::Map::new();
+    for (user_id, p) in &gs.presence {
+        if let Some(pid) = directory::player_id_of(user_id) {
+            if let Ok(v) = serde_json::to_value(p) {
+                out.insert(pid, v);
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// Whether this homeserver appears to run presence at all.
+///
+/// Not a setting we can read — the spec offers no "is presence enabled"
+/// endpoint. The honest proxy is whether it has ever told us about anyone.
+pub fn presence_known(guild_id: &str) -> bool {
+    STATE
+        .read()
+        .unwrap()
+        .get(guild_id)
+        .is_some_and(|gs| !gs.presence.is_empty())
 }
 
 /// Who has seen your latest message in this room, for a window just opening it.
@@ -2289,10 +2749,41 @@ pub async fn backfill(
 }
 
 /// Replace the cached timeline with a server-authoritative backfill.
+/// Put a freshly backfilled page into the cache without losing what arrived
+/// while it was being fetched.
+///
+/// This used to overwrite. Backfilling is an await, sync keeps running
+/// through it, and anything delivered in that window was destroyed by the
+/// page landing on top — gone from the cache, so the next time the room was
+/// opened it was simply missing. The window had it (it was pushed live), but
+/// nothing else did.
 pub fn seed_timeline(guild_id: &str, room_id: &str, messages: Vec<Message>) {
     let mut map = STATE.write().unwrap();
     let gs = map.entry(guild_id.to_string()).or_default();
-    gs.timelines.insert(room_id.to_string(), messages);
+    let arrived_meanwhile: Vec<Message> = gs
+        .timelines
+        .get(room_id)
+        .map(|existing| {
+            let seen: std::collections::HashSet<&str> =
+                messages.iter().map(|m| m.event_id.as_str()).collect();
+            existing
+                .iter()
+                .filter(|m| !seen.contains(m.event_id.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut merged = messages;
+    // After the page, in the order they arrived: a backfill is history, and
+    // anything the cache already held that the page does not cover is newer
+    // than all of it.
+    merged.extend(arrived_meanwhile);
+    if merged.len() > TIMELINE_CAP {
+        let cut = merged.len() - TIMELINE_CAP;
+        merged.drain(..cut);
+    }
+    gs.timelines.insert(room_id.to_string(), merged);
 }
 
 /// The message types this client will emit. An allowlist, not a passthrough:
@@ -2538,6 +3029,34 @@ pub async fn join(session: &Session, room_id: &str) -> Result<(), String> {
 /// also mutes the same account in Element on a phone, and a room silenced
 /// there arrives silenced here. A local "muted" flag would have been half a
 /// feature.
+/// Say what you are doing, to everyone who can see you.
+///
+/// Synapse marks an account `online` on its own while it is syncing, so this
+/// is not what makes a player visible — they already are. What this adds is
+/// the STATUS LINE, and that is the part with consequences: in a game about
+/// raiding each other, "fleet away" tells a rival your planet may be
+/// undefended.
+pub async fn publish_status(
+    session: &Session,
+    state: &str,
+    status_msg: Option<&str>,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/presence/{}/status",
+        base(session),
+        urlseg(&session.user_id)
+    );
+    let mut payload = json!({ "presence": state });
+    if let Some(msg) = status_msg {
+        payload["status_msg"] = json!(msg);
+    }
+    authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await
+    .map(|_| ())
+}
+
 pub async fn set_muted(session: &Session, room_id: &str, muted: bool) -> Result<(), String> {
     let url = format!(
         "{}/pushrules/global/room/{}",
@@ -3269,6 +3788,9 @@ pub async fn members(session: &Session, room_id: &str) -> Result<Vec<Value>, Str
                 "tag": ident.as_ref().map(|i| i.tag.clone()).unwrap_or_default(),
                 "pfp_attrs": ident.as_ref().and_then(|i| i.pfp_attrs.clone()),
                 "is_self": user_id == session.user_id,
+                // Absent when the homeserver has said nothing, which is not
+                // the same as offline.
+                "presence": presence_of(&user_id),
             })
         })
         .collect();
@@ -3515,6 +4037,57 @@ mod tests {
         STATE.write().unwrap().remove("g");
     }
 
+    /// Presence is the most social thing Matrix carries, and silence about it
+    /// is not the same as absence.
+    #[test]
+    fn presence_is_read_but_silence_is_not_offline() {
+        let s = session();
+        let ev = |user: &str, state: &str, active: bool| {
+            json!({
+                "next_batch": "s1",
+                "presence": { "events": [ {
+                    "type": "m.presence", "sender": user,
+                    "content": {
+                        "presence": state, "currently_active": active,
+                        "last_active_ago": 12_000
+                    }
+                } ] }
+            })
+        };
+
+        // A homeserver that has said nothing yet knows nothing. Many Synapse
+        // deployments turn presence off entirely because it is expensive, and
+        // a client that read silence as "everyone offline" would show a dead
+        // guild to every player on one of them.
+        assert!(!presence_known("pres"), "nothing heard yet");
+
+        let d = apply_sync("pres", &s, &ev("@1-61:example.com", "online", true));
+        assert!(d.presence, "a first sighting is a change");
+        assert!(presence_known("pres"));
+
+        // Keyed by PLAYER id: every other window in this app speaks that, and
+        // handing them Matrix ids would make each learn a second scheme.
+        let by_player = presence_by_player("pres");
+        assert_eq!(by_player["1-61"]["state"], "online");
+        assert_eq!(by_player["1-61"]["currently_active"], true);
+
+        // Somebody the server has said nothing about is absent from the map,
+        // NOT present with state "offline".
+        assert!(by_player.get("1-99").is_none());
+
+        // An unchanged report is not news; pushing it would repaint every
+        // roster in the app for nothing.
+        let d = apply_sync("pres", &s, &ev("@1-61:example.com", "online", true));
+        assert!(!d.presence, "the same state again is not a change");
+
+        // Going idle is. `unavailable` is the spec's word for it.
+        let d = apply_sync("pres", &s, &ev("@1-61:example.com", "unavailable", false));
+        assert!(d.presence);
+        assert_eq!(presence_by_player("pres")["1-61"]["state"], "unavailable");
+
+        STATE.write().unwrap().remove("pres");
+    }
+
     /// Being asked into a room has to be visible.
     ///
     /// `rooms.invite` was not read at all, so an invitation produced no row,
@@ -3671,6 +4244,456 @@ mod tests {
         assert!(d.receipts.is_empty(), "a repeated receipt is not news");
 
         STATE.write().unwrap().remove("seen");
+    }
+
+    /// Being rate limited is ordinary, and the server always says for how long.
+    ///
+    /// `M_LIMIT_EXCEEDED` is Synapse's normal answer to a burst — several
+    /// messages in a row, a handful of reactions, a search while syncing.
+    /// Ignoring it turned an ordinary "slow down" into a message that simply
+    /// did not send.
+    #[test]
+    fn a_rate_limit_is_read_and_bounded() {
+        let limited = json!({
+            "errcode": "M_LIMIT_EXCEEDED", "error": "Too Many Requests",
+            "retry_after_ms": 800
+        });
+        assert_eq!(rate_limited_for(429, &limited), Some(800));
+
+        // Some servers send the errcode without the 429, and vice versa.
+        assert_eq!(rate_limited_for(200, &limited), Some(800));
+        assert_eq!(
+            rate_limited_for(429, &json!({ "error": "slow down" })),
+            Some(1_000),
+            "no delay named: the spec's own suggestion beats giving up"
+        );
+
+        // Everything else is not a rate limit and must not be waited on.
+        assert_eq!(rate_limited_for(403, &json!({ "errcode": "M_FORBIDDEN" })), None);
+        assert_eq!(rate_limited_for(200, &json!({ "ok": true })), None);
+        assert_eq!(rate_limited_for(500, &Value::Null), None);
+
+        // A wait longer than the cap is reported rather than sat through: a
+        // click that freezes for a minute with no explanation is worse than
+        // being told to try again.
+        let long = json!({ "errcode": "M_LIMIT_EXCEEDED", "retry_after_ms": 60_000 });
+        assert!(rate_limited_for(429, &long).unwrap() > MAX_RATE_LIMIT_WAIT_MS);
+
+        // And what the player is shown says what to do, not which spec
+        // constant was returned.
+        let shown = matrix_error(429, &long);
+        assert!(shown.contains("try again in 60s"), "{}", shown);
+        assert!(!shown.contains("M_LIMIT_EXCEEDED"), "{}", shown);
+
+        // Other errors keep their detail — a permission failure is worth
+        // naming precisely.
+        let forbidden = matrix_error(403, &json!({
+            "errcode": "M_FORBIDDEN", "error": "You are not allowed"
+        }));
+        assert!(forbidden.contains("M_FORBIDDEN"), "{}", forbidden);
+    }
+
+    /// The two clients differ in the one way that matters, and both are shared.
+    ///
+    /// A `reqwest::Client` owns the connection pool. This module used to build
+    /// a fresh one per request, which throws that pool away every time and
+    /// pays a TLS handshake for every message, receipt and reaction.
+    #[test]
+    fn requests_and_long_polls_wait_differently() {
+        // A `/sync` is MEANT to hang: the server holds it open, and a client
+        // timeout under that would kill healthy long-polls.
+        assert!(
+            HTTP_TIMEOUT_SECS > SYNC_TIMEOUT_MS / 1000,
+            "the long-poll client must outwait the server's own hold"
+        );
+        // Everything else has a player watching. A send that inherits the
+        // long-poll's patience leaves a dimmed message on screen for most of
+        // a minute before it can even offer to retry.
+        assert!(
+            REQUEST_TIMEOUT_SECS < HTTP_TIMEOUT_SECS,
+            "an ordinary request must give up sooner than a long-poll"
+        );
+        assert!(REQUEST_TIMEOUT_SECS >= 10, "…but not so soon that a slow link fails");
+
+        // Both are the shared instances, not fresh builds: cloning a Client
+        // clones an Arc around one pool, which is the whole point.
+        let a = http().unwrap();
+        let b = http().unwrap();
+        drop((a, b));
+    }
+
+    /// A name nobody can verify must not pass for one that is verified.
+    ///
+    /// A player's name comes from the chain and is theirs. Everyone else has
+    /// only a Matrix display name — self-chosen, unverified, changeable — so
+    /// a bot calling itself "Marklifer" rendered beside the real Marklifer
+    /// with nothing to tell them apart. People agree to raids and trades in
+    /// these rooms.
+    #[test]
+    fn a_display_name_cannot_borrow_a_players_name() {
+        directory::remember_for_test(
+            "1-194",
+            directory::Ident {
+                username: "Marklifer".into(),
+                tag: "SN.C".into(),
+                guild_id: "0-5".into(),
+                pfp_attrs: None,
+            },
+        );
+
+        let mut gs = GuildState::default();
+        // A service account that has set its display name to a player's.
+        gs.names.insert("@sneaky-bot:h".into(), "Marklifer".into());
+        // …and one with a name of its own.
+        gs.names.insert("@guild-bot:h".into(), "SN Corp Bot".into());
+
+        let said = |sender: &str| {
+            let ev = json!({
+                "type": "m.room.message", "event_id": "$x", "sender": sender,
+                "origin_server_ts": 1,
+                "content": { "msgtype": "m.text", "body": "trust me" }
+            });
+            render_event(&ev, &gs, "!r:h", "@me:h").unwrap().sender_name
+        };
+
+        // The impersonator is named, but not ONLY by the borrowed name.
+        assert_eq!(said("@sneaky-bot:h"), "Marklifer (sneaky-bot)");
+        // An ordinary bot is left alone — this must not tax every non-player.
+        assert_eq!(said("@guild-bot:h"), "SN Corp Bot");
+        // Somebody with no display name at all is still identifiable.
+        assert_eq!(said("@nameless:h"), "nameless");
+
+        directory::forget_for_test("1-194");
+    }
+
+    /// Backfilling must not destroy what arrived while it was running.
+    ///
+    /// Fetching a page of history is an await; sync keeps delivering through
+    /// it. Overwriting the cache with the page threw away anything that
+    /// landed in that window — the message was on screen (it had been pushed
+    /// live) but gone from the cache, so re-opening the room lost it.
+    #[test]
+    fn a_backfill_keeps_what_arrived_during_it() {
+        let msg = |id: &str, body: &str| Message {
+            event_id: id.to_string(),
+            thread_root: None, work: None, edited: false,
+            reactions: Vec::new(), reply_to: None, reply_sender: None,
+            reply_excerpt: None,
+            sender: "@1-61:h".into(), sender_name: "JPEG".into(), sender_tag: None,
+            pfp_attrs: None, player_id: None,
+            body: body.to_string(), kind: "text", is_self: false, admin: false,
+            ts: 1, mentions_me: false, mxc: None, width: None, height: None,
+        };
+
+        // Something arrived from sync while the page was in flight.
+        seed_timeline("bf", "!r:h", vec![msg("$live", "arrived meanwhile")]);
+        // …and the page lands, covering older history it never saw.
+        seed_timeline("bf", "!r:h", vec![msg("$old1", "older"), msg("$old2", "older still")]);
+
+        let bodies: Vec<String> = STATE.read().unwrap().get("bf").unwrap()
+            .timelines["!r:h"].iter().map(|m| m.body.clone()).collect();
+        assert_eq!(
+            bodies,
+            vec!["older", "older still", "arrived meanwhile"],
+            "history first, then what came in while it was being fetched"
+        );
+
+        // A later page that DOES cover everything must not double anything.
+        //
+        // The realistic sequence: `matrix_timeline` only backfills when the
+        // cache is SMALLER than the page it wants, so a page always covers at
+        // least what was already held, and anything left over is what arrived
+        // while it was in flight.
+        seed_timeline(
+            "bf",
+            "!r:h",
+            vec![msg("$old1", "older"), msg("$old2", "older still"),
+                 msg("$live", "arrived meanwhile")],
+        );
+        let ids: Vec<String> = STATE.read().unwrap().get("bf").unwrap()
+            .timelines["!r:h"].iter().map(|m| m.event_id.clone()).collect();
+        assert_eq!(ids, vec!["$old1", "$old2", "$live"],
+                   "deduped by event id: {:?}", ids);
+
+        STATE.write().unwrap().remove("bf");
+    }
+
+    /// A truncated batch is a hole in the conversation, and must show as one.
+    ///
+    /// `limited: true` means the server dropped messages between what we hold
+    /// and what it is sending. It happens after every reconnect. Appending
+    /// regardless produced a history that reads as continuous and is not.
+    #[test]
+    fn a_truncated_batch_leaves_a_visible_gap() {
+        let s = session();
+        let batch = |id: &str, body: &str, limited: bool, token: &str| {
+            json!({
+                "next_batch": token,
+                "rooms": { "join": { "!g:example.com": {
+                    "state": { "events": [] },
+                    "timeline": {
+                        "limited": limited, "prev_batch": token,
+                        "events": [ {
+                            "type": "m.room.message", "event_id": id,
+                            "sender": "@1-61:h", "origin_server_ts": 1,
+                            "content": { "msgtype": "m.text", "body": body }
+                        } ]
+                    }
+                } } }
+            })
+        };
+        let kinds = || {
+            STATE.read().unwrap().get("gap").unwrap().timelines["!g:example.com"]
+                .iter().map(|m| m.kind).collect::<Vec<_>>()
+        };
+
+        // A LIMITED first batch is not a gap — it is simply where our view of
+        // the room starts, and there is nothing before it to be missing.
+        apply_sync("gap", &s, &batch("$a", "first", true, "t1"));
+        assert_eq!(kinds(), vec!["text"], "no gap before the first message");
+
+        // A limited batch after that IS one.
+        apply_sync("gap", &s, &batch("$b", "later", true, "t2"));
+        assert_eq!(kinds(), vec!["text", "gap", "text"]);
+
+        // A normal, complete batch adds nothing.
+        apply_sync("gap", &s, &batch("$c", "next", false, "t3"));
+        assert_eq!(kinds(), vec!["text", "gap", "text", "text"]);
+
+        STATE.write().unwrap().remove("gap");
+    }
+
+    /// `m.room.member` carries five different stories under one event type.
+    ///
+    /// The one that mattered most: changing a display name or a picture is a
+    /// member event with `membership: "join"`, exactly like arriving. Every
+    /// profile edit read as "X joined", so an active guild produced a steady
+    /// drip of people apparently joining a room they had been in all day.
+    #[test]
+    fn a_profile_edit_is_not_a_join() {
+        let gs = GuildState::default();
+        let member = |was: Option<(&str, &str)>, now: &str, name: &str,
+                      sender: &str, subject: &str| {
+            let mut ev = json!({
+                "type": "m.room.member", "event_id": "$m", "sender": sender,
+                "state_key": subject, "origin_server_ts": 1,
+                "content": { "membership": now, "displayname": name }
+            });
+            if let Some((prev_membership, prev_name)) = was {
+                ev["unsigned"] = json!({ "prev_content": {
+                    "membership": prev_membership, "displayname": prev_name
+                } });
+            }
+            ev
+        };
+        let render = |ev: Value| render_event(&ev, &gs, "!r:h", "@me:h").map(|m| m.body);
+
+        // Already in the room, only the picture changed: not a line anyone
+        // wants in a conversation.
+        assert_eq!(
+            render(member(Some(("join", "JPEG")), "join", "JPEG", "@1-61:h", "@1-61:h")),
+            None
+        );
+        // A rename says what happened rather than pretending they arrived.
+        assert_eq!(
+            render(member(Some(("join", "JPEG")), "join", "Netlag", "@1-61:h", "@1-61:h")),
+            Some("is now known as Netlag".to_string())
+        );
+        // Actually arriving still reads as arriving.
+        assert_eq!(
+            render(member(None, "join", "JPEG", "@1-61:h", "@1-61:h")),
+            Some("joined".to_string())
+        );
+
+        // Leaving on your own is not the same story as being thrown out, and
+        // the difference is whether the sender is the subject.
+        assert_eq!(
+            render(member(Some(("join", "JPEG")), "leave", "", "@1-61:h", "@1-61:h")),
+            Some("left".to_string())
+        );
+        assert_eq!(
+            render(member(Some(("join", "JPEG")), "leave", "", "@mod:h", "@1-61:h")),
+            Some("was removed".to_string())
+        );
+
+        // An unban is `ban → leave` performed by a moderator — which the
+        // "somebody else did this" test would call a removal, the opposite of
+        // what happened, if it were checked first.
+        assert_eq!(
+            render(member(Some(("ban", "")), "leave", "", "@mod:h", "@1-61:h")),
+            Some("was unbanned".to_string())
+        );
+        assert_eq!(
+            render(member(Some(("join", "")), "ban", "", "@mod:h", "@1-61:h")),
+            Some("was banned".to_string())
+        );
+    }
+
+    /// An upgraded room points at where the conversation went.
+    ///
+    /// Changing a room's version is a normal admin action and leaves the old
+    /// room joinable, listed and open — so without following the pointer a
+    /// player goes on talking into a room everyone else has left, and nothing
+    /// tells them.
+    #[test]
+    fn an_upgraded_room_points_at_its_replacement() {
+        let gs = GuildState::default();
+        let ev = json!({
+            "type": "m.room.tombstone", "event_id": "$tomb", "sender": "@1-61:h",
+            "origin_server_ts": 1,
+            "content": { "body": "This room has been replaced",
+                         "replacement_room": "!new:example.com" }
+        });
+        let m = render_event(&ev, &gs, "!old:example.com", "@me:h").unwrap();
+        assert_eq!(m.kind, "notice");
+        assert!(m.body.contains("replaced"), "{}", m.body);
+        assert!(!m.body.contains("changed tombstone"), "{}", m.body);
+
+        let s = session();
+        let v = json!({
+            "next_batch": "s1",
+            "rooms": { "join": { "!old:example.com": {
+                "state": { "events": [ {
+                    "type": "m.room.tombstone",
+                    "content": { "replacement_room": "!new:example.com" }
+                } ] },
+                "timeline": { "events": [] }
+            } } }
+        });
+        apply_sync("tomb", &s, &v);
+        let room = || STATE.read().unwrap().get("tomb").unwrap()
+            .rooms.get("!old:example.com").cloned().unwrap();
+        assert_eq!(room().replaced_by.as_deref(), Some("!new:example.com"));
+
+        // Sticky, like encryption: the tombstone arrives once and a room does
+        // not come back to life.
+        let quiet = json!({
+            "next_batch": "s2",
+            "rooms": { "join": { "!old:example.com": {
+                "state": { "events": [] }, "timeline": { "events": [] }
+            } } }
+        });
+        apply_sync("tomb", &s, &quiet);
+        assert_eq!(room().replaced_by.as_deref(), Some("!new:example.com"));
+
+        STATE.write().unwrap().remove("tomb");
+    }
+
+    /// An encrypted room has to say so, not produce nonsense.
+    ///
+    /// Element creates direct messages encrypted BY DEFAULT, and this client
+    /// has no crypto. Before this, `m.room.encrypted` fell through to the
+    /// generic state branch and every message in such a DM read "changed
+    /// encrypted" — gibberish, with no hint that encryption was the reason.
+    #[test]
+    fn an_encrypted_room_says_so_rather_than_rendering_nonsense() {
+        let gs = GuildState::default();
+        let ev = json!({
+            "type": "m.room.encrypted", "event_id": "$e1", "sender": "@1-61:h",
+            "origin_server_ts": 1,
+            "content": { "algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "AwgAEn..." }
+        });
+        let m = render_event(&ev, &gs, "!r:h", "@me:h").unwrap();
+        assert_eq!(m.kind, "notice");
+        assert!(m.body.contains("encrypted"), "{}", m.body);
+        assert!(!m.body.contains("changed"), "not the generic state line: {}", m.body);
+
+        // …and the room itself is marked, so it can be explained once at the
+        // top rather than only line by line.
+        let s = session();
+        let v = json!({
+            "next_batch": "s1",
+            "rooms": { "join": { "!e:example.com": {
+                "state": { "events": [
+                    { "type": "m.room.encryption",
+                      "content": { "algorithm": "m.megolm.v1.aes-sha2" } }
+                ] },
+                "timeline": { "events": [] }
+            } } }
+        });
+        apply_sync("enc", &s, &v);
+        let room = || STATE.read().unwrap().get("enc").unwrap()
+            .rooms.get("!e:example.com").cloned().unwrap();
+        assert!(room().encrypted);
+
+        // Sticky. The state event arrives once, in the sync that turned it
+        // on; a later sync mentioning nothing must not read as "encryption
+        // was switched off", which Matrix has no way to express.
+        let quiet = json!({
+            "next_batch": "s2",
+            "rooms": { "join": { "!e:example.com": {
+                "state": { "events": [] }, "timeline": { "events": [] }
+            } } }
+        });
+        apply_sync("enc", &s, &quiet);
+        assert!(room().encrypted, "encryption does not lapse");
+
+        STATE.write().unwrap().remove("enc");
+    }
+
+    /// A threaded message is not a reply, however much it looks like one.
+    ///
+    /// Element threads heavily, and every threaded message carries an
+    /// `m.in_reply_to` purely so clients that do not understand threads show
+    /// something. It is marked `is_falling_back` and points at whoever spoke
+    /// last in the thread — so rendering it as a reply puts a quote in
+    /// somebody's mouth they never chose.
+    #[test]
+    fn a_threading_fallback_is_not_a_reply() {
+        let gs = GuildState::default();
+        let threaded = json!({
+            "type": "m.room.message", "event_id": "$t1", "sender": "@1-61:h",
+            "origin_server_ts": 1,
+            "content": {
+                "msgtype": "m.text",
+                "body": "> <@1-42:h> earlier\n\nagreed",
+                "m.relates_to": {
+                    "rel_type": "m.thread", "event_id": "$root",
+                    "m.in_reply_to": { "event_id": "$last" },
+                    "is_falling_back": true
+                }
+            }
+        });
+        let m = render_event(&threaded, &gs, "!r:h", "@me:h").unwrap();
+        assert_eq!(m.thread_root.as_deref(), Some("$root"), "it is in a thread");
+        assert_eq!(m.reply_to, None, "and NOT a reply to whoever spoke last");
+        assert_eq!(m.reply_sender, None);
+        // The `> ` block is compatibility scaffolding either way, so it still
+        // comes off — leaving it in prints the same words twice.
+        assert_eq!(m.body, "agreed");
+
+        // A GENUINE reply inside a thread is a real reply: the spec says so
+        // by leaving `is_falling_back` off.
+        let real = json!({
+            "type": "m.room.message", "event_id": "$t2", "sender": "@1-61:h",
+            "origin_server_ts": 2,
+            "content": {
+                "msgtype": "m.text",
+                "body": "> <@1-42:h> which one\n\nthe second",
+                "m.relates_to": {
+                    "rel_type": "m.thread", "event_id": "$root",
+                    "m.in_reply_to": { "event_id": "$asked" },
+                    "is_falling_back": false
+                }
+            }
+        });
+        let m = render_event(&real, &gs, "!r:h", "@me:h").unwrap();
+        assert_eq!(m.thread_root.as_deref(), Some("$root"));
+        assert_eq!(m.reply_to.as_deref(), Some("$asked"), "a chosen reply survives");
+        assert_eq!(m.reply_sender.as_deref(), Some("@1-42:h"));
+
+        // And a plain reply, in no thread at all, is unchanged.
+        let plain = json!({
+            "type": "m.room.message", "event_id": "$t3", "sender": "@1-61:h",
+            "origin_server_ts": 3,
+            "content": {
+                "msgtype": "m.text", "body": "> <@1-42:h> q\n\na",
+                "m.relates_to": { "m.in_reply_to": { "event_id": "$q" } }
+            }
+        });
+        let m = render_event(&plain, &gs, "!r:h", "@me:h").unwrap();
+        assert_eq!(m.reply_to.as_deref(), Some("$q"));
+        assert_eq!(m.thread_root, None);
     }
 
     /// An edit rewrites a message; it is not a second message.
@@ -3992,6 +5015,8 @@ mod tests {
             joined,
             pinned: Vec::new(),
             muted: false,
+            encrypted: false,
+            replaced_by: None,
             invited: false,
             invited_by: None,
             unread,

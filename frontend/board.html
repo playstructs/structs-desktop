@@ -62,6 +62,17 @@
        state (feed list, roster selection) survives tab switches. */
     .page[hidden] { display: none; }
     .ops-muted { opacity: .7; }
+    /* Who is actually around, from Comms. Drawn only when the homeserver runs
+       presence at all — a column of grey dots implying an empty guild is
+       worse than no column. */
+    .ops-presence {
+      display: inline-block; width: 6px; height: 6px;
+      margin-right: 6px; vertical-align: middle;
+      background: var(--text-hint, #A7C0C6);
+    }
+    .ops-presence.ops-mod-online { background: var(--text-player-primary, #7FD1B9); }
+    .ops-presence.ops-mod-idle { background: var(--text-warning, #E8B24A); }
+    .ops-presence.ops-mod-away { background: var(--border-subtle, #33484d); }
     /* Watch-planet / watch-fleet links on a roster row. Sized to sit inline
        with the subtitle text rather than as full buttons — they are one glyph
        each, and the row's own click still opens the detail drawer. */

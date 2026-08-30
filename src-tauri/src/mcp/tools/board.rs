@@ -20,6 +20,22 @@ use crate::hasher::types::TaskRegistry;
 
 /// Last-rendered board inner-HTML, so the board window can paint on load (before
 /// the next push) via the `mcp_board_html` command.
+/// Escape text for the board's inner HTML.
+///
+/// Quotes included, though every current use is text content where they are
+/// harmless. The markup here quotes attributes with SINGLE quotes, so the day
+/// somebody moves an escaped value into one — a `title`, an `aria-label` — an
+/// apostrophe in a name breaks out. Some of these names are other players'
+/// (threat labels carry them), so that is not a hypothetical attacker.
+/// Completing the escaper removes the class rather than the instance.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 pub static LAST_BOARD: LazyLock<Mutex<String>> =
     LazyLock::new(|| Mutex::new("<div class='k'>Waiting for the first board update…</div>".to_string()));
 
@@ -292,7 +308,14 @@ async fn render_board(registry: &Arc<TaskRegistry>) -> BoardRender {
 
     // ── Inner HTML for the window, using genuine SUI components so it matches
     //    the game (board.html links the real sui.css + a sui-theme-player wrapper).
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    // Quotes included, though every current use is text content where they
+    // are harmless. The markup here quotes attributes with SINGLE quotes, so
+    // the day somebody moves an escaped value into one — a `title`, an
+    // `aria-label` — an apostrophe in a name breaks out. Some of these names
+    // are other players' (threat labels carry them), so that is not a
+    // hypothetical attacker. Completing the escaper costs nothing and removes
+    // the class rather than the instance.
+    let esc = html_escape;
     // Drop any leading non-ASCII (emoji prefix from threat labels) — the board
     // uses real SUI icons instead, never emoji.
     let strip_emoji = |s: &str| -> String {
@@ -548,6 +571,24 @@ async fn show_component(
 
 #[cfg(test)]
 mod component_tests {
+    /// The board builds HTML by hand, and some of the text in it is other
+    /// players' names.
+    #[test]
+    fn the_board_escaper_covers_every_breakout() {
+        use super::html_escape;
+        assert_eq!(html_escape("<script>"), "&lt;script&gt;");
+        assert_eq!(html_escape("a & b"), "a &amp; b");
+        // Ampersand first, or the entities it writes get re-escaped into
+        // "&amp;lt;" and the markup shows the escape rather than the text.
+        assert_eq!(html_escape("&lt;"), "&amp;lt;");
+        // Attributes here are single-quoted, so an apostrophe is the breakout
+        // character — not the double quote people remember.
+        assert_eq!(html_escape("O'Brien"), "O&#39;Brien");
+        assert_eq!(html_escape("say \"hi\""), "say &quot;hi&quot;");
+        // Ordinary text is left alone.
+        assert_eq!(html_escape("Marklifer"), "Marklifer");
+    }
+
     use super::*;
     use serde_json::json;
 

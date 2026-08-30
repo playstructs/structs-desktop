@@ -239,7 +239,14 @@
        vanishing — a silently dropped message reads as a broken client. */
     .chat-msg-body.chat-mod-unknown { color: var(--text-hint); }
     .chat-msg-pending { opacity: .55; }
-    .chat-msg-failed .chat-msg-body { color: var(--text-enemy-primary); }
+    /* The words stay readable; the failure is a separate line beneath. Tinting
+       the message itself made the player's own text look like an error. */
+    .chat-send-failed {
+      display: flex; align-items: baseline; gap: var(--spacing-md);
+      margin-top: 2px; align-self: stretch; text-align: left;
+      font-size: 11px; line-height: 16px;
+    }
+    .chat-send-failed-why { color: var(--text-enemy-primary); }
 
     /* The room's own statement of what it is for, under its name. */
     .chat-topic {
@@ -518,6 +525,43 @@
     .chat-work-verdict.chat-mod-good { color: var(--text-player-primary); }
     .chat-work-verdict.chat-mod-bad { color: var(--text-enemy-primary); }
 
+    /* ── Sharing what you are doing ───────────────────────────────────── */
+    .chat-status-share { display: inline-flex; align-items: baseline; gap: var(--spacing-md); }
+
+    /* ── Encrypted rooms ──────────────────────────────────────────────── */
+    /* A statement of fact, not an error: the room works, this client cannot
+       read it. */
+    /* An upgraded room: the same shape of notice as encryption, because both
+       are "this room works, but not the way you expect" — with a way out. */
+    .chat-encrypted.chat-mod-moved { color: var(--text-body); }
+    /* Nothing is arriving. Sits above every view, because a stall is not
+       about the room you happen to be looking at. */
+    .chat-encrypted.chat-mod-stalled {
+      color: var(--text-warning);
+      border-bottom-color: var(--text-warning);
+    }
+    .chat-encrypted {
+      flex: 0 0 auto; align-self: stretch; text-align: left;
+      display: flex; align-items: baseline; gap: var(--spacing-sm);
+      padding: var(--spacing-sm) var(--spacing-md);
+      border-bottom: 1px solid var(--border-subtle);
+      color: var(--text-hint); font-size: 11px; line-height: 16px;
+    }
+
+    /* ── Presence ─────────────────────────────────────────────────────── */
+    /* Small and quiet. It is a fact about a person, not a call to action —
+       and it sits beside a name that is already the point of the row. */
+    .chat-presence {
+      display: inline-block; width: 6px; height: 6px;
+      margin-right: var(--spacing-sm); vertical-align: middle;
+      background: var(--text-hint);
+    }
+    .chat-presence.chat-mod-online { background: var(--text-player-primary); }
+    .chat-presence.chat-mod-idle { background: var(--text-warning); }
+    /* Away is drawn, but dimmed almost out. Absent presence draws nothing at
+       all — that is a different state and must not look like this one. */
+    .chat-presence.chat-mod-away { background: var(--border-subtle); }
+
     /* ── Invitations ──────────────────────────────────────────────────── */
     /* Declining is quieter than accepting: both are one click, but only one
        of them is what the row is inviting you to do. */
@@ -637,6 +681,9 @@
       overflow: hidden;
     }
     .chat-reply-quote:hover { border-left-color: var(--accent-primary); }
+    /* A thread this window does not draw. Marked differently from a reply so
+       the two are not mistaken for each other. */
+    .chat-reply-quote.chat-mod-thread { border-left-style: dashed; }
     .chat-reply-who { color: var(--accent-secondary); flex: 0 0 auto; }
     .chat-reply-text {
       flex: 1 1 auto; min-width: 0;

@@ -223,6 +223,27 @@
     .rv-fit-toggle { margin-left: 14px; padding-left: 14px;
       border-left: 1px solid var(--border, #345); }
     #rv-log-body { overflow: auto; padding: 0 12px 8px; }
+    /* Same frame as the battle log beneath it: two panels about the same
+       planet should not look like two different kinds of thing. */
+    /* Same stacking as the battle log above it. Without this the panel
+       defaulted to `z-index: auto` and the bottom-left action bar — which is
+       absolutely positioned over the whole lower-left corner — painted across
+       its header, leaving "…cuss  hide" showing and the label hidden. */
+    #rv-chat {
+      position: relative; z-index: 45;
+      border-top: 1px solid var(--border, #345);
+    }
+    #rv-chat.rv-collapsed #rv-chat-body { display: none; }
+    #rv-chat-head { display: flex; align-items: baseline; gap: 8px;
+      padding: 6px 12px; flex-wrap: nowrap; }
+    #rv-chat-body { overflow: auto; max-height: 22vh; padding: 0 12px 8px; }
+    .rv-chat-row { padding: 3px 0; border-bottom: 1px solid var(--border-subtle, #24343a); }
+    .rv-chat-row:last-child { border-bottom: none; }
+    .rv-chat-who { color: var(--accent-secondary, #8FB8FF); margin-right: 6px; }
+    .rv-chat-room { color: var(--text-hint, #A7C0C6); margin-left: 6px; }
+    .rv-chat-body-text { color: var(--text-body, #C5D7D9); }
+    /* Something was said while the panel was closed. */
+    #rv-chat-head.rv-chat-fresh .rv-log-count { color: var(--text-warning, #E8B24A); }
     .rv-log-empty { color: var(--text-hint, #A7C0C6); padding: 6px 0; }
     .rv-log-row {
       /* Labels are single words now (see LOG_LABEL), so the column can be
@@ -635,6 +656,24 @@
       <a href="javascript: void(0)" id="rv-fit-toggle" class="rv-log-toggle rv-fit-toggle">zoom in</a>
     </div>
     <div id="rv-log-body" class="sui-text-tiny"><div class="rv-log-empty sui-text-tiny">No recorded activity for this planet yet.</div></div>
+  </div>
+
+  <!-- What people have SAID about this planet, beside what happened to it.
+       A spectator window is where you are already looking at the thing, so
+       "has anyone mentioned this" is the question that belongs here. Read
+       only: sending would need a room to send TO, and guessing which is
+       worse than handing the player to Comms with the id already in the box.
+  -->
+  <div id="rv-chat" class="rv-collapsed">
+    <div id="rv-chat-head" class="sui-text-label">
+      <i class="icon-phone"></i>
+      <span>Comms</span>
+      <span id="rv-chat-count" class="rv-log-count"></span>
+      <span class="rv-spacer"></span>
+      <a href="javascript: void(0)" id="rv-chat-discuss" class="rv-log-toggle">discuss</a>
+      <a href="javascript: void(0)" id="rv-chat-toggle" class="rv-log-toggle">show</a>
+    </div>
+    <div id="rv-chat-body" class="sui-text-tiny"><div class="rv-log-empty sui-text-tiny">Nothing said about this planet yet.</div></div>
   </div>
 
   <script src="js/vendor/lottie-5.12.2.min.js"></script>

@@ -393,6 +393,25 @@ cat > "$FIX" <<'EOF'
 
   var F = {
     mcp_game_stats_snapshot: SNAPSHOT,
+    // Comms reaching into the board: who is around, and the two ways to
+    // reach them. Absent from this table, the leaderboard would silently
+    // lose its social half and the tests would not notice.
+    get matrix_presence() {
+      return window.__HARNESS_NO_PRESENCE__
+        ? { known: false, presence: {} }
+        // Ids that really appear on the leaderboard (mkPlayers uses
+        // 1-101…1-125), so the integration is exercised rather than the
+        // fixture quietly matching nobody.
+        : { known: true, presence: {
+            '1-101': { state: 'online', currently_active: true },
+            '1-102': { state: 'unavailable' },
+          } };
+    },
+    // What it really answers with — the room it opened and who it is with.
+    // This said `{ok: true}` for about five minutes, from assumption rather
+    // than from reading Rust, and the response check caught it.
+    matrix_message_player: { room_id: '!dm-harness:h', player_id: '1-61' },
+    matrix_share: { ok: true },
     mcp_board_html: '<div class="sui-data-card-row">harness ops snapshot</div>',
     mcp_board_feed: [],
     mcp_health: { ok: true },
@@ -444,10 +463,18 @@ cat > "$FIX" <<'EOF'
   window.__HARNESS_EMIT__ = function (name, payload) {
     (listeners[name] || []).forEach(function (cb) { cb({ payload: payload }); });
   };
+  // Tests flip this to make a command refuse, so failure paths are reachable
+  // without a second fixture variant — the same lever the chat harness has.
+  // The one that matters here: Comms not signed in, which is the state every
+  // player is in before they connect.
+  window.__HARNESS_REJECT__ = {};
   window.__TAURI__ = {
     core: {
       invoke: function (cmd, args) {
         calls.push({ cmd: cmd, args: args });
+        if (window.__HARNESS_REJECT__[cmd]) {
+          return Promise.reject(window.__HARNESS_REJECT__[cmd]);
+        }
         return Object.prototype.hasOwnProperty.call(F, cmd)
           ? Promise.resolve(F[cmd])
           : Promise.reject('harness: no fixture for ' + cmd);
@@ -524,6 +551,19 @@ cat > "$RFIX" <<'EOF'
     mcp_raid_state: { snapshot: SNAP },
     mcp_raid_log: { rows: [] },
     matrix_share: { ok: true },
+    // What people have said about this planet. Tests set
+    // __HARNESS_COMMS_OFF__ for a raid window opened without Comms signed in
+    // — which must say so rather than reading as "nobody spoke".
+    get matrix_object_chatter() {
+      return window.__HARNESS_COMMS_OFF__
+        ? { connected: false, hits: [] }
+        : { connected: true, hits: [
+            { room_id: '!snc:h', room_name: 'SN.Corporation',
+              message: { event_id: '$c1', sender: '@1-61:h', sender_name: 'JPEG',
+                         sender_tag: 'SN.C', kind: 'text', ts: 1,
+                         body: 'shield on 2-1 is down to 25' } },
+          ] };
+    },
   };
   var calls = [];
   var listeners = {};
@@ -815,8 +855,13 @@ cat > "$CFIX" <<'EOF'
       { user_id: '@1-194:matrix.beta.playstructs.com', name: 'Marklifer',
         player_id: '1-194', tag: 'SN.C', is_self: true,
         pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":0,"background":3}' },
+      // Rust attaches `presence` to every member row, so the fixture must
+      // too — and only SOME people will have set a status line, which is the
+      // case the row's fallback exists for.
       { user_id: '@1-61:matrix.beta.playstructs.com', name: 'JPEG',
         player_id: '1-61', tag: 'SN.C', is_self: false,
+        presence: { state: 'online', currently_active: true,
+                    status_msg: 'On station' },
         pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}' },
       { user_id: '@guild-bot:matrix.beta.playstructs.com', name: 'SN Corp Bot',
         player_id: null, tag: '', is_self: false, pfp_attrs: null },
@@ -866,6 +911,22 @@ cat > "$CFIX" <<'EOF'
       { id: '2-9001', label: 'your planet' },
       { id: '9-77', label: 'your fleet' },
     ] },
+    // Presence, when the homeserver runs it. Tests set
+    // __HARNESS_NO_PRESENCE__ for a server that has it turned off — which
+    // must render as nothing, not as a guild full of grey dots.
+    get matrix_presence() {
+      return window.__HARNESS_NO_PRESENCE__
+        ? { known: false, presence: {} }
+        : { known: true, sharing: !!window.__HARNESS_SHARING__,
+            status: window.__HARNESS_SHARING__ ? 'Fleet away' : null,
+            presence: {
+              '1-61': { state: 'online', currently_active: true,
+                        status_msg: 'On station' },
+              '1-42': { state: 'unavailable', last_active_ago: 600000 },
+              '1-77': { state: 'offline' },
+            } };
+    },
+    matrix_status_sharing: { enabled: true, status: 'Fleet away' },
     matrix_mute: { ok: true },
     matrix_redact: { ok: true },
     // Verification is the safety-critical half: a result arriving over

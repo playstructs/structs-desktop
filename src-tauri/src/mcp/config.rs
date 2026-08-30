@@ -13,6 +13,17 @@ pub struct McpConfig {
     /// via `structs_board web:"on"` or the Team Ops CONFIG page.
     #[serde(default)]
     pub web_board_enabled: bool,
+    /// Publish a line about what you are doing, visible to everyone who can
+    /// see you in Comms.
+    ///
+    /// OPT-IN, and it stays that way. This is a game about raiding each
+    /// other: "fleet away" tells anyone reading that your planet may be
+    /// undefended, and "raiding 2-15361" tells your target you are coming.
+    /// All of it is on a public chain already, but there is a real difference
+    /// between DISCOVERABLE by querying and PUSHED to every rival's screen,
+    /// and that difference is the player's to choose.
+    #[serde(default)]
+    pub comms_status_enabled: bool,
 }
 
 impl Default for McpConfig {
@@ -22,6 +33,9 @@ impl Default for McpConfig {
             port: 8420,
             bearer_token: None,
             web_board_enabled: false,
+            // Off. Nothing about what you are doing leaves this machine until
+            // the player asks for it.
+            comms_status_enabled: false,
         }
     }
 }

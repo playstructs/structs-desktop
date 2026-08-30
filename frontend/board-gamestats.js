@@ -168,10 +168,26 @@
       // dir contract from sortControl: -1 = descending (rank 1 first).
       var ordered = state.metric.dir < 0 ? rows : rows.slice().reverse();
       ordered.forEach(function (r) {
+        // A leaderboard is a list of PEOPLE. Who is actually around, and a
+        // way to reach them, is what turns a table of rivals into something
+        // you can act on — the same two affordances the roster carries, on
+        // the same players.
+        var title = H.el('span');
+        var here = Board.presenceDot && Board.presenceDot(r.player_id);
+        if (here) title.appendChild(here);
+        title.appendChild(document.createTextNode(
+          '#' + r.rank + '  ' + (r.username || r.player_id)));
+
+        var sub = H.el('span');
+        sub.appendChild(document.createTextNode(
+          (r.guild_name || '') + (r.tag ? ' [' + r.tag + ']' : '')));
+        var reach = Board.reachLinks && Board.reachLinks(r);
+        if (reach) { sub.appendChild(document.createTextNode(' ')); sub.appendChild(reach); }
+
         table.appendChild(H.resultRow({
           portrait: pfpNode(r),
-          title: '#' + r.rank + '  ' + (r.username || r.player_id),
-          subtitle: (r.guild_name || '') + (r.tag ? ' [' + r.tag + ']' : ''),
+          title: title,
+          subtitle: sub,
           chips: [H.statTile(def.label, def.fmt(num(r.value)), def.icon)],
         }));
       });
@@ -302,6 +318,10 @@
   }
 
   function pull() {
+    // Who is around, alongside the snapshot rather than before it. The
+    // leaderboard must render whether or not Comms is signed in, so presence
+    // can only ever add a dot to a row that already exists.
+    if (Board.ensurePresence) Board.ensurePresence(function () { renderSoon(); });
     return Board.T.core.invoke('mcp_game_stats_snapshot').then(function (snap) {
       state.snap = snap;
     }).catch(function () {});

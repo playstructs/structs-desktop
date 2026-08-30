@@ -54,6 +54,18 @@
     // Narrowing a long channel list. Kept across renders so typing into it
     // does not fight the room-list pushes arriving underneath.
     roomFilter: '',
+    // Who is here right now, by player id. `presenceKnown` false means the
+    // homeserver has never mentioned anyone's — most likely it runs with
+    // presence off — and then NOTHING is shown, because a wall of grey dots
+    // implying an empty guild is worse than no dots at all.
+    presence: {},
+    presenceKnown: false,
+    // Whether messages are still arriving. Rust says so only once a dropped
+    // long-poll has stopped looking like a blip — see `start_sync`.
+    syncStalled: null,
+    // Whether WE are publishing a line about ourselves, and what it says.
+    sharingStatus: false,
+    myStatus: null,
     // Who has seen your latest message here: {event_id, names}. Null until
     // somebody has.
     seen: null,
@@ -780,6 +792,10 @@
 
     var info = el('div', 'sui-result-row-player-info');
     var block = el('div', 'sui-text-label-block');
+    // A direct message IS a person, so it is the one room row where "are they
+    // actually here" is a question about the row itself.
+    var here = presenceDot(r.player_id);
+    if (here) block.appendChild(here);
     block.appendChild(el('span', null, r.name || r.canonical_alias || r.room_id));
     block.appendChild(el('br'));
     // A DM's subtitle is who it is with; a channel's is how many are in it.
@@ -1118,11 +1134,19 @@
 
     var info = el('div', 'sui-result-row-player-info');
     var block = el('div', 'sui-text-label-block');
+    // "Who is here" is the question this whole list exists to answer, so the
+    // dot goes first, before the name it belongs to.
+    var here = presenceDot(p.player_id);
+    if (here) block.appendChild(here);
     if (p.tag) block.appendChild(el('span', 'chat-msg-tag', '[' + p.tag + '] '));
     block.appendChild(el('span', null, p.name + (p.is_self ? ' (you)' : '')));
     block.appendChild(el('br'));
+    // What they say they are doing, when they have chosen to say it. Most
+    // will not have, so the id stays the fallback rather than the row going
+    // blank.
+    var said = p.presence && p.presence.status_msg;
     block.appendChild(el('span', 'sui-text-hint',
-      p.player_id ? 'PID #' + p.player_id : p.user_id));
+      said || (p.player_id ? 'PID #' + p.player_id : p.user_id)));
     info.appendChild(block);
     left.appendChild(info);
     row.appendChild(left);
@@ -1495,6 +1519,13 @@
 
   // ── Room view ─────────────────────────────────────────────────────────────
   function messageNode(m, prev) {
+    // A break in the record. Drawn as a rule rather than a message because it
+    // is not something anyone said — and drawn at all because a history that
+    // reads as continuous and is not is the one kind of wrong a log must
+    // never be.
+    if ((m.kind || 'text') === 'gap') {
+      return ruleNode('some messages are missing', true);
+    }
     var wrap = el('div', 'chat-msg');
     // So a reply's quote line can find what it answers.
     if (m.event_id) wrap.setAttribute('data-event', m.event_id);
@@ -1587,6 +1618,19 @@
     head.appendChild(meta);
     wrap.appendChild(head);
 
+    // Part of a thread, which this window does not group. Saying so is honest;
+    // showing the quote Matrix attaches for compatibility would put words in
+    // the sender's mouth they never chose — see `render_event`.
+    if (m.thread_root && !m.reply_to) {
+      var th = el('a', 'chat-reply-quote chat-mod-thread');
+      th.href = 'javascript:void(0)';
+      th.appendChild(el('span', 'chat-reply-who', 'In a thread'));
+      th.title = 'Go to what this thread is about';
+      th.addEventListener('click', function () { jumpTo(m.thread_root); });
+      wrap.insertBefore(th, wrap.firstChild);
+      wrap.classList.add('chat-mod-reply');
+    }
+
     // What this answers. One line, above the message: a pointer back, not a
     // copy — the full text is already up there in the room.
     if (m.reply_to) {
@@ -1636,6 +1680,20 @@
         });
         if (cards.childNodes.length) wrap.appendChild(cards);
       }
+    }
+
+    // Why it did not send, and a way to send it again. The text itself is
+    // untouched, so retrying needs no un-mangling and copying it copies only
+    // what was written.
+    if (m.failed && m.retry) {
+      var fail = el('div', 'chat-send-failed');
+      fail.appendChild(el('span', 'chat-send-failed-why', 'Not sent — ' + (m.error || '')));
+      var again = el('a', 'chat-ref-action');
+      again.href = 'javascript:void(0)';
+      again.appendChild(el('span', null, 'Try again'));
+      again.addEventListener('click', function () { retrySend(m); });
+      fail.appendChild(again);
+      wrap.appendChild(fail);
     }
 
     var work = workCard(m);
@@ -2468,6 +2526,61 @@
   }
   Chat.onSeen = onSeen;
 
+  // ── Who is here ───────────────────────────────────────────────────────────
+  // One dot, three states, and a fourth that draws nothing at all.
+  function presenceDot(playerId) {
+    if (!S.presenceKnown || !playerId) return null;
+    var p = S.presence[playerId];
+    if (!p) return null;                    // unknown, which is not offline
+    var cls = p.state === 'online' ? 'chat-mod-online'
+      : p.state === 'unavailable' ? 'chat-mod-idle' : 'chat-mod-away';
+    var dot = el('span', 'chat-presence ' + cls);
+    dot.title = p.state === 'online' ? 'Online'
+      : p.state === 'unavailable' ? 'Idle' : 'Away';
+    return dot;
+  }
+  Chat.presenceDot = presenceDot;
+
+  // Nothing is arriving, and the window would otherwise look like a quiet
+  // guild. Shown wherever the player is: a stall is not about one room.
+  function onSyncHealth(payload) {
+    if (!payload) return;
+    if (payload.guild_id && payload.guild_id !== S.guildId) return;
+    S.syncStalled = payload.ok ? null : (payload.reason || 'not reachable');
+    render();
+  }
+  Chat.onSyncHealth = onSyncHealth;
+
+  function stalledBanner() {
+    if (!S.syncStalled) return null;
+    var bar = el('div', 'chat-encrypted chat-mod-stalled');
+    bar.appendChild(icon('icon-alert sui-text-warning', 'sui-icon-xs'));
+    bar.appendChild(el('span', null,
+      'Not receiving messages \u2014 trying again. ' + S.syncStalled));
+    return bar;
+  }
+
+  function onPresence(payload) {
+    if (!payload) return;
+    if (payload.guild_id && payload.guild_id !== S.guildId) return;
+    S.presence = payload.presence || {};
+    S.presenceKnown = Object.keys(S.presence).length > 0;
+    render();
+  }
+  Chat.onPresence = onPresence;
+
+  function loadPresence() {
+    return invoke('matrix_presence', { guildId: S.guildId })
+      .then(function (res) {
+        S.presence = (res && res.presence) || {};
+        S.presenceKnown = !!(res && res.known);
+        S.sharingStatus = !!(res && res.sharing);
+        S.myStatus = (res && res.status) || null;
+        render();
+      })
+      .catch(function () {});
+  }
+
   function replyButton(m) {
     var a = el('a', 'chat-reply-btn');
     a.href = 'javascript:void(0)';
@@ -2602,6 +2715,47 @@
       page.appendChild(el('div', 'chat-topic', S.room.topic));
     }
 
+    // The room has been upgraded and the conversation is somewhere else. The
+    // old room stays joinable and stays in the list, so nothing else would
+    // tell a player they are talking to an empty room.
+    if (S.room && S.room.replaced_by) {
+      var moved = el('div', 'chat-encrypted chat-mod-moved');
+      moved.appendChild(icon('icon-link-out sui-text-warning', 'sui-icon-xs'));
+      moved.appendChild(el('span', null,
+        'This room has been replaced. The conversation continues in a new one.'));
+      // NOT `go` — `var` hoists to the whole function, and a local of that
+      // name shadows the module's `go()` navigator for every other handler in
+      // this render, including the member-list button that has nothing to do
+      // with upgrades.
+      var goThere = el('a', 'chat-ref-action');
+      goThere.href = 'javascript:void(0)';
+      goThere.appendChild(el('span', null, 'Go there'));
+      goThere.addEventListener('click', function () {
+        var target = S.room.replaced_by;
+        // Joining first: an upgraded room is usually one this account has
+        // never been in, and opening it without joining shows an empty
+        // screen that looks like the upgrade lost the history.
+        invoke('matrix_join', { guildId: S.guildId, roomId: target })
+          .catch(function () {})            // already in it is not a failure
+          .then(function () { return refreshRooms(); })
+          .then(function () { openRoom(target); });
+      });
+      moved.appendChild(goThere);
+      page.appendChild(moved);
+    }
+
+    // Said once, at the top, because the alternative is a player scrolling a
+    // wall of "encrypted message" wondering what is broken. Element makes
+    // direct messages encrypted by default, so this is not a rare corner.
+    if (S.room && S.room.encrypted) {
+      var enc = el('div', 'chat-encrypted');
+      enc.appendChild(icon('icon-key sui-text-warning', 'sui-icon-xs'));
+      enc.appendChild(el('span', null,
+        'This conversation is end-to-end encrypted. Structs cannot read it \u2014 '
+        + 'use a Matrix client with encryption to follow it.'));
+      page.appendChild(enc);
+    }
+
     var pins = pinnedStrip();
     if (pins) page.appendChild(pins);
 
@@ -2628,7 +2782,11 @@
         // date. Only between days, never above the first message.
         // An event line carries its own time, so a date rule between two of
         // them is noise on noise.
-        if (prev && dayKey(m.ts) !== dayKey(prev.ts)
+        // A gap has no time — it is a hole, not a moment — so it must not
+        // drag a date rule in with it. Its `ts` of 0 dated it to the epoch
+        // and printed "31 Dec 1969" above every break in the record.
+        var timeless = m.kind === 'gap' || (prev && prev.kind === 'gap');
+        if (prev && !timeless && dayKey(m.ts) !== dayKey(prev.ts)
             && !((m.kind === 'event') && (prev.kind === 'event'))) {
           scroll.appendChild(ruleNode(dayLabel(m.ts)));
         }
@@ -3268,10 +3426,31 @@
       .catch(function (e) {
         msg.pending = false;
         msg.failed = true;
-        msg.body = text + '  — not sent (' + String(e) + ')';
+        // The error goes BESIDE the message, never into it. Appending it to
+        // the body entangled the player's own words with a diagnostic — so
+        // copying the text to send again copied "— not sent (…)" with it, and
+        // nothing could offer a retry without first un-mangling the string.
+        msg.error = String(e);
+        msg.retry = { text: text, msgtype: msgtype, replyTo: answering };
         render();
       });
   }
+
+  // Send it again, exactly as it was written.
+  //
+  // The failed echo is dropped first: leaving it would put the same words on
+  // screen twice, and the one that stays should be the attempt that is
+  // actually in flight.
+  function retrySend(m) {
+    var again = m.retry;
+    if (!again) return;
+    S.messages = S.messages.filter(function (x) { return x !== m; });
+    // Restore what was being answered, so a retried reply is still a reply.
+    S.replyTo = again.replyTo || null;
+    render();
+    sendMessage(again.text, again.msgtype);
+  }
+  Chat.retrySend = retrySend;
 
   // ── Scroll anchoring ──────────────────────────────────────────────────────
   // Follow the conversation only while the reader is AT the conversation.
@@ -3383,6 +3562,37 @@
     return box;
   }
 
+  function statusSharingRow() {
+    var row = el('div', 'sui-data-card-row');
+    row.appendChild(el('span', 'sui-text-hint', 'Activity'));
+    var val = el('span', 'chat-status-share');
+    val.appendChild(el('span', null, S.sharingStatus
+      ? (S.myStatus || 'Shared')
+      : 'Not shared'));
+    var a = el('a', 'chat-ref-action');
+    a.href = 'javascript:void(0)';
+    a.appendChild(el('span', null, S.sharingStatus ? 'Stop sharing' : 'Share'));
+    a.title = S.sharingStatus
+      ? 'Stop telling other players what you are doing'
+      : 'Tell other players roughly what you are doing — including when your '
+        + 'fleet is away, which says your planet may be undefended';
+    a.addEventListener('click', function () { setStatusSharing(!S.sharingStatus); });
+    val.appendChild(a);
+    row.appendChild(val);
+    return row;
+  }
+
+  function setStatusSharing(on) {
+    return invoke('matrix_status_sharing', { guildId: S.guildId, enabled: on })
+      .then(function (res) {
+        S.sharingStatus = !!(res && res.enabled);
+        S.myStatus = (res && res.status) || null;
+        render();
+      })
+      .catch(function (e) { showError(String(e)); });
+  }
+  Chat.setStatusSharing = setStatusSharing;
+
   function renderConnection() {
     var page = el('div', 'chat-page');
     page.appendChild(pageHeader('Connection', function () { go('channels'); }, headerResources()));
@@ -3424,6 +3634,11 @@
       idBody.appendChild(kv('Portrait',
         S.profile.avatar_published ? 'Published' : 'Not published yet'));
     }
+    // What this player tells everyone else about themselves. Off unless
+    // asked for, and the row says exactly what turning it on would reveal —
+    // this is a game about raiding each other, and "fleet away" tells a
+    // rival your planet may be undefended.
+    idBody.appendChild(statusSharingRow());
     idCard.appendChild(idBody);
     scroll.appendChild(idCard);
 
@@ -3541,6 +3756,15 @@
     else if (S.view === 'members') node = renderMembers();
     else if (S.view === 'search') node = renderSearch();
     else node = renderChannels();
+    // Above whatever the player is looking at. A stall is not about one
+    // conversation, and the view they happen to be on is not where it stops
+    // mattering.
+    // At the top of the PAGE, not beside it: the host is a flex ROW, so a
+    // sibling banner sat next to the page and squeezed the conversation into
+    // half the window. Every view returns a `.chat-page`, and that is a
+    // column.
+    var stalled = stalledBanner();
+    if (stalled) node.insertBefore(stalled, node.firstChild);
     host.appendChild(node);
     // Every view except a room is composer-less; the host is emptied here so
     // no stale action bar survives a view change.
@@ -3813,6 +4037,7 @@
           S.view = 'channels';
           render();
           loadMyIds();
+          loadPresence();
           return refreshRooms().then(claimPendingRoom).then(claimPendingDraft);
         }
         render();
@@ -4005,6 +4230,8 @@
     listen('matrix::redacted', function (e) { onRedacted(e && e.payload); });
     listen('matrix::edited', function (e) { onEdited(e && e.payload); });
     listen('matrix::seen', function (e) { onSeen(e && e.payload); });
+    listen('matrix::presence', function (e) { onPresence(e && e.payload); });
+    listen('matrix::sync_health', function (e) { onSyncHealth(e && e.payload); });
     listen('matrix::rooms', function (e) { onRooms(e && e.payload); });
     listen('matrix::status', function (e) { onStatus(e && e.payload); });
 
@@ -4018,6 +4245,7 @@
           S.loading = true;
           render();
           loadMyIds();
+          loadPresence();
           return refreshRooms().then(claimPendingRoom).then(claimPendingDraft);
         }
         S.loading = false;

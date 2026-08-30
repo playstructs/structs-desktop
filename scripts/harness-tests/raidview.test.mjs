@@ -127,6 +127,105 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     !!call && call.args.text === '2-1', JSON.stringify(call && call.args));
 }
 
+// ── What people have said about this planet ────────────────────────────────
+// The battle log is the chain's account of a raid; this is the guild's.
+// Together they are the whole story, and a spectator window is where you are
+// already looking at the thing being talked about.
+{
+  console.log('\n— comms panel');
+  const d = w.document;
+  const panel = d.getElementById('rv-chat');
+  check('the raid window has a comms panel', !!panel);
+  // Collapsed by default: the map is what the window is for.
+  check('…collapsed, like the battle log', panel.classList.contains('rv-collapsed'));
+  check('…and nothing is fetched until it is opened',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length === 0);
+
+  d.getElementById('rv-chat-toggle')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 120));
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').pop();
+  check('opening it asks what was said', !!call && call.args.objectId === '2-1',
+    JSON.stringify(call && call.args));
+  const rows = d.querySelectorAll('.rv-chat-row');
+  check('…and shows it', rows.length === 1, String(rows.length));
+  check('…with who said it',
+    rows[0].textContent.includes('JPEG') && rows[0].textContent.includes('shield on 2-1'),
+    rows[0].textContent);
+  // Which room it was said in is the part you cannot infer.
+  check('…and where', rows[0].textContent.includes('SN.Corporation'), rows[0].textContent);
+
+  // Read-only: sending would need a room to send TO, and guessing is worse
+  // than handing the player to Comms with the id already in the box.
+  check('there is no composer here', !d.querySelector('#rv-chat-body input'));
+  d.getElementById('rv-chat-discuss')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 120));
+  const shared = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_share').pop();
+  check('discussing hands the planet to Comms', !!shared && shared.args.text === '2-1',
+    JSON.stringify(shared && shared.args));
+}
+
+// ── The comms panel is live ────────────────────────────────────────────────
+// A raid is live; the panel used to load once on open and then go stale
+// during exactly the event it exists for.
+{
+  console.log('\n— live comms');
+  const d = w.document;
+
+  // `2-1` is a prefix of `2-15361`. Substring-matching chain ids has caused
+  // real misattribution in this codebase before — an id must be bounded by
+  // something that cannot continue it.
+  const m = w.RaidView.mentionsObject;
+  check('an id on its own is a mention', m('shield on 2-1 is down', '2-1'));
+  check('…at the very start', m('2-1 is being raided', '2-1'));
+  check('…at the very end', m('everyone to 2-1', '2-1'));
+  check('…and next to punctuation', m('hit 2-1, now', '2-1'));
+  check('a LONGER id that starts the same is not this one',
+    !m('raiding 2-15361 at dawn', '2-1'), 'prefix collision');
+  check('…nor one that ends the same', !m('see 12-1 there', '2-1'));
+  check('…nor one glued to a word', !m('planet2-1x', '2-1'));
+
+  // Closed panel: say something was said rather than silently changing a
+  // number nobody is looking at.
+  const head = d.getElementById('rv-chat-toggle');
+  head.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));   // close it
+  await new Promise((r) => setTimeout(r, 60));
+  const before = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length;
+
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:h',
+    messages: [{ event_id: '$n1', sender: '@1-61:h', body: 'shield on 2-1 is down', kind: 'text' }],
+  });
+  await new Promise((r) => setTimeout(r, 120));
+  check('a message about this planet marks the closed panel',
+    d.getElementById('rv-chat-count').textContent === 'new',
+    d.getElementById('rv-chat-count').textContent);
+  check('…without fetching for a panel nobody is looking at',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length === before,
+    String(w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length));
+
+  // A message about a DIFFERENT planet must not mark it at all.
+  d.getElementById('rv-chat-count').textContent = '';
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:h',
+    messages: [{ event_id: '$n2', sender: '@1-61:h', body: 'raiding 2-15361', kind: 'text' }],
+  });
+  await new Promise((r) => setTimeout(r, 120));
+  check('another planet does not mark this one',
+    d.getElementById('rv-chat-count').textContent !== 'new',
+    d.getElementById('rv-chat-count').textContent);
+
+  // Opening clears the marker and fetches.
+  head.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 150));
+  check('opening it fetches again',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length > before);
+  check('…and the marker is gone',
+    d.getElementById('rv-chat-count').textContent !== 'new',
+    d.getElementById('rv-chat-count').textContent);
+}
+
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');
 w.close();
 process.exit(failures ? 1 : 0);

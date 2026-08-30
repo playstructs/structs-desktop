@@ -3529,5 +3529,386 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('a real message still offers them', !!real.querySelector('.chat-react-btn'));
 }
 
+// ── Who is actually here ───────────────────────────────────────────────────
+// Presence is the most social signal Matrix carries and this app discarded it
+// entirely. It is also the one that ties Comms to the rest of the app: the
+// roster lists who EXISTS, this says who is AROUND.
+{
+  console.log('\n— presence');
+  const { w, d } = await open();
+  w.Chat.go('channels');
+  await tick();
+
+  const dm = all(d, '.sui-result-row').find((n) => text(n).includes('JPEG'));
+  check('a direct message shows whether they are here',
+    !!dm.querySelector('.chat-presence'), dm.innerHTML.slice(0, 200));
+  check('…online, when they are',
+    dm.querySelector('.chat-presence').className.includes('chat-mod-online'),
+    dm.querySelector('.chat-presence').className);
+
+  // Idle is a real state with its own word in the spec (`unavailable`), and
+  // it means something different from away.
+  const dot = w.Chat.presenceDot('1-42');
+  check('idle is its own state', dot && dot.className.includes('chat-mod-idle'),
+    dot && dot.className);
+  check('…and says so in words', dot.title === 'Idle', dot.title);
+
+  // Silence is not offline. Somebody the server has said nothing about draws
+  // nothing at all.
+  check('an unknown player draws no dot', w.Chat.presenceDot('1-999') === null);
+  check('…and neither does a room that is not a person',
+    w.Chat.presenceDot(null) === null);
+
+  // A live update repaints.
+  w.__HARNESS_EMIT__('matrix::presence', {
+    guild_id: '0-5', presence: { '1-61': { state: 'offline' } },
+  });
+  await tick();
+  const after = all(d, '.sui-result-row').find((n) => text(n).includes('JPEG'));
+  check('going away updates the dot',
+    after.querySelector('.chat-presence').className.includes('chat-mod-away'),
+    after.querySelector('.chat-presence').className);
+}
+
+// A homeserver with presence turned off must show nothing, not a dead guild.
+{
+  console.log('\n— presence disabled');
+  const dom = await JSDOM.fromFile(harness, {
+    url: pathToFileURL(harness).href,
+    runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
+    beforeParse(window) { window.__HARNESS_NO_PRESENCE__ = true; },
+  });
+  const w = dom.window;
+  await until(() => w.Chat && w.Chat._state && !w.Chat._state.loading);
+  await new Promise((r) => setTimeout(r, 150));
+  const d = w.document;
+  // Many Synapse deployments turn presence off because it is expensive at
+  // scale. A wall of grey dots implying nobody is here is worse than none.
+  check('no dots at all when the server does not run presence',
+    d.querySelectorAll('.chat-presence').length === 0,
+    String(d.querySelectorAll('.chat-presence').length));
+  check('…and the rooms are still listed',
+    all(d, '.sui-result-row').length > 0,
+    String(all(d, '.sui-result-row').length));
+}
+
+// ── Saying what you are doing ──────────────────────────────────────────────
+// The other half of presence. Synapse marks an account online on its own
+// while it syncs, so this is not about being visible — it is about the STATUS
+// LINE, which in a game about raiding each other is tactical.
+{
+  console.log('\n— sharing your activity');
+  const { w, d } = await open();
+  w.Chat.go('connection');
+  await tick();
+  const page = () => text(d.querySelector('.chat-page'));
+
+  // Off unless asked for. Nothing about what you are doing leaves the machine
+  // until the player says so.
+  check('activity is not shared by default', page().includes('Not shared'), page().slice(0, 200));
+  const btn = all(d, '.chat-ref-action').find((n) => text(n) === 'Share');
+  check('…and there is a way to turn it on', !!btn);
+  // The control must say what turning it on would reveal.
+  check('…which says what it would reveal',
+    btn.title.includes('fleet is away') && btn.title.includes('undefended'),
+    btn.title);
+
+  btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_status_sharing').pop();
+  check('turning it on tells Rust', !!call && call.args.enabled === true,
+    JSON.stringify(call && call.args));
+  check('…and the page then shows what is being said',
+    page().includes('Fleet away'), page().slice(0, 220));
+  check('…and offers the way back',
+    !!all(d, '.chat-ref-action').find((n) => text(n) === 'Stop sharing'));
+}
+
+// Other people's status, where their name already is.
+{
+  console.log('\n— what others are doing');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w.Chat.go('members');
+  await tick(); await tick();
+
+  const rows = all(d, '.sui-result-row');
+  const said = rows.find((n) => text(n).includes('On station'));
+  check('somebody who says what they are doing shows it', !!said,
+    rows.map((n) => text(n)).join(' | ').slice(0, 160));
+  // Most people will not have set one, so the id stays the fallback rather
+  // than the row going blank.
+  const quiet = rows.find((n) => text(n).includes('PID #'));
+  check('…and everyone else still shows their id', !!quiet,
+    rows.map((n) => text(n)).join(' | ').slice(0, 160));
+}
+
+// ── Threads ────────────────────────────────────────────────────────────────
+// Element threads heavily and every threaded message carries a compatibility
+// `m.in_reply_to`. Rendering that as a reply quotes somebody who was never
+// answered.
+{
+  console.log('\n— threads');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$th1', sender: '@1-61:h', sender_name: 'JPEG',
+      body: 'agreed', kind: 'text', ts: 1, thread_root: '$14',
+    }],
+  });
+  await tick();
+  const msg = all(d, '#chat-timeline .chat-msg').pop();
+  check('a threaded message says it is in a thread',
+    text(msg).includes('In a thread'), text(msg));
+  check('…marked as a thread, not as a reply',
+    msg.querySelector('.chat-mod-thread') !== null, msg.innerHTML.slice(0, 200));
+  check('…and quotes nobody', !text(msg).includes('T.Xue'), text(msg));
+
+  msg.querySelector('.chat-reply-quote')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('clicking it goes to what the thread is about',
+    d.querySelector('[data-event="$14"]').className.includes('chat-mod-found'),
+    d.querySelector('[data-event="$14"]').className);
+
+  // A genuine reply inside a thread still shows its quote — the sender chose
+  // that one.
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [{
+      event_id: '$th2', sender: '@1-61:h', sender_name: 'JPEG',
+      body: 'the second', kind: 'text', ts: 2, thread_root: '$14',
+      reply_to: '$14', reply_sender: '@1-77:matrix.beta.playstructs.com',
+      reply_excerpt: 'you around?',
+    }],
+  });
+  await tick();
+  const replied = all(d, '#chat-timeline .chat-msg').pop();
+  check('a real reply in a thread keeps its quote',
+    text(replied).includes('you around?'), text(replied));
+  check('…and is not marked twice',
+    replied.querySelectorAll('.chat-reply-quote').length === 1,
+    String(replied.querySelectorAll('.chat-reply-quote').length));
+}
+
+// ── Encrypted rooms ────────────────────────────────────────────────────────
+// Element makes direct messages encrypted by DEFAULT and this client has no
+// crypto, so this is the common case, not a corner.
+{
+  console.log('\n— encrypted rooms');
+  const { w, d } = await open();
+  w.__HARNESS_TIMELINE__ = {
+    room: { room_id: '!enc:h', name: 'JPEG', encrypted: true, joined: true,
+            members: 2, section: 'direct', pinned: [] },
+    messages: [{ event_id: '$e1', sender: '@1-61:h', sender_name: 'JPEG',
+                 kind: 'notice', ts: 1,
+                 body: 'encrypted message — this app cannot read it' }],
+  };
+  await w.Chat.openRoom('!enc:h');
+  await tick();
+
+  const page = text(d.querySelector('.chat-page'));
+  check('an encrypted room says so once, at the top',
+    !!d.querySelector('.chat-encrypted'), page.slice(0, 120));
+  // The player needs to know it is not broken, and what to do instead.
+  check('…explaining that this app cannot read it',
+    page.includes('cannot read it'), page.slice(0, 200));
+  check('…and what would', page.includes('Matrix client with encryption'),
+    page.slice(0, 240));
+
+  // Each message is still honest about itself, and NOT the old nonsense.
+  const msg = all(d, '#chat-timeline .chat-msg').pop();
+  check('an encrypted message reads as one', text(msg).includes('encrypted message'),
+    text(msg));
+  check('…and not as "changed encrypted"', !text(msg).includes('changed'), text(msg));
+
+  // A normal room shows no such banner.
+  w.__HARNESS_TIMELINE__ = null;
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  check('a readable room says nothing about encryption',
+    !d.querySelector('.chat-encrypted'));
+}
+
+// ── An upgraded room ───────────────────────────────────────────────────────
+// Changing a room's version is a normal admin action. The old room stays
+// joinable, stays in the list and stays open — so without following the
+// tombstone a player goes on talking into a room everyone else has left.
+{
+  console.log('\n— room upgrades');
+  const { w, d } = await open();
+  w.__HARNESS_TIMELINE__ = {
+    room: { room_id: '!old:h', name: 'SN.Corporation', joined: true, members: 25,
+            section: 'local', pinned: [], replaced_by: '!new:h' },
+    messages: [{ event_id: '$t', sender: '@1-61:h', sender_name: 'JPEG',
+                 kind: 'notice', ts: 1,
+                 body: 'this room has been replaced — the conversation continues elsewhere' }],
+  };
+  await w.Chat.openRoom('!old:h');
+  await tick();
+
+  const moved = d.querySelector('.chat-mod-moved');
+  check('a replaced room says so', !!moved, text(d.querySelector('.chat-page')).slice(0, 120));
+  check('…in plain terms', text(moved).includes('conversation continues'), text(moved));
+  // A notice with no way forward would leave the player to hunt for a room
+  // they have never been in.
+  const go = [...moved.querySelectorAll('a')].find((n) => text(n) === 'Go there');
+  check('…and offers the way there', !!go);
+
+  go.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick(); await tick();
+  const joined = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_join').pop();
+  // Joining first: an upgraded room is usually one this account has never
+  // been in, and opening it without joining shows an empty screen that looks
+  // like the upgrade lost the history.
+  check('going there joins the replacement first',
+    !!joined && joined.args.roomId === '!new:h', JSON.stringify(joined && joined.args));
+  check('…and then opens it', w.Chat._state.roomId === '!new:h',
+    String(w.Chat._state.roomId));
+
+  // A living room says nothing of the sort.
+  w.__HARNESS_TIMELINE__ = null;
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  check('a room that has not moved shows no notice', !d.querySelector('.chat-mod-moved'));
+}
+
+// ── A break in the record ──────────────────────────────────────────────────
+// `limited: true` is the server saying it truncated the batch — messages
+// exist between what we hold and what arrived. It happens after any
+// reconnect. Appending regardless stitches two ends of a conversation
+// together as though nothing were missing.
+{
+  console.log('\n— missing messages');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  const before = all(d, '#chat-timeline .chat-msg').length;
+
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
+    messages: [
+      { event_id: 'gap:!snc:t1', kind: 'gap', body: 'some messages are missing', ts: 0 },
+      { event_id: '$after', sender: '@1-61:h', sender_name: 'JPEG',
+        body: 'back again', kind: 'text', ts: 1787900700000 },
+    ],
+  });
+  await tick();
+
+  const rules = all(d, '.chat-rule');
+  const gap = rules.find((n) => text(n).includes('some messages are missing'));
+  check('a gap is drawn across the timeline', !!gap,
+    rules.map((n) => text(n)).join(' | '));
+  // It is not something anyone said, so it must not look like a message.
+  check('…as a rule, not as a message',
+    all(d, '#chat-timeline .chat-msg').length === before + 1,
+    (all(d, '#chat-timeline .chat-msg').length - before) + ' new messages');
+  check('…and it is marked, not a quiet date separator',
+    gap.className.includes('chat-mod-alert'), gap.className);
+  check('…with the message that followed it still shown',
+    text(d.querySelector('#chat-timeline')).includes('back again'));
+  // A gap has no time — it is a hole, not a moment. Dating it to its `ts` of
+  // 0 printed "31 Dec 1969" above every break in the record.
+  check('…and no date is invented for it',
+    !text(d.querySelector('#chat-timeline')).includes('1969'),
+    text(d.querySelector('#chat-timeline')).slice(-160));
+  check('…nor for the message straight after it',
+    rules.filter((n) => /19\d\d|20\d\d/.test(text(n))).length <= 1,
+    rules.map((n) => text(n)).join(' | '));
+}
+
+// ── When nothing is arriving ───────────────────────────────────────────────
+// The sync loop recovers on its own, but until it does, a window with nothing
+// arriving looks exactly like a quiet guild. A stall that presents as calm is
+// the worst failure a chat client has.
+{
+  console.log('\n— sync stalled');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  check('a healthy window says nothing about sync',
+    !d.querySelector('.chat-mod-stalled'));
+
+  w.__HARNESS_EMIT__('matrix::sync_health', {
+    guild_id: '0-5', ok: false, reason: 'connection refused',
+  });
+  await tick();
+  const bar = d.querySelector('.chat-mod-stalled');
+  check('a stall is announced', !!bar, text(d.querySelector('.chat-page')).slice(0, 80));
+  check('…saying it is still trying', text(bar).includes('trying again'), text(bar));
+  check('…and why', text(bar).includes('connection refused'), text(bar));
+
+  // A stall is not about one conversation, so leaving the room must not hide
+  // it — that would look like the problem went away.
+  w.Chat.go('channels');
+  await tick();
+  check('it follows you out of the room', !!d.querySelector('.chat-mod-stalled'));
+
+  // Recovery clears it without being asked.
+  w.__HARNESS_EMIT__('matrix::sync_health', { guild_id: '0-5', ok: true });
+  await tick();
+  check('recovering clears it', !d.querySelector('.chat-mod-stalled'));
+
+  // Another guild's trouble is not this one's.
+  w.__HARNESS_EMIT__('matrix::sync_health', {
+    guild_id: '0-1', ok: false, reason: 'elsewhere',
+  });
+  await tick();
+  check('another network cannot raise it here', !d.querySelector('.chat-mod-stalled'));
+}
+
+// ── A message that would not send ──────────────────────────────────────────
+// The commonest failure a player meets — a rate limit, a dropped connection.
+// The error used to be appended to the message body, so the player's own
+// words came entangled with a diagnostic and there was nothing to retry.
+{
+  console.log('\n— failed sends');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+
+  w.__HARNESS_REJECT__.matrix_send =
+    'the homeserver is rate limiting this; try again in 3s';
+  const input = d.getElementById('chat-input');
+  input.value = 'raid 2-15361 at dawn';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick(); await tick();
+
+  const failed = all(d, '#chat-timeline .chat-msg').pop();
+  // The words are the player's, and must survive intact.
+  check('the message keeps exactly what was written',
+    text(failed.querySelector('.chat-msg-body')) === 'raid 2-15361 at dawn',
+    text(failed.querySelector('.chat-msg-body')));
+  check('…with the reason beside it, not inside it',
+    text(failed.querySelector('.chat-send-failed-why')).includes('rate limiting'),
+    text(failed));
+  check('…and a way to send it again',
+    !!Array.from(failed.querySelectorAll('a')).find((n) => text(n) === 'Try again'));
+
+  // Retrying sends the original text, not the text plus an error.
+  w.__HARNESS_REJECT__.matrix_send = null;
+  delete w.__HARNESS_REJECT__.matrix_send;
+  Array.from(failed.querySelectorAll('a')).find((n) => text(n) === 'Try again')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick(); await tick();
+
+  const sent = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send').pop();
+  check('retrying sends what was written', sent.args.body === 'raid 2-15361 at dawn',
+    JSON.stringify(sent.args.body));
+  // Leaving the failed echo would put the same words on screen twice.
+  check('…and the failed copy is gone',
+    all(d, '#chat-timeline .chat-msg')
+      .filter((n) => text(n).includes('raid 2-15361 at dawn')).length === 1,
+    String(all(d, '#chat-timeline .chat-msg')
+      .filter((n) => text(n).includes('raid 2-15361 at dawn')).length));
+  check('…and it is no longer marked failed',
+    !all(d, '#chat-timeline .chat-msg').pop().className.includes('chat-msg-failed'),
+    all(d, '#chat-timeline .chat-msg').pop().className);
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

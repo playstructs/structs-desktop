@@ -230,8 +230,14 @@ pub async fn matrix_disconnect(app: tauri::AppHandle, guild_id: String) -> Resul
     Ok(json!({ "ok": true }))
 }
 
+/// The session for a guild, or a reason a player can act on.
+///
+/// The message is read by people, not only by logs: it surfaces on a roster
+/// row in Team Ops and on a leaderboard in Game Stats, where "not signed in
+/// to 0-5" names an identifier the player has never seen and gives them
+/// nothing to do about it.
 fn session_for(guild_id: &str) -> Result<store::Session, String> {
-    store::get(guild_id).ok_or_else(|| format!("not signed in to {}", guild_id))
+    store::get(guild_id).ok_or_else(|| "Comms is not connected — open Comms to sign in".to_string())
 }
 
 #[tauri::command]
@@ -1016,6 +1022,106 @@ pub async fn matrix_search(
     Ok(json!({ "hits": hits, "query": query.trim() }))
 }
 
+/// What has been said about one game object, anywhere the player can read.
+///
+/// The spectator's version of chat. A raid window is where you are already
+/// looking at a planet; "has anyone mentioned this" is the question that
+/// belongs there, and it is a search the homeserver already knows how to
+/// answer — no new room, no new protocol, no invented state.
+///
+/// Read-only on purpose. Sending from here would need a room to send TO, and
+/// guessing which one is worse than handing the player to Comms with the id
+/// already in the box, which `matrix_share` does.
+#[tauri::command]
+pub async fn matrix_object_chatter(
+    guild_id: Option<String>,
+    object_id: String,
+    limit: Option<u32>,
+) -> Result<Value, String> {
+    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    // Not signed in, or no homeserver: silence, not an error. A raid window
+    // must open and work whether or not Comms is connected.
+    let Ok(session) = session_for(&guild) else {
+        return Ok(json!({ "connected": false, "hits": [] }));
+    };
+    if refs::parse_id(&object_id).is_none() {
+        return Err(format!("{} is not an object id", object_id));
+    }
+    let hits = client::search(&session, &object_id, None, limit.unwrap_or(12).min(50)).await?;
+    Ok(json!({ "connected": true, "hits": hits }))
+}
+
+/// The line this player would publish about themselves, or None.
+///
+/// Derived from state that is already on a public chain — but see
+/// `comms_status_enabled`: discoverable and broadcast are different things,
+/// and which one applies is the player's call, not this function's.
+///
+/// Deliberately COARSE. "Fleet away" is already a tactical disclosure; a
+/// target id would be a gift to whoever is reading.
+pub fn status_line() -> Option<String> {
+    let gs = crate::game_state::GAME_STATE.read().ok()?;
+    let fleet = gs.fleet_status.as_deref().unwrap_or("");
+    Some(match fleet {
+        "away" => "Fleet away".to_string(),
+        "onStation" => "On station".to_string(),
+        _ => "Playing".to_string(),
+    })
+}
+
+/// Publish, or stop publishing, a line about what this player is doing.
+///
+/// Turning it OFF clears the message rather than leaving the last one
+/// standing: a status that stops updating is worse than none, because it
+/// keeps asserting something that has stopped being true.
+async fn push_status(guild_id: &str) {
+    let Ok(session) = session_for(guild_id) else { return };
+    let on = crate::mcp::config::McpConfig::load().comms_status_enabled;
+    let msg = if on { status_line() } else { Some(String::new()) };
+    if let Err(e) = client::publish_status(&session, "online", msg.as_deref()).await {
+        eprintln!("[Comms] could not publish status: {}", e);
+    }
+}
+
+/// Turn the status line on or off.
+#[tauri::command]
+pub async fn matrix_status_sharing(
+    guild_id: Option<String>,
+    enabled: bool,
+) -> Result<Value, String> {
+    let mut cfg = crate::mcp::config::McpConfig::load();
+    cfg.comms_status_enabled = enabled;
+    cfg.save().map_err(|e| e.to_string())?;
+    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    // Immediately, in both directions: switching it off must clear what is
+    // already published, not merely stop refreshing it.
+    push_status(&guild).await;
+    Ok(json!({ "enabled": enabled, "status": if enabled { status_line() } else { None } }))
+}
+
+/// Who is online, keyed by player id.
+///
+/// For every window in the app, not only Comms: Team Ops lists players, the
+/// raid views list players, and "are they actually here" is the same question
+/// in all of them.
+#[tauri::command]
+pub fn matrix_presence(guild_id: Option<String>) -> Result<Value, String> {
+    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    // What we ourselves are publishing, so the window can say so plainly
+    // rather than the player having to ask another client.
+    let sharing = crate::mcp::config::McpConfig::load().comms_status_enabled;
+    Ok(json!({
+        "sharing": sharing,
+        "status": if sharing { status_line() } else { None },
+        // False means the homeserver has never mentioned anyone's presence —
+        // most likely it has presence turned off, which many do. Surfaces
+        // must then show NOTHING rather than a wall of grey dots implying an
+        // empty guild.
+        "known": client::presence_known(&guild),
+        "presence": client::presence_by_player(&guild),
+    }))
+}
+
 /// Is anything waiting in Comms?
 ///
 /// For surfaces outside the Comms window — the door into it, most obviously.
@@ -1075,14 +1181,24 @@ pub async fn matrix_refs(ids: Vec<String>) -> Result<Value, String> {
 #[tauri::command]
 pub async fn matrix_open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    let safe = openable(&url)?;
+    app.opener()
+        .open_url(safe, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// The decision half of `matrix_open_url`, split out so it can be tested.
+///
+/// A security control with no test is one that gets simplified away later by
+/// somebody who cannot see what it was for — and this one is fed by federated
+/// strangers.
+fn openable(url: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url.trim())
         .map_err(|_| format!("not a link: {}", url))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("refusing to open a {} link", parsed.scheme()));
     }
-    app.opener()
-        .open_url(parsed.to_string(), None::<&str>)
-        .map_err(|e| e.to_string())
+    Ok(parsed.to_string())
 }
 
 /// Tell the homeserver how far you have read.
@@ -1372,6 +1488,33 @@ pub fn boot(app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    /// Links in chat come from federated strangers, and this is the only
+    /// thing standing between one of them and the OS's scheme handlers.
+    #[test]
+    fn only_web_links_open() {
+        assert!(super::openable("https://playstructs.com/x").is_ok());
+        assert!(super::openable("http://example.com").is_ok());
+        // Case is normalised by the parser, so an uppercase scheme is not a
+        // way past the check.
+        assert!(super::openable("HTTPS://example.com").is_ok());
+        // Surrounding whitespace is trimmed rather than making it unparseable.
+        assert!(super::openable("  https://example.com  ").is_ok());
+
+        for bad in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "tauri://localhost/x",
+            "data:text/html,<script>x</script>",
+            "vscode://file/etc/passwd",
+            "mailto:someone@example.com",
+        ] {
+            assert!(super::openable(bad).is_err(), "should refuse: {}", bad);
+        }
+        // Not a link at all.
+        assert!(super::openable("just some words").is_err());
+        assert!(super::openable("").is_err());
+    }
+
     use super::*;
 
     #[test]
