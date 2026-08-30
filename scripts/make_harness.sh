@@ -399,7 +399,14 @@ cat > "$FIX" <<'EOF'
     mcp_grass_recent: [],
     // renderConfig() fetches the bundle before ANY config section paints, so
     // the profiles view needs it even though it reads nothing from it.
-    mcp_config_bundle: { loops: {}, policies: {}, doctrine: {}, engine: {}, access: {} },
+    // The shape `mcp_config_bundle` really answers with. It used to claim
+    // `engine` and `access`, which Rust has never sent, and omit `hash`,
+    // which board-pages.js reads — so a config-page test would have been
+    // written against fiction and `d.hash` would have been silently empty.
+    mcp_config_bundle: {
+      policies: {}, loops: {}, hash: {}, doctrine: {}, presets: [],
+      web_board: { enabled: false, bind: '127.0.0.1', port: 8099, url: null },
+    },
     mcp_profiles_get: PROFILES,
     // Writes are accepted and echoed; assertions read __HARNESS_CALLS__ for the
     // payload rather than expecting the fixture to apply it.

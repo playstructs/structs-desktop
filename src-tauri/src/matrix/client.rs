@@ -123,6 +123,13 @@ pub struct Room {
     pub topic: Option<String>,
     pub members: u64,
     pub joined: bool,
+    /// Somebody has asked you into this room and you have not answered.
+    /// Not joined — you cannot read it yet — but not nothing either.
+    #[serde(default)]
+    pub invited: bool,
+    /// Who asked, by the name a player would know them by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invited_by: Option<String>,
     /// Silenced: still counted as unread, never allowed to interrupt.
     #[serde(default)]
     pub muted: bool,
@@ -241,6 +248,10 @@ fn section_for(room_id: &str, server: &str) -> &'static str {
 }
 
 /// A DM is not a channel and does not belong in either net: it is a person.
+/// An invitation is not a place you are; it is a question you have been
+/// asked. Its own section, above everything, because it is the one row in the
+/// list that is waiting on an answer.
+const SECTION_INVITE: &str = "invite";
 const SECTION_DIRECT: &'static str = "direct";
 
 /// `#orbital-hydro:matrix.crew.oh.energy` → `Orbital Hydro`. An alias is a
@@ -1149,6 +1160,8 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 .or_else(|| existing.as_ref().map(|r| r.members))
                 .unwrap_or(0),
             joined: true,
+            invited: false,
+            invited_by: None,
             muted: gs.muted.contains(&room_id),
             // Absent means "this sync did not mention pins", never "there are
             // none" — the same trap as the unread counts above.
@@ -1260,6 +1273,114 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 buf.drain(..cut);
             }
             deltas.push((room_id.clone(), rendered));
+        }
+    }
+
+    // ── Invitations
+    //
+    // Read at all, for the first time. `rooms.invite` was ignored entirely,
+    // so being asked into a room — a guild lobby, a raid channel, a stranger's
+    // DM — was completely invisible: no row, no badge, nothing. In a
+    // federated game where guilds invite each other that is not a small gap.
+    //
+    // An invite carries `invite_state`: STRIPPED state, enough to decide
+    // whether to accept and nothing more. There is no timeline until you do.
+    if let Some(invited) = v
+        .get("rooms")
+        .and_then(|r| r.get("invite"))
+        .and_then(|i| i.as_object())
+    {
+        for (room_id, room) in invited {
+            let events = room
+                .get("invite_state")
+                .and_then(|s| s.get("events"))
+                .and_then(|e| e.as_array())
+                .map(|a| a.as_slice())
+                .unwrap_or(&[]);
+
+            let mut name = String::new();
+            let mut alias = None;
+            let mut topic = None;
+            let mut inviter = None;
+            for ev in events {
+                let etype = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let content = ev.get("content");
+                match etype {
+                    "m.room.name" => {
+                        name = content
+                            .and_then(|c| c.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                    }
+                    "m.room.canonical_alias" => {
+                        alias = content
+                            .and_then(|c| c.get("alias"))
+                            .and_then(|a| a.as_str())
+                            .map(str::to_string);
+                    }
+                    "m.room.topic" => {
+                        topic = content
+                            .and_then(|c| c.get("topic"))
+                            .and_then(|t| t.as_str())
+                            .map(str::to_string);
+                    }
+                    // The membership event naming US is the one whose sender
+                    // is the person who asked.
+                    "m.room.member"
+                        if ev.get("state_key").and_then(|k| k.as_str())
+                            == Some(session.user_id.as_str()) =>
+                    {
+                        inviter = ev.get("sender").and_then(|s| s.as_str()).map(str::to_string);
+                    }
+                    _ => {}
+                }
+            }
+
+            let display = if !name.is_empty() {
+                name
+            } else if let Some(pretty) = alias.as_deref().and_then(pretty_alias) {
+                pretty
+            } else {
+                room_id.clone()
+            };
+            let by = inviter.as_deref().map(|u| {
+                directory::player_id_of(u)
+                    .and_then(|pid| directory::get(&pid).map(|i| i.username))
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| gs.names.get(u).cloned())
+                    .unwrap_or_else(|| localpart(u))
+            });
+            if let Some(u) = inviter.as_deref() {
+                if let Some(pid) = directory::player_id_of(u) {
+                    if directory::get(&pid).is_none() {
+                        needs_identity.push(pid);
+                    }
+                }
+            }
+
+            let entry = Room {
+                room_id: room_id.clone(),
+                name: display,
+                canonical_alias: alias.clone(),
+                topic,
+                members: 0,
+                joined: false,
+                invited: true,
+                invited_by: by,
+                muted: false,
+                pinned: Vec::new(),
+                unread: 0,
+                mention: false,
+                icon: icon_for("", alias.as_deref()),
+                section: SECTION_INVITE,
+                pfp_attrs: None,
+                player_id: None,
+            };
+            if gs.rooms.get(room_id) != Some(&entry) {
+                rooms_changed = true;
+            }
+            gs.rooms.insert(room_id.clone(), entry);
         }
     }
 
@@ -1867,6 +1988,8 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
                 mention: false,
                 pinned: Vec::new(),
                 muted: false,
+                invited: false,
+                invited_by: None,
                 section: section_for(room_id, &server),
                 pfp_attrs: None,
                 player_id: None,
@@ -1949,6 +2072,8 @@ pub async fn browse(
             mention: false,
             pinned: Vec::new(),
             muted: false,
+            invited: false,
+            invited_by: None,
             section: section_for(room_id, &server),
             pfp_attrs: None,
             player_id: None,
@@ -1977,6 +2102,8 @@ pub async fn browse(
                 mention: false,
                 pinned: Vec::new(),
                 muted: false,
+                invited: false,
+                invited_by: None,
                 section: section_for(&s.room_id, &server),
                 pfp_attrs: None,
                 player_id: None,
@@ -3388,6 +3515,61 @@ mod tests {
         STATE.write().unwrap().remove("g");
     }
 
+    /// Being asked into a room has to be visible.
+    ///
+    /// `rooms.invite` was not read at all, so an invitation produced no row,
+    /// no badge and no notice — it was indistinguishable from never having
+    /// been invited.
+    #[test]
+    fn an_invitation_becomes_a_room_you_can_answer() {
+        let s = session();
+        let v = json!({
+            "next_batch": "s1",
+            "rooms": { "invite": { "!lobby:crab.la": { "invite_state": { "events": [
+                { "type": "m.room.name", "content": { "name": "Guild Lobby" } },
+                { "type": "m.room.topic", "content": { "topic": "come and talk" } },
+                { "type": "m.room.canonical_alias",
+                  "content": { "alias": "#lobby:crab.la" } },
+                // The membership event naming US is the one whose sender asked.
+                { "type": "m.room.member", "sender": "@1-61:crab.la",
+                  "state_key": "@1-194:example.com",
+                  "content": { "membership": "invite" } },
+                // …and one naming somebody else, which must not be mistaken
+                // for the inviter.
+                { "type": "m.room.member", "sender": "@someone:crab.la",
+                  "state_key": "@other:crab.la",
+                  "content": { "membership": "join" } }
+            ] } } } }
+        });
+        apply_sync("inv", &s, &v);
+        let room = STATE.read().unwrap().get("inv").unwrap()
+            .rooms.get("!lobby:crab.la").cloned().unwrap();
+
+        assert!(room.invited, "it is an invitation");
+        assert!(!room.joined, "…and not somewhere you can read yet");
+        assert_eq!(room.name, "Guild Lobby");
+        assert_eq!(room.topic.as_deref(), Some("come and talk"));
+        assert_eq!(room.section, SECTION_INVITE);
+        // Who asked is the whole basis for deciding, so it must be the right
+        // person — the sender of the event naming YOU.
+        assert_eq!(room.invited_by.as_deref(), Some("1-61"));
+
+        // An invite with nothing in its stripped state still has to be
+        // answerable rather than dropped.
+        let bare = json!({
+            "next_batch": "s2",
+            "rooms": { "invite": { "!bare:crab.la": { "invite_state": { "events": [] } } } }
+        });
+        apply_sync("inv", &s, &bare);
+        let room = STATE.read().unwrap().get("inv").unwrap()
+            .rooms.get("!bare:crab.la").cloned().unwrap();
+        assert!(room.invited);
+        assert_eq!(room.name, "!bare:crab.la", "named by its id rather than blank");
+        assert_eq!(room.invited_by, None);
+
+        STATE.write().unwrap().remove("inv");
+    }
+
     /// A muted room is one whose push rule does not notify.
     ///
     /// Asked as "do these actions notify" rather than matched against a
@@ -3810,6 +3992,8 @@ mod tests {
             joined,
             pinned: Vec::new(),
             muted: false,
+            invited: false,
+            invited_by: None,
             unread,
             mention,
             icon: "icon-guild".into(),

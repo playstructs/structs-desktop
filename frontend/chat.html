@@ -205,13 +205,27 @@
     /* A picture someone posted. Bounded so one image cannot take the whole
        timeline, and its box is reserved from the event's own dimensions so
        the log does not jump when the bytes land. */
+    /* A picture in a conversation is an aside, not the page.
+       Only the WIDTH was bounded, which bounds nothing for a tall image: a
+       480x1200 screenshot rendered at 320 wide is 800px of timeline, and the
+       conversation goes with it. Both axes, so any aspect fits the same box.
+
+       Absolute px, not `vh`: the height that matters is the timeline's, and
+       `vh` measures the window — which in a scaled, embedded layout is a
+       different number entirely. */
     .chat-image {
-      max-width: 320px; margin-top: 2px;
+      max-width: 320px; max-height: 320px; margin-top: 2px;
       border: 1px solid var(--border-subtle);
       background: var(--surface-player-body);
       overflow: hidden;
     }
-    .chat-image-img { display: block; width: 100%; height: auto; }
+    /* `contain`, never `cover`: cropping somebody's screenshot to fit a box
+       is worse than showing it smaller. Left-top so a wide image aligns with
+       the message it belongs to rather than floating in the middle. */
+    .chat-image-img {
+      display: block; width: 100%; height: 100%;
+      max-height: 320px; object-fit: contain; object-position: left top;
+    }
     .chat-image-loading, .chat-image-failed {
       padding: var(--spacing-sm); color: var(--text-hint);
       font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
@@ -503,6 +517,12 @@
     }
     .chat-work-verdict.chat-mod-good { color: var(--text-player-primary); }
     .chat-work-verdict.chat-mod-bad { color: var(--text-enemy-primary); }
+
+    /* ── Invitations ──────────────────────────────────────────────────── */
+    /* Declining is quieter than accepting: both are one click, but only one
+       of them is what the row is inviting you to do. */
+    .chat-room-decline { color: var(--text-hint); }
+    .chat-room-decline:hover { color: var(--text-enemy-primary); }
 
     /* ── Channel filter ───────────────────────────────────────────────── */
     #chat-room-filter { padding: var(--spacing-md); align-self: stretch; }

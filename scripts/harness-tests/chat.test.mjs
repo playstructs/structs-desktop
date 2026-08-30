@@ -3271,5 +3271,198 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     rules[0].style.cssText);
 }
 
+// ── A picture is an aside, not the page ────────────────────────────────────
+// Only the WIDTH was bounded, which bounds nothing for a tall image: a
+// 480x1200 screenshot rendered at 320 wide is 800px of timeline, and the
+// conversation goes with it.
+{
+  console.log('\n— image bounds');
+  const { d } = await open();
+  const rules = Array.from(d.styleSheets)
+    .flatMap((s) => { try { return Array.from(s.cssRules); } catch (e) { return []; } })
+    .filter((r) => r.selectorText);
+  const box = rules.find((r) => r.selectorText === '.chat-image');
+  const img = rules.find((r) => r.selectorText === '.chat-image-img');
+
+  check('an image is bounded on both axes',
+    box.style.getPropertyValue('max-width') === '320px' &&
+    box.style.getPropertyValue('max-height') === '320px',
+    box.style.cssText);
+  // Absolute px, not `vh`: the height that matters is the timeline's, and
+  // `vh` measures the window — a different number entirely in a scaled or
+  // embedded layout, as this harness demonstrates.
+  check('…in absolute units, not viewport ones',
+    !/vh/.test(box.style.cssText), box.style.cssText);
+  // `contain`, never `cover`: cropping somebody's screenshot to fit a box is
+  // worse than showing it smaller.
+  check('…and scaled to fit rather than cropped',
+    img.style.getPropertyValue('object-fit') === 'contain',
+    img.style.cssText);
+  check('…the image itself capped too, not just its frame',
+    img.style.getPropertyValue('max-height') === '320px', img.style.cssText);
+}
+
+// ── The connection page ────────────────────────────────────────────────────
+// There is deliberately no Sign out: the credential is the key the player is
+// already playing with, so signing out would only strand them somewhere they
+// cannot chat from. Reconnect is a different thing and does belong.
+{
+  console.log('\n— connection page');
+  const { w, d } = await open();
+  w.Chat.go('connection');
+  await tick();
+
+  check('a connected session offers a reconnect',
+    !!d.getElementById('chat-reconnect'));
+  // A session can go bad while still reporting itself signed in, and then
+  // there is no failure to retry — so "Try again" never appears and the
+  // player is stuck being told everything is fine.
+  check('…and not a retry, which there is nothing to retry',
+    !d.getElementById('chat-retry'));
+  check('…and no sign out, which would only strand them',
+    !text(d.querySelector('.chat-page')).toLowerCase().includes('sign out'),
+    text(d.querySelector('.chat-page')).slice(0, 60));
+
+  d.getElementById('chat-reconnect')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const calls = w.__HARNESS_CALLS__.map((c) => c.cmd);
+  check('reconnecting drops the session', calls.indexOf('matrix_disconnect') !== -1);
+  check('…and takes another straight away',
+    calls.lastIndexOf('matrix_connect') > calls.lastIndexOf('matrix_disconnect'),
+    JSON.stringify(calls.slice(-4)));
+
+  // Whether other clients can see this player's face renders correctly in
+  // here whatever the answer, so this page is the only place the difference
+  // is visible at all.
+  w.Chat.go('connection');
+  await tick();
+  check('identity says whether the portrait is published',
+    text(d.querySelector('.chat-page')).includes('Published'),
+    text(d.querySelector('.chat-page')).slice(0, 200));
+}
+
+// A failed sign-in offers the retry instead.
+{
+  console.log('\n— a failed connection');
+  const dom = await JSDOM.fromFile(harness, {
+    url: pathToFileURL(harness).href + '?fixture=unauth',
+    runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
+  });
+  const w = dom.window;
+  await until(() => w.Chat && w.Chat._state && !w.Chat._state.loading);
+  w.Chat.go('connection');
+  await new Promise((r) => setTimeout(r, 120));
+  const d = w.document;
+  check('a session that is not connected offers a retry',
+    !!d.getElementById('chat-retry'));
+  check('…and not a reconnect, which would have nothing to drop',
+    !d.getElementById('chat-reconnect'));
+}
+
+// ── Browsing for somewhere to go ───────────────────────────────────────────
+// A directory in arrival order led with a room that had nobody in it, and
+// buried a 3,100-player channel below it.
+{
+  console.log('\n— browse order');
+  const { w, d } = await open();
+  const order = w.Chat.browseOrder;
+  const r = (name, members, joined) => ({ name: name, members: members, joined: !!joined });
+  const sort = (l) => l.slice().sort(order).map((x) => x.name).join(',');
+
+  check('busiest first', sort([r('empty', 0), r('big', 3100), r('small', 4)])
+    === 'big,small,empty');
+  // A row you are already in answers a question you did not ask.
+  check('what you have not joined comes first',
+    sort([r('mine', 999, true), r('new', 3)]) === 'new,mine');
+  check('…and joined rooms are still ordered among themselves',
+    sort([r('a', 1, true), r('b', 50, true)]) === 'b,a');
+
+  // And on screen.
+  w.Chat.go('browse');
+  await tick(); await tick();
+  const rows = all(d, '.sui-result-row');
+  check('the directory leads with somewhere worth going',
+    !text(rows[0]).includes('0 Players'), text(rows[0]));
+  check('…and every row is still there',
+    rows.length === w.Chat._state.browse.length,
+    rows.length + '/' + w.Chat._state.browse.length);
+}
+
+// ── Being asked into a room ────────────────────────────────────────────────
+// `rooms.invite` was not read at all, so an invitation produced no row, no
+// badge and no notice — indistinguishable from never having been invited.
+{
+  console.log('\n— invitations');
+  const { w, d } = await open();
+  const withInvite = w.__HARNESS_FIXTURES__.matrix_rooms.rooms.concat([{
+    room_id: '!lobby:crab.la', name: 'Guild Lobby', icon: 'icon-guild',
+    members: 0, joined: false, invited: true, invited_by: 'JPEG',
+    unread: 0, mention: false, muted: false, section: 'invite', pinned: [],
+  }]);
+  w.__HARNESS_EMIT__('matrix::rooms', { guild_id: '0-5', rooms: withInvite });
+  await tick();
+
+  const rows = all(d, '.sui-result-row');
+  const invite = rows.find((n) => text(n).includes('Guild Lobby'));
+  check('an invitation is listed', !!invite);
+  // First, always: it is the one row waiting on an answer from you rather
+  // than reporting something that happened.
+  check('…first, above everything else', rows[0] === invite, text(rows[0]));
+  // A member count is meaningless for a room you cannot see yet; who asked
+  // is the whole basis for deciding.
+  check('…saying who asked', text(invite).includes('Invited by JPEG'), text(invite));
+  check('…and not pretending to know how many are in it',
+    !text(invite).includes('0 Players'), text(invite));
+
+  const btns = [...invite.querySelectorAll('button')].map((b) => b.textContent.trim());
+  check('…offering to accept', btns.indexOf('Accept') !== -1, btns.join(','));
+  check('…and to decline', btns.indexOf('Decline') !== -1, btns.join(','));
+
+  // A room merely found in the directory has nothing to decline — you were
+  // never asked.
+  const found = rows.find((n) => n !== invite &&
+    [...n.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Join'));
+  if (found) {
+    check('a directory room offers no decline',
+      ![...found.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Decline'),
+      [...found.querySelectorAll('button')].map((b) => b.textContent).join(','));
+  }
+
+  // Declining removes it at once — waiting for a sync leaves a question on
+  // screen that has already been answered.
+  [...invite.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Decline')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const left = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_leave').pop();
+  check('declining turns it down', !!left && left.args.roomId === '!lobby:crab.la',
+    JSON.stringify(left && left.args));
+  check('…and it leaves the list immediately',
+    !all(d, '.sui-result-row').some((n) => text(n).includes('Guild Lobby')));
+}
+
+// Accepting goes there, the way joining from the directory does.
+{
+  console.log('\n— accepting');
+  const { w, d } = await open();
+  w.__HARNESS_EMIT__('matrix::rooms', {
+    guild_id: '0-5',
+    rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms.concat([{
+      room_id: '!raid:matrix.beta.playstructs.com', name: 'Raid', icon: 'icon-raid',
+      members: 0, joined: false, invited: true, invited_by: 'Netlag',
+      unread: 0, mention: false, muted: false, section: 'invite', pinned: [],
+    }]),
+  });
+  await tick();
+  const invite = all(d, '.sui-result-row')[0];
+  [...invite.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Accept')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick(); await tick();
+  const joined = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_join').pop();
+  check('accepting joins the room', !!joined, JSON.stringify(joined && joined.args));
+  check('…and takes you there', w.Chat._state.roomId === '!raid:matrix.beta.playstructs.com',
+    String(w.Chat._state.roomId));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

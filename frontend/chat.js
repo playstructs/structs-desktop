@@ -730,6 +730,9 @@
 
   // ── Channels view ─────────────────────────────────────────────────────────
   var SECTIONS = [
+    // First, always. An invitation is the one row in the list waiting on an
+    // answer from you rather than reporting something that happened.
+    { key: 'invite', label: 'Invitations' },
     { key: 'direct', label: 'Direct' },
     { key: 'local', label: 'Local Net' },
     { key: 'galaxy', label: 'Galaxy Net' },
@@ -787,7 +790,11 @@
       sub = el('span', 'sui-text-hint',
         (r.tag ? '[' + r.tag + '] ' : '') + 'PID #' + r.player_id);
     } else {
-      var parts = [fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')];
+      var parts = r.invited
+        // An invitation has no member count worth showing — you cannot see
+        // the room yet. Who asked is the whole basis for deciding.
+        ? [r.invited_by ? 'Invited by ' + r.invited_by : 'You have been invited']
+        : [fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')];
       if (browsing) {
         var host = foreignServerLabel(r);
         if (host) parts.push(host);
@@ -822,8 +829,34 @@
     if (browsing && r.joined) {
       right.appendChild(el('div', 'sui-badge sui-mod-default', 'Joined'));
     }
+    // Declining is only offered for an INVITATION. A room you merely found in
+    // the directory has nothing to decline — you were never asked.
+    if (r.invited) {
+      var no = el('button', 'sui-screen-btn chat-room-decline', 'Decline');
+      no.title = 'Turn down this invitation';
+      no.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        no.disabled = true;
+        no.textContent = 'Declining';
+        invoke('matrix_leave', { guildId: S.guildId, roomId: r.room_id })
+          .then(function () {
+            // Gone from the list at once. Waiting for a sync to confirm it
+            // leaves a question on screen that has already been answered.
+            S.rooms = S.rooms.filter(function (x) { return x.room_id !== r.room_id; });
+            render();
+            return refreshRooms();
+          })
+          .catch(function (e) {
+            no.textContent = 'Decline';
+            no.disabled = false;
+            showError(String(e));
+          });
+      });
+      right.appendChild(no);
+    }
     if (!r.joined) {
-      var join = el('button', 'sui-screen-btn sui-mod-secondary', 'Join');
+      var join = el('button', 'sui-screen-btn sui-mod-secondary',
+        r.invited ? 'Accept' : 'Join');
       join.addEventListener('click', function (ev) {
         ev.stopPropagation();
         join.disabled = true;
@@ -832,12 +865,13 @@
         invoke('matrix_join', { guildId: S.guildId, roomId: r.room_id })
           .then(function () {
             return refreshRooms().then(function () {
-              // Joining from the directory is a decision to go there.
-              if (browsing) openRoom(r.room_id);
+              // Joining from the directory, or accepting an invitation, is a
+              // decision to go there.
+              if (browsing || r.invited) openRoom(r.room_id);
             });
           })
           .catch(function (e) {
-            join.textContent = 'Join';
+            join.textContent = r.invited ? 'Accept' : 'Join';
             join.disabled = false;
             join.classList.remove('sui-mod-disabled');
             showError(String(e));
@@ -885,7 +919,8 @@
   // same order the eye is reading — deriving it twice is how the top row and
   // the one that opens come to disagree.
   function filteredRooms() {
-    var mine = S.rooms.filter(function (r) { return r.joined; }).filter(matchesFilter);
+    var mine = S.rooms.filter(function (r) { return r.joined || r.invited; })
+      .filter(matchesFilter);
     var out = [];
     SECTIONS.forEach(function (sec) {
       mine.filter(function (r) { return (r.section || 'galaxy') === sec.key; })
@@ -932,7 +967,7 @@
 
     // Only once the list is long enough to need it. A filter box above four
     // rooms is a control that costs more attention than it saves.
-    var joined = S.rooms.filter(function (r) { return r.joined; });
+    var joined = S.rooms.filter(function (r) { return r.joined || r.invited; });
     // Long lists get it unasked; a short list only shows it once you have
     // gone looking for it — but then it must be there, or Ctrl-K would put
     // the cursor nowhere.
@@ -1004,7 +1039,7 @@
 
     if (S.loading) {
       scroll.appendChild(noticeBlock('Loading', 'Reading your channels.'));
-    } else if (!S.rooms.filter(function (r) { return r.joined; }).length) {
+    } else if (!S.rooms.filter(function (r) { return r.joined || r.invited; }).length) {
       scroll.appendChild(noticeBlock(
         'No channels yet',
         'You have not joined anything. Browse the directory to find rooms.'));
@@ -1012,7 +1047,8 @@
       // Only rooms you are IN. What else exists lives in Browse — a list that
       // mixes "your channels" with "every channel on the server" answers
       // neither question well.
-      var mine = S.rooms.filter(function (r) { return r.joined; }).filter(matchesFilter);
+      var mine = S.rooms.filter(function (r) { return r.joined || r.invited; })
+        .filter(matchesFilter);
       if (!mine.length) {
         scroll.appendChild(noticeBlock('Nothing matches',
           'No channel of yours is called ' + JSON.stringify(S.roomFilter) + '.'));
@@ -1130,6 +1166,21 @@
   // IRC's `/list`: everything public on the homeserver, searched server-side
   // because a busy server only ever hands us a page and filtering locally
   // would filter the wrong set.
+  // Browse is for finding somewhere to go, so what you have NOT joined comes
+  // first — a row you are already in answers a question you did not ask.
+  //
+  // Then busiest first. A directory in arrival order put a room with nobody
+  // in it at the top, which is the least useful row it could possibly lead
+  // with, and buried a 3,100-player channel below it.
+  function browseOrder(a, b) {
+    var ja = a.joined ? 1 : 0, jb = b.joined ? 1 : 0;
+    if (ja !== jb) return ja - jb;
+    var ma = Number(a.members) || 0, mb = Number(b.members) || 0;
+    if (ma !== mb) return mb - ma;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  }
+  Chat.browseOrder = browseOrder;
+
   function renderBrowse() {
     var page = el('div', 'chat-page');
     page.appendChild(pageHeader('Browse Channels', function () { go('channels'); }, null));
@@ -1161,7 +1212,8 @@
     } else {
       var table = el('div', 'sui-result-table');
       var list = el('div', 'sui-result-rows');
-      S.browse.forEach(function (r) { list.appendChild(roomRow(r, true)); });
+      S.browse.slice().sort(browseOrder)
+        .forEach(function (r) { list.appendChild(roomRow(r, true)); });
       table.appendChild(list);
       scroll.appendChild(table);
     }
@@ -3331,6 +3383,14 @@
     idBody.appendChild(kv('Homeserver', net ? net.homeserver : '—'));
     idBody.appendChild(kv('Matrix ID', S.profile ? S.profile.user_id : (net && net.user_id) || '—'));
     idBody.appendChild(kv('Player', S.profile ? S.profile.display_name : '—'));
+    // Whether other clients can see this player's face. It renders correctly
+    // in here whatever the answer, so this is the only place the difference
+    // is visible at all — it was a tooltip on the composer portrait and
+    // nowhere else.
+    if (S.profile) {
+      idBody.appendChild(kv('Portrait',
+        S.profile.avatar_published ? 'Published' : 'Not published yet'));
+    }
     idCard.appendChild(idBody);
     scroll.appendChild(idCard);
 
@@ -3351,19 +3411,33 @@
     // No Connect button and no Sign out. Signing in needs nothing from the
     // player — the credential is the key they are already playing with — so
     // asking would be a question with one sensible answer. Signing out would
-    // only strand them somewhere they cannot chat from. This page reports
-    // what happened; the one control is a retry, and only when there is
-    // something to retry.
+    // only strand them somewhere they cannot chat from.
+    //
+    // Reconnect is a different thing and does belong here. A session can go
+    // bad while still reporting itself signed in — a homeserver that has
+    // forgotten the token, a sync loop that has stopped answering — and the
+    // window then has no failure to retry, so "Try again" never appears and
+    // the player is stuck being told everything is fine. This drops the
+    // session and immediately takes another, which is the actual fix for
+    // that state and never leaves them signed out.
     var connected = !!(net && net.logged_in);
+    var actions = el('div', 'sui-screen-btn-flex-wrapper');
     if (!connected && !S.connecting) {
-      var actions = el('div', 'sui-screen-btn-flex-wrapper');
       var btn = el('button', 'sui-screen-btn sui-mod-primary');
       btn.id = 'chat-retry';
       btn.textContent = 'Try again';
       btn.addEventListener('click', function () { connect(); });
       actions.appendChild(btn);
-      scroll.appendChild(actions);
+    } else if (connected) {
+      var again = el('button', 'sui-screen-btn');
+      again.id = 'chat-reconnect';
+      again.textContent = S.connecting ? 'Reconnecting…' : 'Reconnect';
+      again.disabled = !!S.connecting;
+      again.title = 'Drop this session and take a fresh one';
+      again.addEventListener('click', function () { reconnect(); });
+      actions.appendChild(again);
     }
+    if (actions.childNodes.length) scroll.appendChild(actions);
 
     page.appendChild(scroll);
     return page;
@@ -3731,6 +3805,21 @@
       .catch(function (e) { showError(String(e)); });
   }
   Chat.disconnect = disconnect;
+
+  // Drop this session and take another, without ever passing through a
+  // signed-out state the player has to get themselves out of.
+  function reconnect() {
+    S.connecting = true;
+    render();
+    return disconnect()
+      .then(connect)
+      .catch(function (e) {
+        S.connecting = false;
+        S.error = String(e);
+        render();
+      });
+  }
+  Chat.reconnect = reconnect;
 
   // ── Live updates ──────────────────────────────────────────────────────────
   // Rust runs the /sync loop and pushes. The window never polls.
