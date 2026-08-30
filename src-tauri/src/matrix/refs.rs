@@ -146,6 +146,11 @@ fn player_card(id: &str, v: &Value) -> Value {
         actions.push(action("watch_fleet", "Fleet", "icon-fleet-tile"));
     }
     actions.push(action("message", "Message", "icon-phone"));
+    // Paying someone you are talking to is the most ordinary social act the
+    // game has, and it was the one thing chat could name a player for but not
+    // act on. The button does NOT send: Comms has no authority to spend, so it
+    // hands Team Ops a pre-filled form (see `matrix_open_transfer`).
+    actions.push(action("send_alpha", "Pay", "icon-send-alpha"));
 
     json!({
         "id": id, "kind": "player", "icon": "icon-member",
@@ -603,7 +608,7 @@ mod tests {
         let keys: Vec<String> = player_card("1-61", &with_both)["actions"]
             .as_array().unwrap().iter()
             .map(|a| a["key"].as_str().unwrap().to_string()).collect();
-        assert_eq!(keys, vec!["watch_planet", "watch_fleet", "message"]);
+        assert_eq!(keys, vec!["watch_planet", "watch_fleet", "message", "send_alpha"]);
 
         // A player with no planet must not offer to watch one.
         let homeless = json!({ "Player": { "name": "X", "fleetId": "9-1" },
@@ -611,7 +616,7 @@ mod tests {
         let keys: Vec<String> = player_card("1-2", &homeless)["actions"]
             .as_array().unwrap().iter()
             .map(|a| a["key"].as_str().unwrap().to_string()).collect();
-        assert_eq!(keys, vec!["watch_fleet", "message"]);
+        assert_eq!(keys, vec!["watch_fleet", "message", "send_alpha"]);
     }
 
     #[test]

@@ -433,6 +433,7 @@
       }).catch(function (e) { cardNote(box, String(e), true); });
       return;
     }
+    if (key === 'send_alpha') { sendAlpha(card, box); return; }
     if (key === 'agreement') { rentForm(card, box); return; }
     if (key === 'ask_help') { askForHelp(card, box); return; }
   }
@@ -453,6 +454,23 @@
         });
       })
       .then(function () { cardNote(box, 'asked'); })
+      .catch(function (e) { cardNote(box, String(e), true); });
+  }
+
+  // Hand Team Ops a pre-filled transfer for this player.
+  //
+  // Comms deliberately cannot spend. `mcp_transfer_execute` is board-only and
+  // re-runs its own preview server-side, and this window renders text written
+  // by federated strangers — it is the last place that should hold a wallet.
+  // So the button asks, and the money is still committed in Team Ops, in front
+  // of a preview naming the recipient.
+  //
+  // Only the player ID crosses over. The address is resolved from the chain on
+  // the other side, so a crafted card cannot name where the funds go.
+  function sendAlpha(card, box) {
+    cardNote(box, 'opening Team Ops\u2026');
+    return invoke('matrix_open_transfer', { playerId: card.id })
+      .then(function () { cardNote(box, 'ready in Team Ops — confirm it there'); })
       .catch(function (e) { cardNote(box, String(e), true); });
   }
 

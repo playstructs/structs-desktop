@@ -548,7 +548,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const actions = Array.from(playerCard.querySelectorAll('.chat-ref-action'))
     .map((b) => text(b));
   check('a player card offers what the player has',
-    actions.join(',') === 'Planet,Fleet,Message', actions.join(','));
+    actions.join(',') === 'Planet,Fleet,Message,Pay', actions.join(','));
 
   Array.from(playerCard.querySelectorAll('.chat-ref-action'))
     .find((b) => text(b) === 'Message')
@@ -557,6 +557,23 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const dm = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_dm').pop();
   check('Message opens a DM with them', !!dm && dm.args.playerId === '1-61',
     JSON.stringify(dm && dm.args));
+
+  // Paying someone is a hand-off, not a payment. Comms has no authority to
+  // spend, so the button must call the hand-off and pass ONLY the player id —
+  // the destination address is resolved from the chain on the other side.
+  Array.from(playerCard.querySelectorAll('.chat-ref-action'))
+    .find((b) => text(b) === 'Pay')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const pay = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_open_transfer').pop();
+  check('Pay hands the transfer to Team Ops',
+    !!pay && pay.args.playerId === '1-61', JSON.stringify(pay && pay.args));
+  check('…passing the id and nothing else',
+    !!pay && Object.keys(pay.args).length === 1, JSON.stringify(pay && pay.args));
+  check('…and Comms never calls the executing command',
+    !w.__HARNESS_CALLS__.some((c) => c.cmd === 'mcp_transfer_execute'));
+  check('…telling the player where to finish it',
+    /Team Ops/.test(text(playerCard)), text(playerCard).slice(-80));
 
   // Watching opens the SAME spectator window Team Ops opens.
   Array.from(playerCard.querySelectorAll('.chat-ref-action'))

@@ -118,7 +118,12 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
 {
   console.log('\n— share to comms');
   const d = w.document;
-  const btn = d.getElementById('rv-share');
+  // The control lives in the Comms panel, NOT the defender's status chunk: a
+  // button between the portrait and the charge bar split one unit into two
+  // unrelated tiles and read as an upload control.
+  check('no share button in the defender status chunk',
+    d.getElementById('rv-share') === null);
+  const btn = d.getElementById('rv-chat-discuss');
   check('the raid window offers a share control', !!btn && !btn.classList.contains('hidden'));
   btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 20));

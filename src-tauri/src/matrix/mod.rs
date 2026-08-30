@@ -1432,6 +1432,100 @@ pub async fn matrix_share(app: tauri::AppHandle, text: String) -> Result<Value, 
     Ok(json!({ "ok": true, "text": text }))
 }
 
+/// Hand a "send Alpha to this player" intent from Comms to Team Ops.
+///
+/// This command MOVES NO MONEY, and that is deliberate. `mcp_transfer_execute`
+/// is gated `require_board` and re-runs its own preview server-side precisely
+/// so a stale or hand-crafted payload cannot skip the gates. Comms renders text
+/// written by federated strangers, so it is the last window that should be able
+/// to spend from the wallet. Chat therefore ASKS; Team Ops still decides.
+///
+/// The safety hinge is what crosses the boundary: chat passes a **player id**
+/// and nothing else. The destination address is read from the CHAIN here, so a
+/// hostile message cannot name where the money goes — the worst a forged card
+/// can do is pre-fill a real player the sender did not mean to pay, which the
+/// preview then shows by name before anything is signed.
+#[tauri::command]
+pub async fn matrix_open_transfer(
+    app: tauri::AppHandle,
+    player_id: String,
+) -> Result<Value, String> {
+    let player_id = player_id.trim().to_string();
+    // A player id is `<guild>-<index>`. Validated before it reaches the chain
+    // so a crafted localpart cannot become part of a query path.
+    let shaped = {
+        let mut parts = player_id.split('-');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(a), Some(b), None) => {
+                !a.is_empty()
+                    && !b.is_empty()
+                    && a.bytes().all(|c| c.is_ascii_digit())
+                    && b.bytes().all(|c| c.is_ascii_digit())
+            }
+            _ => false,
+        }
+    };
+    if !shaped {
+        return Err(format!("{player_id} is not a player id"));
+    }
+
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let record = client.query_entity("player", &player_id).await?;
+    let address = record
+        .get("Player")
+        .and_then(|p| p.get("primaryAddress"))
+        .and_then(|a| a.as_str())
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| format!("the chain has no payable address for {player_id}"))?
+        .to_string();
+    // The same shape `mcp_transfer_preview` insists on. Checked here too, so a
+    // malformed chain record fails with a readable message instead of
+    // pre-filling a form with something that can never validate.
+    if !address.starts_with("structs1") || address.len() < 39 {
+        return Err(format!(
+            "{player_id} has an unusable address on chain — nothing was pre-filled"
+        ));
+    }
+
+    let name = crate::mcp::enrich::addresses_map()
+        .get(&address)
+        .cloned()
+        .unwrap_or_else(|| player_id.clone());
+
+    if app.get_webview_window("board").is_none() {
+        crate::mcp::board_feed::build_board_window(&app)
+            .map_err(|e| format!("couldn't open Team Ops: {e}"))?;
+    } else if let Some(w) = app.get_webview_window("board") {
+        let _ = w.set_focus();
+    }
+
+    let intent = json!({ "to": address, "playerId": player_id, "name": name });
+    set_pending_transfer(&intent);
+    crate::mcp::web_board::emit_board(&app, "board-transfer", intent.clone());
+    Ok(intent)
+}
+
+/// A transfer Comms asked Team Ops to pre-fill. Same replay problem as a
+/// pending room: the ask usually OPENS the board, so the event fires into
+/// nothing.
+static PENDING_TRANSFER: RwLock<Option<Value>> = RwLock::new(None);
+
+fn set_pending_transfer(intent: &Value) {
+    if let Ok(mut p) = PENDING_TRANSFER.write() {
+        *p = Some(intent.clone());
+    }
+}
+
+/// Take the transfer Team Ops was asked to pre-fill, if any. Consuming: a
+/// pre-fill already delivered must not reappear and silently re-address a
+/// form the player has since retyped.
+#[tauri::command]
+pub fn matrix_take_pending_transfer() -> Result<Value, String> {
+    let taken = PENDING_TRANSFER.write().ok().and_then(|mut p| p.take());
+    Ok(taken.unwrap_or(Value::Null))
+}
+
 /// A draft the app handed Comms before the window was listening. Same
 /// replay problem as a pending room: the share usually OPENS the window, so
 /// the event fires into nothing.

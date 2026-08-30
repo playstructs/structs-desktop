@@ -393,6 +393,9 @@ cat > "$FIX" <<'EOF'
 
   var F = {
     mcp_game_stats_snapshot: SNAPSHOT,
+    // Nothing parked. The board claims a Comms hand-off on every boot, so the
+    // quiet answer is the normal one and must not reject into the console.
+    matrix_take_pending_transfer: null,
     // Comms reaching into the board: who is around, and the two ways to
     // reach them. Absent from this table, the leaderboard would silently
     // lose its social half and the tests would not notice.
@@ -702,7 +705,8 @@ cat > "$CFIX" <<'EOF'
       planet_id: '2-223', fleet_id: '9-61',
       actions: [{ key: 'watch_planet', label: 'Planet', icon: 'icon-planet' },
                 { key: 'watch_fleet', label: 'Fleet', icon: 'icon-fleet-tile' },
-                { key: 'message', label: 'Message', icon: 'icon-phone' }],
+                { key: 'message', label: 'Message', icon: 'icon-phone' },
+                { key: 'send_alpha', label: 'Pay', icon: 'icon-send-alpha' }],
       rows: [{ label: 'Alpha', value: '9.4Kg' },
              { label: 'Energy', value: '128.01KW/133.64KW' }] },
     // An offer you can close from the conversation that mentioned it.
@@ -897,6 +901,9 @@ cat > "$CFIX" <<'EOF'
     matrix_mark_read: { ok: true },
     // Answers only for ids the chain knows; 1-1945 is absent on purpose.
     matrix_refs: null,
+    // The hand-off answers with what it parked for Team Ops; the address is
+    // the chain's, which is why the window never supplies one.
+    matrix_open_transfer: { to: 'structs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq', playerId: '1-61', name: 'JPEG' },
     // A room's pinned messages, fetched on demand. Tests set
     // __HARNESS_PINS__ to control what comes back.
     get matrix_pinned() {

@@ -376,11 +376,17 @@
        line. Full-size screen buttons wrapped onto two rows and outweighed the
        summary they belonged to. */
     .chat-ref-actions {
-      display: flex; gap: var(--spacing-xs);
+      /* Wraps. A card's action count is not fixed — a player with a planet, a
+         fleet, a DM and a payment already fills the row at chat widths, and a
+         nowrap row does not overflow visibly: it squeezes the LAST button
+         until its label breaks over two lines and outgrows its neighbours. */
+      display: flex; flex-wrap: wrap; gap: var(--spacing-xs);
       padding: 0 var(--spacing-sm) var(--spacing-sm);
     }
     .chat-ref-action {
       display: inline-flex; align-items: center; gap: var(--spacing-xs);
+      /* A label belongs on one line; the ROW wraps instead of the words. */
+      white-space: nowrap; flex: 0 0 auto;
       padding: 2px var(--spacing-sm);
       border: 1px solid var(--border-subtle);
       background: transparent;

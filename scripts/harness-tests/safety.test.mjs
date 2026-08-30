@@ -150,5 +150,48 @@ for (const file of FEDERATED) {
     built.length === 0, built.join(' | '));
 }
 
+// ── Comms must not be able to spend ─────────────────────────────────────────
+// Chat renders text written by federated strangers. The transfer path is the
+// one place in the app where believing that text costs real money, so three
+// things have to stay true together. Any ONE of them regressing quietly turns
+// a hostile message into a payment instruction.
+{
+  const mod = readFileSync(root + '/src-tauri/src/matrix/mod.rs', 'utf8');
+  const pages = readFileSync(root + '/src-tauri/src/mcp/tools/board_pages.rs', 'utf8');
+  const chat = readFileSync(root + '/frontend/chat.js', 'utf8');
+
+  // 1. The board-only gate on the command that actually moves funds. This is
+  //    the guard the chat hand-off was designed AROUND rather than through.
+  const exec = pages.slice(pages.indexOf('pub async fn mcp_transfer_execute'));
+  check('mcp_transfer_execute is still gated to the board window',
+    /require_board\(&window\)\?/.test(exec.slice(0, 400)),
+    'the gate chat was designed around is gone');
+
+  // 2. Comms hands over an ID, never a destination. If this command ever grew
+  //    an address parameter, a crafted card could name where funds go.
+  const open = mod.slice(mod.indexOf('pub async fn matrix_open_transfer'));
+  const sig = open.slice(0, open.indexOf(')'));
+  check('matrix_open_transfer takes no caller-supplied address',
+    !/addr|address|to\s*:/i.test(sig), sig.replace(/\s+/g, ' ').slice(0, 120));
+  check('matrix_open_transfer resolves the address from the chain',
+    /query_entity\("player"/.test(open.slice(0, 2000))
+    && /primaryAddress/.test(open.slice(0, 2000)));
+
+  // 3. The window side sends the id and nothing else.
+  const call = chat.slice(chat.indexOf("invoke('matrix_open_transfer'"), )
+    .slice(0, 90).replace(/\s+/g, ' ');
+  check('chat sends only a player id to the transfer hand-off',
+    /invoke\('matrix_open_transfer', \{ playerId: card\.id \}\)/.test(call), call);
+
+  // 4. And it does not invoke the executing command at all. Comments are
+  //    stripped first: this file NAMES that command in prose explaining why it
+  //    stays out of reach, and the prose must not be what satisfies the check.
+  const chatCode = chat
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  check('chat never invokes mcp_transfer_execute',
+    !/mcp_transfer_execute/.test(chatCode));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);
