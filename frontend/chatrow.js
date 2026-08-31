@@ -6,8 +6,11 @@
  * treatment, no clock, no run-collapsing, no event lines. Asked for twice as
  * "why is this styled in a unique way", which is the right question.
  *
- * So the row lives here, with `css/chat-rows.css`, and both windows render the
- * SAME component. What differs between them is not the row: it is what the
+ * So the row lives here, with `chat-rows.css`, and both windows render the
+ * SAME component. Both files sit at the TOP LEVEL of `frontend/`, which is
+ * repo-owned: `frontend/css/` is deleted and re-copied from the webapp
+ * submodule by `scripts/sync.sh`, so a stylesheet placed there does not
+ * survive a release build. It did not, once. What differs between them is not the row: it is what the
  * row can DO. A full timeline carries react, reply, pin, edit and delete; a
  * rail carries none of that. Those arrive through `opts.controls`, so the
  * embedded version is the same thing with less bolted on rather than a

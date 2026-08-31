@@ -4183,6 +4183,70 @@
     body.appendChild(H.card('POLICIES · one rule each, evaluated per sync', pbody));
   }
 
+  // ── Notifications ─────────────────────────────────────────────────────────
+  // Which events may raise a NATIVE desktop notification. The switches are the
+  // whole truth: every source — the grass tap in the game window, the combat
+  // assessment, Comms, the watchdog, the updater — routes through one Rust gate
+  // keyed by these same channel names, so nothing can interrupt off-list.
+  //
+  // Channels, labels and grouping come from Rust (notifications::CHANNELS), not
+  // from a list restated here: a channel added on one side and missed on the
+  // other is exactly the failure this section exists to make visible.
+  function sectionNotifications(d, body) {
+    var n = (d && d.notifications) || {};
+    var chans = n.channels || [];
+
+    var head = H.el('div');
+    head.appendChild(H.field('desktop notifications',
+      H.checkbox(n.enabled, null, function (on) { cfgSet('notify', { enabled: on }); })));
+    var tiles = H.el('div', 'hstrip');
+    var live = chans.filter(function (c) { return c.enabled; }).length;
+    tiles.appendChild(statTile('channels on', live + '/' + chans.length, null,
+      (n.enabled && live) ? 'live' : 'muted'));
+    // macOS can withhold authorisation entirely, and then every switch here is
+    // a promise the app cannot keep. Shown as a reading, not a warning banner.
+    tiles.appendChild(statTile('system permission', n.permission ? 'granted' : 'denied', null,
+      n.permission ? 'ok' : 'bad'));
+    head.appendChild(tiles);
+    body.appendChild(H.card('NOTIFICATIONS', head));
+
+    // Group order follows the server's channel order — the first time a group
+    // is seen fixes its position, so Rust owns the layout too.
+    var order = [], byGroup = {};
+    chans.forEach(function (c) {
+      if (!byGroup[c.group]) { byGroup[c.group] = []; order.push(c.group); }
+      byGroup[c.group].push(c);
+    });
+
+    order.forEach(function (group) {
+      var rows = byGroup[group];
+      var allOn = rows.every(function (c) { return c.enabled; });
+      var wrap = H.el('div');
+      wrap.appendChild(H.field('all ' + group.toLowerCase(),
+        H.checkbox(allOn, null, function (on) {
+          cfgSet('notify', { group: group, on: on });
+        })));
+      var t = H.resultTable();
+      t.classList.add('list-short');
+      rows.forEach(function (c) {
+        // The master switch silences everything without rewriting any channel,
+        // so a channel keeps showing its own setting and the CHIP carries the
+        // fact that nothing is getting through.
+        var state = !n.enabled ? 'muted' : c.enabled ? 'on' : 'off';
+        t.appendChild(H.resultRow({
+          lead: H.checkbox(c.enabled, null, function (on) {
+            cfgSet('notify', { channel: c.key, on: on });
+          }),
+          title: c.label,
+          subtitle: c.key,
+          chips: [statTile('state', state, null, state === 'on' ? 'live' : 'muted')],
+        }));
+      });
+      wrap.appendChild(t);
+      body.appendChild(H.card(group.toUpperCase(), wrap));
+    });
+  }
+
   function sectionEngine(d, body) {
     var hc = d.hash || {};
     var hbody = H.el('div');
@@ -4845,6 +4909,7 @@
     switch (configState.section) {
       case 'loops': sectionLoops(d, body); break;
       case 'policies': sectionPolicies(d, body); break;
+      case 'notifications': sectionNotifications(d, body); break;
       case 'engine': sectionEngine(d, body); break;
       case 'access': sectionAccess(d, body); break;
       // Squad identity is a name AND a portrait; both live here.

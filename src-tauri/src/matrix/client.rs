@@ -1987,6 +1987,15 @@ fn maybe_notify(
             && (is_dm || m.mentions_me)
     });
     let Some(m) = hit else { return };
+    // A DM and a mention are different interruptions — someone opening a
+    // conversation with you, versus your name coming up in a room you are
+    // already in — so they are separately switchable. Checked BEFORE the rate
+    // limiter: a silenced channel must not spend the room's notify slot, or a
+    // muted mention would suppress the DM that arrived a second later.
+    let channel = if is_dm { "comms_dm" } else { "comms_mention" };
+    if !crate::notifications::is_on(channel) {
+        return;
+    }
     if !claim_notify_slot(room_id) {
         return;
     }

@@ -435,6 +435,20 @@ cat > "$FIX" <<'EOF'
     mcp_config_bundle: {
       policies: {}, loops: {}, hash: {}, doctrine: {}, presets: [],
       web_board: { enabled: false, bind: '127.0.0.1', port: 8099, url: null },
+      // Rust owns the channel list, its labels AND its grouping — the board
+      // renders whatever arrives. Two groups here, with one channel already
+      // switched off, is enough to pin the grouping and the group-toggle
+      // arithmetic without restating all eighteen.
+      notifications: {
+        enabled: true,
+        permission: true,
+        channels: [
+          { key: 'raid_status', label: 'Raid status', group: 'Combat', enabled: true },
+          { key: 'struct_attack', label: 'Structs under fire', group: 'Combat', enabled: true },
+          { key: 'sent', label: 'Alpha sent', group: 'Ledger', enabled: true },
+          { key: 'received', label: 'Alpha received', group: 'Ledger', enabled: false },
+        ],
+      },
     },
     mcp_profiles_get: PROFILES,
     // Writes are accepted and echoed; assertions read __HARNESS_CALLS__ for the

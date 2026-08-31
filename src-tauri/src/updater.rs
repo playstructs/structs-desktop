@@ -234,14 +234,16 @@ async fn run_startup_update(app: &tauri::AppHandle) -> Result<Option<String>, St
     // Already downloaded on a previous run and the user hasn't restarted yet —
     // don't re-download, just re-remind.
     if already_staged(&version) {
-        crate::notifications::notify(
+        crate::notifications::notify_on(
+            "update",
             "Structs update ready",
             &format!("Version {version} is downloaded — restart Structs to finish updating."),
         );
         return Ok(Some(version));
     }
 
-    crate::notifications::notify(
+    crate::notifications::notify_on(
+        "update",
         "Structs update available",
         &format!("Downloading version {version} in the background…"),
     );
@@ -249,7 +251,8 @@ async fn run_startup_update(app: &tauri::AppHandle) -> Result<Option<String>, St
     stage_update(app, update, false).await?;
     mark_staged(&version);
 
-    crate::notifications::notify(
+    crate::notifications::notify_on(
+        "update",
         "Structs update ready",
         &format!("Version {version} is downloaded — restart Structs to finish updating."),
     );

@@ -642,9 +642,14 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       return true;
     }
 
-    function sendNotification(title, body) {
+    // `channel` is the grass event category, which is also the key the
+    // Notifications section switches on (Rust: notifications::CHANNELS). Rust
+    // is the gate — passing the category through is the whole wiring, and a
+    // category with no switch yet still notifies (is_on fails open).
+    function sendNotification(title, body, channel) {
       if (window.__TAURI__) {
-        window.__TAURI__.core.invoke('send_notification', { title: title, body: body })
+        window.__TAURI__.core.invoke('send_notification',
+          { title: title, body: body, channel: channel || null })
           .catch(function(e) { console.warn('[Structs Notify] Failed:', e); });
       }
     }
@@ -828,7 +833,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 var title = typeof eventDef.title === 'function' ? eventDef.title(data, ctx) : eventDef.title;
                 var body = eventDef.format(data, ctx);
                 console.info('[Structs Notify] Sending notification:', title, '—', body);
-                sendNotification(title, body);
+                sendNotification(title, body, data.category);
               }
 
               if (needsDelay) {
@@ -3104,7 +3109,8 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         // One desktop notification per launch, reusing the existing command.
         TAURI.core.invoke('send_notification', {
           title: 'Structs update available',
-          body: 'Version ' + info.latest_version + ' is ready to download.'
+          body: 'Version ' + info.latest_version + ' is ready to download.',
+          channel: 'update'
         }).catch(function () {});
       }).catch(function (e) {
         console.warn('[Structs Update] check failed:', e);

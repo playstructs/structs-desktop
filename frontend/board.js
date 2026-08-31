@@ -92,6 +92,7 @@
       { key: 'doctrine', label: 'Doctrine', page: 'config', view: 'doctrine' },
       { key: 'loops', label: 'Loops', page: 'config', view: 'loops' },
       { key: 'policies', label: 'Policies', page: 'config', view: 'policies' },
+      { key: 'notifications', label: 'Notifications', page: 'config', view: 'notifications' },
       { key: 'engine', label: 'Engine', page: 'config', view: 'engine' },
       { key: 'access', label: 'Access', page: 'config', view: 'access' },
       { key: 'diagnostics', label: 'Diagnostics', page: 'diagnostics' },

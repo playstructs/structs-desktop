@@ -1262,6 +1262,9 @@ pub async fn mcp_config_bundle() -> Result<Value, String> {
         "loops": loops_json(),
         "hash": crate::mcp::tools::hasher::hash_config_json(),
         "doctrine": { "posture": posture, "pinned_target": pinned, "autonomy": autonomy },
+        // Which events are allowed to raise a desktop notification, plus
+        // whether the OS ever granted us permission to raise one at all.
+        "notifications": crate::notifications::config_json(),
         "presets": crate::mcp::tools::doctrine::PRESETS,
         // `bind` and `port` are readings the Access card shows as tiles — the
         // console used to explain the loopback binding in a sentence instead of
@@ -1278,7 +1281,7 @@ pub async fn mcp_config_bundle() -> Result<Value, String> {
 }
 
 /// One multiplexed, board-guarded write path for every dashboard config
-/// mutation. Domains: "policy" | "loop" | "hash" | "doctrine". Each write is
+/// mutation. Domains: "policy" | "loop" | "hash" | "doctrine" | "notify". Each write is
 /// audited to the event feed so human changes appear in the same stream the
 /// agent's do.
 #[tauri::command]
@@ -1560,6 +1563,49 @@ pub async fn mcp_config_set_impl(
                 );
             }
             Ok(json!({ "ok": true, "hash": crate::mcp::tools::hasher::hash_config_json() }))
+        }
+        // Desktop-notification switches. One payload may carry the master
+        // switch, one channel, or one whole group — the section sends whichever
+        // control the operator touched.
+        "notify" => {
+            let mut changes: Vec<String> = Vec::new();
+            let on = |k: &str| payload.get(k).and_then(|v| v.as_bool());
+            if let Some(enabled) = on("enabled") {
+                crate::notifications::set_enabled(enabled);
+                changes.push(format!(
+                    "notifications → {}",
+                    if enabled { "ON" } else { "off" }
+                ));
+            }
+            if let Some(group) = payload.get("group").and_then(|v| v.as_str()) {
+                let want = on("on").unwrap_or(true);
+                let n = crate::notifications::set_group(group, want);
+                if n == 0 {
+                    return Err(format!("unknown notification group '{group}'"));
+                }
+                changes.push(format!(
+                    "{group} ({n} channels) → {}",
+                    if want { "on" } else { "OFF" }
+                ));
+            }
+            if let Some(channel) = payload.get("channel").and_then(|v| v.as_str()) {
+                let want = on("on").unwrap_or(true);
+                crate::notifications::set_channel(channel, want)?;
+                changes.push(format!("{channel} → {}", if want { "on" } else { "OFF" }));
+            }
+            if changes.is_empty() {
+                return Err("notify: nothing to set (enabled, group or channel)".into());
+            }
+            board_feed::push(
+                &app,
+                board_feed::Severity::Notice,
+                "config",
+                format!("notify: {}", changes.join(", ")),
+            );
+            Ok(json!({
+                "ok": true,
+                "notifications": crate::notifications::config_json(),
+            }))
         }
         "doctrine" => {
             // Reuse the doctrine tool's set path wholesale (presets included).

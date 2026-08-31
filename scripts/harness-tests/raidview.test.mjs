@@ -634,7 +634,7 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   const sheets = [...d.querySelectorAll('link[rel=stylesheet]')]
     .map((l) => (l.getAttribute('href') || '').split('?')[0]);
   check('the row stylesheet is linked here too',
-    sheets.includes('css/chat-rows.css'), sheets.join(', '));
+    sheets.includes('chat-rows.css'), sheets.join(', '));
 
   /* The chrome is Comms' too, not just the rows.
    *

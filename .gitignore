@@ -10,9 +10,12 @@ frontend/js/workers/
 frontend/sui/
 .build-tmp/
 
-# Static board harness (scripts/make_harness.sh) — must never ship in frontendDist
-frontend/_harness.html
-frontend/_fixtures.js
+# Generated harnesses (scripts/make_harness.sh) — must never ship in
+# frontendDist, which is the whole frontend/ directory. Globbed, not listed:
+# the per-file list drifted every time a harness was added, and the newest two
+# were tracked by accident.
+frontend/_harness*
+frontend/_fixtures*
 
 # Rust build
 src-tauri/target/
@@ -48,7 +51,3 @@ src-tauri/gen/
 
 # Icon source (keep generated sizes, not the 1024px source)
 src-tauri/icons/Structs Icon.png
-frontend/_harness_raid.html
-frontend/_fixtures_raid.js
-frontend/_harness_chat.html
-frontend/_fixtures_chat.js

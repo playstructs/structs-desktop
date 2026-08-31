@@ -449,9 +449,7 @@ pub async fn sync_game_state(
             } else {
                 assess.detail.clone()
             };
-            tokio::spawn(async move {
-                let _ = crate::notifications::send_notification(title, body).await;
-            });
+            crate::notifications::notify_on("combat_alert", &title, &body);
             // No main-window toast: the native notification above + this
             // Important feed entry (which can auto-open the Team Ops window if
             // the player opted in) are the alert surfaces. Agent/automation
@@ -546,10 +544,7 @@ pub async fn sync_game_state(
                 let n = lines.len();
                 let body = lines.into_iter().take(6).collect::<Vec<_>>().join("; ");
                 let title = format!("⚠ Structs: {} team threat(s) detected", n);
-                let body_n = body.clone();
-                tokio::spawn(async move {
-                    let _ = crate::notifications::send_notification(title, body_n).await;
-                });
+                crate::notifications::notify_on("team_threat", &title, &body);
                 // Vplayer info stays OUT of the main game window: pipe it into
                 // the Team Ops feed instead (Important ⇒ the window auto-opens).
                 crate::mcp::board_feed::push(

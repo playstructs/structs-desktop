@@ -1,0 +1,152 @@
+/* The chat message row — the component, not one window's copy of it.
+ *
+ * Lifted verbatim out of chat.html so the raid viewer's Comms rail can render
+ * the SAME rows rather than a lookalike. The rail had its own `.rv-chat-*`
+ * styling that approximated this and drifted from it; two spellings of one
+ * component is how a design system quietly forks.
+ *
+ * Presentation ONLY. The interactive controls a full timeline carries —
+ * react, reply, pin, edit, delete — stay in chat.html, because the rail does
+ * not have them and should not inherit their hover machinery.
+ */
+/* ── Room events ───────────────────────────────────────────────────────
+   Joins, leaves, renames. Real, but not conversation: one dim line, no
+   sender header, and consecutive ones packed tight so a room's whole
+   history of comings and goings costs a few lines rather than a screen. */
+.chat-event {
+  display: flex; align-items: baseline; gap: var(--spacing-sm);
+  text-align: left;
+  color: var(--text-hint); opacity: .65;
+  padding-left: calc(var(--spacing-sm) + 2px);
+}
+.chat-event + .chat-event { margin-top: -var(--spacing-xs); }
+.chat-event-who {
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+  text-transform: uppercase; flex: 0 0 auto;
+}
+.chat-event-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chat-event-time {
+  margin-left: auto; flex: 0 0 auto;
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+}
+
+/* ── Timeline ──────────────────────────────────────────────────────── */
+.chat-msg {
+  display: flex; flex-direction: column; gap: var(--spacing-xs);
+  /* main.css sets `text-align: center` on the body, and it is inherited by
+     anything that goes full width. The Comms window happened to override it
+     further up; the raid rail did not, so every message body rendered
+     CENTRED there. Set on the component, so no window has to remember. */
+  text-align: left;
+  /* Every message carries the rail; only a mention colours it. Reserving
+     it on all of them keeps the left edge of the text straight. */
+  border-left: 2px solid transparent;
+  padding-left: var(--spacing-sm);
+}
+.chat-msg-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+.chat-msg-sender {
+  font-family: 'ExtremeHazard', sans-serif;
+  font-size: 8px; line-height: 16px; text-transform: uppercase;
+  color: var(--accent-secondary);
+}
+.chat-msg-sender.chat-mod-self { color: var(--text-player-primary); }
+.chat-msg-tag { color: var(--text-hint); }
+/* Flex, so the tag and the name keep a real gap: a trailing space inside
+   the tag span is collapsed away by flex layout ("[SN.C]NETLAG"). */
+.chat-msg-sender { display: flex; align-items: baseline; gap: var(--spacing-sm); }
+/* A sender who is a player can be messaged; the name is that affordance. */
+.chat-msg-sender.chat-mod-addressable { cursor: pointer; }
+.chat-msg-sender.chat-mod-addressable:hover { color: var(--accent-primary-active); }
+/* A same-sender run drops the header, the way the mockup's stacked
+   paragraphs from one speaker do. */
+.chat-msg.chat-mod-cont .chat-msg-head { display: none; }
+.chat-msg.chat-mod-cont { margin-top: calc(-1 * var(--spacing-sm)); }
+/* Right of the sender line: badge, then clock. */
+.chat-msg-meta { display: flex; align-items: baseline; gap: var(--spacing-sm); flex: 0 0 auto; }
+.chat-msg-time {
+  color: var(--text-hint); opacity: .7;
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+}
+/* An emote is one line, so its clock rides the same row. */
+.chat-msg.chat-mod-oneline {
+  flex-direction: row; align-items: baseline;
+  justify-content: space-between; gap: var(--spacing-md);
+}
+/* Being named is the loudest thing that happens in a chat client. A left
+   rule in the warning colour, not a background wash — the timeline stays
+   readable and the eye still lands on it. */
+.chat-msg.chat-mod-mention { border-left-color: var(--text-warning); }
+.chat-msg-body { white-space: pre-wrap; word-break: break-word; }
+
+/* A picture someone posted. Bounded so one image cannot take the whole
+   timeline, and its box is reserved from the event's own dimensions so
+   the log does not jump when the bytes land. */
+/* A picture in a conversation is an aside, not the page.
+   Only the WIDTH was bounded, which bounds nothing for a tall image: a
+   480x1200 screenshot rendered at 320 wide is 800px of timeline, and the
+   conversation goes with it. Both axes, so any aspect fits the same box.
+
+   Absolute px, not `vh`: the height that matters is the timeline's, and
+   `vh` measures the window — which in a scaled, embedded layout is a
+   different number entirely. */
+.chat-image {
+  max-width: 320px; max-height: 320px; margin-top: var(--spacing-xs);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-player-body);
+  overflow: hidden;
+}
+/* `contain`, never `cover`: cropping somebody's screenshot to fit a box
+   is worse than showing it smaller. Left-top so a wide image aligns with
+   the message it belongs to rather than floating in the middle. */
+.chat-image-img {
+  display: block; width: 100%; height: 100%;
+  max-height: 320px; object-fit: contain; object-position: left top;
+}
+.chat-image-loading, .chat-image-failed {
+  padding: var(--spacing-sm); color: var(--text-hint);
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+  text-transform: uppercase;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chat-image-failed { color: var(--text-enemy-primary); }
+.chat-msg-body.chat-mod-notice { color: var(--text-hint); }
+.chat-msg-body.chat-mod-emote { color: var(--text-neutral-primary); font-style: italic; }
+/* An event we have no renderer for still shows its type rather than
+   vanishing — a silently dropped message reads as a broken client. */
+.chat-msg-body.chat-mod-unknown { color: var(--text-hint); }
+.chat-msg-pending { opacity: .55; }
+/* The words stay readable; the failure is a separate line beneath. Tinting
+   the message itself made the player's own text look like an error. */
+.chat-send-failed {
+  display: flex; align-items: baseline; gap: var(--spacing-md);
+  margin-top: var(--spacing-xs); align-self: stretch; text-align: left;
+  font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 16px;
+}
+.chat-send-failed-why { color: var(--text-enemy-primary); }
+
+/* The scroll band a timeline lives in, and the room's own statement of what
+   it is for. Both moved out of chat.html for the same reason the rows did:
+   the raid rail needs them and was approximating them. */
+.chat-scroll {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  /* Extra right padding: the scrollbar overlays the content and was
+     clipping the timestamps at the end of every sender line. */
+  padding: var(--spacing-sm) var(--spacing-lg) var(--spacing-sm) var(--spacing-md);
+  display: flex; flex-direction: column; gap: var(--spacing-md);
+  /* .sui-page-body-screen centres its content for the game's short menu
+     copy. Prose in a chat log is read left-to-right down a ragged right
+     edge, so this band opts out. */
+  text-align: left;
+}
+/* The room's own statement of what it is for, under its name. */
+.chat-topic {
+  flex: 0 0 auto;
+  padding: 0 var(--spacing-md) var(--spacing-sm);
+  color: var(--text-hint);
+  text-align: left;
+  /* One line: a long topic must not push the timeline down the screen. */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}

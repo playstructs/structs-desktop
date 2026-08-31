@@ -516,7 +516,8 @@ pub fn check(app: &tauri::AppHandle) {
         // remedy failed. Escalate to a native notification at the threshold.
         let attempts = fails.entry(f.key.clone()).or_insert(0);
         if *attempts >= NOTIFY_AFTER_FAILURES {
-            crate::notifications::notify(
+            crate::notifications::notify_on(
+                "watchdog",
                 "Structs watchdog",
                 &format!("{} — remediation failed {} times", f.message, *attempts),
             );
