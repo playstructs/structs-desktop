@@ -130,6 +130,8 @@ fn main() {
             matrix::matrix_take_pending_room,
             matrix::matrix_share,
             matrix::matrix_take_pending_draft,
+            matrix::matrix_object_room,
+            matrix::matrix_object_room_create,
             matrix::matrix_open_transfer,
             matrix::matrix_take_pending_transfer,
             mcp::game_stats::mcp_game_stats_snapshot,

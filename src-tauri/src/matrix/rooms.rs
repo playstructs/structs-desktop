@@ -99,6 +99,26 @@ pub async fn alias_for(object_id: &str) -> Option<String> {
     alias_on(object_id, &server)
 }
 
+/// The homeserver an alias lives on.
+pub fn server_of(alias: &str) -> Option<&str> {
+    // An alias is `#localpart:server`. Split from the RIGHT so a localpart
+    // that somehow contains a colon cannot steal the server.
+    alias.rsplit_once(':').map(|(_, s)| s).filter(|s| !s.is_empty())
+}
+
+/// May WE create the room at this alias?
+///
+/// A client can only claim an alias in its own homeserver's namespace, so this
+/// decides whether a missing room is ours to make or somebody else's to wait
+/// for. Whole-server equality, never a substring test: `oh.energy` is a
+/// suffix of `matrix.oh.energy` and a prefix of `oh.energy.example.com`, and
+/// treating either as a match would have us try to create rooms on a server
+/// that will refuse us — the same shape as the id prefix-collision bug this
+/// codebase has already been bitten by.
+pub fn ours_to_create(alias: &str, own_server: &str) -> bool {
+    !own_server.is_empty() && server_of(alias) == Some(own_server)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +175,34 @@ mod tests {
         // nowhere.
         assert!(alias_on("2-15361", "").is_none());
         assert!(alias_on("2-15361", "   ").is_none());
+    }
+
+    #[test]
+    fn only_our_own_server_is_ours_to_create_on() {
+        let mine = alias_on("2-15361", "matrix.oh.energy").unwrap();
+        assert!(ours_to_create(&mine, "matrix.oh.energy"));
+        // Another guild's planet: theirs to create, ours to wait for.
+        assert!(!ours_to_create(&mine, "matrix.beta.playstructs.com"));
+
+        // The collision class. A substring test would call all three of these
+        // ours, and each would be a create request the server refuses.
+        assert!(!ours_to_create(&mine, "oh.energy"));
+        assert!(!ours_to_create(&mine, "matrix.oh.energy.example.com"));
+        assert!(!ours_to_create(&alias_on("2-1", "oh.energy").unwrap(), "matrix.oh.energy"));
+
+        // No server on either side is not a match — it is "we do not know",
+        // and guessing yes means trying to create somebody else's room.
+        assert!(!ours_to_create(&mine, ""));
+        assert!(!ours_to_create("#planet-2-1", "matrix.oh.energy"));
+        assert!(!ours_to_create("", ""));
+    }
+
+    #[test]
+    fn the_server_is_taken_from_the_right() {
+        assert_eq!(server_of("#planet-2-1:matrix.oh.energy"), Some("matrix.oh.energy"));
+        // A colon in the localpart must not become the server.
+        assert_eq!(server_of("#odd:name:matrix.oh.energy"), Some("matrix.oh.energy"));
+        assert_eq!(server_of("#planet-2-1:"), None);
+        assert_eq!(server_of("no-colon"), None);
     }
 }

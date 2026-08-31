@@ -217,12 +217,17 @@
   }
 
   // "~7m" / "1.2h" / "now" — the tightest honest ETA text.
+  /* An ETA on the shared ladder.
+   *
+   * `null` in, `null` out — the harvest line OMITS a piece it has no number
+   * for rather than printing a placeholder, so a dash here would put "—" into
+   * a row designed around absence being silent.
+   *
+   * It had no seconds rung of its own, which rounded every cycle under a
+   * minute up to "1m": a five-second extraction reported as sixty.
+   */
   function fmtEta(s) {
-    if (s == null) return null;
-    if (s <= 0) return 'now';
-    if (s < 3600) return Math.max(1, Math.round(s / 60)) + 'm';
-    if (s < 86400) return (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
-    return Math.round(s / 86400) + 'd';
+    return H.duration(s, { empty: null, zero: 'now' });
   }
 
   // Icons-only harvest line: [buried ore] N · [mine] eta · [refine] eta.
@@ -3950,14 +3955,16 @@
     return w;
   }
 
-  // A loop's cadence. NOT fmtEta: that one floors everything under a minute to
-  // "1m", which would hide the whole point of auto_response's 20-second scan.
-  function fmtCadence(s) {
-    if (s == null) return '—';
-    if (s < 60) return s + 's';
-    if (s < 3600) return Math.round(s / 60) + 'm';
-    return (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
-  }
+  /* A loop's cadence.
+   *
+   * This function used to be a fourth private time ladder, and its own comment
+   * explained why: *"NOT fmtEta: that one floors everything under a minute to
+   * 1m, which would hide the whole point of auto_response's 20-second scan."*
+   * The missing seconds rung was real — the answer was to give the shared
+   * ladder one, not to fork it. Forking also lost the days rung, so a loop on
+   * a daily cadence read as "24h".
+   */
+  function fmtCadence(s) { return H.duration(s); }
 
   // Policies with no config of their own would otherwise render as a bare name.
   var POLICY_BLURB = {

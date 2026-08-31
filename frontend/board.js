@@ -70,7 +70,19 @@
       { key: 'transactions', label: 'Transactions', page: 'tx' },
     ] },
     { key: 'war', label: 'War', sections: [
-      { key: 'doctrine', label: 'Doctrine', page: 'war', view: 'doctrine' },
+      /* "Tuning", not "Doctrine". Two sections carried that label — this one
+       * and System → Doctrine — and the sub-nav is the only thing that
+       * distinguishes them, so a player who remembered "Doctrine" could not
+       * know which they wanted. The game's own vocabulary settles which one
+       * keeps the word: `structs_doctrine` means posture and autonomy, which
+       * is System's page. This one is RESPONSE SETTINGS, TARGETING GATES and
+       * SCORING WEIGHTS — knobs, not stance.
+       *
+       * `view` stays 'doctrine': the key is the URL segment and the view
+       * picks the render branch, and they are allowed to differ (Armada's
+       * Squads section already does).
+       */
+      { key: 'tuning', label: 'Tuning', page: 'war', view: 'doctrine' },
       { key: 'targets', label: 'Targets', page: 'war', view: 'targets' },
       { key: 'lists', label: 'Lists', page: 'war', view: 'lists' },
       { key: 'incidents', label: 'Incidents', page: 'war', view: 'incidents' },
@@ -271,13 +283,11 @@
     for (var i = 0; i < l.length; i++) if (l[i][2] === unit) return l[i][1];
     return 1;
   }
-  function ago(ms) {
-    if (!ms) return '—';
-    var s = Math.max(0, (Date.now() - ms) / 1000);
-    if (s < 90) return Math.round(s) + 's';
-    if (s < 5400) return Math.round(s / 60) + 'm';
-    return Math.round(s / 3600) + 'h';
-  }
+  // Both delegate to the shared ladder in units.js. They used to step at
+  // different boundaries from each other and from `fmtEta`, and `ago` had no
+  // days rung at all — three days showed as "72h" on a console people leave
+  // running for days.
+  function ago(ms, opts) { return window.StructsUnits.fmtAgo(ms, opts); }
   function alertLine(text, iconCls) {
     var a = el('div', 'sui-message-inline-alert');
     a.appendChild(el('i', iconCls || 'icon-info'));
@@ -417,7 +427,7 @@
   // copy using per-key accessors. Used identically by Armada / Energy / Work.
   function sortControl(keys, state, onChange) {
     var wrap = el('div', null);
-    wrap.style.cssText = 'display:flex;gap:8px;align-items:center;';
+    wrap.style.cssText = 'display:flex;gap:var(--spacing-md);align-items:center;';
     var sel = el('select', 'sui-input-text');
     keys.forEach(function (k, i) {
       var op = el('option', null, (i === 0 ? 'sort: ' : '') + k.label);
@@ -675,14 +685,7 @@
   // three because none of them took options. Seconds in; `opts.zero` is the
   // word for 0 ("now" for an ETA, nothing for a cadence).
   function duration(seconds, opts) {
-    opts = opts || {};
-    if (seconds == null || isNaN(seconds)) return opts.empty || '—';
-    var s = Math.max(0, Number(seconds));
-    if (s <= 0 && opts.zero) return opts.zero;
-    if (s < 60) return Math.round(s) + 's';
-    if (s < 3600) return Math.round(s / 60) + 'm';
-    if (s < 86400) return (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
-    return Math.round(s / 86400) + 'd';
+    return window.StructsUnits.fmtDuration(seconds, opts);
   }
 
   // ── One state block for loading / empty / error ──────────────────────────
@@ -1301,7 +1304,13 @@
   function renderHealth() {
     return Board.T.core.invoke('mcp_health').then(function (h) {
       renderInto('ops-health', function (body) {
-        body.appendChild(healthTiles(h));
+        // In a card, like every other section on this page and like the same
+        // tiles on Diagnostics. They used to sit bare against the page, which
+        // left seven figures and a warning block floating with nothing to tell
+        // one group from the next. Wrapped HERE rather than inside
+        // `healthTiles`, because Diagnostics supplies its own card and would
+        // otherwise get two.
+        body.appendChild(card('SYSTEM HEALTH', healthTiles(h)));
 
         // Name the loops, don't just count them — "2 overdue" is not
         // actionable, "auto_raid overdue" is. (The snapshot reports names.)
@@ -1318,7 +1327,7 @@
         (h.loops_blocked || []).forEach(function (b) {
           notes.appendChild(stateBlock('warning', (b.loop || 'loop') + ' blocked — ' + (b.reason || '?')));
         });
-        if (notes.childNodes.length) body.appendChild(card('SYSTEM', notes));
+        if (notes.childNodes.length) body.appendChild(card('LOOPS', notes));
       });
     }).catch(function (e) {
       renderInto('ops-health', function (body) {

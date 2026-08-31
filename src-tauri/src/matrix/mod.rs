@@ -1191,6 +1191,89 @@ pub fn matrix_unread() -> Result<Value, String> {
     Ok(json!({ "count": count, "mention": mention }))
 }
 
+/// The room that belongs to a planet or a fleet.
+///
+/// A raid rail is a conversation ABOUT an object, and until now it faked one by
+/// searching every room for the object's id — which meant a message that did
+/// not name the planet was invisible in the very panel that sent it. A real
+/// room removes the fake: the message simply belongs.
+///
+/// Three answers, and the caller must handle all of them:
+///
+/// * `room_id` set — the room exists, read and write it.
+/// * `room_id` null and `can_create` true — it is OUR object, so we may make
+///   it. Deliberately not created on sight: a room per planet anybody merely
+///   LOOKED at would litter the directory. Create on the first message.
+/// * `room_id` null and `can_create` false — another guild's object and they
+///   have not made its room. Not an error; the rail falls back to search.
+#[tauri::command]
+pub async fn matrix_object_room(
+    guild_id: Option<String>,
+    object_id: String,
+) -> Result<Value, String> {
+    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    let Ok(session) = session_for(&guild) else {
+        return Ok(json!({ "connected": false }));
+    };
+    let Some(alias) = rooms::alias_for(&object_id).await else {
+        // No alias means no owner we can resolve, or a type that gets no room.
+        return Ok(json!({ "connected": true, "alias": null, "room_id": null,
+                          "can_create": false }));
+    };
+    let room_id = client::room_id_for_alias(&session, &alias).await;
+    // Only our own homeserver's namespace is ours to write in.
+    let can_create = room_id.is_none()
+        && rooms::ours_to_create(&alias, &client::own_server(&session));
+    // Membership is the difference between a room we can READ and one we can
+    // only see exists. Deliberately not joined here: a raid window opens on
+    // every planet the player merely looks at, and auto-joining each one would
+    // fill their channel list with rooms they never spoke in. Joining happens
+    // when they say something — see `matrix_object_room_create`.
+    let joined = room_id.as_deref().is_some_and(|id| {
+        client::rooms_of(&guild).iter().any(|r| r.room_id == id && r.joined)
+    });
+    Ok(json!({
+        "connected": true, "alias": alias, "room_id": room_id,
+        "can_create": can_create, "joined": joined, "guild_id": guild,
+    }))
+}
+
+/// Create the room for an object, at the alias [`matrix_object_room`] named.
+///
+/// Separate from the lookup because creation is a WRITE that should happen on
+/// a deliberate act — the first message — rather than on opening a window.
+#[tauri::command]
+pub async fn matrix_object_room_create(
+    guild_id: Option<String>,
+    object_id: String,
+) -> Result<Value, String> {
+    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    let session = session_for(&guild)?;
+    let alias = rooms::alias_for(&object_id)
+        .await
+        .ok_or_else(|| format!("no room alias for {object_id}"))?;
+    // Someone may have created it already — the usual case for another
+    // guild's object, and a race for our own. Either way the answer is to
+    // join it, which is exactly what "I want to speak here" means.
+    if let Some(existing) = client::room_id_for_alias(&session, &alias).await {
+        client::join(&session, &existing).await?;
+        return Ok(json!({ "room_id": existing, "created": false, "joined": true }));
+    }
+    let localpart = rooms::alias_localpart(&object_id)
+        .ok_or_else(|| format!("{object_id} does not get a room"))?;
+    let (kind, _) = refs::parse_id(&object_id).ok_or("not an object id")?;
+    let (what, lower) = if kind == 2 { ("Planet", "planet") } else { ("Fleet", "fleet") };
+    let room_id = client::create_object_room(
+        &session,
+        &localpart,
+        &format!("{what} {object_id}"),
+        &format!("Everything said about {lower} {object_id}."),
+    )
+    .await?;
+    // createRoom joins the creator, so no explicit join is needed here.
+    Ok(json!({ "room_id": room_id, "created": true, "joined": true }))
+}
+
 /// Summarise the object ids a message mentioned.
 ///
 /// Players talk in ids — "raid 2-15361", "5-2184 is stuck", "ask 1-61". The

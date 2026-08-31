@@ -5,7 +5,7 @@
 // page beside it calls "9.4Kg". Nothing was wrong with the arithmetic; the
 // window was just telling a different story about the number than every other
 // screen. A second ladder is a second story, so there is now only one.
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 
 let failures = 0;
 const check = (name, ok, detail) => {
@@ -97,6 +97,23 @@ check('…and board.js uses the shared one', /window\.StructsUnits/.test(board))
 const cfg = readFileSync(root + '/frontend/structs-config.js', 'utf8');
 check('…as does the main window\'s debug panel', /window\.StructsUnits/.test(cfg));
 
+/* The same guard for TIME, which had gone the same way.
+ *
+ * Three private ladders that disagreed: one stepped at 90s and 90m and never
+ * reached days, one at 60s/60m and did, and one had no seconds rung at all.
+ * They were not caught because the check above only knows what a MASS ladder
+ * looks like. The tell for a time ladder is second-count arithmetic beside a
+ * unit letter.
+ */
+for (const f of readdirSync(root + '/frontend')
+  .filter((x) => /\.js$/.test(x) && !x.startsWith('_') && x !== 'units.js')) {
+  const raw = readFileSync(root + '/frontend/' + f, 'utf8');
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  const timeish = /\/\s*(?:60|3600|86400)\b[\s\S]{0,60}?['"](?:s|m|h|d)['"]/.test(src);
+  check(f + ' does not carry its own time ladder', !timeish);
+}
+
 // A window that formats units must actually LOAD them, or it fails at runtime
 // in a way no static check would show.
 for (const [html, why] of [
@@ -145,7 +162,6 @@ console.log('\n— portrait layer counts match the art that ships');
 // chat.js because our windows cannot import from the submodule — so they are
 // checked against the thing that would actually 404: the files on disk.
 {
-  const { readdirSync } = await import('fs');
   const chat = readFileSync(root + '/frontend/chat.js', 'utf8');
   const m = /var PFP_PART_COUNTS = \{([\s\S]*?)\};/.exec(chat);
   check('chat.js declares the part counts', !!m);
@@ -167,6 +183,50 @@ console.log('\n— portrait layer counts match the art that ships');
   // that would 404, which three of ours did.
   check('…and the art is 1-based, so 0 is not an index',
     !readdirSync(root + '/frontend/img/pfp/head').includes('pfp_head_0.png'));
+}
+
+// ── Time is one ladder ─────────────────────────────────────────────────────
+//
+// It was three, disagreeing about the same instant. The two that mattered:
+// `ago` had no days rung, so three days on a console people leave running for
+// days read as "72h"; and `fmtEta` had no seconds rung, so a five-second
+// extraction cycle was reported as "1m".
+{
+  const D = U.fmtDuration;
+
+  check('seconds are reported as seconds', D(5) === '5s' && D(30) === '30s',
+    [D(5), D(30)].join(' '));
+  check('...and an ETA no longer rounds five seconds up to a minute',
+    D(5, { zero: 'now' }) === '5s', D(5, { zero: 'now' }));
+
+  check('minutes, hours, days each have a rung',
+    D(600) === '10m' && D(7200) === '2h' && D(259200) === '3d',
+    [D(600), D(7200), D(259200)].join(' '));
+  check('days are reached rather than piling into hours',
+    !/h$/.test(D(259200)), D(259200));
+
+  // Boundaries, stated once so the three former ladders cannot re-diverge.
+  check('the rungs change at 60s, 3600s and 86400s',
+    D(59) === '59s' && D(60) === '1m' && D(3599) === '60m'
+      && D(3600) === '1h' && D(86399) === '24h' && D(86400) === '1d',
+    [D(59), D(60), D(3600), D(86400)].join(' '));
+
+  // A caller that omits a row on absence must not be handed a dash to print.
+  check('absence renders as a dash by default', D(null) === '—' && D(NaN) === '—');
+  check('...but an explicit null means render nothing',
+    D(null, { empty: null }) === null && D(undefined, { empty: null }) === null);
+  check('zero is 0s unless the caller says otherwise',
+    D(0) === '0s' && D(0, { zero: 'now' }) === 'now' && D(-5, { zero: 'now' }) === 'now');
+
+  // fmtAgo is the same ladder reached through a subtraction, not a second one.
+  const now = Date.now();
+  check('ago walks the same rungs',
+    U.fmtAgo(now - 5000) === '5s' && U.fmtAgo(now - 259200000) === '3d',
+    [U.fmtAgo(now - 5000), U.fmtAgo(now - 259200000)].join(' '));
+  check('...and no timestamp is a dash, not "56y ago"',
+    U.fmtAgo(0) === '—' && U.fmtAgo(null) === '—');
+  check('...with the same opt-out for callers that render nothing',
+    U.fmtAgo(0, { empty: null }) === null);
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');

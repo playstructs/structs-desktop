@@ -72,7 +72,6 @@
     /* Inert by construction: nothing here binds a listener, but make that
        visible too — no hand cursor promising an action that never comes. */
     #rv-hud a { cursor: default; }
-    #rv-hud .hidden { display: none; }
 
     /* Viewport scaling, matching the game EXACTLY (main.css breakpoints):
        the HUD paints at 2x from 1152px and 4x from 2304px, with the element
@@ -254,15 +253,23 @@
       flex: 0 0 clamp(240px, 26vw, 340px);
       display: flex; flex-direction: column; min-height: 0;
     }
-    /* Collapsed must not leave a 300px empty column. The rail shrinks to the
-       header's own width and the header sheds everything but the icon, the
-       unread count and the way back open. */
-    #rv-chat.rv-collapsed { flex: 0 0 auto; }
-    #rv-chat.rv-collapsed #rv-chat-body,
-    #rv-chat.rv-collapsed #rv-chat-compose,
-    #rv-chat.rv-collapsed .rv-chat-title,
-    #rv-chat.rv-collapsed #rv-chat-discuss,
-    #rv-chat.rv-collapsed .rv-spacer { display: none; }
+    /* The charge battery is a fixed 36px component (5 chunks + 4 gaps) sitting
+       in a screen sized by the PORTRAIT above it, which is wider. Left-aligned
+       by default, that put all the slack on one side and read as a bar that
+       did not fit its section. Centred, the two stack as one unit. */
+    #rv-hud .sui-screen-battery { margin-left: auto; margin-right: auto; }
+
+    /* The composer, shaped like the Comms window's: the SCREEN is the frame,
+       so the input draws nothing of its own — no border, no background, no
+       focus ring fighting the panel art, and no chevron that shifts the row. */
+    #rv-chat-entry { display: flex; align-items: center; gap: var(--spacing-sm); }
+    #rv-chat-entry input[type=text] {
+      flex: 1 1 auto; width: 100%; min-width: 0;
+      border: none; outline: none; background: transparent;
+      color: var(--text-body);
+      font-family: 'DirectiveZero', sans-serif; font-size: inherit;
+      padding: var(--spacing-sm);
+    }
     #rv-chat-head { display: flex; align-items: baseline; gap: var(--spacing-md);
       padding: var(--spacing-sm) var(--spacing-lg); flex-wrap: nowrap; flex: 0 0 auto; }
     #rv-chat-body {
@@ -305,11 +312,12 @@
       border-top: 1px solid var(--border-subtle);
       display: flex; flex-direction: column; gap: var(--spacing-xs);
     }
-    #rv-chat-compose.hidden { display: none; }
+    /* No local `.hidden` rules in this file: main.css already ships
+       `.hidden { display: none !important }` and it is linked above. Three
+       restatements of it lived here, which is how a design system quietly
+       gets forked — and one of them was written believing none existed. */
     #rv-chat-room { width: 100%; min-width: 0; }
-    #rv-chat-entry { display: flex; align-items: flex-end; gap: var(--spacing-sm); }
-    /* SUI fields carry a min-width wider than this rail. */
-    #rv-chat-entry label.sui-input-text { flex: 1 1 auto; min-width: 0; }
+
     #rv-chat-send { flex: 0 0 auto; }
     #rv-chat-error:empty { display: none; }
     /* "enemy" is the game's semantic for danger; there is no --text-error. */
@@ -749,26 +757,30 @@
        it defaults to wherever this object was last discussed and is a plain
        selector otherwise, which is the honest way to send from a window that
        is about an object rather than about a room. -->
-  <div id="rv-chat" class="rv-collapsed">
+  <!-- ALWAYS OPEN. There was a collapsed state; collapsed it was a tall empty
+       column doing nothing but holding a "show" link, which is a worse use of
+       the space than the conversation itself. The rail is either wanted or the
+       window is not the raid view. -->
+  <div id="rv-chat">
     <div id="rv-chat-head" class="sui-text-label">
-      <i class="icon-phone"></i>
+      <i class="sui-icon-sm icon-phone"></i>
       <span class="rv-chat-title">Comms</span>
       <span id="rv-chat-count" class="rv-log-count"></span>
       <span class="rv-spacer"></span>
-      <a href="javascript: void(0)" id="rv-chat-discuss" class="rv-log-toggle">discuss</a>
-      <a href="javascript: void(0)" id="rv-chat-toggle" class="rv-log-toggle">show</a>
+      <a href="javascript: void(0)" id="rv-chat-discuss" class="rv-log-toggle">open in comms</a>
     </div>
     <div id="rv-chat-body" class="sui-text-tiny"><div class="rv-log-empty sui-text-tiny">Nothing said about this planet yet.</div></div>
     <!-- Hidden until Comms is connected AND a room is known: a composer that
          cannot send is worse than no composer. -->
     <div id="rv-chat-compose" class="hidden">
       <select id="rv-chat-room" class="sui-text-tiny"></select>
-      <div id="rv-chat-entry">
-        <label class="sui-input-text" for="rv-chat-input">
-          <span>Message</span>
-          <input id="rv-chat-input" type="text" maxlength="900"
-                 placeholder="Say something…">
-        </label>
+      <!-- The Comms window's composer shape: a screen frame with a bare input
+           inside it. NOT `label.sui-input-text` — that component draws its own
+           focus chevron and adds 24px of padding on focus, so the whole row
+           jumped every time the field was clicked. -->
+      <div id="rv-chat-entry" class="sui-screen">
+        <input id="rv-chat-input" type="text" maxlength="900"
+               placeholder="Say something — the planet id is added for you">
         <a href="javascript: void(0)" id="rv-chat-send" class="rv-log-toggle">send</a>
       </div>
       <div id="rv-chat-error" class="sui-text-tiny"></div>

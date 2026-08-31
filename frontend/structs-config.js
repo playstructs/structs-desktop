@@ -2301,9 +2301,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               mgrStatusColor = 'var(--text-hint)';
               btnLabel = 'Toggle';
             }
+            // SUI's own button, not a hand-rolled one. The previous version
+            // redrew padding, border, colour, radius and a 0.9em type size by
+            // hand — fractional scaling on a pixel face is exactly what the
+            // type roles exist to prevent, and it drifts the moment SUI moves.
             var btnHtml = '<a id="debug-engine-toggle" href="javascript:void(0)" ' +
-              'style="padding:2px 12px; margin-left:8px; border:1px solid var(--accent-primary); ' +
-              'color:var(--accent-primary); text-decoration:none; border-radius:2px; font-size:0.9em;">' +
+              'class="sui-screen-btn sui-mod-primary" ' +
+              'style="margin-left:var(--spacing-md);">' +
               btnLabel + '</a>';
             html += row('Task Manager',
               '<span style="color:' + mgrStatusColor + '; font-weight:bold;">' + mgrStatusText + '</span>' + btnHtml);
@@ -2436,8 +2440,8 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           var html = '';
           // Status + refresh button on one row
           var refreshBtn = '<a id="debug-energy-refresh" href="javascript:void(0)" ' +
-            'style="padding:2px 12px; margin-left:8px; border:1px solid var(--accent-primary); ' +
-            'color:var(--accent-primary); text-decoration:none; border-radius:2px; font-size:0.9em;">' +
+            'class="sui-screen-btn sui-mod-primary" ' +
+            'style="margin-left:var(--spacing-md);">' +
             'Refresh</a>';
           html += row('Status',
             (online ? '<span style="color:var(--accent-primary);">ONLINE</span>'

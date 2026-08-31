@@ -42,18 +42,53 @@ const BUDGET = {
   // sizes — 8, 12 and 16 — and Team Ops invented a continuous one between
   // them (8, 9, 10, 11, 12, 13). Remapping is a visible change to a console
   // people use, so it wants doing deliberately rather than in a sweep.
-  'chat.html':        [2, 83],
-  'chat.js':          [0, 0],
-  'raidview.html':    [0, 46],
-  'board.html':       [9, 99],
-  'board-pages.js':   [1, 11],
-  'transfer.html':    [1, 1],
-  'transfer.js':      [0, 0],
-  'index.html':       [0, 0],
+  'chat.html':          [2, 83],
+  'chat.js':            [0, 0],
+  'raidview.html':      [0, 46],
+  // Four ambit background colours, copied from main.css and commented as
+  // such. Only `space` (#222034) has a token — it is `--surface-default` —
+  // and swapping one of four for a token would make the group inconsistent
+  // for no gain. This is the "a count is not a bug" case in the header.
+  'raidview.js':        [4, 1],
+  'board.html':         [9, 99],
+  'board.js':           [0, 0],
+  'board-pages.js':     [1, 11],
+  // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not
+  // spacing and has no token.
+  'board-gamestats.js': [0, 1],
+  'board-shim.js':      [0, 0],
+  // The debug-tab patch INJECTED INTO THE GAME'S OWN WINDOW, so it renders
+  // inches from the real UI — and it was the least audited file in the repo.
+  // These numbers are where it stood when it was first measured, not an
+  // endorsement of them.
+  'structs-config.js':  [14, 52],
+  'transfer.html':      [1, 1],
+  'transfer.js':        [0, 0],
+  'units.js':           [0, 0],
+  'ui-telemetry.js':    [0, 0],
+  'index.html':         [0, 0],
 };
 
+/* Every window file, not a hand-kept list.
+ *
+ * The budget list used to be typed out by hand, and a file simply absent from
+ * it was silently unaudited — which is how `structs-config.js` accumulated 14
+ * hardcoded colours and three off-scale type sizes while the suite reported
+ * "all checks passed". A new file must not be able to join the app without
+ * joining the audit, so an unlisted file is now a FAILURE, not a skip.
+ */
 console.log('\n— hardcoded values (budget: may fall, never rise)');
-for (const [file, [maxHex, maxPx]] of Object.entries(BUDGET)) {
+const windowFiles = readdirSync(root + '/frontend')
+  .filter((f) => /\.(html|js)$/.test(f) && !f.startsWith('_'))
+  .sort();
+const unlisted = windowFiles.filter((f) => !(f in BUDGET));
+check('every window file has a budget', unlisted.length === 0,
+  unlisted.join(', ') + ' — add it to BUDGET at its current count');
+const gone = Object.keys(BUDGET).filter((f) => !windowFiles.includes(f));
+check('every budgeted file still exists', gone.length === 0, gone.join(', '));
+
+for (const file of windowFiles) {
+  const [maxHex, maxPx] = BUDGET[file] || [0, 0];
   const src = readFileSync(root + '/frontend/' + file, 'utf8');
   const hex = (src.match(/#[0-9A-Fa-f]{3,6}\b/g) || []).length;
   const px = (src.match(/: *[0-9]+px/g) || []).length;
@@ -114,12 +149,49 @@ check('no window reaches outside the three families', failures === before2);
 // invented a continuous scale between them (9, 10, 11, 13), which renders a
 // pixel font at 1.25x and 1.375x.
 console.log('\n— type sizes are SUI roles');
-for (const file of ['chat.html', 'board.html', 'raidview.html', 'transfer.html']) {
+/* Same two lessons as the budget above.
+ *
+ * The list was four HTML files, so JS never got asked — and `board-gamestats`
+ * set a 10px label through `setAttribute('font-size', ...)`, which is not the
+ * CSS form the pattern looked for either. Both are covered now, over every
+ * window file.
+ *
+ * `structs-config.js` is a ratchet rather than a pass: it is a patch injected
+ * into the game's own window and remapping its type is a visible change to a
+ * panel people use, so it wants doing deliberately. Listed sizes may only be
+ * REMOVED — a new odd size in that file still fails.
+ */
+const TYPE_DEBT = { 'structs-config.js': ['11', '13', '15'] };
+for (const file of windowFiles) {
   const src = readFileSync(root + '/frontend/' + file, 'utf8');
-  const odd = [...new Set((src.match(/font-size: *(\d+)px/g) || [])
-    .map((m) => m.match(/(\d+)/)[1])
-    .filter((n) => !['8', '12', '16'].includes(n)))];
+  const sizes = [
+    ...(src.match(/font-size: *(\d+)px/g) || []),
+    // The SVG attribute form: `setAttribute('font-size', '10')`.
+    ...(src.match(/font-size['"], *['"](\d+)['"]/g) || []),
+  ].map((m) => m.match(/(\d+)/)[1]);
+  const allowed = ['8', '12', '16'].concat(TYPE_DEBT[file] || []);
+  const odd = [...new Set(sizes.filter((n) => !allowed.includes(n)))];
   check(`${file} uses only 8/12/16px`, odd.length === 0, odd.join(', ') + 'px');
+  /* Relative type sizes are outside the system too, and were invisible here.
+   *
+   * The px check could not see `font-size:0.9em`, which is fractional scaling
+   * on a pixel face — the very thing the 8/12/16 roles exist to prevent, just
+   * spelled in another unit. Two of them sat in the debug panel inside a
+   * hand-rolled button that SUI already provides.
+   *
+   * `1em`/`100%` are allowed: they assert "inherit", which changes nothing.
+   */
+  const rel = [...new Set((src.match(/font-size: *([0-9.]+)(em|rem|%)/g) || [])
+    .filter((m) => !/[: ](1em|1rem|100%)$/.test(m)))];
+  check(`${file} sizes type in px, not em`, rel.length === 0, rel.join(', '));
+
+  // Debt that has been paid must be struck off, or the exception outlives the
+  // problem and quietly re-permits it.
+  const stale = (TYPE_DEBT[file] || []).filter((n) => !sizes.includes(n));
+  if (stale.length) {
+    check(`${file}: TYPE_DEBT is still true`, false,
+      'no longer uses ' + stale.join(', ') + 'px — remove from TYPE_DEBT');
+  }
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');

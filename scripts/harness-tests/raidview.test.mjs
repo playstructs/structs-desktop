@@ -19,6 +19,25 @@ if (!existsSync(harness)) {
 }
 
 let failures = 0;
+/* Does any rule in the document hide this element AS IT IS RIGHT NOW?
+ *
+ * The failure this guards is a `classList.toggle('hidden')` on an element no
+ * stylesheet covers: the class lands, nothing moves, and the control stays on
+ * screen. Matching the element against each rule's own selector — rather than
+ * looking for a selector string the test knows — means the check cannot pass
+ * by agreeing with a copy of the code.
+ */
+function hidesElement(el) {
+  for (const sheet of el.ownerDocument.styleSheets) {
+    let rules;
+    try { rules = sheet.cssRules; } catch { continue; }
+    for (const rule of rules || []) {
+      if (!rule.selectorText || !rule.style || rule.style.display !== 'none') continue;
+      try { if (el.matches(rule.selectorText)) return true; } catch { /* :has etc. */ }
+    }
+  }
+  return false;
+}
 function check(name, ok, detail) {
   console.log((ok ? '  ok ' : 'FAIL ') + name + (ok || detail == null ? '' : ' — ' + detail));
   if (!ok) failures++;
@@ -141,17 +160,15 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   const d = w.document;
   const panel = d.getElementById('rv-chat');
   check('the raid window has a comms panel', !!panel);
-  // Collapsed by default: the map is what the window is for.
-  check('…collapsed, like the battle log', panel.classList.contains('rv-collapsed'));
-  check('…and nothing is fetched until it is opened',
-    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length === 0);
+  // ALWAYS OPEN. Collapsed, the rail was a tall empty column holding a "show"
+  // link — a worse use of the space than the conversation it was hiding.
+  check('…which is not collapsible', !panel.classList.contains('rv-collapsed'));
+  check('…and there is no show/hide toggle', d.getElementById('rv-chat-toggle') === null);
 
-  d.getElementById('rv-chat-toggle')
-    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 120));
   const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').pop();
-  check('opening it asks what was said', !!call && call.args.objectId === '2-1',
-    JSON.stringify(call && call.args));
+  check('it asks what was said without being opened',
+    !!call && call.args.objectId === '2-1', JSON.stringify(call && call.args));
   const rows = d.querySelectorAll('.rv-chat-row');
   check('…and shows it', rows.length === 1, String(rows.length));
   check('…with who said it',
@@ -185,7 +202,11 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     !!sent && sent.args.roomId === '!snc:h', JSON.stringify(sent && sent.args));
   check('…in the guild the read came from, not one inferred again',
     !!sent && sent.args.guildId === '0-5', JSON.stringify(sent && sent.args));
-  check('…trimmed', !!sent && sent.args.body === 'they are down to one shield',
+  // Trimmed, AND tagged with the planet: the rail finds its messages by
+  // searching for the object id, so one that does not name the planet is sent
+  // successfully and then never appears here.
+  check('…trimmed and tagged with the planet',
+    !!sent && sent.args.body === 'they are down to one shield 2-1',
     JSON.stringify(sent && sent.args.body));
   check('…and the box is cleared so it cannot be sent twice', input.value === '');
 
@@ -209,7 +230,7 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     await new Promise((r) => setTimeout(r, 40));
     let last = sends().pop();
     check('/me is an emote, as it is in Comms',
-      !!last && last.args.body === 'is out of charge' && last.args.msgtype === 'm.emote',
+      !!last && last.args.body === 'is out of charge 2-1' && last.args.msgtype === 'm.emote',
       JSON.stringify(last && last.args));
 
     // The escape exists precisely so someone can say "/me waves" literally.
@@ -220,7 +241,7 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     await new Promise((r) => setTimeout(r, 40));
     last = sends().pop();
     check('a doubled slash sends the literal text, not an emote',
-      !!last && last.args.body === '/me waves' && !last.args.msgtype,
+      !!last && last.args.body === '/me waves 2-1' && !last.args.msgtype,
       JSON.stringify(last && last.args));
 
     // Ordinary text is untouched by any of this.
@@ -228,9 +249,18 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     d.getElementById('rv-chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 40));
     last = sends().pop();
-    check('a message with no slash is sent unchanged',
-      !!last && last.args.body === 'they are down to one shield' && !last.args.msgtype,
+    check('a message with no slash keeps its text',
+      !!last && last.args.body === 'they are down to one shield 2-1' && !last.args.msgtype,
       JSON.stringify(last && last.args));
+
+    // Already named? Then it is not named twice.
+    input.value = 'watch 2-1 closely';
+    d.getElementById('rv-chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    last = sends().pop();
+    check('…and a planet already named is not repeated',
+      !!last && last.args.body === 'watch 2-1 closely',
+      JSON.stringify(last && last.args.body));
   }
 
   // A composer that cannot send is worse than none: it invites a message the
@@ -282,44 +312,236 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   check('…nor one that ends the same', !m('see 12-1 there', '2-1'));
   check('…nor one glued to a word', !m('planet2-1x', '2-1'));
 
-  // Closed panel: say something was said rather than silently changing a
-  // number nobody is looking at.
-  const head = d.getElementById('rv-chat-toggle');
-  head.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));   // close it
-  await new Promise((r) => setTimeout(r, 60));
+  // The rail is always open, so a message about this planet REFETCHES rather
+  // than marking a badge nobody would see.
   const before = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length;
-
   w.__HARNESS_EMIT__('matrix::timeline', {
     guild_id: '0-5', room_id: '!snc:h',
     messages: [{ event_id: '$n1', sender: '@1-61:h', body: 'shield on 2-1 is down', kind: 'text' }],
   });
-  await new Promise((r) => setTimeout(r, 120));
-  check('a message about this planet marks the closed panel',
-    d.getElementById('rv-chat-count').textContent === 'new',
-    d.getElementById('rv-chat-count').textContent);
-  check('…without fetching for a panel nobody is looking at',
-    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length === before,
-    String(w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length));
+  await new Promise((r) => setTimeout(r, 150));
+  check('a message about this planet refreshes the rail',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length > before);
 
-  // A message about a DIFFERENT planet must not mark it at all.
-  d.getElementById('rv-chat-count').textContent = '';
+  // A message about a DIFFERENT planet must not touch it at all.
+  const before2 = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length;
   w.__HARNESS_EMIT__('matrix::timeline', {
     guild_id: '0-5', room_id: '!snc:h',
     messages: [{ event_id: '$n2', sender: '@1-61:h', body: 'raiding 2-15361', kind: 'text' }],
   });
-  await new Promise((r) => setTimeout(r, 120));
-  check('another planet does not mark this one',
-    d.getElementById('rv-chat-count').textContent !== 'new',
-    d.getElementById('rv-chat-count').textContent);
-
-  // Opening clears the marker and fetches.
-  head.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 150));
-  check('opening it fetches again',
-    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length > before);
-  check('…and the marker is gone',
-    d.getElementById('rv-chat-count').textContent !== 'new',
+  check('another planet does not refresh this one',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').length === before2);
+
+  // The count is now just how many lines are on screen, not a "you missed
+  // something" badge — there is no closed state to miss anything in.
+  check('the count reports what is displayed',
+    d.getElementById('rv-chat-count').textContent
+      === String(d.querySelectorAll('.rv-chat-row').length || ''),
     d.getElementById('rv-chat-count').textContent);
+}
+
+// ── The object's own room ───────────────────────────────────────────────────
+//
+// The rail has two ways to get messages and they must not behave the same.
+// Searching every room for the planet's id is the fallback for a planet on
+// somebody else's homeserver; a room per planet is the real thing. The tests
+// below pin what changes when the real thing exists — because the difference
+// is exactly the id-tagging workaround the search path needs and the room
+// path must not do.
+{
+  const d = w.document;
+  const chat = RV._chat;
+  const before = JSON.stringify({ room: chat.room, rows: chat.rows.length });
+
+  check('with no room of its own, the rail is not "in" one',
+    RV._inRoom() === false && RV._reachableRoom() === false, before);
+
+  // A room that exists but we have not joined is REACHABLE, not entered:
+  // sending is what buys the membership.
+  chat.room = { connected: true, guild_id: '0-5', alias: '#planet-2-1:h',
+                room_id: '!planet-2-1:h', can_create: false, joined: false };
+  check('an unjoined room is reachable but not entered',
+    RV._reachableRoom() === true && RV._inRoom() === false);
+
+  // Likewise a room that does not exist yet but is ours to make.
+  chat.room = { connected: true, guild_id: '0-5', alias: '#planet-2-1:h',
+                room_id: null, can_create: true, joined: false };
+  check('a creatable room is reachable but not entered',
+    RV._reachableRoom() === true && RV._inRoom() === false);
+
+  chat.room = { connected: true, guild_id: '0-5', alias: '#planet-2-1:h',
+                room_id: '!planet-2-1:h', can_create: false, joined: true };
+  check('a joined room is entered', RV._inRoom() === true);
+
+  // The composer must stop offering a room to choose. The choice only exists
+  // because the search path has to guess; a room per planet has answered it,
+  // and offering it again invites sending the planet's talk elsewhere.
+  chat.connected = true; chat.guildId = '0-5';
+  RV._syncComposer();
+  const sel = d.getElementById('rv-chat-room');
+  const input = d.getElementById('rv-chat-input');
+  check('the room selector is hidden inside the object room',
+    sel.classList.contains('hidden'));
+  // Not `getComputedStyle`: jsdom answered 'none' for this control even with
+  // the rule deleted, so it proved nothing. Ask the question directly — is
+  // there a rule in the page that MATCHES this element and hides it? That is
+  // the actual bug class, a class toggle with no rule behind it, and it is
+  // asked without naming the selector the code uses.
+  check('...and a rule in the page actually hides it', hidesElement(sel));
+  check('the placeholder stops promising an appended id',
+    !/id is added/.test(input.placeholder), input.placeholder);
+
+  // And it comes back when there is no room — the fallback must still work.
+  chat.room = null;
+  RV._syncComposer();
+  check('the selector returns on the search path', !sel.classList.contains('hidden'));
+  check('...and the placeholder admits the id is appended',
+    /id is added/.test(input.placeholder), input.placeholder);
+
+  // A message in the object's own room refreshes the rail even though it
+  // never names the planet — belonging, not naming, is the test in there.
+  chat.room = { connected: true, guild_id: '0-5', alias: '#planet-2-1:h',
+                room_id: '!planet-2-1:h', can_create: false, joined: true };
+  const n0 = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_timeline').length;
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!planet-2-1:h',
+    messages: [{ event_id: '$q1', sender: '@1-61:h', body: 'no id here', kind: 'text' }],
+  });
+  await until(() =>
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_timeline').length > n0, 2000);
+  check('an unnamed message in the object room still refreshes it',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_timeline').length > n0);
+
+  // ...and its body is rendered verbatim, with no id bolted on.
+  const bodies = [...d.querySelectorAll('.rv-chat-body-text')].map((e) => e.textContent);
+  check('room messages render without an appended id',
+    bodies.includes('shield is down'), bodies.join(' | '));
+
+  // A message in a DIFFERENT room must not, or every room in the guild
+  // repaints a panel about one planet.
+  const n1 = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_timeline').length;
+  w.__HARNESS_EMIT__('matrix::timeline', {
+    guild_id: '0-5', room_id: '!general:h',
+    messages: [{ event_id: '$q2', sender: '@1-61:h', body: 'unrelated', kind: 'text' }],
+  });
+  await new Promise((r) => setTimeout(r, 150));
+  check('another room does not refresh the object room',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_timeline').length === n1);
+}
+
+// ── What actually goes on the wire ─────────────────────────────────────────
+//
+// The id-tagging workaround is a SEND-time behaviour, so only a send can
+// prove it stopped. Rendering the fixture proves nothing about it.
+{
+  const d = w.document;
+  const chat = RV._chat;
+  const input = d.getElementById('rv-chat-input');
+  const send = d.getElementById('rv-chat-send');
+  const sends = () => w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send');
+
+  async function say(text) {
+    const n = sends().length;
+    input.value = text;
+    chat.sending = false;
+    send.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await until(() => sends().length > n, 2000);
+    return sends()[sends().length - 1];
+  }
+
+  // Searching: the id has to be appended or the rail cannot find its own
+  // message. This is the behaviour that must survive.
+  chat.room = null;
+  chat.connected = true; chat.guildId = '0-5'; chat.roomId = '!snc:h';
+  const searched = await say('shield is down');
+  check('on the search path the id is appended',
+    searched && searched.args.body === 'shield is down 2-1',
+    searched && searched.args.body);
+
+  // In the object's own room it must NOT be: the message belongs by where it
+  // was sent, and an appended id is noise the player did not type.
+  chat.room = { connected: true, guild_id: '0-5', alias: '#planet-2-1:h',
+                room_id: '!planet-2-1:h', can_create: false, joined: true };
+  const inRoomSend = await say('shield is down');
+  check('in the object room the id is NOT appended',
+    inRoomSend && inRoomSend.args.body === 'shield is down',
+    inRoomSend && inRoomSend.args.body);
+  check('...and it goes to the object room, not the picked room',
+    inRoomSend && inRoomSend.args.roomId === '!planet-2-1:h',
+    inRoomSend && inRoomSend.args.roomId);
+
+  // A room we have not joined: speaking is what joins us, so the join must
+  // happen BEFORE the send or the send is rejected for non-membership.
+  chat.room = { connected: true, guild_id: '0-5', alias: '#planet-2-1:h',
+                room_id: null, can_create: true, joined: false };
+  const nCreate = w.__HARNESS_CALLS__.filter(
+    (c) => c.cmd === 'matrix_object_room_create').length;
+  const joined = await say('opening this up');
+  check('speaking joins-or-creates the room first',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_room_create').length
+      === nCreate + 1);
+  check('...and the message lands in it, untagged',
+    joined && joined.args.roomId === '!planet-2-1:h'
+      && joined.args.body === 'opening this up',
+    joined && joined.args.roomId + ' / ' + joined.args.body);
+
+  // Ordering, explicitly: a send that raced ahead of its join would fail on
+  // the real server and pass a test that only counted calls.
+  const order = w.__HARNESS_CALLS__.map((c) => c.cmd)
+    .filter((c) => c === 'matrix_object_room_create' || c === 'matrix_send');
+  check('the join precedes the send it enabled',
+    order[order.length - 2] === 'matrix_object_room_create'
+      && order[order.length - 1] === 'matrix_send', order.slice(-3).join(' → '));
+
+  // `/me` still means emote and `//` still escapes, in a room as much as in a
+  // search — the rail must not quietly change what typing means.
+  const emote = await say('/me watches the shield');
+  check('/me is still an emote in the object room',
+    emote && emote.args.msgtype === 'm.emote'
+      && emote.args.body === 'watches the shield',
+    emote && emote.args.msgtype + ' / ' + emote.args.body);
+}
+
+// ── Telling the two panels apart ───────────────────────────────────────────
+//
+// They look the same and behave differently — one appends an id to what you
+// type, the other does not. If the panel does not say which it is, a player
+// cannot tell why their message did or did not appear.
+{
+  const d = w.document;
+  const chat = RV._chat;
+  const title = () => d.querySelector('.rv-chat-title').textContent;
+
+  chat.room = null;
+  chat.connected = true; chat.guildId = '0-5';
+  chat.rows = [{ room_id: '!snc:h', room_name: 'SN.Corporation',
+                 message: { sender_name: 'JPEG', body: 'shield on 2-1 down' } }];
+  RV._renderChat();
+  check('searching is labelled Comms', title() === 'Comms', title());
+  check('...and each row says which room it came from',
+    [...d.querySelectorAll('.rv-chat-room')].some((e) => e.textContent === 'SN.Corporation'));
+
+  chat.room = { connected: true, guild_id: '0-5', room_id: '!planet-2-1:h', joined: true };
+  chat.roomName = 'Planet 2-1';
+  RV._renderChat();
+  check('the object room is named in the title', title() === 'Planet 2-1', title());
+  check('...and the per-row room label stops repeating it',
+    [...d.querySelectorAll('.rv-chat-room')].every((e) => e.textContent === ''));
+
+  // The empty state must not call a fleet a planet. This window opens on both.
+  chat.rows = [];
+  RV._renderChat();
+  check('the empty line names the right kind of object',
+    /this planet yet/.test(d.getElementById('rv-chat-body').textContent),
+    d.getElementById('rv-chat-body').textContent);
+  // Both branches, not just the one this harness window happens to be. The
+  // fleet case is the one that was wrong, and a planet-only window can never
+  // catch it.
+  check('...and a fleet window would say fleet',
+    RV._objectWord('fleet') === 'fleet' && RV._objectWord('planet') === 'planet'
+      && RV._objectWord(undefined) === 'planet',
+    [RV._objectWord('fleet'), RV._objectWord('planet')].join('/'));
 }
 
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');

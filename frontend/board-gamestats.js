@@ -52,24 +52,52 @@
     svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
     svg.setAttribute('preserveAspectRatio', 'none');
     svg.style.cssText = 'display:block;width:100%;height:' + h + 'px;';
-    var nums = values.filter(function (v) { return typeof v === 'number' && isFinite(v); });
-    if (nums.length < 2) {
+    function collecting() {
       var t = document.createElementNS(SVG_NS, 'text');
       t.setAttribute('x', '4'); t.setAttribute('y', String(h - 6));
       t.setAttribute('fill', 'var(--text-hint)');
-      t.setAttribute('font-size', '10');
+      // 8, not 10: SUI's type roles are 8/12/16 and this is a hint label,
+      // which is the 8px role. 10 rendered a pixel face at 1.25x.
+      t.setAttribute('font-size', '8');
       t.textContent = 'collecting…';
       svg.appendChild(t);
       return svg;
     }
+    var nums = values.filter(function (v) { return typeof v === 'number' && isFinite(v); });
+    if (nums.length < 2) return collecting();
     var min = Math.min.apply(null, nums), max = Math.max.apply(null, nums);
     var span = (max - min) || 1;
     var step = values.length > 1 ? w / (values.length - 1) : w;
+    /* Gaps BREAK the line; they are not drawn through and not drawn as zero.
+     *
+     * A gap means "no sample", and both alternatives assert something false:
+     * a zero invents a crash, and a straight line across invents readings
+     * nobody took. Starting a fresh `M` after a gap leaves a visible break,
+     * which is the honest shape.
+     *
+     * It also keeps NaN out of the path. `d` is one attribute — a single
+     * non-finite value anywhere in it invalidates the whole path and the
+     * chart silently renders nothing.
+     */
     var d = '';
+    var pen = 'M';
+    var drew = false;
     values.forEach(function (v, i) {
+      if (typeof v !== 'number' || !isFinite(v)) { pen = 'M'; return; }
       var y = h - 3 - ((v - min) / span) * (h - 6);
-      d += (d ? 'L' : 'M') + (i * step).toFixed(1) + ' ' + y.toFixed(1);
+      d += pen + (i * step).toFixed(1) + ' ' + y.toFixed(1);
+      if (pen === 'L') drew = true;
+      pen = 'L';
     });
+    /* Two samples are not two samples if a gap sits between them.
+     *
+     * `nums.length >= 2` was the test for "there is a line to draw", and it is
+     * not: `[5, null, 7]` passes it and produces two lone movetos, which SVG
+     * draws as nothing at all. An empty chart with no caption reads as broken.
+     * Ask the real question — did any segment get drawn — instead of a proxy
+     * for it.
+     */
+    if (!drew) return collecting();
     var base = document.createElementNS(SVG_NS, 'line');
     base.setAttribute('x1', '0'); base.setAttribute('x2', String(w));
     base.setAttribute('y1', String(h - 1)); base.setAttribute('y2', String(h - 1));
@@ -86,9 +114,21 @@
     return svg;
   }
 
+  /* Samples for one series, with NULL for "not known at that block".
+   *
+   * Was `Number(p[key]) || 0`, which turned every unknown into a hard zero —
+   * and, incidentally, every genuine zero into one too, so the two were
+   * indistinguishable. The producer now sends null for a total it has not
+   * swept yet (see `opt_num` in game_stats.rs); this keeps the distinction
+   * instead of collapsing it, and the sparkline breaks its line across it.
+   */
   function seriesValues(key) {
     var s = (state.snap && state.snap.series) || [];
-    return s.map(function (p) { return Number(p[key]) || 0; });
+    return s.map(function (p) {
+      if (p == null || p[key] == null) return null;
+      var n = Number(p[key]);
+      return isFinite(n) ? n : null;
+    });
   }
 
   // ── Renderers ─────────────────────────────────────────────────────────────
@@ -153,7 +193,8 @@
     var body = H.el('div');
     var def = metricDef(state.metric.key);
     var toolbar = H.el('div');
-    toolbar.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:6px;';
+    toolbar.style.cssText =
+      'display:flex;justify-content:flex-end;margin-bottom:var(--spacing-md);';
     toolbar.appendChild(H.sortControl(
       METRICS.map(function (m) { return { key: m.key, label: m.label }; }),
       state.metric,
@@ -281,7 +322,11 @@
       host.appendChild(trendsCard());
 
       var cols = H.el('div');
-      cols.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:10px;align-items:start;';
+        // 420px is a column BREAKPOINT, not spacing — it has no token. The gap
+      // does: 10px was off SUI's 2/4/8/12/16 ladder entirely.
+    cols.style.cssText = 'display:grid;'
+      + 'grid-template-columns:repeat(auto-fit,minmax(420px,1fr));'
+      + 'gap:var(--spacing-lg);align-items:start;';
       cols.appendChild(playersCard());
       cols.appendChild(guildsCard());
       host.appendChild(cols);
@@ -376,6 +421,11 @@
   function enter() {
     return ensureBoot().then(renderNow);
   }
+
+  // Test hooks. The two functions that turn samples into a picture are where
+  // a chart can lie without erroring, so they are asserted directly on inputs
+  // the fixture cannot produce — an all-gap series, a lone island sample.
+  Board._gamestats = { sparkline: sparkline, seriesValues: seriesValues, state: state };
 
   Board.registerPage('gamestats', {
     onEnter: enter,

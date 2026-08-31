@@ -44,9 +44,14 @@ cat > "$FIX" <<'EOF'
         events: 20 + Math.round(18 * Math.abs(Math.sin(i / 9))),
         combat: (i % 13 === 0) ? 3 : 0,
         tx: 4 + (i % 7),
-        raids: (i > n - 40) ? 2 : 1,
-        structs: 5980 + Math.floor(i / 12),
-        draw: 1.05e10 + i * 1.4e6,
+        // NULL, not 0, for the first few blocks. This mirrors what the
+        // producer really sends: `totals` is empty until the first sweep
+        // lands, and those blocks genuinely have no structs/raids/draw
+        // reading. Recording them as 0 dragged the sparkline's own minimum to
+        // zero and flattened every real movement into a sliver.
+        raids: i < 3 ? null : ((i > n - 40) ? 2 : 1),
+        structs: i < 3 ? null : 5980 + Math.floor(i / 12),
+        draw: i < 3 ? null : 1.05e10 + i * 1.4e6,
       });
     }
     return out;
@@ -578,6 +583,24 @@ cat > "$RFIX" <<'EOF'
       { room_id: '!snc:h', name: 'SN.Corporation' },
     ] },
     matrix_send: { ok: true, event_id: '$sent' },
+    // Whether this planet has a room of its own. DEFAULT IS NO — the search
+    // path is what a planet on somebody else's homeserver gets, and it stays
+    // the case the rest of these fixtures are written for. Tests that want
+    // the room path set __HARNESS_OBJECT_ROOM__ before the lookup runs.
+    get matrix_object_room() {
+      return window.__HARNESS_OBJECT_ROOM__ || {
+        connected: true, guild_id: '0-5', alias: null, room_id: null,
+        can_create: false, joined: false,
+      };
+    },
+    matrix_object_room_create: { room_id: '!planet-2-1:h', created: true, joined: true },
+    matrix_timeline: { room: { room_id: '!planet-2-1:h', name: 'Planet 2-1' }, messages: [
+      { event_id: '$r1', sender: '@1-61:h', sender_name: 'JPEG', sender_tag: 'SN.C',
+        // Deliberately does NOT name the planet: inside the planet's own room
+        // a message belongs by where it was sent, and a rail that still
+        // filtered on the id would hide it.
+        kind: 'text', ts: 2, body: 'shield is down' },
+    ] },
   };
   var calls = [];
   var listeners = {};

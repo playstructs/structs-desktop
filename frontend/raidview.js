@@ -492,7 +492,23 @@
                     // The composer's room. `rooms` is what the player may pick
                     // from; `roomId` is the pick. Never inferred silently — see
                     // syncComposer.
-                    rooms: [], roomId: null, sending: false, guildId: null };
+                    rooms: [], roomId: null, sending: false, guildId: null,
+                    // The object's OWN room, once looked up: `{alias, room_id,
+                    // can_create, joined}`. Null means not looked up yet or no
+                    // such room, and both leave the panel on the search path.
+                    room: null };
+
+  /* "planet" or "fleet" — whichever this window is actually about.
+   *
+   * Written out three separate times before this, in the empty line and in
+   * both composer placeholders, so a fleet window said "planet" wherever one
+   * of them was missed. One definition, and the kind can only be wrong
+   * everywhere at once.
+   */
+  function objectWord(kind) {
+    var k = kind || (TARGET && TARGET.kind);
+    return k === 'fleet' ? 'fleet' : 'planet';
+  }
 
   // Does this text name THIS object, and not one whose id merely starts the
   // same way?
@@ -516,7 +532,6 @@
   }
 
   function wireChat() {
-    var head = document.getElementById('rv-chat-toggle');
     var discuss = document.getElementById('rv-chat-discuss');
     if (discuss) {
       discuss.addEventListener('click', function () {
@@ -527,14 +542,11 @@
           .catch(function (e) { discuss.textContent = String(e).slice(0, 40); });
       });
     }
-    if (!head) return;
-    head.addEventListener('click', function () {
-      chatState.open = !chatState.open;
-      document.getElementById('rv-chat').classList.toggle('rv-collapsed', !chatState.open);
-      head.textContent = chatState.open ? 'hide' : 'show';
-      if (chatState.open) { chatState.fresh = false; loadChat(); }
-      else renderChat();
-    });
+    // The rail is always open, so there is nothing to toggle and nothing to
+    // defer: read the conversation as soon as the window has a target. The
+    // room lookup comes first because it decides WHICH read happens.
+    chatState.open = true;
+    resolveRoom().then(loadChat);
 
     // Live, because a raid is live. The panel used to load once on open and
     // then go stale during exactly the event it exists for.
@@ -546,20 +558,45 @@
       window.__TAURI__.event.listen('matrix::timeline', function (e) {
         var p = (e && e.payload) || {};
         if (!TARGET || !p.messages) return;
-        var hit = p.messages.some(function (m) {
-          return m && !m.self && mentionsObject(m.body, TARGET.id);
-        });
+        // In the object's own room, BELONGING is the test — every message
+        // there is about this object whether or not it names it, which is the
+        // whole point of having the room. Outside it, naming is all we have.
+        var hit = inRoom() && p.room_id === chatState.room.room_id
+          ? p.messages.some(function (m) { return m && !m.self; })
+          : p.messages.some(function (m) {
+              return m && !m.self && mentionsObject(m.body, TARGET.id);
+            });
         if (!hit) return;
-        if (chatState.open) loadChat();
-        // Closed: say that something was said rather than silently changing
-        // a count nobody is looking at.
-        else { chatState.fresh = true; renderChat(); }
+        loadChat();
       });
     }
   }
 
+  /* Does this object have a room of its own, and may we speak in it?
+   *
+   * Asked once per window. Three answers matter and each changes the panel:
+   * a room we have JOINED is read directly and needs no id in the message; a
+   * room that exists but we have not joined, or does not exist and is ours to
+   * make, is reachable — sending gets us in; anything else leaves the panel on
+   * the search it has always used.
+   */
+  function resolveRoom() {
+    if (!TARGET || !window.__TAURI__) return Promise.resolve();
+    return window.__TAURI__.core.invoke('matrix_object_room', { objectId: TARGET.id })
+      .then(function (res) { chatState.room = res || null; })
+      // A lookup failure is not a panel failure: the search path still works.
+      .catch(function () { chatState.room = null; });
+  }
+
+  // True when the rail is reading the object's OWN room rather than searching
+  // every room for its id.
+  function inRoom() {
+    return !!(chatState.room && chatState.room.room_id && chatState.room.joined);
+  }
+
   function loadChat() {
     if (!TARGET || chatState.loading) return;
+    if (inRoom()) return loadRoomChat();
     chatState.loading = true;
     window.__TAURI__.core.invoke('matrix_object_chatter', { objectId: TARGET.id })
       .then(function (res) {
@@ -578,19 +615,61 @@
       });
   }
 
+  /* Read the object's own room.
+   *
+   * Mapped into the same row shape the search path produces, so there is one
+   * renderer and the two ways of getting messages cannot drift apart in how
+   * they look.
+   */
+  function loadRoomChat() {
+    chatState.loading = true;
+    window.__TAURI__.core.invoke('matrix_timeline', {
+      guildId: chatState.room.guild_id || chatState.guildId,
+      roomId: chatState.room.room_id, limit: 40,
+    }).then(function (res) {
+      chatState.loading = false;
+      chatState.connected = true;
+      chatState.guildId = chatState.room.guild_id || chatState.guildId;
+      var name = (res && res.room && res.room.name) || '';
+      chatState.roomName = name;
+      chatState.rows = ((res && res.messages) || []).map(function (m) {
+        return { message: m, room_id: chatState.room.room_id, room_name: name };
+      });
+      syncComposer();
+      renderChat();
+    }).catch(function () {
+      chatState.loading = false;
+      // The room went unreadable — we were removed, or it was upgraded. Fall
+      // back rather than showing an empty panel that looks like silence.
+      chatState.room = null;
+      loadChat();
+    });
+  }
+
   function renderChat() {
     var body = document.getElementById('rv-chat-body');
     var count = document.getElementById('rv-chat-count');
     var head = document.getElementById('rv-chat-head');
     if (!body) return;
+
+    /* Say which of the two panels this is.
+     *
+     * Reading the object's own room and searching every room for its id look
+     * identical but are not: one shows everything said in a place, the other
+     * shows only what happened to name the object, and only one appends an id
+     * to what you type. A player who cannot tell them apart cannot tell why
+     * their message did or did not appear.
+     */
+    var title = head && head.querySelector('.rv-chat-title');
+    if (title) {
+      title.textContent = inRoom()
+        ? (chatState.roomName || 'Comms')
+        : 'Comms';
+    }
     body.textContent = '';
     if (count) {
-      // A closed panel with something new says so; an open one just shows it.
-      count.textContent = chatState.fresh && !chatState.open
-        ? 'new'
-        : (chatState.rows.length ? String(chatState.rows.length) : '');
+      count.textContent = chatState.rows.length ? String(chatState.rows.length) : '';
     }
-    if (head) head.classList.toggle('rv-chat-fresh', chatState.fresh && !chatState.open);
 
     if (!chatState.connected) {
       // A raid window opens whether or not Comms is signed in, and must say
@@ -604,7 +683,8 @@
     if (!chatState.rows.length) {
       var none = document.createElement('div');
       none.className = 'rv-log-empty sui-text-tiny';
-      none.textContent = 'Nothing said about this planet yet.';
+      // A fleet is not a planet. The rail opens on both.
+      none.textContent = 'Nothing said about this ' + objectWord() + ' yet.';
       body.appendChild(none);
       return;
     }
@@ -621,7 +701,11 @@
       text.textContent = m.body || '';
       var room = document.createElement('span');
       room.className = 'rv-chat-room';
-      room.textContent = h.room_name || '';
+      // Which room a line came from only tells you something when the lines
+      // come from DIFFERENT rooms. In the object's own room every row would
+      // repeat the same name, which is a column of noise; the panel title
+      // says it once instead.
+      room.textContent = inRoom() ? '' : (h.room_name || '');
       // Speaker and room on one line, the message under it. In a rail there
       // is not width for all three side by side.
       var meta = document.createElement('div');
@@ -664,10 +748,33 @@
     var sel = document.getElementById('rv-chat-room');
     if (!box || !sel) return;
     // A composer that cannot send is worse than no composer: it invites a
-    // message the player will lose.
-    var usable = chatState.connected && chatState.guildId && chatState.rooms.length > 0;
+    // message the player will lose. A reachable object room counts — sending
+    // joins or creates it — so the composer is not gated on the guild's room
+    // list when the object has a room of its own.
+    var usable = chatState.connected && chatState.guildId
+      && (reachableRoom() || chatState.rooms.length > 0);
     box.classList.toggle('hidden', !usable);
     if (!usable) return;
+
+    /* Inside the object's own room there is nothing to choose.
+     *
+     * The selector exists because the search path has to guess which room a
+     * reply belongs in. A room per planet answers that question outright, so
+     * offering the choice again would only invite sending the planet's
+     * conversation somewhere it does not belong.
+     */
+    var own = reachableRoom();
+    sel.classList.toggle('hidden', own);
+    var input = document.getElementById('rv-chat-input');
+    if (input) {
+      // The placeholder is a promise about what happens to the text. Inside a
+      // room nothing is appended, and saying otherwise would be a lie.
+      input.placeholder = own
+        ? (inRoom() ? 'Say something'
+                    : 'Say something — this opens the ' + objectWord() + ' room')
+        : 'Say something — the ' + objectWord() + ' id is added for you';
+    }
+    if (own) return;
     if (!chatState.roomId
         || !chatState.rooms.some(function (r) { return r.room_id === chatState.roomId; })) {
       chatState.roomId = defaultRoomId();
@@ -688,7 +795,7 @@
     var err = document.getElementById('rv-chat-error');
     if (!input || chatState.sending) return;
     var text = input.value.trim();
-    if (!text || !chatState.roomId) return;
+    if (!text || !(chatState.roomId || reachableRoom())) return;
 
     /* A leading slash means the same things it means in Comms.
      *
@@ -723,22 +830,76 @@
       }
     }
 
+    /* Say WHICH planet — but only when the message has nowhere else to belong.
+     *
+     * Without a room of its own this panel is not a room at all: it is a
+     * SEARCH for the object's id across the guild's rooms. A message typed
+     * here that does not name the planet is sent successfully, arrives for
+     * everyone else, and then never appears in the rail that sent it —
+     * reported from live play, and it looks exactly like a broken send.
+     * Appending the id makes the message findable, which is the least this
+     * panel can do while it is searching.
+     *
+     * Inside the object's own room, none of that applies. The message belongs
+     * by virtue of where it was sent, and an appended id would be noise the
+     * player did not type.
+     *
+     * The test is `reachableRoom`, NOT `inRoom` — where the message will END
+     * UP, not where we stand right now. A room we are about to join by
+     * speaking is not entered yet, so `inRoom` is still false here while the
+     * send below will nonetheless deliver into it: deciding on `inRoom` tagged
+     * exactly those messages, putting a stray id in the one room that never
+     * needed one. Destination and tag must answer the same question.
+     */
+    if (!reachableRoom() && TARGET && TARGET.id && !mentionsObject(text, TARGET.id)) {
+      text += ' ' + TARGET.id;
+    }
+
     chatState.sending = true;
     if (err) err.textContent = '';
-    window.__TAURI__.core.invoke('matrix_send', {
-      guildId: chatState.guildId, roomId: chatState.roomId, body: text,
-      msgtype: msgtype,
+
+    // Speaking is what joins you. A room the player never said anything in is
+    // not a room they wanted, so the membership is bought at the moment they
+    // show they want it — not when the window happened to open.
+    var ready = inRoom() || !reachableRoom()
+      ? Promise.resolve()
+      : window.__TAURI__.core.invoke('matrix_object_room_create', { objectId: TARGET.id })
+          .then(function (res) {
+            chatState.room = Object.assign({}, chatState.room, res, { joined: true });
+          });
+
+    ready.then(function () {
+      var target = inRoom() ? chatState.room.room_id : chatState.roomId;
+      if (!target) throw new Error('no room to send to');
+      return window.__TAURI__.core.invoke('matrix_send', {
+        guildId: chatState.guildId, roomId: target, body: text, msgtype: msgtype,
+      });
     }).then(function () {
       chatState.sending = false;
       input.value = '';
-      // The panel reads by SEARCH, and a just-sent message is not indexed the
-      // instant it lands. Re-reading immediately would usually show nothing
-      // new and read as a failed send, so the refresh is deferred one beat.
-      setTimeout(function () { chatState.loading = false; loadChat(); }, 1200);
+      chatState.loading = false;
+      if (inRoom()) {
+        // A real room echoes the message straight back through sync, so there
+        // is nothing to wait for.
+        syncComposer();
+        loadChat();
+      } else {
+        // The search path is different: a just-sent message is not indexed the
+        // instant it lands, so re-reading now would show nothing new and read
+        // as a failed send. Deferred one beat.
+        setTimeout(function () { chatState.loading = false; loadChat(); }, 1200);
+      }
     }).catch(function (e) {
       chatState.sending = false;
       if (err) err.textContent = String(e).slice(0, 120);
     });
+  }
+
+  // A room we could be speaking in after one join — either it exists and we
+  // have not joined, or it does not exist and it is ours to create.
+  function reachableRoom() {
+    var r = chatState.room;
+    return !!(r && (r.joined || r.room_id || r.can_create));
   }
 
   function wireComposer() {
@@ -3575,6 +3736,15 @@
     COL: COL,
     domId: domId,
     _state: state,
+    // The comms rail's room state — which of "a room of its own" and "a
+    // search across every room" this panel is doing, and the two predicates
+    // that everything else keys off.
+    _chat: chatState,
+    _inRoom: inRoom,
+    _reachableRoom: reachableRoom,
+    _syncComposer: syncComposer,
+    _renderChat: renderChat,
+    _objectWord: objectWord,
     _applySnapshot: applySnapshot,
     _applyAttacks: applyAttacks,
     _applyDelta: applyDelta,

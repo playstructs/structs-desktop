@@ -81,6 +81,49 @@
     return null;
   }
 
+  /* TIME, on one ladder.
+   *
+   * There were three, with three different answers for the same instant: an
+   * `ago` that stepped at 90s and 90m and never reached days (three days ago
+   * read as "72h"), a `duration` that stepped at 60s and 60m and did reach
+   * them, and an `fmtEta` with no seconds rung at all — which reported a
+   * five-second cycle as "1m". Same class as the alpha ladder above: two
+   * presentations of one number tell the player two different stories.
+   *
+   * Options, because the CALLERS differ even though the ladder must not:
+   *   empty — what to print when there is no number. Pass `null` to render
+   *           nothing at all; a caller that omits the row entirely on absence
+   *           must not be handed a dash to display.
+   *   zero  — what to print at or below zero ("now" for an ETA, but a
+   *           duration of zero really is "0s").
+   */
+  function fmtDuration(seconds, opts) {
+    opts = opts || {};
+    // `'empty' in opts`, not `opts.empty || '—'`: a caller that deliberately
+    // wants NOTHING passes null, and `||` would silently hand it the dash.
+    var blank = 'empty' in opts ? opts.empty : '—';
+    if (seconds == null || isNaN(seconds)) return blank;
+    var s = Math.max(0, Number(seconds));
+    if (s <= 0 && 'zero' in opts) return opts.zero;
+    if (s < 60) return Math.round(s) + 's';
+    if (s < 3600) return Math.round(s / 60) + 'm';
+    if (s < 86400) return trim1(s / 3600) + 'h';
+    return Math.round(s / 86400) + 'd';
+  }
+
+  function trim1(v) { return v.toFixed(1).replace(/\.0$/, ''); }
+
+  /* How long ago, from an absolute timestamp.
+   *
+   * The same ladder, reached through a subtraction — not a second one. `ago`
+   * was where the missing days rung actually hurt: a console that runs for
+   * days is exactly where "72h" turns up.
+   */
+  function fmtAgo(ms, opts) {
+    if (!ms) return (opts && 'empty' in opts) ? opts.empty : '—';
+    return fmtDuration((Date.now() - ms) / 1000, opts);
+  }
+
   root.StructsUnits = {
     SCALES: SCALES,
     trim2: trim2,
@@ -91,5 +134,7 @@
     fmtWatts: function (mw) { return fmtScale(mw, 'power'); },
     fmtOre: function (g) { return fmtScale(g, 'ore'); },
     parseAlpha: function (t) { return parse(t, 'alpha'); },
+    fmtDuration: fmtDuration,
+    fmtAgo: fmtAgo,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

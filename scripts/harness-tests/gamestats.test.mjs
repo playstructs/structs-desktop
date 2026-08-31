@@ -131,6 +131,28 @@ async function until(fn, ms = 5000) {
     subnav.length === 2 && !subnav.includes('Universe'), JSON.stringify(subnav));
   check('gamestats page stays hidden on the main board',
     w.document.getElementById('page-gamestats').hidden === true);
+
+  /* Manifest invariants. AREAS is the whole navigation, so a mistake in it is
+   * a section a player cannot find or cannot tell apart, and nothing else
+   * fails when it happens.
+   */
+  const sections = w.Board.AREAS.flatMap(
+    (a) => a.sections.map((sec) => ({ area: a.label, ...sec })));
+
+  // Two sections labelled "Doctrine" shipped in different areas, and the
+  // sub-nav is all that distinguishes them: a player who remembered the word
+  // could not know which one they wanted.
+  const byLabel = {};
+  sections.forEach((sec) => { (byLabel[sec.label] ||= []).push(sec.area); });
+  const dupes = Object.entries(byLabel).filter(([, areas]) => areas.length > 1);
+  check('no section label is used in two areas',
+    dupes.length === 0, JSON.stringify(dupes));
+
+  // A nav entry pointing at an unregistered page is a tab that goes nowhere.
+  const orphans = sections.filter((sec) => !w.Board.pages[sec.page]);
+  check('every section points at a registered page',
+    orphans.length === 0, orphans.map((o) => o.label + '→' + o.page).join(', '));
+
   w.close();
 }
 
@@ -203,6 +225,67 @@ async function until(fn, ms = 5000) {
     link.title.includes('open Comms'), link.title);
   check('…naming the player, not their id alone',
     /could not message \S/.test(link.title), link.title);
+}
+
+// ── A chart must not invent readings ───────────────────────────────────────
+//
+// The producer's totals are empty until the first sweep lands, so the blocks
+// before it genuinely have no structs/raids/draw figure. Recording those as 0
+// put a false floor in the series: a sparkline scales from its own minimum, so
+// one bogus zero flattened an hour of real movement into a sliver and drew a
+// cliff out of a galaxy that had never been empty. Nulls, and a broken line.
+{
+  const dom = await load('?view=gamestats');
+  const w = dom.window;
+  await until(() => w.Board && w.Board._gamestats && w.Board._gamestats.state.snap);
+  const G = w.Board._gamestats;
+  const d = w.document;
+
+  // The fixture's first three blocks carry nulls, as the real cold start does.
+  const structs = G.seriesValues('structs');
+  check('an unswept block reads as unknown, not as zero',
+    structs.slice(0, 3).every((v) => v === null) && structs[3] > 0,
+    JSON.stringify(structs.slice(0, 4)));
+
+  // A genuine zero is data and must survive — the distinction the old
+  // `Number(x) || 0` collapsed in both directions.
+  G.state.snap.series = [{ z: 0 }, { z: null }, { z: 5 }];
+  check('a real zero is kept while a gap stays a gap',
+    JSON.stringify(G.seriesValues('z')) === '[0,null,5]',
+    JSON.stringify(G.seriesValues('z')));
+
+  const path = (vals) => {
+    const p = G.sparkline(vals).querySelector('path');
+    return p ? p.getAttribute('d') : '';
+  };
+
+  // The failure that renders as an empty chart with no error: one non-finite
+  // value anywhere in `d` invalidates the whole attribute.
+  const withGap = path([5, 6, null, 8, 9]);
+  check('a gap never puts NaN in the path', !/NaN/.test(withGap), withGap);
+  check('...and breaks the line rather than drawing through it',
+    (withGap.match(/M/g) || []).length === 2, withGap);
+
+  // The bug itself, stated as geometry: with the gap excluded from scaling,
+  // the drawn points must span the chart's height. A false zero in the data
+  // would pin the minimum to the floor and bunch every real value at the top.
+  const ys = [...path([100, 101, null, 102, 103]).matchAll(/[ML][\d.]+ ([\d.]+)/g)]
+    .map((m) => Number(m[1]));
+  check('the gap does not drag the scale to zero',
+    Math.max(...ys) - Math.min(...ys) > 40, JSON.stringify(ys));
+
+  // Two samples with a gap between them are not a line: SVG draws two lone
+  // movetos as nothing at all, and an empty chart with no caption reads as
+  // broken rather than as early.
+  const island = G.sparkline([5, null, 7]);
+  check('an unjoinable pair says it is still collecting',
+    !island.querySelector('path') && /collecting/.test(island.textContent),
+    island.textContent);
+  const empty = G.sparkline([null, null, null]);
+  check('...as does a series with nothing in it yet',
+    !empty.querySelector('path') && /collecting/.test(empty.textContent));
+
+  w.close();
 }
 
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');

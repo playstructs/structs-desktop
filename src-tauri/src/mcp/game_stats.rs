@@ -112,6 +112,32 @@ fn with_cache<R>(f: impl FnOnce(&mut Cache) -> R) -> R {
 
 /// Guild API numerics arrive as strings (`"alpha": "1234"`); `as_f64()` alone
 /// reads them as zero. One tolerant reader everywhere.
+/// A number for the series, or `null` when we simply do not know yet.
+///
+/// `num` answers 0 for a missing key, which is right for a display tile —
+/// "0 raids" and "we have not counted raids" look the same to a reader, and
+/// both are harmless. It is WRONG for a time series. The totals map is empty
+/// until the first sweep lands, so every block tick before then recorded a
+/// hard 0 for structs, raids and draw, and those zeros stayed in the ring for
+/// its full 720 blocks — about an hour. A sparkline scales from its own min,
+/// so a single false zero flattened every real movement into a sliver and
+/// drew a cliff out of a galaxy that had never been empty.
+///
+/// Absence is reported as absence, and the renderer breaks the line across it.
+/// Note this keys off the KEY being present, not the value being non-zero: a
+/// genuine `0` raids is data and must still plot.
+fn opt_num(v: Option<&Value>) -> Value {
+    // `Value::Null` needs no arm of its own: it parses as neither a number nor
+    // a numeric string, so it lands on the same `Null` the missing key does,
+    // which is the answer we want for both.
+    v.and_then(|x| {
+        x.as_f64()
+            .or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))
+    })
+    .map(|n| json!(n))
+    .unwrap_or(Value::Null)
+}
+
 fn num(v: Option<&Value>) -> f64 {
     v.and_then(|x| {
         x.as_f64()
@@ -162,9 +188,11 @@ pub fn note_event(app: &tauri::AppHandle, event: &GameEvent) {
                 "events": c.counters.events,
                 "combat": c.counters.combat,
                 "tx": c.counters.tx,
-                "raids": num(c.totals.get("raids_active")) as u64,
-                "structs": num(c.totals.get("structs_total")) as u64,
-                "draw": num(c.totals.get("structs_draw")),
+                // `opt_num`, not `num`: a total we have not swept yet is
+                // null, never 0. See its doc comment.
+                "raids": opt_num(c.totals.get("raids_active")),
+                "structs": opt_num(c.totals.get("structs_total")),
+                "draw": opt_num(c.totals.get("structs_draw")),
             });
             c.counters = BlockCounters::default();
             if c.series.len() >= SERIES_CAP {
@@ -832,6 +860,37 @@ mod tests {
         assert_eq!(num(Some(&json!(3.5))), 3.5);
         assert_eq!(num(Some(&json!(null))), 0.0);
         assert_eq!(num(None), 0.0);
+    }
+
+    #[test]
+    fn a_total_we_have_not_swept_is_null_not_zero() {
+        let swept = json!({ "raids_active": 3, "structs_total": 42625 });
+        assert_eq!(opt_num(swept.get("raids_active")), json!(3.0));
+
+        // The whole point: absence must survive as absence. `num` answers 0
+        // here, which is fine for a tile and a lie in a time series — the
+        // sparkline scales from its own minimum, so a false zero flattens
+        // every real movement and draws a cliff.
+        assert_eq!(opt_num(swept.get("structs_draw")), Value::Null);
+        assert_eq!(num(swept.get("structs_draw")), 0.0);
+
+        // A cold cache is `Value::Null`, not an empty object, and `.get` on it
+        // yields None. This is the state every session starts in.
+        let cold = Value::Null;
+        assert_eq!(opt_num(cold.get("structs_total")), Value::Null);
+
+        // A genuine zero is DATA and must plot. Keyed off the key being
+        // present, never off the value being falsy.
+        let quiet = json!({ "raids_active": 0 });
+        assert_eq!(opt_num(quiet.get("raids_active")), json!(0.0));
+
+        // An explicit null, and a value that is not a number at all, are both
+        // "unknown" rather than zero.
+        let odd = json!({ "a": null, "b": "not a number", "c": "12" });
+        assert_eq!(opt_num(odd.get("a")), Value::Null);
+        assert_eq!(opt_num(odd.get("b")), Value::Null);
+        // Guild API numerics arrive as strings; those are known values.
+        assert_eq!(opt_num(odd.get("c")), json!(12.0));
     }
 
     #[test]

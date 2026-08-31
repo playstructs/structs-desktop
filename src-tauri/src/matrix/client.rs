@@ -3851,6 +3851,59 @@ pub async fn media_data_url(
     Ok((format!("data:{};base64,{}", mime, b64), mime))
 }
 
+/// Resolve a room ALIAS to a room id, anywhere in the federation.
+///
+/// `GET /directory/room/{alias}` is the one lookup that works across servers
+/// without the other side trusting us — the same fact `discovery.rs` is built
+/// on. `None` means no room with that alias exists yet, which for a per-object
+/// room is the ordinary case rather than an error.
+pub async fn room_id_for_alias(session: &Session, alias: &str) -> Option<String> {
+    let url = format!("{}/directory/room/{}", base(session), urlseg(alias));
+    let v = authed(session, move |c, s| c.get(&url).bearer_auth(&s.access_token))
+        .await
+        .ok()?;
+    v.get("room_id")?.as_str().map(|s| s.to_string())
+}
+
+/// Create a public room at `localpart` on OUR homeserver.
+///
+/// A client may only create an alias in its own server's namespace, so this
+/// can only ever make the rooms for objects our guild owns. Rooms for another
+/// guild's planets are theirs to create — which is why the caller treats a
+/// missing room as "not yet", never as a failure.
+pub async fn create_object_room(
+    session: &Session,
+    localpart: &str,
+    name: &str,
+    topic: &str,
+) -> Result<String, String> {
+    let url = format!("{}/createRoom", base(session));
+    let payload = json!({
+        "room_alias_name": localpart,
+        "name": name,
+        "topic": topic,
+        // Public and world-readable: a planet's conversation should be
+        // findable by anyone who can see the planet, including the guild
+        // raiding it. `preset` also publishes the join rule the directory
+        // lookup above relies on.
+        "preset": "public_chat",
+        "visibility": "public",
+    });
+    let v = authed(session, move |c, s| {
+        c.post(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await?;
+    v.get("room_id")
+        .and_then(|r| r.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "createRoom returned no room_id".to_string())
+}
+
+/// The server this session's own account lives on.
+pub fn own_server(session: &Session) -> String {
+    server_name(session)
+}
+
 /// Everyone in a room, as people rather than ids.
 ///
 /// The window had no way to answer "who is here" at all — the most basic
