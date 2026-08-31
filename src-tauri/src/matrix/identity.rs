@@ -147,6 +147,21 @@ mod tests {
     }
 
     #[test]
+    fn even_an_owned_name_has_to_be_legible() {
+        // An on-chain name is the one string this app trusts outright: it
+        // renders with no player id beside it, because the chain settles who
+        // owns it. The chain does NOT settle whether it can be read — nothing
+        // stops registering a name that reorders the text around it.
+        assert_eq!(sanitize("Mark\u{202E}lifer"), "Marklifer");
+        assert_eq!(sanitize("[SN.C]\u{200B} Corp"), "[SN.C] Corp");
+        // Ordinary names pass through untouched — this must not quietly
+        // rewrite what people are called.
+        for ok in ["Marklifer", "JPEG", "Kilgore Crabla", "T.Xue", "beezhan"] {
+            assert_eq!(sanitize(ok), ok);
+        }
+    }
+
+    #[test]
     fn a_name_that_paints_its_own_guild_badge_is_flagged() {
         assert!(claims_a_guild_tag("[SN.C] Marklifer"));
         assert!(claims_a_guild_tag("Marklifer]"));

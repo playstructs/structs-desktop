@@ -754,6 +754,12 @@ cat > "$CFIX" <<'EOF'
       icon: 'icon-member', members: 2, joined: true, unread: 0, section: 'direct',
       player_id: '1-61', tag: 'SN.C',
       pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}' },
+    // A direct message with NO player behind it: the other side's Matrix id
+    // is not a player id, so Rust classifies the room 'direct' but has no
+    // player_id to attach. Reading DM-ness off player_id rendered this as a
+    // channel with a member count.
+    { room_id: '!dm-bot:matrix.beta.playstructs.com', name: 'Indexer',
+      icon: 'icon-member', members: 2, joined: true, unread: 0, section: 'direct' },
   ];
 
   var PEOPLE = [

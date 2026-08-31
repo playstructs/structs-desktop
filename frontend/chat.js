@@ -291,6 +291,7 @@
   // Exposed so the tests can hold both copies to the same list.
   var REF_KINDS = { 0: 1, 1: 1, 2: 1, 4: 1, 5: 1, 9: 1, 10: 1 };
   Chat.REF_KINDS = REF_KINDS;
+  Chat.ID_RE = ID_RE;
 
   // id → card, or `false` while a lookup is in flight, or null when the chain
   // had nothing. Shared across the whole timeline: a room arguing about one
@@ -813,8 +814,17 @@
     var row = el('div', 'sui-result-row chat-room-row');
 
     var left = el('div', 'sui-result-row-left-section');
+    // Whether this is a PERSON is the server's classification, not something
+    // to infer from having a player id.
+    //
+    // `player_id` is only set when the other side's Matrix id parses as a
+    // player — so a direct message with a bot or a service account has none,
+    // and reading DM-ness off it rendered that room as a channel, complete
+    // with a member count, while Rust classified it 'direct' and notified it
+    // as a DM. `section` is what `dm_with` actually produces.
+    var isDm = r.section === 'direct';
     var portrait = el('div', 'sui-result-row-portrait');
-    if (r.pfp_attrs || r.player_id) {
+    if (r.pfp_attrs || r.player_id || isDm) {
       // A direct message IS a person — the same portrait the roster shows.
       portrait.appendChild(pfpPortrait(r.pfp_attrs));
     } else {
@@ -844,7 +854,12 @@
         // An invitation has no member count worth showing — you cannot see
         // the room yet. Who asked is the whole basis for deciding.
         ? [r.invited_by ? 'Invited by ' + r.invited_by : 'You have been invited']
-        : [fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')];
+        // "2 Players" under a direct message is a count of a conversation,
+        // which is not a fact anybody wants. A DM with no player behind it
+        // simply says nothing rather than pretending to be a channel.
+        : isDm
+          ? []
+          : [fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')];
       if (browsing) {
         // The ADDRESS — the one thing about a room that cannot be taken.
         // Anyone may publish a public room under any name, so two rows here

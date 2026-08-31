@@ -502,14 +502,17 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             identities.insert(
                 pid,
                 Identity {
-                    username: text(row.get("username")),
+                    // A leaderboard is read by eye and compared row to row, so
+                    // a name that can reorder the text around it is worth as
+                    // little here as it is in chat.
+                    username: crate::matrix::identity::sanitize(&text(row.get("username"))),
                     pfp: row.get("pfp").cloned().unwrap_or(Value::Null),
                     pfp_attrs: row
                         .get("pfp_client_render_attributes")
                         .cloned()
                         .unwrap_or(Value::Null),
-                    guild_name: text(row.get("guild_name")),
-                    tag: text(row.get("tag")),
+                    guild_name: crate::matrix::identity::sanitize(&text(row.get("guild_name"))),
+                    tag: crate::matrix::identity::sanitize(&text(row.get("tag"))),
                 },
             );
         }

@@ -189,6 +189,50 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     JSON.stringify(sent && sent.args.body));
   check('…and the box is cleared so it cannot be sent twice', input.value === '');
 
+  // ── A slash means the same thing here as in Comms ──────────────────────
+  // The rail has no commands. What matters is that it does not PUBLISH one:
+  // Comms answers `/foo` with "unknown command", and a rail that just sent it
+  // would post the player's mistake to the guild.
+  {
+    const err = d.getElementById('rv-chat-error');
+    const sends = () => w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_send');
+
+    const before = sends().length;
+    input.value = '/sweep all';
+    d.getElementById('rv-chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    check('an unknown command is not posted to the room', sends().length === before);
+    check('…and says where commands live', /Comms/.test(err.textContent), err.textContent);
+
+    input.value = '/me is out of charge';
+    d.getElementById('rv-chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    let last = sends().pop();
+    check('/me is an emote, as it is in Comms',
+      !!last && last.args.body === 'is out of charge' && last.args.msgtype === 'm.emote',
+      JSON.stringify(last && last.args));
+
+    // The escape exists precisely so someone can say "/me waves" literally.
+    // It is checked BEFORE /me, or it would be defeated by the thing it
+    // escapes — and it is why this parsing cannot live server-side.
+    input.value = '//me waves';
+    d.getElementById('rv-chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    last = sends().pop();
+    check('a doubled slash sends the literal text, not an emote',
+      !!last && last.args.body === '/me waves' && !last.args.msgtype,
+      JSON.stringify(last && last.args));
+
+    // Ordinary text is untouched by any of this.
+    input.value = 'they are down to one shield';
+    d.getElementById('rv-chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    last = sends().pop();
+    check('a message with no slash is sent unchanged',
+      !!last && last.args.body === 'they are down to one shield' && !last.args.msgtype,
+      JSON.stringify(last && last.args));
+  }
+
   // A composer that cannot send is worse than none: it invites a message the
   // player will lose.
   {

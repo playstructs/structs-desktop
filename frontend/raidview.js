@@ -689,10 +689,45 @@
     if (!input || chatState.sending) return;
     var text = input.value.trim();
     if (!text || !chatState.roomId) return;
+
+    /* A leading slash means the same things it means in Comms.
+     *
+     * Not because this rail has commands — it has none — but because the rail
+     * must not turn a typed command into a message posted to the guild. Comms
+     * answers `/foo` with "unknown command"; a rail that simply sent it would
+     * publish the mistake.
+     *
+     * The two rules that DO carry over are Comms' own, in its order: `//`
+     * escapes to a literal slash, and `/me` is an emote. The escape has to be
+     * checked first — it exists so that someone who wants to say "/me waves"
+     * literally can, and a rail that read `//me` as an emote would defeat the
+     * very thing they reached for.
+     *
+     * Deliberately NOT pushed down into `matrix_send`, which is where the
+     * mention fallback went: Comms strips `/me` itself and sends the remainder,
+     * so a server-side re-parse would turn an escaped `//me waves` — which
+     * arrives as the plain body `/me waves` — back into the emote the player
+     * escaped to avoid.
+     */
+    var msgtype = null;
+    if (text.indexOf('//') === 0) {
+      text = text.slice(1);
+    } else if (text.charAt(0) === '/') {
+      var m = /^\/me\s+([\s\S]+)$/.exec(text);
+      if (m) {
+        text = m[1];
+        msgtype = 'm.emote';
+      } else {
+        if (err) err.textContent = 'Commands live in Comms — this sends messages.';
+        return;
+      }
+    }
+
     chatState.sending = true;
     if (err) err.textContent = '';
     window.__TAURI__.core.invoke('matrix_send', {
       guildId: chatState.guildId, roomId: chatState.roomId, body: text,
+      msgtype: msgtype,
     }).then(function () {
       chatState.sending = false;
       input.value = '';

@@ -96,7 +96,22 @@
     /* Repeat counter: 54 identical auto_harvest lines collapse to one row. */
     .feed-count { flex: none; padding: 0 5px; font-size: 10px; letter-spacing: .5px;
       border: 1px solid var(--accent-secondary); color: var(--accent-secondary); }
-    .feed-msg { min-width: 0; overflow-wrap: anywhere; }
+    .feed-msg { min-width: 0; overflow-wrap: anywhere; text-align: left; }
+    /* Quiet until wanted. One visible button per row would turn a list people
+       read for its TEXT into a column of buttons; `margin-left: auto` keeps it
+       pinned right so rows do not jitter when it appears. Focus-visible as
+       well as hover, so it is reachable without a mouse. */
+    .feed-share {
+      flex: none; margin-left: auto; opacity: 0;
+      color: var(--text-hint, #A7C0C6); text-decoration: none;
+      transition: opacity .12s ease-out;
+    }
+    #feed-list li:hover .feed-share,
+    #feed-alerts li:hover .feed-share,
+    .feed-share:focus-visible { opacity: 1; }
+    .feed-share:hover { color: var(--accent-primary, #4FD1C5); }
+    /* Told already — so a glance down the feed says what has been passed on. */
+    .feed-share.feed-shared { opacity: 1; color: var(--accent-secondary, #8FB8FF); }
     #feed-alerts { list-style: none; margin: 0; padding: 0; width: 100%;
       font-family: monospace; font-size: 12px; }
     #feed-alerts li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; }
@@ -996,6 +1011,8 @@
     window.SUIRuntime = { offcanvas: offcanvas };
     window.dispatchEvent(new Event('sui-ready'));
   </script>
+  <!-- Unit ladders first: board.js aliases them at module load. -->
+  <script src="units.js"></script>
   <script src="board-shim.js"></script>
   <script src="ui-telemetry.js"></script>
   <script src="board.js"></script>

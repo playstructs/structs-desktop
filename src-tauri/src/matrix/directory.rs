@@ -75,8 +75,15 @@ pub async fn ensure_fresh() {
             found.insert(
                 pid,
                 Ident {
-                    username: text(row.get("username")),
-                    tag: text(row.get("tag")),
+                    // Sanitized even though the chain settles OWNERSHIP of this
+                    // name. Owning a name and the name being legible are
+                    // different things: nothing stops a player registering one
+                    // that carries a bidi override or a zero-width joiner, and
+                    // this string is the one the window trusts outright — it is
+                    // the branch of `sender_display` that returns early with no
+                    // player id beside it.
+                    username: crate::matrix::identity::sanitize(&text(row.get("username"))),
+                    tag: crate::matrix::identity::sanitize(&text(row.get("tag"))),
                     guild_id: cfg.guild_id.clone(),
                     pfp_attrs: if attrs.trim().is_empty() { None } else { Some(attrs) },
                 },
@@ -137,7 +144,9 @@ pub async fn resolve(player_id: &str) -> Option<Ident> {
     let guild_id = text(p.get("guildId"));
     let attrs = text(p.get("pfpClientRenderAttributes"));
     let ident = Ident {
-        username: text(p.get("name")),
+        // Same reasoning as the roster path above: owned is not the same as
+        // legible.
+        username: crate::matrix::identity::sanitize(&text(p.get("name"))),
         // The chain has no guild TAG — that is the guild's own cosmetic name,
         // which the directory config already carries.
         tag: crate::guild_config::get_guild_configs()

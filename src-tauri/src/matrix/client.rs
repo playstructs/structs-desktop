@@ -543,7 +543,12 @@ const SETUP_EVENTS: &[&str] = &[
 /// rooms, and "Marklifer said it was fine" needs to mean Marklifer.
 fn sender_display(sender: &str, ident: Option<&directory::Ident>, gs: &GuildState) -> String {
     if let Some(name) = ident.map(|i| i.username.clone()).filter(|n| !n.is_empty()) {
-        return name;                    // on-chain, and nobody else's to take
+        // On-chain, and nobody else's to TAKE — which is why it needs no player
+        // id beside it. It is already sanitized at ingestion (directory.rs),
+        // because owning a name and the name being legible are different
+        // things: the chain settles the first and says nothing about the
+        // second.
+        return name;
     }
     // Everything below is SELF-CHOSEN: any account may set any string, and
     // federation means the account need not even be on our homeserver. It is
@@ -752,10 +757,15 @@ fn edited_body(content: &Value) -> Option<String> {
 
 /// Apply an edit to the message it replaces. Returns whether one was found.
 ///
-/// Only the sender may rewrite their own words. The homeserver enforces this
-/// too, but a client that displayed somebody else's "edit" of your message
-/// would be putting words in your mouth on the strength of an unchecked
-/// field.
+/// Only the sender may rewrite their own words, and checking that is THIS
+/// side's job.
+///
+/// The spec puts the obligation on the client: a replacement must carry the
+/// same `sender` as the event it replaces, and a client is to ignore one that
+/// does not. Do not delete the check below on the assumption the homeserver
+/// already made it — an `m.replace` is an ordinary message event, and a room
+/// full of strangers is exactly where somebody would try rewriting your
+/// words with one.
 fn apply_edit(gs: &mut GuildState, room_id: &str, ev: &Value) -> Option<String> {
     let content = ev.get("content")?;
     let target = replaces(content)?;
@@ -1107,12 +1117,22 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
     // is EXACT — the word-boundary guess in the window is only a fallback for
     // clients that do not send it. The live Orbital Hydro room already
     // contains messages carrying it.
-    let mentions_me = content
+    let addressed_to_me = content
         .get("m.mentions")
         .and_then(|m| m.get("user_ids"))
         .and_then(|u| u.as_array())
         .map(|a| a.iter().any(|v| v.as_str() == Some(me)))
         .unwrap_or(false);
+    // …and the fallback the comment above promises, actually applied.
+    //
+    // These were two different questions with two different answers. The UI
+    // highlighted on the exact signal ONLY, and the notifier matched the body
+    // text ONLY — so a spec-compliant mention whose body does not spell your
+    // name highlighted without ever interrupting you, and a mention from a
+    // client too old to send `m.mentions` interrupted you without highlighting.
+    // Each surface was missing exactly what the other had.
+    let mentions_me = addressed_to_me
+        || (sender != me && is_mention(&body, &my_names(me)));
 
     // Where the picture lives, for the ones that have one.
     let media = if kind == "image" {
@@ -1641,6 +1661,35 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         }
         if !rendered.is_empty() {
             let buf = gs.timelines.entry(room_id.clone()).or_default();
+
+            /* The same batch twice is not the same message twice.
+             *
+             * A client retries `/sync` with the SAME `since` token until it
+             * gets a response it managed to process, so a batch arriving again
+             * is ordinary behaviour rather than a server misbehaving —
+             * `apply_reaction` says as much where it dedupes reactors, and the
+             * timeline simply did not do the equivalent. A dropped connection
+             * mid-conversation therefore printed the whole batch a second time.
+             *
+             * Keyed on the server's event id, so only events the homeserver has
+             * actually named are deduped: a local echo has no id yet, and a gap
+             * marker is a rendering of a discontinuity rather than an event.
+             */
+            let seen: std::collections::HashSet<&str> = buf
+                .iter()
+                .filter(|m| m.event_id.starts_with('$'))
+                .map(|m| m.event_id.as_str())
+                .collect();
+            let fresh: Vec<Message> = rendered
+                .iter()
+                .filter(|m| !(m.event_id.starts_with('$') && seen.contains(m.event_id.as_str())))
+                .cloned()
+                .collect();
+            if fresh.is_empty() {
+                continue;               // nothing new; not even a gap to mark
+            }
+            let rendered = fresh;
+
             // Only when there is something to be discontinuous WITH. A
             // limited first batch is not a gap; it is simply where our view
             // of the room starts, and the scrollback control already says so.
@@ -1819,9 +1868,9 @@ fn drain_pending_identity() -> Vec<String> {
 
 /// The names that count as "me" in a message body: the on-chain username and
 /// the player id. Matched at word boundaries — see `is_mention`.
-fn my_names(session: &Session) -> Vec<String> {
+fn my_names(user_id: &str) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(pid) = directory::player_id_of(&session.user_id) {
+    if let Some(pid) = directory::player_id_of(user_id) {
         if let Some(ident) = directory::get(&pid) {
             if !ident.username.is_empty() {
                 out.push(ident.username);
@@ -1916,10 +1965,12 @@ fn maybe_notify(
             .map(|gs| gs.dm_with.contains_key(room_id))
             .unwrap_or(false)
     };
-    let names = my_names(session);
-    let hit = messages.iter().find(|m| {
-        !m.is_self && m.kind != "unknown" && (is_dm || is_mention(&m.body, &names))
-    });
+    // Asked of the MESSAGE, not worked out a second time: `mentions_me` is
+    // already the exact signal plus the text fallback, and a notifier with its
+    // own opinion is how the badge and the notification came to disagree.
+    let hit = messages
+        .iter()
+        .find(|m| !m.is_self && m.kind != "unknown" && (is_dm || m.mentions_me));
     let Some(m) = hit else { return };
     if !claim_notify_slot(room_id) {
         return;
@@ -2807,6 +2858,20 @@ pub fn seed_timeline(guild_id: &str, room_id: &str, messages: Vec<Message>) {
     // anything the cache already held that the page does not cover is newer
     // than all of it.
     merged.extend(arrived_meanwhile);
+    /* A page fetched into a FULL cache does not survive in the cache.
+     *
+     * The page sits in front and the trim below takes the front, so in a room
+     * already holding TIMELINE_CAP messages the 40 discarded are exactly the
+     * 40 just fetched. That is the right bound for a cache whose job is the
+     * most recent conversation — and it costs the player nothing visible,
+     * because `matrix_backfill` hands the page straight to the window rather
+     * than having it re-read from here.
+     *
+     * Written down because the merge above reads as though seeding preserves
+     * the page: it preserves messages that arrived DURING the fetch, which is
+     * a different problem. Do not "fix" the trim to take from the end — the
+     * end is the newest, which is the part the cache exists to hold.
+     */
     if merged.len() > TIMELINE_CAP {
         let cut = merged.len() - TIMELINE_CAP;
         merged.drain(..cut);
@@ -4745,6 +4810,126 @@ mod tests {
         assert_eq!(m.thread_root, None);
     }
 
+    /// Scrolling up in a room already at the cache cap.
+    ///
+    /// `seed_timeline` puts the fetched page in front and then trims the
+    /// front when the result is over `TIMELINE_CAP` — so the page can be
+    /// exactly what gets dropped. This test states what actually happens,
+    /// whichever way it comes out, because "history you just asked for"
+    /// silently going missing is worth knowing about either way.
+    #[test]
+    fn a_backfill_into_a_full_cache() {
+        let msg = |id: &str, body: &str| Message {
+            event_id: id.into(),
+            sender: "@a:h".into(),
+            sender_name: "a".into(),
+            sender_tag: None,
+            pfp_attrs: None,
+            player_id: None,
+            body: body.into(),
+            kind: "text".into(),
+            is_self: false,
+            admin: false,
+            ts: 1,
+            mentions_me: false,
+            reactions: Vec::new(),
+            reply_to: None,
+            reply_sender: None,
+            reply_excerpt: None,
+            thread_root: None,
+            work: None,
+            edited: false,
+            mxc: None,
+            width: None,
+            height: None,
+        };
+
+        // A room sitting at the cap, as a busy guild room would be.
+        {
+            let mut map = STATE.write().unwrap();
+            let gs = map.entry("cap".to_string()).or_default();
+            let full: Vec<Message> = (0..TIMELINE_CAP)
+                .map(|i| msg(&format!("$live{i}"), "live"))
+                .collect();
+            gs.timelines.insert("!r:h".to_string(), full);
+        }
+
+        // One page of scrollback, the size the window actually asks for.
+        let page: Vec<Message> = (0..40).map(|i| msg(&format!("$old{i}"), "history")).collect();
+        seed_timeline("cap", "!r:h", page);
+
+        let map = STATE.read().unwrap();
+        let buf = &map["cap"].timelines["!r:h"];
+        assert_eq!(buf.len(), TIMELINE_CAP, "the cache stays bounded");
+        let kept_history = buf.iter().filter(|m| m.body == "history").count();
+        // The page goes in FRONT and the trim takes the front, so the 40
+        // messages discarded are exactly the 40 just fetched — every live
+        // message survives untouched.
+        assert_eq!(kept_history, 0, "history survived the trim");
+        assert_eq!(buf[0].event_id, "$live0", "a live message was dropped instead");
+        assert_eq!(buf[TIMELINE_CAP - 1].event_id, format!("$live{}", TIMELINE_CAP - 1));
+    }
+
+    /// The same batch twice must not be the same message twice.
+    ///
+    /// A client retries `/sync` with the SAME `since` token until it gets a
+    /// response it could process, so re-delivery of a batch is ordinary
+    /// behaviour rather than a server misbehaving — `apply_reaction` already
+    /// says as much where it dedupes reactors.
+    #[test]
+    fn a_replayed_batch_does_not_double_the_timeline() {
+        let s = session();
+        let batch = json!({
+            "next_batch": "s1",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] },
+                "timeline": { "events": [
+                    { "type": "m.room.message", "event_id": "$one", "sender": "@a:h",
+                      "origin_server_ts": 1,
+                      "content": { "msgtype": "m.text", "body": "hello" } }
+                ] }
+            } } }
+        });
+        apply_sync("dup", &s, &batch);
+        apply_sync("dup", &s, &batch);
+
+        let bodies = || -> Vec<String> {
+            STATE.read().unwrap()["dup"].timelines["!r:example.com"]
+                .iter()
+                .map(|m| m.body.clone())
+                .collect()
+        };
+        assert_eq!(bodies(), vec!["hello".to_string()], "the batch was applied twice");
+
+        // The overlap case, which is the realistic one: a retry that returns
+        // what we already have PLUS what arrived since. Dropping the whole
+        // batch because part of it was familiar would lose the new message.
+        let overlap = json!({
+            "next_batch": "s2",
+            "rooms": { "join": { "!r:example.com": {
+                "state": { "events": [] },
+                "timeline": { "events": [
+                    { "type": "m.room.message", "event_id": "$one", "sender": "@a:h",
+                      "origin_server_ts": 1,
+                      "content": { "msgtype": "m.text", "body": "hello" } },
+                    { "type": "m.room.message", "event_id": "$two", "sender": "@a:h",
+                      "origin_server_ts": 2,
+                      "content": { "msgtype": "m.text", "body": "and again" } }
+                ] }
+            } } }
+        });
+        let d = apply_sync("dup", &s, &overlap);
+        assert_eq!(bodies(), vec!["hello".to_string(), "and again".to_string()]);
+        // And the window is told about the new one ONLY — a delta carrying the
+        // duplicate would repaint it however well the buffer behaved.
+        let said: Vec<String> = d
+            .deltas
+            .iter()
+            .flat_map(|(_, ms)| ms.iter().map(|m| m.body.clone()))
+            .collect();
+        assert_eq!(said, vec!["and again".to_string()]);
+    }
+
     /// An edit rewrites a message; it is not a second message.
     #[test]
     fn an_edit_replaces_rather_than_appends() {
@@ -4790,9 +4975,10 @@ mod tests {
         assert!(msgs()[0].edited, "the change is shown, not hidden");
         assert!(d.deltas.is_empty(), "an edit is not new traffic");
 
-        // Only the sender may rewrite their own words. The homeserver enforces
-        // this, but a client that trusted the field would put words in
-        // somebody's mouth on the strength of an unchecked value.
+        // A forged edit: somebody ELSE claiming to replace this message. The
+        // spec makes ignoring it the client's job, so this is the check
+        // standing between a stranger and words in your mouth — not a
+        // belt-and-braces double of something the server did.
         let forged = json!({
             "next_batch": "s3",
             "rooms": { "join": { "!r:example.com": {
@@ -5189,12 +5375,67 @@ mod tests {
         }
     }
 
+    /// "Was this aimed at me" has ONE answer, and both surfaces use it.
+    ///
+    /// The badge read the spec's `m.mentions` only; the notifier matched the
+    /// body text only. So a mention that named me properly highlighted without
+    /// interrupting, and one from a client too old to send `m.mentions`
+    /// interrupted without highlighting — each surface missing exactly what
+    /// the other had.
+    #[test]
+    fn a_mention_is_the_exact_signal_or_the_text_fallback() {
+        let gs = GuildState::default();
+        let me = "@7-8001:example.com";
+        directory::learn_server_name("7-8", me);
+        directory::remember_for_test(
+            "7-8001",
+            directory::Ident {
+                username: "Solenne".into(),
+                tag: String::new(),
+                guild_id: "7-8".into(),
+                pfp_attrs: None,
+            },
+        );
+
+        let say = |body: &str, mentions: Option<Value>| {
+            let mut content = json!({ "msgtype": "m.text", "body": body });
+            if let Some(m) = mentions {
+                content["m.mentions"] = m;
+            }
+            let ev = json!({
+                "type": "m.room.message", "event_id": "$m", "sender": "@other:h",
+                "origin_server_ts": 1, "content": content
+            });
+            render_event(&ev, &gs, "!r:h", me).unwrap().mentions_me
+        };
+
+        // The spec's own answer, with a body that never spells my name. This
+        // is what Element sends for a pill, and it used to reach the badge but
+        // never the notifier.
+        assert!(say("are you around?", Some(json!({ "user_ids": [me] }))));
+
+        // The fallback, for a client that sends no `m.mentions` at all. This
+        // reached the notifier but never the badge.
+        assert!(say("@Solenne are you around?", None));
+        // The player id works as a name too — players talk in ids.
+        assert!(say("7-8001 are you around?", None));
+
+        // Neither: an ordinary message stays quiet.
+        assert!(!say("has anyone seen the shield?", None));
+        // Somebody ELSE being mentioned is not me being mentioned.
+        assert!(!say("hello", Some(json!({ "user_ids": ["@1-61:example.com"] }))));
+        // A name inside a longer word is not a mention.
+        assert!(!say("the Solennes are here", None));
+
+        directory::forget_for_test("7-8001");
+    }
+
     #[test]
     fn a_short_name_is_not_matched_at_all() {
         // A one-character username would fire on almost every message; better
         // to miss those mentions than to interrupt constantly.
         let s = Session { user_id: "@1-1:example.com".into(), ..session() };
-        assert!(!my_names(&s).iter().any(|n| n.chars().count() < 2));
+        assert!(!my_names(&s.user_id).iter().any(|n| n.chars().count() < 2));
     }
 
     #[test]

@@ -325,39 +325,23 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
     // ── Unit Display Formatter ──
     // Mirrors structs.UNIT_DISPLAY_FORMAT from structs-pg
+    /* Alpha, ore and power, on the game's own ladders.
+     *
+     * The tables live in units.js rather than here. This file used to carry a
+     * third private copy of them — after board.js's and Rust's — and copies of
+     * these tables have already drifted once: the Rust suite still records that
+     * ore's Tg divisor was 1e12 in one place and 1e18 in another, a factor of a
+     * million on a number a player reads as a holding.
+     */
     function formatUnit(amount, denom) {
       if (amount == null || amount === '?') return '?';
       var num = parseFloat(amount);
       if (isNaN(num)) return String(amount);
-      var len = Math.floor(num).toString().length;
-
-      if (denom === 'ualpha' || !denom) {
-        // Alpha Matter: ualpha → μg, mg, g, Kg, Tg
-        var exp, postfix;
-        if (len >= 16)      { exp = 18; postfix = 'Tg'; }
-        else if (len >= 10) { exp = 9;  postfix = 'Kg'; }
-        else if (len >= 6)  { exp = 6;  postfix = 'g'; }
-        else if (len >= 3)  { exp = 3;  postfix = 'mg'; }
-        else                { exp = 0;  postfix = 'μg'; }
-        return (num / Math.pow(10, exp)).toFixed(2).replace(/\.?0+$/, '') + postfix;
-
-      } else if (denom === 'ore') {
-        // Ore: g, Kg, Tg
-        if (len >= 12)      { exp = 12; postfix = 'Tg'; }
-        else if (len >= 4)  { exp = 3;  postfix = 'Kg'; }
-        else                { exp = 0;  postfix = 'g'; }
-        return (num / Math.pow(10, exp)).toFixed(2).replace(/\.?0+$/, '') + postfix;
-
-      } else if (denom === 'milliwatt') {
-        // Power: mW, W, KW, MW, TW
-        if (len >= 16)      { exp = 18; postfix = 'TW'; }
-        else if (len >= 10) { exp = 9;  postfix = 'MW'; }
-        else if (len >= 6)  { exp = 6;  postfix = 'KW'; }
-        else if (len >= 3)  { exp = 3;  postfix = 'W'; }
-        else                { exp = 0;  postfix = 'mW'; }
-        return (num / Math.pow(10, exp)).toFixed(2).replace(/\.?0+$/, '') + postfix;
-      }
-
+      var U = window.StructsUnits;
+      if (denom === 'ore') return U.fmtOre(num);
+      if (denom === 'milliwatt') return U.fmtWatts(num);
+      // No denom means Alpha: the debug panel's commonest column.
+      if (denom === 'ualpha' || !denom) return U.fmtAlpha(num);
       return String(amount);
     }
 

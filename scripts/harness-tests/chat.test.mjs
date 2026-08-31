@@ -10,7 +10,7 @@
 import { JSDOM } from 'jsdom';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const harness = resolve(repo, 'frontend', '_harness_chat.html');
@@ -66,22 +66,37 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   // and live in Browse — a list that mixes "your channels" with "every
   // channel on the server" answers neither question.
   const rows = all(d, '.sui-result-row');
-  check('only joined rooms are listed', rows.length === 4, String(rows.length));
+  check('only joined rooms are listed', rows.length === 5, String(rows.length));
   check('an unjoined room is not here',
     !rows.some((r) => text(r).startsWith('Alpha Base')),
     rows.map((r) => text(r)).join(' | '));
 
   // Grouping follows the fixture's `section`, not row order. People first.
   const groups = all(d, '.chat-net-group');
-  const dmRows = groups[0].querySelectorAll('.sui-result-row');
-  check('direct holds the one DM', dmRows.length === 1, String(dmRows.length));
-  check('a DM is titled by the person, not the room',
-    text(dmRows[0]).startsWith('JPEG'), text(dmRows[0]));
+  const dmRows = Array.from(groups[0].querySelectorAll('.sui-result-row'));
+  check('direct holds the DMs', dmRows.length === 2, String(dmRows.length));
+  // Picked by name rather than position: the order is roomOrder's business,
+  // and an index would make this test depend on it for no reason.
+  const jpeg = dmRows.find((r) => text(r).startsWith('JPEG'));
+  check('a DM is titled by the person, not the room', !!jpeg,
+    dmRows.map((r) => text(r)).join(' | '));
   check('a DM is subtitled by their player id',
-    text(dmRows[0]).includes('PID #1-61'), text(dmRows[0]));
+    text(jpeg).includes('PID #1-61'), text(jpeg));
   check('a DM shows a portrait, not a channel glyph',
-    dmRows[0].querySelectorAll('.pfp-viewer-layer').length === 5,
-    String(dmRows[0].querySelectorAll('.pfp-viewer-layer').length));
+    jpeg.querySelectorAll('.pfp-viewer-layer').length === 5,
+    String(jpeg.querySelectorAll('.pfp-viewer-layer').length));
+
+  // A DM with no PLAYER behind it — a bot, a service account — is still a DM.
+  // `player_id` is absent for those, so anything reading DM-ness off it turned
+  // the room into a channel: a member count, a channel glyph, the lot.
+  const bot = dmRows.find((r) => text(r).startsWith('Indexer'));
+  check('a DM with a non-player is still a DM', !!bot,
+    dmRows.map((r) => text(r)).join(' | '));
+  check('…so it is not given a member count',
+    !!bot && !/Players?/.test(text(bot)), bot && text(bot));
+  check('…and it wears a portrait, not a channel glyph',
+    !!bot && bot.querySelector('.chat-room-icon') === null
+      && bot.querySelector('.pfp-viewer-layer') !== null);
 
   const localRows = groups[1].querySelectorAll('.sui-result-row');
   check('local net holds the one joined room', localRows.length === 1, String(localRows.length));
@@ -96,7 +111,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('no JOIN buttons in your own channel list',
     all(d, '.sui-result-row button').length === 0,
     String(all(d, '.sui-result-row button').length));
-  check('every listed room is clickable', all(d, '.chat-room-row').length === 4,
+  check('every listed room is clickable', all(d, '.chat-room-row').length === 5,
     String(all(d, '.chat-room-row').length));
 
   // Only the player's OWN guild is offered — no other guild will authenticate them.
@@ -513,10 +528,33 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('a provider id IS referenced', ids('10-1') === '10-1', ids('10-1'));
   // The set exists in Rust too. Adding a type in one place and not the other
   // means the id is marked but never carded, or carded but never marked.
-  check('the referenceable set matches Rust',
-    Object.keys(w.Chat.REF_KINDS).map(Number).sort((a, b) => a - b).join(',')
-      === '0,1,2,4,5,9,10',
-    Object.keys(w.Chat.REF_KINDS).join(','));
+  //
+  // Read OUT OF the Rust source rather than compared to a literal copied from
+  // it: a literal only pins the JS side, so changing `is_referenceable` alone
+  // would leave this passing while the two languages disagreed — which is the
+  // exact failure the check exists to catch.
+  {
+    const refs = readFileSync(repo + '/src-tauri/src/matrix/refs.rs', 'utf8');
+    const m = /fn is_referenceable\(kind: u8\) -> bool \{\s*matches!\(kind,([^)]*)\)/.exec(refs);
+    const rust = m ? m[1].split('|').map((x) => x.trim()).filter(Boolean).sort((a, b) => a - b) : null;
+    const js = Object.keys(w.Chat.REF_KINDS).map(Number).sort((a, b) => a - b);
+    check('the referenceable set matches Rust',
+      !!rust && rust.join(',') === js.join(','),
+      'rust ' + (rust || []).join(',') + ' vs js ' + js.join(','));
+  }
+
+  // And the ID SHAPE itself, which is the other half of the same agreement:
+  // the window decides what LOOKS like an id, Rust decides what IS one, and a
+  // window that marks ids Rust rejects renders dead text as a link.
+  {
+    const refs = readFileSync(repo + '/src-tauri/src/matrix/refs.rs', 'utf8');
+    const bounds = /t\.len\(\) > (\d+) \|\| i\.len\(\) > (\d+)/.exec(refs);
+    const reSrc = String(w.Chat.ID_RE || '');
+    check('Rust bounds an id to 2 and 9 digits', !!bounds && bounds[1] === '2' && bounds[2] === '9',
+      bounds && bounds.slice(1).join('/'));
+    check('…and the window looks for exactly that shape',
+      /\\d\{1,2\}-\\d\{1,9\}/.test(reSrc), reSrc);
+  }
   check('a date is not an id', ids('2026-08') === '', ids('2026-08'));
 }
 

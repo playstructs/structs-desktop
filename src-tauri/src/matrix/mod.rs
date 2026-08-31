@@ -368,6 +368,21 @@ pub async fn matrix_send(
         })
         .collect();
 
+    // A caller that resolved nothing gets the on-chain directory tried for it.
+    //
+    // Comms does its own resolution against the room's members, which reaches
+    // people this cannot (a Matrix display name with no player behind it), so
+    // its answer is preferred whenever it found something. But it is no longer
+    // the ONLY window that sends: the raid view's Comms rail composes too, and
+    // it has no address book, so `@Marklifer` typed there notified nobody and
+    // said nothing about having failed. The same text in two windows must not
+    // mean two different things.
+    let pairs = if pairs.is_empty() {
+        mentions_from_directory(body)
+    } else {
+        pairs
+    };
+
     // Replying carries what is being answered, so the fallback other clients
     // rely on can be built in one place — see `client::send_full`.
     let reply = reply_to.as_ref().map(|r| client::Reply {
@@ -378,6 +393,43 @@ pub async fn matrix_send(
     let event_id =
         client::send_full(&session, &room_id, body, kind, &pairs, reply).await?;
     Ok(json!({ "event_id": event_id, "msgtype": kind, "mentioned": pairs.len() }))
+}
+
+/// `@name` in a message body, matched against the on-chain player directory.
+///
+/// Longest name first, so `@Net` inside `@Netlag` resolves to Netlag rather
+/// than truncating it — the same rule the window applies, for the same reason.
+/// The match is bounded on the right so a name is not found inside a longer
+/// one, and case-insensitive because nobody types a display name exactly.
+fn mentions_from_directory(body: &str) -> Vec<(String, String)> {
+    let lower = body.to_lowercase();
+    // The Matrix id is BUILT, not looked up: a player id is the localpart and
+    // the guild's homeserver is the host, which is the whole reason any player
+    // in the galaxy is addressable (see directory::server_name_for_guild).
+    let mut people: Vec<(String, String, String)> = directory::all()
+        .into_iter()
+        .filter(|(_, i)| !i.username.trim().is_empty())
+        .map(|(pid, i)| (i.username, pid, i.guild_id))
+        .collect();
+    people.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, player_id, guild_id) in people {
+        let needle = format!("@{}", name.to_lowercase());
+        let Some(at) = lower.find(&needle) else { continue };
+        // Bounded on the right: a name must not be found inside a longer one.
+        let after = lower[at + needle.len()..].chars().next();
+        if after.is_some_and(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)) {
+            continue;
+        }
+        let Some(server) = directory::server_name_for_guild(&guild_id) else { continue };
+        let user_id = format!("@{player_id}:{server}");
+        if out.iter().any(|(_, u)| *u == user_id) {
+            continue;
+        }
+        out.push((name, user_id));
+    }
+    out
 }
 
 #[tauri::command]
@@ -1600,6 +1652,60 @@ pub fn boot(app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    use super::directory::{self, Ident};
+
+    /// `@name` has to mean the same thing wherever it is typed.
+    ///
+    /// Comms resolves mentions against the room's own members, which reaches
+    /// people the chain does not know. The raid view's Comms rail has no such
+    /// address book, so before this a name typed there notified nobody and
+    /// gave no sign of having failed.
+    #[test]
+    fn a_mention_resolves_without_the_chat_window() {
+        let mk = |name: &str| Ident {
+            username: name.into(),
+            tag: "SN.C".into(),
+            guild_id: "7-9".into(),
+            pfp_attrs: None,
+        };
+        directory::learn_server_name("7-9", "@7-9001:matrix.test");
+        directory::remember_for_test("7-9001", mk("Thessaly"));
+        directory::remember_for_test("7-9002", mk("Orrick"));
+        // A name that CONTAINS another: the boundary rule is what stops
+        // "@Net" being found inside it.
+        directory::remember_for_test("7-9003", mk("Vex"));
+        directory::remember_for_test("7-9004", mk("Vexation"));
+
+        let ids = |body: &str| -> Vec<String> {
+            let mut v: Vec<String> = super::mentions_from_directory(body)
+                .into_iter()
+                .map(|(_, u)| u)
+                .collect();
+            v.sort();
+            v
+        };
+
+        assert_eq!(ids("@Thessaly get over here"), vec!["@7-9001:matrix.test"]);
+        // Case, because nobody types a display name exactly.
+        assert_eq!(ids("thanks @orrick"), vec!["@7-9002:matrix.test"]);
+        // Longest first: @Netlag is Netlag, not Net with a stray "lag".
+        assert_eq!(ids("@Vexation ping"), vec!["@7-9004:matrix.test"]);
+        // …and the shorter name still resolves on its own.
+        assert_eq!(ids("@Vex ping"), vec!["@7-9003:matrix.test"]);
+        // Two people, once each, however often they are named.
+        assert_eq!(
+            ids("@Orrick and @Thessaly and @Orrick again"),
+            vec!["@7-9001:matrix.test", "@7-9002:matrix.test"],
+        );
+        // A name nobody has is not a mention, and neither is a bare word.
+        assert!(ids("@nobody hello").is_empty());
+        assert!(ids("Thessaly without the at sign").is_empty());
+
+        for pid in ["7-9001", "7-9002", "7-9003", "7-9004"] {
+            directory::forget_for_test(pid);
+        }
+    }
+
     /// Links in chat come from federated strangers, and this is the only
     /// thing standing between one of them and the OS's scheme handlers.
     #[test]

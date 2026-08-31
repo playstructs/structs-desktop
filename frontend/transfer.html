@@ -31,6 +31,7 @@
     .tx-fact { display: flex; gap: 10px; align-items: baseline; font-size: 12px; }
     .tx-fact-label { flex: 0 0 74px; color: var(--text-hint, #A7C0C6); }
     .tx-fact-value { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+    .tx-all { margin-left: 8px; color: var(--accent-primary, #4FD1C5); }
     /* SUI fields want a minimum width wider than this window; letting that
        through would push a horizontal scrollbar onto a 420px pane. */
     label.sui-input-text { min-width: 0; }
@@ -57,7 +58,7 @@
        inside it is styled by descendant rules. Putting the class on the input
        itself got a bare white browser box beside pixel-art buttons. -->
   <label class="sui-input-text" for="tx-amount">
-    <span>Amount (Alpha)</span>
+    <span>Amount — g, Kg, mg…</span>
     <input id="tx-amount" type="text" inputmode="decimal" placeholder="0" autocomplete="off">
   </label>
 
@@ -70,6 +71,7 @@
       <i class="icon-send-alpha"></i><span id="tx-send-label"> Send</span></a>
   </div>
 
+  <script src="units.js"></script>
   <script src="transfer.js"></script>
 </body>
 </html>

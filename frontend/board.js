@@ -227,31 +227,14 @@
   // A scale is also addressable BY NAME (fmtIn / SCALES) so an input can offer
   // "which unit am I typing in", which is the only honest way to ask someone
   // for a quantity that spans twelve orders of magnitude.
-  var SCALES = {
-    // milliwatts in
-    power: [[16, 1e18, 'TW'], [10, 1e9, 'MW'], [6, 1e6, 'KW'], [3, 1e3, 'W'], [0, 1, 'mW']],
-    // ualpha in (1 g Alpha = 1e6 ualpha — "Alpha" and "gram" are the same unit)
-    alpha: [[16, 1e18, 'Tg'], [10, 1e9, 'Kg'], [6, 1e6, 'g'], [3, 1e3, 'mg'], [0, 1, 'μg']],
-    // grams in
-    ore: [[12, 1e12, 'Tg'], [4, 1e3, 'Kg'], [0, 1, 'g']],
-  };
-  // Trim to at most 2 decimals without leaving a trailing ".0"/".00" — exactly
-  // what the game's `toFixed(2).replace(/\.?0+$/,'')` does.
-  function trim2(v) {
-    return v.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
-  }
-  function stepFor(raw, ladder) {
-    var len = String(Math.abs(Math.trunc(Number(raw)))).length;
-    for (var i = 0; i < ladder.length; i++) {
-      if (len >= ladder[i][0]) return ladder[i];
-    }
-    return ladder[ladder.length - 1];
-  }
-  function fmtScale(raw, kind) {
-    if (raw == null || isNaN(raw)) return '—';
-    var step = stepFor(raw, SCALES[kind]);
-    return trim2(Number(raw) / step[1]) + step[2];
-  }
+  // The ladders live in units.js so the small windows (the focused Pay window)
+  // can print Alpha the way every other screen does without loading the whole
+  // console. Kept as local aliases so the ~40 call sites below read unchanged.
+  var U = window.StructsUnits;
+  var SCALES = U.SCALES;
+  var trim2 = U.trim2;
+  var stepFor = U.stepFor;
+  var fmtScale = U.fmtScale;
   // Energy: raw value in MILLIWATTS.
   function fmtWatts(mw) { return fmtScale(mw, 'power'); }
   // Alpha: raw value in ualpha (micrograms).
@@ -1417,8 +1400,45 @@
     count.hidden = true;
     li.appendChild(count);
     li.appendChild(el('span', 'feed-msg', e.message));
+    li.appendChild(feedShare());
     if (opts && opts.noCollapse) li.dataset.tkey = '';
     return li;
+  }
+
+  /* "Tell the guild."
+   *
+   * The console could already hear Comms (the unread control in the nav) but
+   * had no way to SPEAK into it: everything the app noticed on your behalf —
+   * a raid lost, a substation down — stayed inside a window only you can see.
+   *
+   * It hands over a DRAFT rather than posting: which room this belongs in is a
+   * judgement the console cannot make, and a feed row that quietly published
+   * itself to a guild channel would be a nasty surprise. Comms opens with the
+   * line in the box and the player presses send.
+   *
+   * Deliberately quiet — one per feed row would otherwise be a column of
+   * buttons down a list people read for its text. It appears on hover, and on
+   * keyboard focus so it is not mouse-only.
+   */
+  function feedShare() {
+    var a = el('a', 'feed-share');
+    a.href = 'javascript:void(0)';
+    a.title = 'Tell the guild — opens Comms with this line ready to send';
+    a.setAttribute('aria-label', a.title);
+    a.appendChild(el('i', 'icon-phone'));
+    a.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      // The NEWEST text, read off the row: a folded row (×3) shows the latest
+      // numbers, and those are the ones worth telling anyone.
+      var li = a.parentElement;
+      var msg = li && li.querySelector('.feed-msg');
+      var text = msg ? msg.textContent : '';
+      if (!text) return;
+      Board.T.core.invoke('matrix_share', { text: text })
+        .then(function () { a.classList.add('feed-shared'); })
+        .catch(function (err) { a.title = String(err).slice(0, 120); });
+    });
+    return a;
   }
 
   // Fold `e` into `li` if it is another instance of the same line: bump the
@@ -1459,6 +1479,10 @@
         if (alertCard) alertCard.hidden = false;
       }
     }
+
+    // The feed's entry point, reachable from the harness: everything else here
+    // is closed over `feed` and `alerts`, which only exist once setup has run.
+    Board._feedAddForTest = feedAdd;
 
     T.core.invoke('mcp_board_feed').then(function (entries) {
       (entries || []).forEach(feedAdd); // oldest→newest, so newest ends on top

@@ -89,6 +89,52 @@ await new Promise((r) => setTimeout(r, 50));
 check('clicking it opens Comms',
   w.__HARNESS_CALLS__.some((c) => c.cmd === 'open_chat_window'));
 
+// ── Telling the guild ──────────────────────────────────────────────────────
+// The console can hear Comms; this is the other direction. Everything the app
+// notices on your behalf lived in a window only you can see.
+console.log('\n— sharing a feed line');
+{
+  const feed = d.getElementById('feed-list');
+  const push = (message, ts) => w.Board._feedAddForTest({
+    message, ts_ms: ts || 1, severity: 'notice', source: 'auto_raid',
+  });
+
+  push('raid on 2-15361 lost 3 structs');
+  const row = feed.firstChild;
+  const share = row.querySelector('.feed-share');
+  check('every feed line can be told to the guild', !!share);
+  check('…without shouting: it is not a visible button', !!share
+    && w.getComputedStyle(share).opacity === '0', share && w.getComputedStyle(share).opacity);
+
+  share.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 50));
+  const shared = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_share').pop();
+  check('it hands Comms a draft rather than posting',
+    !!shared && shared.args.text === 'raid on 2-15361 lost 3 structs',
+    JSON.stringify(shared && shared.args));
+  check('…and the row remembers it was told', share.classList.contains('feed-shared'));
+
+  // A repeated line FOLDS into the row above it and shows the newest numbers.
+  // Sharing must send what is on screen, not the text the row was born with —
+  // otherwise the guild is told a stale count.
+  push('raid on 2-15361 lost 3 structs');
+  push('raid on 2-15361 lost 9 structs');
+  const folded = feed.firstChild;
+  check('a repeated line folds rather than stacking',
+    folded.querySelector('.feed-count').hidden === false,
+    folded.textContent);
+  folded.querySelector('.feed-share').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 50));
+  const latest = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_share').pop();
+  check('…and sharing it tells the NEWEST numbers, not the first',
+    !!latest && latest.args.text === 'raid on 2-15361 lost 9 structs',
+    JSON.stringify(latest && latest.args));
+
+  // The internal source tag is for the console, not for people.
+  check('the guild is not told our internal source tag',
+    !/auto_raid/.test(latest.args.text), latest.args.text);
+}
+
 dom.window.close();
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

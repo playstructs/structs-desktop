@@ -238,6 +238,23 @@ for (const file of FEDERATED) {
   check('…it spends only what the SERVER previewed',
     /to: S\.preview\.to/.test(tx) && /amount: S\.preview\.amount/.test(tx));
 
+  // 5. "all" means the EXACT balance, never the printed one.
+  //
+  // The ladder rounds to two decimals, so a balance of 9,400,000,999 ualpha
+  // prints as "9.4Kg"; reading that off the screen and typing it back asks for
+  // 9,400,000,000 and strands the rest. The control therefore carries a
+  // base-unit override that bypasses the text parse — and typing has to clear
+  // it, or editing the box would silently still send everything.
+  check('the Pay window can send the whole balance exactly',
+    /S\.exact = S\.alpha\.amount/.test(tx));
+  check('…preferring that over anything parsed from the box',
+    /S\.exact != null[\s\S]{0,80}baseUnits/.test(tx));
+  check('…and typing takes the number back',
+    /addEventListener\('input'[\s\S]{0,300}S\.exact = null/.test(tx));
+  check('…as does a new recipient, and a completed send',
+    (tx.match(/S\.exact = null/g) || []).length >= 3,
+    String((tx.match(/S\.exact = null/g) || []).length));
+
   // 5. And it does not invoke the executing command at all. Comments are
   //    stripped first: this file NAMES that command in prose explaining why it
   //    stays out of reach, and the prose must not be what satisfies the check.
@@ -301,6 +318,33 @@ for (const file of FEDERATED) {
   const remote = srcs.filter((x) => !x.startsWith("'img/") && !/data_url/.test(x));
   check('…and no image is pointed at a URL from message data',
     remote.length === 0, remote.join(' | '));
+}
+
+// ── Names the app trusts outright ──────────────────────────────────────────
+// An on-chain name renders with NO player id beside it, because the chain
+// settles who owns it. That makes it the most trusted string in the app, and
+// the chain says nothing about whether it can be read — a registered name can
+// still carry a bidi override. Sanitizing happens where identities are
+// ingested, so every surface downstream inherits it.
+{
+  console.log('\n— owned names');
+  const dir = readFileSync(root + '/src-tauri/src/matrix/directory.rs', 'utf8');
+  const usernames = [...dir.matchAll(/username:\s*([^,\n]+)/g)]
+    .map((m) => m[1].trim())
+    .filter((v) => v !== 'String');            // the struct field declaration
+  check('every on-chain name is sanitized as it is ingested',
+    usernames.length > 0 && usernames.every((v) => /identity::sanitize/.test(v)),
+    usernames.join(' | '));
+
+  // The leaderboard reads its own identities from the guild rosters rather
+  // than through the Comms directory, so it is a separate ingestion path with
+  // the same problem.
+  const stats = readFileSync(root + '/src-tauri/src/mcp/game_stats.rs', 'utf8');
+  const ident = stats.slice(stats.indexOf('Identity {', stats.indexOf('identities.insert')));
+  const fields = [...ident.slice(0, 1400).matchAll(/(username|guild_name|tag):\s*([^,\n]+)/g)];
+  check('…including the ones the leaderboard renders',
+    fields.length > 0 && fields.every((m) => /identity::sanitize/.test(m[2])),
+    fields.map((m) => m[1] + ': ' + m[2]).join(' | '));
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
