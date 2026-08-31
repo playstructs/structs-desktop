@@ -34,8 +34,8 @@
     *, *::before, *::after { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; overflow: hidden; }
     body {
-      background: var(--page-background, #1A2029);
-      color: var(--text-body, #C5D7D9);
+      background: var(--page-background);
+      color: var(--text-body);
       font-family: 'DirectiveZero', sans-serif;
       /* ROW now: the left column holds map + battle log, and Comms is a rail
          down the right at full window height. */
@@ -108,14 +108,14 @@
          clear at 1x, 2x and 4x alike. */
       position: absolute; top: 38px; left: 50%; transform: translateX(-50%);
       max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis;
-      display: flex; align-items: center; gap: 8px; white-space: nowrap;
-      padding: 3px 10px; border: 1px solid var(--border-subtle, #394958);
+      display: flex; align-items: center; gap: var(--spacing-md); white-space: nowrap;
+      padding: var(--spacing-xs) var(--spacing-md); border: 1px solid var(--border-subtle);
       background: rgba(26, 32, 41, .88);
-      color: var(--text-player-primary, #43CDB6);
+      color: var(--text-player-primary);
     }
-    .rv-live-dot { color: var(--text-hint, #A7C0C6); }
-    .rv-live-dot.stale { color: var(--text-warning, #F3C878); }
-    .rv-live-dot.dead { color: var(--text-enemy-primary, #EE7D69); }
+    .rv-live-dot { color: var(--text-hint); }
+    .rv-live-dot.stale { color: var(--text-warning); }
+    .rv-live-dot.dead { color: var(--text-enemy-primary); }
 
     /* Tile selection. The ring art is the game's own (img/focus/*), and the
        INFO it opens is the point: a spectator cannot act on a struct, but
@@ -134,12 +134,12 @@
        and above tiles. Dot marks the DEFENDING end. */
     .rv-defweb { position: absolute; left: 0; top: 0; z-index: 510; pointer-events: none; }
     .rv-defweb line {
-      stroke: var(--text-player-primary, #59d999); stroke-width: 2;
+      stroke: var(--text-player-primary); stroke-width: 2;
       stroke-dasharray: 6 4; opacity: .85;
     }
-    .rv-defweb circle { fill: var(--text-player-primary, #59d999); opacity: .9; }
-    .rv-defweb.rv-defweb-enemy line { stroke: var(--text-enemy-primary, #ee7d69); }
-    .rv-defweb.rv-defweb-enemy circle { fill: var(--text-enemy-primary, #ee7d69); }
+    .rv-defweb circle { fill: var(--text-player-primary); opacity: .9; }
+    .rv-defweb.rv-defweb-enemy line { stroke: var(--text-enemy-primary); }
+    .rv-defweb.rv-defweb-enemy circle { fill: var(--text-enemy-primary); }
     /* Portrait hover. sui.css hides the pfp on hover and reveals an icon in its
        place — but it reveals `icon-menu` under the PLAYER theme and `icon-info`
        only under the ENEMY one. This window uses `icon-info` on BOTH portraits
@@ -149,7 +149,7 @@
        Reveal our icon in that theme too, in the theme's own accent. */
     .sui-theme-player .sui-screen-portrait:hover i.icon-info {
       display: inline-block;
-      color: var(--accent-primary, #43CDB6);
+      color: var(--accent-primary);
     }
 
     /* Empty tiles are selectable too — the Design System's Action Chunk has a
@@ -157,11 +157,11 @@
        selection layer; here the same job is one outline, tinted by side. */
     .rv-cell { cursor: pointer; }
     .rv-cell.rv-tile-selected {
-      outline: 2px solid var(--text-player-primary, #43CDB6);
+      outline: 2px solid var(--text-player-primary);
       outline-offset: -2px;
     }
     .rv-cell.rv-tile-selected.rv-enemy-side {
-      outline-color: var(--text-enemy-primary, #EE7D69);
+      outline-color: var(--text-enemy-primary);
     }
 
     /* The Cheatsheet is a POPOVER (Design System: "a popover used to display
@@ -193,8 +193,8 @@
     /* ── Battle log ───────────────────────────────────────────────────── */
     #rv-log {
       flex: none; z-index: 45;
-      border-top: 1px solid var(--border-subtle, #394958);
-      background: var(--surface-default, #222034);
+      border-top: 1px solid var(--border-subtle);
+      background: var(--surface-default);
       display: flex; flex-direction: column; min-height: 0;
       max-height: 45%;
     }
@@ -204,8 +204,8 @@
        map showing through behind the action-bar icons and the filter chips
        reads as clutter, and 31px is not worth it. */
     #rv-log-head {
-      flex: none; display: flex; align-items: center; gap: 8px;
-      padding: 5px 12px; color: var(--text-hint, #A7C0C6);
+      flex: none; display: flex; align-items: center; gap: var(--spacing-md);
+      padding: var(--spacing-sm) var(--spacing-lg); color: var(--text-hint);
     }
     #rv-log-head .rv-spacer { flex: 1 1 auto; min-width: 0; }
     /* ── The bar must survive a narrow window ──────────────────────────────
@@ -220,17 +220,17 @@
     .rv-log-count,
     #rv-log-head .rv-log-toggle { flex: none; white-space: nowrap; }
     #rv-log-head { flex-wrap: nowrap; }
-    .rv-log-filters { display: inline-flex; gap: 6px; margin-left: 10px;
+    .rv-log-filters { display: inline-flex; gap: var(--spacing-sm); margin-left: var(--spacing-md);
       flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
     .rv-log-filters::-webkit-scrollbar { display: none; }
     .rv-log-filters > * { flex: none; }
-    .rv-log-count { color: var(--text-body, #C5D7D9); }
-    .rv-log-toggle { color: var(--text-player-primary, #43CDB6); text-decoration: none; }
+    .rv-log-count { color: var(--text-body); }
+    .rv-log-toggle { color: var(--text-player-primary); text-decoration: none; }
     /* Separated from the log's own show/hide so the two reads as two controls
        rather than one pair of words. */
-    .rv-fit-toggle { margin-left: 14px; padding-left: 14px;
-      border-left: 1px solid var(--border, #345); }
-    #rv-log-body { overflow: auto; padding: 0 12px 8px; }
+    .rv-fit-toggle { margin-left: var(--spacing-lg); padding-left: var(--spacing-lg);
+      border-left: 1px solid var(--border); }
+    #rv-log-body { overflow: auto; padding: 0 var(--spacing-lg) var(--spacing-md); }
     /* Same frame as the battle log beneath it: two panels about the same
        planet should not look like two different kinds of thing. */
     /* Same stacking as the battle log above it. Without this the panel
@@ -254,10 +254,10 @@
     #rv-chat.rv-collapsed .rv-chat-title,
     #rv-chat.rv-collapsed #rv-chat-discuss,
     #rv-chat.rv-collapsed .rv-spacer { display: none; }
-    #rv-chat-head { display: flex; align-items: baseline; gap: 8px;
-      padding: 6px 12px; flex-wrap: nowrap; flex: 0 0 auto; }
+    #rv-chat-head { display: flex; align-items: baseline; gap: var(--spacing-md);
+      padding: var(--spacing-sm) var(--spacing-lg); flex-wrap: nowrap; flex: 0 0 auto; }
     #rv-chat-body {
-      overflow: auto; padding: 0 12px 8px;
+      overflow: auto; padding: 0 var(--spacing-lg) var(--spacing-md);
       flex: 1 1 auto; min-height: 0;
       /* Newest line sits next to the composer, not stranded at the top of a
          tall empty rail — the reading order every chat client has. */
@@ -270,7 +270,7 @@
        while the message was an inline span beside the speaker; a full-width
        block in a rail shows it immediately. */
     .rv-chat-row { display: flex; flex-direction: column; gap: 1px; text-align: left; }
-    .rv-chat-meta { display: flex; align-items: baseline; gap: 6px; }
+    .rv-chat-meta { display: flex; align-items: baseline; gap: var(--spacing-sm); }
     .rv-chat-meta .rv-chat-room {
       margin-left: auto; flex: 0 1 auto; min-width: 0;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -297,68 +297,68 @@
     #rv-chat-error:empty { display: none; }
     /* "enemy" is the game's semantic for danger; there is no --text-error. */
     #rv-chat-error { color: var(--text-enemy-primary); }
-    .rv-chat-row { padding: 3px 0; border-bottom: 1px solid var(--border-subtle, #24343a); }
+    .rv-chat-row { padding: var(--spacing-xs) 0; border-bottom: 1px solid var(--border-subtle); }
     .rv-chat-row:last-child { border-bottom: none; }
-    .rv-chat-who { color: var(--accent-secondary, #8FB8FF); }
-    .rv-chat-room { color: var(--text-hint, #A7C0C6); }
-    .rv-chat-body-text { color: var(--text-body, #C5D7D9); }
+    .rv-chat-who { color: var(--accent-secondary); }
+    .rv-chat-room { color: var(--text-hint); }
+    .rv-chat-body-text { color: var(--text-body); }
     /* Something was said while the panel was closed. */
-    #rv-chat-head.rv-chat-fresh .rv-log-count { color: var(--text-warning, #E8B24A); }
-    .rv-log-empty { color: var(--text-hint, #A7C0C6); padding: 6px 0; }
+    #rv-chat-head.rv-chat-fresh .rv-log-count { color: var(--text-warning); }
+    .rv-log-empty { color: var(--text-hint); padding: var(--spacing-sm) 0; }
     .rv-log-row {
       /* Labels are single words now (see LOG_LABEL), so the column can be
          narrow AND nowrap: every row is exactly one line tall, which is what
          makes a few hundred of them skimmable. An unknown future category
          falls back to its humanised chain name and is ellipsised rather than
          being allowed to wrap and break the rhythm. */
-      display: grid; grid-template-columns: 62px 78px 1fr; gap: 10px;
-      align-items: baseline; padding: 3px 0;
+      display: grid; grid-template-columns: 62px 78px 1fr; gap: var(--spacing-md);
+      align-items: baseline; padding: var(--spacing-xs) 0;
       border-bottom: 1px solid rgba(57, 73, 88, .5);
     }
-    .rv-log-t { color: var(--text-hint, #A7C0C6); font-variant-numeric: tabular-nums; }
+    .rv-log-t { color: var(--text-hint); font-variant-numeric: tabular-nums; }
     .rv-log-cat {
-      color: var(--text-player-primary, #43CDB6);
+      color: var(--text-player-primary);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .rv-log-row.rv-bad .rv-log-cat { color: var(--text-enemy-primary, #EE7D69); }
-    .rv-log-row.rv-warn .rv-log-cat { color: var(--text-warning, #F3C878); }
-    .rv-log-row.rv-dim .rv-log-cat { color: var(--text-hint, #A7C0C6); }
-    .rv-log-d { color: var(--text-body, #C5D7D9); word-break: break-word; text-align: left; }
+    .rv-log-row.rv-bad .rv-log-cat { color: var(--text-enemy-primary); }
+    .rv-log-row.rv-warn .rv-log-cat { color: var(--text-warning); }
+    .rv-log-row.rv-dim .rv-log-cat { color: var(--text-hint); }
+    .rv-log-d { color: var(--text-body); word-break: break-word; text-align: left; }
     #rv-log-body, .rv-log-row { text-align: left; }
 
     /* Combat is the story; bookkeeping is context. A left rule and a brighter
        detail line give an attack visible weight in a list where thousands of
        status flags otherwise look identical to it. */
     .rv-log-row.rv-k-combat {
-      border-left: 2px solid var(--text-enemy-primary, #EE7D69);
-      padding-left: 8px; margin-left: -10px;
+      border-left: 2px solid var(--text-enemy-primary);
+      padding-left: var(--spacing-md); margin-left: -var(--spacing-md);
     }
-    .rv-log-row.rv-k-state .rv-log-d { color: var(--text-hint, #A7C0C6); }
+    .rv-log-row.rv-k-state .rv-log-d { color: var(--text-hint); }
 
     /* Day break. Rows arrive newest-first; without this a list crossing
        midnight reads as unsorted. Sticky so the day stays legible while
        scrolling a long log. */
     .rv-log-day {
       position: sticky; top: 0; z-index: 1;
-      padding: 6px 0 3px; margin-top: 4px;
-      color: var(--text-hint, #A7C0C6);
-      background: var(--surface-default, #222034);
-      border-bottom: 1px solid var(--border-subtle, #394958);
+      padding: var(--spacing-sm) 0 var(--spacing-xs); margin-top: var(--spacing-sm);
+      color: var(--text-hint);
+      background: var(--surface-default);
+      border-bottom: 1px solid var(--border-subtle);
     }
     .rv-log-day:first-child { margin-top: 0; }
 
     /* Filter strip in the log header. */
     .rv-log-chip {
-      display: inline-flex; align-items: center; gap: 4px;
-      padding: 1px 6px; text-decoration: none;
-      border: 1px solid var(--border-subtle, #394958);
-      color: var(--text-hint, #A7C0C6); opacity: .55;
+      display: inline-flex; align-items: center; gap: var(--spacing-sm);
+      padding: 1px var(--spacing-sm); text-decoration: none;
+      border: 1px solid var(--border-subtle);
+      color: var(--text-hint); opacity: .55;
     }
-    .rv-log-chip.rv-on { opacity: 1; border-color: var(--border, #5D7E90); }
-    .rv-log-chip .rv-bad { color: var(--text-enemy-primary, #EE7D69); }
-    .rv-log-chip .rv-warn { color: var(--text-warning, #F3C878); }
-    .rv-log-chip .rv-dim { color: var(--text-hint, #A7C0C6); }
-    .rv-log-chip-n { color: var(--text-hint, #A7C0C6); font-variant-numeric: tabular-nums; }
+    .rv-log-chip.rv-on { opacity: 1; border-color: var(--border); }
+    .rv-log-chip .rv-bad { color: var(--text-enemy-primary); }
+    .rv-log-chip .rv-warn { color: var(--text-warning); }
+    .rv-log-chip .rv-dim { color: var(--text-hint); }
+    .rv-log-chip-n { color: var(--text-hint); font-variant-numeric: tabular-nums; }
 
     /* ── Map ──────────────────────────────────────────────────────────────
        Plain DOM + CSS background tiles, exactly the technique the game uses —
@@ -369,9 +369,9 @@
        directly with the HUD's z-index and paint over it — a marker was
        covering the selected struct's readout. Contained here, every map layer
        stays below the HUD however high its own z-index climbs. */
-    #rv-scroll { flex: 1 1 auto; overflow: auto; padding: 16px;
+    #rv-scroll { flex: 1 1 auto; overflow: auto; padding: var(--spacing-xl);
       position: relative; z-index: 0; }
-    /* margin:auto, not flex centering — a centered flex child that overflows
+    /* margin: auto, not flex centering — a centered flex child that overflows
        clips its left edge unreachably; margins degrade to scrollable. */
     #rv-map { position: relative; width: -moz-fit-content; width: fit-content;
       margin: 0 auto; }
@@ -394,7 +394,7 @@
        them over the health bar's corner instead of under the struct. */
     .rv-status-badges { position: absolute; bottom: 0; left: 0; z-index: 520;
       display: flex; width: 100%; height: 32px;
-      align-items: center; justify-content: center; gap: 4px; }
+      align-items: center; justify-content: center; gap: var(--spacing-sm); }
     /* Transition rows: layers STACK inside one tile-height block (the game's
        .map-terrain-transition) — the previous ambit's edge-bottom under the
        next ambit's edge-top is what blends two bands together. */
@@ -446,14 +446,14 @@
        apparent border thickness. */
     .rv-hudbox { position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
       display: flex; width: 48px; flex-direction: column;
-      align-items: center; justify-content: center; gap: 2px;
-      background-color: var(--border-neutral-dark, #0A0C12);
-      border: 2px solid var(--border-neutral-dark, #0A0C12); }
+      align-items: center; justify-content: center; gap: var(--spacing-xs);
+      background-color: var(--border-neutral-dark);
+      border: 2px solid var(--border-neutral-dark); }
     .rv-hp { display: flex; width: 100%; height: 4px;
-      justify-content: space-between; gap: 2px; }
+      justify-content: space-between; gap: var(--spacing-xs); }
     .rv-seg { display: flex; flex: 1 1 100%;
-      background: var(--struct-health-bar-damage, #CC2D2D); }
-    .rv-seg.on { background: var(--struct-health-bar-health, #EFB719); }
+      background: var(--struct-health-bar-damage); }
+    .rv-seg.on { background: var(--struct-health-bar-health); }
     /* (No per-struct type caption: the real client draws a health bar and
        status icons on a struct tile and nothing else — confirmed by comparing
        the same art side by side against the running game. Identity comes from
@@ -464,7 +464,7 @@
       display: flex; align-items: center; justify-content: center; }
     /* Typography from `sui-text-label` (applied in markup); only the vertical
        orientation and colour are specific to this gutter. */
-    .rv-band span { color: var(--text-hint, #A7C0C6);
+    .rv-band span { color: var(--text-hint);
       writing-mode: vertical-rl; text-orientation: mixed; }
 
     /* ── PiP bubble — combat happening off-screen ─────────────────────────
@@ -493,12 +493,12 @@
       position: absolute; top: 0; left: 0;
       display: flex; box-sizing: border-box;
       width: 118px; height: 118px;
-      border-radius: 8px; margin: 5px;
+      border-radius: 8px; margin: var(--spacing-sm);
       overflow: hidden; align-items: center; justify-content: center;
       background-repeat: no-repeat; background-position: center;
     }
-    #rv-pip.rv-side-left  .rv-pip-mask { border: 1px solid var(--border-focus-friendly-dark, #2A9D9B); }
-    #rv-pip.rv-side-right .rv-pip-mask { border: 1px solid var(--border-focus-enemy-dark, #C11F16); }
+    #rv-pip.rv-side-left  .rv-pip-mask { border: 1px solid var(--border-focus-friendly-dark); }
+    #rv-pip.rv-side-right .rv-pip-mask { border: 1px solid var(--border-focus-enemy-dark); }
 
     .rv-pip-focus {
       position: relative; z-index: 10; display: flex;
@@ -552,16 +552,16 @@
          the only band that is always free. */
       position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%);
       z-index: 45; pointer-events: none;
-      max-width: min(92%, 620px); padding: 6px 12px;
+      max-width: min(92%, 620px); padding: var(--spacing-sm) var(--spacing-lg);
       text-align: center; line-height: 1.4;
       background: rgba(13, 15, 21, .82);
-      border: 1px solid var(--border, #345);
-      color: var(--text-warning, #F3C878);
+      border: 1px solid var(--border);
+      color: var(--text-warning);
     }
     #rv-note.on { display: block; }
-    .rv-empty { display: flex; flex-direction: column; gap: 8px;
-      align-items: center; justify-content: center; padding: 60px 20px;
-      color: var(--text-hint, #A7C0C6); text-align: center; }
+    .rv-empty { display: flex; flex-direction: column; gap: var(--spacing-md);
+      align-items: center; justify-content: center; padding: var(--spacing-xxxl) var(--spacing-xl);
+      color: var(--text-hint); text-align: center; }
   </style>
 </head>
 <body>

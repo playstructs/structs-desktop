@@ -97,7 +97,7 @@
        .sui-text-label — same font and case, inverted onto the accent. */
     .chat-net-label {
       align-self: flex-start;
-      padding: 2px var(--spacing-sm);
+      padding: var(--spacing-xs) var(--spacing-sm);
       background: var(--accent-primary);
       color: var(--text-player-inverted);
       font-family: 'ExtremeHazard', sans-serif;
@@ -145,7 +145,7 @@
       color: var(--text-hint); opacity: .65;
       padding-left: calc(var(--spacing-sm) + 2px);
     }
-    .chat-event + .chat-event { margin-top: -2px; }
+    .chat-event + .chat-event { margin-top: -var(--spacing-xs); }
     .chat-event-who {
       font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
       text-transform: uppercase; flex: 0 0 auto;
@@ -158,7 +158,7 @@
 
     /* ── Timeline ──────────────────────────────────────────────────────── */
     .chat-msg {
-      display: flex; flex-direction: column; gap: 2px;
+      display: flex; flex-direction: column; gap: var(--spacing-xs);
       /* Every message carries the rail; only a mention colours it. Reserving
          it on all of them keeps the left edge of the text straight. */
       border-left: 2px solid transparent;
@@ -214,7 +214,7 @@
        `vh` measures the window — which in a scaled, embedded layout is a
        different number entirely. */
     .chat-image {
-      max-width: 320px; max-height: 320px; margin-top: 2px;
+      max-width: 320px; max-height: 320px; margin-top: var(--spacing-xs);
       border: 1px solid var(--border-subtle);
       background: var(--surface-player-body);
       overflow: hidden;
@@ -243,8 +243,8 @@
        the message itself made the player's own text look like an error. */
     .chat-send-failed {
       display: flex; align-items: baseline; gap: var(--spacing-md);
-      margin-top: 2px; align-self: stretch; text-align: left;
-      font-size: 11px; line-height: 16px;
+      margin-top: var(--spacing-xs); align-self: stretch; text-align: left;
+      font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 16px;
     }
     .chat-send-failed-why { color: var(--text-enemy-primary); }
 
@@ -362,7 +362,7 @@
       display: grid; grid-template-columns: auto 1fr;
       /* A little air between rows: at 16px line-height four facts read as a
          solid block rather than as four separate readings. */
-      gap: 2px var(--spacing-md);
+      gap: var(--spacing-xs) var(--spacing-md);
       padding: 0 var(--spacing-sm) var(--spacing-sm);
       line-height: 18px;
     }
@@ -387,7 +387,7 @@
       display: inline-flex; align-items: center; gap: var(--spacing-xs);
       /* A label belongs on one line; the ROW wraps instead of the words. */
       white-space: nowrap; flex: 0 0 auto;
-      padding: 2px var(--spacing-sm);
+      padding: var(--spacing-xs) var(--spacing-sm);
       border: 1px solid var(--border-subtle);
       background: transparent;
       color: var(--text-hint);
@@ -526,7 +526,7 @@
     .chat-work.chat-kind-result { border-left-color: var(--accent-primary); }
     .chat-work-verdict {
       padding: var(--spacing-sm) var(--spacing-md) 0;
-      font-size: 11px; line-height: 16px;
+      font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 16px;
     }
     .chat-work-verdict.chat-mod-good { color: var(--text-player-primary); }
     .chat-work-verdict.chat-mod-bad { color: var(--text-enemy-primary); }
@@ -551,7 +551,7 @@
       display: flex; align-items: baseline; gap: var(--spacing-sm);
       padding: var(--spacing-sm) var(--spacing-md);
       border-bottom: 1px solid var(--border-subtle);
-      color: var(--text-hint); font-size: 11px; line-height: 16px;
+      color: var(--text-hint); font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 16px;
     }
 
     /* ── Presence ─────────────────────────────────────────────────────── */
@@ -587,7 +587,7 @@
     .chat-seen {
       flex: 0 0 auto; align-self: stretch; text-align: right;
       padding: 0 var(--spacing-md) var(--spacing-sm);
-      color: var(--text-hint); font-size: 10px; line-height: 14px;
+      color: var(--text-hint); font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 14px;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
 
@@ -597,7 +597,7 @@
     .chat-msg .chat-edit-btn:focus { opacity: 1; }
     /* Always visible, unlike the controls: this is a fact about the message,
        not an action on it. */
-    .chat-msg-edited { color: var(--text-hint); font-size: 10px; }
+    .chat-msg-edited { color: var(--text-hint); font-family: 'DirectiveZero', sans-serif; font-size: 8px; }
     .chat-reply-chip.chat-mod-editing .chat-reply-who { color: var(--text-warning); }
 
     /* ── Delete ───────────────────────────────────────────────────────── */
@@ -620,7 +620,7 @@
       padding: var(--spacing-sm) var(--spacing-md);
       background: var(--surface-player-body);
       border-bottom: 1px solid var(--border-subtle);
-      color: var(--text-hint); font-size: 11px; line-height: 16px;
+      color: var(--text-hint); font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 16px;
       text-align: left;
     }
     .chat-complete-hint:empty { display: none; }
@@ -637,8 +637,8 @@
       margin-top: var(--spacing-sm); align-self: stretch;
     }
     .chat-reaction {
-      display: inline-flex; align-items: center; gap: 4px;
-      padding: 1px 6px; line-height: 16px;
+      display: inline-flex; align-items: center; gap: var(--spacing-sm);
+      padding: 1px var(--spacing-sm); line-height: 16px;
     }
     /* A key this window does not know is other people's text — an emoji from
        Element, a word from a bot. Give it a font that can render either, since
@@ -646,7 +646,7 @@
     .chat-reaction-key {
       font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji',
                    'DirectiveZero', sans-serif;
-      font-size: 12px;
+      font-size: 8px;
     }
     /* The game's own hulls, at chip size.
        NOT `pixelated`, though this is pixel art and the portrait compositor
@@ -662,7 +662,7 @@
     /* The struct sheet wraps to several rows; keep it from crowding the
        message it belongs to. */
     .chat-reactions { max-height: 30vh; overflow-y: auto; }
-    .chat-reaction-count { font-size: 11px; }
+    .chat-reaction-count { font-family: 'Inter', sans-serif; font-size: 12px; }
     /* The picker's own offers read as outlines until taken, so the ones
        already on the message stay the ones that look filled in. */
     .chat-reaction.chat-mod-offer {
@@ -681,9 +681,9 @@
        One line, clipped, dimmer than the message it belongs to. */
     .chat-reply-quote {
       display: flex; align-items: baseline; gap: var(--spacing-sm);
-      margin: 0 0 2px 0; padding-left: var(--spacing-sm);
+      margin: 0 0 var(--spacing-xs) 0; padding-left: var(--spacing-sm);
       border-left: 2px solid var(--border-subtle);
-      color: var(--text-hint); font-size: 11px; line-height: 16px;
+      color: var(--text-hint); font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 16px;
       overflow: hidden;
     }
     .chat-reply-quote:hover { border-left-color: var(--accent-primary); }
@@ -704,7 +704,7 @@
       padding: var(--spacing-sm) var(--spacing-md);
       background: var(--surface-player-body);
       border-bottom: 1px solid var(--border-subtle);
-      color: var(--text-hint); font-size: 11px; line-height: 16px;
+      color: var(--text-hint); font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 16px;
       text-align: left;
     }
     .chat-reply-chip .chat-reply-text { flex: 1 1 auto; min-width: 0; }
@@ -795,7 +795,7 @@
     .chat-step-detail { color: var(--text-hint); word-break: break-all; }
 
     .chat-kv { display: flex; justify-content: space-between; gap: var(--spacing-md);
-      padding: 2px 0; align-self: stretch; }
+      padding: var(--spacing-xs) 0; align-self: stretch; }
     .chat-kv > :first-child { color: var(--text-hint); white-space: nowrap; }
     /* Break between words, not inside them: `word-break: break-all` split
        "blocks" across two lines as "bloc / ks". Long unbroken tokens (ids,

@@ -73,7 +73,7 @@
     var base = document.createElementNS(SVG_NS, 'line');
     base.setAttribute('x1', '0'); base.setAttribute('x2', String(w));
     base.setAttribute('y1', String(h - 1)); base.setAttribute('y2', String(h - 1));
-    base.setAttribute('stroke', 'var(--border-primary, var(--text-hint))');
+    base.setAttribute('stroke', 'var(--border-subtle)');
     base.setAttribute('stroke-width', '0.5');
     svg.appendChild(base);
     var path = document.createElementNS(SVG_NS, 'path');

@@ -24,15 +24,15 @@
        page, and the cards are all pinned to 100% and pages are stretch-flex
        columns so cards span edge-to-edge on a wide window. */
     #board-layout .sui-page-body-screen { width: 100%; align-self: stretch; }
-    .ops-scroll { width: 100%; overflow-y: auto; overflow-x: hidden; padding: 14px 18px; }
+    .ops-scroll { width: 100%; overflow-y: auto; overflow-x: hidden; padding: var(--spacing-lg) var(--spacing-xl); }
     .page { width: 100%; }
     .page:not([hidden]) { display: flex; flex-direction: column; align-items: stretch; }
-    #board-layout .sui-data-card { width: 100%; align-self: stretch; margin-bottom: 12px; }
+    #board-layout .sui-data-card { width: 100%; align-self: stretch; margin-bottom: var(--spacing-lg); }
     .sui-data-card-body { width: 100%; flex-direction: column; }
-    .sui-data-card-row { width: 100%; justify-content: space-between; gap: 16px; }
+    .sui-data-card-row { width: 100%; justify-content: space-between; gap: var(--spacing-xl); }
     .ops-val { font-weight: 600; }
-    .ops-list { margin: 4px 0 0; padding-left: 16px; }
-    .ops-list li { margin: 4px 0; }
+    .ops-list { margin: var(--spacing-sm) 0 0; padding-left: var(--spacing-xl); }
+    .ops-list li { margin: var(--spacing-sm) 0; }
     /* Nav bar: tabs left, refresh control right. Scoped to the board window so
        it can't affect the game's own sui-screen-nav elsewhere. */
     #board-layout .sui-screen-nav { display: flex; align-items: center; justify-content: space-between; }
@@ -44,15 +44,15 @@
       #board-layout .sui-screen-nav { flex-wrap: wrap; }
       #board-layout .sui-screen-nav-items { flex-wrap: wrap; overflow-x: visible; }
     }
-    .board-navaside { display: flex; align-items: center; gap: 6px; flex: none; padding: 0 4px; }
-    .board-navaside #board-updated { font-size: 10px; white-space: nowrap; }
+    .board-navaside { display: flex; align-items: center; gap: var(--spacing-sm); flex: none; padding: 0 var(--spacing-sm); }
+    .board-navaside #board-updated { font-family: 'Inter', sans-serif; font-size: 12px; white-space: nowrap; }
     .board-navaside .is-busy { opacity: .4; pointer-events: none; }
     .board-navaside #board-comms.hidden { display: none; }
-    .board-navaside #board-comms span { margin-left: 4px; font-size: 10px; }
+    .board-navaside #board-comms span { margin-left: var(--spacing-sm); font-family: 'Inter', sans-serif; font-size: 12px; }
     /* A mention is not the same event as unread traffic — it is addressed to
        you — so it gets the warning colour the rest of the console reserves for
        things that want a decision. */
-    .board-navaside #board-comms.board-mod-mention { color: var(--text-warning, #E8B24A); }
+    .board-navaside #board-comms.board-mod-mention { color: var(--text-warning); }
     /* The five area tabs need ~394px in the game font. Below that the
        timestamp was stealing 170px and scrolling Command and System out of
        the bar entirely — the nav is not the place to lose. The stamp is
@@ -60,9 +60,9 @@
     @media (max-width: 760px) {
       .board-navaside #board-updated { display: none; }
     }
-    .ops-refresh { display: flex; align-items: baseline; gap: 10px; padding-right: 16px; font-size: 12px; white-space: nowrap; }
+    .ops-refresh { display: flex; align-items: baseline; gap: var(--spacing-md); padding-right: var(--spacing-xl); font-family: 'Inter', sans-serif; font-size: 12px; white-space: nowrap; }
     .ops-refresh-btn { cursor: pointer; text-decoration: underline; text-decoration-style: dotted;
-                       color: var(--accent-primary, #6cf); white-space: nowrap; }
+                       color: var(--accent-primary); white-space: nowrap; }
     .ops-refresh-btn.is-busy { opacity: .5; pointer-events: none; }
     /* Pages: persistent sibling containers toggled with [hidden] so per-page
        state (feed list, roster selection) survives tab switches. */
@@ -73,28 +73,28 @@
        worse than no column. */
     .ops-presence {
       display: inline-block; width: 6px; height: 6px;
-      margin-right: 6px; vertical-align: middle;
-      background: var(--text-hint, #A7C0C6);
+      margin-right: var(--spacing-sm); vertical-align: middle;
+      background: var(--text-hint);
     }
-    .ops-presence.ops-mod-online { background: var(--text-player-primary, #7FD1B9); }
-    .ops-presence.ops-mod-idle { background: var(--text-warning, #E8B24A); }
-    .ops-presence.ops-mod-away { background: var(--border-subtle, #33484d); }
+    .ops-presence.ops-mod-online { background: var(--text-player-primary); }
+    .ops-presence.ops-mod-idle { background: var(--text-warning); }
+    .ops-presence.ops-mod-away { background: var(--border-subtle); }
     /* Watch-planet / watch-fleet links on a roster row. Sized to sit inline
        with the subtitle text rather than as full buttons — they are one glyph
        each, and the row's own click still opens the detail drawer. */
-    .ops-spectate { display: inline-flex; gap: 4px; vertical-align: middle; }
-    .ops-spectate .ops-refresh-btn { padding: 0 4px; line-height: 1; }
-    .ops-spectate .ops-refresh-btn.err { color: var(--accent-destructive, #EE7D69); }
+    .ops-spectate { display: inline-flex; gap: var(--spacing-sm); vertical-align: middle; }
+    .ops-spectate .ops-refresh-btn { padding: 0 var(--spacing-sm); line-height: 1; }
+    .ops-spectate .ops-refresh-btn.err { color: var(--accent-destructive); }
     /* EVENT FEED — newest first, capped height so it never swallows the page. */
-    #feed-list { list-style: none; margin: 4px 0 0; padding: 0; max-height: 240px; overflow-y: auto;
-                 font-family: monospace; font-size: 12px; width: 100%; }
-    #feed-list li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; }
+    #feed-list { list-style: none; margin: var(--spacing-sm) 0 0; padding: 0; max-height: 240px; overflow-y: auto;
+                 width: 100%; font-variant-numeric: tabular-nums; }
+    #feed-list li { margin: var(--spacing-xs) 0; display: flex; gap: var(--spacing-md); align-items: baseline; }
     .feed-ts { opacity: .55; flex: none; }
     .feed-src { opacity: .75; flex: none; }
     .feed-important { color: var(--text-warning); font-weight: 600; }
     .feed-notice { font-weight: 500; }
     /* Repeat counter: 54 identical auto_harvest lines collapse to one row. */
-    .feed-count { flex: none; padding: 0 5px; font-size: 10px; letter-spacing: .5px;
+    .feed-count { flex: none; padding: 0 var(--spacing-sm); font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: .5px;
       border: 1px solid var(--accent-secondary); color: var(--accent-secondary); }
     .feed-msg { min-width: 0; overflow-wrap: anywhere; text-align: left; }
     /* Quiet until wanted. One visible button per row would turn a list people
@@ -103,20 +103,20 @@
        well as hover, so it is reachable without a mouse. */
     .feed-share {
       flex: none; margin-left: auto; opacity: 0;
-      color: var(--text-hint, #A7C0C6); text-decoration: none;
+      color: var(--text-hint); text-decoration: none;
       transition: opacity .12s ease-out;
     }
     #feed-list li:hover .feed-share,
     #feed-alerts li:hover .feed-share,
     .feed-share:focus-visible { opacity: 1; }
-    .feed-share:hover { color: var(--accent-primary, #4FD1C5); }
+    .feed-share:hover { color: var(--accent-primary); }
     /* Told already — so a glance down the feed says what has been passed on. */
-    .feed-share.feed-shared { opacity: 1; color: var(--accent-secondary, #8FB8FF); }
+    .feed-share.feed-shared { opacity: 1; color: var(--accent-secondary); }
     #feed-alerts { list-style: none; margin: 0; padding: 0; width: 100%;
-      font-family: monospace; font-size: 12px; }
-    #feed-alerts li { margin: 3px 0; display: flex; gap: 8px; align-items: baseline; }
+      font-variant-numeric: tabular-nums; }
+    #feed-alerts li { margin: var(--spacing-xs) 0; display: flex; gap: var(--spacing-md); align-items: baseline; }
     /* GRASS stream — one generic row style for every message category. */
-    #grass-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+    #grass-toolbar { display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center; margin-bottom: var(--spacing-md); }
     /* The controls need 652px laid out at their natural size, so in the 560px
        pop-out they wrapped onto two rows. Let the two text fields absorb the
        difference instead — they are the only elastic things here. */
@@ -128,22 +128,22 @@
     #grass-toolbar input.sui-input-text { flex: 1 1 120px; min-width: 90px; max-width: 240px; }
     #grass-toolbar #grass-count { margin-left: auto; flex: none; }
     #grass-toolbar > a { flex: none; }
-    #grass-list { list-style: none; margin: 4px 0 0; padding: 0; width: 100%;
+    #grass-list { list-style: none; margin: var(--spacing-sm) 0 0; padding: 0; width: 100%;
                   max-height: calc(100vh - 190px); overflow-y: auto;
-                  font-family: monospace; font-size: 12px; }
+                  font-variant-numeric: tabular-nums; }
     /* A log entry, not a paragraph. One header line you scan (time · category
        · subject) over a band of key/value chips you read only if the header
        caught your eye. The old single flow put a 60-character subject with a
        bech32 address in it inline with the values, centred, and the whole
        thing read as a wall. */
-    #grass-list li { margin: 0; padding: 6px 2px; display: block; text-align: left;
+    #grass-list li { margin: 0; padding: var(--spacing-sm) var(--spacing-xs); display: block; text-align: left;
                      border-bottom: 1px solid rgba(167,192,198,.10); }
     #grass-list li:last-child { border-bottom: 0; }
     /* Wrap, and give the subject a floor. A long category name
        (struct_block_ore_refine_start is 203px) plus the time and the block
        height exceeded a narrow row, and because the subject was the only
        shrinkable item it got squeezed to ZERO width and disappeared. */
-    .grass-head { display: flex; gap: 4px 8px; align-items: baseline; min-width: 0;
+    .grass-head { display: flex; gap: var(--spacing-sm) var(--spacing-md); align-items: baseline; min-width: 0;
                   flex-wrap: wrap; }
     /* A log reads down the left edge, so the time is a fixed column. It holds
        a 24-hour stamp (8 chars) — the 12-hour form is 11 and wrapped "AM" onto
@@ -151,39 +151,39 @@
     .grass-head .feed-ts { flex: none; width: 8ch; font-variant-numeric: tabular-nums; }
     /* Block height: right-aligned so the numbers form a readable column, and
        out of the chip band where it was costing a third of the width. */
-    .grass-block { flex: none; margin-left: auto; padding-left: 8px;
+    .grass-block { flex: none; margin-left: auto; padding-left: var(--spacing-md);
                    opacity: .5; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .grass-badge { flex: 0 1 auto; max-width: 100%; overflow: hidden;
-                   text-overflow: ellipsis; padding: 0 6px; border: 1px solid; font-size: 10px;
+                   text-overflow: ellipsis; padding: 0 var(--spacing-sm); border: 1px solid; font-family: 'Inter', sans-serif; font-size: 12px;
                    text-transform: uppercase; letter-spacing: .5px; white-space: nowrap; }
     /* Truncate rather than wrap: the head of a subject carries the meaning and
        the tail is an address. Full value is on the element's title. */
     .grass-subj { flex: 1 1 10ch; min-width: 10ch; opacity: .7;
                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .grass-chips { display: flex; flex-wrap: wrap; gap: 3px 5px; margin-top: 3px; }
+    .grass-chips { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-sm); margin-top: var(--spacing-xs); }
     /* Discrete pills so pairs stop running together into prose. */
     .grass-chip { min-width: 0; max-width: 100%; overflow-wrap: anywhere;
-                  padding: 0 5px; border: 1px solid rgba(167,192,198,.16);
+                  padding: 0 var(--spacing-sm); border: 1px solid rgba(167,192,198,.16);
                   background: rgba(167,192,198,.05); line-height: 1.6; }
     .grass-chip b { font-weight: 500; color: var(--text-hint); }
     /* TX queue rows */
-    .tx-btns { display: inline-flex; gap: 6px; align-items: center; }
-    .tx-btns a { padding: 0 5px; cursor: pointer; }
+    .tx-btns { display: inline-flex; gap: var(--spacing-sm); align-items: center; }
+    .tx-btns a { padding: 0 var(--spacing-sm); cursor: pointer; }
     .tx-pos { opacity: .55; flex: none; min-width: 18px; text-align: right; }
     /* AGENT UI directives (toasts + prompts) — board-window only. */
     #agent-ui:empty { display: none; }
     .agent-card { border: 1px solid rgba(120,180,255,.45); border-radius: 8px;
-                  background: rgba(120,180,255,.08); padding: 10px 12px; margin-bottom: 10px; }
-    .agent-card-head { display: flex; align-items: baseline; gap: 8px; }
-    .agent-mark { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
+                  background: rgba(120,180,255,.08); padding: var(--spacing-md) var(--spacing-lg); margin-bottom: var(--spacing-md); }
+    .agent-card-head { display: flex; align-items: baseline; gap: var(--spacing-md); }
+    .agent-mark { font-family: 'DirectiveZero', sans-serif; font-size: 8px; font-weight: 700; padding: 1px var(--spacing-sm); border-radius: 8px;
                   background: rgba(120,180,255,.18); color: #9ecbff; flex: none; }
     .agent-title { font-weight: 600; flex: 1; }
-    .agent-x { cursor: pointer; opacity: .7; flex: none; padding: 0 4px; }
+    .agent-x { cursor: pointer; opacity: .7; flex: none; padding: 0 var(--spacing-sm); }
     .agent-x:hover { opacity: 1; }
-    .agent-body { margin: 6px 0 0; font-size: 13px; white-space: pre-wrap; }
-    .agent-buttons { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .agent-body { margin: var(--spacing-sm) 0 0; font-family: 'DirectiveZero', sans-serif; font-size: 16px; white-space: pre-wrap; }
+    .agent-buttons { display: flex; gap: var(--spacing-md); margin-top: var(--spacing-md); flex-wrap: wrap; }
     .agent-btn { cursor: pointer; border: 1px solid rgba(120,180,255,.55); border-radius: 6px;
-                 background: rgba(120,180,255,.14); color: inherit; padding: 4px 14px; font: inherit; }
+                 background: rgba(120,180,255,.14); color: inherit; padding: var(--spacing-sm) var(--spacing-lg); font: inherit; }
     .agent-btn:hover { background: rgba(120,180,255,.28); }
     .agent-toast { border-color: rgba(255,180,84,.5); background: rgba(255,180,84,.08); }
     /* ── Native SUI result-rows (raid-scan / roster idiom), laid out as a
@@ -200,7 +200,7 @@
          the identity gets ~170-220px and rows stop wrapping entirely (measured
          137px tall -> 88px). min() keeps it collapsible on a narrow window. */
       grid-template-columns: repeat(auto-fill, minmax(min(520px, 100%), 1fr));
-      gap: 8px;
+      gap: var(--spacing-md);
       width: 100%;
       max-height: calc(100vh - 300px);
       overflow-y: auto;
@@ -209,8 +209,8 @@
     /* Roomy like the game's own MEMBER ROSTER row — not the old compressed
        override. Portrait + identity on the left, labeled stats on the right. */
     #board-layout .sui-result-row {
-      border: 1px solid var(--border, #345);   /* every cell fully bordered in a grid */
-      padding: 9px 12px; gap: 8px 12px; min-width: 0; align-items: center;
+      border: 1px solid var(--border);   /* every cell fully bordered in a grid */
+      padding: var(--spacing-md) var(--spacing-lg); gap: var(--spacing-md) var(--spacing-lg); min-width: 0; align-items: center;
       /* WRAP, don't clip. A roster row is a portrait + identity + three stat
          tiles; below about 420px those cannot share a line, and forcing them to
          made the stats overlap the PID instead of moving. Wrapping puts the
@@ -218,10 +218,10 @@
       flex-wrap: wrap;
     }
     #board-layout .sui-result-row-left-section {
-      min-width: 0; flex: 1 1 180px; gap: 10px; padding-right: 0; align-items: center; overflow: hidden;
+      min-width: 0; flex: 1 1 180px; gap: var(--spacing-md); padding-right: 0; align-items: center; overflow: hidden;
     }
     #board-layout .sui-result-row-right-section {
-      min-width: 0; flex: 1 1 auto; gap: 10px; align-items: center; justify-content: flex-end;
+      min-width: 0; flex: 1 1 auto; gap: var(--spacing-md); align-items: center; justify-content: flex-end;
     }
     /* Profile portrait — 40px framed avatar; the 5 pfp layers stack absolutely
        and paint back-to-front (crisp pixel art). */
@@ -229,7 +229,7 @@
     #board-layout .sui-result-row-portrait-icon { width: 40px; height: 40px; flex: none; }
     #board-layout .sui-result-row-portrait-image {
       position: relative; width: 40px; height: 40px; overflow: hidden;
-      border: 1px solid var(--border-subtle, #2a3a4d); background: #0b1017;
+      border: 1px solid var(--border-subtle); background: #0b1017;
     }
     /* Let the webapp's own .pfp-viewer-layer rule position the 5 layers (a 72px
        layer centered, then cropped by the 40px frame — the native
@@ -237,7 +237,7 @@
        native translateX and shoves the layer off-frame (black gap). We only
        make the pixel art crisp. */
     #board-layout .pfp-viewer-layer { image-rendering: pixelated; }
-    #board-layout .sui-result-row-resources { gap: 16px; flex-wrap: wrap; justify-content: flex-end; }
+    #board-layout .sui-result-row-resources { gap: var(--spacing-xl); flex-wrap: wrap; justify-content: flex-end; }
     /* Flex items default to `min-width: auto`, so a long unbroken name
        (auto_retreat_if_cmd_belowhp) pushed the row wider than its card
        instead of wrapping. */
@@ -252,9 +252,9 @@
     .sui-resource { font-variant-numeric: tabular-nums; white-space: nowrap; }
     .sui-resource span { white-space: nowrap; }
     /* Labeled stat tile: value over a tiny uppercase caption. */
-    .fstat { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
-    .fstat-v { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
-      font-variant-numeric: tabular-nums; font-size: 13px; line-height: 1.1; }
+    .fstat { display: flex; flex-direction: column; align-items: center; gap: var(--spacing-xs); min-width: 0; }
+    .fstat-v { display: inline-flex; align-items: center; gap: var(--spacing-sm); white-space: nowrap;
+      font-variant-numeric: tabular-nums; font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: 1.1; }
     .fstat-v i { flex: none; }
     .fstat-l { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 1.3;
       text-transform: uppercase; letter-spacing: .5px; color: var(--text-hint); }
@@ -273,25 +273,25 @@
     /* Health strip — one row of stat tiles, wrapping on narrow windows. */
     /* Not scoped to #ops-health: System/Diagnostics renders the same tiles,
        and while it was, they fell back to .fstat's centred column there. */
-    .hstrip { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: flex-start; }
+    .hstrip { display: flex; flex-wrap: wrap; gap: var(--spacing-lg) var(--spacing-xxl); align-items: flex-start; }
     .hstrip .fstat { flex: 0 0 auto; align-items: flex-start; }
     .hstrip .fstat-v, .hstrip .fstat-l { justify-content: flex-start; text-align: left; }
     /* The strip is deliberately card-less, but it sat flush against the
        PRIMARY card header below it — the last tile caption and that header
        read as one collided line. */
-    #ops-health { margin-bottom: 14px; }
-    #ops-health .hblocked { margin-top: 10px; }
+    #ops-health { margin-bottom: var(--spacing-lg); }
+    #ops-health .hblocked { margin-top: var(--spacing-md); }
     /* Row title with an inline glyph — the light alternative to a portrait. */
-    .row-title { display: inline-flex; align-items: center; gap: 7px; }
+    .row-title { display: inline-flex; align-items: center; gap: var(--spacing-md); }
     .row-title i { flex: none; opacity: .8; }
     /* Harvest trio under the PID: icons + values only, quiet by design. */
     /* Three nowrap items in a non-wrapping inline-flex: in a narrow window
        the trio pushed the whole roster row past its card rather than
        dropping to a second line. */
-    .htrio-line { display: inline-flex; flex-wrap: wrap; gap: 2px 10px;
-                  max-width: 100%; opacity: .75; font-size: 11px; }
+    .htrio-line { display: inline-flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-md);
+                  max-width: 100%; opacity: .75; font-family: 'DirectiveZero', sans-serif; font-size: 8px; }
     .htrio { white-space: nowrap; }
-    .htrio i { font-size: 11px; }
+    .htrio i { font-family: 'DirectiveZero', sans-serif; font-size: 8px; }
     /* ── Units keep their case ─────────────────────────────────────────────
        The game's unit ladder is CASE-BEARING — g / Kg / mg / μg, W / KW / mW —
        and 'ExtremeHazard', the display face SUI uses for labels and button
@@ -304,42 +304,42 @@
     #board-layout .mass-btn .fig,
     #sui-offcanvas .fig {
       font-family: 'DirectiveZero', sans-serif; text-transform: none;
-      font-size: 11px; letter-spacing: 0;
+      font-size: 16px; letter-spacing: 0;
     }
     /* Callsigns config section — the preview wraps rather than scrolls, since
        it is a sample rather than a list to scan through. */
-    .cs-preview { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 10px; }
+    .cs-preview { display: flex; flex-wrap: wrap; gap: var(--spacing-md) var(--spacing-xl); margin-top: var(--spacing-md); }
     .cs-preview .fstat { flex: 0 0 auto; align-items: flex-start; }
     .cs-preview .fstat-v, .cs-preview .fstat-l { justify-content: flex-start; text-align: left; }
-    .cs-preview .fstat-v { font-size: 13px; }
+    .cs-preview .fstat-v { font-family: 'DirectiveZero', sans-serif; font-size: 16px; }
     /* Role Appearance config section */
-    .appear-role { display: flex; flex-direction: column; gap: 8px; }
-    .appear-preview { display: flex; gap: 8px; margin-bottom: 4px; }
+    .appear-role { display: flex; flex-direction: column; gap: var(--spacing-md); }
+    .appear-preview { display: flex; gap: var(--spacing-md); margin-bottom: var(--spacing-sm); }
     .appear-preview .sui-result-row-portrait,
     .appear-preview .sui-result-row-portrait-image { width: 48px; height: 48px; }
-    .appear-layer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .appear-layer { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md); }
     /* 84px was tuned to the longest label ("Background") at the default
        window; at 400px the same word needs 90 and clipped. Let it take what
        it needs and give the controls the slack instead. */
-    .appear-layer-name { font-size: 12px; min-width: 84px; flex: 0 0 auto; white-space: nowrap; }
-    .appear-layer-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    .appear-layer-name { font-family: 'DirectiveZero', sans-serif; font-size: 8px; min-width: 84px; flex: 0 0 auto; white-space: nowrap; }
+    .appear-layer-ctl { display: flex; align-items: center; gap: var(--spacing-md); flex-wrap: wrap;
                         flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
     .appear-thumb { position: relative; width: 34px; height: 34px; overflow: hidden; flex: none;
-      border: 1px solid var(--border-subtle, #2a3a4d); background: #0b1017; }
+      border: 1px solid var(--border-subtle); background: #0b1017; }
     .appear-thumb-btn { cursor: pointer; }
-    .appear-thumb-btn:hover { border-color: var(--accent-primary, #6cf); }
-    .appear-step { display: inline-flex; padding: 2px 4px; cursor: pointer; opacity: .8; }
+    .appear-thumb-btn:hover { border-color: var(--accent-primary); }
+    .appear-step { display: inline-flex; padding: var(--spacing-xs) var(--spacing-sm); cursor: pointer; opacity: .8; }
     .appear-step:hover { opacity: 1; }
-    .appear-idx { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-hint, #6883a0); min-width: 54px; text-align: center; }
-    .appear-toggle { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; padding: 2px 8px;
-      border: 1px solid var(--border, #345); cursor: pointer; white-space: nowrap; }
-    .appear-toggle.is-random { color: var(--accent-primary, #6cf); border-color: var(--accent-primary, #6cf); }
-    .appear-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; width: 100%; max-height: 60vh; overflow-y: auto; }
-    .appear-grid-cell { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 3px; border: 1px solid transparent; }
-    .appear-grid-cell:hover { border-color: var(--accent-primary, #6cf); }
+    .appear-idx { font-family: 'Inter', sans-serif; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-hint); min-width: 54px; text-align: center; }
+    .appear-toggle { font-family: 'DirectiveZero', sans-serif; font-size: 8px; text-transform: uppercase; letter-spacing: .5px; padding: var(--spacing-xs) var(--spacing-md);
+      border: 1px solid var(--border); cursor: pointer; white-space: nowrap; }
+    .appear-toggle.is-random { color: var(--accent-primary); border-color: var(--accent-primary); }
+    .appear-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: var(--spacing-sm); width: 100%; max-height: 60vh; overflow-y: auto; }
+    .appear-grid-cell { display: flex; flex-direction: column; align-items: center; gap: var(--spacing-xs); padding: var(--spacing-xs); border: 1px solid transparent; }
+    .appear-grid-cell:hover { border-color: var(--accent-primary); }
     .appear-grid-cell.sel { border-color: var(--text-player-primary); }
     .appear-grid-cell .appear-thumb { width: 40px; height: 40px; }
-    .appear-grid-n { font-size: 9px; color: var(--text-hint, #6883a0); }
+    .appear-grid-n { font-family: 'Inter', sans-serif; font-size: 12px; color: var(--text-hint); }
     #board-layout .sui-result-row-player-info,
     #board-layout .sui-text-label-block { min-width: 0; }
     #board-layout .sui-text-label-block { overflow: hidden; text-overflow: ellipsis; }
@@ -353,20 +353,20 @@
        where its Cancel/Confirm buttons land. The irreversible action was the
        part you could not click. */
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
-      display: flex; align-items: center; justify-content: center; z-index: 2100; padding: 20px; }
+      display: flex; align-items: center; justify-content: center; z-index: 2100; padding: var(--spacing-xl); }
     .modal-overlay .sui-message-system-modal { max-height: 90%; overflow-y: auto; }
     #detail-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
       display: flex; align-items: center; justify-content: center; z-index: 2050; }
-    #detail-overlay .detail-panel { background: var(--surface-player-body, #0f1520);
-      border: 1px solid var(--border, #345); max-width: 520px; width: 90%;
-      max-height: 80%; overflow-y: auto; padding: 14px 16px; }
-    #detail-overlay .detail-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
-    #detail-overlay .detail-x { cursor: pointer; opacity: .7; padding: 0 4px; }
+    #detail-overlay .detail-panel { background: var(--surface-player-body);
+      border: 1px solid var(--border); max-width: 520px; width: 90%;
+      max-height: 80%; overflow-y: auto; padding: var(--spacing-lg) var(--spacing-xl); }
+    #detail-overlay .detail-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--spacing-md); margin-bottom: var(--spacing-md); }
+    #detail-overlay .detail-x { cursor: pointer; opacity: .7; padding: 0 var(--spacing-sm); }
     #detail-overlay .detail-x:hover { opacity: 1; }
     /* Toolbars */
-    .fbat { display: inline-flex; gap: 2px; align-items: center; }
+    .fbat { display: inline-flex; gap: var(--spacing-xs); align-items: center; }
     .fbat i { width: 5px; height: 10px; background: rgba(120,180,255,.15); display: inline-block; }
-    .fbat i.on { background: var(--accent-primary, #6cf); }
+    .fbat i.on { background: var(--accent-primary); }
     .attn { color: var(--text-warning); }
     .err { color: var(--accent-destructive); }
     /* Mass-action toolbar buttons: keep SUI look, add busy state. */
@@ -375,17 +375,17 @@
        ~48α" went to three lines) overflows its own frame. Let the button
        grow sideways instead. */
     .mass-btn span { white-space: nowrap; }
-    #mass-progress { width: 100%; margin: 6px 0; }
-    .bar { height: 8px; background: rgba(120,180,255,.12); border: 1px solid var(--border, #345); width: 80px; }
-    .bar > i { display: block; height: 100%; background: var(--accent-primary, #6cf); width: 0; transition: width .3s; }
+    #mass-progress { width: 100%; margin: var(--spacing-sm) 0; }
+    .bar { height: 8px; background: rgba(120,180,255,.12); border: 1px solid var(--border); width: 80px; }
+    .bar > i { display: block; height: 100%; background: var(--accent-primary); width: 0; transition: width .3s; }
     /* CONFIG page */
-    .cfg-group { margin-bottom: 4px; }
-    .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
-               padding: 3px 0; font-size: 13px; width: 100%; flex-wrap: wrap; }
+    .cfg-group { margin-bottom: var(--spacing-sm); }
+    .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md);
+               padding: var(--spacing-xs) 0; font-family: 'DirectiveZero', sans-serif; font-size: 8px; width: 100%; flex-wrap: wrap; }
     /* (The raw input/select restyling that used to live here is gone — H.field,
        H.stepper, H.selectBox and H.textBox now emit SUI's own markup, so
        sui.css styles them and an override would only fight it.) */
-    .cfg-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+    .cfg-actions { display: flex; gap: var(--spacing-md); flex-wrap: wrap; margin-top: var(--spacing-sm); }
     /* ── PROFILES: the build order ────────────────────────────────────────
        A loadout row is "keep N of this type in this (target, ambit)", and the
        four slots it claims are shared with every other row in the same ambit.
@@ -408,18 +408,18 @@
        row it can afford — so it leads the row rather than hiding in the text. */
     .prof-pri {
       flex: none; min-width: 16px; text-align: right;
-      font-family: 'ExtremeHazard', sans-serif; font-size: 11px;
+      font-family: 'ExtremeHazard', sans-serif; font-size: 12px;
       color: var(--text-hint);
     }
 
-    .prof-sub { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-    .prof-ambit { display: inline-flex; align-items: center; gap: 3px; }
+    .prof-sub { display: inline-flex; align-items: center; gap: var(--spacing-sm); flex-wrap: wrap; }
+    .prof-ambit { display: inline-flex; align-items: center; gap: var(--spacing-xs); }
     .prof-ambit > span { text-transform: uppercase; letter-spacing: .04em; }
 
     /* Four pips = the four chain slots of one (target, ambit). Claimed by an
        earlier row, claimed by this row, or free — and clicking a pip sets
        `want` straight to it. */
-    .prof-pips { display: inline-flex; gap: 3px; align-items: center; }
+    .prof-pips { display: inline-flex; gap: var(--spacing-xs); align-items: center; }
     .prof-pip {
       width: 9px; height: 14px; box-sizing: border-box;
       border: 1px solid var(--border-subtle); background: transparent;
@@ -431,12 +431,12 @@
 
     /* Per-ambit fill, above the list: an ambit sitting at 0/4 is the gap that
        leaves a fleet with no answer, so it is coloured like one. */
-    .prof-slotbar { display: inline-flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    .prof-slot { display: inline-flex; align-items: center; gap: 3px; color: var(--text-body); }
+    .prof-slotbar { display: inline-flex; gap: var(--spacing-md); flex-wrap: wrap; align-items: center; }
+    .prof-slot { display: inline-flex; align-items: center; gap: var(--spacing-xs); color: var(--text-body); }
     .prof-slot.is-empty { color: var(--text-enemy-primary); }
     .prof-slot.is-full { color: var(--text-player-primary); }
 
-    .prof-builds .sui-result-row { padding-top: 4px; padding-bottom: 4px; }
+    .prof-builds .sui-result-row { padding-top: var(--spacing-sm); padding-bottom: var(--spacing-sm); }
     /* Two SUI defaults have to be relaxed for a result row to work inside the
        332px drawer, and both need the #sui-offcanvas prefix to out-specify the
        rules they are relaxing.
@@ -454,7 +454,7 @@
     #sui-offcanvas .prof-picker .sui-result-row-right-section,
     #board-layout .prof-builds .sui-result-row-right-section,
     #board-layout .prof-picker .sui-result-row-right-section {
-      min-width: 0; flex: 0 0 auto; gap: 6px;
+      min-width: 0; flex: 0 0 auto; gap: var(--spacing-sm);
     }
     #sui-offcanvas .prof-builds .sui-text-label-block,
     #sui-offcanvas .prof-picker .sui-text-label-block,
@@ -466,24 +466,24 @@
        24px the name does not get. */
     #sui-offcanvas .prof-builds .sui-result-row-player-info,
     #sui-offcanvas .prof-picker .sui-result-row-player-info {
-      flex: 1 1 auto; padding-right: 6px;
+      flex: 1 1 auto; padding-right: var(--spacing-sm);
     }
 
     /* The picker, opened in place under the list it adds to. Capped so the
        Add button and the list above it stay on screen while choosing. */
-    .prof-picker { max-height: 46vh; overflow-y: auto; margin-top: 6px;
+    .prof-picker { max-height: 46vh; overflow-y: auto; margin-top: var(--spacing-sm);
                    border: 1px solid var(--border-subtle); }
     .prof-picker .sui-result-row.is-disabled { opacity: .45; cursor: default; }
 
     /* WAR page: the list cards add free-text id inputs alongside the numeric
        ones, and each result row carries a couple of inline icon actions. */
     .cfg-row .sui-result-row-right-section .cfg-actions,
-    .sui-result-row .cfg-actions { margin-top: 0; gap: 4px; }
-    .war-addrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .sui-result-row .cfg-actions { margin-top: 0; gap: var(--spacing-sm); }
+    .war-addrow { display: flex; align-items: center; gap: var(--spacing-md); flex-wrap: wrap; }
     /* Config sub-sections: the same nav component as the board's own tab bar,
        inset so it reads as a level down rather than a second top-level bar. */
-    .subnav { margin: 0 0 12px; }
-    .subnav .sui-screen-nav { padding: 0 4px; }
+    .subnav { margin: 0 0 var(--spacing-lg); }
+    .subnav .sui-screen-nav { padding: 0 var(--spacing-sm); }
     .subnav .sui-screen-nav-items { flex-wrap: wrap; }
 
     /* ── SUI checkbox, used bare (no text label) ──────────────────────────
@@ -505,14 +505,14 @@
     #sui-offcanvas .sui-radio-container label { margin-left: 0; }
     /* …unless it genuinely carries text, which needs the offset back. */
     #board-layout .sui-checkbox-container.has-label { width: auto; }
-    #board-layout .sui-checkbox-container.has-label label { margin-left: 40px; }
+    #board-layout .sui-checkbox-container.has-label label { margin-left: var(--spacing-xxxl); }
 
     /* Steppers. Two board-specific sizings, both because the game renders SUI
        at transform:scale(2)/(4) (main.css:2338) while this console runs at 1x:
        an 8px inherited font is legible there and not here, and SUI's 25px
        input is sized for a 1-2 digit quantity picker, not a 5-digit interval. */
     #board-layout .sui-input-stepper,
-    #sui-offcanvas .sui-input-stepper { gap: 4px; }
+    #sui-offcanvas .sui-input-stepper { gap: var(--spacing-sm); }
     #board-layout .sui-input-stepper input[type="number"],
     #sui-offcanvas .sui-input-stepper input[type="number"] {
       /* Wide enough for the widest real setting (roster_ttl_secs = 21600).
@@ -523,8 +523,9 @@
          straight back down. SUI's 16px side padding also has to go, or half
          the field is padding at this size. */
       flex: none; width: 7.2em; min-width: 7.2em;
-      padding: var(--spacing-md) 4px;
-      font-size: 13px; font-variant-numeric: tabular-nums; text-align: center;
+      padding: var(--spacing-md) var(--spacing-sm);
+      font-family: 'Inter', sans-serif;
+      font-size: 12px; font-variant-numeric: tabular-nums; text-align: center;
     }
     #board-layout .sui-input-stepper,
     #sui-offcanvas .sui-input-stepper { flex: none; }
@@ -532,7 +533,7 @@
        settings row; trim to the field height without touching the component. */
     #board-layout .sui-input-stepper .sui-screen-btn,
     #sui-offcanvas .sui-input-stepper .sui-screen-btn {
-      height: 24px; min-height: 0; padding: 0 6px; margin: 0;
+      height: 24px; min-height: 0; padding: 0 var(--spacing-sm); margin: 0;
     }
     #board-layout .sui-input-stepper .sui-screen-btn i,
     #sui-offcanvas .sui-input-stepper .sui-screen-btn i { font-size: 12px; width: 12px; height: 12px; }
@@ -547,7 +548,7 @@
     #sui-offcanvas label.sui-input-text.cfg-field {
       min-width: 0;
       flex-direction: row; align-items: center; justify-content: space-between;
-      gap: 8px 18px; padding: 3px 0;
+      gap: var(--spacing-md) var(--spacing-xl); padding: var(--spacing-xs) 0;
     }
     /* :first-child — only the caption span, never a control that happens to
        be a span (SUI's own `label.sui-input-text span` rule has this bug). */
@@ -560,7 +561,7 @@
        query on viewport width — which never fired, because the viewport is
        the whole window. Labels and long values overlapped as a result. */
     #sui-offcanvas label.sui-input-text.cfg-field {
-      flex-direction: column; align-items: stretch; gap: 2px;
+      flex-direction: column; align-items: stretch; gap: var(--spacing-xs);
     }
     #sui-offcanvas label.sui-input-text.cfg-field > span:first-child { flex: none; }
     /* DIRECT children only. A compound control (H.amountField: number + unit
@@ -593,32 +594,32 @@
     /* A drawer's primary action must always be reachable without hunting for
        it: pin it to the bottom of the panel. */
     #sui-offcanvas .drawer-cta { position: sticky; bottom: 0; z-index: 2;
-      margin: 10px -2px 0; padding: 10px 2px 2px;
-      background: linear-gradient(to bottom, transparent, var(--surface-player-body, #0f1520) 35%);
-      display: flex; gap: 8px; flex-wrap: wrap; }
+      margin: var(--spacing-md) -var(--spacing-xs) 0; padding: var(--spacing-md) var(--spacing-xs) var(--spacing-xs);
+      background: linear-gradient(to bottom, transparent, var(--surface-player-body) 35%);
+      display: flex; gap: var(--spacing-md); flex-wrap: wrap; }
     #sui-offcanvas .drawer-cta .mass-btn { flex: 1 1 auto; justify-content: center; }
 
     /* ── Amount field (H.amountField) ──────────────────────────────────────
        number + unit picker + MAX, on one line. The unit is a real control, not
        a caption: an operator moving 2 μg and one moving 7 Kg are using the same
        field and neither should be doing arithmetic in their head. */
-    .amount-field { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }
+    .amount-field { display: flex; align-items: center; gap: var(--spacing-sm); min-width: 0; flex: 1 1 auto; }
     /* The number is the field; the unit picker and MAX are trim. SUI styles the
        BARE `select` at a 256px minimum (sized for a full page), which without
        these overrides swallowed the whole row and left the number 20px wide. */
     #board-layout .amount-field .amount-input,
     #sui-offcanvas .amount-field .amount-input {
       flex: 1 1 auto; min-width: 3.5em; width: auto;
-      background: transparent; color: inherit; padding: 4px 6px; font: inherit;
+      background: transparent; color: inherit; padding: var(--spacing-sm) var(--spacing-sm); font: inherit;
       font-variant-numeric: tabular-nums; text-align: right;
       border: 0 none; border-bottom: 2px solid var(--accent-secondary); }
     .amount-field .amount-input:focus { outline: none; border-bottom-color: var(--accent-primary-active); }
     #board-layout .amount-field select.amount-unit,
     #sui-offcanvas .amount-field select.amount-unit {
-      flex: 0 0 auto; min-width: 0; width: auto; padding-right: 22px; }
-    .amount-field .amount-max { flex: none; cursor: pointer; font-size: 10px; letter-spacing: .5px;
-      padding: 2px 6px; border: 1px solid var(--border, #345); color: var(--accent-primary, #6cf); }
-    .amount-field .amount-max:hover { border-color: var(--accent-primary, #6cf); }
+      flex: 0 0 auto; min-width: 0; width: auto; padding-right: var(--spacing-xxl); }
+    .amount-field .amount-max { flex: none; cursor: pointer; font-family: 'DirectiveZero', sans-serif; font-size: 8px; letter-spacing: .5px;
+      padding: var(--spacing-xs) var(--spacing-sm); border: 1px solid var(--border); color: var(--accent-primary); }
+    .amount-field .amount-max:hover { border-color: var(--accent-primary); }
     /* An amount is a compound control; it needs its own line even where the
        plain label/control pairs sit side by side. */
     #board-layout label.sui-input-text.cfg-field-amount { flex-direction: column; align-items: stretch; }
@@ -638,23 +639,23 @@
        as a minus in the game's pixel font. */
     .approx { border-bottom: 1px dotted currentColor; }
     /* A stepper and the unit it counts in. */
-    .stepper-unit-pair { display: inline-flex; align-items: center; gap: 5px; flex: none; }
-    .stepper-unit { font-size: 11px; color: var(--text-hint); min-width: 1.2em; }
+    .stepper-unit-pair { display: inline-flex; align-items: center; gap: var(--spacing-sm); flex: none; }
+    .stepper-unit { font-family: 'DirectiveZero', sans-serif; font-size: 8px; color: var(--text-hint); min-width: 1.2em; }
     /* A secret: masked by default, revealed and copied by its own controls.
        `code` keeps the token monospaced so a revealed one can be compared. */
-    .secret-row { align-items: flex-start; gap: 8px; }
-    .secret-val { flex: 1 1 auto; min-width: 0; font-size: 11px; }
-    .secret-acts { flex: none; display: inline-flex; gap: 6px; }
-    .secret-acts a { padding: 0 4px; }
+    .secret-row { align-items: flex-start; gap: var(--spacing-md); }
+    .secret-val { flex: 1 1 auto; min-width: 0; font-family: 'Inter', sans-serif; font-size: 12px; }
+    .secret-acts { flex: none; display: inline-flex; gap: var(--spacing-sm); }
+    .secret-acts a { padding: 0 var(--spacing-sm); }
 
     /* Read-only "here is the fact" rows inside a drawer form. */
     #sui-offcanvas .form-fact { display: flex; flex-direction: column; gap: 1px;
-      padding: 4px 0; text-align: left; }
+      padding: var(--spacing-sm) 0; text-align: left; }
     #sui-offcanvas .form-fact-label { font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
       line-height: 16px; text-transform: uppercase; color: var(--text-hint); }
     #sui-offcanvas .form-fact-value { overflow-wrap: anywhere; }
-    #sui-offcanvas .form-note { text-align: left; font-size: 11px; color: var(--text-hint);
-      margin-top: 2px; }
+    #sui-offcanvas .form-note { text-align: left; font-size: 8px; color: var(--text-hint);
+      margin-top: var(--spacing-xs); }
 
     /* SUI's `.sui-data-card-body` is `align-items: flex-start`, so its children
        shrink to their own content instead of filling the card. On a wide
@@ -671,7 +672,7 @@
     /* Allocation utilisation meter. The numbers alone read as "8.45 MW /
        8.45 MW / 1.22 W" — three different units and no signal that the grid is
        full. The bar carries that instantly; the numbers stay for precision. */
-    .alloc-meter { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }
+    .alloc-meter { display: flex; flex-direction: column; gap: var(--spacing-xs); margin-bottom: var(--spacing-md); }
     .alloc-meter-bar { height: 10px; border: 1px solid var(--border);
       background: var(--surface-player-body); position: relative; }
     .alloc-meter-bar > i { display: block; height: 100%; background: var(--text-player-primary);
@@ -679,34 +680,34 @@
     .alloc-meter-bar.tight > i { background: var(--text-warning); }
     .alloc-meter-bar.full  > i { background: var(--text-enemy-primary); }
     .alloc-meter-caption { display: flex; justify-content: space-between; align-items: baseline;
-      gap: 10px; font-size: 11px; color: var(--text-hint); text-align: left; }
+      gap: var(--spacing-md); font-family: 'DirectiveZero', sans-serif; font-size: 8px; color: var(--text-hint); text-align: left; }
     .alloc-meter-pct { font-variant-numeric: tabular-nums; flex: none; }
     /* The four budget tiles sat shoulder to shoulder and read as one string. */
-    #board-layout .alloc-budget.hstrip { gap: 14px 28px; margin-bottom: 4px; }
+    #board-layout .alloc-budget.hstrip { gap: var(--spacing-lg) var(--spacing-xxl); margin-bottom: var(--spacing-sm); }
 
     /* "New allocation" is the rarest action here — it should not be the
        loudest thing in the card. */
-    .alloc-create { margin-top: 12px; display: flex; justify-content: flex-start; }
+    .alloc-create { margin-top: var(--spacing-lg); display: flex; justify-content: flex-start; }
     .alloc-create .mass-btn { margin: 0; }
 
     /* Allocation editor: an inline panel under the row it edits. */
-    .alloc-editor { border-left: 2px solid var(--accent-secondary); padding: 6px 0 6px 10px;
-      margin: 0 0 8px 10px; display: flex; flex-direction: column; gap: 4px; text-align: left; }
+    .alloc-editor { border-left: 2px solid var(--accent-secondary); padding: var(--spacing-sm) 0 var(--spacing-sm) var(--spacing-md);
+      margin: 0 0 var(--spacing-md) var(--spacing-md); display: flex; flex-direction: column; gap: var(--spacing-sm); text-align: left; }
     .alloc-editor label.sui-input-text { max-width: 420px; }
 
     /* ── listView ────────────────────────────────────────────────────────
        Toolbar / rows / count / pager. The rows grid never scrolls internally:
        it is paginated, so the page scrolls and the pager stays reachable
        instead of a list scrolling inside a scrolling page. ── */
-    .listview { display: flex; flex-direction: column; gap: 8px; width: 100%; }
-    .listview-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .listview { display: flex; flex-direction: column; gap: var(--spacing-md); width: 100%; }
+    .listview-toolbar { display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center; }
     .listview-text { min-width: 140px; flex: 1 1 160px; max-width: 320px;
-      background: transparent; color: inherit; padding: 4px 8px;
+      background: transparent; color: inherit; padding: var(--spacing-sm) var(--spacing-md);
       border: 0 none; border-bottom: 2px solid var(--accent-secondary); }
     .listview-text:focus { outline: none; border-bottom-color: var(--accent-primary-active); }
-    .listview-toggle { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .listview-toggle { display: inline-flex; align-items: center; gap: var(--spacing-sm); white-space: nowrap; }
     .listview-foot { display: flex; justify-content: space-between; align-items: center;
-      gap: 12px; font-size: 11px; }
+      gap: var(--spacing-lg); font-family: 'DirectiveZero', sans-serif; font-size: 8px; }
     .listview-pager { display: flex; justify-content: center; }
     #board-layout .sui-result-rows.sui-result-table.list-managed {
       max-height: none; overflow: visible;
@@ -786,8 +787,8 @@
     #board-layout .sui-data-card-body .ops-muted,
     #sui-offcanvas .ops-muted { text-align: left; }
     .sui-data-card-body .ops-muted:last-child,
-    .cfg-note { font-size: 11px; line-height: 1.45; text-align: left;
-      margin-top: 10px; max-width: 62ch; }
+    .cfg-note { font-size: 8px; line-height: 1.45; text-align: left;
+      margin-top: var(--spacing-md); max-width: 62ch; }
 
     /* ── Pop-out mode (board.html?view=stream) ──────────────────────────────
        Same page, one section, no chrome: the window IS the stream. */
@@ -800,7 +801,7 @@
        it grow to its full 16,000px content and the filter controls scrolled
        away with the rows. */
     html[data-solo] .ops-scroll { height: 100vh; max-height: 100vh; overflow: hidden;
-                                  padding: 10px 12px; }
+                                  padding: var(--spacing-md) var(--spacing-lg); }
     /* Stream-only: display:flex would override the router's `hidden` toggle,
        so it must never apply to a DIFFERENT solo view's window — that is how
        the Game Stats pop-out got a 723px invisible grass page shoving its own
@@ -874,13 +875,13 @@
               <div class="sui-data-card sui-theme-player" id="feed-alerts-card" hidden>
                 <div class="sui-data-card-header">NEEDS YOU</div>
                 <div class="sui-data-card-body sui-mod-spacing-xl">
-                  <ul id="feed-alerts"></ul>
+                  <ul id="feed-alerts" class="sui-text-ticker"></ul>
                 </div>
               </div>
               <div class="sui-data-card sui-theme-player">
                 <div class="sui-data-card-header">EVENT FEED</div>
                 <div class="sui-data-card-body sui-mod-spacing-xl">
-                  <ul id="feed-list"><li class="ops-muted">no events yet</li></ul>
+                  <ul id="feed-list" class="sui-text-ticker"><li class="ops-muted">no events yet</li></ul>
                 </div>
               </div>
             </div>
@@ -923,7 +924,7 @@
             <!-- ═══ GRASS (live game-event stream) ═══ -->
             <div class="page" id="page-grass" hidden>
               <div id="grass-toolbar"></div>
-              <ul id="grass-list" class="ops-feed"></ul>
+              <ul id="grass-list" class="ops-feed sui-text-ticker"></ul>
             </div>
 
             <!-- ═══ WAR (grudges, target board, incidents, combat settings) ═══ -->

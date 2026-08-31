@@ -2042,18 +2042,22 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // This opens it directly. Deliberately unlabelled: it is a door for
       // people who already know it is here, not a feature to advertise.
       //
-      // The font stack is pinned because π is U+03C0, and BOTH bundled faces
-      // (DirectiveZero, ExtremeHazard) contain zero glyphs in the Greek block —
-      // verified against the .ttf cmaps, 95 and 96 codepoints, none Greek. The
-      // glyph would therefore fall through to whatever generic the platform
-      // happens to pick, which differs per OS. Naming the stack makes it look
-      // the same everywhere.
+      // It used to be a π in a pinned serif stack, because π is U+03C0 and
+      // neither bundled face has any Greek glyph — so the character fell
+      // through to whatever generic the platform picked. Pinning Georgia made
+      // it consistent, at the cost of a font from outside the design system
+      // sitting in the middle of the game's own UI.
+      //
+      // `icon-cmd-post` removes the problem rather than working around it: a
+      // command post is what Team Ops IS, it comes from the game's own icon
+      // font, and it needs no fallback stack at all.
       html += '<div style="display:flex; justify-content:flex-end; padding:2px 4px 0 0;">'
-        + '<span id="debug-teamops" title="Team Ops" '
-        + 'style="font-family: Georgia, \'Times New Roman\', \'DejaVu Serif\', serif;'
-        + ' font-size:15px; line-height:1; cursor:pointer; user-select:none;'
-        + ' color:var(--text-hint); opacity:.45; padding:2px 4px;'
-        + ' transition:opacity .15s ease, color .15s ease;">π</span>'
+        + '<i id="debug-teamops" title="Team Ops" '
+        + 'class="sui-icon-sm icon-cmd-post" '
+        + 'style="cursor:pointer; user-select:none;'
+        + ' color:var(--text-hint); opacity:.45;'
+        + ' padding:var(--spacing-xs) var(--spacing-sm);'
+        + ' transition:opacity .15s ease, color .15s ease;"></i>'
         + '</div>';
 
       html += '</div>';
@@ -2431,7 +2435,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             'Refresh</a>';
           html += row('Status',
             (online ? '<span style="color:var(--accent-primary);">ONLINE</span>'
-                    : '<span style="color:var(--accent-warning, #d66);">OFFLINE</span>') + refreshBtn);
+                    : '<span style="color:var(--text-warning);">OFFLINE</span>') + refreshBtn);
           html += row('Total Load', fmtPower(totalLoad) + ' / ' + fmtPower(totalCap) +
             (totalCap > 0 ? ' (' + margin + '% margin)' : ''));
           html += row('Structs Load', fmtPower(structLoadP));
