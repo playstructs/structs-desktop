@@ -309,28 +309,14 @@
   // webapp's PfpViewerComponent. Falls back to the placeholder when a player has
   // no portrait yet. `fallbackIcon` (a sui-icon name) is used only if even the
   // placeholder is unwanted — normally omit it. Returns a portrait node.
-  var PFP_LAYERS = ['background', 'arms', 'body', 'neck', 'head'];
+  // The shared composer in pfp.js. This copy validated NOTHING — it read a
+  // layer index straight out of another player's on-chain string and
+  // interpolated it into an image path, on the two surfaces that show the
+  // most strangers: the roster and the leaderboards.
   function pfpPortrait(attrsJson) {
     var box = el('div', 'sui-result-row-portrait');
-    var img = el('div', 'sui-result-row-portrait-image pfp-frame');
-    var pfp = null;
-    if (attrsJson) { try { pfp = JSON.parse(attrsJson); } catch (e) { pfp = null; } }
-    if (pfp && typeof pfp === 'object' && pfp.head != null) {
-      PFP_LAYERS.forEach(function (part) {
-        var idx = pfp[part];
-        if (idx == null) return;
-        var im = el('img', 'pfp-viewer-layer');
-        im.src = 'img/pfp/' + part + '/pfp_' + part + '_' + idx + '.png';
-        im.alt = '';
-        img.appendChild(im);
-      });
-    } else {
-      var ph = el('img', 'pfp-viewer-layer');
-      ph.src = 'img/portrait-placeholder.png';
-      ph.alt = '';
-      img.appendChild(ph);
-    }
-    box.appendChild(img);
+    box.appendChild(window.StructsPfp.fillPortrait(
+      el('div', 'sui-result-row-portrait-image pfp-frame'), attrsJson));
     return box;
   }
   // ── Native SUI result-row builders (the game's raid-scan / roster idiom) ──

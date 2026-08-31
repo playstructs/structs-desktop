@@ -62,5 +62,52 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
     starts.join(', '));
 }
 
+// ── The panel is built as innerHTML, so escaping is the whole safety story ──
+//
+// `row()` did not escape. 33 of its 38 callers pass plain text — the player's
+// own on-chain username, ids read back from the guild API, and `e.message`
+// out of a failed fetch — and all of it lands in `innerHTML`. Nothing about a
+// call site said which calls were safe, so the default had to change: `row`
+// escapes, `rowHtml` is the named opt-out for the five that build markup.
+{
+  console.log('\n— the debug panel escapes what it prints');
+
+  // Exactly one escaper in the file, at a scope everything can reach. There
+  // were two: one inside the agent-UI section, invisible to the panel builder
+  // that needed it, which is why `row` had none.
+  const escDefs = (src.match(/function\s*\(s\)\s*\{\s*\n?\s*return String\(s == null/g) || []).length;
+  check('one escaper, defined once', escDefs === 1, String(escDefs));
+  check('…and it covers quotes, not just angle brackets',
+    /\[&<>"'\]/.test(src.slice(0, 2000)));
+
+  // The default is safe.
+  const rowDef = /var row = function\(label, value, id\) \{\s*\n\s*return rowHtml\(label, STRUCTS_ESC\(value\), id\);/.test(src);
+  check('row() escapes its value', rowDef);
+  check('…and rowHtml() escapes the label and id it controls',
+    /rowHtml = function[\s\S]{0,600}?STRUCTS_ESC\(id\)[\s\S]{0,400}?STRUCTS_ESC\(label\)/.test(src));
+
+  /* Every raw-HTML call is accounted for.
+   *
+   * `rowHtml` is the unsafe one by design, so the guard is that its callers
+   * stay a known, small set that passes literal markup — and that any dynamic
+   * value inside one is escaped at the call site. The address row is the only
+   * one that interpolates anything.
+   */
+  const rawCalls = [...src.matchAll(/rowHtml\('([^']+)'/g)].map((m) => m[1]).sort();
+  check('the raw-HTML rows are the five known ones',
+    rawCalls.join() === 'Address,Config,Detail,Onboarding,Token', rawCalls.join());
+  // To end of line, NOT to the first `;` — the inline `style="cursor:pointer;"`
+  // is full of semicolons and truncating there hid the value being checked.
+  const addr = /rowHtml\('Address'.*/.exec(src)[0];
+  check('…and the only one with a dynamic value escapes it',
+    /STRUCTS_ESC\(walletAddress/.test(addr) && !/\+ walletAddress/.test(addr), addr.slice(-90));
+
+  // No OTHER row-ish builder quietly reintroduces the raw default.
+  const rawInterp = [...src.matchAll(/^\s*(?:html|out) \+= '<[^']*' \+ (?!row|rowHtml|listBlock|STRUCTS_ESC)([A-Za-z_$][\w$]*)/gm)]
+    .map((m) => m[1]);
+  check('no panel string interpolates a bare variable into markup',
+    rawInterp.length === 0, rawInterp.join(', '));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

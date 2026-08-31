@@ -1,3 +1,16 @@
+/* One HTML escaper for this whole file.
+ *
+ * This patch builds a lot of its panels as innerHTML strings, and it had an
+ * escaper buried inside the agent-UI section where the debug page's own row
+ * builder could not reach it. So `row()` interpolated raw — see its comment.
+ * File scope, so there is one and only one.
+ */
+var STRUCTS_ESC = function (s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+};
+
 // [structs-universe DIAGNOSTIC — remove later] Identify the "dark square"
 // render artifact. Hover the square and press Ctrl+Shift+D (or Cmd+Shift+D):
 // logs the element stack under the cursor (id/class/rect/bg/visibility/
@@ -1946,9 +1959,21 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
       var mcpUrl = 'http://127.0.0.1:8420/mcp';
 
+      /* One row of the panel.
+       *
+       * `row` ESCAPES; `rowHtml` does not. They were one function that did
+       * not escape, which is a bad default when 33 of its 38 callers pass
+       * plain text — including the player's own on-chain username and ids
+       * read back from the guild API — and the whole thing lands in
+       * `innerHTML`. Whether a given call was safe was invisible at the call
+       * site, so the five that genuinely build markup now say so by name.
+       */
+      var rowHtml = function(label, valueHtml, id) {
+        var valHtml = id ? '<span id="' + STRUCTS_ESC(id) + '">' + valueHtml + '</span>' : valueHtml;
+        return '<div class="sui-data-card-row" style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:2px 0;"><div style="white-space:nowrap; color:var(--text-hint);">' + STRUCTS_ESC(label) + '</div><div style="text-align:right; word-break:break-all; color:var(--text-body);">' + valHtml + '</div></div>';
+      };
       var row = function(label, value, id) {
-        var valHtml = id ? '<span id="' + id + '">' + value + '</span>' : value;
-        return '<div class="sui-data-card-row" style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:2px 0;"><div style="white-space:nowrap; color:var(--text-hint);">' + label + '</div><div style="text-align:right; word-break:break-all; color:var(--text-body);">' + valHtml + '</div></div>';
+        return rowHtml(label, STRUCTS_ESC(value), id);
       };
 
       var html = '<div style="padding: 4px; display:flex; flex-direction:column; gap:8px; width:100%;">';
@@ -1985,7 +2010,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div class="sui-data-card-header sui-text-header">Identity</div>';
       html += '<div class="sui-data-card-body">';
       html += row('Player', playerName + ' (' + playerId + ')');
-      html += row('Address', '<span id="debug-address" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted;">' + walletAddress.substring(0, 24) + '… (copy)</span>');
+      html += rowHtml('Address', '<span id="debug-address" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted;">' + STRUCTS_ESC(walletAddress.substring(0, 24)) + '… (copy)</span>');
       html += row('Guild', guildId);
       html += row('Substation', substationId);
       html += row('Fleet', fleetId);
@@ -2009,9 +2034,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div class="sui-data-card-body">';
       html += row('URL', mcpUrl);
       html += row('Status', 'checking...', 'debug-mcp-status');
-      html += row('Token', '<span id="debug-mcp-token">loading...</span>');
-      html += row('Config', '<span id="debug-mcp-config" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy to clipboard</span>');
-      html += row('Onboarding', '<span id="debug-onboard-prompt" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy Onboarding Prompt</span>');
+      html += rowHtml('Token', '<span id="debug-mcp-token">loading...</span>');
+      html += rowHtml('Config', '<span id="debug-mcp-config" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy to clipboard</span>');
+      html += rowHtml('Onboarding', '<span id="debug-onboard-prompt" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy Onboarding Prompt</span>');
       html += '</div></div>';
 
       // Engine
@@ -2329,7 +2354,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 : totalHps >= 1e3 ? (totalHps / 1e3).toFixed(1) + ' Kh/s'
                 : Math.round(totalHps) + ' h/s';
               html += row('Hashrate', hpsText);
-              html += row('Detail', '<span style="color:var(--text-hint);">per-task view: Team Ops → Work</span>');
+              html += rowHtml('Detail', '<span style="color:var(--text-hint);">per-task view: Team Ops → Work</span>');
             } else {
               html += row('Queue', 'No active tasks');
             }
@@ -2402,7 +2427,10 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         }
         function listBlock(title, items, formatter, emptyMsg) {
           var out = '<div style="margin-top:8px; padding:4px 0 4px 10px; border-left:2px solid var(--accent-primary); background:rgba(0,0,0,0.15);">';
-          out += '<div style="color:var(--text-body); font-weight:bold; padding-bottom:4px;">' + title +
+          // Escaped like everything else here. Every caller passes a literal
+          // today, which is exactly the state `row` was in before somebody
+          // passed it a username.
+          out += '<div style="color:var(--text-body); font-weight:bold; padding-bottom:4px;">' + STRUCTS_ESC(title) +
                  (items && items.length ? ' (' + items.length + ')' : '') + '</div>';
           if (!items || !items.length) {
             out += row('—', emptyMsg || 'none');
@@ -2738,11 +2766,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     var queue = [];              // pending interactive directives (no focus-hijack)
     var activeId = null;         // currently-open interactive surface
 
-    function esc(s) {
-      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-      });
-    }
+    var esc = STRUCTS_ESC;
 
     function respond(directiveId, value, cancelled) {
       TAURI.core.invoke('mcp_ui_response', {

@@ -313,9 +313,20 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('no markup is parsed out of a message body',
     hostile.querySelectorAll('img, script').length === 0,
     String(hostile.querySelectorAll('img, script').length));
+  /* Nothing rendered a <script> into the page.
+   *
+   * The baseline is COUNTED FROM THE HARNESS FILE, not written here as a 2.
+   * A hardcoded expectation makes this check fail the day the window
+   * legitimately gains a script — which it just did, when the portrait
+   * composer moved to its own module — and a check that breaks on unrelated
+   * changes gets "fixed" by bumping the number, which is how it stops
+   * guarding anything. Derived, it still catches the thing it is for: an
+   * injected tag is one the file does not contain.
+   */
+  const inFile = (readFileSync(harness, 'utf8').match(/<script src=/g) || []).length;
   check('the document grew no injected nodes at all',
-    d.querySelectorAll('script[src]').length === 2, // _fixtures_chat.js + chat.js
-    String(d.querySelectorAll('script[src]').length));
+    d.querySelectorAll('script[src]').length === inFile,
+    `${d.querySelectorAll('script[src]').length} in DOM vs ${inFile} in the file`);
 }
 
 // ── Reading a timeline ──────────────────────────────────────────────────────

@@ -3075,27 +3075,16 @@
   // indices in `pfpClientRenderAttributes` and the client composites them.
   // Same layer order as the game's PfpViewerComponent and the Team Ops roster,
   // so one player looks like the same person everywhere.
-  var PFP_LAYERS = ['background', 'arms', 'body', 'neck', 'head'];
-
+  /* The shared composer in pfp.js — the placeholder-on-nothing behaviour this
+   * function documented is now its behaviour everywhere.
+   *
+   * This window is the reason validating matters: the portrait it draws
+   * belongs to the player currently attacking you, from a string that player
+   * wrote themselves, and this copy checked nothing before putting it in a
+   * path.
+   */
   function renderPfpInto(host, attrsJson) {
-    var attrs = null;
-    if (attrsJson) { try { attrs = JSON.parse(attrsJson); } catch (e) { attrs = null; } }
-    if (attrs && typeof attrs === 'object' && attrs.head != null) {
-      PFP_LAYERS.forEach(function (part) {
-        if (attrs[part] == null) return;
-        var im = el('img', 'pfp-viewer-layer');
-        im.src = 'img/pfp/' + part + '/pfp_' + part + '_' + attrs[part] + '.png';
-        im.alt = '';
-        host.appendChild(im);
-      });
-      return;
-    }
-    // No attributes on chain yet — the game shows a placeholder rather than a
-    // blank frame, so the HUD keeps its shape.
-    var ph = el('img', 'pfp-viewer-layer');
-    ph.src = 'img/portrait-placeholder.png';
-    ph.alt = '';
-    host.appendChild(ph);
+    window.StructsPfp.fillPortrait(host, attrsJson);
   }
 
   // Port of ChargeCalculator (util/ChargeCalculator.js): raw charge → level 0-5.

@@ -3725,11 +3725,16 @@
   // A single-layer thumbnail (over the role's current background for context).
   function layerThumb(cfg, part, idx) {
     var box = H.el('div', 'appear-thumb');
+    var src = window.StructsPfp.layerSrc;
     if (part !== 'background') {
       var bgIdx = layerVal(cfg, 'background', APPEAR_SAMPLES[0], appear.counts.background);
-      var bg = H.el('img', 'pfp-viewer-layer'); bg.src = 'img/pfp/background/pfp_background_' + bgIdx + '.png'; box.appendChild(bg);
+      var bg = H.el('img', 'pfp-viewer-layer');
+      bg.src = src('background', bgIdx);
+      box.appendChild(bg);
     }
-    var im = H.el('img', 'pfp-viewer-layer'); im.src = 'img/pfp/' + part + '/pfp_' + part + '_' + idx + '.png'; box.appendChild(im);
+    var im = H.el('img', 'pfp-viewer-layer');
+    im.src = src(part, idx);
+    box.appendChild(im);
     return box;
   }
   // Grid modal to pick a fixed layer index.

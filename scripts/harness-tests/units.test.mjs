@@ -16,6 +16,9 @@ const check = (name, ok, detail) => {
 const root = process.cwd();
 const g = { window: undefined };
 new Function('window', readFileSync(root + '/frontend/units.js', 'utf8'))(g);
+// pfp.js the same way. `isLayer` is pure, so it needs no DOM; only
+// `fillPortrait` touches `document` and nothing here calls it.
+new Function('window', readFileSync(root + '/frontend/pfp.js', 'utf8'))(g);
 const U = g.StructsUnits;
 
 console.log('\n— printing');
@@ -163,8 +166,11 @@ console.log('\n— portrait layer counts match the art that ships');
 // checked against the thing that would actually 404: the files on disk.
 {
   const chat = readFileSync(root + '/frontend/chat.js', 'utf8');
-  const m = /var PFP_PART_COUNTS = \{([\s\S]*?)\};/.exec(chat);
-  check('chat.js declares the part counts', !!m);
+  // Read from pfp.js: the counts moved there when three windows turned out to
+  // be composing portraits independently and only one was validating.
+  const pfp = readFileSync(root + '/frontend/pfp.js', 'utf8');
+  const m = /var PFP_PART_COUNTS = \{([\s\S]*?)\};/.exec(pfp);
+  check('pfp.js declares the part counts', !!m);
   const declared = {};
   for (const [, part, n] of (m ? m[1] : '').matchAll(/(\w+):\s*(\d+)/g)) {
     declared[part] = Number(n);
@@ -178,6 +184,27 @@ console.log('\n— portrait layer counts match the art that ships');
     check(`${part}: ${declared[part]} declared, ${onDisk} shipped`,
       declared[part] === onDisk);
   }
+  /* Rust holds a SIXTH copy, and says so.
+   *
+   * `src/mcp/pfp.rs` carries the same five constants under a comment reading
+   * "must match `frontend/img/pfp/<part>/` file counts and the webapp's
+   * PFP_PART_COUNTS". A comment asserting agreement is exactly the situation
+   * the ore divisor was in before it drifted — so it is asserted here instead,
+   * against the same files on disk, which is the only copy that cannot lie.
+   */
+  const rs = readFileSync(root + '/src-tauri/src/mcp/pfp.rs', 'utf8');
+  const rustCounts = {};
+  for (const [, name, n] of rs.matchAll(/pub const (HEAD|NECK|BODY|ARMS|BACKGROUND): u32 = (\d+);/g)) {
+    rustCounts[name.toLowerCase()] = Number(n);
+  }
+  check('pfp.rs declares all five part counts',
+    Object.keys(rustCounts).length === 5, JSON.stringify(rustCounts));
+  for (const part of ['head', 'neck', 'body', 'arms', 'background']) {
+    check(`  …and its ${part} matches the shipped art`,
+      rustCounts[part] === declared[part],
+      `rust ${rustCounts[part]} vs js ${declared[part]}`);
+  }
+
   // 1-BASED. The webapp generates `floor(random * count) + 1`, and there is no
   // pfp_<part>_0.png for any part — a fixture using 0 describes a portrait
   // that would 404, which three of ours did.
@@ -227,6 +254,57 @@ console.log('\n— portrait layer counts match the art that ships');
     U.fmtAgo(0) === '—' && U.fmtAgo(null) === '—');
   check('...with the same opt-out for callers that render nothing',
     U.fmtAgo(0, { empty: null }) === null);
+}
+
+// ── A portrait is somebody else's data ─────────────────────────────────────
+//
+// `pfpClientRenderAttributes` is a free-form string each player writes about
+// THEMSELVES on chain, and every surface that draws one is drawing a
+// stranger: the roster shows the guild, the leaderboards the galaxy, and the
+// raid HUD the person currently attacking you. Three windows composed these
+// independently and only Comms validated the index before putting it in a
+// path — so the checks below are about the shared composer being the only one.
+{
+  const P = g.StructsPfp;
+
+  check('the layer order is back-to-front, head last',
+    P.PFP_LAYERS.join() === 'background,arms,body,neck,head', P.PFP_LAYERS.join());
+
+  // The reason this function exists. An <img> makes the usual tricks inert,
+  // but an unchecked value is still a request shaped by someone else.
+  check('a path escape is not a layer index',
+    !P.isLayer('head', '../../secret') && !P.isLayer('head', './x'));
+  check('a string digit is not a number',
+    !P.isLayer('head', '1') && !P.isLayer('head', '01'));
+  check('a fraction is not an index', !P.isLayer('head', 1.5));
+  check('null and undefined are not indices',
+    !P.isLayer('head', null) && !P.isLayer('head', undefined));
+  check('an unknown part has no valid index', !P.isLayer('nose', 1));
+
+  // 1-BASED, and bounded by the art that actually ships. Both ends were wrong
+  // in an earlier version of this check — it accepted 0 and accepted 999.
+  check('0 is not an index, because the art is 1-based', !P.isLayer('head', 0));
+  check('the range ends where the art does',
+    P.isLayer('head', 87) && !P.isLayer('head', 88) && !P.isLayer('background', 7),
+    'head max ' + P.PFP_PART_COUNTS.head);
+  check('every part is bounded by its OWN count, not the largest',
+    !P.isLayer('background', 20) && P.isLayer('background', 6));
+
+  /* And no window composes one on its own again.
+   *
+   * This is the check that would have caught the original problem. Three
+   * copies existed; the two that skipped validation were on the surfaces that
+   * render the most strangers, and nothing failed. The tell is an `img/pfp/`
+   * path built by interpolation.
+   */
+  for (const f of readdirSync(root + '/frontend')
+    .filter((x) => /\.js$/.test(x) && !x.startsWith('_') && x !== 'pfp.js')) {
+    const raw = readFileSync(root + '/frontend/' + f, 'utf8');
+    const src = raw.replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+    check(f + ' does not compose portraits itself',
+      !/['"]img\/pfp\//.test(src));
+  }
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
