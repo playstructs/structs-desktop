@@ -239,7 +239,7 @@
        its header, leaving "…cuss  hide" showing and the label hidden. */
     #rv-chat {
       position: relative; z-index: 45;
-      border-left: 1px solid var(--border, #345);
+      border-left: 1px solid var(--border-subtle);
       /* A rail, not a strip: fixed width, full height, its body taking the
          slack so the newest line sits at the bottom like any chat. */
       flex: 0 0 clamp(240px, 26vw, 340px);
@@ -277,25 +277,26 @@
     }
     .rv-chat-body-text { overflow-wrap: anywhere; }
     /* ── Composer ───────────────────────────────────────────────────────── */
+    /* The FIELD is SUI's (`label.sui-input-text`), not a hand-rolled input.
+       The previous version drew its own box out of `--input-background` and
+       `--border` — and `--input-background` does not exist, so the fallback
+       painted a colour this window invented. That is what made the rail read
+       as a web form dropped into a pixel-art game. */
     #rv-chat-compose {
-      flex: 0 0 auto; padding: 6px 12px 8px;
-      border-top: 1px solid var(--border-subtle, #24343a);
-      display: flex; flex-direction: column; gap: 6px;
+      flex: 0 0 auto;
+      padding: var(--spacing-sm) var(--spacing-md) var(--spacing-sm);
+      border-top: 1px solid var(--border-subtle);
+      display: flex; flex-direction: column; gap: var(--spacing-xs);
     }
     #rv-chat-compose.hidden { display: none; }
     #rv-chat-room { width: 100%; min-width: 0; }
-    #rv-chat-entry { display: flex; align-items: center; gap: 8px; }
-    #rv-chat-input {
-      flex: 1 1 auto; min-width: 0;
-      background: var(--input-background, #131A21);
-      border: 1px solid var(--border, #345);
-      color: var(--text-body, #C5D7D9);
-      font-family: inherit; padding: 4px 6px;
-    }
-    #rv-chat-input:focus { outline: 1px solid var(--accent-primary, #4FD1C5); }
+    #rv-chat-entry { display: flex; align-items: flex-end; gap: var(--spacing-sm); }
+    /* SUI fields carry a min-width wider than this rail. */
+    #rv-chat-entry label.sui-input-text { flex: 1 1 auto; min-width: 0; }
     #rv-chat-send { flex: 0 0 auto; }
     #rv-chat-error:empty { display: none; }
-    #rv-chat-error { color: var(--text-error, #E2686A); }
+    /* "enemy" is the game's semantic for danger; there is no --text-error. */
+    #rv-chat-error { color: var(--text-enemy-primary); }
     .rv-chat-row { padding: 3px 0; border-bottom: 1px solid var(--border-subtle, #24343a); }
     .rv-chat-row:last-child { border-bottom: none; }
     .rv-chat-who { color: var(--accent-secondary, #8FB8FF); }
@@ -740,8 +741,11 @@
     <div id="rv-chat-compose" class="hidden">
       <select id="rv-chat-room" class="sui-text-tiny"></select>
       <div id="rv-chat-entry">
-        <input id="rv-chat-input" class="sui-text-tiny" type="text"
-               maxlength="900" placeholder="Say something…">
+        <label class="sui-input-text" for="rv-chat-input">
+          <span>Message</span>
+          <input id="rv-chat-input" type="text" maxlength="900"
+                 placeholder="Say something…">
+        </label>
         <a href="javascript: void(0)" id="rv-chat-send" class="rv-log-toggle">send</a>
       </div>
       <div id="rv-chat-error" class="sui-text-tiny"></div>

@@ -24,7 +24,10 @@ node_modules/
 reference/
 
 # Claude Code session data
-.claude/
+.claude/*
+# …except project skills, which are part of the repo: they tell every session
+# how to build UI in this codebase, and a local-only copy helps nobody else.
+!.claude/skills/
 
 # IDE
 .idea/

@@ -14,62 +14,128 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
+
+    /* SUI tokens only, and NO fallbacks.
+     *
+     * A `var(--x, #345)` fallback looks defensive and is the opposite: it makes
+     * a token name that does not exist render as a colour this window invented,
+     * which is how this window came to look like a web form beside a pixel-art
+     * game. `--text-error`, `--input-background` and `--button-background` were
+     * all names I had made up, silently resolving to my own hex. Without a
+     * fallback a wrong token is visible immediately, which is what you want. */
     body {
-      background: var(--page-background, #1A2029);
-      color: var(--text-body, #C5D7D9);
+      background: var(--page-background);
+      color: var(--text-body);
       font-family: 'DirectiveZero', sans-serif;
-      display: flex; flex-direction: column;
-      padding: 14px; gap: 12px;
-      /* main.css centres body text for the game's own screens. Every label and
-         fact in this window is a left-hand column, so it has to be undone
-         here — the same inherited rule that centred the raid rail's messages. */
+      /* main.css centres body text for the game's own screens; every label and
+         fact here is a left-hand column. */
       text-align: left;
     }
-    h1 { font-size: 15px; margin: 0; letter-spacing: .04em; }
-    .tx-sub { color: var(--text-hint, #A7C0C6); font-size: 11px; }
-    .tx-facts { display: flex; flex-direction: column; gap: 4px; }
-    .tx-fact { display: flex; gap: 10px; align-items: baseline; font-size: 12px; }
-    .tx-fact-label { flex: 0 0 74px; color: var(--text-hint, #A7C0C6); }
+    /* The panel fills the window; SUI's own art draws every edge. */
+    #tx-layout { height: 100%; display: flex; padding: var(--spacing-sm); }
+    #tx-layout > .sui-panel { flex: 1 1 auto; min-width: 0; }
+    #tx-body {
+      display: flex; flex-direction: column; gap: var(--spacing-md);
+      padding: var(--spacing-md);
+      height: 100%;
+    }
+
+    /* Layout only. Every colour and every size comes from a token, and all
+       typography comes from a `sui-text-*` class in the markup. */
+    .tx-sub { color: var(--text-hint); overflow-wrap: anywhere; }
+    .tx-facts { display: flex; flex-direction: column; gap: var(--spacing-xs); }
+    .tx-fact { display: flex; gap: var(--spacing-sm); align-items: baseline; }
+    .tx-fact-label { flex: 0 0 78px; color: var(--text-hint); }
     .tx-fact-value { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-    .tx-all { margin-left: 8px; color: var(--accent-primary, #4FD1C5); }
-    /* SUI fields want a minimum width wider than this window; letting that
-       through would push a horizontal scrollbar onto a 420px pane. */
+    .tx-all { margin-left: var(--spacing-sm); color: var(--accent-primary); }
+    .tx-all:hover { color: var(--accent-primary-active); }
+
+    /* SUI fields carry a min-width wider than this window. */
     label.sui-input-text { min-width: 0; }
-    #tx-out { flex: 1 1 auto; min-height: 0; overflow: auto;
-              display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
-    .tx-msg { padding: 6px 8px; border-left: 2px solid var(--border, #345); }
-    .tx-msg.tx-error { border-left-color: var(--text-error, #E2686A);
-                       color: var(--text-error, #E2686A); }
-    .tx-msg.tx-warn { border-left-color: var(--text-warning, #E8B24A);
-                      color: var(--text-warning, #E8B24A); }
-    .tx-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+    #tx-out {
+      flex: 1 1 auto; min-height: 0; overflow: auto;
+      display: flex; flex-direction: column; gap: var(--spacing-xs);
+    }
+    /* The same left-rule the Comms window uses to mark a line as commentary
+       rather than content. */
+    .tx-msg {
+      padding: var(--spacing-xs) var(--spacing-sm);
+      border-left: 2px solid var(--border-subtle);
+    }
+    /* "enemy" is the game's own semantic for danger — main.css has no
+       `--text-error`, and chat.html styles its failures this way too. */
+    .tx-msg.tx-error {
+      border-left-color: var(--text-enemy-primary);
+      color: var(--text-enemy-primary);
+    }
+    .tx-msg.tx-warn {
+      border-left-color: var(--text-warning);
+      color: var(--text-warning);
+    }
+    .tx-actions { display: flex; gap: var(--spacing-sm); justify-content: flex-end; }
     .sui-screen-btn.tx-disabled { opacity: .4; pointer-events: none; }
   </style>
 </head>
 <body>
-  <div>
-    <h1 id="tx-title" class="sui-text-label">Send Alpha</h1>
-    <div class="tx-sub sui-text-tiny" id="tx-who">…</div>
+
+<!-- A Structs SCREEN, not a page with Structs colours on it.
+     The frame is SUI's own: a `.sui-panel` with its fill backgrounds and edges,
+     one `.sui-panel-chunk` holding a `.sui-screen` header and a
+     `.sui-page-body-screen` body. Copied in structure from chat.html, which is
+     itself the game's menu-page shell — the panel art does all the drawing, and
+     nothing here paints a border of its own. -->
+<div id="tx-layout">
+  <div class="sui-panel sui-theme-player">
+    <div class="sui-panel-top-fill-background"></div>
+    <div class="sui-panel-bottom-fill-background"></div>
+    <div class="sui-panel-edge-left"></div>
+
+    <div class="sui-panel-chunk sui-mod-grow sui-mod-shrink">
+
+      <div class="sui-screen sui-screen-full-width">
+        <div class="sui-screen-nav">
+          <div class="sui-screen-nav-items">
+            <span class="sui-screen-nav-item sui-mod-active">SEND ALPHA</span>
+          </div>
+          <a id="tx-close" class="sui-screen-nav-close" href="javascript: void(0)" title="Close">
+            <i class="sui-icon-sm icon-close"></i>
+          </a>
+        </div>
+      </div>
+
+      <div class="height-100 sui-screen sui-screen-full-width sui-screen-shrink">
+        <div class="height-100 sui-page-body-screen">
+          <div id="tx-body">
+
+            <div class="tx-sub sui-text-tiny" id="tx-who">…</div>
+            <div class="tx-facts" id="tx-facts"></div>
+
+            <!-- SUI's own field: `.sui-input-text` is the LABEL wrapper, and
+                 the input inside it is styled by descendant rules. -->
+            <label class="sui-input-text" for="tx-amount">
+              <span>Amount — g, Kg, mg…</span>
+              <input id="tx-amount" type="text" inputmode="decimal"
+                     placeholder="0" autocomplete="off">
+            </label>
+
+            <div id="tx-out"></div>
+
+            <div class="tx-actions">
+              <a href="javascript:void(0)" id="tx-cancel" class="sui-screen-btn sui-mod-secondary">
+                <i class="icon-close"></i><span> Cancel</span></a>
+              <a href="javascript:void(0)" id="tx-send" class="sui-screen-btn sui-mod-primary tx-disabled">
+                <i class="icon-send-alpha"></i><span id="tx-send-label"> Send</span></a>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="sui-panel-edge-right"></div>
   </div>
-
-  <div class="tx-facts" id="tx-facts"></div>
-
-  <!-- SUI's own field: `.sui-input-text` is the LABEL wrapper, and the input
-       inside it is styled by descendant rules. Putting the class on the input
-       itself got a bare white browser box beside pixel-art buttons. -->
-  <label class="sui-input-text" for="tx-amount">
-    <span>Amount — g, Kg, mg…</span>
-    <input id="tx-amount" type="text" inputmode="decimal" placeholder="0" autocomplete="off">
-  </label>
-
-  <div id="tx-out"></div>
-
-  <div class="tx-actions">
-    <a href="javascript:void(0)" id="tx-cancel" class="sui-screen-btn sui-mod-secondary">
-      <i class="icon-close"></i><span> Cancel</span></a>
-    <a href="javascript:void(0)" id="tx-send" class="sui-screen-btn sui-mod-primary tx-disabled">
-      <i class="icon-send-alpha"></i><span id="tx-send-label"> Send</span></a>
-  </div>
+</div>
 
   <script src="units.js"></script>
   <script src="transfer.js"></script>

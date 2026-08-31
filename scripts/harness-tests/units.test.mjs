@@ -139,5 +139,35 @@ console.log('\n— the same ladder in both languages');
   }
 }
 
+console.log('\n— portrait layer counts match the art that ships');
+// These numbers come from the webapp's own `js/constants/PfpConstants.js`, the
+// same ones its PfpViewerComponent generates against. They are duplicated into
+// chat.js because our windows cannot import from the submodule — so they are
+// checked against the thing that would actually 404: the files on disk.
+{
+  const { readdirSync } = await import('fs');
+  const chat = readFileSync(root + '/frontend/chat.js', 'utf8');
+  const m = /var PFP_PART_COUNTS = \{([\s\S]*?)\};/.exec(chat);
+  check('chat.js declares the part counts', !!m);
+  const declared = {};
+  for (const [, part, n] of (m ? m[1] : '').matchAll(/(\w+):\s*(\d+)/g)) {
+    declared[part] = Number(n);
+  }
+  for (const part of ['head', 'neck', 'body', 'arms', 'background']) {
+    let onDisk = 0;
+    try {
+      onDisk = readdirSync(root + '/frontend/img/pfp/' + part)
+        .filter((f) => /^pfp_[a-z]+_\d+\.png$/.test(f)).length;
+    } catch (e) { /* counted as 0 → the check fails, which is right */ }
+    check(`${part}: ${declared[part]} declared, ${onDisk} shipped`,
+      declared[part] === onDisk);
+  }
+  // 1-BASED. The webapp generates `floor(random * count) + 1`, and there is no
+  // pfp_<part>_0.png for any part — a fixture using 0 describes a portrait
+  // that would 404, which three of ours did.
+  check('…and the art is 1-based, so 0 is not an index',
+    !readdirSync(root + '/frontend/img/pfp/head').includes('pfp_head_0.png'));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

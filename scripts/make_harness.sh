@@ -64,7 +64,7 @@ cat > "$FIX" <<'EOF'
         pfp: null,
         // String-on-purpose: the Guild API sends numerics as strings and the
         // page must survive that end-to-end.
-        pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":0,"background":3}',
+        pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":3,"background":3}',
         guild_name: 'Guild ' + (1 + (i % 5)),
         tag: 'G' + (1 + (i % 5)),
         value: metric === 'alpha' ? (i === 1 ? 4.934e10 : (26 - i) * 4.2e7)
@@ -791,7 +791,7 @@ cat > "$CFIX" <<'EOF'
   var PROFILE = {
     user_id: '@1-194:matrix.beta.playstructs.com', display_name: 'Marklifer',
     tag: 'SN.C',
-    pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":0,"background":3}',
+    pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":3,"background":3}',
     // Whether other Matrix clients can see this face. Tests flip it, since
     // the difference is invisible from inside this window.
     get avatar_published() { return !window.__HARNESS_AVATAR_UNPUBLISHED__; },
@@ -875,7 +875,7 @@ cat > "$CFIX" <<'EOF'
     matrix_members: { members: [
       { user_id: '@1-194:matrix.beta.playstructs.com', name: 'Marklifer',
         player_id: '1-194', tag: 'SN.C', is_self: true,
-        pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":0,"background":3}' },
+        pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":3,"background":3}' },
       // Rust attaches `presence` to every member row, so the fixture must
       // too — and only SOME people will have set a status line, which is the
       // case the row's fallback exists for.

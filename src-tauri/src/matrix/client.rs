@@ -1965,12 +1965,27 @@ fn maybe_notify(
             .map(|gs| gs.dm_with.contains_key(room_id))
             .unwrap_or(false)
     };
-    // Asked of the MESSAGE, not worked out a second time: `mentions_me` is
-    // already the exact signal plus the text fallback, and a notifier with its
-    // own opinion is how the badge and the notification came to disagree.
-    let hit = messages
-        .iter()
-        .find(|m| !m.is_self && m.kind != "unknown" && (is_dm || m.mentions_me));
+    /* Only when somebody has actually SAID something.
+     *
+     * `kind != "unknown"` was far too loose. Ten different things render as
+     * kind `event` — a join, a rename, a topic change, a pin, an invitation —
+     * and in a DM every one of them interrupted the player. Signing in
+     * therefore produced a desktop notification reading "<name> joined",
+     * every time, which is noise attached to the one channel that should only
+     * ever mean a person is talking to you.
+     *
+     * An allowlist, and a conservative one. `notice` is deliberately absent:
+     * it carries real `m.notice` messages, but it is ALSO the kind this file
+     * gives its own synthesized lines — "message removed", "this room has been
+     * replaced", "encrypted message — this app cannot read it". None of those
+     * are a person speaking, and a redaction notifying you about a message you
+     * were already notified about is the same bug wearing a different hat.
+     */
+    let hit = messages.iter().find(|m| {
+        !m.is_self
+            && matches!(m.kind, "text" | "emote" | "image")
+            && (is_dm || m.mentions_me)
+    });
     let Some(m) = hit else { return };
     if !claim_notify_slot(room_id) {
         return;
@@ -5436,6 +5451,44 @@ mod tests {
         // to miss those mentions than to interrupt constantly.
         let s = Session { user_id: "@1-1:example.com".into(), ..session() };
         assert!(!my_names(&s.user_id).iter().any(|n| n.chars().count() < 2));
+    }
+
+    /// Only a person SPEAKING may interrupt you.
+    ///
+    /// Reported from live play: signing in produced a desktop notification
+    /// reading "<name> joined", every time. A DM notifies on anything that is
+    /// not `unknown`, and ten different things — joins, renames, topic and pin
+    /// changes, invitations — all render as kind `event`.
+    #[test]
+    fn only_a_message_is_worth_interrupting_someone_for() {
+        // What renders as what, straight from render_event, so this test moves
+        // if the kinds do.
+        let gs = GuildState::default();
+        let kind_of = |ev: &Value| render_event(ev, &gs, "!r:h", "@me:h").map(|m| m.kind);
+
+        let join = json!({
+            "type": "m.room.member", "event_id": "$j", "sender": "@a:h",
+            "origin_server_ts": 1, "content": { "membership": "join" }
+        });
+        assert_eq!(kind_of(&join), Some("event"), "a join is an event");
+
+        let said = json!({
+            "type": "m.room.message", "event_id": "$m", "sender": "@a:h",
+            "origin_server_ts": 2, "content": { "msgtype": "m.text", "body": "hello" }
+        });
+        assert_eq!(kind_of(&said), Some("text"), "a message is a message");
+
+        // The allowlist the notifier applies. `notice` is absent on purpose:
+        // it is both a real m.notice AND this file's own synthesized lines
+        // ("message removed", a tombstone, an unreadable encrypted message),
+        // none of which is a person talking.
+        let notifiable = |k: &str| matches!(k, "text" | "emote" | "image");
+        assert!(notifiable("text"));
+        assert!(notifiable("emote"));
+        assert!(notifiable("image"));
+        assert!(!notifiable("event"), "a join must never interrupt anyone");
+        assert!(!notifiable("notice"), "nor a redaction or a tombstone");
+        assert!(!notifiable("gap"), "nor a hole in the scrollback");
     }
 
     #[test]

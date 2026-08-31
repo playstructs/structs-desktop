@@ -12,6 +12,7 @@
 //! so an install that has never used chat makes no chat requests at all.
 
 pub mod identity;
+pub mod rooms;
 pub mod avatar;
 pub mod work;
 pub mod auth;

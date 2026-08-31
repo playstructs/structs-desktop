@@ -347,5 +347,31 @@ for (const file of FEDERATED) {
     fields.map((m) => m[1] + ': ' + m[2]).join(' | '));
 }
 
+// ── Only a person speaking may interrupt you ───────────────────────────────
+// Reported from live play: signing in produced a desktop notification reading
+// "<name> joined", every time. A DM notified on anything that was not
+// `unknown`, and joins, renames, topic changes, pins and invitations all
+// render as kind `event`.
+//
+// Checked against the SOURCE, not a copy of the list: a Rust test asserting its
+// own local closure passes happily while the real filter regresses.
+{
+  console.log('\n— what may raise a notification');
+  const client = readFileSync(root + '/src-tauri/src/matrix/client.rs', 'utf8');
+  const fn = client.slice(client.indexOf('fn maybe_notify('));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+  const m = /matches!\(m\.kind,([^)]*)\)/.exec(body);
+  check('the notifier uses an allowlist of kinds', !!m,
+    'a `kind != "unknown"` filter lets a join interrupt you');
+  const kinds = m ? m[1].match(/"[a-z]+"/g).map((x) => x.slice(1, -1)).sort() : [];
+  check('…which is exactly text, emote and image',
+    kinds.join(',') === 'emote,image,text', kinds.join(','));
+  // `notice` is both a real m.notice and this file's own synthesized lines
+  // ("message removed", a tombstone, an unreadable encrypted message).
+  check('…and never event, notice or gap',
+    !kinds.includes('event') && !kinds.includes('notice') && !kinds.includes('gap'),
+    kinds.join(','));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

@@ -166,18 +166,31 @@
   // one inside the other, or inside a box of my own with `overflow: hidden`,
   // clips the clip: that is what mangled both portraits.
   var PFP_LAYERS = ['background', 'arms', 'body', 'neck', 'head'];
-  // A portrait layer index: a small non-negative integer and nothing else.
-  // `'01'`, `1.5`, `-1` and `'../x'` are all rejected — the last is the reason
-  // this exists, the others are why it is stricter than a range check.
-  function isLayer(v) {
-    return typeof v === 'number' && isFinite(v) && v >= 0 && v < 1000
-      && Math.floor(v) === v;
+  /* How many variants each portrait layer actually has.
+   *
+   * From the webapp's own `js/constants/PfpConstants.js` — the same numbers its
+   * `PfpViewerComponent` generates against — and verified against the art that
+   * ships in `img/pfp/`, which is the thing that would actually 404. Indices
+   * are 1-BASED: the webapp generates `floor(random * count) + 1`.
+   */
+  var PFP_PART_COUNTS = {
+    head: 87, neck: 10, body: 57, arms: 34, background: 6,
+  };
+  Chat.PFP_PART_COUNTS = PFP_PART_COUNTS;
+
+  // A portrait layer index for a given part. `'01'`, `1.5`, `0` and `'../x'`
+  // are all rejected — the last is the reason this exists, the others are why
+  // it checks the real range rather than "some small number".
+  function isLayer(part, v) {
+    var max = PFP_PART_COUNTS[part];
+    return !!max && typeof v === 'number' && isFinite(v)
+      && Math.floor(v) === v && v >= 1 && v <= max;
   }
 
   function fillPfp(frame, attrsJson) {
     var pfp = null;
     if (attrsJson) { try { pfp = JSON.parse(attrsJson); } catch (e) { pfp = null; } }
-    if (pfp && typeof pfp === 'object' && isLayer(pfp.head)) {
+    if (pfp && typeof pfp === 'object' && isLayer('head', pfp.head)) {
       PFP_LAYERS.forEach(function (part) {
         var idx = pfp[part];
         // A layer index is a NUMBER, and it is checked because this value is
@@ -186,7 +199,7 @@
         // up interpolated into a path, and while an <img> makes the usual
         // tricks inert, a junk value still means a burst of failed loads and a
         // path this window never meant to ask for.
-        if (!isLayer(idx)) return;
+        if (!isLayer(part, idx)) return;
         var im = el('img', 'pfp-viewer-layer');
         im.src = 'img/pfp/' + part + '/pfp_' + part + '_' + idx + '.png';
         im.alt = '';

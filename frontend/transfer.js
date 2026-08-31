@@ -216,8 +216,11 @@
     schedule();
   });
   document.getElementById('tx-send').addEventListener('click', send);
-  document.getElementById('tx-cancel').addEventListener('click', function () {
-    T.window.getCurrentWindow().close();
+  // Cancel and the screen's own close control do the same thing: this window
+  // has one job, so leaving it is leaving it.
+  ['tx-cancel', 'tx-close'].forEach(function (id) {
+    var n = document.getElementById(id);
+    if (n) n.addEventListener('click', function () { T.window.getCurrentWindow().close(); });
   });
 
   // A second Pay while this window is already open re-addresses it rather than
