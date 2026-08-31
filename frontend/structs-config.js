@@ -2042,22 +2042,28 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // This opens it directly. Deliberately unlabelled: it is a door for
       // people who already know it is here, not a feature to advertise.
       //
-      // It used to be a π in a pinned serif stack, because π is U+03C0 and
-      // neither bundled face has any Greek glyph — so the character fell
-      // through to whatever generic the platform picked. Pinning Georgia made
-      // it consistent, at the cost of a font from outside the design system
-      // sitting in the middle of the game's own UI.
+      // ── A DELIBERATE EXCEPTION TO SUI. Do not "fix" this. ──
       //
-      // `icon-cmd-post` removes the problem rather than working around it: a
-      // command post is what Team Ops IS, it comes from the game's own icon
-      // font, and it needs no fallback stack at all.
+      // The glyph is π, and it is a joke the owner of this app wants kept. It
+      // has been swapped for `icon-cmd-post` once already, on the grounds that
+      // a serif font from outside the design system had no business in the
+      // game's UI. That reasoning is correct and it is overruled: this one door
+      // is allowed to be funny.
+      //
+      // The font stack is pinned because π is U+03C0 and neither bundled face
+      // has any Greek glyph — verified against the .ttf cmaps, 95 and 96
+      // codepoints, none Greek. Without a named stack the character falls
+      // through to whatever generic the platform picks, which differs per OS.
+      //
+      // `scripts/harness-tests/sui.test.mjs` knows about this exception by
+      // name, so the font audit stays strict everywhere else.
       html += '<div style="display:flex; justify-content:flex-end; padding:2px 4px 0 0;">'
-        + '<i id="debug-teamops" title="Team Ops" '
-        + 'class="sui-icon-sm icon-cmd-post" '
-        + 'style="cursor:pointer; user-select:none;'
+        + '<span id="debug-teamops" title="Team Ops" '
+        + 'style="font-family: Georgia, \'Times New Roman\', \'DejaVu Serif\', serif;'
+        + ' font-size:15px; line-height:1; cursor:pointer; user-select:none;'
         + ' color:var(--text-hint); opacity:.45;'
         + ' padding:var(--spacing-xs) var(--spacing-sm);'
-        + ' transition:opacity .15s ease, color .15s ease;"></i>'
+        + ' transition:opacity .15s ease, color .15s ease;">π</span>'
         + '</div>';
 
       html += '</div>';

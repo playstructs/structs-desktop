@@ -82,16 +82,25 @@
        Transform + viewport-unit compensation is used rather than `zoom` for
        the reason recorded in main.rs: standardized CSS zoom stopped dividing
        viewport units, which cropped the whole app to its top-left quarter. */
+    /* PERCENTAGES, not viewport units.
+     *
+     * The compensation has to be relative to the HUD's CONTAINER — the stage —
+     * not to the window. With `vw`/`vh` the HUD kept filling the whole window
+     * after the Comms rail took a column off the right: the top-right status
+     * panel landed on top of the rail, and the bottom action bar sat over the
+     * battle log. `inset: 0` already sizes this to the stage; 50% + scale(2)
+     * reproduces the same pixel scaling within it, and now follows the stage
+     * whatever else shares the window. */
     @media only screen and (min-width: 1152px), only screen and (min-height: 1024px) {
       #rv-hud {
         transform: scale(2); transform-origin: 0 0;
-        width: 50vw; height: 50vh; height: 50dvh;
+        width: 50%; height: 50%;
       }
     }
     @media only screen and (min-width: 2304px), only screen and (min-height: 2048px) {
       #rv-hud {
         transform: scale(4); transform-origin: 0 0;
-        width: 25vw; height: 25vh; height: 25dvh;
+        width: 25%; height: 25%;
       }
     }
 
@@ -269,13 +278,21 @@
     /* text-align comes in CENTRED from the game stylesheet. It went unnoticed
        while the message was an inline span beside the speaker; a full-width
        block in a rail shows it immediately. */
-    .rv-chat-row { display: flex; flex-direction: column; gap: 1px; text-align: left; }
+    /* The SAME shape a message has in the Comms window: a transparent left
+       rail so every body starts on one vertical line, the sender in the label
+       face, the room where Comms puts the time. A second chat that looks like
+       a different product is the thing to avoid. */
+    .rv-chat-row {
+      display: flex; flex-direction: column; gap: var(--spacing-xs);
+      text-align: left;
+      border-left: 2px solid transparent; padding-left: var(--spacing-sm);
+    }
     .rv-chat-meta { display: flex; align-items: baseline; gap: var(--spacing-sm); }
     .rv-chat-meta .rv-chat-room {
       margin-left: auto; flex: 0 1 auto; min-width: 0;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .rv-chat-body-text { overflow-wrap: anywhere; }
+    .rv-chat-body-text { white-space: pre-wrap; word-break: break-word; }
     /* ── Composer ───────────────────────────────────────────────────────── */
     /* The FIELD is SUI's (`label.sui-input-text`), not a hand-rolled input.
        The previous version drew its own box out of `--input-background` and
@@ -297,10 +314,16 @@
     #rv-chat-error:empty { display: none; }
     /* "enemy" is the game's semantic for danger; there is no --text-error. */
     #rv-chat-error { color: var(--text-enemy-primary); }
-    .rv-chat-row { padding: var(--spacing-xs) 0; border-bottom: 1px solid var(--border-subtle); }
-    .rv-chat-row:last-child { border-bottom: none; }
-    .rv-chat-who { color: var(--accent-secondary); }
-    .rv-chat-room { color: var(--text-hint); }
+        .rv-chat-row + .rv-chat-row { margin-top: var(--spacing-md); }
+    
+    .rv-chat-who {
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      text-transform: uppercase; color: var(--accent-secondary);
+    }
+    .rv-chat-room {
+      font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+      color: var(--text-hint); opacity: .7;
+    }
     .rv-chat-body-text { color: var(--text-body); }
     /* Something was said while the panel was closed. */
     #rv-chat-head.rv-chat-fresh .rv-log-count { color: var(--text-warning); }

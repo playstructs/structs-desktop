@@ -357,8 +357,23 @@
       });
   }
 
-  // The card itself: the same title / subtitle / label-value shape Team Ops
-  // and the dashboard use, built from .sui-data-card.
+  /* The card itself. NOT `.sui-data-card`, and deliberately so.
+   *
+   * This comment used to claim it was built from that component; it never has
+   * been, and the claim invited exactly the wrong fix. Rendered side by side at
+   * the window's real scale, a `.sui-data-card` in a chat transcript is nearly
+   * three times taller and carries a filled header bar that shouts: two of
+   * these cards occupy the height of one, and a single message can name several
+   * objects at once. It reads as a dashboard panel dropped into a conversation.
+   *
+   * What this is instead: one surface, a coloured LEFT EDGE that encodes the
+   * object type (planet teal, struct amber, player periwinkle — see
+   * `.chat-kind-*`), and the same label/value rows. Same information, same type
+   * channel, a third of the height, and it reads as an aside — which is what an
+   * embed in a conversation should be.
+   *
+   * `.sui-data-card` IS used in this window, in the connection view, where the
+   * context is a full panel and it fits. Right component, right place. */
   // Actions a card carries from Rust, plus the ones only the window can
   // decide. Asking for help is one of those: it depends on being in a room.
   function cardActions(card) {
