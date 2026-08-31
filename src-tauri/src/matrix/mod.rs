@@ -78,6 +78,10 @@ fn own_guild_id() -> Option<String> {
 /// Still returned as a list: the window's nav renders whatever it is given,
 /// and an empty list is the honest answer when the guild runs no comms server.
 fn networks() -> Vec<Value> {
+    networks_as(None)
+}
+
+fn networks_as(as_player: Option<&str>) -> Vec<Value> {
     let Some(guild_id) = own_guild_id() else {
         return Vec::new();
     };
@@ -86,9 +90,13 @@ fn networks() -> Vec<Value> {
         .filter(|c| c.guild_id == guild_id)
         .filter_map(|c| {
             let homeserver = c.matrix_url.clone().filter(|m| !m.is_empty())?;
-            let session = store::get(&c.guild_id);
+            let key = store::key_for(&c.guild_id, as_player);
+            let session = store::get(&key);
             Some(json!({
-                "guild_id": c.guild_id,
+                // The KEY, so the window addresses its own identity on every
+                // later call without having to remember the split.
+                "guild_id": key,
+                "as_player": as_player,
                 "guild_name": c.name,
                 "tag": c.guild_tag,
                 "homeserver": homeserver,
@@ -141,31 +149,40 @@ fn resources() -> Option<Value> {
     }))
 }
 
-async fn status_payload() -> Value {
+/// Status for ONE identity's window.
+///
+/// `as_player` is the roster player this window speaks as, or `None` for the
+/// primary. Everything downstream keys off the session key, so a window only
+/// has to know who it is once — at boot — and pass that key as its `guild_id`
+/// from then on.
+async fn status_payload_as(as_player: Option<&str>) -> Value {
     // Identity for every player in the galaxy, so a timeline can show real
     // names and portraits and any player can be addressed. Cached with a TTL;
     // this is a no-op on all but the first call in 15 minutes.
     directory::ensure_fresh().await;
-    let nets = networks();
-    let guild = selected_guild();
-    let profile = match guild.as_deref().and_then(store::get) {
+    let nets = networks_as(as_player);
+    // The SESSION KEY, not the guild id: this is what the window echoes back
+    // as `guild_id` on every later call, and it is what selects the identity.
+    let key = own_guild_id().map(|g| store::key_for(&g, as_player));
+    let profile = match key.as_deref().and_then(store::get) {
         Some(session) => client::profile(&session).await.ok(),
         None => None,
     };
     json!({
         "networks": nets,
-        "selected": guild,
+        "selected": key,
+        "as_player": as_player,
         "profile": profile,
         "resources": resources(),
-        "error": last_error(guild.as_deref()),
+        "error": last_error(key.as_deref()),
     })
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn matrix_status() -> Result<Value, String> {
-    Ok(status_payload().await)
+pub async fn matrix_status(as_player: Option<String>) -> Result<Value, String> {
+    Ok(status_payload_as(as_player.as_deref()).await)
 }
 
 #[tauri::command]
@@ -182,10 +199,15 @@ pub async fn matrix_connect(app: tauri::AppHandle, guild_id: String) -> Result<V
     // The window draws the ladder from these pushes, so a sign-in that stalls
     // on one hop is visibly stalled ON THAT HOP rather than just slow.
     let emit_app = app.clone();
+    // Whose sign-in this is. Every chat window receives the broadcast, and a
+    // ladder appearing in the wrong window is worse than no ladder — it says
+    // an identity is connecting when it is not.
+    let who = store::player_of(&guild_id).map(|p| p.to_string());
+    let emit_who = who.clone();
     let emit = move |l: &auth::Ladder| {
         let _ = emit_app.emit(
             "matrix::status",
-            json!({ "connecting": true, "steps": l.steps() }),
+            json!({ "connecting": true, "steps": l.steps(), "as_player": emit_who }),
         );
     };
 
@@ -200,7 +222,8 @@ pub async fn matrix_connect(app: tauri::AppHandle, guild_id: String) -> Result<V
             client::start_sync(app.clone(), guild_id.clone());
             let _ = app.emit(
                 "matrix::status",
-                json!({ "connecting": false, "steps": steps, "error": null }),
+                json!({ "connecting": false, "steps": steps, "error": null,
+                        "as_player": who }),
             );
             Ok(json!({ "ok": true, "steps": steps }))
         }
@@ -208,7 +231,8 @@ pub async fn matrix_connect(app: tauri::AppHandle, guild_id: String) -> Result<V
             note_error(&guild_id, e.clone());
             let _ = app.emit(
                 "matrix::status",
-                json!({ "connecting": false, "steps": steps, "error": e }),
+                json!({ "connecting": false, "steps": steps, "error": e,
+                        "as_player": who }),
             );
             // The steps ride along on the error path too — the caller shows
             // the ladder either way, and the failing hop is the whole point.
@@ -228,7 +252,13 @@ pub async fn matrix_disconnect(app: tauri::AppHandle, guild_id: String) -> Resul
     client::stop_sync(&guild_id);
     // A deliberate sign-out is not a failure to remember.
     clear_error(&guild_id);
-    let _ = app.emit("matrix::status", status_payload().await);
+    // For the identity that signed out. The emit is a broadcast and every chat
+    // window receives it, so the payload names whose status it is and a window
+    // for another identity ignores it.
+    let _ = app.emit(
+        "matrix::status",
+        status_payload_as(store::player_of(&guild_id)).await,
+    );
     Ok(json!({ "ok": true }))
 }
 
@@ -1274,6 +1304,38 @@ pub async fn matrix_object_room_create(
     Ok(json!({ "room_id": room_id, "created": true, "joined": true }))
 }
 
+/// Open a Comms window that speaks AS one of our own roster players.
+///
+/// Every player on the Armada roster is a real player on chain with its own
+/// authority to talk: the Matrix localpart IS the player id, so `1-271`
+/// already has an identity on the guild's homeserver waiting to be used. This
+/// signs it in beside the primary and gives it its own window, so two accounts
+/// can hold two conversations at once.
+///
+/// Refuses anyone we do not hold a key for. `find` accepts a player id, an
+/// address or an HD index, but only OUR roster is searched — this cannot be
+/// pointed at another player.
+#[tauri::command]
+pub async fn matrix_open_as(
+    app: tauri::AppHandle,
+    player_id: String,
+) -> Result<Value, String> {
+    let pid = player_id.trim().to_string();
+    let vp = crate::mcp::virtual_players::VirtualPlayerStore::load();
+    let known = vp
+        .find(&pid)
+        .ok_or_else(|| format!("{pid} is not one of your players"))?;
+    // Answer with the player id even if the caller passed an index or address,
+    // so the window label and the session key cannot disagree.
+    let pid = known
+        .player_id
+        .clone()
+        .ok_or_else(|| format!("{pid} has no on-chain player id yet"))?;
+
+    open_chat_window_as(app, Some(&pid))?;
+    Ok(json!({ "player_id": pid, "window": chat_window_label(Some(&pid)) }))
+}
+
 /// Summarise the object ids a message mentioned.
 ///
 /// Players talk in ids — "raid 2-15361", "5-2184 is stuck", "ask 1-61". The
@@ -1479,22 +1541,53 @@ pub async fn matrix_members(guild_id: String, room_id: String) -> Result<Value, 
 
 // ── The window ──────────────────────────────────────────────────────────────
 
+/// The label of the window that speaks as `player_id` (`None` = the primary).
+///
+/// One window per identity. A shared window would have to switch accounts,
+/// which is the version where you send as the wrong person — the point of the
+/// feature is two conversations visible at once.
+pub fn chat_window_label(player_id: Option<&str>) -> String {
+    match player_id {
+        None => "chat".to_string(),
+        Some(p) => format!("chat-{p}"),
+    }
+}
+
 /// Idempotent: a second request raises the window already open rather than
 /// stacking a duplicate, the way the raid windows do.
 #[tauri::command]
 pub fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_chat_window_as(app, None)
+}
+
+pub fn open_chat_window_as(
+    app: tauri::AppHandle,
+    player_id: Option<&str>,
+) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-    if let Some(w) = app.get_webview_window("chat") {
+    let label = chat_window_label(player_id);
+    if let Some(w) = app.get_webview_window(&label) {
         let _ = w.unminimize();
         let _ = w.set_focus();
         return Ok(());
     }
+    // The identity rides in the URL: the window has to know who it is before
+    // it asks Rust anything, and its label is not readable from the document.
+    let url = match player_id {
+        None => "chat.html".to_string(),
+        Some(p) => format!("chat.html?as={p}"),
+    };
     // No initialization_script, for the same reason the raid windows have
     // none: this document shares an origin with the game, and the game's init
     // script would give a non-game window the signing façades.
-    WebviewWindowBuilder::new(&app, "chat", WebviewUrl::App("chat.html".into()))
-        .title("Structs — Comms")
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .title(match player_id {
+            None => "Structs — Comms".to_string(),
+            // Whose voice this window speaks in, in its title bar. Two
+            // identical title bars is how you send as the wrong player.
+            Some(p) => format!("Structs — Comms as {p}"),
+        })
         // Portrait-ish: the mockup is a single column of channels and a single
         // column of messages, and the game's own menu panel is this shape.
         .inner_size(560.0, 820.0)

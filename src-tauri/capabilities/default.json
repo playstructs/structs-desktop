@@ -7,6 +7,7 @@
     "stream",
     "gamestats",
     "chat",
+    "chat-*",
     "transfer",
     "raid-*"
   ],

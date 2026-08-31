@@ -400,11 +400,30 @@ async fn sign_login(
     app: &tauri::AppHandle,
     guild_id: &str,
     timestamp: &str,
+    as_player: Option<&str>,
 ) -> Result<SignedLogin, String> {
+    /* Which wallet signs.
+     *
+     * `None` is the primary, and the façade uses the game's own signing
+     * account exactly as before. For one of our roster players we send the HD
+     * INDEX — the façade derives that key itself and never hands it out, and
+     * it still builds the login message from (guild, address, timestamp)
+     * rather than accepting one, so this remains impossible to use as a
+     * generic signing oracle.
+     */
+    let index = match as_player {
+        None => None,
+        Some(pid) => Some(
+            crate::mcp::virtual_players::VirtualPlayerStore::load()
+                .find(pid)
+                .map(|p| p.index)
+                .ok_or_else(|| format!("{pid} is not one of your players"))?,
+        ),
+    };
     let v = crate::mcp::vplayer_bridge::call(
         app,
         "login_signature",
-        json!({ "guild_id": guild_id, "timestamp": timestamp }),
+        json!({ "guild_id": guild_id, "timestamp": timestamp, "index": index }),
         SIGN_TIMEOUT_SECS,
     )
     .await?;
@@ -487,15 +506,23 @@ pub struct Connected {
 
 /// Run the whole chain. `emit` is called after every state change so the
 /// window's ladder animates as it goes.
+/// Sign in one IDENTITY.
+///
+/// `key` is a session key, not a bare guild id — `0-5` is the primary and
+/// `0-5#1-271` is one of our own roster players signing in alongside it. Every
+/// hop below is identical for both; only the wallet that signs the guild login
+/// differs, which is the whole of what makes a second identity possible.
 pub async fn connect<F>(
     app: &tauri::AppHandle,
-    guild_id: &str,
+    key: &str,
     ladder: &mut Ladder,
     emit: F,
 ) -> Result<Connected, String>
 where
     F: Fn(&Ladder),
 {
+    let guild_id = store::guild_of(key);
+    let as_player = store::player_of(key);
     // 1 ── the guild's declared homeserver
     let (homeserver, guild_api) = step!(
         ladder,
@@ -588,7 +615,7 @@ where
                 |a: &String| Some(a.clone()),
                 {
                     let ts = guild_timestamp(&http, &guild_api).await?;
-                    let signed = sign_login(app, guild_id, &ts).await?;
+                    let signed = sign_login(app, guild_id, &ts, as_player).await?;
                     guild_login(&http, &guild_api, guild_id, &signed, &ts).await?;
                     Ok::<String, String>(signed.address)
                 }
@@ -655,6 +682,7 @@ where
 
     let session = Session {
         guild_id: guild_id.to_string(),
+        player_id: as_player.map(|p| p.to_string()),
         homeserver: homeserver.trim_end_matches('/').to_string(),
         user_id,
         device_id,

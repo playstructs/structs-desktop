@@ -748,6 +748,28 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await tick();
   check('a request for another network is ignored',
     w.Chat._state.roomId === stay, String(w.Chat._state.roomId));
+
+  /* The boot race, which is the ORDINARY case for a Message click.
+   *
+   * These requests usually arrive because a click in Team Ops OPENED this
+   * window, and Team Ops emits as soon as the DM resolves — which can beat
+   * our first status round-trip. Until that returns, `S.guildId` is null, and
+   * the guard read "not my guild" and dropped the request in silence. The
+   * window opened on the channel list and the conversation never appeared.
+   *
+   * The tests above could not catch it: they emit after boot, when the guild
+   * is already known.
+   */
+  w.Chat._state.guildId = null;
+  w.Chat._state.roomId = null;
+  w.__HARNESS_EMIT__('matrix::show_room', {
+    guild_id: '0-5', room_id: '!dm-jpeg:matrix.beta.playstructs.com',
+  });
+  await tick();
+  await tick();
+  check('a request arriving before the guild is known still opens',
+    w.Chat._state.roomId === '!dm-jpeg:matrix.beta.playstructs.com',
+    String(w.Chat._state.roomId));
 }
 
 // ── Pictures ────────────────────────────────────────────────────────────────
@@ -4029,6 +4051,109 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('…and it is no longer marked failed',
     !all(d, '#chat-timeline .chat-msg').pop().className.includes('chat-msg-failed'),
     all(d, '#chat-timeline .chat-msg').pop().className);
+}
+
+// ── Speaking as one of our own players ─────────────────────────────────────
+//
+// Every player on the Armada roster is a real account on chain with its own
+// authority to talk, and the Matrix localpart IS the player id — so `1-271`
+// already has an identity on the guild's homeserver. A window opened for one
+// of them must address ITS OWN session, and must not adopt the primary's.
+{
+  console.log('\n— speaking as a roster player');
+
+  const primary = await open();
+  check('a plain window is the primary', primary.w.Chat.AS_PLAYER === null,
+    String(primary.w.Chat.AS_PLAYER));
+
+  const asVp = await open('?as=1-271');
+  check('an ?as= window knows who it is',
+    asVp.w.Chat.AS_PLAYER === '1-271', String(asVp.w.Chat.AS_PLAYER));
+
+  // The identity has to reach Rust, or the window signs in as the primary and
+  // silently speaks with the wrong voice — the worst failure this can have.
+  const statusCall = asVp.w.__HARNESS_CALLS__.find((c) => c.cmd === 'matrix_status');
+  check('...and asks Rust for that identity',
+    statusCall && statusCall.args && statusCall.args.asPlayer === '1-271',
+    JSON.stringify(statusCall && statusCall.args));
+  const primaryCall = primary.w.__HARNESS_CALLS__.find((c) => c.cmd === 'matrix_status');
+  check('...while the primary asks for none',
+    primaryCall && primaryCall.args && primaryCall.args.asPlayer === null,
+    JSON.stringify(primaryCall && primaryCall.args));
+
+  // Only ids are accepted, so a crafted window URL cannot steer this.
+  const junk = await open('?as=' + encodeURIComponent('../../evil'));
+  check('a non-id ?as= is ignored, not trusted',
+    junk.w.Chat.AS_PLAYER === null, String(junk.w.Chat.AS_PLAYER));
+  junk.w.close();
+
+  /* Status is a BROADCAST, so both windows hear both sign-ins.
+   *
+   * Unfiltered, the primary's window would adopt the roster player's
+   * connection state and draw a sign-in ladder for a sign-in it is not doing.
+   */
+  // Watch `connecting`/`steps`, which the LADDER actually sets — not
+  // `networks`, which a ladder payload does not carry at all and so could not
+  // have changed either way. An assertion on the wrong field passes whether
+  // or not the filter is there.
+  primary.w.Chat._state.connecting = false;
+  primary.w.Chat._state.steps = null;
+  primary.w.__HARNESS_EMIT__('matrix::status', {
+    connecting: true, steps: [{ id: 'login', state: 'running' }], as_player: '1-271',
+  });
+  await tick();
+  check('the primary ignores another identity\'s status',
+    primary.w.Chat._state.connecting === false
+      && primary.w.Chat._state.steps === null,
+    JSON.stringify({ connecting: primary.w.Chat._state.connecting,
+                     steps: primary.w.Chat._state.steps }));
+
+  // Its OWN identity's ladder must still land, or the filter has just broken
+  // sign-in feedback for everybody.
+  primary.w.__HARNESS_EMIT__('matrix::status', {
+    connecting: true, steps: [{ id: 'login', state: 'running' }], as_player: null,
+  });
+  await tick();
+  check('...and still takes its own', primary.w.Chat._state.connecting === true);
+
+  // A payload naming no identity is accepted too — that is the sync loop's
+  // error-only push, which predates identities and belongs to whoever reads it.
+  // Asserted SYNCHRONOUSLY: an error-only push also triggers a status
+  // re-read, and that re-read legitimately clears the error again. Awaiting
+  // here would race a real behaviour and read as a filter bug.
+  primary.w.Chat._state.error = null;
+  primary.w.__HARNESS_EMIT__('matrix::status', { error: 'homeserver dropped us' });
+  check('...as well as an untagged push',
+    primary.w.Chat._state.error === 'homeserver dropped us',
+    String(primary.w.Chat._state.error));
+  await tick();
+
+  /* And the roster window takes untagged pushes too.
+   *
+   * Easy to get wrong in the direction that looks safe: a filter comparing
+   * `(payload.as_player || null)` to this window's id drops every untagged
+   * payload here, because null is not '1-271'. The sync loop's error-only
+   * push is untagged, so that window would never learn its session had died —
+   * it would just stop receiving messages, silently. Only the PRIMARY window
+   * shows the two spellings behaving alike, which is why testing one is not
+   * testing the rule.
+   */
+  asVp.w.Chat._state.error = null;
+  asVp.w.__HARNESS_EMIT__('matrix::status', { error: 'homeserver dropped us' });
+  check('the roster window takes untagged pushes as well',
+    asVp.w.Chat._state.error === 'homeserver dropped us',
+    String(asVp.w.Chat._state.error));
+  await tick();
+
+  // ...but still not one addressed to somebody else.
+  asVp.w.Chat._state.connecting = false;
+  asVp.w.__HARNESS_EMIT__('matrix::status', { connecting: true, as_player: null });
+  check('...and still ignores the primary\'s',
+    asVp.w.Chat._state.connecting === false,
+    String(asVp.w.Chat._state.connecting));
+
+  primary.w.close();
+  asVp.w.close();
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');

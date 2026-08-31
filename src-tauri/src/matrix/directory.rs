@@ -151,7 +151,9 @@ pub async fn resolve(player_id: &str) -> Option<Ident> {
         // which the directory config already carries.
         tag: crate::guild_config::get_guild_configs()
             .into_iter()
-            .find(|c| c.guild_id == guild_id)
+            // `guild_of`: this may arrive as a session key when a second
+            // identity is signed in. Idempotent for a plain guild id.
+            .find(|c| c.guild_id == super::store::guild_of(&guild_id))
             .map(|c| c.guild_tag)
             .unwrap_or_default(),
         guild_id,
@@ -291,7 +293,7 @@ pub fn server_name_for_guild(guild_id: &str) -> Option<String> {
     }
     let cfg = crate::guild_config::get_guild_configs()
         .into_iter()
-        .find(|c| c.guild_id == guild_id)?;
+        .find(|c| c.guild_id == super::store::guild_of(guild_id))?;
     let url = cfg.matrix_url?;
     reqwest::Url::parse(&url).ok()?.host_str().map(|h| h.to_string())
 }

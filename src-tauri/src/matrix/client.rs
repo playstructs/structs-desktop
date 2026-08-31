@@ -4001,6 +4001,7 @@ mod tests {
     fn session() -> Session {
         Session {
             guild_id: "0-5".into(),
+            player_id: None,
             homeserver: "https://matrix.example.com".into(),
             user_id: "@1-194:example.com".into(),
             device_id: "ABCDEFGHIJ".into(),

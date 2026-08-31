@@ -22,6 +22,13 @@ pub struct Session {
     /// `@1-42:matrix.crew.oh.energy` — localpart is the player id, never the
     /// wallet address (addresses rotate on chain; player ids do not).
     pub user_id: String,
+    /// Which of OUR players this session speaks as, or `None` for the primary.
+    ///
+    /// The Armada roster is full of players we hold keys for, and each one has
+    /// a real Matrix identity waiting (the localpart IS the player id). This
+    /// is what lets more than one of them be signed in at once.
+    #[serde(default)]
+    pub player_id: Option<String>,
     pub device_id: String,
     pub access_token: String,
     #[serde(default)]
@@ -116,8 +123,48 @@ fn save(file: &StoreFile) {
     }
 }
 
-pub fn get(guild_id: &str) -> Option<Session> {
-    load().sessions.get(guild_id).cloned()
+/* Sessions are keyed by IDENTITY, not by guild.
+ *
+ * The primary keeps the bare guild id as its key, so every session stored
+ * before this existed still loads and every caller that passes a plain guild
+ * id still finds it. A second identity on the same guild is `guild#player`.
+ *
+ * `#` cannot appear in a guild id or a player id — both are `<n>-<n>` — so the
+ * split is unambiguous in both directions.
+ */
+pub const IDENT_SEP: char = '#';
+
+pub fn key_for(guild_id: &str, player_id: Option<&str>) -> String {
+    match player_id {
+        None => guild_id.to_string(),
+        Some(p) => format!("{guild_id}{IDENT_SEP}{p}"),
+    }
+}
+
+/// The guild a session key belongs to, whichever identity it names.
+pub fn guild_of(key: &str) -> &str {
+    key.split_once(IDENT_SEP).map(|(g, _)| g).unwrap_or(key)
+}
+
+/// Which player a session key speaks as, or `None` for the primary.
+pub fn player_of(key: &str) -> Option<&str> {
+    key.split_once(IDENT_SEP).map(|(_, p)| p)
+}
+
+pub fn get(key: &str) -> Option<Session> {
+    load().sessions.get(key).cloned()
+}
+
+/// Every identity currently signed in on one guild, primary first.
+pub fn identities_on(guild_id: &str) -> Vec<Session> {
+    let mut out: Vec<Session> = load()
+        .sessions
+        .iter()
+        .filter(|(k, _)| guild_of(k) == guild_id)
+        .map(|(_, s)| s.clone())
+        .collect();
+    out.sort_by_key(|s| s.player_id.clone());
+    out
 }
 
 pub fn all() -> Vec<Session> {
@@ -129,13 +176,14 @@ pub fn put(session: Session) {
     file.version = VERSION;
     file.clients
         .insert(session.homeserver.clone(), session.client_id.clone());
-    file.sessions.insert(session.guild_id.clone(), session);
+    let key = key_for(&session.guild_id, session.player_id.as_deref());
+    file.sessions.insert(key, session);
     save(&file);
 }
 
-pub fn remove(guild_id: &str) {
+pub fn remove(key: &str) {
     let mut file = load();
-    if file.sessions.remove(guild_id).is_some() {
+    if file.sessions.remove(key).is_some() {
         file.version = VERSION;
         save(&file);
     }
@@ -164,4 +212,64 @@ pub fn put_client(homeserver: &str, client_id: &str) {
     file.clients
         .insert(homeserver.to_string(), client_id.to_string());
     save(&file);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_primary_keeps_the_bare_guild_id() {
+        // Not cosmetic: every session stored before identities existed is
+        // keyed this way, and every caller that passes a plain guild id must
+        // keep finding it. A scheme that keyed the primary as `0-5#` would
+        // have silently signed everyone out on upgrade.
+        assert_eq!(key_for("0-5", None), "0-5");
+        assert_eq!(guild_of("0-5"), "0-5");
+        assert_eq!(player_of("0-5"), None);
+    }
+
+    #[test]
+    fn a_roster_player_is_a_second_identity_on_the_same_guild() {
+        let k = key_for("0-5", Some("1-271"));
+        assert_eq!(k, "0-5#1-271");
+        // Both halves survive the round trip — this is what lets one key be
+        // passed everywhere a guild id used to be.
+        assert_eq!(guild_of(&k), "0-5");
+        assert_eq!(player_of(&k), Some("1-271"));
+        // Same guild, different identity: they must not collide in the store.
+        assert_ne!(key_for("0-5", Some("1-271")), key_for("0-5", Some("1-272")));
+        assert_ne!(key_for("0-5", Some("1-271")), key_for("0-5", None));
+    }
+
+    #[test]
+    fn guild_of_is_idempotent() {
+        // Call sites normalise with it whether or not they were handed a key,
+        // so it has to be safe to apply twice and safe to apply to a plain id.
+        let k = key_for("0-5", Some("1-271"));
+        assert_eq!(guild_of(guild_of(&k)), "0-5");
+        assert_eq!(guild_of(guild_of("0-5")), "0-5");
+    }
+
+    #[test]
+    fn the_separator_cannot_occur_in_an_id() {
+        // Guild ids and player ids are both `<n>-<n>`, so `#` never appears in
+        // either and the split is unambiguous in both directions. A separator
+        // that COULD occur (say `-`) would make `0-5` parse as guild `0`,
+        // player `5`.
+        assert!(!"0-5".contains(IDENT_SEP));
+        assert!(!"1-271".contains(IDENT_SEP));
+        assert_eq!(guild_of("0-5"), "0-5", "a plain id must not split");
+    }
+
+    #[test]
+    fn identities_are_listed_per_guild() {
+        // Pure ordering/filtering check on the shape `identities_on` returns;
+        // it reads the real store, so only the invariant is asserted here.
+        let a = key_for("0-5", None);
+        let b = key_for("0-5", Some("1-271"));
+        let other = key_for("0-1", Some("1-271"));
+        assert_eq!(guild_of(&a), guild_of(&b));
+        assert_ne!(guild_of(&b), guild_of(&other));
+    }
 }

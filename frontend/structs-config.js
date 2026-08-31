@@ -1562,7 +1562,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           case 'login_signature': {
             var comms = window.__STRUCTS_COMMS__;
             if (!comms) { respond(false, {}, 'comms façade unavailable (patch not built / not signed in)'); return; }
-            data = await comms.loginSignature(args.guild_id, args.timestamp);
+            data = await comms.loginSignature(args.guild_id, args.timestamp, args.index);
             break;
           }
           default: respond(false, {}, 'unknown vplayer op: ' + op); return;

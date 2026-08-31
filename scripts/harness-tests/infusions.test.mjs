@@ -111,8 +111,21 @@ const genRows = rowsIn('GENERATOR INFUSIONS');
 check('generator infusions are listed apart', genRows.length === 1);
 check('generator infusions carry no actions', genRows[0].querySelectorAll('.mass-btn').length === 0);
 check('generator conversion rate is shown', /2 kW\/g/.test(text(genRows[0])), text(genRows[0]));
-check('the one-way warning is on the card',
-  /cannot be defused/.test(text(cardBody('GENERATOR INFUSIONS'))));
+
+/* The card explains nothing.
+ *
+ * It used to carry a three-sentence warning about Alpha being annihilated and
+ * where generators belong. That is documentation, and it does not go in the
+ * interface: the player knows the game. The row already says `one-way`, and
+ * says `DESTROYED — the Alpha is gone` when that is what happened — state,
+ * not a lecture.
+ *
+ * This assertion replaces one that required the paragraph to be present.
+ */
+check('the card carries no explanatory prose',
+  !/cannot be defused|annihilated|belong only/.test(text(cardBody('GENERATOR INFUSIONS'))));
+check('...while the row still states the fact as status',
+  /one-way/.test(text(genRows[0])), text(genRows[0]));
 
 // The reactor directory doubles as the picker's context.
 const reactorRows = rowsIn('REACTORS');

@@ -33,6 +33,22 @@
     : function () { return Promise.resolve(function () {}); };
 
   // ── State ─────────────────────────────────────────────────────────────────
+  /* Which of our players this window speaks as.
+   *
+   * `null` is the primary. A window opened from the Armada roster carries
+   * `?as=1-271`, and from that point every command it sends is addressed with
+   * a SESSION KEY (`0-5#1-271`) in the `guildId` slot — so the whole rest of
+   * this file, and all 26 commands behind it, needed no change. The identity
+   * is decided once, here, from something the window cannot get wrong.
+   */
+  var AS_PLAYER = (function () {
+    try {
+      var m = /[?&]as=([0-9]+-[0-9]+)/.exec(window.location.search || '');
+      return m ? m[1] : null;
+    } catch (e) { return null; }
+  })();
+  Chat.AS_PLAYER = AS_PLAYER;
+
   var S = Chat._state = {
     view: 'connection',       // 'channels' | 'room' | 'connection'
     networks: [],             // [{guild_id, guild_name, tag, homeserver, logged_in, ...}]
@@ -3903,7 +3919,7 @@
   }
 
   function refreshStatus() {
-    return invoke('matrix_status')
+    return invoke('matrix_status', { asPlayer: AS_PLAYER })
       .then(function (st) {
         S.started = true;
         applyStatus(st);
@@ -4016,7 +4032,19 @@
   // there is nothing listening yet.
   function showRequestedRoom(target) {
     if (!target || !target.room_id) return;
-    if (target.guild_id && target.guild_id !== S.guildId) return;
+    /* A guild we do not know YET is not a different guild.
+     *
+     * `S.guildId` is filled by `refreshStatus()`, and the listeners above are
+     * registered before that call returns — so a request arriving during boot
+     * met `S.guildId === null`, failed this comparison, and was dropped in
+     * silence. That is exactly when these requests arrive: the usual case is
+     * a Message click that OPENS this window, and Team Ops emits as soon as
+     * the DM resolves, which can beat our first status round-trip.
+     *
+     * Only a guild we actually know and that actually differs is a reason to
+     * ignore one.
+     */
+    if (target.guild_id && S.guildId && target.guild_id !== S.guildId) return;
     refreshRooms().then(function () { openRoom(target.room_id); });
   }
 
@@ -4221,6 +4249,23 @@
   Chat.onRooms = onRooms;
 
   function onStatus(payload) {
+    /* Somebody else's status is not ours.
+     *
+     * These are BROADCASTS — a plain `listen()` targets Any, so every chat
+     * window receives every one. With two identities signed in, an unfiltered
+     * handler would let the primary's window adopt the roster player's
+     * connection state, and show a sign-in ladder for a sign-in it is not
+     * doing. Payloads name whose they are; a payload for a different identity
+     * is dropped.
+     *
+     * A payload naming NO identity is accepted: that is the sync loop's
+     * error-only push, which predates identities and belongs to whoever reads
+     * it.
+     */
+    if (payload && payload.as_player !== undefined
+        && (payload.as_player || null) !== AS_PLAYER) {
+      return;
+    }
     applyStatus(payload);
     render();
     // A push that only carries an error is the sync loop telling us the

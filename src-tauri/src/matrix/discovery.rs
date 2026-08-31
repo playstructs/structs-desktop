@@ -89,7 +89,8 @@ pub async fn homeserver_host(guild_id: &str) -> Option<String> {
     }
     let cfg = crate::guild_config::get_guild_configs()
         .into_iter()
-        .find(|c| c.guild_id == guild_id)?;
+        // A session key (`0-5#1-271`) names the same guild as `0-5`.
+        .find(|c| c.guild_id == super::store::guild_of(guild_id))?;
 
     // Published wins — it is the guild's own statement of the answer.
     let published = cfg

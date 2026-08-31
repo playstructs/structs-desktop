@@ -353,6 +353,33 @@
     if (icon) icon.className = 'sui-icon-md icon-alert';
   }
 
+  /* Open a Comms window that speaks AS this player.
+   *
+   * Only on the Armada roster, and only for players that are not the primary:
+   * every row there is one of OUR players, each a real account on chain with
+   * its own authority to talk, and the Matrix localpart IS the player id — so
+   * `1-271` already has an identity on the guild's homeserver. The primary
+   * gets no icon because its window is the ordinary Comms window, already one
+   * click away.
+   *
+   * Deliberately NOT added to `reachLinks`, which the leaderboards also use:
+   * those list the whole galaxy, and this must never appear beside a player
+   * whose keys we do not hold.
+   */
+  function speakAsLink(r) {
+    if (!r || !r.player_id || r.role === 'primary') return null;
+    var a = H.el('a', 'ops-refresh-btn');
+    a.href = 'javascript:void(0)';
+    a.title = 'Open Comms as ' + (r.player_name || r.player_id);
+    a.appendChild(H.el('i', 'sui-icon-md icon-member'));
+    a.addEventListener('click', function (e) {
+      e.stopPropagation();
+      Board.T.core.invoke('matrix_open_as', { playerId: r.player_id })
+        .catch(function (err) { reachFailed(a, 'open Comms as', r, err); });
+    });
+    return a;
+  }
+
   function messageLink(r) {
     if (!r || !r.player_id) return null;
     var a = H.el('a', 'ops-refresh-btn');
@@ -463,12 +490,14 @@
       // actions.
       var spectate = spectatorLinks(r);
       var message = messageLink(r);
+      var speakAs = speakAsLink(r);
       var share = shareLink(r);
-      if (spectate || message || share) {
+      if (spectate || message || speakAs || share) {
         if (!trio) sub.appendChild(H.el('br'));
         else sub.appendChild(document.createTextNode(' '));
         if (spectate) sub.appendChild(spectate);
         if (message) sub.appendChild(message);
+        if (speakAs) sub.appendChild(speakAs);
         if (share) sub.appendChild(share);
       }
       // Charge: battery + a clear Ready/n so "what is this number" is answered.
@@ -1434,10 +1463,6 @@
     // ── Generators (one-way, so read-only) ──
     if (genRows.length) {
       var gbody2 = H.el('div');
-      gbody2.appendChild(H.stateBlock('warning',
-        'Generator infusions cannot be defused — the Alpha is annihilated on success, and a '
-        + 'destroyed generator takes it with it. They convert far better than a reactor, so '
-        + 'they belong only on a struct you can defend.'));
       genRows.forEach(function (r) {
         gbody2.appendChild(H.resultRow({
           icon: r.destroyed ? 'icon-wreckage' : 'sui-icon-inert-alpha',

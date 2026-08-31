@@ -272,7 +272,12 @@ cat >> "$BUILD_DIR/js/index.js" <<'VP_EOF'
 // [structs-universe patch] Virtual-players façade (multi-account off one mnemonic).
 try {
   const __vpAccounts = {}; // index -> {index, address, pubkey, player_id?}
-  const __vpDerive = async (index) => {
+  // `var`, not `const`: these façades are separate appended `try {}` blocks in
+  // one module, and a `const` here is block-scoped — invisible to the Comms
+  // façade below, which needs the same derivation to sign in as a roster
+  // player. `var` is function/module-scoped, so there is ONE deriver rather
+  // than a second copy of the key-handling code.
+  var __vpDerive = async (index) => {
     const w = await walletManager.createWalletForIndex(gameState.mnemonic, index);
     const accs = await w.getAccountsWithPrivkeys();
     return accs[0]; // {address, pubkey: Uint8Array, privkey: Uint8Array}
@@ -535,20 +540,40 @@ try {
   window.__STRUCTS_COMMS__ = {
     // Returns only what the guild's POST /auth/login needs. Same call path as
     // AuthManager.buildLoginRequest — if the game can log in, so can this.
-    async loginSignature(guildId, timestamp) {
-      if (!gameState.signingAccount || !gameState.signingAccount.privkey) {
-        throw new Error('not signed in to the game yet');
-      }
+    // `index` selects WHICH of our wallets signs: null/undefined is the
+    // primary's signing account, a number is that HD index — one of the
+    // roster players, which is how a second identity signs in to chat
+    // alongside the primary.
+    //
+    // The derived private key never leaves this function, and the message is
+    // still BUILT here from (guild, address, timestamp) rather than accepted
+    // from the caller, so adding the selector does not turn this into a
+    // generic signing oracle.
+    async loginSignature(guildId, timestamp, index) {
       if (!guildId || !timestamp) {
         throw new Error('loginSignature needs a guild id and a timestamp');
       }
-      const address = gameState.signingAccount.address;
+      let address, privkey, pubkey;
+      if (index == null) {
+        if (!gameState.signingAccount || !gameState.signingAccount.privkey) {
+          throw new Error('not signed in to the game yet');
+        }
+        address = gameState.signingAccount.address;
+        privkey = gameState.signingAccount.privkey;
+        pubkey = gameState.pubkey;
+      } else {
+        // Shared with the vplayers façade above — see the `var` note there.
+        if (typeof __vpDerive !== 'function') {
+          throw new Error('vplayers façade missing; cannot sign as a roster player');
+        }
+        const a = await __vpDerive(index);
+        address = a.address;
+        privkey = a.privkey;
+        pubkey = walletManager.bytesToHex(a.pubkey);
+      }
       const message = guildAPI.buildLoginMessage(guildId, address, String(timestamp));
-      const signature = await walletManager.createSignatureForProxyMessage(
-        message,
-        gameState.signingAccount.privkey
-      );
-      return { address: address, pubkey: gameState.pubkey, signature: signature };
+      const signature = await walletManager.createSignatureForProxyMessage(message, privkey);
+      return { address: address, pubkey: pubkey, signature: signature };
     },
   };
   console.info('[structs-universe] __STRUCTS_COMMS__ ready');
