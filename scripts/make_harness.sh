@@ -1134,6 +1134,87 @@ EOF
 
 echo "built: $COUT + $CFIX  (variants: ?fixture=unauth|nomatrix|failed)"
 
+# ── Pay window ──────────────────────────────────────────────────────────────
+# It gained an asset picker, a unit picker and two player cards; three controls
+# that decide what leaves a wallet should not ship unexercised.
+TSRC=frontend/transfer.html
+TOUT=frontend/_harness_transfer.html
+TFIX=frontend/_fixtures_transfer.js
+
+cat > "$TFIX" <<'TX_EOF'
+// [harness] Tauri stand-in for the Pay window.
+(function () {
+  var calls = [];
+  var listeners = {};
+  window.__HARNESS_CALLS__ = calls;
+  window.__HARNESS_EMIT__ = function (n, p) {
+    (listeners[n] || []).forEach(function (cb) { cb({ payload: p }); });
+  };
+  // A player holding Alpha AND a guild token, so the picker has something to
+  // pick. `sendable` is the server's answer and the window must obey it: the
+  // staking state and the ore row below are both refused here.
+  var ASSETS = [
+    { denom: 'ualpha', amount: 31420000000, sendable: true,
+      base_name: 'μg Alpha', display_name: 'Alpha', exponent: 6, guild_tag: '' },
+    { denom: 'uguild.0-5', amount: 4200000, sendable: true,
+      base_name: 'μSN', display_name: 'SN', exponent: 6, guild_id: '0-5', guild_tag: 'SN.C' },
+    { denom: 'ualpha.infused', amount: 999, sendable: false,
+      base_name: 'μg Alpha', display_name: 'Alpha (infused)', exponent: 6 },
+    { denom: 'ore', amount: 1234, sendable: false, display_name: 'Ore',
+      base_name: 'g', exponent: 0 },
+  ];
+  var F = {
+    mcp_inventory: {
+      player: { player_id: '1-194', index: null, name: 'Marklifer',
+                address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne',
+                pfp_attrs: '{"head":3,"neck":2,"body":4,"arms":5,"background":1}' },
+      assets: ASSETS,
+    },
+    matrix_take_pending_transfer: {
+      to: 'structs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
+      playerId: '1-61', name: 'JPEG',
+    },
+    mcp_transfer_preview: null,   // set per test
+    mcp_transfer_execute: { ok: true },
+  };
+  window.__HARNESS_FIXTURES__ = F;
+  window.__TAURI__ = {
+    core: { invoke: function (cmd, args) {
+      calls.push({ cmd: cmd, args: args });
+      if (cmd === 'mcp_transfer_preview') {
+        // Echo what was asked, so a test can see the denom and amount that
+        // would really have been sent.
+        return Promise.resolve(Object.assign({
+          ok: true, problems: [], to: args.to, denom: args.denom,
+          amount: args.amount, balance: 31420000000,
+          recipient: 'JPEG (1-61)', recipient_id: '1-61',
+          recipient_pfp: '{"head":9,"neck":1,"body":2,"arms":3,"background":2}',
+        }, F.mcp_transfer_preview || {}));
+      }
+      return Object.prototype.hasOwnProperty.call(F, cmd)
+        ? Promise.resolve(F[cmd]) : Promise.reject('harness: no fixture for ' + cmd);
+    } },
+    event: { listen: function (n, cb) {
+      (listeners[n] = listeners[n] || []).push(cb);
+      return Promise.resolve(function () {});
+    } },
+    window: { getCurrentWindow: function () { return { close: function () {} }; } },
+  };
+})();
+TX_EOF
+
+python3 - "$TSRC" "$TOUT" <<'EOF'
+import sys
+src, out = sys.argv[1], sys.argv[2]
+html = open(src).read()
+anchor = '  <script src="units.js"></script>'
+assert anchor in html, 'transfer.html changed: units.js tag not found'
+html = html.replace(anchor, '  <script src="_fixtures_transfer.js"></script>\n' + anchor, 1)
+open(out, 'w').write(html)
+EOF
+
+echo "built: $TOUT + $TFIX"
+
 echo "built: $OUT + $FIX"
 echo "serve: (cd frontend && python3 -m http.server 8899)"
 echo "open:  http://localhost:8899/_harness.html?view=gamestats"

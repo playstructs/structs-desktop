@@ -48,6 +48,21 @@
     .tx-fact-label { flex: 0 0 78px; color: var(--text-hint); }
     .tx-fact-value { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
     .tx-all { margin-left: var(--spacing-sm); color: var(--accent-primary); }
+
+    /* Parties, asset and unit. main.css centres text on everything that goes
+       full width, so these say left explicitly — it has bitten this window
+       once already. */
+    .tx-parties { display: flex; flex-direction: column; gap: var(--spacing-sm);
+                  text-align: left; }
+    .tx-row { display: flex; align-items: center; gap: var(--spacing-md);
+              text-align: left; }
+    .tx-row select { flex: 1 1 auto; min-width: 0; }
+    .tx-amount-row { display: flex; align-items: flex-end; gap: var(--spacing-md);
+                     text-align: left; }
+    .tx-amount-row label.sui-input-text { flex: 1 1 auto; }
+    .tx-amount-row select { flex: 0 0 auto; }
+    /* The party row's own line, under the name. */
+    .tx-party-addr { color: var(--text-hint); overflow-wrap: anywhere; }
     .tx-all:hover { color: var(--accent-primary-active); }
 
     /* SUI fields carry a min-width wider than this window. */
@@ -96,7 +111,7 @@
       <div class="sui-screen sui-screen-full-width">
         <div class="sui-screen-nav">
           <div class="sui-screen-nav-items">
-            <span class="sui-screen-nav-item sui-mod-active">SEND ALPHA</span>
+            <span class="sui-screen-nav-item sui-mod-active" id="tx-title">SEND ALPHA</span>
           </div>
           <a id="tx-close" class="sui-screen-nav-close" href="javascript: void(0)" title="Close">
             <i class="sui-icon-sm icon-close"></i>
@@ -109,15 +124,36 @@
           <div id="tx-body">
 
             <div class="tx-sub sui-text-tiny" id="tx-who">…</div>
+
+            <!-- Who is paying whom, as PEOPLE. The game draws a player as a
+                 portrait with a name and an id; a payment screen that showed
+                 the word "primary" twice was naming neither party. Same
+                 `sui-result-row` idiom the roster uses. -->
+            <div class="tx-parties" id="tx-parties"></div>
+
+            <!-- Which asset. Present whenever more than one is holdable, so a
+                 player with only Alpha never sees a choice they do not have. -->
+            <div class="tx-row" id="tx-asset-row" hidden>
+              <label class="sui-text-label" for="tx-asset">Asset</label>
+              <select id="tx-asset" class="sui-text-tiny"></select>
+            </div>
+
             <div class="tx-facts" id="tx-facts"></div>
 
-            <!-- SUI's own field: `.sui-input-text` is the LABEL wrapper, and
-                 the input inside it is styled by descendant rules. -->
-            <label class="sui-input-text" for="tx-amount">
-              <span>Amount — g, Kg, mg…</span>
-              <input id="tx-amount" type="text" inputmode="decimal"
-                     placeholder="0" autocomplete="off">
-            </label>
+            <!-- Amount and its unit. The unit is a CONTROL rather than
+                 something to be typed, so "9.4Kg" and "9400g" are one click
+                 apart instead of a spelling the player has to know. Typing a
+                 suffix still works. -->
+            <div class="tx-amount-row">
+              <!-- SUI's own field: `.sui-input-text` is the LABEL wrapper, and
+                   the input inside it is styled by descendant rules. -->
+              <label class="sui-input-text" for="tx-amount">
+                <span id="tx-amount-label">Amount</span>
+                <input id="tx-amount" type="text" inputmode="decimal"
+                       placeholder="0" autocomplete="off">
+              </label>
+              <select id="tx-unit" class="sui-text-tiny" title="Unit"></select>
+            </div>
 
             <div id="tx-out"></div>
 
@@ -138,6 +174,8 @@
 </div>
 
   <script src="units.js"></script>
+  <!-- Portrait composer first: transfer.js draws both parties as player cards. -->
+  <script src="pfp.js"></script>
   <script src="transfer.js"></script>
 </body>
 </html>

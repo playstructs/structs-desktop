@@ -169,13 +169,19 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_object_chatter').pop();
   check('it asks what was said without being opened',
     !!call && call.args.objectId === '2-1', JSON.stringify(call && call.args));
-  const rows = d.querySelectorAll('.rv-chat-row');
+  // `.chat-msg` — the Comms window's own row class. The rail used to build
+  // its own `.rv-chat-row` lookalike; it now draws the shared component from
+  // `chatrow.js`, so the selector is the real one.
+  const rows = d.querySelectorAll('.chat-msg');
   check('…and shows it', rows.length === 1, String(rows.length));
+  // Read through a default rather than indexing: "no rows at all" is a case
+  // these very checks exist to catch, and `rows[0].textContent` turns it into
+  // a TypeError that ends the run instead of a failure that names itself.
+  const first = (rows[0] || {}).textContent || '';
   check('…with who said it',
-    rows[0].textContent.includes('JPEG') && rows[0].textContent.includes('shield on 2-1'),
-    rows[0].textContent);
+    first.includes('JPEG') && first.includes('shield on 2-1'), first);
   // Which room it was said in is the part you cannot infer.
-  check('…and where', rows[0].textContent.includes('SN.Corporation'), rows[0].textContent);
+  check('…and where', first.includes('SN.Corporation'), first);
 
   // ── Answering from here ───────────────────────────────────────────────
   // The panel used to be read-only because sending "would mean guessing a
@@ -337,7 +343,7 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   // something" badge — there is no closed state to miss anything in.
   check('the count reports what is displayed',
     d.getElementById('rv-chat-count').textContent
-      === String(d.querySelectorAll('.rv-chat-row').length || ''),
+      === String(d.querySelectorAll('.chat-msg').length || ''),
     d.getElementById('rv-chat-count').textContent);
 }
 
@@ -414,7 +420,7 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_timeline').length > n0);
 
   // ...and its body is rendered verbatim, with no id bolted on.
-  const bodies = [...d.querySelectorAll('.rv-chat-body-text')].map((e) => e.textContent);
+  const bodies = [...d.querySelectorAll('.chat-msg-body')].map((e) => e.textContent);
   check('room messages render without an appended id',
     bodies.includes('shield is down'), bodies.join(' | '));
 
@@ -542,6 +548,85 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     RV._objectWord('fleet') === 'fleet' && RV._objectWord('planet') === 'planet'
       && RV._objectWord(undefined) === 'planet',
     [RV._objectWord('fleet'), RV._objectWord('planet')].join('/'));
+}
+
+// ── The rail is the Comms row, not a lookalike ─────────────────────────────
+//
+// Asked for twice, the second time as "why does it need to be styled in a
+// unique way". The first answer mirrored the styling, which is how the two
+// drifted apart again. This asserts the actual thing: one component, drawn by
+// both windows.
+{
+  const d = w.document;
+  const chat = RV._chat;
+
+  chat.connected = true; chat.guildId = '0-5';
+  chat.room = { connected: true, guild_id: '0-5', room_id: '!p:h', joined: true };
+  chat.roomName = 'Planet 2-1';
+  const t0 = Date.now();
+  chat.rows = [
+    { room_id: '!p:h', message: { event_id: '$e1', sender: '@1-194:h', sender_name: 'Marklifer',
+        kind: 'event', ts: t0, body: 'joined' } },
+    { room_id: '!p:h', message: { event_id: '$m1', sender: '@1-61:h', sender_name: 'JPEG',
+        sender_tag: 'SN.C', kind: 'text', ts: t0 + 1000, body: 'shield is down' } },
+    { room_id: '!p:h', message: { event_id: '$m2', sender: '@1-61:h', sender_name: 'JPEG',
+        sender_tag: 'SN.C', kind: 'text', ts: t0 + 2000, body: 'moving in' } },
+    { room_id: '!p:h', message: { event_id: '$m3', sender: '@1-194:h', sender_name: 'Marklifer',
+        kind: 'emote', ts: t0 + 3000, body: 'watches' } },
+  ];
+  RV._renderChat();
+
+  // A room event is not conversation. The rail used to render "joined" as
+  // though somebody had said it.
+  /* `txt()` rather than `querySelector(...).textContent`.
+   *
+   * A missing element is exactly what these checks are for, and dereferencing
+   * null turns that into a TypeError that kills the run — which reports as a
+   * crash, not as a failure. The same ambiguity bites a mutation run: it
+   * cannot tell "the guard worked" from "the harness broke".
+   */
+  const txt = (sel) => (d.querySelector(sel) || {}).textContent || '';
+
+  check('a room event draws as an event line, not a message',
+    d.querySelectorAll('.chat-event').length === 1
+      && txt('.chat-event-who') === 'Marklifer',
+    String(d.querySelectorAll('.chat-event').length));
+
+  check('messages use the shared row class',
+    d.querySelectorAll('.chat-msg').length === 3,
+    String(d.querySelectorAll('.chat-msg').length));
+  check('...and none of the old bespoke markup survives',
+    d.querySelectorAll('.rv-chat-row, .rv-chat-who, .rv-chat-body-text').length === 0);
+
+  // The things the rail simply did not have before.
+  check('every message carries a clock',
+    [...d.querySelectorAll('.chat-msg:not(.chat-mod-oneline)')]
+      .every((n) => /^\d\d:\d\d$/.test((n.querySelector('.chat-msg-time') || {}).textContent || '')),
+    [...d.querySelectorAll('.chat-msg-time')].map((n) => n.textContent).join(' '));
+  check('the sender tag is a tag, not glued to the name',
+    txt('.chat-msg-tag') === '[SN.C]', txt('.chat-msg-tag'));
+  check('a run from one sender collapses its header',
+    d.querySelectorAll('.chat-msg.chat-mod-cont').length === 1,
+    String(d.querySelectorAll('.chat-msg.chat-mod-cont').length));
+  check('an emote is one line, not a header plus a body',
+    d.querySelectorAll('.chat-msg.chat-mod-oneline').length === 1
+      && /watches/.test(txt('.chat-mod-emote')),
+    txt('.chat-mod-emote'));
+
+  /* A rail is the same row with LESS on it, not a different one.
+   *
+   * React, reply, pin, edit and delete belong to a full timeline. If they ever
+   * appeared here it would mean the rail had been handed the Comms window's
+   * `controls` hook by accident.
+   */
+  check('no timeline controls are bolted onto the rail',
+    d.querySelectorAll('.chat-react-btn, .chat-reply-btn, .chat-pin-btn, .chat-edit-btn').length === 0);
+
+  // The component's CSS has to reach this document, or the rows render as
+  // unstyled divs — the class-toggle-with-no-rule failure, one level up.
+  const sheets = [...d.querySelectorAll('link[rel=stylesheet]')].map((l) => l.getAttribute('href'));
+  check('the row stylesheet is linked here too',
+    sheets.includes('css/chat-rows.css'), sheets.join(', '));
 }
 
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');

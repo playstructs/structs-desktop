@@ -245,8 +245,12 @@ for (const file of FEDERATED) {
   // 9,400,000,000 and strands the rest. The control therefore carries a
   // base-unit override that bypasses the text parse — and typing has to clear
   // it, or editing the box would silently still send everything.
+  // Spelled against the ASSET rather than a hardcoded `S.alpha`, since the
+  // window sends guild tokens too. `transfer.test.mjs` asserts the behaviour
+  // itself — that "all" spends the un-printable remainder as well — which is
+  // the check that actually matters; this one just keeps the override present.
   check('the Pay window can send the whole balance exactly',
-    /S\.exact = S\.alpha\.amount/.test(tx));
+    /S\.exact = asset\(\)\.amount/.test(tx));
   check('…preferring that over anything parsed from the box',
     /S\.exact != null[\s\S]{0,80}baseUnits/.test(tx));
   check('…and typing takes the number back',

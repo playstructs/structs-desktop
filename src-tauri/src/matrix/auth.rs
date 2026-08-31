@@ -743,6 +743,19 @@ fn urlencode(s: &str) -> String {
 /// Post a MAS consent form back and keep following. Refuses to post to
 /// anywhere but the issuer the homeserver named, so a hijacked page cannot
 /// turn this into a blind form submitter.
+/// How many interstitial pages the auth service may put in the way.
+///
+/// A first-ever sign-in is not one page. MAS shows the grant, and can follow
+/// it with another step before it will hand back a code — so a handler that
+/// posted ONE form and demanded a callback next failed every first sign-in,
+/// while leaving the grant recorded on the server. That is exactly why "Try
+/// Again" then worked perfectly: the second attempt had nothing left to
+/// consent to.
+///
+/// Bounded rather than unbounded: a service that keeps serving the same form
+/// is a loop, and posting a form forever is worse than saying so.
+const MAX_CONSENT_PAGES: usize = 4;
+
 async fn consent(
     http: &reqwest::Client,
     meta: &AuthMetadata,
@@ -750,43 +763,55 @@ async fn consent(
     body: String,
 ) -> Result<reqwest::Url, String> {
     let issuer = reqwest::Url::parse(&meta.issuer).map_err(|e| e.to_string())?;
-    if url.host_str() != issuer.host_str() {
-        return Err(format!(
-            "the authorization chain stopped at {}, which is neither the callback nor the auth service",
-            redact(&url)
-        ));
+    let (mut url, mut body) = (url, body);
+
+    for _ in 0..MAX_CONSENT_PAGES {
+        // Re-checked on EVERY page, not just the first: a later hop is as much
+        // an opportunity to be walked somewhere else as the first one.
+        if url.host_str() != issuer.host_str() {
+            return Err(format!(
+                "the authorization chain stopped at {}, which is neither the callback nor the auth service",
+                redact(&url)
+            ));
+        }
+        let (action, fields) = parse_form(&body, &url)
+            .ok_or_else(|| format!("{} needs a browser to continue", redact(&url)))?;
+        if action.host_str() != issuer.host_str() {
+            return Err(format!("consent form targets {}, not the auth service", redact(&action)));
+        }
+        let resp = http
+            .post(action.clone())
+            .form(&fields)
+            .send()
+            .await
+            .map_err(|e| format!("consent: {}", e))?;
+        let next = if resp.status().is_redirection() {
+            let loc = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("consent redirected without a Location")?;
+            action.join(loc).map_err(|e| e.to_string())?
+        } else {
+            return Err(format!(
+                "consent returned {} instead of continuing",
+                resp.status().as_u16()
+            ));
+        };
+        match follow(http, next).await? {
+            Landing::Callback(u) => return Ok(u),
+            // Another page: answer it too, instead of giving up one step short
+            // of the code.
+            Landing::Page { url: u, body: b } => {
+                url = u;
+                body = b;
+            }
+        }
     }
-    let (action, fields) = parse_form(&body, &url)
-        .ok_or_else(|| format!("{} needs a browser to continue", redact(&url)))?;
-    if action.host_str() != issuer.host_str() {
-        return Err(format!("consent form targets {}, not the auth service", redact(&action)));
-    }
-    let resp = http
-        .post(action.clone())
-        .form(&fields)
-        .send()
-        .await
-        .map_err(|e| format!("consent: {}", e))?;
-    let next = if resp.status().is_redirection() {
-        let loc = resp
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or("consent redirected without a Location")?;
-        action.join(loc).map_err(|e| e.to_string())?
-    } else {
-        return Err(format!(
-            "consent returned {} instead of continuing",
-            resp.status().as_u16()
-        ));
-    };
-    match follow(http, next).await? {
-        Landing::Callback(u) => Ok(u),
-        Landing::Page { url, .. } => Err(format!(
-            "the authorization chain stopped at {} instead of returning a code",
-            redact(&url)
-        )),
-    }
+    Err(format!(
+        "the authorization chain stopped at {} instead of returning a code",
+        redact(&url)
+    ))
 }
 
 async fn exchange_code(
@@ -1002,6 +1027,148 @@ mod tests {
         assert_eq!(url.as_str(), "https://auth.example/consent/01ABC");
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0], ("csrf".to_string(), "tok&en".to_string()));
+    }
+
+    /* A first sign-in, against a stand-in for MAS.
+     *
+     * `consent` used to post ONE form and demand a callback next; a first-ever
+     * sign-in is more than one page, so it failed every time — while leaving
+     * the grant recorded on the server, which is exactly why "Try Again" then
+     * worked perfectly. A unit test on `parse_form` cannot see any of that:
+     * the bug was in how many times the chain was walked, so the test has to
+     * walk a chain.
+     *
+     * A real socket, because that is what the bug lived in. `pages` is how
+     * many consent forms the stand-in serves before handing back a code.
+     */
+    fn fake_issuer(pages: usize) -> (String, std::thread::JoinHandle<usize>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut posts = 0usize;
+            // Each consent round is a POST then a GET of wherever it pointed,
+            // and the last round redirects to the loopback callback instead.
+            for conn in listener.incoming() {
+                let mut stream = conn.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() || line.is_empty() {
+                    break;
+                }
+                let is_post = line.starts_with("POST");
+                // Drain the headers so the client is not left writing into a
+                // socket nobody is reading.
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if reader.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                if len > 0 {
+                    use std::io::Read;
+                    let mut body = vec![0u8; len];
+                    let _ = reader.read_exact(&mut body);
+                }
+                let resp = if is_post {
+                    posts += 1;
+                    if posts >= pages {
+                        // Done consenting — hand back the code.
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {}?code=abc&state=xyz\r\nContent-Length: 0\r\n\r\n",
+                            REDIRECT_URI
+                        )
+                    } else {
+                        "HTTP/1.1 302 Found\r\nLocation: /consent/next\r\nContent-Length: 0\r\n\r\n"
+                            .to_string()
+                    }
+                } else {
+                    // Another consent form.
+                    let body = r#"<form method="POST" action="/consent/next"><input type="hidden" name="csrf" value="t"><input type="hidden" name="action" value="consent"></form>"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+                if posts >= pages {
+                    break;
+                }
+            }
+            posts
+        });
+        (base, handle)
+    }
+
+    fn meta_for(issuer: &str) -> AuthMetadata {
+        AuthMetadata {
+            issuer: issuer.to_string(),
+            authorization_endpoint: format!("{issuer}/authorize"),
+            token_endpoint: format!("{issuer}/token"),
+            registration_endpoint: None,
+        }
+    }
+
+    const FORM: &str = r#"<form method="POST" action="/consent/01ABC"><input type="hidden" name="csrf" value="t"><input type="hidden" name="action" value="consent"></form>"#;
+
+    #[tokio::test]
+    async fn one_consent_page_still_returns_the_code() {
+        // The path that already worked must keep working.
+        let (base, server) = fake_issuer(1);
+        let meta = meta_for(&base);
+        let url = reqwest::Url::parse(&format!("{base}/consent/01ABC")).unwrap();
+        let got = consent(&chain_client().unwrap(), &meta, url, FORM.to_string()).await;
+        assert!(got.is_ok(), "{got:?}");
+        assert!(got.unwrap().as_str().starts_with(REDIRECT_URI));
+        assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_first_sign_in_walks_every_consent_page() {
+        // THE bug: two pages, and the old handler gave up after the first —
+        // one step short of the code.
+        let (base, server) = fake_issuer(2);
+        let meta = meta_for(&base);
+        let url = reqwest::Url::parse(&format!("{base}/consent/01ABC")).unwrap();
+        let got = consent(&chain_client().unwrap(), &meta, url, FORM.to_string()).await;
+        assert!(got.is_ok(), "should have answered both pages, got {got:?}");
+        assert!(got.unwrap().as_str().starts_with(REDIRECT_URI));
+        assert_eq!(server.join().unwrap(), 2, "both forms must be posted");
+    }
+
+    #[tokio::test]
+    async fn an_endless_consent_loop_is_reported_not_ridden() {
+        // A service that keeps serving the same form is a loop. Posting one
+        // forever is worse than saying so.
+        let (base, server) = fake_issuer(MAX_CONSENT_PAGES + 5);
+        let meta = meta_for(&base);
+        let url = reqwest::Url::parse(&format!("{base}/consent/01ABC")).unwrap();
+        let got = consent(&chain_client().unwrap(), &meta, url, FORM.to_string()).await;
+        assert!(got.is_err());
+        assert!(
+            got.unwrap_err().contains("instead of returning a code"),
+            "the message a player sees should still name the stall"
+        );
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn a_consent_page_off_the_issuer_is_refused() {
+        // Re-checked on EVERY hop, not just the first: a later page is as much
+        // an opportunity to be walked somewhere else.
+        let (base, server) = fake_issuer(1);
+        let meta = meta_for(&base);
+        let elsewhere = reqwest::Url::parse("https://evil.example/consent/01ABC").unwrap();
+        let got = consent(&chain_client().unwrap(), &meta, elsewhere, FORM.to_string()).await;
+        assert!(got.is_err());
+        assert!(got.unwrap_err().contains("neither the callback nor the auth service"));
+        drop(server);
     }
 
     #[test]

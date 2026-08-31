@@ -688,33 +688,37 @@
       body.appendChild(none);
       return;
     }
+    /* The Comms window's own row, not a lookalike.
+     *
+     * This panel used to build its own `.rv-chat-*` markup that approximated
+     * one — a different sender treatment, no clock, no run-collapsing, and
+     * room events rendered as if somebody had said "joined". `chatrow.js` is
+     * the component both windows draw, so a stripped-down channel is exactly
+     * that: the same rows with nothing bolted on.
+     *
+     * No `controls` and no `onSender`: react, reply, pin and edit belong to a
+     * full timeline. A rail beside a live raid is for reading and saying one
+     * thing.
+     */
+    var R = window.StructsChatRow;
+    var prev = null;
     chatState.rows.forEach(function (h) {
       var m = h.message || {};
-      var row = document.createElement('div');
-      row.className = 'rv-chat-row';
-      var who = document.createElement('span');
-      who.className = 'rv-chat-who';
-      who.textContent = (m.sender_tag ? '[' + m.sender_tag + '] ' : '') +
-        (m.sender_name || m.sender || '');
-      var text = document.createElement('span');
-      text.className = 'rv-chat-body-text';
-      text.textContent = m.body || '';
-      var room = document.createElement('span');
-      room.className = 'rv-chat-room';
+      var node = R.render(m, prev, {});
       // Which room a line came from only tells you something when the lines
       // come from DIFFERENT rooms. In the object's own room every row would
-      // repeat the same name, which is a column of noise; the panel title
-      // says it once instead.
-      room.textContent = inRoom() ? '' : (h.room_name || '');
-      // Speaker and room on one line, the message under it. In a rail there
-      // is not width for all three side by side.
-      var meta = document.createElement('div');
-      meta.className = 'rv-chat-meta';
-      meta.appendChild(who);
-      meta.appendChild(room);
-      row.appendChild(meta);
-      row.appendChild(text);
-      body.appendChild(row);
+      // repeat the same name; the panel title says it once instead. On the
+      // search path it rides the sender line, where the clock would be.
+      if (!inRoom() && h.room_name) {
+        var meta = node.querySelector('.chat-msg-meta');
+        if (meta) meta.insertBefore(el('span', 'rv-chat-room', h.room_name), meta.firstChild);
+      }
+      body.appendChild(node);
+      if ((m.kind || 'text') !== 'event') prev = m;
+      // The BODY is a separate node under the head, as the timeline draws it.
+      if ((m.kind || 'text') !== 'event' && (m.kind || 'text') !== 'emote') {
+        node.appendChild(el('div', 'chat-msg-body', m.body || ''));
+      }
     });
   }
 

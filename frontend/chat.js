@@ -1590,104 +1590,43 @@
 
   // ── Room view ─────────────────────────────────────────────────────────────
   function messageNode(m, prev) {
-    // A break in the record. Drawn as a rule rather than a message because it
-    // is not something anyone said — and drawn at all because a history that
-    // reads as continuous and is not is the one kind of wrong a log must
-    // never be.
-    if ((m.kind || 'text') === 'gap') {
-      return ruleNode('some messages are missing', true);
-    }
-    var wrap = el('div', 'chat-msg');
-    // So a reply's quote line can find what it answers.
-    if (m.event_id) wrap.setAttribute('data-event', m.event_id);
-    if (m.pending) wrap.classList.add('chat-msg-pending');
-    if (m.failed) wrap.classList.add('chat-msg-failed');
-
-    // A room event — joined, left, renamed — is not conversation. One dim
-    // line naming who did what, and no sender header: the six-line burst every
-    // room emits at creation used to open every timeline.
-    if ((m.kind || 'text') === 'event') {
-      var ev = el('div', 'chat-event');
-      ev.appendChild(el('span', 'chat-event-who', m.sender_name || m.sender));
-      ev.appendChild(el('span', 'chat-event-what', m.body || ''));
-      ev.appendChild(el('span', 'chat-event-time', fmtTime(m.ts)));
-      return ev;
-    }
-
-    // An emote is one line, IRC's way: "* Netlag waves". A header above it
-    // would say the name twice.
-    if ((m.kind || 'text') === 'emote') {
-      var line = el('div', 'chat-msg-body chat-mod-emote');
-      line.appendChild(el('span', null,
-        '* ' + (m.sender_name || m.sender) + ' ' + (m.body || '')));
-      wrap.appendChild(line);
-      wrap.appendChild(el('div', 'chat-msg-time', fmtTime(m.ts)));
-      wrap.classList.add('chat-mod-oneline');
-      return wrap;
-    }
-
-    // Collapse the header on a run from one sender, as the mockup does — but
-    // never across a gap long enough that "when" stopped being obvious.
-    var RUN_GAP_MS = 5 * 60 * 1000;
-    if (prev && prev.sender === m.sender && !prev.failed && !m.failed
-        && (m.kind || 'text') !== 'emote' && (prev.kind || 'text') !== 'emote'
-        && Math.abs(Number(m.ts) - Number(prev.ts)) < RUN_GAP_MS) {
-      wrap.classList.add('chat-mod-cont');
-    }
-    // `mentions_me` is the sender saying so via `m.mentions` — exact. The
-    // word-boundary guess is only for clients that do not send it.
-    if (!m.self && (m.mentions_me || mentionsMe(m.body))) {
-      wrap.classList.add('chat-mod-mention');
-    }
-
-    var head = el('div', 'chat-msg-head');
-    var who = el('div', 'chat-msg-sender' + (m.self ? ' chat-mod-self' : ''));
-    // No portrait on the message line, deliberately. The game's portrait is a
-    // fixed 72px composition that its frame CROPS to head-and-shoulders, so it
-    // needs ~40px to read as a face — at name height it is a sliver of scalp.
-    // Portraits appear where they have that room: DM rows, the people picker
-    // and the composer. Cropping a variant to fit here would be inventing art.
-    if (m.sender_tag) {
-      who.appendChild(el('span', 'chat-msg-tag', '[' + m.sender_tag + ']'));
-    }
-    who.appendChild(el('span', null, m.sender_name || m.sender));
-    // Any player is directly addressable, so their name is the affordance.
-    if (m.player_id && !m.self) {
-      who.classList.add('chat-mod-addressable');
-      who.title = 'Message ' + (m.sender_name || m.player_id);
-      who.addEventListener('click', function () { startDm(m.player_id); });
-    }
-    head.appendChild(who);
-    // Right of the sender line: the badge, then the clock. Every serious chat
-    // client answers "when was this said" without being asked.
-    var meta = el('div', 'chat-msg-meta');
-    if (m.admin) meta.appendChild(el('div', 'sui-badge sui-mod-warning', 'Admin'));
-    // Shown, never hidden: a message that quietly becomes different text is
-    // how a conversation gets rewritten under the people reading it.
-    if (m.edited) meta.appendChild(el('span', 'chat-msg-edited', 'edited'));
-    // Pinning lives on the message, revealed on hover — always visible it
-    // would be a column of beacons down a conversation nobody is pinning.
-    // Only in the timeline: the strip has its own unpin, and a local echo has
-    // no event id to pin yet.
-    // The id the SERVER knows this by. A message you just sent still carries
-    // its local echo id, but the send already came back with the real one —
-    // and without this, the message you most want to take back (the one you
-    // just regretted) was the one message with no controls at all.
-    var serverId = serverIdOf(m);
-    if (S.view === 'room' && !m.pending && serverId) {
-      meta.appendChild(reactButton(m, serverId));
-      meta.appendChild(replyButton(m));
-      meta.appendChild(pinToggle(m, isPinned(serverId), serverId));
-      // Your own only. A moderator could redact anyone's, but offering that
-      // to everybody is an invitation to click and be refused.
-      if (m.self && m.kind !== 'notice') {
-        meta.appendChild(editButton(m, serverId));
-        meta.appendChild(deleteButton(m, serverId));
-      }
-    }
-    meta.appendChild(el('div', 'chat-msg-time', fmtTime(m.ts)));
-    head.appendChild(meta);
-    wrap.appendChild(head);
+    /* The shared row from `chatrow.js`, plus what only a full timeline has.
+     *
+     * The presentation — event lines, emotes, run-collapsing, the mention
+     * rail, the clock — moved there so the raid viewer's rail could draw the
+     * SAME rows instead of a lookalike that had already drifted from these.
+     * What stays here is what the rail does not have: react, reply, pin, edit
+     * and delete, handed over as a `controls` hook.
+     */
+    var wrap = window.StructsChatRow.render(m, prev, {
+      gapNode: function () { return ruleNode('some messages are missing', true); },
+      mentionsMe: mentionsMe,
+      // Any player is directly addressable, so their name is the affordance.
+      onSender: function (msg) { startDm(msg.player_id); },
+      controls: function (msg, meta) {
+        // Pinning lives on the message, revealed on hover — always visible it
+        // would be a column of beacons down a conversation nobody is pinning.
+        // The id the SERVER knows this by: a message you just sent still
+        // carries its local echo id, but the send already came back with the
+        // real one — and without this, the message you most want to take back
+        // is the one message with no controls at all.
+        var serverId = serverIdOf(msg);
+        if (S.view !== 'room' || msg.pending || !serverId) return;
+        meta.appendChild(reactButton(msg, serverId));
+        meta.appendChild(replyButton(msg));
+        meta.appendChild(pinToggle(msg, isPinned(serverId), serverId));
+        // Your own only. A moderator could redact anyone's, but offering that
+        // to everybody is an invitation to click and be refused.
+        if (msg.self && msg.kind !== 'notice') {
+          meta.appendChild(editButton(msg, serverId));
+          meta.appendChild(deleteButton(msg, serverId));
+        }
+      },
+    });
+    // Events and emotes are complete rows on their own — the rest of this
+    // function is the body, the quote line and the attachments beneath a head.
+    var kind = m.kind || 'text';
+    if (kind === 'gap' || kind === 'event' || kind === 'emote') return wrap;
 
     // Part of a thread, which this window does not group. Saying so is honest;
     // showing the quote Matrix attaches for compatibility would put words in

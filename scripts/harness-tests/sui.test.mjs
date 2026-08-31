@@ -64,6 +64,7 @@ const BUDGET = {
   'structs-config.js':  [14, 52],
   'transfer.html':      [1, 1],
   'transfer.js':        [0, 0],
+  'chatrow.js':         [0, 0],
   'pfp.js':             [0, 0],
   'units.js':           [0, 0],
   'ui-telemetry.js':    [0, 0],

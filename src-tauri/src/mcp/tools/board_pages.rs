@@ -252,13 +252,40 @@ fn loops_json() -> Value {
 //   2. Anything whose transferability we have not verified is read-only too.
 //      `SENDABLE_DENOMS` is an allow-list, never a free-text denom field.
 
-/// Denoms we know a player can send with `MsgPlayerSend` / `bank_send`.
-/// `uguild.*` is deliberately absent: it is observed only in provider/guild
-/// flows, so it stays read-only until proven otherwise.
+/// Denoms a player can send with `MsgPlayerSend` / `bank_send`.
+///
+/// `uguild.*` used to be excluded as "observed only in provider/guild flows,
+/// so read-only until proven otherwise". It has now been proven, against the
+/// production ledger rather than by reasoning about the message type:
+///
+///   * `uguild.0-5`: 1252 `sent` / 1252 `received`. Matched counts, so the
+///     bank is moving them and nothing is being burned.
+///   * 11 of those sends ORIGINATED from real player addresses, so the keeper
+///     accepts a player as the sender of a guild coin.
+///   * 1251 were RECEIVED by real player addresses, so a player account holds
+///     them fine.
+///
+/// The one combination with no precedent is player→player: every
+/// player-originated send so far went to a module or guild address. There is
+/// no mechanism by which it would differ — `MsgPlayerSend` is a bank send and
+/// bank sends do not inspect the pair — but it is worth knowing that this
+/// specific path is new.
+///
+/// Still an ALLOW-LIST, never a free-text denom field: `ualpha.infused` and
+/// `ualpha.defusing` appear in the ledger too and are staking states, not
+/// spendable balances.
 pub const SENDABLE_DENOMS: &[&str] = &["ualpha"];
 
+/// `uguild.<guild id>` — a guild's own token, checked by shape because the set
+/// is open: any guild may have one and new guilds appear without a release.
+fn is_guild_denom(denom: &str) -> bool {
+    denom
+        .strip_prefix("uguild.")
+        .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit() || c == '-'))
+}
+
 pub fn is_sendable(denom: &str) -> bool {
-    SENDABLE_DENOMS.contains(&denom)
+    SENDABLE_DENOMS.contains(&denom) || is_guild_denom(denom)
 }
 
 /// Resolve a player reference (index, address, player id, or "primary") to
@@ -365,8 +392,19 @@ pub async fn mcp_inventory(player: Option<String>) -> Result<Value, String> {
     let team_alpha: f64 = rows.iter().map(|r| r.alpha_ualpha).sum();
     let team_ore: f64 = rows.iter().map(|r| r.ore).sum();
 
+    // The portrait, so a window can show WHO is paying rather than a word.
+    // Read from the roster cache, which already holds every player's
+    // on-chain `pfpClientRenderAttributes`; absent is fine and renders as the
+    // game's placeholder.
+    let pfp_attrs = roster_cache::all_rows()
+        .into_iter()
+        .find(|r| r.player_id == player_id)
+        .and_then(|r| r.pfp_attrs);
     Ok(json!({
-        "player": { "player_id": player_id, "index": index, "name": name, "address": address },
+        "player": {
+            "player_id": player_id, "index": index, "name": name,
+            "address": address, "pfp_attrs": pfp_attrs,
+        },
         "assets": assets,
         "bank_error": bank_err,
         "team": { "players": rows.len(), "alpha_ualpha": team_alpha, "ore": team_ore },
@@ -483,6 +521,23 @@ pub async fn mcp_transfer_preview(
     // Who is on the other end?
     let known = crate::mcp::enrich::addresses_map();
     let recipient = known.get(&to).cloned();
+    /* ...and their face, when they are one of ours.
+     *
+     * A payment is addressed to a PERSON, and a bech32 string is not a person.
+     * Resolved via the vplayer registry, which is the only table that joins an
+     * ADDRESS to a player id — `RosterRow` carries portraits but no address.
+     * Absent for an external destination, which is exactly the distinction
+     * this window needs to draw.
+     */
+    let recipient_id = crate::mcp::virtual_players::VirtualPlayerStore::load()
+        .find(&to)
+        .and_then(|p| p.player_id.clone());
+    let recipient_pfp = recipient_id.as_ref().and_then(|pid| {
+        roster_cache::all_rows()
+            .into_iter()
+            .find(|r| &r.player_id == pid)
+            .and_then(|r| r.pfp_attrs)
+    });
 
     // Can they afford it?
     let client = crate::mcp::cosmos_client::CosmosClient::new();
@@ -511,6 +566,8 @@ pub async fn mcp_transfer_preview(
         // null here is the point: an unrecognised destination must be shown as
         // an external address, not silently rendered as if it were a teammate.
         "recipient": recipient,
+        "recipient_pfp": recipient_pfp,
+        "recipient_id": recipient_id,
         "denom": denom,
         "amount": amount,
         "balance": balance,
@@ -2002,18 +2059,29 @@ mod inventory_tests {
         assert!(!SENDABLE_DENOMS.contains(&"ore"));
     }
 
-    /// Guild tokens are real bank assets but their transferability is not
-    /// verified, so they stay read-only until it is.
+    /// Guild tokens WERE read-only, pending proof they transfer at all. The
+    /// proof arrived from the production ledger (see `SENDABLE_DENOMS`):
+    /// `uguild.0-5` shows 1252 sends matched by 1252 receipts, 11 of those
+    /// sends originating from real player addresses. This test used to assert
+    /// the opposite and is deliberately inverted rather than deleted — the
+    /// policy changed on evidence, and that is worth being able to read.
     #[test]
-    fn guild_tokens_are_read_only_for_now() {
-        assert!(!is_sendable("uguild.0-5"));
-        assert!(!is_sendable("uguild.0-1"));
+    fn guild_tokens_are_sendable_now() {
+        assert!(is_sendable("uguild.0-5"));
+        assert!(is_sendable("uguild.0-1"));
     }
 
+    /// The allow-list is still an allow-list. What changed is that one SHAPE
+    /// joined it, not that the field became free text — the denoms below are
+    /// all real and all still refused.
     #[test]
-    fn alpha_is_the_only_sendable_denom() {
+    fn only_alpha_and_guild_tokens_are_sendable() {
         assert_eq!(SENDABLE_DENOMS, &["ualpha"]);
         assert!(is_sendable("ualpha"));
+        assert!(!is_sendable("ualpha.infused"));
+        assert!(!is_sendable("ualpha.defusing"));
+        assert!(!is_sendable("ore"));
+        assert!(!is_sendable("uatom"));
     }
 }
 
@@ -2124,5 +2192,41 @@ mod allocation_tests {
     fn negative_and_nonfinite_are_refused() {
         assert!(power_change_refusal(-1.0, 0.0, 6.46 * KW, 0.0).is_some());
         assert!(power_change_refusal(f64::NAN, 0.0, 6.46 * KW, 0.0).is_some());
+    }
+}
+
+#[cfg(test)]
+mod sendable_tests {
+    use super::*;
+
+    #[test]
+    fn alpha_and_guild_tokens_may_be_sent() {
+        assert!(is_sendable("ualpha"));
+        // Proven against the production ledger — see SENDABLE_DENOMS.
+        assert!(is_sendable("uguild.0-1"));
+        assert!(is_sendable("uguild.0-5"));
+        assert!(is_sendable("uguild.12-345"));
+    }
+
+    #[test]
+    fn staking_states_are_not_balances() {
+        // These are real denoms in the ledger and they are NOT spendable: a
+        // free-text denom field would have offered them as if they were.
+        assert!(!is_sendable("ualpha.infused"));
+        assert!(!is_sendable("ualpha.defusing"));
+        // Ore is not a bank asset at all.
+        assert!(!is_sendable("ore"));
+    }
+
+    #[test]
+    fn the_guild_shape_is_not_a_prefix_match() {
+        // The whole point of checking a shape rather than `starts_with`: an
+        // id is digits and dashes, so nothing else rides in behind the prefix.
+        assert!(!is_sendable("uguild."));
+        assert!(!is_sendable("uguildX0-1"));
+        assert!(!is_sendable("uguild.0-1.infused"));
+        assert!(!is_sendable("uguild.../../x"));
+        assert!(!is_sendable("uguild.abc"));
+        assert!(!is_sendable(""));
     }
 }
