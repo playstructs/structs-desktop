@@ -416,7 +416,7 @@
         // buttons wrapped onto two rows and dominated the summary they belong
         // to.
         var b = el('button', 'chat-ref-action');
-        b.appendChild(icon(a.icon || 'icon-info', 'sui-icon-sm'));
+        b.appendChild(icon(a.icon || 'icon-info', 'sui-icon-md'));
         b.appendChild(el('span', null, a.label));
         b.addEventListener('click', function (ev) {
           ev.stopPropagation();
@@ -723,7 +723,7 @@
 
         var x = el('span', 'chat-tab-close');
         x.title = 'Close';
-        x.appendChild(icon('icon-close', 'sui-icon-xs'));
+        x.appendChild(icon('icon-close', 'sui-icon-sm'));
         x.addEventListener('click', function (ev) {
           // Without this the tab underneath would also fire and re-open what
           // was just closed.
@@ -900,7 +900,7 @@
     // A silenced room still shows its count — it is unread, it just does not
     // interrupt. The marker is what explains why it never rang.
     if (r.muted) {
-      var q = icon('icon-disabled', 'sui-icon-xs chat-room-muted');
+      var q = icon('icon-disabled', 'sui-icon-sm chat-room-muted');
       q.title = 'Silenced';
       right.appendChild(q);
     }
@@ -1961,11 +1961,11 @@
     var wrap = el('div', 'chat-pins');
     var head = el('a', 'chat-pins-head');
     head.href = 'javascript:void(0)';
-    head.appendChild(icon('icon-beacon sui-text-secondary', 'sui-icon-xs'));
+    head.appendChild(icon('icon-beacon sui-text-secondary', 'sui-icon-md'));
     head.appendChild(el('span', 'chat-pins-label',
       count === 1 ? 'Pinned message' : count + ' pinned messages'));
     head.appendChild(icon((open ? 'icon-chevron-up' : 'icon-chevron-down') +
-      ' sui-text-secondary', 'sui-icon-xs'));
+      ' sui-text-secondary', 'sui-icon-sm'));
     head.addEventListener('click', function () {
       S.pinsOpen[S.roomId] = !open;
       render();
@@ -2081,7 +2081,7 @@
     }
     m = /^:([a-z0-9-]+):$/.exec(key);
     if (m && REACTION_ICONS[m[1]]) {
-      return icon(REACTION_ICONS[m[1]], 'sui-icon-xs');
+      return icon(REACTION_ICONS[m[1]], 'sui-icon-sm');
     }
     return el('span', 'chat-reaction-key', key);
   }
@@ -2139,7 +2139,7 @@
       more.href = 'javascript:void(0)';
       more.title = S.reactStructs ? 'Hide the hulls' : 'React with a struct';
       more.appendChild(icon(S.reactStructs ? 'icon-chevron-left' : 'icon-cmd-post',
-        'sui-icon-xs'));
+        'sui-icon-sm'));
       more.addEventListener('click', function (e) {
         e.stopPropagation();
         S.reactStructs = !S.reactStructs;
@@ -2158,7 +2158,7 @@
     var a = el('a', 'chat-react-btn');
     a.href = 'javascript:void(0)';
     a.title = 'React to this message';
-    a.appendChild(icon('icon-add sui-text-secondary', 'sui-icon-xs'));
+    a.appendChild(icon('icon-add sui-text-secondary', 'sui-icon-sm'));
     a.addEventListener('click', function (e) {
       e.stopPropagation();
       var id = serverId || serverIdOf(m);
@@ -2240,7 +2240,7 @@
     var a = el('a', 'chat-edit-btn');
     a.href = 'javascript:void(0)';
     a.title = 'Change this message';
-    a.appendChild(icon('icon-edit sui-text-secondary', 'sui-icon-xs'));
+    a.appendChild(icon('icon-edit sui-text-secondary', 'sui-icon-sm'));
     a.addEventListener('click', function (e) {
       e.stopPropagation();
       S.editing = { event_id: serverId, body: m.body, msgtype: m.kind };
@@ -2261,13 +2261,13 @@
     if (!S.editing) return null;
     var chip = el('div', 'chat-reply-chip chat-mod-editing');
     chip.id = 'chat-edit-chip';
-    chip.appendChild(icon('icon-edit sui-text-secondary', 'sui-icon-xs'));
+    chip.appendChild(icon('icon-edit sui-text-secondary', 'sui-icon-sm'));
     chip.appendChild(el('span', 'chat-reply-who', 'Editing'));
     chip.appendChild(el('span', 'chat-reply-text', excerpt(S.editing.body)));
     var x = el('a', 'chat-reply-cancel');
     x.href = 'javascript:void(0)';
     x.title = 'Keep it as it was';
-    x.appendChild(icon('icon-close sui-text-secondary', 'sui-icon-xs'));
+    x.appendChild(icon('icon-close sui-text-secondary', 'sui-icon-sm'));
     x.addEventListener('click', function () { cancelEdit(); });
     chip.appendChild(x);
     return chip;
@@ -2338,7 +2338,7 @@
     a.href = 'javascript:void(0)';
     a.title = armed ? 'Click again to remove this message' : 'Remove this message';
     a.appendChild(icon('icon-close' + (armed ? ' sui-text-enemy-primary' : ' sui-text-secondary'),
-      'sui-icon-xs'));
+      'sui-icon-sm'));
     a.addEventListener('mouseleave', function () {
       if (S.deleteArmed === serverId) { S.deleteArmed = null; render(); }
     });
@@ -2434,7 +2434,7 @@
       + (stale ? ' chat-mod-stale' : ''));
 
     var head = el('div', 'chat-ref-head');
-    head.appendChild(icon(WORK_ICON[w.task] || 'icon-computer', 'sui-icon-xs'));
+    head.appendChild(icon(WORK_ICON[w.task] || 'icon-computer', 'sui-icon-md'));
     head.appendChild(el('span', 'chat-ref-title',
       (offer ? 'Work wanted \u00b7 ' : 'Solved \u00b7 ') + (WORK_LABEL[w.task] || w.task)));
     card.appendChild(head);
@@ -2467,14 +2467,14 @@
     if (offer) {
       var help = el('a', 'sui-panel-btn sui-mod-default chat-ref-action');
       help.href = 'javascript:void(0)';
-      help.appendChild(icon('icon-computer', 'sui-icon-xs'));
+      help.appendChild(icon('icon-computer', 'sui-icon-sm'));
       help.appendChild(el('span', null, 'Help'));
       help.addEventListener('click', function () { acceptWork(m, w, card); });
       actions.appendChild(help);
     } else {
       var check = el('a', 'sui-panel-btn sui-mod-default chat-ref-action');
       check.href = 'javascript:void(0)';
-      check.appendChild(icon('icon-okay', 'sui-icon-xs'));
+      check.appendChild(icon('icon-okay', 'sui-icon-sm'));
       check.appendChild(el('span', null, 'Check'));
       check.addEventListener('click', function () { verifyWork(w, card); });
       actions.appendChild(check);
@@ -2546,7 +2546,7 @@
     if (card.querySelector('.chat-work-submit')) return;
     var b = el('a', 'sui-panel-btn sui-mod-default chat-ref-action chat-work-submit');
     b.href = 'javascript:void(0)';
-    b.appendChild(icon('icon-send-alpha', 'sui-icon-xs'));
+    b.appendChild(icon('icon-send-alpha', 'sui-icon-sm'));
     b.appendChild(el('span', null, 'Submit'));
     b.title = 'Submit this proof yourself — it costs your charge, not theirs';
     b.addEventListener('click', function () {
@@ -2627,7 +2627,7 @@
   function stalledBanner() {
     if (!S.syncStalled) return null;
     var bar = el('div', 'chat-encrypted chat-mod-stalled');
-    bar.appendChild(icon('icon-alert sui-text-warning', 'sui-icon-xs'));
+    bar.appendChild(icon('icon-alert sui-text-warning', 'sui-icon-md'));
     bar.appendChild(el('span', null,
       'Not receiving messages \u2014 trying again. ' + S.syncStalled));
     return bar;
@@ -2658,7 +2658,7 @@
     var a = el('a', 'chat-reply-btn');
     a.href = 'javascript:void(0)';
     a.title = 'Reply to ' + (m.sender_name || m.sender);
-    a.appendChild(icon('icon-incoming sui-text-secondary', 'sui-icon-xs'));
+    a.appendChild(icon('icon-incoming sui-text-secondary', 'sui-icon-sm'));
     a.addEventListener('click', function (e) {
       e.stopPropagation();
       S.replyTo = m;
@@ -2699,7 +2699,7 @@
     a.href = 'javascript:void(0)';
     a.title = pinned ? 'Unpin this message' : 'Pin this message';
     a.appendChild(icon('icon-beacon' + (pinned ? ' sui-text-warning' : ' sui-text-secondary'),
-      'sui-icon-xs'));
+      'sui-icon-sm'));
     a.addEventListener('click', function (e) {
       e.stopPropagation();
       setPin(serverId || serverIdOf(m), !pinned);
@@ -2793,7 +2793,7 @@
     // tell a player they are talking to an empty room.
     if (S.room && S.room.replaced_by) {
       var moved = el('div', 'chat-encrypted chat-mod-moved');
-      moved.appendChild(icon('icon-link-out sui-text-warning', 'sui-icon-xs'));
+      moved.appendChild(icon('icon-link-out sui-text-warning', 'sui-icon-md'));
       moved.appendChild(el('span', null,
         'This room has been replaced. The conversation continues in a new one.'));
       // NOT `go` — `var` hoists to the whole function, and a local of that
@@ -2822,7 +2822,7 @@
     // direct messages encrypted by default, so this is not a rare corner.
     if (S.room && S.room.encrypted) {
       var enc = el('div', 'chat-encrypted');
-      enc.appendChild(icon('icon-key sui-text-warning', 'sui-icon-xs'));
+      enc.appendChild(icon('icon-key sui-text-warning', 'sui-icon-md'));
       enc.appendChild(el('span', null,
         'This conversation is end-to-end encrypted. Structs cannot read it \u2014 '
         + 'use a Matrix client with encryption to follow it.'));
@@ -2922,13 +2922,13 @@
     var m = S.replyTo;
     var chip = el('div', 'chat-reply-chip');
     chip.id = 'chat-reply-chip';
-    chip.appendChild(icon('icon-incoming sui-text-secondary', 'sui-icon-xs'));
+    chip.appendChild(icon('icon-incoming sui-text-secondary', 'sui-icon-sm'));
     chip.appendChild(el('span', 'chat-reply-who', m.sender_name || m.sender));
     chip.appendChild(el('span', 'chat-reply-text', excerpt(m.body)));
     var x = el('a', 'chat-reply-cancel');
     x.href = 'javascript:void(0)';
     x.title = 'Stop replying';
-    x.appendChild(icon('icon-close sui-text-secondary', 'sui-icon-xs'));
+    x.appendChild(icon('icon-close sui-text-secondary', 'sui-icon-sm'));
     x.addEventListener('click', function () { S.replyTo = null; render(); });
     chip.appendChild(x);
     return chip;
