@@ -588,9 +588,13 @@ cat > "$RFIX" <<'EOF'
     // the case the rest of these fixtures are written for. Tests that want
     // the room path set __HARNESS_OBJECT_ROOM__ before the lookup runs.
     get matrix_object_room() {
+      // DEFAULT: the room does not exist yet but is ours to make. That is the
+      // ordinary case — the lookup falls back to our own homeserver when the
+      // owner's guild has not created one — and it is the state the rail has
+      // to be usable in, because most raid targets belong to somebody else.
       return window.__HARNESS_OBJECT_ROOM__ || {
-        connected: true, guild_id: '0-5', alias: null, room_id: null,
-        can_create: false, joined: false,
+        connected: true, guild_id: '0-5', alias: '#planet-2-1:h', room_id: null,
+        can_create: true, joined: false,
       };
     },
     matrix_object_room_create: { room_id: '!planet-2-1:h', created: true, joined: true },
@@ -1219,4 +1223,31 @@ echo "built: $OUT + $FIX"
 echo "serve: (cd frontend && python3 -m http.server 8899)"
 echo "open:  http://localhost:8899/_harness.html?view=gamestats"
 echo "       http://localhost:8899/_harness_chat.html"
+# ── Cache-bust every generated harness ──────────────────────────────────────
+#
+# A browser caches `chatrow.js`, `pfp.js` and `chat-rows.css` independently of
+# the HTML, so reloading a harness after an edit re-runs the OLD script against
+# the NEW markup — which reads exactly like "the change did not work". That
+# cost three separate debugging detours in one day, twice while trying to SHOW
+# somebody that a change had landed.
+#
+# Every local asset URL in a generated harness carries this build's timestamp,
+# so a rebuild is always a fresh fetch. Only the `_harness*` copies are
+# touched; the real windows are untouched and load their assets normally.
+python3 - "$(date +%s)" <<'BUST_EOF'
+import re, sys, glob
+stamp = sys.argv[1]
+for f in glob.glob('frontend/_harness*.html'):
+    html = open(f).read()
+    # Local relative URLs only: leave absolute and protocol URLs alone.
+    def add(m):
+        attr, url = m.group(1), m.group(2)
+        if url.startswith(('http:', 'https:', '//', 'data:')) or '?' in url:
+            return m.group(0)
+        return f'{attr}="{url}?h={stamp}"'
+    html = re.sub(r'\b(src|href)="([^"]+\.(?:js|css))"', add, html)
+    open(f, 'w').write(html)
+    print('  cache-busted', f)
+BUST_EOF
+
 echo "REMEMBER: rm frontend/_harness*.html frontend/_fixtures*.js before building the app."

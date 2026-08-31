@@ -128,7 +128,79 @@
     return wrap;
   }
 
+  /* The composer, as the game draws it.
+   *
+   * A `sui-panel` in the player theme: portrait well, connector, the message
+   * on an inset screen, connector, and the send button as a `sui-panel-btn` —
+   * the same pair every action button in the HUD is built from. This is the
+   * thing that makes a chat look like part of Structs rather than a web form,
+   * and the raid rail was drawing a bare input in a `sui-screen` instead.
+   *
+   * Returns `{ node, input, send }` so each window can wire its own behaviour
+   * — completion, typing notices, reply chips — around the same shape.
+   */
+  function composer(opts) {
+    opts = opts || {};
+    var panel = el('div', 'sui-panel sui-theme-player');
+    panel.appendChild(el('div', 'sui-panel-edge-left'));
+
+    /* Portrait chunk — the player, in the game's own portrait well.
+     *
+     * Carries a class of its own so a narrow host can drop it. Positional
+     * selectors do not work here: the panel's first `div` child is
+     * `.sui-panel-edge-left`, so `:first-of-type` picks the edge, not this.
+     */
+    var pChunk = el('div', 'sui-panel-chunk chat-composer-portrait');
+    var pScreen = el('div', 'sui-screen');
+    var portrait = el('div', 'sui-screen-portrait');
+    if (opts.portraitId) portrait.id = opts.portraitId;
+    // `.sui-screen-portrait-image` is the action bar's own frame, with its own
+    // crop. Nesting the roster frame inside it crops the portrait twice.
+    var well = el('div', 'sui-screen-portrait-image');
+    if (root.StructsPfp) root.StructsPfp.fillPortrait(well, opts.pfpAttrs);
+    portrait.appendChild(well);
+    pScreen.appendChild(portrait);
+    pChunk.appendChild(pScreen);
+    panel.appendChild(pChunk);
+
+    panel.appendChild(el('div', 'sui-panel-connector chat-composer-portrait-join'));
+
+    var iChunk = el('div', 'sui-panel-chunk sui-mod-grow sui-mod-shrink');
+    var iScreen = el('div', 'sui-screen sui-screen-full-width');
+    var field = el('div', 'sui-screen-dialogue sui-theme-neutral');
+    var input = document.createElement('input');
+    input.type = 'text';
+    if (opts.inputId) { input.id = opts.inputId; input.name = opts.inputId; }
+    input.placeholder = opts.placeholder || 'Message';
+    input.autocomplete = 'off';
+    input.maxLength = opts.maxLength || 4000;
+    field.appendChild(input);
+    iScreen.appendChild(field);
+    iChunk.appendChild(iScreen);
+    panel.appendChild(iChunk);
+
+    panel.appendChild(el('div', 'sui-panel-connector sui-panel-style-medium-to-default'));
+
+    var bChunk = el('div', 'sui-panel-chunk sui-theme-player');
+    var group = el('div', 'sui-action-bar-btn-group');
+    var send = el('a', 'sui-panel-btn sui-mod-default');
+    if (opts.sendId) send.id = opts.sendId;
+    send.href = 'javascript:void(0)';
+    var arrow = el('i', 'sui-icon sui-icon-md icon-arrow');
+    send.appendChild(arrow);
+    group.appendChild(send);
+    bChunk.appendChild(group);
+    panel.appendChild(bChunk);
+
+    panel.appendChild(el('div', 'sui-panel-edge-right'));
+
+    var wrap = el('div', 'sui-panel-wrapper-fit-content');
+    wrap.appendChild(panel);
+    return { node: wrap, input: input, send: send, portrait: portrait };
+  }
+
   root.StructsChatRow = {
+    composer: composer,
     render: render,
     continues: continues,
     fmtTime: fmtTime,

@@ -261,10 +261,14 @@
        did not fit its section. Centred, the two stack as one unit. */
     #rv-hud .sui-screen-battery { margin-left: auto; margin-right: auto; }
 
-    /* The composer, shaped like the Comms window's: the SCREEN is the frame,
-       so the input draws nothing of its own — no border, no background, no
-       focus ring fighting the panel art, and no chevron that shifts the row. */
-    #rv-chat-entry { display: flex; align-items: center; gap: var(--spacing-sm); }
+    /* The composer is the Comms window's OWN panel, built by
+       `StructsChatRow.composer()`. This file used to draw a lookalike — a bare
+       input in a screen frame — which is what made the rail read as a
+       different product. Only the fit is set here: the panel is narrow, and
+       the portrait well and button are fixed while the message grows. */
+    #rv-chat-entry .sui-panel { width: 100%; }
+    #rv-chat-entry .sui-panel-chunk.sui-mod-grow { min-width: 0; }
+    #rv-chat-entry .sui-screen-dialogue { display: flex; align-items: center; }
     #rv-chat-entry input[type=text] {
       flex: 1 1 auto; width: 100%; min-width: 0;
       border: none; outline: none; background: transparent;
@@ -272,21 +276,28 @@
       font-family: 'DirectiveZero', sans-serif; font-size: inherit;
       padding: var(--spacing-sm);
     }
-    #rv-chat-head { display: flex; align-items: baseline; gap: var(--spacing-md);
-      padding: var(--spacing-sm) var(--spacing-lg); flex-wrap: nowrap; flex: 0 0 auto; }
-    #rv-chat-body {
-      overflow: auto; padding: 0 var(--spacing-lg) var(--spacing-md);
-      flex: 1 1 auto; min-height: 0;
-      /* Newest line sits next to the composer, not stranded at the top of a
-         tall empty rail — the reading order every chat client has. */
-      display: flex; flex-direction: column; justify-content: flex-end;
+    /* A rail is narrower than the Comms window, so the portrait well is the
+       smaller of the game's two sizes rather than the 48px one. */
+    #rv-chat-entry .sui-screen-portrait,
+    #rv-chat-entry .sui-screen-portrait-image { width: 32px; height: 32px; }
+    #rv-chat-entry .pfp-viewer-layer { image-rendering: pixelated; }
+    /* At the rail's narrow end the portrait and the button together leave the
+       message about 70px — measured, not guessed. The portrait is the part
+       that can go: it says who you are, which this window has never been in
+       doubt about, while the message is the whole point. Above 300px there is
+       room for both and it comes back. */
+    @media (max-width: 1150px) {
+      #rv-chat-entry .chat-composer-portrait,
+      #rv-chat-entry .chat-composer-portrait-join { display: none; }
     }
-    /* Rows STACK in a rail. Who/text/where inline was right for a wide strip
-       along the bottom; at 280px it wraps mid-sentence and the room name
-       collides with the message it labels. */
-    /* text-align comes in CENTRED from the game stylesheet. It went unnoticed
-       while the message was an inline span beside the speaker; a full-width
-       block in a rail shows it immediately. */
+    /* The header is SUI's `.sui-page-header`, the same component the Comms
+       window's room page uses, so nothing about its shape is set here. Only
+       the unread count, which is this rail's own. */
+    #rv-chat-head { flex: 0 0 auto; }
+    /* The timeline is `.chat-scroll` from the shared stylesheet. The one thing
+       that differs: a rail is tall and usually near-empty, so the newest line
+       sits next to the composer instead of stranded at the top. */
+    #rv-chat-body { justify-content: flex-end; }
     /* The message row itself is `css/chat-rows.css`, linked above and shared
        with the Comms window. This file used to carry a careful imitation of
        it — same intent, separate spelling — which is precisely how the two
@@ -314,9 +325,6 @@
        `.hidden { display: none !important }` and it is linked above. Three
        restatements of it lived here, which is how a design system quietly
        gets forked — and one of them was written believing none existed. */
-    #rv-chat-room { width: 100%; min-width: 0; }
-
-    #rv-chat-send { flex: 0 0 auto; }
     #rv-chat-error:empty { display: none; }
     /* "enemy" is the game's semantic for danger; there is no --text-error. */
     #rv-chat-error { color: var(--text-enemy-primary); }
@@ -752,27 +760,28 @@
        the space than the conversation itself. The rail is either wanted or the
        window is not the raid view. -->
   <div id="rv-chat">
-    <div id="rv-chat-head" class="sui-text-label">
-      <i class="sui-icon-sm icon-phone"></i>
-      <span class="rv-chat-title">Comms</span>
+    <!-- The Comms room header: `sui-page-header` with the room's name, and
+         the room's own topic under it. No tabs — there is one channel here,
+         and a tab strip with a single tab is a control that decides nothing.
+         No back chevron either, for the same reason: there is nowhere to go
+         back TO. The "open in comms" link is gone; this IS the room. -->
+    <div id="rv-chat-head" class="sui-page-header">
+      <a href="javascript: void(0)" class="sui-nav-btn" id="rv-chat-title-btn">
+        <span class="rv-chat-title">Comms</span>
+      </a>
       <span id="rv-chat-count" class="rv-log-count"></span>
-      <span class="rv-spacer"></span>
-      <a href="javascript: void(0)" id="rv-chat-discuss" class="rv-log-toggle">open in comms</a>
     </div>
-    <div id="rv-chat-body" class="sui-text-tiny"><div class="rv-log-empty sui-text-tiny">Nothing said about this planet yet.</div></div>
+    <div id="rv-chat-topic" class="chat-topic sui-text-tiny"></div>
+    <div id="rv-chat-body" class="chat-scroll sui-text-tiny"><div class="rv-log-empty sui-text-tiny">Nothing said about this planet yet.</div></div>
     <!-- Hidden until Comms is connected AND a room is known: a composer that
          cannot send is worse than no composer. -->
+    <!-- The composer is BUILT, not written here: `StructsChatRow.composer()`
+         is the same `sui-panel` the Comms window uses — portrait well, the
+         message on an inset screen, and the send button as a `sui-panel-btn`.
+         There is no room selector. This rail is the planet's channel and
+         nothing else; picking a different one was never what it meant. -->
     <div id="rv-chat-compose" class="hidden">
-      <select id="rv-chat-room" class="sui-text-tiny"></select>
-      <!-- The Comms window's composer shape: a screen frame with a bare input
-           inside it. NOT `label.sui-input-text` — that component draws its own
-           focus chevron and adds 24px of padding on focus, so the whole row
-           jumped every time the field was clicked. -->
-      <div id="rv-chat-entry" class="sui-screen">
-        <input id="rv-chat-input" type="text" maxlength="900"
-               placeholder="Say something — the planet id is added for you">
-        <a href="javascript: void(0)" id="rv-chat-send" class="rv-log-toggle">send</a>
-      </div>
+      <div id="rv-chat-entry"></div>
       <div id="rv-chat-error" class="sui-text-tiny"></div>
     </div>
   </div>

@@ -1251,9 +1251,34 @@ pub async fn matrix_object_room(
                           "can_create": false }));
     };
     let room_id = client::room_id_for_alias(&session, &alias).await;
-    // Only our own homeserver's namespace is ours to write in.
+
+    /* Where this object's room gets MADE, if it does not exist.
+     *
+     * A client may only claim an alias in its own homeserver's namespace, so
+     * the owner's alias is only ours to create when the owner is us. For an
+     * enemy planet — which is most raid targets — that meant nobody we could
+     * ask had made the room, and the rail was read-only for exactly the
+     * planets people most want to talk about.
+     *
+     * So it is a resolution ORDER, not a single address: prefer the owner's
+     * room, and fall back to one on our own server. Both are "the planet's
+     * channel"; the second is our guild's copy of that conversation, which is
+     * what we would have had anyway.
+     */
+    let own_server = client::own_server(&session);
+    let mine = rooms::alias_on(&object_id, &own_server);
+    let (alias, room_id) = match (&room_id, &mine) {
+        // The owner's room exists — that is the one, wherever it lives.
+        (Some(_), _) => (alias, room_id),
+        // No owner room. Is there one of ours already?
+        (None, Some(m)) => {
+            let ours = client::room_id_for_alias(&session, m).await;
+            (m.clone(), ours)
+        }
+        (None, None) => (alias, room_id),
+    };
     let can_create = room_id.is_none()
-        && rooms::ours_to_create(&alias, &client::own_server(&session));
+        && rooms::ours_to_create(&alias, &own_server);
     // Membership is the difference between a room we can READ and one we can
     // only see exists. Deliberately not joined here: a raid window opens on
     // every planet the player merely looks at, and auto-joining each one would
@@ -1279,15 +1304,31 @@ pub async fn matrix_object_room_create(
 ) -> Result<Value, String> {
     let guild = guild_id.or_else(selected_guild).unwrap_or_default();
     let session = session_for(&guild)?;
-    let alias = rooms::alias_for(&object_id)
+    /* The same resolution order the lookup uses, and for the same reason.
+     *
+     * Prefer the owner's room if it exists — joining theirs is what keeps one
+     * conversation in one place. Only when there is none do we make ours, and
+     * only on our own server, because that is the only namespace we can claim
+     * an alias in.
+     */
+    let owner_alias = rooms::alias_for(&object_id)
         .await
         .ok_or_else(|| format!("no room alias for {object_id}"))?;
-    // Someone may have created it already — the usual case for another
-    // guild's object, and a race for our own. Either way the answer is to
-    // join it, which is exactly what "I want to speak here" means.
+    if let Some(existing) = client::room_id_for_alias(&session, &owner_alias).await {
+        client::join(&session, &existing).await?;
+        return Ok(json!({ "room_id": existing, "created": false, "joined": true }));
+    }
+    let own_server = client::own_server(&session);
+    let alias = rooms::alias_on(&object_id, &own_server).unwrap_or(owner_alias);
+    // Ours may already exist — a teammate opened this planet first.
     if let Some(existing) = client::room_id_for_alias(&session, &alias).await {
         client::join(&session, &existing).await?;
         return Ok(json!({ "room_id": existing, "created": false, "joined": true }));
+    }
+    if !rooms::ours_to_create(&alias, &own_server) {
+        return Err(format!(
+            "{object_id}'s room lives on another guild's server and they have not made it"
+        ));
     }
     let localpart = rooms::alias_localpart(&object_id)
         .ok_or_else(|| format!("{object_id} does not get a room"))?;
