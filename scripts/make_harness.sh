@@ -575,6 +575,16 @@ cat > "$RFIX" <<'EOF'
     mcp_raid_state: { snapshot: SNAP },
     mcp_raid_log: { rows: [] },
     matrix_share: { ok: true },
+    /* Who the rail speaks AS. There was no fixture for this, so `loadMyPfp`
+     * rejected in every harness run and the composer's well drew the
+     * placeholder forever — which is precisely the bug the rail shipped with,
+     * invisible here because the test never asked for a face. */
+    mcp_inventory: {
+      player: { player_id: '1-194', name: 'Marklifer',
+                address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne',
+                pfp_attrs: '{"head":3,"neck":2,"body":4,"arms":5,"background":1}' },
+      assets: [],
+    },
     // What people have said about this planet. Tests set
     // __HARNESS_COMMS_OFF__ for a raid window opened without Comms signed in
     // — which must say so rather than reading as "nobody spoke".

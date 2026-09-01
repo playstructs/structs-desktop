@@ -301,13 +301,20 @@
     #rv-chat-entry .sui-screen-portrait,
     #rv-chat-entry .sui-screen-portrait-image { width: 32px; height: 32px; }
     #rv-chat-entry .pfp-viewer-layer { image-rendering: pixelated; }
-    /* At the rail's narrow end the portrait and the button together leave the
-       message about 70px — measured, not guessed. The portrait is the part
-       that can go: it says who you are, which this window has never been in
-       doubt about, while the message is the whole point. Above 300px there is
-       room for both and it comes back. */
+    /* The portrait stays at every width.
+       It was dropped below a ~300px rail to buy the message room, on the
+       reasoning that this window is never in doubt about who you are. That was
+       wrong from the reader's side: the rail is the one place in the app you
+       speak from without a name anywhere on screen, and the two portraits
+       directly above it are the OTHER two players. Yours belongs beside them.
+
+       What it costs, measured at the rail's 240px floor: the message field
+       goes 81px -> 71px. Dropping the connector between the portrait and the
+       message gives 10px of that back, which is the whole reason that join
+       carries a hook class. The portrait chunk itself cannot go below 48px —
+       `.sui-panel-chunk-spacer-indicator` is SUI's art and fixed — so a
+       smaller well would shrink the face without buying a pixel. */
     @media (max-width: 1150px) {
-      #rv-chat-entry .chat-composer-portrait,
       #rv-chat-entry .chat-composer-portrait-join { display: none; }
     }
     /* The header is SUI's `.sui-page-header`, the same component the Comms

@@ -493,8 +493,11 @@
                     // The built composer (node/input/send), kept so a repaint
                     // does not throw away the caret mid-sentence.
                     composer: null,
-                    // The player's own portrait, for the composer's well.
+                    // The player's own portrait and name, for the composer's
+                    // well and the tooltip that says who you are speaking as.
                     myPfp: null,
+                    myName: null,
+                    myId: null,
                     // The object's OWN room, once looked up: `{alias, room_id,
                     // can_create, joined}`. Null means not looked up yet or no
                     // such room, and both leave the panel on the search path.
@@ -600,7 +603,14 @@
   function loadMyPfp() {
     if (!window.__TAURI__) return Promise.resolve();
     return window.__TAURI__.core.invoke('mcp_inventory', { player: 'primary' })
-      .then(function (d) { chatState.myPfp = d && d.player && d.player.pfp_attrs; })
+      .then(function (d) {
+        var p = d && d.player;
+        chatState.myPfp = p && p.pfp_attrs;
+        chatState.myName = p && p.name;
+        chatState.myId = p && p.player_id;
+        // The composer may already be on screen with a placeholder in it.
+        paintComposerIdentity();
+      })
       .catch(function () {});
   }
 
@@ -610,6 +620,28 @@
       .then(function (res) { chatState.room = res || null; })
       // A lookup failure is not a panel failure: the search path still works.
       .catch(function () { chatState.room = null; });
+  }
+
+  /* Paint the composer's portrait with the player it will speak as.
+   *
+   * Separate from building the composer because the two RACE: `loadMyPfp` and
+   * the room lookup that leads to the first paint are fired together in
+   * `wireChat`, so the composer is routinely built before the profile lands.
+   * `pfpAttrs` was read once at construction, which meant the well drew the
+   * placeholder and kept it — the portrait was very often nobody. Whichever
+   * of the two finishes second calls this, so the face arrives either way.
+   *
+   * Absent stays absent: the well's own placeholder is what the action bar
+   * does too, and a tooltip claiming a name we do not have is worse than one
+   * that admits it.
+   */
+  function paintComposerIdentity() {
+    var portrait = chatState.composer && chatState.composer.portrait;
+    if (!portrait) return;
+    paintPfp(portrait.querySelector('.sui-screen-portrait-image'), chatState.myPfp);
+    portrait.setAttribute('data-sui-mod-placement', 'top');
+    portrait.setAttribute('data-sui-tooltip',
+      'Speaking as\n' + whoLine(chatState.myName, chatState.myId, 'your primary'));
   }
 
   // True when the rail is reading the object's OWN room rather than searching
@@ -792,6 +824,14 @@
         maxLength: 900,
       });
       host.appendChild(chatState.composer.node);
+      /* Who you are speaking as, in this window's own idiom.
+       *
+       * The two portraits above this one are the defender and the raider, and
+       * each says who it is on hover (`renderSide`). The third portrait is
+       * you, and it said nothing — so the rail was the one place in the app
+       * you speak from with no name on screen at all. Same attribute, same
+       * placement, same shape of text. */
+      paintComposerIdentity();
       chatState.composer.send.addEventListener('click', sendChat);
       chatState.composer.input.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
@@ -3041,15 +3081,10 @@
     var portrait = document.getElementById('rv-' + which + '-portrait');
     if (portrait) {
       portrait.setAttribute('data-sui-tooltip',
-        label + '\n' + (name ? name + ' (' + (id || '?') + ')' : (id || 'unknown'))
+        label + '\n' + whoLine(name, id)
         + (charge == null ? '' : '\nCharge ' + fmtNum(charge)));
     }
-    var img = document.getElementById('rv-' + which + '-pfp');
-    if (img && img.dataset.pfp !== (pfp || '')) {
-      img.dataset.pfp = pfp || '';
-      img.innerHTML = '';
-      renderPfpInto(img, pfp);
-    }
+    paintPfp(document.getElementById('rv-' + which + '-pfp'), pfp);
     // Charge drives the 5-chunk battery by the game's OWN ladder, not a linear
     // scale: ChargeCalculator maps raw charge through the thresholds
     // [0,1,2,3,5,8] to a level 0-5. Copied rather than approximated so a
@@ -3078,6 +3113,28 @@
    */
   function renderPfpInto(host, attrsJson) {
     window.StructsPfp.fillPortrait(host, attrsJson);
+  }
+
+  /* Repaint a portrait host, but only when the attributes actually changed.
+   *
+   * The guard is not an optimisation: `renderSide` runs on every snapshot,
+   * several times a second during a raid, and a rebuild that swaps five <img>
+   * elements each time makes the two HUD faces flicker.
+   */
+  function paintPfp(host, attrsJson) {
+    if (!host || host.dataset.pfp === (attrsJson || '')) return;
+    host.dataset.pfp = attrsJson || '';
+    host.innerHTML = '';
+    renderPfpInto(host, attrsJson);
+  }
+
+  /* How this window names a player in a tooltip: "Marklifer (1-194)", falling
+   * back to whichever half we have. Three portraits use it — defender, raider
+   * and the composer — and they must read alike, because the whole point of
+   * the third one is that it sits beside the other two.
+   */
+  function whoLine(name, id, unknown) {
+    return name ? name + ' (' + (id || '?') + ')' : (id || unknown || 'unknown');
   }
 
   // Port of ChargeCalculator (util/ChargeCalculator.js): raw charge → level 0-5.

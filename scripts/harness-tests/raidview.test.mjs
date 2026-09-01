@@ -9,7 +9,7 @@
 import { JSDOM } from 'jsdom';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const harness = resolve(repo, 'frontend', '_harness_raid.html');
@@ -221,6 +221,71 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   check('the portrait chunk has its spacer',
     !!d.querySelector('#rv-chat-entry .chat-composer-portrait'
       + ' > .sui-panel-chunk-spacer-indicator'));
+
+  /* Your own face, and a name for it.
+   *
+   * The portrait used to be hidden below a ~300px rail to buy the message
+   * room, and — separately — the profile fetch raced the composer's first
+   * paint, so when it did show it was usually the placeholder. Between them
+   * the rail was the one place in the app you speak from with no indication
+   * of who you are, while the two portraits directly above it name the
+   * defender and the raider on hover.
+   */
+  check('the composer says who you are speaking as',
+    /Speaking as/.test(d.querySelector('#rv-chat-entry .sui-screen-portrait')
+      .getAttribute('data-sui-tooltip') || ''),
+    d.querySelector('#rv-chat-entry .sui-screen-portrait')
+      .getAttribute('data-sui-tooltip'));
+  check('…naming the player, in the HUD portraits’ own idiom',
+    /Marklifer|1-194/.test(d.querySelector('#rv-chat-entry .sui-screen-portrait')
+      .getAttribute('data-sui-tooltip') || ''),
+    d.querySelector('#rv-chat-entry .sui-screen-portrait')
+      .getAttribute('data-sui-tooltip'));
+  // The face itself, not the placeholder: the well carries composed layers.
+  check('…and the well holds the composed portrait, not the placeholder',
+    d.querySelectorAll('#rv-chat-entry .sui-screen-portrait-image'
+      + ' .pfp-viewer-layer').length >= 3,
+    String(d.querySelectorAll('#rv-chat-entry .sui-screen-portrait-image'
+      + ' .pfp-viewer-layer').length) + ' layers');
+  /* One painter, one name-line.
+   *
+   * The composer's identity was first written as its own `innerHTML = ''` +
+   * `fillPortrait`, and its own `name + " (" + id + ")"` — both of which
+   * already existed in `renderSide`, 3,000 lines down the same file. Reusing
+   * the COMPONENT (`StructsChatRow.composer`, `StructsPfp`) while re-deriving
+   * the glue around it is the same fork, one level lower.
+   */
+  {
+    const rv = readFileSync(repo + '/frontend/raidview.js', 'utf8');
+    check('one place composes a portrait',
+      (rv.match(/StructsPfp\.fillPortrait\(/g) || []).length === 1,
+      String((rv.match(/StructsPfp\.fillPortrait\(/g) || []).length) + ' call sites');
+    /* The change guard is the point of `paintPfp`: `renderSide` runs on every
+     * snapshot, so an unguarded repaint swaps five <img> elements several
+     * times a second and the HUD faces flicker. Asserting on `innerHTML = ''`
+     * cannot see that — the file clears nodes everywhere for ordinary reasons
+     * — so assert the thing that is actually true instead: the painter has
+     * exactly one caller, and it is the guard. */
+    const intoCalls = (rv.match(/(?<!function )renderPfpInto\(/g) || []).length;
+    const guarded = /function paintPfp\([\s\S]{0,400}?renderPfpInto\(/.test(rv);
+    check('…and every repaint goes through the change guard',
+      intoCalls === 1 && guarded,
+      intoCalls + ' call site(s), guard wired: ' + guarded);
+    check('one place spells "Name (id)" for a tooltip',
+      (rv.match(/\+ ' \(' \+/g) || []).length === 1,
+      String((rv.match(/\+ ' \(' \+/g) || []).length) + ' spellings');
+    check('…and all three portraits use it',
+      (rv.match(/whoLine\(/g) || []).length >= 3,
+      String((rv.match(/whoLine\(/g) || []).length) + ' uses (1 def + 2 calls minimum)');
+  }
+
+  // The hide is gone; only the connector may drop at the narrow end.
+  const railCss = readFileSync(repo + '/frontend/raidview.html', 'utf8');
+  const narrow = /@media \(max-width: 1150px\) \{([\s\S]*?)\n    \}/.exec(railCss);
+  check('a narrow rail drops the connector, never the portrait',
+    !!narrow && !/\.chat-composer-portrait[,\s{]/.test(narrow[1])
+      && /\.chat-composer-portrait-join/.test(narrow[1]),
+    narrow && narrow[1].trim());
   check('…and no action-bar grouping was borrowed',
     d.querySelectorAll('#rv-chat-entry .sui-action-bar-btn-group').length === 0);
   check('the right edge carries the theme, as the game’s does',
