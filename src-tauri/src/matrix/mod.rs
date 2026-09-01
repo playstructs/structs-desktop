@@ -1245,40 +1245,51 @@ pub async fn matrix_object_room(
     let Ok(session) = session_for(&guild) else {
         return Ok(json!({ "connected": false }));
     };
-    let Some(alias) = rooms::alias_for(&object_id).await else {
-        // No alias means no owner we can resolve, or a type that gets no room.
+    // Only planets and fleets get a room at all.
+    if rooms::alias_localpart(&object_id).is_none() {
         return Ok(json!({ "connected": true, "alias": null, "room_id": null,
-                          "can_create": false }));
-    };
-    let room_id = client::room_id_for_alias(&session, &alias).await;
+                          "can_create": false, "joined": false }));
+    }
+    let owner_alias = rooms::alias_for(&object_id).await;
 
-    /* Where this object's room gets MADE, if it does not exist.
+    /* Where this object's room lives — a resolution ORDER, not one address.
      *
      * A client may only claim an alias in its own homeserver's namespace, so
-     * the owner's alias is only ours to create when the owner is us. For an
-     * enemy planet — which is most raid targets — that meant nobody we could
-     * ask had made the room, and the rail was read-only for exactly the
-     * planets people most want to talk about.
+     * the owner's alias is only ours to create when the owner is us. Worse,
+     * `alias_for` returns None entirely when the owner cannot be resolved to a
+     * guild with a known Matrix server — which is most of the galaxy. Both
+     * cases used to end with `can_create: false`, and a rail with no room is a
+     * rail with no name, no topic and no composer: it could not be used to
+     * START a conversation, only to read one that already existed somewhere.
+     * That is the state a raid window opens in almost every time.
      *
-     * So it is a resolution ORDER, not a single address: prefer the owner's
-     * room, and fall back to one on our own server. Both are "the planet's
-     * channel"; the second is our guild's copy of that conversation, which is
-     * what we would have had anyway.
+     * So:
+     *   1. the owner's room, IF it exists — joining theirs keeps one
+     *      conversation in one place;
+     *   2. otherwise ours, on our own server. Still "the planet's channel";
+     *      it is our guild's copy of that conversation, which is what we would
+     *      have had anyway.
+     *
+     * Step 2 does not depend on step 1 resolving, which was the bug.
      */
     let own_server = client::own_server(&session);
-    let mine = rooms::alias_on(&object_id, &own_server);
-    let (alias, room_id) = match (&room_id, &mine) {
-        // The owner's room exists — that is the one, wherever it lives.
-        (Some(_), _) => (alias, room_id),
-        // No owner room. Is there one of ours already?
-        (None, Some(m)) => {
-            let ours = client::room_id_for_alias(&session, m).await;
-            (m.clone(), ours)
-        }
-        (None, None) => (alias, room_id),
+    let owner_room = match &owner_alias {
+        Some(a) => client::room_id_for_alias(&session, a).await,
+        None => None,
     };
-    let can_create = room_id.is_none()
-        && rooms::ours_to_create(&alias, &own_server);
+    let mine = rooms::alias_on(&object_id, &own_server);
+    let mine_room = match (&owner_room, &mine) {
+        // Only look ours up when the owner's is not the answer.
+        (None, Some(m)) => client::room_id_for_alias(&session, m).await,
+        _ => None,
+    };
+    // The decision itself is pure and tested — see `rooms::resolve`.
+    let (alias, room_id, can_create) =
+        rooms::resolve(owner_alias, owner_room, mine, mine_room, &own_server);
+    let Some(alias) = alias else {
+        return Ok(json!({ "connected": true, "alias": null, "room_id": null,
+                          "can_create": false, "joined": false }));
+    };
     // Membership is the difference between a room we can READ and one we can
     // only see exists. Deliberately not joined here: a raid window opens on
     // every planet the player merely looks at, and auto-joining each one would
@@ -1311,15 +1322,17 @@ pub async fn matrix_object_room_create(
      * only on our own server, because that is the only namespace we can claim
      * an alias in.
      */
-    let owner_alias = rooms::alias_for(&object_id)
-        .await
-        .ok_or_else(|| format!("no room alias for {object_id}"))?;
-    if let Some(existing) = client::room_id_for_alias(&session, &owner_alias).await {
-        client::join(&session, &existing).await?;
-        return Ok(json!({ "room_id": existing, "created": false, "joined": true }));
+    // Same order as the lookup, INCLUDING the case where the owner's server
+    // cannot be resolved at all — then there is simply no owner room to prefer.
+    if let Some(owner_alias) = rooms::alias_for(&object_id).await {
+        if let Some(existing) = client::room_id_for_alias(&session, &owner_alias).await {
+            client::join(&session, &existing).await?;
+            return Ok(json!({ "room_id": existing, "created": false, "joined": true }));
+        }
     }
     let own_server = client::own_server(&session);
-    let alias = rooms::alias_on(&object_id, &own_server).unwrap_or(owner_alias);
+    let alias = rooms::alias_on(&object_id, &own_server)
+        .ok_or_else(|| format!("{object_id} does not get a room"))?;
     // Ours may already exist — a teammate opened this planet first.
     if let Some(existing) = client::room_id_for_alias(&session, &alias).await {
         client::join(&session, &existing).await?;

@@ -772,7 +772,12 @@
       <span id="rv-chat-count" class="rv-log-count"></span>
     </div>
     <div id="rv-chat-topic" class="chat-topic sui-text-tiny"></div>
-    <div id="rv-chat-body" class="chat-scroll sui-text-tiny"><div class="rv-log-empty sui-text-tiny">Nothing said about this planet yet.</div></div>
+    <div id="rv-chat-body" class="chat-scroll sui-text-tiny">
+      <!-- Replaced by renderChat on the first paint; the same notice block
+           Comms uses, so the pre-JS frame does not flash a different shape. -->
+      <div class="chat-notice"><div class="chat-notice-title">Quiet</div>
+        <div class="sui-text-paragraph">Nothing has been said about this planet yet.</div></div>
+    </div>
     <!-- Hidden until Comms is connected AND a room is known: a composer that
          cannot send is worse than no composer. -->
     <!-- The composer is BUILT, not written here: `StructsChatRow.composer()`

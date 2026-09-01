@@ -468,7 +468,6 @@
     .chat-msg .chat-edit-btn:focus { opacity: 1; }
     /* Always visible, unlike the controls: this is a fact about the message,
        not an action on it. */
-    .chat-msg-edited { color: var(--text-hint); font-family: 'DirectiveZero', sans-serif; font-size: 8px; }
     .chat-reply-chip.chat-mod-editing .chat-reply-who { color: var(--text-warning); }
 
     /* ── Delete ───────────────────────────────────────────────────────── */
@@ -635,14 +634,6 @@
     .chat-search-hit-room:hover { color: var(--accent-primary); }
 
     /* ── Notices ──────────────────────────────────────────────────────── */
-    .chat-notice {
-      display: flex; flex-direction: column; gap: var(--spacing-sm);
-      padding: var(--spacing-md);
-      color: var(--text-hint);
-      align-self: stretch; text-align: left;
-    }
-    .chat-notice .chat-notice-title { color: var(--text-body); }
-    .chat-notice.chat-mod-error .chat-notice-title { color: var(--text-enemy-primary); }
 
     /* Connection ladder: one row per step of the sign-in chain, so a failure
        says WHICH hop failed instead of "login failed". */

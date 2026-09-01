@@ -403,6 +403,9 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   const input = d.getElementById('rv-chat-input');
   check('the placeholder promises no appended id',
     !!input && !/id is added/.test(input.placeholder), input && input.placeholder);
+  // Matching Comms, and short enough not to truncate in a 240px rail.
+  check('…and is just "Message", as Comms says',
+    !!input && input.placeholder === 'Message', input && input.placeholder);
 
   // Unreachable is a hidden COMPOSER, not a fallback to somebody else's
   // channel: a message the player cannot send here should not be invited.
@@ -528,7 +531,16 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   chat.rows = [{ room_id: '!snc:h', room_name: 'SN.Corporation',
                  message: { sender_name: 'JPEG', body: 'shield on 2-1 down' } }];
   RV._renderChat();
-  check('searching is labelled Comms', title() === 'Comms', title());
+  /* The channel is named after the OBJECT even before a room exists.
+   *
+   * It used to say the word "Comms" until a room had been resolved AND joined,
+   * so a raid window opened on a planet nobody had discussed showed a channel
+   * called "Comms" with no topic and no composer — which is every raid window,
+   * the first time. This panel has never been in doubt about which planet it
+   * is.
+   */
+  check('the channel is named after the planet, not "Comms"',
+    title() === 'Planet 2-1', title());
   check('...and each row says which room it came from',
     [...d.querySelectorAll('.rv-chat-room')].some((e) => e.textContent === 'SN.Corporation'));
 
@@ -658,12 +670,73 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     topic.classList.contains('chat-topic')
       && topic.textContent === 'Everything said about planet 2-1.',
     topic.textContent);
-  // Hidden when empty rather than reserved: a blank strip above a narrow
-  // timeline is a line of nothing where messages could be.
+  /* With no room yet, the topic is the one the room WILL be created with.
+   *
+   * Not a guess: `matrix_object_room_create` sets exactly this sentence, so
+   * showing it early is the same text one hop sooner — and it means the panel
+   * does not reshape itself the moment somebody speaks.
+   */
   chat.roomTopic = '';
   RV._renderChat();
-  check('…and takes no room when there is none',
-    topic.classList.contains('hidden'));
+  check('…defaulting to the topic the room will be created with',
+    topic.textContent === 'Everything said about planet 2-1.'
+      && !topic.classList.contains('hidden'),
+    topic.textContent);
+}
+
+// ── A channel nobody has spoken in is still a channel ──────────────────────
+//
+// The state EVERY raid window opens in, and the one that was broken: with no
+// room resolved the rail showed a header saying "Comms", no topic, no
+// composer, and a bare line of hint text. There was no way to start a
+// conversation about a planet — only to read one that already existed.
+{
+  const d = w.document;
+  const chat = RV._chat;
+  const R = w.StructsChatRow;
+
+  chat.connected = true; chat.guildId = '0-5';
+  chat.rows = [];
+  chat.roomName = null;
+  chat.roomTopic = '';
+  // No room yet, but ours to make — what the lookup answers for a planet
+  // whose owner's server we cannot resolve, which is most of the galaxy.
+  chat.room = { connected: true, guild_id: '0-5', alias: '#planet-2-1:h',
+                room_id: null, can_create: true, joined: false };
+  RV._syncComposer();
+  RV._renderChat();
+
+  check('an empty channel still carries the planet’s name',
+    d.querySelector('.rv-chat-title').textContent === 'Planet 2-1',
+    d.querySelector('.rv-chat-title').textContent);
+  check('…and its topic',
+    d.getElementById('rv-chat-topic').textContent === 'Everything said about planet 2-1.',
+    d.getElementById('rv-chat-topic').textContent);
+  check('…and a composer, so a conversation can be STARTED',
+    !d.getElementById('rv-chat-compose').classList.contains('hidden')
+      && !!d.getElementById('rv-chat-input'));
+
+  // The empty state is Comms' own notice block, not a bare hint line.
+  const notice = d.querySelector('#rv-chat-body .chat-notice');
+  check('the empty state is the shared notice block', !!notice);
+  check('…with a title and a sentence, as Comms draws it',
+    !!notice && notice.querySelector('.chat-notice-title')
+      && /Nothing has been said/.test(notice.textContent),
+    notice && notice.textContent.trim());
+  check('…and none of the old bespoke empty markup',
+    d.querySelectorAll('#rv-chat-body .rv-log-empty').length === 0);
+
+  // Signed out is a DIFFERENT answer from "nobody spoke", and must say so.
+  chat.connected = false;
+  RV._renderChat();
+  check('not-connected says so, rather than reading as silence',
+    /Not connected/.test(d.getElementById('rv-chat-body').textContent),
+    d.getElementById('rv-chat-body').textContent.trim());
+
+  // Both windows draw that block from one function.
+  check('Comms and the rail share the notice builder',
+    typeof R.notice === 'function'
+      && R.notice('T', 'D').classList.contains('chat-notice'));
 }
 
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');

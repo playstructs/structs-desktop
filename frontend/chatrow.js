@@ -202,7 +202,21 @@
     return { node: wrap, input: input, send: send, portrait: portrait };
   }
 
+  /* What a timeline shows instead of messages.
+   *
+   * A title and a sentence, not a bare line of hint text. This is the state a
+   * channel is MOST often seen in — a raid window opens on a planet nobody has
+   * discussed yet — so it is the one that has to look like the real thing.
+   */
+  function notice(title, detail, isError) {
+    var box = el('div', 'chat-notice' + (isError ? ' chat-mod-error' : ''));
+    box.appendChild(el('div', 'chat-notice-title', title));
+    if (detail) box.appendChild(el('div', 'sui-text-paragraph', detail));
+    return box;
+  }
+
   root.StructsChatRow = {
+    notice: notice,
     composer: composer,
     render: render,
     continues: continues,

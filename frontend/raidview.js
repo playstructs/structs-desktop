@@ -507,6 +507,20 @@
    * of them was missed. One definition, and the kind can only be wrong
    * everywhere at once.
    */
+  // "Planet 2-16116" — the channel's name, and the one the room is created
+  // with, so the header does not change under the player when it appears.
+  function objectTitle() {
+    if (!TARGET || !TARGET.id) return 'Comms';
+    return objectWord().charAt(0).toUpperCase() + objectWord().slice(1)
+      + ' ' + TARGET.id;
+  }
+
+  // Matches the topic `matrix_object_room_create` sets on the real room.
+  function defaultTopic() {
+    if (!TARGET || !TARGET.id) return '';
+    return 'Everything said about ' + objectWord() + ' ' + TARGET.id + '.';
+  }
+
   function objectWord(kind) {
     var k = kind || (TARGET && TARGET.kind);
     return k === 'fleet' ? 'fleet' : 'planet';
@@ -657,6 +671,7 @@
   }
 
   function renderChat() {
+    var R = window.StructsChatRow;
     var body = document.getElementById('rv-chat-body');
     var count = document.getElementById('rv-chat-count');
     var head = document.getElementById('rv-chat-head');
@@ -670,19 +685,25 @@
      * to what you type. A player who cannot tell them apart cannot tell why
      * their message did or did not appear.
      */
+    /* The channel is named after the OBJECT, always.
+     *
+     * It used to fall back to the word "Comms" until a room had been resolved
+     * and joined — so a raid window opened on a planet nobody had spoken about
+     * showed a channel called "Comms", with no topic and no composer. That is
+     * every raid window, the first time. This panel has never been in doubt
+     * about which planet it is, so it says so from the first paint.
+     */
     var title = head && head.querySelector('.rv-chat-title');
-    if (title) {
-      title.textContent = inRoom()
-        ? (chatState.roomName || 'Comms')
-        : 'Comms';
-    }
+    if (title) title.textContent = chatState.roomName || objectTitle();
+
     /* The room's own statement of what it is for, as IRC has shown since the
-     * beginning. Hidden when empty rather than reserved: an empty strip above
-     * a narrow timeline is a line of nothing where messages could be.
+     * beginning — and as Comms shows it. Defaulted rather than blank: the
+     * topic a room GETS on creation is this sentence, so showing it before the
+     * room exists is not a guess, it is the same text one hop early.
      */
     var topic = document.getElementById('rv-chat-topic');
     if (topic) {
-      topic.textContent = inRoom() ? (chatState.roomTopic || '') : '';
+      topic.textContent = chatState.roomTopic || defaultTopic();
       topic.classList.toggle('hidden', !topic.textContent);
     }
     body.textContent = '';
@@ -690,21 +711,20 @@
       count.textContent = chatState.rows.length ? String(chatState.rows.length) : '';
     }
 
+    // Comms' own notice block, not a bare line of hint text. This is the state
+    // a channel is most often seen in, so it is the one that most has to look
+    // like the real thing.
     if (!chatState.connected) {
       // A raid window opens whether or not Comms is signed in, and must say
       // which of "nobody spoke" and "we did not look" is true.
-      var off = document.createElement('div');
-      off.className = 'rv-log-empty sui-text-tiny';
-      off.textContent = 'Comms is not connected, so nothing can be read.';
-      body.appendChild(off);
+      body.appendChild(R.notice('Not connected',
+        'Comms is not signed in, so nothing here can be read.'));
       return;
     }
     if (!chatState.rows.length) {
-      var none = document.createElement('div');
-      none.className = 'rv-log-empty sui-text-tiny';
       // A fleet is not a planet. The rail opens on both.
-      none.textContent = 'Nothing said about this ' + objectWord() + ' yet.';
-      body.appendChild(none);
+      body.appendChild(R.notice('Quiet',
+        'Nothing has been said about this ' + objectWord() + ' yet.'));
       return;
     }
     /* The Comms window's own row, not a lookalike.
@@ -719,7 +739,6 @@
      * full timeline. A rail beside a live raid is for reading and saying one
      * thing.
      */
-    var R = window.StructsChatRow;
     var prev = null;
     chatState.rows.forEach(function (h) {
       var m = h.message || {};
@@ -778,11 +797,10 @@
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
       });
     }
-    // The placeholder is a promise about what happens to the text: inside the
-    // room nothing is appended, and before it exists, sending is what makes it.
-    chatState.composer.input.placeholder = inRoom()
-      ? 'Message'
-      : 'Message — this opens the ' + objectWord() + ' room';
+    // Just "Message", as Comms says. The longer form ("— this opens the planet
+    // room") did not fit the rail and truncated to "Message —", which reads as
+    // a bug; and the topic above already says what this channel is.
+    chatState.composer.input.placeholder = 'Message';
   }
 
   function sendChat() {

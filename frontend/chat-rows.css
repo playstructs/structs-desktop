@@ -118,6 +118,11 @@
    vanishing — a silently dropped message reads as a broken client. */
 .chat-msg-body.chat-mod-unknown { color: var(--text-hint); }
 .chat-msg-pending { opacity: .55; }
+/* `chatrow.js` emits this on any edited message, so it belongs with the row and
+   not in one window's stylesheet — the rail was rendering it unstyled. */
+.chat-msg-edited {
+  color: var(--text-hint); font-family: 'DirectiveZero', sans-serif; font-size: 8px;
+}
 /* The words stay readable; the failure is a separate line beneath. Tinting
    the message itself made the player's own text look like an error. */
 .chat-send-failed {
@@ -150,3 +155,16 @@
   /* One line: a long topic must not push the timeline down the screen. */
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* The empty / notice block a timeline shows instead of messages. Shared for the
+   same reason the rows are: the raid rail had its own bare `.rv-log-empty` div
+   and looked like a different product at exactly the moment a channel is most
+   often seen — before anyone has said anything. */
+.chat-notice {
+  display: flex; flex-direction: column; gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  color: var(--text-hint);
+  align-self: stretch; text-align: left;
+}
+.chat-notice .chat-notice-title { color: var(--text-body); }
+.chat-notice.chat-mod-error .chat-notice-title { color: var(--text-enemy-primary); }

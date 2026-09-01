@@ -1171,3 +1171,63 @@ Two things were available the whole time and went unused:
 
 Both are now in `.claude/skills/sui-design/SKILL.md` with the caveats, and
 `.claude/launch.json` has an `app` entry for `cargo tauri dev`.
+
+## The empty channel, and "how is this not the same code?" — 2026-08-31
+
+Two separate things, and the first was the visible one.
+
+### It could not START a conversation
+
+A raid window opened on a planet nobody had discussed showed a header saying
+**"Comms"**, no topic, no composer, and a bare line of hint text. Not a styling
+problem: the room never resolved.
+
+`rooms::alias_for` answers `None` whenever the owner cannot be resolved to a
+guild with a known Matrix server — **most of the galaxy**, since we hold config
+for few guilds. That path set `can_create: false`, and a rail with no room has
+no name, no topic and no composer. An earlier fix had added a fallback to our
+own homeserver, but only for the case where the alias resolved and the room did
+not exist. The far commoner case — no alias at all — still fell through.
+
+Room resolution is now `rooms::resolve(owner, owner_room, mine, mine_room,
+own_server)`: a **pure function**, extracted precisely because this is the logic
+that has been wrong twice and the part a network call cannot be pointed at.
+Six tests; three mutations killed, including the exact regression.
+
+The rail also stopped waiting for the room to answer before naming itself. It
+has never been in doubt about which planet it is showing, so the header says
+`Planet 2-16116` and the topic says `Everything said about planet 2-16116.`
+from the first paint — the same sentence the room is created with, so nothing
+reshapes when somebody finally speaks.
+
+### Sharing the leaves is not sharing the look
+
+The fair challenge was "how is this not basically the same code?" It now is,
+and the honest measure:
+
+| | shared | window-specific |
+|---|---|---|
+| `chat-rows.css` | 35 rules | `chat.html` 19 (all control hover states), `raidview.html` 1 (tighter row spacing in a rail) |
+| `chatrow.js` | `render`, `composer`, `notice`, `continues`, `fmtTime` | — |
+
+What was still bespoke and is not any more: the **empty state**. Comms drew
+`noticeBlock('Quiet', …)` — a title and a sentence — while the rail drew a bare
+`.rv-log-empty` div. That is the state a channel is MOST often seen in, so it
+was the worst possible thing to leave un-shared.
+
+One real leak the move exposed: `.chat-msg-edited` is emitted by the **shared**
+renderer but was styled only in `chat.html`, so an edited message rendered bare
+in the rail. A new check in `units.test.mjs` now walks every class `chatrow.js`
+emits and fails if the shared sheet does not style it. It found two more
+immediately — `chat-composer-portrait` and its connector — which are genuine
+HOOKS with no appearance of their own, so they are a named exception, with a
+second assertion that fails if either ever gains styling and stops being a hook.
+
+### Method
+
+The suite was green through all of this, again. Two more of my own checks were
+measuring nothing: one asserted the header said "Comms", one asserted the topic
+was hidden — both pinned to the broken behaviour. And the crash-vs-pass
+detector missed a suite because `raidview.test.mjs` prints `failure(s)` while
+others print `failing check`; the runner now requires one of every suite's own
+summary wordings.

@@ -307,5 +307,43 @@ console.log('\n— portrait layer counts match the art that ships');
   }
 }
 
+// ── The shared row's classes must be styled in the shared sheet ────────────
+//
+// `chatrow.js` is drawn by two windows, so every class it emits has to be
+// styled somewhere BOTH of them load. `.chat-msg-edited` was emitted by the
+// shared renderer and styled only in chat.html, so an edited message rendered
+// unstyled in the raid rail — the same split that broke the whole panel, one
+// class wide.
+{
+  const js = readFileSync(root + '/frontend/chatrow.js', 'utf8');
+  const css = readFileSync(root + '/frontend/chat-rows.css', 'utf8');
+  const emitted = [...new Set(
+    [...js.matchAll(/el\('[a-z]+',\s*'([^']*chat-[^']*)'/g)]
+      .flatMap((m) => m[1].split(/\s+/))
+      .filter((c) => c.startsWith('chat-') && !c.startsWith('chat-mod-')))];
+  check('the shared renderer emits classes', emitted.length > 5, emitted.join(' '));
+  /* Two named exceptions, and they are HOOKS rather than styling.
+   *
+   * The composer's portrait chunk and its connector carry these so a narrow
+   * host can drop them — the raid rail hides both below ~300px, where the
+   * portrait and the send button would leave the message about 70px. They have
+   * no appearance of their own, so there is nothing for the shared sheet to
+   * say about them; naming them here keeps the check strict for everything
+   * else rather than loosening it.
+   */
+  const HOOKS = ['chat-composer-portrait', 'chat-composer-portrait-join'];
+  const unstyled = emitted
+    .filter((c) => !HOOKS.includes(c))
+    .filter((c) => !new RegExp('\\.' + c + '\\b').test(css));
+  // An exception that stops being true is worse than none: if a hook ever gains
+  // styling of its own it belongs in the shared sheet like everything else.
+  const stale = HOOKS.filter((c) => new RegExp('\\.' + c + '\\b').test(css));
+  check('the hook exceptions are still hooks', stale.length === 0,
+    stale.join(', ') + ' — now styled; drop it from HOOKS');
+  check('every class it emits is styled in the shared sheet',
+    unstyled.length === 0,
+    unstyled.join(', ') + ' — styled in one window only, so the other renders it bare');
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

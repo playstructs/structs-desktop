@@ -3565,11 +3565,10 @@
     return row;
   }
 
+  // The shared one — the raid rail shows the same block, and its styles moved
+  // to chat-rows.css with the rest of the timeline's.
   function noticeBlock(title, detail, isError) {
-    var box = el('div', 'chat-notice' + (isError ? ' chat-mod-error' : ''));
-    box.appendChild(el('div', 'chat-notice-title', title));
-    if (detail) box.appendChild(el('div', 'sui-text-paragraph', detail));
-    return box;
+    return window.StructsChatRow.notice(title, detail, isError);
   }
 
   function statusSharingRow() {

@@ -119,6 +119,45 @@ pub fn ours_to_create(alias: &str, own_server: &str) -> bool {
     !own_server.is_empty() && server_of(alias) == Some(own_server)
 }
 
+/// Which address this object's room has, and whether it is ours to make.
+///
+/// Split out of `matrix_object_room` because it is the part that has been wrong
+/// twice and the part a network call cannot be pointed at. Inputs are what four
+/// lookups answered; the output is the decision.
+///
+/// * `owner` — the owner's guild's alias, or None when the owner cannot be
+///   resolved to a guild with a known Matrix server. **This is the common
+///   case**, not an edge: most of the galaxy is guilds we hold no config for.
+/// * `owner_room` — whether a room exists at that alias.
+/// * `mine` — the same object's alias on OUR homeserver.
+/// * `mine_room` — whether a room exists at THAT alias.
+///
+/// Returns `(alias, room_id, can_create)`.
+pub fn resolve(
+    owner: Option<String>,
+    owner_room: Option<String>,
+    mine: Option<String>,
+    mine_room: Option<String>,
+    own_server: &str,
+) -> (Option<String>, Option<String>, bool) {
+    // The owner's room wins ONLY if it actually exists — joining theirs is what
+    // keeps one conversation in one place.
+    if let (Some(a), Some(id)) = (&owner, &owner_room) {
+        return (Some(a.clone()), Some(id.clone()), false);
+    }
+    // Otherwise ours, and this must not depend on the owner resolving at all.
+    // That dependency was the bug: it left `can_create` false, and a rail with
+    // no room has no name, no topic and no composer — unable to START a
+    // conversation, only to read one that already existed.
+    match mine {
+        Some(m) => {
+            let can = mine_room.is_none() && ours_to_create(&m, own_server);
+            (Some(m), mine_room, can)
+        }
+        None => (owner, None, false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +234,81 @@ mod tests {
         assert!(!ours_to_create(&mine, ""));
         assert!(!ours_to_create("#planet-2-1", "matrix.oh.energy"));
         assert!(!ours_to_create("", ""));
+    }
+
+    const MINE: &str = "matrix.oh.energy";
+    fn s(x: &str) -> Option<String> { Some(x.to_string()) }
+
+    #[test]
+    fn an_owner_room_that_exists_is_the_one() {
+        // Joining theirs is what keeps one conversation in one place.
+        let (alias, room, can) = resolve(
+            s("#planet-2-1:their.server"), s("!theirs"),
+            s("#planet-2-1:matrix.oh.energy"), None, MINE);
+        assert_eq!(alias.as_deref(), Some("#planet-2-1:their.server"));
+        assert_eq!(room.as_deref(), Some("!theirs"));
+        assert!(!can, "we never create in somebody else's namespace");
+    }
+
+    #[test]
+    fn an_unresolvable_owner_still_gets_a_room() {
+        /* THE BUG, twice over.
+         *
+         * `alias_for` answers None whenever the owner cannot be resolved to a
+         * guild with a known Matrix server — most of the galaxy. That used to
+         * end with `can_create: false`, and a rail with no room has no name, no
+         * topic and no composer: it could not START a conversation about a
+         * planet, only read one that already existed. That is the state every
+         * raid window opens in.
+         */
+        let (alias, room, can) = resolve(
+            None, None, s("#planet-2-1:matrix.oh.energy"), None, MINE);
+        assert_eq!(alias.as_deref(), Some("#planet-2-1:matrix.oh.energy"));
+        assert_eq!(room, None);
+        assert!(can, "our own server's alias is always ours to create");
+    }
+
+    #[test]
+    fn an_owner_with_no_room_yet_falls_back_to_ours() {
+        // The owner's guild is known but nobody there has made the room.
+        let (alias, _room, can) = resolve(
+            s("#planet-2-1:their.server"), None,
+            s("#planet-2-1:matrix.oh.energy"), None, MINE);
+        assert_eq!(alias.as_deref(), Some("#planet-2-1:matrix.oh.energy"));
+        assert!(can);
+    }
+
+    #[test]
+    fn our_existing_room_is_joined_not_recreated() {
+        let (alias, room, can) = resolve(
+            None, None, s("#planet-2-1:matrix.oh.energy"), s("!ours"), MINE);
+        assert_eq!(alias.as_deref(), Some("#planet-2-1:matrix.oh.energy"));
+        assert_eq!(room.as_deref(), Some("!ours"));
+        assert!(!can, "it already exists");
+    }
+
+    #[test]
+    fn it_never_claims_another_servers_namespace() {
+        /* `resolve` takes `mine` as a parameter, so it must hold for any input
+         * and not merely for the one its caller happens to build. A client can
+         * only claim an alias on its OWN homeserver; answering `can_create` for
+         * anything else is a create request the server will refuse — and,
+         * worse, a composer offered for a room that can never appear.
+         */
+        let (alias, _room, can) = resolve(
+            None, None, s("#planet-2-1:somebody.else"), None, MINE);
+        assert_eq!(alias.as_deref(), Some("#planet-2-1:somebody.else"));
+        assert!(!can, "not our namespace");
+    }
+
+    #[test]
+    fn with_no_address_at_all_there_is_nothing_to_create() {
+        // No object alias anywhere — a type that gets no room, or no server
+        // name known even for us. Must not claim it is creatable.
+        let (alias, room, can) = resolve(None, None, None, None, MINE);
+        assert_eq!(alias, None);
+        assert_eq!(room, None);
+        assert!(!can);
     }
 
     #[test]
