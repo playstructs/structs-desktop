@@ -1986,6 +1986,50 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         return rowHtml(label, STRUCTS_ESC(value), id);
       };
 
+      /* The game's own status chip.
+       *
+       * ON/OFF, ONLINE/PAUSED and the energy status were three hand-rolled
+       * `<span style="color:var(--accent-primary)">`s — a colour decision
+       * re-made at each site, in the body face at body size, where SUI
+       * already has the component: ExtremeHazard, 8px, uppercase, bordered.
+       *
+       * `.sui-badge` with no mod is flat and unbordered, which is the honest
+       * OFF state, so `hint` composes it with `.sui-text-hint` instead of
+       * inventing an off-mod SUI does not have.
+       */
+      /* The panel's copy-to-clipboard affordances.
+       *
+       * There were four, each a `<span>` with its own hand-drawn dotted
+       * underline (one of them applied imperatively, in JS, after the fact) —
+       * four opinions about what a link looks like, none of them clickable by
+       * keyboard and none with a hover state. `a.sui-text-secondary` is the
+       * game's own inline link and already carries all of it.
+       */
+      /* The one-line note under a door button.
+       *
+       * Three copies of the same inline blob, each picking 11px — a size on
+       * no SUI scale (8 / 12 / 16). `.sui-text-tiny` is the 8px role and
+       * `.sui-text-hint` the colour; only the centring is local.
+       *
+       * The TEXT of these is a separate question: they describe what a
+       * control does, which is the shape the player has asked us to stop
+       * putting in panels. Flagged, not removed unilaterally.
+       */
+      var doorNote = function(id, text) {
+        return '<div id="' + STRUCTS_ESC(id) + '" class="sui-text-hint sui-text-tiny" ' +
+          'style="text-align:center; margin-top:var(--spacing-xs);">' +
+          STRUCTS_ESC(text) + '</div>';
+      };
+      var copyLink = function(id, label) {
+        return '<a id="' + STRUCTS_ESC(id) + '" href="javascript:void(0)" ' +
+          'class="sui-text-secondary">' + STRUCTS_ESC(label) + '</a>';
+      };
+      var badge = function(text, mod) {
+        var cls = 'sui-badge' +
+          (mod === 'hint' ? ' sui-text-hint' : mod ? ' sui-mod-' + mod : '');
+        return '<span class="' + cls + '">' + STRUCTS_ESC(text) + '</span>';
+      };
+
       var html = '<div style="padding: 4px; display:flex; flex-direction:column; gap:8px; width:100%;">';
 
       // Comms — first thing in the panel. Federated chat over the guild's
@@ -2000,7 +2044,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // why each carried hand-rolled cursor, padding and centring: it was
       // rendering as a bare div. Same component the engine toggle below uses.
       html += '<a href="javascript:void(0)" id="debug-comms" class="sui-screen-btn sui-mod-secondary">Comms<span id="debug-comms-unread" class="sui-badge sui-mod-default" style="display:none; margin-left:var(--spacing-md);"></span></a>';
-      html += '<div id="debug-comms-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">federated guild chat · opens in its own window</div>';
+      html += doorNote('debug-comms-note', 'federated guild chat \u00b7 opens in its own window');
       html += '</div></div>';
 
       // Support bundle — because when someone needs it they are already having
@@ -2008,7 +2052,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-body" style="padding:var(--spacing-md);">';
       html += '<a href="javascript:void(0)" id="debug-download-logs" class="sui-screen-btn sui-mod-secondary">Download logs</a>';
-      html += '<div id="debug-download-logs-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">7 days of activity as a zip · no wallet keys included</div>';
+      html += doorNote('debug-download-logs-note', '7 days of activity as a zip \u00b7 no wallet keys included');
       html += '</div></div>';
 
       // Game Stats door — second card, still above the fold, because it is a
@@ -2016,7 +2060,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-body" style="padding:var(--spacing-md);">';
       html += '<a href="javascript:void(0)" id="debug-gamestats" class="sui-screen-btn sui-mod-secondary">Game Stats</a>';
-      html += '<div id="debug-gamestats-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">whole-universe dashboard · opens in its own window</div>';
+      html += doorNote('debug-gamestats-note', 'whole-universe dashboard \u00b7 opens in its own window');
       html += '</div></div>';
 
       // Identity
@@ -2024,7 +2068,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div class="sui-data-card-header sui-text-header">Identity</div>';
       html += '<div class="sui-data-card-body">';
       html += row('Player', playerName + ' (' + playerId + ')');
-      html += rowHtml('Address', '<span id="debug-address" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted;">' + STRUCTS_ESC(walletAddress.substring(0, 24)) + '… (copy)</span>');
+      html += rowHtml('Address', copyLink('debug-address', walletAddress.substring(0, 24) + '\u2026 (copy)'));
       html += row('Guild', guildId);
       html += row('Substation', substationId);
       html += row('Fleet', fleetId);
@@ -2048,9 +2092,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       html += '<div class="sui-data-card-body">';
       html += row('URL', mcpUrl);
       html += row('Status', 'checking...', 'debug-mcp-status');
-      html += rowHtml('Token', '<span id="debug-mcp-token">loading...</span>');
-      html += rowHtml('Config', '<span id="debug-mcp-config" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy to clipboard</span>');
-      html += rowHtml('Onboarding', '<span id="debug-onboard-prompt" style="cursor:pointer; text-decoration:underline; text-decoration-style:dotted; color:var(--accent-primary);">Copy Onboarding Prompt</span>');
+      html += rowHtml('Token', copyLink('debug-mcp-token', 'loading\u2026'));
+      html += rowHtml('Config', copyLink('debug-mcp-config', 'Copy to clipboard'));
+      html += rowHtml('Onboarding', copyLink('debug-onboard-prompt', 'Copy Onboarding Prompt'));
       html += '</div></div>';
 
       // Engine
@@ -2231,14 +2275,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           var tokenEl = document.getElementById('debug-mcp-token');
           if (tokenEl && mcpConfig.bearer_token) {
             var t = mcpConfig.bearer_token;
-            tokenEl.textContent = t.substring(0, 8) + '...' + t.substring(t.length - 4);
-            tokenEl.style.cursor = 'pointer';
-            tokenEl.style.textDecoration = 'underline';
-            tokenEl.style.textDecorationStyle = 'dotted';
+            tokenEl.textContent = t.substring(0, 8) + '\u2026' + t.substring(t.length - 4);
             tokenEl.addEventListener('click', function() {
               copyToClipboard(t);
               tokenEl.textContent = 'Copied!';
-              setTimeout(function() { tokenEl.textContent = t.substring(0, 8) + '...' + t.substring(t.length - 4); }, 1000);
+              setTimeout(function() { tokenEl.textContent = t.substring(0, 8) + '\u2026' + t.substring(t.length - 4); }, 1000);
             });
           }
 
@@ -2326,18 +2367,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             // when pause/resume was triggered elsewhere.
             var mgr = window.taskManager;
             var isOnline = (mgr && typeof mgr.isOnline === 'function') ? mgr.isOnline() : null;
-            var mgrStatusText, mgrStatusColor, btnLabel;
+            var mgrStatusText, mgrStatusMod, btnLabel;
             if (isOnline === true) {
               mgrStatusText = 'ONLINE';
-              mgrStatusColor = 'var(--accent-primary)';
+              mgrStatusMod = 'solid';
               btnLabel = 'Pause';
             } else if (isOnline === false) {
               mgrStatusText = 'PAUSED';
-              mgrStatusColor = 'var(--text-hint)';
+              mgrStatusMod = 'hint';
               btnLabel = 'Resume';
             } else {
               mgrStatusText = 'Unknown';
-              mgrStatusColor = 'var(--text-hint)';
+              mgrStatusMod = 'hint';
               btnLabel = 'Toggle';
             }
             // SUI's own button, not a hand-rolled one. The previous version
@@ -2348,8 +2389,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               'class="sui-screen-btn sui-mod-primary" ' +
               'style="margin-left:var(--spacing-md);">' +
               btnLabel + '</a>';
-            html += row('Task Manager',
-              '<span style="color:' + mgrStatusColor + '; font-weight:bold;">' + mgrStatusText + '</span>' + btnHtml);
+            html += rowHtml('Task Manager', badge(mgrStatusText, mgrStatusMod) + btnHtml);
 
             html += row('Active Tasks', String(data.active_tasks || 0));
 
@@ -2368,7 +2408,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 : totalHps >= 1e3 ? (totalHps / 1e3).toFixed(1) + ' Kh/s'
                 : Math.round(totalHps) + ' h/s';
               html += row('Hashrate', hpsText);
-              html += rowHtml('Detail', '<span style="color:var(--text-hint);">per-task view: Team Ops → Work</span>');
+              html += rowHtml('Detail', '<span class="sui-text-hint">per-task view: Team Ops \u2192 Work</span>');
             } else {
               html += row('Queue', 'No active tasks');
             }
@@ -2485,9 +2525,8 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             'class="sui-screen-btn sui-mod-primary" ' +
             'style="margin-left:var(--spacing-md);">' +
             'Refresh</a>';
-          html += row('Status',
-            (online ? '<span style="color:var(--accent-primary);">ONLINE</span>'
-                    : '<span style="color:var(--text-warning);">OFFLINE</span>') + refreshBtn);
+          html += rowHtml('Status',
+            badge(online ? 'ONLINE' : 'OFFLINE', online ? 'solid' : 'warning') + refreshBtn);
           html += row('Total Load', fmtPower(totalLoad) + ' / ' + fmtPower(totalCap) +
             (totalCap > 0 ? ' (' + margin + '% margin)' : ''));
           html += row('Structs Load', fmtPower(structLoadP));
@@ -2601,8 +2640,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           for (var name in data) {
             if (data.hasOwnProperty(name)) {
               var p = data[name];
-              var status = p.enabled ? '<span style="color:var(--accent-primary);">ON</span>' : '<span style="color:var(--text-hint);">OFF</span>';
-              html += row(name, status);
+              html += rowHtml(name, badge(p.enabled ? 'ON' : 'OFF', p.enabled ? 'solid' : 'hint'));
             }
           }
           policiesEl.innerHTML = html;

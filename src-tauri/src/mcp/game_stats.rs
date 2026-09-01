@@ -587,6 +587,15 @@ async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
 
 /// Heavy tier: grid metrics, identities, leaderboards, live raids.
 async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
+    /* Timed, per stage.
+     *
+     * "Best players takes an incredibly long time" could not be answered from
+     * inside the app — the sweep logged nothing, so the only way to tell a slow
+     * endpoint from slow orchestration was to read the code and size the work
+     * against the database by hand. It logs now: which stage, how long, and how
+     * much it fetched.
+     */
+    let t0 = crate::hasher::types::now_millis();
     let mut truncated = false;
 
     // Identities (username/pfp/tag/alpha) come from the guild rosters — the
@@ -617,8 +626,41 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
     let mut identities: HashMap<String, Identity> = HashMap::new();
     // player id → (guild id, guild name); feeds the per-guild energy rollup.
     let mut guild_of: HashMap<String, (String, String)> = HashMap::new();
-    for gid in guild_ids.iter().filter(|g| !g.is_empty()) {
-        let roster = client.guild.guild_roster(gid).await.unwrap_or(Value::Null);
+
+    /* Every roster at once, not one after another.
+     *
+     * This was `for gid { … .await }` — five sequential round trips, and they
+     * are not small: the largest guild has 2,615 members and each row carries
+     * portrait attributes. The requests do not depend on each other, so the
+     * wait was the SUM of five when it only ever had to be the slowest. That
+     * is the whole reason "Best players" took so long to appear: local
+     * orchestration, not a slow endpoint.
+     *
+     * Guilds live on different servers (crew.oh.energy, beta.playstructs.com,
+     * shell.crab.la), so this also spreads the load rather than concentrating
+     * it — five hosts asked once each, concurrently.
+     */
+    let rosters: Vec<(String, Value)> = {
+        let mut set: tokio::task::JoinSet<(String, Value)> = tokio::task::JoinSet::new();
+        for gid in guild_ids.iter().filter(|g| !g.is_empty()).cloned() {
+            let c = client.clone();
+            set.spawn(async move {
+                let r = c.guild.guild_roster(&gid).await.unwrap_or(Value::Null);
+                (gid, r)
+            });
+        }
+        let mut out = Vec::new();
+        while let Some(res) = set.join_next().await {
+            // A panicked task is one guild missing from the leaderboard, not a
+            // failed sweep — the same tolerance the sequential version had via
+            // `unwrap_or(Value::Null)`.
+            if let Ok(pair) = res {
+                out.push(pair);
+            }
+        }
+        out
+    };
+    for (gid, roster) in &rosters {
         for row in roster.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
             let pid = text(row.get("id"));
             if pid.is_empty() {
@@ -643,6 +685,18 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             );
         }
     }
+
+    let t_rosters = crate::hasher::types::now_millis();
+    crate::mcp::telemetry::tlog_kv(
+        "game_stats",
+        crate::mcp::telemetry::Sev::Info,
+        "heavy sweep: rosters",
+        serde_json::json!({
+            "ms": (t_rosters - t0).round(),
+            "guilds": rosters.len(),
+            "players": identities.len(),
+        }),
+    );
 
     // Honest alpha, straight from the bank: `denom_owners(ualpha)` returns
     // every holder in base units (912 addresses ≈ one LCD page), joined to
@@ -792,11 +846,16 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
         }
         c.heavy_updated_ms = crate::hasher::types::now_millis();
     });
+    crate::mcp::telemetry::tlog_kv(
+        "game_stats",
+        crate::mcp::telemetry::Sev::Info,
+        "heavy sweep: done",
+        serde_json::json!({ "total_ms": (crate::hasher::types::now_millis() - t0).round() }),
+    );
     Ok(())
 }
 
 // ── Sweep task ──────────────────────────────────────────────────────────────
-
 /// Start the background sweep loop (idempotent). Runs sweeps only while the
 /// gamestats window exists; otherwise idles cheaply.
 pub fn ensure_running(app: &tauri::AppHandle) {

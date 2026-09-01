@@ -187,6 +187,25 @@
     r.appendChild(l); r.appendChild(v);
     return r;
   }
+  /* A read-only fact: label above value, value free to wrap.
+   *
+   * The sibling of `row`, and the right one whenever the value can be long —
+   * an address, a route, a reason. `row` is `.sui-data-card-row`, which wraps
+   * at the FLEX level: a value wider than the row is pushed onto its own line
+   * whole, stranding the label on a 36px row above it. This says the same
+   * thing in one block, and it is what the drawer forms already use, so a
+   * confirm dialogue reads as a continuation of the form that opened it.
+   */
+  function fact(label, value, title) {
+    var d = el('div', 'form-fact');
+    d.appendChild(el('div', 'form-fact-label sui-text-label', label));
+    var v = el('div', 'form-fact-value');
+    if (value && value.nodeType) v.appendChild(value);
+    else v.textContent = value == null ? '' : String(value);
+    if (title) v.title = title;
+    d.appendChild(v);
+    return d;
+  }
   function card(title, bodyNode) {
     var c = el('div', 'sui-data-card sui-theme-player');
     c.appendChild(el('div', 'sui-data-card-header sui-text-header', title));
@@ -1003,6 +1022,7 @@
     listView: listView, pagination: pagination, pageSlots: pageSlots,
     fmtInt: fmtInt, fmtWatts: fmtWatts, fmtAlpha: fmtAlpha, fmtOre: fmtOre,
     denomName: denomName, denomAmount: denomAmount, denomQty: denomQty,
+    fact: fact,
     confirmModal: confirmModal,
   };
 
@@ -1070,7 +1090,7 @@
   // SUI's system modal. Used for anything irreversible; `bodyNode` should
   // spell out exactly what is about to happen, not just ask "are you sure".
   function confirmModal(title, bodyNode, ctaLabel, onConfirm) {
-    var ov = el('div', 'modal-overlay');
+    var ov = el('div', 'sui-message-system-model-overlay ops-modal-overlay');
     var modal = el('div', 'sui-message-system-modal');
     var frame = el('div', 'sui-message-system-modal-frame');
     var left = el('div', 'sui-message-system-modal-frame-left');

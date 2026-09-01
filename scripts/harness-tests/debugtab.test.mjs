@@ -86,21 +86,128 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
   check('…and rowHtml() escapes the label and id it controls',
     /rowHtml = function[\s\S]{0,600}?STRUCTS_ESC\(id\)[\s\S]{0,400}?STRUCTS_ESC\(label\)/.test(src));
 
-  /* Every raw-HTML call is accounted for.
+  /* The check that matters is the one that was missing.
    *
-   * `rowHtml` is the unsafe one by design, so the guard is that its callers
-   * stay a known, small set that passes literal markup — and that any dynamic
-   * value inside one is escaped at the call site. The address row is the only
-   * one that interpolates anything.
+   * The old guard here froze the rowHtml callers at a list of five names. It
+   * pinned the wrong side: three call sites built markup and handed it to the
+   * ESCAPING `row()`, so the Debug tab printed
+   * `<span style="color:var(--text-hint);">OFF</span>` as literal text beside
+   * every policy, the Task Manager status and the energy status. Nothing
+   * failed — enumerating rowHtml's callers cannot see a row that never
+   * became one, and the frozen list actively blocked the fix.
+   *
+   * So: walk every `row(` call with a paren balancer and assert its arguments
+   * contain no markup at all. A `<` in a `row()` argument is the bug, whole.
    */
-  const rawCalls = [...src.matchAll(/rowHtml\('([^']+)'/g)].map((m) => m[1]).sort();
-  check('the raw-HTML rows are the five known ones',
-    rawCalls.join() === 'Address,Config,Detail,Onboarding,Token', rawCalls.join());
-  // To end of line, NOT to the first `;` — the inline `style="cursor:pointer;"`
-  // is full of semicolons and truncating there hid the value being checked.
-  const addr = /rowHtml\('Address'.*/.exec(src)[0];
-  check('…and the only one with a dynamic value escapes it',
-    /STRUCTS_ESC\(walletAddress/.test(addr) && !/\+ walletAddress/.test(addr), addr.slice(-90));
+  const callArgs = (name) => {
+    const out = [];
+    const re = new RegExp('(?<![A-Za-z0-9_$])' + name + '\\(', 'g');
+    let m;
+    while ((m = re.exec(src))) {
+      let i = m.index + m[0].length, depth = 1, q = null;
+      for (; i < src.length && depth > 0; i++) {
+        const c = src[i];
+        if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+        if (c === "'" || c === '"' || c === '`') q = c;
+        else if (c === '(') depth++;
+        else if (c === ')') depth--;
+      }
+      out.push(src.slice(m.index + m[0].length, i - 1));
+    }
+    return out;
+  };
+  // Only the SECOND argument is the value. `rowHtml` escapes the label and the
+  // id itself, so scanning every argument flagged its own safe wrapper.
+  const argAt = (call, n) => {
+    const parts = [];
+    let depth = 0, q = null, last = 0;
+    for (let i = 0; i < call.length; i++) {
+      const c = call[i];
+      if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+      if (c === "'" || c === '"' || c === '`') q = c;
+      else if ('([{'.includes(c)) depth++;
+      else if (')]}'.includes(c)) depth--;
+      else if (c === ',' && depth === 0) { parts.push(call.slice(last, i)); last = i + 1; }
+    }
+    parts.push(call.slice(last));
+    return parts[n] || '';
+  };
+
+  const rowCalls = callArgs('row');
+  check('every row() call site exists to be checked', rowCalls.length > 20,
+    String(rowCalls.length));
+  const markupRows = rowCalls.filter((a) => argAt(a, 1).includes('<'));
+  check('no row() call passes markup to the escaper', markupRows.length === 0,
+    markupRows.map((a) => a.slice(0, 60)).join(' | '));
+
+  /* And the opt-out stays honest: rowHtml interpolates only values that were
+   * escaped, badged, or built from string literals. Named rather than
+   * enumerated, so adding a correct raw row does not fail the suite.
+   */
+  const MARKUP_LOCALS = ['btnHtml', 'refreshBtn'];
+  const rawArgs = callArgs('rowHtml');
+  const unsafe = [];
+  rawArgs.forEach((call) => {
+    // Drop string literals and the two safe wrappers, then see what is left.
+    const bare = argAt(call, 1)
+      .replace(/'(?:\\.|[^'\\])*'/g, '')
+      .replace(/"(?:\\.|[^"\\])*"/g, '')
+      .replace(/STRUCTS_ESC\([^)]*\)/g, '');
+    // Nested parens (`copyLink('x', a.substring(0, 24))`) outrun a `[^)]*`
+    // strip, which stops early and leaves the tail looking unescaped.
+    const stripCalls = (t) => {
+      for (const name of ['badge', 'copyLink', 'doorNote']) {
+        let i;
+        while ((i = t.indexOf(name + '(')) >= 0) {
+          let j = i + name.length + 1, depth = 1;
+          for (; j < t.length && depth > 0; j++) {
+            if (t[j] === '(') depth++; else if (t[j] === ')') depth--;
+          }
+          t = t.slice(0, i) + t.slice(j);
+        }
+      }
+      return t;
+    };
+    (stripCalls(bare).match(/[A-Za-z_$][\w$]*/g) || []).forEach((id) => {
+      if (MARKUP_LOCALS.indexOf(id) < 0) unsafe.push(id);
+    });
+  });
+  check('rowHtml interpolates nothing unescaped', unsafe.length === 0,
+    [...new Set(unsafe)].join(', '));
+
+  // …and those two locals are markup built only from literals — including the
+  // labels they interpolate, each of which is assigned string constants only.
+  MARKUP_LOCALS.forEach((name) => {
+    const def = new RegExp('var ' + name + ' =([\\s\\S]*?);\\n').exec(src);
+    check(name + ' is defined once as markup', !!def);
+    if (!def) return;
+    const ids = (def[1]
+      .replace(/'(?:\\.|[^'\\])*'/g, '')
+      .match(/[A-Za-z_$][\w$]*/g) || []);
+    const dynamic = ids.filter((id) => {
+      const asg = [...src.matchAll(new RegExp(id + ' = ([^;\\n]+);', 'g'))].map((m) => m[1]);
+      return asg.length === 0 || !asg.every((v) => /^'[^']*'$/.test(v.trim()));
+    });
+    check('…and every value it interpolates is a string constant',
+      dynamic.length === 0, dynamic.join(', '));
+  });
+
+  /* The status chip is SUI's, not a colour picked at the call site. */
+  check('status values use the SUI badge, not an inline colour',
+    !/row(?:Html)?\([^;]*style="color:/.test(src),
+    (/row(?:Html)?\([^;]*style="color:[^"]*"/.exec(src) || [''])[0]);
+  /* Every wrapper stripped above buys its exemption by escaping. Named here
+   * with what it must escape, so adding one to the strip list without making
+   * it safe widens the hole loudly rather than silently. */
+  [['badge', ['text']], ['copyLink', ['id', 'label']], ['doorNote', ['id', 'text']]]
+    .forEach(([name, params]) => {
+      const at = src.indexOf('var ' + name + ' = function');
+      const body = at < 0 ? '' : src.slice(at, src.indexOf('\n      };', at));
+      check(name + '() is defined once', at >= 0 && body.length < 900, String(body.length));
+      params.forEach((prm) => check(
+        '…and ' + name + '() escapes ' + prm,
+        new RegExp('STRUCTS_ESC\\(' + prm + '\\)').test(body)));
+    });
 
   // No OTHER row-ish builder quietly reintroduces the raw default.
   const rawInterp = [...src.matchAll(/^\s*(?:html|out) \+= '<[^']*' \+ (?!row|rowHtml|listBlock|STRUCTS_ESC)([A-Za-z_$][\w$]*)/gm)]

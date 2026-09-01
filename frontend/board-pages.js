@@ -911,10 +911,10 @@
   function applyAllocPower(a, mw) {
     if (allocState.busy) return;
     var body = H.el('div');
-    body.appendChild(H.row('Allocation', a.id + ' → ' + a.destination_id));
-    body.appendChild(H.row('From', H.fmtWatts(a.power_mw)));
-    body.appendChild(H.row('To', H.fmtWatts(mw)));
-    body.appendChild(H.row('Your load moves by',
+    body.appendChild(H.fact('Allocation', a.id + ' → ' + a.destination_id));
+    body.appendChild(H.fact('From', H.fmtWatts(a.power_mw)));
+    body.appendChild(H.fact('To', H.fmtWatts(mw)));
+    body.appendChild(H.fact('Your load moves by',
       (mw >= a.power_mw ? '+' : '−') + H.fmtWatts(Math.abs(mw - a.power_mw))));
     H.confirmModal('Set allocation power?', body, 'Apply', function () {
       allocState.busy = true;
@@ -1184,18 +1184,18 @@
     function commit(p) {
       if (infuState.busy) return;
       var body = H.el('div');
-      body.appendChild(H.row('Player', p.player_name + ' · ' + p.player_id));
-      body.appendChild(H.row('Amount', alpha(st.amount)));
-      body.appendChild(H.row(o.op === 'migrate' ? 'From' : 'Reactor', st.dest));
-      if (o.op === 'migrate') body.appendChild(H.row('To', st.target));
+      body.appendChild(H.fact('Player', p.player_name + ' · ' + p.player_id));
+      body.appendChild(H.fact('Amount', alpha(st.amount)));
+      body.appendChild(H.fact(o.op === 'migrate' ? 'From' : 'Reactor', st.dest));
+      if (o.op === 'migrate') body.appendChild(H.fact('To', st.target));
       var f = p.facts || {};
-      if (o.op === 'infuse') body.appendChild(H.row('Capacity gained', kw(f.gained_mw)));
+      if (o.op === 'infuse') body.appendChild(H.fact('Capacity gained', kw(f.gained_mw)));
       if (o.op === 'defuse') {
-        body.appendChild(H.row('Capacity removed now', kw(f.capacity_lost_mw)));
-        body.appendChild(H.row('Alpha returns in', H.duration(f.cooldown_secs, { zero: 'now' })));
+        body.appendChild(H.fact('Capacity removed now', kw(f.capacity_lost_mw)));
+        body.appendChild(H.fact('Alpha returns in', H.duration(f.cooldown_secs, { zero: 'now' })));
       }
       if (o.op === 'migrate') {
-        body.appendChild(H.row('Net capacity',
+        body.appendChild(H.fact('Net capacity',
           (f.net_mw < 0 ? '−' : '+') + kw(Math.abs(f.net_mw))));
       }
       H.confirmModal(o.confirm, body, o.cta, function () {
@@ -1308,10 +1308,10 @@
 
   function cancelDefusion(row) {
     var body = H.el('div');
-    body.appendChild(H.row('Player', row.player_name));
-    body.appendChild(H.row('Amount', alpha(row.amount_ualpha)));
-    body.appendChild(H.row('Reactor', row.reactor_id || row.validator));
-    body.appendChild(H.row('Re-stakes at', 'block ' + row.creation_height));
+    body.appendChild(H.fact('Player', row.player_name));
+    body.appendChild(H.fact('Amount', alpha(row.amount_ualpha)));
+    body.appendChild(H.fact('Reactor', row.reactor_id || row.validator));
+    body.appendChild(H.fact('Re-stakes at', 'block ' + row.creation_height));
     H.confirmModal('Cancel this defusion and re-stake?', body, 'Re-stake', function () {
       Board.T.core.invoke('mcp_infusion_cancel_defusion', {
         address: row.address, validator: row.validator,
@@ -1327,7 +1327,7 @@
 
   function restartReactor(id) {
     var body = H.el('div');
-    body.appendChild(H.row('Reactor', id));
+    body.appendChild(H.fact('Reactor', id));
     body.appendChild(H.el('div', null,
       'Resyncs the reactor from live staking. Permissionless, and the fix for a validator that '
       + 'was unjailed but never rebonded — which leaves every infusion in it earning nothing.'));
@@ -1877,15 +1877,10 @@
   // Dry-run first and always: the preview names the sender, resolves the
   // destination against the roster, and flags an address we don't know BEFORE
   // anything is signed. The backend re-runs these gates on execute.
-  // A read-only fact row: label above value, value free to wrap.
-  function formFact(label, value, title) {
-    var d = H.el('div', 'form-fact');
-    d.appendChild(H.el('div', 'form-fact-label', label));
-    var v = H.el('div', 'form-fact-value', value);
-    if (title) v.title = title;
-    d.appendChild(v);
-    return d;
-  }
+  // Was a second copy of what is now H.fact — the confirm dialogue these forms
+  // open could not reach it, so it used the label/value ROW instead and the two
+  // halves of one flow stopped looking alike.
+  var formFact = H.fact;
 
   function shortAddress(a) {
     a = String(a || '');
@@ -2004,14 +1999,15 @@
       var p = preview;
       if (!p) return;
       var body = H.el('div');
-      body.appendChild(H.el('div', 'ops-muted',
-        'Irreversible — the funds leave ' + p.from.name + ' immediately.'));
+      // No caveat line. "Irreversible — the funds leave X immediately" restated
+      // what Send means; the attention rail, the destructive CTA and the four
+      // facts below are the warning.
       // The confirm never shows the cosmetic name alone.
-      body.appendChild(H.row('Asset', H.denomName(denom, reg, { style: 'both' })));
-      body.appendChild(H.row('Amount', H.denomQty(p.amount, denom, reg)
+      body.appendChild(H.fact('Asset', H.denomName(denom, reg, { style: 'both' })));
+      body.appendChild(H.fact('Amount', H.denomQty(p.amount, denom, reg)
         + ' (' + H.fmtInt(p.amount) + ' base units)'));
-      body.appendChild(H.row('From', p.from.name + ' · ' + p.from.address));
-      body.appendChild(H.row('To', (p.recipient || 'EXTERNAL') + ' · ' + p.to));
+      body.appendChild(H.fact('From', p.from.name + ' · ' + p.from.address));
+      body.appendChild(H.fact('To', (p.recipient || 'EXTERNAL') + ' · ' + p.to));
       H.confirmModal('Send ' + H.denomName(denom, reg, { style: 'both' }) + '?',
         body, 'Send', function () {
           out.innerHTML = '';

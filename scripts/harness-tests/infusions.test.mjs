@@ -167,10 +167,30 @@ check('and when the Alpha comes back', /alpha returns in/.test(text(drawer()))
 // Nothing is signed from the drawer directly — the confirm restates the two
 // figures that matter before the message goes out.
 drawer().querySelector('.drawer-cta .mass-btn').click();
-await until(() => D.querySelector('.modal-overlay'));
-const modal = () => D.querySelector('.modal-overlay');
+await until(() => D.querySelector('.ops-modal-overlay'));
+const modal = () => D.querySelector('.ops-modal-overlay');
 check('the confirm restates the immediate capacity loss',
   /Capacity removed now/.test(text(modal())), text(modal()).slice(0, 200));
+/* The confirm is SUI's system modal and the form's own fact rows.
+ *
+ * Both had drifted. The overlay was a hand-written `.modal-overlay` — a second
+ * opinion about the fixed inset, the dim and the centring that SUI already
+ * has — and the body used the label/value ROW, which wraps at the FLEX level:
+ * a 44-character address is pushed onto its own line whole, stranding the
+ * label on a 36px row above it. Stacked facts are what the drawer that opened
+ * the dialogue already uses, so the two halves of one flow read alike.
+ */
+check('the overlay is SUI\u2019s own, not a local re-draw',
+  modal().classList.contains('sui-message-system-model-overlay'),
+  modal().className);
+check('the confirm states its facts in the form\u2019s idiom',
+  modal().querySelectorAll('.form-fact').length >= 3
+  && modal().querySelectorAll('.sui-data-card-row').length === 0,
+  modal().querySelectorAll('.form-fact').length + ' facts, '
+  + modal().querySelectorAll('.sui-data-card-row').length + ' rows');
+check('\u2026and its labels are SUI\u2019s label type, not a hand copy',
+  [...modal().querySelectorAll('.form-fact-label')]
+    .every((l) => l.classList.contains('sui-text-label')));
 const confirmBtn = () => modal().querySelectorAll('.sui-message-system-modal-cta-btn-wrapper a')[1];
 confirmBtn().click();
 await until(() => lastCall('mcp_infusion_defuse'), 3000);
@@ -212,7 +232,7 @@ check('the pending defusion shows when the Alpha returns',
 check('a migration in flight is read-only',
   pending[1].querySelectorAll('.mass-btn').length === 0);
 pending[0].querySelector('.mass-btn').click();
-await until(() => D.querySelector('.modal-overlay'));
+await until(() => D.querySelector('.ops-modal-overlay'));
 confirmBtn().click();
 await until(() => lastCall('mcp_infusion_cancel_defusion'), 3000);
 const cancelArgs = lastCall('mcp_infusion_cancel_defusion').args;

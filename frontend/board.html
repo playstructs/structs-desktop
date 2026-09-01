@@ -377,9 +377,18 @@
        on the viewport, the drawer owns the right ~460px, and that is exactly
        where its Cancel/Confirm buttons land. The irreversible action was the
        part you could not click. */
-    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
-      display: flex; align-items: center; justify-content: center; z-index: 2100; padding: var(--spacing-xl); }
-    .modal-overlay .sui-message-system-modal { max-height: 90%; overflow-y: auto; }
+    /* SUI's own `.sui-message-system-model-overlay` does the fixed inset, the
+       dim and the centring. It was reimplemented here under an invented name,
+       which meant a second opinion about all three.
+
+       The one thing it cannot supply is the stacking. Its z-index is
+       `--popup-z-index: 2000` — the SAME layer as the offcanvas drawer, and
+       later-in-DOM wins a tie. Every confirm on this board is opened FROM a
+       drawer, the modal is centred on the viewport, and the drawer owns the
+       right ~460px: the irreversible action was the part you could not click.
+       So one override, for the one property that is genuinely ours. */
+    .ops-modal-overlay { z-index: 2100; padding: var(--spacing-xl); }
+    .ops-modal-overlay .sui-message-system-modal { max-height: 90%; overflow-y: auto; }
     #detail-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
       display: flex; align-items: center; justify-content: center; z-index: 2050; }
     #detail-overlay .detail-panel { background: var(--surface-player-body);
@@ -670,12 +679,21 @@
     .secret-acts { flex: none; display: inline-flex; gap: var(--spacing-sm); }
     .secret-acts a { padding: 0 var(--spacing-sm); }
 
-    /* Read-only "here is the fact" rows inside a drawer form. */
-    #sui-offcanvas .form-fact { display: flex; flex-direction: column; gap: 1px;
+    /* Read-only "here is the fact" rows.
+       Not scoped to the drawer any more: the confirm dialogue a drawer opens
+       restates the same facts, and it was using the label/value ROW instead.
+       `.sui-data-card-row` is `flex-wrap: wrap`, so a 44-character address —
+       whose max-content width exceeds the row — is pushed onto its own line
+       before any shrinking can happen, leaving the label alone above it on a
+       36px row. Stacking on purpose says the same thing without the gap, and
+       says it the way the form the player just filled in said it. */
+    .form-fact { display: flex; flex-direction: column; gap: 1px;
       padding: var(--spacing-sm) 0; text-align: left; }
-    #sui-offcanvas .form-fact-label { font-family: 'ExtremeHazard', sans-serif; font-size: 8px;
-      line-height: 16px; text-transform: uppercase; color: var(--text-hint); }
-    #sui-offcanvas .form-fact-value { overflow-wrap: anywhere; }
+    /* The face, size, leading and uppercasing came from `.sui-text-label`, hand
+       copied. The label carries that class now and this rule keeps only the
+       one thing SUI does not decide: a read-only fact's label is a hint. */
+    .form-fact-label { color: var(--text-hint); }
+    .form-fact-value { overflow-wrap: anywhere; }
     #sui-offcanvas .form-note { text-align: left; font-size: 8px; color: var(--text-hint);
       margin-top: var(--spacing-xs); }
 
