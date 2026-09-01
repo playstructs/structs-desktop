@@ -28,7 +28,12 @@ const css = ['/frontend/css/sui/sui.css', '/frontend/css/main.css']
 const defined = new Set([...css.matchAll(/(--[a-z0-9-]+):/g)].map((m) => m[1]));
 
 const BUDGET = {
-  // file:            hex, px
+  // file:            colour, px
+  //
+  // "colour" counts `#rrggbb` AND `rgba()`/`hsl()`. It used to count only the
+  // first, so the numbers below jumped when the second was added — nothing got
+  // worse, the audit simply started seeing what was already there. Those are
+  // the OPEN work: `board.html` and `structs-config.js` carry most of them.
   //
   // hex: raidview and board were mostly DEAD FALLBACKS — `var(--border, #345)`
   // on tokens that exist, so the hex never rendered. Two files even gave the
@@ -42,17 +47,17 @@ const BUDGET = {
   // sizes — 8, 12 and 16 — and Team Ops invented a continuous one between
   // them (8, 9, 10, 11, 12, 13). Remapping is a visible change to a console
   // people use, so it wants doing deliberately rather than in a sweep.
-  'chat.html':          [2, 83],
+  'chat.html':          [0, 65],
   'chat.js':            [0, 0],
-  'raidview.html':      [0, 46],
+  'raidview.html':      [3, 45],
   // Four ambit background colours, copied from main.css and commented as
   // such. Only `space` (#222034) has a token — it is `--surface-default` —
   // and swapping one of four for a token would make the group inconsistent
   // for no gain. This is the "a count is not a bug" case in the header.
-  'raidview.js':        [4, 1],
-  'board.html':         [9, 99],
+  'raidview.js':        [4, 0],
+  'board.html':         [2, 87],
   'board.js':           [0, 0],
-  'board-pages.js':     [1, 11],
+  'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not
   // spacing and has no token.
   'board-gamestats.js': [0, 1],
@@ -61,8 +66,8 @@ const BUDGET = {
   // inches from the real UI — and it was the least audited file in the repo.
   // These numbers are where it stood when it was first measured, not an
   // endorsement of them.
-  'structs-config.js':  [14, 52],
-  'transfer.html':      [1, 1],
+  'structs-config.js':  [10, 34],
+  'transfer.html':      [0, 1],
   'transfer.js':        [0, 0],
   'chatrow.js':         [0, 0],
   'pfp.js':             [0, 0],
@@ -89,10 +94,41 @@ check('every window file has a budget', unlisted.length === 0,
 const gone = Object.keys(BUDGET).filter((f) => !windowFiles.includes(f));
 check('every budgeted file still exists', gone.length === 0, gone.join(', '));
 
+/* Comments are stripped before counting, for the reason the token check below
+ * already gives: a file that DOCUMENTS a value must not be reported as using
+ * one. A comment explaining why `.sui-screen-battery` is `width: 36px` counted
+ * as a hardcoded px and pushed two files over budget.
+ */
+function code(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+}
+
 for (const file of windowFiles) {
   const [maxHex, maxPx] = BUDGET[file] || [0, 0];
-  const src = readFileSync(root + '/frontend/' + file, 'utf8');
-  const hex = (src.match(/#[0-9A-Fa-f]{3,6}\b/g) || []).length;
+  const src = code(readFileSync(root + '/frontend/' + file, 'utf8'));
+  /* `rgba()` counts as a hardcoded colour too.
+   *
+   * The budget only ever matched `#rrggbb`, so a colour written as
+   * `rgba(120,180,255,.12)` was invisible to it — which is how the Team Ops
+   * progress bar painted a fill no token defines, past an audit that reported
+   * zero hardcoded colours for that file.
+   */
+  /* `#feed` is not a colour.
+   *
+   * `#[0-9A-Fa-f]{3,6}\b` matched the ID selectors `#feed-list` and
+   * `#feed-alerts` — "feed" is four hex digits and `\b` is happy to stop at
+   * the hyphen. Six phantom colours in board.html, which made the file look
+   * dirtier than it is and would have sent a later pass hunting for them.
+   * `#face`, `#dad`, `#beef`, `#cafe` are all the same trap.
+   *
+   * A colour literal ends the token: nothing word-ish, and no hyphen, may
+   * follow it.
+   */
+  const hex = (src.match(/#[0-9A-Fa-f]{3,8}(?![0-9A-Za-z_-])/g) || []).length
+    + (src.match(/\b(?:rgba?|hsla?)\(/g) || []).length;
   const px = (src.match(/: *[0-9]+px/g) || []).length;
   check(`${file}: ${hex} hex (budget ${maxHex})`, hex <= maxHex, 'went UP');
   check(`${file}: ${px} px (budget ${maxPx})`, px <= maxPx, 'went UP');
@@ -120,14 +156,101 @@ check('no window uses an undefined token or an 8px icon', failures === before1);
 // SUI publishes THREE font families — ExtremeHazard, DirectiveZero, Inter —
 // and five roles. Anything else is outside the system: Team Ops had three
 // event logs in `monospace`, which is not one of them.
+/* Every `sui-*` class a window uses must be one SUI actually defines.
+ *
+ * An invented one is INVISIBLE: it renders as an unstyled div, which looks like
+ * a styling mistake rather than a typo. The Pay window's player cards used
+ * `sui-result-row-body`, `-title` and `-subtitle` — none of which exist — and
+ * rendered as giant unstyled text beside a portrait, while every test passed.
+ *
+ * The rule is the same one that already governs CSS tokens here: if SUI does
+ * not define it, we are inventing, and the game will not look like the game.
+ */
+/* Pixel art has square corners.
+ *
+ * SUI sets `border-radius: 0` FOURTEEN separate times — it squares every
+ * corner on purpose, because a rounded one is a shape the tileset cannot draw
+ * and reads as a web widget dropped into the game. Our agent-UI surfaces had
+ * 8px and 6px radii on cards, chips, toasts and buttons.
+ */
+console.log('\n— nothing is rounded');
+const beforeRadius = failures;
+for (const file of windowFiles) {
+  const src = code(readFileSync(root + '/frontend/' + file, 'utf8'));
+  const rounded = [...new Set((src.match(/border-radius: *[^;'"}\n]+/g) || [])
+    .filter((r) => !/:\s*0\b/.test(r)))];
+  if (rounded.length) check(`${file} keeps its corners square`, false, rounded.join(', '));
+}
+check('no window rounds a corner', failures === beforeRadius);
+
+console.log('\n— only classes SUI defines');
+const suiCss = readFileSync(root + '/frontend/css/sui/sui.css', 'utf8')
+  + readFileSync(root + '/frontend/css/structicons.css', 'utf8')
+  + readFileSync(root + '/frontend/css/main.css', 'utf8');
+const definedClasses = new Set(
+  [...suiCss.matchAll(/\.(sui-[a-z0-9-]+)/g)].map((m) => m[1]));
+// Ours too: a few `sui-`-prefixed classes are declared by our own windows.
+for (const f of windowFiles) {
+  const src = readFileSync(root + '/frontend/' + f, 'utf8');
+  for (const m of src.matchAll(/\.(sui-[a-z0-9-]+)\s*[,{:]/g)) definedClasses.add(m[1]);
+}
+const beforeCls = failures;
+for (const file of windowFiles) {
+  const raw = readFileSync(root + '/frontend/' + file, 'utf8');
+  const src = code(raw);
+  const used = new Set();
+  // class="a b c" in markup, and el('div', 'a b c') / className = 'a b' in JS.
+  for (const m of src.matchAll(/(?:class(?:Name)?\s*=\s*|classList\.(?:add|toggle|contains)\()['"]([^'"]*)['"]/g)) {
+    m[1].split(/\s+/).forEach((c) => { if (c.startsWith('sui-')) used.add(c); });
+  }
+  for (const m of src.matchAll(/el\(\s*'[a-z]+'\s*,\s*'([^']*)'/g)) {
+    m[1].split(/\s+/).forEach((c) => { if (c.startsWith('sui-')) used.add(c); });
+  }
+  /* Known debt, ratcheted rather than waived — each is a real invented class
+   * with a real replacement, listed so the check can pass today and refuse to
+   * grow. Removing one from here must make the file pass, not fail.
+   */
+  // Empty, and kept so the next invented class has somewhere to be recorded
+  // deliberately rather than waved through.
+  const CLASS_DEBT = {};
+  const invented = [...used]
+    // A trailing `-` is a concatenation fragment (`'sui-icon-' + name`), not a
+    // class anyone applies. Matching it would report the extractor, not the code.
+    .filter((c) => !c.endsWith('-'))
+    .filter((c) => !(CLASS_DEBT[file] || []).includes(c))
+    .filter((c) => !definedClasses.has(c));
+  // A waiver that stops being true is worse than none.
+  const stale = (CLASS_DEBT[file] || []).filter((c) => definedClasses.has(c) || !used.has(c));
+  if (stale.length) {
+    check(`${file}: CLASS_DEBT is still true`, false,
+      'no longer invented/used: ' + stale.join(', ') + ' — remove from CLASS_DEBT');
+  }
+  if (invented.length) {
+    check(`${file} uses only classes SUI defines`, false, invented.join(', '));
+  }
+}
+check('no window invents a sui-* class', failures === beforeCls);
+
 console.log('\n— only SUI families');
 const before2 = failures;
 for (const file of readdirSync(root + '/frontend').filter((f) => /\.(html|js)$/.test(f) && !f.startsWith('_'))) {
   const raw = readFileSync(root + '/frontend/' + file, 'utf8');
   const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '');
-  const fams = [...src.matchAll(/font-family: *([^;'"}\n]+)/g)]
-    .map((m) => m[1].trim().split(',')[0].replace(/['"]/g, '').trim())
-    .filter((f) => f && f !== 'inherit');
+  /* The `font:` SHORTHAND counts too.
+   *
+   * This check only ever read `font-family`, so
+   * `font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif` walked
+   * straight past it — the OS's UI font, over a pixel-art game, on the update
+   * bar that appears before anything else on startup.
+   *
+   * The shorthand's family is everything after the size/line-height, so the
+   * first token that is not a number, a keyword or a `/` starts it.
+   */
+  const shorthand = [...src.matchAll(/\bfont: *[^;'"}\n]*?(?:\d[^ ;'"}\n]*) +([^;'"}\n]+)/g)]
+    .map((m) => m[1].trim().split(',')[0].replace(/['"]/g, '').trim());
+  const fams = [...shorthand, ...[...src.matchAll(/font-family: *([^;'"}\n]+)/g)]
+    .map((m) => m[1].trim().split(',')[0].replace(/['"]/g, '').trim())]
+    .filter((f) => f && f !== 'inherit' && !/^\d/.test(f));
   const alien = [...new Set(fams)].filter((f) => !['ExtremeHazard', 'DirectiveZero', 'Inter'].includes(f));
   // ONE named exception, and it is a decision rather than an oversight.
   //
@@ -163,7 +286,7 @@ console.log('\n— type sizes are SUI roles');
  * panel people use, so it wants doing deliberately. Listed sizes may only be
  * REMOVED — a new odd size in that file still fails.
  */
-const TYPE_DEBT = { 'structs-config.js': ['11', '13', '15'] };
+const TYPE_DEBT = { 'structs-config.js': ['11', '15'] };
 for (const file of windowFiles) {
   const src = readFileSync(root + '/frontend/' + file, 'utf8');
   const sizes = [

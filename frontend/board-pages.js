@@ -749,18 +749,25 @@
     var used = b.capacity_mw > 0 ? Math.min(1, b.load_mw / b.capacity_mw) : 0;
     var pct = Math.round(used * 1000) / 10;
     var meter = H.el('div', 'alloc-meter');
-    var bar = H.el('div', 'alloc-meter-bar');
-    var fill = H.el('i');
-    fill.style.width = (used * 100) + '%';
-    // Amber under 15% spare, red when there is effectively nothing left.
+    // The game's chunked bar, the same one the action bar draws. This was a
+    // second hand-rolled smooth fill — a different visual language from
+    // everything beside it.
+    var bar = H.progressBar(used);
+    // Amber under 15% spare, red when there is effectively nothing left. The
+    // chunk is a plain background, so the state rides the component rather
+    // than replacing it.
     var spare = b.capacity_mw > 0 ? b.allocatable_mw / b.capacity_mw : 1;
-    bar.className += spare < 0.01 ? ' full' : (spare < 0.15 ? ' tight' : '');
-    bar.appendChild(fill);
+    var state = spare < 0.01 ? 'full' : (spare < 0.15 ? 'tight' : '');
+    if (state) bar.classList.add('alloc-mod-' + state);
     meter.appendChild(bar);
     var cap = H.el('div', 'alloc-meter-caption');
     cap.appendChild(H.el('span', null,
       H.fmtWatts(b.load_mw) + ' allocated of ' + H.fmtWatts(b.capacity_mw) + ' capacity'));
-    cap.appendChild(H.el('span', 'alloc-meter-pct', pct + '%'));
+    // SUI's own text roles say "this number is a problem" — the same words the
+    // game uses, rather than a colour invented for this one meter.
+    cap.appendChild(H.el('span', 'alloc-meter-pct'
+      + (state === 'full' ? ' sui-text-destructive'
+        : state === 'tight' ? ' sui-text-warning' : ''), pct + '%'));
     meter.appendChild(cap);
     host.appendChild(meter);
 

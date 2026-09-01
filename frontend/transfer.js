@@ -157,27 +157,84 @@
    * shared composer, which validates every layer index before it reaches a
    * path. No portrait is fine: it draws the game's placeholder.
    */
+  /* One party, built exactly as the GAME builds a recipient row.
+   *
+   * Copied structurally from `AccountRecipientSearchResults.renderResultRowHTML`
+   * in structs-webapp — the screen the game itself shows when you are choosing
+   * who to send Alpha to. That is the authority for what a player looks like
+   * when money is about to move, so this is the same DOM with the same classes:
+   *
+   *   .sui-result-row
+   *     .sui-result-row-left-section
+   *       .sui-result-row-portrait > .sui-result-row-portrait-image
+   *       .sui-result-row-player-info > .sui-text-label-block
+   *     .sui-result-row-right-section
+   *
+   * The previous version invented `sui-result-row-body`, `-title` and
+   * `-subtitle`. None exist, so the card rendered as unstyled text beside a
+   * portrait — which is what "you re-implemented a player card again" was.
+   */
   function partyCard(role, name, playerId, address, pfpAttrs) {
     var row = el('div', 'sui-result-row');
+
+    var left = el('div', 'sui-result-row-left-section');
     var box = el('div', 'sui-result-row-portrait');
     box.appendChild(window.StructsPfp.fillPortrait(
-      el('div', 'sui-result-row-portrait-image pfp-frame'), pfpAttrs));
-    row.appendChild(box);
+      el('div', 'sui-result-row-portrait-image'), pfpAttrs));
+    left.appendChild(box);
 
-    var body = el('div', 'sui-result-row-body');
-    var head = el('div', 'sui-result-row-title');
-    head.appendChild(el('span', 'sui-text-label', role));
-    head.appendChild(document.createTextNode(' ' + (name || playerId || '?')));
-    body.appendChild(head);
+    var info = el('div', 'sui-result-row-player-info');
+    var block = el('div', 'sui-text-label-block');
+    // Name on the first line, id on the second as a hint — the game's own
+    // "[TAG] Username / PID #1-61" shape.
+    block.appendChild(document.createTextNode(name || playerId || '?'));
+    block.appendChild(el('br'));
+    var pid = el('span', 'sui-text-hint');
+    // The id AND the address: the id is who, the address is where the money
+    // actually goes, and only one of them can be checked against the chain.
+    pid.textContent = (playerId ? 'PID #' + playerId + ' · ' : '') + (address || '');
+    block.appendChild(pid);
+    info.appendChild(block);
+    left.appendChild(info);
+    row.appendChild(left);
 
-    var sub = el('div', 'sui-result-row-subtitle sui-text-tiny');
-    // Both, because they answer different questions: the id is who, and the
-    // address is where the money actually goes.
-    sub.textContent = (playerId ? playerId + ' · ' : '') + (address || '');
-    sub.classList.add('tx-party-addr');
-    body.appendChild(sub);
-    row.appendChild(body);
+    // FROM / TO rides the right section, where the game puts a row's resources.
+    var right = el('div', 'sui-result-row-right-section');
+    right.appendChild(el('span', 'sui-text-label', role));
+    row.appendChild(right);
     return row;
+  }
+
+  /* Size the window to its content.
+   *
+   * The window was a fixed 420x460 and the content outgrew it — two player
+   * cards, an asset picker, a unit picker, the amount and the server's answer
+   * — so the end of it sat below the fold behind a scrollbar. On a screen
+   * where a wrong number costs real Alpha, nothing should be hidden.
+   *
+   * Measured rather than guessed, because the height genuinely varies: the
+   * asset row is absent for a player holding only Alpha, and the preview adds
+   * lines as it answers. Width is left alone; only the height moves.
+   */
+  var MAX_H = 900;   // taller than any real content; a runaway must not eat the screen
+  function fitWindow() {
+    var W = T && T.window;
+    if (!W || !W.getCurrentWindow || !W.LogicalSize) return;
+    var layout = document.getElementById('tx-layout');
+    if (!layout) return;
+    // Next frame: the browser has to lay the new nodes out before it can be
+    // asked how tall they are.
+    requestAnimationFrame(function () {
+      var need = Math.ceil(layout.getBoundingClientRect().height)
+        + (window.outerHeight - window.innerHeight);   // title bar and chrome
+      if (!need || need > MAX_H) need = Math.min(need || MAX_H, MAX_H);
+      // Only ever grow, and only when it matters: shrinking on every repaint
+      // would make the window twitch while the preview streams in.
+      if (need <= window.outerHeight + 2) return;
+      try {
+        W.getCurrentWindow().setSize(new W.LogicalSize(window.outerWidth, need));
+      } catch (e) { /* a window that will not resize is not a reason to fail */ }
+    });
   }
 
   function renderParties() {
@@ -326,6 +383,8 @@
       document.getElementById('tx-send-label').textContent =
         ' Send ' + fmtAmount(p.amount);
       setReady(true);
+      // The server's answer added lines; the window takes the room for them.
+      fitWindow();
     }).catch(function (e) {
       if (seq !== S.seq) return;
       clearOut();
@@ -389,6 +448,7 @@
       renderUnits();
       renderTitle();
       renderFacts();
+      fitWindow();
     }).catch(function (e) { out('error', 'inventory unavailable: ' + e); });
   }
 

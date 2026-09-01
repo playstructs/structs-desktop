@@ -1216,8 +1216,19 @@ cat > "$TFIX" <<'TX_EOF'
       (listeners[n] = listeners[n] || []).push(cb);
       return Promise.resolve(function () {});
     } },
-    window: { getCurrentWindow: function () { return { close: function () {} }; } },
+    // The Pay window sizes itself to its content; the harness records what it
+    // asked for so a test can check it grew rather than scrolled.
+    window: {
+      LogicalSize: function (w, h) { this.width = w; this.height = h; },
+      getCurrentWindow: function () {
+        return {
+          close: function () {},
+          setSize: function (s) { window.__HARNESS_SIZES__.push(s); },
+        };
+      },
+    },
   };
+  window.__HARNESS_SIZES__ = [];
 })();
 TX_EOF
 

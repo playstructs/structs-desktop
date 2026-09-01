@@ -30,6 +30,17 @@
        from the shipped webapp; these rules only place them. */
 
     *, *::before, *::after { box-sizing: border-box; }
+    /* ...but NOT SUI's own components, which the game leaves on the browser
+       default and which are authored against it.
+       `.sui-screen-battery` is `width: 36px` with a 2px themed border: five
+       4px chunks and four 4px gaps fit that content box EXACTLY. Under a
+       border-box reset the content is 32px instead, the chunks flex-shrink to
+       3.203125px, and pixel art at a fractional width is mush — which is what
+       "the charge bars are wonky, the real map looks cleaner" was.
+       The game has no such reset (normalize.css scopes box-sizing to `legend`
+       and the radio/checkbox inputs), so this restores SUI to the box model it
+       was drawn in. */
+    [class^="sui-"], [class*=" sui-"] { box-sizing: content-box; }
     html, body { height: 100%; margin: 0; overflow: hidden; }
     body {
       background: var(--page-background);

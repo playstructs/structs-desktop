@@ -9,6 +9,17 @@
   <link rel="stylesheet" href="css/main.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; }
+    /* ...but NOT SUI's own components, which the game leaves on the browser
+       default and which are authored against it.
+       `.sui-screen-battery` is `width: 36px` with a 2px themed border: five
+       4px chunks and four 4px gaps fit that content box EXACTLY. Under a
+       border-box reset the content is 32px instead, the chunks flex-shrink to
+       3.203125px, and pixel art at a fractional width is mush — which is what
+       "the charge bars are wonky, the real map looks cleaner" was.
+       The game has no such reset (normalize.css scopes box-sizing to `legend`
+       and the radio/checkbox inputs), so this restores SUI to the box model it
+       was drawn in. */
+    [class^="sui-"], [class*=" sui-"] { box-sizing: content-box; }
     html, body { height: 100%; overflow-x: hidden; }
     body { margin: 0; background: var(--page-background); }
     .height-100 { height: 100%; }
@@ -137,7 +148,7 @@
        bech32 address in it inline with the values, centred, and the whole
        thing read as a wall. */
     #grass-list li { margin: 0; padding: var(--spacing-sm) var(--spacing-xs); display: block; text-align: left;
-                     border-bottom: 1px solid rgba(167,192,198,.10); }
+                     border-bottom: 1px solid var(--border-subtle); }
     #grass-list li:last-child { border-bottom: 0; }
     /* Wrap, and give the subject a floor. A long category name
        (struct_block_ore_refine_start is 203px) plus the time and the block
@@ -163,8 +174,8 @@
     .grass-chips { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-sm); margin-top: var(--spacing-xs); }
     /* Discrete pills so pairs stop running together into prose. */
     .grass-chip { min-width: 0; max-width: 100%; overflow-wrap: anywhere;
-                  padding: 0 var(--spacing-sm); border: 1px solid rgba(167,192,198,.16);
-                  background: rgba(167,192,198,.05); line-height: 1.6; }
+                  padding: 0 var(--spacing-sm); border: 1px solid var(--border-subtle);
+                  background: var(--surface-player-body); line-height: 1.6; }
     .grass-chip b { font-weight: 500; color: var(--text-hint); }
     /* TX queue rows */
     .tx-btns { display: inline-flex; gap: var(--spacing-sm); align-items: center; }
@@ -172,20 +183,28 @@
     .tx-pos { opacity: .55; flex: none; min-width: 18px; text-align: right; }
     /* AGENT UI directives (toasts + prompts) — board-window only. */
     #agent-ui:empty { display: none; }
-    .agent-card { border: 1px solid rgba(120,180,255,.45); border-radius: 8px;
-                  background: rgba(120,180,255,.08); padding: var(--spacing-md) var(--spacing-lg); margin-bottom: var(--spacing-md); }
+    /* Agent UI. Built before the SUI pass and never brought through it: it had
+       ROUNDED CORNERS in a pixel-art game — SUI sets `border-radius: 0`
+       fourteen separate times, squaring every corner on purpose — and painted
+       itself in a sky blue (`rgba(120,180,255,…)`) that is nowhere in the
+       palette. Square corners, and the game's own player-surface colours. */
+    .agent-card { border: 1px solid var(--border-focus-friendly-dark);
+                  background: var(--surface-player-body);
+                  padding: var(--spacing-md) var(--spacing-lg); margin-bottom: var(--spacing-md); }
     .agent-card-head { display: flex; align-items: baseline; gap: var(--spacing-md); }
-    .agent-mark { font-family: 'DirectiveZero', sans-serif; font-size: 8px; font-weight: 700; padding: 1px var(--spacing-sm); border-radius: 8px;
-                  background: rgba(120,180,255,.18); color: #9ecbff; flex: none; }
-    .agent-title { font-weight: 600; flex: 1; }
+    .agent-mark { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+                  text-transform: uppercase; padding: 1px var(--spacing-sm);
+                  background: var(--surface-player-highlight);
+                  color: var(--text-player-primary); flex: none; }
+    .agent-title { flex: 1; }
     .agent-x { cursor: pointer; opacity: .7; flex: none; padding: 0 var(--spacing-sm); }
     .agent-x:hover { opacity: 1; }
     .agent-body { margin: var(--spacing-sm) 0 0; font-family: 'DirectiveZero', sans-serif; font-size: 16px; white-space: pre-wrap; }
     .agent-buttons { display: flex; gap: var(--spacing-md); margin-top: var(--spacing-md); flex-wrap: wrap; }
-    .agent-btn { cursor: pointer; border: 1px solid rgba(120,180,255,.55); border-radius: 6px;
-                 background: rgba(120,180,255,.14); color: inherit; padding: var(--spacing-sm) var(--spacing-lg); font: inherit; }
-    .agent-btn:hover { background: rgba(120,180,255,.28); }
-    .agent-toast { border-color: rgba(255,180,84,.5); background: rgba(255,180,84,.08); }
+    /* The buttons themselves are `a.sui-screen-btn` in board.js now; this only
+       lays the row out. */
+    .agent-toast { border-color: var(--border-focus-enemy-dark);
+                   background: var(--surface-enemy-body); }
     /* ── Native SUI result-rows (raid-scan / roster idiom), laid out as a
        RESPONSIVE GRID so rows flow into 1→N columns as the window widens and
        collapse to one column when narrow — using the full horizontal space
@@ -229,7 +248,7 @@
     #board-layout .sui-result-row-portrait-icon { width: 40px; height: 40px; flex: none; }
     #board-layout .sui-result-row-portrait-image {
       position: relative; width: 40px; height: 40px; overflow: hidden;
-      border: 1px solid var(--border-subtle); background: #0b1017;
+      border: 1px solid var(--border-subtle); background: var(--surface-default);
     }
     /* Let the webapp's own .pfp-viewer-layer rule position the 5 layers (a 72px
        layer centered, then cropped by the 40px frame — the native
@@ -247,7 +266,7 @@
     #sui-offcanvas .sui-result-row-player-info { min-width: 0; }
     #board-layout .sui-result-row .sui-text-label-block,
     #sui-offcanvas .sui-result-row .sui-text-label-block { overflow-wrap: anywhere; }
-    #board-layout .sui-result-row:hover { background: rgba(120,180,255,.07); }
+    #board-layout .sui-result-row:hover { background: var(--surface-player-highlight); }
     /* Values must never break mid-unit ("1062 / 1077 kW" stays on one line). */
     .sui-resource { font-variant-numeric: tabular-nums; white-space: nowrap; }
     .sui-resource span { white-space: nowrap; }
@@ -322,7 +341,7 @@
     .appear-layer-ctl { display: flex; align-items: center; gap: var(--spacing-md); flex-wrap: wrap;
                         flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
     .appear-thumb { position: relative; width: 34px; height: 34px; overflow: hidden; flex: none;
-      border: 1px solid var(--border-subtle); background: #0b1017; }
+      border: 1px solid var(--border-subtle); background: var(--surface-default); }
     .appear-thumb-btn { cursor: pointer; }
     .appear-thumb-btn:hover { border-color: var(--accent-primary); }
     .appear-step { display: inline-flex; padding: var(--spacing-xs) var(--spacing-sm); cursor: pointer; opacity: .8; }
@@ -361,9 +380,6 @@
     #detail-overlay .detail-x { cursor: pointer; opacity: .7; padding: 0 var(--spacing-sm); }
     #detail-overlay .detail-x:hover { opacity: 1; }
     /* Toolbars */
-    .fbat { display: inline-flex; gap: var(--spacing-xs); align-items: center; }
-    .fbat i { width: 5px; height: 10px; background: rgba(120,180,255,.15); display: inline-block; }
-    .fbat i.on { background: var(--accent-primary); }
     .attn { color: var(--text-warning); }
     .err { color: var(--accent-destructive); }
     /* Mass-action toolbar buttons: keep SUI look, add busy state. */
@@ -373,8 +389,8 @@
        grow sideways instead. */
     .mass-btn span { white-space: nowrap; }
     #mass-progress { width: 100%; margin: var(--spacing-sm) 0; }
-    .bar { height: 8px; background: rgba(120,180,255,.12); border: 1px solid var(--border); width: 80px; }
-    .bar > i { display: block; height: 100%; background: var(--accent-primary); width: 0; transition: width .3s; }
+    /* The progress bar is SUI's own chunked component now (see board.js);
+       the hand-rolled `.bar` it replaced painted an untokenised rgba fill. */
     /* CONFIG page */
     .cfg-group { margin-bottom: var(--spacing-sm); }
     .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md);
@@ -670,12 +686,12 @@
        8.45 MW / 1.22 W" — three different units and no signal that the grid is
        full. The bar carries that instantly; the numbers stay for precision. */
     .alloc-meter { display: flex; flex-direction: column; gap: var(--spacing-xs); margin-bottom: var(--spacing-md); }
-    .alloc-meter-bar { height: 10px; border: 1px solid var(--border);
-      background: var(--surface-player-body); position: relative; }
-    .alloc-meter-bar > i { display: block; height: 100%; background: var(--text-player-primary);
-      transition: width .3s; }
-    .alloc-meter-bar.tight > i { background: var(--text-warning); }
-    .alloc-meter-bar.full  > i { background: var(--text-enemy-primary); }
+    /* The bar is SUI's chunked component (see `H.progressBar`). Only the STATE
+       rides on top: a grid with no headroom left is the one thing this meter
+       exists to say, and the chunk is a plain background so it can say it
+       without replacing the component. */
+    .alloc-mod-tight .sui-action-bar-progress-bar-chunk.sui-mod-filled { background: var(--text-warning); }
+    .alloc-mod-full  .sui-action-bar-progress-bar-chunk.sui-mod-filled { background: var(--text-enemy-primary); }
     .alloc-meter-caption { display: flex; justify-content: space-between; align-items: baseline;
       gap: var(--spacing-md); font-family: 'DirectiveZero', sans-serif; font-size: 8px; color: var(--text-hint); text-align: left; }
     .alloc-meter-pct { font-variant-numeric: tabular-nums; flex: none; }

@@ -1641,7 +1641,12 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         var ae = document.activeElement;
         if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return true;
         if (ae && ae.isContentEditable) return true;
-        var oc = document.querySelector('.sui-offcanvas');
+        // `#sui-offcanvas` — an ID, which is how SUI styles and how the game
+        // creates it. This was `.sui-offcanvas`, a class nothing in the game
+        // carries, so the guard never saw the real drawer: the hotkey fired
+        // while the player was reading it. It matched only our own agent-UI
+        // surface, which had borrowed the class decoratively.
+        var oc = document.getElementById('sui-offcanvas');
         if (oc && oc.offsetParent !== null) return true;
         var dlg = document.getElementById('menu-page-dialogue');
         if (dlg && !dlg.classList.contains('hidden')) return true;
@@ -1990,7 +1995,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // found on purpose.
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-body" style="padding:6px;">';
-      html += '<div id="debug-comms" class="sui-button sui-mod-secondary" style="cursor:pointer; text-align:center; padding:6px 10px;">Comms<span id="debug-comms-unread" class="sui-badge sui-mod-default" style="display:none; margin-left:6px;"></span></div>';
+      // `a.sui-screen-btn`, the button SUI actually defines. These were
+      // `<div class="sui-button">` — a class that does not exist — which is
+      // why each carried hand-rolled cursor, padding and centring: it was
+      // rendering as a bare div. Same component the engine toggle below uses.
+      html += '<a href="javascript:void(0)" id="debug-comms" class="sui-screen-btn sui-mod-secondary">Comms<span id="debug-comms-unread" class="sui-badge sui-mod-default" style="display:none; margin-left:var(--spacing-md);"></span></a>';
       html += '<div id="debug-comms-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">federated guild chat · opens in its own window</div>';
       html += '</div></div>';
 
@@ -1998,7 +2007,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // a bad time and shouldn't have to hunt.
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-body" style="padding:6px;">';
-      html += '<div id="debug-download-logs" class="sui-button sui-mod-secondary" style="cursor:pointer; text-align:center; padding:6px 10px;">Download logs</div>';
+      html += '<a href="javascript:void(0)" id="debug-download-logs" class="sui-screen-btn sui-mod-secondary">Download logs</a>';
       html += '<div id="debug-download-logs-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">7 days of activity as a zip · no wallet keys included</div>';
       html += '</div></div>';
 
@@ -2006,7 +2015,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // destination people come here to open, not a diagnostic they scroll to.
       html += '<div class="sui-data-card">';
       html += '<div class="sui-data-card-body" style="padding:6px;">';
-      html += '<div id="debug-gamestats" class="sui-button sui-mod-secondary" style="cursor:pointer; text-align:center; padding:6px 10px;">Game Stats</div>';
+      html += '<a href="javascript:void(0)" id="debug-gamestats" class="sui-screen-btn sui-mod-secondary">Game Stats</a>';
       html += '<div id="debug-gamestats-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">whole-universe dashboard · opens in its own window</div>';
       html += '</div></div>';
 
@@ -2783,22 +2792,32 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     // leans on the global SUI classes; this only adds layout + attribution.
     (function injectCss() {
       if (document.getElementById('agent-ui-style')) return;
+      /* The agent's own surfaces, and they render INSIDE the game window —
+       * inches from the real UI, which is the worst possible place to invent a
+       * palette. This block used to: a sky blue (#9ecbff / rgba(120,180,255))
+       * and a periwinkle (#5b8def) that appear nowhere in SUI, plus
+       * hand-picked amber, red and green. Every colour is now a token, and the
+       * sizes are the 8/12/16 type roles and the 2/4/8/12/16 spacing scale.
+       *
+       * The only rgba left is the scrim and the shadows — a dim over content
+       * and a drop shadow have no token, and the game's own CSS does the same.
+       */
       var css =
-        '.agent-ui-mark{display:inline-block;font-size:11px;font-weight:700;opacity:.85;margin-left:6px;padding:1px 6px;border-radius:8px;background:rgba(120,180,255,.18);color:#9ecbff;vertical-align:middle}' +
+        '.agent-ui-mark{display:inline-block;font-family:ExtremeHazard,sans-serif;font-size:8px;line-height:16px;text-transform:uppercase;margin-left:var(--spacing-md);padding:1px var(--spacing-sm);background:var(--surface-player-highlight);color:var(--text-player-primary);vertical-align:middle}' +
         '.agent-ui-overlay{position:fixed;inset:0;z-index:99999;display:flex;justify-content:flex-end;background:rgba(0,0,0,.35)}' +
         '.agent-ui-overlay.agent-ui-center{align-items:center;justify-content:center}' +
         '.agent-ui-surface{max-width:420px;width:90%;max-height:90vh;overflow:auto;margin:0;box-shadow:0 0 40px rgba(0,0,0,.5)}' +
-        '.agent-ui-row{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.07)}' +
-        '.agent-ui-row .k{opacity:.7}' +
-        '.agent-ui-item{display:block;width:100%;text-align:left;margin:6px 0}' +
-        '.agent-ui-item small{display:block;opacity:.65;font-weight:400}' +
-        '.agent-ui-toaststack{position:fixed;right:16px;bottom:16px;z-index:100000;display:flex;flex-direction:column;gap:8px;max-width:360px}' +
-        '.agent-ui-toast{padding:10px 12px;border-radius:8px;background:#1b2233;color:#dfe7f5;border-left:4px solid #5b8def;box-shadow:0 4px 16px rgba(0,0,0,.4);font-size:13px}' +
-        '.agent-ui-toast.level-warning{border-left-color:#e0a93b}' +
-        '.agent-ui-toast.level-error{border-left-color:#e05b5b}' +
-        '.agent-ui-badge{margin:2px;padding:3px 8px;border-radius:8px;font-size:12px;background:rgba(120,180,255,.15);color:#9ecbff;display:inline-flex;gap:6px;align-items:center}' +
-        '.agent-ui-badge.theme-enemy{background:rgba(224,91,91,.18);color:#ffb3b3}' +
-        '.agent-ui-badge.theme-player{background:rgba(94,200,140,.18);color:#9ff0bf}';
+        '.agent-ui-row{display:flex;justify-content:space-between;gap:var(--spacing-lg);padding:var(--spacing-sm) 0;border-bottom:1px solid var(--border-subtle)}' +
+        '.agent-ui-row .k{color:var(--text-hint)}' +
+        '.agent-ui-item{display:block;width:100%;text-align:left;margin:var(--spacing-md) 0}' +
+        '.agent-ui-item small{display:block;color:var(--text-hint)}' +
+        '.agent-ui-toaststack{position:fixed;right:var(--spacing-xl);bottom:var(--spacing-xl);z-index:100000;display:flex;flex-direction:column;gap:var(--spacing-md);max-width:360px}' +
+        '.agent-ui-toast{padding:var(--spacing-lg);background:var(--surface-player-body);color:var(--text-body);border-left:4px solid var(--accent-primary);box-shadow:0 4px 16px rgba(0,0,0,.4);font-size:12px}' +
+        '.agent-ui-toast.level-warning{border-left-color:var(--text-warning)}' +
+        '.agent-ui-toast.level-error{border-left-color:var(--text-enemy-primary)}' +
+        '.agent-ui-badge{margin:var(--spacing-xs);padding:var(--spacing-xs) var(--spacing-md);font-size:12px;background:var(--surface-player-highlight);color:var(--text-player-primary);display:inline-flex;gap:var(--spacing-md);align-items:center}' +
+        '.agent-ui-badge.theme-enemy{background:var(--surface-enemy-body);color:var(--text-enemy-primary)}' +
+        '.agent-ui-badge.theme-player{background:var(--surface-player-highlight);color:var(--text-player-primary)}';
       var st = document.createElement('style');
       st.id = 'agent-ui-style';
       st.textContent = css;
@@ -2898,8 +2917,12 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         : bodyHtml(c, variant);
 
       overlay.innerHTML =
-        '<div class="sui-panel sui-offcanvas sui-theme-' + esc(c.theme || 'neutral') + ' agent-ui-surface">' +
-          '<div class="sui-offcanvas-header sui-screen-nav-item">' + title + ' <span class="agent-ui-mark">⚡ Agent</span>' +
+        // No `sui-offcanvas` / `sui-offcanvas-header`: SUI styles the drawer by
+        // ID and defines neither as a class, so both were inert — decoration
+        // that read as structure. `.sui-panel` + the theme is what actually
+        // draws this surface, and `.sui-screen-nav-item` the header.
+        '<div class="sui-panel sui-theme-' + esc(c.theme || 'neutral') + ' agent-ui-surface">' +
+          '<div class="sui-screen-nav-item">' + title + ' <span class="agent-ui-mark">⚡ Agent</span>' +
             '<a class="sui-screen-nav-close agent-ui-close" href="javascript:void(0)">✕</a></div>' +
           '<div class="sui-offcanvas-body">' + inner + '</div>' +
         '</div>';
@@ -3010,9 +3033,15 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       bar.style.cssText = [
         'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:2147483647',
         'display:flex', 'align-items:center', 'gap:12px',
-        'padding:8px 14px', 'box-sizing:border-box',
-        'background:#133546', 'color:#fff',
-        'font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+        'padding:var(--spacing-md) var(--spacing-xl)', 'box-sizing:border-box',
+        // Tokens, not the same colours spelled as hex: #133546 IS
+        // --surface-player-body and #43CDB6 IS --accent-primary, so these were
+        // the palette already — just pinned, so they would not follow it.
+        'background:var(--surface-player-body)', 'color:var(--text-body)',
+        // DirectiveZero at a type role. This was a system font stack in a
+        // `font:` shorthand — the OS's UI font, over a pixel-art game, on the
+        // one bar that appears before anything else on startup.
+        'font-family:DirectiveZero,sans-serif', 'font-size:12px', 'line-height:16px',
         'box-shadow:0 2px 8px rgba(0,0,0,0.35)'
       ].join(';');
 
@@ -3024,9 +3053,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       var dl = document.createElement('button');
       dl.textContent = 'Update now';
       dl.style.cssText = [
-        'cursor:pointer', 'border:none', 'border-radius:4px',
-        'padding:6px 12px', 'font-weight:600',
-        'background:#43CDB6', 'color:#133546'
+        'cursor:pointer', 'border:none',
+        'padding:var(--spacing-md) var(--spacing-lg)',
+        'background:var(--accent-primary)', 'color:var(--surface-player-body)'
       ].join(';');
 
       function openReleasePage() {
@@ -3088,7 +3117,8 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       close.setAttribute('aria-label', 'Dismiss');
       close.style.cssText = [
         'cursor:pointer', 'border:none', 'background:transparent',
-        'color:#fff', 'font-size:15px', 'line-height:1', 'padding:4px 6px'
+        'color:var(--text-body)', 'font-size:16px', 'line-height:16px',
+        'padding:var(--spacing-sm) var(--spacing-md)'
       ].join(';');
       close.addEventListener('click', function () {
         rememberDismissed(info.latest_version);

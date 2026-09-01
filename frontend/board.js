@@ -198,21 +198,45 @@
   function badge(text, mod) {
     return el('span', 'sui-badge' + (mod ? ' sui-mod-' + mod : ''), text);
   }
-  // Tiny charge/energy meter: n-of-total filled cells (scoped .fbat CSS —
-  // lighter than sui-battery's PNG chunks at 12px row height).
+  /* The game's OWN battery — the same pixel-art chunks the action bar draws.
+   *
+   * This was `.fbat`: 5x10px divs, the "off" state painted in a sky blue found
+   * nowhere in the palette. The comment defending it said SUI's PNG chunks
+   * were "heavier at 12px row height" — which is a reason to change the row,
+   * not to draw a third battery. (It was the third: the raid HUD has two more,
+   * and those already use the real component.)
+   *
+   * `sui-theme-player` goes on the element itself: the filled sprite is
+   * selected by `.sui-theme-player.sui-battery .sui-battery-chunk.sui-mod-filled`,
+   * so without a theme the chunks all render empty.
+   */
   function battery(filled, total) {
-    var b = el('span', 'fbat');
+    var b = el('span', 'sui-battery sui-theme-player');
     for (var i = 0; i < total; i++) {
-      b.appendChild(el('i', i < filled ? 'on' : ''));
+      b.appendChild(el('div', 'sui-battery-chunk' + (i < filled ? ' sui-mod-filled' : '')));
     }
     return b;
   }
   // Progress bar 0..1 (scoped .bar CSS).
+  /* The game's OWN progress bar — ten discrete chunks, not a smooth fill.
+   *
+   * Copied from `ActionBarComponent.renderProgressBar` in structs-webapp,
+   * including the chunk count and its `Math.floor` (so a bar only shows a
+   * chunk once it is genuinely complete, never rounded up to look further
+   * along than it is).
+   *
+   * Ours was a CSS-width bar over `rgba(120,180,255,.12)` — a colour no token
+   * defines — which is a different visual language from everything the game
+   * draws beside it.
+   */
+  var PROGRESS_CHUNKS = 10;
   function progressBar(frac) {
-    var wrap = el('div', 'bar');
-    var fill = el('i');
-    fill.style.width = Math.max(0, Math.min(1, frac || 0)) * 100 + '%';
-    wrap.appendChild(fill);
+    var wrap = el('div', 'sui-action-bar-progress-bar');
+    var filled = Math.floor(Math.max(0, Math.min(1, frac || 0)) * PROGRESS_CHUNKS);
+    for (var i = 0; i < PROGRESS_CHUNKS; i++) {
+      wrap.appendChild(el('div',
+        'sui-action-bar-progress-bar-chunk' + (i < filled ? ' sui-mod-filled' : '')));
+    }
     return wrap;
   }
   function fmtNum(n) {
@@ -1529,7 +1553,11 @@
         if (!buttons.length) buttons = [{ label: 'OK', value: 'ok' }];
         var brow = el('div', 'agent-buttons');
         buttons.forEach(function (b) {
-          var btn = el('button', 'agent-btn', (b && b.label) || String(b));
+          // SUI's button, not a hand-rolled `<button class="agent-btn">` with
+          // its own border, radius and invented blue. `disabled` means nothing
+          // on an anchor, but nothing here disables one.
+          var btn = el('a', 'sui-screen-btn sui-mod-primary', (b && b.label) || String(b));
+          btn.href = 'javascript:void(0)';
           btn.addEventListener('click', function () {
             agentRespond(d.directive_id, (b && b.value !== undefined) ? b.value : b, false);
             agentRemove(d.directive_id);

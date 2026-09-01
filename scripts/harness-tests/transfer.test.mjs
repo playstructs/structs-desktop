@@ -178,6 +178,45 @@ const pick = async (id, value) => {
     last.args.denom + ' ' + last.args.amount);
 }
 
+// ── The card is the game's, and the window fits it ─────────────────────────
+{
+  console.log('\n— reusing what already exists');
+
+  /* The player card is the one the GAME draws when you choose who to pay —
+   * `AccountRecipientSearchResults` in structs-webapp. Asserting the classes
+   * rather than the appearance, because the failure mode is silent: an
+   * invented class renders as an unstyled div, which reads as a styling
+   * mistake rather than a typo. `sui-result-row-body`, `-title` and
+   * `-subtitle` were all invented and none exist.
+   */
+  const card = d.querySelector('#tx-parties .sui-result-row');
+  check('a party is the game’s own result row', !!card);
+  check('…with its left section', !!card.querySelector('.sui-result-row-left-section'));
+  check('…the portrait well the game uses',
+    !!card.querySelector('.sui-result-row-portrait > .sui-result-row-portrait-image'));
+  check('…and the player-info block',
+    !!card.querySelector('.sui-result-row-player-info .sui-text-label-block'));
+  check('…naming the player and their id',
+    /Marklifer/.test(card.textContent) && /PID #1-194/.test(card.textContent),
+    card.textContent.replace(/\s+/g, ' ').trim());
+
+  /* The window grows rather than scrolling.
+   *
+   * A payment screen is short and every line of it matters; the end of it
+   * sitting below the fold on a screen where a wrong number costs real Alpha
+   * is the wrong trade.
+   */
+  const scroller = d.getElementById('tx-out');
+  check('the message area does not scroll',
+    w.getComputedStyle(scroller).overflow !== 'auto',
+    w.getComputedStyle(scroller).overflow);
+  check('the window asked to be resized to fit',
+    w.__HARNESS_SIZES__.length > 0, String(w.__HARNESS_SIZES__.length));
+  const tallest = Math.max(...w.__HARNESS_SIZES__.map((s) => s.height));
+  check('…taller than the 460px it was fixed at, and bounded',
+    tallest > 460 && tallest <= 900, String(tallest));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 w.close();
 process.exit(failures ? 1 : 0);
