@@ -527,6 +527,13 @@ pub struct Snapshot {
     pub raider_name: Option<String>,
     pub raider_charge: Option<f64>,
     pub raider_pfp: Option<String>,
+    /// The VIEWER's own charge — the player this app is signed in as, who is
+    /// usually neither combatant. Read from `GAME_STATE`, which derives it the
+    /// way the game itself does (`ChargeCalculator.calcCharge`), so the rail's
+    /// battery agrees with the player's own HUD in the main window. Rides the
+    /// snapshot rather than a command of its own because the raid window
+    /// already polls this live, and charge accrues per block.
+    pub viewer_charge: Option<f64>,
     pub fetched_at_ms: f64,
     /// Populated when a read failed, so the window can say "stale" rather than
     /// silently showing a half-built map.
@@ -561,6 +568,7 @@ pub async fn snapshot_planet(
                 struct_types: HashMap::new(),
                 stored_ore: None,
                 owner_charge: None,
+                viewer_charge: None,
                 owner_energy: None,
                 owner_name: None,
                 owner_pfp: None,
@@ -722,6 +730,10 @@ pub async fn snapshot_planet(
         struct_types,
         stored_ore: owner_hud.0,
         owner_charge: owner_hud.1,
+        viewer_charge: crate::game_state::GAME_STATE
+            .read()
+            .ok()
+            .map(|g| g.get_charge() as f64),
         owner_energy: owner_hud.2,
         owner_name: owner_hud.3,
         owner_pfp: owner_hud.4,

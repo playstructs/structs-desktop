@@ -840,7 +840,19 @@
       portrait.appendChild(pfpPortrait(r.pfp_attrs));
     } else {
       var well = el('div', 'chat-room-icon');
-      well.appendChild(icon(r.icon || 'icon-beacon', 'sui-icon-md'));
+      /* The home channel carries SN Corp's own mark instead of the generic
+       * guild glyph. `img/logo-snc.gif` is the game's asset — the same one the
+       * signup flow shows while connecting to the corp — not something drawn
+       * for this list. Every other row keeps the structicon `icon_for` picked. */
+      if (r.home_rank != null) {
+        var mark = document.createElement('img');
+        mark.className = 'chat-room-mark';
+        mark.src = 'img/logo-snc.gif';
+        mark.alt = '';
+        well.appendChild(mark);
+      } else {
+        well.appendChild(icon(r.icon || 'icon-beacon', 'sui-icon-md'));
+      }
       portrait.appendChild(well);
     }
     left.appendChild(portrait);
@@ -1140,8 +1152,35 @@
         scroll.appendChild(noticeBlock('Nothing matches',
           'No channel of yours is called ' + JSON.stringify(S.roomFilter) + '.'));
       }
+      /* The home channel, above every section.
+       *
+       * Not "first within its section": it lands in Local Net for SN Corp's
+       * own members and Galaxy Net for everyone else, so leaving it in place
+       * would put it under Invitations and Direct for half the roster and in
+       * a different group depending on who you are. Its own group, first, is
+       * the only arrangement that means the same thing to everybody.
+       *
+       * Ranked by the server (`home_rank`), which requires the room to be on
+       * that guild's OWN homeserver — so a directory room that merely calls
+       * itself SN Corp cannot take the slot. The order inside the group is
+       * the rank, NOT `roomOrder`: these are furniture, and furniture that
+       * reshuffles itself by unread count is not pinned in any useful sense.
+       */
+      var home = mine.filter(function (r) { return r.home_rank != null; })
+        .sort(function (a, b) { return a.home_rank - b.home_rank; });
+      var rest = mine.filter(function (r) { return r.home_rank == null; });
+      if (home.length) {
+        var hGroup = el('div', 'chat-net-group');
+        hGroup.appendChild(el('div', 'chat-net-label', 'Structs'));
+        var hTable = el('div', 'sui-result-table');
+        var hList = el('div', 'sui-result-rows');
+        home.forEach(function (r) { hList.appendChild(roomRow(r)); });
+        hTable.appendChild(hList);
+        hGroup.appendChild(hTable);
+        scroll.appendChild(hGroup);
+      }
       SECTIONS.forEach(function (sec) {
-        var rows = mine.filter(function (r) { return (r.section || 'galaxy') === sec.key; });
+        var rows = rest.filter(function (r) { return (r.section || 'galaxy') === sec.key; });
         if (!rows.length) return;
         rows = rows.slice().sort(roomOrder);
         var group = el('div', 'chat-net-group');
@@ -2882,18 +2921,24 @@
     var hint = el('div', 'chat-complete-hint');
     hint.id = 'chat-complete-hint';
     wrap.appendChild(hint);
-    var panel = el('div', 'sui-panel sui-theme-player');
-    panel.appendChild(el('div', 'sui-panel-edge-left'));
+    /* The shared composer in `chatrow.js`, which is this window's own panel.
+     *
+     * It was built inline here while `StructsChatRow.composer()` built a
+     * near-copy for the raid rail — so the two drifted, and the rail grew a
+     * `.sui-panel-chunk-spacer-indicator` bar under the face and a different
+     * send-button wrapper. Same code now; the differences cannot come back. */
+    var made = window.StructsChatRow.composer({
+      inputId: 'chat-input',
+      sendId: 'chat-send',
+      portraitId: 'chat-composer-portrait',
+      placeholder: 'Message, or /help',
+      pfpAttrs: S.profile && S.profile.pfp_attrs,
+    });
+    var panel = made.node.firstChild;
+    var input = made.input;
+    var send = made.send;
+    var portrait = made.portrait;
 
-    // Portrait chunk — the player, in the game's own portrait well.
-    var pChunk = el('div', 'sui-panel-chunk');
-    var pScreen = el('div', 'sui-screen');
-    var portrait = el('div', 'sui-screen-portrait');
-    portrait.id = 'chat-composer-portrait';
-    // `.sui-screen-portrait-image` is the action bar's own frame, with its own
-    // crop. Nesting the roster frame inside it cropped the portrait twice.
-    portrait.appendChild(fillPfp(el('div', 'sui-screen-portrait-image'),
-      S.profile && S.profile.pfp_attrs));
     // Your face always renders in HERE. Whether anyone else can see it is a
     // different question — other clients read the homeserver's avatar, which
     // the app publishes for you. Say which state you are in, on the one
@@ -2903,49 +2948,17 @@
       S.profile && S.profile.avatar_published
         ? 'Your portrait is published — other clients see this face'
         : 'Your portrait is not published yet; it will be shortly');
-    pScreen.appendChild(portrait);
-    pChunk.appendChild(pScreen);
-    panel.appendChild(pChunk);
 
-    panel.appendChild(el('div', 'sui-panel-connector'));
-
-    // Screen chunk — the message being written, on the panel's inset screen.
-    var iChunk = el('div', 'sui-panel-chunk sui-mod-grow sui-mod-shrink');
-    var iScreen = el('div', 'sui-screen sui-screen-full-width');
-    var field = el('div', 'sui-screen-dialogue sui-theme-neutral');
-    var input = el('input');
-    input.type = 'text';
-    input.id = 'chat-input';
-    input.name = 'chat-input';
-    input.placeholder = 'Message, or /help';
-    input.autocomplete = 'off';
-    input.maxLength = 4000;
     input.addEventListener('input', function () {
       resetCompletion();
       clearCompletionHint();
       noteTyping(input.value);
     });
-    field.appendChild(input);
-    iScreen.appendChild(field);
-    iChunk.appendChild(iScreen);
-    panel.appendChild(iChunk);
-
-    panel.appendChild(el('div', 'sui-panel-connector sui-panel-style-medium-to-default'));
-
-    // Button chunk — a .sui-panel-btn in a .sui-action-bar-btn-group, the same
-    // pair every action button in the HUD is built from.
-    var bChunk = el('div', 'sui-panel-chunk sui-theme-player');
-    var group = el('div', 'sui-action-bar-btn-group');
-    var send = el('a', 'sui-panel-btn sui-mod-default');
-    send.id = 'chat-send';
-    send.href = 'javascript:void(0)';
-    send.appendChild(icon('icon-arrow', 'sui-icon-md'));
-    group.appendChild(send);
-    bChunk.appendChild(group);
-    panel.appendChild(bChunk);
-
-    panel.appendChild(el('div', 'sui-panel-edge-right'));
+    // The shared builder returns its own fit-content wrapper; this window
+    // already has one (it carries the reply chip and the completion hint), so
+    // only the panel moves across.
     wrap.appendChild(panel);
+
 
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); return; }

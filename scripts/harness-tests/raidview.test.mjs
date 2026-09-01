@@ -212,15 +212,52 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
    * Copied structurally from `#notification-dialogue` in the game's own
    * `templates/game/index.html.twig`.
    */
-  check('the button sits in the dialogue’s own wrapper',
-    !!d.querySelector('#rv-chat-entry .sui-dialogue-btn-chunk'
-      + ' > .sui-dialogue-btn-chunk-col > a.sui-panel-btn'));
-  check('…under the spacer that seats it',
-    !!d.querySelector('#rv-chat-entry .sui-dialogue-btn-chunk-col'
-      + ' > .sui-panel-chunk-spacer-btn-a'));
-  check('the portrait chunk has its spacer',
+  /* The arrangement is the COMMS WINDOW's, because it is the same function.
+   *
+   * An earlier pass moved this toward the game's `#notification-dialogue` —
+   * the dialogue button wrapper, the spacers — on the reasoning that it was
+   * the game's own markup. It is, but it is not the markup of the window this
+   * rail is meant to match, and the divergence is exactly what read as wrong:
+   * a filler bar under the portrait and a differently-seated send button.
+   * Comms now calls this builder, so both windows are one answer.
+   */
+  check('the button sits in the action-bar group Comms uses',
+    !!d.querySelector('#rv-chat-entry .sui-action-bar-btn-group > a.sui-panel-btn'));
+  check('…and no dialogue filler is left under the portrait',
+    !d.querySelector('#rv-chat-entry .sui-panel-chunk-spacer-indicator'));
+  check('…and the message chunk can give ground in a rail',
+    !!d.querySelector('#rv-chat-entry .sui-panel-chunk.sui-mod-grow.sui-mod-shrink'));
+  /* Under the portrait: the charge battery, in the action bar's arrangement.
+   *
+   * The chunk used to end in `.sui-panel-chunk-spacer-indicator` — a 48px
+   * background image whose job in the game's own dialogue is to fill the
+   * height the action bar's BATTERY takes up beside it. With nothing beside
+   * it, it drew a lone bar under the face that read as a broken meter. The
+   * rail carries the real battery there instead, which is both the game's own
+   * arrangement and 36px against the spacer's 48.
+   */
+  check('the portrait chunk carries the charge battery, not the filler',
     !!d.querySelector('#rv-chat-entry .chat-composer-portrait'
-      + ' > .sui-panel-chunk-spacer-indicator'));
+      + ' > .sui-screen > .sui-screen-battery')
+    && !d.querySelector('#rv-chat-entry .sui-panel-chunk-spacer-indicator'));
+  check('…with the game’s five chunks',
+    d.querySelectorAll('#rv-chat-entry .sui-screen-battery'
+      + ' > .sui-battery-chunk').length === 5,
+    String(d.querySelectorAll('#rv-chat-entry .sui-battery-chunk').length));
+  /* Filled through the game's OWN ladder, not a linear scale: charge 4 sits
+   * between the thresholds [0,1,2,3,5,8] at level 4, which is what the
+   * defender's bar beside it would show for the same number. A viewer
+   * comparing the two is the reason this bar exists. */
+  check('…filled from the viewer’s charge on the game’s ladder',
+    d.querySelectorAll('#rv-chat-entry .sui-battery-chunk.sui-mod-filled')
+      .length === 4,
+    String(d.querySelectorAll('#rv-chat-entry .sui-battery-chunk.sui-mod-filled').length)
+      + ' of 5 filled for charge 4');
+  check('…and the tooltip carries the figure too',
+    /Charge 4/.test(d.querySelector('#rv-chat-entry .sui-screen-portrait')
+      .getAttribute('data-sui-tooltip') || ''),
+    d.querySelector('#rv-chat-entry .sui-screen-portrait')
+      .getAttribute('data-sui-tooltip'));
 
   /* Your own face, and a name for it.
    *
@@ -286,10 +323,8 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     !!narrow && !/\.chat-composer-portrait[,\s{]/.test(narrow[1])
       && /\.chat-composer-portrait-join/.test(narrow[1]),
     narrow && narrow[1].trim());
-  check('…and no action-bar grouping was borrowed',
-    d.querySelectorAll('#rv-chat-entry .sui-action-bar-btn-group').length === 0);
-  check('the right edge carries the theme, as the game’s does',
-    !!d.querySelector('#rv-chat-entry .sui-panel-edge-right.sui-theme-player'));
+  check('the right edge is Comms’ plain one',
+    !!d.querySelector('#rv-chat-entry .sui-panel-edge-right'));
 
   const input = d.getElementById('rv-chat-input');
   input.value = '  they are down to one shield  ';

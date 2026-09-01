@@ -190,6 +190,10 @@ pub struct Room {
     pub mention: bool,
     /// "local" | "galaxy" | "direct" — see `section_for`.
     pub section: &'static str,
+    /// Rank among the channels pinned above every section, or `None` for a
+    /// room that is not pinned. See `home_rank`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_rank: Option<u8>,
     pub icon: &'static str,
     /// For a direct message, the other player's portrait — a DM row should
     /// show a face, not a channel glyph.
@@ -388,6 +392,95 @@ fn icon_for(name: &str, alias: Option<&str>) -> &'static str {
     } else {
         "icon-beacon"
     }
+}
+
+/* The channels pinned above every section, in this order.
+ *
+ * A PRODUCT decision, not a derivable fact: SN Corp is being treated as the
+ * main channel of Structs for now, with the support and infrastructure rooms
+ * under it. One list, so adding, reordering or retiring a pin is one edit.
+ *
+ * Matched on the alias LOCALPART as a whole token, plus WHOLE-SERVER equality
+ * against that guild's own homeserver. Never a substring and never on display
+ * name: anyone may publish a room called "SN Corp" — the browse fixture
+ * carries exactly that forgery at `#sn-corp-official`, on this very server,
+ * whose localpart CONTAINS `sn-corp`. Whole tokens are what separate them.
+ */
+const HOME_GUILD: &str = "0-5";
+const PINNED_LOCALPARTS: [&str; 3] = ["sn-corp", "help", "infrastructure"];
+
+/// The alias localpart: `#help:matrix.example` → `help`. Whole tokens only.
+fn alias_localpart_of(alias: &str) -> Option<&str> {
+    alias.strip_prefix('#')?.split_once(':').map(|(l, _)| l)
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn a_localpart_is_a_whole_token() {
+        assert_eq!(alias_localpart_of("#help:matrix.beta.playstructs.com"), Some("help"));
+        assert_eq!(
+            alias_localpart_of("#infrastructure:matrix.beta.playstructs.com"),
+            Some("infrastructure")
+        );
+        // Not an alias at all.
+        assert_eq!(alias_localpart_of("!room:server"), None);
+        assert_eq!(alias_localpart_of("#nocolon"), None);
+        assert_eq!(alias_localpart_of("#sn-corp:matrix.beta.playstructs.com"), Some("sn-corp"));
+        /* A localpart that merely CONTAINS a pin is a DIFFERENT room — the
+         * prefix-collision bug this codebase has been bitten by before, and
+         * not hypothetical here: `#sn-corp-official` is a real forgery on
+         * this very server, published by someone who is not SN Corp. */
+        for impostor in [
+            "#sn-corp-official:matrix.beta.playstructs.com",
+            "#sn-corp2:matrix.beta.playstructs.com",
+            "#help-desk:matrix.beta.playstructs.com",
+            "#not-help:matrix.beta.playstructs.com",
+            "#infrastructure-wg:matrix.beta.playstructs.com",
+        ] {
+            let local = alias_localpart_of(impostor).unwrap();
+            assert!(
+                !PINNED_LOCALPARTS.contains(&local),
+                "{local} must not take a pinned slot"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pins_are_ordered_and_distinct() {
+        // Rank IS the index, so the list order is the on-screen order.
+        assert_eq!(PINNED_LOCALPARTS[0], "sn-corp");
+        assert_eq!(PINNED_LOCALPARTS[1], "help");
+        assert_eq!(PINNED_LOCALPARTS[2], "infrastructure");
+        let mut seen = PINNED_LOCALPARTS.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), PINNED_LOCALPARTS.len(), "a pin is listed twice");
+    }
+}
+
+/// Where this room sits among the pinned channels, or `None` for the great
+/// majority that are not pinned at all.
+///
+/// Takes only the alias — the display name is deliberately not an input, so
+/// no future edit can reintroduce name matching by reaching for a parameter
+/// that happens to be in scope.
+///
+/// `server` is the session's homeserver, already resolved by the caller.
+/// Returns `None` whenever the directory cannot name the home guild's server,
+/// which degrades to "nothing is pinned" rather than to a wrong guess.
+fn home_rank(alias: Option<&str>, server: &str) -> Option<u8> {
+    let home = super::directory::server_name_for_guild(HOME_GUILD)?;
+    if server.is_empty() || server != home {
+        return None;
+    }
+    let local = alias.and_then(alias_localpart_of)?;
+    PINNED_LOCALPARTS
+        .iter()
+        .position(|p| *p == local)
+        .map(|i| i as u8)
 }
 
 // ── Requests ────────────────────────────────────────────────────────────────
@@ -1506,7 +1599,12 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             }
         }
 
+        // Computed before the literal: `display` and `final_alias` are moved
+        // into it.
+        let rank = if dm_peer.is_some() { None }
+            else { home_rank(final_alias.as_deref(), &server) };
         let entry = Room {
+            home_rank: rank,
             room_id: room_id.clone(),
             icon: if dm_peer.is_some() {
                 "icon-member"
@@ -1806,6 +1904,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 mention: false,
                 icon: icon_for("", alias.as_deref()),
                 section: SECTION_INVITE,
+                home_rank: None,
                 pfp_attrs: None,
                 player_id: None,
             };
@@ -2471,9 +2570,11 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
             .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
+        let rank = home_rank(alias.as_deref(), &server);
         gs.rooms.insert(
             room_id.to_string(),
             Room {
+                home_rank: rank,
                 room_id: room_id.to_string(),
                 icon: icon_for(&name, alias.as_deref()),
                 name,
@@ -2496,7 +2597,7 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
                 invited: false,
                 invited_by: None,
                 section: section_for(room_id, &server),
-                pfp_attrs: None,
+                    pfp_attrs: None,
                 player_id: None,
             },
         );
@@ -2568,7 +2669,9 @@ pub async fn browse(
             .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
+        let rank = home_rank(alias.as_deref(), &server);
         out.push(Room {
+            home_rank: rank,
             room_id: room_id.to_string(),
             icon: icon_for(&name, alias.as_deref()),
             name,
@@ -2607,6 +2710,7 @@ pub async fn browse(
                 continue;
             }
             out.push(Room {
+                home_rank: home_rank(Some(&s.alias), &server),
                 room_id: s.room_id.clone(),
                 icon: icon_for(&s.name, Some(&s.alias)),
                 name: s.name,
@@ -5336,6 +5440,7 @@ mod tests {
             mention,
             icon: "icon-guild".into(),
             section: "local".into(),
+            home_rank: None,
             pfp_attrs: None,
             player_id: None,
         };

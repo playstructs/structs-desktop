@@ -129,6 +129,12 @@
       display: flex; align-items: center; justify-content: center;
       width: 32px; height: 32px; flex: 0 0 32px;
     }
+    /* The home channel's mark. A 32px source drawn at the `md` icon size, so
+       it sits on the same optical size as the `sui-icon-md` glyphs in every
+       other row — the token, not the number, because that is the whole point
+       of having one. NO `image-rendering: pixelated`: that is for upscaling
+       and would wreck a downscale. */
+    .chat-room-mark { width: var(--icon-md); height: var(--icon-md); }
     /* The roster's right section is space-between because it carries a row of
        resource chips AND a trailing button. These rows carry only an unread
        badge and a Join button, so the default leaves them stranded at the

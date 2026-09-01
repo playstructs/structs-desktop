@@ -59,21 +59,105 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('lands on the channel list', w.Chat._state.view === 'channels', w.Chat._state.view);
 
   const labels = all(d, '.chat-net-label').map(text);
-  check('sections are DIRECT, LOCAL NET, GALAXY NET',
-    labels.join('|') === 'Direct|Local Net|Galaxy Net', labels.join('|'));
+  check('the home channel sits above every section',
+    labels.join('|') === 'Structs|Direct|Local Net|Galaxy Net', labels.join('|'));
+
+  /* SN Corp is pinned, and pinned by the SERVER's judgement.
+   *
+   * Not "first within its section": the same room lands in Local Net for its
+   * own members and Galaxy Net for everyone else, so leaving it in place puts
+   * it under Direct for half the roster and in a different group depending on
+   * who is looking. The fixture deliberately files it under 'galaxy' — the
+   * pin has to beat the section order rather than ride on it.
+   */
+  const homeGroup = all(d, '.chat-net-group')[0];
+  const homeRows = Array.from(homeGroup.querySelectorAll('.sui-result-row'));
+  /* SN Corp, then Help, then Infrastructure — the order the pins were given.
+   *
+   * Sorted by RANK, not `roomOrder`: Infrastructure carries 9 unread in the
+   * fixture and would jump to the front of any section, and the two are
+   * alphabetically the wrong way round for a name sort. Furniture that
+   * reshuffles by traffic is not pinned in any useful sense. */
+  check('…holding the three pins in their given order',
+    homeRows.map((r) => text(r).split(/\d| /)[0]).join('|')
+      === 'SN.Corporation|Help|Infrastructure',
+    homeRows.map((r) => text(r)).join(' | '));
+  /* `#help-desk` merely CONTAINS `help`. A substring match hands it a pinned
+   * slot — the prefix-collision shape this codebase has been bitten by. */
+  /* `#help-desk` merely CONTAINS `help`, and `#sn-corp-official` — a real
+   * forgery on SN's OWN server — contains `sn-corp`. A substring match hands
+   * both a pinned slot. Whole tokens are the only thing separating them, and
+   * server equality cannot help here: the impostor is hosted alongside the
+   * genuine article. */
+  check('…and near-miss addresses stay out, even on the right server',
+    !homeRows.some((r) => text(r).startsWith('Help Desk')
+      || text(r).startsWith('SN Corp Annex'))
+    && all(d, '.sui-result-row').some((r) => text(r).startsWith('Help Desk'))
+    && all(d, '.sui-result-row').some((r) => text(r).startsWith('SN Corp Annex')),
+    homeRows.map((r) => text(r)).join(' | '));
+  check('…the first wearing the guild’s own mark, not the generic glyph',
+    homeRows[0].querySelector('img.chat-room-mark')
+      && /logo-snc\.gif$/.test(homeRows[0].querySelector('img.chat-room-mark').getAttribute('src')),
+    homeRows[0].querySelector('.chat-room-icon').innerHTML.slice(0, 90));
+  check('…and a pinned room is not repeated in its own section',
+    all(d, '.sui-result-row').filter((r) => text(r).startsWith('SN.Corporation')).length === 1
+    && all(d, '.sui-result-row').filter((r) => text(r).startsWith('Infrastructure')).length === 1,
+    homeRows.map((r) => text(r)).join(' | '));
+  /* The whole reason the flag comes from Rust: `is_home_channel` requires the
+   * room to be on that guild's OWN homeserver. A room that merely calls itself
+   * SN.Corporation — the forgery in the browse fixture — must not take the
+   * slot or the mark, and the frontend must never key on the NAME to decide. */
+  /* The pin keys on the SERVER's rank, not on what a room calls itself.
+   *
+   * Grepping the source for names was the first attempt and it was wrong
+   * twice: it read chat.js's own comment explaining the rule as a violation
+   * of it, and then matched the composer's `/help` placeholder. The property
+   * is behavioural, so test it behaviourally — a joined room wearing the
+   * pinned names and aliases, but no rank, must stay in its section. Only
+   * `is_home_channel` on the Rust side, which checks the homeserver, can
+   * hand out a slot. */
+  const impostors = w.__HARNESS_FIXTURES__.matrix_rooms.rooms.concat([
+    { room_id: '!fakesnc:evil.example', name: 'SN.Corporation',
+      canonical_alias: '#sn-corporation:evil.example', icon: 'icon-guild',
+      members: 99, joined: true, unread: 0, section: 'galaxy' },
+    { room_id: '!fakehelp:evil.example', name: 'Help',
+      canonical_alias: '#help:evil.example', icon: 'icon-info',
+      members: 99, joined: true, unread: 0, section: 'galaxy' },
+  ]);
+  w.__HARNESS_EMIT__('matrix::rooms', { guild_id: '0-5', rooms: impostors });
+  await tick();
+  const pinnedNow = Array.from(
+    all(d, '.chat-net-group')[0].querySelectorAll('.sui-result-row'));
+  check('a room wearing a pinned name but no rank stays out',
+    pinnedNow.length === 3,
+    pinnedNow.map((r) => text(r)).join(' | '));
+  check('…and is still listed, in its own section',
+    all(d, '.sui-result-row').filter((r) => text(r).startsWith('Help')).length === 3,
+    String(all(d, '.sui-result-row').filter((r) => text(r).startsWith('Help')).length));
+  w.__HARNESS_EMIT__('matrix::rooms',
+    { guild_id: '0-5', rooms: w.__HARNESS_FIXTURES__.matrix_rooms.rooms });
+  await tick();
 
   // Only rooms you are IN. Alpha Base and Community are public but unjoined,
   // and live in Browse — a list that mixes "your channels" with "every
   // channel on the server" answers neither question.
   const rows = all(d, '.sui-result-row');
-  check('only joined rooms are listed', rows.length === 5, String(rows.length));
+  // 9: the five it always had, plus Help, Infrastructure and the two
+  // near-miss addresses (`#help-desk`, `#sn-corp-official`) that prove
+  // whole-token matching on SN's own server.
+  check('only joined rooms are listed', rows.length === 9, String(rows.length));
   check('an unjoined room is not here',
     !rows.some((r) => text(r).startsWith('Alpha Base')),
     rows.map((r) => text(r)).join(' | '));
 
-  // Grouping follows the fixture's `section`, not row order. People first.
-  const groups = all(d, '.chat-net-group');
-  const dmRows = Array.from(groups[0].querySelectorAll('.sui-result-row'));
+  // Grouping follows the fixture's `section`, not row order.
+  // Selected by LABEL, not index: this used to read `groups[0]`, which meant
+  // adding the pinned group above it silently repointed the DM checks at SN
+  // Corp — and they went on asserting things about "the first group" that were
+  // no longer about direct messages at all.
+  const groupNamed = (label) => all(d, '.chat-net-group')
+    .find((g) => text(g.querySelector('.chat-net-label')) === label);
+  const dmRows = Array.from(groupNamed('Direct').querySelectorAll('.sui-result-row'));
   check('direct holds the DMs', dmRows.length === 2, String(dmRows.length));
   // Picked by name rather than position: the order is roomOrder's business,
   // and an index would make this test depend on it for no reason.
@@ -98,7 +182,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     !!bot && bot.querySelector('.chat-room-icon') === null
       && bot.querySelector('.pfp-viewer-layer') !== null);
 
-  const localRows = groups[1].querySelectorAll('.sui-result-row');
+  const localRows = groupNamed('Local Net').querySelectorAll('.sui-result-row');
   check('local net holds the one joined room', localRows.length === 1, String(localRows.length));
   check('room names render', text(localRows[0]).indexOf('Raid') === 0, text(localRows[0]));
   check('a single member is singular', text(localRows[0]).includes('1 Player'), text(localRows[0]));
@@ -111,7 +195,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('no JOIN buttons in your own channel list',
     all(d, '.sui-result-row button').length === 0,
     String(all(d, '.sui-result-row button').length));
-  check('every listed room is clickable', all(d, '.chat-room-row').length === 5,
+  check('every listed room is clickable', all(d, '.chat-room-row').length === 9,
     String(all(d, '.chat-room-row').length));
 
   // Only the player's OWN guild is offered — no other guild will authenticate them.
@@ -140,7 +224,8 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_browse'));
 
   const rows = all(d, '.sui-result-row');
-  check('every public channel is listed', rows.length === 7, String(rows.length));
+  // 11: seven, plus Help, Infrastructure and the two near-misses.
+  check('every public channel is listed', rows.length === 11, String(rows.length));
   check('including ones you are already in',
     rows.some((r) => text(r).startsWith('SN.Corporation')),
     rows.map((r) => text(r)).join(' | '));
@@ -214,12 +299,20 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('…and what it is for',
     text(crabla).includes('AI-native guild'), text(crabla));
   check('…and offers to join it', crabla.querySelector('button') !== null);
-  // Picked by ADDRESS, not by name: the directory now contains a forgery
-  // sharing this room's display name, so selecting by name here would be a
-  // coin flip — the same coin flip the address exists to spare the player.
+  /* Picked by ADDRESS, not by name: the directory contains a forgery sharing
+   * this room's display name, so selecting by name here would be a coin flip
+   * — the same coin flip the address exists to spare the player.
+   *
+   * And the address is matched as a WHOLE TOKEN, because `#sn-corp` is a
+   * prefix of the forgery's `#sn-corp-official`. A plain `includes` finds
+   * whichever row happens to come first, which is exactly the bug the pinning
+   * rule upstream exists to avoid — a test that models the danger badly is no
+   * safer than code that does. */
+  const byAddr = (a) => rows.find((r) => new RegExp(a + '(?![-\\w])').test(text(r)));
   check('a room you are in says so instead of offering Join',
-    rows.find((r) => text(r).includes('#sn-corporation'))
-      .querySelector('.sui-badge') !== null);
+    byAddr('#sn-corp').querySelector('.sui-badge') !== null);
+  // (The `#sn-corp-official` forgery's own behaviour in Browse is covered by
+  // the impostor checks above; it is not in this filtered page.)
   check('a room you are not in offers Join',
     rows.find((r) => text(r).startsWith('Alpha Base')).querySelector('button') !== null);
   check('3.1K is abbreviated',
@@ -2170,6 +2263,24 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
   await tick();
   const p = d.getElementById('chat-composer-portrait');
+  /* Comms is built by the SHARED composer, not a near-copy of it.
+   *
+   * This window hand-built its panel while `StructsChatRow.composer()` built
+   * a lookalike for the raid rail, so the two drifted: the rail grew a
+   * `.sui-panel-chunk-spacer-indicator` bar under the face (panel art meant
+   * to fill the height a battery takes up beside it) and a different
+   * send-button wrapper. "Make it look like the chat window" only stays true
+   * while there is one implementation of the chat window.
+   */
+  check('the Comms composer is the shared builder’s panel',
+    !!d.querySelector('#chat-composer .chat-composer-portrait')
+    && !!d.querySelector('#chat-composer .sui-action-bar-btn-group > a.sui-panel-btn'));
+  check('…with no leftover dialogue filler under the portrait',
+    !d.querySelector('#chat-composer .sui-panel-chunk-spacer-indicator'));
+  /* The battery is opt-in: it answers "can I act right now", which is the
+   * raid rail's question and not this window's. */
+  check('…and no charge battery, which is the rail’s question',
+    !d.querySelector('#chat-composer .sui-screen-battery'));
   check('the composer shows your own portrait, not a placeholder',
     p && !!p.querySelector('img[src*="pfp_head_1.png"]'),
     p && p.innerHTML.slice(0, 120));
@@ -3549,9 +3660,16 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const rows = all(d, '.sui-result-row');
   const invite = rows.find((n) => text(n).includes('Guild Lobby'));
   check('an invitation is listed', !!invite);
-  // First, always: it is the one row waiting on an answer from you rather
-  // than reporting something that happened.
-  check('…first, above everything else', rows[0] === invite, text(rows[0]));
+  /* First among the SECTIONS — no longer the very first row in the window.
+   *
+   * The pinned channels now sit above every section, so an invitation leads
+   * the part of the list that changes rather than the whole list. That is a
+   * deliberate trade: the pins are permanent furniture and the player asked
+   * for them at the top always, while an invitation is still the first thing
+   * that is actually waiting on an answer. */
+  const firstUnpinned = rows.find((n) => !n.querySelector('img.chat-room-mark')
+    && !['Help', 'Infrastructure', 'SN.Corporation'].some((p) => text(n).startsWith(p)));
+  check('…first, above every section', firstUnpinned === invite, text(firstUnpinned));
   // A member count is meaningless for a room you cannot see yet; who asked
   // is the whole basis for deciding.
   check('…saying who asked', text(invite).includes('Invited by JPEG'), text(invite));
@@ -3597,7 +3715,9 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     }]),
   });
   await tick();
-  const invite = all(d, '.sui-result-row')[0];
+  // By name, not position: the pinned group sits above the invitation now,
+  // and `[0]` quietly became "SN Corp" — a row with no Accept button.
+  const invite = all(d, '.sui-result-row').find((n) => text(n).includes('Raid'));
   [...invite.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Accept')
     .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick(); await tick();

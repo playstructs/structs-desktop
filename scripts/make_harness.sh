@@ -565,6 +565,9 @@ cat > "$RFIX" <<'EOF'
       protects: null, is_command: true, side: 'defender' },
   ];
   var SNAP = {
+    // The viewer's own charge — drives the composer's battery, and is not
+    // either combatant's. 4 lands on level 4 of [0,1,2,3,5,8].
+    viewer_charge: 4,
     planet_id: '2-1', owner: '1-9', planetary_shield: 120, block_start_raid: 0,
     raid_status: null, raiding_fleet: null,
     fleets: [], slots: { space: 2, air: 2, land: 4, water: 4 },
@@ -788,13 +791,42 @@ cat > "$CFIX" <<'EOF'
     { room_id: '!alpha:matrix.beta.playstructs.com', name: 'Alpha Base',
       canonical_alias: '#alpha-base:matrix.beta.playstructs.com', icon: 'icon-planet',
       members: 0, joined: false, unread: 0, section: 'local' },
+    /* The two pinned channels, matched by ALIAS on SN's own server. Listed
+     * here BEFORE SN Corp and in reverse rank order on purpose: the group's
+     * order must come from the rank, not from array position and not from the
+     * name. Unread stays 0 — a dozen other checks assert this fixture's
+     * counts, and a "prove the sort" number would have broken all of them. */
+    { room_id: '!infra:matrix.beta.playstructs.com', name: 'Infrastructure',
+      canonical_alias: '#infrastructure:matrix.beta.playstructs.com', icon: 'icon-beacon',
+      topic: 'Community infrastructure coordination', home_rank: 2,
+      members: 8, joined: true, unread: 0, section: 'galaxy' },
+    { room_id: '!help:matrix.beta.playstructs.com', name: 'Help',
+      canonical_alias: '#help:matrix.beta.playstructs.com', icon: 'icon-info',
+      topic: 'Support for players, especially new ones', home_rank: 1,
+      members: 12, joined: true, unread: 0, section: 'galaxy' },
     { room_id: '!raid:matrix.beta.playstructs.com', name: 'Raid',
       canonical_alias: '#raid:matrix.beta.playstructs.com', icon: 'icon-raid',
       members: 1, joined: true, unread: 0, section: 'local' },
+    /* The home channel. `home` is decided by RUST (`is_home_channel`), which
+     * requires the room to sit on that guild's own homeserver — so the
+     * forgery further down, which shares this display name, never carries it.
+     * Deliberately in 'galaxy' here: the pin must beat the section order, not
+     * ride on it. */
     { room_id: '!snc:matrix.beta.playstructs.com', name: 'SN.Corporation',
-      canonical_alias: '#sn-corporation:matrix.beta.playstructs.com', icon: 'icon-guild',
-      topic: 'We know better.',
+      canonical_alias: '#sn-corp:matrix.beta.playstructs.com', icon: 'icon-guild',
+      topic: 'We know better.', home_rank: 0,
       members: 25, joined: true, unread: 0, section: 'galaxy' },
+    /* Near-miss addresses on SN's own server: `help-desk` merely CONTAINS
+     * `help`, and `sn-corp-official` contains `sn-corp`. Whole-token matching,
+     * or these take pinned slots — the prefix-collision shape this codebase
+     * has been bitten by before. Browse carries a third, `#sn-corp-official`,
+     * published by someone who is not SN Corp at all. */
+    { room_id: '!sncorp2:matrix.beta.playstructs.com', name: 'SN Corp Annex',
+      canonical_alias: '#sn-corp-annex:matrix.beta.playstructs.com',
+      icon: 'icon-guild', members: 1, joined: true, unread: 0, section: 'galaxy' },
+    { room_id: '!helpdesk:matrix.beta.playstructs.com', name: 'Help Desk',
+      canonical_alias: '#help-desk:matrix.beta.playstructs.com', icon: 'icon-info',
+      members: 2, joined: true, unread: 0, section: 'galaxy' },
     { room_id: '!community:matrix.beta.playstructs.com', name: 'Community',
       canonical_alias: '#community:matrix.beta.playstructs.com', icon: 'icon-member',
       members: 3100, joined: false, unread: 0, section: 'galaxy' },

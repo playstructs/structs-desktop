@@ -498,6 +498,10 @@
                     myPfp: null,
                     myName: null,
                     myId: null,
+                    // The viewer's own charge, off the snapshot. Not derived
+                    // here: `GAME_STATE.get_charge()` already computes it the
+                    // way the game does, and a second opinion would disagree.
+                    myCharge: null,
                     // The object's OWN room, once looked up: `{alias, room_id,
                     // can_create, joined}`. Null means not looked up yet or no
                     // such room, and both leave the panel on the search path.
@@ -639,9 +643,11 @@
     var portrait = chatState.composer && chatState.composer.portrait;
     if (!portrait) return;
     paintPfp(portrait.querySelector('.sui-screen-portrait-image'), chatState.myPfp);
+    paintBattery(chatState.composer.battery, chatState.myCharge);
     portrait.setAttribute('data-sui-mod-placement', 'top');
     portrait.setAttribute('data-sui-tooltip',
-      'Speaking as\n' + whoLine(chatState.myName, chatState.myId, 'your primary'));
+      'Speaking as\n' + whoLine(chatState.myName, chatState.myId, 'your primary')
+      + (chatState.myCharge == null ? '' : '\nCharge ' + fmtNum(chatState.myCharge)));
   }
 
   // True when the rail is reading the object's OWN room rather than searching
@@ -821,6 +827,7 @@
         inputId: 'rv-chat-input',
         sendId: 'rv-chat-send',
         pfpAttrs: chatState.myPfp,
+        battery: true,
         maxLength: 900,
       });
       host.appendChild(chatState.composer.node);
@@ -3065,6 +3072,12 @@
     setText('rv-energy', snap.owner_energy || '—');
 
     // Defender (bottom-left) and raider (bottom-right).
+    // The viewer's charge is a fact about THIS player, not the raid, but it
+    // arrives on the same snapshot and changes on the same clock.
+    if (snap.viewer_charge != null) {
+      chatState.myCharge = snap.viewer_charge;
+      paintComposerIdentity();
+    }
     renderSide('def', snap.owner, snap.owner_name, snap.owner_charge, snap.owner_pfp,
       'Defender — this planet\'s owner');
     var raiding = snap.raiding_fleet || state.raidingFleet;
@@ -3089,14 +3102,7 @@
     // scale: ChargeCalculator maps raw charge through the thresholds
     // [0,1,2,3,5,8] to a level 0-5. Copied rather than approximated so a
     // spectator reads the same "can this player act?" the owner does.
-    var battery = document.getElementById('rv-' + which + '-battery');
-    if (battery) {
-      var level = chargeLevel(charge);
-      var chunks = battery.children;
-      for (var i = 0; i < chunks.length; i++) {
-        chunks[i].classList.toggle('sui-mod-filled', i + 1 <= level);
-      }
-    }
+    paintBattery(document.getElementById('rv-' + which + '-battery'), charge);
   }
 
   // A portrait is STACKED IMAGE LAYERS, not one file: the chain stores part
@@ -3126,6 +3132,22 @@
     host.dataset.pfp = attrsJson || '';
     host.innerHTML = '';
     renderPfpInto(host, attrsJson);
+  }
+
+  /* Fill a 5-chunk battery from a raw charge, through the game's own ladder.
+   *
+   * `chargeLevel` is the port of ChargeCalculator's thresholds; this is the
+   * paint. Both HUD action bars and the composer use it, because a player
+   * comparing their own charge against the defender's must be reading the
+   * same scale — that comparison is the whole reason the composer has one.
+   */
+  function paintBattery(battery, charge) {
+    if (!battery) return;
+    var level = chargeLevel(charge);
+    var chunks = battery.children;
+    for (var i = 0; i < chunks.length; i++) {
+      chunks[i].classList.toggle('sui-mod-filled', i + 1 <= level);
+    }
   }
 
   /* How this window names a player in a tooltip: "Marklifer (1-194)", falling

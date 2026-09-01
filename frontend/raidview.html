@@ -278,8 +278,11 @@
     /* The charge battery is a fixed 36px component (5 chunks + 4 gaps) sitting
        in a screen sized by the PORTRAIT above it, which is wider. Left-aligned
        by default, that put all the slack on one side and read as a bar that
-       did not fit its section. Centred, the two stack as one unit. */
-    #rv-hud .sui-screen-battery { margin-left: auto; margin-right: auto; }
+       did not fit its section. Centred, the two stack as one unit.
+       The composer's battery is the same component in the same arrangement,
+       so it wants the same rule rather than a second one. */
+    #rv-hud .sui-screen-battery,
+    #rv-chat-entry .sui-screen-battery { margin-left: auto; margin-right: auto; }
 
     /* The composer is the Comms window's OWN panel, built by
        `StructsChatRow.composer()`. This file used to draw a lookalike — a bare
@@ -296,10 +299,13 @@
       font-family: 'DirectiveZero', sans-serif; font-size: inherit;
       padding: var(--spacing-sm);
     }
-    /* A rail is narrower than the Comms window, so the portrait well is the
-       smaller of the game's two sizes rather than the 48px one. */
-    #rv-chat-entry .sui-screen-portrait,
-    #rv-chat-entry .sui-screen-portrait-image { width: 32px; height: 32px; }
+    /* The portrait is SUI's own size.
+       It was pinned to 32px to save rail width. `.sui-screen-portrait` is
+       40px in SUI, and shrinking it squeezed the face inside a frame drawn
+       for 40 — while saving nothing, because the chunk's width was set by the
+       48px spacer beside it, not by the portrait. The spacer is now the 36px
+       battery, so the chunk is NARROWER at the real size than it was at the
+       fake one. */
     #rv-chat-entry .pfp-viewer-layer { image-rendering: pixelated; }
     /* The portrait stays at every width.
        It was dropped below a ~300px rail to buy the message room, on the
