@@ -693,19 +693,19 @@
      * every raid window, the first time. This panel has never been in doubt
      * about which planet it is, so it says so from the first paint.
      */
-    var title = head && head.querySelector('.rv-chat-title');
-    if (title) title.textContent = chatState.roomName || objectTitle();
-
-    /* The room's own statement of what it is for, as IRC has shown since the
-     * beginning — and as Comms shows it. Defaulted rather than blank: the
-     * topic a room GETS on creation is this sentence, so showing it before the
-     * room exists is not a guess, it is the same text one hop early.
+    /* The header carries the TOPIC, not the room's name.
+     *
+     * The name was "Planet 2-16116" and the map beside this panel already says
+     * that, in a banner across the top of it — so the rail was repeating it and
+     * spending a second line on the topic underneath. One line, and it is the
+     * line that says something the map does not.
+     *
+     * Defaulted rather than blank before the room exists: the topic a room GETS
+     * on creation is this exact sentence, so showing it early is the same text
+     * one hop sooner, and nothing reshapes when somebody finally speaks.
      */
-    var topic = document.getElementById('rv-chat-topic');
-    if (topic) {
-      topic.textContent = chatState.roomTopic || defaultTopic();
-      topic.classList.toggle('hidden', !topic.textContent);
-    }
+    var title = head && head.querySelector('.rv-chat-title');
+    if (title) title.textContent = chatState.roomTopic || defaultTopic();
     body.textContent = '';
     if (count) {
       count.textContent = chatState.rows.length ? String(chatState.rows.length) : '';

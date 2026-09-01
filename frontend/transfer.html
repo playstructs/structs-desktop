@@ -13,6 +13,13 @@
   <link rel="stylesheet" href="css/main.css">
   <style>
     *, *::before, *::after { box-sizing: border-box; }
+    /* The few SUI components sized to a FIXED content width — see the note in
+       board.html. Only these: exempting every `sui-*` class makes anything at
+       `width: 100%` add its border outside that 100% and overflow its parent. */
+    .sui-screen-battery,
+    .sui-screen-properties,
+    .sui-result-row-portrait,
+    .sui-result-row-portrait-image { box-sizing: content-box; }
     html, body { height: 100%; margin: 0; }
 
     /* SUI tokens only, and NO fallbacks.

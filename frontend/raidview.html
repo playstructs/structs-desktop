@@ -34,17 +34,26 @@
        windows on one planet would collide. Every id here is window-scoped. */
 
     *, *::before, *::after { box-sizing: border-box; }
-    /* ...but NOT SUI's own components, which the game leaves on the browser
-       default and which are authored against it.
+    /* ...except the handful of SUI components sized to a FIXED content width.
        `.sui-screen-battery` is `width: 36px` with a 2px themed border: five
        4px chunks and four 4px gaps fit that content box EXACTLY. Under a
-       border-box reset the content is 32px instead, the chunks flex-shrink to
+       border-box reset the content is 32px, the chunks flex-shrink to
        3.203125px, and pixel art at a fractional width is mush — which is what
-       "the charge bars are wonky, the real map looks cleaner" was.
-       The game has no such reset (normalize.css scopes box-sizing to `legend`
-       and the radio/checkbox inputs), so this restores SUI to the box model it
-       was drawn in. */
-    [class^="sui-"], [class*=" sui-"] { box-sizing: content-box; }
+       "the charge bars are wonky, the real map looks cleaner" was. The game
+       has no reset at all (normalize.css scopes box-sizing to `legend` and the
+       radio/checkbox inputs), so these are restored to the box model they were
+       drawn in.
+
+       NAMED, not `[class^="sui-"]`. Exempting every SUI class was the first
+       attempt and it broke the window: components sized `width: 100%` then
+       added their padding and border OUTSIDE that 100% and overflowed their
+       parent by exactly that much — `.sui-data-card-body` by 34px,
+       `.sui-page-body-screen` by 20px — so `#board-layout` clipped 26px off
+       the right of every page. Only fixed-px components belong here. */
+    .sui-screen-battery,
+    .sui-screen-properties,
+    .sui-result-row-portrait,
+    .sui-result-row-portrait-image { box-sizing: content-box; }
     html, body { height: 100%; margin: 0; overflow: hidden; }
     body {
       background: var(--page-background);
@@ -202,8 +211,8 @@
     }
     .rv-fog-edge {
       background: url("img/tiles/fog-of-war/fog-of-war-left.png") repeat-y top left;
-      height: 100%; width: var(--tile-width, 128px);
-      flex: 0 0 var(--tile-width, 128px);
+      height: 100%; width: var(--tile-width);
+      flex: 0 0 var(--tile-width);
       image-rendering: pixelated;
     }
     .rv-fog-body {
@@ -305,6 +314,12 @@
        window's room page uses, so nothing about its shape is set here. Only
        the unread count, which is this rail's own. */
     #rv-chat-head { flex: 0 0 auto; }
+    /* The topic is a sentence, not a name, so it has to be allowed to run out
+       of room gracefully in a 240px rail. */
+    #rv-chat-head .sui-nav-btn { min-width: 0; }
+    #rv-chat-head .rv-chat-title {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     /* The timeline is `.chat-scroll` from the shared stylesheet. The one thing
        that differs: a rail is tall and usually near-empty, so the newest line
        sits next to the composer instead of stranded at the top. */
@@ -418,7 +433,7 @@
     .rv-row { display: flex; }
     .rv-cell {
       position: relative; flex: none;
-      width: var(--tile-width, 128px); height: var(--tile-height, 128px);
+      width: var(--tile-width); height: var(--tile-height);
       background-repeat: no-repeat; background-position: center;
       image-rendering: pixelated;
     }
@@ -438,9 +453,9 @@
     /* Transition rows: layers STACK inside one tile-height block (the game's
        .map-terrain-transition) — the previous ambit's edge-bottom under the
        next ambit's edge-top is what blends two bands together. */
-    .rv-row.rv-transition { position: relative; height: var(--tile-height, 128px); }
+    .rv-row.rv-transition { position: relative; height: var(--tile-height); }
     .rv-strip { position: absolute; top: 0; left: 0; display: flex; }
-    .rv-tile { flex: none; width: var(--tile-width, 128px); height: var(--tile-height, 128px);
+    .rv-tile { flex: none; width: var(--tile-width); height: var(--tile-height);
       background-repeat: no-repeat; background-position: center; }
 
     /* Slot markers: beacon on a buildable planetary slot, blocked art on an
@@ -781,12 +796,14 @@
          No back chevron either, for the same reason: there is nowhere to go
          back TO. The "open in comms" link is gone; this IS the room. -->
     <div id="rv-chat-head" class="sui-page-header">
+      <!-- The header IS the topic. The planet id was here too and is dropped:
+           the map beside this panel already says which planet it is, in the
+           banner across the top of it, so the rail was saying it twice. -->
       <a href="javascript: void(0)" class="sui-nav-btn" id="rv-chat-title-btn">
         <span class="rv-chat-title">Comms</span>
       </a>
       <span id="rv-chat-count" class="rv-log-count"></span>
     </div>
-    <div id="rv-chat-topic" class="chat-topic sui-text-tiny"></div>
     <div id="rv-chat-body" class="chat-scroll sui-text-tiny">
       <!-- Replaced by renderChat on the first paint; the same notice block
            Comms uses, so the pre-JS frame does not flash a different shape. -->

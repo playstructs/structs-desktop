@@ -284,6 +284,16 @@
   }
   function buildTrends(body) {
     body.innerHTML = '';
+    /* Two columns where there is room.
+     *
+     * Five stacked charts at 56px each plus their captions came to 420px —
+     * most of a short window, before a single leaderboard row. They are
+     * ambient context, not the headline, so they share the width instead of
+     * owning the height.
+     */
+    body.style.cssText = 'display:grid;'
+      + 'grid-template-columns:repeat(auto-fit,minmax(320px,1fr));'
+      + 'gap:0 var(--spacing-xl);align-items:start;';
     TRENDS.forEach(function (t) {
       var vals = seriesValues(t.key);
       var line = H.el('div');
@@ -322,10 +332,14 @@
       host.appendChild(trendsCard());
 
       var cols = H.el('div');
-        // 420px is a column BREAKPOINT, not spacing — it has no token. The gap
-      // does: 10px was off SUI's 2/4/8/12/16 ladder entirely.
+        /* 560px, not 420. A leaderboard row is a portrait, a name and four stat
+         tiles; at 420 the grid made two 470px columns and five guild rows
+         wrapped their stats onto a second line (96px tall against 58). The
+         breakpoint has to be the width a ROW needs, not a round number — this
+         is measured, and it has no token because a column breakpoint is not
+         spacing. */
     cols.style.cssText = 'display:grid;'
-      + 'grid-template-columns:repeat(auto-fit,minmax(420px,1fr));'
+      + 'grid-template-columns:repeat(auto-fit,minmax(560px,1fr));'
       + 'gap:var(--spacing-lg);align-items:start;';
       cols.appendChild(playersCard());
       cols.appendChild(guildsCard());

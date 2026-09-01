@@ -1231,3 +1231,43 @@ was hidden — both pinned to the broken behaviour. And the crash-vs-pass
 detector missed a suite because `raidview.test.mjs` prints `failure(s)` while
 others print `failing check`; the runner now requires one of every suite's own
 summary wordings.
+
+## The composer was real classes in an invented arrangement — 2026-08-31
+
+"Still looks like a temu version of the real action bar. Are we not using real
+components yet?" — a fair question, and the answer was no, not really.
+
+`composer()` was copied from `chat.js`'s composer, which was itself hand-built.
+So neither was the game's. It used the right CLASSES in a layout I invented:
+
+| the game's `#notification-dialogue` | what I had |
+|---|---|
+| button in `.sui-dialogue-btn-chunk > -col` | `.sui-action-bar-btn-group` (the ACTION BAR's grouping) |
+| `.sui-panel-chunk-spacer-btn-a` above the button | omitted |
+| `.sui-panel-chunk-spacer-indicator` in the portrait chunk | omitted |
+| middle chunk `sui-mod-grow` | `sui-mod-grow sui-mod-shrink` |
+| right edge `sui-panel-edge-right sui-theme-player` | unthemed |
+
+The spacers are not decoration. They seat the button and the portrait against
+the panel's own art; without them the pieces float in a frame they do not fit,
+which is precisely what a recreated-looking panel looks like.
+
+Rebuilt structurally from `structs-webapp/src/templates/game/index.html.twig`
+— the game's own dialogue panel, the thing that actually puts a portrait, a
+message and a button on a `sui-panel`. Verified in a browser: the button is
+44x48 carrying the real `panel-btn-default.png` sprite, the right edge is
+themed, and the panel is 72px like the game's.
+
+The lesson generalises past this component: **using SUI class names is not the
+same as using a SUI component.** The arrangement is part of the component, and
+the only way to get it right is to read the game's markup rather than assemble
+something plausible from its vocabulary. Five assertions now pin the
+arrangement, not just the classes.
+
+## The rail header is the topic — 2026-08-31
+
+The header said "PLANET 2-16116" and the topic sat on a second line beneath it.
+The map beside the panel already names the planet in its own banner, so the
+rail was saying it twice and spending a line on the repetition. The header is
+now the topic ("Everything said about planet 2-16116."), ellipsised for a
+240px rail, and the separate line is gone.

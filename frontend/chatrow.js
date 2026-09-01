@@ -131,44 +131,50 @@
     return wrap;
   }
 
-  /* The composer, as the game draws it.
+  /* The composer: the game's OWN dialogue panel, arrangement and all.
    *
-   * A `sui-panel` in the player theme: portrait well, connector, the message
-   * on an inset screen, connector, and the send button as a `sui-panel-btn` —
-   * the same pair every action button in the HUD is built from. This is the
-   * thing that makes a chat look like part of Structs rather than a web form,
-   * and the raid rail was drawing a bare input in a `sui-screen` instead.
+   * Copied structurally from `#notification-dialogue` in
+   * `structs-webapp/src/templates/game/index.html.twig` — the panel the game
+   * itself puts a portrait, a message and a button on.
    *
-   * Returns `{ node, input, send }` so each window can wire its own behaviour
-   * — completion, typing notices, reply chips — around the same shape.
+   * The previous version used the right CLASSES in an arrangement I invented:
+   * the button went in `sui-action-bar-btn-group` (which belongs to the action
+   * bar, not the dialogue) and the three spacers were left out entirely. The
+   * spacers are not decoration — `sui-panel-chunk-spacer-btn-a` and
+   * `sui-panel-chunk-spacer-indicator` are what seat the button and the
+   * portrait against the panel's own art. Without them the pieces float in a
+   * frame they do not fit, which is exactly what "a temu version of the real
+   * action bar" looks like.
+   *
+   * Returns `{ node, input, send, portrait }` so each window wires its own
+   * behaviour around the same shape.
    */
   function composer(opts) {
     opts = opts || {};
     var panel = el('div', 'sui-panel sui-theme-player');
     panel.appendChild(el('div', 'sui-panel-edge-left'));
 
-    /* Portrait chunk — the player, in the game's own portrait well.
-     *
-     * Carries a class of its own so a narrow host can drop it. Positional
-     * selectors do not work here: the panel's first `div` child is
-     * `.sui-panel-edge-left`, so `:first-of-type` picks the edge, not this.
-     */
+    // ── Left chunk: the portrait, on its own screen, then the spacer that
+    //    seats it. The game's own left chunk has exactly this shape.
     var pChunk = el('div', 'sui-panel-chunk chat-composer-portrait');
-    var pScreen = el('div', 'sui-screen');
+    var pScreen = el('div', 'sui-screen sui-theme-player');
     var portrait = el('div', 'sui-screen-portrait');
     if (opts.portraitId) portrait.id = opts.portraitId;
-    // `.sui-screen-portrait-image` is the action bar's own frame, with its own
-    // crop. Nesting the roster frame inside it crops the portrait twice.
+    // `.sui-screen-portrait-image` is the frame with its own crop; nesting the
+    // roster frame inside it would crop the portrait twice.
     var well = el('div', 'sui-screen-portrait-image');
     if (root.StructsPfp) root.StructsPfp.fillPortrait(well, opts.pfpAttrs);
     portrait.appendChild(well);
     pScreen.appendChild(portrait);
     pChunk.appendChild(pScreen);
+    pChunk.appendChild(el('div', 'sui-panel-chunk-spacer-indicator'));
     panel.appendChild(pChunk);
 
     panel.appendChild(el('div', 'sui-panel-connector chat-composer-portrait-join'));
 
-    var iChunk = el('div', 'sui-panel-chunk sui-mod-grow sui-mod-shrink');
+    // ── Middle chunk: the message, on a full-width screen. `sui-mod-grow`
+    //    only — the game does not shrink this one.
+    var iChunk = el('div', 'sui-panel-chunk sui-mod-grow');
     var iScreen = el('div', 'sui-screen sui-screen-full-width');
     var field = el('div', 'sui-screen-dialogue sui-theme-neutral');
     var input = document.createElement('input');
@@ -184,18 +190,23 @@
 
     panel.appendChild(el('div', 'sui-panel-connector sui-panel-style-medium-to-default'));
 
+    // ── Right chunk: the button, in the dialogue's own two-level wrapper with
+    //    its spacer above. This is the part that was invented before.
     var bChunk = el('div', 'sui-panel-chunk sui-theme-player');
-    var group = el('div', 'sui-action-bar-btn-group');
+    var btnChunk = el('div', 'sui-dialogue-btn-chunk');
+    var btnCol = el('div', 'sui-dialogue-btn-chunk-col');
+    btnCol.appendChild(el('div', 'sui-panel-chunk-spacer-btn-a'));
     var send = el('a', 'sui-panel-btn sui-mod-default');
     if (opts.sendId) send.id = opts.sendId;
     send.href = 'javascript:void(0)';
-    var arrow = el('i', 'sui-icon sui-icon-md icon-arrow');
-    send.appendChild(arrow);
-    group.appendChild(send);
-    bChunk.appendChild(group);
+    send.appendChild(el('i', 'sui-icon-md icon-arrow'));
+    btnCol.appendChild(send);
+    btnChunk.appendChild(btnCol);
+    bChunk.appendChild(btnChunk);
     panel.appendChild(bChunk);
 
-    panel.appendChild(el('div', 'sui-panel-edge-right'));
+    // The right edge carries the theme in the game's markup; the left does not.
+    panel.appendChild(el('div', 'sui-panel-edge-right sui-theme-player'));
 
     var wrap = el('div', 'sui-panel-wrapper-fit-content');
     wrap.appendChild(panel);

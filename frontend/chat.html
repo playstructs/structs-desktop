@@ -30,17 +30,26 @@
        from the shipped webapp; these rules only place them. */
 
     *, *::before, *::after { box-sizing: border-box; }
-    /* ...but NOT SUI's own components, which the game leaves on the browser
-       default and which are authored against it.
+    /* ...except the handful of SUI components sized to a FIXED content width.
        `.sui-screen-battery` is `width: 36px` with a 2px themed border: five
        4px chunks and four 4px gaps fit that content box EXACTLY. Under a
-       border-box reset the content is 32px instead, the chunks flex-shrink to
+       border-box reset the content is 32px, the chunks flex-shrink to
        3.203125px, and pixel art at a fractional width is mush — which is what
-       "the charge bars are wonky, the real map looks cleaner" was.
-       The game has no such reset (normalize.css scopes box-sizing to `legend`
-       and the radio/checkbox inputs), so this restores SUI to the box model it
-       was drawn in. */
-    [class^="sui-"], [class*=" sui-"] { box-sizing: content-box; }
+       "the charge bars are wonky, the real map looks cleaner" was. The game
+       has no reset at all (normalize.css scopes box-sizing to `legend` and the
+       radio/checkbox inputs), so these are restored to the box model they were
+       drawn in.
+
+       NAMED, not `[class^="sui-"]`. Exempting every SUI class was the first
+       attempt and it broke the window: components sized `width: 100%` then
+       added their padding and border OUTSIDE that 100% and overflowed their
+       parent by exactly that much — `.sui-data-card-body` by 34px,
+       `.sui-page-body-screen` by 20px — so `#board-layout` clipped 26px off
+       the right of every page. Only fixed-px components belong here. */
+    .sui-screen-battery,
+    .sui-screen-properties,
+    .sui-result-row-portrait,
+    .sui-result-row-portrait-image { box-sizing: content-box; }
     html, body { height: 100%; margin: 0; overflow: hidden; }
     body {
       background: var(--page-background);

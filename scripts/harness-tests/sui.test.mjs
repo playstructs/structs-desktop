@@ -153,6 +153,32 @@ for (const file of readdirSync(root + '/frontend').filter((f) => /\.(html|js)$/.
 }
 check('no window uses an undefined token or an 8px icon', failures === before1);
 
+/* A `var(--x, fallback)` on a token that EXISTS is dead code.
+ *
+ * Nine of them were removed in one pass, and two disagreed with their own
+ * token — `--form-input-height-total` is 40px where the fallback said 32px,
+ * and `--border` is #5D7E90 where the fallback said #345. Unreachable today,
+ * and silently WRONG the day a token is renamed: the app would quietly switch
+ * to the fallback instead of failing visibly, which is the opposite of what a
+ * fallback is for.
+ *
+ * A fallback on a token nothing defines is legitimate — that is a value set at
+ * runtime — so this only fires when the token is really there.
+ */
+const beforeFallback = failures;
+for (const file of windowFiles) {
+  const raw = readFileSync(root + '/frontend/' + file, 'utf8');
+  const src = code(raw);
+  const dead = [...new Set([...src.matchAll(/var\((--[a-z0-9-]+), *[^)]+\)/g)]
+    .map((m) => m[1])
+    .filter((t) => defined.has(t)))];
+  if (dead.length) {
+    check(`${file} has no dead var() fallbacks`, false,
+      dead.join(', ') + ' — the token is defined, so the fallback can never render');
+  }
+}
+check('no window carries a dead var() fallback', failures === beforeFallback);
+
 // SUI publishes THREE font families — ExtremeHazard, DirectiveZero, Inter —
 // and five roles. Anything else is outside the system: Team Ops had three
 // event logs in `monospace`, which is not one of them.
@@ -173,6 +199,67 @@ check('no window uses an undefined token or an 8px icon', failures === before1);
  * and reads as a web widget dropped into the game. Our agent-UI surfaces had
  * 8px and 6px radii on cards, chips, toasts and buttons.
  */
+/* Spacing comes off SUI's scale.
+ *
+ * `--spacing-xs/sm/md/lg/xl/xxl/xxxl` = 2/4/8/12/16/24/32. A `padding:6px` or
+ * `margin-top:10px` is a value nobody chose twice — it lands between two rungs
+ * and drifts a panel out of step with every other panel.
+ *
+ * 1px is allowed, and is not an exception so much as a different thing: this
+ * is pixel art at 1x, where one device pixel is the atom a hairline inset is
+ * measured in. Everything else must be a rung.
+ */
+/* A box-sizing exemption must NAME its components.
+ *
+ * Our windows reset `*` to `border-box`, and all of our own layout is built on
+ * that. A few SUI components are sized to a fixed CONTENT width and need the
+ * browser default back — `.sui-screen-battery` is `width: 36px` holding five
+ * 4px chunks and four 4px gaps exactly.
+ *
+ * Exempting every `sui-*` class was the first attempt, and it broke the whole
+ * window: anything at `width: 100%` then added its padding and border OUTSIDE
+ * that 100% and overflowed its parent by exactly that much —
+ * `.sui-data-card-body` by 34px, `.sui-page-body-screen` by 20px — so
+ * `#board-layout` silently clipped 26px off the right of every page. jsdom
+ * does no layout, so the whole suite stayed green through it.
+ *
+ * The shape of the mistake is checkable even though the layout is not: a
+ * content-box rule whose selector is a wildcard rather than a list of names.
+ */
+console.log('\n— box-sizing exemptions are named');
+const beforeBox = failures;
+for (const file of windowFiles) {
+  const src = code(readFileSync(root + '/frontend/' + file, 'utf8'));
+  for (const m of src.matchAll(/([^{}]*)\{[^{}]*box-sizing: *content-box[^{}]*\}/g)) {
+    const sel = m[1].trim().replace(/\s+/g, ' ');
+    // `[class^="sui-"]`, `[class*=" sui-"]`, `*` — anything matching by shape.
+    if (/\[class|^\*|[\s,]\*/.test(sel)) {
+      check(`${file} names its content-box exemptions`, false,
+        sel.slice(0, 90) + ' — list the components; a wildcard catches every '
+        + '`width: 100%` SUI component and overflows its parent');
+    }
+  }
+}
+check('no window exempts box-sizing by wildcard', failures === beforeBox);
+
+console.log('\n— spacing is on the scale');
+const SPACING = new Set(['0', '1', '2', '4', '8', '12', '16', '24', '32']);
+const beforeSpacing = failures;
+for (const file of windowFiles) {
+  const src = code(readFileSync(root + '/frontend/' + file, 'utf8'));
+  const off = [];
+  for (const m of src.matchAll(
+    /\b(padding|margin|gap|row-gap|column-gap)(?:-(?:top|right|bottom|left))?: *([^;'"}\n]+)/g)) {
+    for (const v of m[2].matchAll(/(\d+)px/g)) {
+      if (!SPACING.has(v[1])) off.push(`${m[1]}:${v[1]}px`);
+    }
+  }
+  if (off.length) {
+    check(`${file} spaces on the scale`, false, [...new Set(off)].join(', '));
+  }
+}
+check('no window invents a spacing value', failures === beforeSpacing);
+
 console.log('\n— nothing is rounded');
 const beforeRadius = failures;
 for (const file of windowFiles) {

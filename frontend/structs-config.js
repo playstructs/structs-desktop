@@ -1994,7 +1994,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // panel is where unannounced things live until they are ready to be
       // found on purpose.
       html += '<div class="sui-data-card">';
-      html += '<div class="sui-data-card-body" style="padding:6px;">';
+      html += '<div class="sui-data-card-body" style="padding:var(--spacing-md);">';
       // `a.sui-screen-btn`, the button SUI actually defines. These were
       // `<div class="sui-button">` — a class that does not exist — which is
       // why each carried hand-rolled cursor, padding and centring: it was
@@ -2006,7 +2006,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // Support bundle — because when someone needs it they are already having
       // a bad time and shouldn't have to hunt.
       html += '<div class="sui-data-card">';
-      html += '<div class="sui-data-card-body" style="padding:6px;">';
+      html += '<div class="sui-data-card-body" style="padding:var(--spacing-md);">';
       html += '<a href="javascript:void(0)" id="debug-download-logs" class="sui-screen-btn sui-mod-secondary">Download logs</a>';
       html += '<div id="debug-download-logs-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">7 days of activity as a zip · no wallet keys included</div>';
       html += '</div></div>';
@@ -2014,7 +2014,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // Game Stats door — second card, still above the fold, because it is a
       // destination people come here to open, not a diagnostic they scroll to.
       html += '<div class="sui-data-card">';
-      html += '<div class="sui-data-card-body" style="padding:6px;">';
+      html += '<div class="sui-data-card-body" style="padding:var(--spacing-md);">';
       html += '<a href="javascript:void(0)" id="debug-gamestats" class="sui-screen-btn sui-mod-secondary">Game Stats</a>';
       html += '<div id="debug-gamestats-note" style="color:var(--text-hint); font-size:11px; text-align:center; margin-top:4px;">whole-universe dashboard · opens in its own window</div>';
       html += '</div></div>';
@@ -2440,7 +2440,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           return Math.floor(s / 86400) + 'd ago';
         }
         function listBlock(title, items, formatter, emptyMsg) {
-          var out = '<div style="margin-top:8px; padding:4px 0 4px 10px; border-left:2px solid var(--accent-primary); background:rgba(0,0,0,0.15);">';
+          var out = '<div style="margin-top:var(--spacing-md); padding:var(--spacing-sm) 0 var(--spacing-sm) var(--spacing-lg); border-left:2px solid var(--accent-primary); background:rgba(0,0,0,0.15);">';
           // Escaped like everything else here. Every caller passes a literal
           // today, which is exactly the state `row` was in before somebody
           // passed it a username.

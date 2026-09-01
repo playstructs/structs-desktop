@@ -101,6 +101,104 @@ struct Cache {
 }
 
 static CACHE: RwLock<Option<Cache>> = RwLock::new(None);
+
+/* Last-known figures, kept across restarts.
+ *
+ * Every tier is a poll, and the heavy one runs every ten minutes — so a fresh
+ * launch showed "collecting…" on half the charts and "Loading…" where the
+ * leaderboards go, for as long as ten minutes. That is honest (see `opt_num`)
+ * but it is not useful: the numbers barely move between restarts, and the page
+ * had them a moment ago.
+ *
+ * So the snapshot is written to disk after each sweep and read back at boot.
+ * The page paints immediately with what was true last time and updates in
+ * place when the first sweep lands. The `*_updated_ms` stamps ride along, so
+ * the header keeps saying WHEN the figures are from rather than implying they
+ * are current.
+ *
+ * Deliberately not persisted: `auth_ok` (a live fact about this session's
+ * credentials, and a stale `false` would suppress the first probe), `sweeping`
+ * (nothing is), and `counters` (a partial block's tally means nothing once the
+ * block has passed).
+ */
+fn cache_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("structs-app").join("game_stats_cache.json"))
+}
+
+/// What survives a restart. A struct rather than the whole `Cache` so adding a
+/// live-only field cannot accidentally start persisting it.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct Persisted {
+    #[serde(default)]
+    block_height: u64,
+    #[serde(default)]
+    fast_updated_ms: f64,
+    #[serde(default)]
+    heavy_updated_ms: f64,
+    #[serde(default)]
+    slow_updated_ms: f64,
+    #[serde(default)]
+    truncated: bool,
+    #[serde(default)]
+    totals: Value,
+    #[serde(default)]
+    guilds: Vec<Value>,
+    #[serde(default)]
+    players_top: Value,
+    #[serde(default)]
+    guild_energy: Vec<Value>,
+    #[serde(default)]
+    series: Vec<Value>,
+}
+
+fn persist() {
+    let Some(path) = cache_path() else { return };
+    let snap = with_cache(|c| Persisted {
+        block_height: c.block_height,
+        fast_updated_ms: c.fast_updated_ms,
+        heavy_updated_ms: c.heavy_updated_ms,
+        slow_updated_ms: c.slow_updated_ms,
+        truncated: c.truncated,
+        totals: c.totals.clone(),
+        guilds: c.guilds.clone(),
+        players_top: c.players_top.clone(),
+        guild_energy: c.guild_energy.clone(),
+        series: c.series.iter().cloned().collect(),
+    });
+    let Ok(body) = serde_json::to_vec(&snap) else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Write-then-rename: a snapshot half-written when the app is killed must
+    // not be what the next launch reads.
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &body).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// Load last-known figures into an empty cache. Never overwrites live data:
+/// called once at startup, and a sweep that has already landed wins.
+fn restore() {
+    let Some(path) = cache_path() else { return };
+    let Ok(body) = std::fs::read(&path) else { return };
+    let Ok(p) = serde_json::from_slice::<Persisted>(&body) else { return };
+    with_cache(|c| {
+        if c.fast_updated_ms > 0.0 || c.heavy_updated_ms > 0.0 {
+            return; // a sweep beat us; live data always wins
+        }
+        c.block_height = p.block_height;
+        c.fast_updated_ms = p.fast_updated_ms;
+        c.heavy_updated_ms = p.heavy_updated_ms;
+        c.slow_updated_ms = p.slow_updated_ms;
+        c.truncated = p.truncated;
+        c.totals = p.totals;
+        c.guilds = p.guilds;
+        c.players_top = p.players_top;
+        c.guild_energy = p.guild_energy;
+        c.series = p.series.into_iter().collect();
+    });
+}
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
 fn with_cache<R>(f: impl FnOnce(&mut Cache) -> R) -> R {
@@ -705,6 +803,10 @@ pub fn ensure_running(app: &tauri::AppHandle) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
+    // Last-known figures, before the first sweep. The restored `*_updated_ms`
+    // stamps are OLD, so every tier still reads as due and refreshes at once —
+    // this fills the page, it does not delay it.
+    restore();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
@@ -752,6 +854,7 @@ pub fn ensure_running(app: &tauri::AppHandle) {
                             "game-stats-update",
                             &json!({ "tier": "fast", "snapshot": snapshot() }),
                         );
+                        persist();
                     }
                     Err(e) => {
                         auth_failed = is_auth_error(&e);
@@ -777,6 +880,7 @@ pub fn ensure_running(app: &tauri::AppHandle) {
                             "game-stats-update",
                             &json!({ "tier": "heavy", "snapshot": snapshot() }),
                         );
+                        persist();
                     }
                     Err(e) => {
                         with_cache(|c| c.slow_updated_ms = crate::hasher::types::now_millis());
@@ -792,6 +896,7 @@ pub fn ensure_running(app: &tauri::AppHandle) {
                             "game-stats-update",
                             &json!({ "tier": "heavy", "snapshot": snapshot() }),
                         );
+                        persist();
                     }
                     Err(e) => {
                         with_cache(|c| c.heavy_updated_ms = crate::hasher::types::now_millis());
@@ -860,6 +965,41 @@ mod tests {
         assert_eq!(num(Some(&json!(3.5))), 3.5);
         assert_eq!(num(Some(&json!(null))), 0.0);
         assert_eq!(num(None), 0.0);
+    }
+
+    #[test]
+    fn the_persisted_snapshot_keeps_figures_and_drops_live_state() {
+        /* What survives a restart, and what must not.
+         *
+         * `auth_ok` is a live fact about THIS session's credentials — a stale
+         * `false` would suppress the first probe and leave the page dead. And
+         * `counters` is a partial block's tally, which means nothing once that
+         * block has passed. Neither has a field here, which is the point of
+         * `Persisted` being its own struct rather than the whole `Cache`: a new
+         * live-only field cannot start persisting itself by accident.
+         */
+        let json = serde_json::to_string(&Persisted::default()).unwrap();
+        for gone in ["auth_ok", "sweeping", "counters", "pid_by_addr", "planet_counts"] {
+            assert!(!json.contains(gone), "{gone} must not be persisted");
+        }
+        for kept in ["totals", "guilds", "players_top", "series", "block_height"] {
+            assert!(json.contains(kept), "{kept} must be persisted");
+        }
+    }
+
+    #[test]
+    fn a_restored_snapshot_still_reads_as_due_for_a_sweep() {
+        // The restored stamps are the OLD ones, so `now - stamp >= INTERVAL`
+        // stays true and every tier refreshes immediately. Restoring fills the
+        // page; it must never delay it.
+        let restored_at = 1_000_000.0_f64;
+        let now = restored_at + FAST_INTERVAL_MS + 1.0;
+        assert!(now - restored_at >= FAST_INTERVAL_MS);
+        assert!(now - restored_at >= 0.0);
+        // And a snapshot from an hour ago is due on every tier.
+        let hour_ago = now - 3_600_000.0;
+        assert!(now - hour_ago >= FAST_INTERVAL_MS);
+        assert!(now - hour_ago >= HEAVY_INTERVAL_MS);
     }
 
     #[test]

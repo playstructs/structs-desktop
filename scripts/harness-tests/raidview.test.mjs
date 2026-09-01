@@ -201,6 +201,31 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   check('…and send as a panel button, not a text link',
     !!d.querySelector('#rv-chat-entry a.sui-panel-btn .icon-arrow'));
 
+  /* The ARRANGEMENT is the game's too, not just the classes.
+   *
+   * The previous version used real SUI classes in a layout I invented: the
+   * button sat in `sui-action-bar-btn-group` (which belongs to the action bar,
+   * not the dialogue) and all three spacers were missing. Those spacers seat
+   * the button and the portrait against the panel's own art — without them the
+   * pieces float in a frame they do not fit.
+   *
+   * Copied structurally from `#notification-dialogue` in the game's own
+   * `templates/game/index.html.twig`.
+   */
+  check('the button sits in the dialogue’s own wrapper',
+    !!d.querySelector('#rv-chat-entry .sui-dialogue-btn-chunk'
+      + ' > .sui-dialogue-btn-chunk-col > a.sui-panel-btn'));
+  check('…under the spacer that seats it',
+    !!d.querySelector('#rv-chat-entry .sui-dialogue-btn-chunk-col'
+      + ' > .sui-panel-chunk-spacer-btn-a'));
+  check('the portrait chunk has its spacer',
+    !!d.querySelector('#rv-chat-entry .chat-composer-portrait'
+      + ' > .sui-panel-chunk-spacer-indicator'));
+  check('…and no action-bar grouping was borrowed',
+    d.querySelectorAll('#rv-chat-entry .sui-action-bar-btn-group').length === 0);
+  check('the right edge carries the theme, as the game’s does',
+    !!d.querySelector('#rv-chat-entry .sui-panel-edge-right.sui-theme-player'));
+
   const input = d.getElementById('rv-chat-input');
   input.value = '  they are down to one shield  ';
   d.getElementById('rv-chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
@@ -539,15 +564,19 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
    * the first time. This panel has never been in doubt about which planet it
    * is.
    */
-  check('the channel is named after the planet, not "Comms"',
-    title() === 'Planet 2-1', title());
+  check('the header says what the channel is for, not "Comms"',
+    title() === 'Everything said about planet 2-1.', title());
   check('...and each row says which room it came from',
     [...d.querySelectorAll('.rv-chat-room')].some((e) => e.textContent === 'SN.Corporation'));
 
   chat.room = { connected: true, guild_id: '0-5', room_id: '!planet-2-1:h', joined: true };
   chat.roomName = 'Planet 2-1';
+  chat.roomTopic = 'Everything said about planet 2-1.';
   RV._renderChat();
-  check('the object room is named in the title', title() === 'Planet 2-1', title());
+  // The header shows the TOPIC, not the room name: the map beside this panel
+  // already names the planet, so the name here was said twice.
+  check('the header shows the topic, not the room name',
+    title() === 'Everything said about planet 2-1.', title());
   check('...and the per-row room label stops repeating it',
     [...d.querySelectorAll('.rv-chat-room')].every((e) => e.textContent === ''));
 
@@ -662,26 +691,26 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   check('the timeline is the shared scroll band',
     d.getElementById('rv-chat-body').classList.contains('chat-scroll'));
 
-  // The room's own statement of what it is for, as Comms shows it.
+  /* The header IS the topic, and there is no separate name line.
+   *
+   * The name was "Planet 2-1" and the map beside this panel already says that
+   * in its own banner — so the rail repeated it and spent a second line on the
+   * topic underneath. One line, and it is the one that says something the map
+   * does not.
+   */
+  const headText = () => (d.querySelector('.rv-chat-title') || {}).textContent || '';
   chat.roomTopic = 'Everything said about planet 2-1.';
   RV._renderChat();
-  const topic = d.getElementById('rv-chat-topic');
-  check('the room topic is shown under its name',
-    topic.classList.contains('chat-topic')
-      && topic.textContent === 'Everything said about planet 2-1.',
-    topic.textContent);
-  /* With no room yet, the topic is the one the room WILL be created with.
-   *
-   * Not a guess: `matrix_object_room_create` sets exactly this sentence, so
-   * showing it early is the same text one hop sooner — and it means the panel
-   * does not reshape itself the moment somebody speaks.
-   */
+  check('the header carries the topic',
+    headText() === 'Everything said about planet 2-1.', headText());
+  check('…and there is no separate topic line any more',
+    d.getElementById('rv-chat-topic') === null);
+  // Defaulted before the room exists: `matrix_object_room_create` sets exactly
+  // this sentence, so showing it early is the same text one hop sooner.
   chat.roomTopic = '';
   RV._renderChat();
   check('…defaulting to the topic the room will be created with',
-    topic.textContent === 'Everything said about planet 2-1.'
-      && !topic.classList.contains('hidden'),
-    topic.textContent);
+    headText() === 'Everything said about planet 2-1.', headText());
 }
 
 // ── A channel nobody has spoken in is still a channel ──────────────────────
@@ -706,12 +735,9 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   RV._syncComposer();
   RV._renderChat();
 
-  check('an empty channel still carries the planet’s name',
-    d.querySelector('.rv-chat-title').textContent === 'Planet 2-1',
+  check('an empty channel still says what it is for',
+    d.querySelector('.rv-chat-title').textContent === 'Everything said about planet 2-1.',
     d.querySelector('.rv-chat-title').textContent);
-  check('…and its topic',
-    d.getElementById('rv-chat-topic').textContent === 'Everything said about planet 2-1.',
-    d.getElementById('rv-chat-topic').textContent);
   check('…and a composer, so a conversation can be STARTED',
     !d.getElementById('rv-chat-compose').classList.contains('hidden')
       && !!d.getElementById('rv-chat-input'));

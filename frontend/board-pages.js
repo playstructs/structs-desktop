@@ -100,7 +100,8 @@
     var launch = H.el('div', null);
     launch.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;align-items:center;font-size:12px;';
     var countIn = H.el('input'); countIn.type = 'number'; countIn.min = '1'; countIn.max = '50'; countIn.value = '1';
-    countIn.style.cssText = 'width:64px;background:transparent;color:inherit;border:1px solid var(--border,#345);padding:2px 6px;';
+    countIn.style.cssText = 'width:64px;background:transparent;color:inherit;border:1px solid var(--border);'
+      + 'padding:var(--spacing-xs) var(--spacing-md);';
     var launchRole = H.el('select', 'sui-input-text');
     // Every launchable role; auto_raid can only dispatch VPlayerRole::Raider,
     // so leaving raider out of this list silently caps the war machine.
@@ -656,7 +657,7 @@
       // These replace the old "View map →" link, which routed to a page that
       // rendered a ~11-second still through the game's own canvas.
       var watch = H.el('div');
-      watch.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
+      watch.style.cssText = 'display:flex;gap:var(--spacing-md);margin-top:var(--spacing-lg);';
       (canSpectate() ? [
         { id: r.planet_id, label: 'Watch planet', arg: 'planet_id' },
         { id: r.fleet_id, label: 'Watch fleet', arg: 'fleet_id' }
@@ -3399,7 +3400,7 @@
           : 'Raid targeting is off. Enable it on the Doctrine tab to start scoring targets (it starts in advise mode and signs nothing).',
         'icon-info'));
     } else {
-      var tbar = H.el('div'); tbar.style.cssText = 'margin-bottom:6px;';
+      var tbar = H.el('div'); tbar.style.cssText = 'margin-bottom:var(--spacing-md);';
       tbar.appendChild(H.sortControl(WAR_KEYS, warState.sort, renderWarBody));
       tbody.appendChild(tbar);
       var ttable = H.resultTable();
