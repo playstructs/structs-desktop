@@ -168,3 +168,38 @@
 }
 .chat-notice .chat-notice-title { color: var(--text-body); }
 .chat-notice.chat-mod-error .chat-notice-title { color: var(--text-enemy-primary); }
+
+/* ── The composer's message field ──────────────────────────────────────────
+   One rule, because the composer is one component. Comms and the raid rail
+   each carried a near-identical copy of this keyed on their own window id —
+   which is how the two drifted in the first place.
+
+   The screen IS the field's frame, so the field contributes none of its own:
+   no border, no background, no focus ring fighting the panel art. Two lines
+   tall, and not resizable — a drag handle in the corner of a pixel-art panel
+   is not a thing this game has. */
+.chat-composer-panel textarea {
+  width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  overflow-y: auto;
+  color: var(--text-body);
+  font-family: 'DirectiveZero', sans-serif;
+  font-size: inherit;
+  line-height: 20px;
+  padding: var(--spacing-sm);
+}
+/* A placeholder should read as an invitation, not as content. */
+.chat-composer-panel textarea::placeholder {
+  color: var(--text-hint);
+  opacity: 0.45;
+}
+/* Two lines want the field to FILL the screen, not sit centred in it. */
+.chat-composer-panel .sui-screen-dialogue {
+  display: flex;
+  align-items: stretch;
+}

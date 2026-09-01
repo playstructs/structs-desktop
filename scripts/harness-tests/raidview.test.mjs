@@ -196,8 +196,14 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     !!d.querySelector('#rv-chat-entry .sui-panel.sui-theme-player'));
   check('…with the portrait well',
     !!d.querySelector('#rv-chat-entry .sui-screen-portrait-image'));
-  check('…the message on an inset screen',
-    !!d.querySelector('#rv-chat-entry .sui-screen-dialogue input[type=text]'));
+  /* A TEXTAREA, two lines tall — the portrait and battery stack to ~92px and
+   * a single-line field left most of that empty either side of the one thing
+   * in the panel people look at. */
+  check('…the message on an inset screen, two lines tall',
+    !!d.querySelector('#rv-chat-entry .sui-screen-dialogue textarea')
+    && d.querySelector('#rv-chat-entry textarea').rows === 2,
+    String(d.querySelector('#rv-chat-entry textarea')
+      && d.querySelector('#rv-chat-entry textarea').rows));
   check('…and send as a panel button, not a text link',
     !!d.querySelector('#rv-chat-entry a.sui-panel-btn .icon-arrow'));
 

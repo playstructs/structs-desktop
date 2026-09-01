@@ -358,16 +358,6 @@
     /* The panel's chunks size to content; the message field is the one that
        should absorb the width. */
     #chat-composer .sui-panel-chunk.sui-mod-grow { min-width: 0; }
-    #chat-composer .sui-screen-dialogue { display: flex; align-items: center; }
-    /* The screen IS the input's frame, so the input contributes none of its
-       own: no border, no background, no focus ring fighting the panel art. */
-    #chat-composer input[type=text] {
-      width: 100%; min-width: 0;
-      border: none; outline: none; background: transparent;
-      color: var(--text-body);
-      font-family: 'DirectiveZero', sans-serif; font-size: inherit;
-      padding: var(--spacing-sm);
-    }
     /* A placeholder should read as an invitation, not as content. SUI's own
        is `--text-hint` (#A7C0C6) against `--text-body` (#C5D7D9) — barely a
        shade apart, so "Message, or /help" looked like something already
@@ -377,7 +367,8 @@
        named three and was already wrong twice: the channel filter and the
        message search were both added later and neither was added here, so
        each shipped with a placeholder brighter than the text it invites. */
-    input::placeholder {
+    input::placeholder,
+    textarea::placeholder {
       color: var(--text-hint);
       opacity: 0.45;
     }

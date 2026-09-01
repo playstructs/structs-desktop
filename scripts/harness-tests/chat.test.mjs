@@ -3510,17 +3510,44 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
 // Every placeholder in the window recedes, not an enumerated few.
 {
   console.log('\n— placeholders');
-  const { d } = await open();
+  const { w, d } = await open();
+  /* Every placeholder recedes, whatever element carries it.
+   *
+   * The rule was `input::placeholder`, and the composer's field became a
+   * TEXTAREA — which that selector does not reach, so the one placeholder
+   * this rule was written for stopped being covered by it. The enumerated
+   * version before it named three ids and was wrong twice for the same
+   * reason: a rule that lists what it covers goes stale the moment something
+   * is added. Both element types, and the composer's own is in the shared
+   * sheet with the component it belongs to. */
+  /* OUR rules only. SUI ships its own
+   * `label.sui-input-text input[type=text]::placeholder` with a colour and no
+   * opacity; universally quantifying over every placeholder rule in the
+   * document made this test an opinion about the DESIGN SYSTEM's stylesheet
+   * rather than about this window's. (Filtering by `sheet.href` did not work
+   * — jsdom leaves it unset for the linked sheets here — so filter on the
+   * selector, which is what actually distinguishes them.) */
   const rules = Array.from(d.styleSheets)
     .flatMap((s) => { try { return Array.from(s.cssRules); } catch (e) { return []; } })
-    .filter((r) => r.selectorText === 'input::placeholder');
-  check('one rule covers every input', rules.length === 1,
-    String(rules.length));
-  // The enumerated version named three ids and was already wrong twice: the
-  // channel filter and the message search were both added later.
-  check('…and it is the receding one',
-    rules[0].style.getPropertyValue('opacity') === '0.45',
-    rules[0].style.cssText);
+    .filter((r) => /::placeholder/.test(r.selectorText || ''))
+    .filter((r) => !/\.sui-/.test(r.selectorText));
+  const covered = (el) => rules.some((r) => r.selectorText.split(',')
+    .some((sel) => sel.trim().startsWith(el)));
+  check('a placeholder rule covers inputs AND textareas',
+    covered('input') && covered('textarea'),
+    rules.map((r) => r.selectorText).join(' | '));
+  check('…and every one of them recedes',
+    rules.length > 0 && rules.every((r) =>
+      r.style.getPropertyValue('opacity') === '0.45'),
+    rules.map((r) => r.selectorText + ' → ' + r.style.cssText).join(' | '));
+  // The field it was written for is the composer's, so prove that one lands.
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  check('…including the composer\u2019s own two-line field',
+    d.getElementById('chat-input').tagName === 'TEXTAREA'
+      && d.getElementById('chat-input').rows === 2,
+    d.getElementById('chat-input').tagName + ' rows='
+      + d.getElementById('chat-input').rows);
 }
 
 // ── A picture is an aside, not the page ────────────────────────────────────

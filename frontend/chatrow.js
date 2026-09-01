@@ -158,7 +158,7 @@
    */
   function composer(opts) {
     opts = opts || {};
-    var panel = el('div', 'sui-panel sui-theme-player');
+    var panel = el('div', 'sui-panel sui-theme-player chat-composer-panel');
     panel.appendChild(el('div', 'sui-panel-edge-left'));
 
     // ── Portrait chunk: the player, in the game's own portrait well.
@@ -196,8 +196,20 @@
     var iChunk = el('div', 'sui-panel-chunk sui-mod-grow sui-mod-shrink');
     var iScreen = el('div', 'sui-screen sui-screen-full-width');
     var field = el('div', 'sui-screen-dialogue sui-theme-neutral');
-    var input = document.createElement('input');
-    input.type = 'text';
+    /* A TEXTAREA, two lines tall.
+     *
+     * The portrait and the battery stack to about 92px while a single-line
+     * field used ~26 of it, so the panel was mostly empty either side of the
+     * message — the one thing in it people actually look at. Two lines also
+     * make a paste or a long sentence readable before you send it.
+     *
+     * Enter still sends; Shift+Enter takes the newline, which every host here
+     * already implements by preventing the default on a bare Enter. The
+     * history recall in Comms guards on caret-at-start / caret-at-end, so it
+     * keeps working and now yields to line movement in between, which is what
+     * a two-line field should do. */
+    var input = document.createElement('textarea');
+    input.rows = 2;
     if (opts.inputId) { input.id = opts.inputId; input.name = opts.inputId; }
     input.placeholder = opts.placeholder || 'Message';
     input.autocomplete = 'off';
