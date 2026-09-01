@@ -816,14 +816,17 @@ cat > "$CFIX" <<'EOF'
       canonical_alias: '#sn-corp:matrix.beta.playstructs.com', icon: 'icon-guild',
       topic: 'We know better.', home_rank: 0,
       members: 25, joined: true, unread: 0, section: 'galaxy' },
-    /* Near-miss addresses on SN's own server: `help-desk` merely CONTAINS
-     * `help`, and `sn-corp-official` contains `sn-corp`. Whole-token matching,
-     * or these take pinned slots — the prefix-collision shape this codebase
-     * has been bitten by before. Browse carries a third, `#sn-corp-official`,
-     * published by someone who is not SN Corp at all. */
-    { room_id: '!sncorp2:matrix.beta.playstructs.com', name: 'SN Corp Annex',
-      canonical_alias: '#sn-corp-annex:matrix.beta.playstructs.com',
-      icon: 'icon-guild', members: 1, joined: true, unread: 0, section: 'galaxy' },
+    /* A near-miss address on SN's OWN server: `help-desk` merely CONTAINS
+     * `help`. Whole-token matching, or it takes a pinned slot — the
+     * prefix-collision shape this codebase has been bitten by before, and
+     * server equality cannot help when the impostor is hosted alongside the
+     * genuine article.
+     *
+     * ONE of these here on purpose: the joined list shows a filter box above
+     * eight rooms, and a fixture that quietly crosses that threshold changes
+     * what unrelated tests are even looking at. The exhaustive collision set
+     * (`sn-corp-official`, `sn-corp2`, `not-help`, `infrastructure-wg`) lives
+     * in `matrix::client::pin_tests`, which is the layer that decides. */
     { room_id: '!helpdesk:matrix.beta.playstructs.com', name: 'Help Desk',
       canonical_alias: '#help-desk:matrix.beta.playstructs.com', icon: 'icon-info',
       members: 2, joined: true, unread: 0, section: 'galaxy' },

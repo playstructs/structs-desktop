@@ -89,11 +89,9 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
    * both a pinned slot. Whole tokens are the only thing separating them, and
    * server equality cannot help here: the impostor is hosted alongside the
    * genuine article. */
-  check('…and near-miss addresses stay out, even on the right server',
-    !homeRows.some((r) => text(r).startsWith('Help Desk')
-      || text(r).startsWith('SN Corp Annex'))
-    && all(d, '.sui-result-row').some((r) => text(r).startsWith('Help Desk'))
-    && all(d, '.sui-result-row').some((r) => text(r).startsWith('SN Corp Annex')),
+  check('…and a near-miss address stays out, even on the right server',
+    !homeRows.some((r) => text(r).startsWith('Help Desk'))
+    && all(d, '.sui-result-row').some((r) => text(r).startsWith('Help Desk')),
     homeRows.map((r) => text(r)).join(' | '));
   check('…the first wearing the guild’s own mark, not the generic glyph',
     homeRows[0].querySelector('img.chat-room-mark')
@@ -142,10 +140,10 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   // and live in Browse — a list that mixes "your channels" with "every
   // channel on the server" answers neither question.
   const rows = all(d, '.sui-result-row');
-  // 9: the five it always had, plus Help, Infrastructure and the two
-  // near-miss addresses (`#help-desk`, `#sn-corp-official`) that prove
-  // whole-token matching on SN's own server.
-  check('only joined rooms are listed', rows.length === 9, String(rows.length));
+  // 8: the five it always had, plus Help, Infrastructure and the `#help-desk`
+  // near-miss. Eight is also the filter box's threshold — a ninth would make
+  // two unrelated tests start asserting against a filtered list.
+  check('only joined rooms are listed', rows.length === 8, String(rows.length));
   check('an unjoined room is not here',
     !rows.some((r) => text(r).startsWith('Alpha Base')),
     rows.map((r) => text(r)).join(' | '));
@@ -195,7 +193,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('no JOIN buttons in your own channel list',
     all(d, '.sui-result-row button').length === 0,
     String(all(d, '.sui-result-row button').length));
-  check('every listed room is clickable', all(d, '.chat-room-row').length === 9,
+  check('every listed room is clickable', all(d, '.chat-room-row').length === 8,
     String(all(d, '.chat-room-row').length));
 
   // Only the player's OWN guild is offered — no other guild will authenticate them.
@@ -224,8 +222,8 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_browse'));
 
   const rows = all(d, '.sui-result-row');
-  // 11: seven, plus Help, Infrastructure and the two near-misses.
-  check('every public channel is listed', rows.length === 11, String(rows.length));
+  // 10: seven, plus Help, Infrastructure and Help Desk.
+  check('every public channel is listed', rows.length === 10, String(rows.length));
   check('including ones you are already in',
     rows.some((r) => text(r).startsWith('SN.Corporation')),
     rows.map((r) => text(r)).join(' | '));
@@ -3668,7 +3666,8 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
    * for them at the top always, while an invitation is still the first thing
    * that is actually waiting on an answer. */
   const firstUnpinned = rows.find((n) => !n.querySelector('img.chat-room-mark')
-    && !['Help', 'Infrastructure', 'SN.Corporation'].some((p) => text(n).startsWith(p)));
+    && !['Help', 'Infrastructure', 'SN.Corporation'].some((p) => text(n).startsWith(p))
+    && !text(n).startsWith('Help Desk'));
   check('…first, above every section', firstUnpinned === invite, text(firstUnpinned));
   // A member count is meaningless for a room you cannot see yet; who asked
   // is the whole basis for deciding.
