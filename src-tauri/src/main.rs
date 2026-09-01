@@ -11,6 +11,7 @@ mod matrix;
 mod mcp;
 mod menu;
 mod notifications;
+mod remote_image;
 mod updater;
 
 fn main() {
@@ -97,6 +98,7 @@ fn main() {
             matrix::matrix_backfill,
             matrix::matrix_open_url,
             matrix::matrix_media,
+            remote_image::remote_image,
             matrix::matrix_members,
             matrix::matrix_mark_read,
             matrix::matrix_send,

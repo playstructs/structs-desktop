@@ -11,6 +11,90 @@ var STRUCTS_ESC = function (s) {
   });
 };
 
+/* Remote images, through Rust.
+ *
+ * The app's CSP is `img-src 'self' data: blob:` — no `http:`, no `https:` —
+ * so every image the webapp points at a remote host renders as a blank box.
+ * The guild directory is where it shows: a guild's logo comes from
+ * `guild_meta.logo`, published in that guild's own `guild.json`, and it is not
+ * required to live near that guild's API —
+ *
+ *   SN Corp        https://beta.playstructs.com/img/logo-snc.gif
+ *   Orbital Hydro  https://oh.energy/images/logo.svg   (not crew.oh.energy)
+ *
+ * Guilds WITHOUT a logo were fine, because the webapp draws `icon-unknown` for
+ * those — which is why the list read as "some guilds have no picture" rather
+ * than as a broken window.
+ *
+ * The CSP is not the bug. Those URLs are chosen by other players, and loading
+ * them directly would tell an arbitrary host who is browsing the guild
+ * directory and when. So the bytes come through `remote_image` instead — the
+ * same answer the Comms window already uses for posted pictures, and the
+ * reason the policy can stay shut.
+ *
+ * Generic on purpose: it adopts any remote `<img>` the game renders, not just
+ * the guild directory, so the next screen that shows one is already handled.
+ */
+(function () {
+  try {
+    if (!window.__TAURI__ || window.__structsImgProxy) return;
+    window.__structsImgProxy = true;
+
+    var pending = {};    // url -> true while in flight
+    var resolved = {};   // url -> data URI, so a re-render is free
+
+    function adopt(img) {
+      var url = img.getAttribute('src') || '';
+      if (url.slice(0, 8) !== 'https://') return;
+      img.dataset.remoteSrc = url;
+      // Drop the blocked src NOW: leaving it set is what paints the empty box.
+      img.removeAttribute('src');
+      if (resolved[url]) { img.src = resolved[url]; return; }
+      if (pending[url]) return;
+      pending[url] = true;
+      window.__TAURI__.core.invoke('remote_image', { url: url }).then(function (r) {
+        delete pending[url];
+        if (!r || !r.data_url) return;
+        resolved[url] = r.data_url;
+        // Every element waiting on this URL, not just the one that asked —
+        // the directory re-renders and the same logo appears more than once.
+        var all = document.querySelectorAll('img[data-remote-src]');
+        for (var i = 0; i < all.length; i++) {
+          if (all[i].dataset.remoteSrc === url) all[i].src = r.data_url;
+        }
+      }).catch(function (e) {
+        delete pending[url];
+        // A refusal is a fact about that guild's URL, not a window error.
+        // Left as the webapp's own empty frame rather than invented artwork.
+        console.info('[Structs] image not loaded: ' + url + ' — ' + e);
+      });
+    }
+
+    function sweep(root) {
+      if (!root || !root.querySelectorAll) return;
+      if (root.tagName === 'IMG') adopt(root);
+      var imgs = root.querySelectorAll('img[src^="https://"]');
+      for (var i = 0; i < imgs.length; i++) adopt(imgs[i]);
+    }
+
+    sweep(document);
+    // The game re-renders whole panels, so a one-shot sweep would only ever
+    // fix whatever happened to be on screen at load.
+    new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes;
+        for (var j = 0; j < added.length; j++) sweep(added[j]);
+        // `src` set after insertion — the directory builds rows this way.
+        if (muts[i].type === 'attributes') sweep(muts[i].target);
+      }
+    }).observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true, attributeFilter: ['src'],
+    });
+  } catch (e) {
+    console.warn('[Structs] image proxy unavailable', e);
+  }
+})();
+
 // [structs-universe DIAGNOSTIC — remove later] Identify the "dark square"
 // render artifact. Hover the square and press Ctrl+Shift+D (or Cmd+Shift+D):
 // logs the element stack under the cursor (id/class/rect/bg/visibility/

@@ -216,5 +216,47 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
     rawInterp.length === 0, rawInterp.join(', '));
 }
 
+/* ── Remote images go through Rust ─────────────────────────────────────────
+ *
+ * The CSP is `img-src 'self' data: blob:`, so a remote `<img>` renders a blank
+ * box. Guild logos are the visible case and they are GUILD-AUTHORED URLs on
+ * hosts of that guild's choosing, so loading them directly would tell an
+ * arbitrary host who is browsing the directory. The proxy is the fix; these
+ * check it cannot quietly become "just widen the policy".
+ */
+{
+  console.log('\n— remote images');
+  const csp = readFileSync(process.cwd() + '/src-tauri/tauri.conf.json', 'utf8');
+  const imgSrc = /"csp":[^"]*"([^"]*)"/.exec(csp);
+  const directive = imgSrc && /img-src ([^;"]*)/.exec(imgSrc[1]);
+  check('the policy still refuses remote images', !!directive
+    && !/https?:/.test(directive[1]), directive && directive[1]);
+
+  check('a blocked src is dropped, not left to paint an empty box',
+    /removeAttribute\('src'\)/.test(src));
+  check('…and the URL is remembered so it can be filled in',
+    /dataset\.remoteSrc = url/.test(src));
+  check('the bytes come from Rust, not the window',
+    /invoke\('remote_image'/.test(src) && !/img\.src = url/.test(src));
+  check('every element waiting on one URL is filled, not just the first',
+    /querySelectorAll\('img\[data-remote-src\]'\)/.test(src));
+  // A one-shot sweep only ever fixes what happened to be on screen at load;
+  // this window rebuilds whole panels as you navigate.
+  check('it keeps up with re-rendered panels',
+    /new MutationObserver/.test(src) && /attributeFilter: \['src'\]/.test(src));
+
+  const rust = readFileSync(process.cwd() + '/src-tauri/src/remote_image.rs', 'utf8');
+  check('the fetcher refuses anything but https',
+    /scheme\(\) != "https"/.test(rust));
+  check('…and refuses private hosts, resolved not just spelled',
+    /to_socket_addrs/.test(rust) && /is_loopback/.test(rust));
+  check('…and re-checks every redirect',
+    /redirect::Policy::custom/.test(rust) && /refuse_reason\(attempt\.url\(\)/.test(rust));
+  check('…and caps what it will hold',
+    /MAX_BYTES/.test(rust) && /content_length\(\)/.test(rust));
+  check('…and will not pass off a non-image as one',
+    /starts_with\("image\/"\)/.test(rust));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);
