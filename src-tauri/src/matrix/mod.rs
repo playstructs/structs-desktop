@@ -520,6 +520,11 @@ pub async fn matrix_dm(
     let their_id = directory::matrix_id_resolving(&player_id).await?;
 
     let room_id = client::open_dm(&guild_id, &session, &their_id).await?;
+    // We were handed a PLAYER id. Keep it against the room rather than letting
+    // the window re-derive who this is from `m.direct`, `m.heroes` and the
+    // galaxy directory — none of which is populated for a conversation whose
+    // invitee has not accepted yet, which is every DM for its first minutes.
+    client::note_dm_player(&guild_id, &room_id, player_id.trim());
     let _ = app.emit(
         "matrix::rooms",
         json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),

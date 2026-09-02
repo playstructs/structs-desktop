@@ -389,6 +389,12 @@
        So one override, for the one property that is genuinely ours. */
     .ops-modal-overlay { z-index: 2100; padding: var(--spacing-xl); }
     .ops-modal-overlay .sui-message-system-modal { max-height: 90%; overflow-y: auto; }
+    /* The lookup's search box. Capped so it reads as a search field rather
+       than a full-width banner on a wide board, and explicitly left-aligned:
+       main.css sets `text-align: center` on the body and it bites anything
+       that goes full-width. */
+    .explore-search { max-width: 420px; text-align: left; margin-bottom: var(--spacing-lg); }
+    .explore-search .sui-input-text, .explore-search input { min-width: 0; width: 100%; }
     #detail-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
       display: flex; align-items: center; justify-content: center; z-index: 2050; }
     #detail-overlay .detail-panel { background: var(--surface-player-body);

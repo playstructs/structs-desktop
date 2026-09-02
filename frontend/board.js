@@ -1225,7 +1225,14 @@
     host.innerHTML = '';
     // Hidden sections (pop-out-only pages) never render a nav entry.
     var visible = area.sections.filter(function (s) { return !s.hidden; });
-    if (Board.solo || visible.length < 2) return;
+    /* A one-section area still gets its strip.
+     *
+     * The rule was "two or more", on the reasoning that a nav with a single
+     * choice is not a choice. But it also means the section has no name on
+     * screen anywhere, so a new area reads as a page with no heading — which
+     * is exactly what Explore looked like. Naming where you are is worth the
+     * row even when there is nowhere else to go yet. */
+    if (Board.solo || visible.length < 1) return;
     host.appendChild(navStrip(visible, section.key, null, function (k) {
       return '#/' + area.key + '/' + k;
     }));

@@ -2259,8 +2259,22 @@
   var exploreState = { q: '', results: null, searching: false, player: null,
                        data: null, error: null, loading: false };
 
-  // Chain entity field names, in one place. `gridAttributes` is where the game
-  // keeps the live numbers; the rest sit on the player record.
+  /* The chain's player entity, whose shape is NOT flat.
+   *
+   * Read off a live record (`mcp_player_detail 1-61`), not guessed: the
+   * identity fields sit under a nested `Player` object and the live numbers
+   * under `gridAttributes`, so reading `entity.planetId` — which is what this
+   * did first — returns undefined for every field. That is why the profile
+   * came up empty and why the planet and fleet buttons never appeared: they
+   * are only drawn when there is an id to open.
+   *
+   *   entity.Player.{ name, guildId, planetId, fleetId, substationId,
+   *                   primaryAddress, pfpClientRenderAttributes, guildRank }
+   *   entity.gridAttributes.{ ore, load, capacity, structsLoad,
+   *                           connectionCapacity, lastAction }
+   *   entity.playerInventory.rocks.{ amount, denom }
+   */
+  function entPlayer(ent) { return (ent && ent.Player) || {}; }
   function entNum(ent, path) {
     var cur = ent;
     for (var i = 0; i < path.length && cur != null; i++) cur = cur[path[i]];
@@ -2269,12 +2283,17 @@
     return typeof n === 'number' && isFinite(n) ? n : null;
   }
   function entStr(ent, key) {
-    var v = ent && ent[key];
+    var v = entPlayer(ent)[key];
     return v == null || v === '' ? null : String(v);
   }
 
   function exploreSearch(q) {
     exploreState.q = q;
+    // A new query is a new question: drop whatever profile is on screen so the
+    // page never shows a search and an unrelated profile at the same time.
+    exploreState.player = null;
+    exploreState.data = null;
+    exploreState.error = null;
     if (!q.trim()) { exploreState.results = null; return renderExplore(); }
     exploreState.searching = true;
     renderExplore();
@@ -2295,6 +2314,14 @@
   exploreSearch.seq = 0;
 
   function exploreOpen(playerId) {
+    /* Opening a result CLEARS the result list.
+     *
+     * Both were drawn at once, so the player you clicked appeared twice —
+     * once as the row you clicked and again as the profile header directly
+     * beneath it. Searching is how you get here; once you have arrived, the
+     * search that brought you is no longer the subject. Typing again brings
+     * the list back. */
+    exploreState.results = null;
     exploreState.player = playerId;
     exploreState.data = null;
     exploreState.error = null;
@@ -2323,7 +2350,7 @@
   function exploreAsRow(ent, pid) {
     return {
       player_id: pid,
-      player_name: entStr(ent, 'username') || pid,
+      player_name: entStr(ent, 'name') || pid,
       planet_id: entStr(ent, 'planetId'),
       fleet_id: entStr(ent, 'fleetId'),
     };
@@ -2391,36 +2418,80 @@
 
     /* What this player is routing OUT, and what they have staked. The two
      * things a lookup wants that your own profile has no reason to show. */
-    var allocs = d.allocations || [];
-    var aBody = H.el('div');
-    if (!d.allocations) aBody.appendChild(H.stateBlock('info', 'not published by this guild'));
-    else if (!allocs.length) aBody.appendChild(H.stateBlock('info', 'none'));
-    else allocs.forEach(function (a) {
-      aBody.appendChild(H.row(
-        String(a.id || a.allocation_id || '?') + ' → ' + String(a.destination_id || '?'),
-        H.fmtWatts(Number(a.power || a.power_mw || 0))));
-    });
-    wrap.appendChild(H.card('Outgoing Allocations', aBody));
+    /* Rendered the way Industry renders the same two things: a
+     * `sui-result-row` with `statTile` chips, not a label/value list.
+     *
+     * NOT `infusionRow`/the Distribution list themselves — those carry Add,
+     * Defuse, Migrate and Restart, which are controls over OUR OWN stake. On
+     * somebody else's profile they would be either dead or dangerous. The
+     * vocabulary is what transfers; the write actions are what must not.
+     *
+     * Field names are the ones `mcp_allocations` and `mcp_infusions` really
+     * return, read off the live commands: allocations carry `power_mw` and
+     * `destination_id`, infusions `fuel_ualpha`, `capacity_mw`, `commission`
+     * and `destination_label`.
+     */
+    var listCard = function (title, rows, empty, build) {
+      var body = H.el('div');
+      if (!rows) body.appendChild(H.stateBlock('info', 'not published by this guild'));
+      else if (!rows.length) body.appendChild(H.stateBlock('info', empty));
+      else {
+        var table = H.resultTable();
+        var list = H.el('div', 'sui-result-rows');
+        rows.forEach(function (r) { list.appendChild(build(r)); });
+        table.appendChild(list);
+        body.appendChild(table);
+      }
+      return H.card(title, body);
+    };
 
-    var infs = d.infusions || [];
-    var iBody = H.el('div');
-    if (!d.infusions) iBody.appendChild(H.stateBlock('info', 'not published by this guild'));
-    else if (!infs.length) iBody.appendChild(H.stateBlock('info', 'none'));
-    else infs.forEach(function (i) {
-      iBody.appendChild(H.row(String(i.destination_id || i.reactor_id || i.validator || '?'),
-        H.fmtAlpha(Number(i.fuel || i.amount || 0))));
-    });
-    wrap.appendChild(H.card('Infusions', iBody));
+    wrap.appendChild(listCard('Outgoing Allocations', d.allocations, 'none routing out',
+      function (a) {
+        var mw = Number(a.power_mw || a.power || 0);
+        return H.resultRow({
+          icon: 'sui-icon-energy',
+          title: H.fmtWatts(mw) + ' → ' + String(a.destination_id || '?'),
+          subtitle: String(a.id || '?') + (a.type ? ' · ' + a.type : ''),
+          chips: [statTile('power', H.fmtWatts(mw), null, 'muted')],
+        });
+      }));
+
+    wrap.appendChild(listCard('Infusions', d.infusions, 'nothing staked',
+      function (i) {
+        var chips = [];
+        if (i.capacity_mw != null) {
+          chips.push(statTile('capacity', H.fmtWatts(Number(i.capacity_mw)), null,
+            i.dead ? 'bad' : 'ok'));
+        }
+        if (i.commission != null) {
+          chips.push(statTile('commission',
+            (Number(i.commission) * 100).toFixed(1).replace(/\.0$/, '') + '%', null, 'muted'));
+        }
+        return H.resultRow({
+          icon: i.dead ? 'sui-icon-no-power' : 'sui-icon-energy',
+          title: H.fmtAlpha(Number(i.fuel_ualpha || i.fuel || 0)) + ' → '
+            + String(i.destination_label || i.destination_id || '?'),
+          subtitle: i.dead ? 'validator not producing' : null,
+          chips: chips,
+        });
+      }));
 
     return wrap;
   }
 
   function renderExplore() {
     return H.renderInto('explore-body', function (body) {
-      // The search is the page's own control, not a card: it is how you get
-      // anywhere here at all.
-      body.appendChild(H.field('Find a player',
+      /* The search sits in its own row and stops at a readable width.
+       *
+       * `H.field` stretches to its container, and on a wide board that put a
+       * 1,400px input under a short label with the caret miles from the words
+       * describing it. A search box wants to look like a search box at every
+       * width — so it is capped, and left-aligned against `main.css`'s
+       * inherited `text-align: center`. */
+      var search = H.el('div', 'explore-search');
+      search.appendChild(H.field('Find a player',
         H.textBox(exploreState.q, 'id, name or address', exploreSearch)));
+      body.appendChild(search);
 
       if (exploreState.searching) {
         body.appendChild(H.stateBlock('loading', 'searching…'));
@@ -2430,12 +2501,12 @@
         var table = H.resultTable();
         var rows = H.el('div', 'sui-result-rows');
         exploreState.results.slice(0, 25).forEach(function (r) {
-          var pid = r.player_id || r.id;
+          // One shape, normalised in Rust — no `a || b || c` over two records.
+          var pid = r.player_id;
           if (!pid) return;
           rows.appendChild(H.resultRow({
-            portrait: H.pfpPortrait(r.pfp || r.pfp_attrs
-              || r.pfp_client_render_attributes || null),
-            title: r.username || r.name || pid,
+            portrait: H.pfpPortrait(r.pfp),
+            title: r.username || pid,
             subtitle: '#' + pid + (r.guild_id ? ' · ' + r.guild_id : ''),
             onClick: function () { exploreOpen(pid); },
           }));

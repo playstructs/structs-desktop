@@ -153,6 +153,28 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
    * (`pinned_rank_for`), and the window has never had one: it reads the rank
    * and nothing else. This asserts the window stays that way. */
   const rustPins = readFileSync(repo + '/src-tauri/src/matrix/client.rs', 'utf8');
+
+  /* A DM opened FOR a player is titled by that player, immediately.
+   *
+   * `dm_with` holds a Matrix id and arrives from `m.direct` on a later sync;
+   * the peer is otherwise re-derived from `m.heroes`, the member count and the
+   * galaxy directory. All of those are empty while an invitee has not accepted
+   * — which is every DM for its first minutes — so a new conversation had
+   * nothing to title itself with and printed its own room id, in a net section
+   * rather than under Direct. The caller was HANDED a player id; keeping it is
+   * the fix, not another derivation.
+   */
+  const rustMod = readFileSync(repo + '/src-tauri/src/matrix/mod.rs', 'utf8');
+  check('opening a DM remembers which player it is for',
+    /note_dm_player\(&guild_id, &room_id, player_id\.trim\(\)\)/.test(rustMod)
+    && /pub fn note_dm_player/.test(rustPins));
+  check('…and that alone makes the room a direct message',
+    /let is_dm = told_player\.is_some\(\) \|\| dm_peer\.is_some\(\)/.test(rustPins)
+    && /section: if is_dm \{/.test(rustPins),
+    'an unaccepted invite has no heroes, so dm_peer alone leaves it a channel');
+  check('…titled by the player rather than by the room id',
+    /None => dm_player\.clone\(\)\.unwrap_or\(display\)/.test(rustPins),
+    'falling through to `display` prints the raw room id at the reader');
   check('the pin rule takes the room, not the viewer',
     /fn pinned_rank_for\(alias: &str, home_server: &str\)/.test(rustPins),
     (/fn pinned_rank_for\([^)]*\)/.exec(rustPins) || [''])[0]);

@@ -383,6 +383,17 @@ async fn board_invoke(
         "mcp_work" => from_result(board_pages::mcp_work_impl(&st.registry).await),
         "mcp_health" => from_result(board_pages::mcp_health().await),
         "mcp_allocations" => from_result(board_pages::mcp_allocations().await),
+        /* Explore → Player. Both are READS about somebody else, so they carry
+         * no write authority and belong on the same side of the impl split as
+         * every other read here. A page registered in the manifest but whose
+         * commands are not routed renders an empty shell on the web copy —
+         * which is exactly what "most of the data seems missing" was. */
+        "mcp_player_profile" => from_result(
+            board_pages::mcp_player_profile(s("player").unwrap_or_default()).await,
+        ),
+        "mcp_player_search" => from_result(
+            board_pages::mcp_player_search(s("query").unwrap_or_default()).await,
+        ),
         "mcp_allocation_preview" => from_result(
             board_pages::mcp_allocation_preview(
                 s("allocationId").unwrap_or_default(),

@@ -220,6 +220,20 @@ struct GuildState {
     /// messages. Sourced from `m.direct` account data, which is where Matrix
     /// records that fact.
     dm_with: HashMap<String, String>,
+    /* room_id → the PLAYER id we opened this conversation for.
+     *
+     * `dm_with` holds a Matrix id and is sourced from `m.direct`, which the
+     * homeserver only tells us about on a later sync — and the peer's identity
+     * is otherwise re-derived from `m.heroes`, membership counts and the
+     * galaxy directory. Every one of those is empty for a DM whose invitee has
+     * not accepted yet, so a brand-new conversation had nothing to title
+     * itself with and fell back to printing its own room id.
+     *
+     * When the window is asked to message a PLAYER, it is told exactly who. So
+     * remember that instead of re-deriving it: this is the one source that is
+     * correct the instant the room exists.
+     */
+    dm_player_id: HashMap<String, String>,
     /// room_id → who is typing right now. Ephemeral by definition: it is
     /// rebuilt from each sync rather than accumulated, because "stopped
     /// typing" arrives as an empty list, not as a removal.
@@ -1674,6 +1688,8 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         // a DM created by another client, or by the guild's own tooling, never
         // writes it into our account data. So an unnamed two-person room counts
         // as a direct message on its own evidence.
+        // We were TOLD who this is; nothing below has to guess.
+        let told_player = gs.dm_player_id.get(&room_id).cloned();
         let dm_peer = gs.dm_with.get(&room_id).cloned().or_else(|| {
             let two_or_fewer = members.map(|m| m <= 2).unwrap_or(false);
             if name.is_none() && final_alias.is_none() && two_or_fewer {
@@ -1682,7 +1698,13 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 None
             }
         });
-        let dm_player = dm_peer.as_deref().and_then(directory::player_id_of);
+        let dm_player = told_player
+            .clone()
+            .or_else(|| dm_peer.as_deref().and_then(directory::player_id_of));
+        // A conversation we opened FOR somebody is a direct message even
+        // before they accept — which is the state it spends its first moments
+        // in, and the one it was rendering as a channel.
+        let is_dm = told_player.is_some() || dm_peer.is_some();
         let dm_ident = dm_player.as_deref().and_then(directory::get);
         if let Some(pid) = dm_player.as_deref() {
             if dm_ident.is_none() {
@@ -1695,8 +1717,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
 
         // Computed before the literal: `display` and `final_alias` are moved
         // into it.
-        let rank = if dm_peer.is_some() { None }
-            else { home_rank(final_alias.as_deref()) };
+        let rank = if is_dm { None } else { home_rank(final_alias.as_deref()) };
         let entry = Room {
             home_rank: rank,
             room_id: room_id.clone(),
@@ -1716,7 +1737,9 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                         .cloned()
                         .or_else(|| dm_player.clone())
                         .unwrap_or_else(|| localpart(peer)),
-                    None => display,
+                    // No peer yet, but we know which player this is for. Their
+                    // id beats printing the room's own id at them.
+                    None => dm_player.clone().unwrap_or(display),
                 },
             },
             canonical_alias: final_alias,
@@ -1743,7 +1766,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 .unwrap_or_default(),
             unread: notif_count,
             mention: highlight_count > 0,
-            section: if dm_peer.is_some() {
+            section: if is_dm {
                 SECTION_DIRECT
             } else {
                 section_for(&room_id, &server)
@@ -3459,6 +3482,20 @@ pub async fn open_dm(
         eprintln!("[Comms] m.direct update: {}", e);
     }
     Ok(room_id)
+}
+
+/// Remember that this room is the conversation with this PLAYER.
+///
+/// Called by `matrix_message_player`, which is handed a player id and would
+/// otherwise throw that fact away the moment it had resolved a Matrix id from
+/// it — leaving the window to re-derive the same answer from heroes and the
+/// directory, neither of which is populated yet for a fresh invite.
+pub fn note_dm_player(guild_id: &str, room_id: &str, player_id: &str) {
+    if let Ok(mut map) = STATE.write() {
+        let gs = map.entry(guild_id.to_string()).or_default();
+        gs.dm_player_id
+            .insert(room_id.to_string(), player_id.to_string());
+    }
 }
 
 /// Write the whole `m.direct` map back. Matrix has no partial update for

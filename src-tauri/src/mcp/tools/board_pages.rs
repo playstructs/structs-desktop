@@ -153,6 +153,25 @@ pub async fn mcp_player_profile(player: String) -> Result<Value, String> {
     }))
 }
 
+/// One search result, whatever found it.
+fn hit(
+    id: &str,
+    name: Option<&str>,
+    guild: Option<&str>,
+    pfp: Option<&str>,
+    planet: Option<&str>,
+    fleet: Option<&str>,
+) -> Value {
+    json!({
+        "player_id": id,
+        "username": name,
+        "guild_id": guild,
+        "pfp": pfp,
+        "planet_id": planet,
+        "fleet_id": fleet,
+    })
+}
+
 /// Find a player by id, name or address.
 #[tauri::command]
 pub async fn mcp_player_search(query: String) -> Result<Value, String> {
@@ -170,17 +189,43 @@ pub async fn mcp_player_search(query: String) -> Result<Value, String> {
      * search for everything else. */
     if crate::matrix::refs::parse_id(q).is_some_and(|(kind, _)| kind == 1) {
         if let Ok(entity) = client.query_entity("player", q).await {
-            return Ok(json!({ "results": [{
-                "player_id": q,
-                "username": entity.get("username").and_then(|v| v.as_str()),
-                "guild_id": entity.get("guildId").and_then(|v| v.as_str()),
-                "pfp": entity.get("pfpClientRenderAttributes").and_then(|v| v.as_str()),
-                "exact": true,
-            }] }));
+            // Identity lives under a nested `Player` object, not at the top.
+            let p = entity.get("Player").unwrap_or(&Value::Null);
+            let f = |k: &str| p.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            return Ok(json!({ "results": [ hit(q, f("name"), f("guildId"),
+                f("pfpClientRenderAttributes"), f("planetId"), f("fleetId")) ] }));
         }
     }
+    /* ONE shape out of both branches.
+     *
+     * The guild API's search DTO keys the player as `id`, while the chain
+     * branch above knows it as `player_id` — so the window was reading
+     * `r.player_id || r.id` and papering over two different records. Anything
+     * only ONE branch carries (the guild id, the planet and fleet a lookup
+     * needs to offer its map buttons) then existed on some rows and not
+     * others, depending on how you had searched. Normalised here so the
+     * window has one record to read.
+     */
     let found = client.guild.player_search(q, None).await?;
-    Ok(json!({ "results": found }))
+    let rows: Vec<Value> = found
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| {
+            let g = |k: &str| r.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            let id = g("id").or_else(|| g("player_id"))?;
+            Some(hit(
+                id,
+                g("username"),
+                g("guild_id"),
+                g("pfp_client_render_attributes"),
+                g("planet_id"),
+                g("fleet_id"),
+            ))
+        })
+        .collect();
+    Ok(json!({ "results": rows }))
 }
 
 // ── ENERGY ───────────────────────────────────────────────────────────────────
