@@ -2089,20 +2089,29 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
        * keyboard and none with a hover state. `a.sui-text-secondary` is the
        * game's own inline link and already carries all of it.
        */
-      /* The one-line note under a door button.
+      /* Say what happened ON the control that did it.
        *
-       * Three copies of the same inline blob, each picking 11px — a size on
-       * no SUI scale (8 / 12 / 16). `.sui-text-tiny` is the 8px role and
-       * `.sui-text-hint` the colour; only the centring is local.
+       * The three doors reported failures into the descriptive line beneath
+       * them. With those lines gone the button is the only place left — and
+       * the better one anyway, since the message is then attached to the thing
+       * that was clicked instead of floating under it.
        *
-       * The TEXT of these is a separate question: they describe what a
-       * control does, which is the shape the player has asked us to stop
-       * putting in panels. Flagged, not removed unilaterally.
+       * `innerHTML` is what gets saved, not the text: the Comms button carries
+       * the unread badge inside it, and `textContent` would eat it.
        */
-      var doorNote = function(id, text) {
-        return '<div id="' + STRUCTS_ESC(id) + '" class="sui-text-hint sui-text-tiny" ' +
-          'style="text-align:center; margin-top:var(--spacing-xs);">' +
-          STRUCTS_ESC(text) + '</div>';
+      var flashBtn = function(el, msg, ms) {
+        if (!el) return;
+        if (el.dataset.restore == null) el.dataset.restore = el.innerHTML;
+        el.textContent = msg;
+        clearTimeout(el.__flashTimer);
+        el.__flashTimer = setTimeout(function () {
+          el.innerHTML = el.dataset.restore;
+          delete el.dataset.restore;
+          el.dataset.busy = '0';
+          // The count may have moved while the button was saying something
+          // else; the saved markup carries the old one.
+          paintCommsUnread();
+        }, ms || 6000);
       };
       var copyLink = function(id, label) {
         return '<a id="' + STRUCTS_ESC(id) + '" href="javascript:void(0)" ' +
@@ -2121,30 +2130,29 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // in the game's own menu: the feature is real but unannounced, and this
       // panel is where unannounced things live until they are ready to be
       // found on purpose.
+      /* The three doors, in one frame.
+       *
+       * They were three cards, each holding one button and a line describing
+       * what it opened. The descriptions are gone — this panel's reader knows
+       * what Comms is — and with them the reason the three were ever separate.
+       *
+       * `a.sui-screen-btn` is the button SUI actually defines. These were once
+       * `<div class="sui-button">`, a class that does not exist, which is why
+       * each carried hand-rolled cursor, padding and centring: it was
+       * rendering as a bare div.
+       */
       html += '<div class="sui-data-card">';
-      html += '<div class="sui-data-card-body" style="padding:var(--spacing-md);">';
-      // `a.sui-screen-btn`, the button SUI actually defines. These were
-      // `<div class="sui-button">` — a class that does not exist — which is
-      // why each carried hand-rolled cursor, padding and centring: it was
-      // rendering as a bare div. Same component the engine toggle below uses.
-      html += '<a href="javascript:void(0)" id="debug-comms" class="sui-screen-btn sui-mod-secondary">Comms<span id="debug-comms-unread" class="sui-badge sui-mod-default" style="display:none; margin-left:var(--spacing-md);"></span></a>';
-      html += doorNote('debug-comms-note', 'federated guild chat \u00b7 opens in its own window');
-      html += '</div></div>';
-
-      // Support bundle — because when someone needs it they are already having
-      // a bad time and shouldn't have to hunt.
-      html += '<div class="sui-data-card">';
-      html += '<div class="sui-data-card-body" style="padding:var(--spacing-md);">';
+      html += '<div class="sui-data-card-body" style="padding:var(--spacing-md);'
+        + ' display:flex; flex-direction:row; flex-wrap:wrap;'
+        + ' gap:var(--spacing-md); align-items:center;">';
       html += '<a href="javascript:void(0)" id="debug-download-logs" class="sui-screen-btn sui-mod-secondary">Download logs</a>';
-      html += doorNote('debug-download-logs-note', '7 days of activity as a zip \u00b7 no wallet keys included');
-      html += '</div></div>';
-
-      // Game Stats door — second card, still above the fold, because it is a
-      // destination people come here to open, not a diagnostic they scroll to.
-      html += '<div class="sui-data-card">';
-      html += '<div class="sui-data-card-body" style="padding:var(--spacing-md);">';
       html += '<a href="javascript:void(0)" id="debug-gamestats" class="sui-screen-btn sui-mod-secondary">Game Stats</a>';
-      html += doorNote('debug-gamestats-note', 'whole-universe dashboard \u00b7 opens in its own window');
+      // The unread count rides INSIDE the Comms button: it is a fact about
+      // what is behind that door, and anywhere else it would need a label to
+      // say which door it belonged to.
+      html += '<a href="javascript:void(0)" id="debug-comms" class="sui-screen-btn sui-mod-secondary">Comms'
+        + '<span id="debug-comms-unread" class="sui-badge sui-mod-default"'
+        + ' style="display:none; margin-left:var(--spacing-md);"></span></a>';
       html += '</div></div>';
 
       // Identity
@@ -2263,29 +2271,20 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // reports progress and disables itself rather than looking dead.
       setTimeout(function() {
         var dlEl = document.getElementById('debug-download-logs');
-        var dlNote = document.getElementById('debug-download-logs-note');
         if (dlEl) {
           dlEl.addEventListener('click', function() {
             if (dlEl.dataset.busy === '1') return;
             dlEl.dataset.busy = '1';
-            var restore = dlEl.textContent;
+            if (dlEl.dataset.restore == null) dlEl.dataset.restore = dlEl.innerHTML;
+            // Not a flash: this one stands until the export finishes, which at
+            // fleet scale takes a moment. Without it the button looks dead.
             dlEl.textContent = 'Packaging…';
-            if (dlNote) dlNote.textContent = 'collecting database, configs and crash reports';
-            var done = function(text, note) {
-              dlEl.textContent = text;
-              if (dlNote) dlNote.textContent = note;
-              setTimeout(function() {
-                dlEl.textContent = restore;
-                if (dlNote) dlNote.textContent = '7 days of activity as a zip · no wallet keys included';
-                dlEl.dataset.busy = '0';
-              }, 6000);
-            };
-            if (!window.__TAURI__) { done('Unavailable', 'desktop app only'); return; }
+            if (!window.__TAURI__) { flashBtn(dlEl, 'Desktop app only'); return; }
             window.__TAURI__.core.invoke('export_log_bundle').then(function(res) {
-              var name = String((res && res.path) || '').split('/').pop();
-              done('Saved to Downloads', name + ' · ' + ((res && res.mb) || 0) + ' MB');
+              var mb = (res && res.mb) || 0;
+              flashBtn(dlEl, 'Saved to Downloads · ' + mb + ' MB');
             }).catch(function(e) {
-              done('Export failed', String(e));
+              flashBtn(dlEl, 'Export failed: ' + e);
             });
           });
         }
@@ -2321,11 +2320,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         if (commsEl) {
           commsEl.addEventListener('click', function() {
             window.__TAURI__.core.invoke('open_chat_window').catch(function(e) {
-              var note = document.getElementById('debug-comms-note');
-              if (note) {
-                note.textContent = 'Could not open Comms: ' + e;
-                note.style.color = 'var(--text-enemy-primary)';
-              }
+              flashBtn(commsEl, 'Could not open: ' + e);
             });
           });
         }
@@ -2337,11 +2332,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         if (gameStatsEl) {
           gameStatsEl.addEventListener('click', function() {
             window.__TAURI__.core.invoke('open_game_stats_window').catch(function(e) {
-              var note = document.getElementById('debug-gamestats-note');
-              if (note) {
-                note.textContent = 'Could not open Game Stats: ' + e;
-                note.style.color = 'var(--text-enemy-primary)';
-              }
+              flashBtn(gameStatsEl, 'Could not open: ' + e);
             });
           });
         }

@@ -156,7 +156,7 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
     // Nested parens (`copyLink('x', a.substring(0, 24))`) outrun a `[^)]*`
     // strip, which stops early and leaves the tail looking unescaped.
     const stripCalls = (t) => {
-      for (const name of ['badge', 'copyLink', 'doorNote']) {
+      for (const name of ['badge', 'copyLink']) {
         let i;
         while ((i = t.indexOf(name + '(')) >= 0) {
           let j = i + name.length + 1, depth = 1;
@@ -199,7 +199,7 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
   /* Every wrapper stripped above buys its exemption by escaping. Named here
    * with what it must escape, so adding one to the strip list without making
    * it safe widens the hole loudly rather than silently. */
-  [['badge', ['text']], ['copyLink', ['id', 'label']], ['doorNote', ['id', 'text']]]
+  [['badge', ['text']], ['copyLink', ['id', 'label']]]
     .forEach(([name, params]) => {
       const at = src.indexOf('var ' + name + ' = function');
       const body = at < 0 ? '' : src.slice(at, src.indexOf('\n      };', at));
@@ -305,6 +305,48 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
   check('…and ignores its own writes',
     /debugRoot\.contains\(t\)/.test(src),
     'reacting to our own re-attach is how an observer feeds itself');
+}
+
+/* ── The doors are one row, and say nothing they do not have to ────────────
+ *
+ * Three cards, each holding one button and a line describing what it opened.
+ * The descriptions are gone — this panel's reader knows what Comms is — and
+ * with them the reason the three were ever separate.
+ */
+{
+  console.log('\n— the door row');
+  const doors = ['debug-download-logs', 'debug-gamestats', 'debug-comms'];
+  const at = doors.map((id) => src.indexOf("id=\"" + id + "\""));
+  check('all three doors exist', at.every((i) => i > 0), JSON.stringify(at));
+  check('…in the order asked for', at[0] < at[1] && at[1] < at[2],
+    'Download logs, Game Stats, Comms');
+  // One card, one body: the three ids must fall inside a single card's markup.
+  const first = at[0];
+  const cardOpen = src.lastIndexOf('sui-data-card"', first);
+  const cardClose = src.indexOf("'</div></div>'", at[2]);
+  check('…in ONE framed section',
+    cardOpen > 0 && cardClose > at[2]
+    && src.slice(cardOpen, cardClose).split('sui-data-card"').length === 2,
+    'a card boundary between the buttons means they are still separate frames');
+  check('…with no descriptions left anywhere in the panel',
+    !/doorNote/.test(src) && !/-note'/.test(src),
+    (/doorNote|-note'/.exec(src) || [''])[0]);
+
+  /* The unread count belongs INSIDE the Comms button: anywhere else it would
+   * need a label to say which door it counted for. */
+  const comms = src.slice(at[2], src.indexOf('</a>', at[2]));
+  check('the unread badge rides inside the Comms button',
+    /debug-comms-unread/.test(comms) && /sui-badge/.test(comms), comms.slice(0, 120));
+
+  /* With the descriptive lines gone, a failure has nowhere to go but the
+   * control that caused it — which is where it belonged anyway. */
+  check('a door reports its own failure', /flashBtn\(/.test(src));
+  check('…and restores markup, not text, so the badge survives',
+    /dataset\.restore = el\.innerHTML/.test(src)
+    && /el\.innerHTML = el\.dataset\.restore/.test(src),
+    'textContent would eat the unread badge inside the Comms button');
+  check('…and repaints the count it may have hidden',
+    /paintCommsUnread\(\);/.test(src.slice(src.indexOf('var flashBtn'))));
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
