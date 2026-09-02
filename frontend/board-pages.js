@@ -2274,6 +2274,18 @@
    *                           connectionCapacity, lastAction }
    *   entity.playerInventory.rocks.{ amount, denom }
    */
+  /* The PRECISE figure, never the floored one beside it.
+   *
+   * The guild API sends `fuel` (display, floored) next to `fuel_p` (base
+   * units), and the same for `power`, `defusing` and `ratio`. Reading the bare
+   * field and handing it to a base-unit formatter is how a 3 gram stake
+   * rendered as "3mG". */
+  function pnum(obj, key) {
+    var v = obj && obj[key];
+    if (v == null || v === '') return null;
+    var n = Number(v);
+    return isFinite(n) ? n : null;
+  }
   function entPlayer(ent) { return (ent && ent.Player) || {}; }
   function entNum(ent, path) {
     var cur = ent;
@@ -2356,19 +2368,46 @@
     };
   }
 
+  /* The game's OWN profile header, not a roster row.
+   *
+   * `.profile-header` and friends are in main.css, which this window already
+   * links — so the portrait is the 72px unbordered one the game draws (its
+   * frame is a highlight box-shadow, not a border) and the name is
+   * `sui-text-display`. A `sui-result-row` was the wrong component here: it is
+   * built for a LIST, and using it made the subject of the page look like one
+   * more entry in one.
+   */
   function exploreHeader(ent, pid) {
     var row = exploreAsRow(ent, pid);
-    var acts = H.el('div', 'ops-row-acts');
+    var head = H.el('div', 'profile-header');
+
+    var portBox = H.el('div', 'profile-header-image-container');
+    var port = H.el('div', 'profile-header-image');
+    if (window.StructsPfp) {
+      window.StructsPfp.fillPortrait(port, entStr(ent, 'pfpClientRenderAttributes'));
+    }
+    portBox.appendChild(port);
+    head.appendChild(portBox);
+
+    var info = H.el('div', 'profile-header-info-container');
+    var name = H.el('div', 'profile-header-info-name sui-text-display');
+    var tag = entStr(ent, 'guildTag');
+    if (tag) name.appendChild(H.el('span', 'sui-text-secondary', '[' + tag + ']'));
+    name.appendChild(H.el('span', null, row.player_name));
+    info.appendChild(name);
+
+    var idLine = H.el('div', 'profile-header-info-player-id');
+    idLine.appendChild(H.el('span', null, '#' + pid));
+    // The three doors, beside the id rather than floating at the row's end:
+    // they act on the player this header names.
     var msg = messageLink(row);
-    if (msg) acts.appendChild(msg);
+    if (msg) idLine.appendChild(msg);
     var spec = spectatorLinks(row);
-    if (spec) acts.appendChild(spec);
-    return H.resultRow({
-      portrait: H.pfpPortrait(entStr(ent, 'pfpClientRenderAttributes')),
-      title: row.player_name,
-      subtitle: '#' + pid,
-      action: acts.childNodes.length ? acts : null,
-    });
+    if (spec) idLine.appendChild(spec);
+    info.appendChild(idLine);
+
+    head.appendChild(info);
+    return head;
   }
 
   function exploreProfile(d) {
@@ -2407,13 +2446,18 @@
       return isFinite(f) ? f : null;
     };
     var dash = function (n, fmt) { return n == null ? '—' : (fmt ? fmt(n) : String(n)); };
+    /* `mined` / `seized` / `forfeited` — the guild API's own names, read off a
+     * live response. The webapp labels the same three fields Ore Mined, Ore
+     * Stolen and Ore Lost, so the labels here match what that player sees on
+     * their own profile even though the keys do not look like them. Guessing
+     * `ore_mined` is why all three read "—". */
     var ore = d.ore_stats || null;
     var st = H.el('div');
     st.appendChild(H.row('Planets Completed', dash(num(d.planets_completed, 'count'))));
     st.appendChild(H.row('Raids Launched', dash(num(d.raids_launched, 'count'))));
-    st.appendChild(H.row('Ore Mined', dash(num(ore, 'ore_mined'), H.fmtOre)));
-    st.appendChild(H.row('Ore Stolen', dash(num(ore, 'ore_stolen'), H.fmtOre)));
-    st.appendChild(H.row('Ore Lost', dash(num(ore, 'ore_lost'), H.fmtOre)));
+    st.appendChild(H.row('Ore Mined', dash(num(ore, 'mined'), H.fmtOre)));
+    st.appendChild(H.row('Ore Stolen', dash(num(ore, 'seized'), H.fmtOre)));
+    st.appendChild(H.row('Ore Lost', dash(num(ore, 'forfeited'), H.fmtOre)));
     wrap.appendChild(H.card('Statistics', st));
 
     /* What this player is routing OUT, and what they have staked. The two
@@ -2447,7 +2491,8 @@
 
     wrap.appendChild(listCard('Outgoing Allocations', d.allocations, 'none routing out',
       function (a) {
-        var mw = Number(a.power_mw || a.power || 0);
+        var mw = pnum(a, 'power_p') != null ? pnum(a, 'power_p')
+          : Number(a.power_mw || 0);
         return H.resultRow({
           icon: 'sui-icon-energy',
           title: H.fmtWatts(mw) + ' → ' + String(a.destination_id || '?'),
@@ -2456,22 +2501,29 @@
         });
       }));
 
+    /* `_p` is the PRECISE figure; the bare field is a floored display value.
+     *
+     * The guild API sends both — `fuel: "3"` beside `fuel_p: "3000000"` — and
+     * reading the bare one fed 3 to a formatter expecting base units, which
+     * rendered a 3 GRAM stake as "3mG". Same trap the inventory ledger hit.
+     * Every figure here is the `_p` one.
+     */
     wrap.appendChild(listCard('Infusions', d.infusions, 'nothing staked',
       function (i) {
         var chips = [];
-        if (i.capacity_mw != null) {
-          chips.push(statTile('capacity', H.fmtWatts(Number(i.capacity_mw)), null,
-            i.dead ? 'bad' : 'ok'));
-        }
+        var powerMw = pnum(i, 'power_p');
+        if (powerMw != null) chips.push(statTile('capacity', H.fmtWatts(powerMw), null, 'ok'));
         if (i.commission != null) {
           chips.push(statTile('commission',
             (Number(i.commission) * 100).toFixed(1).replace(/\.0$/, '') + '%', null, 'muted'));
         }
+        var defusing = pnum(i, 'defusing_p');
+        if (defusing) chips.push(statTile('defusing', H.fmtAlpha(defusing), null, 'live'));
+        var dest = String(i.destination_id || '?');
         return H.resultRow({
-          icon: i.dead ? 'sui-icon-no-power' : 'sui-icon-energy',
-          title: H.fmtAlpha(Number(i.fuel_ualpha || i.fuel || 0)) + ' → '
-            + String(i.destination_label || i.destination_id || '?'),
-          subtitle: i.dead ? 'validator not producing' : null,
+          icon: 'sui-icon-energy',
+          title: H.fmtAlpha(pnum(i, 'fuel_p') || 0) + ' → ' + dest,
+          subtitle: i.destination_type || null,
           chips: chips,
         });
       }));

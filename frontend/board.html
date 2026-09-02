@@ -393,8 +393,25 @@
        than a full-width banner on a wide board, and explicitly left-aligned:
        main.css sets `text-align: center` on the body and it bites anything
        that goes full-width. */
-    .explore-search { max-width: 420px; text-align: left; margin-bottom: var(--spacing-lg); }
-    .explore-search .sui-input-text, .explore-search input { min-width: 0; width: 100%; }
+    /* The lookup's search box.
+       `cfg-field` puts a label BESIDE its control, which is right for a
+       settings list and wrong here: capped to a readable width the label had
+       nowhere to go, wrapped to two lines and sat on top of the input. Stacked
+       instead — the same treatment the 332px drawer already gives every field
+       for the same reason. Left-aligned explicitly: main.css sets
+       `text-align: center` on the body and it bites anything full-width. */
+    .explore-search { max-width: 420px; text-align: left; margin-bottom: var(--spacing-xl); }
+    #board-layout .explore-search label.sui-input-text.cfg-field {
+      flex-direction: column; align-items: stretch; gap: var(--spacing-xs);
+    }
+    #board-layout .explore-search label.sui-input-text.cfg-field > span:first-child {
+      flex: none;
+    }
+    .explore-search input { min-width: 0; width: 100%; }
+    /* The header's action icons sit on the id line, so they need to be on the
+       text's baseline rather than stretched to it. */
+    .profile-header-info-player-id .ops-refresh-btn,
+    .profile-header-info-player-id .ops-spectate { margin-left: var(--spacing-md); }
     #detail-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
       display: flex; align-items: center; justify-content: center; z-index: 2050; }
     #detail-overlay .detail-panel { background: var(--surface-player-body);

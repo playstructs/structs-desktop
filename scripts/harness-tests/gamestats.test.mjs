@@ -9,7 +9,7 @@
 import { JSDOM } from 'jsdom';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const harness = resolve(repo, 'frontend', '_harness.html');
@@ -286,6 +286,42 @@ async function until(fn, ms = 5000) {
     !empty.querySelector('path') && /collecting/.test(empty.textContent));
 
   w.close();
+}
+
+/* ── Explore reads the fields the API actually sends ───────────────────────
+ *
+ * Three shapes were guessed and all three were wrong against a live response:
+ * the chain nests identity under `Player`, the ore stats are named
+ * `mined`/`seized`/`forfeited`, and every guild-API figure ships a floored
+ * display value beside a precise `_p` one. Reading the bare field fed 3 to a
+ * base-unit formatter and rendered a 3 GRAM stake as "3mG".
+ */
+{
+  console.log('\n— explore field names');
+  const pages = readFileSync(process.cwd() + '/frontend/board-pages.js', 'utf8');
+  const explore = pages.slice(pages.indexOf('EXPLORE \u2192 PLAYER'));
+
+  check('identity is read from the nested Player object',
+    /function entPlayer\(ent\) \{ return \(ent && ent\.Player\)/.test(pages),
+    'entity.planetId is undefined; entity.Player.planetId is the id');
+  check('ore stats use the API\u2019s own names',
+    /num\(ore, 'mined'\)/.test(explore) && /num\(ore, 'seized'\)/.test(explore)
+    && /num\(ore, 'forfeited'\)/.test(explore),
+    'ore_mined / ore_stolen / ore_lost do not exist and render as dashes');
+  check('every money and power figure reads the precise `_p` field',
+    /pnum\(i, 'fuel_p'\)/.test(explore) && /pnum\(i, 'power_p'\)/.test(explore)
+    && /pnum\(a, 'power_p'\)/.test(explore),
+    'the bare field is floored for display and is not in base units');
+
+  /* The header is the game's own profile header, not a list row: a
+   * `sui-result-row` is built for a LIST, and it made the subject of the page
+   * look like one more entry in one. */
+  check('the header uses the game\u2019s profile classes',
+    /'profile-header'/.test(explore) && /'profile-header-image-container'/.test(explore)
+    && /sui-text-display/.test(explore),
+    'these are main.css classes the window already links');
+  check('\u2026and not a roster row',
+    !/function exploreHeader[\s\S]{0,900}?H\.resultRow/.test(explore));
 }
 
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');

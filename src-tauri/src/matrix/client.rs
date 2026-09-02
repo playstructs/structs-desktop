@@ -3491,10 +3491,42 @@ pub async fn open_dm(
 /// it — leaving the window to re-derive the same answer from heroes and the
 /// directory, neither of which is populated yet for a fresh invite.
 pub fn note_dm_player(guild_id: &str, room_id: &str, player_id: &str) {
+    let ident = directory::get(player_id);
     if let Ok(mut map) = STATE.write() {
         let gs = map.entry(guild_id.to_string()).or_default();
         gs.dm_player_id
             .insert(room_id.to_string(), player_id.to_string());
+
+        /* And patch the room we ALREADY have.
+         *
+         * Recording the player is not enough on its own: room entries are
+         * rebuilt only for rooms that appear in a sync RESPONSE, and a
+         * freshly created DM nobody has spoken in yet appears in exactly one
+         * — the sync that first saw it, which ran before anyone told us who
+         * it was for. The cached entry then keeps its "unnamed room" reading
+         * (a channel, titled by its own id) until somebody sends a message
+         * into it. Which is why this looked unfixed: the fact was recorded and
+         * nothing ever re-read it.
+         */
+        if let Some(room) = gs.rooms.get_mut(room_id) {
+            room.section = SECTION_DIRECT;
+            room.home_rank = None;
+            room.player_id = Some(player_id.to_string());
+            if let Some(i) = ident.as_ref() {
+                if !i.username.is_empty() {
+                    room.name = i.username.clone();
+                }
+                if i.pfp_attrs.is_some() {
+                    room.pfp_attrs = i.pfp_attrs.clone();
+                }
+            }
+            // A room still titled by its own id says nothing to anybody. The
+            // player id is the worst acceptable answer, not the fallback.
+            if room.name == room_id {
+                room.name = player_id.to_string();
+            }
+            room.icon = "icon-member";
+        }
     }
 }
 

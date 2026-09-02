@@ -525,6 +525,14 @@ pub async fn matrix_dm(
     // galaxy directory — none of which is populated for a conversation whose
     // invitee has not accepted yet, which is every DM for its first minutes.
     client::note_dm_player(&guild_id, &room_id, player_id.trim());
+    // Push the corrected list now. Sync rebuilds a room's entry only when that
+    // room appears in a sync RESPONSE, and a DM nobody has spoken in yet never
+    // does — so without this nudge the window keeps the entry it built before
+    // it knew who the room was for, however long you stare at it.
+    let _ = app.emit(
+        "matrix::rooms",
+        json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
+    );
     let _ = app.emit(
         "matrix::rooms",
         json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
