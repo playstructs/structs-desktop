@@ -28,10 +28,11 @@
 
   var SERIES_CAP = 720; // mirror of the Rust ring
 
-  // Alpha is the default board (wealth is the game's headline score). The
-  // values come from the BANK module (denom_owners), never the Guild API's
-  // roster/search "alpha" columns — those sum every denom, so guild-token
-  // holders masquerade as alpha whales there.
+  // Alpha is the default board (wealth is the game's headline score). Values
+  // come from /api/leaderboard/player (alpha_value = balance + infused, the
+  // server's denom-correct ranking) with the bank module as fallback — never
+  // the roster/search "alpha" columns, which sum every denom and let
+  // guild-token holders masquerade as alpha whales.
   var METRICS = [
     { key: 'alpha', label: 'alpha', icon: 'sui-icon-alpha-matter', fmt: function (v) { return H.fmtAlpha(v); } },
     { key: 'structs_load', label: 'structs load', icon: 'sui-icon-deployed-structs', fmt: function (v) { return H.fmtWatts(v); } },
@@ -276,11 +277,48 @@
     // right place to see the galaxy powering up over an hour.
     { key: 'draw', label: 'structs draw', stroke: 'var(--accent-secondary)', fmt: function (v) { return H.fmtWatts(v); } },
   ];
+  // 7-day hourly galaxy totals from the server's LOCF aggregate — history
+  // that survives app restarts, unlike the per-block ring. Older guild APIs
+  // don't serve it; the section simply doesn't render then.
+  var HISTORY_SERIES = [
+    { key: 'ore', label: 'stored ore — 7 days', stroke: 'var(--text-player-primary)', fmt: function (v) { return H.fmtOre(v); } },
+    { key: 'structs_load', label: 'structs draw — 7 days', stroke: 'var(--accent-secondary)', fmt: function (v) { return H.fmtWatts(v); } },
+  ];
+  function historyValues(key) {
+    var h = state.snap && state.snap.history;
+    var rows = h && h[key];
+    if (!rows || !rows.length) return [];
+    // Rows are {bucket, sum, avg, population, samples}; sum is null before
+    // the first observation — skip leading nulls, keep the line honest.
+    var out = [];
+    rows.forEach(function (r) {
+      var v = num(r.sum);
+      if (v == null && !out.length) return;   // before first observation
+      out.push(v == null ? (out.length ? out[out.length - 1] : 0) : v);
+    });
+    return out;
+  }
+  function buildHistory(body) {
+    HISTORY_SERIES.forEach(function (t) {
+      var vals = historyValues(t.key);
+      if (vals.length < 2) return;
+      var line = H.el('div');
+      line.style.marginBottom = '8px';
+      var cap = H.el('div');
+      cap.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;';
+      cap.appendChild(H.el('span', 'sui-text-hint', t.label));
+      cap.appendChild(H.el('span', 'ops-val', (t.fmt || H.fmtNum)(vals[vals.length - 1])));
+      line.appendChild(cap);
+      line.appendChild(sparkline(vals, t.stroke));
+      body.appendChild(line);
+    });
+  }
   function trendsCard() {
     var body = H.el('div', null);
     body.id = 'gs-trends';
     buildTrends(body);
-    return H.card('TRENDS — LAST HOUR OF BLOCKS', body);
+    return H.card('TRENDS — LAST HOUR OF BLOCKS' +
+      (state.snap && state.snap.history ? ' · LAST 7 DAYS' : ''), body);
   }
   function buildTrends(body) {
     body.innerHTML = '';
@@ -307,9 +345,10 @@
       line.appendChild(sparkline(vals, t.stroke));
       body.appendChild(line);
     });
+    // The 7-day server aggregates render after the per-block hour: freshest
+    // context first, the week's shape beneath it.
+    buildHistory(body);
   }
-
-
 
   function render() {
     state.lastRender = Date.now();

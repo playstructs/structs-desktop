@@ -2377,7 +2377,7 @@
    * built for a LIST, and using it made the subject of the page look like one
    * more entry in one.
    */
-  function exploreHeader(ent, pid) {
+  function exploreHeader(ent, pid, guild) {
     var row = exploreAsRow(ent, pid);
     var head = H.el('div', 'profile-header');
 
@@ -2391,7 +2391,11 @@
 
     var info = H.el('div', 'profile-header-info-container');
     var name = H.el('div', 'profile-header-info-name sui-text-display');
-    var tag = entStr(ent, 'guildTag');
+    /* The tag comes from the GUILD record, not the player: the chain's player
+     * entity carries `guildId` and nothing else about the guild. Without that
+     * extra read the header could only print the player's name, and the Guild
+     * row could only say "0-1". */
+    var tag = guild && guild.tag;
     if (tag) name.appendChild(H.el('span', 'sui-text-secondary', '[' + tag + ']'));
     name.appendChild(H.el('span', null, row.player_name));
     info.appendChild(name);
@@ -2414,10 +2418,15 @@
     var wrap = H.el('div');
     var ent = (d && d.entity) || {};
     var pid = d.player_id;
-    wrap.appendChild(exploreHeader(ent, pid));
+    var guild = d.guild || null;
+    wrap.appendChild(exploreHeader(ent, pid, guild));
 
     var det = H.el('div');
-    det.appendChild(H.row('Guild', entStr(ent, 'guildId') || '—'));
+    // The guild's NAME, as the game's own profile shows it — with the id
+    // beside it, because this page is also where you come to look one up.
+    var gid = entStr(ent, 'guildId');
+    det.appendChild(H.row('Guild', guild && guild.name
+      ? guild.name + (gid ? ' \u00b7 ' + gid : '') : (gid || '\u2014')));
     det.appendChild(H.row('Player ID', pid));
     det.appendChild(H.row('Address', entStr(ent, 'primaryAddress') || '—'));
     wrap.appendChild(H.card('Player Details', det));
@@ -2480,10 +2489,13 @@
       if (!rows) body.appendChild(H.stateBlock('info', 'not published by this guild'));
       else if (!rows.length) body.appendChild(H.stateBlock('info', empty));
       else {
+        /* Rows go straight into the table. `H.resultTable()` already IS the
+         * `sui-result-rows` container — nesting a second one inside it left
+         * the outer element with no rows of its own, and SUI's
+         * `.sui-result-table.sui-result-rows:first-child { border-top }` drew
+         * it as a bare line above the list. */
         var table = H.resultTable();
-        var list = H.el('div', 'sui-result-rows');
-        rows.forEach(function (r) { list.appendChild(build(r)); });
-        table.appendChild(list);
+        rows.forEach(function (r) { table.appendChild(build(r)); });
         body.appendChild(table);
       }
       return H.card(title, body);
@@ -2551,19 +2563,17 @@
         body.appendChild(H.stateBlock('info', 'nobody matches ' + JSON.stringify(exploreState.q)));
       } else if (exploreState.results && exploreState.results.length) {
         var table = H.resultTable();
-        var rows = H.el('div', 'sui-result-rows');
         exploreState.results.slice(0, 25).forEach(function (r) {
           // One shape, normalised in Rust — no `a || b || c` over two records.
           var pid = r.player_id;
           if (!pid) return;
-          rows.appendChild(H.resultRow({
+          table.appendChild(H.resultRow({
             portrait: H.pfpPortrait(r.pfp),
             title: r.username || pid,
             subtitle: '#' + pid + (r.guild_id ? ' · ' + r.guild_id : ''),
             onClick: function () { exploreOpen(pid); },
           }));
         });
-        table.appendChild(rows);
         body.appendChild(table);
       }
 

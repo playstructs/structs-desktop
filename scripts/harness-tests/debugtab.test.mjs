@@ -275,8 +275,14 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
    * narrowed the whole panel to its widest row; before the wrapper, the page's
    * own `width:100%` div was the direct child and filled the row. */
   check('…and stretches to the window rather than to its widest row',
-    /root\.style\.cssText = 'flex:1 1 auto; min-width:0; width:100%;'/.test(src),
+    /root\.style\.cssText =[\s\S]{0,120}?flex:1 1 auto/.test(src)
+    && /width:100%/.test(src),
     'a flex item with no width shrink-wraps its content');
+  // …without overflowing it: a `width: 100%` CONTENT box plus the page's own
+  // padding is wider than its container by exactly that padding.
+  check('…without paying for its own padding twice',
+    /box-sizing:border-box/.test(src),
+    'the overflow is the horizontal scrollbar, and the vertical one it forces');
   check('…and a wipe re-attaches THAT node',
     /content\.appendChild\(debugRoot\)/.test(src),
     'rebuilding on every wipe is what flickered');

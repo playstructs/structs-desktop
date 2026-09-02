@@ -96,6 +96,13 @@ struct Cache {
     // Slow-tier caches reused by the faster tiers between slow sweeps.
     pid_by_addr: HashMap<String, String>, // primary_address → player id (alpha join)
     planet_counts: HashMap<String, u64>,  // guild id → planets complete
+    // PR #121 availability flags: when a modern endpoint fails (older guild
+    // API), the flag routes the datum through the legacy walk instead.
+    counts_fallback: bool,
+    alpha_fallback: bool,
+    // 7-day hourly LOCF aggregates from /api/stat/{m}/aggregate/range —
+    // {ore: [rows], structs_load: [rows]}, rows {bucket, sum, avg, ...}.
+    history: Value,
     series: VecDeque<Value>, // {height, events, combat, tx, raids, structs, fuel}
     counters: BlockCounters,
 }
@@ -336,6 +343,7 @@ fn snapshot() -> Value {
             "guilds": c.guilds,
             "players_top": c.players_top,
             "guild_energy": c.guild_energy,
+            "history": c.history,
             "series": c.series.iter().cloned().collect::<Vec<_>>(),
         })
     })
@@ -402,8 +410,60 @@ async fn fast_sweep(client: &CosmosClient) -> Result<(), String> {
         .unwrap_or(Value::Null)
         .get("count")) as u64;
 
+    // PR #121 singles: the block clock plus one-request galaxy counts that
+    // replaced four table walks (planets 205 pages, lastAction 31, work 46,
+    // struct math via the LCD). Any failure flips the fallback flag and the
+    // slow tier walks the legacy way — older guild APIs keep working.
+    let block = client.guild.current_block().await;
+    let planet_cnt = client.guild.planet_count().await;
+    let struct_all = client.guild.struct_count(None).await;
+    let struct_flags = client.guild.struct_status_counts().await;
+    let work_cnt = client.guild.work_count().await;
+    let active_cnt = client.guild.player_active_count(16_363).await;
+    let counts_ok = planet_cnt.is_ok()
+        && struct_all.is_ok()
+        && struct_flags.is_ok()
+        && work_cnt.is_ok()
+        && active_cnt.is_ok();
+
     with_cache(|c| {
         c.guilds = guilds;
+        // The HTTP block clock backstops grass: after the oh.energy TLS
+        // outage taught us a dead grass stream freezes every block-derived
+        // number, the indexer's own height now moves the clock too (grass
+        // still wins between fast sweeps — we only ever move forward).
+        if let Ok(b) = &block {
+            let h = num(b.get("height")) as u64;
+            if h > c.block_height {
+                c.block_height = h;
+            }
+        }
+        c.counts_fallback = !counts_ok;
+        if counts_ok {
+            if !c.totals.is_object() {
+                c.totals = json!({});
+            }
+            if let Some(m) = c.totals.as_object_mut() {
+                m.insert(
+                    "planets_total".into(),
+                    json!(num(planet_cnt.as_ref().ok().and_then(|v| v.get("count"))) as u64),
+                );
+                // Deployed structs = all rows minus corpses; the same 42.6k
+                // the LCD's count_total reports, now from the guild's own API.
+                let all = num(struct_all.as_ref().ok().and_then(|v| v.get("count")));
+                let destroyed =
+                    num(struct_flags.as_ref().ok().and_then(|v| v.get("destroyed")));
+                m.insert("structs_total".into(), json!((all - destroyed).max(0.0) as u64));
+                m.insert(
+                    "work_queue".into(),
+                    json!(num(work_cnt.as_ref().ok().and_then(|v| v.get("count"))) as u64),
+                );
+                m.insert(
+                    "active_24h".into(),
+                    json!(num(active_cnt.as_ref().ok().and_then(|v| v.get("count"))) as u64),
+                );
+            }
+        }
         let t = c.totals.as_object_mut().map(|m| {
             m.insert("guilds".into(), json!(guild_count));
             m.insert("players".into(), json!(player_count as u64));
@@ -460,15 +520,22 @@ fn leaderboard(
 /// counts). 30-minute cadence — the single largest lever on API load.
 async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
     let mut truncated = false;
+    let (counts_fallback, alpha_fallback) =
+        with_cache(|c| (c.counts_fallback, c.alpha_fallback));
 
-    // Planets: status breakdown.
-    let (planet_rows, cut) = walk_pages(|p| client.guild.planet_list_all(p)).await?;
-    truncated |= cut;
-    let planets_total = planet_rows.len() as u64;
-    let planets_complete = planet_rows
-        .iter()
-        .filter(|r| text(r.get("status")) == "complete")
-        .count() as u64;
+    // Planets: total now comes from /api/planet/count in the fast tier and
+    // complete from the per-guild counts below — the 205-page walk runs only
+    // for guilds on a pre-#121 API.
+    let mut legacy_planets: Option<(u64, u64)> = None;
+    if counts_fallback {
+        let (planet_rows, cut) = walk_pages(|p| client.guild.planet_list_all(p)).await?;
+        truncated |= cut;
+        let complete = planet_rows
+            .iter()
+            .filter(|r| text(r.get("status")) == "complete")
+            .count() as u64;
+        legacy_planets = Some((planet_rows.len() as u64, complete));
+    }
 
     // Fleets: how much of the galaxy is on the move.
     let (fleet_rows, cut) = walk_pages(|p| client.guild.fleet_list_all(p)).await?;
@@ -479,16 +546,16 @@ async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
         .filter(|r| text(r.get("status")) == "away")
         .count() as u64;
 
-    // Structs. The indexer's `struct` table keeps every corpse (verified
-    // live: 138,849 rows, 96,253 destroyed) — orders of magnitude past any
-    // sane page walk, and a truncated walk silently reported 11,951 of
-    // 42,608 live structs. Two honest sources instead:
-    //  - deployed count: the LCD's pagination.total (the chain prunes
-    //    destroyed structs, so this IS the live count; one request);
-    //  - recent losses: the list orders `updated_at DESC`, so walk only
-    //    until rows age past 24h and count destructions inside the window
-    //    by `destroyed_block`.
-    let structs_total = client.count_entities("struct").await.unwrap_or(0);
+    // Structs deployed: fast-tier count math when the modern API is there,
+    // the LCD's pagination.total otherwise (the chain prunes corpses, so it
+    // is the live count; the 138k-row list can never be walked).
+    let legacy_structs_total = if counts_fallback {
+        Some(client.count_entities("struct").await.unwrap_or(0))
+    } else {
+        None
+    };
+    // Recent losses: the list orders `updated_at DESC`, so walk only until
+    // rows age past 24h and count destructions by `destroyed_block`.
     let day_ago_ms = crate::hasher::types::now_millis() - 24.0 * 3600.0 * 1000.0;
     // 24h of block time at 5.28s/block, against the grass-fed height.
     let day_ago_block = with_cache(|c| c.block_height).saturating_sub(16_363) as f64;
@@ -517,10 +584,12 @@ async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
         tokio::time::sleep(std::time::Duration::from_millis(INTER_PAGE_DELAY_MS)).await;
     }
 
-    // Who is actually playing: lastAction is a per-player block-height
-    // anchor, so "acted within the last 24h of blocks" is one grid walk.
-    let mut active_24h: u64 = 0;
-    {
+    // Active players + work depth: fast-tier one-request counts on a modern
+    // API; the legacy walks run only in fallback.
+    let mut legacy_active: Option<u64> = None;
+    let mut legacy_work: Option<u64> = None;
+    if counts_fallback {
+        let mut active_24h: u64 = 0;
         let (rows, cut) =
             walk_pages(|p| client.guild.grid_by_attribute_type("lastAction", p)).await?;
         truncated |= cut;
@@ -529,16 +598,16 @@ async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
                 active_24h += 1;
             }
         }
+        legacy_active = Some(active_24h);
+        let (work_rows, cut) = walk_pages(|p| client.guild.work_all(p)).await?;
+        truncated |= cut;
+        legacy_work = Some(work_rows.len() as u64);
     }
 
-    // Work queue depth: page count is enough, no need to hold rows.
-    let (work_rows, cut) = walk_pages(|p| client.guild.work_all(p)).await?;
-    truncated |= cut;
-    let work_queue = work_rows.len() as u64;
-
-    // Address→player map for the heavy tier's bank-alpha join.
+    // Address→player map: only the LEGACY alpha path (bank denom_owners join)
+    // needs it — /api/leaderboard/player carries usernames itself.
     let mut pid_by_addr: HashMap<String, String> = HashMap::new();
-    {
+    if alpha_fallback {
         let (players, cut) = walk_pages(|p| client.guild.player_list_all(p)).await?;
         truncated |= cut;
         for row in players {
@@ -563,22 +632,37 @@ async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
         planet_counts.insert(gid.clone(), num(v.get("count")) as u64);
     }
 
+    // Galaxy planets-complete = the per-guild sum (every complete planet has
+    // an owner in a guild) — /api/planet/count has no status filter.
+    let planets_complete_sum: u64 = planet_counts.values().sum();
+
     with_cache(|c| {
-        c.pid_by_addr = pid_by_addr;
+        if alpha_fallback {
+            c.pid_by_addr = pid_by_addr;
+        }
         c.planet_counts = planet_counts;
         c.truncated |= truncated;
         if !c.totals.is_object() {
             c.totals = json!({});
         }
         if let Some(m) = c.totals.as_object_mut() {
-            m.insert("planets_total".into(), json!(planets_total));
-            m.insert("planets_complete".into(), json!(planets_complete));
+            m.insert("planets_complete".into(), json!(planets_complete_sum));
             m.insert("fleets_total".into(), json!(fleets_total));
             m.insert("fleets_away".into(), json!(fleets_away));
-            m.insert("structs_total".into(), json!(structs_total));
             m.insert("destroyed_24h".into(), json!(destroyed_24h));
-            m.insert("active_24h".into(), json!(active_24h));
-            m.insert("work_queue".into(), json!(work_queue));
+            if let Some((total, complete)) = legacy_planets {
+                m.insert("planets_total".into(), json!(total));
+                m.insert("planets_complete".into(), json!(complete));
+            }
+            if let Some(v) = legacy_structs_total {
+                m.insert("structs_total".into(), json!(v));
+            }
+            if let Some(v) = legacy_active {
+                m.insert("active_24h".into(), json!(v));
+            }
+            if let Some(v) = legacy_work {
+                m.insert("work_queue".into(), json!(v));
+            }
         }
         c.slow_updated_ms = crate::hasher::types::now_millis();
     });
@@ -698,16 +782,54 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
         }),
     );
 
-    // Honest alpha, straight from the bank: `denom_owners(ualpha)` returns
-    // every holder in base units (912 addresses ≈ one LCD page), joined to
-    // players via `primary_address` from the player list. Addresses that
-    // aren't a player's primary (guild banks, device keys) simply don't
-    // chart, which is the right answer for a PLAYER leaderboard.
-    // The address→player map is the slow tier's 31-page walk, cached — new
-    // signups chart with up to 30 minutes' delay, which a leaderboard can
-    // afford; the balances themselves are fresh every heavy sweep.
-    let mut alpha_by_player: HashMap<String, f64> = HashMap::new();
+    // Alpha board: PR #121's `/api/leaderboard/player` is the server ranking
+    // over the denom-correct api_leaderboard_player table — one request,
+    // usernames included, `alpha_value` = balance + infused. The bank-module
+    // join (denom_owners + cached address map) stays as the fallback for
+    // guilds on an older API; the flag also tells the slow tier whether the
+    // 31-page address map is still worth maintaining.
+    let mut alpha_board: Option<Vec<Value>> = None;
+    match client
+        .guild
+        .leaderboard("player", Some("alpha_value.desc"), TOP_N as u32)
+        .await
     {
+        Ok(v) => {
+            with_cache(|c| c.alpha_fallback = false);
+            let rows: Vec<Value> = v.as_array().cloned().unwrap_or_default();
+            alpha_board = Some(
+                rows.iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let pid = text(r.get("player_id"));
+                        let ident = identities.get(&pid);
+                        json!({
+                            "rank": i + 1,
+                            "player_id": pid,
+                            "username": crate::matrix::identity::sanitize(&{
+                                let u = text(r.get("username"));
+                                if u.is_empty() {
+                                    ident.map(|x| x.username.clone()).unwrap_or_default()
+                                } else {
+                                    u
+                                }
+                            }),
+                            "pfp": ident.map(|x| x.pfp.clone()).unwrap_or(Value::Null),
+                            "pfp_attrs": ident.map(|x| x.pfp_attrs.clone()).unwrap_or(Value::Null),
+                            "guild_name": ident.map(|x| x.guild_name.clone()).unwrap_or_default(),
+                            "tag": ident.map(|x| x.tag.clone()).unwrap_or_default(),
+                            "value": num(r.get("alpha_value_p")),
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        Err(_) => {
+            with_cache(|c| c.alpha_fallback = true);
+        }
+    }
+    let mut alpha_by_player: HashMap<String, f64> = HashMap::new();
+    if alpha_board.is_none() {
         let pid_by_addr = with_cache(|c| c.pid_by_addr.clone());
         let (owners, hit_cap) = client
             .denom_owners("ualpha", 10)
@@ -730,27 +852,80 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
     // ore). Summing them together would print a number that is neither.
     let mut stored_ore = 0.0;
     let mut ground_ore = 0.0;
+    // The #7 filter turns the ore walk from 233 pages into ~24. Ground ore
+    // (planet rows, ~165 filtered pages — not worth walking) comes from the
+    // 1-request LOCF aggregate instead; on an older API the single unfiltered
+    // walk supplies both, as before.
+    let mut ground_ore_from_walk = false;
+    match walk_pages(|p| client.guild.grid_by_attribute_and_object_type("ore", "player", p)).await
     {
-        let (rows, cut) = walk_pages(|p| client.guild.grid_by_attribute_type("ore", p)).await?;
-        truncated |= cut;
-        for row in rows {
-            let val = num(row.get("val"));
-            match text(row.get("object_type")).as_str() {
-                "player" => {
-                    stored_ore += val;
-                    ore_by_player.insert(text(row.get("object_id")), val);
+        Ok((rows, cut)) => {
+            truncated |= cut;
+            for row in rows {
+                let val = num(row.get("val"));
+                stored_ore += val;
+                ore_by_player.insert(text(row.get("object_id")), val);
+            }
+        }
+        Err(_) => {
+            let (rows, cut) =
+                walk_pages(|p| client.guild.grid_by_attribute_type("ore", p)).await?;
+            truncated |= cut;
+            ground_ore_from_walk = true;
+            for row in rows {
+                let val = num(row.get("val"));
+                match text(row.get("object_type")).as_str() {
+                    "player" => {
+                        stored_ore += val;
+                        ore_by_player.insert(text(row.get("object_id")), val);
+                    }
+                    "planet" => ground_ore += val,
+                    _ => {}
                 }
-                "planet" => ground_ore += val,
-                _ => {}
+            }
+        }
+    }
+    if !ground_ore_from_walk {
+        // Last hourly bucket of the planet-ore aggregate = current unmined
+        // total (LOCF carries every planet forward). Keep the previous value
+        // if the endpoint hiccups.
+        let now_s = (crate::hasher::types::now_millis() / 1000.0) as i64;
+        match client
+            .guild
+            .stat_aggregate("ore", "planet", "1h", now_s - 7200, now_s)
+            .await
+        {
+            Ok(v) => {
+                let last_sum = v
+                    .as_array()
+                    .and_then(|rows| {
+                        rows.iter().rev().find_map(|r| {
+                            r.get("sum").filter(|x| !x.is_null()).map(|x| num(Some(x)))
+                        })
+                    })
+                    .unwrap_or(0.0);
+                ground_ore = last_sum;
+            }
+            Err(_) => {
+                ground_ore = with_cache(|c| num(c.totals.get("ground_ore")));
             }
         }
     }
     {
-        let (rows, cut) =
-            walk_pages(|p| client.guild.grid_by_attribute_type("structsLoad", p)).await?;
+        let (rows, cut) = match walk_pages(|p| {
+            client
+                .guild
+                .grid_by_attribute_and_object_type("structsLoad", "player", p)
+        })
+        .await
+        {
+            Ok(ok) => ok,
+            Err(_) => walk_pages(|p| client.guild.grid_by_attribute_type("structsLoad", p)).await?,
+        };
         truncated |= cut;
         for row in rows {
-            if text(row.get("object_type")) == "player" {
+            let ot = text(row.get("object_type"));
+            if ot.is_empty() || ot == "player" {
                 sload_by_player.insert(text(row.get("object_id")), num(row.get("val")));
             }
         }
@@ -763,10 +938,18 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
     let mut load_by_player: HashMap<String, f64> = HashMap::new();
     let mut cap_by_player: HashMap<String, f64> = HashMap::new();
     for (attr, map) in [("load", &mut load_by_player), ("capacity", &mut cap_by_player)] {
-        let (rows, cut) = walk_pages(|p| client.guild.grid_by_attribute_type(attr, p)).await?;
+        let (rows, cut) = match walk_pages(|p| {
+            client.guild.grid_by_attribute_and_object_type(attr, "player", p)
+        })
+        .await
+        {
+            Ok(ok) => ok,
+            Err(_) => walk_pages(|p| client.guild.grid_by_attribute_type(attr, p)).await?,
+        };
         truncated |= cut;
         for row in rows {
-            if text(row.get("object_type")) == "player" {
+            let ot = text(row.get("object_type"));
+            if ot.is_empty() || ot == "player" {
                 map.insert(text(row.get("object_id")), num(row.get("val")));
             }
         }
@@ -802,26 +985,88 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Live raids: same source and reduction as War · Live Raids, so the two
-    // numbers can never disagree.
-    let raid_rows = crate::mcp::guild_api::fetch_all_pages(
-        |page| client.guild.planet_activity_by_category("raid_status", page),
-        3,
-    )
-    .await
-    .unwrap_or_default();
-    let raids_active = crate::mcp::raid_view::reduce_raids(
-        &raid_rows,
-        crate::hasher::types::now_millis(),
-        crate::mcp::raid_view::STALE_AFTER_MS,
-    )
-    .iter()
-    .filter(|r| r.live)
-    .count() as u64;
+    // Live raids: PR #121's planet-raid list, filtered for freshness — the
+    // table keeps abandoned non-terminal rows forever (one 19-day-old
+    // `initiated` observed), so `updated_at` within the same staleness
+    // horizon War · Live Raids uses decides "live". Falls back to the legacy
+    // activity-feed reduction on an older API.
+    let raids_active = {
+        let now_ms = crate::hasher::types::now_millis();
+        let mut live: Option<u64> = None;
+        let mut fresh_total = 0u64;
+        let mut all_ok = true;
+        for status in ["initiated", "ongoing", "shieldsVulnerable"] {
+            match client.guild.planet_raid_by_status(status, 1).await {
+                Ok(page) => {
+                    fresh_total += page
+                        .items
+                        .iter()
+                        .filter(|r| {
+                            crate::mcp::raid_view::parse_guild_time(&text(r.get("updated_at")))
+                                .map(|ms| now_ms - ms < crate::mcp::raid_view::STALE_AFTER_MS)
+                                .unwrap_or(false)
+                        })
+                        .count() as u64;
+                }
+                Err(_) => {
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+        if all_ok {
+            live = Some(fresh_total);
+        }
+        match live {
+            Some(n) => n,
+            None => {
+                let raid_rows = crate::mcp::guild_api::fetch_all_pages(
+                    |page| client.guild.planet_activity_by_category("raid_status", page),
+                    3,
+                )
+                .await
+                .unwrap_or_default();
+                crate::mcp::raid_view::reduce_raids(
+                    &raid_rows,
+                    crate::hasher::types::now_millis(),
+                    crate::mcp::raid_view::STALE_AFTER_MS,
+                )
+                .iter()
+                .filter(|r| r.live)
+                .count() as u64
+            }
+        }
+    };
 
-    // Leaderboards: alpha from the bank, ore and structs-load from the grid.
+    // Long-horizon history for the trends card: 7 days of hourly LOCF-aligned
+    // galaxy totals from the aggregate endpoint — the graphs that were
+    // impossible before #121, and they survive app restarts (unlike the
+    // per-block ring). Absent on older APIs; the card simply doesn't render
+    // the section then.
+    let history = {
+        let now_s = (crate::hasher::types::now_millis() / 1000.0) as i64;
+        let week_ago = now_s - 7 * 24 * 3600;
+        let ore = client
+            .guild
+            .stat_aggregate("ore", "player", "1h", week_ago, now_s)
+            .await
+            .unwrap_or(Value::Null);
+        let sload = client
+            .guild
+            .stat_aggregate("structs_load", "player", "1h", week_ago, now_s)
+            .await
+            .unwrap_or(Value::Null);
+        if ore.is_null() && sload.is_null() {
+            Value::Null
+        } else {
+            json!({ "ore": ore, "structs_load": sload })
+        }
+    };
+
+    // Leaderboards: alpha from the server ranking (bank fallback), ore and
+    // structs-load from the grid.
     let players_top = json!({
-        "alpha": leaderboard(&alpha_by_player, &identities),
+        "alpha": alpha_board.unwrap_or_else(|| leaderboard(&alpha_by_player, &identities)),
         "ore": leaderboard(&ore_by_player, &identities),
         "structs_load": leaderboard(&sload_by_player, &identities),
     });
@@ -833,6 +1078,9 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
         // `guild_energy` by guild_id, so the fast tier rebuilding the rows
         // every minute can't wash out the (heavy-tier) honest numbers.
         c.guild_energy = guild_energy;
+        if !history.is_null() {
+            c.history = history;
+        }
         if !c.totals.is_object() {
             c.totals = json!({});
         }

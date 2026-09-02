@@ -142,9 +142,24 @@ pub async fn mcp_player_profile(player: String) -> Result<Value, String> {
         g.allocation_by_controller(&pid, 1),
     );
 
+    /* The guild's NAME and TAG. Sequential on purpose: the guild id is inside
+     * the entity we just read, so this cannot be fired with the others. One
+     * extra round trip buys "Orbital Hydro" and "[OH]" instead of "0-1", which
+     * is what the game's own profile shows. */
+    let guild = match entity
+        .get("Player")
+        .and_then(|p| p.get("guildId"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        Some(gid) => g.guild_by_id(gid).await.ok(),
+        None => None,
+    };
+
     Ok(json!({
         "player_id": pid,
         "entity": entity,
+        "guild": guild,
         "ore_stats": ore.ok(),
         "planets_completed": planets.ok(),
         "raids_launched": raids.ok(),

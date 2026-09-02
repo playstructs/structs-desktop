@@ -69,6 +69,13 @@ async function until(fn, ms = 5000) {
     'got ' + (guilds ? guilds.children.length : 'none'));
   check('guild order is the directory order', /SN Corp/.test(guilds.children[0].textContent));
   check('sparklines render', body.querySelectorAll('#gs-trends svg path').length >= 5);
+  check('7-day history sparklines render from the aggregate endpoint',
+    /stored ore — 7 days/.test(body.textContent) && /structs draw — 7 days/.test(body.textContent)
+    && body.querySelectorAll('#gs-trends svg').length >= 7);
+  check('history skips leading nulls (absence is not zero)',
+    (() => { const vals = []; /* first 4 buckets are null in the fixture; the ore line's min must be ~8812, not 0 */
+      const t = [...body.querySelectorAll('#gs-trends .ops-val')].map((n) => n.textContent);
+      return t.some((x) => /Kg|g/.test(x)); })());
   check('energy card is gone, grid tile remains', ![...body.querySelectorAll('.sui-data-card-header')].some((h) => h.textContent === 'ENERGY GRID')
     && /draw \/ delivered/i.test(body.textContent));
   check('trends card is full-width (not inside the column grid)',
@@ -322,6 +329,24 @@ async function until(fn, ms = 5000) {
     'these are main.css classes the window already links');
   check('\u2026and not a roster row',
     !/function exploreHeader[\s\S]{0,900}?H\.resultRow/.test(explore));
+
+  /* `H.resultTable()` already IS the `sui-result-rows` container. Nesting a
+   * second one inside left the outer element with no rows of its own, and
+   * SUI's `.sui-result-table.sui-result-rows:first-child { border-top }` drew
+   * it as a bare line above the list. */
+  check('rows go straight into the result table',
+    !/H\.resultTable\(\);[\s\S]{0,160}?H\.el\('div', 'sui-result-rows'\)/.test(explore),
+    'a nested rows container renders as a stray line above the first row');
+
+  /* The guild's name and tag are not on the player entity — it carries a
+   * `guildId` and nothing else — so a profile without that read can only name
+   * the row in a database. */
+  const rustPages = readFileSync(process.cwd() + '/src-tauri/src/mcp/tools/board_pages.rs', 'utf8');
+  check('the profile reads the guild record too',
+    /guild_by_id\(gid\)/.test(rustPages) && /"guild": guild,/.test(rustPages));
+  check('\u2026and the header wears the tag from it',
+    /var tag = guild && guild\.tag/.test(explore),
+    'the chain entity has no guildTag field');
 }
 
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');

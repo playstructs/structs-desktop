@@ -412,6 +412,14 @@
        text's baseline rather than stretched to it. */
     .profile-header-info-player-id .ops-refresh-btn,
     .profile-header-info-player-id .ops-spectate { margin-left: var(--spacing-md); }
+    /* …and the header needs room beneath it. `.profile-header` is written for
+       a page that owns its own spacing; dropped straight above a data card the
+       72px portrait sat on that card's header strip. */
+    #page-explore .profile-header { margin-bottom: var(--spacing-xxl); }
+    #page-explore .profile-header-info-container {
+      display: flex; flex-direction: column; gap: var(--spacing-sm);
+      text-align: left; min-width: 0;
+    }
     #detail-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
       display: flex; align-items: center; justify-content: center; z-index: 2050; }
     #detail-overlay .detail-panel { background: var(--surface-player-body);

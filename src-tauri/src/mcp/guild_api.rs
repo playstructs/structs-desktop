@@ -684,6 +684,12 @@ impl GuildApiClient {
         self.get("/api/guild/count").await
     }
     /// `{guild_id, total_fuel, total_load, total_capacity, avg_connection_capacity}`.
+    /// One guild's record — its NAME and TAG, which the chain's player entity
+    /// does not carry. A profile that can only say "0-1" is naming the row in
+    /// a database rather than the guild the player belongs to.
+    pub async fn guild_by_id(&self, guild_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/guild/{}", guild_id)).await
+    }
     pub async fn guild_power_stats(&self, guild_id: &str) -> Result<Value, String> {
         self.get(&format!("/api/guild/{}/power/stats", guild_id))
             .await
@@ -728,6 +734,190 @@ impl GuildApiClient {
     pub async fn work_all(&self, page: u32) -> Result<GuildPage<Value>, String> {
         self.get_page(&format!("/api/work/all/page/{}", page), page)
             .await
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // PR #121 endpoints (the wishlist deliveries). Every caller must keep a
+    // legacy fallback: guilds run different webapp versions, and an older
+    // API answers these with a 404.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// `{height, tip_height, lag_blocks, status, updated_at}` — the indexer's
+    /// block clock over HTTP (wishlist #2).
+    pub async fn current_block(&self) -> Result<Value, String> {
+        self.get("/api/block").await
+    }
+    /// Ranked rows from the server-side leaderboard tables (wishlist #1).
+    /// kinds: player|guild|reactor|substation|provider; `order` must be on
+    /// the server's allowlist; amounts arrive as `*_p` base-unit strings.
+    pub async fn leaderboard(
+        &self,
+        kind: &str,
+        order: Option<&str>,
+        limit: u32,
+    ) -> Result<Value, String> {
+        let mut path = format!("/api/leaderboard/{}?limit={}", kind, limit);
+        if let Some(o) = order {
+            path.push_str(&format!("&order={}", o));
+        }
+        self.get(&path).await
+    }
+    /// One row of per-flag totals over view.struct_status (wishlist #5).
+    pub async fn struct_status_counts(&self) -> Result<Value, String> {
+        self.get("/api/struct/status/counts").await
+    }
+    pub async fn planet_count(&self) -> Result<Value, String> {
+        self.get("/api/planet/count").await
+    }
+    pub async fn struct_count(&self, is_destroyed: Option<bool>) -> Result<Value, String> {
+        match is_destroyed {
+            Some(d) => {
+                self.get(&format!("/api/struct/count?is_destroyed={}", if d { 1 } else { 0 }))
+                    .await
+            }
+            None => self.get("/api/struct/count").await,
+        }
+    }
+    pub async fn work_count(&self) -> Result<Value, String> {
+        self.get("/api/work/count").await
+    }
+    pub async fn player_active_count(&self, window_blocks: u64) -> Result<Value, String> {
+        self.get(&format!(
+            "/api/player/active/count?window_blocks={}",
+            window_blocks
+        ))
+        .await
+    }
+    /// Grid rows for one attribute filtered to one object type (wishlist #7)
+    /// — the ore walk drops from 233 pages to ~24.
+    pub async fn grid_by_attribute_and_object_type(
+        &self,
+        attribute_type: &str,
+        object_type: &str,
+        page: u32,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page(
+            &format!(
+                "/api/grid/attribute-type/{}/object-type/{}/page/{}",
+                attribute_type, object_type, page
+            ),
+            page,
+        )
+        .await
+    }
+    /// Current raid rows by status (wishlist #3), ordered `updated_at DESC`.
+    /// The table keeps stale non-terminal rows forever — callers filter by
+    /// `updated_at` freshness, exactly as with the activity feed.
+    pub async fn planet_raid_by_status(
+        &self,
+        status: &str,
+        page: u32,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page(
+            &format!("/api/planet-raid/status/{}/page/{}", status, page),
+            page,
+        )
+        .await
+    }
+    /// GET a list endpoint at a caller-chosen page size (PR #121 `?limit=`,
+    /// server-clamped at 1000). `has_more` keys off the REQUESTED size, so a
+    /// 500-row final page under limit=1000 ends the walk without an extra
+    /// empty fetch.
+    async fn get_page_limited(
+        &self,
+        path: &str,
+        page: u32,
+        limit: usize,
+    ) -> Result<GuildPage<Value>, String> {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        let data = self.get(&format!("{}{}limit={}", path, sep, limit)).await?;
+        let items = match data {
+            Value::Array(arr) => arr,
+            Value::Null => vec![],
+            other => return Err(format!("expected array, got {}", other)),
+        };
+        let has_more = items.len() >= limit;
+        Ok(GuildPage {
+            items,
+            page,
+            has_more,
+        })
+    }
+    /// Every holder of one denom, richest first: `{owner_type, owner_id,
+    /// denom, balance}` — the whole galaxy's alpha in one or two pages.
+    pub async fn inventory_by_denom(
+        &self,
+        denom: &str,
+        page: u32,
+        limit: usize,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page_limited(
+            &format!("/api/inventory/denom/{}/page/{}", denom, page),
+            page,
+            limit,
+        )
+        .await
+    }
+    pub async fn player_list_by_guild_limited(
+        &self,
+        guild_id: &str,
+        page: u32,
+        limit: usize,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page_limited(
+            &format!("/api/player/list/guild/{}/page/{}", guild_id, page),
+            page,
+            limit,
+        )
+        .await
+    }
+    pub async fn grid_by_attribute_and_object_type_limited(
+        &self,
+        attribute_type: &str,
+        object_type: &str,
+        page: u32,
+        limit: usize,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page_limited(
+            &format!(
+                "/api/grid/attribute-type/{}/object-type/{}/page/{}",
+                attribute_type, object_type, page
+            ),
+            page,
+            limit,
+        )
+        .await
+    }
+    pub async fn planet_attribute_by_type_limited(
+        &self,
+        attribute_type: &str,
+        page: u32,
+        limit: usize,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page_limited(
+            &format!("/api/planet-attribute/type/{}/page/{}", attribute_type, page),
+            page,
+            limit,
+        )
+        .await
+    }
+
+    /// Galaxy-wide LOCF-aligned totals per bucket (wishlist #11): rows carry
+    /// a `bucket` timestamp and a running `sum` for every object of
+    /// `object_type`, absent objects carried forward, never zero-filled.
+    pub async fn stat_aggregate(
+        &self,
+        metric: &str,
+        object_type: &str,
+        bucket: &str,
+        start: i64,
+        end: i64,
+    ) -> Result<Value, String> {
+        self.get(&format!(
+            "/api/stat/{}/aggregate/range?object_type={}&bucket={}&start_time={}&end_time={}",
+            metric, object_type, bucket, start, end
+        ))
+        .await
     }
 }
 

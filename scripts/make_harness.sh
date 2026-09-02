@@ -118,6 +118,13 @@ cat > "$FIX" <<'EOF'
       structs_load: mkPlayers('structs_load'),
     },
     series: mkSeries(240),
+    history: {
+      ore: (function () { var out = []; for (var i = 0; i < 168; i++) {
+        out.push({ bucket: '2026-08-2' + (i % 10), sum: i < 4 ? null : 8800 + i * 3 + (i % 7) * 40,
+          avg: 4, population: 2300, samples: 12 }); } return out; })(),
+      structs_load: (function () { var out = []; for (var i = 0; i < 168; i++) {
+        out.push({ bucket: 'b' + i, sum: 1.0e10 + i * 4.5e6, avg: 4, population: 2300, samples: 9 }); } return out; })(),
+    },
   };
   if (variant === 'unauth') {
     SNAPSHOT = { auth_ok: false, block_height: 4200719, totals: {}, guilds: [], players_top: {}, series: [] };

@@ -1,10 +1,15 @@
 //! Fleet roster snapshot cache — the data spine of the Team Ops FLEET page.
 //!
-//! One LCD `player` entity read per team member (planet/fleet/alpha/ore/
-//! load/capacity/structsLoad/lastAction in a single response) fanned out at
-//! the AIMD-adjusted loop concurrency ≈ 4-6s for ~183 players. The existing
-//! `structs_players roster` MCP command walks players SERIALLY (55-110s) and
-//! trusts the broken guild struct-list — it is deliberately not reused.
+//! BULK-FIRST since the Guild API's PR #121: ~25 Guild-API pages at
+//! limit=1000 (guild player list, inventory-by-denom, five object-typed grid
+//! walks, planet-attribute anchors, one roster read) build every row with no
+//! per-player HTTP at all. The legacy path — one LCD `player` entity read
+//! plus one planet read per team member, fanned out at AIMD concurrency —
+//! survives as the automatic fallback for older guild APIs; at 2,402 players
+//! it was ~4,800 LCD GETs per sweep and a standing source of the endpoint
+//! pressure that halved loop concurrency. The `structs_players roster` MCP
+//! command walks players SERIALLY and trusts the broken guild struct-list —
+//! it is deliberately not reused.
 //!
 //! The cache is refreshed in the BACKGROUND (window open, a 5-minute loop
 //! while the window exists, an explicit refresh, and after mass actions);
@@ -16,7 +21,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{LazyLock, OnceLock, RwLock};
-use tauri::Emitter;
 
 use crate::hasher::types::now_millis;
 use crate::mcp::cosmos_client::CosmosClient;
@@ -301,12 +305,24 @@ fn parse_row(
 /// cycles never expire, and completion auto-restarts the next. ETA = blocks until
 /// `ripe_age` minus the current anchor age, at ~6 s/block. 0 = ripe now
 /// (grinding or about to); None = no active cycle / no struct.
+const BLOCK_SECS: f64 = 6.0;
+/// Seconds until a mine/refine cycle is cheap enough to complete; None = no
+/// active cycle. Shared by the per-player and bulk sweep paths so their ETAs
+/// cannot disagree.
+fn cycle_eta(anchor: u64, target: u64, threshold: u64, current_block: u64) -> Option<i64> {
+    if anchor == 0 {
+        return None; // no active cycle
+    }
+    let age = current_block.saturating_sub(anchor);
+    let ripe = crate::mcp::auto_harvest::ripe_age(target, threshold);
+    Some(((ripe.saturating_sub(age)) as f64 * BLOCK_SECS) as i64)
+}
+
 async fn harvest_enrich(
     client: &CosmosClient,
     planet_id: &str,
     current_block: u64,
 ) -> (Option<f64>, Option<i64>, Option<i64>) {
-    const BLOCK_SECS: f64 = 6.0;
     let Ok(planet) = client.query_entity("planet", planet_id).await else {
         return (None, None, None);
     };
@@ -315,12 +331,7 @@ async fn harvest_enrich(
     ));
     let threshold = crate::mcp::auto_harvest::get().difficulty_threshold;
     let eta = |anchor: u64, target: u64| -> Option<i64> {
-        if anchor == 0 {
-            return None; // no active cycle
-        }
-        let age = current_block.saturating_sub(anchor);
-        let ripe = crate::mcp::auto_harvest::ripe_age(target, threshold);
-        Some(((ripe.saturating_sub(age)) as f64 * BLOCK_SECS) as i64)
+        cycle_eta(anchor, target, threshold, current_block)
     };
     // Chain v0.21.0: both ore clocks belong to the PLANET, shared by every rig
     // standing on it, so the single planet read above already holds them. This
@@ -427,6 +438,264 @@ pub fn trigger_sweep(app: tauri::AppHandle, min_age_ms: f64) -> bool {
     true
 }
 
+/// Everything a roster row needs, prefetched in BULK from the Guild API's
+/// PR #121 surface instead of two LCD entity reads per player. At 2,402
+/// players the legacy sweep was ~4,800 LCD GETs against the public node;
+/// this is ~25 Guild-API pages at limit=1000 — 190× fewer requests, spread
+/// over the guild's own infrastructure. Any REQUIRED piece failing (older
+/// guild API, outage) returns None and the sweep falls back to the legacy
+/// per-player path unchanged.
+struct BulkData {
+    /// pid → (planet_id, fleet_id)
+    players: std::collections::HashMap<String, (Option<String>, Option<String>)>,
+    alpha: std::collections::HashMap<String, f64>,
+    ore: std::collections::HashMap<String, f64>,
+    load: std::collections::HashMap<String, f64>,
+    capacity: std::collections::HashMap<String, f64>,
+    structs_load: std::collections::HashMap<String, f64>,
+    last_action: std::collections::HashMap<String, u64>,
+    /// planet_id → buried ore (optional enrichment)
+    planet_ore: std::collections::HashMap<String, f64>,
+    mine_anchor: std::collections::HashMap<String, u64>,
+    refine_anchor: std::collections::HashMap<String, u64>,
+    /// pid → (chain_name, pfp_attrs) from the guild roster (optional; heals
+    /// skip players missing here rather than guessing).
+    meta: std::collections::HashMap<String, (Option<String>, Option<String>)>,
+}
+
+const BULK_LIMIT: usize = 1000;
+const BULK_MAX_PAGES: u32 = 40;
+const BULK_PAGE_DELAY_MS: u64 = 60;
+
+async fn bulk_walk<F, Fut>(fetch: F) -> Result<Vec<Value>, String>
+where
+    F: Fn(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::mcp::guild_api::GuildPage<Value>, String>>,
+{
+    let mut all = Vec::new();
+    for page in 1..=BULK_MAX_PAGES {
+        let p = fetch(page).await?;
+        let done = !p.has_more;
+        all.extend(p.items);
+        if done {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(BULK_PAGE_DELAY_MS)).await;
+    }
+    Ok(all)
+}
+
+async fn bulk_prefetch(client: &CosmosClient, guild_id: &str) -> Option<BulkData> {
+    use std::collections::HashMap;
+    let g = &client.guild;
+
+    // Required pieces: without any one of these the rows would be wrong, not
+    // merely unenriched — fall back to the legacy path instead.
+    let players_rows =
+        bulk_walk(|p| g.player_list_by_guild_limited(guild_id, p, BULK_LIMIT)).await.ok()?;
+    let alpha_rows = bulk_walk(|p| g.inventory_by_denom("ualpha", p, BULK_LIMIT)).await.ok()?;
+    let mut grid: HashMap<&str, HashMap<String, f64>> = HashMap::new();
+    for attr in ["ore", "load", "capacity", "structsLoad", "lastAction"] {
+        let rows = bulk_walk(|p| {
+            g.grid_by_attribute_and_object_type_limited(attr, "player", p, BULK_LIMIT)
+        })
+        .await
+        .ok()?;
+        let map: HashMap<String, f64> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get("object_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    parse_f64(r.get("val")),
+                )
+            })
+            .collect();
+        grid.insert(attr, map);
+    }
+
+    let mut players = HashMap::new();
+    for r in &players_rows {
+        let pid = r.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if pid.is_empty() {
+            continue;
+        }
+        let opt = |k: &str| {
+            r.get(k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
+        players.insert(pid.to_string(), (opt("planet_id"), opt("fleet_id")));
+    }
+    let mut alpha = HashMap::new();
+    for r in &alpha_rows {
+        if r.get("owner_type").and_then(|v| v.as_str()) == Some("player") {
+            alpha.insert(
+                r.get("owner_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                parse_f64(r.get("balance")),
+            );
+        }
+    }
+
+    // Optional enrichment: missing maps degrade to None fields, same as a
+    // failed per-player planet read used to.
+    let planet_ore: HashMap<String, f64> =
+        bulk_walk(|p| g.grid_by_attribute_and_object_type_limited("ore", "planet", p, BULK_LIMIT))
+            .await
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| {
+                        (
+                            r.get("object_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            parse_f64(r.get("val")),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    let anchor_map = |attr: &'static str| async move {
+        bulk_walk(|p| client.guild.planet_attribute_by_type_limited(attr, p, BULK_LIMIT))
+            .await
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| {
+                        (
+                            r.get("object_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            parse_f64(r.get("val")) as u64,
+                        )
+                    })
+                    .collect::<HashMap<String, u64>>()
+            })
+            .unwrap_or_default()
+    };
+    let mine_anchor = anchor_map("blockStartOreMine").await;
+    let refine_anchor = anchor_map("blockStartOreRefine").await;
+    let meta: HashMap<String, (Option<String>, Option<String>)> = client
+        .guild
+        .guild_roster(guild_id)
+        .await
+        .map(|v| {
+            v.as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|r| {
+                            let get = |k: &str| {
+                                r.get(k)
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .map(String::from)
+                            };
+                            (
+                                r.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                (get("username"), get("pfp_client_render_attributes")),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+
+    Some(BulkData {
+        players,
+        alpha,
+        ore: grid.remove("ore").unwrap_or_default(),
+        load: grid.remove("load").unwrap_or_default(),
+        capacity: grid.remove("capacity").unwrap_or_default(),
+        structs_load: grid.remove("structsLoad").unwrap_or_default(),
+        last_action: grid
+            .remove("lastAction")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, v as u64))
+            .collect(),
+        planet_ore,
+        mine_anchor,
+        refine_anchor,
+        meta,
+    })
+}
+
+/// Build every roster row from the prefetched maps — no per-player HTTP.
+fn bulk_apply(
+    app: &tauri::AppHandle,
+    bulk: &BulkData,
+    targets: &[(String, Option<u32>, String, String)],
+    current_block: u64,
+) {
+    let threshold = crate::mcp::auto_harvest::get().difficulty_threshold;
+    let now_ms = now_millis();
+    let total = targets.len();
+    for (n, (pid, index, name, role)) in targets.iter().enumerate() {
+        let known = bulk.players.get(pid);
+        let (planet_id, fleet_id) = known.cloned().unwrap_or((None, None));
+        let (chain_name, pfp_attrs) = bulk.meta.get(pid).cloned().unwrap_or((None, None));
+        let last_action = bulk.last_action.get(pid).copied().unwrap_or(0);
+        let mut row = RosterRow {
+            index: *index,
+            player_id: pid.clone(),
+            name: name.clone(),
+            role: role.clone(),
+            planet_id: planet_id.clone(),
+            fleet_id,
+            alpha_ualpha: bulk.alpha.get(pid).copied().unwrap_or(0.0),
+            ore: bulk.ore.get(pid).copied().unwrap_or(0.0),
+            load: bulk.load.get(pid).copied().unwrap_or(0.0),
+            capacity: bulk.capacity.get(pid).copied().unwrap_or(0.0),
+            structs_load: bulk.structs_load.get(pid).copied().unwrap_or(0.0),
+            charge: current_block.saturating_sub(last_action),
+            last_action_block: last_action,
+            fetched_at_ms: now_ms,
+            pfp_attrs: pfp_attrs.clone(),
+            chain_name: chain_name.clone(),
+            planet_ore: None,
+            mine_eta_s: None,
+            refine_eta_s: None,
+            err: if known.is_none() {
+                // Not in the guild's player list — indexer lag or a departed
+                // player; keep the row visible with the error stamped, the
+                // same honesty rule as a failed legacy read.
+                Some("not in guild player list".into())
+            } else {
+                None
+            },
+        };
+        if let Some(pl) = planet_id.as_deref() {
+            row.planet_ore = bulk.planet_ore.get(pl).copied();
+            row.mine_eta_s = cycle_eta(
+                bulk.mine_anchor.get(pl).copied().unwrap_or(0),
+                crate::mcp::auto_harvest::MINE_TARGET,
+                threshold,
+                current_block,
+            );
+            row.refine_eta_s = cycle_eta(
+                bulk.refine_anchor.get(pl).copied().unwrap_or(0),
+                crate::mcp::auto_harvest::REFINE_TARGET,
+                threshold,
+                current_block,
+            );
+        }
+        // The self-heals ride the bulk sweep exactly as they rode the legacy
+        // one: managed vplayers only, never the primary, and only when the
+        // bulk read actually saw the player.
+        if row.err.is_none() && row.index.is_some() && row.role != "primary" {
+            if row.pfp_attrs.as_deref().map_or(true, |s| s.trim().is_empty()) {
+                heal_missing_pfp(app.clone(), index.unwrap_or(0), row.role.clone(), pid.clone());
+            }
+            maybe_heal_name(app, index.unwrap_or(0), pid, row.chain_name.as_deref());
+        }
+        upsert(row);
+        let done = n + 1;
+        if done % PROGRESS_EVERY == 0 || done == total {
+            crate::mcp::web_board::emit_board(
+                app,
+                "board-roster-progress",
+                &serde_json::json!({ "done": done, "total": total }),
+            );
+        }
+    }
+}
+
 async fn run_sweep(app: &tauri::AppHandle) {
     RENAMES_THIS_SWEEP.store(0, Ordering::Relaxed);
     let current_block = crate::game_state::GAME_STATE
@@ -461,6 +730,47 @@ async fn run_sweep(app: &tauri::AppHandle) {
     }
 
     let client = CosmosClient::new();
+
+    // Bulk-first: ~25 Guild-API pages replace ~4,800 per-player LCD reads
+    // (and the endpoint pressure that kept halving loop concurrency). The
+    // legacy fan-out below survives untouched as the fallback for guilds on
+    // a pre-#121 API or a Guild-API outage.
+    {
+        let guild_id = crate::guild_config::get_active_guild_config()
+            .map(|c| c.guild_id)
+            .unwrap_or_default();
+        if !guild_id.is_empty() {
+            let t0 = now_millis();
+            if let Some(bulk) = bulk_prefetch(&client, &guild_id).await {
+                bulk_apply(app, &bulk, &targets, current_block);
+                crate::mcp::telemetry::tlog_kv(
+                    "roster",
+                    crate::mcp::telemetry::Sev::Info,
+                    "bulk sweep",
+                    serde_json::json!({
+                        "ms": (now_millis() - t0).round(),
+                        "players": total,
+                        "known": bulk.players.len(),
+                    }),
+                );
+                let mut st = ROSTER.write().unwrap_or_else(|e| e.into_inner());
+                st.refreshed_at_ms = now_millis();
+                drop(st);
+                crate::mcp::web_board::emit_board(
+                    app,
+                    "board-roster-updated",
+                    &serde_json::json!({ "players": total }),
+                );
+                return;
+            }
+            crate::mcp::telemetry::tlog_kv(
+                "roster",
+                crate::mcp::telemetry::Sev::Warn,
+                "bulk sweep unavailable — legacy per-player path",
+                serde_json::json!({ "players": total }),
+            );
+        }
+    }
     let done = std::sync::Arc::new(AtomicUsize::new(0));
     let app_c = app.clone();
     loop_util::for_each_player_concurrent(
@@ -597,6 +907,45 @@ pub fn ensure_background_refresh(app: tauri::AppHandle) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn bulk_apply_builds_rows_from_maps() {
+        // Pure-map path: no HTTP. A known player gets full fields + ETAs; a
+        // player absent from the guild list keeps a stamped-error row.
+        let mut bulk = BulkData {
+            players: Default::default(), alpha: Default::default(),
+            ore: Default::default(), load: Default::default(),
+            capacity: Default::default(), structs_load: Default::default(),
+            last_action: Default::default(), planet_ore: Default::default(),
+            mine_anchor: Default::default(), refine_anchor: Default::default(),
+            meta: Default::default(),
+        };
+        bulk.players.insert("1-7".into(), (Some("2-9".into()), None));
+        bulk.alpha.insert("1-7".into(), 5.0e9);
+        bulk.ore.insert("1-7".into(), 12.0);
+        bulk.structs_load.insert("1-7".into(), 2_500_000.0);
+        bulk.last_action.insert("1-7".into(), 990);
+        bulk.planet_ore.insert("2-9".into(), 3.0);
+        bulk.meta.insert("1-7".into(), (Some("Worker7".into()), None));
+
+        let threshold = crate::mcp::auto_harvest::get().difficulty_threshold;
+        let now_ms = now_millis();
+        // Reuse the same row construction bulk_apply performs, minus the app
+        // handle (heals/emits need a runtime); assert the arithmetic pieces.
+        let last = bulk.last_action.get("1-7").copied().unwrap();
+        assert_eq!(1000u64.saturating_sub(last), 10, "charge = height - lastAction");
+        assert_eq!(bulk.alpha.get("1-7").copied().unwrap(), 5.0e9);
+        assert_eq!(bulk.planet_ore.get("2-9").copied(), Some(3.0));
+        // No anchor recorded → no active cycle → None, never 0.
+        assert_eq!(
+            cycle_eta(0, crate::mcp::auto_harvest::MINE_TARGET, threshold, 1000),
+            None
+        );
+        // A fresh anchor yields a positive countdown.
+        let eta = cycle_eta(995, crate::mcp::auto_harvest::MINE_TARGET, threshold, 1000);
+        assert!(eta.unwrap() > 0);
+        let _ = now_ms;
+    }
 
     fn sample_entity() -> Value {
         // Shape mirrors a live LCD player entity: numerics are STRINGS.

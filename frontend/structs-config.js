@@ -2264,7 +2264,12 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
        * and filled the row; wrapping it narrowed the whole panel to whatever
        * its widest row happened to be. Stretch, and let the content column
        * follow the window. */
-      root.style.cssText = 'flex:1 1 auto; min-width:0; width:100%;';
+      /* `box-sizing: border-box` matters: the page's own wrapper adds padding,
+       * and a `width: 100%` CONTENT box plus that padding is wider than the
+       * container by exactly the padding — which is the horizontal scrollbar,
+       * and the vertical one it then makes room for. */
+      root.style.cssText =
+        'flex:1 1 auto; min-width:0; width:100%; box-sizing:border-box; overflow-x:hidden;';
       root.innerHTML = html;
       debugRoot = root;
       var contentEl = document.getElementById('menu-page-body-content');
