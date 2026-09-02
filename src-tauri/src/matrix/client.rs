@@ -448,6 +448,80 @@ mod pin_tests {
         }
     }
 
+    /* The pins are the same three for EVERYONE.
+     *
+     * The first version compared the SESSION's homeserver to SN Corp's, so it
+     * answered "am I on SN's server?" rather than "is this room on SN's
+     * server?" — and every room came back unpinned for every player outside
+     * SN Corp, which is most of them. The viewer does not appear in this
+     * function's arguments any more; this pins that shut.
+     */
+    #[test]
+    fn the_pins_do_not_depend_on_the_viewers_guild() {
+        const SN: &str = "matrix.beta.playstructs.com";
+        assert_eq!(pinned_rank_for("#sn-corp:matrix.beta.playstructs.com", SN), Some(0));
+        assert_eq!(pinned_rank_for("#help:matrix.beta.playstructs.com", SN), Some(1));
+        assert_eq!(pinned_rank_for("#infrastructure:matrix.beta.playstructs.com", SN), Some(2));
+        // A room of the viewer's OWN guild is not pinned just for being theirs.
+        assert_eq!(pinned_rank_for("#orbital-hydro:matrix.crew.oh.energy", SN), None);
+        // …and a pinned NAME on another server is a different room entirely.
+        assert_eq!(pinned_rank_for("#help:matrix.crew.oh.energy", SN), None);
+        assert_eq!(pinned_rank_for("#sn-corp:evil.example", SN), None);
+        // Suffix and prefix of the home server are not the home server.
+        assert_eq!(pinned_rank_for("#help:beta.playstructs.com", SN), None);
+        assert_eq!(pinned_rank_for("#help:matrix.beta.playstructs.com.evil.example", SN), None);
+        // Nothing is pinned when the directory cannot name the home server.
+        assert_eq!(pinned_rank_for("#help:matrix.beta.playstructs.com", ""), None);
+    }
+
+    /* A guild that does not federate must be handled, not hammered.
+     *
+     * Every launch starts a sync, and every sync used to retry all three
+     * joins. For a deployment that will never federate with SN Corp's server
+     * that is three doomed federated requests forever — and for one that
+     * merely had a bad minute, giving up permanently would be just as wrong.
+     * So the question is never "is this fatal", only "how long until we ask
+     * again".
+     */
+    #[test]
+    fn a_settled_refusal_waits_a_day_and_a_blip_waits_a_launch() {
+        for settled in [
+            "M_FORBIDDEN: You are not invited to this room",
+            "M_NOT_FOUND: Room alias #help:matrix.beta.playstructs.com not found",
+            "M_UNRECOGNIZED: Unrecognized request",
+            "M_UNSUPPORTED_ROOM_VERSION: your server cannot speak version 11",
+            "M_INCOMPATIBLE_ROOM_VERSION: 12",
+        ] {
+            assert_eq!(
+                pinned_retry_delay_ms(settled),
+                PINNED_SETTLED_RETRY_MS,
+                "{settled} should wait a day"
+            );
+        }
+        for blip in [
+            // Synapse's catch-all when it cannot reach the remote server —
+            // which is exactly the case that comes BACK when federation is
+            // turned on, so it must not be written off for a day.
+            "M_UNKNOWN: No known servers",
+            "HTTP 502",
+            "HTTP 504",
+            "the homeserver is rate limiting this; try again in 12s",
+            "error sending request for url (https://…): connection closed",
+            "",
+        ] {
+            assert_eq!(pinned_retry_delay_ms(blip), 0, "{blip} should retry next launch");
+        }
+    }
+
+    /* Classified on the ERRCODE, never on the message. The message half is
+     * free text written by another deployment; a room whose topic or error
+     * string happens to contain "M_FORBIDDEN" must not change our mind. */
+    #[test]
+    fn only_the_errcode_decides() {
+        assert_eq!(pinned_retry_delay_ms("M_UNKNOWN: not M_FORBIDDEN at all"), 0);
+        assert_eq!(pinned_retry_delay_ms("HTTP 500: M_NOT_FOUND appears here"), 0);
+    }
+
     #[test]
     fn the_pins_are_ordered_and_distinct() {
         // Rank IS the index, so the list order is the on-screen order.
@@ -468,15 +542,35 @@ mod pin_tests {
 /// no future edit can reintroduce name matching by reaching for a parameter
 /// that happens to be in scope.
 ///
-/// `server` is the session's homeserver, already resolved by the caller.
+/// The server compared is the ROOM's own, taken from its alias — not the
+/// session's.
+///
+/// This read the session's homeserver and refused anything that did not match
+/// SN Corp's, which meant the pin could only ever fire for SN Corp's own
+/// members: an Orbital Hydro player got `None` for every room including the
+/// three pinned ones, because it was asking "am I on SN's server?" instead of
+/// "is this room on SN's server?". The whole point is that these three are
+/// pinned for everyone, so the viewer's guild must not enter into it.
+///
 /// Returns `None` whenever the directory cannot name the home guild's server,
 /// which degrades to "nothing is pinned" rather than to a wrong guess.
-fn home_rank(alias: Option<&str>, server: &str) -> Option<u8> {
+fn home_rank(alias: Option<&str>) -> Option<u8> {
     let home = super::directory::server_name_for_guild(HOME_GUILD)?;
-    if server.is_empty() || server != home {
+    pinned_rank_for(alias?, &home)
+}
+
+/// The decision itself, with nothing global in it.
+///
+/// Split out because the bug above was not in the rule but in what was fed to
+/// it, and a rule that can only be exercised through the live guild directory
+/// cannot be asked "does the viewer's own guild change your answer?".
+fn pinned_rank_for(alias: &str, home_server: &str) -> Option<u8> {
+    // Whole-server equality, never a substring: `oh.energy` is a suffix of
+    // `matrix.oh.energy` and a prefix of `oh.energy.example.com`.
+    if home_server.is_empty() || super::rooms::server_of(alias) != Some(home_server) {
         return None;
     }
-    let local = alias.and_then(alias_localpart_of)?;
+    let local = alias_localpart_of(alias)?;
     PINNED_LOCALPARTS
         .iter()
         .position(|p| *p == local)
@@ -1602,7 +1696,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         // Computed before the literal: `display` and `final_alias` are moved
         // into it.
         let rank = if dm_peer.is_some() { None }
-            else { home_rank(final_alias.as_deref(), &server) };
+            else { home_rank(final_alias.as_deref()) };
         let entry = Room {
             home_rank: rank,
             room_id: room_id.clone(),
@@ -2259,6 +2353,181 @@ pub async fn heal_avatar(app: &tauri::AppHandle, guild_id: &str) {
     }
 }
 
+/// What this install knows about each pinned channel.
+///
+/// Keyed by full alias. `joined` is sticky on purpose — see
+/// `join_pinned_channels` — and `next_try_ms` is how a guild whose homeserver
+/// does not federate with SN Corp's stops being asked three times a launch
+/// forever, without being written off permanently either.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+struct PinnedRoom {
+    joined: bool,
+    /// The last refusal, verbatim, so the Debug tab can say WHY rather than
+    /// leaving a player to guess whether their guild is federated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    #[serde(default)]
+    next_try_ms: u64,
+}
+
+type PinnedState = std::collections::HashMap<String, PinnedRoom>;
+
+fn pinned_state_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("structs-app").join("pinned_joined.json"))
+}
+
+fn pinned_state_read() -> PinnedState {
+    let Some(text) = pinned_state_path().and_then(|p| std::fs::read_to_string(p).ok()) else {
+        return PinnedState::new();
+    };
+    if let Ok(map) = serde_json::from_str::<PinnedState>(&text) {
+        return map;
+    }
+    // The first shape this file had was a flat list of joined aliases. Read it
+    // rather than discarding it: throwing it away would re-join every pinned
+    // room for anyone who had already left one.
+    serde_json::from_str::<Vec<String>>(&text)
+        .map(|v| {
+            v.into_iter()
+                .map(|a| (a, PinnedRoom { joined: true, ..Default::default() }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pinned_state_write(state: &PinnedState) {
+    let Some(p) = pinned_state_path() else { return };
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")));
+    if let Ok(t) = serde_json::to_string(state) {
+        let tmp = p.with_extension("tmp");
+        if std::fs::write(&tmp, t).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
+/// A guild whose homeserver refuses, or cannot reach, SN Corp's.
+///
+/// Federation is a deployment decision that can change either way, so nothing
+/// here is permanent — the question is only how long to wait before asking
+/// again. A refusal the server has actually MADE UP ITS MIND about (denied,
+/// no such room from here, room version it cannot speak) is worth a day; a
+/// blip, a 5xx, a timeout, a rate limit is worth the next launch.
+///
+/// Classified on the ERRCODE, which `matrix_error` puts first as
+/// `M_FORBIDDEN: …`. Never on the message: that half is free text from another
+/// deployment and can say anything at all.
+const PINNED_SETTLED_RETRY_MS: u64 = 24 * 60 * 60 * 1000;
+
+fn pinned_retry_delay_ms(err: &str) -> u64 {
+    let code = err.split(':').next().unwrap_or("").trim();
+    match code {
+        // The remote side, or ours, has decided. Ask again tomorrow.
+        "M_FORBIDDEN" | "M_NOT_FOUND" | "M_UNRECOGNIZED" | "M_UNSUPPORTED_ROOM_VERSION"
+        | "M_INCOMPATIBLE_ROOM_VERSION" | "M_BAD_STATE" => PINNED_SETTLED_RETRY_MS,
+        // Everything else — 5xx, a dropped connection, rate limiting,
+        // Synapse's catch-all "No known servers" — is a bad minute, not a
+        // policy. Try again next launch.
+        _ => 0,
+    }
+}
+
+/// Put every player in the three pinned channels, whatever guild they are in.
+///
+/// These are pinned for everybody, so being able to SEE them at the top of the
+/// list is only half of it — an Orbital Hydro player had no way into
+/// `#help:matrix.beta.playstructs.com` except by knowing the address and
+/// typing it. The join is by alias and crosses homeservers by federation.
+///
+/// ONCE per install per room, which is the part worth being careful about.
+/// Re-joining on every launch would mean a player who leaves `#infrastructure`
+/// is dragged back the next time they open the app, with no way out short of
+/// blocking the room. Recording what we joined lets leaving stick.
+///
+/// A guild that does not federate with SN Corp's homeserver is handled as a
+/// fact, not an error: the join fails, the reason is kept, the pinned rooms
+/// simply do not appear in that player's list, and we ask again tomorrow
+/// rather than three times every launch. Nothing is said in the chat window
+/// about it — there is no action the player can take — but the Debug tab can
+/// answer "is my guild federated?" from `matrix_pinned_status`.
+async fn join_pinned_channels(guild_id: &str) {
+    let Some(session) = store::get(guild_id) else { return };
+    let Some(home) = super::directory::server_name_for_guild(HOME_GUILD) else {
+        return;
+    };
+    let now = crate::hasher::types::now_millis() as u64;
+    let mut state = pinned_state_read();
+    let mut dirty = false;
+
+    for local in PINNED_LOCALPARTS {
+        let alias = format!("#{local}:{home}");
+        let rec = state.entry(alias.clone()).or_default();
+        if rec.joined || now < rec.next_try_ms {
+            continue;
+        }
+        // Already in it — joined by hand, or by an earlier install. Record
+        // that so we never ask again, and never fight a later leave.
+        let joined_here = STATE.read().ok().is_some_and(|st| {
+            st.get(guild_id).is_some_and(|g| {
+                g.rooms.values().any(|r| {
+                    r.joined && r.canonical_alias.as_deref() == Some(alias.as_str())
+                })
+            })
+        });
+        if joined_here {
+            rec.joined = true;
+            rec.last_error = None;
+            dirty = true;
+            continue;
+        }
+        match join(&session, &alias).await {
+            Ok(()) => {
+                rec.joined = true;
+                rec.last_error = None;
+                eprintln!("[Comms] joined pinned channel {}", alias);
+            }
+            Err(e) => {
+                let wait = pinned_retry_delay_ms(&e);
+                rec.next_try_ms = now + wait;
+                rec.last_error = Some(e.clone());
+                eprintln!(
+                    "[Comms] pinned channel {} not joined: {} (retry {})",
+                    alias,
+                    e,
+                    if wait == 0 { "next launch" } else { "tomorrow" }
+                );
+            }
+        }
+        dirty = true;
+    }
+    if dirty {
+        pinned_state_write(&state);
+    }
+}
+
+/// What this install knows about the pinned channels, for the Debug tab.
+#[tauri::command]
+pub fn matrix_pinned_status() -> Value {
+    let home = super::directory::server_name_for_guild(HOME_GUILD);
+    let state = pinned_state_read();
+    let rooms: Vec<Value> = PINNED_LOCALPARTS
+        .iter()
+        .map(|local| {
+            let alias = home
+                .as_ref()
+                .map(|h| format!("#{local}:{h}"))
+                .unwrap_or_else(|| format!("#{local}"));
+            let rec = state.get(&alias).cloned().unwrap_or_default();
+            json!({
+                "alias": alias,
+                "joined": rec.joined,
+                "error": rec.last_error,
+            })
+        })
+        .collect();
+    json!({ "server": home, "rooms": rooms })
+}
+
 pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
     {
         let mut running = RUNNING.write().unwrap();
@@ -2279,6 +2548,13 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
         let app = app.clone();
         let guild_id = guild_id.clone();
         tauri::async_runtime::spawn(async move { heal_avatar(&app, &guild_id).await });
+    }
+    // The three pinned channels, once per install each. Same shape as the
+    // avatar heal above: off the sync loop, so a homeserver that will not
+    // federate cannot delay the first messages.
+    {
+        let guild_id = guild_id.clone();
+        tauri::async_runtime::spawn(async move { join_pinned_channels(&guild_id).await });
     }
     tauri::async_runtime::spawn(async move {
         let mut backoff = 2u64;
@@ -2570,7 +2846,7 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
             .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
-        let rank = home_rank(alias.as_deref(), &server);
+        let rank = home_rank(alias.as_deref());
         gs.rooms.insert(
             room_id.to_string(),
             Room {
@@ -2669,7 +2945,7 @@ pub async fn browse(
             .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
-        let rank = home_rank(alias.as_deref(), &server);
+        let rank = home_rank(alias.as_deref());
         out.push(Room {
             home_rank: rank,
             room_id: room_id.to_string(),
@@ -2710,7 +2986,7 @@ pub async fn browse(
                 continue;
             }
             out.push(Room {
-                home_rank: home_rank(Some(&s.alias), &server),
+                home_rank: home_rank(Some(&s.alias)),
                 room_id: s.room_id.clone(),
                 icon: icon_for(&s.name, Some(&s.alias)),
                 name: s.name,

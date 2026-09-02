@@ -156,7 +156,7 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
     // Nested parens (`copyLink('x', a.substring(0, 24))`) outrun a `[^)]*`
     // strip, which stops early and leaves the tail looking unescaped.
     const stripCalls = (t) => {
-      for (const name of ['badge', 'copyLink', 'doorNote']) {
+      for (const name of ['badge', 'copyLink', 'doorNote', 'pinnedState']) {
         let i;
         while ((i = t.indexOf(name + '(')) >= 0) {
           let j = i + name.length + 1, depth = 1;
@@ -199,7 +199,9 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
   /* Every wrapper stripped above buys its exemption by escaping. Named here
    * with what it must escape, so adding one to the strip list without making
    * it safe widens the hole loudly rather than silently. */
-  [['badge', ['text']], ['copyLink', ['id', 'label']], ['doorNote', ['id', 'text']]]
+  [['badge', ['text']], ['copyLink', ['id', 'label']], ['doorNote', ['id', 'text']],
+   // The remote homeserver's own refusal text — written by another deployment.
+   ['pinnedState', ['error']]]
     .forEach(([name, params]) => {
       const at = src.indexOf('var ' + name + ' = function');
       const body = at < 0 ? '' : src.slice(at, src.indexOf('\n      };', at));

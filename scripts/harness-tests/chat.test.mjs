@@ -114,6 +114,34 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
    * pinned names and aliases, but no rank, must stay in its section. Only
    * `is_home_channel` on the Rust side, which checks the homeserver, can
    * hand out a slot. */
+  /* The pins are for EVERY player, not only SN Corp's.
+   *
+   * `home_rank` first compared the SESSION's homeserver to SN Corp's, so it
+   * answered "am I on SN's server?" instead of "is this room on SN's server?"
+   * — and an Orbital Hydro player, which is most of the roster, got nothing
+   * pinned at all. The Rust side now has no viewer input to get wrong
+   * (`pinned_rank_for`), and the window has never had one: it reads the rank
+   * and nothing else. This asserts the window stays that way. */
+  const rustPins = readFileSync(repo + '/src-tauri/src/matrix/client.rs', 'utf8');
+  check('the pin rule takes the room, not the viewer',
+    /fn pinned_rank_for\(alias: &str, home_server: &str\)/.test(rustPins),
+    (/fn pinned_rank_for\([^)]*\)/.exec(rustPins) || [''])[0]);
+  check('…and every player is put INTO the pinned channels',
+    /async fn join_pinned_channels/.test(rustPins)
+    && /join\(&session, &alias\)/.test(rustPins));
+  check('…once per install, so leaving a pinned room sticks',
+    /pinned_state_read\(\)/.test(rustPins) && /rec\.joined = true/.test(rustPins),
+    'a re-join every launch would drag a player back into a room they left');
+  /* A guild whose homeserver will not federate with SN Corp's is a fact to
+   * handle, not an error to repeat: every launch starts a sync, so an
+   * unconditional retry is three doomed federated requests forever. A settled
+   * refusal waits a day; a blip waits a launch. */
+  check('…and a guild that cannot federate is not retried every launch',
+    /fn pinned_retry_delay_ms/.test(rustPins) && /next_try_ms/.test(rustPins),
+    'an unfederated guild would be asked three times on every launch');
+  check('…while a transient failure still is',
+    /_ => 0,/.test(rustPins), 'a bad minute must not be written off for a day');
+
   const impostors = w.__HARNESS_FIXTURES__.matrix_rooms.rooms.concat([
     { room_id: '!fakesnc:evil.example', name: 'SN.Corporation',
       canonical_alias: '#sn-corporation:evil.example', icon: 'icon-guild',

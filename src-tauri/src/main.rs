@@ -99,6 +99,7 @@ fn main() {
             matrix::matrix_open_url,
             matrix::matrix_media,
             remote_image::remote_image,
+            matrix::client::matrix_pinned_status,
             matrix::matrix_members,
             matrix::matrix_mark_read,
             matrix::matrix_send,

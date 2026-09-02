@@ -2104,6 +2104,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           'style="text-align:center; margin-top:var(--spacing-xs);">' +
           STRUCTS_ESC(text) + '</div>';
       };
+      /* Whether a pinned channel is reachable from THIS guild's homeserver.
+       *
+       * A named wrapper rather than markup at the call site: `rowHtml` does
+       * not escape, and the reason half of this is the remote homeserver's
+       * own error string — text written by another deployment, which is
+       * exactly the kind of value the escaping split exists for.
+       */
+      var pinnedState = function(joined, error) {
+        if (joined) return badge('JOINED', 'solid');
+        return badge('NOT JOINED', 'warning') +
+          (error ? ' <span class="sui-text-hint">' + STRUCTS_ESC(error) + '</span>' : '');
+      };
       var copyLink = function(id, label) {
         return '<a id="' + STRUCTS_ESC(id) + '" href="javascript:void(0)" ' +
           'class="sui-text-secondary">' + STRUCTS_ESC(label) + '</a>';
@@ -2129,6 +2141,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // rendering as a bare div. Same component the engine toggle below uses.
       html += '<a href="javascript:void(0)" id="debug-comms" class="sui-screen-btn sui-mod-secondary">Comms<span id="debug-comms-unread" class="sui-badge sui-mod-default" style="display:none; margin-left:var(--spacing-md);"></span></a>';
       html += doorNote('debug-comms-note', 'federated guild chat \u00b7 opens in its own window');
+      // The pinned channels' reachability. STATE, not an explanation: whether
+      // your guild's homeserver federates with SN Corp's is the one question
+      // behind "why do I not have #help", and it has no answer the player can
+      // act on — so it belongs here rather than in the chat window.
+      html += '<div id="debug-pinned"></div>';
       html += '</div></div>';
 
       // Support bundle — because when someone needs it they are already having
@@ -2421,6 +2438,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             });
           }
         }).catch(function() {});
+
+        // Pinned channels: joined, or the homeserver's own words for why not.
+        window.__TAURI__.core.invoke('matrix_pinned_status').then(function (d) {
+          var host = document.getElementById('debug-pinned');
+          if (!host || !d) return;
+          var out = '';
+          (d.rooms || []).forEach(function (r) {
+            var local = String(r.alias || '').split(':')[0];
+            out += rowHtml(local, pinnedState(r.joined, r.error));
+          });
+          host.innerHTML = out;
+        }).catch(function () {});
 
         // Load hash engine status (also refreshes on a 2s tick below)
         function refreshHashEngine() {
