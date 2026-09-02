@@ -447,6 +447,10 @@
     .rv-invisible { visibility: hidden; }
     /* Concurrent animation layers stack inside the one mount. */
     .rv-anim-layer { position: absolute; inset: 0; }
+    /* The game mirrors every impact_* and destroy_* layer (sui-flip-horizontal
+       in MapStructViewerComponent); the bundles are authored facing the other
+       way. Applied per layer, so it composes with the attacker mount's flip. */
+    .rv-anim-layer.rv-flip-layer, .rv-anim.rv-flip-layer { transform: scaleX(-1); }
     /* Offline badge, top-right of the tile. */
     /* Status indicators: BOTTOM of the tile, centred across its full width —
        `.map-struct-hud-status-indicators` verbatim (bottom 0, tile-width, 32px

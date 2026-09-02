@@ -534,8 +534,52 @@ pub fn note_charged_action(player_id: &str) {
     }
 }
 
-/// Has this player already taken its one charged action this block?
+/// Charged signs that are QUEUED or IN FLIGHT, per player. A sign waits in
+/// the admission gate (measured ~26 s at 17 deep) and then a full block for
+/// inclusion, and the ledger above is stamped only when it lands — so for
+/// half a minute a second loop verifying the same player saw a clean ledger,
+/// passed its own pre-sign check, and queued a tx the chain was certain to
+/// reject ("required charge of 8 but player only had 6": 12 in 45 min, each a
+/// wasted 6 s sign slot AND a 30-minute initiate backoff). This set closes
+/// that window: reserve at enqueue, release when the attempt is over.
+static PENDING_CHARGE: LazyLock<Mutex<HashMap<String, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// RAII reservation of a player's charge for one queued sign. Dropping it
+/// (success, failure, cancel) releases the reservation; `acted_this_block`
+/// is true for the player while any reservation is alive.
+pub struct ChargeReservation(String);
+
+impl Drop for ChargeReservation {
+    fn drop(&mut self) {
+        if let Ok(mut m) = PENDING_CHARGE.lock() {
+            match m.get_mut(&self.0) {
+                Some(n) if *n > 1 => *n -= 1,
+                _ => {
+                    m.remove(&self.0);
+                }
+            }
+        }
+    }
+}
+
+/// Reserve `player_id`'s charge for a sign that is about to be queued.
+pub fn reserve_charge(player_id: &str) -> Option<ChargeReservation> {
+    if player_id.is_empty() {
+        return None;
+    }
+    if let Ok(mut m) = PENDING_CHARGE.lock() {
+        *m.entry(player_id.to_string()).or_insert(0) += 1;
+    }
+    Some(ChargeReservation(player_id.to_string()))
+}
+
+/// Has this player already taken — or queued — its one charged action this
+/// block?
 pub fn acted_this_block(player_id: &str) -> bool {
+    if PENDING_CHARGE.lock().map(|m| m.contains_key(player_id)).unwrap_or(false) {
+        return true;
+    }
     CHARGE_LEDGER
         .lock()
         .map(|m| {
@@ -702,5 +746,36 @@ mod perception_shim_tests {
     fn an_old_snapshot_is_stale_even_with_a_live_feed() {
         assert!(!perception_is_fresh(PERCEPTION_MAX_AGE_MS, Some(1_000.0)));
         assert!(!perception_is_fresh(-1.0, Some(1_000.0)), "clock skew never counts as fresh");
+    }
+}
+
+#[cfg(test)]
+mod charge_reservation_tests {
+    use super::*;
+
+    #[test]
+    fn a_reservation_marks_the_player_acted_until_dropped() {
+        let pid = "1-777001"; // unique: the ledger is process-global
+        assert!(!acted_this_block(pid));
+        let r = reserve_charge(pid).expect("reservation");
+        assert!(acted_this_block(pid), "queued sign counts as acted");
+        drop(r);
+        assert!(!acted_this_block(pid), "released on drop");
+    }
+
+    #[test]
+    fn overlapping_reservations_release_independently() {
+        let pid = "1-777002";
+        let a = reserve_charge(pid).unwrap();
+        let b = reserve_charge(pid).unwrap();
+        drop(a);
+        assert!(acted_this_block(pid), "one reservation still alive");
+        drop(b);
+        assert!(!acted_this_block(pid));
+    }
+
+    #[test]
+    fn empty_player_id_reserves_nothing() {
+        assert!(reserve_charge("").is_none());
     }
 }

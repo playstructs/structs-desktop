@@ -474,7 +474,17 @@ where
 {
     let mut all = Vec::new();
     for page in 1..=BULK_MAX_PAGES {
-        let p = fetch(page).await?;
+        // One page failing used to fail the whole prefetch and drop the sweep
+        // to the legacy per-player path — 18 minutes and ~10k reads for a
+        // single transient 5xx/timeout (3 of 20 sweeps today). Retry the page
+        // once after a short pause before giving up on the bulk path.
+        let p = match fetch(page).await {
+            Ok(p) => p,
+            Err(first) => {
+                tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+                fetch(page).await.map_err(|second| format!("{first}; retry: {second}"))?
+            }
+        };
         let done = !p.has_more;
         all.extend(p.items);
         if done {

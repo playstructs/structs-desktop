@@ -871,6 +871,137 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
       && R.notice('T', 'D').classList.contains('chat-notice'));
 }
 
+// ── Battle choreography parity with the game ───────────────────────────────
+//
+// planAttack is the pure mirror of StructListener.processAttack: the rules
+// below are the ones the game applies, expressed as live-recorded shot
+// details (grass_events, 2026-08/09) so a drift shows up as a failing
+// fixture rather than as "the battle animations don't look right".
+{
+  const d = w.document;
+  const S = {
+    '5-a':  { id: '5-a',  type_name: 'Battleship', type_slug: 'battleship', category: 'fleet', ambit: 'space', online: true },
+    '5-t':  { id: '5-t',  type_name: 'Starfighter', type_slug: 'starfighter', category: 'fleet', ambit: 'space', online: true },
+    '5-js': { id: '5-js', type_name: 'Jamming Satellite', type_slug: 'jamming_satellite', category: 'planet', ambit: 'space', online: true },
+    '5-pd': { id: '5-pd', type_name: 'Planetary Defense Cannon', type_slug: 'planetary_defense_cannon', category: 'planet', ambit: 'land', online: true },
+    '5-c':  { id: '5-c',  type_name: 'Cruiser', type_slug: 'cruiser', category: 'fleet', ambit: 'water', online: true },
+    '5-d':  { id: '5-d',  type_name: 'Destroyer', type_slug: 'destroyer', category: 'fleet', ambit: 'water', online: true },
+  };
+  const names = (evs) => evs.map((e) => e.structId + ':' + (e.names.join('+') || '-'));
+
+  // Cruiser water→water primary is a rule in the game's factory; it was
+  // missing here, so every such shot counted as unmatched.
+  const cw = RV.resolveShotAnimation('Cruiser', 'water', 'water', 'primaryWeapon', 2, false, '');
+  check('cruiser water→water resolves to angled-down missile',
+    cw && cw.names[0] === 'IMPACT_ANGLED_DOWN_MISSILE', JSON.stringify(cw));
+
+  // Interceptor network: recorded 2026-08-28 on 2-16116. `evaded` is FALSE;
+  // the planetary flag carries it, and the art plays on the Jamming
+  // Satellite, not the target — and the target shows NO impact.
+  const lobin = RV.planAttack({
+    attacker_id: '5-a', attacker_type: 'Battleship', attacker_ambit: 'space', weapon: 'secondaryWeapon',
+    attacker_health_before: 3, attacker_health_after: 3,
+    shots: [{ evaded: false, evadedCause: 'noUnitDefenses',
+      evadedByPlanetaryDefenses: true, evadedByPlanetaryDefensesCause: 'lowOrbitBallisticInterceptorNetwork',
+      blocked: false, targetStructId: '5-t', targetStructOperatingAmbit: 'space',
+      targetHealthBefore: '3', targetHealthAfter: '3', targetDestroyed: false, targetCountered: false,
+      eventAttackDefenderCounterDetail: [] }],
+  }, S);
+  check('interception plays the network art on the Jamming Satellite',
+    names(lobin).includes('5-js:LOW_ORBIT_BALLISTIC_INTERCEPTOR_NETWORK'), names(lobin).join(' '));
+  check('…and nothing on the intercepted target',
+    !lobin.some((e) => e.structId === '5-t'), names(lobin).join(' '));
+  check('the network art is treated as an evade (still stays visible)',
+    RV.stillFlags(['LOW_ORBIT_BALLISTIC_INTERCEPTOR_NETWORK']).during === true);
+
+  // A shot whose target health did not move shows no impact (game rule e).
+  const absorbed = RV.planAttack({
+    attacker_id: '5-a', attacker_type: 'Battleship', attacker_ambit: 'space', weapon: 'primaryWeapon',
+    attacker_health_before: 3, attacker_health_after: 3,
+    shots: [{ evaded: false, blocked: false, targetStructId: '5-t', targetStructOperatingAmbit: 'space',
+      targetHealthBefore: '3', targetHealthAfter: '3', damageReductionCause: 'armour' }],
+  }, S);
+  check('an absorbed shot animates the attacker but not the target',
+    names(absorbed).join(' ') === '5-a:ATTACK_PRIMARY_WEAPON', names(absorbed).join(' '));
+
+  // Defender counter (recorded: Battleship 5-218611 secondary, 1 damage):
+  // counter weapon first, then the attacker's impact, THEN the attacker fires.
+  const countered = RV.planAttack({
+    attacker_id: '5-t', attacker_type: 'Starfighter', attacker_ambit: 'space', weapon: 'primaryWeapon',
+    attacker_health_before: 3, attacker_health_after: 2,
+    shots: [{ evaded: false, blocked: false, targetStructId: '5-a', targetStructOperatingAmbit: 'space',
+      targetHealthBefore: '6', targetHealthAfter: '4',
+      eventAttackDefenderCounterDetail: [{ counterByStructId: '5-a', counterByStructType: 'Battleship',
+        counterByStructOperatingAmbit: 'space', counterByStructWeaponSystem: 'secondaryWeapon',
+        counterDamage: '1', counterDestroyedAttacker: false }] }],
+  }, S);
+  const cn = names(countered);
+  check('a defender counter plays its weapon before the attacker fires',
+    cn[0] === '5-a:ATTACK_SECONDARY_WEAPON' && cn.indexOf('5-t:ATTACK_PRIMARY_WEAPON') === 2, cn.join(' '));
+  check('…and the attacker takes the counter as a horizontal missile impact',
+    cn[1] === '5-t:IMPACT_HORIZONTAL_MISSILE+SHAKE_HORIZONTAL_DEFAULT_FIRST', cn[1]);
+  check('the attacker health steps down once, to the counter result',
+    countered.filter((e) => e.structId === '5-t' && e.healthAfter === 2).length === 1);
+  check('the target still takes its own hit',
+    cn.includes('5-a:IMPACT_HORIZONTAL_MISSILE+SHAKE_HORIZONTAL_DEFAULT_FIRST'), cn.join(' '));
+
+  // A counter that KILLS the attacker suppresses its attack animation and
+  // plays its destroy (game: defenderCounterDestroyedAttacker).
+  const killed = RV.planAttack({
+    attacker_id: '5-t', attacker_type: 'Starfighter', attacker_ambit: 'space', weapon: 'primaryWeapon',
+    attacker_health_before: 1, attacker_health_after: 0,
+    shots: [{ evaded: false, blocked: false, targetStructId: '5-a', targetStructOperatingAmbit: 'space',
+      targetHealthBefore: '6', targetHealthAfter: '6',
+      eventAttackDefenderCounterDetail: [{ counterByStructId: '5-a', counterByStructType: 'Battleship',
+        counterByStructOperatingAmbit: 'space', counterByStructWeaponSystem: 'secondaryWeapon',
+        counterDamage: '1', counterDestroyedAttacker: true }] }],
+  }, S);
+  const kn = names(killed);
+  check('a lethal counter plays the attacker destroy and no attack',
+    kn.includes('5-t:DESTROY_SPACE') && !kn.includes('5-t:ATTACK_PRIMARY_WEAPON'), kn.join(' '));
+  check('…exactly once, even though the parent detail also says 0',
+    killed.filter((e) => e.names[0] === 'DESTROY_SPACE').length === 1);
+
+  // Target counter (recorded: targetCountered with 2 damage, primary).
+  const tc = RV.planAttack({
+    attacker_id: '5-d', attacker_type: 'Destroyer', attacker_ambit: 'water', weapon: 'primaryWeapon',
+    attacker_health_before: 3, attacker_health_after: 1,
+    shots: [{ evaded: false, blocked: false, targetStructId: '5-c', targetStructOperatingAmbit: 'water',
+      targetHealthBefore: '3', targetHealthAfter: '1', targetDestroyed: false,
+      targetCountered: true, targetCounterWeaponSystem: 'primaryWeapon', targetCounteredDamage: '2',
+      targetCounterDestroyedAttacker: false }],
+  }, S);
+  const tn = names(tc);
+  check('a surviving target fires back after taking the hit',
+    tn.indexOf('5-c:ATTACK_PRIMARY_WEAPON') > tn.indexOf('5-c:IMPACT_ANGLED_DOWN_TORPEDO+SHAKE_ANGLED_DOWN_DEFAULT_FIRST'), tn.join(' '));
+  check('…and its counter lands on the attacker as the cruiser rule says',
+    tn.includes('5-d:IMPACT_ANGLED_DOWN_MISSILE+SHAKE_ANGLED_DOWN_DEFAULT_FIRST'), tn.join(' '));
+
+  // Planetary Defense Cannon: forwarded on the parent row by the Rust side.
+  const pdc = RV.planAttack({
+    attacker_id: '5-a', attacker_type: 'Battleship', attacker_ambit: 'space', weapon: 'primaryWeapon',
+    attacker_health_before: 3, attacker_health_after: 1,
+    pdc_damage_to_attacker: true, pdc_damage: 2, pdc_destroyed_attacker: false,
+    shots: [{ evaded: false, blocked: false, targetStructId: '5-pd', targetStructOperatingAmbit: 'land',
+      targetHealthBefore: '3', targetHealthAfter: '2' }],
+  }, S);
+  const pn = names(pdc);
+  check('the planet cannon fires back after the volley',
+    pn.slice(-2).join(' ') === '5-pd:ATTACK_PRIMARY_WEAPON 5-a:IMPACT_ANGLED_UP_CANNON+SHAKE_ANGLED_UP_DEFAULT_FIRST', pn.join(' '));
+
+  // Layer mirroring: the game flips impact_* and destroy_* only.
+  check('impact and destroy layers mirror, shakes and evades do not',
+    RV.flipsLayer('IMPACT_HORIZONTAL_CANNON') && RV.flipsLayer('DESTROY_WATER')
+      && !RV.flipsLayer('SHAKE_HORIZONTAL_DEFAULT_FIRST') && !RV.flipsLayer('DEFENSIVE_MANEUVER')
+      && !RV.flipsLayer('ATTACK_PRIMARY_WEAPON'));
+  check('the mirror class is styled',
+    [...d.styleSheets].some((sh) => { try { return [...sh.cssRules].some((r) => r.selectorText && r.selectorText.includes('.rv-flip-layer') && /scaleX\(-1\)/.test(r.style.transform)); } catch { return false; } }));
+
+  // Evade art covers exactly the three defences the game draws.
+  check('every evade cause the game animates has art here',
+    ['defensiveManeuver', 'signalJamming', 'lowOrbitBallisticInterceptorNetwork'].every((k) => RV.EVADE_ART[k]));
+}
+
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');
 w.close();
 process.exit(failures ? 1 : 0);

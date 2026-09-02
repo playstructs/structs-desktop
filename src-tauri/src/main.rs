@@ -602,6 +602,12 @@ try {{
             }
             let mcp_port = mcp_config.port;
             let mcp_token = mcp_config.bearer_token.clone().unwrap_or_default();
+            // Signing-throughput knobs (persisted in mcp_config.json, live-
+            // settable via `structs_system config`).
+            mcp::vplayer_bridge::set_sign_mode(&mcp_config.sign_mode);
+            if let Some(cap) = mcp_config.tx_gate_cap {
+                mcp::tx_gate::set_cap(cap);
+            }
             {
                 let registry = app.handle().state::<std::sync::Arc<hasher::types::TaskRegistry>>().inner().clone();
                 let app_handle_mcp = app.handle().clone();

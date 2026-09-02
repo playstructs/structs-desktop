@@ -347,6 +347,31 @@ pub async fn call(
 /// Convenience wrapper for the common "sign & broadcast as HD index N" op —
 /// builds the `{index, type_url, payload}` args the façade's `sign` handler
 /// expects. `index` 0 is the primary's key; >= 1 are the virtual players.
+/// How the façade returns a sign: `sync` waits for block inclusion (the
+/// DeliverTx result comes back inline, p50 6.1 s); `async` returns once the
+/// mempool accepts the tx and the settlement arrives later as a `tx_settled`
+/// event. Set from `McpConfig::sign_mode` at startup and at runtime via
+/// `structs_system config set {sign_mode}`.
+static SIGN_ASYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn sign_mode() -> &'static str {
+    if SIGN_ASYNC.load(std::sync::atomic::Ordering::Relaxed) {
+        "async"
+    } else {
+        "sync"
+    }
+}
+
+/// Returns false (and changes nothing) for an unknown mode.
+pub fn set_sign_mode(mode: &str) -> bool {
+    match mode {
+        "async" => SIGN_ASYNC.store(true, std::sync::atomic::Ordering::Relaxed),
+        "sync" => SIGN_ASYNC.store(false, std::sync::atomic::Ordering::Relaxed),
+        _ => return false,
+    }
+    true
+}
+
 pub async fn sign_action(
     app_handle: &tauri::AppHandle,
     index: u32,
@@ -357,7 +382,7 @@ pub async fn sign_action(
     call(
         app_handle,
         "sign",
-        serde_json::json!({ "index": index, "type_url": type_url, "payload": payload }),
+        serde_json::json!({ "index": index, "type_url": type_url, "payload": payload, "mode": sign_mode() }),
         timeout_secs,
     )
     .await

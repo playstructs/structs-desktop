@@ -422,9 +422,22 @@ fn first_free(occupied: &HashSet<u64>) -> Option<u64> {
 /// perception snapshot. One player read (charge + location ids) and, when
 /// the build consumes a slot, one location read (is that slot still empty?).
 /// Two reads per ACTION, replacing the one-per-struct-per-scan fan-out.
-/// `false` = do not sign (logged as perception drift, or a read failed —
-/// never sign blind). The Command Ship passes `require_free_slot = false`:
-/// its initiate does not consume the slot it names (verified live, 1-280).
+/// Anything but `Verified` means do not sign (logged as perception drift, or
+/// a read failed — never sign blind). `NoCharge` / `ReadFailed` are about the
+/// PLAYER, so the caller stops trying other loadout entries for this scan;
+/// `SlotTaken` is about one entry, so the caller moves to the next. (Before
+/// this distinction a player with no charge was re-read once per ripe entry —
+/// five identical drift lines 20 ms apart in the log.) The Command Ship
+/// passes `require_free_slot = false`: its initiate does not consume the slot
+/// it names (verified live, 1-280).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitiateCheck {
+    Verified,
+    NoCharge,
+    SlotTaken,
+    ReadFailed,
+}
+
 async fn initiate_verified_on_chain(
     client: &CosmosClient,
     pid: &str,
@@ -433,8 +446,8 @@ async fn initiate_verified_on_chain(
     slot: u64,
     require_free_slot: bool,
     current_block: u64,
-) -> bool {
-    let Ok(player) = client.query_entity("player", pid).await else { return false };
+) -> InitiateCheck {
+    let Ok(player) = client.query_entity("player", pid).await else { return InitiateCheck::ReadFailed };
     let ga = player.get("gridAttributes");
     let charge = current_block.saturating_sub(read_u64_field(ga, "lastAction"));
     if charge < BUILD_CHARGE {
@@ -443,10 +456,10 @@ async fn initiate_verified_on_chain(
             crate::mcp::telemetry::Sev::Notice,
             format!("perception drift: {pid} charge {charge} < {BUILD_CHARGE} on chain — initiate skipped"),
         );
-        return false;
+        return InitiateCheck::NoCharge;
     }
     if !require_free_slot {
-        return true;
+        return InitiateCheck::Verified;
     }
     let (wrapper, id_field) = if target == "fleet" { ("Fleet", "fleetId") } else { ("Planet", "planetId") };
     let loc = player
@@ -456,9 +469,13 @@ async fn initiate_verified_on_chain(
         .unwrap_or("")
         .to_string();
     if loc.is_empty() {
-        return false;
+        return InitiateCheck::ReadFailed;
     }
-    let Ok(entity) = client.query_entity(target, &loc).await else { return false };
+    let Ok(entity) = client.query_entity(target, &loc).await else { return InitiateCheck::ReadFailed };
+    // Fold the live row in so the next scan's slot map is right too.
+    if target == "planet" {
+        crate::mcp::perception::absorb_planet_entity(&entity);
+    }
     let occupied = entity
         .get(wrapper)
         .and_then(|o| o.get(ambit))
@@ -472,9 +489,9 @@ async fn initiate_verified_on_chain(
             crate::mcp::telemetry::Sev::Notice,
             format!("perception drift: {pid} {target} {ambit} slot {slot} occupied on chain — initiate skipped"),
         );
-        return false;
+        return InitiateCheck::SlotTaken;
     }
-    true
+    InitiateCheck::Verified
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -942,7 +959,8 @@ async fn scan(
                     let Some(idx) = idx_opt else { return };
                     // Chain re-verify (charge only — the Command Ship needs no free slot).
                     if scanned_from_snapshot
-                        && !initiate_verified_on_chain(&client, &pid, "fleet", amb, slot, false, current_block).await
+                        && initiate_verified_on_chain(&client, &pid, "fleet", amb, slot, false, current_block).await
+                            != InitiateCheck::Verified
                     {
                         return;
                     }
@@ -1052,10 +1070,14 @@ async fn scan(
                     // still empty on the live planet/fleet row. A drift here
                     // means the snapshot missed a build or a move; try the
                     // next ripe entry rather than sign into an occupied slot.
-                    if scanned_from_snapshot
-                        && !initiate_verified_on_chain(&client, &pid, &target, &ambit, slot, true, current_block).await
-                    {
-                        continue;
+                    if scanned_from_snapshot {
+                        match initiate_verified_on_chain(&client, &pid, &target, &ambit, slot, true, current_block).await {
+                            InitiateCheck::Verified => {}
+                            // This entry's slot is gone; another may still be free.
+                            InitiateCheck::SlotTaken => continue,
+                            // The PLAYER cannot initiate this scan — stop, don't re-read per entry.
+                            InitiateCheck::NoCharge | InitiateCheck::ReadFailed => break,
+                        }
                     }
                     let res = crate::mcp::tx_retry::sign_with_retry(
                         &app,

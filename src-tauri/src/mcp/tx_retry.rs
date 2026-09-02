@@ -281,6 +281,19 @@ pub async fn sign_with_retry_guarded(
     guard: Option<FreshAnchor>,
 ) -> Result<Value, String> {
     let mut last_err = String::new();
+    // RESERVE the player's once-per-block charge for the whole attempt —
+    // queue wait, sign, inclusion — not just after it lands. The gate wait
+    // (~26 s at 17 deep) plus a block of inclusion is a window in which the
+    // other loops used to verify the same player against a clean ledger and
+    // queue a tx the chain was certain to reject: "required charge of 8 but
+    // player only had 6" (12 in 45 min, each a wasted 6 s sign slot AND a
+    // 30-minute initiate backoff) and code 2022 "already discharged". See
+    // loop_util::acted_this_block. Released on drop (any exit path).
+    let _reservation = if crate::mcp::loop_util::is_charged_type(type_url) {
+        crate::mcp::loop_util::player_from_context(context).and_then(crate::mcp::loop_util::reserve_charge)
+    } else {
+        None
+    };
     for attempt in 1..=MAX_ATTEMPTS {
         // Admission gate: keeps the signing façade's own FIFO shallow so a
         // deadline-bound combat answer isn't stuck behind hundreds of bulk

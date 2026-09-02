@@ -438,6 +438,10 @@ async fn scan(
                             );
                             continue;
                         }
+                        // Fold the live planet back in: the ore clocks never
+                        // stream, so without this the same struct is re-nominated
+                        // (and re-verified, two reads) every scan until refresh.
+                        crate::mcp::perception::absorb_planet_entity(&live_planet);
                         let live_anchor = crate::mcp::loop_util::planet_ore_anchor(Some(&live_planet), task_type);
                         if live_anchor != anchor {
                             crate::mcp::telemetry::tlog(
@@ -497,7 +501,26 @@ async fn scan(
                 //     the refinery mid-cycle or strand un-refined ore (refine-it-all-first;
                 //     Alpha survives explore, the refinery rebuilds on the new planet).
                 if auto_explore {
-                    if let (Some(planet_id), Some(idx)) = (extractor_planet, idx_opt) {
+                    if let (Some(_extractor_planet), Some(idx)) = (extractor_planet, idx_opt) {
+                        // The planet to judge is the player's CURRENT planet from
+                        // the CHAIN, not the extractor's location. After an
+                        // explore the rig can linger on the old, drained planet
+                        // (and the snapshot's player row still points there
+                        // until refresh), so keying off the struct re-signed
+                        // explores every scan for six minutes — each one a
+                        // wasted sign slot and a chain reject ("new planet
+                        // cannot be explored while current planet has ore").
+                        // One chain read; this is the pre-sign verify for explore.
+                        let Ok(live_player) = client.query_entity("player", &pid).await else { return };
+                        let planet_id = live_player
+                            .get("Player")
+                            .and_then(|p| p.get("planetId"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if planet_id.is_empty() {
+                            return;
+                        }
                         let planet_ore = match client.query_entity("planet", &planet_id).await {
                             Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
                             Err(_) => 1.0, // unknown → don't explore
@@ -512,10 +535,8 @@ async fn scan(
                         // blocked the explore. With refines completing, the ore drains to 0
                         // and the worker moves on.)
                         let role_ready = if caps.explore_when_drained_only {
-                            match client.query_entity("player", &pid).await {
-                                Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0,
-                                Err(_) => false, // unknown → don't explore
-                            }
+                            // Same chain read as above — the stored pile is on the player grid.
+                            parse_f64(live_player.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0
                         } else {
                             true // no stored pile to protect — re-planet at once
                         };
@@ -533,6 +554,11 @@ async fn scan(
                                     // Planet changed → bust the owned-cache so threat
                                     // detection re-resolves this player's new planet.
                                     crate::mcp::virtual_players::invalidate_owned(&pid);
+                                    // The snapshot's player row now points at a
+                                    // planet that no longer exists for this player
+                                    // and nothing streams the new id: read from the
+                                    // chain for this player until the next refresh.
+                                    crate::mcp::perception::forget_player(&pid);
                                     run.actions.fetch_add(1, Ordering::Relaxed);
                                     crate::mcp::telemetry::tlog(
                                         "auto_harvest",

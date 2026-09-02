@@ -141,7 +141,9 @@
 
     { name: 'angled down missile', impact: 'IMPACT_ANGLED_DOWN_MISSILE', shake: 'SHAKE_ANGLED_DOWN_DEFAULT', projectile: 'MISSILE',
       any: [
-        { atk: 'Cruiser', from: [WATER], to: [LAND], weapon: PRIMARY },
+        // The game's clause is LAND OR WATER; this table said LAND only, so a
+        // Cruiser shooting another water hull counted as an unmatched shot.
+        { atk: 'Cruiser', from: [WATER], to: [LAND, WATER], weapon: PRIMARY },
         { atk: 'Submersible', from: [WATER], to: [WATER], weapon: PRIMARY },
         { atk: 'Frigate', from: [SPACE], to: [AIR], weapon: PRIMARY },
       ] },
@@ -177,7 +179,35 @@
   var EVADE_ART = {
     defensiveManeuver: 'DEFENSIVE_MANEUVER',
     signalJamming: 'SIGNAL_JAMMING',
+    // A PLANETARY defence: the shot detail flags it as
+    // evadedByPlanetaryDefenses (not `evaded`), and the game plays this art on
+    // the planet's Jamming Satellite, not on the shot's target.
+    lowOrbitBallisticInterceptorNetwork: 'LOW_ORBIT_BALLISTIC_INTERCEPTOR_NETWORK',
   };
+  var EVADE_NAMES = Object.keys(EVADE_ART).map(function (k) { return EVADE_ART[k]; });
+  function isEvadeName(n) { return EVADE_NAMES.indexOf(n) >= 0; }
+
+  /* The game mirrors every impact_* and destroy_* layer (`sui-flip-horizontal`
+   * on those containers in MapStructViewerComponent, since 2026-04) and
+   * nothing else — the bundles are authored facing the other way. Missing
+   * this put the defender's hits and wreckage on the wrong side. */
+  function flipsLayer(name) {
+    var n = String(name || '');
+    return n.indexOf('IMPACT_') === 0 || n.indexOf('DESTROY_') === 0;
+  }
+
+  /* The planet's one struct of a type — the game resolves the Jamming
+   * Satellite and the Planetary Defense Cannon this way because the attack
+   * detail never names them (getJammingSatelliteByKeyPlayer /
+   * getPlanetaryDefenseCannonByKeyPlayer). */
+  function planetaryStructOfType(structsById, slug) {
+    var ids = Object.keys(structsById || {});
+    for (var i = 0; i < ids.length; i++) {
+      var s = structsById[ids[i]];
+      if (s && s.type_slug === slug && s.category === 'planet' && !s.destroyed) return s;
+    }
+    return null;
+  }
 
   function ruleMatches(clause, atkType, atkAmbit, tgtAmbit, weapon) {
     if (clause.atk !== atkType) return false;
@@ -2417,7 +2447,7 @@
    * PIP viewer from driving the global AnimationEventQueue. */
 
   var PIP_SEQ = ['ATTACK_', 'IMPACT_', 'SHAKE_', 'EVADE', 'DESTROY_',
-                 'DEFENSIVE_MANEUVER', 'SIGNAL_JAMMING'];
+                 'DEFENSIVE_MANEUVER', 'SIGNAL_JAMMING', 'LOW_ORBIT_BALLISTIC_INTERCEPTOR_NETWORK'];
   function isAttackSequence(names) {
     return (names || []).some(function (n) {
       return PIP_SEQ.some(function (p) { return n === p || String(n).indexOf(p) === 0; });
@@ -2498,7 +2528,7 @@
     mount.appendChild(still);
 
     if (name && window.lottie) {
-      var animBox = el2('div', 'rv-anim');
+      var animBox = el2('div', 'rv-anim' + (flipsLayer(name) ? ' rv-flip-layer' : ''));
       mount.appendChild(animBox);
       try {
         pip.anim = window.lottie.loadAnimation({
@@ -2627,9 +2657,7 @@
    * false only for destroys. Derived from the names rather than carried as
    * flags, because the mapping is total. */
   function stillFlags(names) {
-    var evadeOnly = names.length > 0 && names.every(function (n) {
-      return n === 'DEFENSIVE_MANEUVER' || n === 'SIGNAL_JAMMING';
-    });
+    var evadeOnly = names.length > 0 && names.every(isEvadeName);
     var destroys = names.some(function (n) { return String(n).indexOf('DESTROY_') === 0; });
     return { during: evadeOnly, after: !destroys };
   }
@@ -2745,7 +2773,7 @@
 
     names.forEach(function (name) {
       var box = document.createElement('div');
-      box.className = 'rv-anim-layer';
+      box.className = 'rv-anim-layer' + (flipsLayer(name) ? ' rv-flip-layer' : '');
       mount.appendChild(box);
       var anim;
       try {
@@ -2834,97 +2862,141 @@
   // Choreography — turning a polled attack into a played sequence
   // ══════════════════════════════════════════════════════════════════════════
 
-  /* One attack row becomes: the attacker's weapon animation, then per shot an
-   * impact + shake on the target, then a destroy if the shot killed it.
-   *
-   * Health is threaded through every step from the shot's own
-   * targetHealthBefore/After rather than read from live state — by the time
-   * this arrives (the activity poll runs seconds behind the stream) live state
-   * has already moved to the final value. */
-  function choreograph(attack) {
-    var atk = state.structsById[attack.attacker_id];
+  /* One attack row → the ordered animation events, sequenced exactly as the
+   * game's StructListener does per shot:
+   *   (a) each defender counter: its weapon animation, then the attacker's
+   *       impact (and destroy if it killed the attacker);
+   *   (b) the attacker's own weapon animation — unless (a) just killed it;
+   *   (c) an evasion by the TARGET's own defence → its evade art; an
+   *       interception by the planet's network → the Jamming Satellite's art;
+   *   (d) a blocked shot lands on the BLOCKER, always;
+   *   (e) the target's impact + shake ONLY when its health actually moved —
+   *       an intercepted or absorbed shot shows nothing on the target;
+   *   (f) the target's counter: its weapon, then the attacker's impact;
+   *   (g) the planet's cannon: its weapon, then the attacker's impact.
+   * Health is threaded from the shot's own before/after fields, never read
+   * from live state (the poll runs seconds behind the stream). Pure, so the
+   * harness can assert on it; choreograph feeds the result to the queue. */
+  function planAttack(attack, structsById) {
+    structsById = structsById || {};
+    var events = [];
+    var atk = structsById[attack.attacker_id];
     var atkType = attack.attacker_type || (atk && atk.type_name);
-    // The attacker's ambit rides on the PARENT detail
-    // (attackerStructOperatingAmbit) — the snapshot is only the fallback.
     var atkAmbit = attack.attacker_ambit || (atk && atk.ambit);
+    var atkSlug = atk && atk.type_slug;
     var weapon = attack.weapon || PRIMARY;
+    var running = numOf(attack.attacker_health_before);   // attacker HP as counters land
+    var attackerDead = false;
 
-    if (atk) {
-      enqueue({
-        structId: attack.attacker_id,
-        typeSlug: atk.type_slug,
-        names: [weapon === SECONDARY ? 'ATTACK_SECONDARY_WEAPON' : 'ATTACK_PRIMARY_WEAPON'],
+    function attackAnim(structId, slug, weaponSystem) {
+      events.push({
+        structId: structId, typeSlug: slug,
+        names: [weaponSystem === SECONDARY ? 'ATTACK_SECONDARY_WEAPON' : 'ATTACK_PRIMARY_WEAPON'],
         healthAfter: null,
       });
     }
+    function destroyName(victim, ambitHint) {
+      // Planetary structs sitting on water are destroyed with the LAND
+      // animation — they stand on platforms. Straight from the factory.
+      var ambit = ambitHint || (victim && victim.ambit);
+      if (victim && victim.category === 'planet' && ambit === WATER) ambit = LAND;
+      return 'DESTROY_' + String(ambit || LAND).toUpperCase();
+    }
+    function attackerHit(byType, byAmbit, byWeapon, dmg, killed) {
+      var after = running == null ? null : Math.max(0, running - (dmg || 0));
+      running = after;
+      var r = resolveShotAnimation(byType, byAmbit, atkAmbit, byWeapon, after == null ? 1 : after, false, '');
+      events.push({ structId: attack.attacker_id, typeSlug: atkSlug, names: r ? r.names : [], healthAfter: after });
+      if (killed && !attackerDead) {
+        attackerDead = true;
+        events.push({ structId: attack.attacker_id, typeSlug: atkSlug, names: [destroyName(atk, atkAmbit)], healthAfter: 0 });
+      }
+    }
 
     (attack.shots || []).forEach(function (shot) {
-      // A blocked shot lands on the BLOCKER, not the nominal target — that is
-      // what the player sees, and animating the target would show damage that
-      // never happened to it.
-      var blocked = truthy(shot.blocked);
-      var victimId = blocked && shot.blockedByStructId ? shot.blockedByStructId : shot.targetStructId;
-      var victim = state.structsById[victimId];
-      var tgtAmbit = blocked
-        ? (shot.blockedByStructOperatingAmbit || (victim && victim.ambit))
-        : (shot.targetStructOperatingAmbit || (victim && victim.ambit));
-
-      var healthAfter = blocked ? numOf(shot.blockerHealthAfter) : numOf(shot.targetHealthAfter);
-      var destroyed = blocked ? truthy(shot.blockerDestroyed) : truthy(shot.targetDestroyed);
-
-      var resolved = resolveShotAnimation(
-        atkType, atkAmbit, tgtAmbit, weapon,
-        healthAfter == null ? 1 : healthAfter,
-        truthy(shot.evaded), shot.evadedCause
-      );
-
-      // Even with no matching animation the health still has to land, or the
-      // bar would stay wrong until the next snapshot.
-      enqueue({
-        structId: victimId,
-        typeSlug: victim && victim.type_slug,
-        names: resolved ? resolved.names : [],
-        healthAfter: healthAfter,
+      (shot.eventAttackDefenderCounterDetail || []).forEach(function (c) {
+        var cs = structsById[c.counterByStructId];
+        attackAnim(c.counterByStructId, cs && cs.type_slug, c.counterByStructWeaponSystem);
+        attackerHit(c.counterByStructType || (cs && cs.type_name),
+          c.counterByStructOperatingAmbit || (cs && cs.ambit),
+          c.counterByStructWeaponSystem, numOf(c.counterDamage), truthy(c.counterDestroyedAttacker));
       });
+      if (!attackerDead && atk) attackAnim(attack.attacker_id, atkSlug, weapon);
 
-      if (destroyed && victim) {
-        // Planetary structs sitting on water are destroyed with the LAND
-        // animation — they stand on platforms. Straight from the factory.
-        var ambit = victim.ambit;
-        if (victim.category === 'planet' && ambit === WATER) ambit = LAND;
-        enqueue({
-          structId: victimId,
-          typeSlug: victim.type_slug,
-          names: ['DESTROY_' + String(ambit || LAND).toUpperCase()],
-          healthAfter: 0,
-        });
+      var tgt = structsById[shot.targetStructId];
+      var tgtAmbit = shot.targetStructOperatingAmbit || (tgt && tgt.ambit);
+      var hb = numOf(shot.targetHealthBefore), ha = numOf(shot.targetHealthAfter);
+
+      if (truthy(shot.evaded)) {
+        var art = EVADE_ART[shot.evadedCause];
+        events.push({ structId: shot.targetStructId, typeSlug: tgt && tgt.type_slug,
+          names: art ? [art] : [], healthAfter: ha });
+      } else if (truthy(shot.evadedByPlanetaryDefenses)
+        && shot.evadedByPlanetaryDefensesCause === 'lowOrbitBallisticInterceptorNetwork') {
+        var sat = planetaryStructOfType(structsById, 'jamming_satellite');
+        if (sat) {
+          events.push({ structId: sat.id, typeSlug: sat.type_slug,
+            names: [EVADE_ART.lowOrbitBallisticInterceptorNetwork], healthAfter: null });
+        }
+      }
+
+      if (truthy(shot.blocked) && shot.blockedByStructId) {
+        var blocker = structsById[shot.blockedByStructId];
+        var bAmbit = shot.blockedByStructOperatingAmbit || (blocker && blocker.ambit);
+        var bAfter = numOf(shot.blockerHealthAfter);
+        var rb = resolveShotAnimation(atkType, atkAmbit, bAmbit, weapon, bAfter == null ? 1 : bAfter, false, '');
+        events.push({ structId: shot.blockedByStructId, typeSlug: blocker && blocker.type_slug,
+          names: rb ? rb.names : [], healthAfter: bAfter });
+        if (truthy(shot.blockerDestroyed)) {
+          events.push({ structId: shot.blockedByStructId, typeSlug: blocker && blocker.type_slug,
+            names: [destroyName(blocker, bAmbit)], healthAfter: 0 });
+        }
+      }
+
+      if (hb != null && ha != null && hb !== ha) {
+        var rt = resolveShotAnimation(atkType, atkAmbit, tgtAmbit, weapon, ha, false, '');
+        events.push({ structId: shot.targetStructId, typeSlug: tgt && tgt.type_slug,
+          names: rt ? rt.names : [], healthAfter: ha });
+        if (truthy(shot.targetDestroyed)) {
+          events.push({ structId: shot.targetStructId, typeSlug: tgt && tgt.type_slug,
+            names: [destroyName(tgt, tgtAmbit)], healthAfter: 0 });
+        }
+      }
+
+      if (!truthy(shot.targetDestroyed) && truthy(shot.targetCountered)) {
+        attackAnim(shot.targetStructId, tgt && tgt.type_slug, shot.targetCounterWeaponSystem);
+        attackerHit(shot.targetStructType || (tgt && tgt.type_name), tgtAmbit,
+          shot.targetCounterWeaponSystem, numOf(shot.targetCounteredDamage),
+          truthy(shot.targetCounterDestroyedAttacker));
       }
     });
 
-    // The attacker's own aftermath: counters and recoil land on it
-    // (attackerHealthBefore/After on the parent detail). Step its bar down —
-    // and when a counter KILLS it (the classic Command-Ship-dies-to-
-    // strongCounterAttack ending), play its destroy instead of leaving a
-    // ghost until the next snapshot.
-    var after = numOf(attack.attacker_health_after);
-    var before = numOf(attack.attacker_health_before);
-    if (after != null && before != null && after < before) {
-      if (after === 0) {
-        enqueue({
-          structId: attack.attacker_id,
-          typeSlug: atk && atk.type_slug,
-          names: ['DESTROY_' + String(atkAmbit || LAND).toUpperCase()],
-          healthAfter: 0,
-        });
-      } else {
-        enqueue({
-          structId: attack.attacker_id,
-          typeSlug: atk && atk.type_slug,
-          names: [],
-          healthAfter: after,
-        });
+    if (truthy(attack.pdc_damage_to_attacker)) {
+      var pdc = planetaryStructOfType(structsById, 'planetary_defense_cannon');
+      if (pdc) {
+        attackAnim(pdc.id, pdc.type_slug, PRIMARY);
+        attackerHit('Planetary Defense Cannon', pdc.ambit, PRIMARY, numOf(attack.pdc_damage),
+          truthy(attack.pdc_destroyed_attacker));
       }
     }
+
+    // Safety net: whatever the parent detail says the attacker ended on
+    // (recoil is not itemised per shot). Step the bar, and play the destroy
+    // if it died and nothing above showed it.
+    var after = numOf(attack.attacker_health_after);
+    if (after != null && after !== running) {
+      if (after === 0 && !attackerDead) {
+        attackerDead = true;
+        events.push({ structId: attack.attacker_id, typeSlug: atkSlug, names: [destroyName(atk, atkAmbit)], healthAfter: 0 });
+      } else if (after !== 0) {
+        events.push({ structId: attack.attacker_id, typeSlug: atkSlug, names: [], healthAfter: after });
+      }
+    }
+    return events;
+  }
+
+  function choreograph(attack) {
+    planAttack(attack, state.structsById).forEach(enqueue);
   }
 
   /* Arrivals and departures between two snapshots.
@@ -3781,6 +3853,9 @@
     // Bounded id matching — the prefix-collision guard the comms panel needs.
     mentionsObject: mentionsObject,
     resolveShotAnimation: resolveShotAnimation,
+    planAttack: planAttack,
+    flipsLayer: flipsLayer,
+    EVADE_ART: EVADE_ART,
     lottiePath: lottiePath,
     tileUrl: tileUrl,
     artPath: artPath,

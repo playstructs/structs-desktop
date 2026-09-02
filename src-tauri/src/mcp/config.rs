@@ -24,6 +24,20 @@ pub struct McpConfig {
     /// and that difference is the player's to choose.
     #[serde(default)]
     pub comms_status_enabled: bool,
+    /// How virtual-player signs return: `"sync"` (default) waits for block
+    /// inclusion and returns the DeliverTx result — p50 6.1 s per sign;
+    /// `"async"` returns after the mempool accepts the tx (~0.2 s) and the
+    /// settlement arrives later as a `tx_settled` event. Runtime-settable via
+    /// `structs_system config set {sign_mode}`; measured, not guessed.
+    #[serde(default = "default_sign_mode")]
+    pub sign_mode: String,
+    /// Admission-gate cap override (see `tx_gate`). `None` = the built-in 4.
+    #[serde(default)]
+    pub tx_gate_cap: Option<usize>,
+}
+
+fn default_sign_mode() -> String {
+    "sync".to_string()
 }
 
 impl Default for McpConfig {
@@ -36,6 +50,8 @@ impl Default for McpConfig {
             // Off. Nothing about what you are doing leaves this machine until
             // the player asks for it.
             comms_status_enabled: false,
+            sign_mode: default_sign_mode(),
+            tx_gate_cap: None,
         }
     }
 }

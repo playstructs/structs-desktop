@@ -724,6 +724,54 @@ pub fn absorb_struct_entity(entity: &Value) {
     }
 }
 
+/// Fold a just-read PLANET entity into the live snapshot: its attributes
+/// (the ore clocks — GRASS never streams them) and grid. Call after a
+/// pre-sign planet read so the next scan stops re-nominating a struct whose
+/// planet clock already moved (measured: a dozen false candidates per scan,
+/// each costing two chain reads, until the next 10-minute refresh).
+pub fn absorb_planet_entity(entity: &Value) {
+    let Some(p) = entity.get("Planet") else { return };
+    let id = str_of(p, "id");
+    if id.is_empty() {
+        return;
+    }
+    if let Ok(mut g) = CURRENT.write() {
+        if let Some(s) = g.as_mut() {
+            s.planets.insert(id.clone(), p.clone());
+            if let Some(pa) = entity.get("planetAttributes") {
+                let a = s.planet_attrs.entry(id.clone()).or_insert([0; 16]);
+                for (i, n) in PLANET_ATTRS.iter().enumerate() {
+                    if let Some(v) = pa.get(*n) {
+                        a[i] = to_u64(Some(v));
+                    }
+                }
+            }
+            if let Some(ga) = entity.get("gridAttributes") {
+                let g2 = s.grid.entry(id).or_insert([0; 15]);
+                for (i, n) in GRID_ATTRS.iter().enumerate() {
+                    if let Some(v) = ga.get(*n) {
+                        g2[i] = to_u64(Some(v));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Drop a player's row so scans fall through to the chain for it until the
+/// next refresh. For actions that change what the row POINTS AT and are not
+/// streamed — an explore moves `planetId` to a planet we have never seen and
+/// no GRASS frame carries the new id. Without this the loop kept re-signing
+/// explores for six minutes against the old planet ("new planet cannot be
+/// explored while current planet has ore available").
+pub fn forget_player(pid: &str) {
+    if let Ok(mut g) = CURRENT.write() {
+        if let Some(s) = g.as_mut() {
+            s.players.remove(pid);
+        }
+    }
+}
+
 pub fn summary() -> Value {
     with_snapshot(|s| s.summary()).unwrap_or_else(|| json!({ "ready": false }))
 }

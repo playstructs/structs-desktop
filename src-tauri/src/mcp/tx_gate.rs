@@ -40,6 +40,43 @@ use tokio::sync::oneshot;
 /// FIFO this module exists to prevent.
 const MAX_IN_FLIGHT: usize = 4;
 
+/// The live cap — runtime-tunable (`structs_system config set
+/// {tx_gate_cap}`) so the value can be measured against the façade instead
+/// of guessed at build time. The 4 above was chosen when a sign held a
+/// WebSocket; the façade now signs over stateless HTTP, and at 2,400 players
+/// the gate is the system's throughput ceiling (p50 6.1 s per sign × 4 in
+/// flight ≈ 0.66 signs/s, saturated for a whole 45-minute window). Bounded
+/// 1..=32 so a typo cannot re-create the 40-deep FIFO this module replaced.
+static CAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(MAX_IN_FLIGHT);
+
+pub fn cap() -> usize {
+    CAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set the cap; returns the value actually applied (clamped).
+pub fn set_cap(n: usize) -> usize {
+    let n = clamp_cap(n);
+    CAP.store(n, std::sync::atomic::Ordering::Relaxed);
+    // A raised cap admits waiters immediately; a lowered one drains naturally.
+    release_waiters();
+    n
+}
+
+/// 1..=32: never 0 (nothing would ever sign) and never the 40-deep FIFO.
+pub fn clamp_cap(n: usize) -> usize {
+    n.clamp(1, 32)
+}
+
+fn release_waiters() {
+    let mut st = lock();
+    while st.in_flight < cap() {
+        let Some(w) = st.queues.iter_mut().find_map(|q| q.pop_front()) else { break };
+        if w.tx.send(()).is_ok() {
+            st.in_flight += 1;
+        }
+    }
+}
+
 /// Scheduling class. Lower discriminant = admitted first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Priority {
@@ -140,7 +177,7 @@ impl Drop for Permit {
         }
         // Hand the freed slot to the best waiter. A receiver that has gone away
         // (caller cancelled) frees the slot again on the next iteration.
-        while st.in_flight < MAX_IN_FLIGHT {
+        while st.in_flight < cap() {
             let Some(w) = st
                 .queues
                 .iter_mut()
@@ -169,7 +206,7 @@ pub async fn acquire(context: &str) -> Permit {
         if let Some(name) = loop_name {
             *st.per_loop.entry(name).or_insert(0) += 1;
         }
-        if st.in_flight < MAX_IN_FLIGHT {
+        if st.in_flight < cap() {
             st.in_flight += 1;
             return Permit { loop_name };
         }
@@ -293,5 +330,20 @@ mod tests {
         drop(winner);
         held.clear();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), bulk).await;
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    // Pure: the live CAP is process-global and the admission test in the
+    // sibling module runs concurrently, so this never touches it.
+    #[test]
+    fn cap_is_clamped_to_a_sane_band() {
+        assert_eq!(clamp_cap(0), 1);
+        assert_eq!(clamp_cap(1_000), 32);
+        assert_eq!(clamp_cap(8), 8);
+        assert_eq!(cap(), MAX_IN_FLIGHT, "default until someone sets it");
     }
 }

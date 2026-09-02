@@ -213,14 +213,36 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                         applied.push(format!("watchdog_remediate={remediate}"));
                     }
                 }
+                // Signing-throughput knobs. Persisted so a restart keeps them;
+                // applied live so they can be MEASURED (tx p50 duration and
+                // the gate's queued_bulk in `tx`) instead of guessed at.
+                if let Some(mode) = set.get("sign_mode").and_then(|v| v.as_str()) {
+                    if crate::mcp::vplayer_bridge::set_sign_mode(mode) {
+                        let mut cfg = crate::mcp::config::McpConfig::load();
+                        cfg.sign_mode = mode.to_string();
+                        let _ = cfg.save();
+                        applied.push(format!("sign_mode={mode}"));
+                    } else {
+                        return err(format!("sign_mode must be \"sync\" or \"async\", got {mode:?}"));
+                    }
+                }
+                if let Some(cap) = set.get("tx_gate_cap").and_then(|v| v.as_u64()) {
+                    let n = crate::mcp::tx_gate::set_cap(cap as usize);
+                    let mut cfg = crate::mcp::config::McpConfig::load();
+                    cfg.tx_gate_cap = Some(n);
+                    let _ = cfg.save();
+                    applied.push(format!("tx_gate_cap={n}"));
+                }
                 if applied.is_empty() {
-                    return err("nothing recognized in `set`. Settable here: {\"remediate\": bool}. Hash knobs live in structs_hash config; loop knobs in structs_players.");
+                    return err("nothing recognized in `set`. Settable here: {\"remediate\": bool, \"sign_mode\": \"sync\"|\"async\", \"tx_gate_cap\": 1..32}. Hash knobs live in structs_hash config; loop knobs in structs_players.");
                 }
                 return text(json!({ "applied": applied }));
             }
             text(json!({
                 "effective_loop_concurrency": loop_util::effective_max_concurrent(),
                 "loop_concurrency_ceiling": loop_util::MAX_CONCURRENT_PLAYERS,
+                "sign_mode": crate::mcp::vplayer_bridge::sign_mode(),
+                "tx_gate_cap": crate::mcp::tx_gate::cap(),
                 "watchdog_remediate": crate::mcp::policy::POLICY_ENGINE
                     .read()
                     .map(|e| e.is_enabled("watchdog_remediate"))
@@ -258,7 +280,7 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 "snapshot": snapshot,
                 "pending_new_structs": crate::mcp::perception::with_snapshot(|s| s.pending_new_structs())
                     .unwrap_or_default(),
-                "note": "Loops still read the LCD directly; this snapshot is fed by GRASS and refreshed on demand. Scan from it, re-verify before signing.",
+                "note": "auto_build/harvest/defend scan from this snapshot when it is fresh (<20 min, GRASS frame <2 min) and re-verify from the chain before every sign; `logs` severity notice shows `perception drift` lines. Refreshes every 10 min from any loop scan.",
             }))
         }
 

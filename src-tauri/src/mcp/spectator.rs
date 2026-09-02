@@ -1720,6 +1720,20 @@ pub fn collect_shots(rows: &[Value], cursor: f64) -> (Vec<Value>, f64) {
                 // the next snapshot.
                 "attacker_health_before": detail.get("attackerHealthBefore").and_then(num_u64),
                 "attacker_health_after": detail.get("attackerHealthAfter").and_then(num_u64),
+                // The planet's own cannon answering the volley lives on the
+                // PARENT detail, not in any shot. The game plays the cannon's
+                // weapon animation and the attacker's impact for it
+                // (StructListener: planetaryDefenseCannonDamageToAttacker);
+                // without these three the viewer could not.
+                "pdc_damage_to_attacker": detail
+                    .get("planetaryDefenseCannonDamageToAttacker")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                "pdc_damage": detail.get("planetaryDefenseCannonDamage").and_then(num_u64).unwrap_or(0),
+                "pdc_destroyed_attacker": detail
+                    .get("planetaryDefenseCannonDamageDestroyedAttacker")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 "shots": shots,
             }),
         ));

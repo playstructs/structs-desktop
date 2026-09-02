@@ -148,7 +148,7 @@ cat >> "$SCM" <<'SCM_EOF'
 // address to skip re-deriving chain params, but a cached client holds no socket.
 // Primary client/queue untouched. Port 26657 (CometBFT RPC) serves both schemes.
 SigningClientManager.prototype._vpClients = SigningClientManager.prototype._vpClients || new Map();
-SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, signerAddress, typeUrl, payload) {
+SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, signerAddress, typeUrl, payload, mode) {
   const cache = SigningClientManager.prototype._vpClients;
   // Derive the HTTP RPC URL once from the WS URL (same host:26657, stateless scheme).
   const rpcUrl = this._vpRpcUrl || (this._vpRpcUrl =
@@ -208,6 +208,25 @@ SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, sign
     const value = (typeof type.fromJSON === 'function')
       ? type.fromJSON(merged)
       : type.fromPartial(merged);
+    // ASYNC MODE (opt-in from Rust, `structs_system config set {sign_mode:"async"}`).
+    // signAndBroadcastSync returns the hash as soon as the mempool ACCEPTS the
+    // tx (CheckTx: ante errors such as "zero charge this block" still surface
+    // synchronously as a thrown error) instead of polling for inclusion. At
+    // 2,400 players the inclusion wait — p50 6.1 s, one block — times the
+    // gate's 4 slots was the whole system's throughput ceiling (~0.66 signs/s,
+    // saturated for a full 45-minute window). The DeliverTx result is
+    // delivered later by _vpWatchSettlement as a `tx_settled` grass event, which
+    // the Rust side already records and surfaces loudly when it failed.
+    if (mode === 'async' && typeof client.signAndBroadcastSync === 'function') {
+      const hash = await Promise.race([
+        client.signAndBroadcastSync(signerAddress, [{ typeUrl, value }], FEE),
+        new Promise(function (_, reject) {
+          setTimeout(function () { reject(new Error('signAndBroadcastSync timed out')); }, 55000);
+        }),
+      ]);
+      SigningClientManager.prototype._vpWatchSettlement(client, hash, typeUrl, signerAddress);
+      return { code: 0, transactionHash: hash, height: null, rawLog: null, async: true };
+    }
     // Race a hard timeout so a hung WS can't wedge the caller forever (55s stays
     // under the Rust bridge's 60s bound so the caller still gets an answer).
     const res = await Promise.race([
@@ -233,9 +252,60 @@ SigningClientManager.prototype.signAndBroadcastAs = async function (wallet, sign
     throw e;
   }
 };
+// Async-mode settlement watcher: poll getTx(hash) until the tx is in a block
+// (or 90 s pass), then push ONE `tx_settled` grass event carrying the
+// DeliverTx code — the same shape the primary's signing queue reports, so
+// Rust's note_failed_settlement ledgers a failure and the board shows it.
+// One poll every ~3 s per outstanding tx; a settled tx stops its own timer.
+SigningClientManager.prototype._vpWatchSettlement = function (client, hash, typeUrl, signerAddress) {
+  var started = Date.now();
+  var push = function (status, code, height, rawLog, error) {
+    if (!window.__TAURI__) return;
+    window.__TAURI__.core.invoke('push_game_event', { event: {
+      category: 'tx_settled',
+      subject: typeUrl + ' ' + signerAddress,
+      detail: { action: typeUrl, status: status, code: code, transactionHash: hash, height: height,
+        error: error, rawLog: rawLog, signer: signerAddress, async: true },
+      timestamp: Date.now()
+    }}).catch(function () {});
+  };
+  var poll = function () {
+    client.getTx(hash).then(function (tx) {
+      if (tx) {
+        var ok = tx.code === 0;
+        push(ok ? 'succeeded' : 'dropped', tx.code, tx.height, tx.rawLog || null, ok ? null : (tx.rawLog || ('code ' + tx.code)));
+        return;
+      }
+      if (Date.now() - started > 90000) { push('dropped', null, null, null, 'not in a block after 90s'); return; }
+      setTimeout(poll, 3000);
+    }, function (e) {
+      if (Date.now() - started > 90000) { push('dropped', null, null, null, 'getTx failed: ' + ((e && e.message) || e)); return; }
+      setTimeout(poll, 3000);
+    });
+  };
+  setTimeout(poll, 3000);
+};
 SCM_EOF
 grep -q "signAndBroadcastAs" "$SCM" \
   || { echo "ERROR: SigningClientManager signAndBroadcastAs patch did not apply"; exit 1; }
+
+echo "    Patching MapStructLottieAnimationSVG.js (scope the struct-art swap to this animation's own SVG)..."
+# The shared animation bundles (shake_*, destroy_*, deployment_*, move_*) are
+# TEMPLATES with a placeholder hull baked in (a Cruiser-style hull in the
+# shake bundles); after the SVG loads the game swaps each tagged layer for the
+# struct's own art. It found those layers with
+#   document.querySelector(`#${lottieContainerId} g g.struct_init image`)
+# — a DOCUMENT-wide search by element id. Every map (alpha-base, raid,
+# preview) builds its struct viewers with the same ids for the same struct
+# (MapStructLayerComponent passes no idPrefix), so once a struct has animated
+# on one map, a later hit on it on ANOTHER map patches the first SVG in
+# document order — the hidden one — and the visible map keeps the template's
+# hull: a fighter "turning into a cruiser" mid-attack (seen live 2026-09-02).
+# Scope the query to this animation's own renderer, falling back to the old
+# lookup only when lottie has not built the SVG yet.
+LSVG="$BUILD_DIR/js/view_models/components/MapStructLottieAnimationSVG.js"
+perl -0pi -e 's|const originalSVGImage = document\.querySelector\(\s*`#\$\{this\.lottieContainerId\} g g\$\{targetClass\} image`\s*\);|const ownSvg = this.animation \&\& this.animation.renderer \&\& this.animation.renderer.svgElement;\n    const originalSVGImage = ownSvg\n      ? ownSvg.querySelector(`g g\${targetClass} image`)\n      : document.querySelector(`#\${this.lottieContainerId} g g\${targetClass} image`);|' "$LSVG"
+verify_patched "$LSVG" 'ownSvg.querySelector' "MapStructLottieAnimationSVG.js scoped swap"
 
 echo "    Patching WalletManager.js (multi-index HD derivation for virtual players)..."
 WM="$BUILD_DIR/js/managers/WalletManager.js"
@@ -333,11 +403,11 @@ try {
       return { index, address, pubkey: pubkeyHex, player_id: playerId };
     },
     // Sign+broadcast a msg AS virtual player `index` (its own address = creator).
-    async signAndBroadcast(index, typeUrl, payload) {
+    async signAndBroadcast(index, typeUrl, payload, mode) {
       const wallet = await walletManager.createWalletForIndex(gameState.mnemonic, index);
       const accs = await wallet.getAccountsWithPrivkeys();
       const address = accs[0].address;
-      return await signingClientManager.signAndBroadcastAs(wallet, address, typeUrl, payload);
+      return await signingClientManager.signAndBroadcastAs(wallet, address, typeUrl, payload, mode || 'sync');
     },
     list() { return Object.values(__vpAccounts); },
     // Prepare the OFF-SCREEN preview map for a planet, mirroring the webapp's
