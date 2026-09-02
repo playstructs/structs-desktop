@@ -99,6 +99,8 @@ fn main() {
             matrix::matrix_open_url,
             matrix::matrix_media,
             remote_image::remote_image,
+            mcp::tools::board_pages::mcp_player_profile,
+            mcp::tools::board_pages::mcp_player_search,
             matrix::matrix_members,
             matrix::matrix_mark_read,
             matrix::matrix_send,

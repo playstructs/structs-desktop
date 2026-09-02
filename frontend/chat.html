@@ -125,16 +125,20 @@
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden;
     }
+    /* Fills the portrait slot rather than sitting in a smaller box inside it.
+       `.sui-result-row-portrait` is 44px and `align-items: flex-start`, so a
+       32px child was pinned to the TOP of the row's portrait column while the
+       DM portraits beside it filled all 44 — which is what read as the icons
+       being off-centre. Same box, so the glyph lands in the middle of it. */
     .chat-room-icon {
       display: flex; align-items: center; justify-content: center;
-      width: 32px; height: 32px; flex: 0 0 32px;
+      width: 100%; height: 100%;
     }
-    /* The home channel's mark. A 32px source drawn at the `md` icon size, so
-       it sits on the same optical size as the `sui-icon-md` glyphs in every
-       other row — the token, not the number, because that is the whole point
-       of having one. NO `image-rendering: pixelated`: that is for upscaling
-       and would wreck a downscale. */
-    .chat-room-mark { width: var(--icon-md); height: var(--icon-md); }
+    /* The mark itself is sized by SUI's own `.sui-result-row-portrait img`
+       (width: 100%), the same rule the webapp's Guild Directory uses — so
+       nothing here sets a size and the two cannot drift apart. `body` already
+       carries `image-rendering: pixelated` for the whole document. */
+    .chat-room-mark { display: block; }
     /* The roster's right section is space-between because it carries a row of
        resource chips AND a trailing button. These rows carry only an unread
        badge and a Join button, so the default leaves them stranded at the

@@ -103,6 +103,86 @@ pub async fn mcp_player_detail(player: String) -> Result<Value, String> {
     }))
 }
 
+/* ── EXPLORE → PLAYER ────────────────────────────────────────────────────────
+ *
+ * A profile for somebody ELSE. The webapp's Account → Profile answers the same
+ * questions about yourself, and this reports the same figures from the same
+ * endpoints so the two cannot disagree — plus the two things a lookup wants
+ * that your own profile has no reason to show: what capacity this player is
+ * routing OUT (allocations they control) and what they have staked (their
+ * infusions).
+ *
+ * Every read is independent, so they go out together. Serially this was eight
+ * round trips to a guild API whose roster call alone measured 436ms.
+ *
+ * Nothing here fails the whole profile: a guild that does not publish one of
+ * these endpoints, or a player with no fleet, should leave a blank field, not
+ * an error page. Each part is `null` when it could not be read, and the window
+ * decides what to draw.
+ */
+#[tauri::command]
+pub async fn mcp_player_profile(player: String) -> Result<Value, String> {
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let pid = player.trim().to_string();
+    if pid.is_empty() {
+        return Err("no player given".into());
+    }
+
+    let entity = client.query_entity("player", &pid).await?;
+
+    let g = &client.guild;
+    let (ore, planets, raids, infusions, allocations) = tokio::join!(
+        g.player_ore_stats(&pid),
+        g.player_planets_completed(&pid),
+        g.player_raids_launched(&pid),
+        g.infusion_by_player(&pid, 1),
+        // `controller`, not `source`: this is the same reader our OWN
+        // allocations page uses, so "outgoing" means the same thing on both
+        // screens rather than two defensible readings of one word.
+        g.allocation_by_controller(&pid, 1),
+    );
+
+    Ok(json!({
+        "player_id": pid,
+        "entity": entity,
+        "ore_stats": ore.ok(),
+        "planets_completed": planets.ok(),
+        "raids_launched": raids.ok(),
+        "infusions": infusions.ok().map(|p| p.items),
+        "allocations": allocations.ok().map(|p| p.items),
+    }))
+}
+
+/// Find a player by id, name or address.
+#[tauri::command]
+pub async fn mcp_player_search(query: String) -> Result<Value, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(json!({ "results": [] }));
+    }
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    /* An exact id is not a search.
+     *
+     * `1-194` is an address, not a term, and the search endpoint is scoped to
+     * a guild — so looking up a player in another guild by their id would
+     * come back empty while the chain knows exactly who they are. Try the
+     * chain first for anything shaped like an id, and fall back to the text
+     * search for everything else. */
+    if crate::matrix::refs::parse_id(q).is_some_and(|(kind, _)| kind == 1) {
+        if let Ok(entity) = client.query_entity("player", q).await {
+            return Ok(json!({ "results": [{
+                "player_id": q,
+                "username": entity.get("username").and_then(|v| v.as_str()),
+                "guild_id": entity.get("guildId").and_then(|v| v.as_str()),
+                "pfp": entity.get("pfpClientRenderAttributes").and_then(|v| v.as_str()),
+                "exact": true,
+            }] }));
+        }
+    }
+    let found = client.guild.player_search(q, None).await?;
+    Ok(json!({ "results": found }))
+}
+
 // ── ENERGY ───────────────────────────────────────────────────────────────────
 
 /// Guild power (3 live LCD reads) + per-player supply/demand margins computed

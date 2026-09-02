@@ -150,6 +150,7 @@ impl GuildApiClient {
     }
 
     /// Low-level GET: returns the unwrapped `data` field, validating the envelope.
+    // (see `query_esc` below)
     async fn get(&self, path: &str) -> Result<Value, String> {
         note_request();
         let url = self.build_url(path);
@@ -327,6 +328,44 @@ impl GuildApiClient {
             player_id
         ))
         .await
+    }
+
+    /* -- player profile reads --
+     *
+     * The four the webapp's own Account → Profile screen makes, so a profile
+     * we draw for somebody ELSE reports the same figures theirs would
+     * (`AccountProfileViewModel.fetchPageData`). Kept as separate calls rather
+     * than folded into one because that is what the API offers; the caller
+     * runs them concurrently.
+     */
+    pub async fn player_ore_stats(&self, player_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/player/{}/ore/stats", player_id)).await
+    }
+    pub async fn player_planets_completed(&self, player_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/player/{}/planet/completed", player_id))
+            .await
+    }
+    pub async fn player_raids_launched(&self, player_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/player/{}/raid/launched", player_id))
+            .await
+    }
+
+    /* Find a player by id, name or address.
+     *
+     * The endpoint is named for the screen that first needed it — picking who
+     * to pay — but what it answers is "which players match this string", which
+     * is also what a lookup needs. Reusing it means one search behaviour in
+     * the app rather than two that disagree about what matches.
+     *
+     * The string is URL-encoded here: a name may contain a space or an `&`,
+     * and a raw one would silently truncate the query at the first separator.
+     */
+    pub async fn player_search(&self, q: &str, guild_id: Option<&str>) -> Result<Value, String> {
+        let mut path = format!("/api/player/transfer/search?search_string={}", query_esc(q));
+        if let Some(g) = guild_id.filter(|g| !g.is_empty()) {
+            path.push_str(&format!("&guild_id={}", query_esc(g)));
+        }
+        self.get(&path).await
     }
 
     // -- grid --
@@ -783,5 +822,42 @@ mod tests {
         assert_eq!(without.build_url("/api/foo"), "http://crew.oh.energy/api/foo");
         let localhost = GuildApiClient::new(Arc::new(RwLock::new("http://localhost/api".into())));
         assert_eq!(localhost.build_url("/api/foo"), "http://localhost/api/foo");
+    }
+}
+
+/// Percent-encode one query-string VALUE.
+///
+/// A player's name is free text: a space, an `&` or a `#` in it would end the
+/// value early and the server would search for the truncated half — quietly
+/// returning the wrong players rather than failing. Every byte outside the
+/// unreserved set goes through, so this is safe for names, ids and addresses
+/// alike.
+fn query_esc(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{:02X}", b),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::query_esc;
+
+    #[test]
+    fn a_name_cannot_break_out_of_its_parameter() {
+        assert_eq!(query_esc("1-194"), "1-194");
+        assert_eq!(query_esc("Slow Ninja"), "Slow%20Ninja");
+        // The characters that would end the value or start another parameter.
+        assert_eq!(query_esc("a&guild_id=0-5"), "a%26guild_id%3D0-5");
+        assert_eq!(query_esc("a#b"), "a%23b");
+        assert_eq!(query_esc("a?b"), "a%3Fb");
+        // Unreserved characters are left alone, so ordinary queries stay legible.
+        assert_eq!(query_esc("Mark_lifer.1~2"), "Mark_lifer.1~2");
+        // Non-ASCII is encoded per byte, not dropped.
+        assert_eq!(query_esc("\u{e9}"), "%C3%A9");
     }
 }

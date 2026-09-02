@@ -838,21 +838,25 @@
     if (r.pfp_attrs || r.player_id || isDm) {
       // A direct message IS a person — the same portrait the roster shows.
       portrait.appendChild(pfpPortrait(r.pfp_attrs));
-    } else {
-      var well = el('div', 'chat-room-icon');
+    } else if (r.home_rank != null) {
       /* The home channel carries SN Corp's own mark instead of the generic
        * guild glyph. `img/logo-snc.gif` is the game's asset — the same one the
        * signup flow shows while connecting to the corp — not something drawn
-       * for this list. Every other row keeps the structicon `icon_for` picked. */
-      if (r.home_rank != null) {
-        var mark = document.createElement('img');
-        mark.className = 'chat-room-mark';
-        mark.src = 'img/logo-snc.gif';
-        mark.alt = '';
-        well.appendChild(mark);
-      } else {
-        well.appendChild(icon(r.icon || 'icon-beacon', 'sui-icon-md'));
-      }
+       * for this list.
+       *
+       * Straight into the portrait, which is exactly how the webapp's own
+       * Guild Directory renders a guild logo: `.sui-result-row-portrait img`
+       * is `width: 100%`, so it fills the 44px slot. It was nested in a 32px
+       * `.chat-room-icon` first and came out a third of the size, floating in
+       * the corner of a box built for something bigger. */
+      var mark = document.createElement('img');
+      mark.className = 'chat-room-mark';
+      mark.src = 'img/logo-snc.gif';
+      mark.alt = '';
+      portrait.appendChild(mark);
+    } else {
+      var well = el('div', 'chat-room-icon');
+      well.appendChild(icon(r.icon || 'icon-beacon', 'sui-icon-md'));
       portrait.appendChild(well);
     }
     left.appendChild(portrait);

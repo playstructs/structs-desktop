@@ -88,6 +88,12 @@
       { key: 'incidents', label: 'Incidents', page: 'war', view: 'incidents' },
       { key: 'raids', label: 'Live Raids', page: 'raids' },
     ] },
+    /* Looking OUTWARD. Every other area is about our own roster; this one is
+     * about anybody — which is why it is its own area rather than a section
+     * under Armada, where every page means "ours". */
+    { key: 'explore', label: 'Explore', sections: [
+      { key: 'player', label: 'Player', page: 'explore', view: 'player' },
+    ] },
     { key: 'system', label: 'System', sections: [
       { key: 'doctrine', label: 'Doctrine', page: 'config', view: 'doctrine' },
       { key: 'loops', label: 'Loops', page: 'config', view: 'loops' },
@@ -1166,6 +1172,7 @@
       var div = document.getElementById('page-' + p);
       if (div) div.hidden = (p !== section.page);
     });
+    syncAreaTabs();
     var tabs = document.querySelectorAll('#board-tabs .sui-screen-nav-item');
     for (var i = 0; i < tabs.length; i++) {
       tabs[i].classList.toggle('sui-mod-active', tabs[i].getAttribute('data-area') === area.key);
@@ -1178,6 +1185,36 @@
     // moment the page opened.
     if (def) def.lastRun = Date.now();
     if (def && def.onEnter) def.onEnter(params, section.view);
+  }
+
+  /* The area tabs ARE the manifest.
+   *
+   * They were hand-written in board.html beside `AREAS` — two lists of the
+   * same thing, and adding an area to the manifest left it routable, paged
+   * and completely unreachable, because nothing in the nav pointed at it.
+   * The markup stays as the first paint; this reconciles it against AREAS on
+   * every route, so a new area appears by existing.
+   */
+  function syncAreaTabs() {
+    var host = document.getElementById('board-tabs');
+    if (!host) return;
+    var want = AREAS.filter(function (a) { return !a.hidden; });
+    var have = {};
+    host.querySelectorAll('.sui-screen-nav-item').forEach(function (t) {
+      have[t.getAttribute('data-area')] = t;
+    });
+    want.forEach(function (a, i) {
+      var tab = have[a.key];
+      if (!tab) {
+        tab = el('a', 'sui-screen-nav-item');
+        tab.setAttribute('data-area', a.key);
+        tab.href = '#/' + a.key;
+        tab.textContent = a.label;
+      }
+      // Order follows the manifest, so an area inserted in the middle lands
+      // where the manifest puts it rather than at the end.
+      if (host.children[i] !== tab) host.insertBefore(tab, host.children[i] || null);
+    });
   }
 
   // The sub-nav is a real link strip: sections are in the hash, so they are

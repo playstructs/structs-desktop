@@ -2243,6 +2243,222 @@
     onEnter: renderInventory, refresh: renderInventory, cadenceMs: 30000,
   });
 
+  /* ═══════════════════════════ EXPLORE → PLAYER ════════════════════════════
+   *
+   * A profile for somebody ELSE. Every other area in Team Ops is about our own
+   * roster; this one takes an id, a name or an address and reports on whoever
+   * comes back.
+   *
+   * The shape follows the game's own Account → Profile — Player Details,
+   * Power, Statistics — reading the same endpoints so the two cannot disagree
+   * about the same player, and drops the parts that only make sense about
+   * yourself (renaming, device management). What it adds is what a lookup
+   * wants and your own profile has no reason to show: the capacity this player
+   * is routing OUT, and what they have staked.
+   */
+  var exploreState = { q: '', results: null, searching: false, player: null,
+                       data: null, error: null, loading: false };
+
+  // Chain entity field names, in one place. `gridAttributes` is where the game
+  // keeps the live numbers; the rest sit on the player record.
+  function entNum(ent, path) {
+    var cur = ent;
+    for (var i = 0; i < path.length && cur != null; i++) cur = cur[path[i]];
+    if (cur == null) return null;
+    var n = typeof cur === 'string' ? Number(cur) : cur;
+    return typeof n === 'number' && isFinite(n) ? n : null;
+  }
+  function entStr(ent, key) {
+    var v = ent && ent[key];
+    return v == null || v === '' ? null : String(v);
+  }
+
+  function exploreSearch(q) {
+    exploreState.q = q;
+    if (!q.trim()) { exploreState.results = null; return renderExplore(); }
+    exploreState.searching = true;
+    renderExplore();
+    var seq = ++exploreSearch.seq;
+    Board.T.core.invoke('mcp_player_search', { query: q }).then(function (r) {
+      if (seq !== exploreSearch.seq) return;   // a later keystroke won
+      exploreState.searching = false;
+      exploreState.results = (r && r.results) || [];
+      renderExplore();
+    }).catch(function (e) {
+      if (seq !== exploreSearch.seq) return;
+      exploreState.searching = false;
+      exploreState.results = [];
+      exploreState.error = String(e);
+      renderExplore();
+    });
+  }
+  exploreSearch.seq = 0;
+
+  function exploreOpen(playerId) {
+    exploreState.player = playerId;
+    exploreState.data = null;
+    exploreState.error = null;
+    exploreState.loading = true;
+    renderExplore();
+    var seq = ++exploreOpen.seq;
+    Board.T.core.invoke('mcp_player_profile', { player: playerId }).then(function (d) {
+      if (seq !== exploreOpen.seq) return;
+      exploreState.loading = false;
+      exploreState.data = d;
+      renderExplore();
+    }).catch(function (e) {
+      if (seq !== exploreOpen.seq) return;
+      exploreState.loading = false;
+      exploreState.error = String(e);
+      renderExplore();
+    });
+  }
+  exploreOpen.seq = 0;
+
+  /* The row shape `messageLink` and `spectatorLinks` already take.
+   *
+   * Both are built for a roster row, and a looked-up player is the same three
+   * facts under different key names — so this adapts rather than growing a
+   * second pair of icons that would drift from the roster's. */
+  function exploreAsRow(ent, pid) {
+    return {
+      player_id: pid,
+      player_name: entStr(ent, 'username') || pid,
+      planet_id: entStr(ent, 'planetId'),
+      fleet_id: entStr(ent, 'fleetId'),
+    };
+  }
+
+  function exploreHeader(ent, pid) {
+    var row = exploreAsRow(ent, pid);
+    var acts = H.el('div', 'ops-row-acts');
+    var msg = messageLink(row);
+    if (msg) acts.appendChild(msg);
+    var spec = spectatorLinks(row);
+    if (spec) acts.appendChild(spec);
+    return H.resultRow({
+      portrait: H.pfpPortrait(entStr(ent, 'pfpClientRenderAttributes')),
+      title: row.player_name,
+      subtitle: '#' + pid,
+      action: acts.childNodes.length ? acts : null,
+    });
+  }
+
+  function exploreProfile(d) {
+    var wrap = H.el('div');
+    var ent = (d && d.entity) || {};
+    var pid = d.player_id;
+    wrap.appendChild(exploreHeader(ent, pid));
+
+    var det = H.el('div');
+    det.appendChild(H.row('Guild', entStr(ent, 'guildId') || '—'));
+    det.appendChild(H.row('Player ID', pid));
+    det.appendChild(H.row('Address', entStr(ent, 'primaryAddress') || '—'));
+    wrap.appendChild(H.card('Player Details', det));
+
+    /* Energy the way the game states it: usage over total, counting the
+     * structs' draw and the share coming back from the substation. Getting
+     * either half wrong makes the number disagree with this player's own HUD. */
+    var load = (entNum(ent, ['gridAttributes', 'load']) || 0)
+      + (entNum(ent, ['gridAttributes', 'structsLoad']) || 0);
+    var total = (entNum(ent, ['gridAttributes', 'capacity']) || 0)
+      + (entNum(ent, ['gridAttributes', 'connectionCapacity']) || 0);
+    var pow = H.el('div');
+    pow.appendChild(H.row('Alpha Matter',
+      H.fmtAlpha(entNum(ent, ['playerInventory', 'rocks', 'amount']) || 0)));
+    pow.appendChild(H.row('Energy Usage', H.fmtWatts(load) + ' / ' + H.fmtWatts(total)));
+    pow.appendChild(H.row('Ore', H.fmtOre(entNum(ent, ['gridAttributes', 'ore']) || 0)));
+    wrap.appendChild(H.card('Power', pow));
+
+    // `null` is not zero: a guild that does not publish one of these leaves a
+    // dash rather than claiming the player has never mined.
+    var num = function (v, key) {
+      if (v == null) return null;
+      var n = key ? v[key] : v;
+      if (n == null) return null;
+      var f = typeof n === 'string' ? Number(n) : n;
+      return isFinite(f) ? f : null;
+    };
+    var dash = function (n, fmt) { return n == null ? '—' : (fmt ? fmt(n) : String(n)); };
+    var ore = d.ore_stats || null;
+    var st = H.el('div');
+    st.appendChild(H.row('Planets Completed', dash(num(d.planets_completed, 'count'))));
+    st.appendChild(H.row('Raids Launched', dash(num(d.raids_launched, 'count'))));
+    st.appendChild(H.row('Ore Mined', dash(num(ore, 'ore_mined'), H.fmtOre)));
+    st.appendChild(H.row('Ore Stolen', dash(num(ore, 'ore_stolen'), H.fmtOre)));
+    st.appendChild(H.row('Ore Lost', dash(num(ore, 'ore_lost'), H.fmtOre)));
+    wrap.appendChild(H.card('Statistics', st));
+
+    /* What this player is routing OUT, and what they have staked. The two
+     * things a lookup wants that your own profile has no reason to show. */
+    var allocs = d.allocations || [];
+    var aBody = H.el('div');
+    if (!d.allocations) aBody.appendChild(H.stateBlock('info', 'not published by this guild'));
+    else if (!allocs.length) aBody.appendChild(H.stateBlock('info', 'none'));
+    else allocs.forEach(function (a) {
+      aBody.appendChild(H.row(
+        String(a.id || a.allocation_id || '?') + ' → ' + String(a.destination_id || '?'),
+        H.fmtWatts(Number(a.power || a.power_mw || 0))));
+    });
+    wrap.appendChild(H.card('Outgoing Allocations', aBody));
+
+    var infs = d.infusions || [];
+    var iBody = H.el('div');
+    if (!d.infusions) iBody.appendChild(H.stateBlock('info', 'not published by this guild'));
+    else if (!infs.length) iBody.appendChild(H.stateBlock('info', 'none'));
+    else infs.forEach(function (i) {
+      iBody.appendChild(H.row(String(i.destination_id || i.reactor_id || i.validator || '?'),
+        H.fmtAlpha(Number(i.fuel || i.amount || 0))));
+    });
+    wrap.appendChild(H.card('Infusions', iBody));
+
+    return wrap;
+  }
+
+  function renderExplore() {
+    return H.renderInto('explore-body', function (body) {
+      // The search is the page's own control, not a card: it is how you get
+      // anywhere here at all.
+      body.appendChild(H.field('Find a player',
+        H.textBox(exploreState.q, 'id, name or address', exploreSearch)));
+
+      if (exploreState.searching) {
+        body.appendChild(H.stateBlock('loading', 'searching…'));
+      } else if (exploreState.results && !exploreState.results.length) {
+        body.appendChild(H.stateBlock('info', 'nobody matches ' + JSON.stringify(exploreState.q)));
+      } else if (exploreState.results && exploreState.results.length) {
+        var table = H.resultTable();
+        var rows = H.el('div', 'sui-result-rows');
+        exploreState.results.slice(0, 25).forEach(function (r) {
+          var pid = r.player_id || r.id;
+          if (!pid) return;
+          rows.appendChild(H.resultRow({
+            portrait: H.pfpPortrait(r.pfp || r.pfp_attrs
+              || r.pfp_client_render_attributes || null),
+            title: r.username || r.name || pid,
+            subtitle: '#' + pid + (r.guild_id ? ' · ' + r.guild_id : ''),
+            onClick: function () { exploreOpen(pid); },
+          }));
+        });
+        table.appendChild(rows);
+        body.appendChild(table);
+      }
+
+      if (exploreState.loading) {
+        body.appendChild(H.stateBlock('loading', 'reading ' + exploreState.player + '…'));
+      } else if (exploreState.error) {
+        body.appendChild(H.stateBlock('error', exploreState.error));
+      } else if (exploreState.data) {
+        body.appendChild(exploreProfile(exploreState.data));
+      }
+    });
+  }
+
+  // No cadence: a profile is a thing you asked for, not a feed. Re-reading it
+  // every few seconds would move the numbers under the eye that is reading
+  // them, and every read is a round trip to somebody else's guild API.
+  Board.registerPage('explore', { onEnter: renderExplore });
+
   // ═══════════════════════════ DIAGNOSTICS ══════════════════════════════════
   // Is the machine itself healthy? Command carries the one-line strip; this is
   // where you come when it says something is wrong. Loop health and the

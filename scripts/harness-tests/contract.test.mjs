@@ -185,5 +185,39 @@ check('…and every one is registered in the handler list',
 check('…and every argument matches its parameter name',
   badArgs.length === 0, badArgs.slice(0, 8).join('; '));
 
+/* ── Every area in the manifest is reachable ───────────────────────────────
+ *
+ * The area tabs were hand-written in board.html beside `AREAS`, so adding an
+ * area left it routable, paged, sub-navigated — and completely unreachable,
+ * because nothing in the nav pointed at it. Two lists of the same thing.
+ */
+{
+  console.log('\n— the nav is the manifest');
+  const boardJs = readFileSync(root + "/frontend/board.js", "utf8");
+  const boardHtml = readFileSync(root + "/frontend/board.html", "utf8");
+  const areas = [...boardJs.matchAll(/\{ key: '([a-z]+)', label: '([A-Za-z ]+)', sections:/g)]
+    .map((m) => ({ key: m[1], label: m[2] }));
+  check('the manifest parses', areas.length >= 6, JSON.stringify(areas.map((a) => a.key)));
+  const tabs = [...boardHtml.matchAll(/data-area="([a-z]+)"/g)].map((m) => m[1]);
+  check('every area has a tab in the first paint',
+    areas.every((a) => tabs.includes(a.key)),
+    'manifest: ' + areas.map((a) => a.key).join(',') + ' | tabs: ' + tabs.join(','));
+  check('…in the manifest’s own order',
+    tabs.join(',') === areas.map((a) => a.key).join(','),
+    'tabs: ' + tabs.join(',') + ' | manifest: ' + areas.map((a) => a.key).join(','));
+  // …and the markup is only the first paint: the router reconciles it, so an
+  // area added to the manifest alone still appears.
+  check('the router reconciles the tabs against the manifest',
+    /function syncAreaTabs\(\)/.test(boardJs) && /syncAreaTabs\(\);/.test(boardJs),
+    'without this, the html list is a second source of truth');
+
+  // Explore's page div has to exist or the router hides a page that is not there.
+  check('every page in the manifest has a container',
+    [...boardJs.matchAll(/page: '([a-z]+)'/g)].map((m) => m[1])
+      .filter((p, i, a) => a.indexOf(p) === i)
+      .every((p) => boardHtml.includes('id="page-' + p + '"') || p === 'gamestats'),
+    'a section pointing at a missing div renders nothing at all');
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

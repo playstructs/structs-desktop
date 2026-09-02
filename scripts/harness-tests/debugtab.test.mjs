@@ -270,6 +270,13 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
   console.log('\n— the page is put back, not rebuilt');
 
   check('the built page is kept', /var debugRoot = null/.test(src));
+  /* `#menu-page-body-content` is a flex container, so the kept node is a flex
+   * ITEM and defaults to sizing itself to its content. Wrapping the page in it
+   * narrowed the whole panel to its widest row; before the wrapper, the page's
+   * own `width:100%` div was the direct child and filled the row. */
+  check('…and stretches to the window rather than to its widest row',
+    /root\.style\.cssText = 'flex:1 1 auto; min-width:0; width:100%;'/.test(src),
+    'a flex item with no width shrink-wraps its content');
   check('…and a wipe re-attaches THAT node',
     /content\.appendChild\(debugRoot\)/.test(src),
     'rebuilding on every wipe is what flickered');

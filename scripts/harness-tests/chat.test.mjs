@@ -93,10 +93,40 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     !homeRows.some((r) => text(r).startsWith('Help Desk'))
     && all(d, '.sui-result-row').some((r) => text(r).startsWith('Help Desk')),
     homeRows.map((r) => text(r)).join(' | '));
+  /* Everything in the portrait column occupies the SAME 44px slot.
+   *
+   * `.sui-result-row-portrait` is 44px and `align-items: flex-start`, so a
+   * smaller child is pinned to its top-left rather than centred — which is
+   * what made the channel glyphs look off next to the DM portraits, and made
+   * the guild mark a third of the size it is in the webapp's own Guild
+   * Directory. The mark goes straight into the portrait, exactly as that
+   * directory renders it, and is sized by SUI's `.sui-result-row-portrait img`
+   * so the two cannot drift apart. */
+  check('the guild mark sits directly in the portrait, as the directory does',
+    !!d.querySelector('.sui-result-row-portrait > img.chat-room-mark')
+    && !d.querySelector('.chat-room-icon img.chat-room-mark'),
+    'nested in a smaller box it renders at a third of the size');
+  const iconRule = Array.from(d.styleSheets)
+    .flatMap((sh) => { try { return Array.from(sh.cssRules); } catch (e) { return []; } })
+    .find((r) => r.selectorText === '.chat-room-icon');
+  check('…and a glyph fills that slot rather than sitting in a smaller one',
+    !!iconRule && iconRule.style.getPropertyValue('width') === '100%'
+    && iconRule.style.getPropertyValue('height') === '100%',
+    iconRule && iconRule.style.cssText);
+  check('…with nothing local re-deciding the mark’s size',
+    !/\.chat-room-mark[^}]*width/.test(
+      Array.from(d.styleSheets)
+        .flatMap((sh) => { try { return Array.from(sh.cssRules); } catch (e) { return []; } })
+        .map((r) => r.cssText).join('\n')),
+    'SUI already sizes it; a second opinion is how they drift');
+
   check('…the first wearing the guild’s own mark, not the generic glyph',
     homeRows[0].querySelector('img.chat-room-mark')
       && /logo-snc\.gif$/.test(homeRows[0].querySelector('img.chat-room-mark').getAttribute('src')),
-    homeRows[0].querySelector('.chat-room-icon').innerHTML.slice(0, 90));
+    // The portrait, not `.chat-room-icon`: a pinned row has no icon box any
+    // more. A detail expression is evaluated even when the check passes, so
+    // reading a node that moved crashes the suite instead of failing a check.
+    homeRows[0].querySelector('.sui-result-row-portrait').innerHTML.slice(0, 90));
   check('…and a pinned room is not repeated in its own section',
     all(d, '.sui-result-row').filter((r) => text(r).startsWith('SN.Corporation')).length === 1
     && all(d, '.sui-result-row').filter((r) => text(r).startsWith('Infrastructure')).length === 1,

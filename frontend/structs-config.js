@@ -2258,6 +2258,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
        * stay bound because their elements never went away. */
       var root = document.createElement('div');
       root.id = DEBUG_ROOT_ID;
+      /* `#menu-page-body-content` is a FLEX container, so this node is a flex
+       * ITEM and defaults to sizing itself to its content. Before the page was
+       * wrapped in a kept node its own `width:100%` div was the direct child
+       * and filled the row; wrapping it narrowed the whole panel to whatever
+       * its widest row happened to be. Stretch, and let the content column
+       * follow the window. */
+      root.style.cssText = 'flex:1 1 auto; min-width:0; width:100%;';
       root.innerHTML = html;
       debugRoot = root;
       var contentEl = document.getElementById('menu-page-body-content');
