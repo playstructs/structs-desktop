@@ -2448,8 +2448,10 @@ fn pinned_retry_delay_ms(err: &str) -> u64 {
 /// fact, not an error: the join fails, the reason is kept, the pinned rooms
 /// simply do not appear in that player's list, and we ask again tomorrow
 /// rather than three times every launch. Nothing is said in the chat window
-/// about it — there is no action the player can take — but the Debug tab can
-/// answer "is my guild federated?" from `matrix_pinned_status`.
+/// about it — there is no action the player can take. The reason is written
+/// to the log, which the Debug tab's "Download logs" already collects; it was
+/// briefly a row in that panel too, and taking it back out is why `last_error`
+/// is still recorded rather than dropped on the floor.
 async fn join_pinned_channels(guild_id: &str) {
     let Some(session) = store::get(guild_id) else { return };
     let Some(home) = super::directory::server_name_for_guild(HOME_GUILD) else {
@@ -2503,29 +2505,6 @@ async fn join_pinned_channels(guild_id: &str) {
     if dirty {
         pinned_state_write(&state);
     }
-}
-
-/// What this install knows about the pinned channels, for the Debug tab.
-#[tauri::command]
-pub fn matrix_pinned_status() -> Value {
-    let home = super::directory::server_name_for_guild(HOME_GUILD);
-    let state = pinned_state_read();
-    let rooms: Vec<Value> = PINNED_LOCALPARTS
-        .iter()
-        .map(|local| {
-            let alias = home
-                .as_ref()
-                .map(|h| format!("#{local}:{h}"))
-                .unwrap_or_else(|| format!("#{local}"));
-            let rec = state.get(&alias).cloned().unwrap_or_default();
-            json!({
-                "alias": alias,
-                "joined": rec.joined,
-                "error": rec.last_error,
-            })
-        })
-        .collect();
-    json!({ "server": home, "rooms": rooms })
 }
 
 pub fn start_sync(app: tauri::AppHandle, guild_id: String) {

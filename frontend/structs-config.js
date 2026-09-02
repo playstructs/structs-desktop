@@ -2104,18 +2104,6 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           'style="text-align:center; margin-top:var(--spacing-xs);">' +
           STRUCTS_ESC(text) + '</div>';
       };
-      /* Whether a pinned channel is reachable from THIS guild's homeserver.
-       *
-       * A named wrapper rather than markup at the call site: `rowHtml` does
-       * not escape, and the reason half of this is the remote homeserver's
-       * own error string — text written by another deployment, which is
-       * exactly the kind of value the escaping split exists for.
-       */
-      var pinnedState = function(joined, error) {
-        if (joined) return badge('JOINED', 'solid');
-        return badge('NOT JOINED', 'warning') +
-          (error ? ' <span class="sui-text-hint">' + STRUCTS_ESC(error) + '</span>' : '');
-      };
       var copyLink = function(id, label) {
         return '<a id="' + STRUCTS_ESC(id) + '" href="javascript:void(0)" ' +
           'class="sui-text-secondary">' + STRUCTS_ESC(label) + '</a>';
@@ -2141,11 +2129,6 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       // rendering as a bare div. Same component the engine toggle below uses.
       html += '<a href="javascript:void(0)" id="debug-comms" class="sui-screen-btn sui-mod-secondary">Comms<span id="debug-comms-unread" class="sui-badge sui-mod-default" style="display:none; margin-left:var(--spacing-md);"></span></a>';
       html += doorNote('debug-comms-note', 'federated guild chat \u00b7 opens in its own window');
-      // The pinned channels' reachability. STATE, not an explanation: whether
-      // your guild's homeserver federates with SN Corp's is the one question
-      // behind "why do I not have #help", and it has no answer the player can
-      // act on — so it belongs here rather than in the chat window.
-      html += '<div id="debug-pinned"></div>';
       html += '</div></div>';
 
       // Support bundle — because when someone needs it they are already having
@@ -2252,10 +2235,27 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
       html += '</div>';
 
-      // Inject into page content
+      /* Build ONCE, then re-attach the same node.
+       *
+       * The webapp's grass listeners navigate the menu on their own schedule,
+       * and every navigation wipes `#menu-page-body-content`. At this player's
+       * event volume that is about once a second, and the answer used to be to
+       * render the whole page again — which is what the flicker was: not a
+       * repaint, a full teardown and rebuild, throwing away the loaded values
+       * and every wired handler and building them from scratch.
+       *
+       * Re-appending the SAME detached element puts the page back in one move.
+       * Nothing is rebuilt, so nothing flashes half-built; the hash figures,
+       * the energy readout and the scroll position survive, and the handlers
+       * stay bound because their elements never went away. */
+      var root = document.createElement('div');
+      root.id = DEBUG_ROOT_ID;
+      root.innerHTML = html;
+      debugRoot = root;
       var contentEl = document.getElementById('menu-page-body-content');
       if (contentEl) {
-        contentEl.innerHTML = html;
+        contentEl.innerHTML = '';
+        contentEl.appendChild(root);
       }
 
       // Support bundle. Writes a zip to Downloads and reveals it in Finder.
@@ -2439,111 +2439,127 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           }
         }).catch(function() {});
 
-        // Pinned channels: joined, or the homeserver's own words for why not.
-        window.__TAURI__.core.invoke('matrix_pinned_status').then(function (d) {
-          var host = document.getElementById('debug-pinned');
-          if (!host || !d) return;
-          var out = '';
-          (d.rooms || []).forEach(function (r) {
-            var local = String(r.alias || '').split(':')[0];
-            out += rowHtml(local, pinnedState(r.joined, r.error));
-          });
-          host.innerHTML = out;
-        }).catch(function () {});
-
         // Load hash engine status (also refreshes on a 2s tick below)
+        /* The engine block's fixed shape, built once.
+         *
+         * This whole card used to be re-rendered with `innerHTML` every two
+         * seconds — five rows and a button thrown away and rebuilt to move two
+         * numbers. That is the other half of the flicker, it re-bound the
+         * toggle handler on every tick, and it made every row's height jump as
+         * the value changed. The skeleton is written once; the ticks only set
+         * text. */
+        function ensureEngineRows(engineEl) {
+          if (engineEl.dataset.built === '1') return;
+          engineEl.dataset.built = '1';
+          var btnHtml = '<a id="debug-engine-toggle" href="javascript:void(0)" ' +
+            'class="sui-screen-btn sui-mod-primary" ' +
+            'style="margin-left:var(--spacing-md);">Toggle</a>';
+          var html = '';
+          html += rowHtml('Engine', '', 'debug-engine-name');
+          // The JS-side TaskManager listens for TASK_CMD_MANAGER_PAUSE /
+          // TASK_CMD_MANAGER_RESUME; we just dispatch them. State is read from
+          // window.taskManager (exposed as `global.taskManager` in the
+          // webapp's index.js) so the label flips even when pause/resume came
+          // from somewhere else.
+          html += rowHtml('Task Manager',
+            '<span id="debug-engine-mgr"></span>' + btnHtml);
+          html += rowHtml('Active Tasks', '', 'debug-engine-active');
+          // Both conditional rows exist from the start and take turns being
+          // hidden. Swapping which ROWS exist is what made the card change
+          // height as work started and stopped.
+          html += '<div id="debug-engine-busy">'
+            + rowHtml('Hashrate', '', 'debug-engine-hps')
+            + rowHtml('Detail', '<span class="sui-text-hint">per-task view: Team Ops \u2192 Work</span>')
+            + '</div>';
+          html += '<div id="debug-engine-idle">' + row('Queue', 'No active tasks') + '</div>';
+          engineEl.innerHTML = html;
+
+          // Bound ONCE, because the button now outlives the tick.
+          var toggleBtn = document.getElementById('debug-engine-toggle');
+          if (toggleBtn) {
+            toggleBtn.addEventListener('click', function() {
+              var mgrNow = window.taskManager;
+              var onlineNow = (mgrNow && typeof mgrNow.isOnline === 'function') ? mgrNow.isOnline() : true;
+              var evtName = onlineNow ? 'TASK_CMD_MANAGER_PAUSE' : 'TASK_CMD_MANAGER_RESUME';
+              window.dispatchEvent(new CustomEvent(evtName));
+              console.info('[Structs Debug] Dispatched ' + evtName);
+              // Optimistic refresh — the state-change event forces one too,
+              // but this gives instant feedback if the listener races.
+              setTimeout(refreshHashEngine, 50);
+            });
+          }
+        }
+
+        function setText(id, text) {
+          var el = document.getElementById(id);
+          // Only touch the DOM when the value actually moved: an unchanged
+          // write still invalidates layout for that node.
+          if (el && el.textContent !== text) el.textContent = text;
+        }
+
         function refreshHashEngine() {
           if (!debugActive) return;
           window.__TAURI__.core.invoke('list_hash_tasks').then(function(data) {
             var engineEl = document.getElementById('debug-engine');
             if (!engineEl) return;
+            ensureEngineRows(engineEl);
 
-            // ── Engine summary ──
-            var html = '';
             var engineLabel;
             if (data.engine === 'gpu' && data.gpu_info) {
-              engineLabel = 'GPU — ' + data.gpu_info.name +
+              engineLabel = 'GPU \u2014 ' + data.gpu_info.name +
                 ' (' + data.gpu_info.backend + ', ' + data.gpu_info.device_type + ')';
             } else if (data.engine === 'gpu') {
               engineLabel = 'GPU';
             } else {
-              engineLabel = 'CPU — ' + (data.cpu_threads || '?') + ' threads of ' +
+              engineLabel = 'CPU \u2014 ' + (data.cpu_threads || '?') + ' threads of ' +
                 (data.cpu_total_cores || '?') + ' cores';
             }
-            html += row('Engine', engineLabel);
+            setText('debug-engine-name', engineLabel);
 
-            // ── Task Manager toggle ──
-            // The JS-side TaskManager listens for TASK_CMD_MANAGER_PAUSE /
-            // TASK_CMD_MANAGER_RESUME events; we just dispatch them. State
-            // is read from window.taskManager (exposed via `global.taskManager`
-            // in webapp/index.js) so the button label flips correctly even
-            // when pause/resume was triggered elsewhere.
             var mgr = window.taskManager;
             var isOnline = (mgr && typeof mgr.isOnline === 'function') ? mgr.isOnline() : null;
             var mgrStatusText, mgrStatusMod, btnLabel;
             if (isOnline === true) {
-              mgrStatusText = 'ONLINE';
-              mgrStatusMod = 'solid';
-              btnLabel = 'Pause';
+              mgrStatusText = 'ONLINE'; mgrStatusMod = 'solid'; btnLabel = 'Pause';
             } else if (isOnline === false) {
-              mgrStatusText = 'PAUSED';
-              mgrStatusMod = 'hint';
-              btnLabel = 'Resume';
+              mgrStatusText = 'PAUSED'; mgrStatusMod = 'hint'; btnLabel = 'Resume';
             } else {
-              mgrStatusText = 'Unknown';
-              mgrStatusMod = 'hint';
-              btnLabel = 'Toggle';
+              mgrStatusText = 'Unknown'; mgrStatusMod = 'hint'; btnLabel = 'Toggle';
             }
-            // SUI's own button, not a hand-rolled one. The previous version
-            // redrew padding, border, colour, radius and a 0.9em type size by
-            // hand — fractional scaling on a pixel face is exactly what the
-            // type roles exist to prevent, and it drifts the moment SUI moves.
-            var btnHtml = '<a id="debug-engine-toggle" href="javascript:void(0)" ' +
-              'class="sui-screen-btn sui-mod-primary" ' +
-              'style="margin-left:var(--spacing-md);">' +
-              btnLabel + '</a>';
-            html += rowHtml('Task Manager', badge(mgrStatusText, mgrStatusMod) + btnHtml);
+            var mgrEl = document.getElementById('debug-engine-mgr');
+            var mgrHtml = badge(mgrStatusText, mgrStatusMod);
+            if (mgrEl && mgrEl.innerHTML !== mgrHtml) mgrEl.innerHTML = mgrHtml;
+            var toggle = document.getElementById('debug-engine-toggle');
+            if (toggle && toggle.textContent !== btnLabel) toggle.textContent = btnLabel;
 
-            html += row('Active Tasks', String(data.active_tasks || 0));
+            setText('debug-engine-active', String(data.active_tasks || 0));
 
-            // Count only — the per-task list used to render here, and at
-            // fleet scale it made the debug page a scroll marathon just to
-            // reach the sections below. The full task detail lives where it
-            // belongs: Team Ops → Industry → Work. One aggregate hashrate row
-            // keeps the at-a-glance "is the engine actually grinding" signal.
-            if (data.tasks && data.tasks.length > 0) {
+            // Count only — the per-task list used to render here, and at fleet
+            // scale it made this page a scroll marathon just to reach the
+            // sections below. The detail lives in Team Ops → Industry → Work.
+            var busy = data.tasks && data.tasks.length > 0;
+            if (busy) {
               var totalHps = 0;
               for (var i = 0; i < data.tasks.length; i++) {
                 totalHps += (data.tasks[i].hashrate || 0) * 1000;
               }
-              var hpsText = totalHps >= 1e9 ? (totalHps / 1e9).toFixed(2) + ' Gh/s'
+              setText('debug-engine-hps',
+                totalHps >= 1e9 ? (totalHps / 1e9).toFixed(2) + ' Gh/s'
                 : totalHps >= 1e6 ? (totalHps / 1e6).toFixed(1) + ' Mh/s'
                 : totalHps >= 1e3 ? (totalHps / 1e3).toFixed(1) + ' Kh/s'
-                : Math.round(totalHps) + ' h/s';
-              html += row('Hashrate', hpsText);
-              html += rowHtml('Detail', '<span class="sui-text-hint">per-task view: Team Ops \u2192 Work</span>');
-            } else {
-              html += row('Queue', 'No active tasks');
+                : Math.round(totalHps) + ' h/s');
             }
-            engineEl.innerHTML = html;
-
-            // Re-attach the toggle handler each render (innerHTML wiped it).
-            var toggleBtn = document.getElementById('debug-engine-toggle');
-            if (toggleBtn) {
-              toggleBtn.addEventListener('click', function() {
-                var mgrNow = window.taskManager;
-                var onlineNow = (mgrNow && typeof mgrNow.isOnline === 'function') ? mgrNow.isOnline() : true;
-                var evtName = onlineNow ? 'TASK_CMD_MANAGER_PAUSE' : 'TASK_CMD_MANAGER_RESUME';
-                window.dispatchEvent(new CustomEvent(evtName));
-                console.info('[Structs Debug] Dispatched ' + evtName);
-                // Optimistic refresh — state-change event also forces one but
-                // this gives instant feedback if the listener races.
-                setTimeout(refreshHashEngine, 50);
-              });
-            }
+            var busyEl = document.getElementById('debug-engine-busy');
+            var idleEl = document.getElementById('debug-engine-idle');
+            if (busyEl) busyEl.hidden = !busy;
+            if (idleEl) idleEl.hidden = busy;
           }).catch(function(e) {
             var engineEl = document.getElementById('debug-engine');
-            if (engineEl) engineEl.innerHTML = row('Error', String(e));
+            if (!engineEl) return;
+            // A failed read is not a reason to tear the card down; say so in
+            // the row that is already there.
+            ensureEngineRows(engineEl);
+            setText('debug-engine-name', String(e));
           });
         }
         refreshHashEngine();
@@ -2790,6 +2806,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     // invokes. One redraw per second is far faster than a human notices and
     // keeps a storm of events from turning into a storm of renders.
     var REASSERT_MIN_GAP_MS = 1000;
+    var DEBUG_ROOT_ID = 'structs-debug-root';
+    // The built page, kept so a wipe costs a re-attach, not a rebuild.
+    var debugRoot = null;
 
     /* Put the Debug page back when something else wipes it.
      *
@@ -2815,11 +2834,33 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       var layout = document.getElementById('menu-page-layout');
       if (!layout || layout.classList.contains('hidden')) {
         debugActive = false;
+        // Drop the kept node: a later visit should read the chain again, not
+        // re-attach figures from the last session.
+        debugRoot = null;
         if (reassertTimer) { clearTimeout(reassertTimer); reassertTimer = null; }
         return;
       }
-      if (!document.getElementById('menu-page-body-content')) return;
-      if (document.getElementById('debug-engine')) return; // still ours — nothing to do
+      var content = document.getElementById('menu-page-body-content');
+      if (!content) return;
+      if (debugRoot && debugRoot.parentNode === content) return; // still ours
+      /* Put the SAME node back, without the throttle.
+       *
+       * Re-attaching is one DOM move and costs nothing, so there is no reason
+       * to coalesce it — and coalescing is what made the page visibly absent:
+       * the webapp's own panel sat there for up to a second before ours
+       * returned. The throttle below still guards the expensive path, a full
+       * rebuild, which now only happens when there is no node to put back. */
+      if (debugRoot) {
+        reasserting = true;
+        try {
+          content.innerHTML = '';
+          content.appendChild(debugRoot);
+          markDebugTabActive();
+        } finally {
+          reasserting = false;
+        }
+        return;
+      }
       /* THROTTLE WITH A TRAILING EDGE — and the trailing edge is the whole
        * point, not a refinement.
        *
@@ -2851,19 +2892,22 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       reasserting = true;
       try {
         renderDebugPage();
-        var tab = document.getElementById(DEBUG_NAV_ID);
-        if (tab) {
-          var nav = document.getElementById('menu-page-nav-items');
-          if (nav) {
-            nav.querySelectorAll('.sui-screen-nav-item').forEach(function (i) {
-              i.classList.remove('sui-mod-active');
-            });
-          }
-          tab.classList.add('sui-mod-active');
-        }
+        markDebugTabActive();
       } finally {
         reasserting = false;
       }
+    }
+
+    function markDebugTabActive() {
+      var tab = document.getElementById(DEBUG_NAV_ID);
+      if (!tab) return;
+      var nav = document.getElementById('menu-page-nav-items');
+      if (nav) {
+        nav.querySelectorAll('.sui-screen-nav-item').forEach(function (i) {
+          i.classList.remove('sui-mod-active');
+        });
+      }
+      tab.classList.add('sui-mod-active');
     }
 
     // Watch for the nav to render and inject our tab
@@ -2898,11 +2942,35 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       navItems.appendChild(debugTab);
     }
 
-    var observer = new MutationObserver(function() {
-      // Tab first: a webapp navigation rebuilds `menu-page-nav-items` wholesale,
-      // so the tab has to be back before the reassert can mark it active.
-      ensureDebugTab();
-      reassertDebugPage();
+    /* One check per frame, not one per mutation.
+     *
+     * This watches `document.body` with `subtree: true`, so it fires for the
+     * animating map, the HUD, the grass feed — everything, many times a frame.
+     * The work it triggers is cheap now, but running it dozens of times per
+     * frame to reach the same answer is not free either. Coalescing to an
+     * animation frame keeps the response immediate (a wipe is repaired before
+     * the next paint) while doing the work once.
+     *
+     * Our own writes are skipped outright: re-attaching the page is itself a
+     * mutation, and reacting to it is how an observer feeds itself. */
+    var observerQueued = false;
+    var observer = new MutationObserver(function(muts) {
+      if (reasserting || observerQueued) return;
+      var ours = true;
+      for (var i = 0; i < muts.length && ours; i++) {
+        var t = muts[i].target;
+        ours = !!(debugRoot && t && debugRoot.contains(t));
+      }
+      if (ours && muts.length) return;
+      observerQueued = true;
+      requestAnimationFrame(function() {
+        observerQueued = false;
+        // Tab first: a webapp navigation rebuilds `menu-page-nav-items`
+        // wholesale, so the tab has to be back before the reassert can mark
+        // it active.
+        ensureDebugTab();
+        reassertDebugPage();
+      });
     });
 
     // Start observing

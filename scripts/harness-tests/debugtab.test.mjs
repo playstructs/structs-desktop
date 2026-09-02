@@ -156,7 +156,7 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
     // Nested parens (`copyLink('x', a.substring(0, 24))`) outrun a `[^)]*`
     // strip, which stops early and leaves the tail looking unescaped.
     const stripCalls = (t) => {
-      for (const name of ['badge', 'copyLink', 'doorNote', 'pinnedState']) {
+      for (const name of ['badge', 'copyLink', 'doorNote']) {
         let i;
         while ((i = t.indexOf(name + '(')) >= 0) {
           let j = i + name.length + 1, depth = 1;
@@ -199,9 +199,7 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
   /* Every wrapper stripped above buys its exemption by escaping. Named here
    * with what it must escape, so adding one to the strip list without making
    * it safe widens the hole loudly rather than silently. */
-  [['badge', ['text']], ['copyLink', ['id', 'label']], ['doorNote', ['id', 'text']],
-   // The remote homeserver's own refusal text — written by another deployment.
-   ['pinnedState', ['error']]]
+  [['badge', ['text']], ['copyLink', ['id', 'label']], ['doorNote', ['id', 'text']]]
     .forEach(([name, params]) => {
       const at = src.indexOf('var ' + name + ' = function');
       const body = at < 0 ? '' : src.slice(at, src.indexOf('\n      };', at));
@@ -258,6 +256,55 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
     /MAX_BYTES/.test(rust) && /content_length\(\)/.test(rust));
   check('…and will not pass off a non-image as one',
     /starts_with\("image\/"\)/.test(rust));
+}
+
+/* ── The page must not rebuild itself to stay on screen ────────────────────
+ *
+ * The webapp's grass listeners navigate the menu on their own schedule, and
+ * every navigation wipes the content area. At fleet event volume that is about
+ * once a second, and the fix used to be "render the whole page again" — a full
+ * teardown and rebuild, throwing away loaded values and every wired handler.
+ * That was the flicker. These pin the cheap path shut.
+ */
+{
+  console.log('\n— the page is put back, not rebuilt');
+
+  check('the built page is kept', /var debugRoot = null/.test(src));
+  check('…and a wipe re-attaches THAT node',
+    /content\.appendChild\(debugRoot\)/.test(src),
+    'rebuilding on every wipe is what flickered');
+  check('…without waiting out the throttle',
+    /if \(debugRoot\) \{[\s\S]{0,400}?content\.appendChild\(debugRoot\)/.test(src),
+    'coalescing a re-attach leaves the webapp\u2019s own panel on screen meanwhile');
+  check('…and the full rebuild is still throttled',
+    /REASSERT_MIN_GAP_MS/.test(src));
+  check('leaving Debug drops the kept node',
+    /debugRoot = null;/.test(src.slice(src.indexOf('debugActive = false;'))),
+    'a later visit would re-attach figures from the last session');
+
+  // The engine card ticked every 2s by replacing its own innerHTML: five rows
+  // and a button rebuilt to move two numbers, re-binding the handler each time.
+  const engine = src.slice(src.indexOf('function ensureEngineRows'));
+  check('the engine card is built once', /dataset\.built === .1./.test(engine));
+  check('…and the ticks only set text',
+    !/engineEl\.innerHTML = html;[\s\S]{0,80}?debug-engine-toggle/.test(src)
+    && /function setText\(id, text\)/.test(src));
+  check('…skipping writes that would not change anything',
+    /el\.textContent !== text/.test(src));
+  check('…and the toggle is bound once, not per tick',
+    (src.match(/debug-engine-toggle.\)[\s\S]{0,60}?addEventListener/g) || []).length === 1);
+  // Swapping which ROWS exist is what made the card change height as work
+  // started and stopped; both exist and take turns being hidden.
+  check('both states of the card exist from the start',
+    /debug-engine-busy/.test(src) && /debug-engine-idle/.test(src)
+    && /busyEl\.hidden = !busy/.test(src));
+
+  check('the observer coalesces to a frame',
+    /requestAnimationFrame/.test(src) && /observerQueued/.test(src),
+    'it watches the whole body, which the animating map mutates constantly');
+  check('…and ignores its own writes',
+    /debugRoot\.contains\(t\)/.test(src),
+    'reacting to our own re-attach is how an observer feeds itself');
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
