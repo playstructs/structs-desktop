@@ -17,7 +17,7 @@ use crate::mcp::{board_feed, loop_util, watchdog};
 
 #[derive(Debug, Deserialize)]
 pub struct SystemParams {
-    /// Command: status | logs | loops | tx | pow | watchdog | feed | config
+    /// Command: status | logs | loops | tx | pow | watchdog | feed | config | perception
     pub command: String,
     /// logs: filter by component (e.g. "auto_build", "tx", "watchdog", "policy", "conn")
     pub component: Option<String>,
@@ -235,8 +235,35 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
             }))
         }
 
+        // The shared whole-galaxy snapshot (mcp::perception). Read-only unless
+        // `set.refresh` is true, which pulls a fresh snapshot inline (~11 bulk
+        // LCD requests, ~8 s) and reports the result.
+        "perception" => {
+            let refresh = params
+                .set
+                .as_ref()
+                .and_then(|s| s.get("refresh"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if refresh {
+                let client = crate::mcp::cosmos_client::CosmosClient::new();
+                return match crate::mcp::perception::refresh(&client).await {
+                    Ok(summary) => text(json!({ "refreshed": true, "snapshot": summary })),
+                    Err(e) => err(format!("refresh failed: {e}")),
+                };
+            }
+            let snapshot = crate::mcp::perception::summary();
+            text(json!({
+                "ready": crate::mcp::perception::is_ready(),
+                "snapshot": snapshot,
+                "pending_new_structs": crate::mcp::perception::with_snapshot(|s| s.pending_new_structs())
+                    .unwrap_or_default(),
+                "note": "Loops still read the LCD directly; this snapshot is fed by GRASS and refreshed on demand. Scan from it, re-verify before signing.",
+            }))
+        }
+
         other => err(format!(
-            "unknown command '{other}'. Use: status, logs, loops, tx, pow, watchdog, feed, config"
+            "unknown command '{other}'. Use: status, logs, loops, tx, pow, watchdog, feed, config, perception"
         )),
     }
 }

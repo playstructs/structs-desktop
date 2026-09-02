@@ -418,6 +418,65 @@ fn first_free(occupied: &HashSet<u64>) -> Option<u64> {
 }
 
 /// One loadout entry that could be built right now.
+/// Pre-sign chain check for a build initiate that was DECIDED from the
+/// perception snapshot. One player read (charge + location ids) and, when
+/// the build consumes a slot, one location read (is that slot still empty?).
+/// Two reads per ACTION, replacing the one-per-struct-per-scan fan-out.
+/// `false` = do not sign (logged as perception drift, or a read failed —
+/// never sign blind). The Command Ship passes `require_free_slot = false`:
+/// its initiate does not consume the slot it names (verified live, 1-280).
+async fn initiate_verified_on_chain(
+    client: &CosmosClient,
+    pid: &str,
+    target: &str,
+    ambit: &str,
+    slot: u64,
+    require_free_slot: bool,
+    current_block: u64,
+) -> bool {
+    let Ok(player) = client.query_entity("player", pid).await else { return false };
+    let ga = player.get("gridAttributes");
+    let charge = current_block.saturating_sub(read_u64_field(ga, "lastAction"));
+    if charge < BUILD_CHARGE {
+        crate::mcp::telemetry::tlog(
+            "auto_build",
+            crate::mcp::telemetry::Sev::Notice,
+            format!("perception drift: {pid} charge {charge} < {BUILD_CHARGE} on chain — initiate skipped"),
+        );
+        return false;
+    }
+    if !require_free_slot {
+        return true;
+    }
+    let (wrapper, id_field) = if target == "fleet" { ("Fleet", "fleetId") } else { ("Planet", "planetId") };
+    let loc = player
+        .get("Player")
+        .and_then(|p| p.get(id_field))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if loc.is_empty() {
+        return false;
+    }
+    let Ok(entity) = client.query_entity(target, &loc).await else { return false };
+    let occupied = entity
+        .get(wrapper)
+        .and_then(|o| o.get(ambit))
+        .and_then(|a| a.as_array())
+        .and_then(|a| a.get(slot as usize))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if occupied {
+        crate::mcp::telemetry::tlog(
+            "auto_build",
+            crate::mcp::telemetry::Sev::Notice,
+            format!("perception drift: {pid} {target} {ambit} slot {slot} occupied on chain — initiate skipped"),
+        );
+        return false;
+    }
+    true
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RipeEntry {
     /// Position in the loadout — lower is higher priority.
@@ -604,6 +663,11 @@ async fn scan(
     let initiates = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (completes_c, initiates_c) = (completes.clone(), initiates.clone());
     let run_c = run.clone();
+    // Keep the shared perception snapshot current (no-op if fresh or already
+    // refreshing); the scan below reads from it when fresh, the chain otherwise.
+    // Structs announced since the last refresh get their one entity read here.
+    crate::mcp::perception::maybe_refresh(&client);
+    crate::mcp::perception::resolve_pending(&client, 50).await;
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
         crate::mcp::loop_util::effective_max_concurrent(),
@@ -627,7 +691,11 @@ async fn scan(
                 // return a global page) — using them made auto_build see no structs
                 // on the player's own planet and OVER-BUILD duplicates, inflating
                 // structsLoad toward a brownout. See loop_util::player_structs.
-                let structs = crate::mcp::loop_util::player_structs(&client, &pid).await;
+                //
+                // SCAN reads: perception snapshot when fresh, chain otherwise
+                // (mcp::perception). Every read before a sign is the chain.
+                let (structs, scan_src) = crate::mcp::loop_util::scan_player_structs(&client, &pid).await;
+                let scanned_from_snapshot = scan_src == crate::mcp::loop_util::ReadSource::Snapshot;
                 if structs.is_empty() {
                     return;
                 }
@@ -646,8 +714,8 @@ async fn scan(
                             continue;
                         }
                     }
-                    let entity = match client.query_entity("struct", &sid).await {
-                        Ok(e) => e,
+                    let entity = match crate::mcp::loop_util::scan_entity(&client, "struct", &sid).await {
+                        Ok((e, _)) => e,
                         Err(_) => continue,
                     };
                     let sa = entity.get("structAttributes");
@@ -677,6 +745,33 @@ async fn scan(
                     if calculate_difficulty(age, difficulty_target) > complete_difficulty {
                         continue;
                     }
+                    // ── CHAIN RE-VERIFY before committing GPU work. ── The
+                    // struct came from the perception snapshot; the build
+                    // clock is the proof anchor, so read it from the chain
+                    // once per ISSUED completion (not once per struct per scan).
+                    let mut anchor = anchor;
+                    if scanned_from_snapshot {
+                        let Ok(live) = crate::mcp::loop_util::verify_struct_entity(&client, &sid).await else { continue };
+                        let lsa = live.get("structAttributes");
+                        if parse_bool(lsa.and_then(|x| x.get("isBuilt"))) || parse_bool(lsa.and_then(|x| x.get("isDestroyed"))) {
+                            BUILT_CACHE.lock().unwrap().insert(sid.clone());
+                            continue;
+                        }
+                        let live_anchor = read_u64_field(lsa, "blockStartBuild");
+                        if live_anchor != anchor {
+                            crate::mcp::telemetry::tlog(
+                                "auto_build",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("perception drift: {sid} build anchor {anchor} scanned vs {live_anchor} on chain"),
+                            );
+                            anchor = live_anchor;
+                            if anchor == 0
+                                || calculate_difficulty(current_block.saturating_sub(anchor), difficulty_target) > complete_difficulty
+                            {
+                                continue;
+                            }
+                        }
+                    }
                     let params = TaskParams::for_ore(&sid, "BUILD", anchor, difficulty_target);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {
@@ -704,8 +799,8 @@ async fn scan(
                     return;
                 }
                 // Read the player's grid (charge from lastAction, structsLoad, personal cap).
-                let player = match client.query_entity("player", &pid).await {
-                    Ok(p) => p,
+                let player = match crate::mcp::loop_util::scan_entity(&client, "player", &pid).await {
+                    Ok((p, _)) => p,
                     Err(_) => return,
                 };
                 let ga = player.get("gridAttributes");
@@ -845,6 +940,12 @@ async fn scan(
                         // dangerous than an untidy slot number.
                         .unwrap_or(("land", 0));
                     let Some(idx) = idx_opt else { return };
+                    // Chain re-verify (charge only — the Command Ship needs no free slot).
+                    if scanned_from_snapshot
+                        && !initiate_verified_on_chain(&client, &pid, "fleet", amb, slot, false, current_block).await
+                    {
+                        return;
+                    }
                     let payload = json!({
                         "playerId": pid,
                         "structTypeId": type_id,
@@ -947,6 +1048,15 @@ async fn scan(
                     // Only vplayers route through the façade signer; primary needs its own
                     // path (not wired here), so skip primary initiates for now.
                     let Some(idx) = idx_opt else { break };
+                    // Chain re-verify: charge, and that the chosen slot is
+                    // still empty on the live planet/fleet row. A drift here
+                    // means the snapshot missed a build or a move; try the
+                    // next ripe entry rather than sign into an occupied slot.
+                    if scanned_from_snapshot
+                        && !initiate_verified_on_chain(&client, &pid, &target, &ambit, slot, true, current_block).await
+                    {
+                        continue;
+                    }
                     let res = crate::mcp::tx_retry::sign_with_retry(
                         &app,
                         idx,

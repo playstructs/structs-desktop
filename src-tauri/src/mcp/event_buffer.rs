@@ -82,6 +82,12 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     // fleet scale); this is the 7-day record that a support bundle carries.
     crate::mcp::telemetry::record_grass(&event.category, &event.subject, &event.detail);
 
+    // Fold the delta into the shared perception snapshot (a no-op until one
+    // has been taken). The webapp subscribes `structs.>`, so every grid /
+    // status / health / defense / move change in the galaxy passes here —
+    // this is what keeps the bulk snapshot current between refreshes.
+    crate::mcp::perception::on_grass(&event.category, &event.subject, &event.detail);
+
     // A DROPPED settlement is the most dangerous event in the system and used
     // to be the quietest. The signing bridge acks "queued" the moment a message
     // is accepted — it must, because charge-gated messages settle minutes later

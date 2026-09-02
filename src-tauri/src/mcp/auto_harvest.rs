@@ -223,6 +223,12 @@ async fn scan(
     let auto_explore = cfg.auto_explore;
     let app = app_handle.clone();
     let run_c = run.clone();
+    // Keep the shared perception snapshot current (no-op if fresh or already
+    // refreshing). The scan below reads from it when it is fresh and from the
+    // chain when it is not, so this never blocks the pass. Structs announced
+    // since the last refresh get their one entity read here (bounded).
+    crate::mcp::perception::maybe_refresh(&client);
+    crate::mcp::perception::resolve_pending(&client, 50).await;
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
         crate::mcp::loop_util::effective_max_concurrent(),
@@ -246,7 +252,13 @@ async fn scan(
                 // player's structs, so scanning them meant we never saw a vplayer's
                 // OWN extractor/refinery (refines never completed, explores never
                 // fired, the whole fleet froze). See loop_util::player_struct_ids.
-                let sids = crate::mcp::loop_util::player_struct_ids(&client, &pid).await;
+                //
+                // SCAN reads come from the shared perception snapshot when it
+                // is fresh (one whole-galaxy pull + GRASS deltas, see
+                // mcp::perception) and from the chain otherwise; the read
+                // right before a task is issued always goes to the chain.
+                let (sids, scan_src) = crate::mcp::loop_util::scan_player_struct_ids(&client, &pid).await;
+                let scanned_from_snapshot = scan_src == crate::mcp::loop_util::ReadSource::Snapshot;
                 let mut extractor_planet: Option<String> = None;
                 // The planet ENTITY, read at most ONCE per player per scan. It
                 // carries BOTH the mined-out guard's ore reserve and — since
@@ -260,8 +272,8 @@ async fn scan(
                 for sid in sids.iter() {
                     // The struct ENTITY is the reliable source for type + location +
                     // online + anchors (the struct-LIST endpoints are unusable, above).
-                    let entity = match client.query_entity("struct", sid).await {
-                        Ok(e) => e,
+                    let entity = match crate::mcp::loop_util::scan_entity(&client, "struct", sid).await {
+                        Ok((e, _)) => e,
                         Err(_) => continue,
                     };
                     let s = entity.get("Struct");
@@ -315,7 +327,7 @@ async fn scan(
                     if !planet_fetched {
                         planet_fetched = true;
                         if let Some(loc) = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) {
-                            if let Ok(p) = client.query_entity("planet", loc).await {
+                            if let Ok((p, _)) = crate::mcp::loop_util::scan_entity(&client, "planet", loc).await {
                                 planet_cache = Some(p);
                             }
                         }
@@ -350,8 +362,8 @@ async fn scan(
                         // whole system, and every one of them paid for with
                         // wasted proof-of-work.
                         if player_ore_cache.is_none() {
-                            player_ore_cache = Some(match client.query_entity("player", &pid).await {
-                                Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
+                            player_ore_cache = Some(match crate::mcp::loop_util::scan_entity(&client, "player", &pid).await {
+                                Ok((p, _)) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
                                 // Unknown → don't block refining on a read failure.
                                 Err(_) => 1.0,
                             });
@@ -398,6 +410,49 @@ async fn scan(
                     // the EASIEST alpha, not a phantom.
                     if !is_ripe(age, target, difficulty_threshold) {
                         continue;
+                    }
+                    // ── CHAIN RE-VERIFY before committing GPU work. ──
+                    // Everything above may have come from the perception
+                    // snapshot. The anchor and the rig's online state are
+                    // action-gating (a wrong anchor is a proof that cannot
+                    // land — the futile-mining incident), so when the scan was
+                    // served from the snapshot, read the two entities that
+                    // decide this task from the chain now: one planet read +
+                    // one struct read per ISSUED task, instead of one per
+                    // struct per scan. Both results fold back into the
+                    // snapshot. A disagreement is logged: it is the measure of
+                    // how far perception drifts, and the reason this step stays.
+                    let mut anchor = anchor;
+                    if scanned_from_snapshot {
+                        let loc = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()).unwrap_or("");
+                        let Ok(live_planet) = client.query_entity("planet", loc).await else { continue };
+                        let Ok(live_struct) = crate::mcp::loop_util::verify_struct_entity(&client, sid).await else { continue };
+                        let live_sa = live_struct.get("structAttributes");
+                        if !parse_bool(live_sa.and_then(|x| x.get("isOnline")))
+                            || parse_bool(live_sa.and_then(|x| x.get("isDestroyed")))
+                        {
+                            crate::mcp::telemetry::tlog(
+                                "auto_harvest",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("perception drift: {sid} scanned online, chain says not — skipped"),
+                            );
+                            continue;
+                        }
+                        let live_anchor = crate::mcp::loop_util::planet_ore_anchor(Some(&live_planet), task_type);
+                        if live_anchor != anchor {
+                            crate::mcp::telemetry::tlog(
+                                "auto_harvest",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("perception drift: {sid} {task_type} anchor {anchor} scanned vs {live_anchor} on chain"),
+                            );
+                            anchor = live_anchor;
+                            if anchor == 0
+                                || crate::hasher::completion_in_flight(sid) == Some(anchor)
+                                || !is_ripe(current_block.saturating_sub(anchor), target, difficulty_threshold)
+                            {
+                                continue;
+                            }
+                        }
                     }
                     let params = TaskParams::for_ore(sid, task_type, anchor, target);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {

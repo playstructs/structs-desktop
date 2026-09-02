@@ -633,6 +633,11 @@ async fn scan(
     let run_c = run.clone();
     let stats = catalog();
 
+    // Keep the shared perception snapshot current (no-op if fresh or already
+    // refreshing); the scan below reads from it when fresh, the chain otherwise.
+    // Structs announced since the last refresh get their one entity read here.
+    crate::mcp::perception::maybe_refresh(&client);
+    crate::mcp::perception::resolve_pending(&client, 50).await;
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
         crate::mcp::loop_util::effective_max_concurrent(),
@@ -665,7 +670,10 @@ async fn scan(
                 // Resolve THIS player's structs from its planet + fleet slot arrays;
                 // the guild struct-LIST endpoints are broken (return a global page,
                 // not the owner's). See loop_util::player_structs.
-                let structs = crate::mcp::loop_util::player_structs(&client, &pid).await;
+                // SCAN reads: perception snapshot when fresh, chain otherwise
+                // (mcp::perception). The read before the sign is always the chain.
+                let (structs, scan_src) = crate::mcp::loop_util::scan_player_structs(&client, &pid).await;
+                let scanned_from_snapshot = scan_src == crate::mcp::loop_util::ReadSource::Snapshot;
                 if structs.is_empty() {
                     return;
                 }
@@ -700,8 +708,8 @@ async fn scan(
                         built.insert(sid);
                         continue;
                     }
-                    let entity = match client.query_entity("struct", &sid).await {
-                        Ok(e) => e,
+                    let entity = match crate::mcp::loop_util::scan_entity(&client, "struct", &sid).await {
+                        Ok((e, _)) => e,
                         Err(_) => continue,
                     };
                     let sa = entity.get("structAttributes");
@@ -777,7 +785,54 @@ async fn scan(
                 if crate::mcp::loop_util::acted_this_block(&pid) {
                     return;
                 }
-                let needs_clear = current.contains_key(&edge.defender);
+                let mut needs_clear = current.contains_key(&edge.defender);
+                // ── CHAIN RE-VERIFY before the sign. ── The edge was chosen
+                // from the perception snapshot; a defense set/clear is a
+                // charged action, so confirm the two hulls it names from the
+                // chain: both must still exist and be built, and the defender's
+                // live `protectedStructIndex` decides SET vs CLEAR (the snapshot
+                // may have missed a defense change — measured 8 of 29 in one
+                // window). Two reads per ACTION, not per struct per scan.
+                if scanned_from_snapshot {
+                    let (Ok(d), Ok(p)) = (
+                        crate::mcp::loop_util::verify_struct_entity(&client, &edge.defender).await,
+                        crate::mcp::loop_util::verify_struct_entity(&client, &edge.protected).await,
+                    ) else {
+                        return; // never sign blind
+                    };
+                    let ok = |e: &Value| {
+                        let sa = e.get("structAttributes");
+                        truthy(sa.and_then(|x| x.get("isBuilt"))) && !truthy(sa.and_then(|x| x.get("isDestroyed")))
+                    };
+                    if !ok(&d) || !ok(&p) {
+                        crate::mcp::telemetry::tlog(
+                            "auto_defend",
+                            crate::mcp::telemetry::Sev::Notice,
+                            format!("perception drift: {} → {} no longer both built on chain — skipped", edge.defender, edge.protected),
+                        );
+                        return;
+                    }
+                    let live_prot = d
+                        .get("structAttributes")
+                        .and_then(|x| x.get("protectedStructIndex"))
+                        .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|v| v.parse().ok())))
+                        .unwrap_or(0);
+                    let live_target = if live_prot == 0 { None } else { Some(format!("5-{live_prot}")) };
+                    if live_target.as_deref() == Some(edge.protected.as_str()) {
+                        // Already wired on chain; the snapshot was behind.
+                        ASSIGNED_CACHE.lock().unwrap().insert(edge.defender.clone(), edge.protected.clone());
+                        return;
+                    }
+                    let live_needs_clear = live_target.is_some();
+                    if live_needs_clear != needs_clear {
+                        crate::mcp::telemetry::tlog(
+                            "auto_defend",
+                            crate::mcp::telemetry::Sev::Notice,
+                            format!("perception drift: {} wired={} on chain vs {} scanned", edge.defender, live_needs_clear, needs_clear),
+                        );
+                        needs_clear = live_needs_clear;
+                    }
+                }
 
                 let (msg, payload, verb) = if needs_clear {
                     (

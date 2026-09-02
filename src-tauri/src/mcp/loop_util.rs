@@ -240,6 +240,111 @@ pub fn invalidate_all_player_structs() {
     }
 }
 
+// ── Scan reads: perception snapshot first, chain otherwise ──────────────────
+//
+// The auto-loops split their reads in two. SCAN reads decide which players
+// and structs are candidates (fleet-wide, thousands per pass); VERIFY reads
+// happen once per action, right before a sign, and always go to the chain.
+// These helpers serve the SCAN half from `mcp::perception`'s whole-galaxy
+// snapshot when it is fresh, and transparently fall back to the LCD when it
+// is not (no snapshot yet, refresh failed, GRASS went quiet). A loop written
+// against them behaves exactly as before until a snapshot exists, and never
+// scans from a stale one.
+
+/// A snapshot older than this is not scanned from, whatever GRASS says: the
+/// refresh cadence is ~10 min, so this is "two missed refreshes".
+pub const PERCEPTION_MAX_AGE_MS: f64 = 20.0 * 60_000.0;
+/// If no GRASS frame has been folded in for this long, the feed is presumed
+/// dead (the signing-bridge-death tell is exactly a decaying grass stream)
+/// and the snapshot is treated as stale from that moment.
+pub const PERCEPTION_MAX_EVENT_GAP_MS: f64 = 120_000.0;
+
+/// Where a scan read was served from — surfaced in loop summaries so a
+/// silent fallback to the chain is visible, not inferred from timings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadSource {
+    Snapshot,
+    Chain,
+}
+
+/// The freshness rule, pure so it is testable: a snapshot is scannable when
+/// it is younger than [`PERCEPTION_MAX_AGE_MS`] AND the GRASS feed is alive —
+/// either a frame landed within [`PERCEPTION_MAX_EVENT_GAP_MS`] or the
+/// snapshot itself is younger than that gap (a quiet galaxy right after a
+/// refresh is fine; a quiet feed an hour later is not).
+pub fn perception_is_fresh(age_ms: f64, last_event_age_ms: Option<f64>) -> bool {
+    if age_ms < 0.0 || age_ms >= PERCEPTION_MAX_AGE_MS {
+        return false;
+    }
+    match last_event_age_ms {
+        Some(gap) => gap < PERCEPTION_MAX_EVENT_GAP_MS,
+        None => age_ms < PERCEPTION_MAX_EVENT_GAP_MS,
+    }
+}
+
+fn perception_usable_now() -> bool {
+    let now = crate::hasher::types::now_millis();
+    crate::mcp::perception::with_snapshot(|s| {
+        let gap = if s.last_event_ms > 0.0 { Some(now - s.last_event_ms) } else { None };
+        perception_is_fresh(now - s.taken_ms, gap)
+    })
+    .unwrap_or(false)
+}
+
+/// Scan-time entity read: `query_entity` shape, snapshot-first. `kind` is
+/// one of `struct` / `planet` / `player` / `fleet`. An object the snapshot
+/// does not know (created since the refresh, or pruned) falls through to the
+/// chain, so a fresh id is never mistaken for a missing one.
+pub async fn scan_entity(client: &CosmosClient, kind: &str, id: &str) -> Result<(Value, ReadSource), String> {
+    if perception_usable_now() {
+        let hit = crate::mcp::perception::with_snapshot(|s| match kind {
+            "struct" => s.struct_entity(id),
+            "planet" => s.planet_entity(id),
+            "player" => s.player_entity(id),
+            "fleet" => s.fleet_entity(id),
+            _ => None,
+        })
+        .flatten();
+        if let Some(v) = hit {
+            return Ok((v, ReadSource::Snapshot));
+        }
+    }
+    client.query_entity(kind, id).await.map(|v| (v, ReadSource::Chain))
+}
+
+/// Scan-time [`player_struct_ids`], snapshot-first.
+pub async fn scan_player_struct_ids(client: &CosmosClient, pid: &str) -> (Vec<String>, ReadSource) {
+    if perception_usable_now() {
+        if let Some(ids) = crate::mcp::perception::with_snapshot(|s| s.player_struct_ids(pid)) {
+            if !ids.is_empty() {
+                return (ids, ReadSource::Snapshot);
+            }
+        }
+    }
+    (player_struct_ids(client, pid).await, ReadSource::Chain)
+}
+
+/// Scan-time [`player_structs`], snapshot-first.
+pub async fn scan_player_structs(client: &CosmosClient, pid: &str) -> (Vec<Value>, ReadSource) {
+    if perception_usable_now() {
+        if let Some(v) = crate::mcp::perception::with_snapshot(|s| s.player_structs(pid)) {
+            if !v.is_empty() {
+                return (v, ReadSource::Snapshot);
+            }
+        }
+    }
+    (player_structs(client, pid).await, ReadSource::Chain)
+}
+
+/// VERIFY read: always the chain, and the result is folded back into the
+/// snapshot so the next scan already reflects it. Use this for the one read
+/// a loop does right before signing.
+pub async fn verify_struct_entity(client: &CosmosClient, sid: &str) -> Result<Value, String> {
+    let v = client.query_entity("struct", sid).await?;
+    crate::mcp::perception::absorb_struct_entity(&v);
+    Ok(v)
+}
+
 /// Max player bodies in flight per scan. Each body does a handful of LCD reads
 /// and possibly one webview sign, so this also caps simultaneous LCD requests
 /// and sign events. 8–12 is the working band. This is the CEILING; the live
@@ -569,5 +674,33 @@ mod tests {
         })
         .await;
         assert_eq!(done.load(Ordering::SeqCst), 9, "one panic, nine completions");
+    }
+}
+
+#[cfg(test)]
+mod perception_shim_tests {
+    use super::*;
+
+    #[test]
+    fn a_young_snapshot_with_a_live_feed_is_fresh() {
+        assert!(perception_is_fresh(60_000.0, Some(5_000.0)));
+    }
+
+    #[test]
+    fn a_young_snapshot_with_no_frames_yet_is_fresh_until_the_gap_elapses() {
+        assert!(perception_is_fresh(30_000.0, None));
+        assert!(!perception_is_fresh(PERCEPTION_MAX_EVENT_GAP_MS + 1.0, None), "quiet feed, snapshot past the gap");
+    }
+
+    #[test]
+    fn a_dead_feed_makes_any_snapshot_stale() {
+        assert!(!perception_is_fresh(60_000.0, Some(PERCEPTION_MAX_EVENT_GAP_MS)));
+        assert!(!perception_is_fresh(60_000.0, Some(3_600_000.0)));
+    }
+
+    #[test]
+    fn an_old_snapshot_is_stale_even_with_a_live_feed() {
+        assert!(!perception_is_fresh(PERCEPTION_MAX_AGE_MS, Some(1_000.0)));
+        assert!(!perception_is_fresh(-1.0, Some(1_000.0)), "clock skew never counts as fresh");
     }
 }

@@ -29,7 +29,7 @@ fn client() -> &'static Client {
 /// A Cosmos `next_key` is base64, which contains '+', '/' and '=' — all of
 /// which change meaning inside a query string. Percent-encode them or page 2
 /// silently returns page 1 (or an error).
-fn encode_pagination_key(key: &str) -> String {
+pub(crate) fn encode_pagination_key(key: &str) -> String {
     key.chars()
         .map(|c| match c {
             '+' => "%2B".to_string(),
@@ -228,6 +228,53 @@ impl CosmosClient {
     pub async fn lcd_get(&self, path: &str) -> Result<Value, String> {
         let base = self.reactor_api.read().unwrap().clone();
         get_json(&format!("{}{}", base.trim_end_matches('/'), path)).await
+    }
+
+    /// Bulk LCD GET for whole-store page walks (`mcp::perception`). Returns
+    /// the body plus the chain height and server wall-clock the page was
+    /// served at (`grpc-metadata-x-cosmos-block-height`, `x-server-time`), so
+    /// a snapshot can be ordered against GRASS frames.
+    ///
+    /// Uses its own HTTP client: the shared one is tuned for thousands of
+    /// tiny entity reads (15 s timeout), while a 60k-row page is ~2.5 MB and
+    /// takes 1–6 s on a quiet node — a loaded node would trip the small
+    /// timeout and turn one big read into a retry storm. Not retried here:
+    /// the caller decides whether a failed snapshot matters.
+    pub async fn lcd_get_bulk(&self, path: &str) -> Result<(Value, u64, f64), String> {
+        static BULK_CLIENT: OnceLock<Client> = OnceLock::new();
+        let c = BULK_CLIENT.get_or_init(|| {
+            Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(90))
+                .pool_max_idle_per_host(4)
+                .build()
+                .expect("failed to build bulk HTTP client")
+        });
+        let base = self.reactor_api.read().unwrap().clone();
+        let url = format!("{}{}", base.trim_end_matches('/'), path);
+        let resp = c.get(&url).send().await.map_err(|e| format!("HTTP error: {}", e))?;
+        let status = resp.status();
+        let height = resp
+            .headers()
+            .get("grpc-metadata-x-cosmos-block-height")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let server_time = resp
+            .headers()
+            .get("x-server-time")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let body = resp.text().await.map_err(|e| format!("Read error: {}", e))?;
+        if !status.is_success() {
+            if status.as_u16() == 429 || status.is_server_error() {
+                crate::mcp::loop_util::report_failure();
+            }
+            return Err(format!("API returned {}: {}", status, body.chars().take(300).collect::<String>()));
+        }
+        let v: Value = serde_json::from_str(&body).map_err(|e| format!("JSON parse error: {}", e))?;
+        Ok((v, height, server_time))
     }
 
     /// How many of an entity type exist on-chain right now, via the LCD's
