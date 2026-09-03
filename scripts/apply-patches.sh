@@ -337,19 +337,30 @@ MapStructLottieAnimationSVG.prototype._swapCanvasImage = function (targetClass, 
   var renderer = this.animation && this.animation.renderer;
   var targets = walk(renderer && renderer.elements, []);
   if (!targets.length) return Promise.resolve();
+  // Lottie paints frame 0 the moment the bundle loads — BEFORE DOMLoaded fires
+  // and before any swap — and a canvas keeps that paint until the next
+  // render. Measured live: a first-time art preload took ~320 ms, and for
+  // that whole window the tile showed the template's Cruiser (the SVG path
+  // never did: it empties the <g> synchronously). So mirror that: blank the
+  // layer NOW and force a redraw, then redraw again when the real art lands.
+  var redraw = function () {
+    try {
+      var an = self.animation;
+      if (an && an.renderer && an.isLoaded) an.renderer.renderFrame(an.currentFrame, true);
+    } catch (e) { /* a torn-down renderer has nothing to repaint */ }
+  };
   var apply = function (img) {
     if (!self.animation) return;
     if (generation !== undefined && generation !== self._configGen) return;
     targets.forEach(function (e) { e.img = img; });
+    redraw();
   };
-  if (!newImageSrc) {
-    // Nothing to show in this slot: a 1×1 transparent canvas draws nothing.
-    var blank = document.createElement('canvas');
-    blank.width = 1;
-    blank.height = 1;
-    apply(blank);
-    return Promise.resolve();
-  }
+  // A 1×1 transparent canvas draws nothing.
+  var blank = document.createElement('canvas');
+  blank.width = 1;
+  blank.height = 1;
+  apply(blank);
+  if (!newImageSrc) return Promise.resolve();
   return MapStructLottieAnimationSVG._preloadImage(newImageSrc)
     .catch(function () { return null; })
     .then(function (img) {
