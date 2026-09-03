@@ -110,6 +110,9 @@ structs-universe/
 │           ├── tx_queue.rs   # Transaction signing bridge (Rust ↔ JS CosmJS)
 │           ├── ui_bridge.rs  # Agent-driven UI directive bridge (Rust → JS, prompt round-trip)
 │           ├── vplayer_bridge.rs # Virtual-player bridge (Rust → JS signing/derivation round-trip)
+│           ├── native_signer.rs  # Native virtual-player signer (keychain-held key, LCD broadcast; sign_mode native)
+│           ├── chain_codec.rs    # JSON payload → protobuf via the embedded chain descriptor set
+│           ├── structs_chain.binpb # Chain FileDescriptorSet (scripts/gen-chain-descriptor.sh)
 │           ├── virtual_players.rs # Virtual-player registry (public ids only; no keys)
 │           ├── combat.rs     # Pure combat math for the attack simulator
 │           ├── error_translator.rs  # Chain error → human message

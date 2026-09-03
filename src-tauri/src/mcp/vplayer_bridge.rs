@@ -96,6 +96,8 @@ pub fn health() -> serde_json::Value {
         // the 2026-08-20 outage this page showed "ok" for 100 minutes.
         "client_saturated": is_saturated(),
         "consecutive_client_failures": CONSEC_CLIENT_FAILURES.load(Ordering::Relaxed),
+        "sign_mode": sign_mode(),
+        "native_signer": crate::mcp::native_signer::health(),
     })
 }
 
@@ -212,7 +214,7 @@ fn claim_probe_slot() -> bool {
 static ACCOUNT_LOCKS: std::sync::LazyLock<std::sync::Mutex<HashMap<i64, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-fn account_lock(index: i64) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn account_lock(index: i64) -> std::sync::Arc<tokio::sync::Mutex<()>> {
     let mut m = ACCOUNT_LOCKS.lock().unwrap();
     m.entry(index)
         .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
@@ -347,29 +349,87 @@ pub async fn call(
 /// Convenience wrapper for the common "sign & broadcast as HD index N" op —
 /// builds the `{index, type_url, payload}` args the façade's `sign` handler
 /// expects. `index` 0 is the primary's key; >= 1 are the virtual players.
-/// How the façade returns a sign: `sync` waits for block inclusion (the
-/// DeliverTx result comes back inline, p50 6.1 s); `async` returns once the
-/// mempool accepts the tx and the settlement arrives later as a `tx_settled`
-/// event. Set from `McpConfig::sign_mode` at startup and at runtime via
+/// How a virtual-player sign is carried out and returned. Set from
+/// `McpConfig::sign_mode` at startup and at runtime via
 /// `structs_system config set {sign_mode}`.
-static SIGN_ASYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+///
+/// * `sync` — the webview's CosmJS client signs and waits for block inclusion
+///   (the DeliverTx result comes back inline, p50 6.1 s).
+/// * `async` — the webview signs and returns once the mempool accepts the
+///   tx; settlement arrives later as a `tx_settled` event.
+/// * `native` / `native_async` — Rust signs and broadcasts itself
+///   (`native_signer`), with the same two return contracts. While no key has
+///   been handed over yet these fall back to the webview path, counted and
+///   logged, so nothing stalls.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SignMode {
+    Sync,
+    Async,
+    Native,
+    NativeAsync,
+}
+
+impl SignMode {
+    pub const ALL: [SignMode; 4] = [SignMode::Sync, SignMode::Async, SignMode::Native, SignMode::NativeAsync];
+
+    pub fn parse(s: &str) -> Option<SignMode> {
+        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "sync" => Some(SignMode::Sync),
+            "async" => Some(SignMode::Async),
+            "native" | "native_sync" => Some(SignMode::Native),
+            "native_async" => Some(SignMode::NativeAsync),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SignMode::Sync => "sync",
+            SignMode::Async => "async",
+            SignMode::Native => "native",
+            SignMode::NativeAsync => "native_async",
+        }
+    }
+
+    pub fn is_native(self) -> bool {
+        matches!(self, SignMode::Native | SignMode::NativeAsync)
+    }
+
+    pub fn is_async(self) -> bool {
+        matches!(self, SignMode::Async | SignMode::NativeAsync)
+    }
+
+    /// The mode the JS façade should use when this mode is carried out (or
+    /// falls back) through the webview.
+    fn js_name(self) -> &'static str {
+        if self.is_async() {
+            "async"
+        } else {
+            "sync"
+        }
+    }
+}
+
+static SIGN_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn current_sign_mode() -> SignMode {
+    SignMode::ALL[SIGN_MODE.load(std::sync::atomic::Ordering::Relaxed) as usize % SignMode::ALL.len()]
+}
 
 pub fn sign_mode() -> &'static str {
-    if SIGN_ASYNC.load(std::sync::atomic::Ordering::Relaxed) {
-        "async"
-    } else {
-        "sync"
-    }
+    current_sign_mode().name()
 }
 
 /// Returns false (and changes nothing) for an unknown mode.
 pub fn set_sign_mode(mode: &str) -> bool {
-    match mode {
-        "async" => SIGN_ASYNC.store(true, std::sync::atomic::Ordering::Relaxed),
-        "sync" => SIGN_ASYNC.store(false, std::sync::atomic::Ordering::Relaxed),
-        _ => return false,
+    match SignMode::parse(mode) {
+        Some(m) => {
+            let idx = SignMode::ALL.iter().position(|x| *x == m).unwrap_or(0) as u8;
+            SIGN_MODE.store(idx, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        None => false,
     }
-    true
 }
 
 pub async fn sign_action(
@@ -379,10 +439,17 @@ pub async fn sign_action(
     payload: Value,
     timeout_secs: u64,
 ) -> Result<Value, String> {
+    let mode = current_sign_mode();
+    if mode.is_native() {
+        if crate::mcp::native_signer::is_ready() {
+            return crate::mcp::native_signer::sign(app_handle, index, type_url, payload, mode.is_async()).await;
+        }
+        crate::mcp::native_signer::note_fallback();
+    }
     call(
         app_handle,
         "sign",
-        serde_json::json!({ "index": index, "type_url": type_url, "payload": payload, "mode": sign_mode() }),
+        serde_json::json!({ "index": index, "type_url": type_url, "payload": payload, "mode": mode.js_name() }),
         timeout_secs,
     )
     .await

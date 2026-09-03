@@ -47,6 +47,12 @@ tower = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tauri-plugin-window-state = "2.4.1"
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+cosmrs = { version = "0.22", features = ["bip32"] }
+prost-reflect = { version = "0.16", features = ["serde"] }
+bip39 = "2"
+keyring = "4"
+zeroize = "1"
+prost = "0.14"
 # Native notifications (macOS uses UNUserNotificationCenter via objc2)
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", features = ["exception"] }

@@ -7,7 +7,7 @@ use crate::mcp::guild_api::GuildApiClient;
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
-fn client() -> &'static Client {
+pub(crate) fn client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {
         Client::builder()
             // Bounded so a dead/unroutable LCD fails a scan in seconds instead
@@ -72,7 +72,7 @@ fn parse_permission_page(v: &Value, player_id: &str) -> Vec<(String, u64)> {
 /// One shared GET with a single jittered retry on transport errors, timeouts,
 /// 429s, and 5xx — safe because these are idempotent reads. Retried-and-still-
 /// failing pressure errors feed the AIMD loop-concurrency controller.
-async fn get_json(url: &str) -> Result<Value, String> {
+pub(crate) async fn get_json(url: &str) -> Result<Value, String> {
     let mut last_err = String::new();
     for attempt in 0..2 {
         if attempt > 0 {
@@ -124,6 +124,12 @@ fn reactor_api_cell() -> &'static Arc<RwLock<String>> {
             .unwrap_or_else(|| "http://localhost:1317".to_string());
         Arc::new(RwLock::new(url))
     })
+}
+
+/// The active guild's LCD base (no trailing slash) — what every read and,
+/// in native sign mode, every broadcast goes to.
+pub(crate) fn reactor_api_base() -> String {
+    reactor_api_cell().read().unwrap().trim_end_matches('/').to_string()
 }
 
 fn guild_api_cell() -> &'static Arc<RwLock<String>> {

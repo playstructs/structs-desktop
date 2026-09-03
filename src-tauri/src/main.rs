@@ -70,6 +70,9 @@ fn main() {
             mcp::tx_queue::mcp_transaction_response,
             mcp::ui_bridge::mcp_ui_response,
             mcp::vplayer_bridge::vplayer_response,
+            mcp::native_signer::native_signer_import,
+            mcp::native_signer::native_signer_status,
+            mcp::native_signer::native_signer_forget,
             mcp::event_buffer::push_game_event,
             mcp::event_buffer::mcp_grass_recent,
             mcp::txq_bridge::txq_response,
@@ -605,6 +608,9 @@ try {{
             // Signing-throughput knobs (persisted in mcp_config.json, live-
             // settable via `structs_system config`).
             mcp::vplayer_bridge::set_sign_mode(&mcp_config.sign_mode);
+            // Native signer: load the key from the OS keychain (off-thread);
+            // until the game hands one over, native modes fall back to the webview.
+            mcp::native_signer::init();
             if let Some(cap) = mcp_config.tx_gate_cap {
                 mcp::tx_gate::set_cap(cap);
             }

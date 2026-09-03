@@ -24,11 +24,14 @@ pub struct McpConfig {
     /// and that difference is the player's to choose.
     #[serde(default)]
     pub comms_status_enabled: bool,
-    /// How virtual-player signs return: `"sync"` (default) waits for block
-    /// inclusion and returns the DeliverTx result — p50 6.1 s per sign;
-    /// `"async"` returns after the mempool accepts the tx (~0.2 s) and the
-    /// settlement arrives later as a `tx_settled` event. Runtime-settable via
-    /// `structs_system config set {sign_mode}`; measured, not guessed.
+    /// How virtual-player signs are carried out and returned: `"sync"`
+    /// (default) signs in the webview and waits for block inclusion — p50
+    /// 6.1 s per sign; `"async"` signs in the webview and returns after the
+    /// mempool accepts the tx (~0.2 s), settling later as a `tx_settled`
+    /// event; `"native"` / `"native_async"` sign in Rust (`native_signer`)
+    /// with the same two return contracts and no webview round-trip.
+    /// Runtime-settable via `structs_system config set {sign_mode}`;
+    /// measured, not guessed.
     #[serde(default = "default_sign_mode")]
     pub sign_mode: String,
     /// Admission-gate cap override (see `tx_gate`). `None` = the built-in 4.

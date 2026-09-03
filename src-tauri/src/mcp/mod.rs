@@ -1,5 +1,7 @@
 pub mod callsign;
+pub mod chain_codec;
 pub mod combat;
+pub mod native_signer;
 pub mod combat_lists;
 pub mod auto_raid;
 pub mod auto_response;

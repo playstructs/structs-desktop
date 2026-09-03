@@ -1664,6 +1664,40 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     console.info('[Structs] virtual-players bridge enabled');
   })();
 
+  // ── Native signer key handoff ──
+  // Rust signs virtual players itself when sign_mode is "native"; it needs the
+  // mnemonic once. The webapp already keeps it in localStorage (gameState);
+  // Rust verifies it against the signed-in device address before accepting and
+  // moves it into the OS keychain. Re-offered whenever the mnemonic changes
+  // (sign-out / sign-in). Never logged.
+  (function setupNativeSignerHandoff() {
+    if (!window.__TAURI__ || !window.__TAURI__.core) return;
+    var offered = null, attempted = null, failures = 0;
+    function tick() {
+      try {
+        var gs = window.gameState;
+        var m = gs && gs.mnemonic;
+        var addr = gs && gs.signingAccount && gs.signingAccount.address;
+        if (!m || !addr || m === offered) return;
+        if (m !== attempted) { attempted = m; failures = 0; }
+        if (failures >= 5) return;
+        var handing = m;
+        window.__TAURI__.core.invoke('native_signer_import', { mnemonic: handing, address: addr })
+          .then(function (r) {
+            offered = handing;
+            console.info('[Structs] native signer key ' + (r && r.changed ? 'stored' : 'confirmed') + ' for ' + addr
+              + (r && r.keychain_error ? ' (memory only: ' + r.keychain_error + ')' : ''));
+          })
+          .catch(function (e) {
+            failures++;
+            console.warn('[Structs] native signer key handoff failed (' + failures + '/5):', e);
+          });
+      } catch (e) { /* not signed in yet */ }
+    }
+    setInterval(tick, 5000);
+    tick();
+  })();
+
   // ── Signing-queue bridge (Team Ops TX page) ──
   // Same round-trip shape as the vplayer bridge: Rust emits structs:txq-request,
   // we dispatch to the injected __STRUCTS_TXQ__ façade (snapshot/mutate over the

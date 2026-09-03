@@ -223,7 +223,9 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                         let _ = cfg.save();
                         applied.push(format!("sign_mode={mode}"));
                     } else {
-                        return err(format!("sign_mode must be \"sync\" or \"async\", got {mode:?}"));
+                        return err(format!(
+                            "sign_mode must be \"sync\", \"async\", \"native\" or \"native_async\", got {mode:?}"
+                        ));
                     }
                 }
                 if let Some(cap) = set.get("tx_gate_cap").and_then(|v| v.as_u64()) {
@@ -242,6 +244,7 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 "effective_loop_concurrency": loop_util::effective_max_concurrent(),
                 "loop_concurrency_ceiling": loop_util::MAX_CONCURRENT_PLAYERS,
                 "sign_mode": crate::mcp::vplayer_bridge::sign_mode(),
+                "native_signer": crate::mcp::native_signer::health(),
                 "tx_gate_cap": crate::mcp::tx_gate::cap(),
                 "watchdog_remediate": crate::mcp::policy::POLICY_ENGINE
                     .read()
