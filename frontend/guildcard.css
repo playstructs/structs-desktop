@@ -1,0 +1,43 @@
+/* The guild card — the player card's sibling (see playercard.css, which
+ * carries the shared frame, readings, doors and grid). This file adds only
+ * what a guild has that a player does not: an EMBLEM instead of a portrait,
+ * a tag before the name, and the inline chip.
+ *
+ * Hand-authored, top-level in frontend/ for the same reason playercard.css is.
+ */
+
+/* ── emblem: the guild's logo shown whole, or the guild glyph ─────────── */
+.gc-emblem {
+  position: relative; flex: none; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  width: 72px; height: 72px; box-sizing: content-box;
+  border: 1px solid var(--border-subtle); background: var(--surface-default);
+  color: var(--accent-secondary);
+}
+.gc-emblem img { max-width: 100%; max-height: 100%; width: auto; height: auto; }
+.gc-emblem.gc-xs { width: 24px; height: 24px; border: 0 none; background: transparent; }
+
+/* ── identity ─────────────────────────────────────────────────────────── */
+.gc-tag { color: var(--accent-secondary); flex: none; }
+
+/* ── the card: readings as a 2×2 block beside the emblem ──────────────── */
+.gc-card .pc-reads {
+  flex: 1 1 auto; display: grid; grid-template-columns: auto auto;
+  gap: var(--spacing-md) var(--spacing-xl);
+  justify-content: end; justify-items: end; align-items: center;
+}
+.gc-card .pc-reads .pc-res:only-child { grid-column: 1 / span 2; }
+
+/* ── the chip: one line, for a guild named inside something else ─────── */
+.gc-chip {
+  display: inline-flex; align-items: center; gap: var(--spacing-md);
+  max-width: 100%; min-width: 0;
+  padding: var(--spacing-xs) var(--spacing-md) var(--spacing-xs) var(--spacing-xs);
+  border: 1px solid var(--border-subtle); background: var(--surface-player-body);
+  text-align: left; vertical-align: middle; text-decoration: none;
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+  text-transform: uppercase; color: var(--text-body);
+}
+.gc-chip .pc-name { gap: var(--spacing-sm); min-width: 0; }
+.gc-chip .pc-id { flex: none; }
+a.gc-chip.pc-mod-clickable:hover { border-color: var(--accent-primary); }

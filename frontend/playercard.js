@@ -295,6 +295,10 @@
   }
 
   root.StructsPlayerCard = {
+    // The building blocks, for the card's siblings (guildcard.js draws a guild
+    // with the same readings, doors and frame). One vocabulary, one file.
+    parts: { el: el, icon: icon, badge: badge, reading: reading, actions: actions,
+             wireClick: wireClick, BADGE_MODS: BADGE_MODS },
     CHARGE_LEVEL_THRESHOLDS: CHARGE_LEVEL_THRESHOLDS,
     BATTERY_CHUNKS: BATTERY_CHUNKS,
     chargeLevel: chargeLevel,

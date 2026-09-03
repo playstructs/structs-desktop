@@ -334,6 +334,36 @@
   }
   Board.reachActions = reachActions;
 
+  // The doors a guild card carries: talk ABOUT it in Comms. (A guild's site
+  // and its rooms are the guild's own services; they get doors only where the
+  // record says they exist — see Comms' network cards.)
+  function guildActions(g) {
+    var gid = g && (g.guild_id || g.id);
+    if (!gid) return [];
+    var who = g.name || gid;
+    return [
+      { icon: 'icon-outgoing', title: 'Share ' + who + ' in Comms', onClick: function (ev, a) {
+        Board.T.core.invoke('matrix_share', { text: String(gid) })
+          .catch(function (err) { reachFailed(a, 'share', { name: who, player_id: gid }, err); });
+      } },
+    ];
+  }
+  Board.guildActions = guildActions;
+
+  // A guild named inside something else — the shared inline chip.
+  // `guild` is whatever record the caller has (guild API row, config entry,
+  // or just an id); the chip draws what it is given and nothing it is not.
+  function guildChip(guild, gid, opts) {
+    var g = guild || {};
+    return window.StructsGuildCard.chip({
+      id: g.guild_id || g.id || gid,
+      name: g.name || g.guild_name || g.label || null,
+      tag: g.tag || g.guild_tag || null,
+      logo: g.logo || null,
+    }, opts || {});
+  }
+  Board.guildChip = guildChip;
+
   // A click that fails has to LOOK like it failed.
   //
   // These used to put the reason in a `title` and nothing else, so pressing
@@ -2409,8 +2439,7 @@
     // The guild's NAME, as the game's own profile shows it — with the id
     // beside it, because this page is also where you come to look one up.
     var gid = entStr(ent, 'guildId');
-    det.appendChild(H.row('Guild', guild && guild.name
-      ? guild.name + (gid ? ' \u00b7 ' + gid : '') : (gid || '\u2014')));
+    det.appendChild(H.row('Guild', gid ? guildChip(guild, gid) : '\u2014'));
     det.appendChild(H.row('Player ID', pid));
     det.appendChild(H.row('Address', entStr(ent, 'primaryAddress') || '—'));
     wrap.appendChild(H.card('Player Details', det));
@@ -3822,9 +3851,9 @@
     var qbody = H.el('div');
     (lists.priority_guilds || []).forEach(function (g) {
       var r = H.el('div', 'cfg-row');
-      var l = H.el('span');
-      l.appendChild(H.el('i', 'icon-guild'));
-      l.appendChild(document.createTextNode(' ' + (g.label || g.guild_id) + '  ×' + g.weight));
+      var l = H.el('span', 'row-title');
+      l.appendChild(guildChip(g, g.guild_id));
+      l.appendChild(H.el('span', 'fig', '\u00d7' + g.weight));
       r.appendChild(l);
       r.appendChild(iconBtn('icon-subtract', 'Remove ' + g.guild_id, function () {
         warSet({ action: 'remove', kind: 'priority_guild', id: g.guild_id });
@@ -3842,9 +3871,8 @@
     var abody = H.el('div');
     (lists.allies || []).forEach(function (gid) {
       var r = H.el('div', 'cfg-row');
-      var l = H.el('span');
-      l.appendChild(H.el('i', 'icon-guild'));
-      l.appendChild(document.createTextNode(' ' + gid));
+      var l = H.el('span', 'row-title');
+      l.appendChild(guildChip(null, gid));
       r.appendChild(l);
       r.appendChild(iconBtn('icon-subtract', 'Stop protecting ' + gid, function () {
         warSet({ action: 'remove', kind: 'ally', id: gid });

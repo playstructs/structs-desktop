@@ -73,11 +73,14 @@ const BUDGET = {
   'pfp.js':             [0, 0],
   'units.js':           [0, 0],
   'playercard.js':      [0, 0],
+  'guildcard.js':       [0, 0],
   // Hand-authored stylesheets live beside the windows (css/ is regenerated)
   // and are audited the same way. The px here are the portrait's native 72px
   // art, 32px icon doors, a 6px presence dot and 1px hairlines.
   'playercard.css':     [0, 17],
   'chat-rows.css':      [0, 19],
+  // The guild emblem (72px / 24px) and its 1px frame.
+  'guildcard.css':      [0, 8],
   'ui-telemetry.js':    [0, 0],
   'index.html':         [0, 0],
 };

@@ -402,7 +402,31 @@
     return box;
   }
 
+  /* A GUILD named in chat is the shared guild card (guildcard.js), the
+   * player card's sibling. Rust sends label/value rows (Owner, Comms); they
+   * become readings that say what they are as a hint, since neither has a
+   * glyph of its own. */
+  function guildRefCard(card) {
+    var box = el('div', 'chat-ref chat-kind-guild chat-mod-card');
+    var tag = /^\[([^\]]+)\]/.exec(card.subtitle || '');
+    var acts = cardActions(card).map(function (a) {
+      return { icon: a.icon || 'icon-info', title: a.label,
+               onClick: function () { runCardAction(card, a.key, box); } };
+    });
+    box.appendChild(window.StructsGuildCard.card({
+      id: card.id,
+      name: card.title || null,
+      tag: tag ? tag[1] : null,
+      logo: card.logo || null,
+      readings: (card.rows || []).map(function (r) {
+        return { value: r.value, icon: READING_ICONS[r.label] || null, title: r.label };
+      }),
+    }, { actions: acts }));
+    return box;
+  }
+
   function refCard(card) {
+    if (card.kind === 'guild' && window.StructsGuildCard) return guildRefCard(card);
     if (card.kind === 'player' && card.pfp_attrs && window.StructsPlayerCard) return playerRefCard(card);
     // ONE frame, not three. The card used to nest a bordered header, a
     // bordered body and bordered buttons inside a bordered card — four
@@ -3684,7 +3708,19 @@
     var idCard = el('div', 'sui-data-card');
     idCard.appendChild(el('div', 'sui-data-card-header sui-text-header', 'Identity'));
     var idBody = el('div', 'sui-data-card-body');
-    idBody.appendChild(kv('Network', net ? (net.guild_name || net.guild_id) : '—'));
+    // The network is a guild: the shared chip, not a bare name.
+    var netRow = el('div', 'chat-kv');
+    netRow.appendChild(el('div', null, 'Network'));
+    var netVal = el('div');
+    if (net && window.StructsGuildCard) {
+      netVal.appendChild(window.StructsGuildCard.chip({
+        id: net.guild_id, name: net.guild_name || null, tag: net.tag || null, logo: net.logo || null,
+      }));
+    } else {
+      netVal.textContent = '—';
+    }
+    netRow.appendChild(netVal);
+    idBody.appendChild(netRow);
     idBody.appendChild(kv('Homeserver', net ? net.homeserver : '—'));
     idBody.appendChild(kv('Matrix ID', S.profile ? S.profile.user_id : (net && net.user_id) || '—'));
     idBody.appendChild(kv('Player', S.profile ? S.profile.display_name : '—'));

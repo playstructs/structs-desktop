@@ -87,7 +87,9 @@ cat > "$FIX" <<'EOF'
     GUILDS.push({
       guild_id: '0-' + g,
       name: ['SN Corp', 'Oh Energy', 'Void Miners', 'Deep Anchor', 'Redline'][g - 1],
-      logo: null,
+      // SN Corp publishes a mark (the game's own asset); the rest do not.
+      logo: g === 1 ? 'img/logo-snc.gif' : null,
+      tag: ['SNC', 'OH', 'VM', 'DA', 'RL'][g - 1],
       members: g === 1 ? 2489 : 200 - g * 30,
       alpha: String((6 - g) * 6.6e8),   // string numeric on purpose
       planets_complete: (6 - g) * 31,

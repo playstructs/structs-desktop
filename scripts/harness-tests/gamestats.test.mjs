@@ -76,6 +76,15 @@ async function until(fn, ms = 5000) {
   check('guild leaderboard renders', guilds && guilds.children.length === 5,
     'got ' + (guilds ? guilds.children.length : 'none'));
   check('guild order is the directory order', /SN Corp/.test(guilds.children[0].textContent));
+  check('a guild is the shared guild card', guilds.children[0].classList.contains('gc-card')
+    && guilds.children[0].getAttribute('data-guild-id') === '0-1');
+  check('…with its tag, mark and four readings',
+    /\[SNC\]/.test(guilds.children[0].textContent)
+    && !!guilds.children[0].querySelector('.gc-emblem img')
+    && guilds.children[0].querySelectorAll('.pc-res').length === 4);
+  check('…and no captions', !/Members|Capacity|Planets/.test(guilds.children[0].textContent),
+    guilds.children[0].textContent.slice(0, 80));
+  check('a guild without a mark gets the glyph', !!guilds.children[1].querySelector('.gc-emblem .icon-guild'));
   check('sparklines render', body.querySelectorAll('#gs-trends svg path').length >= 5);
   check('7-day history sparklines render from the aggregate endpoint',
     /stored ore — 7 days/.test(body.textContent) && /structs draw — 7 days/.test(body.textContent)

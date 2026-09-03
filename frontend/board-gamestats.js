@@ -242,19 +242,27 @@
     if (!rows.length) {
       body.appendChild(H.stateBlock('info', 'Loading…'));
     } else {
+      // Guild CARDS (guildcard.js) — the player card's sibling, in the same
+      // grid the roster uses. The result-table container stays so the card
+      // keeps its scroll budget; `.pc-grid` widens the track for cards.
       var table = H.resultTable();
+      table.classList.add('pc-grid');
       rows.forEach(function (g, i) {
         var e = energyByGuild[g.guild_id];
-        table.appendChild(H.resultRow({
-          icon: 'sui-icon-players',
-          title: '#' + (i + 1) + '  ' + (g.name || g.guild_id),
-          subtitle: g.guild_id,
-          chips: [
-            H.statTile('Members', H.fmtInt(num(g.members))),
-            H.statTile('Alpha', H.fmtAlpha(num(g.alpha)), 'sui-icon-alpha-matter'),
-            H.statTile('Capacity', e ? H.fmtWatts(num(e.capacity)) : '—', 'sui-icon-energy'),
-            H.statTile('Planets', H.fmtInt(num(g.planets_complete))),
+        table.appendChild(window.StructsGuildCard.card({
+          id: g.guild_id,
+          name: g.name || null,
+          tag: g.tag || null,
+          logo: g.logo || null,
+          badge: { text: '#' + (i + 1), mod: 'default' },
+          readings: [
+            { value: H.fmtInt(num(g.members)), icon: 'sui-icon-players', title: 'Members' },
+            { value: H.fmtAlpha(num(g.alpha)), icon: 'sui-icon-alpha-matter', title: 'Alpha infused' },
+            { value: e ? H.fmtWatts(num(e.capacity)) : '—', icon: 'sui-icon-energy', title: 'Capacity' },
+            { value: H.fmtInt(num(g.planets_complete)), icon: 'sui-icon-md icon-planet', title: 'Planets' },
           ],
+        }, {
+          actions: Board.guildActions ? Board.guildActions(g) : [],
         }));
       });
       body.appendChild(table);
