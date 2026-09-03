@@ -62,8 +62,12 @@ async function until(fn, ms = 5000) {
   check('rank + name + tag on row 1', /#1\s/.test(first.textContent) && /\[G\d\]/.test(first.textContent),
     first.textContent.slice(0, 60));
   check('string numerics format (players tile)', body.textContent.includes('2,662'));
-  check('default metric is alpha, Kg ladder', /alpha/.test(first.textContent) && /49\.34Kg/.test(first.textContent),
+  // No word under the number: the glyph says alpha, the title says it on hover.
+  check('default metric is alpha, Kg ladder',
+    !!first.querySelector('.pc-res .sui-icon-alpha-matter') && /49\.34Kg/.test(first.textContent)
+    && !/alpha/.test(first.textContent),
     first.textContent.slice(0, 80));
+  check('a leaderboard row is the shared player row', first.classList.contains('pc-row'));
   const guilds = body.querySelectorAll('.sui-result-rows')[1];
   check('guild leaderboard renders', guilds && guilds.children.length === 5,
     'got ' + (guilds ? guilds.children.length : 'none'));
@@ -175,27 +179,27 @@ async function until(fn, ms = 5000) {
   await until(() => d.getElementById('gamestats-body')?.querySelector('.fstat'));
   // Presence arrives on its own promise and repaints, so wait for the row to
   // actually carry it rather than racing the first paint.
-  await until(() => d.querySelector('.ops-presence') || d.querySelector('.ops-reach'));
-  const rows = [...d.querySelectorAll('.sui-result-row')];
+  await until(() => d.querySelector('.pc-row .ops-presence') || d.querySelector('.pc-row .pc-act'));
+  const rows = [...d.querySelectorAll('.pc-row')];
   const player = rows.find((n) => n.querySelector('.ops-presence') ||
-    n.querySelector('.ops-reach'));
+    n.querySelector('.pc-act'));
   check('a leaderboard row carries the social affordances', !!player,
     rows.length ? rows[0].textContent.slice(0, 60) : 'no rows');
 
   if (player) {
     check('…whether they are around', !!player.querySelector('.ops-presence'),
       player.innerHTML.slice(0, 200));
-    const reach = player.querySelector('.ops-reach');
+    const reach = player.querySelector('.pc-actions');
     check('…and both ways to reach them',
-      reach && reach.querySelectorAll('a').length === 2,
-      reach ? String(reach.querySelectorAll('a').length) : 'none');
+      reach && reach.querySelectorAll('a.pc-act').length === 2,
+      reach ? String(reach.querySelectorAll('a.pc-act').length) : 'none');
     check('…one of which is a direct message',
       !!player.querySelector('.icon-phone'), player.innerHTML.slice(0, 200));
   }
 
   // A guild row is not a person and must offer neither.
-  const guild = rows.find((n) => /^#\d+\s+\S/.test(n.textContent.trim()) &&
-    !n.querySelector('.ops-reach') && n.textContent.includes('Members'));
+  const guild = [...d.querySelectorAll('.sui-result-row')].find((n) => /^#\d+\s+\S/.test(n.textContent.trim()) &&
+    !n.querySelector('.pc-act') && n.textContent.includes('Members'));
   if (guild) {
     check('a guild row offers no message link', !guild.querySelector('.icon-phone'),
       guild.textContent.slice(0, 40));
@@ -212,14 +216,15 @@ async function until(fn, ms = 5000) {
   const w = dom.window;
   const d = w.document;
   await until(() => d.getElementById('gamestats-body')?.querySelector('.fstat'));
-  await until(() => d.querySelector('.ops-reach'));
+  await until(() => d.querySelector('.pc-row .pc-act'));
 
   // Every matrix call refuses, the way it does when nothing is signed in.
   w.__HARNESS_REJECT__ = w.__HARNESS_REJECT__ || {};
   w.__HARNESS_REJECT__.matrix_message_player =
     'Comms is not connected — open Comms to sign in';
 
-  const link = d.querySelector('.ops-reach a');
+  // The first door on a player row is the direct message.
+  const link = d.querySelector('.pc-row .pc-act');
   link.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 120));
 
@@ -305,7 +310,8 @@ async function until(fn, ms = 5000) {
  */
 {
   console.log('\n— explore field names');
-  const pages = readFileSync(process.cwd() + '/frontend/board-pages.js', 'utf8');
+  // From the repo, not the cwd: `npm run test:all` runs inside harness-tests.
+  const pages = readFileSync(resolve(repo, 'frontend', 'board-pages.js'), 'utf8');
   const explore = pages.slice(pages.indexOf('EXPLORE \u2192 PLAYER'));
 
   check('identity is read from the nested Player object',

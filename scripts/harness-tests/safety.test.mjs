@@ -28,6 +28,7 @@ const FEDERATED = [
   'frontend/raidview.js',
   'frontend/board-pages.js',
   'frontend/board-gamestats.js',
+  'frontend/playercard.js',
 ];
 
 // Ways a string becomes markup rather than text.

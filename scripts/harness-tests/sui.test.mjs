@@ -72,6 +72,12 @@ const BUDGET = {
   'chatrow.js':         [0, 0],
   'pfp.js':             [0, 0],
   'units.js':           [0, 0],
+  'playercard.js':      [0, 0],
+  // Hand-authored stylesheets live beside the windows (css/ is regenerated)
+  // and are audited the same way. The px here are the portrait's native 72px
+  // art, 32px icon doors, a 6px presence dot and 1px hairlines.
+  'playercard.css':     [0, 17],
+  'chat-rows.css':      [0, 19],
   'ui-telemetry.js':    [0, 0],
   'index.html':         [0, 0],
 };
@@ -86,7 +92,7 @@ const BUDGET = {
  */
 console.log('\n— hardcoded values (budget: may fall, never rise)');
 const windowFiles = readdirSync(root + '/frontend')
-  .filter((f) => /\.(html|js)$/.test(f) && !f.startsWith('_'))
+  .filter((f) => /\.(html|js|css)$/.test(f) && !f.startsWith('_'))
   .sort();
 const unlisted = windowFiles.filter((f) => !(f in BUDGET));
 check('every window file has a budget', unlisted.length === 0,

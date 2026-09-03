@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="css/structicons.css" />
   <link rel="stylesheet" href="css/sui/sui.css" />
   <link rel="stylesheet" href="css/main.css" />
+  <link rel="stylesheet" href="playercard.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     /* ...except the handful of SUI components sized to a FIXED content width.
@@ -783,6 +784,11 @@
     #board-layout .sui-result-rows.sui-result-table.list-managed {
       max-height: none; overflow: visible;
     }
+    /* The Armada roster is a grid of player CARDS (playercard.css), which are
+       narrower than a result row: three across at the board's usual width. */
+    #board-layout .sui-result-rows.sui-result-table.pc-grid {
+      grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+    }
 
     /* A short list (loops, policies) should grow with the card — the internal
        scroll exists for the 180-row Armada roster, and here it just clipped the
@@ -1093,6 +1099,7 @@
   <script src="units.js"></script>
   <!-- Portrait composer: board.js aliases it at module load. -->
   <script src="pfp.js"></script>
+  <script src="playercard.js"></script>
   <script src="board-shim.js"></script>
   <script src="ui-telemetry.js"></script>
   <script src="board.js"></script>

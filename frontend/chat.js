@@ -367,7 +367,43 @@
     return actions;
   }
 
+  /* A PLAYER named in chat is the same card the roster shows.
+   *
+   * One component (playercard.js) draws every player in the app; the chat
+   * embed only supplies what the chain said and what a click should do. The
+   * readings Rust sends are label/value pairs; the labels map to the game's
+   * own glyphs, and a label with no glyph is shown as a small hint so nothing
+   * is dropped on the floor when a new row arrives.
+   */
+  var READING_ICONS = { Alpha: 'sui-icon-alpha-matter', Energy: 'sui-icon-energy', Ore: 'sui-icon-alpha-ore' };
+
+  function playerRefCard(card) {
+    var box = el('div', 'chat-ref chat-kind-player chat-mod-card');
+    var tag = /^\[([^\]]+)\]/.exec(card.subtitle || '');
+    var acts = cardActions(card).map(function (a) {
+      return { icon: a.icon || 'icon-info', title: a.label, key: a.key,
+               onClick: function () { runCardAction(card, a.key, box); } };
+    });
+    var pc = window.StructsPlayerCard.card({
+      id: card.id,
+      name: card.title || card.id,
+      pfp: card.pfp_attrs,
+      sub: tag ? '[' + tag[1] + ']' : null,
+      presence: presenceDot(card.id),
+      readings: (card.rows || []).map(function (r) {
+        return { value: r.value, icon: READING_ICONS[r.label] || null, title: r.label };
+      }),
+    }, {
+      actions: acts,
+      // The portrait is the shortest path to "look at this player's world".
+      onPortrait: card.planet_id ? function () { runCardAction(card, 'watch_planet', box); } : null,
+    });
+    box.appendChild(pc);
+    return box;
+  }
+
   function refCard(card) {
+    if (card.kind === 'player' && card.pfp_attrs && window.StructsPlayerCard) return playerRefCard(card);
     // ONE frame, not three. The card used to nest a bordered header, a
     // bordered body and bordered buttons inside a bordered card — four
     // competing rectangles for one summary. Now: a single surface with a

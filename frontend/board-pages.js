@@ -205,6 +205,9 @@
       empty: 'no players match these filters',
       onCounts: function () { updateArmadaChrome(); },
     });
+    // Cards, not rows: the list body takes the player-card grid (board.html
+    // overrides the 520px result-row track for `.pc-grid`).
+    armada.lv.body.classList.add('pc-grid');
     body.appendChild(armada.lv.node);
   }
 
@@ -229,34 +232,6 @@
    */
   function fmtEta(s) {
     return H.duration(s, { empty: null, zero: 'now' });
-  }
-
-  // Icons-only harvest line: [buried ore] N · [mine] eta · [refine] eta.
-  // Null fields (no planet read yet / no such struct / idle cycle) are simply
-  // omitted — absence IS the signal, no placeholder words.
-  function harvestTrio(r) {
-    var parts = [];
-    function piece(iconCls, text, title) {
-      var s = H.el('span', 'htrio');
-      s.title = title;
-      s.appendChild(H.el('i', iconCls));
-      s.appendChild(document.createTextNode(' ' + text));
-      return s;
-    }
-    if (r.planet_ore != null) {
-      parts.push(piece('icon-undiscovered-ore', ore(r.planet_ore), 'ore left on planet'));
-    }
-    var m = fmtEta(r.mine_eta_s);
-    if (m) parts.push(piece('icon-mine', m, 'next extraction ~'));
-    var f = fmtEta(r.refine_eta_s);
-    if (f) parts.push(piece('icon-refine', f, 'next refine ~'));
-    if (!parts.length) return null;
-    var line = H.el('span', 'htrio-line');
-    parts.forEach(function (p, i) {
-      if (i) line.appendChild(document.createTextNode('  '));
-      line.appendChild(p);
-    });
-    return line;
   }
 
   // Push the current roster at the list; it decides what actually changed.
@@ -341,6 +316,24 @@
   }
   Board.reachLinks = reachLinks;
 
+  // The same two doors as descriptors for the shared player card
+  // (playercard.js), which draws its own 32px icon buttons.
+  function reachActions(r) {
+    if (!r || !r.player_id) return [];
+    var who = r.player_name || r.name || r.player_id;
+    return [
+      { icon: 'icon-phone', title: 'Message ' + who, onClick: function (ev, a) {
+        Board.T.core.invoke('matrix_message_player', { playerId: r.player_id })
+          .catch(function (err) { reachFailed(a, 'message', r, err); });
+      } },
+      { icon: 'icon-outgoing', title: 'Share ' + who + ' in Comms', onClick: function (ev, a) {
+        Board.T.core.invoke('matrix_share', { text: r.player_id })
+          .catch(function (err) { reachFailed(a, 'share', r, err); });
+      } },
+    ];
+  }
+  Board.reachActions = reachActions;
+
   // A click that fails has to LOOK like it failed.
   //
   // These used to put the reason in a `title` and nothing else, so pressing
@@ -352,33 +345,6 @@
     anchor.title = 'could not ' + verb + ' ' + (r.name || r.player_id) + ': ' + err;
     var icon = anchor.querySelector('i');
     if (icon) icon.className = 'sui-icon-md icon-alert';
-  }
-
-  /* Open a Comms window that speaks AS this player.
-   *
-   * Only on the Armada roster, and only for players that are not the primary:
-   * every row there is one of OUR players, each a real account on chain with
-   * its own authority to talk, and the Matrix localpart IS the player id — so
-   * `1-271` already has an identity on the guild's homeserver. The primary
-   * gets no icon because its window is the ordinary Comms window, already one
-   * click away.
-   *
-   * Deliberately NOT added to `reachLinks`, which the leaderboards also use:
-   * those list the whole galaxy, and this must never appear beside a player
-   * whose keys we do not hold.
-   */
-  function speakAsLink(r) {
-    if (!r || !r.player_id || r.role === 'primary') return null;
-    var a = H.el('a', 'ops-refresh-btn');
-    a.href = 'javascript:void(0)';
-    a.title = 'Open Comms as ' + (r.player_name || r.player_id);
-    a.appendChild(H.el('i', 'sui-icon-md icon-member'));
-    a.addEventListener('click', function (e) {
-      e.stopPropagation();
-      Board.T.core.invoke('matrix_open_as', { playerId: r.player_id })
-        .catch(function (err) { reachFailed(a, 'open Comms as', r, err); });
-    });
-    return a;
   }
 
   function messageLink(r) {
@@ -442,86 +408,95 @@
     return wrap.childNodes.length ? wrap : null;
   }
 
-  function armadaRow(r) {
-    return (function () {
-      // Checkbox (vplayers only; primary is never a mass-action target).
-      var lead = null;
-      if (r.index != null) {
-        lead = H.checkbox(!!armada.selection[r.player_id], null, function (on) {
-          if (on) armada.selection[r.player_id] = true;
-          else delete armada.selection[r.player_id];
-          updateArmadaChrome();
-        });
-      }
-      // Title: name + role badge (the avatar frame already signals role, the
-      // badge names it in words).
-      var title = H.el('span', r.err ? 'err' : null);
-      // Before the name, the way Comms does it: whether this player is
-      // actually around right now, not merely on the roster.
-      var here = presenceDot(r.player_id);
-      if (here) title.appendChild(here);
-      title.appendChild(document.createTextNode(r.name + ' '));
-      // Every role gets its own badge. `raider` used to fall through to BAIT
-      // here as well as in the backend's role_str, so a player you had just
-      // assigned to the war machine still read as bait in the roster.
-      var ROLE_BADGE = {
-        primary: ['PRIME', 'warning'], productive: ['PROD', 'solid'],
-        raider: ['RAID', 'destructive'], bait: ['BAIT', 'default'],
-      };
-      var rb = ROLE_BADGE[r.role] || [String(r.role || '?').toUpperCase(), 'default'];
-      title.appendChild(H.badge(rb[0], rb[1]));
-      // Subtitle: PID (the native roster's identity line). Freshness is shown
-      // only when a row needs attention, so the common case stays clean; the
-      // rest (index, planet, last action) lives in the click-through detail.
-      var sub = H.el('span');
-      sub.appendChild(document.createTextNode('PID #' + r.player_id));
-      if (armadaAttention(r)) {
-        // `fetched_at_ms` is when WE last read this player, not when the player
-        // last acted — labelling it "idle" said the opposite of what it meant.
-        sub.appendChild(document.createTextNode(' · '));
-        sub.appendChild(H.el('span', 'attn',
-          r.err ? 'read failed' : 'last read ' + H.ago(r.fetched_at_ms) + ' ago'));
-      }
-      // Harvest trio — icons only, no words (tooltips explain): ore left on
-      // the planet · time to next mine completion · time to next refine.
-      var trio = harvestTrio(r);
-      if (trio) { sub.appendChild(H.el('br')); sub.appendChild(trio); }
-      // Watch this player's planet / fleet, and talk to them. On the subtitle
-      // line rather than in the stat tiles: tiles are readings, these are
-      // actions.
-      var spectate = spectatorLinks(r);
-      var message = messageLink(r);
-      var speakAs = speakAsLink(r);
-      var share = shareLink(r);
-      if (spectate || message || speakAs || share) {
-        if (!trio) sub.appendChild(H.el('br'));
-        else sub.appendChild(document.createTextNode(' '));
-        if (spectate) sub.appendChild(spectate);
-        if (message) sub.appendChild(message);
-        if (speakAs) sub.appendChild(speakAs);
-        if (share) sub.appendChild(share);
-      }
-      // Charge: battery + a clear Ready/n so "what is this number" is answered.
-      var chargeVal = H.el('span');
-      chargeVal.appendChild(H.battery(Math.min(8, r.charge), 8));
-      chargeVal.appendChild(document.createTextNode(' ' + (r.charge >= 8 ? 'Ready' : r.charge)));
-      var row = H.resultRow({
-        lead: lead,
-        portrait: H.pfpPortrait(r.pfp_attrs),
-        title: title,
-        subtitle: sub,
-        // Labeled stat tiles — value over a small uppercase caption, so every
-        // number says what it is at a glance.
-        chips: [
-          statTile('Charge', chargeVal, null, r.charge >= 8 ? 'ok' : null),
-          statTile('Alpha', alpha(r.alpha_ualpha), 'sui-icon-alpha-matter'),
-          statTile('Ore', ore(r.ore), 'sui-icon-alpha-ore'),
-        ],
+  // Every door a roster card offers, as descriptors for playercard.js: watch
+  // the planet, follow the fleet, message, open Comms AS them, share them.
+  function armadaActions(r) {
+    var acts = [];
+    if (canSpectate()) {
+      [
+        { id: r.planet_id, icon: 'icon-planet', what: 'planet', arg: 'planet_id' },
+        { id: r.fleet_id, icon: 'icon-fleet-tile', what: 'fleet', arg: 'fleet_id' }
+      ].forEach(function (t) {
+        if (!t.id) return;
+        acts.push({ icon: t.icon, title: 'Watch ' + t.what + ' ' + t.id, onClick: function (ev, a) {
+          var opts = {};
+          opts[t.arg] = t.id;
+          openSpectatorWindow(opts).catch(function (err) {
+            a.classList.add('err');
+            a.title = 'could not open the ' + t.what + ' window: ' + err;
+          });
+        } });
       });
-      row.addEventListener('click', function () { showDetail(r); });
-      row.style.cursor = 'pointer';
-      return row;
-    })();
+    }
+    var reach = reachActions(r);
+    acts.push(reach[0]);
+    // Speak AS this player. Roster only: every row here is one of OUR players,
+    // a real account whose Matrix localpart IS the player id. Never offered
+    // beside a stranger (reachActions is what the leaderboards get), and not
+    // for the primary, whose window is the ordinary Comms window.
+    if (r.role !== 'primary') {
+      acts.push({ icon: 'icon-member', title: 'Open Comms as ' + (r.name || r.player_id), onClick: function (ev, a) {
+        Board.T.core.invoke('matrix_open_as', { playerId: r.player_id })
+          .catch(function (err) { reachFailed(a, 'open Comms as', r, err); });
+      } });
+    }
+    acts.push(reach[1]);
+    return acts;
+  }
+
+  // Every role gets its own badge. `raider` used to fall through to BAIT
+  // here as well as in the backend's role_str, so a player you had just
+  // assigned to the war machine still read as bait in the roster.
+  var ROLE_BADGE = {
+    primary: ['PRIME', 'warning'], productive: ['PROD', 'solid'],
+    raider: ['RAID', 'destructive'], bait: ['BAIT', 'default'],
+  };
+
+  // One roster card (playercard.js). Pure: given a row it returns a node, so
+  // listView can cache and reuse it until that row's data (or its selected
+  // state) changes. The PORTRAIT is the selector — there is no checkbox — and
+  // the primary is never a mass-action target, so its portrait is inert.
+  function armadaRow(r) {
+    var rb = ROLE_BADGE[r.role] || [String(r.role || '?').toUpperCase(), 'default'];
+    // Harvest marks — icons only, no words (titles explain): ore left on the
+    // planet · time to next mine completion · time to next refine. Null
+    // fields (no planet read yet / idle cycle) are simply omitted.
+    var marks = [];
+    if (r.planet_ore != null) marks.push({ icon: 'icon-undiscovered-ore', value: ore(r.planet_ore), title: 'ore left on planet' });
+    var m = fmtEta(r.mine_eta_s);
+    if (m) marks.push({ icon: 'icon-mine', value: m, title: 'next extraction ~' });
+    var f = fmtEta(r.refine_eta_s);
+    if (f) marks.push({ icon: 'icon-refine', value: f, title: 'next refine ~' });
+    // Freshness is shown only when a row needs attention, so the common case
+    // stays clean. `fetched_at_ms` is when WE last read this player, not when
+    // the player last acted — labelling it "idle" said the opposite.
+    var attn = null;
+    if (armadaAttention(r)) attn = r.err ? 'read failed' : 'last read ' + H.ago(r.fetched_at_ms) + ' ago';
+    return window.StructsPlayerCard.card({
+      id: r.player_id,
+      name: r.name,
+      badge: { text: rb[0], mod: rb[1] },
+      presence: presenceDot(r.player_id),
+      pfp: r.pfp_attrs,
+      err: !!r.err,
+      attn: attn,
+      charge: r.charge,
+      readings: [
+        { value: alpha(r.alpha_ualpha), icon: 'sui-icon-alpha-matter', title: 'Alpha' },
+        { value: ore(r.ore), icon: 'sui-icon-alpha-ore', title: 'Ore' },
+      ],
+      marks: marks,
+    }, {
+      selectable: r.index != null,
+      selected: !!armada.selection[r.player_id],
+      onSelect: function (on) {
+        if (on) armada.selection[r.player_id] = true;
+        else delete armada.selection[r.player_id];
+        updateArmadaChrome();
+      },
+      actions: armadaActions(r),
+      onClick: function () { showDetail(r); },
+    });
   }
 
   function updateArmadaChrome() {
@@ -2562,19 +2537,23 @@
       } else if (exploreState.results && !exploreState.results.length) {
         body.appendChild(H.stateBlock('info', 'nobody matches ' + JSON.stringify(exploreState.q)));
       } else if (exploreState.results && exploreState.results.length) {
-        var table = H.resultTable();
+        var grid = H.el('div', 'pc-grid');
         exploreState.results.slice(0, 25).forEach(function (r) {
           // One shape, normalised in Rust — no `a || b || c` over two records.
           var pid = r.player_id;
           if (!pid) return;
-          table.appendChild(H.resultRow({
-            portrait: H.pfpPortrait(r.pfp),
-            title: r.username || pid,
-            subtitle: '#' + pid + (r.guild_id ? ' · ' + r.guild_id : ''),
+          // The shared player card (playercard.js): the same face a player
+          // has on the roster and in Comms.
+          grid.appendChild(window.StructsPlayerCard.card({
+            id: pid,
+            name: r.username || pid,
+            pfp: r.pfp,
+            sub: r.guild_id || null,
+          }, {
             onClick: function () { exploreOpen(pid); },
           }));
         });
-        body.appendChild(table);
+        body.appendChild(grid);
       }
 
       if (exploreState.loading) {

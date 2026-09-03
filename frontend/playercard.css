@@ -1,0 +1,163 @@
+/* The player card — one component for every place the app shows a player.
+ *
+ * Two shapes, one vocabulary:
+ *   .pc-card  the game's planet-card frame: name/id in the header, role badge
+ *             on the right, a 72px portrait beside the readings, then a
+ *             footer of harvest marks and icon actions. Armada, Explore, Comms.
+ *   .pc-row   one aligned line: portrait | identity | readings | actions.
+ *             Leaderboards and anywhere a long list wants scanning.
+ *
+ * No words. The battery is charge, the alpha and ore glyphs are the game's
+ * own, the id is just "#1-194". A familiar player reads the icons; the
+ * unfamiliar one hovers, and every reading carries a title.
+ *
+ * The PORTRAIT is the selector: where a list supports selection there is no
+ * checkbox — click the portrait and the frame turns accent.
+ *
+ * Hand-authored, so it lives at the top of frontend/ (css/ is regenerated
+ * from the webapp submodule on every release build — see assets.test.mjs).
+ * Every colour is a SUI token; every gap is on SUI's spacing scale.
+ */
+
+/* ── portrait: the art's native 72×72, shown whole ───────────────────────
+   img/pfp/* are 72px layers. main.css positions .pfp-viewer-layer for the
+   game's 44px crops (left:50% + translateX); at full size that offset is
+   simply undone so the frame shows the whole portrait. */
+.pc-pfp {
+  position: relative; flex: none; overflow: hidden;
+  width: 72px; height: 72px;
+  box-sizing: content-box;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-default);
+}
+.pc-pfp .pfp-viewer-layer {
+  position: absolute; top: 0; left: 0;
+  width: 72px; height: 72px; max-width: none;
+  transform: none;
+  image-rendering: pixelated;
+}
+.pc-pfp.pc-mod-clickable { cursor: pointer; }
+.pc-pfp.pc-mod-clickable:hover { border-color: var(--border-strong); }
+.is-selected > .pc-pfp,
+.is-selected .pc-body > .pc-pfp {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px var(--accent-primary);
+}
+
+/* ── identity ─────────────────────────────────────────────────────────── */
+.pc-name {
+  display: flex; align-items: center; gap: var(--spacing-md);
+  white-space: nowrap; min-width: 0;
+  color: var(--text-body);
+}
+.pc-name .pc-nm { overflow: hidden; text-overflow: ellipsis; }
+.pc-name .pc-prefix { color: var(--text-hint); }
+.is-err .pc-nm { color: var(--text-enemy-primary); }
+.pc-id {
+  color: var(--text-hint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pc-attn { color: var(--text-warning); }
+/* Who is around, from Comms — the same dot the roster and chat draw. */
+.pc-presence {
+  display: inline-block; flex: none;
+  width: 6px; height: 6px;
+  background: var(--text-hint);
+}
+.pc-presence.pc-mod-online { background: var(--text-player-primary); }
+.pc-presence.pc-mod-idle { background: var(--text-warning); }
+.pc-presence.pc-mod-away { background: var(--border-subtle); }
+
+/* ── readings: battery, then value+glyph pairs ─────────────────────────
+   Quantities are set in DirectiveZero: ExtremeHazard has no lowercase, and
+   "40.23Kg" / "0μg" are case-bearing units. */
+.pc-reads { display: flex; align-items: center; gap: var(--spacing-xl); }
+.pc-res {
+  display: inline-flex; align-items: center; gap: var(--spacing-sm);
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+  font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: 1;
+  text-transform: none; letter-spacing: 0;
+  color: var(--text-body);
+}
+.pc-res .pc-res-hint {
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+  text-transform: uppercase; color: var(--text-hint);
+}
+.pc-batt { display: inline-flex; align-items: center; }
+
+/* ── marks: the quiet icon+value line (ore left, next mine, next refine) */
+.pc-marks {
+  display: inline-flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-md);
+  min-width: 0; opacity: .75;
+  font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: 1;
+  text-transform: none; letter-spacing: 0;
+}
+.pc-mark { white-space: nowrap; }
+.pc-mark i { color: var(--text-hint); }
+
+/* ── actions: icon doors, 32px hit areas, the game's md glyphs ────────── */
+.pc-actions { display: flex; gap: var(--spacing-xs); }
+.pc-act {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; flex: none;
+  color: var(--accent-primary); text-decoration: none; cursor: pointer;
+}
+.pc-act:hover { background: var(--surface-player-highlight); }
+/* reachFailed() marks a door that did not open. */
+.pc-act.err { color: var(--accent-destructive); }
+
+/* ═══ .pc-card — the planet-card frame ═══════════════════════════════════ */
+.pc-grid {
+  display: grid; width: 100%;
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+  gap: var(--spacing-md);
+  align-content: start;
+}
+.pc-card { text-align: left; }
+.pc-card.pc-mod-clickable { cursor: pointer; }
+.pc-card .sui-planet-card-header { align-items: center; gap: var(--spacing-md); }
+.pc-card .sui-planet-card-header-label { min-width: 0; flex: 1 1 auto; }
+.pc-card .sui-planet-card-header-label-title { min-width: 0; max-width: 100%; }
+/* sui.css paints the header's first line accent (it is "ALPHA BASE" on the
+   game's card); here the first line is the player's name. */
+.pc-card .sui-planet-card-header-label-title span:first-child { color: var(--text-body); }
+.pc-card .sui-badge { flex: none; }
+.pc-card .sui-planet-card-body {
+  padding: var(--spacing-lg); gap: var(--spacing-lg);
+  align-items: stretch;
+}
+.pc-card.pc-mod-clickable:hover .sui-planet-card-body { background: var(--surface-player-highlight); }
+.pc-card .sui-planet-card-body-content.pc-body {
+  min-height: 0; flex-direction: row; align-items: center; gap: var(--spacing-xl);
+}
+.pc-card .pc-reads {
+  flex: 1 1 auto; flex-direction: column; align-items: flex-end; gap: var(--spacing-md);
+}
+.pc-card .pc-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--spacing-md); width: 100%; min-height: 32px;
+}
+.pc-card .pc-foot .pc-actions { margin-left: auto; }
+
+/* ═══ .pc-row — one aligned line ═════════════════════════════════════════ */
+.pc-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center; gap: var(--spacing-xl);
+  padding: var(--spacing-md);
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.pc-row.pc-mod-clickable { cursor: pointer; }
+.pc-row.pc-mod-clickable:hover { background: var(--surface-player-highlight); }
+.pc-row .pc-ident { display: flex; flex-direction: column; gap: var(--spacing-xs); min-width: 0; }
+.pc-row .pc-reads {
+  display: grid; grid-template-columns: auto auto;
+  gap: var(--spacing-md) var(--spacing-xl); align-items: center; justify-items: end;
+}
+.pc-row .pc-reads .pc-batt { grid-column: 1 / span 2; justify-self: end; }
+.pc-row .pc-reads .pc-res:only-child { grid-column: 1 / span 2; }
+.pc-row .pc-actions {
+  display: grid; grid-template-columns: 32px 32px; gap: var(--spacing-xs);
+  padding-left: var(--spacing-lg); border-left: 1px solid var(--border-subtle);
+}
+.pc-row .pc-actions:empty { display: none; }

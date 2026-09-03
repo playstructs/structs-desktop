@@ -433,6 +433,36 @@ cat > "$FIX" <<'EOF'
     mcp_board_feed: [],
     mcp_health: { ok: true },
     mcp_grass_recent: [],
+    // The Armada roster, in the shape `mcp_roster` really answers with (the
+    // fields armadaRow reads). Six players covering every role, one with a
+    // stale read, so the shared player card is exercised end to end.
+    get mcp_roster() {
+      var now = Date.now();
+      function row(i, name, role, pid, charge, alpha, ore, pore, mine, refine, extra) {
+        var r = { index: i, name: name, role: role, player_id: pid, charge: charge,
+          alpha_ualpha: alpha, ore: ore, planet_ore: pore, mine_eta_s: mine, refine_eta_s: refine,
+          planet_id: '2-' + pid.split('-')[1], fleet_id: '9-' + pid.split('-')[1],
+          structs_load: 0, fetched_at_ms: now, err: null,
+          pfp_attrs: JSON.stringify({ head: 1 + (i || 0) * 7, neck: 1 + (i || 0) % 9, body: 1 + (i || 0) * 5,
+                                      arms: 1 + (i || 0) * 3, background: 1 + (i || 0) % 6 }) };
+        for (var k in (extra || {})) r[k] = extra[k];
+        return r;
+      }
+      return { refreshed_at_ms: now, rows: [
+        row(null, 'MARKLIFER', 'primary', '1-194', 8, 40230000000, 0, 0, null, null),
+        row(1, 'SCOUT1', 'bait', '1-271', 5, 0, 98, 4, 120, 40),
+        row(2, 'MINER2', 'bait', '1-272', 8, 0, 84, 5, 0, null),
+        row(3, 'BRENDA-COX', 'bait', '1-273', 8, 0, 77, 1, 360, 60),
+        row(4, 'WORKER 17', 'productive', '1-287', 3, 2100000000, 12, 210, 45, 180, { fetched_at_ms: now - 3 * 3600 * 1000 }),
+        row(5, 'HAULER-4', 'raider', '1-402', 8, 0, 0, null, null, null),
+      ] };
+    },
+    // Explore: what a name search answers with (normalised in Rust).
+    mcp_player_search: { results: [
+      { player_id: '1-61', username: 'JPEG', guild_id: '0-1', pfp: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}' },
+      { player_id: '1-248', username: 'PHONIFFER', guild_id: '0-1', pfp: '{"head":40,"neck":3,"body":30,"arms":20,"background":2}' },
+      { player_id: '1-1957', username: null, guild_id: '0-5', pfp: null },
+    ] },
     // renderConfig() fetches the bundle before ANY config section paints, so
     // the profiles view needs it even though it reads nothing from it.
     // The shape `mcp_config_bundle` really answers with. It used to claim

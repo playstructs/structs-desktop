@@ -21,6 +21,7 @@
   <link rel="stylesheet" href="css/main.css" />
   <!-- The chat message row, shared with the other window that draws one. -->
   <link rel="stylesheet" href="chat-rows.css" />
+  <link rel="stylesheet" href="playercard.css" />
   <style>
     /* ── Comms ────────────────────────────────────────────────────────────
        Composition only. Every colour, font and spacing value below is a SUI
@@ -301,6 +302,9 @@
     }
     .chat-ref-action:disabled { opacity: .4; cursor: default; }
 
+    /* A PLAYER is drawn by the shared player card (playercard.js), which
+       brings the game's own frame; the embed wrapper then adds no second one. */
+    .chat-ref.chat-mod-card { border: 0 none; background: transparent; }
     .chat-ref-portrait.chat-mod-clickable { cursor: pointer; }
     .chat-ref-portrait.chat-mod-clickable:hover { outline: 1px solid var(--accent-primary); }
 
@@ -742,6 +746,7 @@
 <!-- Portrait composer first: chat.js aliases it at module load. -->
 <script src="chatrow.js"></script>
 <script src="pfp.js"></script>
+<script src="playercard.js"></script>
 <script src="chat.js"></script>
 </body>
 </html>

@@ -184,12 +184,6 @@
     return c;
   }
 
-  function pfpNode(row) {
-    var attrs = row.pfp_attrs;
-    if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
-    return H.pfpPortrait(attrs);
-  }
-
   function playersCard() {
     var body = H.el('div');
     var def = metricDef(state.metric.key);
@@ -213,24 +207,19 @@
         // A leaderboard is a list of PEOPLE. Who is actually around, and a
         // way to reach them, is what turns a table of rivals into something
         // you can act on — the same two affordances the roster carries, on
-        // the same players.
-        var title = H.el('span');
-        var here = Board.presenceDot && Board.presenceDot(r.player_id);
-        if (here) title.appendChild(here);
-        title.appendChild(document.createTextNode(
-          '#' + r.rank + '  ' + (r.username || r.player_id)));
-
-        var sub = H.el('span');
-        sub.appendChild(document.createTextNode(
-          (r.guild_name || '') + (r.tag ? ' [' + r.tag + ']' : '')));
-        var reach = Board.reachLinks && Board.reachLinks(r);
-        if (reach) { sub.appendChild(document.createTextNode(' ')); sub.appendChild(reach); }
-
-        table.appendChild(H.resultRow({
-          portrait: pfpNode(r),
-          title: title,
-          subtitle: sub,
-          chips: [H.statTile(def.label, def.fmt(num(r.value)), def.icon)],
+        // the same players. One shared card draws both (playercard.js).
+        var attrs = r.pfp_attrs;
+        if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
+        table.appendChild(window.StructsPlayerCard.row({
+          id: r.player_id,
+          prefix: '#' + r.rank,
+          name: r.username || r.player_id,
+          presence: Board.presenceDot && Board.presenceDot(r.player_id),
+          pfp: attrs,
+          sub: ((r.guild_name || '') + (r.tag ? ' [' + r.tag + ']' : '')).trim() || null,
+          readings: [{ value: def.fmt(num(r.value)), icon: def.icon, title: def.label }],
+        }, {
+          actions: Board.reachActions ? Board.reachActions(r) : [],
         }));
       });
       body.appendChild(table);

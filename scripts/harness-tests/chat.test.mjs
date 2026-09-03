@@ -811,22 +811,27 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('a player card carries their portrait',
     playerCard.querySelectorAll('.pfp-viewer-layer').length === 5,
     String(playerCard.querySelectorAll('.pfp-viewer-layer').length));
-  // The layers are a fixed 72px crop positioned by main.css; the FRAME does
-  // the cropping. Wrapping them in a smaller box of our own clipped the clip
-  // and cut every portrait off-centre.
-  check('…in the roster\'s own frame',
-    playerCard.querySelector('.sui-result-row-portrait-image') !== null);
-  check('…with nothing nested inside it',
-    playerCard.querySelectorAll('.sui-result-row-portrait-image').length === 1,
-    String(playerCard.querySelectorAll('.sui-result-row-portrait-image').length));
-  // A card is not a single button any more — it offers named actions.
-  const actions = Array.from(playerCard.querySelectorAll('.chat-ref-action'))
-    .map((b) => text(b));
+  // A player is drawn by the SHARED player card (playercard.js): the game's
+  // planet-card frame around the whole 72px portrait, the same face the
+  // roster and the leaderboards show.
+  check('…in the shared player card',
+    playerCard.querySelector('.pc-card.sui-planet-card') !== null);
+  check('…showing the whole portrait, once',
+    playerCard.querySelectorAll('.pc-pfp').length === 1,
+    String(playerCard.querySelectorAll('.pc-pfp').length));
+  check('…with no second frame around it',
+    playerCard.classList.contains('chat-mod-card'));
+  // A card is not a single button any more — it offers actions: icon doors
+  // that say what they do on hover, never words.
+  const actions = Array.from(playerCard.querySelectorAll('.pc-act'))
+    .map((b) => b.title);
   check('a player card offers what the player has',
     actions.join(',') === 'Planet,Fleet,Message,Pay', actions.join(','));
+  check('…as icons, not words',
+    Array.from(playerCard.querySelectorAll('.pc-act')).every((b) => text(b) === ''));
 
-  Array.from(playerCard.querySelectorAll('.chat-ref-action'))
-    .find((b) => text(b) === 'Message')
+  Array.from(playerCard.querySelectorAll('.pc-act'))
+    .find((b) => b.title === 'Message')
     .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick();
   const dm = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_dm').pop();
@@ -836,8 +841,8 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   // Paying someone is a hand-off, not a payment. Comms has no authority to
   // spend, so the button must call the hand-off and pass ONLY the player id —
   // the destination address is resolved from the chain on the other side.
-  Array.from(playerCard.querySelectorAll('.chat-ref-action'))
-    .find((b) => text(b) === 'Pay')
+  Array.from(playerCard.querySelectorAll('.pc-act'))
+    .find((b) => b.title === 'Pay')
     .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick();
   const pay = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_open_transfer').pop();
@@ -851,8 +856,8 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     /Team Ops/.test(text(playerCard)), text(playerCard).slice(-80));
 
   // Watching opens the SAME spectator window Team Ops opens.
-  Array.from(playerCard.querySelectorAll('.chat-ref-action'))
-    .find((b) => text(b) === 'Planet')
+  Array.from(playerCard.querySelectorAll('.pc-act'))
+    .find((b) => b.title === 'Planet')
     .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick();
   const watch = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'mcp_raid_view_open').pop();
@@ -860,8 +865,8 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     !!watch && watch.args.planetId === '2-223' && watch.args.fleetId === null,
     JSON.stringify(watch && watch.args));
 
-  Array.from(playerCard.querySelectorAll('.chat-ref-action'))
-    .find((b) => text(b) === 'Fleet')
+  Array.from(playerCard.querySelectorAll('.pc-act'))
+    .find((b) => b.title === 'Fleet')
     .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick();
   const wf = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'mcp_raid_view_open').pop();
@@ -870,7 +875,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     JSON.stringify(wf && wf.args));
 
   // The portrait is the shortest path to the same place.
-  playerCard.querySelector('.chat-ref-portrait')
+  playerCard.querySelector('.pc-pfp')
     .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick();
   check('the portrait watches their planet too',
