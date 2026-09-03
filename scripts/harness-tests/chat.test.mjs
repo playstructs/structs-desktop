@@ -181,6 +181,13 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('…and every player is put INTO the pinned channels',
     /async fn join_pinned_channels/.test(rustPins)
     && /join\(&session, &alias\)/.test(rustPins));
+  /* …and per IDENTITY, not per install: this app signs in as more than one
+   * player on purpose, and a record keyed only by alias let one account's
+   * joins tell every other account the work was already done. */
+  check('the join record is keyed by account, not just by room',
+    /HashMap<String, std::collections::HashMap<String, PinnedRoom>>/.test(rustPins)
+    && /state\.entry\(session\.user_id\.clone\(\)\)/.test(rustPins),
+    'one identity\u2019s joins would silence every other identity\u2019s');
   check('…once per install, so leaving a pinned room sticks',
     /pinned_state_read\(\)/.test(rustPins) && /rec\.joined = true/.test(rustPins),
     'a re-join every launch would drag a player back into a room they left');

@@ -470,6 +470,33 @@ mod pin_tests {
      * SN Corp, which is most of them. The viewer does not appear in this
      * function's arguments any more; this pins that shut.
      */
+    /* Membership is a fact about an ACCOUNT, not about the install.
+     *
+     * The record was keyed by alias alone, so joining `#help` as one identity
+     * told every OTHER identity the work was done. That is not a corner case
+     * on an app whose whole point is speaking as more than one player: a
+     * roster-player session joined all three, and when the primary got its own
+     * session back it was handed an empty channel list and never joined
+     * anything, because the file said "already".
+     */
+    #[test]
+    fn one_identity_s_joins_do_not_silence_another_s() {
+        let alias = "#help:matrix.beta.playstructs.com".to_string();
+        let mut state = PinnedState::new();
+        state
+            .entry("@1-271:matrix.crew.oh.energy".into())
+            .or_default()
+            .insert(alias.clone(), PinnedRoom { joined: true, ..Default::default() });
+
+        // The account that joined is recorded as joined…
+        assert!(state["@1-271:matrix.crew.oh.energy"][&alias].joined);
+        // …and another account on the same install is not.
+        let other = state
+            .get("@1-194:matrix.crew.oh.energy")
+            .and_then(|m| m.get(&alias));
+        assert!(other.is_none(), "the primary must still have this to do");
+    }
+
     #[test]
     fn the_pins_do_not_depend_on_the_viewers_guild() {
         const SN: &str = "matrix.beta.playstructs.com";
@@ -2393,7 +2420,18 @@ struct PinnedRoom {
     next_try_ms: u64,
 }
 
-type PinnedState = std::collections::HashMap<String, PinnedRoom>;
+/* Keyed by MATRIX USER, then by alias.
+ *
+ * It was keyed by alias alone, which is wrong the moment this install has more
+ * than one identity — and it has, by design. Joining `#help` as one player
+ * recorded "joined" globally, so every OTHER identity was told the work was
+ * already done and never joined anything. That is not hypothetical: a session
+ * signed in as a roster player joined all three, and when the primary got its
+ * own session back it was left with an empty channel list.
+ *
+ * Membership is a fact about an ACCOUNT, so the account has to be in the key.
+ */
+type PinnedState = std::collections::HashMap<String, std::collections::HashMap<String, PinnedRoom>>;
 
 fn pinned_state_path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join("structs-app").join("pinned_joined.json"))
@@ -2406,16 +2444,15 @@ fn pinned_state_read() -> PinnedState {
     if let Ok(map) = serde_json::from_str::<PinnedState>(&text) {
         return map;
     }
-    // The first shape this file had was a flat list of joined aliases. Read it
-    // rather than discarding it: throwing it away would re-join every pinned
-    // room for anyone who had already left one.
-    serde_json::from_str::<Vec<String>>(&text)
-        .map(|v| {
-            v.into_iter()
-                .map(|a| (a, PinnedRoom { joined: true, ..Default::default() }))
-                .collect()
-        })
-        .unwrap_or_default()
+    /* An older shape: a flat list of aliases, then a flat alias→record map.
+     * Neither records WHO joined, so neither can be migrated — an entry of
+     * unknown ownership would go on suppressing the join for whichever
+     * identity it did not belong to, which is the bug this key change exists
+     * to end. Discarding costs one re-join for anyone upgrading; keeping it
+     * costs somebody an empty channel list forever.
+     */
+    eprintln!("[Comms] pinned-channel record predates per-identity keys; starting fresh");
+    PinnedState::new()
 }
 
 fn pinned_state_write(state: &PinnedState) {
@@ -2475,18 +2512,22 @@ fn pinned_retry_delay_ms(err: &str) -> u64 {
 /// to the log, which the Debug tab's "Download logs" already collects; it was
 /// briefly a row in that panel too, and taking it back out is why `last_error`
 /// is still recorded rather than dropped on the floor.
-async fn join_pinned_channels(guild_id: &str) {
+async fn join_pinned_channels(app: &tauri::AppHandle, guild_id: &str) {
     let Some(session) = store::get(guild_id) else { return };
     let Some(home) = super::directory::server_name_for_guild(HOME_GUILD) else {
         return;
     };
     let now = crate::hasher::types::now_millis() as u64;
     let mut state = pinned_state_read();
+    // Whose memberships these are. Two identities on one install are two
+    // different accounts in two different sets of rooms.
+    let mine = state.entry(session.user_id.clone()).or_default();
     let mut dirty = false;
+    let mut joined_any = false;
 
     for local in PINNED_LOCALPARTS {
         let alias = format!("#{local}:{home}");
-        let rec = state.entry(alias.clone()).or_default();
+        let rec = mine.entry(alias.clone()).or_default();
         if rec.joined || now < rec.next_try_ms {
             continue;
         }
@@ -2509,6 +2550,7 @@ async fn join_pinned_channels(guild_id: &str) {
             Ok(()) => {
                 rec.joined = true;
                 rec.last_error = None;
+                joined_any = true;
                 eprintln!("[Comms] joined pinned channel {}", alias);
             }
             Err(e) => {
@@ -2527,6 +2569,15 @@ async fn join_pinned_channels(guild_id: &str) {
     }
     if dirty {
         pinned_state_write(&state);
+    }
+    if joined_any {
+        // The rooms exist for us now, but sync will not mention them again
+        // until something happens in them — so the list would stay as it was
+        // until somebody spoke. Push the current one.
+        let _ = app.emit(
+            "matrix::rooms",
+            json!({ "guild_id": guild_id, "rooms": rooms_of(guild_id) }),
+        );
     }
 }
 
@@ -2556,7 +2607,8 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
     // federate cannot delay the first messages.
     {
         let guild_id = guild_id.clone();
-        tauri::async_runtime::spawn(async move { join_pinned_channels(&guild_id).await });
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move { join_pinned_channels(&app, &guild_id).await });
     }
     tauri::async_runtime::spawn(async move {
         let mut backoff = 2u64;
