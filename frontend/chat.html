@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="chat-rows.css" />
   <link rel="stylesheet" href="playercard.css" />
   <link rel="stylesheet" href="guildcard.css" />
+  <link rel="stylesheet" href="providercard.css" />
   <style>
     /* ── Comms ────────────────────────────────────────────────────────────
        Composition only. Every colour, font and spacing value below is a SUI
@@ -332,6 +333,14 @@
       text-transform: uppercase;
     }
     .chat-rent .chat-ref-actions { padding: 0; }
+    /* Inside the provider CARD the form is one more block of the body: it
+       stretches to the card's width and its quote sits over the buttons. */
+    .pc-card .chat-rent { width: 100%; padding: var(--spacing-lg) 0 0; }
+    .pc-card .chat-rent-quote {
+      font-family: 'DirectiveZero', sans-serif; font-size: 16px; text-transform: none;
+      text-align: right;
+    }
+    .pc-card .chat-rent .chat-ref-actions { justify-content: flex-end; }
 
     /* A labelled hairline: day separators, and the unread divider. */
     .chat-rule {
@@ -749,6 +758,7 @@
 <script src="pfp.js"></script>
 <script src="playercard.js"></script>
 <script src="guildcard.js"></script>
+<script src="providercard.js"></script>
 <script src="chat.js"></script>
 </body>
 </html>

@@ -76,8 +76,9 @@ async function until(fn, ms = 5000) {
   check('guild leaderboard renders', guilds && guilds.children.length === 5,
     'got ' + (guilds ? guilds.children.length : 'none'));
   check('guild order is the directory order', /SN Corp/.test(guilds.children[0].textContent));
-  check('a guild is the shared guild card', guilds.children[0].classList.contains('gc-card')
-    && guilds.children[0].getAttribute('data-guild-id') === '0-1');
+  check('a guild is the shared guild row', guilds.children[0].classList.contains('gc-row')
+    && guilds.children[0].getAttribute('data-guild-id') === '0-1'
+    && /^#1 /.test(guilds.children[0].querySelector('.pc-name').textContent));
   check('…with its tag, mark and four readings',
     /\[SNC\]/.test(guilds.children[0].textContent)
     && !!guilds.children[0].querySelector('.gc-emblem img')

@@ -91,6 +91,18 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
 }
 
 {
+  console.log('\n— row');
+  const row = GC.row({ id: '0-2', prefix: '#2', name: 'Oh Energy', tag: 'OH', badge: { text: 'ALLY', mod: 'default' },
+    readings: [{ value: '140', icon: 'sui-icon-players', title: 'Members' }, { value: '2.64Kg', icon: 'sui-icon-alpha-matter', title: 'Alpha' }] },
+    { actions: [{ icon: 'icon-outgoing', title: 'Share' }] });
+  check('a row is one aligned line, like the player row', row.classList.contains('pc-row') && row.classList.contains('gc-row'));
+  check('rank, tag, name, badge on the name line', text(row.querySelector('.pc-name')) === '#2 [OH] Oh Energy ALLY', text(row.querySelector('.pc-name')));
+  check('the id on its own line', text(row.querySelector('.pc-id')) === '#0-2');
+  check('a 44px emblem', !!row.querySelector('.gc-emblem.gc-sm .icon-guild'));
+  check('readings and a door', row.querySelectorAll('.pc-res').length === 2 && row.querySelectorAll('.pc-act').length === 1);
+}
+
+{
   console.log('\n— chip');
   let opened = 0;
   const chip = GC.chip({ id: '0-2', name: 'Oh Energy', tag: 'OH' }, { onClick: () => { opened++; } });

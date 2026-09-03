@@ -181,6 +181,52 @@ pub fn put(session: Session) {
     save(&file);
 }
 
+/* The bare guild key means THE PRIMARY. Make sure whoever is in it belongs.
+ *
+ * A sign-in that authenticated as somebody else while `as_player` was unset
+ * lands in that slot anyway, and nothing downstream questions it: the primary's
+ * own Comms window then opens that person's account — their rooms, their DMs,
+ * their voice — with a plain "Comms" title bar and no indication anything is
+ * off. That is a wrong-identity bug, not a cosmetic one; the whole point of
+ * keying sessions by identity is that you cannot speak as the wrong player.
+ *
+ * So this checks rather than trusts. A session in the primary's slot whose
+ * `user_id` names a DIFFERENT player is re-filed under the identity it
+ * actually is (where that window can still use it), leaving the primary's slot
+ * empty so the next status call signs in as the primary.
+ *
+ * Returns the key it moved the session to, or `None` when there was nothing to
+ * do — including when the primary's id is not known yet, because "we have not
+ * synced" must never be read as "this is the wrong person".
+ */
+pub fn heal_primary_slot(guild_id: &str, primary_player_id: &str) -> Option<String> {
+    if guild_id.is_empty() || primary_player_id.is_empty() {
+        return None;
+    }
+    let mut file = load();
+    let session = file.sessions.get(guild_id)?.clone();
+    // Already labelled as somebody's identity: not in the primary's slot at all.
+    if session.player_id.is_some() {
+        return None;
+    }
+    let who = super::directory::player_id_of(&session.user_id)?;
+    if who == primary_player_id {
+        return None;
+    }
+    let mut moved = session.clone();
+    moved.player_id = Some(who.clone());
+    let dest = key_for(guild_id, Some(&who));
+    file.sessions.remove(guild_id);
+    file.sessions.entry(dest.clone()).or_insert(moved);
+    file.version = VERSION;
+    save(&file);
+    eprintln!(
+        "[Comms] {guild_id}: the primary's session was signed in as {who}; \
+         moved it to {dest} and left the primary signed out"
+    );
+    Some(dest)
+}
+
 pub fn remove(key: &str) {
     let mut file = load();
     if file.sessions.remove(key).is_some() {
@@ -217,6 +263,49 @@ pub fn put_client(homeserver: &str, client_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* The primary's slot holds the primary, or it is emptied.
+     *
+     * Tested on the DECISION rather than through the file, because what can go
+     * wrong here is the judgement, not the IO: "is the account in the primary's
+     * slot actually the primary" has three answers and only one of them is
+     * "move it". Getting the third wrong — treating "not synced yet" as "wrong
+     * person" — would sign the player out of Comms every launch until the
+     * chain caught up.
+     */
+    fn misplaced(user_id: &str, primary: &str, labelled: Option<&str>) -> bool {
+        if labelled.is_some() {
+            return false;
+        }
+        match super::super::directory::player_id_of(user_id) {
+            Some(who) => who != primary,
+            // A user id we cannot read a player out of is not evidence.
+            None => false,
+        }
+    }
+
+    #[test]
+    fn only_a_genuinely_wrong_account_is_moved_out_of_the_primary_slot() {
+        let srv = "@{}:matrix.crew.oh.energy";
+        let uid = |p: &str| srv.replace("{}", p);
+        // The primary's own session stays put.
+        assert!(!misplaced(&uid("1-194"), "1-194", None));
+        // Somebody else's does not.
+        assert!(misplaced(&uid("1-271"), "1-194", None));
+        // A session already labelled with an identity is not in this slot.
+        assert!(!misplaced(&uid("1-271"), "1-194", Some("1-271")));
+        // A user id that names no player is not evidence of anything.
+        assert!(!misplaced("@bot:matrix.crew.oh.energy", "1-194", None));
+    }
+
+    #[test]
+    fn an_unknown_primary_id_moves_nothing() {
+        // `heal_primary_slot` refuses an empty primary id outright: before the
+        // chain has synced we do not know who the primary IS, and signing the
+        // player out on every launch until it does would be worse than the bug.
+        assert_eq!(heal_primary_slot("0-1", ""), None);
+        assert_eq!(heal_primary_slot("", "1-194"), None);
+    }
 
     #[test]
     fn the_primary_keeps_the_bare_guild_id() {

@@ -30,6 +30,7 @@ const FEDERATED = [
   'frontend/board-gamestats.js',
   'frontend/playercard.js',
   'frontend/guildcard.js',
+  'frontend/providercard.js',
 ];
 
 // Ways a string becomes markup rather than text.

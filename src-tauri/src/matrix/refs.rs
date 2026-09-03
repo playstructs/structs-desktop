@@ -93,6 +93,23 @@ fn player_label(player_id: &str) -> String {
     }
 }
 
+/// A player as a card draws them inline: id, name, tag and portrait from the
+/// galaxy directory. `null` for an empty id.
+fn owner_ref(player_id: &str) -> Value {
+    if player_id.is_empty() {
+        return Value::Null;
+    }
+    match super::directory::get(player_id) {
+        Some(i) => json!({
+            "id": player_id,
+            "name": if i.username.is_empty() { Value::Null } else { json!(i.username) },
+            "tag": if i.tag.is_empty() { Value::Null } else { json!(i.tag) },
+            "pfp_attrs": i.pfp_attrs,
+        }),
+        None => json!({ "id": player_id, "name": Value::Null, "tag": Value::Null, "pfp_attrs": Value::Null }),
+    }
+}
+
 /// Blocks → a human duration. The chain's block time is ~5.28s (measured, see
 /// the futile-mining incident); using 6 here would drift ~12% on a long build.
 const BLOCK_SECS: f64 = 5.28;
@@ -102,6 +119,22 @@ fn since_blocks(start: f64, now: f64) -> String {
         return String::new();
     }
     let secs = (now - start) * BLOCK_SECS;
+    if secs < 90.0 {
+        format!("{}s", secs.round() as i64)
+    } else if secs < 5400.0 {
+        format!("{}m", (secs / 60.0).round() as i64)
+    } else if secs < 172_800.0 {
+        format!("{}h", (secs / 3600.0).round() as i64)
+    } else {
+        format!("{}d", (secs / 86_400.0).round() as i64)
+    }
+}
+
+/// A span of blocks as time: "100" blocks → "9m". For the provider card's
+/// agreement lengths, which run from minutes to months and read as nothing
+/// when printed as raw block counts.
+fn blocks_span(blocks: f64) -> String {
+    let secs = blocks.max(0.0) * BLOCK_SECS;
     if secs < 90.0 {
         format!("{}s", secs.round() as i64)
     } else if secs < 5400.0 {
@@ -393,16 +426,24 @@ fn provider_card(id: &str, v: &Value) -> Value {
             row("Market", if policy.is_empty() { "—".to_string() } else { policy.clone() }),
         ],
         "actions": actions,
+        // Who is offering, as the provider card draws them: a small player
+        // line with the same portrait the roster shows.
+        "owner": owner_ref(&text(p.get("owner"))),
+        "policy": policy,
         // Everything the rent form needs, so it can price a deal without a
-        // second round trip.
+        // second round trip — and the readings as the card prints them.
         "provider": {
             "rate_amount": rate_amount,
             "rate_denom": rate_denom,
             "denom_label": denom_label(&text(rate.get("denom"))),
             "capacity_min": num(p.get("capacityMinimum")),
             "capacity_max": num(p.get("capacityMaximum")),
+            "capacity_min_text": format_power(num(p.get("capacityMinimum"))),
+            "capacity_max_text": format_power(num(p.get("capacityMaximum"))),
             "duration_min": num(p.get("durationMinimum")),
             "duration_max": num(p.get("durationMaximum")),
+            "duration_min_text": blocks_span(num(p.get("durationMinimum"))),
+            "duration_max_text": blocks_span(num(p.get("durationMaximum"))),
             "open": open,
         },
     })

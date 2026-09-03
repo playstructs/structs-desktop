@@ -1,0 +1,35 @@
+/* The provider card — third of the family. playercard.css carries the frame,
+ * readings and doors; guildcard.css the emblem frame and the chip. This file
+ * adds only what an OFFER has that a player or guild does not: a price with
+ * its unit, two ranges, and the owner as a small player line.
+ *
+ * Hand-authored, top-level in frontend/ for the same reason playercard.css is.
+ */
+
+/* ── readings: price and ranges stack in one right-aligned column ─────── */
+.xp-card .pc-reads {
+  flex: 1 1 auto; display: grid; grid-template-columns: auto;
+  gap: var(--spacing-md); justify-content: end; justify-items: end;
+}
+.xp-unit {
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+  text-transform: uppercase; color: var(--text-hint);
+  margin-left: var(--spacing-xs);
+}
+.xp-range { gap: var(--spacing-sm); }
+.xp-range .xp-dash { color: var(--text-hint); }
+
+/* ── the owner line: a 24px portrait, [TAG] name, #id ─────────────────── */
+.xp-owner {
+  display: inline-flex; align-items: center; gap: var(--spacing-md);
+  min-width: 0; text-decoration: none; color: var(--text-body);
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+  text-transform: uppercase;
+}
+.xp-owner .pc-pfp { width: 24px; height: 24px; border: 0 none; background: transparent; }
+.xp-owner .pc-pfp .pfp-viewer-layer { width: 24px; height: 24px; }
+.xp-owner .pc-name { gap: var(--spacing-sm); min-width: 0; }
+a.xp-owner.pc-mod-clickable:hover .pc-nm { color: var(--text-player-primary); }
+
+/* ── the chip: the policy badge rides along ───────────────────────────── */
+.xp-chip .sui-badge { flex: none; }

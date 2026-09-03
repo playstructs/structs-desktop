@@ -160,6 +160,21 @@ async fn status_payload_as(as_player: Option<&str>) -> Value {
     // names and portraits and any player can be addressed. Cached with a TTL;
     // this is a no-op on all but the first call in 15 minutes.
     directory::ensure_fresh().await;
+    /* The primary's window must show the PRIMARY. A session that authenticated
+     * as another player has no business in that slot — see
+     * `store::heal_primary_slot`. Checked on every status call rather than
+     * once at boot, because the mis-keying can happen at any sign-in. */
+    if as_player.is_none() {
+        if let (Some(guild), Some(primary)) = (
+            own_guild_id(),
+            crate::game_state::GAME_STATE
+                .read()
+                .ok()
+                .and_then(|g| g.player_id.clone()),
+        ) {
+            store::heal_primary_slot(&guild, &primary);
+        }
+    }
     let nets = networks_as(as_player);
     // The SESSION KEY, not the guild id: this is what the window echoes back
     // as `guild_id` on every later call, and it is what selects the identity.

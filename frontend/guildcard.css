@@ -28,6 +28,10 @@
 }
 .gc-card .pc-reads .pc-res:only-child { grid-column: 1 / span 2; }
 
+/* ── the row: a 44px emblem, readings 2×2 like the player row ───────── */
+.gc-emblem.gc-sm { width: 44px; height: 44px; }
+.gc-row .pc-reads { display: grid; grid-template-columns: auto auto; gap: var(--spacing-md) var(--spacing-xl); justify-items: end; align-items: center; }
+
 /* ── the chip: one line, for a guild named inside something else ─────── */
 .gc-chip {
   display: inline-flex; align-items: center; gap: var(--spacing-md);

@@ -242,19 +242,17 @@
     if (!rows.length) {
       body.appendChild(H.stateBlock('info', 'Loading…'));
     } else {
-      // Guild CARDS (guildcard.js) — the player card's sibling, in the same
-      // grid the roster uses. The result-table container stays so the card
-      // keeps its scroll budget; `.pc-grid` widens the track for cards.
+      // Guild ROWS (guildcard.js) — the same aligned line the player
+      // leaderboard uses, rank first, in the same result-table container.
       var table = H.resultTable();
-      table.classList.add('pc-grid');
       rows.forEach(function (g, i) {
         var e = energyByGuild[g.guild_id];
-        table.appendChild(window.StructsGuildCard.card({
+        table.appendChild(window.StructsGuildCard.row({
           id: g.guild_id,
+          prefix: '#' + (i + 1),
           name: g.name || null,
           tag: g.tag || null,
           logo: g.logo || null,
-          badge: { text: '#' + (i + 1), mod: 'default' },
           readings: [
             { value: H.fmtInt(num(g.members)), icon: 'sui-icon-players', title: 'Members' },
             { value: H.fmtAlpha(num(g.alpha)), icon: 'sui-icon-alpha-matter', title: 'Alpha infused' },

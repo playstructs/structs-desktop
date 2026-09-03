@@ -6,9 +6,10 @@
   "scripts": {
     "test": "node gamestats.test.mjs",
     "test:profiles": "node profiles.test.mjs",
-    "test:all": "node playercard.test.mjs && node guildcard.test.mjs && node gamestats.test.mjs && node profiles.test.mjs && node raidview.test.mjs && node infusions.test.mjs && node chat.test.mjs && node notifications.test.mjs",
+    "test:all": "node playercard.test.mjs && node guildcard.test.mjs && node providercard.test.mjs && node gamestats.test.mjs && node profiles.test.mjs && node raidview.test.mjs && node infusions.test.mjs && node chat.test.mjs && node notifications.test.mjs",
     "test:playercard": "node playercard.test.mjs",
     "test:guildcard": "node guildcard.test.mjs",
+    "test:providercard": "node providercard.test.mjs",
     "test:raidview": "node raidview.test.mjs",
     "test:infusions": "node infusions.test.mjs",
     "test:chat": "node chat.test.mjs",

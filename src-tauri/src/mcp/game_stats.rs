@@ -384,6 +384,38 @@ where
     Ok((all, true))
 }
 
+/// A guild's logo as a URL our windows can load.
+///
+/// The directory's `logo` is a URI the guild's own site serves; the webapp
+/// renders it as-is because it IS that site. A root-relative path like
+/// `/img/guild/logo.png` resolves to nothing inside a Tauri window, so it is
+/// rebased onto the guild's site origin (its `guild_api` minus the `/api`
+/// path). Absolute http(s) URLs pass through; anything else is no logo.
+fn absolute_logo(guild_id: &str, logo: &str) -> Value {
+    let logo = logo.trim();
+    if logo.is_empty() {
+        return Value::Null;
+    }
+    if logo.starts_with("http://") || logo.starts_with("https://") {
+        return json!(logo);
+    }
+    if logo.starts_with('/') && !logo.starts_with("//") {
+        let origin = crate::guild_config::get_guild_configs()
+            .into_iter()
+            .find(|c| c.guild_id == guild_id)
+            .and_then(|c| {
+                let api = c.guild_api.trim_end_matches('/');
+                let rest = api.strip_prefix("https://").or_else(|| api.strip_prefix("http://"))?;
+                let host = rest.split('/').next()?;
+                Some(format!("{}://{}", if api.starts_with("https") { "https" } else { "http" }, host))
+            });
+        if let Some(origin) = origin {
+            return json!(format!("{}{}", origin, logo));
+        }
+    }
+    Value::Null
+}
+
 /// Fast tier: guild leaderboard + power totals. The directory is pre-ranked
 /// `members DESC, alpha DESC` server-side, so ordering is preserved as-is.
 async fn fast_sweep(client: &CosmosClient) -> Result<(), String> {
@@ -410,7 +442,7 @@ async fn fast_sweep(client: &CosmosClient) -> Result<(), String> {
         guilds.push(json!({
             "guild_id": gid,
             "name": text(row.get("name")),
-            "logo": row.get("logo").cloned().unwrap_or(Value::Null),
+            "logo": absolute_logo(&gid, &text(row.get("logo"))),
             "members": num(row.get("members")) as u64,
             "alpha": alpha_ualpha,
             "planets_complete": planets_complete,
@@ -1569,6 +1601,17 @@ mod tests {
         assert_eq!(opt_num(odd.get("b")), Value::Null);
         // Guild API numerics arrive as strings; those are known values.
         assert_eq!(opt_num(odd.get("c")), json!(12.0));
+    }
+
+    #[test]
+    fn a_logo_is_a_url_our_windows_can_load() {
+        assert_eq!(absolute_logo("0-1", ""), Value::Null);
+        assert_eq!(absolute_logo("0-1", "https://x.example/l.png"), json!("https://x.example/l.png"));
+        // A bare filename or a protocol-relative path is not something we can place.
+        assert_eq!(absolute_logo("0-1", "logo.png"), Value::Null);
+        assert_eq!(absolute_logo("0-1", "//x.example/l.png"), Value::Null);
+        // A root-relative path needs the guild's site; an unknown guild has none.
+        assert_eq!(absolute_logo("0-999999", "/img/l.png"), Value::Null);
     }
 
     #[test]

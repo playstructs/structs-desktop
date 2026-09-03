@@ -1237,17 +1237,27 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const msg = all(d, '.chat-msg').find((n) => text(n).includes('renting from'));
   const card = msg.querySelector('.chat-ref');
   check('a provider gets a card', !!card, text(msg));
+  check('…as the shared provider card', !!card.querySelector('.xp-card.sui-planet-card'));
   check('…priced in the provider\'s own denom',
-    text(card).includes('1 ack / W / block'), text(card));
+    /1 ack \/ W \/ blk/i.test(text(card.querySelector('.xp-rate'))), text(card));
+  check('…with the policy as the badge', text(card.querySelector('.sui-badge')) === 'OPEN');
+  check('…the agreement length as time, blocks on hover',
+    text(card.querySelector('.xp-range[title^="Agreement"]')) === '9m – 61d'
+    && /100 – 1M blocks/.test(card.querySelector('.xp-range[title^="Agreement"]').title),
+    text(card.querySelector('.xp-range[title^="Agreement"]')));
+  check('…and the owner as a player line',
+    text(card.querySelector('.xp-owner')) === '[OH] Someone #1-170'
+    && card.querySelectorAll('.xp-owner .pfp-viewer-layer').length === 5,
+    text(card.querySelector('.xp-owner')));
 
-  const rent = Array.from(card.querySelectorAll('.chat-ref-action'))
-    .find((b) => text(b) === 'Rent capacity');
+  const rent = Array.from(card.querySelectorAll('.pc-act'))
+    .find((b) => b.title === 'Rent capacity');
   check('…and offers to rent', !!rent);
   rent.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick();
 
   const form = card.querySelector('.chat-rent');
-  check('the form opens in the card', !!form);
+  check('the form opens in the card', !!form && !!form.closest('.sui-planet-card-body'));
   const cap = form.querySelector('#rent-capacityw');
   const dur = form.querySelector('#rent-durationblocks');
   check('it starts at the provider\'s minimums',

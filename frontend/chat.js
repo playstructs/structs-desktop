@@ -425,7 +425,50 @@
     return box;
   }
 
+  /* A PROVIDER named in chat is the shared provider card (providercard.js):
+   * price, capacity and duration as readings, the access policy as the
+   * badge, the owner as a small player line. Rust sends both the numbers
+   * (for the rent form) and the printed readings; an older Rust without the
+   * printed ones still gets a card from the numbers it does send. */
+  function providerRefCard(card) {
+    var box = el('div', 'chat-ref chat-kind-provider chat-mod-card');
+    var p = card.provider || {};
+    var isAlpha = p.rate_denom === 'ualpha';
+    var acts = cardActions(card).map(function (a) {
+      return { icon: a.icon || 'icon-info', title: a.label,
+               onClick: function () { runCardAction(card, a.key, box); } };
+    });
+    if (card.owner && card.owner.id) {
+      acts.push({ icon: 'icon-phone', title: 'Message ' + (card.owner.name || card.owner.id),
+                  onClick: function () { startDm(card.owner.id); } });
+    }
+    box.appendChild(window.StructsProviderCard.card({
+      id: card.id,
+      substation: card.substation_id || null,
+      policy: card.policy || (p.open ? 'openMarket' : null),
+      rate: p.rate_amount != null ? {
+        value: fmtCount(p.rate_amount),
+        denomLabel: isAlpha ? null : (p.denom_label || p.rate_denom || null),
+        denomIcon: isAlpha ? 'sui-icon-alpha-matter' : null,
+      } : null,
+      capacity: p.capacity_min != null ? {
+        min: p.capacity_min_text || fmtCount(p.capacity_min) + 'W',
+        max: p.capacity_max_text || fmtCount(p.capacity_max) + 'W',
+      } : null,
+      duration: p.duration_min != null ? {
+        min: p.duration_min_text || fmtCount(p.duration_min),
+        max: p.duration_max_text || fmtCount(p.duration_max),
+        blocks: fmtCount(p.duration_min) + ' \u2013 ' + fmtCount(p.duration_max) + ' blocks',
+      } : null,
+      owner: card.owner && card.owner.id ? {
+        id: card.owner.id, name: card.owner.name, tag: card.owner.tag, pfp: card.owner.pfp_attrs,
+      } : null,
+    }, { actions: acts }));
+    return box;
+  }
+
   function refCard(card) {
+    if (card.kind === 'provider' && window.StructsProviderCard) return providerRefCard(card);
     if (card.kind === 'guild' && window.StructsGuildCard) return guildRefCard(card);
     if (card.kind === 'player' && card.pfp_attrs && window.StructsPlayerCard) return playerRefCard(card);
     // ONE frame, not three. The card used to nest a bordered header, a
@@ -627,7 +670,9 @@
           cardNote(box, String(e), true);
         });
     });
-    box.appendChild(form);
+    // Inside the card's own body when the provider is drawn as a card, so
+    // the form reads as part of the offer rather than a box under it.
+    (box.querySelector('.sui-planet-card-body') || box).appendChild(form);
     cap.input.focus();
   }
 
@@ -687,6 +732,12 @@
 
   function fmtCount(n) {
     n = Number(n) || 0;
+    // Agreement lengths run to a million blocks; "1000K" is not a number
+    // anyone says, "1M" is.
+    if (n >= 1e6) {
+      var m = n / 1e6;
+      return (m >= 10 ? Math.round(m) : Math.round(m * 10) / 10) + 'M';
+    }
     if (n >= 1000) {
       var k = n / 1000;
       return (k >= 10 ? Math.round(k) : Math.round(k * 10) / 10) + 'K';

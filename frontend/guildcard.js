@@ -5,8 +5,11 @@
  * playercard.js.
  *
  *   StructsGuildCard.card(g, opts)   the game's planet-card frame
+ *   StructsGuildCard.row(g, opts)    one aligned line for leaderboards
  *   StructsGuildCard.chip(g, opts)   one inline line, for a guild named
  *                                    inside something else
+ *
+ *   g.prefix  '#1'   rank, before the name (row only)
  *
  * `g` is a plain description, already formatted:
  *
@@ -123,6 +126,33 @@
     return node;
   }
 
+  /* ── one aligned line: emblem | tag · name · badge / id | readings | doors
+   * The leaderboard shape, mirroring the player row. ─────────────────── */
+  function row(g, opts) {
+    opts = opts || {};
+    var P = parts();
+    var node = P.el('div', 'pc-row gc-row');
+    node.setAttribute('data-guild-id', str(g.id));
+    node.appendChild(emblem(g, 'sm'));
+    var ident = P.el('div', 'pc-ident');
+    var nm = P.el('div', 'pc-name sui-text-label-block');
+    if (g.prefix) { nm.appendChild(P.el('span', 'pc-prefix', g.prefix)); nm.appendChild(document.createTextNode(' ')); }
+    var ns = nameSpan(g);
+    while (ns.firstChild) nm.appendChild(ns.firstChild);
+    var bd = P.badge(g.badge);
+    if (bd) { nm.appendChild(document.createTextNode(' ')); nm.appendChild(bd); }
+    ident.appendChild(nm);
+    var idl = P.el('div', 'pc-id sui-text-label-block');
+    var is = idSpan(g);
+    while (is.firstChild) idl.appendChild(is.firstChild);
+    ident.appendChild(idl);
+    node.appendChild(ident);
+    node.appendChild(readings(g));
+    node.appendChild(P.actions(opts.actions));
+    P.wireClick(node, opts);
+    return node;
+  }
+
   /* ── one inline line ───────────────────────────────────────────────── */
   function chip(g, opts) {
     opts = opts || {};
@@ -141,6 +171,7 @@
   root.StructsGuildCard = {
     emblem: emblem,
     card: card,
+    row: row,
     chip: chip,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
