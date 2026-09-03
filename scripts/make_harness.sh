@@ -785,6 +785,10 @@ cat > "$CFIX" <<'EOF'
     { event_id: '$12', sender: '@1-61:matrix.beta.playstructs.com', sender_name: 'JPEG',
       sender_tag: 'SN.C', player_id: '1-61', kind: 'text', self: false,
       admin: false, ts: 1787900011000, body: 'renting from 10-1 if anyone needs power' },
+    // A guild named on its own: the card is the guild, not a person.
+    { event_id: '$12g', sender: '@1-61:matrix.beta.playstructs.com', sender_name: 'JPEG',
+      sender_tag: 'SN.C', player_id: '1-61', kind: 'text', self: false,
+      admin: false, ts: 1787900011500, body: '0-1 is recruiting' },
     // A picture. Live rooms carry these; the client used to print the
     // filename and nothing else.
     { event_id: '$13', sender: '@1-42:matrix.beta.playstructs.com', sender_name: 'Netlag',
@@ -817,6 +821,15 @@ cat > "$CFIX" <<'EOF'
                 { key: 'send_alpha', label: 'Pay', icon: 'icon-send-alpha' }],
       rows: [{ label: 'Alpha', value: '9.4Kg' },
              { label: 'Energy', value: '128.01KW/133.64KW' }] },
+    // A guild, as refs.rs sends it: the leaderboard's figures and logo, the
+    // founder as a person, and its site as a door.
+    '0-1': { id: '0-1', kind: 'guild', icon: 'icon-guild',
+      title: 'SN Corp', subtitle: '[SNC] 0-1', tag: 'SNC', logo: 'img/logo-snc.gif',
+      stats: { members_text: '2,489', alpha_text: '3.3Kg', capacity_text: '27MW', planets_text: '155' },
+      owner: { id: '1-1', name: 'JPEG', tag: 'SNC', pfp_attrs: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}' },
+      comms: true, site: 'https://beta.playstructs.com',
+      rows: [{ label: 'Owner', value: '[SNC] JPEG' }, { label: 'Comms', value: 'Yes' }],
+      actions: [{ key: 'site', label: 'Guild site', icon: 'icon-link-out' }] },
     // An offer you can close from the conversation that mentioned it.
     '10-1': { id: '10-1', kind: 'provider', icon: 'icon-transfers',
       title: 'Provider 10-1', subtitle: 'From [OH] Someone',

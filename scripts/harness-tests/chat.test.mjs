@@ -466,7 +466,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     text(d.querySelector('.sui-page-header')));
 
   const msgs = all(d, '.chat-msg');
-  check('every event renders', msgs.length === 14, String(msgs.length));
+  check('every event renders', msgs.length === 15, String(msgs.length));
 
   // A run from one sender drops the repeated header, as the mockup does —
   // but $1 and $2 are a day apart, so that run is deliberately broken.
@@ -518,7 +518,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await tick();
 
   const times = all(d, '.chat-msg-time').map(text);
-  check('every message is stamped', times.length === 14, String(times.length));
+  check('every message is stamped', times.length === 15, String(times.length));
   check('stamps are fixed-width 24h', times.every((t) => /^\d{2}:\d{2}$/.test(t)),
     times.join(','));
 
@@ -1232,6 +1232,33 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     text(all(d, '.chat-msg').pop()));
 }
 
+// ── A guild named in the room ───────────────────────────────────────────────
+// The same face and figures Best Guilds shows, plus the founder and a door to
+// the guild's site. "1-1 OWNER · Yes COMMS" was the whole card once; the
+// figures replaced both, on the owner's call.
+{
+  console.log('\n— guild cards');
+  const { w, d } = await open();
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await until(() => d.querySelectorAll('.chat-ref').length > 0);
+  const msg = all(d, '.chat-msg').find((n) => text(n).includes('recruiting'));
+  const card = msg.querySelector('.chat-ref.chat-kind-guild');
+  check('a guild gets the shared guild card', !!card && !!card.querySelector('.gc-card.sui-planet-card'), text(msg));
+  check('…tag and name in the header', /^\[SNC\] SN Corp/.test(text(card.querySelector('.pc-name'))), text(card.querySelector('.pc-name')));
+  check('…its logo as the emblem', !!card.querySelector('.gc-emblem img[src="img/logo-snc.gif"]'));
+  check('…the leaderboard\'s four figures, no captions',
+    card.querySelectorAll('.pc-res').length === 4 && /2,489/.test(text(card)) && !/OWNER|COMMS|Members/i.test(text(card)),
+    text(card));
+  check('…and no owner line or comms flag', !card.querySelector('.pc-person') && !/Yes|None/.test(text(card)), text(card));
+  const site = Array.from(card.querySelectorAll('.pc-act')).find((b) => b.title === 'Guild site');
+  check('…and a door to the guild site', !!site);
+  site.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const opened = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_open_url').pop();
+  check('the site opens through the guarded opener', !!opened && opened.args.url === 'https://beta.playstructs.com',
+    JSON.stringify(opened && opened.args));
+}
+
 // ── Renting capacity from a card ────────────────────────────────────────────
 // A provider is an offer; the point of putting it in the conversation is to be
 // able to close it there. It is also a PURCHASE, so the quote comes first.
@@ -1348,7 +1375,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   d.getElementById('chat-send').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 
   // The echo is on screen before the command resolves — that is the point.
-  const base = 14;
+  const base = 15;
   let msgs = all(d, '.chat-msg');
   check('local echo appears immediately', msgs.length === base + 1, String(msgs.length));
   const echo = () => all(d, '.chat-msg')[base];

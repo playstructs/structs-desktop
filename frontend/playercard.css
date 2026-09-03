@@ -110,6 +110,19 @@
 /* reachFailed() marks a door that did not open. */
 .pc-act.err { color: var(--accent-destructive); }
 
+/* ── a person named inside another card: 24px portrait, [TAG] name, #id ─ */
+.pc-person {
+  display: inline-flex; align-items: center; gap: var(--spacing-md);
+  min-width: 0; text-decoration: none; color: var(--text-body);
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
+  text-transform: uppercase;
+}
+.pc-person .pc-pfp { width: 24px; height: 24px; border: 0 none; background: transparent; }
+.pc-person .pc-pfp .pfp-viewer-layer { width: 24px; height: 24px; }
+.pc-person .pc-name { gap: var(--spacing-sm); min-width: 0; }
+.pc-person .gc-tag { color: var(--accent-secondary); flex: none; }
+a.pc-person.pc-mod-clickable:hover .pc-nm { color: var(--text-player-primary); }
+
 /* ═══ .pc-card — the planet-card frame ═══════════════════════════════════ */
 .pc-grid {
   display: grid; width: 100%;

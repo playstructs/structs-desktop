@@ -335,8 +335,14 @@
         if (refQueue.length) refTimer = setTimeout(flushRefs, 30);
         render();
       })
-      .catch(function () {
+      .catch(function (e) {
+        // A lookup that failed leaves plain text. A RENDER that failed is a
+        // bug, and one that used to vanish here: the page had been cleared
+        // for the repaint, the throw was swallowed, and the room sat blank.
+        // Say so, then repaint without the cards that caused it.
+        if (e && e.stack) console.error('card render failed', e.stack);
         batch.forEach(function (id) { refCards[id] = null; });
+        if (e && e.stack) render();
       });
   }
 
@@ -408,19 +414,32 @@
    * glyph of its own. */
   function guildRefCard(card) {
     var box = el('div', 'chat-ref chat-kind-guild chat-mod-card');
-    var tag = /^\[([^\]]+)\]/.exec(card.subtitle || '');
+    var tag = card.tag || (/^\[([^\]]+)\]/.exec(card.subtitle || '') || [])[1] || null;
+    var st = card.stats || null;
+    // The leaderboard's figures, the same four Best Guilds shows. Nothing
+    // else: an owner line and a "Comms: yes" were tried and said less than
+    // the numbers do. Until the fast tier has run there are no figures, and
+    // the card is the name, the mark and the door.
+    var readings = st ? [
+      { value: st.members_text, icon: 'sui-icon-players', title: 'Members' },
+      { value: st.alpha_text, icon: 'sui-icon-alpha-matter', title: 'Alpha infused' },
+      st.capacity_text ? { value: st.capacity_text, icon: 'sui-icon-energy', title: 'Capacity' } : null,
+      { value: st.planets_text, icon: 'sui-icon-md icon-planet', title: 'Planets' },
+    ] : [];
     var acts = cardActions(card).map(function (a) {
       return { icon: a.icon || 'icon-info', title: a.label,
                onClick: function () { runCardAction(card, a.key, box); } };
     });
+    // This guild's channels, when it is the network you are on.
+    if (card.id === S.guildId) {
+      acts.push({ icon: 'icon-guild-directory', title: 'Browse channels', onClick: function () { go('browse'); } });
+    }
     box.appendChild(window.StructsGuildCard.card({
       id: card.id,
       name: card.title || null,
-      tag: tag ? tag[1] : null,
+      tag: tag,
       logo: card.logo || null,
-      readings: (card.rows || []).map(function (r) {
-        return { value: r.value, icon: READING_ICONS[r.label] || null, title: r.label };
-      }),
+      readings: readings,
     }, { actions: acts }));
     return box;
   }
@@ -565,6 +584,13 @@
       return;
     }
     if (key === 'send_alpha') { sendAlpha(card, box); return; }
+    if (key === 'site') {
+      // The guild's own website, opened by the OS — the same guarded opener
+      // every link in the timeline goes through.
+      if (!card.site) { cardNote(box, 'no site published', true); return; }
+      invoke('matrix_open_url', { url: card.site }).catch(function (e) { cardNote(box, String(e), true); });
+      return;
+    }
     if (key === 'agreement') { rentForm(card, box); return; }
     if (key === 'ask_help') { askForHelp(card, box); return; }
   }

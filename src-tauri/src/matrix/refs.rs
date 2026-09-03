@@ -369,26 +369,73 @@ fn guild_card(id: &str, v: &Value) -> Value {
     let cfg = crate::guild_config::get_guild_configs()
         .into_iter()
         .find(|c| c.guild_id == id);
+    // What the leaderboard already knows about this guild: its published
+    // logo and the figures Best Guilds shows. The card draws the same face
+    // and the same numbers, so a guild looks the same everywhere.
+    let stats = crate::mcp::game_stats::guild_summary(id);
     let name = cfg
         .as_ref()
         .map(|c| c.name.clone())
         .filter(|n| !n.is_empty())
+        .or_else(|| stats.as_ref().map(|s| text(s.get("name"))).filter(|n| !n.is_empty()))
         .unwrap_or_else(|| {
             let n = text(g.get("name"));
             if n.is_empty() { format!("Guild {}", id) } else { n }
         });
     let tag = cfg.as_ref().map(|c| c.guild_tag.clone()).unwrap_or_default();
     let subtitle = if tag.is_empty() { id.to_string() } else { format!("[{}] {}", tag, id) };
-    let comms = if cfg.as_ref().and_then(|c| c.matrix_url.clone()).is_some() { "Yes" } else { "None" };
+    let has_comms = cfg.as_ref().and_then(|c| c.matrix_url.clone()).is_some();
+    let comms = if has_comms { "Yes" } else { "None" };
+    // The guild's site is its API origin: `https://beta.playstructs.com/api`
+    // → `https://beta.playstructs.com`, the page the game's own profile links.
+    let site = cfg.as_ref().and_then(|c| {
+        let api = c.guild_api.trim_end_matches('/');
+        let rest = api.strip_prefix("https://").or_else(|| api.strip_prefix("http://"))?;
+        let host = rest.split('/').next().filter(|h| !h.is_empty())?;
+        Some(format!("{}://{}", if api.starts_with("https") { "https" } else { "http" }, host))
+    });
+    let mut actions = Vec::new();
+    if site.is_some() {
+        actions.push(action("site", "Guild site", "icon-link-out"));
+    }
+    let printed = stats.as_ref().map(|s| {
+        json!({
+            "members_text": with_commas(num(s.get("members"))),
+            "alpha_text": format_alpha(num(s.get("alpha"))),
+            "capacity_text": s.get("capacity").and_then(|c| c.as_f64()).map(format_power),
+            "planets_text": with_commas(num(s.get("planets_complete"))),
+        })
+    });
     json!({
         "id": id, "kind": "guild", "icon": "icon-guild",
         "title": name,
         "subtitle": subtitle,
+        "tag": if tag.is_empty() { Value::Null } else { json!(tag) },
+        "logo": stats.as_ref().and_then(|s| s.get("logo").cloned()).unwrap_or(Value::Null),
+        "stats": printed.unwrap_or(Value::Null),
+        "owner": owner_ref(&text(g.get("owner"))),
+        "comms": has_comms,
+        "site": site,
         "rows": [
             row("Owner", player_label(&text(g.get("owner")))),
             row("Comms", comms),
         ],
+        "actions": actions,
     })
+}
+
+/// "2489" → "2,489": a count a card prints beside a glyph.
+fn with_commas(n: f64) -> String {
+    let whole = n.max(0.0).round() as u64;
+    let digits = whole.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// A provider is an OFFER: someone renting energy capacity at a price. It is
@@ -628,6 +675,14 @@ mod tests {
             assert!(c["actions"].as_array().unwrap().is_empty(), "{}", policy);
             assert_eq!(c["provider"]["open"], false, "{}", policy);
         }
+    }
+
+    #[test]
+    fn counts_get_thousands_separators() {
+        assert_eq!(with_commas(0.0), "0");
+        assert_eq!(with_commas(999.0), "999");
+        assert_eq!(with_commas(2489.0), "2,489");
+        assert_eq!(with_commas(1_234_567.0), "1,234,567");
     }
 
     #[test]

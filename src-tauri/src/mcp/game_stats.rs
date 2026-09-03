@@ -384,6 +384,28 @@ where
     Ok((all, true))
 }
 
+/// One guild's figures as the leaderboard knows them, for a card drawn
+/// elsewhere (a guild named in Comms). `None` until the fast tier has run or
+/// for a guild the directory does not list; the card then shows what it has.
+pub fn guild_summary(guild_id: &str) -> Option<Value> {
+    with_cache(|c| {
+        let g = c.guilds.iter().find(|g| text(g.get("guild_id")) == guild_id)?;
+        let capacity = c
+            .guild_energy
+            .iter()
+            .find(|e| text(e.get("guild_id")) == guild_id)
+            .map(|e| num(e.get("capacity")));
+        Some(json!({
+            "name": g.get("name").cloned().unwrap_or(Value::Null),
+            "logo": g.get("logo").cloned().unwrap_or(Value::Null),
+            "members": num(g.get("members")),
+            "alpha": num(g.get("alpha")),
+            "planets_complete": num(g.get("planets_complete")),
+            "capacity": capacity,
+        }))
+    })
+}
+
 /// A guild's logo as a URL our windows can load.
 ///
 /// The directory's `logo` is a URI the guild's own site serves; the webapp

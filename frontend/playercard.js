@@ -185,6 +185,34 @@
     return box;
   }
 
+  /* A person named inside another card — a provider's owner, a guild's
+   * founder: 24px portrait, [TAG] name, #id, on one line. `o` is
+   * { id, name, tag, pfp }; `opts.cls` adds a class, `opts.onClick` makes it
+   * a link. Shared so every card draws people the same way. */
+  function personLine(o, opts) {
+    opts = opts || {};
+    if (!o || !o.id) return null;
+    var line = el(opts.onClick ? 'a' : 'span', 'pc-person' + (opts.cls ? ' ' + opts.cls : ''));
+    if (opts.onClick) line.href = 'javascript:void(0)';
+    line.setAttribute('data-player-id', str(o.id));
+    line.appendChild(portrait(o.pfp));
+    var nm = el('span', 'pc-name');
+    if (o.tag) {
+      nm.appendChild(el('span', 'gc-tag', '[' + str(o.tag) + ']'));
+      nm.appendChild(document.createTextNode(' '));
+    }
+    nm.appendChild(el('span', 'pc-nm', o.name != null && o.name !== '' ? str(o.name) : str(o.id)));
+    line.appendChild(nm);
+    line.appendChild(document.createTextNode(' '));
+    line.appendChild(el('span', 'pc-id', '#' + str(o.id)));
+    if (opts.title) line.title = opts.title;
+    if (opts.onClick) {
+      line.classList.add('pc-mod-clickable');
+      line.addEventListener('click', function (ev) { ev.stopPropagation(); opts.onClick(ev, line); });
+    }
+    return line;
+  }
+
   function setSelected(node, on) {
     node.classList.toggle('is-selected', !!on);
   }
@@ -298,7 +326,7 @@
     // The building blocks, for the card's siblings (guildcard.js draws a guild
     // with the same readings, doors and frame). One vocabulary, one file.
     parts: { el: el, icon: icon, badge: badge, reading: reading, actions: actions,
-             wireClick: wireClick, BADGE_MODS: BADGE_MODS },
+             personLine: personLine, wireClick: wireClick, BADGE_MODS: BADGE_MODS },
     CHARGE_LEVEL_THRESHOLDS: CHARGE_LEVEL_THRESHOLDS,
     BATTERY_CHUNKS: BATTERY_CHUNKS,
     chargeLevel: chargeLevel,

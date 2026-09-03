@@ -96,30 +96,12 @@
     return pol ? parts().badge(pol) : null;
   }
 
-  // The owner, as a small player line: portrait, [TAG] name, #id.
+  // The owner, as the shared person line.
   function ownerLine(p, opts) {
-    var P = parts();
     var o = p.owner;
     if (!o || !o.id) return null;
-    var line = P.el(opts.onOwner ? 'a' : 'span', 'xp-owner');
-    if (opts.onOwner) line.href = 'javascript:void(0)';
-    line.setAttribute('data-player-id', str(o.id));
-    if (root.StructsPlayerCard.portrait) line.appendChild(root.StructsPlayerCard.portrait(o.pfp));
-    var nm = P.el('span', 'pc-name');
-    if (o.tag) {
-      nm.appendChild(P.el('span', 'gc-tag', '[' + str(o.tag) + ']'));
-      nm.appendChild(document.createTextNode(' '));
-    }
-    nm.appendChild(P.el('span', 'pc-nm', o.name != null && o.name !== '' ? str(o.name) : str(o.id)));
-    line.appendChild(nm);
-    line.appendChild(document.createTextNode(' '));
-    line.appendChild(P.el('span', 'pc-id', '#' + str(o.id)));
-    line.title = 'Offered by ' + (o.name || o.id);
-    if (opts.onOwner) {
-      line.classList.add('pc-mod-clickable');
-      line.addEventListener('click', function (ev) { ev.stopPropagation(); opts.onOwner(ev, line); });
-    }
-    return line;
+    return parts().personLine(o, { cls: 'xp-owner', onClick: opts.onOwner,
+      title: 'Offered by ' + (o.name || o.id) });
   }
 
   /* ── the planet-card frame ─────────────────────────────────────────── */
