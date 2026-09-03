@@ -411,8 +411,27 @@ try {
   // façade below, which needs the same derivation to sign in as a roster
   // player. `var` is function/module-scoped, so there is ONE deriver rather
   // than a second copy of the key-handling code.
+  // ONE wallet per HD index, derived once. `createWalletForIndex` runs
+  // BIP-39 seed derivation (PBKDF2-SHA512, 2,048 rounds, pure JS) plus the
+  // SLIP-10 path walk — tens of milliseconds of synchronous CPU on the game's
+  // main thread — and the sign path below used to pay it on EVERY signature.
+  // At the fleet's sustained sign rate that was a permanent slice of the
+  // frame budget spent re-deriving keys that never change. Memoised as a
+  // promise so concurrent first calls share one derivation; a rejected
+  // derivation is evicted so the next call retries. Keys were already
+  // resident in `gameState.mnemonic`; this holds nothing new in memory.
+  var __vpWallets = new Map(); // index -> Promise<DirectSecp256k1HdWallet>
+  var __vpWallet = (index) => {
+    let p = __vpWallets.get(index);
+    if (!p) {
+      p = walletManager.createWalletForIndex(gameState.mnemonic, index);
+      p.catch(() => { __vpWallets.delete(index); });
+      __vpWallets.set(index, p);
+    }
+    return p;
+  };
   var __vpDerive = async (index) => {
-    const w = await walletManager.createWalletForIndex(gameState.mnemonic, index);
+    const w = await __vpWallet(index);
     const accs = await w.getAccountsWithPrivkeys();
     return accs[0]; // {address, pubkey: Uint8Array, privkey: Uint8Array}
   };
@@ -468,7 +487,7 @@ try {
     },
     // Sign+broadcast a msg AS virtual player `index` (its own address = creator).
     async signAndBroadcast(index, typeUrl, payload, mode) {
-      const wallet = await walletManager.createWalletForIndex(gameState.mnemonic, index);
+      const wallet = await __vpWallet(index);
       const accs = await wallet.getAccountsWithPrivkeys();
       const address = accs[0].address;
       return await signingClientManager.signAndBroadcastAs(wallet, address, typeUrl, payload, mode || 'sync');

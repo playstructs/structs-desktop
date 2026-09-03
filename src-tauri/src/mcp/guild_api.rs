@@ -85,6 +85,19 @@ struct Envelope {
     data: Value,
 }
 
+/// `Envelope` plus the optional `total` that `include_total=1` adds.
+#[derive(Debug, Deserialize)]
+struct EnvelopeWithTotal {
+    #[serde(default)]
+    success: bool,
+    #[serde(default)]
+    errors: Value,
+    #[serde(default)]
+    data: Value,
+    #[serde(default)]
+    total: Option<Value>,
+}
+
 fn errors_empty(v: &Value) -> bool {
     match v {
         Value::Null => true,
@@ -919,6 +932,91 @@ impl GuildApiClient {
         ))
         .await
     }
+    // ── Filtered / sorted singles (TableReadManager list params) ──────────
+    // The catalog list routes accept `limit` (≤1000), `include_total=1`
+    // (adds `total` = count of the FILTERED set), `updated_since=<unix>`,
+    // `is_destroyed=0|1` (struct lists) and `order=` (grid only,
+    // allowlisted). Together they turn a table walk into one request; every
+    // caller keeps the walk as its fallback because an older guild API
+    // answers these with a 400/404.
+
+    /// GET returning both `data` and the envelope's `total` (present only
+    /// when the caller asked for `include_total=1`).
+    async fn get_with_total(&self, path: &str) -> Result<(Value, Option<u64>), String> {
+        note_request();
+        let url = self.build_url(path);
+        let resp = http()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Guild API HTTP error: {}", e))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Guild API read error: {}", e))?;
+        if !status.is_success() {
+            return Err(format!("Guild API {} {}: {}", status.as_u16(), url, body));
+        }
+        let env: EnvelopeWithTotal = serde_json::from_str(&body)
+            .map_err(|e| format!("Guild API JSON parse error: {} (body: {})", e, body))?;
+        if !env.success || !errors_empty(&env.errors) {
+            return Err(format!(
+                "Guild API returned errors: {}",
+                serde_json::to_string(&env.errors).unwrap_or_default()
+            ));
+        }
+        let total = env.total.and_then(|t| {
+            t.as_u64()
+                .or_else(|| t.as_str().and_then(|s| s.trim().parse().ok()))
+        });
+        Ok((env.data, total))
+    }
+
+    /// The top `limit` grid rows for one attribute × object type, richest
+    /// first — a leaderboard in one request instead of a 30-page walk.
+    pub async fn grid_top(
+        &self,
+        attribute_type: &str,
+        object_type: &str,
+        limit: u32,
+    ) -> Result<Vec<Value>, String> {
+        let data = self
+            .get(&format!(
+                "/api/grid/attribute-type/{}/object-type/{}/page/1?order=val.desc&limit={}",
+                attribute_type, object_type, limit
+            ))
+            .await?;
+        match data {
+            Value::Array(a) => Ok(a),
+            Value::Null => Ok(vec![]),
+            other => Err(format!("expected array, got {}", other)),
+        }
+    }
+
+    /// How many structs were destroyed since `since_unix` (seconds): the
+    /// filtered set's `total`, no rows. `Err` when the API predates
+    /// `include_total`, so the caller can walk instead.
+    pub async fn struct_destroyed_since_total(&self, since_unix: i64) -> Result<u64, String> {
+        let (_, total) = self
+            .get_with_total(&format!(
+                "/api/struct/list/all/page/1?is_destroyed=1&updated_since={}&limit=1&include_total=1",
+                since_unix
+            ))
+            .await?;
+        total.ok_or_else(|| "include_total not honoured by this guild API".to_string())
+    }
+
+    /// Fleet list at a caller-chosen page size (≤1000).
+    pub async fn fleet_list_all_limited(
+        &self,
+        page: u32,
+        limit: usize,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page_limited(&format!("/api/fleet/list/all/page/{}", page), page, limit)
+            .await
+    }
+
 }
 
 /// Walk a paginated endpoint until `has_more` is false or `max_pages` is hit.

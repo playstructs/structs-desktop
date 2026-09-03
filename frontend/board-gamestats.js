@@ -445,7 +445,7 @@
         bumpBlock(p.height);
         return;
       }
-      if (p.tier === 'fast' || p.tier === 'heavy') {
+      if (p.tier === 'fast' || p.tier === 'slow' || p.tier === 'heavy') {
         if (p.snapshot) state.snap = p.snapshot;
         renderSoon();
         return;

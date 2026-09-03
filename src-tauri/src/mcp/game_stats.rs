@@ -5,8 +5,9 @@
 //! game-wide totals — sourced entirely from the Guild API, which is public
 //! chain state every player's client already receives.
 //!
-//! Three refresh tiers, cheapest first, so the window is useful within a
-//! second of opening and the expensive sweeps never sit on a hot path:
+//! Three refresh tiers, run concurrently and painted as each lands, so the
+//! window is useful within a second of opening and the expensive sweeps
+//! never sit on a hot path:
 //!
 //!  - **block** — `note_event` is called from `push_game_event` for every
 //!    grass frame. Pure counter math; on each `block` tick it seals a
@@ -43,12 +44,15 @@ const FAST_INTERVAL_MS: f64 = 60_000.0;
 /// Cadences are sized against the SHARED Guild API, not our own appetite —
 /// the first cut of this module walked ~640 pages every 5 minutes and the
 /// infra team noticed. Measured at live table sizes (2026-08-25):
-///   fast  (60s):  directory + guild count               ≈ 2 req/min
-///   heavy (10m):  grid metrics + rosters + raids + bank ≈ 280 req → 28/min
-///   slow  (30m):  planets, fleets, work, structs-24h,
-///                 player-addr map, per-guild planets    ≈ 330 req → 11/min
-/// ≈ 41 req/min average per open window (was ~130), bursts capped by
-/// INTER_PAGE_DELAY_MS, and zero while the window is closed or minimized.
+///   fast  (60s):  directory + singles                   ≈ 8 req/min
+///   heavy (10m):  rosters, leaderboards, sorted grid
+///                 top, structsLoad pages, raids, stats  ≈ 18 req → 2/min
+///   slow  (30m):  destroyed-24h total, per-guild
+///                 planets (fleets from perception)      ≈ 6 req → 0.2/min
+/// ≈ 10 req/min average per open window (was ~41, and ~130 before that),
+/// bursts capped by INTER_PAGE_DELAY_MS, and zero while the window is
+/// closed or minimized. The 2026-09-03 audit that drove this is in
+/// proposals/game-stats-query-efficiency.md.
 const HEAVY_INTERVAL_MS: f64 = 600_000.0;
 /// Big table walks whose answers drift slowly (planet status, fleet totals,
 /// the day-window destruction count, the address→player map).
@@ -65,6 +69,9 @@ const MAX_LIST_PAGES: u32 = 250;
 /// rather than a burst. 150ms caps a walk at ~5 req/s even with zero server
 /// latency (50ms measured ~13 req/s bursts on the shared API).
 const INTER_PAGE_DELAY_MS: u64 = 150;
+/// Page size for the walks that remain (PR #121 `?limit=`, server-clamped
+/// at 1000): a 3,000-row table is 3 requests, not 30.
+const BIG_PAGE: usize = 1000;
 /// Leaderboard depth. The window shows a podium, not a census.
 const TOP_N: usize = 25;
 /// While unauthenticated, only re-probe once a minute — the fast sweep's
@@ -156,6 +163,10 @@ struct Persisted {
     guild_energy: Vec<Value>,
     #[serde(default)]
     series: Vec<Value>,
+    /// 7-day aggregates. Without this the trends card sat empty for up to
+    /// ten minutes after every launch, waiting on the heavy tier.
+    #[serde(default)]
+    history: Value,
 }
 
 fn persist() {
@@ -171,6 +182,7 @@ fn persist() {
         players_top: c.players_top.clone(),
         guild_energy: c.guild_energy.clone(),
         series: c.series.iter().cloned().collect(),
+        history: c.history.clone(),
     });
     let Ok(body) = serde_json::to_vec(&snap) else { return };
     if let Some(dir) = path.parent() {
@@ -204,6 +216,7 @@ fn restore() {
         c.players_top = p.players_top;
         c.guild_energy = p.guild_energy;
         c.series = p.series.into_iter().collect();
+        c.history = p.history;
     });
 }
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -515,17 +528,24 @@ fn leaderboard(
         .collect()
 }
 
-/// Slow tier: the big table walks whose answers drift slowly, plus the
-/// caches the faster tiers reuse (address→player map, per-guild planet
-/// counts). 30-minute cadence — the single largest lever on API load.
+/// Slow tier: the counts that drift slowly plus the caches the faster tiers
+/// reuse (address→player map, per-guild planet counts). 30-minute cadence.
+///
+/// Was ~115 requests (a 30-page fleet walk and an 80-page struct walk that,
+/// at 224k rows ordered newest-first, could not even reach 24 h back and
+/// under-counted destructions). Now: fleets from the perception snapshot
+/// (zero requests) or a 1,000-row walk, destructions as ONE filtered
+/// `include_total` read, planet counts asked concurrently.
 async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
+    let t0 = crate::hasher::types::now_millis();
+    let req0 = crate::mcp::guild_api::request_stats().0;
     let mut truncated = false;
     let (counts_fallback, alpha_fallback) =
         with_cache(|c| (c.counts_fallback, c.alpha_fallback));
 
     // Planets: total now comes from /api/planet/count in the fast tier and
-    // complete from the per-guild counts below — the 205-page walk runs only
-    // for guilds on a pre-#121 API.
+    // complete from the per-guild counts below — the walk runs only for
+    // guilds on a pre-#121 API.
     let mut legacy_planets: Option<(u64, u64)> = None;
     if counts_fallback {
         let (planet_rows, cut) = walk_pages(|p| client.guild.planet_list_all(p)).await?;
@@ -537,52 +557,52 @@ async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
         legacy_planets = Some((planet_rows.len() as u64, complete));
     }
 
-    // Fleets: how much of the galaxy is on the move.
-    let (fleet_rows, cut) = walk_pages(|p| client.guild.fleet_list_all(p)).await?;
-    truncated |= cut;
-    let fleets_total = fleet_rows.len() as u64;
-    let fleets_away = fleet_rows
-        .iter()
-        .filter(|r| text(r.get("status")) == "away")
-        .count() as u64;
-
-    // Structs deployed: fast-tier count math when the modern API is there,
-    // the LCD's pagination.total otherwise (the chain prunes corpses, so it
-    // is the live count; the 138k-row list can never be walked).
-    let legacy_structs_total = if counts_fallback {
-        Some(client.count_entities("struct").await.unwrap_or(0))
-    } else {
-        None
+    // Fleets: the perception snapshot already holds every fleet in the
+    // galaxy with its status, patched live by GRASS — the answer is in
+    // memory. A snapshot older than this tier's own cadence is not trusted
+    // over a fresh read.
+    let now_ms = crate::hasher::types::now_millis();
+    let from_snapshot: Option<(u64, u64)> = crate::mcp::perception::with_snapshot(|s| {
+        if now_ms - s.taken_ms > SLOW_INTERVAL_MS {
+            return None;
+        }
+        let away = s
+            .fleets
+            .values()
+            .filter(|f| text(f.get("status")) == "away")
+            .count() as u64;
+        Some((s.fleets.len() as u64, away))
+    })
+    .flatten();
+    let (fleets_total, fleets_away, fleets_source) = match from_snapshot {
+        Some((total, away)) => (total, away, "perception"),
+        None => {
+            let (rows, cut) =
+                match walk_pages(|p| client.guild.fleet_list_all_limited(p, BIG_PAGE)).await {
+                    Ok(ok) => ok,
+                    Err(_) => walk_pages(|p| client.guild.fleet_list_all(p)).await?,
+                };
+            truncated |= cut;
+            let away = rows
+                .iter()
+                .filter(|r| text(r.get("status")) == "away")
+                .count() as u64;
+            (rows.len() as u64, away, "guild_api")
+        }
     };
-    // Recent losses: the list orders `updated_at DESC`, so walk only until
-    // rows age past 24h and count destructions by `destroyed_block`.
-    let day_ago_ms = crate::hasher::types::now_millis() - 24.0 * 3600.0 * 1000.0;
-    // 24h of block time at 5.28s/block, against the grass-fed height.
+
+    // Recent losses: destroyed rows touched in the last 24 h, counted
+    // server-side. The legacy newest-first walk stays for older APIs.
+    let day_ago_ms = now_ms - 24.0 * 3600.0 * 1000.0;
     let day_ago_block = with_cache(|c| c.block_height).saturating_sub(16_363) as f64;
-    let mut destroyed_24h: u64 = 0;
-    'day_walk: for page in 1..=80u32 {
-        let p = client.guild.struct_list_all(page).await?;
-        let done = !p.has_more;
-        for row in &p.items {
-            let fresh = crate::mcp::raid_view::parse_guild_time(&text(row.get("updated_at")))
-                .map(|ms| ms >= day_ago_ms)
-                .unwrap_or(false);
-            if !fresh {
-                break 'day_walk;
-            }
-            let destroyed = row
-                .get("is_destroyed")
-                .map(|v| v.as_bool().unwrap_or_else(|| num(Some(v)) != 0.0))
-                .unwrap_or(false);
-            if destroyed && num(row.get("destroyed_block")) >= day_ago_block {
-                destroyed_24h += 1;
-            }
-        }
-        if done {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(INTER_PAGE_DELAY_MS)).await;
-    }
+    let destroyed_24h = match client
+        .guild
+        .struct_destroyed_since_total((day_ago_ms / 1000.0) as i64)
+        .await
+    {
+        Ok(n) => n,
+        Err(_) => legacy_destroyed_walk(client, day_ago_ms, day_ago_block).await?,
+    };
 
     // Active players + work depth: fast-tier one-request counts on a modern
     // API; the legacy walks run only in fallback.
@@ -619,17 +639,29 @@ async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
         }
     }
 
-    // Per-guild planets-complete counts for the fast tier's guild rows.
+    // Per-guild planets-complete counts for the fast tier's guild rows —
+    // five independent singles, asked at once.
     let guild_ids: Vec<String> =
         with_cache(|c| c.guilds.iter().map(|g| text(g.get("guild_id"))).collect());
     let mut planet_counts: HashMap<String, u64> = HashMap::new();
-    for gid in guild_ids.iter().filter(|g| !g.is_empty()) {
-        let v = client
-            .guild
-            .guild_planet_complete_count(gid)
-            .await
-            .unwrap_or(Value::Null);
-        planet_counts.insert(gid.clone(), num(v.get("count")) as u64);
+    {
+        let mut set: tokio::task::JoinSet<(String, u64)> = tokio::task::JoinSet::new();
+        for gid in guild_ids.iter().filter(|g| !g.is_empty()).cloned() {
+            let c = client.clone();
+            set.spawn(async move {
+                let v = c
+                    .guild
+                    .guild_planet_complete_count(&gid)
+                    .await
+                    .unwrap_or(Value::Null);
+                (gid, num(v.get("count")) as u64)
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok((gid, n)) = res {
+                planet_counts.insert(gid, n);
+            }
+        }
     }
 
     // Galaxy planets-complete = the per-guild sum (every complete planet has
@@ -654,9 +686,6 @@ async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
                 m.insert("planets_total".into(), json!(total));
                 m.insert("planets_complete".into(), json!(complete));
             }
-            if let Some(v) = legacy_structs_total {
-                m.insert("structs_total".into(), json!(v));
-            }
             if let Some(v) = legacy_active {
                 m.insert("active_24h".into(), json!(v));
             }
@@ -666,26 +695,184 @@ async fn slow_sweep(client: &CosmosClient) -> Result<(), String> {
         }
         c.slow_updated_ms = crate::hasher::types::now_millis();
     });
+    crate::mcp::telemetry::tlog_kv(
+        "game_stats",
+        crate::mcp::telemetry::Sev::Info,
+        "slow sweep: done",
+        json!({
+            "ms": (crate::hasher::types::now_millis() - t0).round(),
+            "requests": crate::mcp::guild_api::request_stats().0 - req0,
+            "fleets_source": fleets_source,
+            "destroyed_24h": destroyed_24h,
+        }),
+    );
     Ok(())
 }
 
-/// Heavy tier: grid metrics, identities, leaderboards, live raids.
+/// Pre-`include_total` destruction count: the list orders `updated_at DESC`,
+/// so walk until rows age past 24 h and count by `destroyed_block`. Capped,
+/// so on a busy day it under-counts — which is why it is the fallback.
+async fn legacy_destroyed_walk(
+    client: &CosmosClient,
+    day_ago_ms: f64,
+    day_ago_block: f64,
+) -> Result<u64, String> {
+    let mut destroyed_24h: u64 = 0;
+    'day_walk: for page in 1..=80u32 {
+        let p = client.guild.struct_list_all(page).await?;
+        let done = !p.has_more;
+        for row in &p.items {
+            let fresh = crate::mcp::raid_view::parse_guild_time(&text(row.get("updated_at")))
+                .map(|ms| ms >= day_ago_ms)
+                .unwrap_or(false);
+            if !fresh {
+                break 'day_walk;
+            }
+            let destroyed = row
+                .get("is_destroyed")
+                .map(|v| v.as_bool().unwrap_or_else(|| num(Some(v)) != 0.0))
+                .unwrap_or(false);
+            if destroyed && num(row.get("destroyed_block")) >= day_ago_block {
+                destroyed_24h += 1;
+            }
+        }
+        if done {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(INTER_PAGE_DELAY_MS)).await;
+    }
+    Ok(destroyed_24h)
+}
+
+/// The last non-null `sum` of an aggregate-range response: with LOCF every
+/// object is carried forward, so the newest bucket IS the current galaxy
+/// total. `None` when the endpoint is absent or the range is empty.
+fn last_bucket_sum(v: &Value) -> Option<f64> {
+    v.as_array().and_then(|rows| {
+        rows.iter().rev().find_map(|r| {
+            r.get("sum")
+                .filter(|x| !x.is_null())
+                .map(|x| num(Some(x)))
+        })
+    })
+}
+
+/// Every roster at once: the requests are independent, so the wait is the
+/// slowest of five rather than their sum (this alone was most of the old
+/// "Best players takes forever"). A panicked task is one guild missing from
+/// the board, not a failed sweep.
+async fn fetch_rosters(client: &CosmosClient, guild_ids: &[String]) -> Vec<(String, Value)> {
+    let mut set: tokio::task::JoinSet<(String, Value)> = tokio::task::JoinSet::new();
+    for gid in guild_ids.iter().filter(|g| !g.is_empty()).cloned() {
+        let c = client.clone();
+        set.spawn(async move {
+            let r = c.guild.guild_roster(&gid).await.unwrap_or(Value::Null);
+            (gid, r)
+        });
+    }
+    let mut out = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(pair) = res {
+            out.push(pair);
+        }
+    }
+    out
+}
+
+/// Live raids: PR #121's planet-raid list, filtered for freshness — the
+/// table keeps abandoned non-terminal rows forever (one 19-day-old
+/// `initiated` observed), so `updated_at` within the same staleness horizon
+/// War · Live Raids uses decides "live". Falls back to the legacy
+/// activity-feed reduction on an older API.
+async fn live_raids(client: &CosmosClient) -> u64 {
+    let now_ms = crate::hasher::types::now_millis();
+    let (a, b, c) = tokio::join!(
+        client.guild.planet_raid_by_status("initiated", 1),
+        client.guild.planet_raid_by_status("ongoing", 1),
+        client.guild.planet_raid_by_status("shieldsVulnerable", 1),
+    );
+    if let (Ok(a), Ok(b), Ok(c)) = (a, b, c) {
+        return [a, b, c]
+            .iter()
+            .flat_map(|page| page.items.iter())
+            .filter(|r| {
+                crate::mcp::raid_view::parse_guild_time(&text(r.get("updated_at")))
+                    .map(|ms| now_ms - ms < crate::mcp::raid_view::STALE_AFTER_MS)
+                    .unwrap_or(false)
+            })
+            .count() as u64;
+    }
+    let raid_rows = crate::mcp::guild_api::fetch_all_pages(
+        |page| client.guild.planet_activity_by_category("raid_status", page),
+        3,
+    )
+    .await
+    .unwrap_or_default();
+    crate::mcp::raid_view::reduce_raids(&raid_rows, now_ms, crate::mcp::raid_view::STALE_AFTER_MS)
+        .iter()
+        .filter(|r| r.live)
+        .count() as u64
+}
+
+/// Per-player `object_id → val` from grid rows, keeping player rows (and
+/// rows from the unfiltered legacy route, which carry no object_type).
+fn player_vals(rows: &[Value]) -> HashMap<String, f64> {
+    let mut m = HashMap::new();
+    for row in rows {
+        let ot = text(row.get("object_type"));
+        if ot.is_empty() || ot == "player" {
+            m.insert(text(row.get("object_id")), num(row.get("val")));
+        }
+    }
+    m
+}
+
+/// Per-guild load/capacity in base units from `/api/leaderboard/guild` rows:
+/// guild id → (name, member_load_p, member_capacity_p).
+fn guild_energy_from_board(rows: &[Value]) -> HashMap<String, (String, f64, f64)> {
+    let mut m = HashMap::new();
+    for r in rows {
+        let gid = text(r.get("guild_id"));
+        if gid.is_empty() {
+            continue;
+        }
+        let name = {
+            let n = text(r.get("name"));
+            if n.is_empty() {
+                text(r.get("onchain_name"))
+            } else {
+                n
+            }
+        };
+        m.insert(
+            gid,
+            (
+                crate::matrix::identity::sanitize(&name),
+                num(r.get("member_load_p")),
+                num(r.get("member_capacity_p")),
+            ),
+        );
+    }
+    m
+}
+
+/// Heavy tier: identities, leaderboards, energy picture, live raids and the
+/// 7-day history. Every stage is independent, so they run at once and the
+/// tier costs max(stage) — about one roster fetch.
+///
+/// Request budget (modern API): 5 rosters + 2 leaderboards + 1 sorted grid
+/// read + ~4 structsLoad pages + 3 raid pages + 3 aggregates ≈ 18, down from
+/// ~106 when the ore/structsLoad/load/capacity boards were each a 30-page
+/// walk. The walks survive only as fallbacks for older guild APIs.
 async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
-    /* Timed, per stage.
-     *
-     * "Best players takes an incredibly long time" could not be answered from
-     * inside the app — the sweep logged nothing, so the only way to tell a slow
-     * endpoint from slow orchestration was to read the code and size the work
-     * against the database by hand. It logs now: which stage, how long, and how
-     * much it fetched.
-     */
     let t0 = crate::hasher::types::now_millis();
+    let req0 = crate::mcp::guild_api::request_stats().0;
     let mut truncated = false;
 
-    // Identities (username/pfp/tag/alpha) come from the guild rosters — the
-    // only bulk source that joins player ids to names. Guild ids are read
-    // from the cache the fast sweep just filled; on a cold start where the
-    // fast sweep failed we fall back to the directory ourselves.
+    // Identities (username/pfp/tag) come from the guild rosters — the only
+    // bulk source that joins player ids to names. Guild ids are read from
+    // the cache the fast sweep filled; on a cold start where the fast sweep
+    // failed we fall back to the directory ourselves.
     let guild_ids: Vec<String> = {
         let cached: Vec<String> =
             with_cache(|c| c.guilds.iter().map(|g| text(g.get("guild_id"))).collect());
@@ -701,49 +888,66 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
                 .unwrap_or_default()
         }
     };
+    let now_s = (crate::hasher::types::now_millis() / 1000.0) as i64;
+    let week_ago = now_s - 7 * 24 * 3600;
+
+    // structsLoad is the one metric still walked in full: the per-guild
+    // draw rollup needs every player's value, and no server rollup carries
+    // it. 1,000-row pages make it ~4 requests; the map also yields the
+    // structs-load board and the galaxy draw total for free.
+    let sload_fut = async {
+        match walk_pages(|p| {
+            client
+                .guild
+                .grid_by_attribute_and_object_type_limited("structsLoad", "player", p, BIG_PAGE)
+        })
+        .await
+        {
+            Ok(ok) => Ok(ok),
+            Err(_) => match walk_pages(|p| {
+                client.guild.grid_by_attribute_and_object_type("structsLoad", "player", p)
+            })
+            .await
+            {
+                Ok(ok) => Ok(ok),
+                Err(_) => walk_pages(|p| client.guild.grid_by_attribute_type("structsLoad", p)).await,
+            },
+        }
+    };
+    let history_fut = async {
+        tokio::join!(
+            client.guild.stat_aggregate("ore", "planet", "1h", now_s - 7200, now_s),
+            client.guild.stat_aggregate("ore", "player", "1h", week_ago, now_s),
+            client.guild.stat_aggregate("structs_load", "player", "1h", week_ago, now_s),
+        )
+    };
+    let (rosters, alpha_res, guild_board_res, ore_top_res, sload_res, raids_active, (ore_planet, ore_hist, sload_hist)) =
+        tokio::join!(
+            fetch_rosters(client, &guild_ids),
+            client.guild.leaderboard("player", Some("alpha_value.desc"), TOP_N as u32),
+            client.guild.leaderboard("guild", Some("player_count.desc"), 50),
+            client.guild.grid_top("ore", "player", TOP_N as u32),
+            sload_fut,
+            live_raids(client),
+            history_fut,
+        );
+    let t_join = crate::hasher::types::now_millis();
+    // Aggregates are optional (absent on older APIs): a failure is "don't
+    // know", carried as Null so every reader falls back to the last value.
+    let (ore_planet, ore_hist, sload_hist) = (
+        ore_planet.unwrap_or(Value::Null),
+        ore_hist.unwrap_or(Value::Null),
+        sload_hist.unwrap_or(Value::Null),
+    );
+
     // NOTE: the roster's `alpha` column is unusable — its SQL sums
     // view.player_inventory over EVERY denom with no `denom='alpha'` filter,
     // so a player holding 2M uguild tokens tops an "alpha" ranking at 40× the
     // real whale (verified live: 1-404, alpha 0, guild.0-5 2,050,000). The
-    // alpha leaderboard is built from the bank module instead (below); the
-    // guild Alpha figure is fine (different query, reactor fuel).
+    // alpha leaderboard comes from the server ranking instead (below).
     let mut identities: HashMap<String, Identity> = HashMap::new();
     // player id → (guild id, guild name); feeds the per-guild energy rollup.
     let mut guild_of: HashMap<String, (String, String)> = HashMap::new();
-
-    /* Every roster at once, not one after another.
-     *
-     * This was `for gid { … .await }` — five sequential round trips, and they
-     * are not small: the largest guild has 2,615 members and each row carries
-     * portrait attributes. The requests do not depend on each other, so the
-     * wait was the SUM of five when it only ever had to be the slowest. That
-     * is the whole reason "Best players" took so long to appear: local
-     * orchestration, not a slow endpoint.
-     *
-     * Guilds live on different servers (crew.oh.energy, beta.playstructs.com,
-     * shell.crab.la), so this also spreads the load rather than concentrating
-     * it — five hosts asked once each, concurrently.
-     */
-    let rosters: Vec<(String, Value)> = {
-        let mut set: tokio::task::JoinSet<(String, Value)> = tokio::task::JoinSet::new();
-        for gid in guild_ids.iter().filter(|g| !g.is_empty()).cloned() {
-            let c = client.clone();
-            set.spawn(async move {
-                let r = c.guild.guild_roster(&gid).await.unwrap_or(Value::Null);
-                (gid, r)
-            });
-        }
-        let mut out = Vec::new();
-        while let Some(res) = set.join_next().await {
-            // A panicked task is one guild missing from the leaderboard, not a
-            // failed sweep — the same tolerance the sequential version had via
-            // `unwrap_or(Value::Null)`.
-            if let Ok(pair) = res {
-                out.push(pair);
-            }
-        }
-        out
-    };
     for (gid, roster) in &rosters {
         for row in roster.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
             let pid = text(row.get("id"));
@@ -770,18 +974,6 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
         }
     }
 
-    let t_rosters = crate::hasher::types::now_millis();
-    crate::mcp::telemetry::tlog_kv(
-        "game_stats",
-        crate::mcp::telemetry::Sev::Info,
-        "heavy sweep: rosters",
-        serde_json::json!({
-            "ms": (t_rosters - t0).round(),
-            "guilds": rosters.len(),
-            "players": identities.len(),
-        }),
-    );
-
     // Alpha board: PR #121's `/api/leaderboard/player` is the server ranking
     // over the denom-correct api_leaderboard_player table — one request,
     // usernames included, `alpha_value` = balance + infused. The bank-module
@@ -789,11 +981,7 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
     // guilds on an older API; the flag also tells the slow tier whether the
     // 31-page address map is still worth maintaining.
     let mut alpha_board: Option<Vec<Value>> = None;
-    match client
-        .guild
-        .leaderboard("player", Some("alpha_value.desc"), TOP_N as u32)
-        .await
-    {
+    match alpha_res {
         Ok(v) => {
             with_cache(|c| c.alpha_fallback = false);
             let rows: Vec<Value> = v.as_array().cloned().unwrap_or_default();
@@ -843,131 +1031,132 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
         }
     }
 
-    // Game-wide per-player metrics from the grid: one attribute type across
-    // every object in the game, filtered to players.
+    // Structs load: full per-player map (see sload_fut).
+    let (sload_rows, cut) = sload_res?;
+    truncated |= cut;
+    let sload_by_player = player_vals(&sload_rows);
+    let structs_draw: f64 = sload_by_player.values().sum();
+
+    // Ore. Grid `ore` holds two distinct populations (verified live: ~16k
+    // planet rows = ore still in the ground, ~2.3k player rows =
+    // stored/stealable ore). The board is the server-sorted top rows; the
+    // stored total is the newest LOCF bucket of the player aggregate; ground
+    // ore the same for planets. An older API walks the player rows (or, older
+    // still, the whole attribute) and sums them, as before.
+    let (prev_stored, prev_ground) =
+        with_cache(|c| (num(c.totals.get("stored_ore")), num(c.totals.get("ground_ore"))));
     let mut ore_by_player: HashMap<String, f64> = HashMap::new();
-    let mut sload_by_player: HashMap<String, f64> = HashMap::new();
-    // Grid `ore` holds two distinct populations (verified live: ~16k planet
-    // rows = ore still in the ground, ~2.3k player rows = stored/stealable
-    // ore). Summing them together would print a number that is neither.
-    let mut stored_ore = 0.0;
-    let mut ground_ore = 0.0;
-    // The #7 filter turns the ore walk from 233 pages into ~24. Ground ore
-    // (planet rows, ~165 filtered pages — not worth walking) comes from the
-    // 1-request LOCF aggregate instead; on an older API the single unfiltered
-    // walk supplies both, as before.
-    let mut ground_ore_from_walk = false;
-    match walk_pages(|p| client.guild.grid_by_attribute_and_object_type("ore", "player", p)).await
-    {
-        Ok((rows, cut)) => {
-            truncated |= cut;
-            for row in rows {
-                let val = num(row.get("val"));
-                stored_ore += val;
-                ore_by_player.insert(text(row.get("object_id")), val);
+    let mut ground_ore_from_walk: Option<f64> = None;
+    let stored_ore = match ore_top_res {
+        Ok(rows) => {
+            for row in &rows {
+                ore_by_player.insert(text(row.get("object_id")), num(row.get("val")));
             }
+            last_bucket_sum(&ore_hist).unwrap_or(prev_stored)
         }
         Err(_) => {
-            let (rows, cut) =
-                walk_pages(|p| client.guild.grid_by_attribute_type("ore", p)).await?;
-            truncated |= cut;
-            ground_ore_from_walk = true;
-            for row in rows {
-                let val = num(row.get("val"));
-                match text(row.get("object_type")).as_str() {
-                    "player" => {
-                        stored_ore += val;
-                        ore_by_player.insert(text(row.get("object_id")), val);
+            let filtered = match walk_pages(|p| {
+                client
+                    .guild
+                    .grid_by_attribute_and_object_type_limited("ore", "player", p, BIG_PAGE)
+            })
+            .await
+            {
+                Ok(ok) => Ok(ok),
+                Err(_) => {
+                    walk_pages(|p| client.guild.grid_by_attribute_and_object_type("ore", "player", p))
+                        .await
+                }
+            };
+            match filtered {
+                Ok((rows, cut)) => {
+                    truncated |= cut;
+                    ore_by_player = player_vals(&rows);
+                }
+                Err(_) => {
+                    let (rows, cut) =
+                        walk_pages(|p| client.guild.grid_by_attribute_type("ore", p)).await?;
+                    truncated |= cut;
+                    let mut ground = 0.0;
+                    for row in &rows {
+                        match text(row.get("object_type")).as_str() {
+                            "player" => {
+                                ore_by_player.insert(text(row.get("object_id")), num(row.get("val")));
+                            }
+                            "planet" => ground += num(row.get("val")),
+                            _ => {}
+                        }
                     }
-                    "planet" => ground_ore += val,
-                    _ => {}
+                    ground_ore_from_walk = Some(ground);
                 }
             }
+            ore_by_player.values().sum()
         }
-    }
-    if !ground_ore_from_walk {
-        // Last hourly bucket of the planet-ore aggregate = current unmined
-        // total (LOCF carries every planet forward). Keep the previous value
-        // if the endpoint hiccups.
-        let now_s = (crate::hasher::types::now_millis() / 1000.0) as i64;
-        match client
-            .guild
-            .stat_aggregate("ore", "planet", "1h", now_s - 7200, now_s)
-            .await
-        {
-            Ok(v) => {
-                let last_sum = v
-                    .as_array()
-                    .and_then(|rows| {
-                        rows.iter().rev().find_map(|r| {
-                            r.get("sum").filter(|x| !x.is_null()).map(|x| num(Some(x)))
-                        })
-                    })
-                    .unwrap_or(0.0);
-                ground_ore = last_sum;
-            }
-            Err(_) => {
-                ground_ore = with_cache(|c| num(c.totals.get("ground_ore")));
-            }
-        }
-    }
-    {
-        let (rows, cut) = match walk_pages(|p| {
-            client
-                .guild
-                .grid_by_attribute_and_object_type("structsLoad", "player", p)
-        })
-        .await
-        {
-            Ok(ok) => ok,
-            Err(_) => walk_pages(|p| client.guild.grid_by_attribute_type("structsLoad", p)).await?,
-        };
-        truncated |= cut;
-        for row in rows {
-            let ot = text(row.get("object_type"));
-            if ot.is_empty() || ot == "player" {
-                sload_by_player.insert(text(row.get("object_id")), num(row.get("val")));
-            }
-        }
-    }
-    // Energy picture, straight from the grid in raw milliwatts. Deliberately
-    // NOT the `/guild/{id}/power/stats` endpoint: that sums view.player's
-    // total_load/total_capacity, whose floor() has an operator-precedence bug
-    // upstream (`floor(a + b / 1000)`) that adds milliwatts to watts. The
-    // grid rows are the source those columns are derived from.
-    let mut load_by_player: HashMap<String, f64> = HashMap::new();
-    let mut cap_by_player: HashMap<String, f64> = HashMap::new();
-    for (attr, map) in [("load", &mut load_by_player), ("capacity", &mut cap_by_player)] {
-        let (rows, cut) = match walk_pages(|p| {
-            client.guild.grid_by_attribute_and_object_type(attr, "player", p)
-        })
-        .await
-        {
-            Ok(ok) => ok,
-            Err(_) => walk_pages(|p| client.guild.grid_by_attribute_type(attr, p)).await?,
-        };
-        truncated |= cut;
-        for row in rows {
-            let ot = text(row.get("object_type"));
-            if ot.is_empty() || ot == "player" {
-                map.insert(text(row.get("object_id")), num(row.get("val")));
-            }
-        }
-    }
-    let structs_draw: f64 = sload_by_player.values().sum();
-    let alloc_load: f64 = load_by_player.values().sum();
-    let player_capacity: f64 = cap_by_player.values().sum();
-    // Per-guild rollup over roster membership (every player belongs to a
-    // guild, so the rosters cover the galaxy).
+    };
+    let ground_ore = ground_ore_from_walk
+        .or_else(|| last_bucket_sum(&ore_planet))
+        .unwrap_or(prev_ground);
+
+    // Energy picture in raw milliwatts. Load and capacity per guild come from
+    // the server's api_leaderboard_guild table (base units under `_p`) — one
+    // request for every guild — and deliberately NOT `/guild/{id}/power/stats`,
+    // whose columns inherit view.player's `floor(a + b / 1000)` unit-mixing
+    // bug. Older APIs walk the grid rows and roll up over roster membership.
     let mut by_guild: HashMap<String, (String, f64, f64, f64)> = HashMap::new(); // gid → (name, draw, load, cap)
     for (pid, (gid, gname)) in &guild_of {
         let e = by_guild
             .entry(gid.clone())
             .or_insert_with(|| (gname.clone(), 0.0, 0.0, 0.0));
         e.1 += sload_by_player.get(pid).copied().unwrap_or(0.0);
-        e.2 += load_by_player.get(pid).copied().unwrap_or(0.0);
-        e.3 += cap_by_player.get(pid).copied().unwrap_or(0.0);
     }
+    let (alloc_load, player_capacity) = match guild_board_res {
+        Ok(v) => {
+            let rows: Vec<Value> = v.as_array().cloned().unwrap_or_default();
+            let mut load_sum = 0.0;
+            let mut cap_sum = 0.0;
+            for (gid, (name, load, cap)) in guild_energy_from_board(&rows) {
+                load_sum += load;
+                cap_sum += cap;
+                let e = by_guild
+                    .entry(gid)
+                    .or_insert_with(|| (name, 0.0, 0.0, 0.0));
+                e.2 = load;
+                e.3 = cap;
+            }
+            (load_sum, cap_sum)
+        }
+        Err(_) => {
+            let mut sums = [0.0f64, 0.0];
+            for (i, attr) in ["load", "capacity"].iter().enumerate() {
+                let (rows, cut) = match walk_pages(|p| {
+                    client
+                        .guild
+                        .grid_by_attribute_and_object_type_limited(attr, "player", p, BIG_PAGE)
+                })
+                .await
+                {
+                    Ok(ok) => ok,
+                    Err(_) => walk_pages(|p| client.guild.grid_by_attribute_type(attr, p)).await?,
+                };
+                truncated |= cut;
+                let vals = player_vals(&rows);
+                sums[i] = vals.values().sum();
+                for (pid, v) in vals {
+                    if let Some((gid, gname)) = guild_of.get(&pid) {
+                        let e = by_guild
+                            .entry(gid.clone())
+                            .or_insert_with(|| (gname.clone(), 0.0, 0.0, 0.0));
+                        if i == 0 {
+                            e.2 += v;
+                        } else {
+                            e.3 += v;
+                        }
+                    }
+                }
+            }
+            (sums[0], sums[1])
+        }
+    };
     let mut guild_energy: Vec<Value> = by_guild
         .into_iter()
         .map(|(gid, (name, draw, load, cap))| {
@@ -985,82 +1174,13 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Live raids: PR #121's planet-raid list, filtered for freshness — the
-    // table keeps abandoned non-terminal rows forever (one 19-day-old
-    // `initiated` observed), so `updated_at` within the same staleness
-    // horizon War · Live Raids uses decides "live". Falls back to the legacy
-    // activity-feed reduction on an older API.
-    let raids_active = {
-        let now_ms = crate::hasher::types::now_millis();
-        let mut live: Option<u64> = None;
-        let mut fresh_total = 0u64;
-        let mut all_ok = true;
-        for status in ["initiated", "ongoing", "shieldsVulnerable"] {
-            match client.guild.planet_raid_by_status(status, 1).await {
-                Ok(page) => {
-                    fresh_total += page
-                        .items
-                        .iter()
-                        .filter(|r| {
-                            crate::mcp::raid_view::parse_guild_time(&text(r.get("updated_at")))
-                                .map(|ms| now_ms - ms < crate::mcp::raid_view::STALE_AFTER_MS)
-                                .unwrap_or(false)
-                        })
-                        .count() as u64;
-                }
-                Err(_) => {
-                    all_ok = false;
-                    break;
-                }
-            }
-        }
-        if all_ok {
-            live = Some(fresh_total);
-        }
-        match live {
-            Some(n) => n,
-            None => {
-                let raid_rows = crate::mcp::guild_api::fetch_all_pages(
-                    |page| client.guild.planet_activity_by_category("raid_status", page),
-                    3,
-                )
-                .await
-                .unwrap_or_default();
-                crate::mcp::raid_view::reduce_raids(
-                    &raid_rows,
-                    crate::hasher::types::now_millis(),
-                    crate::mcp::raid_view::STALE_AFTER_MS,
-                )
-                .iter()
-                .filter(|r| r.live)
-                .count() as u64
-            }
-        }
-    };
-
     // Long-horizon history for the trends card: 7 days of hourly LOCF-aligned
-    // galaxy totals from the aggregate endpoint — the graphs that were
-    // impossible before #121, and they survive app restarts (unlike the
-    // per-block ring). Absent on older APIs; the card simply doesn't render
-    // the section then.
-    let history = {
-        let now_s = (crate::hasher::types::now_millis() / 1000.0) as i64;
-        let week_ago = now_s - 7 * 24 * 3600;
-        let ore = client
-            .guild
-            .stat_aggregate("ore", "player", "1h", week_ago, now_s)
-            .await
-            .unwrap_or(Value::Null);
-        let sload = client
-            .guild
-            .stat_aggregate("structs_load", "player", "1h", week_ago, now_s)
-            .await
-            .unwrap_or(Value::Null);
-        if ore.is_null() && sload.is_null() {
-            Value::Null
-        } else {
-            json!({ "ore": ore, "structs_load": sload })
-        }
+    // galaxy totals. Absent on older APIs; the card simply doesn't render the
+    // section then.
+    let history = if ore_hist.is_null() && sload_hist.is_null() {
+        Value::Null
+    } else {
+        json!({ "ore": ore_hist, "structs_load": sload_hist })
     };
 
     // Leaderboards: alpha from the server ranking (bank fallback), ore and
@@ -1098,14 +1218,71 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
         "game_stats",
         crate::mcp::telemetry::Sev::Info,
         "heavy sweep: done",
-        serde_json::json!({ "total_ms": (crate::hasher::types::now_millis() - t0).round() }),
+        json!({
+            "total_ms": (crate::hasher::types::now_millis() - t0).round(),
+            "stages_ms": (t_join - t0).round(),
+            "requests": crate::mcp::guild_api::request_stats().0 - req0,
+            "guilds": rosters.len(),
+            "players": identities.len(),
+            "structs_load_rows": sload_rows.len(),
+        }),
     );
     Ok(())
 }
 
 // ── Sweep task ──────────────────────────────────────────────────────────────
+
+/// One tier's run: sweep, push the snapshot, persist. Returns whether the
+/// failure (if any) was an auth failure.
+async fn run_tier(
+    app: &tauri::AppHandle,
+    tier: &'static str,
+    fut: impl std::future::Future<Output = Result<(), String>>,
+) -> bool {
+    match fut.await {
+        Ok(()) => {
+            if tier == "fast" {
+                with_cache(|c| c.auth_ok = Some(true));
+            }
+            emit_board(
+                app,
+                "game-stats-update",
+                &json!({ "tier": tier, "snapshot": snapshot() }),
+            );
+            persist();
+            false
+        }
+        Err(e) => {
+            let auth_failed = is_auth_error(&e);
+            // Stamp the attempt so the cadence (and the auth backoff) holds.
+            with_cache(|c| {
+                let now = crate::hasher::types::now_millis();
+                match tier {
+                    "fast" => {
+                        if auth_failed {
+                            c.auth_ok = Some(false);
+                        }
+                        c.fast_updated_ms = now;
+                    }
+                    "slow" => c.slow_updated_ms = now,
+                    _ => c.heavy_updated_ms = now,
+                }
+            });
+            eprintln!("[Game Stats] {} sweep failed: {}", tier, e);
+            auth_failed
+        }
+    }
+}
+
 /// Start the background sweep loop (idempotent). Runs sweeps only while the
 /// gamestats window exists; otherwise idles cheaply.
+///
+/// Tiers run CONCURRENTLY and each paints as it lands. They used to run
+/// fast → slow → heavy in sequence, so the leaderboards (heavy) waited
+/// behind the slowest tier on every cold open — ~50 s on a good day, over
+/// 100 s when the API was slow. The one ordering kept: on an unknown or
+/// failed session the fast tier runs alone first, because its first request
+/// is the auth probe and a 401 must not fan out.
 pub fn ensure_running(app: &tauri::AppHandle) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
@@ -1151,68 +1328,44 @@ pub fn ensure_running(app: &tauri::AppHandle) {
             emit_board(&app, "game-stats-update", &json!({ "tier": "sweeping" }));
 
             let client = CosmosClient::new();
+            let t0 = crate::hasher::types::now_millis();
+            let req0 = crate::mcp::guild_api::request_stats().0;
             let mut auth_failed = false;
-            if fast_due {
-                match fast_sweep(&client).await {
-                    Ok(()) => {
-                        with_cache(|c| c.auth_ok = Some(true));
-                        emit_board(
-                            &app,
-                            "game-stats-update",
-                            &json!({ "tier": "fast", "snapshot": snapshot() }),
-                        );
-                        persist();
-                    }
-                    Err(e) => {
-                        auth_failed = is_auth_error(&e);
-                        with_cache(|c| {
-                            if auth_failed {
-                                c.auth_ok = Some(false);
-                            }
-                            // Stamp the attempt so the retry backoff works.
-                            c.fast_updated_ms = crate::hasher::types::now_millis();
-                        });
-                        eprintln!("[Game Stats] fast sweep failed: {}", e);
-                    }
-                }
+            let probe_first = fast_due && auth_ok != Some(true);
+            if probe_first {
+                auth_failed = run_tier(&app, "fast", fast_sweep(&client)).await;
             }
-            // Slow runs BEFORE heavy on a cold start: it builds the
-            // address→player map the heavy tier's alpha join needs, and the
-            // planet counts the fast tier displays.
-            if slow_due && !auth_failed && with_cache(|c| c.auth_ok) == Some(true) {
-                match slow_sweep(&client).await {
-                    Ok(()) => {
-                        emit_board(
-                            &app,
-                            "game-stats-update",
-                            &json!({ "tier": "heavy", "snapshot": snapshot() }),
-                        );
-                        persist();
-                    }
-                    Err(e) => {
-                        with_cache(|c| c.slow_updated_ms = crate::hasher::types::now_millis());
-                        eprintln!("[Game Stats] slow sweep failed: {}", e);
-                    }
-                }
-            }
-            if heavy_due && !auth_failed && with_cache(|c| c.auth_ok) == Some(true) {
-                match heavy_sweep(&client).await {
-                    Ok(()) => {
-                        emit_board(
-                            &app,
-                            "game-stats-update",
-                            &json!({ "tier": "heavy", "snapshot": snapshot() }),
-                        );
-                        persist();
-                    }
-                    Err(e) => {
-                        with_cache(|c| c.heavy_updated_ms = crate::hasher::types::now_millis());
-                        eprintln!("[Game Stats] heavy sweep failed: {}", e);
-                    }
-                }
+            if !auth_failed && with_cache(|c| c.auth_ok) == Some(true) {
+                tokio::join!(
+                    async {
+                        if fast_due && !probe_first {
+                            run_tier(&app, "fast", fast_sweep(&client)).await;
+                        }
+                    },
+                    async {
+                        if slow_due {
+                            run_tier(&app, "slow", slow_sweep(&client)).await;
+                        }
+                    },
+                    async {
+                        if heavy_due {
+                            run_tier(&app, "heavy", heavy_sweep(&client)).await;
+                        }
+                    },
+                );
             }
             with_cache(|c| c.sweeping = false);
             emit_board(&app, "game-stats-update", &json!({ "tier": "idle", "auth_ok": with_cache(|c| c.auth_ok) }));
+            crate::mcp::telemetry::tlog_kv(
+                "game_stats",
+                crate::mcp::telemetry::Sev::Info,
+                "sweep cycle: done",
+                json!({
+                    "ms": (crate::hasher::types::now_millis() - t0).round(),
+                    "requests": crate::mcp::guild_api::request_stats().0 - req0,
+                    "fast": fast_due, "slow": slow_due, "heavy": heavy_due,
+                }),
+            );
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
@@ -1255,6 +1408,52 @@ pub fn mcp_game_stats_snapshot() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_bucket_sum_reads_the_newest_non_null_bucket() {
+        // LOCF: the newest bucket is the current galaxy total. A trailing
+        // null (bucket not closed yet) must not hide the previous one, and an
+        // absent endpoint must read as "don't know", never 0.
+        let v = json!([
+            { "bucket": "a", "sum": "100" },
+            { "bucket": "b", "sum": 250 },
+            { "bucket": "c", "sum": null }
+        ]);
+        assert_eq!(last_bucket_sum(&v), Some(250.0));
+        assert_eq!(last_bucket_sum(&Value::Null), None);
+        assert_eq!(last_bucket_sum(&json!([])), None);
+    }
+
+    #[test]
+    fn player_vals_keeps_player_and_untyped_rows_only() {
+        let rows = vec![
+            json!({ "object_type": "player", "object_id": "1-1", "val": "5" }),
+            json!({ "object_id": "1-2", "val": 7 }),
+            json!({ "object_type": "planet", "object_id": "2-1", "val": "900" }),
+        ];
+        let m = player_vals(&rows);
+        assert_eq!(m.get("1-1"), Some(&5.0));
+        assert_eq!(m.get("1-2"), Some(&7.0));
+        assert!(m.get("2-1").is_none());
+    }
+
+    #[test]
+    fn guild_energy_from_board_uses_base_units_and_falls_back_to_onchain_name() {
+        let rows = vec![
+            json!({ "guild_id": "0-1", "name": "SN Corp", "onchain_name": "x",
+                    "member_load_p": "131340358102", "member_capacity_p": "140799326693" }),
+            json!({ "guild_id": "0-2", "name": "", "onchain_name": "Crab",
+                    "member_load_p": "10", "member_capacity_p": "0" }),
+            json!({ "name": "no id" }),
+        ];
+        let m = guild_energy_from_board(&rows);
+        assert_eq!(m.len(), 2);
+        let (name, load, cap) = m.get("0-1").unwrap();
+        assert_eq!(name, "SN Corp");
+        assert_eq!(*load, 131_340_358_102.0);
+        assert_eq!(*cap, 140_799_326_693.0);
+        assert_eq!(m.get("0-2").unwrap().0, "Crab");
+    }
 
     #[test]
     fn display_alpha_grams_convert_to_ualpha() {
