@@ -29,7 +29,7 @@ use crate::mcp::virtual_players::{self, VPlayerRole};
 
 /// Per-player snapshot row. `alpha_ualpha` is RAW chain units (1 gram alpha =
 /// 1_000_000 ualpha); power fields are raw milliwatts. UI/consumers convert.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct RosterRow {
     /// HD index; None for the primary player.
     pub index: Option<u32>,
@@ -69,10 +69,39 @@ pub struct RosterRow {
     pub err: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Serialize, serde::Deserialize)]
+#[serde(default)]
 struct RosterState {
     rows: HashMap<String, RosterRow>,
     refreshed_at_ms: f64,
+}
+
+// ── Survives a restart ──────────────────────────────────────────────────────
+// The roster is minutes of API reads at fleet scale, and every board page
+// showed placeholder rows (charge 0, alpha 0) until the first sweep landed.
+// Last session's rows come back at launch with their own `fetched_at_ms`, so
+// the "last read Nh ago" attention rule says exactly how old they are, and
+// the first sweep replaces them player by player as it goes.
+const ROSTER_CACHE: &str = "roster";
+static RESTORED: OnceLock<()> = OnceLock::new();
+
+fn ensure_restored() {
+    RESTORED.get_or_init(|| {
+        if let Some(saved) = crate::mcp::cache_store::load::<RosterState>(ROSTER_CACHE) {
+            let mut st = ROSTER.write().unwrap_or_else(|e| e.into_inner());
+            // A sweep that already landed wins; only an empty roster restores.
+            if st.rows.is_empty() {
+                *st = saved;
+            }
+        }
+    });
+}
+
+fn persist_roster() {
+    let snap = ROSTER.read().map(|st| st.clone()).unwrap_or_default();
+    if !snap.rows.is_empty() {
+        crate::mcp::cache_store::save_in_background(ROSTER_CACHE, snap);
+    }
 }
 
 static ROSTER: LazyLock<RwLock<RosterState>> =
@@ -367,6 +396,7 @@ fn role_str(role: Option<VPlayerRole>, index: Option<u32>) -> &'static str {
 /// The snapshot as JSON for the FLEET page: rows sorted primary-first then by
 /// HD index, plus freshness metadata.
 pub fn snapshot_json() -> Value {
+    ensure_restored();
     let (mut rows, refreshed_at) = {
         let st = ROSTER.read().unwrap_or_else(|e| e.into_inner());
         (st.rows.values().cloned().collect::<Vec<_>>(), st.refreshed_at_ms)
@@ -405,6 +435,7 @@ fn chain_height() -> u64 {
 
 /// Look up a cached row (for mass-action planning).
 pub fn get_row(player_id: &str) -> Option<RosterRow> {
+    ensure_restored();
     ROSTER
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -415,6 +446,7 @@ pub fn get_row(player_id: &str) -> Option<RosterRow> {
 
 /// All cached rows (unsorted) — mass-action filters iterate this.
 pub fn all_rows() -> Vec<RosterRow> {
+    ensure_restored();
     ROSTER
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -425,6 +457,7 @@ pub fn all_rows() -> Vec<RosterRow> {
 }
 
 pub fn refreshed_at_ms() -> f64 {
+    ensure_restored();
     ROSTER
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -439,6 +472,7 @@ fn upsert(row: RosterRow) {
 /// Kick a background roster sweep unless one is running or the snapshot is
 /// newer than `min_age_ms`. Returns whether a sweep was started.
 pub fn trigger_sweep(app: tauri::AppHandle, min_age_ms: f64) -> bool {
+    ensure_restored();
     let age = now_millis() - refreshed_at_ms();
     if age < min_age_ms {
         return false;
@@ -723,6 +757,12 @@ fn bulk_apply(
 }
 
 async fn run_sweep(app: &tauri::AppHandle) {
+    ensure_restored();
+    run_sweep_inner(app).await;
+    persist_roster();
+}
+
+async fn run_sweep_inner(app: &tauri::AppHandle) {
     RENAMES_THIS_SWEEP.store(0, Ordering::Relaxed);
     let current_block = chain_height();
     // Roster identities: primary (from GAME_STATE) + every registered vplayer.

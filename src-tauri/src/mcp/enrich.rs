@@ -29,6 +29,46 @@ static STRUCTS: LazyLock<RwLock<HashMap<String, String>>> =
 static IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
+// ── Survives a restart ──────────────────────────────────────────────────────
+// id → name for the event feed: one entity read per unknown id, and every
+// launch started from nothing. Names are last-known; a rename shows up when
+// the id is next re-read.
+const ENRICH_CACHE: &str = "enrich_names";
+static RESTORED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Names {
+    players: HashMap<String, String>,
+    structs: HashMap<String, String>,
+}
+
+fn ensure_restored() {
+    RESTORED.get_or_init(|| {
+        let Some(n) = crate::mcp::cache_store::load::<Names>(ENRICH_CACHE) else { return };
+        if let Ok(mut m) = PLAYERS.write() {
+            for (k, v) in n.players {
+                m.entry(k).or_insert(v);
+            }
+        }
+        persist_names();
+        if let Ok(mut m) = STRUCTS.write() {
+            for (k, v) in n.structs {
+                m.entry(k).or_insert(v);
+            }
+        }
+        persist_names();
+    });
+}
+
+fn persist_names() {
+    let n = Names {
+        players: PLAYERS.read().map(|m| m.clone()).unwrap_or_default(),
+        structs: STRUCTS.read().map(|m| m.clone()).unwrap_or_default(),
+    };
+    crate::mcp::cache_store::save_in_background(ENRICH_CACHE, n);
+}
+
 /// Hard caps so a hostile/very busy galaxy can't grow the maps unbounded.
 const MAX_CACHE: usize = 2000;
 
@@ -62,6 +102,7 @@ fn seed_players() {
             m.entry(id).or_insert(name);
         }
     }
+    persist_names();
 }
 
 /// bech32 address -> a label we can show.
@@ -71,6 +112,7 @@ fn seed_players() {
 /// resolvable locally — the vplayer registry stores an address per player, and
 /// the primary's is in game state.
 pub fn addresses_map() -> HashMap<String, String> {
+    ensure_restored();
     let mut out = HashMap::new();
     if let Ok(reg) = crate::mcp::virtual_players::REGISTRY.read() {
         for p in &reg.players {
@@ -118,6 +160,7 @@ fn struct_types_map() -> HashMap<String, String> {
 
 /// Everything the grass renderer needs, in one JSON object.
 pub fn lookups_json() -> Value {
+    ensure_restored();
     seed_players();
     let players = PLAYERS.read().map(|m| m.clone()).unwrap_or_default();
     let structs = STRUCTS.read().map(|m| m.clone()).unwrap_or_default();
@@ -191,6 +234,7 @@ fn unknown_ids(event: &GameEvent) -> Vec<(&'static str, String)> {
 /// Cheap per-event hook: queue background LCD fetches for unnamed ids and
 /// push resolved names to the board. Never blocks the event path.
 pub fn note_event(app: &tauri::AppHandle, event: &GameEvent) {
+    ensure_restored();
     seed_players();
     let targets = unknown_ids(event);
     if targets.is_empty() {

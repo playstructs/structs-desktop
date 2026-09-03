@@ -509,6 +509,29 @@ pub fn plan_web_stance(
 /// anything, so a defender whose target died was frozen out of the web forever.
 static ASSIGNED_CACHE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+// ── Survives a restart ──────────────────────────────────────────────────────
+// The defender→protected map is one entity read per struct to rebuild, and
+// evictions keep it honest; last session's copy is a head start.
+const DEFEND_CACHE: &str = "auto_defend_memory";
+static RESTORED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+fn ensure_restored() {
+    RESTORED.get_or_init(|| {
+        if let Some(m) = crate::mcp::cache_store::load::<HashMap<String, String>>(DEFEND_CACHE) {
+            if let Ok(mut c) = ASSIGNED_CACHE.lock() {
+                for (k, v) in m {
+                    c.entry(k).or_insert(v);
+                }
+            }
+        }
+    });
+}
+
+fn persist_memory() {
+    let m = ASSIGNED_CACHE.lock().map(|c| c.clone()).unwrap_or_default();
+    crate::mcp::cache_store::save_in_background(DEFEND_CACHE, m);
+}
+
 fn path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join("structs-app").join(FILENAME))
 }
@@ -604,7 +627,9 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     }
     let gen = RUN_GEN.load(Ordering::SeqCst);
     let run = crate::mcp::telemetry::LoopRun::start("auto_defend");
+    ensure_restored();
     scan(app_handle, &cfg, &run).await;
+    persist_memory();
     if RUN_GEN.load(Ordering::SeqCst) != gen {
         run.finish_stale(Some("invalidated by watchdog reset mid-scan".into()));
         return;

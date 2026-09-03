@@ -34,6 +34,30 @@ const CACHE_CAP: usize = 64;
 static CACHE: LazyLock<RwLock<HashMap<String, Value>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+// ── Survives a restart ──────────────────────────────────────────────────────
+// A few dozen guild marks, already screened and size-capped; refetching them
+// on every launch is a round trip per logo for nothing.
+const IMAGE_CACHE: &str = "remote_images";
+static RESTORED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+fn ensure_restored() {
+    RESTORED.get_or_init(|| {
+        if let Some(saved) = crate::mcp::cache_store::load::<HashMap<String, Value>>(IMAGE_CACHE) {
+            if let Ok(mut c) = CACHE.write() {
+                if c.is_empty() {
+                    *c = saved;
+                }
+            }
+            persist_images();
+        }
+    });
+}
+
+fn persist_images() {
+    let snap = CACHE.read().map(|c| c.clone()).unwrap_or_default();
+    crate::mcp::cache_store::save_in_background(IMAGE_CACHE, snap);
+}
+
 /// Is this host one we must never be talked into fetching?
 ///
 /// Whole-host checks and parsed IPs — never a substring test. `evil.com` can
@@ -98,6 +122,7 @@ pub fn refuse_reason(url: &str) -> Option<String> {
 /// Fetch `url` and return `{ data_url, mime }`.
 #[tauri::command]
 pub async fn remote_image(url: String) -> Result<Value, String> {
+    ensure_restored();
     if let Some(hit) = CACHE.read().ok().and_then(|c| c.get(&url).cloned()) {
         return Ok(hit);
     }

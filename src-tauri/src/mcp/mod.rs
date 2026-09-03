@@ -5,6 +5,7 @@ pub mod auto_raid;
 pub mod auto_response;
 pub mod config;
 pub mod config_store;
+pub mod cache_store;
 pub mod cosmos_client;
 pub mod delegation;
 pub mod enrich;

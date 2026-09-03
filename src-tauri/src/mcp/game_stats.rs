@@ -384,6 +384,35 @@ where
     Ok((all, true))
 }
 
+/// The guild directory on demand, for a card drawn OUTSIDE the Game Stats
+/// window — a guild named in Comms. The tiers only run while that window is
+/// visible, so in a fresh session a guild card found an empty cache and drew
+/// no mark and no figures. One fast sweep fills it. Bounded by the fast
+/// cadence either way, so a busy room naming guilds does not become a poll,
+/// and a failing API is not retried on every mention.
+pub async fn ensure_guilds(client: &CosmosClient) {
+    // Last session's directory first. The Game Stats loop restores the
+    // persisted cache when ITS window opens; a guild card in a session where
+    // that window never opened would otherwise start from nothing every
+    // launch. `restore()` never overwrites a sweep that already landed.
+    if with_cache(|c| c.guilds.is_empty() && c.fast_updated_ms == 0.0) {
+        restore();
+    }
+    let now = crate::hasher::types::now_millis();
+    let (have, fast_at) = with_cache(|c| (!c.guilds.is_empty(), c.fast_updated_ms));
+    if have || now - fast_at < FAST_INTERVAL_MS {
+        return;
+    }
+    match fast_sweep(client).await {
+        // Written down, so the NEXT launch has it before any window opens.
+        Ok(()) => persist(),
+        Err(e) => {
+            eprintln!("[Game Stats] on-demand guild sweep failed: {}", e);
+            with_cache(|c| c.fast_updated_ms = now);
+        }
+    }
+}
+
 /// One guild's figures as the leaderboard knows them, for a card drawn
 /// elsewhere (a guild named in Comms). `None` until the fast tier has run or
 /// for a guild the directory does not list; the card then shows what it has.

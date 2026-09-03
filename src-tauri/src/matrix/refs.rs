@@ -553,6 +553,11 @@ pub async fn resolve(id: &str) -> Option<Value> {
         _ => return None,
     };
     let client = crate::mcp::cosmos_client::CosmosClient::new();
+    // A guild's mark and figures live in the Game Stats cache, which only
+    // fills while that window is open; a guild card wants them regardless.
+    if kind == 0 {
+        crate::mcp::game_stats::ensure_guilds(&client).await;
+    }
     // A destroyed struct or a bad id answers 500 "object not found"; that is a
     // normal outcome here, not something to report.
     let v = client.query_entity(entity, id).await.ok()?;

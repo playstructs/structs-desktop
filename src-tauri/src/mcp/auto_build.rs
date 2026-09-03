@@ -278,6 +278,43 @@ static BUILT_CACHE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::n
 /// attempt after the backoff re-derives everything from fresh chain state.
 static INITIATE_BACKOFF: LazyLock<Mutex<HashMap<String, f64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// ── Survives a restart ──────────────────────────────────────────────────────
+// The set of structs confirmed built is what keeps steady-state completion
+// reads at ~0; a restart used to re-read every one. The initiate backoffs
+// come back too, so a deterministic rejection is not retried the instant the
+// app relaunches.
+const BUILD_CACHE: &str = "auto_build_memory";
+static RESTORED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct BuildMemory {
+    built: HashSet<String>,
+    backoff: HashMap<String, f64>,
+}
+
+fn ensure_restored() {
+    RESTORED.get_or_init(|| {
+        let Some(m) = crate::mcp::cache_store::load::<BuildMemory>(BUILD_CACHE) else { return };
+        if let Ok(mut b) = BUILT_CACHE.lock() {
+            b.extend(m.built);
+        }
+        if let Ok(mut bo) = INITIATE_BACKOFF.lock() {
+            for (k, v) in m.backoff {
+                bo.entry(k).or_insert(v);
+            }
+        }
+    });
+}
+
+fn persist_memory() {
+    let m = BuildMemory {
+        built: BUILT_CACHE.lock().map(|b| b.clone()).unwrap_or_default(),
+        backoff: INITIATE_BACKOFF.lock().map(|b| b.clone()).unwrap_or_default(),
+    };
+    crate::mcp::cache_store::save_in_background(BUILD_CACHE, m);
+}
 /// How long a player sits out after a deterministic initiate rejection.
 const INITIATE_BACKOFF_MS: f64 = 30.0 * 60_000.0;
 
@@ -620,7 +657,9 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     }
     let gen = RUN_GEN.load(Ordering::SeqCst);
     let run = crate::mcp::telemetry::LoopRun::start("auto_build");
+    ensure_restored();
     scan(app_handle, &cfg, &run).await;
+    persist_memory();
     if RUN_GEN.load(Ordering::SeqCst) != gen {
         // Invalidated by a watchdog reset mid-scan: a newer scan owns the
         // guard now — record the row, touch nothing else.

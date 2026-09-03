@@ -208,7 +208,54 @@ static SHOT_LOG: LazyLock<Mutex<Vec<f64>>> = LazyLock::new(|| Mutex::new(Vec::ne
 static INCIDENTS: LazyLock<Mutex<Vec<Incident>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 const INCIDENT_CAP: usize = 50;
 
-#[derive(Debug, Clone, Serialize)]
+// ── Survives a restart ──────────────────────────────────────────────────────
+// The WAR page's incident log is the record of what the defence actually did;
+// it vanished on every restart. The per-attacker cooldowns and the hourly shot
+// budget come back with it so a restart is not a free reload.
+const RESPONSE_CACHE: &str = "auto_response_memory";
+static RESTORED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+#[derive(Default, Serialize, serde::Deserialize)]
+#[serde(default)]
+struct ResponseMemory {
+    incidents: Vec<Incident>,
+    incident_seen: HashMap<String, f64>,
+    shot_log: Vec<f64>,
+}
+
+fn ensure_restored() {
+    RESTORED.get_or_init(|| {
+        let Some(m) = crate::mcp::cache_store::load::<ResponseMemory>(RESPONSE_CACHE) else { return };
+        if let Ok(mut v) = INCIDENTS.lock() {
+            if v.is_empty() {
+                *v = m.incidents;
+                v.truncate(INCIDENT_CAP);
+            }
+        }
+        if let Ok(mut seen) = INCIDENT_SEEN.lock() {
+            for (k, t) in m.incident_seen {
+                seen.entry(k).or_insert(t);
+            }
+        }
+        if let Ok(mut log) = SHOT_LOG.lock() {
+            if log.is_empty() {
+                *log = m.shot_log;
+            }
+        }
+    });
+}
+
+fn persist_memory() {
+    let m = ResponseMemory {
+        incidents: INCIDENTS.lock().map(|v| v.clone()).unwrap_or_default(),
+        incident_seen: INCIDENT_SEEN.lock().map(|s| s.clone()).unwrap_or_default(),
+        shot_log: SHOT_LOG.lock().map(|l| l.clone()).unwrap_or_default(),
+    };
+    crate::mcp::cache_store::save_in_background(RESPONSE_CACHE, m);
+}
+
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Incident {
     pub at_ms: f64,
     pub planet_id: String,
@@ -243,6 +290,7 @@ pub fn force_reset_running() {
 }
 
 pub fn recent_incidents() -> Vec<Incident> {
+    ensure_restored();
     INCIDENTS.lock().map(|i| i.clone()).unwrap_or_default()
 }
 
@@ -298,7 +346,9 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     }
     let gen = RUN_GEN.load(Ordering::SeqCst);
     let run = crate::mcp::telemetry::LoopRun::start("auto_response");
+    ensure_restored();
     scan(app_handle, &cfg, &run).await;
+    persist_memory();
     if RUN_GEN.load(Ordering::SeqCst) != gen {
         // Invalidated by a watchdog reset mid-scan. Deliberately does NOT clear
         // `RUNNING`: `force_reset_running` already cleared it when it bumped the

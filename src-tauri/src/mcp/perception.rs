@@ -127,7 +127,7 @@ const P_RAID: usize = 10;
 pub const PAGE_LIMIT: u32 = 60_000;
 
 /// One row of the `struct` table — the bare, attribute-free record.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StructRow {
     pub id: String,
     pub type_id: String,
@@ -139,7 +139,8 @@ pub struct StructRow {
 }
 
 /// The whole-galaxy view at one chain height.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Snapshot {
     /// Chain height the bulk pages were served at (max across pages).
     pub height: u64,
@@ -687,7 +688,40 @@ const PENDING_CAP: usize = 20_000;
 
 /// Read the live snapshot, if one has been taken. Callers hold the read lock
 /// only for the closure — clone out what you need, do not await inside.
+// ── Survives a restart ──────────────────────────────────────────────────────
+// The galaxy is ~11 LCD requests and ~8 seconds to rebuild, and every loop's
+// first scan waits on it. Last session's snapshot is restored on the first
+// read, off-thread (it is tens of megabytes), and only if nothing live has
+// landed first. Its `taken_ms` and `height` are OLD, deliberately: every
+// consumer already measures a snapshot's age against its own cadence, and the
+// loops verify against the chain before they sign — a restored snapshot is a
+// head start, never a source of truth.
+const SNAPSHOT_CACHE: &str = "perception_snapshot";
+static RESTORE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn restore_in_background() {
+    if RESTORE_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("perception-restore".into())
+        .spawn(|| {
+            let Some(saved) = crate::mcp::cache_store::load::<Snapshot>(SNAPSHOT_CACHE) else { return };
+            if let Ok(mut g) = CURRENT.write() {
+                if g.is_none() {
+                    *g = Some(saved);
+                }
+            }
+        })
+        .ok();
+}
+
+fn persist_snapshot(snap: &Snapshot) {
+    crate::mcp::cache_store::save_in_background(SNAPSHOT_CACHE, snap.clone());
+}
+
 pub fn with_snapshot<R>(f: impl FnOnce(&Snapshot) -> R) -> Option<R> {
+    restore_in_background();
     CURRENT.read().ok()?.as_ref().map(f)
 }
 
@@ -904,6 +938,9 @@ pub async fn refresh(client: &CosmosClient) -> Result<Value, String> {
                 snap.apply(c, s, d);
             }
             let s = snap.summary();
+            // A full refresh is the one moment the snapshot is known-good
+            // end to end; that is what the next launch should start from.
+            persist_snapshot(&snap);
             if let Ok(mut g) = CURRENT.write() {
                 *g = Some(snap);
             }

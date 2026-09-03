@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Ident {
     pub username: String,
     pub tag: String,
@@ -30,6 +30,47 @@ pub struct Ident {
 static PLAYERS: std::sync::LazyLock<RwLock<HashMap<String, Ident>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 static FETCHED_AT: RwLock<u64> = RwLock::new(0);
+
+// ── Survives a restart ──────────────────────────────────────────────────────
+// Names, tags and portraits for the whole galaxy, plus the server names the
+// homeservers taught us. Restored before the first fetch so every card and
+// every chat line has a name at launch; `FETCHED_AT` stays 0 so the TTL
+// refresh still runs and the live directory replaces it.
+const DIRECTORY_CACHE: &str = "player_directory";
+static RESTORED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct SavedDirectory {
+    players: HashMap<String, Ident>,
+    learned: HashMap<String, String>,
+}
+
+fn ensure_restored() {
+    RESTORED.get_or_init(|| {
+        let Some(saved) = crate::mcp::cache_store::load::<SavedDirectory>(DIRECTORY_CACHE) else { return };
+        if let Ok(mut p) = PLAYERS.write() {
+            if p.is_empty() {
+                *p = saved.players;
+            }
+        }
+        if let Ok(mut l) = LEARNED.write() {
+            for (k, v) in saved.learned {
+                l.entry(k).or_insert(v);
+            }
+        }
+    });
+}
+
+fn persist_directory() {
+    let snap = SavedDirectory {
+        players: PLAYERS.read().map(|p| p.clone()).unwrap_or_default(),
+        learned: LEARNED.read().map(|l| l.clone()).unwrap_or_default(),
+    };
+    if !snap.players.is_empty() {
+        crate::mcp::cache_store::save_in_background(DIRECTORY_CACHE, snap);
+    }
+}
 
 /// Usernames and portraits change rarely; guild membership less often still.
 const TTL_SECS: u64 = 900;
@@ -44,6 +85,7 @@ fn text(v: Option<&Value>) -> String {
 
 /// Refresh from every guild's roster, unless a recent sweep already did.
 pub async fn ensure_fresh() {
+    ensure_restored();
     {
         let at = *FETCHED_AT.read().unwrap();
         if at != 0 && super::auth::now_secs().saturating_sub(at) < TTL_SECS {
@@ -97,9 +139,11 @@ pub async fn ensure_fresh() {
         return;
     }
     *PLAYERS.write().unwrap() = found;
+    persist_directory();
 }
 
 pub fn get(player_id: &str) -> Option<Ident> {
+    ensure_restored();
     PLAYERS.read().ok()?.get(player_id).cloned()
 }
 

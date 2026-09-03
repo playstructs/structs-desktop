@@ -282,7 +282,73 @@ static HISTORY: LazyLock<Mutex<HashMap<String, (u32, u32)>>> = LazyLock::new(|| 
 /// Expeditions currently in flight, keyed by raider player id.
 static ACTIVE: LazyLock<Mutex<HashMap<String, Expedition>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Debug, Clone, Serialize)]
+// ── Survives a restart ──────────────────────────────────────────────────────
+// What the loop REMEMBERS, as opposed to what it is configured to do: the
+// swept roster (the 800-player sweep is the loop's limiter), the last scored
+// board, per-target cooldowns and the win ledger, and — the one that matters
+// for correctness — the expeditions in flight. A restart used to forget every
+// fleet that was away, and reset every cooldown so the same planet could be
+// hit again at once.
+const RAID_CACHE: &str = "auto_raid_memory";
+static RESTORED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+#[derive(Default, Serialize, serde::Deserialize)]
+#[serde(default)]
+struct RaidMemory {
+    roster_at_ms: f64,
+    roster: Vec<RosterEntry>,
+    board: Vec<Candidate>,
+    cooldown: HashMap<String, f64>,
+    history: HashMap<String, (u32, u32)>,
+    active: HashMap<String, Expedition>,
+}
+
+fn ensure_restored() {
+    RESTORED.get_or_init(|| {
+        let Some(m) = crate::mcp::cache_store::load::<RaidMemory>(RAID_CACHE) else { return };
+        if let Ok(mut r) = ROSTER.lock() {
+            if r.1.is_empty() {
+                *r = (m.roster_at_ms, m.roster);
+            }
+        }
+        if let Ok(mut b) = BOARD.lock() {
+            if b.is_empty() {
+                *b = m.board;
+            }
+        }
+        if let Ok(mut c) = TARGET_COOLDOWN.lock() {
+            for (k, v) in m.cooldown {
+                c.entry(k).or_insert(v);
+            }
+        }
+        if let Ok(mut h) = HISTORY.lock() {
+            for (k, v) in m.history {
+                h.entry(k).or_insert(v);
+            }
+        }
+        if let Ok(mut a) = ACTIVE.lock() {
+            for (k, v) in m.active {
+                a.entry(k).or_insert(v);
+            }
+        }
+    });
+}
+
+fn persist_memory() {
+    let (roster_at_ms, roster) = ROSTER.lock().map(|r| r.clone()).unwrap_or_default();
+    let m = RaidMemory {
+        roster_at_ms,
+        roster,
+        board: BOARD.lock().map(|b| b.clone()).unwrap_or_default(),
+        cooldown: TARGET_COOLDOWN.lock().map(|c| c.clone()).unwrap_or_default(),
+        history: HISTORY.lock().map(|h| h.clone()).unwrap_or_default(),
+        active: ACTIVE.lock().map(|a| a.clone()).unwrap_or_default(),
+    };
+    crate::mcp::cache_store::save_in_background(RAID_CACHE, m);
+}
+
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Expedition {
     pub raider_player: String,
     pub raider_index: u32,
@@ -301,7 +367,8 @@ pub struct Expedition {
 }
 
 /// One scored raid target.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Candidate {
     pub player_id: String,
     pub name: String,
@@ -336,10 +403,12 @@ pub struct Candidate {
 }
 
 pub fn target_board() -> Vec<Candidate> {
+    ensure_restored();
     BOARD.lock().map(|b| b.clone()).unwrap_or_default()
 }
 
 pub fn active_expeditions() -> Vec<Expedition> {
+    ensure_restored();
     ACTIVE.lock().map(|a| a.values().cloned().collect()).unwrap_or_default()
 }
 
@@ -538,7 +607,9 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     }
     let gen = RUN_GEN.load(Ordering::SeqCst);
     let run = crate::mcp::telemetry::LoopRun::start("auto_raid");
+    ensure_restored();
     scan(app_handle, &cfg, &run).await;
+    persist_memory();
     if RUN_GEN.load(Ordering::SeqCst) != gen {
         run.finish_stale(Some("invalidated by watchdog reset mid-scan".into()));
         return;
