@@ -61,6 +61,10 @@ async function until(fn, ms = 5000) {
   const first = rows.children[0];
   check('rank + name + tag on row 1', /#1\s/.test(first.textContent) && /\[G\d\]/.test(first.textContent),
     first.textContent.slice(0, 60));
+  check('…with the guild on its own line, not crowding the id',
+    !!first.querySelector('.pc-guild') && /^\[G\d\] /.test(first.querySelector('.pc-guild').textContent)
+    && /^#1-\d+$/.test(first.querySelector('.pc-id').textContent.trim()),
+    first.querySelector('.pc-id')?.textContent + ' | ' + first.querySelector('.pc-guild')?.textContent);
   check('string numerics format (players tile)', body.textContent.includes('2,662'));
   // No word under the number: the glyph says alpha, the title says it on hover.
   check('default metric is alpha, Kg ladder',
@@ -189,12 +193,21 @@ async function until(fn, ms = 5000) {
   if (player) {
     check('…whether they are around', !!player.querySelector('.ops-presence'),
       player.innerHTML.slice(0, 200));
-    const reach = player.querySelector('.pc-actions');
     check('…and both ways to reach them',
-      reach && reach.querySelectorAll('a.pc-act').length === 2,
-      reach ? String(reach.querySelectorAll('a.pc-act').length) : 'none');
-    check('…one of which is a direct message',
-      !!player.querySelector('.icon-phone'), player.innerHTML.slice(0, 200));
+      !!player.querySelector('.pc-act .icon-phone') && !!player.querySelector('.pc-act .icon-outgoing'),
+      player.innerHTML.slice(0, 200));
+    // Where to look: a planet and a fleet door when the row carries the ids —
+    // the same spectator the roster opens — and no dead door when it does not.
+    check('…and where to look',
+      !!player.querySelector('.pc-act .icon-planet') && !!player.querySelector('.pc-act .icon-fleet-tile'),
+      player.innerHTML.slice(0, 200));
+    const noFleet = rows.find((n) => n.getAttribute('data-player-id') === '1-104');
+    const nowhere = rows.find((n) => n.getAttribute('data-player-id') === '1-105');
+    check('a player with no fleet gets no fleet door',
+      !!noFleet && !!noFleet.querySelector('.pc-act .icon-planet') && !noFleet.querySelector('.pc-act .icon-fleet-tile'));
+    check('a player with neither gets neither',
+      !!nowhere && !nowhere.querySelector('.pc-act .icon-planet') && !nowhere.querySelector('.pc-act .icon-fleet-tile')
+      && nowhere.querySelectorAll('.pc-act').length === 2);
   }
 
   // A guild row is not a person and must offer neither.
@@ -223,8 +236,9 @@ async function until(fn, ms = 5000) {
   w.__HARNESS_REJECT__.matrix_message_player =
     'Comms is not connected — open Comms to sign in';
 
-  // The first door on a player row is the direct message.
-  const link = d.querySelector('.pc-row .pc-act');
+  // The direct-message door (the watch doors come first when the row has a
+  // planet and a fleet to look at).
+  const link = d.querySelector('.pc-row .pc-act .icon-phone').closest('a');
   link.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 120));
 

@@ -17,7 +17,8 @@
  *   badge     { text: 'PRIME', mod: 'warning' }  sui-badge; mod ∈ default|warning|destructive|solid
  *   presence  'online' | 'idle' | 'away' | a Node | null
  *   pfp       '{"head":12,…}'                  the on-chain attrs JSON (untrusted; pfp.js validates)
- *   sub       '[SNC] Orbital Hydro'            after the id, on the hint line
+ *   sub       '0-1'                            after the id, on the hint line (keep it short)
+ *   guild     '[OH] Orbital Hydro'             the guild, on a line of its own
  *   attn      'last read 3h ago'               warning-coloured, after the id
  *   err       true                             the name turns enemy-red
  *   charge    5                                RAW charge; drawn as the game's 5-chunk battery
@@ -123,6 +124,14 @@
       s.appendChild(el('span', 'pc-attn', p.attn));
     }
     return s;
+  }
+
+  // GUILD line: its own line, so a long guild name never crowds the id.
+  function guildLine(p) {
+    if (!p.guild) return null;
+    var g = el('div', 'pc-guild sui-text-label-block', p.guild);
+    g.title = p.guild;
+    return g;
   }
 
   function reading(r) {
@@ -231,6 +240,8 @@
     var idSpan = el('span'); idSpan.className = idl.className;
     while (idl.firstChild) idSpan.appendChild(idl.firstChild);
     title.appendChild(idSpan);
+    var gl = guildLine(p);
+    if (gl) { var gSpan = el('span'); gSpan.className = gl.className.replace('sui-text-label-block', '').trim(); gSpan.title = gl.title; gSpan.textContent = gl.textContent; title.appendChild(gSpan); }
     lab.appendChild(title);
     head.appendChild(lab);
     var bd = badge(p.badge);
@@ -271,6 +282,8 @@
     var ident = el('div', 'pc-ident');
     ident.appendChild(nameLine(p, true));
     ident.appendChild(idLine(p));
+    var gl = guildLine(p);
+    if (gl) ident.appendChild(gl);
     var mk = marks(p);
     if (mk) ident.appendChild(mk);
     node.appendChild(ident);

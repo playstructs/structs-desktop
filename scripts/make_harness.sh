@@ -72,6 +72,10 @@ cat > "$FIX" <<'EOF'
         pfp_attrs: '{"head":1,"neck":2,"body":1,"arms":3,"background":3}',
         guild_name: 'Guild ' + (1 + (i % 5)),
         tag: 'G' + (1 + (i % 5)),
+        // Where to look. Most rows have both; #4 has no fleet (a planet-only
+        // player) and #5 nothing at all, so a missing door is exercised.
+        planet_id: i === 5 ? '' : '2-' + (100 + i),
+        fleet_id: (i === 4 || i === 5) ? '' : '9-' + (100 + i),
         value: metric === 'alpha' ? (i === 1 ? 4.934e10 : (26 - i) * 4.2e7)
           : (metric === 'ore' ? (i === 1 ? 544 : (26 - i) * 4) : 6.4e6 + (26 - i) * 2.7e5),
       });

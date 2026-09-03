@@ -375,16 +375,32 @@ pub fn snapshot_json() -> Value {
         None => 0u64,
         Some(i) => 1 + i as u64,
     });
-    let current_block = crate::game_state::GAME_STATE
-        .read()
-        .map(|g| g.current_block_height)
-        .unwrap_or(0);
+    let current_block = chain_height();
     serde_json::json!({
         "rows": rows,
         "refreshed_at_ms": refreshed_at,
         "refreshing": SWEEP_IN_FLIGHT.load(Ordering::Relaxed),
         "current_block": current_block,
     })
+}
+
+/// The block height charge is measured against.
+///
+/// The game session's height first — it is what the HUD's own battery uses.
+/// But that height is 0 whenever the game window is not signed in (a `make
+/// dev` session, the web board on a headless host, the minute after launch),
+/// and `charge = height - lastAction` then clamps to 0 for EVERY player: a
+/// roster of full batteries drawn empty. The perception snapshot carries the
+/// LCD's height and is refreshed regardless of sign-in, so it is the fallback.
+fn chain_height() -> u64 {
+    let session = crate::game_state::GAME_STATE
+        .read()
+        .map(|g| g.current_block_height)
+        .unwrap_or(0);
+    if session > 0 {
+        return session;
+    }
+    crate::mcp::perception::with_snapshot(|s| s.height).unwrap_or(0)
 }
 
 /// Look up a cached row (for mass-action planning).
@@ -708,10 +724,7 @@ fn bulk_apply(
 
 async fn run_sweep(app: &tauri::AppHandle) {
     RENAMES_THIS_SWEEP.store(0, Ordering::Relaxed);
-    let current_block = crate::game_state::GAME_STATE
-        .read()
-        .map(|g| g.current_block_height)
-        .unwrap_or(0);
+    let current_block = chain_height();
     // Roster identities: primary (from GAME_STATE) + every registered vplayer.
     let mut targets: Vec<(String, Option<u32>, String, String)> = Vec::new();
     {

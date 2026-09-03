@@ -410,24 +410,33 @@
 
   // Every door a roster card offers, as descriptors for playercard.js: watch
   // the planet, follow the fleet, message, open Comms AS them, share them.
-  function armadaActions(r) {
+  // Watch this player's planet, follow their fleet — for the shared player
+  // card, wherever a player is listed. A player with no planet or no fleet
+  // simply gets fewer doors rather than a dead one; the spectator is a native
+  // window, so on the web copy there are none (see canSpectate).
+  function watchActions(r) {
     var acts = [];
-    if (canSpectate()) {
-      [
-        { id: r.planet_id, icon: 'icon-planet', what: 'planet', arg: 'planet_id' },
-        { id: r.fleet_id, icon: 'icon-fleet-tile', what: 'fleet', arg: 'fleet_id' }
-      ].forEach(function (t) {
-        if (!t.id) return;
-        acts.push({ icon: t.icon, title: 'Watch ' + t.what + ' ' + t.id, onClick: function (ev, a) {
-          var opts = {};
-          opts[t.arg] = t.id;
-          openSpectatorWindow(opts).catch(function (err) {
-            a.classList.add('err');
-            a.title = 'could not open the ' + t.what + ' window: ' + err;
-          });
-        } });
-      });
-    }
+    if (!canSpectate() || !r) return acts;
+    [
+      { id: r.planet_id, icon: 'icon-planet', what: 'planet', arg: 'planet_id' },
+      { id: r.fleet_id, icon: 'icon-fleet-tile', what: 'fleet', arg: 'fleet_id' }
+    ].forEach(function (t) {
+      if (!t.id) return;
+      acts.push({ icon: t.icon, title: 'Watch ' + t.what + ' ' + t.id, onClick: function (ev, a) {
+        var opts = {};
+        opts[t.arg] = t.id;
+        openSpectatorWindow(opts).catch(function (err) {
+          a.classList.add('err');
+          a.title = 'could not open the ' + t.what + ' window: ' + err;
+        });
+      } });
+    });
+    return acts;
+  }
+  Board.watchActions = watchActions;
+
+  function armadaActions(r) {
+    var acts = watchActions(r);
     var reach = reachActions(r);
     acts.push(reach[0]);
     // Speak AS this player. Roster only: every row here is one of OUR players,

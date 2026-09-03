@@ -216,10 +216,15 @@
           name: r.username || r.player_id,
           presence: Board.presenceDot && Board.presenceDot(r.player_id),
           pfp: attrs,
-          sub: ((r.guild_name || '') + (r.tag ? ' [' + r.tag + ']' : '')).trim() || null,
+          // The guild on its own line: tag first (short, what people say),
+          // then the name, so neither crowds the id.
+          guild: ((r.tag ? '[' + r.tag + '] ' : '') + (r.guild_name || '')).trim() || null,
           readings: [{ value: def.fmt(num(r.value)), icon: def.icon, title: def.label }],
         }, {
-          actions: Board.reachActions ? Board.reachActions(r) : [],
+          // Watch their planet / follow their fleet when the row carries the
+          // ids, then the two ways to reach them.
+          actions: (Board.watchActions ? Board.watchActions(r) : [])
+            .concat(Board.reachActions ? Board.reachActions(r) : []),
         }));
       });
       body.appendChild(table);

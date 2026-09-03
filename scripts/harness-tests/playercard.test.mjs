@@ -174,12 +174,15 @@ const PFP = '{"head":12,"neck":2,"body":7,"arms":3,"background":3}';
 {
   console.log('\n— row');
   const row = PC.row({
-    id: '1-61', prefix: '#1', name: 'JPEG', sub: 'SN Corp [SNC]', pfp: PFP, charge: 8,
+    id: '1-61', prefix: '#1', name: 'JPEG', guild: '[SNC] SN Corp', pfp: PFP, charge: 8,
     readings: [{ value: '49.34Kg', icon: 'sui-icon-alpha-matter', title: 'alpha' }],
   }, { actions: [{ icon: 'icon-phone', title: 'Message' }, { icon: 'icon-outgoing', title: 'Share' }] });
   check('a row is one grid line', row.classList.contains('pc-row'));
   check('rank, then name', /^#1 JPEG/.test(text(row.querySelector('.pc-name'))), text(row.querySelector('.pc-name')));
-  check('sub sits on the id line', text(row.querySelector('.pc-id')) === '#1-61 · SN Corp [SNC]', text(row.querySelector('.pc-id')));
+  check('the id line is just the id', text(row.querySelector('.pc-id')) === '#1-61', text(row.querySelector('.pc-id')));
+  check('the guild has a line of its own', text(row.querySelector('.pc-guild')) === '[SNC] SN Corp', text(row.querySelector('.pc-guild')));
+  const gcard = PC.card({ id: '1-61', name: 'JPEG', guild: '[SNC] SN Corp', pfp: PFP });
+  check('…in the card header too', text(gcard.querySelector('.sui-planet-card-header .pc-guild')) === '[SNC] SN Corp');
   check('the badge, if any, is on the name line', !row.querySelector('.sui-badge'));
   check('the reading is there', text(row.querySelector('.pc-res')) === '49.34Kg');
   check('two doors', row.querySelectorAll('.pc-act').length === 2);

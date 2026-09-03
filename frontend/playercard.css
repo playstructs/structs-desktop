@@ -58,6 +58,10 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .pc-attn { color: var(--text-warning); }
+.pc-guild {
+  color: var(--text-hint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 /* Who is around, from Comms — the same dot the roster and chat draw. */
 .pc-presence {
   display: inline-block; flex: none;

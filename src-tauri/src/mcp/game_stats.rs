@@ -501,6 +501,31 @@ struct Identity {
     pfp_attrs: Value,
     guild_name: String,
     tag: String,
+    /// Where to LOOK: the player's planet and fleet, so a leaderboard row can
+    /// open the spectator the way a roster row does. Empty when unknown, and
+    /// the card then simply offers no door.
+    planet_id: String,
+    fleet_id: String,
+}
+
+/// A row's planet/fleet ids for the leaderboards. The guild roster carries
+/// `planet_id`; the fleet is not in that API at all, so both are read from
+/// the perception snapshot's player store (`planetId`/`fleetId`) when it has
+/// the player, with the roster's planet as the fallback.
+fn whereabouts(pid: &str, roster_row: &Value) -> (String, String) {
+    let from_snapshot = crate::mcp::perception::with_snapshot(|s| {
+        s.players
+            .get(pid)
+            .map(|p| (text(p.get("planetId")), text(p.get("fleetId"))))
+    })
+    .flatten()
+    .unwrap_or_default();
+    let planet = if from_snapshot.0.is_empty() {
+        text(roster_row.get("planet_id"))
+    } else {
+        from_snapshot.0
+    };
+    (planet, from_snapshot.1)
 }
 
 fn leaderboard(
@@ -522,6 +547,8 @@ fn leaderboard(
                 "pfp_attrs": ident.map(|x| x.pfp_attrs.clone()).unwrap_or(Value::Null),
                 "guild_name": ident.map(|x| x.guild_name.clone()).unwrap_or_default(),
                 "tag": ident.map(|x| x.tag.clone()).unwrap_or_default(),
+                "planet_id": ident.map(|x| x.planet_id.clone()).unwrap_or_default(),
+                "fleet_id": ident.map(|x| x.fleet_id.clone()).unwrap_or_default(),
                 "value": v,
             })
         })
@@ -955,6 +982,7 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
                 continue;
             }
             guild_of.insert(pid.clone(), (gid.clone(), text(row.get("guild_name"))));
+            let (planet_id, fleet_id) = whereabouts(&pid, row);
             identities.insert(
                 pid,
                 Identity {
@@ -969,6 +997,8 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
                         .unwrap_or(Value::Null),
                     guild_name: crate::matrix::identity::sanitize(&text(row.get("guild_name"))),
                     tag: crate::matrix::identity::sanitize(&text(row.get("tag"))),
+                    planet_id,
+                    fleet_id,
                 },
             );
         }
@@ -1006,6 +1036,8 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
                             "pfp_attrs": ident.map(|x| x.pfp_attrs.clone()).unwrap_or(Value::Null),
                             "guild_name": ident.map(|x| x.guild_name.clone()).unwrap_or_default(),
                             "tag": ident.map(|x| x.tag.clone()).unwrap_or_default(),
+                            "planet_id": ident.map(|x| x.planet_id.clone()).unwrap_or_default(),
+                            "fleet_id": ident.map(|x| x.fleet_id.clone()).unwrap_or_default(),
                             "value": num(r.get("alpha_value_p")),
                         })
                     })
