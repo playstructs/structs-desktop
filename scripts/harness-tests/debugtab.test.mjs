@@ -226,11 +226,29 @@ const src = readFileSync(process.cwd() + '/frontend/structs-config.js', 'utf8');
  */
 {
   console.log('\n— remote images');
+  /* The policy is the OWNER's call, and it has been made.
+   *
+   * `img-src` was `'self' data: blob:` — no remote images at all — which is
+   * why guild logos go through `remote_image` and come back as data URIs. The
+   * owner widened it to `https: http:` in 758ebf2 ("Fixing Comms issue"). That
+   * is their decision to make and this does not override it; what it must not
+   * do is drift further without anyone noticing, so the directive is pinned to
+   * exactly what was chosen.
+   *
+   * What it costs, recorded so the choice stays informed: a remote `<img>` now
+   * loads straight from whatever host wrote the URL. Guild logo URLs are
+   * guild-authored and can point anywhere, so opening a screen that shows one
+   * tells that host who is looking and when. `http:` additionally permits
+   * cleartext. The proxy below still runs and still adopts remote images, so
+   * the tight path is intact — this only decides what happens to an image the
+   * proxy has not reached yet.
+   */
   const csp = readFileSync(process.cwd() + '/src-tauri/tauri.conf.json', 'utf8');
   const imgSrc = /"csp":[^"]*"([^"]*)"/.exec(csp);
   const directive = imgSrc && /img-src ([^;"]*)/.exec(imgSrc[1]);
-  check('the policy still refuses remote images', !!directive
-    && !/https?:/.test(directive[1]), directive && directive[1]);
+  check('the image policy is the one the owner chose, unchanged',
+    !!directive && directive[1].trim() === "'self' data: blob: https: http:",
+    directive && directive[1]);
 
   check('a blocked src is dropped, not left to paint an empty box',
     /removeAttribute\('src'\)/.test(src));
