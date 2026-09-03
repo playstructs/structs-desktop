@@ -289,7 +289,7 @@ SCM_EOF
 grep -q "signAndBroadcastAs" "$SCM" \
   || { echo "ERROR: SigningClientManager signAndBroadcastAs patch did not apply"; exit 1; }
 
-echo "    Patching MapStructLottieAnimationSVG.js (scope the struct-art swap to this animation's own SVG)..."
+echo "    Patching MapStructLottieAnimationSVG.js (struct-art swap: canvas renderer support + scoped SVG query)..."
 # The shared animation bundles (shake_*, destroy_*, deployment_*, move_*) are
 # TEMPLATES with a placeholder hull baked in (a Cruiser-style hull in the
 # shake bundles); after the SVG loads the game swaps each tagged layer for the
@@ -303,9 +303,62 @@ echo "    Patching MapStructLottieAnimationSVG.js (scope the struct-art swap to 
 # hull: a fighter "turning into a cruiser" mid-attack (seen live 2026-09-02).
 # Scope the query to this animation's own renderer, falling back to the old
 # lookup only when lottie has not built the SVG yet.
+#
+# THE BIGGER ONE (macOS, found live 2026-09-02 with the Web Inspector): the
+# macOS startup script in src-tauri/src/main.rs forces EVERY lottie animation
+# onto the CANVAS renderer (WebKit ignores `image-rendering: pixelated` on SVG
+# <image>, so canvas is how the sprites stay crisp — verified by rendering the
+# same art both ways side by side). The webapp's swap only knows SVG: on a
+# canvas animation `querySelector('… image')` finds nothing, returns quietly,
+# and every template bundle plays its baked hull. Lottie's canvas elements
+# carry the layer class as `el.data.cl` and draw `el.img` every frame, so
+# swapping THAT is the canvas equivalent — replacing a satellite loop's
+# `el.img` with a Cruiser sprite re-drew the tile instantly in the live app.
 LSVG="$BUILD_DIR/js/view_models/components/MapStructLottieAnimationSVG.js"
-perl -0pi -e 's|const originalSVGImage = document\.querySelector\(\s*`#\$\{this\.lottieContainerId\} g g\$\{targetClass\} image`\s*\);|const ownSvg = this.animation \&\& this.animation.renderer \&\& this.animation.renderer.svgElement;\n    const originalSVGImage = ownSvg\n      ? ownSvg.querySelector(`g g\${targetClass} image`)\n      : document.querySelector(`#\${this.lottieContainerId} g g\${targetClass} image`);|' "$LSVG"
-verify_patched "$LSVG" 'ownSvg.querySelector' "MapStructLottieAnimationSVG.js scoped swap"
+perl -0pi -e 's|const originalSVGImage = document\.querySelector\(\s*`#\$\{this\.lottieContainerId\} g g\$\{targetClass\} image`\s*\);|if (this.animation \&\& this.animation.renderer \&\& this.animation.renderer.rendererType === \x27canvas\x27) {\n      return this._swapCanvasImage(targetClass, newImageSrc, generation);\n    }\n    const ownSvg = this.animation \&\& this.animation.renderer \&\& this.animation.renderer.svgElement;\n    const originalSVGImage = ownSvg\n      ? ownSvg.querySelector(`g g\${targetClass} image`)\n      : document.querySelector(`#\${this.lottieContainerId} g g\${targetClass} image`);|' "$LSVG"
+cat >> "$LSVG" <<'LSVG_EOF'
+
+// [structs-universe patch] Canvas-renderer counterpart of swapImage. The app
+// forces lottie onto the canvas renderer on macOS (crisp pixel art); there the
+// bundle's hull layers are CVImageElements that draw `el.img` each frame, so
+// the struct's own art goes in by replacing that image. Same contract as the
+// SVG path: a falsy src empties the slot, a stale generation is ignored, and a
+// destroyed wrapper is left alone.
+MapStructLottieAnimationSVG.prototype._swapCanvasImage = function (targetClass, newImageSrc, generation) {
+  var cls = String(targetClass || '').replace(/^\./, '');
+  var self = this;
+  var walk = function (els, out) {
+    (els || []).forEach(function (e) {
+      if (e && e.data && e.data.cl === cls) out.push(e);
+      if (e && e.elements) walk(e.elements, out);
+    });
+    return out;
+  };
+  var renderer = this.animation && this.animation.renderer;
+  var targets = walk(renderer && renderer.elements, []);
+  if (!targets.length) return Promise.resolve();
+  var apply = function (img) {
+    if (!self.animation) return;
+    if (generation !== undefined && generation !== self._configGen) return;
+    targets.forEach(function (e) { e.img = img; });
+  };
+  if (!newImageSrc) {
+    // Nothing to show in this slot: a 1×1 transparent canvas draws nothing.
+    var blank = document.createElement('canvas');
+    blank.width = 1;
+    blank.height = 1;
+    apply(blank);
+    return Promise.resolve();
+  }
+  return MapStructLottieAnimationSVG._preloadImage(newImageSrc)
+    .catch(function () { return null; })
+    .then(function (img) {
+      if (!img) { img = new Image(); img.src = newImageSrc; }
+      apply(img);
+    });
+};
+LSVG_EOF
+verify_patched "$LSVG" '_swapCanvasImage' "MapStructLottieAnimationSVG.js canvas-aware swap"
 
 echo "    Patching WalletManager.js (multi-index HD derivation for virtual players)..."
 WM="$BUILD_DIR/js/managers/WalletManager.js"
