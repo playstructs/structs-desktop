@@ -368,16 +368,12 @@ pub(crate) async fn ensure_command_ship(
     pid: &str,
     index: u32,
 ) -> Option<String> {
-    use crate::mcp::loop_util::parse_bool;
     let fleet_id = format!("9-{}", pid.split('-').nth(1)?);
-    let fleet = client.query_entity("fleet", &fleet_id).await.ok()?;
-    let f = fleet.get("Fleet")?;
-    let cmd = f.get("commandStruct").and_then(|x| x.as_str()).unwrap_or("");
-    if !cmd.is_empty() {
-        let alive = client
-            .query_entity("struct", cmd)
+    let cmd = crate::mcp::verify::fleet_command_struct(client, pid, &fleet_id).await.ok()?;
+    if let Some(cmd) = cmd.filter(|c| !c.is_empty()) {
+        let alive = crate::mcp::verify::struct_state(client, &cmd)
             .await
-            .map(|e| !parse_bool(e.get("structAttributes").and_then(|a| a.get("isDestroyed"))))
+            .map(|s| !s.destroyed)
             .unwrap_or(true); // unreadable = assume alive; the walk re-checks
         if alive {
             return None;
@@ -392,15 +388,13 @@ pub(crate) async fn ensure_command_ship(
     };
     // Prefer a genuinely free fleet slot; the initiate names one but does not
     // consume it (verified live on 1-280), so a full fleet still rebuilds.
-    let (amb, slot) = ["land", "water", "air", "space"]
-        .iter()
-        .find_map(|amb| {
-            let arr = f.get(*amb)?.as_array()?;
-            arr.iter()
-                .position(|x| x.as_str().map(|s| s.is_empty()).unwrap_or(true))
-                .map(|i| (*amb, i as u64))
-        })
-        .unwrap_or(("land", 0));
+    // Source-switched (mcp/verify.rs); a failed read just names slot 0.
+    let (amb, slot) = crate::mcp::verify::first_free_slot(client, "fleet", &fleet_id, &["land", "water", "air", "space"])
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(("land".to_string(), 0));
+    let amb = amb.as_str();
     let payload = serde_json::json!({
         "playerId": pid,
         "structTypeId": type_id,
@@ -484,9 +478,11 @@ async fn initiate_verified_on_chain(
     require_free_slot: bool,
     current_block: u64,
 ) -> InitiateCheck {
-    let Ok(player) = client.query_entity("player", pid).await else { return InitiateCheck::ReadFailed };
-    let ga = player.get("gridAttributes");
-    let charge = current_block.saturating_sub(read_u64_field(ga, "lastAction"));
+    // Source-switched reads (mcp/verify.rs): Guild API by default, LCD on
+    // failover or when `verify_source` says so.
+    let Ok(charge) = crate::mcp::verify::player_charge(client, pid, current_block).await else {
+        return InitiateCheck::ReadFailed;
+    };
     if charge < BUILD_CHARGE {
         crate::mcp::telemetry::tlog(
             "auto_build",
@@ -498,28 +494,13 @@ async fn initiate_verified_on_chain(
     if !require_free_slot {
         return InitiateCheck::Verified;
     }
-    let (wrapper, id_field) = if target == "fleet" { ("Fleet", "fleetId") } else { ("Planet", "planetId") };
-    let loc = player
-        .get("Player")
-        .and_then(|p| p.get(id_field))
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
+    let Ok(loc) = crate::mcp::verify::player_location(client, pid, target).await else { return InitiateCheck::ReadFailed };
     if loc.is_empty() {
         return InitiateCheck::ReadFailed;
     }
-    let Ok(entity) = client.query_entity(target, &loc).await else { return InitiateCheck::ReadFailed };
-    // Fold the live row in so the next scan's slot map is right too.
-    if target == "planet" {
-        crate::mcp::perception::absorb_planet_entity(&entity);
-    }
-    let occupied = entity
-        .get(wrapper)
-        .and_then(|o| o.get(ambit))
-        .and_then(|a| a.as_array())
-        .and_then(|a| a.get(slot as usize))
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty());
+    let Ok(occupied) = crate::mcp::verify::slot_occupied(client, target, &loc, ambit, slot).await else {
+        return InitiateCheck::ReadFailed;
+    };
     if occupied {
         crate::mcp::telemetry::tlog(
             "auto_build",
@@ -807,13 +788,12 @@ async fn scan(
                     // once per ISSUED completion (not once per struct per scan).
                     let mut anchor = anchor;
                     if scanned_from_snapshot {
-                        let Ok(live) = crate::mcp::loop_util::verify_struct_entity(&client, &sid).await else { continue };
-                        let lsa = live.get("structAttributes");
-                        if parse_bool(lsa.and_then(|x| x.get("isBuilt"))) || parse_bool(lsa.and_then(|x| x.get("isDestroyed"))) {
+                        let Ok(live) = crate::mcp::verify::struct_state(&client, &sid).await else { continue };
+                        if live.built || live.destroyed {
                             BUILT_CACHE.lock().unwrap().insert(sid.clone());
                             continue;
                         }
-                        let live_anchor = read_u64_field(lsa, "blockStartBuild");
+                        let Ok(live_anchor) = crate::mcp::verify::build_anchor(&client, &pid, &sid).await else { continue };
                         if live_anchor != anchor {
                             crate::mcp::telemetry::tlog(
                                 "auto_build",

@@ -18,6 +18,9 @@ use crate::http_proxy::shared_client;
 /// Server-side page size — matches `PaginationLimits::DEFAULT` in the Guild API.
 /// Used to infer `has_more` on list responses.
 pub const PAGE_SIZE: usize = 100;
+/// `GET /api/objects?ids=` accepts this many ids per call (raised from 25 on
+/// 2026-09-04).
+pub const OBJECTS_BATCH_MAX: usize = 200;
 
 /// Hard cap for `fetch_all_pages` so a runaway intel query can't hammer the API.
 pub const MAX_PAGES: u32 = 5;
@@ -311,6 +314,93 @@ impl GuildApiClient {
     }
 
     // -- struct lists --
+    // -- batched typed reads: `GET /api/objects?ids=a,b,c` (see mcp/verify.rs) --
+    /// Up to `OBJECTS_BATCH_MAX` ids in one call. Returns the typed rows
+    /// (`{id, type, object}`) and the indexer height the response was
+    /// stamped with. Struct rows are BASE columns (owner, location, slot,
+    /// is_destroyed) — no status/health; planet and fleet rows carry `map`
+    /// (slot arrays as a JSON string), fleets also `status` and
+    /// `command_struct`; player rows carry `planet_id` / `fleet_id`.
+    pub async fn objects_by_ids(&self, ids: &[&str]) -> Result<(Vec<Value>, Option<u64>), String> {
+        if ids.is_empty() {
+            return Ok((vec![], None));
+        }
+        if ids.len() > OBJECTS_BATCH_MAX {
+            return Err(format!("objects batch of {} exceeds the {OBJECTS_BATCH_MAX}-id cap", ids.len()));
+        }
+        let env = self.get_envelope(&format!("/api/objects?ids={}", ids.join(","))).await?;
+        let height = env
+            .get("meta")
+            .and_then(|m| m.get("height"))
+            .and_then(|h| h.as_u64().or_else(|| h.as_str().and_then(|s| s.parse().ok())));
+        let rows = match env.get("data") {
+            Some(Value::Array(a)) => a.clone(),
+            Some(Value::Null) | None => vec![],
+            Some(other) => return Err(format!("objects: expected a list, got {other}")),
+        };
+        Ok((rows, height))
+    }
+
+    /// Low-level GET returning the whole validated envelope (for callers
+    /// that need `meta`), same error handling as `get`.
+    async fn get_envelope(&self, path: &str) -> Result<Value, String> {
+        note_request();
+        let url = self.build_url(path);
+        let resp = http()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Guild API HTTP error: {}", e))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Guild API read error: {}", e))?;
+        if !status.is_success() {
+            return Err(format!("Guild API {} {}: {}", status.as_u16(), url, body));
+        }
+        let env: Value = serde_json::from_str(&body)
+            .map_err(|e| format!("Guild API JSON parse error: {} (body: {})", e, body))?;
+        let ok = env.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+        let errors = env.get("errors").cloned().unwrap_or(Value::Null);
+        if !ok || !errors_empty(&errors) {
+            if errors.get("authentication_error").is_some() {
+                return Err("Guild API requires login — sign in via the Structs app first".into());
+            }
+            return Err(format!("Guild API returned errors: {}", serde_json::to_string(&errors).unwrap_or_default()));
+        }
+        Ok(env)
+    }
+
+    // -- single-entity reads (the pre-sign verify source, see mcp/verify.rs) --
+    /// One struct row: `id, type, owner, location_type, location_id,
+    /// operating_ambit, slot, is_destroyed, health, status(bit-flags),
+    /// defending_struct_ids`. `data` is null for an unknown id.
+    pub async fn struct_by_id(&self, struct_id: &str) -> Result<Value, String> {
+        let v = self.get(&format!("/api/struct/{}", struct_id)).await?;
+        if v.is_null() {
+            return Err(format!("Guild API has no struct {struct_id}"));
+        }
+        Ok(v)
+    }
+    /// One planet row: `id, owner, name, *_slots, undiscovered_ore, …`.
+    pub async fn planet_by_id(&self, planet_id: &str) -> Result<Value, String> {
+        let v = self.get(&format!("/api/planet/{}", planet_id)).await?;
+        if v.is_null() {
+            return Err(format!("Guild API has no planet {planet_id}"));
+        }
+        Ok(v)
+    }
+    /// One player row (flat snake_case SQL columns): `planet_id, fleet_id,
+    /// ore, alpha, …` plus an embedded `fleet` row.
+    pub async fn player_by_id(&self, player_id: &str) -> Result<Value, String> {
+        let v = self.get(&format!("/api/player/{}", player_id)).await?;
+        if v.is_null() {
+            return Err(format!("Guild API has no player {player_id}"));
+        }
+        Ok(v)
+    }
+
     pub async fn struct_list_by_location(
         &self,
         location_id: &str,
@@ -393,6 +483,23 @@ impl GuildApiClient {
         )
         .await
     }
+    /// One grid attribute type across every object, `?limit=` rows a page
+    /// (rows: `object_id`, `object_type`, `val`). The batch source for the
+    /// verify layer's `lastAction` (charge) and `ore` sweeps.
+    pub async fn grid_by_attribute_type_limited(
+        &self,
+        attribute_type: &str,
+        page: u32,
+        limit: usize,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page_limited(
+            &format!("/api/grid/attribute-type/{}/page/{}", attribute_type, page),
+            page,
+            limit,
+        )
+        .await
+    }
+
     pub async fn grid_by_attribute_type(
         &self,
         attribute_type: &str,
@@ -901,6 +1008,23 @@ impl GuildApiClient {
         )
         .await
     }
+    /// One struct attribute type across every struct, `?limit=` rows a page
+    /// (rows: `object_id`, `val`). With the 10,000-row limit the whole
+    /// galaxy's `status` is ~6 calls — the batch source for `verify::struct_state`.
+    pub async fn struct_attribute_by_type_limited(
+        &self,
+        attribute_type: &str,
+        page: u32,
+        limit: usize,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page_limited(
+            &format!("/api/struct-attribute/type/{}/page/{}", attribute_type, page),
+            page,
+            limit,
+        )
+        .await
+    }
+
     pub async fn planet_attribute_by_type_limited(
         &self,
         attribute_type: &str,

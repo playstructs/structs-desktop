@@ -819,17 +819,14 @@ async fn scan(
                 // may have missed a defense change — measured 8 of 29 in one
                 // window). Two reads per ACTION, not per struct per scan.
                 if scanned_from_snapshot {
+                    // Source-switched (mcp/verify.rs): Guild API by default.
                     let (Ok(d), Ok(p)) = (
-                        crate::mcp::loop_util::verify_struct_entity(&client, &edge.defender).await,
-                        crate::mcp::loop_util::verify_struct_entity(&client, &edge.protected).await,
+                        crate::mcp::verify::struct_state(&client, &edge.defender).await,
+                        crate::mcp::verify::struct_state(&client, &edge.protected).await,
                     ) else {
                         return; // never sign blind
                     };
-                    let ok = |e: &Value| {
-                        let sa = e.get("structAttributes");
-                        truthy(sa.and_then(|x| x.get("isBuilt"))) && !truthy(sa.and_then(|x| x.get("isDestroyed")))
-                    };
-                    if !ok(&d) || !ok(&p) {
+                    if !d.alive_and_built() || !p.alive_and_built() {
                         crate::mcp::telemetry::tlog(
                             "auto_defend",
                             crate::mcp::telemetry::Sev::Notice,
@@ -837,12 +834,9 @@ async fn scan(
                         );
                         return;
                     }
-                    let live_prot = d
-                        .get("structAttributes")
-                        .and_then(|x| x.get("protectedStructIndex"))
-                        .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|v| v.parse().ok())))
-                        .unwrap_or(0);
-                    let live_target = if live_prot == 0 { None } else { Some(format!("5-{live_prot}")) };
+                    let Ok(live_target) = crate::mcp::verify::defender_target(&client, &edge.defender).await else {
+                        return; // never sign blind
+                    };
                     if live_target.as_deref() == Some(edge.protected.as_str()) {
                         // Already wired on chain; the snapshot was behind.
                         ASSIGNED_CACHE.lock().unwrap().insert(edge.defender.clone(), edge.protected.clone());

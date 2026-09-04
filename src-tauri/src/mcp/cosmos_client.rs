@@ -7,6 +7,45 @@ use crate::mcp::guild_api::GuildApiClient;
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
+// ── Request accounting ──────────────────────────────────────────────────────
+// Our own pressure on the shared public LCD, same shape as the Guild API
+// counters: total since launch plus this/last minute, so "are we hammering
+// the public node" is a lookup (structs_system status → lcd_requests).
+static LCD_REQ_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LCD_REQ_WINDOW: std::sync::Mutex<(u64, u64, u64)> = std::sync::Mutex::new((0, 0, 0)); // (minute, current, previous)
+
+fn note_lcd_request() {
+    LCD_REQ_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let minute = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 60)
+        .unwrap_or(0);
+    let mut w = LCD_REQ_WINDOW.lock().unwrap_or_else(|e| e.into_inner());
+    if w.0 != minute {
+        w.2 = if w.0 + 1 == minute { w.1 } else { 0 };
+        w.0 = minute;
+        w.1 = 0;
+    }
+    w.1 += 1;
+}
+
+/// (total, this_minute, last_minute) LCD requests from this client.
+pub fn lcd_request_stats() -> (u64, u64, u64) {
+    let minute = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 60)
+        .unwrap_or(0);
+    let w = LCD_REQ_WINDOW.lock().unwrap_or_else(|e| e.into_inner());
+    let (cur, prev) = if w.0 == minute {
+        (w.1, w.2)
+    } else if w.0 + 1 == minute {
+        (0, w.1)
+    } else {
+        (0, 0)
+    };
+    (LCD_REQ_TOTAL.load(std::sync::atomic::Ordering::Relaxed), cur, prev)
+}
+
 pub(crate) fn client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {
         Client::builder()
@@ -73,6 +112,7 @@ fn parse_permission_page(v: &Value, player_id: &str) -> Vec<(String, u64)> {
 /// 429s, and 5xx — safe because these are idempotent reads. Retried-and-still-
 /// failing pressure errors feed the AIMD loop-concurrency controller.
 pub(crate) async fn get_json(url: &str) -> Result<Value, String> {
+    note_lcd_request();
     let mut last_err = String::new();
     for attempt in 0..2 {
         if attempt > 0 {
@@ -247,6 +287,7 @@ impl CosmosClient {
     /// timeout and turn one big read into a retry storm. Not retried here:
     /// the caller decides whether a failed snapshot matters.
     pub async fn lcd_get_bulk(&self, path: &str) -> Result<(Value, u64, f64), String> {
+        note_lcd_request();
         static BULK_CLIENT: OnceLock<Client> = OnceLock::new();
         let c = BULK_CLIENT.get_or_init(|| {
             Client::builder()

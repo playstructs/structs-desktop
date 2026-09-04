@@ -343,36 +343,17 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         // after the admission gate — the wait there is where most staleness is
         // actually introduced (see tx_retry::FreshAnchor).
         let mut ore_planet: Option<String> = None;
-        if let Some(anchor) = anchor_field_for(&task_kind) {
+        let mut owner: Option<String> = None;
+        if anchor_field_for(&task_kind).is_some() {
+            // Source-switched read (mcp/verify.rs): Guild API work view by
+            // default, LCD on failover. Chain v0.21.0: the ore clock hangs off
+            // the PLANET the rig stands on; verify resolves that itself.
             let client = crate::mcp::cosmos_client::CosmosClient::new();
-            if let Ok(e) = client.query_entity("struct", &object_id).await {
-                let live = match anchor {
-                    Anchor::StructField(field) => {
-                        crate::mcp::loop_util::read_u64_field(e.get("structAttributes"), field)
-                    }
-                    // Chain v0.21.0: the ore clock hangs off the PLANET the rig
-                    // stands on, so reach it through the struct's locationId. A
-                    // planetary struct's locationId IS its planet id. Reading the
-                    // struct here instead would always see 0 and, because 0 means
-                    // "unknown, don't block", would wave through every stale ore
-                    // proof this guard exists to catch.
-                    Anchor::PlanetOreClock => match e
-                        .get("Struct")
-                        .and_then(|s| s.get("locationId"))
-                        .and_then(|l| l.as_str())
-                    {
-                        Some(planet_id) => {
-                            ore_planet = Some(planet_id.to_string());
-                            match client.query_entity("planet", planet_id).await {
-                                Ok(p) => {
-                                    crate::mcp::loop_util::planet_ore_anchor(Some(&p), &task_kind)
-                                }
-                                Err(_) => 0,
-                            }
-                        }
-                        None => 0,
-                    },
-                };
+            if let Ok((live, planet, who)) =
+                crate::mcp::verify::solved_anchor_live(&client, &object_id, &task_kind).await
+            {
+                ore_planet = planet;
+                owner = who;
                 if live != 0 && live != solved_anchor {
                     crate::mcp::telemetry::tlog(
                         "hasher",
@@ -389,6 +370,8 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         // Re-tested once the gate slot is won, immediately before broadcast.
         let guard = ore_planet.map(|planet_id| crate::mcp::tx_retry::FreshAnchor {
             planet_id,
+            object_id: object_id.clone(),
+            player_id: owner.clone(),
             task_type: task_kind.clone(),
             solved_anchor,
         });

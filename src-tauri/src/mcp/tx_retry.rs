@@ -252,6 +252,10 @@ pub async fn sign_with_retry(
 pub struct FreshAnchor {
     /// The planet carrying the shared ore clock (resolved off the hot path).
     pub planet_id: String,
+    /// The rig the proof is for, and its owner when known (the guild work
+    /// view is keyed by owner).
+    pub object_id: String,
+    pub player_id: Option<String>,
     /// "MINE" or "REFINE".
     pub task_type: String,
     /// The anchor the proof was actually solved against.
@@ -264,10 +268,17 @@ impl FreshAnchor {
     /// may only ever cancel a send it is certain is already dead.
     async fn is_stale(&self) -> bool {
         let client = crate::mcp::cosmos_client::CosmosClient::new();
-        let Ok(p) = client.query_entity("planet", &self.planet_id).await else {
+        let Ok(live) = crate::mcp::verify::ore_anchor(
+            &client,
+            self.player_id.as_deref(),
+            &self.planet_id,
+            &self.object_id,
+            &self.task_type,
+        )
+        .await
+        else {
             return false;
         };
-        let live = crate::mcp::loop_util::planet_ore_anchor(Some(&p), &self.task_type);
         live != 0 && live != self.solved_anchor
     }
 }

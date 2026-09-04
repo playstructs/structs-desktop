@@ -855,22 +855,19 @@ pub async fn matrix_work_submit(
     // and a proof that came over chat has waited longer than a local one.
     let guard = match task.as_str() {
         "MINE" | "REFINE" => {
+            // Source-switched read (mcp/verify.rs): resolves the rig's planet
+            // and owner from the Guild API by default, the LCD on failover.
             let client = crate::mcp::cosmos_client::CosmosClient::new();
-            client
-                .query_entity("struct", &object_id)
-                .await
-                .ok()
-                .and_then(|v| {
-                    v.get("Struct")
-                        .and_then(|s| s.get("locationId"))
-                        .and_then(|l| l.as_str())
-                        .map(str::to_string)
-                })
-                .map(|planet_id| crate::mcp::tx_retry::FreshAnchor {
+            match crate::mcp::verify::solved_anchor_live(&client, &object_id, &task).await {
+                Ok((_, Some(planet_id), owner)) => Some(crate::mcp::tx_retry::FreshAnchor {
                     planet_id,
+                    object_id: object_id.clone(),
+                    player_id: owner,
                     task_type: task.clone(),
                     solved_anchor: block_start,
-                })
+                }),
+                _ => None,
+            }
         }
         _ => None,
     };

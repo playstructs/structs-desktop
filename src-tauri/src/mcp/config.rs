@@ -37,10 +37,20 @@ pub struct McpConfig {
     /// Admission-gate cap override (see `tx_gate`). `None` = the built-in 4.
     #[serde(default)]
     pub tx_gate_cap: Option<usize>,
+    /// Where the loops' pre-sign verify reads go: `"guild"` (default — the
+    /// Guild API, indexer-fresh, ~a block behind) or `"lcd"` (the shared
+    /// public chain node, exact but the endpoint everyone is squeezing).
+    /// Runtime-settable via `structs_system config set {verify_source}`.
+    #[serde(default = "default_verify_source")]
+    pub verify_source: String,
 }
 
 fn default_sign_mode() -> String {
     "sync".to_string()
+}
+
+fn default_verify_source() -> String {
+    "guild".to_string()
 }
 
 impl Default for McpConfig {
@@ -55,6 +65,7 @@ impl Default for McpConfig {
             comms_status_enabled: false,
             sign_mode: default_sign_mode(),
             tx_gate_cap: None,
+            verify_source: default_verify_source(),
         }
     }
 }

@@ -425,12 +425,9 @@ async fn scan(
                     let mut anchor = anchor;
                     if scanned_from_snapshot {
                         let loc = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()).unwrap_or("");
-                        let Ok(live_planet) = client.query_entity("planet", loc).await else { continue };
-                        let Ok(live_struct) = crate::mcp::loop_util::verify_struct_entity(&client, sid).await else { continue };
-                        let live_sa = live_struct.get("structAttributes");
-                        if !parse_bool(live_sa.and_then(|x| x.get("isOnline")))
-                            || parse_bool(live_sa.and_then(|x| x.get("isDestroyed")))
-                        {
+                        // Source-switched (mcp/verify.rs): Guild API by default.
+                        let Ok(live_struct) = crate::mcp::verify::struct_state(&client, sid).await else { continue };
+                        if !live_struct.online || live_struct.destroyed {
                             crate::mcp::telemetry::tlog(
                                 "auto_harvest",
                                 crate::mcp::telemetry::Sev::Notice,
@@ -438,11 +435,14 @@ async fn scan(
                             );
                             continue;
                         }
-                        // Fold the live planet back in: the ore clocks never
-                        // stream, so without this the same struct is re-nominated
-                        // (and re-verified, two reads) every scan until refresh.
-                        crate::mcp::perception::absorb_planet_entity(&live_planet);
-                        let live_anchor = crate::mcp::loop_util::planet_ore_anchor(Some(&live_planet), task_type);
+                        // The ore clocks never stream; the LCD path folds the
+                        // live planet back into the snapshot, the guild path
+                        // reads the work view (one row per rig, one call).
+                        let Ok(live_anchor) =
+                            crate::mcp::verify::ore_anchor(&client, Some(&*pid), loc, sid, task_type).await
+                        else {
+                            continue;
+                        };
                         if live_anchor != anchor {
                             crate::mcp::telemetry::tlog(
                                 "auto_harvest",
@@ -511,20 +511,13 @@ async fn scan(
                         // wasted sign slot and a chain reject ("new planet
                         // cannot be explored while current planet has ore").
                         // One chain read; this is the pre-sign verify for explore.
-                        let Ok(live_player) = client.query_entity("player", &pid).await else { return };
-                        let planet_id = live_player
-                            .get("Player")
-                            .and_then(|p| p.get("planetId"))
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                        let Ok(live_player) = crate::mcp::verify::player_view(&client, &pid).await else { return };
+                        let planet_id = live_player.planet_id.clone();
                         if planet_id.is_empty() {
                             return;
                         }
-                        let planet_ore = match client.query_entity("planet", &planet_id).await {
-                            Ok(p) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
-                            Err(_) => 1.0, // unknown → don't explore
-                        };
+                        // unknown → don't explore
+                        let planet_ore = crate::mcp::verify::planet_ore(&client, &planet_id).await.unwrap_or(1.0);
                         // Workers explore only once fully drained: stored ore <= 0 means
                         // every ore has been refined to Alpha (which survives explore).
                         // stored_ore already counts ore committed to an active refine cycle,
@@ -536,7 +529,7 @@ async fn scan(
                         // and the worker moves on.)
                         let role_ready = if caps.explore_when_drained_only {
                             // Same chain read as above — the stored pile is on the player grid.
-                            parse_f64(live_player.get("gridAttributes").and_then(|g| g.get("ore"))) <= 0.0
+                            live_player.stored_ore <= 0.0
                         } else {
                             true // no stored pile to protect — re-planet at once
                         };

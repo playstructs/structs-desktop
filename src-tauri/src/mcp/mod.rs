@@ -32,6 +32,7 @@ pub mod raid_view;
 pub mod profile;
 pub mod readiness;
 pub mod variance;
+pub mod verify;
 pub mod spectator;
 pub mod resources;
 pub mod roster_cache;
