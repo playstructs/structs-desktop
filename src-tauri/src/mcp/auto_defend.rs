@@ -662,6 +662,9 @@ async fn scan(
     // refreshing); the scan below reads from it when fresh, the chain otherwise.
     // Structs announced since the last refresh get their one entity read here.
     crate::mcp::perception::maybe_refresh(&client);
+    // Never fan out to the chain just because the launch refresh has not
+    // landed yet (that was ~59k LCD requests per launch): wait for it.
+    crate::mcp::loop_util::ensure_perception(&client, "auto_defend", 120_000.0).await;
     crate::mcp::perception::resolve_pending(&client, 50).await;
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,

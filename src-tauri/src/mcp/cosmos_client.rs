@@ -14,6 +14,52 @@ static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 static LCD_REQ_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static LCD_REQ_WINDOW: std::sync::Mutex<(u64, u64, u64)> = std::sync::Mutex::new((0, 0, 0)); // (minute, current, previous)
 
+/// Per-route counts (ids replaced by `{id}`), so "who is hammering the LCD"
+/// names the caller's path rather than a total. Kept small: this minute and
+/// the previous one.
+type PathCounts = std::collections::HashMap<String, u64>;
+static LCD_PATHS: std::sync::LazyLock<std::sync::Mutex<(u64, PathCounts, PathCounts)>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new((0, PathCounts::new(), PathCounts::new())));
+
+fn lcd_path_key(url: &str) -> String {
+    let path = url.split('?').next().unwrap_or(url);
+    let path = path.splitn(4, '/').nth(3).unwrap_or(path); // strip scheme+host
+    path.split('/')
+        .map(|seg| if seg.chars().any(|c| c.is_ascii_digit()) && seg.contains('-') || seg.chars().all(|c| c.is_ascii_digit()) && !seg.is_empty() { "{id}" } else { seg })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn note_lcd_path(url: &str) {
+    let minute = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 60)
+        .unwrap_or(0);
+    let key = lcd_path_key(url);
+    let mut g = LCD_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    if g.0 != minute {
+        let cur = std::mem::take(&mut g.1);
+        g.2 = if g.0 + 1 == minute { cur } else { PathCounts::new() };
+        g.0 = minute;
+    }
+    *g.1.entry(key).or_insert(0) += 1;
+}
+
+/// Top LCD routes by request count over the last full minute (falls back to
+/// this minute while the first one is still open).
+pub fn lcd_top_paths(n: usize) -> Value {
+    let g = LCD_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    let src = if g.2.is_empty() { &g.1 } else { &g.2 };
+    let mut v: Vec<(&String, &u64)> = src.iter().collect();
+    v.sort_by(|a, b| b.1.cmp(a.1));
+    Value::Array(v.into_iter().take(n).map(|(k, c)| serde_json::json!({ "path": k, "count": c })).collect())
+}
+
+fn note_lcd_request_for(url: &str) {
+    note_lcd_path(url);
+    note_lcd_request();
+}
+
 fn note_lcd_request() {
     LCD_REQ_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let minute = std::time::SystemTime::now()
@@ -112,7 +158,7 @@ fn parse_permission_page(v: &Value, player_id: &str) -> Vec<(String, u64)> {
 /// 429s, and 5xx — safe because these are idempotent reads. Retried-and-still-
 /// failing pressure errors feed the AIMD loop-concurrency controller.
 pub(crate) async fn get_json(url: &str) -> Result<Value, String> {
-    note_lcd_request();
+    note_lcd_request_for(url);
     let mut last_err = String::new();
     for attempt in 0..2 {
         if attempt > 0 {
@@ -287,7 +333,7 @@ impl CosmosClient {
     /// timeout and turn one big read into a retry storm. Not retried here:
     /// the caller decides whether a failed snapshot matters.
     pub async fn lcd_get_bulk(&self, path: &str) -> Result<(Value, u64, f64), String> {
-        note_lcd_request();
+        note_lcd_request_for(path);
         static BULK_CLIENT: OnceLock<Client> = OnceLock::new();
         let c = BULK_CLIENT.get_or_init(|| {
             Client::builder()

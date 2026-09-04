@@ -867,6 +867,22 @@ pub const REFRESH_EVERY_MS: f64 = 10.0 * 60_000.0;
 /// [`REFRESH_EVERY_MS`] and none is in flight. Non-blocking: the caller's scan
 /// proceeds on whatever is current (or the chain, via the loop_util shims).
 /// Call from the top of any loop scan.
+/// Start a refresh now if one is not already running (whether or not one is
+/// due). Used at launch and by `loop_util::ensure_perception`.
+pub fn request_refresh(client: &CosmosClient) {
+    if REFRESHING.load(Ordering::Relaxed) {
+        return;
+    }
+    let client = client.clone();
+    tokio::spawn(async move {
+        let _ = refresh(&client).await;
+    });
+}
+
+pub fn is_refreshing() -> bool {
+    REFRESHING.load(Ordering::Relaxed)
+}
+
 pub fn maybe_refresh(client: &CosmosClient) {
     maybe_hot_refresh(client);
     if REFRESHING.load(Ordering::Relaxed) {
@@ -1062,23 +1078,25 @@ pub(crate) fn adapt_attribute_rows(rows: &[Value], names: &[&str]) -> Vec<Value>
 /// Walk one guild catalog list at GUILD_PAGE_LIMIT rows a page. Returns the
 /// rows and the highest indexer height stamped on the pages.
 async fn walk_guild_list(client: &CosmosClient, path: &str) -> Result<(Vec<Value>, u64), String> {
-    let mut rows = Vec::new();
-    let mut height = 0u64;
-    let mut page = 1u32;
-    loop {
-        let (items, h, more) = client
-            .guild
-            .list_page_with_meta(&format!("{path}/page/{page}"), GUILD_PAGE_LIMIT)
-            .await
-            .map_err(|e| format!("{path} page {page}: {e}"))?;
-        height = height.max(h.unwrap_or(0));
-        rows.extend(items);
-        if !more || page >= GUILD_MAX_PAGES {
-            break;
-        }
-        page += 1;
+    let (rows, height, complete) = client.guild.walk_list(path, GUILD_PAGE_LIMIT, GUILD_MAX_PAGES).await?;
+    if !complete {
+        return Err(format!("{path}: walk capped at {GUILD_MAX_PAGES} pages ({} rows) — refusing a truncated store", rows.len()));
     }
-    Ok((rows, height))
+    Ok((rows, height.unwrap_or(0)))
+}
+
+/// A new snapshot must be in the same league as the one it replaces. A
+/// store that came back at a fraction of its previous size is a truncated
+/// or mis-parsed walk, and installing it would make the loops act on a
+/// galaxy most of which "does not exist".
+pub(crate) fn snapshot_plausible(prev: Option<(usize, usize, usize)>, new: (usize, usize, usize)) -> Result<(), String> {
+    let Some((ps, pp, pl)) = prev else { return Ok(()) };
+    for (name, p, n) in [("structs", ps, new.0), ("players", pp, new.1), ("planets", pl, new.2)] {
+        if p >= 100 && n < p / 2 {
+            return Err(format!("guild snapshot has {n} {name} where the previous had {p} — refusing a truncated store"));
+        }
+    }
+    Ok(())
 }
 
 /// Build a snapshot from the guild catalog. Errors (so the caller can fall
@@ -1112,6 +1130,8 @@ async fn guild_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String>
             return Err(format!("guild catalog gave 0 usable {name} rows — row shape or route mismatch"));
         }
     }
+    let prev = with_snapshot(|s| (s.structs.len(), s.players.len(), s.planets.len()));
+    snapshot_plausible(prev, (structs.len(), players.len(), planets.len()))?;
     let mut snap = Snapshot::from_pages(&structs, &sattr, &pattr, &grid, &players, &planets, &fleets);
     let heights = [st.1, sa.1, pa.1, gr.1, pl.1, pn.1, fl.1];
     snap.height = heights.iter().copied().max().unwrap_or(0);
@@ -1147,24 +1167,25 @@ pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, Stri
     }
     let result = async {
         let mut updated = 0usize;
-        for (attr, idx) in [("blockStartOreMine", 12usize), ("blockStartOreRefine", 13usize)] {
+        // The mine clock is the canary: if IT comes back empty the route or
+        // attribute name is wrong and nothing here can be trusted. An empty
+        // refine set on its own is believable (no planet refining).
+        for (attr, idx, required) in [("blockStartOreMine", 12usize, true), ("blockStartOreRefine", 13usize, false)] {
             debug_assert_eq!(PLANET_ATTRS[idx], attr);
-            let mut rows: HashMap<String, u64> = HashMap::new();
-            let mut page = 1u32;
-            loop {
-                let p = client.guild.planet_attribute_by_type_limited(attr, page, GUILD_PAGE_LIMIT).await?;
-                let more = p.has_more;
-                for r in &p.items {
-                    if let Some(oid) = r.get("object_id").and_then(|x| x.as_str()) {
-                        rows.insert(oid.to_string(), to_u64(r.get("val").or_else(|| r.get("value"))));
-                    }
-                }
-                if !more || page >= GUILD_MAX_PAGES {
-                    break;
-                }
-                page += 1;
+            let (items, _, complete) = client
+                .guild
+                .walk_list(&format!("/api/planet-attribute/type/{attr}"), GUILD_PAGE_LIMIT, GUILD_MAX_PAGES)
+                .await?;
+            if !complete {
+                return Err(format!("{attr} sweep capped at {GUILD_MAX_PAGES} pages — refusing a truncated sweep"));
             }
-            if rows.is_empty() {
+            let mut rows: HashMap<String, u64> = HashMap::new();
+            for r in &items {
+                if let Some(oid) = r.get("object_id").and_then(|x| x.as_str()) {
+                    rows.insert(oid.to_string(), to_u64(r.get("val").or_else(|| r.get("value"))));
+                }
+            }
+            if rows.is_empty() && required {
                 return Err(format!("{attr} sweep returned no rows"));
             }
             if let Ok(mut g) = CURRENT.write() {
@@ -1778,5 +1799,79 @@ mod tests {
         assert_eq!(to_u64(Some(&json!(2935000))), 2_935_000);
         assert_eq!(to_u64(Some(&json!(null))), 0);
         assert_eq!(to_u64(None), 0);
+    }
+}
+
+#[cfg(test)]
+mod guild_ingest_tests {
+    use super::*;
+
+    #[test]
+    fn guild_rows_adapt_to_the_lcd_shapes_the_snapshot_speaks() {
+        // Verbatim from live `/api/objects?ids=` rows (2026-09-04).
+        let planet = json!({"id": "2-22432", "max_ore": 5, "owner": "1-195",
+            "map": "{\"air\": [\"\", \"\", \"\", \"\"], \"land\": [\"5-236182\", \"5-192030\", \"\", \"\"], \"space\": [\"5-232859\", \"5-205581\", \"\", \"\"], \"water\": [\"\", \"5-237384\", \"\", \"\"]}",
+            "space_slots": 4, "status": "active", "name": "Oymop Major"});
+        let p = adapt_row(&planet);
+        assert_eq!(p["maxOre"], json!(5));
+        assert_eq!(p["spaceSlots"], json!(4));
+        assert_eq!(p["land"][1], json!("5-192030"));
+        assert_eq!(p["air"].as_array().unwrap().len(), 4);
+        assert!(p.get("map").is_none(), "map is expanded, not carried");
+        let fleet = json!({"id": "9-195", "owner": "1-195", "map": "{\"air\": [\"5-200230\"], \"land\": [], \"space\": [], \"water\": []}",
+            "location_type": "planet", "location_id": "2-22432", "status": "onStation", "command_struct": "5-203656"});
+        let f = adapt_row(&fleet);
+        assert_eq!(f["commandStruct"], json!("5-203656"));
+        assert_eq!(f["locationId"], json!("2-22432"));
+        assert_eq!(f["status"], json!("onStation"));
+        let player = json!({"id": "1-195", "guild_id": "0-1", "planet_id": "2-22432", "fleet_id": "9-195", "primary_address": "structs1f9h"});
+        let pl = adapt_row(&player);
+        assert_eq!((pl["guildId"].as_str(), pl["planetId"].as_str(), pl["fleetId"].as_str()), (Some("0-1"), Some("2-22432"), Some("9-195")));
+    }
+
+    #[test]
+    fn struct_rows_drop_destroyed_and_attribute_rows_become_attribute_ids() {
+        let structs = vec![
+            json!({"id": "5-1", "type": 14, "owner": "1-1", "location_type": "planet", "location_id": "2-1", "operating_ambit": "land", "slot": 1, "is_destroyed": false}),
+            json!({"id": "5-2", "type": 1, "owner": "1-1", "location_type": "fleet", "location_id": "9-1", "operating_ambit": "space", "slot": 0, "is_destroyed": true}),
+        ];
+        let rows = adapt_struct_rows(&structs);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["locationType"], json!("planet"));
+        assert_eq!(rows[0]["operatingAmbit"], json!("land"));
+        let attrs = vec![
+            json!({"object_id": "5-1", "attribute_type": "status", "val": "7"}),
+            json!({"object_id": "5-1", "attribute_type": "blockStartBuild", "val": 2455000}),
+            json!({"object_id": "5-1", "attribute_type": "somethingNew", "val": 1}),
+            json!({"object_id": "", "attribute_type": "status", "val": 1}),
+        ];
+        let a = adapt_attribute_rows(&attrs, &STRUCT_ATTRS);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0]["attributeId"], json!("1-5-1"));
+        assert_eq!(a[1]["attributeId"], json!("2-5-1"));
+        // …and the snapshot reads them exactly like LCD attribute rows.
+        let snap = Snapshot::from_pages(&rows, &a, &[], &[], &[], &[], &[]);
+        assert_eq!(snap.struct_status("5-1"), 7);
+        assert_eq!(snap.struct_attr("5-1", "blockStartBuild"), Some(2455000));
+        assert!(!snap.struct_exists("5-2"));
+    }
+
+    #[test]
+    fn a_shrunken_snapshot_is_refused() {
+        assert!(snapshot_plausible(None, (10, 1, 1)).is_ok(), "first snapshot: nothing to compare");
+        assert!(snapshot_plausible(Some((51_000, 2_700, 16_000)), (50_100, 2_690, 16_010)).is_ok());
+        let e = snapshot_plausible(Some((51_000, 2_700, 16_000)), (1_000, 2_700, 16_000)).unwrap_err();
+        assert!(e.contains("1000 structs"), "{e}");
+        assert!(snapshot_plausible(Some((50, 5, 5)), (10, 5, 5)).is_ok(), "tiny previous stores don't gate");
+    }
+
+    #[test]
+    fn page_walks_end_on_a_short_page_not_the_requested_limit() {
+        use crate::mcp::guild_api::page_walk_continues;
+        // Server clamped us to 1,000: page 1 has 1,000 → continue; 1,000 again → continue; 412 → stop.
+        assert!(page_walk_continues(1000, 1000));
+        assert!(!page_walk_continues(1000, 412));
+        assert!(!page_walk_continues(0, 0), "an empty first page is the end");
+        assert!(!page_walk_continues(1000, 0));
     }
 }

@@ -610,6 +610,14 @@ try {{
             mcp::vplayer_bridge::set_sign_mode(&mcp_config.sign_mode);
             mcp::verify::set_source(&mcp_config.verify_source);
             mcp::perception::set_snapshot_source(&mcp_config.snapshot_source);
+            // Load the local source of truth NOW, not on the first scan: the
+            // loops wait for it instead of reading the chain per player.
+            {
+                let client = mcp::cosmos_client::CosmosClient::new();
+                tauri::async_runtime::spawn(async move {
+                    mcp::perception::request_refresh(&client);
+                });
+            }
             // Native signer: load the key from the OS keychain (off-thread);
             // until the game hands one over, native modes fall back to the webview.
             mcp::native_signer::init();

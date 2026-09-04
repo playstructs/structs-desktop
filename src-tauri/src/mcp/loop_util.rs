@@ -282,6 +282,55 @@ pub fn perception_is_fresh(age_ms: f64, last_event_age_ms: Option<f64>) -> bool 
     }
 }
 
+/// Wait (bounded) for a scannable snapshot before a scan fans out.
+///
+/// Without this, a scan that starts before the launch refresh has landed
+/// reads every player's structs from the chain: measured 2026-09-04, ~59,000
+/// LCD requests in the first three minutes of a 0.1.330 launch — the single
+/// worst thing this app does to the shared node, and it happened at EVERY
+/// launch and guild switch. A refresh takes ~4 s from the guild and ~8 s from
+/// the LCD; waiting for it costs one scan a few seconds. Returns whether the
+/// snapshot is usable; a `false` means the caller's chain fallback will run,
+/// and says so loudly.
+pub async fn ensure_perception(client: &CosmosClient, loop_name: &'static str, max_wait_ms: f64) -> bool {
+    if perception_usable_now() {
+        return true;
+    }
+    let t0 = crate::hasher::types::now_millis();
+    crate::mcp::perception::request_refresh(client);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if perception_usable_now() {
+            let waited = crate::hasher::types::now_millis() - t0;
+            if waited > 2_000.0 {
+                crate::mcp::telemetry::tlog(
+                    loop_name,
+                    crate::mcp::telemetry::Sev::Info,
+                    format!("waited {:.1}s for the perception snapshot before scanning", waited / 1000.0),
+                );
+            }
+            return true;
+        }
+        if crate::hasher::types::now_millis() - t0 > max_wait_ms {
+            crate::mcp::telemetry::tlog(
+                loop_name,
+                crate::mcp::telemetry::Sev::Warn,
+                format!(
+                    "perception snapshot still not scannable after {:.0}s — this scan reads the CHAIN per player (refreshing: {})",
+                    max_wait_ms / 1000.0,
+                    crate::mcp::perception::is_refreshing()
+                ),
+            );
+            return false;
+        }
+        if !crate::mcp::perception::is_refreshing() && !perception_usable_now() {
+            // The refresh finished without producing a usable snapshot (failed,
+            // or the feed is quiet); kick another rather than idle out.
+            crate::mcp::perception::request_refresh(client);
+        }
+    }
+}
+
 fn perception_usable_now() -> bool {
     let now = crate::hasher::types::now_millis();
     crate::mcp::perception::with_snapshot(|s| {

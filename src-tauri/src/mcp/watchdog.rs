@@ -677,8 +677,10 @@ pub fn health_snapshot() -> Value {
             "total": crate::mcp::cosmos_client::lcd_request_stats().0,
             "this_minute": crate::mcp::cosmos_client::lcd_request_stats().1,
             "last_minute": crate::mcp::cosmos_client::lcd_request_stats().2,
+            "top_paths": crate::mcp::cosmos_client::lcd_top_paths(8),
         },
         "verify": crate::mcp::verify::health(),
+        "snapshot": crate::mcp::perception::entity_stats(),
     })
 }
 

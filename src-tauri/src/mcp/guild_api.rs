@@ -101,6 +101,13 @@ struct EnvelopeWithTotal {
     total: Option<Value>,
 }
 
+/// Does a walk continue after a page of `this_len` rows, given the first
+/// page had `first_len`? The first page reveals the server's real page size
+/// (whatever `?limit=` it clamped to); any shorter page is the last.
+pub fn page_walk_continues(first_len: usize, this_len: usize) -> bool {
+    first_len > 0 && this_len == first_len
+}
+
 fn errors_empty(v: &Value) -> bool {
     match v {
         Value::Null => true,
@@ -358,6 +365,42 @@ impl GuildApiClient {
         };
         let more = items.len() >= limit;
         Ok((items, height, more))
+    }
+
+    /// Walk a catalog list from page 1 until it ends. Returns the rows, the
+    /// highest indexer height seen, and whether the walk COMPLETED (false =
+    /// it hit `max_pages` and the rows are a truncated store — never install
+    /// those as the truth).
+    ///
+    /// The end of a list is a page SHORTER than the first page, not shorter
+    /// than the limit we asked for: the server clamps `?limit=` (1,000 on
+    /// 0.1.330's guild), and trusting the requested size ended every walk
+    /// after page one — a 1,000-row "galaxy" that verified explores against
+    /// planets it had never seen (32 chain rejections in an hour).
+    pub async fn walk_list(&self, path_base: &str, limit: usize, max_pages: u32) -> Result<(Vec<Value>, Option<u64>, bool), String> {
+        let mut rows = Vec::new();
+        let mut height: Option<u64> = None;
+        let mut page_size: Option<usize> = None;
+        let mut page = 1u32;
+        loop {
+            let (items, h, _) = self
+                .list_page_with_meta(&format!("{path_base}/page/{page}"), limit)
+                .await
+                .map_err(|e| format!("{path_base} page {page}: {e}"))?;
+            if let Some(h) = h {
+                height = Some(height.map_or(h, |x| x.max(h)));
+            }
+            let n = items.len();
+            rows.extend(items);
+            let first = *page_size.get_or_insert(n);
+            if !page_walk_continues(first, n) {
+                return Ok((rows, height, true));
+            }
+            if page >= max_pages {
+                return Ok((rows, height, false));
+            }
+            page += 1;
+        }
     }
 
     /// Low-level GET returning the whole validated envelope (for callers
