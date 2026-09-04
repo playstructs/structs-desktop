@@ -70,7 +70,7 @@ async fn owner_of(object_id: &str) -> Option<String> {
         _ => return None,
     };
     let client = crate::mcp::cosmos_client::CosmosClient::new();
-    let v = client.query_entity(entity, object_id).await.ok()?;
+    let v = client.entity(entity, object_id).await.ok()?;
     // The chain wraps the record in its type name — `{ "Planet": { … } }`.
     let record = v.get(match kind {
         2 => "Planet",

@@ -1,38 +1,32 @@
-//! Pre-sign verification reads, with a switchable source.
+//! Pre-sign verification reads, answered from the local source of truth.
 //!
-//! Every loop scans from the shared perception snapshot and then, right
-//! before it signs, re-reads the one or two facts that decide the action
-//! (a slot is free, a rig is online, the ore clock has not moved, a hull is
-//! still built). Those reads used to go to the chain's LCD — the public
-//! node the whole guild shares — at one to three requests per action, which
-//! at fleet scale is a steady few thousand requests an hour against an
-//! endpoint that answers 429 to everyone when it is busy.
+//! Every loop scans from the perception snapshot and then, right before it
+//! signs, re-checks the one or two facts that decide the action (a slot is
+//! free, a rig is online, the ore clock has not moved, a hull is still
+//! built). Those checks used to be one to three requests to the chain's LCD
+//! per action — thousands an hour at fleet scale against the public node.
 //!
-//! The Guild API serves the same facts from the indexer (the source GRASS
-//! streams from), typically one block behind the LCD. This module makes the
-//! source a runtime choice (`verify_source`: `guild` by default, `lcd` to
-//! revert) and answers each question through ONE narrow function so the
-//! loops never parse either shape themselves.
+//! The snapshot IS the answer now. It is bulk-loaded from the indexer's
+//! catalog (`perception::guild_pages`, ~45 requests for the galaxy), patched
+//! live by GRASS, and its one non-streaming store — the planet ore clocks —
+//! is re-swept every two minutes (`perception::hot_refresh_ore_clocks`). So a
+//! verify is a memory lookup. A miss (an id the snapshot does not hold, a
+//! snapshot too old to trust, none loaded yet) costs one Guild API read; the
+//! chain is the last resort, or the whole layer when `verify_source` is
+//! `lcd`.
 //!
 //! Contract on the guild path: a missing or unparseable field is an `Err`,
-//! never a silent default — a default of 0 for an ore anchor is exactly how a
-//! proof gets solved against the wrong clock. On an error the LCD path is
-//! tried (counted as a failover and logged, rate-limited) so a lapsed guild
+//! never a silent default — a default of 0 for an ore anchor is exactly how
+//! a proof gets solved against the wrong clock. On an error the LCD path is
+//! tried (counted as a failover, logged rate-limited), so a lapsed guild
 //! session degrades to the old behaviour instead of stopping every loop.
-//!
-//! Field vocabulary (from the webapp's own models and the structs-ai docs):
-//! guild struct rows are snake_case with `status` as a bit-flag (Built=2,
-//! Online=4, Destroyed=32) and `is_destroyed`; player rows carry `planet_id`,
-//! `fleet_id`, `ore`; work rows carry `object_id`, `category`, `block_start`;
-//! numerics may arrive as strings.
 
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::LazyLock;
 
 use crate::mcp::cosmos_client::CosmosClient;
-use crate::mcp::guild_api::OBJECTS_BATCH_MAX;
 use crate::mcp::loop_util::{parse_bool, parse_f64, read_u64_field};
+use crate::mcp::perception::{self, Snapshot};
 use crate::mcp::telemetry::{tlog, Sev};
 
 // ── Source knob ──────────────────────────────────────────────────────────────
@@ -82,124 +76,38 @@ pub fn set_source(s: &str) -> bool {
 
 // ── Accounting ───────────────────────────────────────────────────────────────
 
+static SNAPSHOT_HITS: AtomicU64 = AtomicU64::new(0);
 static GUILD_READS: AtomicU64 = AtomicU64::new(0);
 static LCD_READS: AtomicU64 = AtomicU64::new(0);
 static FAILOVERS: AtomicU64 = AtomicU64::new(0);
 static LAST_FAILOVER_LOG_MS: AtomicU64 = AtomicU64::new(0);
 
+/// The snapshot answers verification while younger than this. A refresh is
+/// due every `REFRESH_EVERY_MS`; two and a half missed refreshes means the
+/// bulk source is down and the per-entity reads should carry the load.
+const SNAPSHOT_TRUST_MS: f64 = 2.5 * perception::REFRESH_EVERY_MS;
+/// The ore clocks answer while the hot refresh is younger than this.
+const HOT_TRUST_MS: f64 = 2.5 * perception::HOT_REFRESH_EVERY_MS;
+
 pub fn health() -> Value {
-    let indexer = INDEXER_HEIGHT.load(Ordering::Relaxed);
-    let game = crate::game_state::GAME_STATE.read().ok().map(|g| g.current_block_height).unwrap_or(0);
     serde_json::json!({
         "source": source().name(),
+        "snapshot_hits": SNAPSHOT_HITS.load(Ordering::Relaxed),
         "guild_reads": GUILD_READS.load(Ordering::Relaxed),
         "lcd_reads": LCD_READS.load(Ordering::Relaxed),
         "failovers_to_lcd": FAILOVERS.load(Ordering::Relaxed),
-        "objects_batches": OBJECT_BATCHES.load(Ordering::Relaxed),
-        "objects_cached": OBJECTS.len(),
-        "sweeps": sweeps_health(),
-        // How far the indexer trails the game's own block clock, from the
-        // last batch response's `meta.height`. 0 = no batch read yet.
-        "indexer_height": indexer,
-        "indexer_lag_blocks": if indexer > 0 && game > indexer { game - indexer } else { 0 },
+        "snapshot_trusted": perception::with_snapshot(|s| s.age_ms() <= SNAPSHOT_TRUST_MS).unwrap_or(false),
+        "ore_clocks_trusted": clocks_hot(),
     })
 }
-
-// ── Batched typed reads (`/api/objects?ids=`, ≤ 200 ids) ─────────────────────
-//
-// One call answers up to 200 "which planet / fleet / owner / slot" questions,
-// so a scan that collects its candidates first pays a handful of requests
-// instead of one per action. Rows are cached briefly: the same planet is
-// asked about by every ripe entry of the same player within one scan.
-// Struct rows here are BASE columns only — built/online still come from
-// `/api/struct/{id}` (see `struct_state`) until status lands in the batch.
-
-const OBJECTS_TTL_MS: f64 = 20_000.0;
-static OBJECTS: LazyLock<dashmap::DashMap<String, (f64, Value)>> = LazyLock::new(dashmap::DashMap::new);
-static OBJECT_BATCHES: AtomicU64 = AtomicU64::new(0);
-static INDEXER_HEIGHT: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> f64 {
     crate::hasher::types::now_millis()
 }
 
-fn cached_object(id: &str) -> Option<Value> {
-    let e = OBJECTS.get(id)?;
-    (now_ms() - e.0 <= OBJECTS_TTL_MS).then(|| e.1.clone())
-}
-
-/// Fetch (and cache) the typed rows for `ids` that are not fresh already, in
-/// batches of up to 200. Returns how many rows were fetched. Call it at the
-/// top of a scan with every planet / fleet / player / struct id the scan will
-/// verify, then the per-action reads below hit the cache.
-pub async fn prefetch_objects(client: &CosmosClient, ids: &[String]) -> Result<usize, String> {
-    let mut want: Vec<&str> = ids.iter().map(String::as_str).filter(|id| cached_object(id).is_none()).collect();
-    want.sort_unstable();
-    want.dedup();
-    let mut fetched = 0;
-    for chunk in want.chunks(OBJECTS_BATCH_MAX) {
-        let (rows, height) = client.guild.objects_by_ids(chunk).await?;
-        OBJECT_BATCHES.fetch_add(1, Ordering::Relaxed);
-        if let Some(h) = height {
-            INDEXER_HEIGHT.store(h, Ordering::Relaxed);
-        }
-        let now = now_ms();
-        for row in rows {
-            let (Some(id), Some(obj)) = (str_field(&row, "id"), row.get("object")) else { continue };
-            if obj.is_object() {
-                OBJECTS.insert(id.to_string(), (now, obj.clone()));
-                fetched += 1;
-            }
-        }
-    }
-    // Keep the map bounded: drop anything stale once it grows past a scan's worth.
-    if OBJECTS.len() > 4 * OBJECTS_BATCH_MAX {
-        let now = now_ms();
-        OBJECTS.retain(|_, (t, _)| now - *t <= OBJECTS_TTL_MS);
-    }
-    Ok(fetched)
-}
-
-/// One typed row from the batch endpoint, via the cache.
-async fn object_row(client: &CosmosClient, id: &str) -> Result<Value, String> {
-    if let Some(v) = cached_object(id) {
-        return Ok(v);
-    }
-    prefetch_objects(client, &[id.to_string()]).await?;
-    cached_object(id).ok_or_else(|| format!("Guild API objects has no {id}"))
-}
-
-/// A planet/fleet row's `map` — slot arrays keyed by ambit, serialised as a
-/// JSON string inside the row.
-pub(crate) fn slot_map(row: &Value) -> Result<Value, String> {
-    match row.get("map") {
-        Some(Value::String(s)) => serde_json::from_str(s).map_err(|e| format!("map is not JSON: {e}")),
-        Some(v @ Value::Object(_)) => Ok(v.clone()),
-        _ => Err("row has no `map`".to_string()),
-    }
-}
-
-pub(crate) fn slot_occupied_in_map(map: &Value, ambit: &str, slot: u64) -> Result<bool, String> {
-    let arr = map
-        .get(ambit)
-        .or_else(|| map.get(ambit.to_ascii_lowercase().as_str()))
-        .and_then(|a| a.as_array())
-        .ok_or_else(|| format!("map has no `{ambit}` array"))?;
-    Ok(arr.get(slot as usize).and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()))
-}
-
-pub(crate) fn first_free_in_map(map: &Value, ambits: &[&str]) -> Option<(String, u64)> {
-    ambits.iter().find_map(|amb| {
-        let arr = map.get(*amb)?.as_array()?;
-        arr.iter()
-            .position(|x| x.as_str().map(|s| s.is_empty()).unwrap_or(true))
-            .map(|i| (amb.to_string(), i as u64))
-    })
-}
-
 fn note_failover(what: &str, err: &str) {
     FAILOVERS.fetch_add(1, Ordering::Relaxed);
-    let now = crate::hasher::types::now_millis() as u64;
+    let now = now_ms() as u64;
     let last = LAST_FAILOVER_LOG_MS.load(Ordering::Relaxed);
     if now.saturating_sub(last) > 60_000 {
         LAST_FAILOVER_LOG_MS.store(now, Ordering::Relaxed);
@@ -209,6 +117,22 @@ fn note_failover(what: &str, err: &str) {
             format!("guild verify read failed ({what}): {err} — falling back to the LCD (rate-limited log)"),
         );
     }
+}
+
+/// A lookup in the trusted snapshot. `None` = not answerable from memory.
+fn snap<R>(f: impl FnOnce(&Snapshot) -> Option<R>) -> Option<R> {
+    if source() == VerifySource::Lcd {
+        return None;
+    }
+    let r = perception::with_snapshot(|s| if s.age_ms() <= SNAPSHOT_TRUST_MS { f(s) } else { None }).flatten();
+    if r.is_some() {
+        SNAPSHOT_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+    r
+}
+
+fn clocks_hot() -> bool {
+    perception::hot_age_ms().is_some_and(|a| a <= HOT_TRUST_MS)
 }
 
 /// Run the guild read; on error fall back to the LCD read. Both futures are
@@ -240,7 +164,7 @@ macro_rules! with_failover {
     }};
 }
 
-// ── Guild row helpers ────────────────────────────────────────────────────────
+// ── Row helpers ──────────────────────────────────────────────────────────────
 
 /// A guild numeric: JSON number, or the LCD's string form.
 pub(crate) fn num_u64(v: Option<&Value>) -> Option<u64> {
@@ -263,11 +187,6 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str()).filter(|s| !s.is_empty())
 }
 
-/// Guild `status` bit-flags (knowledge/mechanics/building.md).
-const STATUS_BUILT: u64 = 2;
-const STATUS_ONLINE: u64 = 4;
-const STATUS_DESTROYED: u64 = 32;
-
 fn require<'a>(row: &'a Value, key: &str, what: &str) -> Result<&'a Value, String> {
     row.get(key).filter(|v| !v.is_null()).ok_or_else(|| format!("{what}: guild row has no `{key}`"))
 }
@@ -279,7 +198,7 @@ pub struct StructState {
     pub built: bool,
     pub online: bool,
     pub destroyed: bool,
-    /// Owning player id, when the source reports it (guild rows always do).
+    /// Owning player id, when the source reports it.
     pub owner: Option<String>,
     /// Planet or fleet the struct stands in.
     pub location_id: Option<String>,
@@ -291,16 +210,24 @@ impl StructState {
     }
 }
 
+pub(crate) fn state_from_status_bits(status: u64) -> StructState {
+    use perception::status as st;
+    StructState {
+        built: status & st::BUILT != 0,
+        online: status & st::ONLINE != 0,
+        destroyed: status & st::DESTROYED != 0,
+        owner: None,
+        location_id: None,
+    }
+}
+
 pub(crate) fn struct_state_from_guild(row: &Value) -> Result<StructState, String> {
     let status = num_u64(Some(require(row, "status", "struct")?)).ok_or("struct: guild `status` is not numeric")?;
-    let destroyed_flag = parse_bool(row.get("is_destroyed"));
-    Ok(StructState {
-        built: status & STATUS_BUILT != 0,
-        online: status & STATUS_ONLINE != 0,
-        destroyed: destroyed_flag || status & STATUS_DESTROYED != 0,
-        owner: str_field(row, "owner").map(String::from),
-        location_id: str_field(row, "location_id").map(String::from),
-    })
+    let mut s = state_from_status_bits(status);
+    s.destroyed = s.destroyed || parse_bool(row.get("is_destroyed"));
+    s.owner = str_field(row, "owner").map(String::from);
+    s.location_id = str_field(row, "location_id").map(String::from);
+    Ok(s)
 }
 
 pub(crate) fn struct_state_from_lcd(entity: &Value) -> Result<StructState, String> {
@@ -315,238 +242,33 @@ pub(crate) fn struct_state_from_lcd(entity: &Value) -> Result<StructState, Strin
     })
 }
 
-// ── Attribute sweeps ─────────────────────────────────────────────────────────
-//
-// The Guild API lists one attribute type across every object at 10,000 rows a
-// page (`struct-attribute/type`, `planet-attribute/type`,
-// `grid/attribute-type`). That is the fast-changing data the loops verify —
-// status, build clock, ore clocks, last action (charge), ore — each a handful
-// of calls for the whole galaxy. GRASS streams changes to most of them, so a
-// sweep is refreshed at most every `ttl` and patched live in between
-// (`on_grass`). The planet ore clocks do NOT stream (measured: zero frames in
-// 111k), so theirs is a short TTL instead. A per-action verify is then a
-// lookup; only an id the sweep does not know costs a single read.
-//
-// Row semantics (docs): an attribute row is DELETED when the chain value
-// reaches zero — an id missing from a fresh sweep means 0, not "unknown".
-
-const SWEEP_PAGE_LIMIT: usize = 10_000;
-const SWEEP_MAX_PAGES: u32 = 30;
-/// After a sweep that fails or returns nothing, don't retry for this long.
-const SWEEP_BACKOFF_MS: f64 = 10.0 * 60_000.0;
-const STREAMED_TTL_MS: f64 = 5.0 * 60_000.0;
-const UNSTREAMED_TTL_MS: f64 = 2.0 * 60_000.0;
-
-#[derive(Clone, Copy)]
-enum SweepSource {
-    StructAttr,
-    PlanetAttr,
-    Grid,
-}
-
-type SweepMap = std::collections::HashMap<String, u64>;
-
-struct Sweep {
-    name: &'static str,
-    source: SweepSource,
-    attribute: &'static str,
-    ttl_ms: f64,
-    state: std::sync::Mutex<Option<(f64, SweepMap)>>,
-    refresh: tokio::sync::Mutex<()>,
-    backoff_until_ms: AtomicU64,
-    sweeps: AtomicU64,
-    patches: AtomicU64,
-}
-
-impl Sweep {
-    const fn new(name: &'static str, source: SweepSource, attribute: &'static str, ttl_ms: f64) -> Self {
-        Sweep {
-            name,
-            source,
-            attribute,
-            ttl_ms,
-            state: std::sync::Mutex::new(None),
-            refresh: tokio::sync::Mutex::const_new(()),
-            backoff_until_ms: AtomicU64::new(0),
-            sweeps: AtomicU64::new(0),
-            patches: AtomicU64::new(0),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(f64, SweepMap)>> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// `Some(lookup)` when the sweep is fresh, `None` when it needs a refresh.
-    fn fresh_lookup(&self, id: &str) -> Option<Option<u64>> {
-        let g = self.lock();
-        let (t, m) = g.as_ref()?;
-        (now_ms() - t <= self.ttl_ms).then(|| m.get(id).copied())
-    }
-
-    async fn page(&self, client: &CosmosClient, page: u32) -> Result<crate::mcp::guild_api::GuildPage<Value>, String> {
-        match self.source {
-            SweepSource::StructAttr => client.guild.struct_attribute_by_type_limited(self.attribute, page, SWEEP_PAGE_LIMIT).await,
-            SweepSource::PlanetAttr => client.guild.planet_attribute_by_type_limited(self.attribute, page, SWEEP_PAGE_LIMIT).await,
-            SweepSource::Grid => client.guild.grid_by_attribute_type_limited(self.attribute, page, SWEEP_PAGE_LIMIT).await,
-        }
-    }
-
-    /// `Ok(Some)` known; `Ok(None)` absent from a fresh sweep (0 on chain, or
-    /// not indexed yet); `Err` the sweep is unavailable.
-    async fn get(&self, client: &CosmosClient, id: &str) -> Result<Option<u64>, String> {
-        if let Some(hit) = self.fresh_lookup(id) {
-            return Ok(hit);
-        }
-        if now_ms() < self.backoff_until_ms.load(Ordering::Relaxed) as f64 {
-            return Err(format!("{} sweep backing off after a failed sweep", self.name));
-        }
-        // Single-flight: whoever gets the lock second finds a fresh map.
-        let _flight = self.refresh.lock().await;
-        if let Some(hit) = self.fresh_lookup(id) {
-            return Ok(hit);
-        }
-        let mut map = SweepMap::new();
-        let mut page = 1;
-        let sweep = async {
-            loop {
-                let p = self.page(client, page).await?;
-                let more = p.has_more;
-                status_rows_into_map(&p.items, &mut map);
-                if !more || page >= SWEEP_MAX_PAGES {
-                    break;
-                }
-                page += 1;
-            }
-            Ok::<(), String>(())
-        }
-        .await;
-        match sweep {
-            Ok(()) if !map.is_empty() => {
-                self.sweeps.fetch_add(1, Ordering::Relaxed);
-                let hit = map.get(id).copied();
-                *self.lock() = Some((now_ms(), map));
-                Ok(hit)
-            }
-            Ok(()) => {
-                self.backoff_until_ms.store((now_ms() + SWEEP_BACKOFF_MS) as u64, Ordering::Relaxed);
-                Err(format!("{} sweep returned no rows for attribute `{}`", self.name, self.attribute))
-            }
-            Err(e) => {
-                self.backoff_until_ms.store((now_ms() + SWEEP_BACKOFF_MS) as u64, Ordering::Relaxed);
-                Err(format!("{} sweep failed on page {page}: {e}", self.name))
-            }
-        }
-    }
-
-    /// GRASS delta. Only patches a sweep that exists (a patch is worthless
-    /// without the baseline it corrects).
-    fn patch(&self, id: &str, v: u64) {
-        if let Some((_, m)) = self.lock().as_mut() {
-            m.insert(id.to_string(), v);
-            self.patches.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    fn health(&self) -> Value {
-        let g = self.lock();
-        serde_json::json!({
-            "sweeps": self.sweeps.load(Ordering::Relaxed),
-            "size": g.as_ref().map(|(_, m)| m.len()).unwrap_or(0),
-            "age_s": g.as_ref().map(|(t, _)| ((now_ms() - t) / 1000.0) as u64),
-            "grass_patches": self.patches.load(Ordering::Relaxed),
-            "backing_off": now_ms() < self.backoff_until_ms.load(Ordering::Relaxed) as f64,
-        })
-    }
-}
-
-static STATUS_SWEEP: Sweep = Sweep::new("struct_status", SweepSource::StructAttr, "status", STREAMED_TTL_MS);
-static BUILD_SWEEP: Sweep = Sweep::new("build_clock", SweepSource::StructAttr, "blockStartBuild", STREAMED_TTL_MS);
-static MINE_CLOCK_SWEEP: Sweep = Sweep::new("mine_clock", SweepSource::PlanetAttr, "blockStartOreMine", UNSTREAMED_TTL_MS);
-static REFINE_CLOCK_SWEEP: Sweep = Sweep::new("refine_clock", SweepSource::PlanetAttr, "blockStartOreRefine", UNSTREAMED_TTL_MS);
-static LAST_ACTION_SWEEP: Sweep = Sweep::new("last_action", SweepSource::Grid, "lastAction", STREAMED_TTL_MS);
-static ORE_SWEEP: Sweep = Sweep::new("ore", SweepSource::Grid, "ore", STREAMED_TTL_MS);
-
-fn sweeps_health() -> Value {
-    serde_json::json!({
-        "struct_status": STATUS_SWEEP.health(),
-        "build_clock": BUILD_SWEEP.health(),
-        "mine_clock": MINE_CLOCK_SWEEP.health(),
-        "refine_clock": REFINE_CLOCK_SWEEP.health(),
-        "last_action": LAST_ACTION_SWEEP.health(),
-        "ore": ORE_SWEEP.health(),
-    })
-}
-
-pub(crate) fn status_rows_into_map(rows: &[Value], map: &mut SweepMap) -> usize {
-    let mut n = 0;
-    for r in rows {
-        if let (Some(id), Some(v)) = (str_field(r, "object_id"), num_u64(r.get("val").or_else(|| r.get("value")))) {
-            map.insert(id.to_string(), v);
-            n += 1;
-        }
-    }
-    n
-}
-
-/// GRASS keeps the sweeps current between refreshes. Called for every event
-/// the webapp forwards; grid frames are keyed by `object_id`, struct frames
-/// by `struct_id`.
-pub fn on_grass(category: &str, detail: &Value) {
-    match category {
-        "struct_status" => {
-            if let (Some(id), Some(v)) = (str_field(detail, "struct_id"), num_u64(detail.get("status"))) {
-                STATUS_SWEEP.patch(id, v);
-            }
-        }
-        "struct_block_build_start" => {
-            if let (Some(id), Some(v)) = (str_field(detail, "struct_id"), num_u64(detail.get("block"))) {
-                BUILD_SWEEP.patch(id, v);
-            }
-        }
-        "lastAction" => {
-            if let (Some(id), Some(v)) = (str_field(detail, "object_id"), num_u64(detail.get("value"))) {
-                LAST_ACTION_SWEEP.patch(id, v);
-            }
-        }
-        "ore" => {
-            if let (Some(id), Some(v)) = (str_field(detail, "object_id"), num_u64(detail.get("value"))) {
-                ORE_SWEEP.patch(id, v);
-            }
-        }
-        _ => {}
-    }
-}
-
-pub(crate) fn state_from_status_bits(status: u64) -> StructState {
-    StructState {
-        built: status & STATUS_BUILT != 0,
-        online: status & STATUS_ONLINE != 0,
-        destroyed: status & STATUS_DESTROYED != 0,
-        owner: None,
-        location_id: None,
-    }
-}
-
 /// Built / online / destroyed for one struct.
 pub async fn struct_state(client: &CosmosClient, sid: &str) -> Result<StructState, String> {
+    if let Some(s) = snap(|s| {
+        s.struct_row(sid).map(|row| {
+            let mut st = state_from_status_bits(s.struct_status(sid));
+            st.owner = Some(row.owner.clone());
+            st.location_id = Some(row.location_id.clone());
+            st
+        })
+    }) {
+        return Ok(s);
+    }
     with_failover!(
         "struct",
-        async {
-            match STATUS_SWEEP.get(client, sid).await {
-                Ok(Some(status)) => return Ok(state_from_status_bits(status)),
-                // Not in the sweep (new, or zeroed row) or sweep unavailable:
-                // one per-struct read, which carries status and health.
-                Ok(None) | Err(_) => {}
-            }
-            struct_state_from_guild(&client.guild.struct_by_id(sid).await?)
-        },
+        async { struct_state_from_guild(&client.guild.struct_by_id(sid).await?) },
         async { struct_state_from_lcd(&crate::mcp::loop_util::verify_struct_entity(client, sid).await?) }
     )
 }
 
 /// The struct a defender is currently wired to, if any.
 pub async fn defender_target(client: &CosmosClient, defender: &str) -> Result<Option<String>, String> {
+    if let Some(t) = snap(|s| {
+        s.struct_attr(defender, "protectedStructIndex")
+            .map(|i| if i == 0 { None } else { Some(format!("5-{i}")) })
+    }) {
+        return Ok(t);
+    }
     with_failover!(
         "defender",
         async {
@@ -581,17 +303,12 @@ pub(crate) fn work_anchor(rows: &Value, object_id: &str, category: &str) -> Resu
 
 /// Live BUILD anchor for a struct (0 = built, or no build outstanding).
 pub async fn build_anchor(client: &CosmosClient, pid: &str, sid: &str) -> Result<u64, String> {
+    if let Some(a) = snap(|s| s.struct_attr(sid, "blockStartBuild")) {
+        return Ok(a);
+    }
     with_failover!(
         "build_anchor",
-        async {
-            match BUILD_SWEEP.get(client, sid).await {
-                Ok(Some(v)) => Ok(v),
-                // Absent from a fresh sweep = clock 0 (built, or not indexed yet;
-                // GRASS `struct_block_build_start` patches a new build in).
-                Ok(None) => Ok(0),
-                Err(_) => work_anchor(&client.guild.work_by_player(pid).await?, sid, "BUILD"),
-            }
-        },
+        async { work_anchor(&client.guild.work_by_player(pid).await?, sid, "BUILD") },
         async {
             let e = crate::mcp::loop_util::verify_struct_entity(client, sid).await?;
             Ok(read_u64_field(e.get("structAttributes"), "blockStartBuild"))
@@ -599,9 +316,9 @@ pub async fn build_anchor(client: &CosmosClient, pid: &str, sid: &str) -> Result
     )
 }
 
-/// Live ore clock (MINE / REFINE) for a rig. `pid` is the rig's owner when
-/// known; on the guild path an unknown owner costs one extra struct read.
-/// `planet_id` is the rig's planet, for the LCD path.
+/// Live ore clock (MINE / REFINE) for a rig on `planet_id`. From the
+/// snapshot only while the hot refresh is current — the clocks never stream.
+/// `pid` is the rig's owner when known (the guild work view is keyed by it).
 pub async fn ore_anchor(
     client: &CosmosClient,
     pid: Option<&str>,
@@ -609,29 +326,28 @@ pub async fn ore_anchor(
     sid: &str,
     task_type: &str,
 ) -> Result<u64, String> {
+    let attr = if task_type == "REFINE" { "blockStartOreRefine" } else { "blockStartOreMine" };
+    if clocks_hot() {
+        if let Some(a) = snap(|s| s.planet_attr(planet_id, attr)) {
+            return Ok(a);
+        }
+    }
     with_failover!(
         "ore_anchor",
         async {
-            // The planet's shared clock, from the sweep (short TTL: it never
-            // streams). Absent from a fresh sweep = 0 = nothing to hash.
-            let sweep = if task_type == "REFINE" { &REFINE_CLOCK_SWEEP } else { &MINE_CLOCK_SWEEP };
-            match sweep.get(client, planet_id).await {
-                Ok(Some(v)) => return Ok(v),
-                Ok(None) => return Ok(0),
-                Err(_) => {}
-            }
             let owner = match pid {
                 Some(p) => p.to_string(),
-                None => str_field(&object_row(client, sid).await?, "owner")
-                    .map(String::from)
-                    .ok_or("ore_anchor: struct row has no owner")?,
+                None => {
+                    let row = client.guild.struct_by_id(sid).await?;
+                    str_field(&row, "owner").map(String::from).ok_or("ore_anchor: struct row has no owner")?
+                }
             };
             work_anchor(&client.guild.work_by_player(&owner).await?, sid, task_type)
         },
         async {
             let p = client.query_entity("planet", planet_id).await?;
             // Fold the live planet back in: the ore clocks never stream.
-            crate::mcp::perception::absorb_planet_entity(&p);
+            perception::absorb_planet_entity(&p);
             Ok(crate::mcp::loop_util::planet_ore_anchor(Some(&p), task_type))
         }
     )
@@ -639,15 +355,12 @@ pub async fn ore_anchor(
 
 /// Blocks of charge the player has right now.
 pub async fn player_charge(client: &CosmosClient, pid: &str, current_block: u64) -> Result<u64, String> {
+    if let Some(c) = snap(|s| s.grid_attr(pid, "lastAction").map(|la| current_block.saturating_sub(la))) {
+        return Ok(c);
+    }
     with_failover!(
         "charge",
         async {
-            match LAST_ACTION_SWEEP.get(client, pid).await {
-                Ok(Some(last)) => return Ok(current_block.saturating_sub(last)),
-                // No row = never acted = full charge.
-                Ok(None) => return Ok(current_block),
-                Err(_) => {}
-            }
             let v = client.guild.player_last_action_block(pid).await?;
             // `{ "last_action_block_height": "12345" }` — a single row.
             let row = if v.is_array() { v.get(0).cloned().unwrap_or(Value::Null) } else { v };
@@ -668,8 +381,6 @@ pub struct PlayerView {
     pub planet_id: String,
     pub fleet_id: String,
     pub stored_ore: f64,
-    /// Raw fleet row when the source embeds one (guild player rows do).
-    pub fleet_row: Option<Value>,
 }
 
 pub(crate) fn player_view_from_guild(row: &Value) -> Result<PlayerView, String> {
@@ -677,7 +388,6 @@ pub(crate) fn player_view_from_guild(row: &Value) -> Result<PlayerView, String> 
         planet_id: str_field(row, "planet_id").unwrap_or("").to_string(),
         fleet_id: str_field(row, "fleet_id").unwrap_or("").to_string(),
         stored_ore: num_f64(row.get("ore")).ok_or("player: guild row has no numeric `ore`")?,
-        fleet_row: row.get("fleet").filter(|f| f.is_object()).cloned(),
     })
 }
 
@@ -687,55 +397,40 @@ pub(crate) fn player_view_from_lcd(entity: &Value) -> Result<PlayerView, String>
         planet_id: str_field(p, "planetId").unwrap_or("").to_string(),
         fleet_id: str_field(p, "fleetId").unwrap_or("").to_string(),
         stored_ore: parse_f64(entity.get("gridAttributes").and_then(|g| g.get("ore"))),
-        fleet_row: None,
     })
 }
 
-/// Just the player's current planet or fleet id (`target` = "planet" |
-/// "fleet"). Guild path: one batch-cacheable row, no ore needed.
-pub async fn player_location(client: &CosmosClient, pid: &str, target: &str) -> Result<String, String> {
-    let key = if target == "fleet" { "fleet_id" } else { "planet_id" };
-    with_failover!(
-        "player_location",
-        async {
-            let row = object_row(client, pid).await?;
-            Ok(str_field(&row, key).unwrap_or("").to_string())
-        },
-        async { player_view_from_lcd(&client.query_entity("player", pid).await?).map(|v| if target == "fleet" { v.fleet_id } else { v.planet_id }) }
-    )
-}
-
 pub async fn player_view(client: &CosmosClient, pid: &str) -> Result<PlayerView, String> {
+    if let Some(v) = snap(|s| {
+        s.player_row(pid).map(|p| PlayerView {
+            planet_id: str_field(p, "planetId").unwrap_or("").to_string(),
+            fleet_id: str_field(p, "fleetId").unwrap_or("").to_string(),
+            stored_ore: s.grid_attr(pid, "ore").unwrap_or(0) as f64,
+        })
+    }) {
+        return Ok(v);
+    }
     with_failover!(
         "player",
-        async {
-            // Location from the batch row, stored ore from the grid sweep;
-            // the profile row only when either is unavailable.
-            if let (Ok(row), Ok(ore)) = (object_row(client, pid).await, ORE_SWEEP.get(client, pid).await) {
-                return Ok(PlayerView {
-                    planet_id: str_field(&row, "planet_id").unwrap_or("").to_string(),
-                    fleet_id: str_field(&row, "fleet_id").unwrap_or("").to_string(),
-                    stored_ore: ore.unwrap_or(0) as f64,
-                    fleet_row: None,
-                });
-            }
-            player_view_from_guild(&client.guild.player_by_id(pid).await?)
-        },
+        async { player_view_from_guild(&client.guild.player_by_id(pid).await?) },
         async { player_view_from_lcd(&client.query_entity("player", pid).await?) }
     )
 }
 
+/// Just the player's current planet or fleet id (`target` = "planet" | "fleet").
+pub async fn player_location(client: &CosmosClient, pid: &str, target: &str) -> Result<String, String> {
+    let v = player_view(client, pid).await?;
+    Ok(if target == "fleet" { v.fleet_id } else { v.planet_id })
+}
+
 /// Undiscovered ore left on a planet.
 pub async fn planet_ore(client: &CosmosClient, planet_id: &str) -> Result<f64, String> {
+    if let Some(o) = snap(|s| s.grid_attr(planet_id, "ore").map(|v| v as f64)) {
+        return Ok(o);
+    }
     with_failover!(
         "planet_ore",
         async {
-            match ORE_SWEEP.get(client, planet_id).await {
-                Ok(Some(v)) => return Ok(v as f64),
-                // Row deleted at zero: a drained planet.
-                Ok(None) => return Ok(0.0),
-                Err(_) => {}
-            }
             let row = client.guild.planet_by_id(planet_id).await?;
             num_f64(row.get("undiscovered_ore")).ok_or_else(|| "planet: guild row has no numeric undiscovered_ore".to_string())
         },
@@ -746,46 +441,80 @@ pub async fn planet_ore(client: &CosmosClient, planet_id: &str) -> Result<f64, S
     )
 }
 
-/// Is `ambit` slot `slot` of planet/fleet `loc` occupied by a live struct?
-pub(crate) fn slot_occupied_in_rows(rows: &[Value], ambit: &str, slot: u64) -> bool {
-    rows.iter().any(|r| {
-        !parse_bool(r.get("is_destroyed"))
-            && str_field(r, "operating_ambit").is_some_and(|a| a.eq_ignore_ascii_case(ambit))
-            && num_u64(r.get("slot")) == Some(slot)
+/// A planet/fleet row's slot arrays: inline (`land`/`water`/`air`/`space`,
+/// the LCD and snapshot shape) or a guild `map` (JSON string or object).
+pub(crate) fn slot_map(row: &Value) -> Result<Value, String> {
+    if ["land", "water", "air", "space"].iter().any(|a| row.get(*a).is_some_and(|v| v.is_array())) {
+        return Ok(row.clone());
+    }
+    match row.get("map") {
+        Some(Value::String(s)) => serde_json::from_str(s).map_err(|e| format!("map is not JSON: {e}")),
+        Some(v @ Value::Object(_)) => Ok(v.clone()),
+        _ => Err("row has no slot arrays or `map`".to_string()),
+    }
+}
+
+pub(crate) fn slot_occupied_in_map(map: &Value, ambit: &str, slot: u64) -> Result<bool, String> {
+    let arr = map
+        .get(ambit)
+        .or_else(|| map.get(ambit.to_ascii_lowercase().as_str()))
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| format!("map has no `{ambit}` array"))?;
+    Ok(arr.get(slot as usize).and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()))
+}
+
+pub(crate) fn first_free_in_map(map: &Value, ambits: &[&str]) -> Option<(String, u64)> {
+    ambits.iter().find_map(|amb| {
+        let arr = map.get(*amb)?.as_array()?;
+        arr.iter()
+            .position(|x| x.as_str().map(|s| s.is_empty()).unwrap_or(true))
+            .map(|i| (amb.to_string(), i as u64))
     })
 }
 
+/// The guild batch row for a planet or fleet (slot arrays, command struct).
+async fn guild_object_row(client: &CosmosClient, id: &str) -> Result<Value, String> {
+    let (rows, _) = client.guild.objects_by_ids(&[id]).await?;
+    rows.iter()
+        .find(|r| r.get("id").and_then(|x| x.as_str()) == Some(id))
+        .and_then(|r| r.get("object"))
+        .filter(|o| o.is_object())
+        .cloned()
+        .ok_or_else(|| format!("Guild API objects has no {id}"))
+}
+
+fn location_row(s: &Snapshot, target: &str, loc: &str) -> Option<Value> {
+    if target == "fleet" { s.fleet_row(loc) } else { s.planet_row(loc) }.cloned()
+}
+
+/// Is `ambit` slot `slot` of planet/fleet `loc` occupied by a live struct?
 pub async fn slot_occupied(client: &CosmosClient, target: &str, loc: &str, ambit: &str, slot: u64) -> Result<bool, String> {
+    if let Some(o) = snap(|s| location_row(s, target, loc).and_then(|row| slot_occupied_in_map(&row, ambit, slot).ok())) {
+        return Ok(o);
+    }
     with_failover!(
         "slot",
-        async {
-            // The planet/fleet row's own slot arrays — exact, one batchable
-            // read, and the same shape the LCD path checks.
-            let map = slot_map(&object_row(client, loc).await?)?;
-            slot_occupied_in_map(&map, ambit, slot)
-        },
+        async { slot_occupied_in_map(&slot_map(&guild_object_row(client, loc).await?)?, ambit, slot) },
         async {
             let entity = client.query_entity(target, loc).await?;
             if target == "planet" {
-                crate::mcp::perception::absorb_planet_entity(&entity);
+                perception::absorb_planet_entity(&entity);
             }
             let wrapper = if target == "fleet" { "Fleet" } else { "Planet" };
-            Ok(entity
-                .get(wrapper)
-                .and_then(|o| o.get(ambit))
-                .and_then(|a| a.as_array())
-                .and_then(|a| a.get(slot as usize))
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty()))
+            let row = entity.get(wrapper).ok_or_else(|| format!("{target} {loc}: LCD entity has no {wrapper}"))?;
+            slot_occupied_in_map(row, ambit, slot)
         }
     )
 }
 
 /// First free slot on a planet/fleet, trying `ambits` in order.
 pub async fn first_free_slot(client: &CosmosClient, target: &str, loc: &str, ambits: &[&str]) -> Result<Option<(String, u64)>, String> {
+    if let Some(f) = snap(|s| location_row(s, target, loc).map(|row| first_free_in_map(&row, ambits))) {
+        return Ok(f);
+    }
     with_failover!(
         "free_slot",
-        async { Ok(first_free_in_map(&slot_map(&object_row(client, loc).await?)?, ambits)) },
+        async { Ok(first_free_in_map(&slot_map(&guild_object_row(client, loc).await?)?, ambits)) },
         async {
             let entity = client.query_entity(target, loc).await?;
             let wrapper = if target == "fleet" { "Fleet" } else { "Planet" };
@@ -794,59 +523,52 @@ pub async fn first_free_slot(client: &CosmosClient, target: &str, loc: &str, amb
     )
 }
 
-/// The fleet's Command Ship id, if it has one. Guild path: the fleet row
-/// from the batch endpoint (`command_struct`).
+/// The fleet's Command Ship id, if it has one.
 pub async fn fleet_command_struct(client: &CosmosClient, _pid: &str, fleet_id: &str) -> Result<Option<String>, String> {
+    if let Some(c) = snap(|s| s.fleet_row(fleet_id).map(|f| str_field(f, "commandStruct").map(String::from))) {
+        return Ok(c);
+    }
     with_failover!(
         "fleet_command",
         async {
-            let fleet = object_row(client, fleet_id).await?;
+            let fleet = guild_object_row(client, fleet_id).await?;
             // An empty/absent command field on a present fleet row means "none".
             Ok(str_field(&fleet, "command_struct").map(String::from))
         },
         async {
             let fleet = client.query_entity("fleet", fleet_id).await?;
-            Ok(fleet
-                .get("Fleet")
-                .and_then(|f| str_field(f, "commandStruct"))
-                .map(String::from))
+            Ok(fleet.get("Fleet").and_then(|f| str_field(f, "commandStruct")).map(String::from))
         }
     )
 }
 
 /// For a solved proof about to be signed: the anchor the chain holds NOW for
 /// `object_id`'s `task_kind` (BUILD / MINE / REFINE), plus the rig's planet
-/// (ore kinds) and owner when the source reports them. `Ok(0)` = unknown or
-/// no work outstanding; callers treat that as "don't block".
+/// (ore kinds) and owner when known. `Ok(0)` = unknown or no work
+/// outstanding; callers treat that as "don't block".
 pub async fn solved_anchor_live(
     client: &CosmosClient,
     object_id: &str,
     task_kind: &str,
 ) -> Result<(u64, Option<String>, Option<String>), String> {
     let is_ore = matches!(task_kind, "MINE" | "REFINE");
+    // Owner and location from the snapshot's struct row, then the anchor
+    // through the same source-aware readers every loop uses.
+    if let Some((owner, location)) = snap(|s| s.struct_row(object_id).map(|r| (r.owner.clone(), r.location_id.clone()))) {
+        let live = if is_ore {
+            ore_anchor(client, Some(&owner), &location, object_id, task_kind).await?
+        } else {
+            build_anchor(client, &owner, object_id).await?
+        };
+        return Ok((live, if is_ore { Some(location) } else { None }, Some(owner)));
+    }
     with_failover!(
         "solved_anchor",
         async {
-            // Base struct row is enough here: owner + location, no status needed.
-            let row = object_row(client, object_id).await?;
+            let row = client.guild.struct_by_id(object_id).await?;
             let owner = str_field(&row, "owner").map(String::from).ok_or("solved_anchor: struct row has no owner")?;
             let location = str_field(&row, "location_id").map(String::from);
-            // Sweeps first (a lookup), the work view only if a sweep is down.
-            let swept = if is_ore {
-                match location.as_deref() {
-                    Some(planet) => {
-                        let sweep = if task_kind == "REFINE" { &REFINE_CLOCK_SWEEP } else { &MINE_CLOCK_SWEEP };
-                        sweep.get(client, planet).await.ok()
-                    }
-                    None => None,
-                }
-            } else {
-                BUILD_SWEEP.get(client, object_id).await.ok()
-            };
-            let live = match swept {
-                Some(v) => v.unwrap_or(0),
-                None => work_anchor(&client.guild.work_by_player(&owner).await?, object_id, task_kind)?,
-            };
+            let live = work_anchor(&client.guild.work_by_player(&owner).await?, object_id, task_kind)?;
             Ok((live, if is_ore { location } else { None }, Some(owner)))
         },
         async {
@@ -879,16 +601,13 @@ mod tests {
         let s = struct_state_from_guild(&json!({"status": 7, "is_destroyed": false, "owner": "1-195", "location_id": "2-22432"})).unwrap();
         assert!(s.built && s.online && !s.destroyed);
         assert_eq!(s.owner.as_deref(), Some("1-195"));
-        // Status as an LCD-style string, destroyed via the flag.
         let d = struct_state_from_guild(&json!({"status": "35", "is_destroyed": false})).unwrap();
         assert!(d.destroyed && d.built);
         let d2 = struct_state_from_guild(&json!({"status": 3, "is_destroyed": true})).unwrap();
         assert!(d2.destroyed);
-        // Materialized only: not built.
         let m = struct_state_from_guild(&json!({"status": 1, "is_destroyed": false})).unwrap();
         assert!(!m.built && !m.online);
-        // Missing status is an error, never "not built".
-        assert!(struct_state_from_guild(&json!({"is_destroyed": false})).is_err());
+        assert!(struct_state_from_guild(&json!({"is_destroyed": false})).is_err(), "missing status is an error, never 'not built'");
     }
 
     #[test]
@@ -916,50 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn status_sweep_rows_and_grass_patches_decode_to_state() {
-        let mut map = std::collections::HashMap::new();
-        let rows = vec![
-            json!({"object_id": "5-1", "val": "7"}),
-            json!({"object_id": "5-2", "val": 35}),
-            json!({"object_id": "5-3", "value": 1}),
-            json!({"object_id": "5-4"}),
-        ];
-        assert_eq!(status_rows_into_map(&rows, &mut map), 3);
-        assert!(state_from_status_bits(map["5-1"]).online);
-        assert!(state_from_status_bits(map["5-2"]).destroyed);
-        assert!(!state_from_status_bits(map["5-3"]).built);
-        // GRASS frames (verbatim shapes) patch a live sweep — and only a live one.
-        on_grass("struct_status", &json!({"struct_id": "5-9", "status": 7}));
-        assert!(STATUS_SWEEP.lock().is_none(), "no baseline, no patch");
-        *STATUS_SWEEP.lock() = Some((now_ms(), map));
-        on_grass("struct_status", &json!({"struct_id": "5-3", "status": 7, "status_old": 1, "player_id": "1-382"}));
-        on_grass("struct_health", &json!({"struct_id": "5-3", "health": 0}));
-        assert_eq!(STATUS_SWEEP.lock().as_ref().unwrap().1["5-3"], 7);
-        assert_eq!(STATUS_SWEEP.fresh_lookup("5-3"), Some(Some(7)));
-        assert_eq!(STATUS_SWEEP.fresh_lookup("5-404"), Some(None), "fresh sweep, unknown id = absent");
-        *STATUS_SWEEP.lock() = None;
-        assert_eq!(STATUS_SWEEP.fresh_lookup("5-3"), None, "no sweep = needs a refresh");
-
-        // Grid frames key by object_id; the build clock by struct_id + block.
-        *LAST_ACTION_SWEEP.lock() = Some((now_ms(), SweepMap::new()));
-        on_grass("lastAction", &json!({"attribute_type": "lastAction", "object_id": "1-1810", "object_type": "player", "value": 2468355, "value_old": 2468321}));
-        assert_eq!(LAST_ACTION_SWEEP.fresh_lookup("1-1810"), Some(Some(2468355)));
-        *LAST_ACTION_SWEEP.lock() = None;
-        *BUILD_SWEEP.lock() = Some((now_ms(), SweepMap::new()));
-        on_grass("struct_block_build_start", &json!({"block": 2352382, "block_height": 2352382, "planet_id": "2-16116", "struct_id": "5-192029"}));
-        assert_eq!(BUILD_SWEEP.fresh_lookup("5-192029"), Some(Some(2352382)));
-        *BUILD_SWEEP.lock() = None;
-    }
-
-    #[test]
-    fn a_stale_sweep_asks_for_a_refresh() {
-        *ORE_SWEEP.lock() = Some((now_ms() - STREAMED_TTL_MS - 1.0, SweepMap::from([("2-1".to_string(), 5u64)])));
-        assert_eq!(ORE_SWEEP.fresh_lookup("2-1"), None);
-        *ORE_SWEEP.lock() = None;
-    }
-
-    #[test]
-    fn slot_maps_come_as_json_strings_on_batch_rows() {
+    fn slot_maps_come_as_json_strings_on_batch_rows_or_inline_arrays() {
         // Verbatim from a live `/api/objects?ids=` planet row (2026-09-04).
         let row = json!({"id": "2-22432", "map": "{\"air\": [\"\", \"\", \"\", \"\"], \"land\": [\"5-236182\", \"5-192030\", \"\", \"\"], \"space\": [\"5-232859\", \"5-205581\", \"\", \"\"], \"water\": [\"\", \"5-237384\", \"\", \"\"]}"});
         let map = slot_map(&row).unwrap();
@@ -968,31 +644,18 @@ mod tests {
         assert!(!slot_occupied_in_map(&map, "air", 0).unwrap());
         assert!(slot_occupied_in_map(&map, "orbit", 0).is_err(), "unknown ambit is an error, not free");
         assert_eq!(first_free_in_map(&map, &["land", "water", "air", "space"]), Some(("land".to_string(), 2)));
-        assert_eq!(first_free_in_map(&map, &["water"]), Some(("water".to_string(), 0)));
-        // A full ambit yields nothing from that ambit.
-        let full = json!({"air": ["5-1", "5-2"]});
-        assert_eq!(first_free_in_map(&full, &["air"]), None);
+        // The LCD / snapshot shape carries the arrays inline.
+        let inline = json!({"id": "9-1", "land": ["5-1", ""], "water": [], "air": [], "space": [], "commandStruct": "5-1"});
+        let m2 = slot_map(&inline).unwrap();
+        assert!(slot_occupied_in_map(&m2, "land", 0).unwrap());
+        assert_eq!(first_free_in_map(&m2, &["land"]), Some(("land".to_string(), 1)));
         assert!(slot_map(&json!({"id": "9-1"})).is_err());
     }
 
     #[test]
-    fn slot_occupancy_ignores_destroyed_and_other_ambits() {
-        let rows = vec![
-            json!({"operating_ambit": "space", "slot": 0, "is_destroyed": false}),
-            json!({"operating_ambit": "land", "slot": 1, "is_destroyed": true}),
-            json!({"operating_ambit": "air", "slot": "2", "is_destroyed": false}),
-        ];
-        assert!(slot_occupied_in_rows(&rows, "space", 0));
-        assert!(!slot_occupied_in_rows(&rows, "land", 1), "a destroyed hull frees its slot");
-        assert!(slot_occupied_in_rows(&rows, "AIR", 2));
-        assert!(!slot_occupied_in_rows(&rows, "water", 0));
-    }
-
-    #[test]
     fn player_view_reads_guild_and_lcd_shapes() {
-        let g = player_view_from_guild(&json!({"planet_id": "2-1", "fleet_id": "9-11", "ore": "17", "fleet": {"command_struct": "5-3"}})).unwrap();
+        let g = player_view_from_guild(&json!({"planet_id": "2-1", "fleet_id": "9-11", "ore": "17"})).unwrap();
         assert_eq!((g.planet_id.as_str(), g.fleet_id.as_str(), g.stored_ore), ("2-1", "9-11", 17.0));
-        assert!(g.fleet_row.is_some());
         assert!(player_view_from_guild(&json!({"planet_id": "2-1"})).is_err(), "ore is required");
         let l = player_view_from_lcd(&json!({"Player": {"planetId": "2-2", "fleetId": "9-2"}, "gridAttributes": {"ore": "3"}})).unwrap();
         assert_eq!((l.planet_id.as_str(), l.stored_ore), ("2-2", 3.0));
@@ -1014,5 +677,75 @@ mod tests {
         assert_eq!(num_u64(Some(&json!("abc"))), None);
         assert_eq!(num_u64(None), None);
         assert_eq!(num_f64(Some(&json!("1.5"))), Some(1.5));
+    }
+
+    /// A small galaxy in the LCD row shapes `Snapshot::from_pages` speaks.
+    fn fixture() -> Snapshot {
+        let structs = vec![
+            json!({"id":"5-2184","type":"14","owner":"1-194","locationType":"planet","locationId":"2-223","operatingAmbit":"space","slot":"0"}),
+            json!({"id":"5-2297","type":"7","owner":"1-194","locationType":"planet","locationId":"2-223","operatingAmbit":"land","slot":"0"}),
+            json!({"id":"5-9000","type":"1","owner":"1-194","locationType":"fleet","locationId":"9-194","operatingAmbit":"space","slot":"0"}),
+        ];
+        let sattr = vec![
+            json!({"attributeId":"1-5-2184","value":"7"}),
+            json!({"attributeId":"1-5-2297","value":"1"}),
+            json!({"attributeId":"2-5-2297","value":"2435000"}),
+            json!({"attributeId":"1-5-9000","value":"7"}),
+            json!({"attributeId":"5-5-9000","value":"2184"}),
+        ];
+        let pattr = vec![
+            json!({"attributeId":"12-2-223","value":"1358696"}),
+            json!({"attributeId":"13-2-223","value":"1616486"}),
+        ];
+        let grid = vec![
+            json!({"attributeId":"11-1-194","value":"2338643"}),
+            json!({"attributeId":"0-1-194","value":"9"}),
+            json!({"attributeId":"0-2-223","value":"4"}),
+        ];
+        let players = vec![json!({"id":"1-194","guildId":"0-1","planetId":"2-223","fleetId":"9-194"})];
+        let planets = vec![json!({"id":"2-223","owner":"1-194","space":["5-2184","","",""],"air":["","","",""],"land":["5-2297","","",""],"water":["","","",""]})];
+        let fleets = vec![json!({"id":"9-194","owner":"1-194","commandStruct":"5-9000","status":"onStation","space":["5-9000","","",""],"air":["","","",""],"land":["","","",""],"water":["","","",""]})];
+        let mut s = Snapshot::from_pages(&structs, &sattr, &pattr, &grid, &players, &planets, &fleets);
+        s.taken_ms = now_ms();
+        s
+    }
+
+    #[test]
+    fn the_snapshot_answers_every_verify_question_from_memory() {
+        let s = fixture();
+        assert_eq!(s.struct_attr("5-2297", "blockStartBuild"), Some(2435000));
+        assert_eq!(s.struct_attr("5-404", "blockStartBuild"), None, "unknown struct is a miss, not 0");
+        assert_eq!(s.struct_attr("5-9000", "protectedStructIndex"), Some(2184));
+        assert_eq!(s.planet_attr("2-223", "blockStartOreMine"), Some(1358696));
+        assert_eq!(s.planet_attr("2-223", "blockStartOreRefine"), Some(1616486));
+        assert_eq!(s.grid_attr("1-194", "lastAction"), Some(2338643));
+        assert_eq!(s.grid_attr("1-194", "ore"), Some(9));
+        assert_eq!(s.grid_attr("2-223", "ore"), Some(4));
+        assert_eq!(s.grid_attr("2-999", "ore"), None);
+        let st = state_from_status_bits(s.struct_status("5-2184"));
+        assert!(st.built && st.online);
+        assert!(!state_from_status_bits(s.struct_status("5-2297")).built, "materialized only");
+        let planet = s.planet_row("2-223").unwrap();
+        assert!(slot_occupied_in_map(planet, "space", 0).unwrap());
+        assert_eq!(first_free_in_map(planet, &["land", "water"]), Some(("land".to_string(), 1)));
+        assert_eq!(str_field(s.fleet_row("9-194").unwrap(), "commandStruct"), Some("5-9000"));
+    }
+
+    #[test]
+    fn snapshot_lookups_respect_trust_and_the_lcd_knob() {
+        let mut s = fixture();
+        perception::install_snapshot(s.clone(), "test");
+        assert_eq!(snap(|s| s.grid_attr("1-194", "lastAction")), Some(2338643));
+        // Too old to trust → miss.
+        s.taken_ms = now_ms() - SNAPSHOT_TRUST_MS - 1.0;
+        perception::install_snapshot(s.clone(), "test");
+        assert_eq!(snap(|s| s.grid_attr("1-194", "lastAction")), None);
+        // Fresh again, but the knob says chain → miss.
+        s.taken_ms = now_ms();
+        perception::install_snapshot(s, "test");
+        set_source("lcd");
+        assert_eq!(snap(|s| s.grid_attr("1-194", "lastAction")), None);
+        set_source("guild");
+        assert_eq!(snap(|s| s.grid_attr("1-194", "lastAction")), Some(2338643));
     }
 }

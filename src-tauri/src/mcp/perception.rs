@@ -327,6 +327,52 @@ impl Snapshot {
         self.sattr(sid, S_STATUS)
     }
 
+    /// Snapshot age in ms.
+    pub fn age_ms(&self) -> f64 {
+        crate::hasher::types::now_millis() - self.taken_ms
+    }
+
+    /// A struct attribute by name; `None` when the struct has no row here.
+    pub fn struct_attr(&self, sid: &str, name: &str) -> Option<u64> {
+        if !self.structs.contains_key(sid) {
+            return None;
+        }
+        let i = STRUCT_ATTRS.iter().position(|n| *n == name)?;
+        Some(self.sattr(sid, i))
+    }
+
+    /// A planet attribute by name; `None` when the planet has no row here.
+    pub fn planet_attr(&self, pid: &str, name: &str) -> Option<u64> {
+        if !self.planets.contains_key(pid) {
+            return None;
+        }
+        let i = PLANET_ATTRS.iter().position(|n| *n == name)?;
+        Some(self.planet_attrs.get(pid).map(|a| a[i]).unwrap_or(0))
+    }
+
+    /// A grid attribute (player or planet) by name; `None` when the object
+    /// has no row here at all.
+    pub fn grid_attr(&self, oid: &str, name: &str) -> Option<u64> {
+        if !self.players.contains_key(oid) && !self.planets.contains_key(oid) && !self.structs.contains_key(oid) {
+            return None;
+        }
+        let i = GRID_ATTRS.iter().position(|n| *n == name)?;
+        Some(self.grid.get(oid).map(|a| a[i]).unwrap_or(0))
+    }
+
+    pub fn player_row(&self, pid: &str) -> Option<&Value> {
+        self.players.get(pid)
+    }
+    pub fn planet_row(&self, pid: &str) -> Option<&Value> {
+        self.planets.get(pid)
+    }
+    pub fn fleet_row(&self, fid: &str) -> Option<&Value> {
+        self.fleets.get(fid)
+    }
+    pub fn struct_row(&self, sid: &str) -> Option<&StructRow> {
+        self.structs.get(sid)
+    }
+
     /// The struct exists on-chain (row present). Attribute rows can outlive
     /// a pruned struct (seen live: `1-5-205054` = 35 with no struct object),
     /// so the ROW is the existence test, never an attribute.
@@ -669,6 +715,8 @@ impl Snapshot {
             "events_applied": self.events_applied,
             "events_skipped_stale": self.events_skipped_stale,
             "pending_new_structs": self.pending_new.len(),
+            "fed_by": fed_by(),
+            "hot_age_s": hot_age_ms().map(|a| (a / 1000.0) as u64),
             "last_event_age_s": if self.last_event_ms > 0.0 {
                 json!(((crate::hasher::types::now_millis() - self.last_event_ms) / 1000.0).round())
             } else { Value::Null },
@@ -820,6 +868,7 @@ pub const REFRESH_EVERY_MS: f64 = 10.0 * 60_000.0;
 /// proceeds on whatever is current (or the chain, via the loop_util shims).
 /// Call from the top of any loop scan.
 pub fn maybe_refresh(client: &CosmosClient) {
+    maybe_hot_refresh(client);
     if REFRESHING.load(Ordering::Relaxed) {
         return;
     }
@@ -845,9 +894,9 @@ pub async fn resolve_pending(client: &CosmosClient, max: usize) -> usize {
     let ids: Vec<String> = with_snapshot(|s| s.pending_new_structs()).unwrap_or_default();
     let mut done = 0;
     for sid in ids.into_iter().take(max) {
-        match client.query_entity("struct", &sid).await {
-            Ok(e) => {
-                absorb_struct_entity(&e);
+        match entity(client, "struct", &sid).await {
+            Ok(_) => {
+                // `entity` folded it in already.
                 done += 1;
             }
             // Not found = pruned before we looked (or not yet indexed); drop
@@ -867,6 +916,460 @@ pub async fn resolve_pending(client: &CosmosClient, max: usize) -> usize {
 }
 
 /// Walk one LCD store to the end. Returns (rows, max height, server time).
+// ── Guild-API ingest ────────────────────────────────────────────────────────
+//
+// The same seven stores from the indexer instead of the chain node: the
+// catalog lists at 10,000 rows a page (~45 requests for the galaxy against
+// the LCD's 11 of 60,000). Rows are snake_case SQL columns; a planet or fleet
+// `map` is its slot arrays as a JSON string; attribute rows are
+// (object_id, attribute_type, val). Everything is adapted to the LCD shapes
+// `from_pages` and every consumer already speak, so the store's schema and
+// the GRASS patching are identical whichever source fed it. The LCD walk
+// stays as the failover, and `snapshot_source` picks the default.
+//
+// One thing the indexer changes: an attribute row is DELETED when its value
+// reaches zero, so a zero is an absent row (from_pages already defaults
+// absent to 0), and destroyed structs keep a base row with `is_destroyed`
+// (the chain prunes them) — those are dropped so `structs` means "exists".
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SnapshotSource {
+    Guild,
+    Lcd,
+}
+
+impl SnapshotSource {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "guild" | "guild_api" | "api" => Some(SnapshotSource::Guild),
+            "lcd" | "chain" => Some(SnapshotSource::Lcd),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            SnapshotSource::Guild => "guild",
+            SnapshotSource::Lcd => "lcd",
+        }
+    }
+}
+
+static SNAPSHOT_SOURCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn snapshot_source() -> SnapshotSource {
+    if SNAPSHOT_SOURCE.load(Ordering::Relaxed) == 1 {
+        SnapshotSource::Lcd
+    } else {
+        SnapshotSource::Guild
+    }
+}
+
+/// Returns false (and changes nothing) for an unknown source.
+pub fn set_snapshot_source(s: &str) -> bool {
+    match SnapshotSource::parse(s) {
+        Some(v) => {
+            SNAPSHOT_SOURCE.store(if v == SnapshotSource::Lcd { 1 } else { 0 }, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Which source fed the CURRENT snapshot ("guild" / "lcd" / "").
+static FED_BY: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
+
+pub fn fed_by() -> &'static str {
+    *FED_BY.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub const GUILD_PAGE_LIMIT: usize = 10_000;
+const GUILD_MAX_PAGES: u32 = 60;
+
+pub(crate) fn snake_to_camel(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut upper = false;
+    for c in key.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.extend(c.to_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A planet/fleet `map` (JSON string or object) → the four ambit arrays.
+fn map_arrays(v: &Value) -> Option<Map<String, Value>> {
+    let parsed: Value = match v {
+        Value::String(s) => serde_json::from_str(s).ok()?,
+        Value::Object(_) => v.clone(),
+        _ => return None,
+    };
+    let obj = parsed.as_object()?;
+    let mut out = Map::new();
+    for amb in ["land", "water", "air", "space"] {
+        out.insert(amb.to_string(), obj.get(amb).cloned().unwrap_or_else(|| json!([])));
+    }
+    Some(out)
+}
+
+/// Generic guild row → LCD row: snake_case keys become camelCase and a `map`
+/// string becomes the ambit arrays the LCD carries inline.
+pub(crate) fn adapt_row(row: &Value) -> Value {
+    let Some(obj) = row.as_object() else { return row.clone() };
+    let mut out = Map::new();
+    for (k, v) in obj {
+        if k == "map" {
+            if let Some(arrays) = map_arrays(v) {
+                out.extend(arrays);
+                continue;
+            }
+        }
+        out.insert(snake_to_camel(k), v.clone());
+    }
+    Value::Object(out)
+}
+
+/// Struct base rows: destroyed ones are dropped (the LCD prunes them; their
+/// status-35 attribute row still says destroyed for anyone who asks).
+pub(crate) fn adapt_struct_rows(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .filter(|r| !crate::mcp::loop_util::parse_bool(r.get("is_destroyed")))
+        .map(adapt_row)
+        .collect()
+}
+
+/// Attribute rows (object_id, attribute_type, val) → the LCD's
+/// `{attributeId: "<index>-<object_id>", value}` for `names`. Rows whose
+/// type is not in `names` are dropped (the store has no slot for them).
+pub(crate) fn adapt_attribute_rows(rows: &[Value], names: &[&str]) -> Vec<Value> {
+    rows.iter()
+        .filter_map(|r| {
+            let t = ["attribute_type", "type", "attribute"]
+                .iter()
+                .find_map(|k| r.get(*k).and_then(|x| x.as_str()))?;
+            let idx = names.iter().position(|n| *n == t)?;
+            let oid = r.get("object_id").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?;
+            let val = r.get("val").or_else(|| r.get("value"))?;
+            Some(json!({ "attributeId": format!("{idx}-{oid}"), "value": val }))
+        })
+        .collect()
+}
+
+/// Walk one guild catalog list at GUILD_PAGE_LIMIT rows a page. Returns the
+/// rows and the highest indexer height stamped on the pages.
+async fn walk_guild_list(client: &CosmosClient, path: &str) -> Result<(Vec<Value>, u64), String> {
+    let mut rows = Vec::new();
+    let mut height = 0u64;
+    let mut page = 1u32;
+    loop {
+        let (items, h, more) = client
+            .guild
+            .list_page_with_meta(&format!("{path}/page/{page}"), GUILD_PAGE_LIMIT)
+            .await
+            .map_err(|e| format!("{path} page {page}: {e}"))?;
+        height = height.max(h.unwrap_or(0));
+        rows.extend(items);
+        if !more || page >= GUILD_MAX_PAGES {
+            break;
+        }
+        page += 1;
+    }
+    Ok((rows, height))
+}
+
+/// Build a snapshot from the guild catalog. Errors (so the caller can fall
+/// back to the LCD) when a store that can never legitimately be empty is.
+async fn guild_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String> {
+    let result = tokio::join!(
+        walk_guild_list(client, "/api/struct/list/all"),
+        walk_guild_list(client, "/api/struct-attribute/all"),
+        walk_guild_list(client, "/api/planet-attribute/all"),
+        walk_guild_list(client, "/api/grid/all"),
+        walk_guild_list(client, "/api/player/list/all"),
+        walk_guild_list(client, "/api/planet/list/all"),
+        walk_guild_list(client, "/api/fleet/list/all"),
+    );
+    let (st, sa, pa, gr, pl, pn, fl) = (result.0?, result.1?, result.2?, result.3?, result.4?, result.5?, result.6?);
+    let structs = adapt_struct_rows(&st.0);
+    let sattr = adapt_attribute_rows(&sa.0, &STRUCT_ATTRS);
+    let pattr = adapt_attribute_rows(&pa.0, &PLANET_ATTRS);
+    let grid = adapt_attribute_rows(&gr.0, &GRID_ATTRS);
+    let players: Vec<Value> = pl.0.iter().map(adapt_row).collect();
+    let planets: Vec<Value> = pn.0.iter().map(adapt_row).collect();
+    let fleets: Vec<Value> = fl.0.iter().map(adapt_row).collect();
+    for (name, n) in [
+        ("structs", structs.len()),
+        ("struct attributes", sattr.len()),
+        ("players", players.len()),
+        ("planets", planets.len()),
+        ("grid", grid.len()),
+    ] {
+        if n == 0 {
+            return Err(format!("guild catalog gave 0 usable {name} rows — row shape or route mismatch"));
+        }
+    }
+    let mut snap = Snapshot::from_pages(&structs, &sattr, &pattr, &grid, &players, &planets, &fleets);
+    let heights = [st.1, sa.1, pa.1, gr.1, pl.1, pn.1, fl.1];
+    snap.height = heights.iter().copied().max().unwrap_or(0);
+    snap.min_height = heights.iter().copied().filter(|h| *h > 0).min().unwrap_or(0);
+    snap.taken_ms = t0;
+    // Grid GRASS frames carry the indexer's `updated_at`; the indexer and this
+    // machine keep wall clocks, so "served now" is the right freshness anchor.
+    snap.taken_unix_s = t0 / 1000.0;
+    Ok(snap)
+}
+
+// ── Hot refresh: the planet ore clocks ──────────────────────────────────────
+//
+// `blockStartOreMine/Refine` never stream (measured: zero frames in 111k),
+// and a proof solved against a moved clock is a proof the chain rejects. So
+// those two planet attributes are re-swept from the guild by-type endpoint
+// every HOT_REFRESH_EVERY_MS (two requests for every planet) and patched into
+// the current snapshot in place. Everything else the snapshot holds streams.
+
+pub const HOT_REFRESH_EVERY_MS: f64 = 2.0 * 60_000.0;
+static HOT_REFRESHING: AtomicBool = AtomicBool::new(false);
+static LAST_HOT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Age of the last ore-clock hot refresh, or `None` if none has run.
+pub fn hot_age_ms() -> Option<f64> {
+    let t = LAST_HOT_MS.load(Ordering::Relaxed);
+    (t > 0).then(|| crate::hasher::types::now_millis() - t as f64)
+}
+
+pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, String> {
+    if HOT_REFRESHING.swap(true, Ordering::SeqCst) {
+        return Err("hot refresh already in flight".into());
+    }
+    let result = async {
+        let mut updated = 0usize;
+        for (attr, idx) in [("blockStartOreMine", 12usize), ("blockStartOreRefine", 13usize)] {
+            debug_assert_eq!(PLANET_ATTRS[idx], attr);
+            let mut rows: HashMap<String, u64> = HashMap::new();
+            let mut page = 1u32;
+            loop {
+                let p = client.guild.planet_attribute_by_type_limited(attr, page, GUILD_PAGE_LIMIT).await?;
+                let more = p.has_more;
+                for r in &p.items {
+                    if let Some(oid) = r.get("object_id").and_then(|x| x.as_str()) {
+                        rows.insert(oid.to_string(), to_u64(r.get("val").or_else(|| r.get("value"))));
+                    }
+                }
+                if !more || page >= GUILD_MAX_PAGES {
+                    break;
+                }
+                page += 1;
+            }
+            if rows.is_empty() {
+                return Err(format!("{attr} sweep returned no rows"));
+            }
+            if let Ok(mut g) = CURRENT.write() {
+                if let Some(s) = g.as_mut() {
+                    let planet_ids: Vec<String> = s.planets.keys().cloned().collect();
+                    for pid in planet_ids {
+                        // Absent from the sweep = row deleted at zero = clock clear.
+                        let v = rows.get(&pid).copied().unwrap_or(0);
+                        if Snapshot::set(&mut s.planet_attrs, &pid, idx, v) == Applied::Changed {
+                            updated += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(updated)
+    }
+    .await;
+    if result.is_ok() {
+        LAST_HOT_MS.store(crate::hasher::types::now_millis() as u64, Ordering::Relaxed);
+    }
+    HOT_REFRESHING.store(false, Ordering::SeqCst);
+    result
+}
+
+fn maybe_hot_refresh(client: &CosmosClient) {
+    if snapshot_source() != SnapshotSource::Guild || !is_ready() || HOT_REFRESHING.load(Ordering::Relaxed) {
+        return;
+    }
+    if hot_age_ms().is_some_and(|a| a < HOT_REFRESH_EVERY_MS) {
+        return;
+    }
+    let client = client.clone();
+    tokio::spawn(async move {
+        if let Err(e) = hot_refresh_ore_clocks(&client).await {
+            crate::mcp::telemetry::tlog(
+                "perception",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("ore-clock hot refresh failed: {e}"),
+            );
+        }
+    });
+}
+
+// ── Snapshot-first entity reads ─────────────────────────────────────────────
+//
+// THE way to read a struct / planet / player / fleet: the snapshot answers
+// from memory in the LCD's own entity shape; a miss costs one read (the
+// guild's per-entity endpoints when the snapshot is guild-fed, else the
+// chain) and the result is folded in so the next caller hits. Every other
+// entity kind goes straight to the chain as before.
+
+pub fn snapshot_entity(kind: &str, id: &str) -> Option<Value> {
+    with_snapshot(|s| match kind {
+        "struct" => s.struct_entity(id),
+        "planet" => s.planet_entity(id),
+        "player" => s.player_entity(id),
+        "fleet" => s.fleet_entity(id),
+        _ => None,
+    })
+    .flatten()
+}
+
+fn absorb_entity(kind: &str, v: &Value) {
+    match kind {
+        "struct" => absorb_struct_entity(v),
+        "planet" => absorb_planet_entity(v),
+        "player" | "fleet" => {
+            let (wrapper, store_is_player) = if kind == "player" { ("Player", true) } else { ("Fleet", false) };
+            let Some(row) = v.get(wrapper) else { return };
+            let id = str_of(row, "id");
+            if id.is_empty() {
+                return;
+            }
+            if let Ok(mut g) = CURRENT.write() {
+                if let Some(s) = g.as_mut() {
+                    if store_is_player {
+                        s.players.insert(id, row.clone());
+                    } else {
+                        s.fleets.insert(id, row.clone());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One entity from the guild's own endpoints, in LCD shape. Structs use the
+/// bespoke route (it carries status/health); players and fleets the batch
+/// row. Planets are NOT served here: the row has no shield or ore, and a
+/// caller that missed the snapshot is exactly the caller who needs them.
+async fn guild_entity(client: &CosmosClient, kind: &str, id: &str) -> Result<Value, String> {
+    match kind {
+        "struct" => {
+            let row = client.guild.struct_by_id(id).await?;
+            if crate::mcp::loop_util::parse_bool(row.get("is_destroyed")) {
+                return Err(format!("struct {id} not found (destroyed)"));
+            }
+            let st = to_u64(row.get("status"));
+            let mut base = match adapt_row(&row) {
+                Value::Object(m) => m,
+                _ => Map::new(),
+            };
+            base.remove("status");
+            base.remove("health");
+            base.remove("isDestroyed");
+            base.remove("defendingStructIds");
+            let sa = json!({
+                "health": to_u64(row.get("health")).to_string(),
+                "status": st.to_string(),
+                "blockStartBuild": "0", "blockStartOreMine": "0", "blockStartOreRefine": "0",
+                "protectedStructIndex": "0", "typeCount": "0",
+                "isMaterialized": st & status::MATERIALIZED != 0,
+                "isBuilt": st & status::BUILT != 0,
+                "isOnline": st & status::ONLINE != 0,
+                "isHidden": st & status::HIDDEN != 0,
+                "isDestroyed": st & status::DESTROYED != 0,
+                "isLocked": st & status::LOCKED != 0,
+            });
+            Ok(json!({ "Struct": Value::Object(base), "structAttributes": sa, "gridAttributes": {} }))
+        }
+        "player" | "fleet" => {
+            let (rows, _) = client.guild.objects_by_ids(&[id]).await?;
+            let row = rows
+                .iter()
+                .find(|r| r.get("id").and_then(|x| x.as_str()) == Some(id))
+                .and_then(|r| r.get("object"))
+                .filter(|o| o.is_object())
+                .ok_or_else(|| format!("Guild API objects has no {kind} {id}"))?;
+            let wrapper = if kind == "player" { "Player" } else { "Fleet" };
+            let mut v = json!({ wrapper: adapt_row(row) });
+            if kind == "player" {
+                v["gridAttributes"] = with_snapshot(|s| attrs_json(&GRID_ATTRS, s.grid.get(id))).unwrap_or_else(|| json!({}));
+            }
+            Ok(v)
+        }
+        _ => Err(format!("no guild entity route for {kind}")),
+    }
+}
+
+pub async fn entity(client: &CosmosClient, kind: &str, id: &str) -> Result<Value, String> {
+    if let Some(v) = snapshot_entity(kind, id) {
+        SNAPSHOT_HITS.fetch_add(1, Ordering::Relaxed);
+        return Ok(v);
+    }
+    if matches!(kind, "struct" | "player" | "fleet") && snapshot_source() == SnapshotSource::Guild {
+        if let Ok(v) = guild_entity(client, kind, id).await {
+            ENTITY_GUILD_READS.fetch_add(1, Ordering::Relaxed);
+            absorb_entity(kind, &v);
+            return Ok(v);
+        }
+    }
+    let v = client.query_entity(kind, id).await?;
+    ENTITY_LCD_READS.fetch_add(1, Ordering::Relaxed);
+    absorb_entity(kind, &v);
+    Ok(v)
+}
+
+static SNAPSHOT_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ENTITY_GUILD_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ENTITY_LCD_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn entity_stats() -> Value {
+    json!({
+        "snapshot_hits": SNAPSHOT_HITS.load(Ordering::Relaxed),
+        "guild_reads": ENTITY_GUILD_READS.load(Ordering::Relaxed),
+        "lcd_reads": ENTITY_LCD_READS.load(Ordering::Relaxed),
+        "source": snapshot_source().name(),
+        "fed_by": fed_by(),
+        "hot_age_s": hot_age_ms().map(|a| (a / 1000.0) as u64),
+    })
+}
+
+/// Install a snapshot as the current one (refresh, restore, tests).
+pub fn install_snapshot(snap: Snapshot, source: &'static str) {
+    if let Ok(mut g) = CURRENT.write() {
+        *g = Some(snap);
+    }
+    *FED_BY.lock().unwrap_or_else(|e| e.into_inner()) = source;
+}
+
+/// The original source: the chain's own stores in 60k-row pages.
+async fn lcd_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String> {
+    let result = tokio::join!(
+        walk_store(client, "/structs/struct", "Struct", None),
+        // The struct_attribute store rejects an un-keyed walk (query gas), but
+        // walks fine from its first key.
+        walk_store(client, "/structs/struct_attribute", "structAttributeRecords", Some("0-")),
+        walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", None),
+        walk_store(client, "/structs/grid", "gridRecords", None),
+        walk_store(client, "/structs/player", "Player", None),
+        walk_store(client, "/structs/planet", "Planet", None),
+        walk_store(client, "/structs/fleet", "Fleet", None),
+    );
+    let (st, sa, pa, gr, pl, pn, fl) = (result.0?, result.1?, result.2?, result.3?, result.4?, result.5?, result.6?);
+    let heights = [st.1, sa.1, pa.1, gr.1, pl.1, pn.1, fl.1];
+    let mut snap = Snapshot::from_pages(&st.0, &sa.0, &pa.0, &gr.0, &pl.0, &pn.0, &fl.0);
+    snap.height = heights.iter().copied().max().unwrap_or(0);
+    snap.min_height = heights.iter().copied().filter(|h| *h > 0).min().unwrap_or(0);
+    snap.taken_ms = t0;
+    snap.taken_unix_s = [st.2, sa.2, pa.2, gr.2, pl.2, pn.2, fl.2].into_iter().fold(0.0, f64::max);
+    Ok(snap)
+}
+
 async fn walk_store(
     client: &CosmosClient,
     path: &str,
@@ -909,27 +1412,24 @@ pub async fn refresh(client: &CosmosClient) -> Result<Value, String> {
         return Err("refresh already in flight".into());
     }
     let t0 = crate::hasher::types::now_millis();
-    let result = tokio::join!(
-        walk_store(client, "/structs/struct", "Struct", None),
-        // The struct_attribute store rejects an un-keyed walk (query gas), but
-        // walks fine from its first key.
-        walk_store(client, "/structs/struct_attribute", "structAttributeRecords", Some("0-")),
-        walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", None),
-        walk_store(client, "/structs/grid", "gridRecords", None),
-        walk_store(client, "/structs/player", "Player", None),
-        walk_store(client, "/structs/planet", "Planet", None),
-        walk_store(client, "/structs/fleet", "Fleet", None),
-    );
-    let outcome = (|| -> Result<Snapshot, String> {
-        let (st, sa, pa, gr, pl, pn, fl) = (result.0?, result.1?, result.2?, result.3?, result.4?, result.5?, result.6?);
-        let heights = [st.1, sa.1, pa.1, gr.1, pl.1, pn.1, fl.1];
-        let mut snap = Snapshot::from_pages(&st.0, &sa.0, &pa.0, &gr.0, &pl.0, &pn.0, &fl.0);
-        snap.height = heights.iter().copied().max().unwrap_or(0);
-        snap.min_height = heights.iter().copied().filter(|h| *h > 0).min().unwrap_or(0);
-        snap.taken_ms = t0;
-        snap.taken_unix_s = [st.2, sa.2, pa.2, gr.2, pl.2, pn.2, fl.2].into_iter().fold(0.0, f64::max);
-        Ok(snap)
-    })();
+    let mut fed = "lcd";
+    let outcome = match snapshot_source() {
+        SnapshotSource::Guild => match guild_pages(client, t0).await {
+            Ok(snap) => {
+                fed = "guild";
+                Ok(snap)
+            }
+            Err(e) => {
+                crate::mcp::telemetry::tlog(
+                    "perception",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("guild snapshot failed, falling back to the LCD walk: {e}"),
+                );
+                lcd_pages(client, t0).await
+            }
+        },
+        SnapshotSource::Lcd => lcd_pages(client, t0).await,
+    };
     let summary = match outcome {
         Ok(mut snap) => {
             // Replay what arrived mid-fetch, then swap in.
@@ -941,9 +1441,7 @@ pub async fn refresh(client: &CosmosClient) -> Result<Value, String> {
             // A full refresh is the one moment the snapshot is known-good
             // end to end; that is what the next launch should start from.
             persist_snapshot(&snap);
-            if let Ok(mut g) = CURRENT.write() {
-                *g = Some(snap);
-            }
+            install_snapshot(snap, fed);
             crate::mcp::telemetry::tlog_kv(
                 "perception",
                 crate::mcp::telemetry::Sev::Info,

@@ -609,6 +609,7 @@ try {{
             // settable via `structs_system config`).
             mcp::vplayer_bridge::set_sign_mode(&mcp_config.sign_mode);
             mcp::verify::set_source(&mcp_config.verify_source);
+            mcp::perception::set_snapshot_source(&mcp_config.snapshot_source);
             // Native signer: load the key from the OS keychain (off-thread);
             // until the game hands one over, native modes fall back to the webview.
             mcp::native_signer::init();

@@ -472,6 +472,16 @@ impl CosmosClient {
     }
 
     /// Query a single entity by type and ID
+    /// Snapshot-first entity read — THE way to read a struct / planet /
+    /// player / fleet. Answers from the perception snapshot (LCD entity
+    /// shape, GRASS-fresh) and only reaches an API on a miss, folding the
+    /// result in. Other kinds go to the chain as `query_entity` does.
+    pub async fn entity(&self, entity_type: &str, id: &str) -> Result<Value, String> {
+        crate::mcp::perception::entity(self, entity_type, id).await
+    }
+
+    /// The chain's own answer, always a network read. Prefer `entity` unless
+    /// the chain must be the authority (a send guard, a pre-sign failover).
     pub async fn query_entity(&self, entity_type: &str, id: &str) -> Result<Value, String> {
         let path = Self::entity_path(entity_type)?;
         let base = self.reactor_api.read().unwrap().clone();

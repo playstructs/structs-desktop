@@ -473,7 +473,7 @@ async fn load_struct_types(
         }
     }
     for key in missing {
-        if let Ok(v) = client.query_entity("struct_type", &key).await {
+        if let Ok(v) = client.entity("struct_type", &key).await {
             let t = parse_struct_type(&v);
             STRUCT_TYPE_CACHE
                 .write()
@@ -552,7 +552,7 @@ pub async fn snapshot_planet(
 ) -> Snapshot {
     let mut warning = None;
 
-    let planet = match client.query_entity("planet", planet_id).await {
+    let planet = match client.entity("planet", planet_id).await {
         Ok(v) => v,
         Err(e) => {
             return Snapshot {
@@ -623,12 +623,12 @@ pub async fn snapshot_planet(
     // ship included — missing. `Player.fleetId` names it.
     let mut fleets: Vec<String> = vec![];
     if let Some(owner_id) = owner.as_deref() {
-        let owner_fleet = match client.query_entity("player", owner_id).await {
+        let owner_fleet = match client.entity("player", owner_id).await {
             Ok(v) => str_of(v.get("Player").unwrap_or(&v).get("fleetId")),
             Err(_) => None,
         };
         if let Some(fid) = owner_fleet {
-            if let Ok(fleet) = client.query_entity("fleet", &fid).await {
+            if let Ok(fleet) = client.entity("fleet", &fid).await {
                 let fbody = fleet.get("Fleet").unwrap_or(&fleet);
                 // Only when it is actually HERE — the owner may be off raiding
                 // someone else, and a fleet that left must not be drawn.
@@ -659,7 +659,7 @@ pub async fn snapshot_planet(
             if fleets.contains(&fleet_id) {
                 break; // reached fleets the other walk already covered
             }
-            let Ok(fleet) = client.query_entity("fleet", &fleet_id).await else {
+            let Ok(fleet) = client.entity("fleet", &fleet_id).await else {
                 warning = Some(format!("fleet {fleet_id} unavailable"));
                 break;
             };
@@ -762,14 +762,14 @@ pub async fn locations_at_planet(
 ) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     out.insert(planet_id.to_string());
-    let Ok(planet) = client.query_entity("planet", planet_id).await else { return out };
+    let Ok(planet) = client.entity("planet", planet_id).await else { return out };
     let body = planet.get("Planet").unwrap_or(&planet);
 
     // The owner's own fleet is never in the visitor list even when on station.
     if let Some(owner_id) = str_of(body.get("owner")) {
-        if let Ok(v) = client.query_entity("player", &owner_id).await {
+        if let Ok(v) = client.entity("player", &owner_id).await {
             if let Some(fid) = str_of(v.get("Player").unwrap_or(&v).get("fleetId")) {
-                if let Ok(fleet) = client.query_entity("fleet", &fid).await {
+                if let Ok(fleet) = client.entity("fleet", &fid).await {
                     let fbody = fleet.get("Fleet").unwrap_or(&fleet);
                     if str_of(fbody.get("locationId")).as_deref() == Some(planet_id) {
                         out.insert(fid);
@@ -790,7 +790,7 @@ pub async fn locations_at_planet(
             if out.len() > MAX_FLEETS_AT_PLANET + 1 || out.contains(&fleet_id) {
                 break;
             }
-            let Ok(fleet) = client.query_entity("fleet", &fleet_id).await else { break };
+            let Ok(fleet) = client.entity("fleet", &fleet_id).await else { break };
             let fbody = fleet.get("Fleet").unwrap_or(&fleet);
             if str_of(fbody.get("locationId")).as_deref() != Some(planet_id) {
                 break;
@@ -890,7 +890,7 @@ async fn read_owner_hud(
     let Some(pid) = owner else {
         return (None, None, None, None, None);
     };
-    let Ok(p) = client.query_entity("player", pid).await else {
+    let Ok(p) = client.entity("player", pid).await else {
         return (None, None, None, None, None);
     };
     let ga = p.get("gridAttributes");
@@ -980,7 +980,7 @@ async fn substation_share(
     if let Some(v) = cached_substation_share(&sub_id) {
         return v;
     }
-    let Ok(sub) = client.query_entity("substation", &sub_id).await else {
+    let Ok(sub) = client.entity("substation", &sub_id).await else {
         return 0.0;
     };
     let share = connection_capacity_of(&sub);
@@ -1258,7 +1258,7 @@ pub async fn pull_state(target: &Target) -> Value {
     let planet_id = match target {
         Target::Planet { planet_id } => Some(planet_id.clone()),
         Target::Fleet { fleet_id } => client
-            .query_entity("fleet", fleet_id)
+            .entity("fleet", fleet_id)
             .await
             .ok()
             .and_then(|v| {
@@ -1286,7 +1286,7 @@ async fn build_struct(
     planet_owner: Option<&str>,
     p: Placement,
 ) -> Option<SpectatorStruct> {
-    let v = client.query_entity("struct", &p.struct_id).await.ok()?;
+    let v = client.entity("struct", &p.struct_id).await.ok()?;
     let body = v.get("Struct").unwrap_or(&v);
     let sattrs = v.get("structAttributes");
     let protected_index = sattrs
@@ -1522,7 +1522,7 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                 Target::Planet { planet_id } => Some(planet_id.clone()),
                 Target::Fleet { fleet_id } => {
                     let at = client
-                        .query_entity("fleet", fleet_id)
+                        .entity("fleet", fleet_id)
                         .await
                         .ok()
                         .and_then(|v| str_of(v.get("Fleet").and_then(|f| f.get("locationId"))));

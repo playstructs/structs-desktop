@@ -560,7 +560,7 @@ pub async fn resolve(id: &str) -> Option<Value> {
     }
     // A destroyed struct or a bad id answers 500 "object not found"; that is a
     // normal outcome here, not something to report.
-    let v = client.query_entity(entity, id).await.ok()?;
+    let v = client.entity(entity, id).await.ok()?;
 
     let card = match kind {
         0 => guild_card(id, &v),

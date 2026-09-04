@@ -680,7 +680,7 @@ pub async fn notify_hash_complete(
         // not the refinery, whose own field now permanently reads 0 (mirrors
         // tools::action::action_refine).
         let client = crate::mcp::cosmos_client::CosmosClient::new();
-        let planet_id = match client.query_entity("struct", &req.struct_id).await {
+        let planet_id = match client.entity("struct", &req.struct_id).await {
             // A planetary rig's locationId IS its planet id.
             Ok(v) => v
                 .get("Struct")
@@ -702,7 +702,7 @@ pub async fn notify_hash_complete(
             );
             return Ok(());
         };
-        let block_height = match client.query_entity("planet", &planet_id).await {
+        let block_height = match client.entity("planet", &planet_id).await {
             Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "REFINE"),
             Err(e) => {
                 eprintln!(

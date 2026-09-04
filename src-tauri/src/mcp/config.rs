@@ -43,6 +43,13 @@ pub struct McpConfig {
     /// Runtime-settable via `structs_system config set {verify_source}`.
     #[serde(default = "default_verify_source")]
     pub verify_source: String,
+    /// Where the perception snapshot (the local source of truth every loop
+    /// and window reads) is bulk-loaded from: `"guild"` (default — the
+    /// indexer's catalog at 10,000 rows a page, ~45 requests) or `"lcd"`
+    /// (the chain's stores, 11 requests of 60,000 rows, on the shared node).
+    /// The guild path falls back to the LCD walk if a store comes back empty.
+    #[serde(default = "default_verify_source")]
+    pub snapshot_source: String,
 }
 
 fn default_sign_mode() -> String {
@@ -66,6 +73,7 @@ impl Default for McpConfig {
             sign_mode: default_sign_mode(),
             tx_gate_cap: None,
             verify_source: default_verify_source(),
+            snapshot_source: default_verify_source(),
         }
     }
 }

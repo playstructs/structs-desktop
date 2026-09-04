@@ -251,7 +251,7 @@ pub fn note_event(app: &tauri::AppHandle, event: &GameEvent) {
         tauri::async_runtime::spawn(async move {
             let client = crate::mcp::cosmos_client::CosmosClient::new();
             let resolved: Option<(&'static str, String)> = match kind {
-                "player" => client.query_entity("player", &id).await.ok().map(|e| {
+                "player" => client.entity("player", &id).await.ok().map(|e| {
                     let name = e
                         .get("Player")
                         .and_then(|p| p.get("name"))
@@ -260,7 +260,7 @@ pub fn note_event(app: &tauri::AppHandle, event: &GameEvent) {
                         .to_string();
                     ("players", name)
                 }),
-                _ => client.query_entity("struct", &id).await.ok().map(|e| {
+                _ => client.entity("struct", &id).await.ok().map(|e| {
                     // Struct entity → type id → catalog name.
                     let s = e.get("Struct").unwrap_or(&e);
                     let tid = crate::mcp::loop_util::extract_type_id(s);

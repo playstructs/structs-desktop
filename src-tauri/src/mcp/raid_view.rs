@@ -310,10 +310,10 @@ async fn enrich_row(client: crate::mcp::cosmos_client::CosmosClient, mut row: Ra
     let planet_id = row.planet_id.clone();
     let fleet_id = row.fleet_id.clone();
     let (planet, fleet) = tokio::join!(
-        client.query_entity("planet", &planet_id),
+        client.entity("planet", &planet_id),
         async {
             match fleet_id.as_deref() {
-                Some(f) => client.query_entity("fleet", f).await.ok(),
+                Some(f) => client.entity("fleet", f).await.ok(),
                 None => None,
             }
         }

@@ -451,7 +451,7 @@ async fn scan(
         .unwrap_or_default();
     for (planet_id, defender) in watched {
         let armed = client
-            .query_entity("planet", &planet_id)
+            .entity("planet", &planet_id)
             .await
             .ok()
             .map(|e| {
@@ -1315,14 +1315,14 @@ async fn recall_fleet(
     client: &CosmosClient,
     player: &str,
 ) -> Result<(), String> {
-    let pl = client.query_entity("player", player).await?;
+    let pl = client.entity("player", player).await?;
     let p = pl.get("Player");
     let home = p.and_then(|x| x.get("planetId")).and_then(|x| x.as_str()).unwrap_or("");
     let fleet = p.and_then(|x| x.get("fleetId")).and_then(|x| x.as_str()).unwrap_or("");
     if home.is_empty() || fleet.is_empty() {
         return Ok(());
     }
-    let fl = client.query_entity("fleet", fleet).await?;
+    let fl = client.entity("fleet", fleet).await?;
     let f = fl.get("Fleet");
     let at = f.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()).unwrap_or("");
     let status = f.and_then(|x| x.get("status")).and_then(|x| x.as_str());
@@ -1332,7 +1332,7 @@ async fn recall_fleet(
     let cmd_online = if cmd.is_empty() {
         false
     } else {
-        let e = client.query_entity("struct", cmd).await?;
+        let e = client.entity("struct", cmd).await?;
         crate::mcp::loop_util::parse_bool(
             e.get("structAttributes").and_then(|x| x.get("isOnline")),
         )
@@ -1380,7 +1380,7 @@ async fn restore_command_ship(
     client: &CosmosClient,
     player: &str,
 ) -> Result<(), String> {
-    let pl = client.query_entity("player", player).await?;
+    let pl = client.entity("player", player).await?;
     let fleet = pl
         .get("Player")
         .and_then(|x| x.get("fleetId"))
@@ -1389,7 +1389,7 @@ async fn restore_command_ship(
     if fleet.is_empty() {
         return Ok(());
     }
-    let fl = client.query_entity("fleet", fleet).await?;
+    let fl = client.entity("fleet", fleet).await?;
     let cmd = fl
         .get("Fleet")
         .and_then(|x| x.get("commandStruct"))
@@ -1398,7 +1398,7 @@ async fn restore_command_ship(
     if cmd.is_empty() {
         return Ok(()); // destroyed or never built — rebuilding is not our job
     }
-    let e = client.query_entity("struct", cmd).await?;
+    let e = client.entity("struct", cmd).await?;
     let attrs = e.get("structAttributes");
     let cmd_online = crate::mcp::loop_util::parse_bool(attrs.and_then(|x| x.get("isOnline")));
     if !should_restore_command_ship(cmd, cmd_online) {
@@ -1478,7 +1478,7 @@ async fn raiding_fleet(
     // their fleet before paying for the visitor walk.
     let mut candidates: Vec<String> = Vec::new();
     if let Some(atk) = attacker_player.filter(|p| !is_team(p)) {
-        if let Ok(pl) = client.query_entity("player", atk).await {
+        if let Ok(pl) = client.entity("player", atk).await {
             if let Some(f) = pl
                 .get("Player")
                 .and_then(|p| p.get("fleetId"))
@@ -1503,7 +1503,7 @@ async fn raiding_fleet(
     }
 
     for fleet_id in candidates {
-        let Ok(fleet) = client.query_entity("fleet", &fleet_id).await else { continue };
+        let Ok(fleet) = client.entity("fleet", &fleet_id).await else { continue };
         let Some(f) = fleet.get("Fleet") else { continue };
         let owner = f.get("owner").and_then(|x| x.as_str()).map(String::from);
         if !hostile_and_here(
@@ -1523,7 +1523,7 @@ async fn raiding_fleet(
         let command_struct = match command_struct {
             Some(cs) => {
                 let dead = client
-                    .query_entity("struct", &cs)
+                    .entity("struct", &cs)
                     .await
                     .map(|e| {
                         crate::mcp::loop_util::parse_bool(

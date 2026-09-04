@@ -87,8 +87,6 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     // status / health / defense / move change in the galaxy passes here —
     // this is what keeps the bulk snapshot current between refreshes.
     crate::mcp::perception::on_grass(&event.category, &event.subject, &event.detail);
-    // …and the verify layer's galaxy-wide status sweep (struct_status only).
-    crate::mcp::verify::on_grass(&event.category, &event.detail);
 
     // A DROPPED settlement is the most dangerous event in the system and used
     // to be the quietest. The signing bridge acks "queued" the moment a message

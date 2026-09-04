@@ -173,7 +173,7 @@ pub async fn resolve(player_id: &str) -> Option<Ident> {
         return None;
     }
     let client = crate::mcp::cosmos_client::CosmosClient::new();
-    let v = match client.query_entity("player", player_id).await {
+    let v = match client.entity("player", player_id).await {
         Ok(v) => v,
         Err(_) => {
             // A destroyed or invented id answers 500; remember so the next

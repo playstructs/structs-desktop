@@ -726,18 +726,18 @@ async fn live_anchor(object_id: &str, task: &str) -> Result<u64, String> {
         // struct. Reading the struct's own field returns 0 forever, which
         // reads as "no cycle" rather than as a bug.
         "MINE" | "REFINE" => {
-            let v = client.query_entity("struct", object_id).await?;
+            let v = client.entity("struct", object_id).await?;
             let planet_id = v
                 .get("Struct")
                 .and_then(|s| s.get("locationId"))
                 .and_then(|l| l.as_str())
                 .map(str::to_string)
                 .ok_or("that struct has no location, so it has no ore clock")?;
-            let p = client.query_entity("planet", &planet_id).await?;
+            let p = client.entity("planet", &planet_id).await?;
             Ok(crate::mcp::loop_util::planet_ore_anchor(Some(&p), task))
         }
         "BUILD" => {
-            let v = client.query_entity("struct", object_id).await?;
+            let v = client.entity("struct", object_id).await?;
             Ok(v.get("structAttributes")
                 .and_then(|a| a.get("blockStartBuild"))
                 .and_then(num_of)
@@ -1533,7 +1533,7 @@ pub async fn matrix_agreement_open(
     // the window: the card may be minutes old and the bounds are the chain's.
     let client = crate::mcp::cosmos_client::CosmosClient::new();
     let v = client
-        .query_entity("provider", &provider_id)
+        .entity("provider", &provider_id)
         .await
         .map_err(|e| format!("provider {}: {}", provider_id, e))?;
     let p = v.get("Provider").cloned().unwrap_or(Value::Null);
@@ -1783,7 +1783,7 @@ pub async fn matrix_open_transfer(
     }
 
     let client = crate::mcp::cosmos_client::CosmosClient::new();
-    let record = client.query_entity("player", &player_id).await?;
+    let record = client.entity("player", &player_id).await?;
     let address = record
         .get("Player")
         .and_then(|p| p.get("primaryAddress"))

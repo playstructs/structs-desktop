@@ -836,31 +836,46 @@ async fn refresh_roster(client: &CosmosClient, cfg: &AutoRaidConfig) -> Vec<Rost
         }
     }
     let mut out: Vec<RosterEntry> = Vec::new();
-    let mut key: Option<String> = None;
-    for _ in 0..cfg.sweep_max_pages.max(1) {
-        let Ok(page) = client.list_entities("player", key.as_deref(), Some(100)).await else { break };
-        if let Some(arr) = page.get("Player").and_then(|x| x.as_array()) {
-            for p in arr {
-                let Some(id) = p.get("id").and_then(|x| x.as_str()) else { continue };
-                // A player with no planet has nothing to raid.
-                if p.get("planetId").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
-                    continue;
-                }
-                let guild = p.get("guildId").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                if crate::mcp::combat_lists::is_vetoed(id, Some(&guild)) {
-                    continue;
-                }
-                out.push((id.to_string(), guild));
-            }
+    let consider = |out: &mut Vec<RosterEntry>, p: &serde_json::Value| {
+        let Some(id) = p.get("id").and_then(|x| x.as_str()) else { return };
+        // A player with no planet has nothing to raid.
+        if p.get("planetId").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
+            return;
         }
-        key = page
-            .get("pagination")
-            .and_then(|x| x.get("next_key"))
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from);
-        if key.is_none() {
-            break;
+        let guild = p.get("guildId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if crate::mcp::combat_lists::is_vetoed(id, Some(&guild)) {
+            return;
+        }
+        out.push((id.to_string(), guild));
+    };
+    // The whole player table is in the perception snapshot (every player,
+    // GRASS-fresh); walking the chain's player store in pages of 100 — up to
+    // `sweep_max_pages` LCD requests per roster — is only the fallback for a
+    // snapshot that has not loaded yet.
+    let from_snapshot: Vec<serde_json::Value> =
+        crate::mcp::perception::with_snapshot(|s| s.players.values().cloned().collect()).unwrap_or_default();
+    if !from_snapshot.is_empty() {
+        for p in &from_snapshot {
+            consider(&mut out, p);
+        }
+    } else {
+        let mut key: Option<String> = None;
+        for _ in 0..cfg.sweep_max_pages.max(1) {
+            let Ok(page) = client.list_entities("player", key.as_deref(), Some(100)).await else { break };
+            if let Some(arr) = page.get("Player").and_then(|x| x.as_array()) {
+                for p in arr {
+                    consider(&mut out, p);
+                }
+            }
+            key = page
+                .get("pagination")
+                .and_then(|x| x.get("next_key"))
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            if key.is_none() {
+                break;
+            }
         }
     }
     // Anyone we hold a grudge against is always a candidate, even if the bounded
@@ -911,7 +926,7 @@ fn next_batch(roster: &[RosterEntry], n: usize) -> Vec<RosterEntry> {
 /// Resolve everything the gates and score need for one candidate.
 /// Four reads: player, planet, fleet, Command Ship.
 async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Option<Candidate> {
-    let pl = client.query_entity("player", player_id).await.ok()?;
+    let pl = client.entity("player", player_id).await.ok()?;
     let p = pl.get("Player")?;
     let planet_id = p.get("planetId").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let fleet_id = p.get("fleetId").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -926,7 +941,7 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
         .map(|g| g.current_block_height)
         .unwrap_or(0);
 
-    let planet = client.query_entity("planet", &planet_id).await.ok()?;
+    let planet = client.entity("planet", &planet_id).await.ok()?;
     let planetary_shield = crate::mcp::loop_util::read_u64_field(planet.get("planetAttributes"), "planetaryShield");
     let planet_ore_remaining =
         crate::mcp::loop_util::parse_f64(planet.get("gridAttributes").and_then(|g| g.get("ore")));
@@ -946,7 +961,7 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
         .filter(|s| !s.is_empty())
     {
         Some(fid) => client
-            .query_entity("fleet", fid)
+            .entity("fleet", fid)
             .await
             .ok()
             .filter(|f| {
@@ -967,7 +982,7 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
     let mut enemy_fleet_structs = 0usize;
     if fleet_id.is_empty() {
         reasons.push("no fleet");
-    } else if let Ok(fl) = client.query_entity("fleet", &fleet_id).await {
+    } else if let Ok(fl) = client.entity("fleet", &fleet_id).await {
         let f = fl.get("Fleet");
         let on_station = f.and_then(|x| x.get("status")).and_then(|x| x.as_str()) == Some("onStation")
             && f.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) == Some(planet_id.as_str());
@@ -987,7 +1002,7 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
         match &command_struct {
             None => reasons.push("no Command Ship"),
             Some(cs) => {
-                if let Ok(e) = client.query_entity("struct", cs).await {
+                if let Ok(e) = client.entity("struct", cs).await {
                     let sa = e.get("structAttributes");
                     command_ambit = e
                         .get("Struct")
@@ -1214,13 +1229,13 @@ async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(Str
     // raider sitting on a previous haul is the worst one to send.
     let mut eligible: Vec<(String, u32, f64, bool)> = Vec::new();
     for (pid, idx) in candidates {
-        let Ok(pl) = client.query_entity("player", &pid).await else { continue };
+        let Ok(pl) = client.entity("player", &pid).await else { continue };
         let p = pl.get("Player");
         let fleet = p.and_then(|x| x.get("fleetId")).and_then(|x| x.as_str()).unwrap_or("");
         if fleet.is_empty() {
             continue;
         }
-        let Ok(fl) = client.query_entity("fleet", fleet).await else { continue };
+        let Ok(fl) = client.entity("fleet", fleet).await else { continue };
         let f = fl.get("Fleet");
         if f.and_then(|x| x.get("status")).and_then(|x| x.as_str()) != Some("onStation") {
             continue; // already in the field
@@ -1236,7 +1251,7 @@ async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(Str
         // false, yet the chain refuses the move with "fleet (9-X) needs an
         // online command struct before deploy". Checking only `isDestroyed`
         // picked such a raider and burned a transaction on a certain reject.
-        match client.query_entity("struct", cmd).await {
+        match client.entity("struct", cmd).await {
             Ok(e) => {
                 let sa = e.get("structAttributes");
                 if crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isDestroyed")))
@@ -1275,7 +1290,7 @@ async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(Str
 }
 
 async fn raider_location(client: &CosmosClient, pid: &str) -> Option<(String, String)> {
-    let pl = client.query_entity("player", pid).await.ok()?;
+    let pl = client.entity("player", pid).await.ok()?;
     let p = pl.get("Player")?;
     let fleet = p.get("fleetId").and_then(|x| x.as_str())?.to_string();
     let planet = p.get("planetId").and_then(|x| x.as_str())?.to_string();
@@ -1311,7 +1326,7 @@ async fn readopt_expeditions(client: &CosmosClient) {
             continue; // already tracked
         }
         let Some((fleet_id, home_planet)) = raider_location(client, &pid).await else { continue };
-        let Ok(fl) = client.query_entity("fleet", &fleet_id).await else { continue };
+        let Ok(fl) = client.entity("fleet", &fleet_id).await else { continue };
         let where_now = fl
             .get("Fleet")
             .and_then(|x| x.get("locationId"))
@@ -1322,7 +1337,7 @@ async fn readopt_expeditions(client: &CosmosClient) {
             continue; // at home — nothing in flight
         }
         let target_player = client
-            .query_entity("planet", &where_now)
+            .entity("planet", &where_now)
             .await
             .ok()
             .and_then(|e| {
@@ -1384,7 +1399,7 @@ async fn supervise(
         // The raider's own Command Ship dying while away is exactly how our 9
         // `attackerDefeated` losses happened; pull out before that.
         if abort.is_none() {
-            if let Ok(fl) = client.query_entity("fleet", &ex.fleet_id).await {
+            if let Ok(fl) = client.entity("fleet", &ex.fleet_id).await {
                 let cmd = fl
                     .get("Fleet")
                     .and_then(|x| x.get("commandStruct"))
@@ -1392,7 +1407,7 @@ async fn supervise(
                     .unwrap_or("");
                 if cmd.is_empty() {
                     abort = Some("raider Command Ship lost".into());
-                } else if let Ok(e) = client.query_entity("struct", cmd).await {
+                } else if let Ok(e) = client.entity("struct", cmd).await {
                     let sa = e.get("structAttributes");
                     if crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isDestroyed"))) {
                         abort = Some("raider Command Ship destroyed".into());
@@ -1414,7 +1429,7 @@ async fn supervise(
             // difficulty decays over `planetaryShield` blocks — see
             // `start_raid_proof`, which needs it as the decay RANGE.
             let (clock, shield) = client
-                .query_entity("planet", &ex.target_planet)
+                .entity("planet", &ex.target_planet)
                 .await
                 .ok()
                 .map(|e| {
@@ -1584,14 +1599,14 @@ async fn siege_round(
 ) -> usize {
     // Re-resolve the defender's Command Ship each round: it may have been
     // rebuilt, or already killed by the previous round.
-    let Ok(pl) = client.query_entity("player", &ex.target_player).await else { return 0 };
+    let Ok(pl) = client.entity("player", &ex.target_player).await else { return 0 };
     let fleet = pl
         .get("Player")
         .and_then(|p| p.get("fleetId"))
         .and_then(|x| x.as_str())
         .filter(|s| !s.is_empty());
     let Some(fleet) = fleet else { return 0 };
-    let Ok(fl) = client.query_entity("fleet", fleet).await else { return 0 };
+    let Ok(fl) = client.entity("fleet", fleet).await else { return 0 };
     let cmd = fl
         .get("Fleet")
         .and_then(|f| f.get("commandStruct"))
@@ -1599,7 +1614,7 @@ async fn siege_round(
         .filter(|s| !s.is_empty());
     let Some(cmd) = cmd else { return 0 }; // already down — the clock should arm
     if client
-        .query_entity("struct", cmd)
+        .entity("struct", cmd)
         .await
         .map(|e| {
             crate::mcp::loop_util::parse_bool(e.get("structAttributes").and_then(|a| a.get("isDestroyed")))

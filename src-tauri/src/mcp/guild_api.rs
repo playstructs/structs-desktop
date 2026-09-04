@@ -341,6 +341,25 @@ impl GuildApiClient {
         Ok((rows, height))
     }
 
+    /// One catalog page at a caller-chosen size, with the indexer height the
+    /// envelope was stamped with and whether a next page exists. The bulk
+    /// source for the perception snapshot (`perception::guild_pages`).
+    pub async fn list_page_with_meta(&self, path: &str, limit: usize) -> Result<(Vec<Value>, Option<u64>, bool), String> {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        let env = self.get_envelope(&format!("{path}{sep}limit={limit}")).await?;
+        let height = env
+            .get("meta")
+            .and_then(|m| m.get("height"))
+            .and_then(|h| h.as_u64().or_else(|| h.as_str().and_then(|s| s.parse().ok())));
+        let items = match env.get("data") {
+            Some(Value::Array(a)) => a.clone(),
+            Some(Value::Null) | None => vec![],
+            Some(other) => return Err(format!("expected a list, got {other}")),
+        };
+        let more = items.len() >= limit;
+        Ok((items, height, more))
+    }
+
     /// Low-level GET returning the whole validated envelope (for callers
     /// that need `meta`), same error handling as `get`.
     async fn get_envelope(&self, path: &str) -> Result<Value, String> {
