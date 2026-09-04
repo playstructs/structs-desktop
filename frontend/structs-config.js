@@ -2157,7 +2157,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         return '<span class="' + cls + '">' + STRUCTS_ESC(text) + '</span>';
       };
 
-      var html = '<div style="padding: 4px; display:flex; flex-direction:column; gap:8px; width:100%;">';
+      /* `box-sizing:border-box`: this wrapper is `width:100%` AND padded, and
+       * a content-box at 100% plus its padding is wider than its parent by
+       * exactly the padding. The parent clips, so what showed was every card's
+       * right border running off the edge of the panel. */
+      var html = '<div style="padding: 4px; display:flex; flex-direction:column; gap:8px; width:100%; box-sizing:border-box;">';
 
       // Comms — first thing in the panel. Federated chat over the guild's
       // Matrix homeserver (structs-tel). Deliberately parked here rather than
@@ -2302,10 +2306,23 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
        * and a `width: 100%` CONTENT box plus that padding is wider than the
        * container by exactly the padding — which is the horizontal scrollbar,
        * and the vertical one it then makes room for. */
+      /* This node is the page's SCROLLER (`overflow-y:auto`; the flex parent
+       * gives it the panel's full height). macOS scrollbars are overlays that
+       * take no layout space, so `width:100%` content runs underneath them —
+       * which is where the π door ended up, under the thumb. The right padding
+       * is the gutter: content stops before the scrollbar, always. */
       root.style.cssText =
-        'flex:1 1 auto; min-width:0; width:100%; box-sizing:border-box; overflow-x:hidden;';
+        'flex:1 1 auto; min-width:0; width:100%; box-sizing:border-box;'
+        + ' overflow-x:hidden; overflow-y:auto; padding-right:var(--spacing-xl);';
       root.innerHTML = html;
       debugRoot = root;
+      /* Remember where the reader is. The webapp's navigations DETACH this
+       * node (see reassertDebugPage), and a scroll container re-inserted into
+       * the document comes back at the top — that was the "refreshes and
+       * brings you back to the top". The position is kept here and put back on
+       * every re-attach. */
+      debugScrollTop = 0;
+      root.addEventListener('scroll', function () { debugScrollTop = root.scrollTop; }, { passive: true });
       var contentEl = document.getElementById('menu-page-body-content');
       if (contentEl) {
         contentEl.innerHTML = '';
@@ -2846,6 +2863,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     var DEBUG_ROOT_ID = 'structs-debug-root';
     // The built page, kept so a wipe costs a re-attach, not a rebuild.
     var debugRoot = null;
+    var debugScrollTop = 0;
 
     /* Put the Debug page back when something else wipes it.
      *
@@ -2874,6 +2892,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         // Drop the kept node: a later visit should read the chain again, not
         // re-attach figures from the last session.
         debugRoot = null;
+        debugScrollTop = 0;
         if (reassertTimer) { clearTimeout(reassertTimer); reassertTimer = null; }
         return;
       }
@@ -2893,6 +2912,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           content.innerHTML = '';
           content.appendChild(debugRoot);
           markDebugTabActive();
+          // Back where the reader was: once now, and once after layout has
+          // settled, since a freshly attached scroller may not accept the
+          // offset until it has a height.
+          var keep = debugRoot;
+          var at = debugScrollTop;
+          keep.scrollTop = at;
+          requestAnimationFrame(function () { if (keep.parentNode === content) keep.scrollTop = at; });
         } finally {
           reasserting = false;
         }
