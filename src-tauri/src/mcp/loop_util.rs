@@ -364,8 +364,16 @@ pub async fn scan_entity(client: &CosmosClient, kind: &str, id: &str) -> Result<
 /// Scan-time [`player_struct_ids`], snapshot-first.
 pub async fn scan_player_struct_ids(client: &CosmosClient, pid: &str) -> (Vec<String>, ReadSource) {
     if perception_usable_now() {
-        if let Some(ids) = crate::mcp::perception::with_snapshot(|s| s.player_struct_ids(pid)) {
-            if !ids.is_empty() {
+        // An EMPTY answer from a snapshot that KNOWS the player is the answer
+        // (a fresh vplayer with no planet yet has no structs). Falling to the
+        // chain on "empty" turned every planet-less roster entry into a chain
+        // read per scan — measured 2026-09-04 as the last ~32 LCD requests a
+        // minute after everything else had moved off the node. Only a player
+        // the snapshot has never heard of justifies a chain read.
+        if let Some((known, ids)) =
+            crate::mcp::perception::with_snapshot(|s| (s.player_row(pid).is_some(), s.player_struct_ids(pid)))
+        {
+            if known || !ids.is_empty() {
                 return (ids, ReadSource::Snapshot);
             }
         }
@@ -376,8 +384,10 @@ pub async fn scan_player_struct_ids(client: &CosmosClient, pid: &str) -> (Vec<St
 /// Scan-time [`player_structs`], snapshot-first.
 pub async fn scan_player_structs(client: &CosmosClient, pid: &str) -> (Vec<Value>, ReadSource) {
     if perception_usable_now() {
-        if let Some(v) = crate::mcp::perception::with_snapshot(|s| s.player_structs(pid)) {
-            if !v.is_empty() {
+        if let Some((known, v)) =
+            crate::mcp::perception::with_snapshot(|s| (s.player_row(pid).is_some(), s.player_structs(pid)))
+        {
+            if known || !v.is_empty() {
                 return (v, ReadSource::Snapshot);
             }
         }

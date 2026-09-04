@@ -435,6 +435,18 @@ impl GuildApiClient {
         Ok(env)
     }
 
+    /// The indexer's current height (`GET /api/block`: `height`, with
+    /// `tip_height` / `lag_blocks` beside it). Used to stamp a guild-fed
+    /// snapshot, since the catalog lists carry no `meta.height`.
+    pub async fn indexer_height(&self) -> Result<u64, String> {
+        let v = self.get("/api/block").await?;
+        let row = if v.is_array() { v.get(0).cloned().unwrap_or(Value::Null) } else { v };
+        ["height", "tip_height"]
+            .iter()
+            .find_map(|k| row.get(*k).and_then(|h| h.as_u64().or_else(|| h.as_str().and_then(|s| s.parse().ok()))))
+            .ok_or_else(|| "block: no height in response".to_string())
+    }
+
     // -- single-entity reads (the pre-sign verify source, see mcp/verify.rs) --
     /// One struct row: `id, type, owner, location_type, location_id,
     /// operating_ambit, slot, is_destroyed, health, status(bit-flags),

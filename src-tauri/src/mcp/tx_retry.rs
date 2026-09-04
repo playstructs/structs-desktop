@@ -39,6 +39,8 @@ const SEQ_RETRY_BASE_MS: u64 = 7_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
     SequenceMismatch,
+    /// Proof-of-work rejected by the keeper ("work failure for input …").
+    WorkFailure,
     InsufficientCharge,
     InsufficientFunds,
     PlayerOffline,
@@ -64,6 +66,7 @@ impl ErrorClass {
             ErrorClass::RateLimited => "rate_limited",
             ErrorClass::Timeout => "timeout",
             ErrorClass::BridgeDown => "bridge_error",
+            ErrorClass::WorkFailure => "work_failure",
             ErrorClass::InsufficientCharge
             | ErrorClass::InsufficientFunds
             | ErrorClass::PlayerOffline
@@ -91,6 +94,23 @@ impl ErrorClass {
     }
 }
 
+/// "429" as an HTTP status, not as three digits inside a nonce or a block
+/// height: neither neighbour may be a digit.
+fn standalone_429(l: &str) -> bool {
+    let b = l.as_bytes();
+    let mut from = 0;
+    while let Some(off) = l[from..].find("429") {
+        let i = from + off;
+        let before_digit = i > 0 && b[i - 1].is_ascii_digit();
+        let after_digit = b.get(i + 3).map_or(false, |c| c.is_ascii_digit());
+        if !before_digit && !after_digit {
+            return true;
+        }
+        from = i + 3;
+    }
+    false
+}
+
 pub fn classify(raw: &str) -> ErrorClass {
     let l = raw.to_lowercase();
     if l.contains("account sequence mismatch") {
@@ -107,7 +127,13 @@ pub fn classify(raw: &str) -> ErrorClass {
         || l.contains("code 8")
     {
         ErrorClass::InvalidTarget
-    } else if l.contains("429") || l.contains("too many requests") || l.contains("rate limit") {
+    } else if l.contains("work failure") {
+        // The proof's anchor disagreed with the chain's clock. Deterministic,
+        // and NOT endpoint pressure — this used to fall through to the "429"
+        // test below, which matched the digits inside the proof's nonce and
+        // fed every stale-anchor rejection into AIMD as throttling.
+        ErrorClass::WorkFailure
+    } else if standalone_429(&l) || l.contains("too many requests") || l.contains("rate limit") {
         ErrorClass::RateLimited
     } else if l.contains("channel closed")
         || l.contains("failed to emit")
@@ -523,6 +549,16 @@ mod tests {
         // A genuine endpoint timeout still classifies as Timeout.
         assert_eq!(classify("error sending request: operation timed out"), ErrorClass::Timeout);
         assert_eq!(classify("something novel"), ErrorClass::Other);
+        // 2026-09-04: a rejected proof's error text carries the proof input,
+        // and a nonce containing the digits 429 read as an HTTP 429 — 94
+        // stale-anchor rejections an hour were feeding AIMD as throttling.
+        let wf = "Broadcasting transaction failed with code 1 (codespace: structs). Log: work failure for input (5-234309MINE2470534NONCE9142937)";
+        assert_eq!(classify(wf), ErrorClass::WorkFailure);
+        assert!(!ErrorClass::WorkFailure.is_pressure());
+        assert!(!ErrorClass::WorkFailure.retryable());
+        assert_eq!(ErrorClass::WorkFailure.outcome(), "work_failure");
+        assert_eq!(classify("block 2471429: something else"), ErrorClass::Other);
+        assert_eq!(classify("status 429"), ErrorClass::RateLimited);
     }
 
     #[test]

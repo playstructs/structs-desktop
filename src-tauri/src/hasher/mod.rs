@@ -368,6 +368,7 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
             }
         }
         // Re-tested once the gate slot is won, immediately before broadcast.
+        let clock_planet = ore_planet.clone();
         let guard = ore_planet.map(|planet_id| crate::mcp::tx_retry::FreshAnchor {
             planet_id,
             object_id: object_id.clone(),
@@ -394,12 +395,36 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         PENDING_COMPLETIONS.remove(&object_id);
         match signed
         {
-            Ok(_) => {
+            Ok(v) => {
                 crate::mcp::telemetry::tlog(
                     "hasher",
                     crate::mcp::telemetry::Sev::Debug,
                     format!("{task_type} completion signed for {object_id} (vplayer {index})"),
                 );
+                // The chain restarted the planet's clock at the inclusion
+                // block: tell the local source of truth now, so the next scan
+                // sees a young anchor instead of re-grinding the consumed one.
+                if let Some(planet) = clock_planet.as_deref() {
+                    let height = v
+                        .get("height")
+                        .and_then(|h| h.as_u64().or_else(|| h.as_str().and_then(|s| s.parse().ok())))
+                        .filter(|h| *h > 0)
+                        .unwrap_or_else(|| {
+                            crate::game_state::GAME_STATE.read().ok().map(|g| g.current_block_height).unwrap_or(0)
+                        });
+                    crate::mcp::perception::note_clock_restart(planet, &task_kind, height);
+                }
+            }
+            Err(e) if e.contains("work failure") => {
+                // Our anchor disagreed with the chain's clock: the snapshot is
+                // stale for that planet. Refresh the clocks now, not in two
+                // minutes, and say so.
+                crate::mcp::telemetry::tlog(
+                    "hasher",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("{task_type} completion REJECTED for {object_id} (vplayer {index}): stale anchor {solved_anchor} — forcing a clock refresh: {e}"),
+                );
+                crate::mcp::perception::request_hot_refresh(&crate::mcp::cosmos_client::CosmosClient::new());
             }
             Err(e) => {
                 // Surface failures loudly: a completion that never lands leaves

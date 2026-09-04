@@ -121,6 +121,8 @@ const S_REFINE: usize = 4;
 const S_PROTECTED: usize = 5;
 const P_SHIELD: usize = 0;
 const P_RAID: usize = 10;
+const P_MINE: usize = 12;
+const P_REFINE: usize = 13;
 
 /// Bulk page size. The LCD's query-gas ceiling (25M) is hit around ~110k
 /// rows of the widest store; 60k is comfortably under it on every store.
@@ -505,6 +507,21 @@ impl Snapshot {
         v
     }
 
+    /// Restart a KNOWN planet's mine/refine clock at `block` (a completion
+    /// we signed landed). Unknown planets and zero blocks are refused: this
+    /// records what the chain did, it never invents a planet.
+    pub fn restart_clock(&mut self, planet_id: &str, task_type: &str, block: u64) -> bool {
+        let idx = match task_type {
+            "MINE" => P_MINE,
+            "REFINE" => P_REFINE,
+            _ => return false,
+        };
+        if block == 0 || !self.planets.contains_key(planet_id) {
+            return false;
+        }
+        Self::set(&mut self.planet_attrs, planet_id, idx, block) == Applied::Changed
+    }
+
     fn set<const N: usize>(store: &mut HashMap<String, [u64; N]>, oid: &str, i: usize, val: u64) -> Applied {
         let slot = store.entry(oid.to_string()).or_insert([0; N]);
         if slot[i] == val {
@@ -633,6 +650,21 @@ impl Snapshot {
                 "shield_change" => {
                     let pid = str_of(detail, "planet_id");
                     Self::set(&mut self.planet_attrs, &pid, P_SHIELD, to_u64(detail.get("planetary_shield")))
+                }
+                // The planet ore clocks. `structs.planet_activity` records these
+                // (`{block, planet_id}`, ~10k rows/day) and the local stack's
+                // notify trigger emits them; the production stream delivered
+                // none in 111k recorded frames, so the work-view hot refresh
+                // stays as the backstop. When they do arrive, they are the
+                // freshest source there is.
+                "struct_block_ore_mine_start" | "struct_block_ore_refine_start" => {
+                    let pid = str_of(detail, "planet_id");
+                    if pid.is_empty() {
+                        return Applied::Ignored;
+                    }
+                    let b = to_u64(detail.get("block").or_else(|| detail.get("block_height")));
+                    let idx = if category == "struct_block_ore_mine_start" { P_MINE } else { P_REFINE };
+                    Self::set(&mut self.planet_attrs, &pid, idx, b)
                 }
                 "block_raid_start" => {
                     let pid = str_of(detail, "planet_id");
@@ -1149,7 +1181,12 @@ async fn guild_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String>
     let mut snap = Snapshot::from_pages(&structs, &sattr, &pattr, &grid, &players, &planets, &fleets);
     let heights = [st.1, sa.1, pa.1, gr.1, pl.1, pn.1, fl.1];
     snap.height = heights.iter().copied().max().unwrap_or(0);
-    snap.min_height = heights.iter().copied().filter(|h| *h > 0).min().unwrap_or(0);
+    if snap.height == 0 {
+        // The catalog lists do not stamp `meta.height`; the indexer's own
+        // block endpoint does. Without it every guild snapshot reads "@0".
+        snap.height = client.guild.indexer_height().await.unwrap_or(0);
+    }
+    snap.min_height = heights.iter().copied().filter(|h| *h > 0).min().unwrap_or(snap.height);
     snap.taken_ms = t0;
     // Grid GRASS frames carry the indexer's `updated_at`; the indexer and this
     // machine keep wall clocks, so "served now" is the right freshness anchor.
@@ -1266,6 +1303,39 @@ pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, Stri
     }
     HOT_REFRESHING.store(false, Ordering::SeqCst);
     result
+}
+
+/// A completion we signed landed: the chain restarted that planet's clock at
+/// the inclusion block. Record it NOW rather than waiting for the next sweep
+/// — with the clock frames not reaching us from production, the two-minute
+/// gap was long enough for the harvest loop to re-nominate the same rig
+/// against the old anchor and grind a proof the chain then rejected
+/// ("work failure", 94 an hour on 2026-09-04).
+pub fn note_clock_restart(planet_id: &str, task_type: &str, block: u64) -> bool {
+    if let Ok(mut g) = CURRENT.write() {
+        if let Some(s) = g.as_mut() {
+            return s.restart_clock(planet_id, task_type, block);
+        }
+    }
+    false
+}
+
+/// Force a clock sweep now (a "work failure" means the snapshot's clock was
+/// wrong; do not wait out the interval to find out how).
+pub fn request_hot_refresh(client: &CosmosClient) {
+    if snapshot_source() != SnapshotSource::Guild || !is_ready() || HOT_REFRESHING.load(Ordering::Relaxed) {
+        return;
+    }
+    let client = client.clone();
+    tokio::spawn(async move {
+        if let Err(e) = hot_refresh_ore_clocks(&client).await {
+            crate::mcp::telemetry::tlog(
+                "perception",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("forced clock refresh failed: {e}"),
+            );
+        }
+    });
 }
 
 fn maybe_hot_refresh(client: &CosmosClient) {
@@ -1864,6 +1934,25 @@ mod guild_ingest_tests {
     use super::*;
 
     #[test]
+    fn a_signed_completion_restarts_only_a_known_planets_clock() {
+        let mut snap = Snapshot::default();
+        snap.planets.insert("2-223".into(), json!({"id": "2-223"}));
+        snap.planet_attrs.insert("2-223".into(), {
+            let mut a = [0u64; 16];
+            a[P_MINE] = 1_358_696;
+            a
+        });
+        assert!(snap.restart_clock("2-223", "MINE", 2_470_534));
+        assert_eq!(snap.planet_attrs["2-223"][P_MINE], 2_470_534);
+        assert!(!snap.restart_clock("2-223", "MINE", 2_470_534), "same block twice is no change");
+        assert!(snap.restart_clock("2-223", "REFINE", 2_470_540));
+        assert_eq!(snap.planet_attrs["2-223"][P_REFINE], 2_470_540);
+        assert!(!snap.restart_clock("2-999", "MINE", 5), "never invents a planet");
+        assert!(!snap.restart_clock("2-223", "BUILD", 5), "build clocks live on the struct");
+        assert!(!snap.restart_clock("2-223", "MINE", 0));
+    }
+
+    #[test]
     fn guild_rows_adapt_to_the_lcd_shapes_the_snapshot_speaks() {
         // Verbatim from live `/api/objects?ids=` rows (2026-09-04).
         let planet = json!({"id": "2-22432", "max_ore": 5, "owner": "1-195",
@@ -1974,6 +2063,19 @@ mod guild_ingest_tests {
         assert_eq!(changed, 4, "mine, refine, build, and the one clear");
         // Idempotent.
         assert_eq!(apply_work_rows(&mut snap, &rows, "0-1"), 0);
+    }
+
+    #[test]
+    fn ore_clock_start_frames_set_the_planet_clocks() {
+        let mut snap = Snapshot::from_pages(&[], &[], &[], &[], &[], &[json!({"id": "2-28137"})], &[]);
+        snap.min_height = 2_469_000;
+        // Verbatim planet_activity rows (2026-09-04): detail carries block + planet_id.
+        assert_eq!(snap.apply("struct_block_ore_mine_start", "structs.planet.2-28137.1-9", &json!({"block": 2469864, "planet_id": "2-28137", "block_height": 2469864})), Applied::Changed);
+        assert_eq!(snap.apply("struct_block_ore_refine_start", "structs.planet.2-28137.1-9", &json!({"block": 2469870, "planet_id": "2-28137", "block_height": 2469870})), Applied::Changed);
+        assert_eq!(snap.planet_attr("2-28137", "blockStartOreMine"), Some(2469864));
+        assert_eq!(snap.planet_attr("2-28137", "blockStartOreRefine"), Some(2469870));
+        assert_eq!(snap.apply("struct_block_ore_mine_start", "s", &json!({"block": 2469864, "planet_id": "2-28137"})), Applied::NoChange);
+        assert_eq!(snap.apply("struct_block_ore_mine_start", "s", &json!({"block": 1})), Applied::Ignored);
     }
 
     #[test]
