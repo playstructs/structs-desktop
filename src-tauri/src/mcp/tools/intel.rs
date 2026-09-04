@@ -2611,6 +2611,24 @@ pub struct RawQueryParams {
     pub filter: Option<RawQueryFilter>,
     /// Page number (1-indexed) for Guild API filtered queries. Defaults to 1.
     pub page: Option<u32>,
+    /// Raw Guild API probe: GET this path (e.g. `/api/grid/all/page/1?limit=3`)
+    /// through the signed-in session and return the whole envelope. For
+    /// checking a route's row shape without the webview console. Overrides
+    /// every other field.
+    pub guild_path: Option<String>,
+}
+
+#[cfg(test)]
+mod raw_query_param_tests {
+    use super::*;
+
+    #[test]
+    fn guild_path_probe_deserializes_beside_the_typed_shape() {
+        let p: RawQueryParams = serde_json::from_value(serde_json::json!({"type": "struct", "guild_path": "/api/grid/all/page/1?limit=3"})).unwrap();
+        assert_eq!(p.guild_path.as_deref(), Some("/api/grid/all/page/1?limit=3"));
+        let q: RawQueryParams = serde_json::from_value(serde_json::json!({"type": "struct", "id": "5-1"})).unwrap();
+        assert!(q.guild_path.is_none());
+    }
 }
 
 /// Guild-API types that have an UNFILTERED list endpoint. Listing one of these
@@ -2622,6 +2640,22 @@ const GUILD_LISTABLE_TYPES: [&str; 3] = ["planet_activity", "agreement", "provid
 
 async fn raw_query(client: &CosmosClient, params: RawQueryParams) -> Vec<Content> {
     let page = params.page.unwrap_or(1).max(1);
+    if let Some(path) = params.guild_path.as_deref() {
+        if !path.starts_with("/api/") {
+            return vec![Content::text("Error: guild_path must start with /api/".to_string())];
+        }
+        return match client.guild.get_envelope(path).await {
+            Ok(env) => {
+                let mut text = serde_json::to_string_pretty(&env).unwrap_or_else(|_| env.to_string());
+                if text.len() > 20_000 {
+                    text.truncate(20_000);
+                    text.push_str("\n… (truncated at 20k chars)");
+                }
+                vec![Content::text(text)]
+            }
+            Err(e) => vec![Content::text(format!("Error: {e}"))],
+        };
+    }
     let result: Result<Value, String> = if let Some(filter) = &params.filter {
         route_guild_query(client, &params.r#type, filter, page).await
     } else if let Some(id) = &params.id {

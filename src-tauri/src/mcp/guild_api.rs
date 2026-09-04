@@ -404,8 +404,9 @@ impl GuildApiClient {
     }
 
     /// Low-level GET returning the whole validated envelope (for callers
-    /// that need `meta`), same error handling as `get`.
-    async fn get_envelope(&self, path: &str) -> Result<Value, String> {
+    /// that need `meta`), same error handling as `get`. Also the raw probe
+    /// behind `structs_intel query {guild_path}`.
+    pub(crate) async fn get_envelope(&self, path: &str) -> Result<Value, String> {
         note_request();
         let url = self.build_url(path);
         let resp = http()

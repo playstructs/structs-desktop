@@ -1064,12 +1064,26 @@ pub(crate) fn adapt_struct_rows(rows: &[Value]) -> Vec<Value> {
 pub(crate) fn adapt_attribute_rows(rows: &[Value], names: &[&str]) -> Vec<Value> {
     rows.iter()
         .filter_map(|r| {
+            let oid = r.get("object_id").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?;
+            // The row id IS the chain's attribute id
+            // (`<attr index>-<object type>-<object index>[-<sub index>]`, e.g.
+            // `12-2-23537` = planet 2-23537's mine clock, `6-1-100-1` = a
+            // typeCount with a sub index) and is authoritative: pass it through
+            // verbatim so `parse_attribute_id` applies exactly the rules it
+            // applies to LCD rows (unknown index or sub-indexed rows are
+            // skipped the same way). The `attribute_type` name is a courtesy
+            // the indexer does not always extend — every planet ore-clock row
+            // it has written since 2026-08-24 carries a NULL name because its
+            // index→name table stops at 10 — so it is only the fallback for a
+            // row with no id.
+            let val = r.get("val").or_else(|| r.get("value"))?;
+            if let Some(id) = r.get("id").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                return Some(json!({ "attributeId": id, "value": val }));
+            }
             let t = ["attribute_type", "type", "attribute"]
                 .iter()
                 .find_map(|k| r.get(*k).and_then(|x| x.as_str()))?;
             let idx = names.iter().position(|n| *n == t)?;
-            let oid = r.get("object_id").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?;
-            let val = r.get("val").or_else(|| r.get("value"))?;
             Some(json!({ "attributeId": format!("{idx}-{oid}"), "value": val }))
         })
         .collect()
@@ -1143,22 +1157,82 @@ async fn guild_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String>
     Ok(snap)
 }
 
-// ── Hot refresh: the planet ore clocks ──────────────────────────────────────
+// ── Hot refresh: the ore and build clocks, from the work view ────────────────
 //
 // `blockStartOreMine/Refine` never stream (measured: zero frames in 111k),
-// and a proof solved against a moved clock is a proof the chain rejects. So
-// those two planet attributes are re-swept from the guild by-type endpoint
-// every HOT_REFRESH_EVERY_MS (two requests for every planet) and patched into
-// the current snapshot in place. Everything else the snapshot holds streams.
+// and a proof solved against a moved clock is a proof the chain rejects. The
+// planet-attribute BY-TYPE route cannot serve them either: the indexer has
+// written every ore-clock row since 2026-08-24 with a NULL `attribute_type`
+// (its index→name table stops at 10), so `type/blockStartOreMine` answers
+// `[]` while the table holds thousands of rows. The guild WORK view is the
+// right source anyway — one row per rig with the clock it hashes against
+// (verified: every MINE row's block_start equals its planet's clock), and
+// our whole guild fits in one 10,000-row page. Every HOT_REFRESH_EVERY_MS
+// those rows are folded into the snapshot: planet ore clocks, struct build
+// clocks, and a clear (0) for any planet of ours with no outstanding work.
 
 pub const HOT_REFRESH_EVERY_MS: f64 = 2.0 * 60_000.0;
 static HOT_REFRESHING: AtomicBool = AtomicBool::new(false);
 static LAST_HOT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Age of the last ore-clock hot refresh, or `None` if none has run.
+/// Age of the last clock hot refresh, or `None` if none has run.
 pub fn hot_age_ms() -> Option<f64> {
     let t = LAST_HOT_MS.load(Ordering::Relaxed);
     (t > 0).then(|| crate::hasher::types::now_millis() - t as f64)
+}
+
+/// Fold guild work rows (`object_id, player_id, category, block_start`) into
+/// the snapshot. Planets belonging to `guild_id`'s players that have no
+/// MINE / REFINE row get that clock cleared: the work view is complete for a
+/// guild, so absence means nothing to hash. Returns how many values changed.
+pub(crate) fn apply_work_rows(snap: &mut Snapshot, rows: &[Value], guild_id: &str) -> usize {
+    let mut changed = 0usize;
+    let mut mine_seen: HashSet<String> = HashSet::new();
+    let mut refine_seen: HashSet<String> = HashSet::new();
+    for r in rows {
+        let oid = str_of(r, "object_id");
+        let cat = str_of(r, "category").to_ascii_uppercase();
+        let block = to_u64(r.get("block_start"));
+        if oid.is_empty() {
+            continue;
+        }
+        match cat.as_str() {
+            "BUILD" => {
+                if snap.structs.contains_key(&oid) && Snapshot::set(&mut snap.struct_attrs, &oid, S_BUILD, block) == Applied::Changed {
+                    changed += 1;
+                }
+            }
+            "MINE" | "REFINE" => {
+                let Some(planet) = snap.structs.get(&oid).filter(|s| s.location_type == "planet").map(|s| s.location_id.clone()) else { continue };
+                if planet.is_empty() {
+                    continue;
+                }
+                let (idx, seen) = if cat == "MINE" { (12usize, &mut mine_seen) } else { (13usize, &mut refine_seen) };
+                seen.insert(planet.clone());
+                if Snapshot::set(&mut snap.planet_attrs, &planet, idx, block) == Applied::Changed {
+                    changed += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Our players' planets with no outstanding ore work: clocks clear.
+    let ours: Vec<String> = snap
+        .players
+        .values()
+        .filter(|p| str_of(p, "guildId") == guild_id)
+        .map(|p| str_of(p, "planetId"))
+        .filter(|id| !id.is_empty() && snap.planets.contains_key(id))
+        .collect();
+    for planet in ours {
+        if !mine_seen.contains(&planet) && Snapshot::set(&mut snap.planet_attrs, &planet, 12, 0) == Applied::Changed {
+            changed += 1;
+        }
+        if !refine_seen.contains(&planet) && Snapshot::set(&mut snap.planet_attrs, &planet, 13, 0) == Applied::Changed {
+            changed += 1;
+        }
+    }
+    changed
 }
 
 pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, String> {
@@ -1166,42 +1240,25 @@ pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, Stri
         return Err("hot refresh already in flight".into());
     }
     let result = async {
-        let mut updated = 0usize;
-        // The mine clock is the canary: if IT comes back empty the route or
-        // attribute name is wrong and nothing here can be trusted. An empty
-        // refine set on its own is believable (no planet refining).
-        for (attr, idx, required) in [("blockStartOreMine", 12usize, true), ("blockStartOreRefine", 13usize, false)] {
-            debug_assert_eq!(PLANET_ATTRS[idx], attr);
-            let (items, _, complete) = client
-                .guild
-                .walk_list(&format!("/api/planet-attribute/type/{attr}"), GUILD_PAGE_LIMIT, GUILD_MAX_PAGES)
-                .await?;
-            if !complete {
-                return Err(format!("{attr} sweep capped at {GUILD_MAX_PAGES} pages — refusing a truncated sweep"));
-            }
-            let mut rows: HashMap<String, u64> = HashMap::new();
-            for r in &items {
-                if let Some(oid) = r.get("object_id").and_then(|x| x.as_str()) {
-                    rows.insert(oid.to_string(), to_u64(r.get("val").or_else(|| r.get("value"))));
-                }
-            }
-            if rows.is_empty() && required {
-                return Err(format!("{attr} sweep returned no rows"));
-            }
-            if let Ok(mut g) = CURRENT.write() {
-                if let Some(s) = g.as_mut() {
-                    let planet_ids: Vec<String> = s.planets.keys().cloned().collect();
-                    for pid in planet_ids {
-                        // Absent from the sweep = row deleted at zero = clock clear.
-                        let v = rows.get(&pid).copied().unwrap_or(0);
-                        if Snapshot::set(&mut s.planet_attrs, &pid, idx, v) == Applied::Changed {
-                            updated += 1;
-                        }
-                    }
-                }
-            }
+        let guild_id = crate::guild_config::get_active_guild_config()
+            .map(|c| c.guild_id)
+            .filter(|g| !g.is_empty())
+            .ok_or("no active guild")?;
+        let (rows, _, complete) = client
+            .guild
+            .walk_list(&format!("/api/work/guild/{guild_id}"), GUILD_PAGE_LIMIT, GUILD_MAX_PAGES)
+            .await?;
+        if !complete {
+            return Err(format!("work view capped at {GUILD_MAX_PAGES} pages — refusing a truncated sweep"));
         }
-        Ok(updated)
+        if rows.is_empty() {
+            // A guild with 2,400 rigs never has zero outstanding work; an
+            // empty answer is a route or session problem, not a quiet galaxy.
+            return Err("work view returned no rows".to_string());
+        }
+        let mut g = CURRENT.write().map_err(|_| "snapshot lock poisoned".to_string())?;
+        let s = g.as_mut().ok_or("no snapshot to patch")?;
+        Ok(apply_work_rows(s, &rows, &guild_id))
     }
     .await;
     if result.is_ok() {
@@ -1854,6 +1911,69 @@ mod guild_ingest_tests {
         assert_eq!(snap.struct_status("5-1"), 7);
         assert_eq!(snap.struct_attr("5-1", "blockStartBuild"), Some(2455000));
         assert!(!snap.struct_exists("5-2"));
+    }
+
+    #[test]
+    fn attribute_rows_key_on_the_id_prefix_when_the_name_is_missing() {
+        // Verbatim shape of the indexer's unnamed ore-clock rows (2026-09-04).
+        let rows = vec![
+            json!({"id": "12-2-27264", "object_id": "2-27264", "object_type": "planet", "attribute_type": null, "val": 2469533}),
+            json!({"id": "13-2-27264", "object_id": "2-27264", "object_type": "planet", "val": 2469000}),
+            json!({"id": "0-2-27264", "object_id": "2-27264", "attribute_type": "planetaryShield", "val": "225"}),
+            json!({"id": "99-2-27264", "object_id": "2-27264", "val": 1}),
+            json!({"object_id": "2-1", "attribute_type": "planetaryShield", "val": 5}),
+        ];
+        let a = adapt_attribute_rows(&rows, &PLANET_ATTRS);
+        let ids: Vec<&str> = a.iter().map(|r| r["attributeId"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["12-2-27264", "13-2-27264", "0-2-27264", "99-2-27264", "0-2-1"]);
+        let snap = Snapshot::from_pages(&[], &[], &a, &[], &[], &[json!({"id": "2-27264"})], &[]);
+        assert_eq!(snap.planet_attr("2-27264", "blockStartOreMine"), Some(2469533));
+        assert_eq!(snap.planet_attr("2-27264", "blockStartOreRefine"), Some(2469000));
+        // An index the store has no slot for is dropped by from_pages (99 ≥ 16),
+        // exactly as an LCD row with that id would be.
+        assert!(snap.planet_attrs.get("2-27264").unwrap().iter().all(|v| *v < 2_500_000));
+        // typeCount rows carry a SUB index (`6-1-100-1` on the LCD, same on the
+        // guild): the id passes through untouched and from_pages skips it, so
+        // the two sources agree instead of the guild path inventing a
+        // per-player typeCount from the name.
+        let tc = adapt_attribute_rows(&[json!({"id": "6-1-1386-1", "object_id": "1-1386", "sub_index": 1, "attribute_type": "typeCount", "val": 1})], &STRUCT_ATTRS);
+        assert_eq!(tc[0]["attributeId"], json!("6-1-1386-1"));
+        let s2 = Snapshot::from_pages(&[], &tc, &[], &[], &[], &[], &[]);
+        assert!(s2.struct_attrs.get("1-1386").is_none());
+    }
+
+    #[test]
+    fn work_rows_set_ore_and_build_clocks_and_clear_our_idle_planets() {
+        let structs = vec![
+            json!({"id": "5-1", "type": "14", "owner": "1-10", "locationType": "planet", "locationId": "2-1", "operatingAmbit": "land", "slot": "0"}),
+            json!({"id": "5-2", "type": "15", "owner": "1-10", "locationType": "planet", "locationId": "2-1", "operatingAmbit": "land", "slot": "1"}),
+            json!({"id": "5-3", "type": "7", "owner": "1-10", "locationType": "fleet", "locationId": "9-10", "operatingAmbit": "air", "slot": "0"}),
+            json!({"id": "5-4", "type": "14", "owner": "1-11", "locationType": "planet", "locationId": "2-2", "operatingAmbit": "land", "slot": "0"}),
+        ];
+        let players = vec![
+            json!({"id": "1-10", "guildId": "0-1", "planetId": "2-1"}),
+            json!({"id": "1-11", "guildId": "0-1", "planetId": "2-2"}),
+            json!({"id": "1-99", "guildId": "0-5", "planetId": "2-9"}),
+        ];
+        let planets = vec![json!({"id": "2-1"}), json!({"id": "2-2"}), json!({"id": "2-9"})];
+        let pattr = vec![json!({"attributeId": "12-2-2", "value": "5"}), json!({"attributeId": "12-2-9", "value": "7"})];
+        let mut snap = Snapshot::from_pages(&structs, &[], &pattr, &[], &players, &planets, &[]);
+        let rows = vec![
+            json!({"object_id": "5-1", "player_id": "1-10", "category": "MINE", "block_start": 2283000}),
+            json!({"object_id": "5-2", "player_id": "1-10", "category": "REFINE", "block_start": "2280000"}),
+            json!({"object_id": "5-3", "player_id": "1-10", "category": "BUILD", "block_start": 2290000}),
+            json!({"object_id": "5-404", "player_id": "1-10", "category": "MINE", "block_start": 1}),
+        ];
+        let changed = apply_work_rows(&mut snap, &rows, "0-1");
+        assert_eq!(snap.planet_attr("2-1", "blockStartOreMine"), Some(2283000));
+        assert_eq!(snap.planet_attr("2-1", "blockStartOreRefine"), Some(2280000));
+        assert_eq!(snap.struct_attr("5-3", "blockStartBuild"), Some(2290000));
+        // 1-11's planet has no MINE row → cleared; 1-99 is another guild → untouched.
+        assert_eq!(snap.planet_attr("2-2", "blockStartOreMine"), Some(0));
+        assert_eq!(snap.planet_attr("2-9", "blockStartOreMine"), Some(7));
+        assert_eq!(changed, 4, "mine, refine, build, and the one clear");
+        // Idempotent.
+        assert_eq!(apply_work_rows(&mut snap, &rows, "0-1"), 0);
     }
 
     #[test]

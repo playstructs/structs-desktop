@@ -32,8 +32,15 @@ const HEALTHY_RATIO: f64 = 1.2;
 const HEALTHY_STREAK_TO_GROW: u32 = 3;
 /// Bounds.
 const MIN_CONCURRENT: u64 = 2;
-const DIFF_MIN: u64 = 8;
-const DIFF_MAX: u64 = 24;
+/// Difficulty is LEADING HEX ZEROS — 4 bits each — so these are hex digits:
+/// 4 = 16 bits (65k tries), 12 = 48 bits (2.8e14 tries, days on any GPU).
+/// They were 8..=24 with the ideal computed in BITS, which clamped every
+/// real GPU at 24 hex digits and walked `difficulty_start` up one notch per
+/// pass — measured 5 → 17 over 2026-09-04 — until every task ground at an
+/// impossible difficulty, solve times ballooned, and the concurrency rule
+/// below cut the pool to 2 workers with 487 tasks pending.
+const DIFF_MIN: u64 = 4;
+const DIFF_MAX: u64 = 12;
 /// Need at least this many recent solves before trusting the stats.
 const MIN_SAMPLES: i64 = 5;
 /// Target solve horizon for difficulty_start: ~one block of grinding.
@@ -155,10 +162,9 @@ fn tune_pass() {
 
     // ── difficulty_start steering ──
     if let Some(rate) = rate_recent.filter(|r| *r > 0.0) {
-        // Highest difficulty whose expected solve time fits the target horizon:
-        // expected tries = 2^d, so d* = log2(rate × horizon).
-        let ideal = (rate * TARGET_SOLVE_SECS).log2().floor() as i64;
-        let ideal = (ideal.max(DIFF_MIN as i64) as u64).min(DIFF_MAX);
+        // Highest difficulty whose expected solve time fits the target horizon.
+        // Difficulty is hex digits: expected tries = 16^d, so d* = log2(rate × horizon) / 4.
+        let ideal = ideal_difficulty(rate);
         let cur = crate::hasher::difficulty_start();
         if ideal.abs_diff(cur) >= 2 {
             let next = if ideal > cur { cur + 1 } else { cur - 1 };
@@ -174,6 +180,13 @@ fn tune_pass() {
             );
         }
     }
+}
+
+/// The highest difficulty (hex digits) a worker at `rate` hashes/s clears in
+/// about one block: expected tries = 16^d, so d* = log2(rate × horizon) / 4.
+pub fn ideal_difficulty(rate_hps: f64) -> u64 {
+    let ideal = ((rate_hps * TARGET_SOLVE_SECS).log2() / 4.0).floor() as i64;
+    (ideal.max(DIFF_MIN as i64) as u64).min(DIFF_MAX)
 }
 
 #[cfg(test)]
@@ -198,12 +211,17 @@ mod tests {
     }
 
     #[test]
-    fn ideal_difficulty_math() {
-        // 200M h/s × 6s ≈ 1.2e9 tries → log2 ≈ 30.2 → clamped to DIFF_MAX (24).
-        let ideal = ((2.0e8f64 * TARGET_SOLVE_SECS).log2().floor() as i64).max(DIFF_MIN as i64) as u64;
-        assert_eq!(ideal.min(DIFF_MAX), 24);
-        // 3M h/s CPU × 6s ≈ 1.8e7 → log2 ≈ 24.1 → 24; a slow 10k h/s rig → 15.
-        let slow = ((1.0e4f64 * TARGET_SOLVE_SECS).log2().floor() as i64).max(DIFF_MIN as i64) as u64;
-        assert_eq!(slow.min(DIFF_MAX), 15);
+    fn ideal_difficulty_is_in_hex_digits_a_gpu_can_clear_in_a_block() {
+        // 200M h/s × 6 s ≈ 1.2e9 tries → log2 ≈ 30.2 bits → 7 hex digits.
+        assert_eq!(ideal_difficulty(2.0e8), 7);
+        // An M1 at ~40M h/s → 2.4e8 tries → 27.8 bits → 6.
+        assert_eq!(ideal_difficulty(4.0e7), 6);
+        // A slow 10k h/s rig → 6e4 tries → 15.9 bits → 3, floored to DIFF_MIN.
+        assert_eq!(ideal_difficulty(1.0e4), DIFF_MIN);
+        // Nothing steers past 12 hex digits (48 bits): that is days, not a block.
+        assert_eq!(ideal_difficulty(1.0e15), DIFF_MAX);
+        // The old bits formula would have said 24 for the GPU — the value the
+        // tuner walked toward one notch per pass.
+        assert!(ideal_difficulty(2.0e8) < 24);
     }
 }
