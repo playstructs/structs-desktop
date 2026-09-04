@@ -903,7 +903,7 @@ pub fn tx_summary(window_ms: f64) -> Result<Value, String> {
                              ELSE context END AS ctx,
                         COUNT(*) AS attempts,
                         SUM(CASE WHEN outcome='success' THEN 1 ELSE 0 END) AS successes,
-                        SUM(CASE WHEN outcome IN ('chain_error','timeout','bridge_error','rate_limited') THEN 1 ELSE 0 END) AS failures,
+                        SUM(CASE WHEN outcome IN ('chain_error','timeout','bridge_error','rate_limited','work_failure') THEN 1 ELSE 0 END) AS failures,
                         SUM(CASE WHEN outcome='skipped' THEN 1 ELSE 0 END) AS skipped
                  FROM tx_attempts WHERE ts_ms >= ?1 GROUP BY ctx ORDER BY attempts DESC LIMIT 50",
             )

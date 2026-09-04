@@ -1244,8 +1244,17 @@ pub(crate) fn apply_work_rows(snap: &mut Snapshot, rows: &[Value], guild_id: &st
                 if planet.is_empty() {
                     continue;
                 }
-                let (idx, seen) = if cat == "MINE" { (12usize, &mut mine_seen) } else { (13usize, &mut refine_seen) };
+                let (idx, seen) = if cat == "MINE" { (P_MINE, &mut mine_seen) } else { (P_REFINE, &mut refine_seen) };
                 seen.insert(planet.clone());
+                // Clocks only move FORWARD (a restart is a later block) or clear
+                // to zero. A lower non-zero value means the view is behind the
+                // chain — the indexer cutover of 2026-09-04 left rows the upsert
+                // never revisits — and must not overwrite what the LCD walk or a
+                // clock frame already told us. 597 rejected proofs in an hour.
+                let held = snap.planet_attrs.get(&planet).map(|a| a[idx]).unwrap_or(0);
+                if block != 0 && block < held {
+                    continue;
+                }
                 if Snapshot::set(&mut snap.planet_attrs, &planet, idx, block) == Applied::Changed {
                     changed += 1;
                 }
@@ -1932,6 +1941,26 @@ mod tests {
 #[cfg(test)]
 mod guild_ingest_tests {
     use super::*;
+
+    #[test]
+    fn the_work_view_never_moves_a_clock_backwards() {
+        let mut snap = Snapshot::default();
+        snap.planets.insert("2-27693".into(), json!({"id": "2-27693"}));
+        snap.players.insert("1-2477".into(), json!({"id": "1-2477", "guildId": "0-1", "planetId": "2-27693"}));
+        snap.structs.insert("5-234309".into(), StructRow { location_type: "planet".into(), location_id: "2-27693".into(), ..Default::default() });
+        snap.planet_attrs.insert("2-27693".into(), { let mut a = [0u64; 16]; a[P_MINE] = 2_470_534; a });
+        // A stale row (the chain says 2470534, the view still says 2463969) is refused.
+        let rows = vec![json!({"object_id": "5-234309", "category": "MINE", "block_start": 2463969})];
+        assert_eq!(apply_work_rows(&mut snap, &rows, "0-1"), 0);
+        assert_eq!(snap.planet_attrs["2-27693"][P_MINE], 2_470_534);
+        // A later restart is applied.
+        let rows = vec![json!({"object_id": "5-234309", "category": "MINE", "block_start": 2471999})];
+        assert_eq!(apply_work_rows(&mut snap, &rows, "0-1"), 1);
+        assert_eq!(snap.planet_attrs["2-27693"][P_MINE], 2_471_999);
+        // No MINE row at all for one of OUR planets = the clock cleared.
+        assert_eq!(apply_work_rows(&mut snap, &[], "0-1"), 1);
+        assert_eq!(snap.planet_attrs["2-27693"][P_MINE], 0);
+    }
 
     #[test]
     fn a_signed_completion_restarts_only_a_known_planets_clock() {

@@ -352,6 +352,38 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       return name || 'Struct';
     }
 
+    // Every JSON object in a raw NATS-over-WebSocket frame, in order.
+    // Pure: shared with the harness test in scripts/harness-tests.
+    window.__STRUCTS_GRASS_PARSE__ = function(raw) {
+      var out = [];
+      if (typeof raw !== 'string') return out;
+      var pos = 0;
+      while (true) {
+        var start = raw.indexOf('{', pos);
+        if (start === -1) break;
+        var depth = 0, end = -1, inStr = false, esc = false;
+        for (var i = start; i < raw.length; i++) {
+          var ch = raw[i];
+          if (inStr) {
+            if (esc) { esc = false; }
+            else if (ch === '\\') { esc = true; }
+            else if (ch === '"') { inStr = false; }
+            continue;
+          }
+          if (ch === '"') { inStr = true; continue; }
+          if (ch === '{') depth++;
+          else if (ch === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+        }
+        if (end === -1) break; // a payload split across frames: nothing more to read here
+        try {
+          var obj = JSON.parse(raw.substring(start, end));
+          if (obj && typeof obj === 'object') out.push(obj);
+        } catch (e) { /* not JSON (protocol noise between MSG lines) */ }
+        pos = end;
+      }
+      return out;
+    };
+
     // Helper: extract planet ID from NATS subject like "structs.planet.2-156"
     function subjectPlanetId(subject) {
       if (!subject) return null;
@@ -831,21 +863,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 return; // Blob — skip
               }
 
-              var jsonStart = raw.indexOf('{');
-              if (jsonStart === -1) return;
-
-              var jsonStr = raw.substring(jsonStart);
-              var braceCount = 0;
-              var jsonEnd = -1;
-              for (var i = 0; i < jsonStr.length; i++) {
-                if (jsonStr[i] === '{') braceCount++;
-                if (jsonStr[i] === '}') braceCount--;
-                if (braceCount === 0) { jsonEnd = i + 1; break; }
-              }
-              if (jsonEnd === -1) return;
-
-              var data = JSON.parse(jsonStr.substring(0, jsonEnd));
-              if (!data.category) return;
+              // A NATS WebSocket frame carries as many MSG payloads as the
+              // server had ready — every planet_activity row of a block lands
+              // in ONE frame (health + status + build_start for a new struct).
+              // This used to parse only the first JSON object per frame and
+              // silently dropped the rest: measured 2026-09-04 as a flat 25%
+              // loss across every category (1,674 status rows emitted in an
+              // hour, 1,223 received), which is what left the snapshot
+              // believing built structs were still building. Walk them all.
+              var messages = window.__STRUCTS_GRASS_PARSE__(raw);
+              for (var mi = 0; mi < messages.length; mi++) {
+              var data = messages[mi];
+              if (!data.category) continue;
 
               // Push all events to Rust event buffer for MCP access.
               // Fold any TOP-LEVEL grass fields into `detail` first: inventory
@@ -925,6 +954,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               } else {
                 dispatchNotification();
               }
+              } // end for each message in frame
             } catch (e) {
               // Silent fail — don't break the app for notification parsing errors
             }
