@@ -77,6 +77,23 @@ pub fn get_categories() -> Vec<String> {
 
 #[tauri::command]
 pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<(), String> {
+    // The webview tap is the FALLBACK path. While the native NATS subscriber
+    // (mcp/grass_native.rs) is live, every frame it forwards is a duplicate
+    // of one Rust already ingested — except `tx_settled`, which the webview's
+    // signer produces and nothing else can deliver.
+    if event.category != "tx_settled" && crate::mcp::grass_native::authoritative() {
+        crate::mcp::grass_native::note_webview_suppressed();
+        return Ok(());
+    }
+    ingest(&app, event);
+    Ok(())
+}
+
+/// One GRASS event into everything that consumes the stream: the durable
+/// telemetry copy, the perception snapshot, settlement checks, the combat
+/// nudge, the in-memory ring, name enrichment, and the GRASS page relay.
+/// Shared by the native subscriber and the webview tap.
+pub fn ingest(app: &tauri::AppHandle, event: GameEvent) {
     // Durable copy FIRST, and unconditionally — including `block` heartbeats.
     // The in-memory ring below is a working set (2000 entries = minutes at
     // fleet scale); this is the 7-day record that a support bundle carries.
@@ -96,7 +113,7 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     // was going only to the webview console. That is the same blind spot that
     // hid 15 days of futile mining; surface it loudly instead.
     if event.category == "tx_settled" {
-        note_failed_settlement(&app, &event);
+        note_failed_settlement(app, &event);
     }
 
     // ── Combat events preempt the response cadence. ──
@@ -137,18 +154,17 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
     }
     // Queue background name lookups for any ids this event mentions (cheap
     // scan; fetches spawn; resolved names push to the board as grass-lookups).
-    crate::mcp::enrich::note_event(&app, &event);
+    crate::mcp::enrich::note_event(app, &event);
     // Route live deltas to any open spectator window watching this planet. A
     // no-op (and near-free) unless Raid View is enabled AND a window is up.
-    crate::mcp::spectator::note_event(&app, &event);
+    crate::mcp::spectator::note_event(app, &event);
     // Per-block sampling for the Game Stats window. Counter math only; the
     // per-block push inside is gated on that window existing.
-    crate::mcp::game_stats::note_event(&app, &event);
+    crate::mcp::game_stats::note_event(app, &event);
     // Live-relay to the Team Ops GRASS page when it exists (mirror of the
     // board_feed pattern). Board closing mid-emit is a benign race — the
     // event is already in the ring for the next back-fill.
-    crate::mcp::web_board::emit_board(&app, "grass-event", &event);
-    Ok(())
+    crate::mcp::web_board::emit_board(app, "grass-event", &event);
 }
 
 /// Did this settlement fail to land?

@@ -368,6 +368,28 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
             }
         }
         // Re-tested once the gate slot is won, immediately before broadcast.
+        if task_kind == "BUILD" {
+            // The struct may already be Online: its completion landed and the
+            // struct_status frame was lost on the way into the snapshot, so
+            // the build loop re-issued this task. One indexed read beats a
+            // rejected tx ("is built but must be building") and a wasted
+            // gate slot — 19 of them in one hour on 2026-09-04.
+            let client = crate::mcp::cosmos_client::CosmosClient::new();
+            if let Ok(live) = crate::mcp::verify::struct_state_live(&client, &object_id).await {
+                if live.built || live.destroyed {
+                    crate::mcp::perception::note_struct_built(&object_id);
+                    crate::mcp::telemetry::tlog(
+                        "hasher",
+                        crate::mcp::telemetry::Sev::Notice,
+                        format!(
+                            "BUILD proof for {object_id} abandoned: already {} on chain (snapshot missed the frame)",
+                            if live.destroyed { "destroyed" } else { "built" }
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
         let clock_planet = ore_planet.clone();
         let guard = ore_planet.map(|planet_id| crate::mcp::tx_retry::FreshAnchor {
             planet_id,

@@ -788,6 +788,23 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
     // ── WebSocket Proxy ──
     // Intercept WebSocket to tap NATS messages transparently.
+    //
+    // Tap accounting. Measured 2026-09-04 (production NATS delivers 100% to a
+    // raw client on the same machine; the Rust side stores every event it is
+    // handed) that ~20% of frames never reach Rust from THIS tap. These
+    // counters, logged once a minute through conn_log, say where: frames seen,
+    // payloads parsed, invokes that resolved, invokes that rejected (+ why).
+    var grassStats = { frames: 0, blobs: 0, msgs: 0, invoked: 0, ok: 0, failed: 0, parseErr: 0, lastErr: '' };
+    window.__STRUCTS_GRASS_STATS__ = grassStats;
+    setInterval(function () {
+      if (!grassStats.frames || !window.__TAURI__) return;
+      var line = 'grass tap: frames=' + grassStats.frames + ' blobs=' + grassStats.blobs + ' msgs=' + grassStats.msgs +
+        ' invoked=' + grassStats.invoked + ' ok=' + grassStats.ok + ' failed=' + grassStats.failed +
+        ' parseErr=' + grassStats.parseErr + (grassStats.lastErr ? ' lastErr=' + grassStats.lastErr : '');
+      grassStats.frames = grassStats.blobs = grassStats.msgs = grassStats.invoked = grassStats.ok = grassStats.failed = grassStats.parseErr = 0;
+      grassStats.lastErr = '';
+      window.__TAURI__.core.invoke('conn_log', { msg: line }).catch(function () {});
+    }, 60000);
     var OriginalWebSocket = window.WebSocket;
     window.WebSocket = new Proxy(OriginalWebSocket, {
       construct: function(target, args) {
@@ -855,11 +872,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
               // Handle both string and binary NATS frames
               var raw;
+              grassStats.frames++;
               if (typeof event.data === 'string') {
                 raw = event.data;
               } else if (event.data instanceof ArrayBuffer) {
                 raw = new TextDecoder().decode(event.data);
               } else {
+                grassStats.blobs++;
                 return; // Blob — skip
               }
 
@@ -875,6 +894,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               for (var mi = 0; mi < messages.length; mi++) {
               var data = messages[mi];
               if (!data.category) continue;
+              grassStats.msgs++;
 
               // Push all events to Rust event buffer for MCP access.
               // Fold any TOP-LEVEL grass fields into `detail` first: inventory
@@ -895,6 +915,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 if (data.detail && typeof data.detail === 'object') {
                   for (var __d in data.detail) mergedDetail[__d] = data.detail[__d];
                 }
+                grassStats.invoked++;
                 window.__TAURI__.core.invoke('push_game_event', {
                   event: {
                     category: data.category,
@@ -902,7 +923,10 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                     detail: mergedDetail,
                     timestamp: Date.now()
                   }
-                }).catch(function() {});
+                }).then(function () { grassStats.ok++; }, function (e) {
+                  grassStats.failed++;
+                  grassStats.lastErr = String(e && e.message ? e.message : e).slice(0, 120);
+                });
               }
 
               // Nudge the reactivity driver so the open menu page reflects the change.
@@ -957,6 +981,8 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               } // end for each message in frame
             } catch (e) {
               // Silent fail — don't break the app for notification parsing errors
+              grassStats.parseErr++;
+              grassStats.lastErr = String(e && e.message ? e.message : e).slice(0, 120);
             }
           });
         }

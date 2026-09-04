@@ -248,6 +248,16 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                         return err(format!("snapshot_source must be \"guild\" or \"lcd\", got {src:?}"));
                     }
                 }
+                if let Some(src) = set.get("grass_source").and_then(|v| v.as_str()) {
+                    if crate::mcp::grass_native::set_source(src) {
+                        let mut cfg = crate::mcp::config::McpConfig::load();
+                        cfg.grass_source = crate::mcp::grass_native::source().name().to_string();
+                        let _ = cfg.save();
+                        applied.push(format!("grass_source={}", crate::mcp::grass_native::source().name()));
+                    } else {
+                        return err(format!("grass_source must be \"native\" or \"webview\", got {src:?}"));
+                    }
+                }
                 if let Some(cap) = set.get("tx_gate_cap").and_then(|v| v.as_u64()) {
                     let n = crate::mcp::tx_gate::set_cap(cap as usize);
                     let mut cfg = crate::mcp::config::McpConfig::load();
@@ -256,7 +266,7 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                     applied.push(format!("tx_gate_cap={n}"));
                 }
                 if applied.is_empty() {
-                    return err("nothing recognized in `set`. Settable here: {\"remediate\": bool, \"sign_mode\": \"sync\"|\"async\"|\"native\"|\"native_async\", \"verify_source\": \"guild\"|\"lcd\", \"snapshot_source\": \"guild\"|\"lcd\", \"tx_gate_cap\": 1..32}. Hash knobs live in structs_hash config; loop knobs in structs_players.");
+                    return err("nothing recognized in `set`. Settable here: {\"remediate\": bool, \"sign_mode\": \"sync\"|\"async\"|\"native\"|\"native_async\", \"verify_source\": \"guild\"|\"lcd\", \"snapshot_source\": \"guild\"|\"lcd\", \"grass_source\": \"native\"|\"webview\", \"tx_gate_cap\": 1..32}. Hash knobs live in structs_hash config; loop knobs in structs_players.");
                 }
                 return text(json!({ "applied": applied }));
             }
@@ -264,6 +274,9 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 "effective_loop_concurrency": loop_util::effective_max_concurrent(),
                 "loop_concurrency_ceiling": loop_util::MAX_CONCURRENT_PLAYERS,
                 "sign_mode": crate::mcp::vplayer_bridge::sign_mode(),
+                "grass_source": crate::mcp::grass_native::source().name(),
+                "grass": crate::mcp::grass_native::health(),
+                "guild_auth": crate::mcp::guild_auth::health(),
                 "native_signer": crate::mcp::native_signer::health(),
                 "verify": crate::mcp::verify::health(),
                 "snapshot": crate::mcp::perception::entity_stats(),

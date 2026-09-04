@@ -254,6 +254,16 @@ pub async fn struct_state(client: &CosmosClient, sid: &str) -> Result<StructStat
     }) {
         return Ok(s);
     }
+    struct_state_live(client, sid).await
+}
+
+/// [`struct_state`] that skips the snapshot: the indexed source (guild, LCD
+/// on failover), never what we believe. For the one decision where a stale
+/// belief costs a signed transaction — completing a build the chain already
+/// completed. Measured 2026-09-04: ~20% of GRASS frames never reach the
+/// snapshot (see structs-config.js grass tap stats), so a struct can sit
+/// "building" here long after it went Online there.
+pub async fn struct_state_live(client: &CosmosClient, sid: &str) -> Result<StructState, String> {
     with_failover!(
         "struct",
         async { struct_state_from_guild(&client.guild.struct_by_id(sid).await?) },
@@ -492,6 +502,13 @@ pub async fn slot_occupied(client: &CosmosClient, target: &str, loc: &str, ambit
     if let Some(o) = snap(|s| location_row(s, target, loc).and_then(|row| slot_occupied_in_map(&row, ambit, slot).ok())) {
         return Ok(o);
     }
+    slot_occupied_live(client, target, loc, ambit, slot).await
+}
+
+/// [`slot_occupied`] that skips the snapshot — the pre-sign check for a build
+/// initiate, where a slot the snapshot still shows free (its struct_status
+/// frame lost) costs a rejected tx and a 30-minute back-off for that player.
+pub async fn slot_occupied_live(client: &CosmosClient, target: &str, loc: &str, ambit: &str, slot: u64) -> Result<bool, String> {
     with_failover!(
         "slot",
         async { slot_occupied_in_map(&slot_map(&guild_object_row(client, loc).await?)?, ambit, slot) },

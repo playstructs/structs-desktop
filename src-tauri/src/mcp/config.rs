@@ -50,6 +50,14 @@ pub struct McpConfig {
     /// The guild path falls back to the LCD walk if a store comes back empty.
     #[serde(default = "default_verify_source")]
     pub snapshot_source: String,
+    /// Where GRASS frames enter Rust: "native" (async-nats from Rust, the
+    /// default) or "webview" (the game window's WebSocket tap).
+    #[serde(default = "default_grass_source")]
+    pub grass_source: String,
+}
+
+fn default_grass_source() -> String {
+    "native".to_string()
 }
 
 fn default_sign_mode() -> String {
@@ -74,6 +82,7 @@ impl Default for McpConfig {
             tx_gate_cap: None,
             verify_source: default_verify_source(),
             snapshot_source: default_verify_source(),
+            grass_source: default_grass_source(),
         }
     }
 }

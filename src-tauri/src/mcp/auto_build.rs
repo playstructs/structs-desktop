@@ -498,7 +498,9 @@ async fn initiate_verified_on_chain(
     if loc.is_empty() {
         return InitiateCheck::ReadFailed;
     }
-    let Ok(occupied) = crate::mcp::verify::slot_occupied(client, target, &loc, ambit, slot).await else {
+    // LIVE, not snapshot: a slot the snapshot still shows free (its frame
+    // lost) is a rejected initiate and a 30-minute back-off. 35 in one hour.
+    let Ok(occupied) = crate::mcp::verify::slot_occupied_live(client, target, &loc, ambit, slot).await else {
         return InitiateCheck::ReadFailed;
     };
     if occupied {

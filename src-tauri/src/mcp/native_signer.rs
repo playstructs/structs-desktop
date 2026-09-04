@@ -129,6 +129,22 @@ pub fn is_ready() -> bool {
 }
 
 /// The bech32 address at HD index `index`.
+/// The device key (HD index 0) and its bech32 address — the account the
+/// game window signed in with, and the one the guild server's
+/// `player_address` table knows. Refuses to answer if the derived address
+/// is not the address the webview handed over at sign-in.
+pub(crate) fn device_key() -> Result<(SigningKey, String), String> {
+    let guard = SEED.read().unwrap();
+    let seed = guard.as_ref().ok_or("native signer has no key (sign in to the game first)")?;
+    let (key, addr) = derive(&seed[..], 0)?;
+    if let Some(expected) = DEVICE_ADDRESS.read().unwrap().as_deref() {
+        if expected != addr {
+            return Err(format!("device key mismatch: derived {addr}, signed-in device is {expected}"));
+        }
+    }
+    Ok((key, addr))
+}
+
 pub fn address(index: u32) -> Result<String, String> {
     let guard = SEED.read().unwrap();
     let seed = guard.as_ref().ok_or("native signer has no key")?;

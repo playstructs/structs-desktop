@@ -174,7 +174,58 @@ impl GuildApiClient {
 
     /// Low-level GET: returns the unwrapped `data` field, validating the envelope.
     // (see `query_esc` below)
+    pub(crate) fn base_url(&self) -> String {
+        self.base.read().map(|b| b.clone()).unwrap_or_default()
+    }
+
+    /// A route that needs no session (`/api/timestamp`): no login retry, so
+    /// the login itself can use it without recursing.
+    pub(crate) async fn get_public(&self, path: &str) -> Result<Value, String> {
+        self.get_once(path).await
+    }
+
+    /// `POST` a JSON body to a public route and return the whole envelope
+    /// (`/api/auth/login` answers `success` + `errors`, no `data`).
+    pub(crate) async fn post_public(&self, path: &str, body: &Value) -> Result<Value, String> {
+        let url = self.build_url(path);
+        note_request();
+        let resp = http()
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("Guild API HTTP error: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| format!("Guild API read error: {e}"))?;
+        if !status.is_success() {
+            return Err(format!("Guild API {} {}: {}", status.as_u16(), url, text));
+        }
+        serde_json::from_str(&text).map_err(|e| format!("Guild API JSON parse error: {e} (body: {text})"))
+    }
+
+    /// Whether an error from the client means "no session" — the guild's
+    /// `authentication_error` envelope, or a bare 401.
+    fn is_auth_error(e: &str) -> bool {
+        e.contains("requires login") || e.starts_with("Guild API 401 ")
+    }
+
     async fn get(&self, path: &str) -> Result<Value, String> {
+        match self.get_once(path).await {
+            Err(e) if Self::is_auth_error(&e) => {
+                // The session is gone (never made, or idled out). Rust can
+                // sign the login itself — see mcp/guild_auth.rs — so make one
+                // and retry once instead of failing over to the LCD.
+                if crate::mcp::guild_auth::recover(self).await {
+                    self.get_once(path).await
+                } else {
+                    Err(e)
+                }
+            }
+            other => other,
+        }
+    }
+
+    async fn get_once(&self, path: &str) -> Result<Value, String> {
         note_request();
         let url = self.build_url(path);
         let resp = http()
@@ -407,6 +458,19 @@ impl GuildApiClient {
     /// that need `meta`), same error handling as `get`. Also the raw probe
     /// behind `structs_intel query {guild_path}`.
     pub(crate) async fn get_envelope(&self, path: &str) -> Result<Value, String> {
+        match self.get_envelope_once(path).await {
+            Err(e) if Self::is_auth_error(&e) => {
+                if crate::mcp::guild_auth::recover(self).await {
+                    self.get_envelope_once(path).await
+                } else {
+                    Err(e)
+                }
+            }
+            other => other,
+        }
+    }
+
+    async fn get_envelope_once(&self, path: &str) -> Result<Value, String> {
         note_request();
         let url = self.build_url(path);
         let resp = http()

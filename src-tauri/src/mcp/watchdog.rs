@@ -658,6 +658,8 @@ pub fn health_snapshot() -> Value {
     json!({
         "status": status,
         "signing_bridge": bridge,
+        "grass": crate::mcp::grass_native::health(),
+        "guild_auth": crate::mcp::guild_auth::health(),
         "sync_age_ms": sync_age_ms as u64,
         "sync_interval_ms": sync_interval as u64,
         "loops_overdue": overdue,

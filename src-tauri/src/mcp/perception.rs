@@ -507,6 +507,21 @@ impl Snapshot {
         v
     }
 
+    /// A KNOWN struct is built on chain: set the bit and clear its build clock,
+    /// exactly as `apply("struct_status")` does for the 1→7 frame.
+    pub fn mark_built(&mut self, sid: &str) -> bool {
+        if !self.structs.contains_key(sid) {
+            return false;
+        }
+        let was = self.sattr(sid, S_STATUS);
+        if was & status::BUILT != 0 {
+            return false;
+        }
+        Self::set(&mut self.struct_attrs, sid, S_STATUS, was | status::BUILT);
+        Self::set(&mut self.struct_attrs, sid, S_BUILD, 0);
+        true
+    }
+
     /// Restart a KNOWN planet's mine/refine clock at `block` (a completion
     /// we signed landed). Unknown planets and zero blocks are refused: this
     /// records what the chain did, it never invents a planet.
@@ -1329,6 +1344,18 @@ pub fn note_clock_restart(planet_id: &str, task_type: &str, block: u64) -> bool 
     false
 }
 
+/// The chain told us (through a live pre-sign read) that a struct is built;
+/// the frame that should have said so never arrived. Mirror what
+/// `apply("struct_status")` would have done.
+pub fn note_struct_built(sid: &str) -> bool {
+    if let Ok(mut g) = CURRENT.write() {
+        if let Some(s) = g.as_mut() {
+            return s.mark_built(sid);
+        }
+    }
+    false
+}
+
 /// Force a clock sweep now (a "work failure" means the snapshot's clock was
 /// wrong; do not wait out the interval to find out how).
 pub fn request_hot_refresh(client: &CosmosClient) {
@@ -1941,6 +1968,18 @@ mod tests {
 #[cfg(test)]
 mod guild_ingest_tests {
     use super::*;
+
+    #[test]
+    fn a_live_read_can_mark_a_struct_built_when_its_frame_was_lost() {
+        let mut snap = Snapshot::default();
+        snap.structs.insert("5-240169".into(), StructRow { id: "5-240169".into(), ..Default::default() });
+        snap.struct_attrs.insert("5-240169".into(), { let mut a = [0u64; 7]; a[S_STATUS] = 1; a[S_BUILD] = 2_471_448; a });
+        assert!(snap.mark_built("5-240169"));
+        assert_ne!(snap.sattr("5-240169", S_STATUS) & status::BUILT, 0);
+        assert_eq!(snap.sattr("5-240169", S_BUILD), 0, "build clock clears with the status, as apply() does");
+        assert!(!snap.mark_built("5-240169"), "already built is no change");
+        assert!(!snap.mark_built("5-999999"), "unknown struct is never invented");
+    }
 
     #[test]
     fn the_work_view_never_moves_a_clock_backwards() {

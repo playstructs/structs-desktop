@@ -621,6 +621,8 @@ try {{
             // Native signer: load the key from the OS keychain (off-thread);
             // until the game hands one over, native modes fall back to the webview.
             mcp::native_signer::init();
+            mcp::grass_native::set_source(&mcp_config.grass_source);
+            mcp::grass_native::init(app.handle().clone());
             if let Some(cap) = mcp_config.tx_gate_cap {
                 mcp::tx_gate::set_cap(cap);
             }
