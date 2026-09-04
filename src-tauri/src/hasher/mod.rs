@@ -32,6 +32,25 @@ static MAX_CONCURRENT: AtomicU64 = AtomicU64::new(5);
 /// Opt-in adaptive tuning of difficulty_start/max_concurrent from solve history.
 static AUTO_TUNE: AtomicBool = AtomicBool::new(false);
 
+/// The hashing engine's configuration and the GPU it found, for the log
+/// bundle manifest — a player's "hashing never starts" report is unanswerable
+/// without exactly these values.
+pub fn config_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "enabled": hash_enabled(),
+        "engine_pref": engine_pref_label(),
+        "gpu_available": GPU_AVAILABLE.load(Ordering::Relaxed),
+        "gpu": GPU_INFO.get().map(|i| serde_json::json!({
+            "name": i.name, "backend": i.backend, "device_type": i.device_type,
+        })),
+        "difficulty_start_effective": difficulty_start(),
+        "difficulty_start_configured": DIFFICULTY_START_OVERRIDE.load(Ordering::Relaxed),
+        "difficulty_start_default": difficulty::DIFFICULTY_START,
+        "max_concurrent": max_concurrent(),
+        "auto_tune": auto_tune(),
+    })
+}
+
 pub fn set_auto_tune(v: bool) {
     AUTO_TUNE.store(v, Ordering::Relaxed);
 }

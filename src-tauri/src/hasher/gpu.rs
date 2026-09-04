@@ -3,7 +3,7 @@ use tauri::Emitter;
 use wgpu::util::DeviceExt;
 
 use crate::hasher::difficulty::{
-    calculate_difficulty, estimate_age, refresh_checkpoint, CHECKPOINT_COMMIT, DIFFICULTY_START_SLEEP_MS,
+    calculate_difficulty, estimate_age, gpu_checkpoint_due, refresh_checkpoint, DIFFICULTY_START_SLEEP_MS,
 };
 use crate::hasher::types::{now_millis, TaskHandle};
 
@@ -458,7 +458,17 @@ pub fn run_gpu_hash(
         current_nonce += GPU_BATCH_SIZE as u64;
 
         // Progress checkpoint
-        if total_hashes % CHECKPOINT_COMMIT == 0 || total_hashes == GPU_BATCH_SIZE as u64 {
+        // Checkpoint on BATCH boundaries. `total_hashes % CHECKPOINT_COMMIT`
+        // was the old test, but total_hashes only ever takes multiples of the
+        // 2^20 batch and 5,000,000 is not one of them — the two first coincide
+        // at 2^20 × 5^7 ≈ 8.2e10 hashes, 20–35 minutes into a grind. Until
+        // then the iteration counter sat at exactly one batch, the watchdog
+        // read that as "running, no progress for 5 min" and reaped a healthy
+        // task, and the grinding difficulty never decayed either (see below).
+        // A human player's webapp never hears about the reap, so its struct
+        // simply never builds. Seen in a player's log bundle 2026-09-04 and
+        // 260 times in our own telemetry that week.
+        if gpu_checkpoint_due(total_hashes, GPU_BATCH_SIZE as u64) || total_hashes == GPU_BATCH_SIZE as u64 {
             let now_ms = now_millis();
             {
                 let mut progress = handle.progress.lock().unwrap();
@@ -481,7 +491,7 @@ pub fn run_gpu_hash(
         }
 
         // Difficulty recalculation
-        if total_hashes % (CHECKPOINT_COMMIT) == 0 {
+        if gpu_checkpoint_due(total_hashes, GPU_BATCH_SIZE as u64) {
             let now_ms = now_millis();
             let (age, block_est) = {
                 let progress = handle.progress.lock().unwrap();

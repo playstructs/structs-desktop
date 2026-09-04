@@ -122,6 +122,7 @@ fn manifest(app: &tauri::AppHandle) -> Value {
             "pending": crate::hasher::pool::pending_len(),
             "cap": crate::hasher::max_concurrent(),
         },
+        "hasher": crate::hasher::config_snapshot(),
         "tx_gate": crate::mcp::tx_gate::snapshot(),
         "watchdog": crate::mcp::watchdog::health_snapshot(),
         "vplayer_count": crate::mcp::virtual_players::count(),
@@ -161,10 +162,20 @@ fn crash_reports(limit: usize) -> Vec<PathBuf> {
 }
 
 /// Build the zip. Returns (path, bytes).
+/// The app-support directory the configs and state files live in.
+///
+/// This used to be `config_path("").parent()`. `config_path("")` yields
+/// `…/structs-app/` and `Path::parent` of that is `…/Application Support`,
+/// whose entries are all directories — so every bundle ever exported (ours
+/// included) carried a manifest and the telemetry DB and NOT ONE config file,
+/// while the manifest promised `config/*.json`. The 2026-09-04 player report
+/// arrived without the hash config that would have answered it in a minute.
+fn bundle_source_dir() -> Option<PathBuf> {
+    crate::mcp::config_store::config_path("manifest.json").and_then(|p| p.parent().map(Path::to_path_buf))
+}
+
 fn build_bundle(app: &tauri::AppHandle) -> Result<(PathBuf, u64), String> {
-    let src_dir = crate::mcp::config_store::config_path("")
-        .ok_or("no config directory")?;
-    let src_dir = src_dir.parent().unwrap_or(&src_dir).to_path_buf();
+    let src_dir = bundle_source_dir().ok_or("no config directory")?;
 
     let downloads = dirs::download_dir()
         .or_else(dirs::home_dir)
@@ -309,6 +320,14 @@ pub fn log_ui_events(events: Vec<crate::mcp::telemetry::UiRow>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundle_reads_the_app_support_dir_where_the_configs_are() {
+        let dir = bundle_source_dir().expect("a config dir");
+        assert!(dir.ends_with("structs-app"), "{}", dir.display());
+        // The regression: the parent of "structs-app/" is Application Support.
+        assert!(!dir.ends_with("Application Support"));
+    }
 
     #[test]
     fn redacts_secret_keys_at_any_depth() {

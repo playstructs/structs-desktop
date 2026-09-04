@@ -241,9 +241,9 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Enqueue a task whose current block age is exactly `age` — with
-    /// difficulty_target 10_000, age 10_000 → difficulty 1 (ripe), age ~2_700
-    /// → difficulty 10 (ripe, harder), age 10 → difficulty 49 (unripe, since
-    /// DIFFICULTY_START is 12).
+    /// difficulty_target 10_000, age 10_000 → difficulty 1 (ripe), age 4_000
+    /// → difficulty 8 (ripe, harder — exactly DIFFICULTY_START), age 10 →
+    /// difficulty 49 (unripe).
     fn task(registry: &Arc<TaskRegistry>, id: &str, age: u64) -> Arc<TaskHandle> {
         let block_start = 100;
         let mut params = TaskParams::for_ore(id, "MINE", block_start, 10_000);
@@ -265,7 +265,7 @@ mod tests {
         let registry = Arc::new(TaskRegistry::new());
         drain_pending();
         task(&registry, "t-easy", 10_000); // difficulty 1
-        task(&registry, "t-hard", 2_700); // difficulty ~10, still ripe
+        task(&registry, "t-hard", 4_000); // difficulty 8 == DIFFICULTY_START, still ripe
         task(&registry, "t-unripe", 10); // difficulty 49 > DIFFICULTY_START
 
         let first = pop_ripest(&registry).expect("easiest ripe task pops first");

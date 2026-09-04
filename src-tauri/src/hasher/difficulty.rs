@@ -10,15 +10,39 @@
 /// `refresh_checkpoint`, which now re-anchors mid-task so it can't accumulate.
 pub const ESTIMATED_BLOCK_TIME_MS: f64 = 5280.0;
 
-/// Minimum difficulty before hashing starts (higher than JS default of 10
-/// because Rust hasher is orders of magnitude faster)
-pub const DIFFICULTY_START: u64 = 12;
+/// Difficulty (leading HEX zeros, 4 bits each) at which a task is admitted to
+/// grind, unless the config or the tuner says otherwise.
+///
+/// Was 12 — 48 bits, 2.8e14 expected tries. No consumer GPU clears that
+/// before the difficulty has decayed for another half hour, so an untuned
+/// player's task ground uselessly from the moment it was admitted (a player's
+/// 2026-09-04 log bundle: every build reaped as "stalled"). 8 is 32 bits:
+/// ~4.3e9 tries, ~100 s at 40 MH/s, ~10 s at 400 MH/s, and it is where the
+/// tuner's own floor sits (`tuner::DIFF_MIN`). The admission wait grows by a
+/// few minutes of anchor age in exchange.
+pub const DIFFICULTY_START: u64 = 8;
 
 /// Sleep delay while waiting for difficulty to drop (matches TASK.DIFFICULTY_START_SLEEP_DELAY = 10000)
 pub const DIFFICULTY_START_SLEEP_MS: u64 = 10000;
 
 /// Iterations between progress checkpoints (matches TASK.CHECKPOINT_COMMIT = 5000000)
 pub const CHECKPOINT_COMMIT: u64 = 5_000_000;
+
+/// Is a progress checkpoint due after `total_hashes`, for an engine that
+/// advances in whole batches of `batch_size`?
+///
+/// Every `max(1, CHECKPOINT_COMMIT / batch_size)` batches — the closest the
+/// batch grain gets to the nominal cadence. Never test `total_hashes %
+/// CHECKPOINT_COMMIT == 0` against batch totals: with a 2^20 batch the first
+/// common multiple is 2^20 × 5^7 ≈ 8.2e10 hashes, so progress (and the
+/// difficulty recalculation that rides on it) froze for 20–35 minutes and the
+/// watchdog reaped healthy tasks as stalled.
+pub fn gpu_checkpoint_due(total_hashes: u64, batch_size: u64) -> bool {
+    let batch_size = batch_size.max(1);
+    let per = (CHECKPOINT_COMMIT / batch_size).max(1);
+    let batches = total_hashes / batch_size;
+    batches > 0 && batches % per == 0
+}
 
 /// Iterations between difficulty recalculations (matches TASK.DIFFICULTY_RECALCULATE = 5000000)
 pub const DIFFICULTY_RECALCULATE: u64 = 5_000_000;
@@ -215,5 +239,50 @@ mod tests {
         // Live height unavailable in tests (GAME_STATE is 0) → keep the anchor.
         let (cp, cpt) = refresh_checkpoint(500, 1000.0, 9999.0);
         assert_eq!((cp, cpt), (500, 1000.0));
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    const BATCH: u64 = 1 << 20;
+
+    #[test]
+    fn gpu_checkpoints_land_every_few_batches_not_every_eighty_billion_hashes() {
+        // 5,000,000 / 2^20 = 4.77 → every 4 batches.
+        let due: Vec<u64> = (1..=16).map(|b| b * BATCH).filter(|t| gpu_checkpoint_due(*t, BATCH)).collect();
+        assert_eq!(due, vec![4 * BATCH, 8 * BATCH, 12 * BATCH, 16 * BATCH]);
+        // The old test: no batch total satisfied it until the lcm, 5^7 batches
+        // (2^20 × 5^7 ≈ 8.2e10 hashes) into the grind.
+        assert!((1..78_125u64).all(|b| (b * BATCH) % CHECKPOINT_COMMIT != 0));
+        assert_eq!((78_125u64 * BATCH) % CHECKPOINT_COMMIT, 0);
+    }
+
+    #[test]
+    fn a_checkpoint_is_never_more_than_a_few_seconds_of_grinding_away() {
+        // 4 batches at a slow 20 MH/s is ~0.2 s — nowhere near the 5-minute
+        // stall horizon the watchdog uses.
+        let per_batches = (CHECKPOINT_COMMIT / BATCH).max(1);
+        let hashes = per_batches * BATCH;
+        assert!(hashes as f64 / 20_000_000.0 < 1.0, "{hashes} hashes between checkpoints");
+    }
+
+    #[test]
+    fn checkpoint_helper_handles_odd_batch_sizes_and_zero() {
+        assert!(!gpu_checkpoint_due(0, BATCH));
+        // A batch larger than the nominal cadence checkpoints every batch.
+        assert!(gpu_checkpoint_due(10_000_000, 10_000_000));
+        assert!(gpu_checkpoint_due(20_000_000, 10_000_000));
+        // A degenerate batch size of 0 must not divide by zero.
+        assert!(gpu_checkpoint_due(CHECKPOINT_COMMIT, 0));
+    }
+
+    #[test]
+    fn default_admission_difficulty_is_something_a_gpu_can_clear() {
+        // Expected tries at the default start: 16^d. 40 MH/s must clear it in
+        // a few minutes, or an untuned player's task grinds forever.
+        let tries = 16f64.powi(DIFFICULTY_START as i32);
+        assert!(tries / 40_000_000.0 < 5.0 * 60.0, "{tries} tries at difficulty {DIFFICULTY_START}");
     }
 }

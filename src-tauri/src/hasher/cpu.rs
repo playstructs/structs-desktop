@@ -123,6 +123,12 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
                 let mut nonce = start_nonce + thread_id as u64;
                 let stride = num_threads as u64;
                 let mut _local_iterations: u64 = 0;
+                // Threshold checkpoints, not `% N == 0`: `global_iters` is a
+                // shared counter bumped by every thread, so the value thread 0
+                // observes skips over exact multiples and a modulus test can
+                // miss a checkpoint entirely.
+                let mut next_checkpoint: u64 = CHECKPOINT_COMMIT;
+                let mut next_recalc: u64 = DIFFICULTY_RECALCULATE;
                 let mut difficulty = {
                     let now_ms = now_millis();
                     let (age, _) = {
@@ -185,7 +191,8 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
                     }
 
                     // Progress checkpoint (only one thread reports)
-                    if global_iters % CHECKPOINT_COMMIT == 0 && thread_id == 0 {
+                    if thread_id == 0 && global_iters >= next_checkpoint {
+                        next_checkpoint = global_iters - (global_iters % CHECKPOINT_COMMIT) + CHECKPOINT_COMMIT;
                         let now_ms = now_millis();
                         {
                             let mut progress = handle.progress.lock().unwrap();
@@ -213,7 +220,8 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
                     }
 
                     // Difficulty recalculation
-                    if global_iters % DIFFICULTY_RECALCULATE == 0 && thread_id == 0 {
+                    if thread_id == 0 && global_iters >= next_recalc {
+                        next_recalc = global_iters - (global_iters % DIFFICULTY_RECALCULATE) + DIFFICULTY_RECALCULATE;
                         let now_ms = now_millis();
                         let (age, block_est) = {
                             let mut progress = handle.progress.lock().unwrap();

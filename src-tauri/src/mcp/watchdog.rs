@@ -48,6 +48,11 @@ const HASH_STALL_MS: f64 = 5.0 * 60_000.0;
 /// zero forever, so they still get collected — just on a horizon long enough
 /// that real work is not mistaken for them.
 const HASH_STARVED_MS: f64 = 45.0 * 60_000.0;
+/// A stalled task is restarted in place (same pid, resuming nonce) this many
+/// times before it is dropped and reported. Ten restarts at the 5-minute stall
+/// horizon is ~an hour of a task making no progress at all — long past what a
+/// slow-but-alive engine looks like.
+const MAX_HASH_RESTARTS: u32 = 10;
 /// The sync tick is STALLED when nothing has synced for this many × the
 /// current sync interval.
 const SYNC_STALL_FACTOR: f64 = 3.0;
@@ -88,6 +93,17 @@ static LAST_CHECK_MS: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 /// watchdog, which in practice is the first sync tick after launch.
 static APP_START_MS: LazyLock<f64> = LazyLock::new(now_millis);
 /// task_id -> (last seen iterations, when they last changed).
+/// pid → in-place restarts so far (see the stalled-task remedy). Pruned with
+/// `HASH_PROGRESS` when the pid leaves the registry.
+static HASH_RESTARTS: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn note_hash_restart(id: &str) -> u32 {
+    let mut m = lock_recover(&HASH_RESTARTS);
+    let n = m.entry(id.to_string()).or_insert(0);
+    *n += 1;
+    *n
+}
+
 static HASH_PROGRESS: LazyLock<Mutex<HashMap<String, (u64, f64)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// finding key (e.g. "wedged:auto_build", "sync") -> consecutive checks the
@@ -453,20 +469,60 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                             // off and spawn a replacement so the bounded pool
                             // never silently drains.
                             crate::hasher::pool::note_wedged();
-                            if let Some(reg) = app.try_state::<Arc<TaskRegistry>>() {
-                                if let Some((_, h)) = reg.tasks.remove(&id) {
-                                    h.cancel.store(true, Ordering::SeqCst);
-                                    return format!("removed stalled hash task {id} from the queue");
-                                }
+                            let Some(reg) = app.try_state::<Arc<TaskRegistry>>() else {
+                                handle.cancel.store(true, Ordering::SeqCst);
+                                return format!("cancelled stalled hash task {id}");
+                            };
+                            let Some((_, old)) = reg.tasks.remove(&id) else {
+                                handle.cancel.store(true, Ordering::SeqCst);
+                                return format!("cancelled stalled hash task {id} (already gone)");
+                            };
+                            old.cancel.store(true, Ordering::SeqCst);
+                            // Judge the restarted task on its own evidence, not
+                            // the stall that got it here.
+                            lock_recover(&HASH_PROGRESS).remove(&id);
+
+                            // Then RESTART, do not drop. The task's owner is
+                            // usually the webapp's TaskManager: it started the
+                            // Rust task through the Worker shim and only ever
+                            // learns about it through hash_progress /
+                            // hash_complete events for this pid. A removed task
+                            // emits neither, so the webapp keeps a live-looking
+                            // TaskProcess forever and never re-spawns — which is
+                            // how a player's builds "never start" (log bundle
+                            // 2026-09-04: two structs reaped, both still
+                            // unbuilt hours later). Re-issuing under the same
+                            // pid, resuming at the nonce already searched, keeps
+                            // that contract. Bounded so a truly dead engine is
+                            // reported rather than retried forever.
+                            let restarts = note_hash_restart(&id);
+                            if restarts > MAX_HASH_RESTARTS {
+                                return format!(
+                                    "removed stalled hash task {id} after {MAX_HASH_RESTARTS} restarts — \
+                                     the hash engine is not making progress on it"
+                                );
                             }
-                            handle.cancel.store(true, Ordering::SeqCst);
-                            format!("cancelled stalled hash task {id}")
+                            let snap = old.snapshot();
+                            let mut params = old.params.clone();
+                            params.nonce_current = snap.nonce_current;
+                            params.iterations = snap.iterations;
+                            params.iterations_since_last_start = 0;
+                            params.status = "starting".to_string();
+                            match crate::hasher::start_hash_task_core(params, app.clone(), reg.inner()) {
+                                Ok(()) => format!(
+                                    "restarted stalled hash task {id} in place (restart {restarts}/{MAX_HASH_RESTARTS}, \
+                                     resuming at nonce {})",
+                                    snap.nonce_current
+                                ),
+                                Err(e) => format!("removed stalled hash task {id}; restart refused: {e}"),
+                            }
                         })),
                     });
                 }
             }
         }
         progress.retain(|id, _| live_ids.contains(id));
+        lock_recover(&HASH_RESTARTS).retain(|id, _| live_ids.contains(id));
     }
 
     findings
