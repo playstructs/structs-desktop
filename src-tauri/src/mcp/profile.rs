@@ -521,11 +521,12 @@ pub fn resolved_protect(p: &Profile) -> Vec<crate::mcp::auto_defend::ProtectTarg
     let Ok(gs) = crate::game_state::GAME_STATE.read() else {
         return Vec::new();
     };
-    let id_of = |name: &str| -> Option<String> {
+    let id_of = |name: &str| -> Option<crate::mcp::types::TypeId> {
         gs.struct_types
             .values()
             .find(|t| t.name.eq_ignore_ascii_case(name))
-            .map(|t| t.id.to_string())
+            .and_then(|t| u16::try_from(t.id).ok())
+            .map(crate::mcp::types::TypeId::new)
     };
     p.defence
         .protect

@@ -159,10 +159,10 @@ pub fn resolve_use_gpu() -> bool {
 // completion the worker calls `maybe_complete_virtual`, which signs the
 // completion tx AS that virtual player via the façade (the webapp TaskManager
 // only ever signs as the primary, so virtual PoW can't go through it).
-static VPLAYER_HASHES: std::sync::LazyLock<dashmap::DashMap<String, (u32, String)>> =
+static VPLAYER_HASHES: std::sync::LazyLock<dashmap::DashMap<String, (u32, crate::mcp::types::TaskType)>> =
     std::sync::LazyLock::new(dashmap::DashMap::new);
 
-pub fn register_vplayer_hash(object_id: String, index: u32, task_type: String) {
+pub fn register_vplayer_hash(object_id: String, index: u32, task_type: crate::mcp::types::TaskType) {
     VPLAYER_HASHES.insert(object_id, (index, task_type));
 }
 
@@ -296,14 +296,13 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
     if !snap.result_exists {
         return;
     }
-    let Some((_k, (index, task_type))) = VPLAYER_HASHES.remove(&snap.object_id) else {
+    let Some((_k, (index, kind))) = VPLAYER_HASHES.remove(&snap.object_id) else {
         return;
     };
     let nonce = snap.result_nonce.clone().unwrap_or_default();
     let proof = snap.result_hash.clone().unwrap_or_default();
     // Completion msg by task type. `creator` is injected by the façade signer.
     // The nonce is passed through as the string it is.
-    let Some(kind) = crate::mcp::types::TaskType::parse(&task_type) else { return };
     let type_url = kind.completion_type_url();
     let payload = kind.completion_payload(&snap.object_id, &proof, &nonce);
     let app = app_handle.clone();

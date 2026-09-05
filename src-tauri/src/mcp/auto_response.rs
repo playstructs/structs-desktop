@@ -711,8 +711,9 @@ async fn handle_alarm(
     };
     if let Some(idx) = defender_index {
         let app2 = app.clone();
-        let pid = alarm.defender_player.clone();
+        let pid = crate::mcp::types::PlayerId::parse(&alarm.defender_player).ok();
         tauri::async_runtime::spawn(async move {
+            let Some(pid) = pid else { return };
             let client = crate::mcp::cosmos_client::CosmosClient::new();
             crate::mcp::auto_build::ensure_command_ship(&app2, &client, &pid, idx).await;
         });

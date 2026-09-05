@@ -1639,7 +1639,7 @@ pub async fn execute(
                 let task_params = TaskParams::for_ore(&sid, "BUILD", block_start, difficulty);
                 match hasher::start_hash_task_core(task_params, app_handle.clone(), registry) {
                     Ok(()) => {
-                        hasher::register_vplayer_hash(sid.clone(), index, "BUILD".to_string());
+                        hasher::register_vplayer_hash(sid.clone(), index, crate::mcp::types::TaskType::Build);
                         return vec![Content::text(format!(
                             "[vplayer {}] build PoW started on {} (blockStartBuild {}, difficulty {}). MsgStructBuildComplete auto-signs when the proof lands. Track with structs_hash list.",
                             index, sid, block_start, difficulty
@@ -1739,7 +1739,9 @@ pub async fn execute(
                 };
                 match hasher::start_hash_task_core(task_params, app_handle.clone(), registry) {
                     Ok(()) => {
-                        hasher::register_vplayer_hash(object_id.clone(), index, task_type.to_string());
+                        if let Some(kind) = crate::mcp::types::TaskType::parse(task_type) {
+                            hasher::register_vplayer_hash(object_id.clone(), index, kind);
+                        }
                         return vec![Content::text(format!(
                             "[vplayer {}] {} hashing started on {} (mine/refine anchor on the planet's shared ore clock; build on the struct). The completion tx will be auto-signed as this player when the proof is found. Track with structs_hash list.",
                             index, action, object_id

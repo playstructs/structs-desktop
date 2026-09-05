@@ -1059,7 +1059,7 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
         defenders_on_cmd,
         enemy_fleet_structs,
         last_action_block: last_action,
-        blocks_since_action: current_block.saturating_sub(last_action),
+        blocks_since_action: crate::mcp::types::Block::new(current_block).since(crate::mcp::types::Block::new(last_action)),
         score: 0.0,
         blocked_by: None,
     })
@@ -1884,7 +1884,7 @@ async fn start_raid_proof(
         difficulty_target,
     );
     crate::hasher::start_hash_task_core(params, app.clone(), &registry)?;
-    crate::hasher::register_vplayer_hash(ex.fleet_id.clone(), ex.raider_index, "RAID".to_string());
+    crate::hasher::register_vplayer_hash(ex.fleet_id.clone(), ex.raider_index, crate::mcp::types::TaskType::Raid);
     Ok(())
 }
 

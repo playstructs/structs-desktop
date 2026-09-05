@@ -26,7 +26,6 @@ use crate::mcp::telemetry::{tlog, LoopRun, Sev};
 use crate::mcp::tools::mass_action::SweepArgs;
 
 const FILENAME: &str = "auto_sweep.json";
-const UALPHA_PER_ALPHA: f64 = 1_000_000.0;
 
 /// player_id → the CACHED balance at which the chain rejected their sweep with
 /// "insufficient funds". The roster cache lags a successful sweep, so the same
@@ -232,7 +231,7 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
     if cfg.dry_run {
         let total: f64 = entries
             .iter()
-            .map(|e| e.amount_ualpha.parse::<f64>().unwrap_or(0.0) / UALPHA_PER_ALPHA)
+            .map(|e| crate::mcp::types::Ualpha::new(e.amount_ualpha.parse().unwrap_or(0)).to_alpha().get())
             .sum();
         tlog(
             "auto_sweep",
@@ -320,7 +319,7 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
                 {
                     Ok(_) => {
                         ok.fetch_add(1, Ordering::Relaxed);
-                        let alpha = e.amount_ualpha.parse::<f64>().unwrap_or(0.0) / UALPHA_PER_ALPHA;
+                        let alpha = crate::mcp::types::Ualpha::new(e.amount_ualpha.parse().unwrap_or(0)).to_alpha().get();
                         *swept.lock().unwrap_or_else(|p| p.into_inner()) += alpha;
                     }
                     Err(err) => {
@@ -393,7 +392,7 @@ mod tests {
             role: role.into(),
             planet_id: None,
             fleet_id: None,
-            alpha_ualpha: alpha * UALPHA_PER_ALPHA,
+            alpha_ualpha: crate::mcp::types::Ualpha::from_alpha(crate::mcp::types::Alpha::new(alpha)).get() as f64,
             ore: 0.0,
             load: 0.0,
             capacity: 0.0,

@@ -200,12 +200,12 @@ async fn scan(
     // rather than a role literal. The built-in profiles reproduce the old
     // reading exactly — bait never refines, because its ore pile IS the lure —
     // so nothing changes until an author says otherwise.
-    let targets: Vec<(String, Option<u32>, crate::mcp::profile::Capabilities)> =
+    let targets: Vec<(crate::mcp::types::PlayerId, Option<u32>, crate::mcp::profile::Capabilities)> =
         crate::mcp::virtual_players::collect_targets(cfg.include_primary)
             .into_iter()
             .map(|(pid, idx, role)| {
                 let caps = crate::mcp::profile::for_player(
-                    crate::mcp::virtual_players::profile_of(&pid).as_deref(),
+                    crate::mcp::virtual_players::profile_of(pid.as_str()).as_deref(),
                     role,
                 )
                 .capabilities;
@@ -245,7 +245,7 @@ async fn scan(
                 // Stand down while this player is answering a raid: charge is
                 // one action per block and the response needs it. Deferral
                 // only — the work happens on the next scan.
-                if crate::mcp::combat_lists::is_held_for_combat(&pid) {
+                if crate::mcp::combat_lists::is_held_for_combat(pid.as_str()) {
                     return;
                 }
                 run.players.fetch_add(1, Ordering::Relaxed);
@@ -260,7 +260,7 @@ async fn scan(
                 // is fresh (one whole-galaxy pull + GRASS deltas, see
                 // mcp::perception) and from the chain otherwise; the read
                 // right before a task is issued always goes to the chain.
-                let (sids, scan_src) = crate::mcp::loop_util::scan_player_struct_ids(&client, &pid).await;
+                let (sids, scan_src) = crate::mcp::loop_util::scan_player_struct_ids(&client, pid.as_str()).await;
                 let scanned_from_snapshot = scan_src == crate::mcp::loop_util::ReadSource::Snapshot;
                 let mut extractor_planet: Option<String> = None;
                 // The planet ENTITY, read at most ONCE per player per scan. It
@@ -365,7 +365,7 @@ async fn scan(
                         // whole system, and every one of them paid for with
                         // wasted proof-of-work.
                         if player_ore_cache.is_none() {
-                            player_ore_cache = Some(match crate::mcp::loop_util::scan_entity(&client, "player", &pid).await {
+                            player_ore_cache = Some(match crate::mcp::loop_util::scan_entity(&client, "player", pid.as_str()).await {
                                 Ok((p, _)) => crate::mcp::types::EntityView::new(&p).grid_f64("ore"),
                                 // Unknown → don't block refining on a read failure.
                                 Err(_) => 1.0,
@@ -466,7 +466,7 @@ async fn scan(
                     let params = TaskParams::for_ore(sid, task_type.as_str(), anchor, target);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {
-                            crate::hasher::register_vplayer_hash(sid.clone(), idx, task_type.as_str().to_string());
+                            crate::hasher::register_vplayer_hash(sid.clone(), idx, task_type);
                         }
                         started.fetch_add(1, Ordering::Relaxed);
                         run.actions.fetch_add(1, Ordering::Relaxed);
@@ -520,8 +520,7 @@ async fn scan(
                         // players only at refresh until the fleet_arrive arm landed,
                         // and 59 explores a day were signed against the planet the
                         // player had already left.
-                        let Ok(pid_t) = crate::mcp::types::PlayerId::parse(&pid) else { return };
-                        let Ok(live_player) = crate::mcp::verify::player_view_live(&client, &pid_t).await else { return };
+                        let Ok(live_player) = crate::mcp::verify::player_view_live(&client, &pid).await else { return };
                         let Some(planet_id) = live_player.planet_id.clone() else {
                             return;
                         };
@@ -548,19 +547,19 @@ async fn scan(
                                 idx,
                                 "/structs.structs.MsgPlanetExplore",
                                 serde_json::json!({ "playerId": pid }),
-                                &format!("auto_harvest:{pid}"),
+                                crate::mcp::types::Context::player_action("auto_harvest", &pid),
                             )
                             .await;
                             match res {
                                 Ok(_) => {
                                     // Planet changed → bust the owned-cache so threat
                                     // detection re-resolves this player's new planet.
-                                    crate::mcp::virtual_players::invalidate_owned(&pid);
+                                    crate::mcp::virtual_players::invalidate_owned(pid.as_str());
                                     // The snapshot's player row now points at a
                                     // planet that no longer exists for this player
                                     // and nothing streams the new id: read from the
                                     // chain for this player until the next refresh.
-                                    crate::mcp::perception::forget_player(&pid);
+                                    crate::mcp::perception::forget_player(pid.as_str());
                                     run.actions.fetch_add(1, Ordering::Relaxed);
                                     crate::mcp::telemetry::tlog(
                                         "auto_harvest",

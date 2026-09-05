@@ -365,11 +365,11 @@ pub fn force_reset_running() {
 pub(crate) async fn ensure_command_ship(
     app: &tauri::AppHandle,
     client: &crate::mcp::cosmos_client::CosmosClient,
-    pid: &str,
+    pid: &crate::mcp::types::PlayerId,
     index: u32,
 ) -> Option<String> {
     // A player's fleet shares its index (fleet 9-N belongs to player 1-N).
-    let fleet = crate::mcp::types::FleetId::from_index(crate::mcp::types::PlayerId::parse(pid).ok()?.index());
+    let fleet = crate::mcp::types::FleetId::from_index(pid.index());
     let fleet_id = fleet.to_string();
     let cmd = crate::mcp::verify::fleet_command_struct(client, &fleet).await.ok()?;
     if let Some(cmd) = cmd {
@@ -408,7 +408,7 @@ pub(crate) async fn ensure_command_ship(
         index,
         "/structs.structs.MsgStructBuildInitiate",
         payload,
-        &format!("cmd_rebuild:{pid}"),
+        crate::mcp::types::Context::player_action("cmd_rebuild", pid),
     )
     .await
     {
@@ -473,7 +473,7 @@ enum InitiateCheck {
 
 async fn initiate_verified_on_chain(
     client: &CosmosClient,
-    pid: &str,
+    pid: &crate::mcp::types::PlayerId,
     target: &str,
     ambit: &str,
     slot: u64,
@@ -482,10 +482,7 @@ async fn initiate_verified_on_chain(
 ) -> InitiateCheck {
     // Source-switched reads (mcp/verify.rs): Guild API by default, LCD on
     // failover or when `verify_source` says so.
-    let Ok(pid_t) = crate::mcp::types::PlayerId::parse(pid) else {
-        return InitiateCheck::ReadFailed;
-    };
-    let Ok(charge) = crate::mcp::verify::player_charge(client, &pid_t, crate::mcp::types::Block::new(current_block)).await else {
+    let Ok(charge) = crate::mcp::verify::player_charge(client, pid, crate::mcp::types::Block::new(current_block)).await else {
         return InitiateCheck::ReadFailed;
     };
     if !charge.covers(BUILD_CHARGE) {
@@ -500,7 +497,7 @@ async fn initiate_verified_on_chain(
         return InitiateCheck::Verified;
     }
     let Some(kind) = crate::mcp::types::LocationKind::parse(target) else { return InitiateCheck::ReadFailed };
-    let Ok(Some(loc)) = crate::mcp::verify::player_location(client, &pid_t, kind).await else { return InitiateCheck::ReadFailed };
+    let Ok(Some(loc)) = crate::mcp::verify::player_location(client, pid, kind).await else { return InitiateCheck::ReadFailed };
     // LIVE, not snapshot: a slot the snapshot still shows free (its frame
     // lost) is a rejected initiate and a 30-minute back-off. 35 in one hour.
     let Ok(occupied) = crate::mcp::verify::slot_occupied_live(client, &loc, ambit, slot).await else {
@@ -727,7 +724,7 @@ async fn scan(
                 // Stand down while this player is answering a raid: charge is
                 // one action per block and the response needs it. Deferral
                 // only — the work happens on the next scan.
-                if crate::mcp::combat_lists::is_held_for_combat(&pid) {
+                if crate::mcp::combat_lists::is_held_for_combat(pid.as_str()) {
                     return;
                 }
                 run.players.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -739,7 +736,7 @@ async fn scan(
                 //
                 // SCAN reads: perception snapshot when fresh, chain otherwise
                 // (mcp::perception). Every read before a sign is the chain.
-                let (structs, scan_src) = crate::mcp::loop_util::scan_player_structs(&client, &pid).await;
+                let (structs, scan_src) = crate::mcp::loop_util::scan_player_structs(&client, pid.as_str()).await;
                 let scanned_from_snapshot = scan_src == crate::mcp::loop_util::ReadSource::Snapshot;
                 if structs.is_empty() {
                     return;
@@ -821,7 +818,7 @@ async fn scan(
                     let params = TaskParams::for_ore(&sid, "BUILD", anchor, difficulty_target);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {
-                            crate::hasher::register_vplayer_hash(sid.clone(), idx, "BUILD".to_string());
+                            crate::hasher::register_vplayer_hash(sid.clone(), idx, crate::mcp::types::TaskType::Build);
                         }
                         completes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -839,19 +836,19 @@ async fn scan(
                 if INITIATE_BACKOFF
                     .lock()
                     .unwrap()
-                    .get(&pid)
+                    .get(pid.as_str())
                     .is_some_and(|until| now_millis() < *until)
                 {
                     return;
                 }
                 // Read the player's grid (charge from lastAction, structsLoad, personal cap).
-                let player = match crate::mcp::loop_util::scan_entity(&client, "player", &pid).await {
+                let player = match crate::mcp::loop_util::scan_entity(&client, "player", pid.as_str()).await {
                     Ok((p, _)) => p,
                     Err(_) => return,
                 };
                 let ga = player.get("gridAttributes");
                 let last_action = read_u64_field(ga, "lastAction");
-                let charge = current_block.saturating_sub(last_action);
+                let charge = crate::mcp::types::Block::new(current_block).since(crate::mcp::types::Block::new(last_action));
                 if charge < BUILD_CHARGE {
                     return; // not enough charge to build this scan
                 }
@@ -878,7 +875,7 @@ async fn scan(
                 // player with no explicit profile builds exactly what it did
                 // before; a player with one builds what its author specified.
                 let profile = crate::mcp::profile::for_player(
-                    crate::mcp::virtual_players::profile_of(&pid).as_deref(),
+                    crate::mcp::virtual_players::profile_of(pid.as_str()).as_deref(),
                     role,
                 );
                 let loadout: &[crate::mcp::profile::LoadoutEntry] = &profile.loadout;
@@ -1004,7 +1001,7 @@ async fn scan(
                         idx,
                         "/structs.structs.MsgStructBuildInitiate",
                         payload,
-                        &format!("auto_build:{pid}"),
+                        crate::mcp::types::Context::player_action("auto_build", &pid),
                     )
                     .await;
                     match res {
@@ -1013,7 +1010,7 @@ async fn scan(
                             run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             // The player's composition just changed; drop the
                             // shared cache so strike planning sees the new hull.
-                            crate::mcp::loop_util::invalidate_player_structs(&pid);
+                            crate::mcp::loop_util::invalidate_player_structs(pid.as_str());
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
                                 crate::mcp::telemetry::Sev::Notice,
@@ -1045,7 +1042,7 @@ async fn scan(
                         Err(e) => {
                             run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let until = now_millis() + INITIATE_BACKOFF_MS;
-                            INITIATE_BACKOFF.lock().unwrap().insert(pid.clone(), until);
+                            INITIATE_BACKOFF.lock().unwrap().insert(pid.to_string(), until);
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
                                 crate::mcp::telemetry::Sev::Warn,
@@ -1067,7 +1064,7 @@ async fn scan(
                 // code-2022 reject — and here it costs more than the wasted
                 // attempt, because a generic Err also arms INITIATE_BACKOFF and
                 // sits the player out for minutes. Defer to the next scan.
-                if crate::mcp::types::PlayerId::parse(&pid).map(|p| crate::mcp::loop_util::acted_this_block(&p)).unwrap_or(false) {
+                if crate::mcp::loop_util::acted_this_block(&pid) {
                     return;
                 }
 
@@ -1126,7 +1123,7 @@ async fn scan(
                         idx,
                         "/structs.structs.MsgStructBuildInitiate",
                         payload,
-                        &format!("auto_build:{pid}"),
+                        crate::mcp::types::Context::player_action("auto_build", &pid),
                     )
                     .await;
                     match res {
@@ -1135,7 +1132,7 @@ async fn scan(
                             run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             // Composition changed — drop the shared struct cache
                             // so strike planning picks the new hull up next scan.
-                            crate::mcp::loop_util::invalidate_player_structs(&pid);
+                            crate::mcp::loop_util::invalidate_player_structs(pid.as_str());
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
                                 crate::mcp::telemetry::Sev::Info,
@@ -1170,7 +1167,7 @@ async fn scan(
                         Err(e) => {
                             run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let until = now_millis() + INITIATE_BACKOFF_MS;
-                            INITIATE_BACKOFF.lock().unwrap().insert(pid.clone(), until);
+                            INITIATE_BACKOFF.lock().unwrap().insert(pid.to_string(), until);
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
                                 crate::mcp::telemetry::Sev::Warn,

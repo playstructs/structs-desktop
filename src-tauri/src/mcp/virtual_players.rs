@@ -149,17 +149,22 @@ impl VirtualPlayerStore {
 /// Registered vplayers that have an on-chain player id, as
 /// `(player_id, HD index, role)`. When `include_primary`, the primary player is
 /// appended as `(pid, None, None)`. Shared target list for the auto-loops.
-pub fn collect_targets(include_primary: bool) -> Vec<(String, Option<u32>, Option<VPlayerRole>)> {
-    let mut targets: Vec<(String, Option<u32>, Option<VPlayerRole>)> = {
+pub fn collect_targets(include_primary: bool) -> Vec<(crate::mcp::types::PlayerId, Option<u32>, Option<VPlayerRole>)> {
+    use crate::mcp::types::PlayerId;
+    // Parsed ONCE here: the loops hold a PlayerId from this point on and
+    // never re-read the string. A registry row whose id does not parse (a
+    // signup still pending writes None; a corrupt file could write worse)
+    // is not a target, exactly as an absent id never was.
+    let mut targets: Vec<(PlayerId, Option<u32>, Option<VPlayerRole>)> = {
         let reg = REGISTRY.read().unwrap();
         reg.players
             .iter()
-            .filter_map(|p| p.player_id.clone().map(|pid| (pid, Some(p.index), Some(p.role))))
+            .filter_map(|p| p.player_id.as_deref().and_then(|s| PlayerId::parse(s).ok()).map(|pid| (pid, Some(p.index), Some(p.role))))
             .collect()
     };
     if include_primary {
         if let Some(pid) = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone()) {
-            if !pid.is_empty() {
+            if let Ok(pid) = PlayerId::parse(&pid) {
                 targets.push((pid, None, None));
             }
         }

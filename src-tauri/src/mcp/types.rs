@@ -266,6 +266,12 @@ impl Ualpha {
     pub fn to_alpha(self) -> Alpha {
         Alpha(self.0 as f64 / UALPHA_PER_ALPHA as f64)
     }
+    /// A balance read as a float (the guild serves numerics as strings and
+    /// some rows are parsed to f64). Base units are integers, so this is
+    /// exact below 2^53; negatives and NaN read as 0.
+    pub fn from_f64(v: f64) -> Self {
+        Self(if v.is_finite() && v > 0.0 { v as u64 } else { 0 })
+    }
     pub fn as_milliwatts(self) -> Milliwatts {
         Milliwatts(self.0)
     }
@@ -281,6 +287,11 @@ impl Alpha {
     }
     pub fn get(self) -> f64 {
         self.0
+    }
+    /// Base units, FLOORED: the conservative direction for an amount that
+    /// leaves a wallet — a plan never sends more than it displayed.
+    pub fn floor_to_ualpha(self) -> Ualpha {
+        Ualpha((self.0 * UALPHA_PER_ALPHA as f64).floor().max(0.0) as u64)
     }
 }
 
@@ -431,6 +442,46 @@ impl Subject {
 impl fmt::Display for Subject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.raw)
+    }
+}
+
+// ── Struct types ────────────────────────────────────────────────────────
+
+/// A struct TYPE from the chain's catalog: the `type` field of a struct and
+/// the `structTypeId` of a build initiate. Numeric on the wire (sometimes a
+/// numeric string); the synced catalog is keyed by its decimal form, which
+/// `Display` yields. Typed so a type id and an object id — both small
+/// integers in the same planner — can no longer be swapped.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct TypeId(u16);
+
+impl TypeId {
+    pub const fn new(v: u16) -> Self {
+        Self(v)
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok().map(Self)
+    }
+    /// From a JSON `type` field: a number, or a numeric string.
+    pub fn from_value(v: Option<&serde_json::Value>) -> Option<Self> {
+        match v? {
+            serde_json::Value::Number(n) => n.as_u64().and_then(|x| u16::try_from(x).ok()).map(Self),
+            serde_json::Value::String(t) => Self::parse(t),
+            _ => None,
+        }
+    }
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl fmt::Display for TypeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -754,6 +805,18 @@ mod tests {
         assert_eq!(Context::parse("board:transfer").subject(), Some("transfer"));
         assert_eq!(Context::parse("comms agreement 11-3").subject(), None);
         assert_eq!(Context::parse("mcp").as_str(), "mcp");
+    }
+
+    #[test]
+    fn type_ids_read_numbers_and_numeric_strings_only() {
+        assert_eq!(TypeId::parse("14"), Some(TypeId::new(14)));
+        assert_eq!(TypeId::parse(" 1 "), Some(TypeId::new(1)));
+        assert_eq!(TypeId::parse(""), None);
+        assert_eq!(TypeId::parse("5-14"), None, "an object id is not a type id");
+        assert_eq!(TypeId::from_value(Some(&serde_json::json!(15))), Some(TypeId::new(15)));
+        assert_eq!(TypeId::from_value(Some(&serde_json::json!("15"))), Some(TypeId::new(15)));
+        assert_eq!(TypeId::from_value(Some(&serde_json::json!(null))), None);
+        assert_eq!(TypeId::new(14).to_string(), "14", "the catalog key");
     }
 
     #[test]

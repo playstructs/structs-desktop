@@ -41,56 +41,58 @@ use crate::hasher::types::now_millis;
 use crate::mcp::cosmos_client::CosmosClient;
 
 const FILENAME: &str = "auto_defend.json";
-const COMMAND_SHIP_TYPE: &str = "1";
+use crate::mcp::types::TypeId;
+
+const COMMAND_SHIP_TYPE: TypeId = TypeId::new(1);
 /// The protection priority the loop used before profiles could state one:
 /// Command Ship, then Ore Refinery, then Ore Extractor.
-const DEFAULT_PROTECT: &[&str] = &[COMMAND_SHIP_TYPE, REFINERY_TYPE, EXTRACTOR_TYPE];
+const DEFAULT_PROTECT: &[TypeId] = &[COMMAND_SHIP_TYPE, REFINERY_TYPE, EXTRACTOR_TYPE];
 
 /// One protection target, resolved to chain type IDS so the planner stays pure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProtectTarget {
-    pub type_id: String,
+    pub type_id: TypeId,
     /// Relative pull when a spare hull chooses what to cover.
     pub weight: f64,
     /// Defender type IDS permitted on this target; empty = any.
-    pub by: Vec<String>,
+    pub by: Vec<TypeId>,
 }
 
-fn blocks_label(type_id: &str) -> &'static str {
+fn blocks_label(type_id: TypeId) -> &'static str {
     match type_id {
-        COMMAND_SHIP_TYPE => "blocks the Command Ship",
-        REFINERY_TYPE => "blocks the Refinery",
-        EXTRACTOR_TYPE => "blocks the Extractor",
+        t if t == COMMAND_SHIP_TYPE => "blocks the Command Ship",
+        t if t == REFINERY_TYPE => "blocks the Refinery",
+        t if t == EXTRACTOR_TYPE => "blocks the Extractor",
         _ => "blocks a protected struct",
     }
 }
 
-fn counters_label(type_id: &str) -> &'static str {
+fn counters_label(type_id: TypeId) -> &'static str {
     match type_id {
-        COMMAND_SHIP_TYPE => "counters attacks on the Command Ship",
-        REFINERY_TYPE => "counters attacks on the Refinery",
-        EXTRACTOR_TYPE => "counters attacks on the Extractor",
+        t if t == COMMAND_SHIP_TYPE => "counters attacks on the Command Ship",
+        t if t == REFINERY_TYPE => "counters attacks on the Refinery",
+        t if t == EXTRACTOR_TYPE => "counters attacks on the Extractor",
         _ => "counters attacks on a protected struct",
     }
 }
 
-fn blocker_guard_label(type_id: &str) -> &'static str {
+fn blocker_guard_label(type_id: Option<TypeId>) -> &'static str {
     match type_id {
-        COMMAND_SHIP_TYPE => "guards the Command Ship's blocker",
-        REFINERY_TYPE => "guards the Refinery's blocker",
+        Some(t) if t == COMMAND_SHIP_TYPE => "guards the Command Ship's blocker",
+        Some(t) if t == REFINERY_TYPE => "guards the Refinery's blocker",
         _ => "guards the primary's blocker",
     }
 }
 
 impl ProtectTarget {
-    pub fn plain(type_id: &str) -> Self {
-        Self { type_id: type_id.to_string(), weight: 1.0, by: Vec::new() }
+    pub fn plain(type_id: TypeId) -> Self {
+        Self { type_id, weight: 1.0, by: Vec::new() }
     }
 }
-const REFINERY_TYPE: &str = "15";
-const EXTRACTOR_TYPE: &str = "14";
+const REFINERY_TYPE: TypeId = TypeId::new(15);
+const EXTRACTOR_TYPE: TypeId = TypeId::new(14);
 /// Production / command types — PROTECTED targets, never used as defenders.
-const PROTECTED_TYPES: &[&str] = &["14", "15", "1"]; // extractor, refinery, command ship
+const PROTECTED_TYPES: &[TypeId] = &[EXTRACTOR_TYPE, REFINERY_TYPE, COMMAND_SHIP_TYPE];
 /// Counter-guards assigned directly to the Command Ship (beyond its blocker).
 const CMD_GUARDS: usize = 2;
 /// Guards assigned to the Command Ship's blocker.
@@ -130,7 +132,7 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 #[derive(Debug, Clone)]
 pub struct Hull {
     pub id: String,
-    pub type_id: String,
+    pub type_id: TypeId,
     pub ambit: String,
     pub location_id: String,
 }
@@ -240,7 +242,7 @@ fn rank(stats: &TypeStats, target_ambit: &str, defender_ambit: &str) -> u64 {
 /// edges. Every defender protects at most one struct (`protectedStructIndex` is
 /// singular), so this is a greedy allocation down the priority list; a hull
 /// whose best remaining assignment scores zero is left free.
-pub fn plan_web(hulls: &[Hull], stats: &HashMap<String, TypeStats>) -> Vec<Edge> {
+pub fn plan_web(hulls: &[Hull], stats: &HashMap<TypeId, TypeStats>) -> Vec<Edge> {
     plan_web_with(hulls, stats, &crate::mcp::variance::Temperament::default())
 }
 
@@ -252,10 +254,10 @@ pub fn plan_web(hulls: &[Hull], stats: &HashMap<String, TypeStats>) -> Vec<Edge>
 /// temperament can never produce a pairing that does nothing.
 pub fn plan_web_with(
     hulls: &[Hull],
-    stats: &HashMap<String, TypeStats>,
+    stats: &HashMap<TypeId, TypeStats>,
     temperament: &crate::mcp::variance::Temperament,
 ) -> Vec<Edge> {
-    let default: Vec<ProtectTarget> = DEFAULT_PROTECT.iter().map(|t| ProtectTarget::plain(t)).collect();
+    let default: Vec<ProtectTarget> = DEFAULT_PROTECT.iter().map(|t| ProtectTarget::plain(*t)).collect();
     plan_web_stance(hulls, stats, temperament, "", &default, CMD_GUARDS, BLOCKER_GUARDS)
 }
 
@@ -275,18 +277,18 @@ pub fn plan_web_with(
 /// `key` so one player's web is stable across scans.
 pub fn plan_web_seeded(
     hulls: &[Hull],
-    stats: &HashMap<String, TypeStats>,
+    stats: &HashMap<TypeId, TypeStats>,
     temperament: &crate::mcp::variance::Temperament,
     key: &str,
 ) -> Vec<Edge> {
-    let default: Vec<ProtectTarget> = DEFAULT_PROTECT.iter().map(|t| ProtectTarget::plain(t)).collect();
+    let default: Vec<ProtectTarget> = DEFAULT_PROTECT.iter().map(|t| ProtectTarget::plain(*t)).collect();
     plan_web_stance(hulls, stats, temperament, key, &default, CMD_GUARDS, BLOCKER_GUARDS)
 }
 
 /// resolves the profile's names against the synced catalog.
 pub fn plan_web_stance(
     hulls: &[Hull],
-    stats: &HashMap<String, TypeStats>,
+    stats: &HashMap<TypeId, TypeStats>,
     temperament: &crate::mcp::variance::Temperament,
     key: &str,
     protect: &[ProtectTarget],
@@ -294,7 +296,7 @@ pub fn plan_web_stance(
     guards_on_blocker: usize,
 ) -> Vec<Edge> {
     let mut rng = crate::mcp::variance::seeded_rng(key);
-    let get = |tid: &str| stats.get(tid).cloned().unwrap_or_default();
+    let get = |tid: TypeId| stats.get(&tid).cloned().unwrap_or_default();
     // Walk the priority list and keep whatever this player actually owns. The
     // head is the primary; the tail get blockers. Re-derived every scan, so a
     // destroyed primary promotes the next survivor on the following pass.
@@ -306,7 +308,7 @@ pub fn plan_web_stance(
     let primary_weight = owned.first().map(|(_, p)| p.weight).unwrap_or(1.0);
     let secondary: Vec<(&Hull, f64)> = owned.iter().skip(1).map(|(h, p)| (*h, p.weight)).collect();
     // target hull id -> permitted defender type ids (empty = any).
-    let accepts: HashMap<String, Vec<String>> =
+    let accepts: HashMap<String, Vec<TypeId>> =
         owned.iter().map(|(h, p)| (h.id.clone(), p.by.clone())).collect();
 
     // The defender pool: everything that is not itself a protected production/
@@ -317,8 +319,8 @@ pub fn plan_web_stance(
     // `cannot defend` reject.
     let mut pool: Vec<&Hull> = hulls
         .iter()
-        .filter(|h| !PROTECTED_TYPES.contains(&h.type_id.as_str()))
-        .filter(|h| get(&h.type_id).can_defend)
+        .filter(|h| !PROTECTED_TYPES.contains(&h.type_id))
+        .filter(|h| get(h.type_id).can_defend)
         .collect();
     let mut edges: Vec<Edge> = Vec::new();
     let mut take = |pool: &mut Vec<&Hull>, best: Option<usize>, protected: &Hull, why: &'static str, edges: &mut Vec<Edge>| {
@@ -338,14 +340,14 @@ pub fn plan_web_stance(
             .enumerate()
             .filter(|(_, h)| h.ambit == cmd.ambit)
             .max_by_key(|(_, h)| {
-                let s = get(&h.type_id);
+                let s = get(h.type_id);
                 (travels_with_target(&h.location_id, &cmd.location_id), s.armour, s.counter_same, breadth(s.reach))
             })
             .map(|(i, _)| i);
         if let Some(i) = best {
             cmd_blocker = Some(pool[i].clone());
         }
-        take(&mut pool, best, cmd, blocks_label(&cmd.type_id), &mut edges);
+        take(&mut pool, best, cmd, blocks_label(cmd.type_id), &mut edges);
 
         // 2. Counter-guards on the CMD: the attacker's ambit is unknown until
         // the shot lands, so what matters is that SOMETHING answers from every
@@ -374,7 +376,7 @@ pub fn plan_web_stance(
                 .iter()
                 .enumerate()
                 .filter(|(_, h)| {
-                    let s = get(&h.type_id);
+                    let s = get(h.type_id);
                     rank(&s, &cmd.ambit, &h.ambit) > 0
                 })
                 .map(|(i, h)| (i, *h))
@@ -383,7 +385,7 @@ pub fn plan_web_stance(
             // travels dominates, then newly-covered ambits, then raw counter
             // value, then armour. At temperature 0 this is the old argmax.
             let quality = |h: &Hull| -> f64 {
-                let s = get(&h.type_id);
+                let s = get(h.type_id);
                 let gain = (counter_ambits(&s, &h.ambit) & !covered).count_ones() as f64;
                 let travels = if travels_with_target(&h.location_id, &cmd.location_id) { 1.0 } else { 0.0 };
                 travels * 10_000.0
@@ -395,26 +397,26 @@ pub fn plan_web_stance(
                 crate::mcp::variance::pick(&eligible, |(_, h)| quality(h), temperament, &mut rng)
                     .map(|k| eligible[k].0);
             if let Some(i) = best {
-                let s = get(&pool[i].type_id);
+                let s = get(pool[i].type_id);
                 covered |= counter_ambits(&s, &pool[i].ambit);
             }
-            take(&mut pool, best, cmd, counters_label(&cmd.type_id), &mut edges);
+            take(&mut pool, best, cmd, counters_label(cmd.type_id), &mut edges);
         }
     }
 
     // 3. Guards on the blocker: stripping it has to cost the attacker.
-    let primary_type: &str = cmd.map(|c| c.type_id.as_str()).unwrap_or("");
+    let primary_type: Option<TypeId> = cmd.map(|c| c.type_id);
     if let Some(blocker) = &cmd_blocker {
         for _ in 0..guards_on_blocker {
             let best = pool
                 .iter()
                 .enumerate()
                 .filter(|(_, h)| {
-                    let s = get(&h.type_id);
+                    let s = get(h.type_id);
                     rank(&s, &blocker.ambit, &h.ambit) > 0
                 })
                 .max_by_key(|(_, h)| {
-                    let s = get(&h.type_id);
+                    let s = get(h.type_id);
                     (travels_with_target(&h.location_id, &blocker.location_id), s.counter_same.max(s.counter) * breadth(s.reach))
                 })
                 .map(|(i, _)| i);
@@ -426,13 +428,13 @@ pub fn plan_web_stance(
     // where Ore Bunkers earn their keep — they can never counter, but a land
     // bunker blocks every land shot at the refinery).
     for (prod, _w) in secondary.iter().copied() {
-        let why: &'static str = blocks_label(&prod.type_id);
+        let why: &'static str = blocks_label(prod.type_id);
         let best = pool
             .iter()
             .enumerate()
             .filter(|(_, h)| h.ambit == prod.ambit && travels_with_target(&h.location_id, &prod.location_id))
             .max_by_key(|(_, h)| {
-                let s = get(&h.type_id);
+                let s = get(h.type_id);
                 (s.armour, std::cmp::Reverse(s.counter_same.max(s.counter) * breadth(s.reach)))
             })
             .map(|(i, _)| i);
@@ -476,7 +478,7 @@ pub fn plan_web_stance(
             // Every legal (defender, target) pairing left on the board.
             let mut options: Vec<(usize, usize, f64)> = Vec::new(); // (pool idx, target idx, score)
             for (pi, h) in pool.iter().enumerate() {
-                let s = get(&h.type_id);
+                let s = get(h.type_id);
                 for (ti, (t, weight)) in targets.iter().enumerate() {
                     let r = rank(&s, &t.ambit, &h.ambit);
                     if r == 0 {
@@ -574,27 +576,23 @@ pub fn set(cfg: AutoDefendConfig) {
     }
 }
 
-fn type_id_of(s: &Value) -> String {
-    s.get("type")
-        .or_else(|| s.get("struct_type"))
-        .map(|x| match x {
-            Value::Number(n) => n.to_string(),
-            Value::String(t) => t.clone(),
-            _ => String::new(),
-        })
-        .unwrap_or_default()
+/// The struct's type, from `type` or the `struct_type` fallback. A struct
+/// with no readable type cannot be planned for and is left out.
+fn type_id_of(s: &Value) -> Option<TypeId> {
+    TypeId::from_value(s.get("type").or_else(|| s.get("struct_type")))
 }
 fn truthy(v: Option<&Value>) -> bool {
     matches!(v, Some(Value::Bool(true))) || matches!(v, Some(Value::String(s)) if s.eq_ignore_ascii_case("true"))
 }
 
 /// Build the planner's type-stats view from the synced game state.
-fn catalog() -> HashMap<String, TypeStats> {
+fn catalog() -> HashMap<TypeId, TypeStats> {
     let mut out = HashMap::new();
     if let Ok(gs) = crate::game_state::GAME_STATE.read() {
         for (tid, t) in gs.struct_types.iter() {
+            let Some(tid) = TypeId::parse(tid) else { continue };
             out.insert(
-                tid.clone(),
+                tid,
                 TypeStats {
                     counter: t.counter_attack.unwrap_or(0),
                     counter_same: t.counter_attack_same_ambit.unwrap_or(0),
@@ -688,7 +686,7 @@ async fn scan(
                 // a roster-wide override on top, so an operator can still mute a
                 // whole role without editing every profile.
                 let caps = crate::mcp::profile::for_player(
-                    crate::mcp::virtual_players::profile_of(&pid).as_deref(),
+                    crate::mcp::virtual_players::profile_of(pid.as_str()).as_deref(),
                     role,
                 )
                 .capabilities;
@@ -706,7 +704,7 @@ async fn scan(
                 // not the owner's). See loop_util::player_structs.
                 // SCAN reads: perception snapshot when fresh, chain otherwise
                 // (mcp::perception). The read before the sign is always the chain.
-                let (structs, scan_src) = crate::mcp::loop_util::scan_player_structs(&client, &pid).await;
+                let (structs, scan_src) = crate::mcp::loop_util::scan_player_structs(&client, pid.as_str()).await;
                 let scanned_from_snapshot = scan_src == crate::mcp::loop_util::ReadSource::Snapshot;
                 if structs.is_empty() {
                     return;
@@ -771,7 +769,7 @@ async fn scan(
                             return None;
                         }
                         let f = |k: &str| s.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                        Some(Hull { id, type_id: type_id_of(s), ambit: f("operating_ambit"), location_id: f("location_id") })
+                        Some(Hull { id, type_id: type_id_of(s)?, ambit: f("operating_ambit"), location_id: f("location_id") })
                     })
                     .collect();
                 // The defence web varies by role: a raider's is loose, the
@@ -782,18 +780,18 @@ async fn scan(
                 // falls back to the shipped priority rather than leaving the
                 // player with no web at all.
                 let profile = crate::mcp::profile::for_player(
-                    crate::mcp::virtual_players::profile_of(&pid).as_deref(),
+                    crate::mcp::virtual_players::profile_of(pid.as_str()).as_deref(),
                     role,
                 );
                 let mut protect = crate::mcp::profile::resolved_protect(&profile);
                 if protect.is_empty() {
-                    protect = DEFAULT_PROTECT.iter().map(|t| ProtectTarget::plain(t)).collect();
+                    protect = DEFAULT_PROTECT.iter().map(|t| ProtectTarget::plain(*t)).collect();
                 }
                 let desired = plan_web_stance(
                     &hulls,
                     &stats,
                     &profile.temperament,
-                    &pid,
+                    pid.as_str(),
                     &protect,
                     profile.defence.guards_on_primary,
                     profile.defence.guards_on_blocker,
@@ -816,7 +814,7 @@ async fn scan(
                 // is a guaranteed code-2022 reject ("already discharged") that
                 // costs a signing slot and a transaction attempt — 24 of them
                 // in one hour, always the same players. Defer to the next scan.
-                if crate::mcp::types::PlayerId::parse(&pid).map(|p| crate::mcp::loop_util::acted_this_block(&p)).unwrap_or(false) {
+                if crate::mcp::loop_util::acted_this_block(&pid) {
                     return;
                 }
                 let mut needs_clear = current.contains_key(&edge.defender);
@@ -886,7 +884,7 @@ async fn scan(
                     idx,
                     msg,
                     payload,
-                    &format!("auto_defend:{pid}"),
+                    crate::mcp::types::Context::player_action("auto_defend", &pid),
                 )
                 .await;
                 match res {
@@ -987,11 +985,11 @@ mod tests {
         const SPACE: u64 = 16;
         // Real type ids: 1 = Command Ship, 9 = Tank, 2 = Battleship,
         // 6 = High Altitude Interceptor.
-        let mut st: HashMap<String, TypeStats> = HashMap::new();
-        st.insert("1".into(), fleet_ok());
-        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..fleet_ok() });
-        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..fleet_ok() });
-        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..fleet_ok() });
+        let mut st: HashMap<TypeId, TypeStats> = HashMap::new();
+        st.insert(TypeId::new(1), fleet_ok());
+        st.insert(TypeId::new(9), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..fleet_ok() });
+        st.insert(TypeId::new(2), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..fleet_ok() });
+        st.insert(TypeId::new(6), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..fleet_ok() });
 
         let hulls = vec![
             hull("5-cmd", "1", "land", "9-1"),
@@ -1031,13 +1029,13 @@ mod tests {
         const LAND: u64 = 4;
         const AIR: u64 = 8;
         const SPACE: u64 = 16;
-        let mut st: HashMap<String, TypeStats> = HashMap::new();
-        st.insert("1".into(), fleet_ok());
-        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..fleet_ok() });
-        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..fleet_ok() });
-        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..fleet_ok() });
+        let mut st: HashMap<TypeId, TypeStats> = HashMap::new();
+        st.insert(TypeId::new(1), fleet_ok());
+        st.insert(TypeId::new(9), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..fleet_ok() });
+        st.insert(TypeId::new(2), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..fleet_ok() });
+        st.insert(TypeId::new(6), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..fleet_ok() });
         // A hull that can neither block the land CMD nor counter anything.
-        st.insert("99".into(), fleet_ok());
+        st.insert(TypeId::new(99), fleet_ok());
 
         let hulls = vec![
             hull("5-cmd", "1", "land", "9-1"),
@@ -1075,11 +1073,11 @@ mod tests {
         const LAND: u64 = 4;
         const AIR: u64 = 8;
         const SPACE: u64 = 16;
-        let mut st: HashMap<String, TypeStats> = HashMap::new();
-        st.insert("1".into(), fleet_ok());
-        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..fleet_ok() });
-        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..fleet_ok() });
-        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..fleet_ok() });
+        let mut st: HashMap<TypeId, TypeStats> = HashMap::new();
+        st.insert(TypeId::new(1), fleet_ok());
+        st.insert(TypeId::new(9), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..fleet_ok() });
+        st.insert(TypeId::new(2), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..fleet_ok() });
+        st.insert(TypeId::new(6), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..fleet_ok() });
         let hulls = vec![
             hull("5-cmd", "1", "land", "9-1"),
             hull("5-tank", "9", "land", "9-1"),
@@ -1108,8 +1106,13 @@ mod tests {
         );
     }
 
-    fn stance(ids: &[&str]) -> Vec<ProtectTarget> {
-        ids.iter().map(|t| ProtectTarget::plain(t)).collect()
+    fn stance(ids: &[TypeId]) -> Vec<ProtectTarget> {
+        ids.iter().map(|t| ProtectTarget::plain(*t)).collect()
+    }
+
+    /// A hull whose type is one of the named constants.
+    fn hull_t(id: &str, tid: TypeId, ambit: &str, loc: &str) -> Hull {
+        Hull { id: id.into(), type_id: tid, ambit: ambit.into(), location_id: loc.into() }
     }
 
     /// "Protect the Command Ship, then the Refinery if it explodes."
@@ -1121,8 +1124,8 @@ mod tests {
         let st = stats();
         let cold = crate::mcp::variance::Temperament::default();
         let with_cmd = vec![
-            hull("5-cmd", COMMAND_SHIP_TYPE, "land", "9-1"),
-            hull("5-ref", REFINERY_TYPE, "land", "2-1"),
+            hull_t("5-cmd", COMMAND_SHIP_TYPE, "land", "9-1"),
+            hull_t("5-ref", REFINERY_TYPE, "land", "2-1"),
             hull("5-tank", "9", "land", "9-1"),
         ];
         let web = plan_web_stance(&with_cmd, &st, &cold, "p", &stance(&[COMMAND_SHIP_TYPE, REFINERY_TYPE]), CMD_GUARDS, BLOCKER_GUARDS);
@@ -1131,7 +1134,7 @@ mod tests {
 
         // Same stance, Command Ship destroyed (absent from the hull list).
         let without_cmd = vec![
-            hull("5-ref", REFINERY_TYPE, "land", "2-1"),
+            hull_t("5-ref", REFINERY_TYPE, "land", "2-1"),
             hull("5-tank", "9", "land", "2-1"),
         ];
         let web2 = plan_web_stance(&without_cmd, &st, &cold, "p", &stance(&[COMMAND_SHIP_TYPE, REFINERY_TYPE]), CMD_GUARDS, BLOCKER_GUARDS);
@@ -1146,14 +1149,14 @@ mod tests {
         let st = stats();
         let cold = crate::mcp::variance::Temperament::default();
         let hulls = vec![
-            hull("5-cmd", COMMAND_SHIP_TYPE, "land", "9-1"),
-            hull("5-ref", REFINERY_TYPE, "land", "9-1"),
+            hull_t("5-cmd", COMMAND_SHIP_TYPE, "land", "9-1"),
+            hull_t("5-ref", REFINERY_TYPE, "land", "9-1"),
             hull("5-tank", "9", "land", "9-1"),
             hull("5-bunker", "16", "land", "9-1"),
         ];
         // Refinery accepts ONLY Ore Bunkers (type 16).
         let mut protect = stance(&[COMMAND_SHIP_TYPE, REFINERY_TYPE]);
-        protect[1].by = vec!["16".into()];
+        protect[1].by = vec![TypeId::new(16)];
         let web = plan_web_stance(&hulls, &st, &cold, "p", &protect, CMD_GUARDS, BLOCKER_GUARDS);
         for e in web.iter().filter(|e| e.protected == "5-ref") {
             assert_ne!(e.defender, "5-tank", "a Tank took a Bunker-only target");
@@ -1167,8 +1170,8 @@ mod tests {
         let st = stats();
         let cold = crate::mcp::variance::Temperament::default();
         let hulls = vec![
-            hull("5-cmd", COMMAND_SHIP_TYPE, "land", "9-1"),
-            hull("5-ref", REFINERY_TYPE, "land", "9-1"),
+            hull_t("5-cmd", COMMAND_SHIP_TYPE, "land", "9-1"),
+            hull_t("5-ref", REFINERY_TYPE, "land", "9-1"),
             hull("5-t1", "9", "land", "9-1"),
             hull("5-t2", "9", "land", "9-1"),
             hull("5-t3", "9", "land", "9-1"),
@@ -1208,7 +1211,7 @@ mod tests {
 
     use super::*;
 
-    fn stats() -> HashMap<String, TypeStats> {
+    fn stats() -> HashMap<TypeId, TypeStats> {
         // A minimal but realistic catalog (values from the live chain table).
         let mut m = HashMap::new();
         let fleet = |counter, counter_same, armour, reach| TypeStats {
@@ -1216,20 +1219,20 @@ mod tests {
         };
         // v0.21.0: planetary types carry canDefend=false on the chain.
         let planetary = TypeStats { can_defend: false, ..fleet_ok() };
-        m.insert("1".into(), fleet(2, 2, 1, 32)); // Command Ship
-        m.insert("2".into(), fleet(1, 1, 0, 6)); // Battleship (water|land, AP)
-        m.insert("9".into(), fleet(1, 1, 1, 4)); // Tank (armoured)
-        m.insert("8".into(), fleet(0, 0, 0, 6)); // Mobile Artillery
-        m.insert("11".into(), fleet(1, 1, 0, 6 | 8)); // Cruiser (secondary reaches air)
-        m.insert("12".into(), fleet(1, 2, 0, 10)); // Destroyer
-        m.insert("18".into(), planetary.clone()); // Ore Bunker
-        m.insert("15".into(), planetary.clone()); // Refinery
-        m.insert("14".into(), planetary); // Extractor
+        m.insert(TypeId::new(1), fleet(2, 2, 1, 32)); // Command Ship
+        m.insert(TypeId::new(2), fleet(1, 1, 0, 6)); // Battleship (water|land, AP)
+        m.insert(TypeId::new(9), fleet(1, 1, 1, 4)); // Tank (armoured)
+        m.insert(TypeId::new(8), fleet(0, 0, 0, 6)); // Mobile Artillery
+        m.insert(TypeId::new(11), fleet(1, 1, 0, 6 | 8)); // Cruiser (secondary reaches air)
+        m.insert(TypeId::new(12), fleet(1, 2, 0, 10)); // Destroyer
+        m.insert(TypeId::new(18), planetary.clone()); // Ore Bunker
+        m.insert(TypeId::new(15), planetary.clone()); // Refinery
+        m.insert(TypeId::new(14), planetary); // Extractor
         m
     }
 
     fn hull(id: &str, tid: &str, ambit: &str, loc: &str) -> Hull {
-        Hull { id: id.into(), type_id: tid.into(), ambit: ambit.into(), location_id: loc.into() }
+        Hull { id: id.into(), type_id: TypeId::parse(tid).expect("test type id"), ambit: ambit.into(), location_id: loc.into() }
     }
 
     #[test]
@@ -1325,8 +1328,8 @@ mod tests {
     #[test]
     fn reach_is_primary_or_secondary_union() {
         let s = stats();
-        assert_eq!(breadth(s["11"].reach), 3, "Cruiser reaches water+land+air via secondary");
-        assert!(breadth(s["11"].reach) > breadth(s["2"].reach));
+        assert_eq!(breadth(s[&TypeId::new(11)].reach), 3, "Cruiser reaches water+land+air via secondary");
+        assert!(breadth(s[&TypeId::new(11)].reach) > breadth(s[&TypeId::new(2)].reach));
     }
 
     #[test]

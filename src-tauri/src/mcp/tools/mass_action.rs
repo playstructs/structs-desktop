@@ -22,7 +22,6 @@ use crate::mcp::tools::board_pages::require_board;
 use crate::mcp::virtual_players::{self, VPlayerRole, VirtualPlayer, REGISTRY};
 use crate::mcp::{board_feed, loop_util, roster_cache, tx_retry, vplayer_bridge};
 
-const UALPHA_PER_ALPHA: f64 = 1_000_000.0;
 /// Sweep sign fan-out: stay well under the vplayer bridge SIGN_GATE (8) so a
 /// sweep never starves the auto-loops of signing slots.
 const SWEEP_CONCURRENCY: usize = 4;
@@ -138,7 +137,8 @@ pub(crate) fn build_sweep_plan(
             skip("stale row (last read failed)");
             continue;
         }
-        let send_alpha = r.alpha_ualpha / UALPHA_PER_ALPHA - a.keep_reserve_alpha;
+        let have = crate::mcp::types::Ualpha::from_f64(r.alpha_ualpha);
+        let send_alpha = have.to_alpha().get() - a.keep_reserve_alpha;
         if send_alpha < a.min_send_alpha {
             skip("below reserve/min-send");
             continue;
@@ -147,13 +147,14 @@ pub(crate) fn build_sweep_plan(
             skip("low charge");
             continue;
         }
-        let amount_ualpha = (send_alpha * UALPHA_PER_ALPHA).floor() as u64;
+        // Floored base units: the send is never more than the plan showed.
+        let amount = crate::mcp::types::Alpha::new(send_alpha).floor_to_ualpha();
         entries.push(PlanEntry {
             player_id: r.player_id.clone(),
             index,
             name: r.name.clone(),
-            amount_ualpha: amount_ualpha.to_string(),
-            alpha_before: r.alpha_ualpha / UALPHA_PER_ALPHA,
+            amount_ualpha: amount.to_amount_string(),
+            alpha_before: have.to_alpha().get(),
         });
     }
     (entries, skipped)
@@ -175,7 +176,7 @@ async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Resul
     let (entries, skipped) = build_sweep_plan(&rows, request.players.as_ref(), a);
     let total_alpha: f64 = entries
         .iter()
-        .map(|e| e.amount_ualpha.parse::<f64>().unwrap_or(0.0) / UALPHA_PER_ALPHA)
+        .map(|e| crate::mcp::types::Ualpha::new(e.amount_ualpha.parse().unwrap_or(0)).to_alpha().get())
         .sum();
 
     if request.mode == "dry_run" {
@@ -208,7 +209,7 @@ async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Resul
     for e in plan {
         let ok = roster_cache::get_row(&e.player_id).is_some_and(|r| {
             let amount = e.amount_ualpha.parse::<f64>().unwrap_or(f64::MAX);
-            r.err.is_none() && r.alpha_ualpha * 1.05 >= amount + a.keep_reserve_alpha * UALPHA_PER_ALPHA
+            r.err.is_none() && r.alpha_ualpha * 1.05 >= amount + crate::mcp::types::Alpha::new(a.keep_reserve_alpha).floor_to_ualpha().get() as f64
         });
         if ok {
             accepted.push(e);
@@ -276,7 +277,7 @@ async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Resul
                     match res {
                         Ok(_) => {
                             ok.fetch_add(1, Ordering::Relaxed);
-                            let alpha = e.amount_ualpha.parse::<f64>().unwrap_or(0.0) / UALPHA_PER_ALPHA;
+                            let alpha = crate::mcp::types::Ualpha::new(e.amount_ualpha.parse().unwrap_or(0)).to_alpha().get();
                             *swept.lock().unwrap_or_else(|p| p.into_inner()) += alpha;
                         }
                         Err(err) => {
