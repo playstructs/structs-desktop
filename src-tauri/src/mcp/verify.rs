@@ -22,6 +22,8 @@
 //! session degrades to the old behaviour instead of stopping every loop.
 
 use serde_json::Value;
+
+use crate::mcp::types::{Block, Charge, FleetId, LocationKind, ObjectId, PlanetId, PlayerId, StructId, TaskType};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use crate::mcp::cosmos_client::CosmosClient;
@@ -207,10 +209,10 @@ pub struct StructState {
     pub built: bool,
     pub online: bool,
     pub destroyed: bool,
-    /// Owning player id, when the source reports it.
-    pub owner: Option<String>,
-    /// Planet or fleet the struct stands in.
-    pub location_id: Option<String>,
+    /// Owning player, when the source reports one that parses.
+    pub owner: Option<PlayerId>,
+    /// Planet or fleet the struct stands in, when it parses.
+    pub location_id: Option<ObjectId>,
 }
 
 impl StructState {
@@ -234,8 +236,8 @@ pub(crate) fn struct_state_from_guild(row: &Value) -> Result<StructState, String
     let status = num_u64(Some(require(row, "status", "struct")?)).ok_or("struct: guild `status` is not numeric")?;
     let mut s = state_from_status_bits(status);
     s.destroyed = s.destroyed || parse_bool(row.get("is_destroyed"));
-    s.owner = str_field(row, "owner").map(String::from);
-    s.location_id = str_field(row, "location_id").map(String::from);
+    s.owner = str_field(row, "owner").and_then(|o| PlayerId::parse(o).ok());
+    s.location_id = str_field(row, "location_id").and_then(|l| ObjectId::parse(l).ok());
     Ok(s)
 }
 
@@ -246,18 +248,18 @@ pub(crate) fn struct_state_from_lcd(entity: &Value) -> Result<StructState, Strin
         built: parse_bool(sa.get("isBuilt")),
         online: parse_bool(sa.get("isOnline")),
         destroyed: parse_bool(sa.get("isDestroyed")),
-        owner: s.and_then(|x| str_field(x, "owner")).map(String::from),
-        location_id: s.and_then(|x| str_field(x, "locationId")).map(String::from),
+        owner: s.and_then(|x| str_field(x, "owner")).and_then(|o| PlayerId::parse(o).ok()),
+        location_id: s.and_then(|x| str_field(x, "locationId")).and_then(|l| ObjectId::parse(l).ok()),
     })
 }
 
 /// Built / online / destroyed for one struct.
-pub async fn struct_state(client: &CosmosClient, sid: &str) -> Result<StructState, String> {
+pub async fn struct_state(client: &CosmosClient, sid: &StructId) -> Result<StructState, String> {
     if let Some(s) = snap(|s| {
-        s.struct_row(sid).map(|row| {
-            let mut st = state_from_status_bits(s.struct_status(sid));
-            st.owner = Some(row.owner.clone());
-            st.location_id = Some(row.location_id.clone());
+        s.struct_row(sid.as_str()).map(|row| {
+            let mut st = state_from_status_bits(s.struct_status(sid.as_str()));
+            st.owner = PlayerId::parse(&row.owner).ok();
+            st.location_id = ObjectId::parse(&row.location_id).ok();
             st
         })
     }) {
@@ -272,19 +274,19 @@ pub async fn struct_state(client: &CosmosClient, sid: &str) -> Result<StructStat
 /// completed. Measured 2026-09-04: ~20% of GRASS frames never reach the
 /// snapshot (see structs-config.js grass tap stats), so a struct can sit
 /// "building" here long after it went Online there.
-pub async fn struct_state_live(client: &CosmosClient, sid: &str) -> Result<StructState, String> {
+pub async fn struct_state_live(client: &CosmosClient, sid: &StructId) -> Result<StructState, String> {
     with_failover!(
         "struct",
-        async { struct_state_from_guild(&client.guild.struct_by_id(sid).await?) },
-        async { struct_state_from_lcd(&crate::mcp::loop_util::verify_struct_entity(client, sid).await?) }
+        async { struct_state_from_guild(&client.guild.struct_by_id(sid.as_str()).await?) },
+        async { struct_state_from_lcd(&crate::mcp::loop_util::verify_struct_entity(client, sid.as_str()).await?) }
     )
 }
 
 /// The struct a defender is currently wired to, if any.
-pub async fn defender_target(client: &CosmosClient, defender: &str) -> Result<Option<String>, String> {
+pub async fn defender_target(client: &CosmosClient, defender: &StructId) -> Result<Option<StructId>, String> {
     if let Some(t) = snap(|s| {
-        s.struct_attr(defender, "protectedStructIndex")
-            .map(|i| if i == 0 { None } else { Some(crate::mcp::types::StructId::from_index(i).to_string()) })
+        s.struct_attr(defender.as_str(), "protectedStructIndex")
+            .map(|i| if i == 0 { None } else { Some(StructId::from_index(i)) })
     }) {
         return Ok(t);
     }
@@ -297,20 +299,23 @@ pub async fn defender_target(client: &CosmosClient, defender: &str) -> Result<Op
 /// defenders (an upsert never revisits an unchanged row), so the snapshot
 /// can hold a link the chain dropped: "is not_defending but must be
 /// defending for defense_clear", 15 in the first hour of the native build.
-pub async fn defender_target_live(client: &CosmosClient, defender: &str) -> Result<Option<String>, String> {
+pub async fn defender_target_live(client: &CosmosClient, defender: &StructId) -> Result<Option<StructId>, String> {
     with_failover!(
         "defender",
         async {
-            let row = client.guild.struct_defender_by_defending(defender).await?;
+            let row = client.guild.struct_defender_by_defending(defender.as_str()).await?;
             if row.is_null() {
                 return Ok(None);
             }
-            Ok(str_field(&row, "protected_struct_id").map(String::from))
+            match str_field(&row, "protected_struct_id") {
+                None => Ok(None),
+                Some(p) => StructId::parse(p).map(Some).map_err(|e| format!("defender: {e}")),
+            }
         },
         async {
-            let e = crate::mcp::loop_util::verify_struct_entity(client, defender).await?;
+            let e = crate::mcp::loop_util::verify_struct_entity(client, defender.as_str()).await?;
             let idx = crate::mcp::types::EntityView::new(&e).struct_attr_u64("protectedStructIndex");
-            Ok(if idx == 0 { None } else { Some(crate::mcp::types::StructId::from_index(idx).to_string()) })
+            Ok(if idx == 0 { None } else { Some(StructId::from_index(idx)) })
         }
     )
 }
@@ -331,63 +336,53 @@ pub(crate) fn work_anchor(rows: &Value, object_id: &str, category: &str) -> Resu
 }
 
 /// Live BUILD anchor for a struct (0 = built, or no build outstanding).
-pub async fn build_anchor(client: &CosmosClient, pid: &str, sid: &str) -> Result<u64, String> {
-    if let Some(a) = snap(|s| s.struct_attr(sid, "blockStartBuild")) {
-        return Ok(a);
+pub async fn build_anchor(client: &CosmosClient, sid: &StructId) -> Result<Block, String> {
+    if let Some(a) = snap(|s| s.struct_attr(sid.as_str(), "blockStartBuild")) {
+        return Ok(Block::new(a));
     }
     // The chain's struct entity, not the guild work view: the view is a join
     // over stores the snapshot already holds, and on a snapshot miss the
     // one object we need is a single LCD read (see mcp/perception.rs on why
     // the view was retired, 2026-09-05).
-    let _ = pid;
     LCD_READS.fetch_add(1, Ordering::Relaxed);
-    let e = crate::mcp::loop_util::verify_struct_entity(client, sid).await?;
-    Ok(crate::mcp::types::EntityView::new(&e).struct_block("blockStartBuild").get())
+    let e = crate::mcp::loop_util::verify_struct_entity(client, sid.as_str()).await?;
+    Ok(crate::mcp::types::EntityView::new(&e).struct_block("blockStartBuild"))
 }
 
-/// Live ore clock (MINE / REFINE) for a rig on `planet_id`. From the
-/// snapshot only while the hot refresh is current — the clocks never stream.
-/// `pid` is the rig's owner when known (the guild work view is keyed by it).
-pub async fn ore_anchor(
-    client: &CosmosClient,
-    pid: Option<&str>,
-    planet_id: &str,
-    sid: &str,
-    task_type: &str,
-) -> Result<u64, String> {
-    let attr = if task_type == "REFINE" { "blockStartOreRefine" } else { "blockStartOreMine" };
+/// Live ore clock (MINE / REFINE) of `planet`. From the snapshot only while
+/// the clocks are trusted (native GRASS authoritative, or a hot refresh
+/// within the window); otherwise the planet entity itself, folded back in.
+pub async fn ore_anchor(client: &CosmosClient, planet: &PlanetId, kind: TaskType) -> Result<Block, String> {
+    let attr = kind.planet_clock_attr().ok_or_else(|| format!("{kind} has no ore clock"))?;
     if clocks_hot() {
-        if let Some(a) = snap(|s| s.planet_attr(planet_id, attr)) {
-            return Ok(a);
+        if let Some(a) = snap(|s| s.planet_attr(planet.as_str(), attr)) {
+            return Ok(Block::new(a));
         }
     }
-    // The planet entity itself (one LCD read), folded back into the
-    // snapshot. The guild work view used to sit between; retired.
-    let _ = (pid, sid);
     LCD_READS.fetch_add(1, Ordering::Relaxed);
-    let p = client.query_entity("planet", planet_id).await?;
+    let p = client.query_entity("planet", planet.as_str()).await?;
     perception::absorb_planet_entity(&p);
-    Ok(crate::mcp::loop_util::planet_ore_anchor(Some(&p), task_type))
+    Ok(Block::new(crate::mcp::loop_util::planet_ore_anchor(Some(&p), kind)))
 }
 
-/// Blocks of charge the player has right now.
-pub async fn player_charge(client: &CosmosClient, pid: &str, current_block: u64) -> Result<u64, String> {
-    if let Some(c) = snap(|s| s.grid_attr(pid, "lastAction").map(|la| current_block.saturating_sub(la))) {
-        return Ok(c);
+/// Blocks of charge the player has at `current`.
+pub async fn player_charge(client: &CosmosClient, pid: &PlayerId, current: Block) -> Result<Charge, String> {
+    if let Some(c) = snap(|s| s.grid_attr(pid.as_str(), "lastAction").map(|la| current.since(Block::new(la)))) {
+        return Ok(Charge::new(c));
     }
     with_failover!(
         "charge",
         async {
-            let v = client.guild.player_last_action_block(pid).await?;
+            let v = client.guild.player_last_action_block(pid.as_str()).await?;
             // `{ "last_action_block_height": "12345" }` — a single row.
             let row = if v.is_array() { v.get(0).cloned().unwrap_or(Value::Null) } else { v };
             let last = num_u64(row.get("last_action_block_height").or_else(|| row.get("val")))
                 .ok_or("charge: guild row has no last_action_block_height")?;
-            Ok(current_block.saturating_sub(last))
+            Ok(Charge::new(current.since(Block::new(last))))
         },
         async {
-            let player = client.query_entity("player", pid).await?;
-            Ok(crate::mcp::types::Block::new(current_block).since(crate::mcp::types::EntityView::new(&player).last_action()))
+            let player = client.query_entity("player", pid.as_str()).await?;
+            Ok(Charge::new(current.since(crate::mcp::types::EntityView::new(&player).last_action())))
         }
     )
 }
@@ -395,15 +390,25 @@ pub async fn player_charge(client: &CosmosClient, pid: &str, current_block: u64)
 /// What the player's profile says right now: current planet, fleet, stored ore.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerView {
-    pub planet_id: String,
-    pub fleet_id: String,
+    /// None = no planet (a fresh member who has not explored).
+    pub planet_id: Option<PlanetId>,
+    pub fleet_id: Option<FleetId>,
     pub stored_ore: f64,
+}
+
+impl PlayerView {
+    pub fn location(&self, kind: LocationKind) -> Option<ObjectId> {
+        match kind {
+            LocationKind::Planet => self.planet_id.as_ref().map(|p| p.object_id()),
+            LocationKind::Fleet => self.fleet_id.as_ref().map(|f| f.object_id()),
+        }
+    }
 }
 
 pub(crate) fn player_view_from_guild(row: &Value) -> Result<PlayerView, String> {
     Ok(PlayerView {
-        planet_id: str_field(row, "planet_id").unwrap_or("").to_string(),
-        fleet_id: str_field(row, "fleet_id").unwrap_or("").to_string(),
+        planet_id: str_field(row, "planet_id").and_then(|p| PlanetId::parse(p).ok()),
+        fleet_id: str_field(row, "fleet_id").and_then(|f| FleetId::parse(f).ok()),
         stored_ore: num_f64(row.get("ore")).ok_or("player: guild row has no numeric `ore`")?,
     })
 }
@@ -411,18 +416,18 @@ pub(crate) fn player_view_from_guild(row: &Value) -> Result<PlayerView, String> 
 pub(crate) fn player_view_from_lcd(entity: &Value) -> Result<PlayerView, String> {
     let p = entity.get("Player").ok_or("player: LCD entity has no Player")?;
     Ok(PlayerView {
-        planet_id: str_field(p, "planetId").unwrap_or("").to_string(),
-        fleet_id: str_field(p, "fleetId").unwrap_or("").to_string(),
+        planet_id: str_field(p, "planetId").and_then(|x| PlanetId::parse(x).ok()),
+        fleet_id: str_field(p, "fleetId").and_then(|x| FleetId::parse(x).ok()),
         stored_ore: parse_f64(entity.get("gridAttributes").and_then(|g| g.get("ore"))),
     })
 }
 
-pub async fn player_view(client: &CosmosClient, pid: &str) -> Result<PlayerView, String> {
+pub async fn player_view(client: &CosmosClient, pid: &PlayerId) -> Result<PlayerView, String> {
     if let Some(v) = snap(|s| {
-        s.player_row(pid).map(|p| PlayerView {
-            planet_id: str_field(p, "planetId").unwrap_or("").to_string(),
-            fleet_id: str_field(p, "fleetId").unwrap_or("").to_string(),
-            stored_ore: s.grid_attr(pid, "ore").unwrap_or(0) as f64,
+        s.player_row(pid.as_str()).map(|p| PlayerView {
+            planet_id: str_field(p, "planetId").and_then(|x| PlanetId::parse(x).ok()),
+            fleet_id: str_field(p, "fleetId").and_then(|x| FleetId::parse(x).ok()),
+            stored_ore: s.grid_attr(pid.as_str(), "ore").unwrap_or(0) as f64,
         })
     }) {
         return Ok(v);
@@ -434,38 +439,37 @@ pub async fn player_view(client: &CosmosClient, pid: &str) -> Result<PlayerView,
 /// we believe. The pre-sign read for an EXPLORE — the one action whose
 /// precondition ("my current planet is mined out") is about a planet the
 /// snapshot may have already been moved off of.
-pub async fn player_view_live(client: &CosmosClient, pid: &str) -> Result<PlayerView, String> {
+pub async fn player_view_live(client: &CosmosClient, pid: &PlayerId) -> Result<PlayerView, String> {
     with_failover!(
         "player",
-        async { player_view_from_guild(&client.guild.player_by_id(pid).await?) },
-        async { player_view_from_lcd(&client.query_entity("player", pid).await?) }
+        async { player_view_from_guild(&client.guild.player_by_id(pid.as_str()).await?) },
+        async { player_view_from_lcd(&client.query_entity("player", pid.as_str()).await?) }
     )
 }
 
-/// Just the player's current planet or fleet id (`target` = "planet" | "fleet").
-pub async fn player_location(client: &CosmosClient, pid: &str, target: &str) -> Result<String, String> {
-    let v = player_view(client, pid).await?;
-    Ok(if target == "fleet" { v.fleet_id } else { v.planet_id })
+/// Just the player's current planet or fleet. `Ok(None)` = has none.
+pub async fn player_location(client: &CosmosClient, pid: &PlayerId, kind: LocationKind) -> Result<Option<ObjectId>, String> {
+    Ok(player_view(client, pid).await?.location(kind))
 }
 
 /// Undiscovered ore left on a planet.
-pub async fn planet_ore(client: &CosmosClient, planet_id: &str) -> Result<f64, String> {
-    if let Some(o) = snap(|s| s.grid_attr(planet_id, "ore").map(|v| v as f64)) {
+pub async fn planet_ore(client: &CosmosClient, planet: &PlanetId) -> Result<f64, String> {
+    if let Some(o) = snap(|s| s.grid_attr(planet.as_str(), "ore").map(|v| v as f64)) {
         return Ok(o);
     }
-    planet_ore_live(client, planet_id).await
+    planet_ore_live(client, planet).await
 }
 
 /// [`planet_ore`] that skips the snapshot (see `player_view_live`).
-pub async fn planet_ore_live(client: &CosmosClient, planet_id: &str) -> Result<f64, String> {
+pub async fn planet_ore_live(client: &CosmosClient, planet: &PlanetId) -> Result<f64, String> {
     with_failover!(
         "planet_ore",
         async {
-            let row = client.guild.planet_by_id(planet_id).await?;
+            let row = client.guild.planet_by_id(planet.as_str()).await?;
             num_f64(row.get("undiscovered_ore")).ok_or_else(|| "planet: guild row has no numeric undiscovered_ore".to_string())
         },
         async {
-            let p = client.query_entity("planet", planet_id).await?;
+            let p = client.query_entity("planet", planet.as_str()).await?;
             Ok(parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))))
         }
     )
@@ -513,68 +517,83 @@ async fn guild_object_row(client: &CosmosClient, id: &str) -> Result<Value, Stri
         .ok_or_else(|| format!("Guild API objects has no {id}"))
 }
 
-fn location_row(s: &Snapshot, target: &str, loc: &str) -> Option<Value> {
-    if target == "fleet" { s.fleet_row(loc) } else { s.planet_row(loc) }.cloned()
+fn location_row(s: &Snapshot, kind: LocationKind, loc: &str) -> Option<Value> {
+    match kind {
+        LocationKind::Fleet => s.fleet_row(loc),
+        LocationKind::Planet => s.planet_row(loc),
+    }
+    .cloned()
+}
+
+/// A planet or fleet id, with its kind decided by the id itself.
+fn location_kind(loc: &ObjectId) -> Result<LocationKind, String> {
+    LocationKind::of(loc).ok_or_else(|| format!("{loc} is neither a planet nor a fleet"))
 }
 
 /// Is `ambit` slot `slot` of planet/fleet `loc` occupied by a live struct?
-pub async fn slot_occupied(client: &CosmosClient, target: &str, loc: &str, ambit: &str, slot: u64) -> Result<bool, String> {
-    if let Some(o) = snap(|s| location_row(s, target, loc).and_then(|row| slot_occupied_in_map(&row, ambit, slot).ok())) {
+pub async fn slot_occupied(client: &CosmosClient, loc: &ObjectId, ambit: &str, slot: u64) -> Result<bool, String> {
+    let kind = location_kind(loc)?;
+    let id = loc.to_string();
+    if let Some(o) = snap(|s| location_row(s, kind, &id).and_then(|row| slot_occupied_in_map(&row, ambit, slot).ok())) {
         return Ok(o);
     }
-    slot_occupied_live(client, target, loc, ambit, slot).await
+    slot_occupied_live(client, loc, ambit, slot).await
 }
 
 /// [`slot_occupied`] that skips the snapshot — the pre-sign check for a build
 /// initiate, where a slot the snapshot still shows free (its struct_status
 /// frame lost) costs a rejected tx and a 30-minute back-off for that player.
-pub async fn slot_occupied_live(client: &CosmosClient, target: &str, loc: &str, ambit: &str, slot: u64) -> Result<bool, String> {
+pub async fn slot_occupied_live(client: &CosmosClient, loc: &ObjectId, ambit: &str, slot: u64) -> Result<bool, String> {
+    let kind = location_kind(loc)?;
+    let id = loc.to_string();
     with_failover!(
         "slot",
-        async { slot_occupied_in_map(&slot_map(&guild_object_row(client, loc).await?)?, ambit, slot) },
+        async { slot_occupied_in_map(&slot_map(&guild_object_row(client, &id).await?)?, ambit, slot) },
         async {
-            let entity = client.query_entity(target, loc).await?;
-            if target == "planet" {
+            let entity = client.query_entity(kind.as_str(), &id).await?;
+            if kind == LocationKind::Planet {
                 perception::absorb_planet_entity(&entity);
             }
-            let wrapper = if target == "fleet" { "Fleet" } else { "Planet" };
-            let row = entity.get(wrapper).ok_or_else(|| format!("{target} {loc}: LCD entity has no {wrapper}"))?;
+            let wrapper = kind.lcd_wrapper();
+            let row = entity.get(wrapper).ok_or_else(|| format!("{kind} {id}: LCD entity has no {wrapper}"))?;
             slot_occupied_in_map(row, ambit, slot)
         }
     )
 }
 
 /// First free slot on a planet/fleet, trying `ambits` in order.
-pub async fn first_free_slot(client: &CosmosClient, target: &str, loc: &str, ambits: &[&str]) -> Result<Option<(String, u64)>, String> {
-    if let Some(f) = snap(|s| location_row(s, target, loc).map(|row| first_free_in_map(&row, ambits))) {
+pub async fn first_free_slot(client: &CosmosClient, loc: &ObjectId, ambits: &[&str]) -> Result<Option<(String, u64)>, String> {
+    let kind = location_kind(loc)?;
+    let id = loc.to_string();
+    if let Some(f) = snap(|s| location_row(s, kind, &id).map(|row| first_free_in_map(&row, ambits))) {
         return Ok(f);
     }
     with_failover!(
         "free_slot",
-        async { Ok(first_free_in_map(&slot_map(&guild_object_row(client, loc).await?)?, ambits)) },
+        async { Ok(first_free_in_map(&slot_map(&guild_object_row(client, &id).await?)?, ambits)) },
         async {
-            let entity = client.query_entity(target, loc).await?;
-            let wrapper = if target == "fleet" { "Fleet" } else { "Planet" };
-            Ok(entity.get(wrapper).and_then(|m| first_free_in_map(m, ambits)))
+            let entity = client.query_entity(kind.as_str(), &id).await?;
+            Ok(entity.get(kind.lcd_wrapper()).and_then(|m| first_free_in_map(m, ambits)))
         }
     )
 }
 
-/// The fleet's Command Ship id, if it has one.
-pub async fn fleet_command_struct(client: &CosmosClient, _pid: &str, fleet_id: &str) -> Result<Option<String>, String> {
-    if let Some(c) = snap(|s| s.fleet_row(fleet_id).map(|f| str_field(f, "commandStruct").map(String::from))) {
+/// The fleet's Command Ship, if it has one. An empty or unparsable command
+/// field on a present fleet row means "none".
+pub async fn fleet_command_struct(client: &CosmosClient, fleet: &FleetId) -> Result<Option<StructId>, String> {
+    let cmd = |v: Option<&str>| v.and_then(|c| StructId::parse(c).ok());
+    if let Some(c) = snap(|s| s.fleet_row(fleet.as_str()).map(|f| cmd(str_field(f, "commandStruct")))) {
         return Ok(c);
     }
     with_failover!(
         "fleet_command",
         async {
-            let fleet = guild_object_row(client, fleet_id).await?;
-            // An empty/absent command field on a present fleet row means "none".
-            Ok(str_field(&fleet, "command_struct").map(String::from))
+            let row = guild_object_row(client, fleet.as_str()).await?;
+            Ok(cmd(str_field(&row, "command_struct")))
         },
         async {
-            let fleet = client.query_entity("fleet", fleet_id).await?;
-            Ok(fleet.get("Fleet").and_then(|f| str_field(f, "commandStruct")).map(String::from))
+            let row = client.query_entity("fleet", fleet.as_str()).await?;
+            Ok(cmd(row.get("Fleet").and_then(|f| str_field(f, "commandStruct"))))
         }
     )
 }
@@ -585,41 +604,40 @@ pub async fn fleet_command_struct(client: &CosmosClient, _pid: &str, fleet_id: &
 /// outstanding; callers treat that as "don't block".
 pub async fn solved_anchor_live(
     client: &CosmosClient,
-    object_id: &str,
-    task_kind: &str,
-) -> Result<(u64, Option<String>, Option<String>), String> {
-    let is_ore = matches!(task_kind, "MINE" | "REFINE");
+    object: &StructId,
+    kind: TaskType,
+) -> Result<(Block, Option<PlanetId>, Option<PlayerId>), String> {
     // Owner and location from the snapshot's struct row, then the anchor
     // through the same source-aware readers every loop uses.
-    if let Some((owner, location)) = snap(|s| s.struct_row(object_id).map(|r| (r.owner.clone(), r.location_id.clone()))) {
-        let live = if is_ore {
-            ore_anchor(client, Some(&owner), &location, object_id, task_kind).await?
-        } else {
-            build_anchor(client, &owner, object_id).await?
+    if let Some((owner, location)) = snap(|s| s.struct_row(object.as_str()).map(|r| (r.owner.clone(), r.location_id.clone()))) {
+        let owner = PlayerId::parse(&owner).ok();
+        if !kind.is_ore() {
+            return Ok((build_anchor(client, object).await?, None, owner));
+        }
+        // Chain v0.21.0: the ore clock hangs off the PLANET the rig stands
+        // on; a planetary struct's location IS its planet. A rig in a fleet
+        // has no clock: unknown, never "dead".
+        let Ok(planet) = PlanetId::parse(&location) else {
+            return Ok((Block::new(0), None, owner));
         };
-        return Ok((live, if is_ore { Some(location) } else { None }, Some(owner)));
+        let live = ore_anchor(client, &planet, kind).await?;
+        return Ok((live, Some(planet), owner));
     }
     // Not in the snapshot: the chain's own struct (and planet) entities.
     LCD_READS.fetch_add(1, Ordering::Relaxed);
-    {
-        {
-            let e = client.query_entity("struct", object_id).await?;
-            let owner = e.get("Struct").and_then(|s| str_field(s, "owner")).map(String::from);
-            if !is_ore {
-                return Ok((crate::mcp::types::EntityView::new(&e).struct_block("blockStartBuild").get(), None, owner));
-            }
-            // Chain v0.21.0: the ore clock hangs off the PLANET the rig stands
-            // on; a planetary struct's locationId IS its planet id.
-            let Some(planet_id) = e.get("Struct").and_then(|s| str_field(s, "locationId")).map(String::from) else {
-                return Ok((0, None, owner));
-            };
-            let live = match client.query_entity("planet", &planet_id).await {
-                Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), task_kind),
-                Err(_) => 0,
-            };
-            Ok((live, Some(planet_id), owner))
-        }
+    let e = client.query_entity("struct", object.as_str()).await?;
+    let owner = e.get("Struct").and_then(|s| str_field(s, "owner")).and_then(|o| PlayerId::parse(o).ok());
+    if !kind.is_ore() {
+        return Ok((crate::mcp::types::EntityView::new(&e).struct_block("blockStartBuild"), None, owner));
     }
+    let Some(planet) = e.get("Struct").and_then(|s| str_field(s, "locationId")).and_then(|l| PlanetId::parse(l).ok()) else {
+        return Ok((Block::new(0), None, owner));
+    };
+    let live = match client.query_entity("planet", planet.as_str()).await {
+        Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), kind),
+        Err(_) => 0,
+    };
+    Ok((Block::new(live), Some(planet), owner))
 }
 
 #[cfg(test)]
@@ -631,7 +649,7 @@ mod tests {
     fn guild_status_bits_decode_built_online_destroyed() {
         let s = struct_state_from_guild(&json!({"status": 7, "is_destroyed": false, "owner": "1-195", "location_id": "2-22432"})).unwrap();
         assert!(s.built && s.online && !s.destroyed);
-        assert_eq!(s.owner.as_deref(), Some("1-195"));
+        assert_eq!(s.owner.as_ref().map(|p| p.as_str()), Some("1-195"));
         let d = struct_state_from_guild(&json!({"status": "35", "is_destroyed": false})).unwrap();
         assert!(d.destroyed && d.built);
         let d2 = struct_state_from_guild(&json!({"status": 3, "is_destroyed": true})).unwrap();
@@ -647,7 +665,7 @@ mod tests {
             "structAttributes": {"isBuilt": true, "isOnline": "false", "isDestroyed": false}});
         let s = struct_state_from_lcd(&e).unwrap();
         assert!(s.built && !s.online && !s.destroyed);
-        assert_eq!(s.location_id.as_deref(), Some("2-9"));
+        assert_eq!(s.location_id.as_ref().map(|l| l.to_string()).as_deref(), Some("2-9"));
     }
 
     #[test]
@@ -686,10 +704,12 @@ mod tests {
     #[test]
     fn player_view_reads_guild_and_lcd_shapes() {
         let g = player_view_from_guild(&json!({"planet_id": "2-1", "fleet_id": "9-11", "ore": "17"})).unwrap();
-        assert_eq!((g.planet_id.as_str(), g.fleet_id.as_str(), g.stored_ore), ("2-1", "9-11", 17.0));
+        assert_eq!((g.planet_id.as_ref().map(|p| p.as_str()), g.fleet_id.as_ref().map(|f| f.as_str()), g.stored_ore), (Some("2-1"), Some("9-11"), 17.0));
         assert!(player_view_from_guild(&json!({"planet_id": "2-1"})).is_err(), "ore is required");
         let l = player_view_from_lcd(&json!({"Player": {"planetId": "2-2", "fleetId": "9-2"}, "gridAttributes": {"ore": "3"}})).unwrap();
-        assert_eq!((l.planet_id.as_str(), l.stored_ore), ("2-2", 3.0));
+        assert_eq!((l.planet_id.as_ref().map(|p| p.as_str()), l.stored_ore), (Some("2-2"), 3.0));
+        let none = player_view_from_guild(&json!({"planet_id": "", "ore": 0})).unwrap();
+        assert_eq!(none.planet_id, None, "no planet is None, not an empty id");
     }
 
     #[test]

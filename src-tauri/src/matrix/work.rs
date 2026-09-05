@@ -30,6 +30,12 @@ pub fn prefix(object_id: &str, task: &str, block_start: u64, target_id: Option<&
     }
 }
 
+/// A nonce we can carry faithfully: non-empty, no whitespace or control
+/// characters (the chain accepts any string; see `verify`).
+pub fn nonce_is_sound(nonce: &str) -> bool {
+    !nonce.is_empty() && !nonce.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 /// Check a nonce somebody else found.
 ///
 /// Rebuilt from fields THIS side supplies, never from the message: a result
@@ -44,9 +50,13 @@ pub fn verify(
     nonce: &str,
     difficulty: u64,
 ) -> Option<String> {
-    // A nonce is a decimal integer. Anything else is not a nonce, and
-    // concatenating it would hash something the chain will never reproduce.
-    if nonce.is_empty() || !nonce.bytes().all(|b| b.is_ascii_digit()) {
+    // A nonce is any string: the chain hashes `prefix + nonce` verbatim and
+    // only OUR grinders happen to iterate integers. Refusing non-digits
+    // here (as this did until 2026-09-05) threw away valid proofs from any
+    // solver that picks its nonces differently. What is refused is the
+    // unrepresentable: empty, or carrying whitespace / control characters
+    // that a chat transport may have trimmed or mangled on the way.
+    if !nonce_is_sound(nonce) {
         return None;
     }
     let message = format!("{}{}", prefix(object_id, task, block_start, target_id), nonce);
@@ -103,7 +113,7 @@ pub fn parse(content: &Value) -> Option<Value> {
         "offer" => {}
         "result" => {
             let nonce = w.get("nonce").and_then(|n| n.as_str())?;
-            if nonce.is_empty() || !nonce.bytes().all(|b| b.is_ascii_digit()) {
+            if !nonce_is_sound(nonce) {
                 return None;
             }
             out["nonce"] = json!(nonce);
@@ -147,13 +157,18 @@ mod tests {
     }
 
     #[test]
-    fn only_a_decimal_nonce_is_a_nonce() {
-        // Concatenating anything else hashes a string the chain will never
-        // reproduce — so it would "verify" here and fail on submission.
-        for bad in ["", "12a45", "0x1f", "-5", " 12", "12 ", "1.5"] {
-            assert!(verify("5-2184", "MINE", 812004, None, bad, 0).is_none(), "{}", bad);
+    fn a_nonce_is_any_string_the_chain_can_hash() {
+        // The chain concatenates the nonce verbatim; integers are only what
+        // our own grinders happen to produce. A solver elsewhere may send
+        // "12a45" or "0x1f" and its proof is as good as ours.
+        for good in ["0", "12345", "12a45", "0x1f", "-5", "1.5", "abc-DEF_42"] {
+            let got = verify("5-2184", "MINE", 812004, None, good, 0).unwrap();
+            assert_eq!(got, hex::encode(Sha256::digest(format!("5-2184MINE812004NONCE{good}").as_bytes())), "{good}");
         }
-        assert!(verify("5-2184", "MINE", 812004, None, "0", 0).is_some());
+        // What cannot travel through chat unchanged is refused.
+        for bad in ["", " 12", "12 ", "1 2", "a\tb", "x\n"] {
+            assert!(verify("5-2184", "MINE", 812004, None, bad, 0).is_none(), "{bad:?}");
+        }
     }
 
     fn offer(extra: Value) -> Value {
@@ -203,7 +218,8 @@ mod tests {
         };
         assert_eq!(parse(&result(json!("918273645"))).unwrap()["nonce"], "918273645");
         assert!(parse(&result(json!(""))).is_none());
-        assert!(parse(&result(json!("cafe"))).is_none());
+        assert!(parse(&result(json!("cafe"))).is_some(), "a nonce is any string the chain can hash");
+        assert!(parse(&result(json!("ca fe"))).is_none(), "whitespace cannot travel through chat unchanged");
         // A number rather than a string: nonces exceed 2^53 and JSON would
         // round them. The string form is the only one that survives.
         assert!(parse(&result(json!(918273645u64))).is_none());

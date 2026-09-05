@@ -162,7 +162,7 @@ async fn action_mine(
             ))];
         };
         match client.query_entity("planet", &planet_id).await {
-            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "MINE"),
+            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), crate::mcp::types::TaskType::Mine),
             Err(e) => {
                 return vec![Content::text(format!("mine: planet {} lookup failed: {}", planet_id, e))]
             }
@@ -261,7 +261,7 @@ async fn action_refine(
             ))];
         };
         match client.query_entity("planet", &planet_id).await {
-            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "REFINE"),
+            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), crate::mcp::types::TaskType::Refine),
             Err(e) => {
                 return vec![Content::text(format!("refine: planet {} lookup failed: {}", planet_id, e))]
             }

@@ -506,7 +506,7 @@ impl PolicyEngine {
         let now = crate::hasher::types::now_millis();
 
         // Auto-refine: when MINE completes, auto-start REFINE
-        if task_type == "MINE" && self.is_enabled("auto_refine") {
+        if crate::mcp::types::TaskType::parse(task_type) == Some(crate::mcp::types::TaskType::Mine) && self.is_enabled("auto_refine") {
             let gs = GAME_STATE.read().unwrap();
 
             // Find an online Ore Refinery owned by the player.

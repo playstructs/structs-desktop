@@ -166,7 +166,16 @@ pub struct Snapshot {
     pub pending_new: HashSet<String>,
     pub events_applied: u64,
     pub events_skipped_stale: u64,
+    /// When a frame last CHANGED something here.
     pub last_event_ms: f64,
+    /// When ANY frame last arrived, block heartbeats included. This is the
+    /// feed-liveness clock: a galaxy where nothing changes for three minutes
+    /// is quiet, not dead, and the heartbeat says so. Judging liveness by
+    /// `last_event_ms` alone declared this snapshot stale during exactly
+    /// such a lull (13:47–13:49 on 2026-09-05: 33 block frames, 0 changes)
+    /// and every scan for those minutes walked the chain per struct —
+    /// 6,000 LCD reads in three minutes with a perfectly good snapshot.
+    pub last_frame_ms: f64,
     /// Rows the ingest edge refused because an id did not parse (a struct
     /// with no valid id, an owner that is not a player, a location that is
     /// not an object). Counted, never silently absorbed; a refresh with more
@@ -550,12 +559,15 @@ impl Snapshot {
     /// Restart a KNOWN planet's mine/refine clock at `block` (a completion
     /// we signed landed). Unknown planets and zero blocks are refused: this
     /// records what the chain did, it never invents a planet.
-    pub fn restart_clock(&mut self, planet_id: &str, task_type: &str, block: u64) -> bool {
-        let idx = match task_type {
-            "MINE" => P_MINE,
-            "REFINE" => P_REFINE,
+    pub fn restart_clock(&mut self, planet: &crate::mcp::types::PlanetId, kind: crate::mcp::types::TaskType, block: crate::mcp::types::Block) -> bool {
+        use crate::mcp::types::TaskType;
+        let idx = match kind {
+            TaskType::Mine => P_MINE,
+            TaskType::Refine => P_REFINE,
             _ => return false,
         };
+        let planet_id = planet.as_str();
+        let block = block.get();
         if block == 0 || !self.planets.contains_key(planet_id) {
             return false;
         }
@@ -826,6 +838,9 @@ impl Snapshot {
             "last_event_age_s": if self.last_event_ms > 0.0 {
                 json!(((crate::hasher::types::now_millis() - self.last_event_ms) / 1000.0).round())
             } else { Value::Null },
+            "last_frame_age_s": if self.last_frame_ms > 0.0 {
+                json!(((crate::hasher::types::now_millis() - self.last_frame_ms) / 1000.0).round())
+            } else { Value::Null },
         })
     }
 }
@@ -898,6 +913,7 @@ pub fn on_grass(category: &str, subject: &str, detail: &Value) {
     }
     if let Ok(mut g) = CURRENT.write() {
         if let Some(s) = g.as_mut() {
+            s.last_frame_ms = crate::hasher::types::now_millis();
             s.apply(category, subject, detail);
         }
     }
@@ -1423,10 +1439,10 @@ pub fn work_for_player(pid: &str) -> Option<Vec<Value>> {
 /// gap was long enough for the harvest loop to re-nominate the same rig
 /// against the old anchor and grind a proof the chain then rejected
 /// ("work failure", 94 an hour on 2026-09-04).
-pub fn note_clock_restart(planet_id: &str, task_type: &str, block: u64) -> bool {
+pub fn note_clock_restart(planet: &crate::mcp::types::PlanetId, kind: crate::mcp::types::TaskType, block: crate::mcp::types::Block) -> bool {
     if let Ok(mut g) = CURRENT.write() {
         if let Some(s) = g.as_mut() {
-            return s.restart_clock(planet_id, task_type, block);
+            return s.restart_clock(planet, kind, block);
         }
     }
     false
@@ -1904,8 +1920,8 @@ mod tests {
     fn planet_entity_feeds_planet_ore_anchor_unchanged() {
         let s = galaxy();
         let p = s.planet_entity("2-223").unwrap();
-        assert_eq!(crate::mcp::loop_util::planet_ore_anchor(Some(&p), "MINE"), 1_358_696);
-        assert_eq!(crate::mcp::loop_util::planet_ore_anchor(Some(&p), "REFINE"), 1_616_486);
+        assert_eq!(crate::mcp::loop_util::planet_ore_anchor(Some(&p), crate::mcp::types::TaskType::Mine), 1_358_696);
+        assert_eq!(crate::mcp::loop_util::planet_ore_anchor(Some(&p), crate::mcp::types::TaskType::Refine), 1_616_486);
         assert_eq!(p["planetAttributes"]["planetaryShield"], "225");
         assert_eq!(p["gridAttributes"]["ore"], "4");
         assert_eq!(p["Planet"]["maxOre"], "5");
@@ -2067,6 +2083,22 @@ mod guild_ingest_tests {
     use super::*;
 
     #[test]
+    fn a_block_heartbeat_stamps_feed_liveness_without_changing_anything() {
+        let mut snap = Snapshot::from_pages(&[], &[], &[], &[], &[], &[], &[]);
+        snap.min_height = 1;
+        snap.taken_ms = crate::hasher::types::now_millis() - 200_000.0;
+        // Publish it as CURRENT and feed a consensus heartbeat through the
+        // real ingest hook: nothing changes, but the feed is alive.
+        *CURRENT.write().unwrap() = Some(snap);
+        on_grass("block", "consensus", &json!({"block_height": 2_482_900}));
+        let (frame, event, usable) = with_snapshot(|s| (s.last_frame_ms, s.last_event_ms, ())).map(|(f, e, _)| (f, e, crate::mcp::loop_util::perception_usable_now_for_test())).unwrap();
+        assert!(frame > 0.0, "heartbeat stamps last_frame_ms");
+        assert_eq!(event, 0.0, "a heartbeat changes nothing");
+        assert!(usable, "a quiet galaxy with a beating feed is scannable");
+        *CURRENT.write().unwrap() = None;
+    }
+
+    #[test]
     fn a_players_own_fleet_arriving_moves_the_player_to_that_planet() {
         let mut snap = Snapshot::from_pages(
             &[], &[], &[], &[],
@@ -2176,14 +2208,14 @@ mod guild_ingest_tests {
             a[P_MINE] = 1_358_696;
             a
         });
-        assert!(snap.restart_clock("2-223", "MINE", 2_470_534));
+        assert!(snap.restart_clock(&crate::mcp::types::PlanetId::parse("2-223").unwrap(), crate::mcp::types::TaskType::Mine, crate::mcp::types::Block::new(2_470_534)));
         assert_eq!(snap.planet_attrs["2-223"][P_MINE], 2_470_534);
-        assert!(!snap.restart_clock("2-223", "MINE", 2_470_534), "same block twice is no change");
-        assert!(snap.restart_clock("2-223", "REFINE", 2_470_540));
+        assert!(!snap.restart_clock(&crate::mcp::types::PlanetId::parse("2-223").unwrap(), crate::mcp::types::TaskType::Mine, crate::mcp::types::Block::new(2_470_534)), "same block twice is no change");
+        assert!(snap.restart_clock(&crate::mcp::types::PlanetId::parse("2-223").unwrap(), crate::mcp::types::TaskType::Refine, crate::mcp::types::Block::new(2_470_540)));
         assert_eq!(snap.planet_attrs["2-223"][P_REFINE], 2_470_540);
-        assert!(!snap.restart_clock("2-999", "MINE", 5), "never invents a planet");
-        assert!(!snap.restart_clock("2-223", "BUILD", 5), "build clocks live on the struct");
-        assert!(!snap.restart_clock("2-223", "MINE", 0));
+        assert!(!snap.restart_clock(&crate::mcp::types::PlanetId::parse("2-999").unwrap(), crate::mcp::types::TaskType::Mine, crate::mcp::types::Block::new(5)), "never invents a planet");
+        assert!(!snap.restart_clock(&crate::mcp::types::PlanetId::parse("2-223").unwrap(), crate::mcp::types::TaskType::Build, crate::mcp::types::Block::new(5)), "build clocks live on the struct");
+        assert!(!snap.restart_clock(&crate::mcp::types::PlanetId::parse("2-223").unwrap(), crate::mcp::types::TaskType::Mine, crate::mcp::types::Block::new(0)));
     }
 
     #[test]

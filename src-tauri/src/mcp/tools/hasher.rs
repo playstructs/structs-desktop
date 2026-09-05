@@ -86,7 +86,7 @@ pub async fn execute(
             // REFINE that is the planet's shared ore clock (chain v0.21.0).
             let block_start = match params.block_start {
                 Some(b) => b,
-                None if matches!(task_type.as_str(), "MINE" | "REFINE") => {
+                None if crate::mcp::types::TaskType::parse(&task_type).is_some_and(|k| k.is_ore()) => {
                     let client = crate::mcp::cosmos_client::CosmosClient::new();
                     let planet_id = match client.query_entity("struct", task_id).await {
                         Ok(v) => v
@@ -108,7 +108,10 @@ pub async fn execute(
                         ))];
                     };
                     match client.query_entity("planet", &planet_id).await {
-                        Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), task_type),
+                        Ok(p) => crate::mcp::loop_util::planet_ore_anchor(
+                            Some(&p),
+                            crate::mcp::types::TaskType::parse(&task_type).unwrap_or(crate::mcp::types::TaskType::Mine),
+                        ),
                         Err(e) => {
                             return vec![Content::text(format!(
                                 "Error: planet {} lookup failed: {}",

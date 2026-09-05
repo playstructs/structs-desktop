@@ -829,9 +829,15 @@ async fn scan(
                 // window). Two reads per ACTION, not per struct per scan.
                 if scanned_from_snapshot {
                     // Source-switched (mcp/verify.rs): Guild API by default.
+                    let (Ok(defender_t), Ok(protected_t)) = (
+                        crate::mcp::types::StructId::parse(&edge.defender),
+                        crate::mcp::types::StructId::parse(&edge.protected),
+                    ) else {
+                        return; // never sign blind
+                    };
                     let (Ok(d), Ok(p)) = (
-                        crate::mcp::verify::struct_state(&client, &edge.defender).await,
-                        crate::mcp::verify::struct_state(&client, &edge.protected).await,
+                        crate::mcp::verify::struct_state(&client, &defender_t).await,
+                        crate::mcp::verify::struct_state(&client, &protected_t).await,
                     ) else {
                         return; // never sign blind
                     };
@@ -843,10 +849,10 @@ async fn scan(
                         );
                         return;
                     }
-                    let Ok(live_target) = crate::mcp::verify::defender_target_live(&client, &edge.defender).await else {
+                    let Ok(live_target) = crate::mcp::verify::defender_target_live(&client, &defender_t).await else {
                         return; // never sign blind
                     };
-                    if live_target.as_deref() == Some(edge.protected.as_str()) {
+                    if live_target.as_ref() == Some(&protected_t) {
                         // Already wired on chain; the snapshot was behind.
                         ASSIGNED_CACHE.lock().unwrap().insert(edge.defender.clone(), edge.protected.clone());
                         return;

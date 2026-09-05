@@ -172,10 +172,7 @@ fn jitter(base_ms: u64) -> u64 {
     base_ms / 2 + base_ms * frac / 100
 }
 
-/// Player id parsed from the "<source>:<player_id>" context convention.
-fn player_from_context(context: &str) -> Option<String> {
-    context.split(':').nth(1).filter(|s| !s.is_empty()).map(String::from)
-}
+use crate::mcp::types::Context;
 
 enum AttemptResult {
     /// Bridge round-trip ok and chain accepted (code 0).
@@ -189,20 +186,20 @@ enum AttemptResult {
 /// answered for (app quit mid-flight, façade silent, queue dropped it) left no
 /// evidence it had ever existed. Payloads are game messages — no keys, no
 /// credentials — so they are stored verbatim for replay/diagnosis.
-fn log_build(context: &str, action: &str, attempt: u32, payload: Option<&Value>) {
+fn log_build(context: &Context, action: &str, attempt: u32, payload: Option<&Value>) {
     telemetry::record_tx_build(telemetry::TxBuildRow {
         ts_ms: now_millis(),
         context: context.to_string(),
         action: action.to_string(),
-        player_id: player_from_context(context),
+        player_id: context.subject().map(String::from),
         attempt,
-        priority: crate::mcp::tx_gate::classify(context).as_str(),
+        priority: crate::mcp::tx_gate::classify(context.as_str()).as_str(),
         payload: payload.map(|p| p.to_string()),
     });
 }
 
 fn record(
-    context: &str,
+    context: &Context,
     action: &str,
     attempt: u32,
     started_ms: f64,
@@ -215,7 +212,7 @@ fn record(
                 ts_ms: now_millis(),
                 context: context.to_string(),
                 action: action.to_string(),
-                player_id: player_from_context(context),
+                player_id: context.subject().map(String::from),
                 attempt,
                 outcome: "success",
                 tx_hash: tx_hash.clone(),
@@ -232,7 +229,7 @@ fn record(
                 ts_ms: now_millis(),
                 context: context.to_string(),
                 action: action.to_string(),
-                player_id: player_from_context(context),
+                player_id: context.subject().map(String::from),
                 attempt,
                 outcome: class.outcome(),
                 tx_hash: None,
@@ -257,7 +254,7 @@ pub async fn sign_with_retry(
     index: u32,
     type_url: &str,
     payload: Value,
-    context: &str,
+    context: impl Into<Context>,
 ) -> Result<Value, String> {
     sign_with_retry_guarded(app, index, type_url, payload, context, None).await
 }
@@ -277,15 +274,11 @@ pub async fn sign_with_retry(
 /// hands the slot straight back, which drains the backlog faster.
 pub struct FreshAnchor {
     /// The planet carrying the shared ore clock (resolved off the hot path).
-    pub planet_id: String,
-    /// The rig the proof is for, and its owner when known (the guild work
-    /// view is keyed by owner).
-    pub object_id: String,
-    pub player_id: Option<String>,
-    /// "MINE" or "REFINE".
-    pub task_type: String,
+    pub planet_id: crate::mcp::types::PlanetId,
+    /// Mine or refine — the two kinds with a planet clock.
+    pub task_type: crate::mcp::types::TaskType,
     /// The anchor the proof was actually solved against.
-    pub solved_anchor: u64,
+    pub solved_anchor: crate::mcp::types::Block,
 }
 
 impl FreshAnchor {
@@ -294,18 +287,10 @@ impl FreshAnchor {
     /// may only ever cancel a send it is certain is already dead.
     async fn is_stale(&self) -> bool {
         let client = crate::mcp::cosmos_client::CosmosClient::new();
-        let Ok(live) = crate::mcp::verify::ore_anchor(
-            &client,
-            self.player_id.as_deref(),
-            &self.planet_id,
-            &self.object_id,
-            &self.task_type,
-        )
-        .await
-        else {
+        let Ok(live) = crate::mcp::verify::ore_anchor(&client, &self.planet_id, self.task_type).await else {
             return false;
         };
-        live != 0 && live != self.solved_anchor
+        !live.is_zero() && live != self.solved_anchor
     }
 }
 
@@ -314,9 +299,11 @@ pub async fn sign_with_retry_guarded(
     index: u32,
     type_url: &str,
     payload: Value,
-    context: &str,
+    context: impl Into<Context>,
     guard: Option<FreshAnchor>,
 ) -> Result<Value, String> {
+    let context: Context = context.into();
+    let context = &context;
     let mut last_err = String::new();
     // RESERVE the player's once-per-block charge for the whole attempt —
     // queue wait, sign, inclusion — not just after it lands. The gate wait
@@ -327,7 +314,7 @@ pub async fn sign_with_retry_guarded(
     // 30-minute initiate backoff) and code 2022 "already discharged". See
     // loop_util::acted_this_block. Released on drop (any exit path).
     let _reservation = if crate::mcp::loop_util::is_charged_type(type_url) {
-        crate::mcp::loop_util::player_from_context(context).as_ref().and_then(crate::mcp::loop_util::reserve_charge)
+        context.player().and_then(crate::mcp::loop_util::reserve_charge)
     } else {
         None
     };
@@ -335,7 +322,7 @@ pub async fn sign_with_retry_guarded(
         // Admission gate: keeps the signing façade's own FIFO shallow so a
         // deadline-bound combat answer isn't stuck behind hundreds of bulk
         // builds. Held for the attempt; released on success, failure or cancel.
-        let _slot = crate::mcp::tx_gate::acquire(context).await;
+        let _slot = crate::mcp::tx_gate::acquire(context.as_str()).await;
         let slot_won = now_millis();
         // The wait above can be an hour deep. Re-test the proof's anchor now
         // that we hold the slot, so a message the chain is guaranteed to reject
@@ -346,7 +333,7 @@ pub async fn sign_with_retry_guarded(
                     ts_ms: now_millis(),
                     context: context.to_string(),
                     action: type_url.to_string(),
-                    player_id: player_from_context(context),
+                    player_id: context.subject().map(String::from),
                     attempt,
                     outcome: "skipped",
                     tx_hash: None,
@@ -369,9 +356,9 @@ pub async fn sign_with_retry_guarded(
         // then re-read the charge and SKIP (no tx, no back-off) if it no
         // longer covers this message.
         if loop_util::is_charged_type(type_url) {
-            if let Some(pid) = loop_util::player_from_context(context) {
+            if let Some(pid) = context.player() {
                 let t0 = now_millis();
-                while (loop_util::charge_reservations(&pid) > 1 || loop_util::charged_this_block(&pid))
+                while (loop_util::charge_reservations(pid) > 1 || loop_util::charged_this_block(pid))
                     && now_millis() - t0 < 12_000.0
                 {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -380,8 +367,8 @@ pub async fn sign_with_retry_guarded(
                 let block = crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0);
                 if block > 0 {
                     let client = crate::mcp::cosmos_client::CosmosClient::new();
-                    if let Ok(have) = crate::mcp::verify::player_charge(&client, pid.as_str(), block).await {
-                        if have < need {
+                    if let Ok(have) = crate::mcp::verify::player_charge(&client, pid, crate::mcp::types::Block::new(block)).await {
+                        if !have.covers(need) {
                             telemetry::record_tx_attempt(TxAttemptRow {
                                 ts_ms: now_millis(),
                                 context: context.to_string(),
@@ -436,8 +423,8 @@ pub async fn sign_with_retry_guarded(
                     // roster concurrently can skip it instead of racing into a
                     // certain code-2022 reject. See loop_util::acted_this_block.
                     if crate::mcp::loop_util::is_charged_type(type_url) {
-                        if let Some(pid) = crate::mcp::loop_util::player_from_context(context) {
-                            crate::mcp::loop_util::note_charged_action(&pid);
+                        if let Some(pid) = context.player() {
+                            crate::mcp::loop_util::note_charged_action(pid);
                         }
                     }
                     return Ok(value);
@@ -465,12 +452,14 @@ pub async fn submit_with_retry(
     app: &tauri::AppHandle,
     action: &str,
     args: Value,
-    context: &str,
+    context: impl Into<Context>,
 ) -> Result<tx_queue::TxResponse, String> {
+    let context: Context = context.into();
+    let context = &context;
     let mut last_err = String::new();
     for attempt in 1..=MAX_ATTEMPTS {
         // Primary-player txs share the same façade, so they share the gate.
-        let _slot = crate::mcp::tx_gate::acquire(context).await;
+        let _slot = crate::mcp::tx_gate::acquire(context.as_str()).await;
         let started = now_millis();
         log_build(context, action, attempt, Some(&args));
         let res = tx_queue::submit_tx(app, action.to_string(), args.clone()).await;
@@ -509,8 +498,10 @@ pub async fn sign_once(
     index: u32,
     type_url: &str,
     payload: Value,
-    context: &str,
+    context: impl Into<Context>,
 ) -> Result<Value, String> {
+    let context: Context = context.into();
+    let context = &context;
     let started = now_millis();
     let res = vplayer_bridge::sign_action(app, index, type_url, payload, 60).await;
     let outcome = match res {
@@ -551,8 +542,10 @@ pub async fn submit_once(
     app: &tauri::AppHandle,
     action: &str,
     args: Value,
-    context: &str,
+    context: impl Into<Context>,
 ) -> Result<tx_queue::TxResponse, String> {
+    let context: Context = context.into();
+    let context = &context;
     let started = now_millis();
     let res = tx_queue::submit_tx(app, action.to_string(), args).await;
     let outcome = match &res {
@@ -639,8 +632,13 @@ mod tests {
     }
 
     #[test]
-    fn player_id_from_context() {
-        assert_eq!(player_from_context("auto_build:1-271"), Some("1-271".into()));
-        assert_eq!(player_from_context("mcp"), None);
+    fn the_ledger_column_carries_the_raw_subject_and_only_players_reserve() {
+        let c = Context::parse("auto_build:1-271");
+        assert_eq!(c.subject(), Some("1-271"));
+        assert!(c.player().is_some());
+        assert_eq!(Context::parse("mcp").subject(), None);
+        let c = Context::parse("pow_complete:5-234309");
+        assert_eq!(c.subject(), Some("5-234309"), "ledger rows keep the struct id, as they always have");
+        assert!(c.player().is_none(), "but it reserves no player's charge");
     }
 }

@@ -720,12 +720,13 @@ pub async fn matrix_mute(
 /// the same answer: making an offer, deciding whether one is still worth
 /// grinding, and telling a reader that a card has gone dead.
 async fn live_anchor(object_id: &str, task: &str) -> Result<u64, String> {
+    use crate::mcp::types::TaskType;
     let client = crate::mcp::cosmos_client::CosmosClient::new();
-    match task {
+    match TaskType::parse(task) {
         // Since chain v0.21.0 the ore clock lives on the PLANET, not the
         // struct. Reading the struct's own field returns 0 forever, which
         // reads as "no cycle" rather than as a bug.
-        "MINE" | "REFINE" => {
+        Some(kind @ (TaskType::Mine | TaskType::Refine)) => {
             let v = client.entity("struct", object_id).await?;
             let planet_id = v
                 .get("Struct")
@@ -734,9 +735,9 @@ async fn live_anchor(object_id: &str, task: &str) -> Result<u64, String> {
                 .map(str::to_string)
                 .ok_or("that struct has no location, so it has no ore clock")?;
             let p = client.entity("planet", &planet_id).await?;
-            Ok(crate::mcp::loop_util::planet_ore_anchor(Some(&p), task))
+            Ok(crate::mcp::loop_util::planet_ore_anchor(Some(&p), kind))
         }
-        "BUILD" => {
+        Some(TaskType::Build) => {
             let v = client.entity("struct", object_id).await?;
             Ok(v.get("structAttributes")
                 .and_then(|a| a.get("blockStartBuild"))
@@ -822,49 +823,33 @@ pub async fn matrix_work_submit(
     nonce: String,
     target_id: Option<String>,
 ) -> Result<Value, String> {
-    let task = task.to_uppercase();
+    let Some(kind) = crate::mcp::types::TaskType::parse(&task) else {
+        return Err(format!("{} is not a kind of work with a completion", task.to_uppercase()));
+    };
+    let task = kind.as_str().to_string();
     let Some(proof) = work::verify(
         &object_id, &task, block_start, target_id.as_deref(), &nonce, difficulty,
     ) else {
         return Err("that nonce does not solve this task".into());
     };
 
-    let (type_url, payload) = match task.as_str() {
-        "MINE" => (
-            "/structs.structs.MsgStructOreMinerComplete",
-            json!({ "structId": object_id, "proof": proof, "nonce": nonce }),
-        ),
-        "REFINE" => (
-            "/structs.structs.MsgStructOreRefineryComplete",
-            json!({ "structId": object_id, "proof": proof, "nonce": nonce }),
-        ),
-        "BUILD" => (
-            "/structs.structs.MsgStructBuildComplete",
-            json!({ "structId": object_id, "proof": proof, "nonce": nonce }),
-        ),
-        "RAID" => (
-            "/structs.structs.MsgPlanetRaidComplete",
-            json!({ "fleetId": object_id, "proof": proof, "nonce": nonce }),
-        ),
-        _ => return Err(format!("{} is not a kind of work with a completion", task)),
-    };
+    let type_url = kind.completion_type_url();
+    let payload = kind.completion_payload(&object_id, &proof, &nonce);
 
     // The chain rebuilds the hashed input from its OWN clock, so the proof is
     // valid only while that clock still reads what was solved against. This
     // guard re-tests at broadcast, which is the only moment that counts —
     // and a proof that came over chat has waited longer than a local one.
-    let guard = match task.as_str() {
-        "MINE" | "REFINE" => {
+    let guard = match (kind.is_ore(), crate::mcp::types::StructId::parse(&object_id)) {
+        (true, Ok(sid)) => {
             // Source-switched read (mcp/verify.rs): resolves the rig's planet
             // and owner from the Guild API by default, the LCD on failover.
             let client = crate::mcp::cosmos_client::CosmosClient::new();
-            match crate::mcp::verify::solved_anchor_live(&client, &object_id, &task).await {
-                Ok((_, Some(planet_id), owner)) => Some(crate::mcp::tx_retry::FreshAnchor {
+            match crate::mcp::verify::solved_anchor_live(&client, &sid, kind).await {
+                Ok((_, Some(planet_id), _owner)) => Some(crate::mcp::tx_retry::FreshAnchor {
                     planet_id,
-                    object_id: object_id.clone(),
-                    player_id: owner,
-                    task_type: task.clone(),
-                    solved_anchor: block_start,
+                    task_type: kind,
+                    solved_anchor: crate::mcp::types::Block::new(block_start),
                 }),
                 _ => None,
             }

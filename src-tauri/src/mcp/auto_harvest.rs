@@ -376,9 +376,9 @@ async fn scan(
                         }
                     }
                     let (task_type, target) = if is_extractor {
-                        ("MINE", MINE_TARGET)
+                        (crate::mcp::types::TaskType::Mine, MINE_TARGET)
                     } else {
-                        ("REFINE", REFINE_TARGET)
+                        (crate::mcp::types::TaskType::Refine, REFINE_TARGET)
                     };
                     // CHAIN v0.21.0: THE ORE CLOCK LIVES ON THE PLANET. It used to
                     // be a struct attribute; now one clock per planet is shared by
@@ -428,8 +428,9 @@ async fn scan(
                     let mut anchor = anchor;
                     if scanned_from_snapshot {
                         let loc = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()).unwrap_or("");
+                        let Ok(sid_t) = crate::mcp::types::StructId::parse(sid) else { continue };
                         // Source-switched (mcp/verify.rs): Guild API by default.
-                        let Ok(live_struct) = crate::mcp::verify::struct_state(&client, sid).await else { continue };
+                        let Ok(live_struct) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
                         if !live_struct.online || live_struct.destroyed {
                             crate::mcp::telemetry::tlog(
                                 "auto_harvest",
@@ -441,11 +442,12 @@ async fn scan(
                         // The ore clocks never stream; the LCD path folds the
                         // live planet back into the snapshot, the guild path
                         // reads the work view (one row per rig, one call).
-                        let Ok(live_anchor) =
-                            crate::mcp::verify::ore_anchor(&client, Some(&*pid), loc, sid, task_type).await
-                        else {
+                        // A rig not on a planet has no clock to verify against.
+                        let Ok(planet_t) = crate::mcp::types::PlanetId::parse(loc) else { continue };
+                        let Ok(live_anchor) = crate::mcp::verify::ore_anchor(&client, &planet_t, task_type).await else {
                             continue;
                         };
+                        let live_anchor = live_anchor.get();
                         if live_anchor != anchor {
                             crate::mcp::telemetry::tlog(
                                 "auto_harvest",
@@ -461,10 +463,10 @@ async fn scan(
                             }
                         }
                     }
-                    let params = TaskParams::for_ore(sid, task_type, anchor, target);
+                    let params = TaskParams::for_ore(sid, task_type.as_str(), anchor, target);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {
-                            crate::hasher::register_vplayer_hash(sid.clone(), idx, task_type.to_string());
+                            crate::hasher::register_vplayer_hash(sid.clone(), idx, task_type.as_str().to_string());
                         }
                         started.fetch_add(1, Ordering::Relaxed);
                         run.actions.fetch_add(1, Ordering::Relaxed);
@@ -518,11 +520,11 @@ async fn scan(
                         // players only at refresh until the fleet_arrive arm landed,
                         // and 59 explores a day were signed against the planet the
                         // player had already left.
-                        let Ok(live_player) = crate::mcp::verify::player_view_live(&client, &pid).await else { return };
-                        let planet_id = live_player.planet_id.clone();
-                        if planet_id.is_empty() {
+                        let Ok(pid_t) = crate::mcp::types::PlayerId::parse(&pid) else { return };
+                        let Ok(live_player) = crate::mcp::verify::player_view_live(&client, &pid_t).await else { return };
+                        let Some(planet_id) = live_player.planet_id.clone() else {
                             return;
-                        }
+                        };
                         // unknown → don't explore
                         let planet_ore = crate::mcp::verify::planet_ore_live(&client, &planet_id).await.unwrap_or(1.0);
                         // Workers explore only once fully drained: stored ore <= 0 means

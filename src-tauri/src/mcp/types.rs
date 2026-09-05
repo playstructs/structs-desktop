@@ -105,6 +105,10 @@ macro_rules! object_id {
             pub fn index(&self) -> u64 {
                 self.0.split_once('-').and_then(|(_, i)| i.parse().ok()).unwrap_or(0)
             }
+            /// The same id as a kind-tagged [`ObjectId`].
+            pub fn object_id(&self) -> ObjectId {
+                ObjectId { kind: $kind, index: self.index() }
+            }
         }
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -430,6 +434,216 @@ impl fmt::Display for Subject {
     }
 }
 
+// ── Work kinds ──────────────────────────────────────────────────────────
+
+/// The kinds of proof-of-work the chain issues and accepts a completion for.
+/// The wire strings are the chain's own (`MINE` / `REFINE` / `BUILD` /
+/// `RAID`); they appear in hash-task params, ledger rows, chat offers and
+/// the work prefix (`5-2184MINE812004NONCE…`), and [`TaskType::as_str`]
+/// gives them back unchanged. Parsing is case-insensitive because the
+/// Comms window and the MCP take a human's spelling.
+///
+/// A NONCE is not typed here on purpose: the chain accepts any string, and
+/// only our grinders happen to iterate integers.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TaskType {
+    Mine,
+    Refine,
+    Build,
+    Raid,
+}
+
+impl TaskType {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "MINE" => Some(Self::Mine),
+            "REFINE" => Some(Self::Refine),
+            "BUILD" => Some(Self::Build),
+            "RAID" => Some(Self::Raid),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mine => "MINE",
+            Self::Refine => "REFINE",
+            Self::Build => "BUILD",
+            Self::Raid => "RAID",
+        }
+    }
+    /// Mine and refine share the planet's ore clock (chain v0.21.0).
+    pub fn is_ore(self) -> bool {
+        matches!(self, Self::Mine | Self::Refine)
+    }
+    /// The PLANET attribute carrying this kind's clock. Build anchors on the
+    /// struct (`blockStartBuild`); a raid on the fleet's own work record.
+    pub fn planet_clock_attr(self) -> Option<&'static str> {
+        match self {
+            Self::Mine => Some("blockStartOreMine"),
+            Self::Refine => Some("blockStartOreRefine"),
+            Self::Build | Self::Raid => None,
+        }
+    }
+    /// The completion message for a solved proof of this kind.
+    pub fn completion_type_url(self) -> &'static str {
+        match self {
+            Self::Mine => "/structs.structs.MsgStructOreMinerComplete",
+            Self::Refine => "/structs.structs.MsgStructOreRefineryComplete",
+            Self::Build => "/structs.structs.MsgStructBuildComplete",
+            Self::Raid => "/structs.structs.MsgPlanetRaidComplete",
+        }
+    }
+    /// Completion payload. `creator` is injected by the signer. A raid's
+    /// object is the FLEET, so its field is `fleetId`.
+    pub fn completion_payload(self, object_id: &str, proof: &str, nonce: &str) -> serde_json::Value {
+        match self {
+            Self::Raid => serde_json::json!({ "fleetId": object_id, "proof": proof, "nonce": nonce }),
+            _ => serde_json::json!({ "structId": object_id, "proof": proof, "nonce": nonce }),
+        }
+    }
+}
+
+impl fmt::Display for TaskType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Where a struct stands: on a planet or in a fleet. The wire strings
+/// (`planet` / `fleet`) are the chain's `locationType` values.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LocationKind {
+    Planet,
+    Fleet,
+}
+
+impl LocationKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "planet" => Some(Self::Planet),
+            "fleet" => Some(Self::Fleet),
+            _ => None,
+        }
+    }
+    pub fn of(id: &ObjectId) -> Option<Self> {
+        match id.kind {
+            ObjectKind::Planet => Some(Self::Planet),
+            ObjectKind::Fleet => Some(Self::Fleet),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planet => "planet",
+            Self::Fleet => "fleet",
+        }
+    }
+    /// The wrapper key of the LCD entity (`{"Planet": …}` / `{"Fleet": …}`).
+    pub fn lcd_wrapper(self) -> &'static str {
+        match self {
+            Self::Planet => "Planet",
+            Self::Fleet => "Fleet",
+        }
+    }
+}
+
+impl fmt::Display for LocationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ── Ledger context ──────────────────────────────────────────────────────
+
+/// The `<source>[:<subject>]` label every transaction carries into the
+/// ledger (`tx_attempts.context`), the priority gate, and the board feed.
+///
+/// The subject is the one thing the label is READ for: the charge
+/// reservation keys on the PLAYER it names, and a struct id there
+/// (`pow_complete:5-234309`) once keyed a reservation on a struct and let
+/// two actions for the same player race into one block. Built through
+/// [`Context::player_action`] / [`Context::completion`] the distinction is
+/// in the type; built through [`Context::parse`] from a free string it is
+/// decided once, here, and never re-parsed downstream. `as_str` yields the
+/// exact label, so the ledger and the gate see what they always saw.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Context {
+    text: String,
+    player: Option<PlayerId>,
+    subject: Option<String>,
+}
+
+impl Context {
+    /// A free-form label, `<source>[:<subject>[:…]]`. The subject is the
+    /// second colon-separated token; it names a player only if it parses
+    /// as one.
+    pub fn parse(text: &str) -> Self {
+        let subject = text.split(':').nth(1).filter(|s| !s.is_empty()).map(String::from);
+        let player = subject.as_deref().and_then(|s| PlayerId::parse(s).ok());
+        Self { text: text.to_string(), player, subject }
+    }
+    /// A loop or tool acting AS `player`: `auto_build:1-271`.
+    pub fn player_action(source: &str, player: &PlayerId) -> Self {
+        Self {
+            text: format!("{source}:{player}"),
+            player: Some(player.clone()),
+            subject: Some(player.to_string()),
+        }
+    }
+    /// A proof-of-work completion for `object`: `pow_complete:5-234309`.
+    /// Names no player — the reservation comes from the struct's owner.
+    pub fn completion(object: &StructId) -> Self {
+        Self {
+            text: format!("pow_complete:{object}"),
+            player: None,
+            subject: Some(object.to_string()),
+        }
+    }
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+    /// The head before the first colon (`auto_build`, `pow_complete`, …).
+    pub fn source(&self) -> &str {
+        self.text.split(':').next().unwrap_or(&self.text)
+    }
+    /// The player this context acts as, if it names one.
+    pub fn player(&self) -> Option<&PlayerId> {
+        self.player.as_ref()
+    }
+    /// The raw second token, whatever it is (the ledger's `player_id` column
+    /// has always carried it verbatim, struct ids included).
+    pub fn subject(&self) -> Option<&str> {
+        self.subject.as_deref()
+    }
+}
+
+impl fmt::Display for Context {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl From<&str> for Context {
+    fn from(s: &str) -> Self {
+        Self::parse(s)
+    }
+}
+impl From<&String> for Context {
+    fn from(s: &String) -> Self {
+        Self::parse(s)
+    }
+}
+impl From<String> for Context {
+    fn from(s: String) -> Self {
+        Self::parse(&s)
+    }
+}
+impl From<&Context> for Context {
+    fn from(c: &Context) -> Self {
+        c.clone()
+    }
+}
+
 // ── LCD entity view ─────────────────────────────────────────────────────
 
 /// Typed reads over an LCD entity (`{"Struct": {...}, "structAttributes":
@@ -500,6 +714,56 @@ impl<'a> EntityView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_types_round_trip_the_chain_strings_and_know_their_clocks() {
+        for (s, t) in [("MINE", TaskType::Mine), ("refine", TaskType::Refine), (" Build ", TaskType::Build), ("RAID", TaskType::Raid)] {
+            assert_eq!(TaskType::parse(s), Some(t));
+        }
+        assert_eq!(TaskType::parse("HARVEST"), None);
+        assert_eq!(TaskType::Refine.as_str(), "REFINE");
+        assert_eq!(TaskType::Mine.planet_clock_attr(), Some("blockStartOreMine"));
+        assert_eq!(TaskType::Refine.planet_clock_attr(), Some("blockStartOreRefine"));
+        assert_eq!(TaskType::Build.planet_clock_attr(), None);
+        assert!(TaskType::Mine.is_ore() && !TaskType::Build.is_ore());
+        // A raid's completion names the FLEET; the nonce is an opaque string.
+        let p = TaskType::Raid.completion_payload("9-194", "abc", "not-a-number");
+        assert_eq!(p["fleetId"], "9-194");
+        assert_eq!(p["nonce"], "not-a-number");
+        assert_eq!(TaskType::Build.completion_payload("5-1", "h", "7")["structId"], "5-1");
+    }
+
+    #[test]
+    fn contexts_keep_their_exact_label_and_name_only_players() {
+        // Pinned wire strings — the ledger has years of these.
+        let c = Context::player_action("auto_defend", &PlayerId::parse("1-635").unwrap());
+        assert_eq!(c.as_str(), "auto_defend:1-635");
+        assert_eq!(c.player().map(|p| p.as_str()), Some("1-635"));
+        assert_eq!(c.subject(), Some("1-635"));
+        assert_eq!(c.source(), "auto_defend");
+        let c = Context::completion(&StructId::parse("5-234309").unwrap());
+        assert_eq!(c.as_str(), "pow_complete:5-234309");
+        assert_eq!(c.player(), None, "a struct id is not a player");
+        assert_eq!(c.subject(), Some("5-234309"), "the ledger column keeps the raw token");
+        // Free strings: the same answers the two hand parsers used to give.
+        assert_eq!(Context::parse("auto_raid_abort:1-2308").player().map(|p| p.as_str()), Some("1-2308"));
+        assert_eq!(Context::parse("pow_complete:5-234309").player(), None);
+        assert_eq!(Context::parse("pow_complete:").subject(), None);
+        assert_eq!(Context::parse("nocolon").subject(), None);
+        assert_eq!(Context::parse("launch:").player(), None);
+        assert_eq!(Context::parse("board:transfer").subject(), Some("transfer"));
+        assert_eq!(Context::parse("comms agreement 11-3").subject(), None);
+        assert_eq!(Context::parse("mcp").as_str(), "mcp");
+    }
+
+    #[test]
+    fn location_kinds_follow_the_object_kind() {
+        assert_eq!(LocationKind::of(&ObjectId::parse("2-5").unwrap()), Some(LocationKind::Planet));
+        assert_eq!(LocationKind::of(&ObjectId::parse("9-5").unwrap()), Some(LocationKind::Fleet));
+        assert_eq!(LocationKind::of(&ObjectId::parse("5-5").unwrap()), None);
+        assert_eq!(LocationKind::parse("Fleet").map(|k| k.lcd_wrapper()), Some("Fleet"));
+        assert_eq!(FleetId::from_index(194).object_id(), ObjectId::parse("9-194").unwrap());
+    }
 
     #[test]
     fn object_ids_round_trip_and_reject_the_wrong_kind() {

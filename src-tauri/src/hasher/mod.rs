@@ -302,30 +302,15 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
     let nonce = snap.result_nonce.clone().unwrap_or_default();
     let proof = snap.result_hash.clone().unwrap_or_default();
     // Completion msg by task type. `creator` is injected by the façade signer.
-    let (type_url, payload) = match task_type.as_str() {
-        "MINE" => (
-            "/structs.structs.MsgStructOreMinerComplete",
-            serde_json::json!({ "structId": snap.object_id, "proof": proof, "nonce": nonce }),
-        ),
-        "REFINE" => (
-            "/structs.structs.MsgStructOreRefineryComplete",
-            serde_json::json!({ "structId": snap.object_id, "proof": proof, "nonce": nonce }),
-        ),
-        "BUILD" => (
-            "/structs.structs.MsgStructBuildComplete",
-            serde_json::json!({ "structId": snap.object_id, "proof": proof, "nonce": nonce }),
-        ),
-        "RAID" => (
-            "/structs.structs.MsgPlanetRaidComplete",
-            // For RAID the hash object_id is the fleet id.
-            serde_json::json!({ "fleetId": snap.object_id, "proof": proof, "nonce": nonce }),
-        ),
-        _ => return,
-    };
+    // The nonce is passed through as the string it is.
+    let Some(kind) = crate::mcp::types::TaskType::parse(&task_type) else { return };
+    let type_url = kind.completion_type_url();
+    let payload = kind.completion_payload(&snap.object_id, &proof, &nonce);
     let app = app_handle.clone();
     let object_id = snap.object_id.clone();
     let solved_anchor = snap.block_start;
-    let task_kind = task_type.clone();
+    let task_kind = kind;
+    let task_type = kind;
     tauri::async_runtime::spawn(async move {
         // ── Is the proof still anchored to a live cycle? ──────────────────
         // The completion message carries only {structId, proof, nonce} — NO
@@ -342,18 +327,21 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         // The ore planet is also remembered, so the SAME check can be repeated
         // after the admission gate — the wait there is where most staleness is
         // actually introduced (see tx_retry::FreshAnchor).
-        let mut ore_planet: Option<String> = None;
-        let mut owner: Option<String> = None;
-        if anchor_field_for(&task_kind).is_some() {
+        let mut ore_planet: Option<crate::mcp::types::PlanetId> = None;
+        let mut owner: Option<crate::mcp::types::PlayerId> = None;
+        // A raid's object is a fleet and has no entry here; it goes unchecked.
+        let struct_id = crate::mcp::types::StructId::parse(&object_id).ok();
+        if let (Some(_), Some(sid)) = (anchor_field_for(task_kind), struct_id.as_ref()) {
             // Source-switched read (mcp/verify.rs): Guild API work view by
             // default, LCD on failover. Chain v0.21.0: the ore clock hangs off
             // the PLANET the rig stands on; verify resolves that itself.
             let client = crate::mcp::cosmos_client::CosmosClient::new();
             if let Ok((live, planet, who)) =
-                crate::mcp::verify::solved_anchor_live(&client, &object_id, &task_kind).await
+                crate::mcp::verify::solved_anchor_live(&client, sid, task_kind).await
             {
                 ore_planet = planet;
                 owner = who;
+                let live = live.get();
                 if live != 0 && live != solved_anchor {
                     crate::mcp::telemetry::tlog(
                         "hasher",
@@ -368,14 +356,14 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
             }
         }
         // Re-tested once the gate slot is won, immediately before broadcast.
-        if task_kind == "BUILD" {
+        if let (crate::mcp::types::TaskType::Build, Some(sid)) = (task_kind, struct_id.as_ref()) {
             // The struct may already be Online: its completion landed and the
             // struct_status frame was lost on the way into the snapshot, so
             // the build loop re-issued this task. One indexed read beats a
             // rejected tx ("is built but must be building") and a wasted
             // gate slot — 19 of them in one hour on 2026-09-04.
             let client = crate::mcp::cosmos_client::CosmosClient::new();
-            if let Ok(live) = crate::mcp::verify::struct_state_live(&client, &object_id).await {
+            if let Ok(live) = crate::mcp::verify::struct_state_live(&client, sid).await {
                 if live.built || live.destroyed {
                     crate::mcp::perception::note_struct_built(&object_id);
                     crate::mcp::telemetry::tlog(
@@ -393,10 +381,8 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         let clock_planet = ore_planet.clone();
         let guard = ore_planet.map(|planet_id| crate::mcp::tx_retry::FreshAnchor {
             planet_id,
-            object_id: object_id.clone(),
-            player_id: owner.clone(),
-            task_type: task_kind.clone(),
-            solved_anchor,
+            task_type: task_kind,
+            solved_anchor: crate::mcp::types::Block::new(solved_anchor),
         });
         // Route through tx_retry — NOT vplayer_bridge directly. This is the
         // most important tx class in the economy (every mine/refine/build/raid
@@ -405,16 +391,17 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         // nothing queryable. A 15-day, ~600k-solve futile-mining incident went
         // undetected precisely because of that blind spot. Now every completion
         // is ledgered like any other tx (sequence-mismatch retry only).
-        let context = format!("pow_complete:{}", object_id);
+        // `pow_complete:<struct>` — or, for a raid, the fleet id, which the
+        // free-form parse keeps verbatim (it names no player either way).
+        let context = match struct_id.as_ref() {
+            Some(sid) => crate::mcp::types::Context::completion(sid),
+            None => crate::mcp::types::Context::parse(&format!("pow_complete:{object_id}")),
+        };
         // A completion is a charged action like any other: hold the owner's
         // charge window for it, and do not queue into a block in which a
         // build initiate or defense set is already spending it. The wait is
         // short (a block is ~5 s); a proof is never abandoned for it.
-        let _charge = match owner
-            .as_deref()
-            .filter(|_| crate::mcp::loop_util::is_charged_type(type_url))
-            .and_then(|o| crate::mcp::types::PlayerId::parse(o).ok())
-        {
+        let _charge = match owner.clone().filter(|_| crate::mcp::loop_util::is_charged_type(type_url)) {
             Some(pid) => {
                 let r = crate::mcp::loop_util::reserve_charge_when_free(&pid, 20_000).await;
                 if r.is_none() {
@@ -448,7 +435,7 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
                 // The chain restarted the planet's clock at the inclusion
                 // block: tell the local source of truth now, so the next scan
                 // sees a young anchor instead of re-grinding the consumed one.
-                if let Some(planet) = clock_planet.as_deref() {
+                if let Some(planet) = clock_planet.as_ref() {
                     let height = v
                         .get("height")
                         .and_then(|h| h.as_u64().or_else(|| h.as_str().and_then(|s| s.parse().ok())))
@@ -456,7 +443,7 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
                         .unwrap_or_else(|| {
                             crate::game_state::GAME_STATE.read().ok().map(|g| g.current_block_height).unwrap_or(0)
                         });
-                    crate::mcp::perception::note_clock_restart(planet, &task_kind, height);
+                    crate::mcp::perception::note_clock_restart(planet, task_kind, crate::mcp::types::Block::new(height));
                 }
             }
             Err(e) if e.contains("work failure") => {
@@ -500,11 +487,12 @@ enum Anchor {
 /// still a struct attribute. RAID anchors on the planet too, but its object_id
 /// is a FLEET rather than a struct, so it has no entry here and is left
 /// unchecked.
-fn anchor_field_for(task_type: &str) -> Option<Anchor> {
+fn anchor_field_for(task_type: crate::mcp::types::TaskType) -> Option<Anchor> {
+    use crate::mcp::types::TaskType;
     match task_type {
-        "MINE" | "REFINE" => Some(Anchor::PlanetOreClock),
-        "BUILD" => Some(Anchor::StructField("blockStartBuild")),
-        _ => None,
+        TaskType::Mine | TaskType::Refine => Some(Anchor::PlanetOreClock),
+        TaskType::Build => Some(Anchor::StructField("blockStartBuild")),
+        TaskType::Raid => None,
     }
 }
 
@@ -562,16 +550,17 @@ mod anchor_tests {
         // on it. Resolving these against the struct reads a permanent 0, which
         // this guard treats as "unknown" and waves through — so pointing them
         // back at a struct field silently disables the staleness check.
-        assert_eq!(anchor_field_for("MINE"), Some(Anchor::PlanetOreClock));
-        assert_eq!(anchor_field_for("REFINE"), Some(Anchor::PlanetOreClock));
+        use crate::mcp::types::TaskType;
+        assert_eq!(anchor_field_for(TaskType::Mine), Some(Anchor::PlanetOreClock));
+        assert_eq!(anchor_field_for(TaskType::Refine), Some(Anchor::PlanetOreClock));
         assert_eq!(
-            anchor_field_for("BUILD"),
+            anchor_field_for(TaskType::Build),
             Some(Anchor::StructField("blockStartBuild"))
         );
         // RAID's object_id is a fleet, not a struct, so it must NOT be checked
         // here — doing so would abandon every raid proof.
-        assert_eq!(anchor_field_for("RAID"), None);
-        assert_eq!(anchor_field_for("nonsense"), None);
+        assert_eq!(anchor_field_for(TaskType::Raid), None);
+        assert_eq!(TaskType::parse("nonsense"), None, "an unknown kind never reaches the anchor table");
     }
 }
 

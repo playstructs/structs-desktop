@@ -54,12 +54,8 @@ pub fn read_u64_field(v: Option<&Value>, field: &str) -> u64 {
 /// does no work — which is exactly how the harvest leg went dark for 38 hours
 /// after the upgrade. Route every ore anchor read through here so there is one
 /// place to change if the clock ever moves again.
-pub fn planet_ore_anchor(planet: Option<&Value>, task_type: &str) -> u64 {
-    let field = match task_type {
-        "MINE" => "blockStartOreMine",
-        "REFINE" => "blockStartOreRefine",
-        _ => return 0,
-    };
+pub fn planet_ore_anchor(planet: Option<&Value>, kind: crate::mcp::types::TaskType) -> u64 {
+    let Some(field) = kind.planet_clock_attr() else { return 0 };
     planet.map(|p| crate::mcp::types::EntityView::new(p).planet_block(field).get()).unwrap_or(0)
 }
 
@@ -255,9 +251,10 @@ pub fn invalidate_all_player_structs() {
 /// A snapshot older than this is not scanned from, whatever GRASS says: the
 /// refresh cadence is ~10 min, so this is "two missed refreshes".
 pub const PERCEPTION_MAX_AGE_MS: f64 = 20.0 * 60_000.0;
-/// If no GRASS frame has been folded in for this long, the feed is presumed
-/// dead (the signing-bridge-death tell is exactly a decaying grass stream)
-/// and the snapshot is treated as stale from that moment.
+/// If no GRASS frame has ARRIVED for this long (block heartbeats count; a
+/// quiet galaxy is not a dead feed), the feed is presumed dead (the
+/// signing-bridge-death tell is exactly a decaying grass stream) and the
+/// snapshot is treated as stale from that moment.
 pub const PERCEPTION_MAX_EVENT_GAP_MS: f64 = 120_000.0;
 
 /// Where a scan read was served from — surfaced in loop summaries so a
@@ -332,10 +329,18 @@ pub async fn ensure_perception(client: &CosmosClient, loop_name: &'static str, m
     }
 }
 
+#[cfg(test)]
+pub(crate) fn perception_usable_now_for_test() -> bool {
+    perception_usable_now()
+}
+
 fn perception_usable_now() -> bool {
     let now = crate::hasher::types::now_millis();
     crate::mcp::perception::with_snapshot(|s| {
-        let gap = if s.last_event_ms > 0.0 { Some(now - s.last_event_ms) } else { None };
+        // Liveness is "a frame arrived", heartbeats included — not "something
+        // changed". See Snapshot::last_frame_ms for the lull that taught us.
+        let last = s.last_frame_ms.max(s.last_event_ms);
+        let gap = if last > 0.0 { Some(now - last) } else { None };
         perception_is_fresh(now - s.taken_ms, gap)
     })
     .unwrap_or(false)
@@ -674,14 +679,6 @@ pub fn acted_this_block(player_id: &PlayerId) -> bool {
         .unwrap_or(false)
 }
 
-/// The player id embedded in a telemetry context like `auto_defend:1-635`.
-pub fn player_from_context(context: &str) -> Option<PlayerId> {
-    // Only a player id reserves charge. `pow_complete:5-234309` names the
-    // STRUCT; keying a reservation on it let completions and initiates for
-    // the same player race into one block. The type refuses it now.
-    context.split_once(':').and_then(|(_, p)| PlayerId::parse(p).ok())
-}
-
 /// Wait (up to `max_ms`) for a player's charged-action window to be free —
 /// no reservation alive and no charged action landed this block — then
 /// reserve it. Returns None only when the wait ran out.
@@ -728,12 +725,14 @@ mod tests {
 
     #[test]
     fn a_context_names_a_player_or_reserves_nothing() {
-        use super::player_from_context;
-        assert_eq!(player_from_context("auto_defend:1-635"), Some(crate::mcp::loop_util::test_pid("1-635")));
-        assert_eq!(player_from_context("auto_build:1-2477"), Some(crate::mcp::loop_util::test_pid("1-2477")));
-        assert_eq!(player_from_context("pow_complete:5-234309"), None, "a struct id is not a player");
-        assert_eq!(player_from_context("pow_complete:"), None);
-        assert_eq!(player_from_context("nocolon"), None);
+        use crate::mcp::types::Context;
+        assert_eq!(Context::parse("auto_defend:1-635").player(), Some(&crate::mcp::loop_util::test_pid("1-635")));
+        assert_eq!(Context::parse("auto_build:1-2477").player(), Some(&crate::mcp::loop_util::test_pid("1-2477")));
+        assert_eq!(Context::parse("pow_complete:5-234309").player(), None, "a struct id is not a player");
+        assert_eq!(Context::parse("pow_complete:").player(), None);
+        assert_eq!(Context::parse("nocolon").player(), None);
+        // Built the typed way, a struct cannot even be offered as the player.
+        assert_eq!(Context::completion(&crate::mcp::types::StructId::parse("5-234309").unwrap()).player(), None);
     }
 
     /// Chain v0.21.0 moved the ore clocks from the struct to the planet. The
@@ -753,8 +752,8 @@ mod tests {
             }
         });
         // Numeric strings are what the LCD actually returns for these.
-        assert_eq!(planet_ore_anchor(Some(&planet), "MINE"), 2_273_508);
-        assert_eq!(planet_ore_anchor(Some(&planet), "REFINE"), 2_275_440);
+        assert_eq!(planet_ore_anchor(Some(&planet), crate::mcp::types::TaskType::Mine), 2_273_508);
+        assert_eq!(planet_ore_anchor(Some(&planet), crate::mcp::types::TaskType::Refine), 2_275_440);
 
         // A STRUCT entity must never satisfy an ore anchor read, even though it
         // still carries the retired fields — this is the exact shape the chain
@@ -766,14 +765,14 @@ mod tests {
                 "isOnline": true,
             }
         });
-        assert_eq!(planet_ore_anchor(Some(&struct_entity), "MINE"), 0);
-        assert_eq!(planet_ore_anchor(Some(&struct_entity), "REFINE"), 0);
+        assert_eq!(planet_ore_anchor(Some(&struct_entity), crate::mcp::types::TaskType::Mine), 0);
+        assert_eq!(planet_ore_anchor(Some(&struct_entity), crate::mcp::types::TaskType::Refine), 0);
 
         // Non-ore task types have their anchors elsewhere and must not be
         // silently answered with an ore clock.
-        assert_eq!(planet_ore_anchor(Some(&planet), "BUILD"), 0);
-        assert_eq!(planet_ore_anchor(Some(&planet), "RAID"), 0);
-        assert_eq!(planet_ore_anchor(None, "MINE"), 0);
+        assert_eq!(planet_ore_anchor(Some(&planet), crate::mcp::types::TaskType::Build), 0);
+        assert_eq!(planet_ore_anchor(Some(&planet), crate::mcp::types::TaskType::Raid), 0);
+        assert_eq!(planet_ore_anchor(None, crate::mcp::types::TaskType::Mine), 0);
     }
 
     /// The live failure: auto_build and auto_defend sweep the same roster
@@ -800,10 +799,11 @@ mod tests {
 
     #[test]
     fn player_id_is_read_from_the_telemetry_context() {
-        assert_eq!(player_from_context("auto_defend:1-635"), Some(crate::mcp::loop_util::test_pid("1-635")));
-        assert_eq!(player_from_context("auto_raid_abort:1-2308"), Some(crate::mcp::loop_util::test_pid("1-2308")));
-        assert_eq!(player_from_context("auto_harvest"), None);
-        assert_eq!(player_from_context("launch:"), None);
+        use crate::mcp::types::Context;
+        assert_eq!(Context::parse("auto_defend:1-635").player(), Some(&crate::mcp::loop_util::test_pid("1-635")));
+        assert_eq!(Context::parse("auto_raid_abort:1-2308").player(), Some(&crate::mcp::loop_util::test_pid("1-2308")));
+        assert_eq!(Context::parse("auto_harvest").player(), None);
+        assert_eq!(Context::parse("launch:").player(), None);
     }
 
     use super::*;

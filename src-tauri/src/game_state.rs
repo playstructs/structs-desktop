@@ -99,11 +99,12 @@ impl GameStateSync {
     pub fn get_difficulty_for_struct(&self, struct_id: &str, task_type: &str) -> Option<u64> {
         let struct_info = self.structs.get(struct_id)?;
         let struct_type = self.struct_types.get(&struct_info.struct_type_id.to_string())?;
-        match task_type {
-            "BUILD" => Some(struct_type.build_difficulty),
-            "MINE" => Some(struct_type.ore_mining_difficulty),
-            "REFINE" => Some(struct_type.ore_refining_difficulty),
-            _ => None,
+        use crate::mcp::types::TaskType;
+        match TaskType::parse(task_type)? {
+            TaskType::Build => Some(struct_type.build_difficulty),
+            TaskType::Mine => Some(struct_type.ore_mining_difficulty),
+            TaskType::Refine => Some(struct_type.ore_refining_difficulty),
+            TaskType::Raid => None,
         }
     }
 
@@ -703,7 +704,7 @@ pub async fn notify_hash_complete(
             return Ok(());
         };
         let block_height = match client.entity("planet", &planet_id).await {
-            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "REFINE"),
+            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), crate::mcp::types::TaskType::Refine),
             Err(e) => {
                 eprintln!(
                     "[Structs Auto] auto_refine planet lookup failed for {}: {}",

@@ -1691,7 +1691,7 @@ pub async fn execute(
                             return vec![Content::text(format!("mine: {} has no planet location — only a planetary extractor can mine.", sid))];
                         };
                         let block = match client.query_entity("planet", &planet_id).await {
-                            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "MINE"),
+                            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), crate::mcp::types::TaskType::Mine),
                             Err(e) => return vec![Content::text(format!("mine: planet {} lookup failed: {}", planet_id, e))],
                         };
                         if block == 0 {
@@ -1711,7 +1711,7 @@ pub async fn execute(
                             return vec![Content::text(format!("refine: {} has no planet location — only a planetary refinery can refine.", sid))];
                         };
                         let block = match client.query_entity("planet", &planet_id).await {
-                            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), "REFINE"),
+                            Ok(p) => crate::mcp::loop_util::planet_ore_anchor(Some(&p), crate::mcp::types::TaskType::Refine),
                             Err(e) => return vec![Content::text(format!("refine: planet {} lookup failed: {}", planet_id, e))],
                         };
                         if block == 0 {

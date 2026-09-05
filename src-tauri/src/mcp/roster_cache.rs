@@ -368,11 +368,11 @@ async fn harvest_enrich(
     // find the anchors — on a multi-thousand-player roster sweep that was up to
     // 16 extra chain reads per player for two numbers we now already have.
     let mine = eta(
-        loop_util::planet_ore_anchor(Some(&planet), "MINE"),
+        loop_util::planet_ore_anchor(Some(&planet), crate::mcp::types::TaskType::Mine),
         crate::mcp::auto_harvest::MINE_TARGET,
     );
     let refine = eta(
-        loop_util::planet_ore_anchor(Some(&planet), "REFINE"),
+        loop_util::planet_ore_anchor(Some(&planet), crate::mcp::types::TaskType::Refine),
         crate::mcp::auto_harvest::REFINE_TARGET,
     );
     (planet_ore, mine, refine)

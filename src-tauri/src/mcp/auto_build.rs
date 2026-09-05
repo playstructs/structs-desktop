@@ -368,9 +368,11 @@ pub(crate) async fn ensure_command_ship(
     pid: &str,
     index: u32,
 ) -> Option<String> {
-    let fleet_id = format!("9-{}", pid.split('-').nth(1)?);
-    let cmd = crate::mcp::verify::fleet_command_struct(client, pid, &fleet_id).await.ok()?;
-    if let Some(cmd) = cmd.filter(|c| !c.is_empty()) {
+    // A player's fleet shares its index (fleet 9-N belongs to player 1-N).
+    let fleet = crate::mcp::types::FleetId::from_index(crate::mcp::types::PlayerId::parse(pid).ok()?.index());
+    let fleet_id = fleet.to_string();
+    let cmd = crate::mcp::verify::fleet_command_struct(client, &fleet).await.ok()?;
+    if let Some(cmd) = cmd {
         let alive = crate::mcp::verify::struct_state(client, &cmd)
             .await
             .map(|s| !s.destroyed)
@@ -389,7 +391,7 @@ pub(crate) async fn ensure_command_ship(
     // Prefer a genuinely free fleet slot; the initiate names one but does not
     // consume it (verified live on 1-280), so a full fleet still rebuilds.
     // Source-switched (mcp/verify.rs); a failed read just names slot 0.
-    let (amb, slot) = crate::mcp::verify::first_free_slot(client, "fleet", &fleet_id, &["land", "water", "air", "space"])
+    let (amb, slot) = crate::mcp::verify::first_free_slot(client, &fleet.object_id(), &["land", "water", "air", "space"])
         .await
         .ok()
         .flatten()
@@ -480,10 +482,13 @@ async fn initiate_verified_on_chain(
 ) -> InitiateCheck {
     // Source-switched reads (mcp/verify.rs): Guild API by default, LCD on
     // failover or when `verify_source` says so.
-    let Ok(charge) = crate::mcp::verify::player_charge(client, pid, current_block).await else {
+    let Ok(pid_t) = crate::mcp::types::PlayerId::parse(pid) else {
         return InitiateCheck::ReadFailed;
     };
-    if charge < BUILD_CHARGE {
+    let Ok(charge) = crate::mcp::verify::player_charge(client, &pid_t, crate::mcp::types::Block::new(current_block)).await else {
+        return InitiateCheck::ReadFailed;
+    };
+    if !charge.covers(BUILD_CHARGE) {
         crate::mcp::telemetry::tlog(
             "auto_build",
             crate::mcp::telemetry::Sev::Notice,
@@ -494,13 +499,11 @@ async fn initiate_verified_on_chain(
     if !require_free_slot {
         return InitiateCheck::Verified;
     }
-    let Ok(loc) = crate::mcp::verify::player_location(client, pid, target).await else { return InitiateCheck::ReadFailed };
-    if loc.is_empty() {
-        return InitiateCheck::ReadFailed;
-    }
+    let Some(kind) = crate::mcp::types::LocationKind::parse(target) else { return InitiateCheck::ReadFailed };
+    let Ok(Some(loc)) = crate::mcp::verify::player_location(client, &pid_t, kind).await else { return InitiateCheck::ReadFailed };
     // LIVE, not snapshot: a slot the snapshot still shows free (its frame
     // lost) is a rejected initiate and a 30-minute back-off. 35 in one hour.
-    let Ok(occupied) = crate::mcp::verify::slot_occupied_live(client, target, &loc, ambit, slot).await else {
+    let Ok(occupied) = crate::mcp::verify::slot_occupied_live(client, &loc, ambit, slot).await else {
         return InitiateCheck::ReadFailed;
     };
     if occupied {
@@ -793,12 +796,14 @@ async fn scan(
                     // once per ISSUED completion (not once per struct per scan).
                     let mut anchor = anchor;
                     if scanned_from_snapshot {
-                        let Ok(live) = crate::mcp::verify::struct_state(&client, &sid).await else { continue };
+                        let Ok(sid_t) = crate::mcp::types::StructId::parse(&sid) else { continue };
+                        let Ok(live) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
                         if live.built || live.destroyed {
                             BUILT_CACHE.lock().unwrap().insert(sid.clone());
                             continue;
                         }
-                        let Ok(live_anchor) = crate::mcp::verify::build_anchor(&client, &pid, &sid).await else { continue };
+                        let Ok(live_anchor) = crate::mcp::verify::build_anchor(&client, &sid_t).await else { continue };
+                        let live_anchor = live_anchor.get();
                         if live_anchor != anchor {
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
