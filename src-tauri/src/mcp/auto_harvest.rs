@@ -514,13 +514,17 @@ async fn scan(
                         // wasted sign slot and a chain reject ("new planet
                         // cannot be explored while current planet has ore").
                         // One chain read; this is the pre-sign verify for explore.
-                        let Ok(live_player) = crate::mcp::verify::player_view(&client, &pid).await else { return };
+                        // LIVE (guild → LCD), never the snapshot: the snapshot moved
+                        // players only at refresh until the fleet_arrive arm landed,
+                        // and 59 explores a day were signed against the planet the
+                        // player had already left.
+                        let Ok(live_player) = crate::mcp::verify::player_view_live(&client, &pid).await else { return };
                         let planet_id = live_player.planet_id.clone();
                         if planet_id.is_empty() {
                             return;
                         }
                         // unknown → don't explore
-                        let planet_ore = crate::mcp::verify::planet_ore(&client, &planet_id).await.unwrap_or(1.0);
+                        let planet_ore = crate::mcp::verify::planet_ore_live(&client, &planet_id).await.unwrap_or(1.0);
                         // Workers explore only once fully drained: stored ore <= 0 means
                         // every ore has been refined to Alpha (which survives explore).
                         // stored_ore already counts ore committed to an active refine cycle,

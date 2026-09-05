@@ -1024,7 +1024,10 @@ async fn scan(
                         Err(e) if is_count_cap_reject(&e) => {
                             // We actually do have one (stale read) — benign; no backoff.
                         }
-                        Err(e) if e.starts_with("skipped:") => {
+                        // A charge lost to a same-block race (a completion the hasher signed a
+                        // moment earlier) is a DEFER like a skip, not a 30-minute back-off:
+                        // the charge is back next block and nothing about the plan was wrong.
+                        Err(e) if e.starts_with("skipped:") || e.contains("already discharged") => {
                             // Charge was spent by a sibling loop while this sat in
                             // the gate: nothing hit the chain, nothing to back off.
                             crate::mcp::telemetry::tlog(
@@ -1149,7 +1152,7 @@ async fn scan(
                             );
                             continue; // try the next loadout item, no backoff/break
                         }
-                        Err(e) if e.starts_with("skipped:") => {
+                        Err(e) if e.starts_with("skipped:") || e.contains("already discharged") => {
                             // Charge was spent by a sibling loop while this sat in
                             // the gate: nothing hit the chain, nothing to back off.
                             crate::mcp::telemetry::tlog(

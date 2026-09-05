@@ -69,6 +69,16 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
                 progress.block_checkpoint, progress.block_checkpoint_time_ms, now_ms
             );
         }
+        // The pool only pops RIPE tasks: landing here means pool and worker
+        // disagree about ripeness and a slot is about to sleep (see pool.rs).
+        if handle.progress.lock().map(|p| p.work_start_time_ms.is_some()).unwrap_or(false) {
+            crate::mcp::telemetry::tlog_kv(
+                "hasher",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("pool popped {pid} unripe: difficulty {difficulty} > {difficulty_start} (age {age}); worker sleeping"),
+                serde_json::json!({"object_id": pid, "difficulty": difficulty, "difficulty_start": difficulty_start, "age": age}),
+            );
+        }
         // Emit progress during wait so UI stays updated
         emit_progress(&app_handle, &handle, &pid);
         std::thread::sleep(std::time::Duration::from_millis(DIFFICULTY_START_SLEEP_MS));

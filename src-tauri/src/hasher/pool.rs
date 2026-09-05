@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use tauri::AppHandle;
 
-use crate::hasher::difficulty::{calculate_difficulty, estimate_age};
+use crate::hasher::difficulty::{calculate_difficulty, estimate_age, refresh_checkpoint};
 use crate::hasher::types::{now_millis, TaskHandle, TaskRegistry};
 
 /// Tasks enqueued but not yet picked by a worker. Order is irrelevant — the
@@ -162,14 +162,26 @@ fn pop_ripest(registry: &Arc<TaskRegistry>) -> Option<Arc<TaskHandle>> {
 
     let mut best: Option<(u64, usize)> = None;
     for (i, h) in pending.iter().enumerate() {
+        // The SAME ripeness the worker will compute a moment later: refresh
+        // the checkpoint from the live height first. Without this the pool
+        // extrapolated from the checkpoint stamped at enqueue, and blocks run
+        // 5.30 s, not the assumed 5.28 s — 0.4 % — so a task pending for
+        // hours was judged ~30 blocks older than it was, popped a couple of
+        // minutes early, and the worker (which DOES refresh) found it unripe
+        // and slept it out in 10-second steps holding a pool slot. That was
+        // a third of all "solves" over 10 s on 2026-09-05 with a healthy
+        // GPU, and the tuner read those sleeps as degradation and removed
+        // workers.
         let (age, block_est) = {
-            let progress = h.progress.lock().unwrap();
-            estimate_age(
-                h.params.block_start,
+            let mut progress = h.progress.lock().unwrap();
+            let (cp, cpt) = refresh_checkpoint(
                 progress.block_checkpoint,
                 progress.block_checkpoint_time_ms,
                 now_ms,
-            )
+            );
+            progress.block_checkpoint = cp;
+            progress.block_checkpoint_time_ms = cpt;
+            estimate_age(h.params.block_start, cp, cpt, now_ms)
         };
         let difficulty = calculate_difficulty(age, h.params.difficulty_target);
         {
@@ -275,6 +287,29 @@ mod tests {
         // Only the unripe task remains; it must NOT pop.
         assert!(pop_ripest(&registry).is_none());
         assert_eq!(pending_len(), 1);
+        drain_pending();
+    }
+
+    /// The ripeness scan must judge age from the SAME refreshed checkpoint
+    /// the worker uses, so a task the pool pops is one the worker will grind
+    /// immediately rather than sleep on. Here a pending task's checkpoint is
+    /// stale (stamped long ago); the scan writes the refreshed checkpoint
+    /// back, exactly as the worker's own wait loop does.
+    #[test]
+    fn pop_refreshes_the_checkpoint_it_judges_ripeness_from() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let registry = Arc::new(TaskRegistry::new());
+        drain_pending();
+        let h = task(&registry, "5-77", 100_000);
+        let before = h.progress.lock().unwrap().block_checkpoint;
+        let _ = pop_ripest(&registry);
+        let p = h.progress.lock().unwrap();
+        // refresh_checkpoint keeps the checkpoint unless the live height is
+        // ahead of it; with no live height in tests the pair is unchanged,
+        // and the pop path stores whatever refresh returned.
+        let (cp, _) = refresh_checkpoint(before, p.block_checkpoint_time_ms, now_millis());
+        assert_eq!(p.block_checkpoint, cp);
+        drop(p);
         drain_pending();
     }
 

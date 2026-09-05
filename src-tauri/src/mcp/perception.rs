@@ -712,6 +712,38 @@ impl Snapshot {
                     let b = to_u64(detail.get("block").or_else(|| detail.get("block_height")));
                     Self::set(&mut self.planet_attrs, &pid, P_RAID, b)
                 }
+                // An explore lands the player's OWN fleet (fleet 9-N belongs to
+                // player 1-N) on the new planet; nothing else in the stream says
+                // "this player's planet changed", and the player row otherwise
+                // waits for the next 10-minute refresh. That gap is what sent
+                // auto_harvest exploring the planet it had already left ("cannot
+                // be explored while current planet has ore", 59 rejects in a
+                // day) and auto_build to a slot on a planet that no longer
+                // existed. Move the player now.
+                "fleet_arrive" => {
+                    let fleet = str_of(detail, "fleet_id");
+                    let planet = subj.object.as_ref().and_then(|o| o.as_planet());
+                    match (crate::mcp::types::FleetId::parse(&fleet), planet, subj.player.as_ref()) {
+                        (Ok(f), Some(planet), Some(owner)) if f.index() == owner.index() => {
+                            let pid = owner.to_string();
+                            let planet_s = planet.to_string();
+                            match self.players.get_mut(&pid) {
+                                Some(row) if row.get("planetId").and_then(|v| v.as_str()) != Some(planet_s.as_str()) => {
+                                    if let Some(obj) = row.as_object_mut() {
+                                        obj.insert("planetId".into(), Value::String(planet_s.clone()));
+                                    }
+                                    if let Some(fl) = self.fleets.get_mut(&f.to_string()).and_then(|v| v.as_object_mut()) {
+                                        fl.insert("locationType".into(), Value::String("planet".into()));
+                                        fl.insert("locationId".into(), Value::String(planet_s));
+                                    }
+                                    Applied::Changed
+                                }
+                                _ => Applied::Ignored,
+                            }
+                        }
+                        _ => Applied::Ignored,
+                    }
+                }
                 _ => Applied::Ignored,
             }
         };
@@ -2033,6 +2065,29 @@ mod tests {
 #[cfg(test)]
 mod guild_ingest_tests {
     use super::*;
+
+    #[test]
+    fn a_players_own_fleet_arriving_moves_the_player_to_that_planet() {
+        let mut snap = Snapshot::from_pages(
+            &[], &[], &[], &[],
+            &[json!({"id": "1-375", "planetId": "2-28000", "fleetId": "9-375"})],
+            &[json!({"id": "2-28000"}), json!({"id": "2-28817"})],
+            &[json!({"id": "9-375", "locationType": "planet", "locationId": "2-28000"})],
+        );
+        snap.min_height = 1;
+        // Explore: the player's fleet lands on the freshly found planet.
+        let r = snap.apply("fleet_arrive", "structs.planet.2-28817.1-375", &json!({"fleet_id": "9-375", "fleet_status": "onStation", "block_height": 2_480_000}));
+        assert_eq!(r, Applied::Changed);
+        assert_eq!(snap.players["1-375"]["planetId"], "2-28817");
+        assert_eq!(snap.fleets["9-375"]["locationId"], "2-28817");
+        // Someone ELSE's fleet arriving (a raider) does not move the owner.
+        let r = snap.apply("fleet_arrive", "structs.planet.2-28817.1-375", &json!({"fleet_id": "9-999", "fleet_status": "onStation", "block_height": 2_480_001}));
+        assert_eq!(r, Applied::Ignored);
+        assert_eq!(snap.players["1-375"]["planetId"], "2-28817");
+        // Same planet again is no change.
+        let r = snap.apply("fleet_arrive", "structs.planet.2-28817.1-375", &json!({"fleet_id": "9-375", "block_height": 2_480_002}));
+        assert_eq!(r, Applied::Ignored);
+    }
 
     #[test]
     fn the_ingest_edge_refuses_malformed_ids_and_counts_them() {

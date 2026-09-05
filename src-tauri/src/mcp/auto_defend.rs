@@ -915,7 +915,7 @@ async fn scan(
                         //  · "cannot defend": the defender is a type the chain
                         //    no longer accepts — un-cache it so the planner
                         //    stops re-proposing a doomed edge on stale state.
-                        let benign = e.contains("not_defending") || e.starts_with("skipped:");
+                        let benign = e.contains("not_defending") || e.starts_with("skipped:") || e.contains("already discharged");
                         if benign || e.contains("cannot defend") {
                             ASSIGNED_CACHE.lock().unwrap().remove(&edge.defender);
                         }

@@ -146,6 +146,16 @@ pub fn run_gpu_hash(
             "[Structs Hasher GPU] {} waiting: difficulty {} > {}",
             pid, difficulty, difficulty_start
         );
+        // The pool only pops RIPE tasks, so landing here means the pool and
+        // this worker disagree about ripeness — a slot is about to sleep.
+        if handle.progress.lock().map(|p| p.work_start_time_ms.is_some()).unwrap_or(false) {
+            crate::mcp::telemetry::tlog_kv(
+                "hasher",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("pool popped {pid} unripe: difficulty {difficulty} > {difficulty_start} (age {age}); worker sleeping"),
+                serde_json::json!({"object_id": pid, "difficulty": difficulty, "difficulty_start": difficulty_start, "age": age}),
+            );
+        }
         emit_event(&app_handle, "hash_progress", &handle);
         std::thread::sleep(std::time::Duration::from_millis(DIFFICULTY_START_SLEEP_MS));
     };

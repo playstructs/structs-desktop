@@ -427,6 +427,14 @@ pub async fn player_view(client: &CosmosClient, pid: &str) -> Result<PlayerView,
     }) {
         return Ok(v);
     }
+    player_view_live(client, pid).await
+}
+
+/// [`player_view`] that skips the snapshot: the indexed source, never what
+/// we believe. The pre-sign read for an EXPLORE — the one action whose
+/// precondition ("my current planet is mined out") is about a planet the
+/// snapshot may have already been moved off of.
+pub async fn player_view_live(client: &CosmosClient, pid: &str) -> Result<PlayerView, String> {
     with_failover!(
         "player",
         async { player_view_from_guild(&client.guild.player_by_id(pid).await?) },
@@ -445,6 +453,11 @@ pub async fn planet_ore(client: &CosmosClient, planet_id: &str) -> Result<f64, S
     if let Some(o) = snap(|s| s.grid_attr(planet_id, "ore").map(|v| v as f64)) {
         return Ok(o);
     }
+    planet_ore_live(client, planet_id).await
+}
+
+/// [`planet_ore`] that skips the snapshot (see `player_view_live`).
+pub async fn planet_ore_live(client: &CosmosClient, planet_id: &str) -> Result<f64, String> {
     with_failover!(
         "planet_ore",
         async {
