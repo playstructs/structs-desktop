@@ -410,9 +410,13 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         // charge window for it, and do not queue into a block in which a
         // build initiate or defense set is already spending it. The wait is
         // short (a block is ~5 s); a proof is never abandoned for it.
-        let _charge = match owner.as_deref().filter(|_| crate::mcp::loop_util::is_charged_type(type_url)) {
+        let _charge = match owner
+            .as_deref()
+            .filter(|_| crate::mcp::loop_util::is_charged_type(type_url))
+            .and_then(|o| crate::mcp::types::PlayerId::parse(o).ok())
+        {
             Some(pid) => {
-                let r = crate::mcp::loop_util::reserve_charge_when_free(pid, 20_000).await;
+                let r = crate::mcp::loop_util::reserve_charge_when_free(&pid, 20_000).await;
                 if r.is_none() {
                     crate::mcp::telemetry::tlog(
                         "hasher",

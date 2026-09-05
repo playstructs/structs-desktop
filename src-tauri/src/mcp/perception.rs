@@ -200,14 +200,13 @@ fn str_of(v: &Value, key: &str) -> String {
 
 /// `"{attr}-{objectType}-{index}"` → `(attr, "objectType-index")`.
 pub fn parse_attribute_id(id: &str) -> Option<(usize, String)> {
-    let mut it = id.splitn(2, '-');
-    let attr = it.next()?.parse::<usize>().ok()?;
-    let rest = it.next()?;
-    // The object id must itself be `type-index`.
-    if rest.split('-').count() != 2 {
+    // One grammar, in mcp/types.rs. Rows with a sub index (typeCount) have
+    // no slot in the fixed-width stores and are skipped, as before.
+    let a = crate::mcp::types::AttributeId::parse(id).ok()?;
+    if a.sub.is_some() {
         return None;
     }
-    Some((attr, rest.to_string()))
+    Some((a.attr as usize, a.object.to_string()))
 }
 
 /// `"2026-09-02T17:34:41.606433+00:00"` → unix seconds. Only the
@@ -1131,7 +1130,8 @@ pub(crate) fn adapt_attribute_rows(rows: &[Value], names: &[&str]) -> Vec<Value>
                 .iter()
                 .find_map(|k| r.get(*k).and_then(|x| x.as_str()))?;
             let idx = names.iter().position(|n| *n == t)?;
-            Some(json!({ "attributeId": format!("{idx}-{oid}"), "value": val }))
+            let object = crate::mcp::types::ObjectId::parse(oid).ok()?;
+            Some(json!({ "attributeId": crate::mcp::types::AttributeId::new(idx as u8, object).to_string(), "value": val }))
         })
         .collect()
 }

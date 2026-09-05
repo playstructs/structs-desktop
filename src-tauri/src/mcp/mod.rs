@@ -44,6 +44,7 @@ pub mod telemetry;
 pub mod tools;
 pub mod log_bundle;
 pub mod tx_gate;
+pub mod types;
 pub mod tx_queue;
 pub mod tx_retry;
 pub mod txq_bridge;

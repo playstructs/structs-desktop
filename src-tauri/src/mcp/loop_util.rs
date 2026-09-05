@@ -12,6 +12,7 @@ use std::sync::{LazyLock, Mutex};
 use tokio::task::JoinSet;
 
 use crate::mcp::cosmos_client::CosmosClient;
+use crate::mcp::types::PlayerId;
 
 // ── Shared JSON coercion helpers ──
 // The chain/guild APIs return numerics as either JSON numbers or strings and
@@ -578,10 +579,8 @@ static CHARGE_LEDGER: LazyLock<Mutex<HashMap<String, f64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Record that `player_id` has spent its charge for this block.
-pub fn note_charged_action(player_id: &str) {
-    if player_id.is_empty() {
-        return;
-    }
+pub fn note_charged_action(player_id: &PlayerId) {
+    let player_id = player_id.as_str();
     if let Ok(mut m) = CHARGE_LEDGER.lock() {
         let now = crate::hasher::types::now_millis();
         // Opportunistic sweep so a long-running process does not accumulate an
@@ -623,10 +622,8 @@ impl Drop for ChargeReservation {
 }
 
 /// Reserve `player_id`'s charge for a sign that is about to be queued.
-pub fn reserve_charge(player_id: &str) -> Option<ChargeReservation> {
-    if player_id.is_empty() {
-        return None;
-    }
+pub fn reserve_charge(player_id: &PlayerId) -> Option<ChargeReservation> {
+    let player_id = player_id.as_str();
     if let Ok(mut m) = PENDING_CHARGE.lock() {
         *m.entry(player_id.to_string()).or_insert(0) += 1;
     }
@@ -645,12 +642,13 @@ pub fn charge_cost(type_url: &str) -> u64 {
 }
 
 /// Live charge reservations for a player (ours included).
-pub fn charge_reservations(player_id: &str) -> usize {
-    PENDING_CHARGE.lock().map(|m| m.get(player_id).copied().unwrap_or(0)).unwrap_or(0)
+pub fn charge_reservations(player_id: &PlayerId) -> usize {
+    PENDING_CHARGE.lock().map(|m| m.get(player_id.as_str()).copied().unwrap_or(0)).unwrap_or(0)
 }
 
 /// A charged action of this player's LANDED within the last block window.
-pub fn charged_this_block(player_id: &str) -> bool {
+pub fn charged_this_block(player_id: &PlayerId) -> bool {
+    let player_id = player_id.as_str();
     CHARGE_LEDGER
         .lock()
         .map(|m| {
@@ -662,7 +660,8 @@ pub fn charged_this_block(player_id: &str) -> bool {
 
 /// Has this player already taken — or queued — its one charged action this
 /// block?
-pub fn acted_this_block(player_id: &str) -> bool {
+pub fn acted_this_block(player_id: &PlayerId) -> bool {
+    let player_id = player_id.as_str();
     if PENDING_CHARGE.lock().map(|m| m.contains_key(player_id)).unwrap_or(false) {
         return true;
     }
@@ -676,22 +675,17 @@ pub fn acted_this_block(player_id: &str) -> bool {
 }
 
 /// The player id embedded in a telemetry context like `auto_defend:1-635`.
-pub fn player_from_context(context: &str) -> Option<&str> {
+pub fn player_from_context(context: &str) -> Option<PlayerId> {
     // Only a player id reserves charge. `pow_complete:5-234309` names the
-    // STRUCT, and keying a reservation on it let completions and initiates
-    // for the same player race into the same block ("already discharged",
-    // "required charge of 8 but player only had 3": 23 in the first hour of
-    // the native build). The hasher reserves on the owner explicitly.
-    context
-        .split_once(':')
-        .map(|(_, p)| p)
-        .filter(|p| p.starts_with("1-") && p[2..].chars().all(|c| c.is_ascii_digit()))
+    // STRUCT; keying a reservation on it let completions and initiates for
+    // the same player race into one block. The type refuses it now.
+    context.split_once(':').and_then(|(_, p)| PlayerId::parse(p).ok())
 }
 
 /// Wait (up to `max_ms`) for a player's charged-action window to be free —
 /// no reservation alive and no charged action landed this block — then
 /// reserve it. Returns None only when the wait ran out.
-pub async fn reserve_charge_when_free(player_id: &str, max_ms: u64) -> Option<ChargeReservation> {
+pub async fn reserve_charge_when_free(player_id: &PlayerId, max_ms: u64) -> Option<ChargeReservation> {
     let t0 = crate::hasher::types::now_millis();
     loop {
         if !acted_this_block(player_id) {
@@ -704,6 +698,12 @@ pub async fn reserve_charge_when_free(player_id: &str, max_ms: u64) -> Option<Ch
     }
 }
 
+/// Test helper: a PlayerId from a literal.
+#[cfg(test)]
+pub(crate) fn test_pid(s: &str) -> PlayerId {
+    PlayerId::parse(s).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -712,25 +712,25 @@ mod tests {
         assert_eq!(charge_cost("/structs.structs.MsgStructBuildInitiate"), 8);
         assert_eq!(charge_cost("/structs.structs.MsgStructDefenseSet"), 1);
         assert_eq!(charge_cost("/structs.structs.MsgStructAttack"), 1);
-        let pid = "1-777001";
-        assert_eq!(charge_reservations(pid), 0);
-        let a = reserve_charge(pid).unwrap();
-        let b = reserve_charge(pid).unwrap();
-        assert_eq!(charge_reservations(pid), 2, "two loops queued for one player are visible to each other");
+        let pid = crate::mcp::loop_util::test_pid("1-777001");
+        assert_eq!(charge_reservations(&pid), 0);
+        let a = reserve_charge(&pid).unwrap();
+        let b = reserve_charge(&pid).unwrap();
+        assert_eq!(charge_reservations(&pid), 2, "two loops queued for one player are visible to each other");
         drop(a);
-        assert_eq!(charge_reservations(pid), 1);
+        assert_eq!(charge_reservations(&pid), 1);
         drop(b);
-        assert_eq!(charge_reservations(pid), 0);
-        assert!(!charged_this_block(pid));
-        note_charged_action(pid);
-        assert!(charged_this_block(pid));
+        assert_eq!(charge_reservations(&pid), 0);
+        assert!(!charged_this_block(&pid));
+        note_charged_action(&pid);
+        assert!(charged_this_block(&pid));
     }
 
     #[test]
     fn a_context_names_a_player_or_reserves_nothing() {
         use super::player_from_context;
-        assert_eq!(player_from_context("auto_defend:1-635"), Some("1-635"));
-        assert_eq!(player_from_context("auto_build:1-2477"), Some("1-2477"));
+        assert_eq!(player_from_context("auto_defend:1-635"), Some(crate::mcp::loop_util::test_pid("1-635")));
+        assert_eq!(player_from_context("auto_build:1-2477"), Some(crate::mcp::loop_util::test_pid("1-2477")));
         assert_eq!(player_from_context("pow_complete:5-234309"), None, "a struct id is not a player");
         assert_eq!(player_from_context("pow_complete:"), None);
         assert_eq!(player_from_context("nocolon"), None);
@@ -782,10 +782,10 @@ mod tests {
     /// same players.
     #[test]
     fn a_player_that_spent_its_charge_is_skipped_until_the_next_block() {
-        assert!(!acted_this_block("1-571"));
-        note_charged_action("1-571");
-        assert!(acted_this_block("1-571"), "second loop must defer, not race");
-        assert!(!acted_this_block("1-999"), "per player, not global");
+        assert!(!acted_this_block(&crate::mcp::loop_util::test_pid("1-571")));
+        note_charged_action(&crate::mcp::loop_util::test_pid("1-571"));
+        assert!(acted_this_block(&crate::mcp::loop_util::test_pid("1-571")), "second loop must defer, not race");
+        assert!(!acted_this_block(&crate::mcp::loop_util::test_pid("1-999")), "per player, not global");
     }
 
     #[test]
@@ -800,8 +800,8 @@ mod tests {
 
     #[test]
     fn player_id_is_read_from_the_telemetry_context() {
-        assert_eq!(player_from_context("auto_defend:1-635"), Some("1-635"));
-        assert_eq!(player_from_context("auto_raid_abort:1-2308"), Some("1-2308"));
+        assert_eq!(player_from_context("auto_defend:1-635"), Some(crate::mcp::loop_util::test_pid("1-635")));
+        assert_eq!(player_from_context("auto_raid_abort:1-2308"), Some(crate::mcp::loop_util::test_pid("1-2308")));
         assert_eq!(player_from_context("auto_harvest"), None);
         assert_eq!(player_from_context("launch:"), None);
     }
@@ -894,27 +894,27 @@ mod charge_reservation_tests {
 
     #[test]
     fn a_reservation_marks_the_player_acted_until_dropped() {
-        let pid = "1-777001"; // unique: the ledger is process-global
-        assert!(!acted_this_block(pid));
-        let r = reserve_charge(pid).expect("reservation");
-        assert!(acted_this_block(pid), "queued sign counts as acted");
+        let pid = crate::mcp::loop_util::test_pid("1-777001"); // unique: the ledger is process-global
+        assert!(!acted_this_block(&pid));
+        let r = reserve_charge(&pid).expect("reservation");
+        assert!(acted_this_block(&pid), "queued sign counts as acted");
         drop(r);
-        assert!(!acted_this_block(pid), "released on drop");
+        assert!(!acted_this_block(&pid), "released on drop");
     }
 
     #[test]
     fn overlapping_reservations_release_independently() {
-        let pid = "1-777002";
-        let a = reserve_charge(pid).unwrap();
-        let b = reserve_charge(pid).unwrap();
+        let pid = crate::mcp::loop_util::test_pid("1-777002");
+        let a = reserve_charge(&pid).unwrap();
+        let b = reserve_charge(&pid).unwrap();
         drop(a);
-        assert!(acted_this_block(pid), "one reservation still alive");
+        assert!(acted_this_block(&pid), "one reservation still alive");
         drop(b);
-        assert!(!acted_this_block(pid));
+        assert!(!acted_this_block(&pid));
     }
 
     #[test]
     fn empty_player_id_reserves_nothing() {
-        assert!(reserve_charge("").is_none());
+        assert!(crate::mcp::types::PlayerId::parse("").is_err(), "an empty id cannot even be constructed");
     }
 }

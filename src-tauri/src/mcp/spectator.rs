@@ -831,7 +831,7 @@ mod defence_tests {
             category: "planet".into(), owner: "1-1".into(), ambit: "land".into(), slot: 0,
             health: Some(3), max_health: 3, destroyed: false, online: true, built: true,
             hidden: false, defending: protects != 0, defended: false,
-            protects: (protects != 0).then(|| format!("5-{protects}")),
+            protects: (protects != 0).then(|| crate::mcp::types::StructId::from_index(protects).to_string()),
             protected_index: protects, is_command: false, side: "defender".into(),
         }
     }
@@ -1360,7 +1360,7 @@ async fn build_struct(
         // relation, not a property, so it cannot be read off one entity.
         defended: false,
         // Struct ids are `5-<index>`; the chain stores only the index.
-        protects: (protected_index != 0).then(|| format!("5-{protected_index}")),
+        protects: (protected_index != 0).then(|| crate::mcp::types::StructId::from_index(protected_index).to_string()),
         protected_index,
         is_command: p.is_command,
     })

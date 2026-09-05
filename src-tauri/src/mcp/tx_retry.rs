@@ -327,7 +327,7 @@ pub async fn sign_with_retry_guarded(
     // 30-minute initiate backoff) and code 2022 "already discharged". See
     // loop_util::acted_this_block. Released on drop (any exit path).
     let _reservation = if crate::mcp::loop_util::is_charged_type(type_url) {
-        crate::mcp::loop_util::player_from_context(context).and_then(crate::mcp::loop_util::reserve_charge)
+        crate::mcp::loop_util::player_from_context(context).as_ref().and_then(crate::mcp::loop_util::reserve_charge)
     } else {
         None
     };
@@ -371,7 +371,7 @@ pub async fn sign_with_retry_guarded(
         if loop_util::is_charged_type(type_url) {
             if let Some(pid) = loop_util::player_from_context(context) {
                 let t0 = now_millis();
-                while (loop_util::charge_reservations(pid) > 1 || loop_util::charged_this_block(pid))
+                while (loop_util::charge_reservations(&pid) > 1 || loop_util::charged_this_block(&pid))
                     && now_millis() - t0 < 12_000.0
                 {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -380,13 +380,13 @@ pub async fn sign_with_retry_guarded(
                 let block = crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0);
                 if block > 0 {
                     let client = crate::mcp::cosmos_client::CosmosClient::new();
-                    if let Ok(have) = crate::mcp::verify::player_charge(&client, pid, block).await {
+                    if let Ok(have) = crate::mcp::verify::player_charge(&client, pid.as_str(), block).await {
                         if have < need {
                             telemetry::record_tx_attempt(TxAttemptRow {
                                 ts_ms: now_millis(),
                                 context: context.to_string(),
                                 action: type_url.to_string(),
-                                player_id: Some(pid.to_string()),
+                                player_id: Some(pid.as_str().to_string()),
                                 attempt,
                                 outcome: "skipped",
                                 tx_hash: None,
@@ -437,7 +437,7 @@ pub async fn sign_with_retry_guarded(
                     // certain code-2022 reject. See loop_util::acted_this_block.
                     if crate::mcp::loop_util::is_charged_type(type_url) {
                         if let Some(pid) = crate::mcp::loop_util::player_from_context(context) {
-                            crate::mcp::loop_util::note_charged_action(pid);
+                            crate::mcp::loop_util::note_charged_action(&pid);
                         }
                     }
                     return Ok(value);

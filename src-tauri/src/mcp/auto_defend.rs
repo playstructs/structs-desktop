@@ -162,7 +162,13 @@ pub struct TypeStats {
 /// case, so open is also usually correct.
 impl Default for TypeStats {
     fn default() -> Self {
-        Self { counter: 0, counter_same: 0, armour: 0, reach: 0, can_defend: true }
+        // CLOSED. This used to fail open ("the chain arbitrates with a clean
+        // reject") and on 2026-09-05 that reject was 200 an hour: Ore Bunkers
+        // proposed as Command Ship guards, each a charged sign that burned
+        // the player's block. Only fleet types may be registered as
+        // defenders (the chain's `canDefend`); a type the catalog cannot
+        // vouch for is not wired until it can.
+        Self { counter: 0, counter_same: 0, armour: 0, reach: 0, can_defend: false }
     }
 }
 
@@ -750,7 +756,7 @@ async fn scan(
                         .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|v| v.parse().ok())))
                         .unwrap_or(0);
                     if prot_idx != 0 {
-                        let target = format!("5-{}", prot_idx);
+                        let target = crate::mcp::types::StructId::from_index(prot_idx).to_string();
                         ASSIGNED_CACHE.lock().unwrap().insert(sid.clone(), target.clone());
                         current.insert(sid, target);
                     }
@@ -810,7 +816,7 @@ async fn scan(
                 // is a guaranteed code-2022 reject ("already discharged") that
                 // costs a signing slot and a transaction attempt — 24 of them
                 // in one hour, always the same players. Defer to the next scan.
-                if crate::mcp::loop_util::acted_this_block(&pid) {
+                if crate::mcp::types::PlayerId::parse(&pid).map(|p| crate::mcp::loop_util::acted_this_block(&p)).unwrap_or(false) {
                     return;
                 }
                 let mut needs_clear = current.contains_key(&edge.defender);
@@ -913,6 +919,23 @@ async fn scan(
                         if benign || e.contains("cannot defend") {
                             ASSIGNED_CACHE.lock().unwrap().remove(&edge.defender);
                         }
+                        if e.contains("cannot defend") {
+                            // The keeper refused the defender's TYPE. Say what we believed
+                            // about it, so a catalog gap is named, not guessed at.
+                            let type_id = crate::mcp::perception::with_snapshot(|s| s.struct_row(&edge.defender).map(|r| r.type_id.clone()))
+                                .flatten()
+                                .unwrap_or_default();
+                            let believed = crate::game_state::GAME_STATE
+                                .read()
+                                .ok()
+                                .and_then(|gs| gs.struct_types.get(&type_id).map(|t| format!("can_defend={:?} category={:?} name={}", t.can_defend, t.category, t.name)))
+                                .unwrap_or_else(|| "NOT IN CATALOG".to_string());
+                            crate::mcp::telemetry::tlog(
+                                "auto_defend",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("chain refused defender {} (type {type_id:?}): catalog said {believed}", edge.defender),
+                            );
+                        }
                         if benign {
                             crate::mcp::telemetry::tlog(
                                 "auto_defend",
@@ -938,6 +961,11 @@ async fn scan(
 
 #[cfg(test)]
 mod tests {
+    /// A fleet type as the catalog reports it: eligible to defend. The
+    /// production default is CLOSED, so fixtures say so explicitly.
+    fn fleet_ok() -> TypeStats {
+        TypeStats { can_defend: true, ..Default::default() }
+    }
 
     /// Guard selection must cover AMBITS, not maximise per-hull breadth.
     ///
@@ -954,10 +982,10 @@ mod tests {
         // Real type ids: 1 = Command Ship, 9 = Tank, 2 = Battleship,
         // 6 = High Altitude Interceptor.
         let mut st: HashMap<String, TypeStats> = HashMap::new();
-        st.insert("1".into(), TypeStats::default());
-        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..Default::default() });
-        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..Default::default() });
-        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..Default::default() });
+        st.insert("1".into(), fleet_ok());
+        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..fleet_ok() });
+        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..fleet_ok() });
+        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..fleet_ok() });
 
         let hulls = vec![
             hull("5-cmd", "1", "land", "9-1"),
@@ -998,12 +1026,12 @@ mod tests {
         const AIR: u64 = 8;
         const SPACE: u64 = 16;
         let mut st: HashMap<String, TypeStats> = HashMap::new();
-        st.insert("1".into(), TypeStats::default());
-        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..Default::default() });
-        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..Default::default() });
-        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..Default::default() });
+        st.insert("1".into(), fleet_ok());
+        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..fleet_ok() });
+        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..fleet_ok() });
+        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..fleet_ok() });
         // A hull that can neither block the land CMD nor counter anything.
-        st.insert("99".into(), TypeStats::default());
+        st.insert("99".into(), fleet_ok());
 
         let hulls = vec![
             hull("5-cmd", "1", "land", "9-1"),
@@ -1042,10 +1070,10 @@ mod tests {
         const AIR: u64 = 8;
         const SPACE: u64 = 16;
         let mut st: HashMap<String, TypeStats> = HashMap::new();
-        st.insert("1".into(), TypeStats::default());
-        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..Default::default() });
-        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..Default::default() });
-        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..Default::default() });
+        st.insert("1".into(), fleet_ok());
+        st.insert("9".into(), TypeStats { counter: 1, counter_same: 1, reach: LAND, armour: 1, ..fleet_ok() });
+        st.insert("2".into(), TypeStats { counter: 1, counter_same: 1, reach: WATER | LAND, ..fleet_ok() });
+        st.insert("6".into(), TypeStats { counter: 1, counter_same: 1, reach: AIR | SPACE, ..fleet_ok() });
         let hulls = vec![
             hull("5-cmd", "1", "land", "9-1"),
             hull("5-tank", "9", "land", "9-1"),
@@ -1157,7 +1185,7 @@ mod tests {
     /// attacker for 1 on 2026-08-18 with reach water|land.
     #[test]
     fn counter_ambits_includes_the_ambit_the_defender_stands_in() {
-        let bship = TypeStats { reach: 2 | 4, ..Default::default() };
+        let bship = TypeStats { reach: 2 | 4, ..fleet_ok() };
         assert_eq!(counter_ambits(&bship, "space") & 16, 16, "standing in space must count");
         assert_eq!(counter_ambits(&bship, "space") & 2, 2, "reach is still counted");
     }
@@ -1168,7 +1196,7 @@ mod tests {
     /// counter-guard.
     #[test]
     fn a_weaponless_hull_counters_from_nowhere() {
-        let bunker = TypeStats { reach: 0, counter: 0, counter_same: 0, armour: 1, ..Default::default() };
+        let bunker = TypeStats { reach: 0, counter: 0, counter_same: 0, armour: 1, ..fleet_ok() };
         assert_eq!(counter_ambits(&bunker, "land"), 0);
     }
 
@@ -1181,7 +1209,7 @@ mod tests {
             counter, counter_same, armour, reach, can_defend: true
         };
         // v0.21.0: planetary types carry canDefend=false on the chain.
-        let planetary = TypeStats { can_defend: false, ..Default::default() };
+        let planetary = TypeStats { can_defend: false, ..fleet_ok() };
         m.insert("1".into(), fleet(2, 2, 1, 32)); // Command Ship
         m.insert("2".into(), fleet(1, 1, 0, 6)); // Battleship (water|land, AP)
         m.insert("9".into(), fleet(1, 1, 1, 4)); // Tank (armoured)

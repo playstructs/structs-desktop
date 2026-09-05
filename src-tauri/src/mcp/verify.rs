@@ -284,7 +284,7 @@ pub async fn struct_state_live(client: &CosmosClient, sid: &str) -> Result<Struc
 pub async fn defender_target(client: &CosmosClient, defender: &str) -> Result<Option<String>, String> {
     if let Some(t) = snap(|s| {
         s.struct_attr(defender, "protectedStructIndex")
-            .map(|i| if i == 0 { None } else { Some(format!("5-{i}")) })
+            .map(|i| if i == 0 { None } else { Some(crate::mcp::types::StructId::from_index(i).to_string()) })
     }) {
         return Ok(t);
     }
@@ -310,7 +310,7 @@ pub async fn defender_target_live(client: &CosmosClient, defender: &str) -> Resu
         async {
             let e = crate::mcp::loop_util::verify_struct_entity(client, defender).await?;
             let idx = read_u64_field(e.get("structAttributes"), "protectedStructIndex");
-            Ok(if idx == 0 { None } else { Some(format!("5-{idx}")) })
+            Ok(if idx == 0 { None } else { Some(crate::mcp::types::StructId::from_index(idx).to_string()) })
         }
     )
 }

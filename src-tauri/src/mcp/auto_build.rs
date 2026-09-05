@@ -1059,7 +1059,7 @@ async fn scan(
                 // code-2022 reject — and here it costs more than the wasted
                 // attempt, because a generic Err also arms INITIATE_BACKOFF and
                 // sits the player out for minutes. Defer to the next scan.
-                if crate::mcp::loop_util::acted_this_block(&pid) {
+                if crate::mcp::types::PlayerId::parse(&pid).map(|p| crate::mcp::loop_util::acted_this_block(&p)).unwrap_or(false) {
                     return;
                 }
 
