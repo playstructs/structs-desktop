@@ -92,6 +92,12 @@ static LAST_CHECK_MS: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 /// Baseline for "never ran yet" loops — first time anything touches the
 /// watchdog, which in practice is the first sync tick after launch.
 static APP_START_MS: LazyLock<f64> = LazyLock::new(now_millis);
+
+/// When this process started (ms). Forced at watchdog start; a caller before
+/// that gets the time of its own first call, which is close enough.
+pub fn app_start_ms() -> f64 {
+    *APP_START_MS
+}
 /// task_id -> (last seen iterations, when they last changed).
 /// pid → in-place restarts so far (see the stalled-task remedy). Pruned with
 /// `HASH_PROGRESS` when the pid leaves the registry.

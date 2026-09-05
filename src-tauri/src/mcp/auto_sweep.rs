@@ -181,6 +181,15 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
         run.blocked("roster cache is empty — nothing to sweep from yet");
         return;
     }
+    // The roster is restored from disk at launch with the balances of the
+    // previous run — including players that run already swept — and the
+    // "rejected at this balance" memory below is not. Every launch used to
+    // open with three to six "spendable balance 0ualpha" rejections until
+    // the first live roster sweep landed. Wait for it.
+    if crate::mcp::roster_cache::refreshed_at_ms() < crate::mcp::watchdog::app_start_ms() {
+        run.blocked("roster balances are from before launch — waiting for the first live roster sweep");
+        return;
+    }
     run.players.fetch_add(rows.len() as u32, Ordering::Relaxed);
 
     // Same eligibility as the manual button, by construction.
