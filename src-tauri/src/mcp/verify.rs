@@ -335,14 +335,14 @@ pub async fn build_anchor(client: &CosmosClient, pid: &str, sid: &str) -> Result
     if let Some(a) = snap(|s| s.struct_attr(sid, "blockStartBuild")) {
         return Ok(a);
     }
-    with_failover!(
-        "build_anchor",
-        async { work_anchor(&client.guild.work_by_player(pid).await?, sid, "BUILD") },
-        async {
-            let e = crate::mcp::loop_util::verify_struct_entity(client, sid).await?;
-            Ok(read_u64_field(e.get("structAttributes"), "blockStartBuild"))
-        }
-    )
+    // The chain's struct entity, not the guild work view: the view is a join
+    // over stores the snapshot already holds, and on a snapshot miss the
+    // one object we need is a single LCD read (see mcp/perception.rs on why
+    // the view was retired, 2026-09-05).
+    let _ = pid;
+    LCD_READS.fetch_add(1, Ordering::Relaxed);
+    let e = crate::mcp::loop_util::verify_struct_entity(client, sid).await?;
+    Ok(read_u64_field(e.get("structAttributes"), "blockStartBuild"))
 }
 
 /// Live ore clock (MINE / REFINE) for a rig on `planet_id`. From the
@@ -361,25 +361,13 @@ pub async fn ore_anchor(
             return Ok(a);
         }
     }
-    with_failover!(
-        "ore_anchor",
-        async {
-            let owner = match pid {
-                Some(p) => p.to_string(),
-                None => {
-                    let row = client.guild.struct_by_id(sid).await?;
-                    str_field(&row, "owner").map(String::from).ok_or("ore_anchor: struct row has no owner")?
-                }
-            };
-            work_anchor(&client.guild.work_by_player(&owner).await?, sid, task_type)
-        },
-        async {
-            let p = client.query_entity("planet", planet_id).await?;
-            // Fold the live planet back in: the ore clocks never stream.
-            perception::absorb_planet_entity(&p);
-            Ok(crate::mcp::loop_util::planet_ore_anchor(Some(&p), task_type))
-        }
-    )
+    // The planet entity itself (one LCD read), folded back into the
+    // snapshot. The guild work view used to sit between; retired.
+    let _ = (pid, sid);
+    LCD_READS.fetch_add(1, Ordering::Relaxed);
+    let p = client.query_entity("planet", planet_id).await?;
+    perception::absorb_planet_entity(&p);
+    Ok(crate::mcp::loop_util::planet_ore_anchor(Some(&p), task_type))
 }
 
 /// Blocks of charge the player has right now.
@@ -598,16 +586,10 @@ pub async fn solved_anchor_live(
         };
         return Ok((live, if is_ore { Some(location) } else { None }, Some(owner)));
     }
-    with_failover!(
-        "solved_anchor",
-        async {
-            let row = client.guild.struct_by_id(object_id).await?;
-            let owner = str_field(&row, "owner").map(String::from).ok_or("solved_anchor: struct row has no owner")?;
-            let location = str_field(&row, "location_id").map(String::from);
-            let live = work_anchor(&client.guild.work_by_player(&owner).await?, object_id, task_kind)?;
-            Ok((live, if is_ore { location } else { None }, Some(owner)))
-        },
-        async {
+    // Not in the snapshot: the chain's own struct (and planet) entities.
+    LCD_READS.fetch_add(1, Ordering::Relaxed);
+    {
+        {
             let e = client.query_entity("struct", object_id).await?;
             let owner = e.get("Struct").and_then(|s| str_field(s, "owner")).map(String::from);
             if !is_ore {
@@ -624,7 +606,7 @@ pub async fn solved_anchor_live(
             };
             Ok((live, Some(planet_id), owner))
         }
-    )
+    }
 }
 
 #[cfg(test)]

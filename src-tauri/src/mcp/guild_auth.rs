@@ -50,6 +50,9 @@ static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 /// Two attempts closer together than this are one attempt: a burst of 401s
 /// from a parallel page walk must not become a burst of logins.
 const MIN_GAP_MS: u64 = 15_000;
+/// How long a 401 handler waits for the device key to come out of the
+/// keychain before giving up on a native login.
+const KEY_WAIT_MS: u64 = 15_000;
 
 fn now_ms() -> u64 {
     crate::hasher::types::now_millis() as u64
@@ -103,8 +106,15 @@ pub async fn login(client: &GuildApiClient) -> Result<(), String> {
 /// login just succeeded (the caller should retry its request once), false
 /// when it was skipped (too soon, in flight, no key) or failed.
 pub async fn recover(client: &GuildApiClient) -> bool {
-    if !crate::mcp::native_signer::is_ready() {
-        return false;
+    // The key is loaded from the keychain on a thread at startup; the first
+    // snapshot refresh races it (401 at +2 s, key at +10 s on 2026-09-05).
+    // Wait a little for it rather than fail over to the LCD walk.
+    let t0 = now_ms();
+    while !crate::mcp::native_signer::is_ready() {
+        if now_ms() - t0 > KEY_WAIT_MS {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     let _guard = LOGIN_LOCK.lock().await;
     let now = now_ms();

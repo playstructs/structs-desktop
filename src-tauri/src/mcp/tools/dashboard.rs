@@ -41,10 +41,17 @@ pub async fn execute(
 
     if let Some(my_id) = me {
         // 1. Active work line (work_by_player) — flag chain/local desync.
-        let work_fut = client.guild.work_by_player(&my_id);
-        if let Ok(Ok(work)) =
-            tokio::time::timeout(Duration::from_millis(500), work_fut).await
-        {
+        // Our own player: the snapshot's rows (same shape as the guild view,
+        // fresher, no request). The guild view remains for other players.
+        let work_local = crate::mcp::perception::work_for_player(&my_id).map(serde_json::Value::Array);
+        let work: Result<serde_json::Value, String> = match work_local {
+            Some(w) => Ok(w),
+            None => tokio::time::timeout(Duration::from_millis(500), client.guild.work_by_player(&my_id))
+                .await
+                .map_err(|_| "timeout".to_string())
+                .and_then(|r| r),
+        };
+        if let Ok(work) = work {
             let active_count = match &work {
                 serde_json::Value::Array(a) => a.len(),
                 serde_json::Value::Object(_) => 1,

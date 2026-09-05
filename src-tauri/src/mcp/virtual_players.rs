@@ -322,7 +322,20 @@ pub async fn team_owned(client: &crate::mcp::cosmos_client::CosmosClient) -> Tea
     let mut out = TeamOwned::default();
     for (pid, name) in entries {
         out.players.insert(pid.clone());
-        let cached = OWNED_CACHE.read().unwrap().get(&pid).cloned();
+        // The snapshot knows every player's planet and fleet; this used to
+        // read each vplayer from the LCD on a cache miss and never cached a
+        // player WITHOUT a planet, so the board's threat poll re-read every
+        // planet-less vplayer on every render — the last unexplained LCD
+        // reader (5,162 reads in the first minute after launch, 30/min after,
+        // named by the backtrace sampler on 2026-09-05).
+        let from_snapshot = crate::mcp::perception::with_snapshot(|s| {
+            s.player_row(&pid).map(|p| {
+                let g = |k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                (g("planetId"), g("fleetId"))
+            })
+        })
+        .flatten();
+        let cached = from_snapshot.or_else(|| OWNED_CACHE.read().unwrap().get(&pid).cloned());
         let (planet, fleet) = match cached {
             Some(pf) => pf,
             None => {
@@ -339,9 +352,10 @@ pub async fn team_owned(client: &crate::mcp::cosmos_client::CosmosClient) -> Tea
                     }
                     Err(_) => (String::new(), String::new()),
                 };
-                if !pf.0.is_empty() {
-                    OWNED_CACHE.write().unwrap().insert(pid.clone(), pf.clone());
-                }
+                // Cache the answer either way: a planet-less vplayer is a
+                // real, stable answer until it explores, and the snapshot
+                // (consulted first) picks that change up on its own.
+                OWNED_CACHE.write().unwrap().insert(pid.clone(), pf.clone());
                 pf
             }
         };
