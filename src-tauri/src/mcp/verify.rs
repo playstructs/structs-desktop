@@ -25,7 +25,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use crate::mcp::cosmos_client::CosmosClient;
-use crate::mcp::loop_util::{parse_bool, parse_f64, read_u64_field};
+use crate::mcp::loop_util::{parse_bool, parse_f64};
 use crate::mcp::perception::{self, Snapshot};
 use crate::mcp::telemetry::{tlog, Sev};
 
@@ -309,7 +309,7 @@ pub async fn defender_target_live(client: &CosmosClient, defender: &str) -> Resu
         },
         async {
             let e = crate::mcp::loop_util::verify_struct_entity(client, defender).await?;
-            let idx = read_u64_field(e.get("structAttributes"), "protectedStructIndex");
+            let idx = crate::mcp::types::EntityView::new(&e).struct_attr_u64("protectedStructIndex");
             Ok(if idx == 0 { None } else { Some(crate::mcp::types::StructId::from_index(idx).to_string()) })
         }
     )
@@ -342,7 +342,7 @@ pub async fn build_anchor(client: &CosmosClient, pid: &str, sid: &str) -> Result
     let _ = pid;
     LCD_READS.fetch_add(1, Ordering::Relaxed);
     let e = crate::mcp::loop_util::verify_struct_entity(client, sid).await?;
-    Ok(read_u64_field(e.get("structAttributes"), "blockStartBuild"))
+    Ok(crate::mcp::types::EntityView::new(&e).struct_block("blockStartBuild").get())
 }
 
 /// Live ore clock (MINE / REFINE) for a rig on `planet_id`. From the
@@ -387,7 +387,7 @@ pub async fn player_charge(client: &CosmosClient, pid: &str, current_block: u64)
         },
         async {
             let player = client.query_entity("player", pid).await?;
-            Ok(current_block.saturating_sub(read_u64_field(player.get("gridAttributes"), "lastAction")))
+            Ok(crate::mcp::types::Block::new(current_block).since(crate::mcp::types::EntityView::new(&player).last_action()))
         }
     )
 }
@@ -593,7 +593,7 @@ pub async fn solved_anchor_live(
             let e = client.query_entity("struct", object_id).await?;
             let owner = e.get("Struct").and_then(|s| str_field(s, "owner")).map(String::from);
             if !is_ore {
-                return Ok((read_u64_field(e.get("structAttributes"), "blockStartBuild"), None, owner));
+                return Ok((crate::mcp::types::EntityView::new(&e).struct_block("blockStartBuild").get(), None, owner));
             }
             // Chain v0.21.0: the ore clock hangs off the PLANET the rig stands
             // on; a planetary struct's locationId IS its planet id.

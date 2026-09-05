@@ -114,7 +114,7 @@ pub fn ripe_age(difficulty_target: u64, threshold: u64) -> u64 {
     (difficulty_target as f64).powf(exp).ceil() as u64
 }
 
-use crate::mcp::loop_util::{extract_type_id, parse_bool, parse_f64};
+use crate::mcp::loop_util::{extract_type_id, parse_bool};
 
 /// Invoked each sync tick (cheap when throttled). Scans owned extractors (and
 /// refineries if enabled) and kicks off a PoW task for each ripe struct that
@@ -346,7 +346,7 @@ async fn scan(
                     if is_extractor {
                         // Unknown → don't block mining on a read failure.
                         let planet_ore = planet
-                            .map(|p| parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))))
+                            .map(|p| crate::mcp::types::EntityView::new(p).grid_f64("ore"))
                             .unwrap_or(1.0);
                         if planet_ore <= 0.0 {
                             continue;
@@ -366,7 +366,7 @@ async fn scan(
                         // wasted proof-of-work.
                         if player_ore_cache.is_none() {
                             player_ore_cache = Some(match crate::mcp::loop_util::scan_entity(&client, "player", &pid).await {
-                                Ok((p, _)) => parse_f64(p.get("gridAttributes").and_then(|g| g.get("ore"))),
+                                Ok((p, _)) => crate::mcp::types::EntityView::new(&p).grid_f64("ore"),
                                 // Unknown → don't block refining on a read failure.
                                 Err(_) => 1.0,
                             });

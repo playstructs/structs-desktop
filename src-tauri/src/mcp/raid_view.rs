@@ -495,9 +495,9 @@ pub async fn mcp_raid_state(
 /// guild indexer, which already stores exactly this.
 #[tauri::command]
 pub async fn mcp_raid_log(planet_id: String, limit: Option<usize>) -> Result<Value, String> {
-    if !valid_entity_id(&planet_id, "2") {
-        return Err(format!("'{planet_id}' is not a planet id"));
-    }
+    let planet_id = crate::mcp::types::PlanetId::parse(&planet_id)
+        .map_err(|_| format!("'{planet_id}' is not a planet id"))?
+        .to_string();
     let client = crate::mcp::cosmos_client::CosmosClient::new();
     let want = limit.unwrap_or(200).min(500);
 

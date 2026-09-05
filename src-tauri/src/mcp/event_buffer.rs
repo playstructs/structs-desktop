@@ -47,7 +47,7 @@ pub fn get_recent(count: usize, category: Option<&str>, subject_token: Option<&s
                 }
             }
             if let Some(tok) = subject_token {
-                if !e.subject.split('.').any(|seg| seg == tok) {
+                if !crate::mcp::types::Subject::parse(&e.subject).has_token(tok) {
                     return false;
                 }
             }

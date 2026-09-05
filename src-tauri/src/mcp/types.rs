@@ -372,6 +372,131 @@ where
     }
 }
 
+// ── GRASS subjects ──────────────────────────────────────────────────────
+
+/// Which stream a GRASS subject belongs to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SubjectFamily {
+    /// `structs.planet.<planet>.<player>` — planet_activity rows.
+    Planet,
+    /// `structs.grid.<objtype>.<object>[.<player>]` — grid attribute changes.
+    Grid,
+    /// `structs.inventory.<denom>.<guild>.<player>.<address>` — bank moves.
+    Inventory,
+    /// `consensus` — the block heartbeat.
+    Consensus,
+    Other,
+}
+
+/// A NATS subject, parsed once. `object` is the id the subject is keyed on
+/// (the planet, the grid object, the inventory's player), `player` the
+/// owner segment when the family carries one. `has_token` is the
+/// whole-segment match that replaced substring matching after the
+/// `1-195` ⊂ `1-1950` incident.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Subject {
+    raw: String,
+    pub family: SubjectFamily,
+    pub object: Option<ObjectId>,
+    pub player: Option<PlayerId>,
+}
+
+impl Subject {
+    pub fn parse(raw: &str) -> Self {
+        let segs: Vec<&str> = raw.split('.').collect();
+        let obj = |i: usize| segs.get(i).and_then(|s| ObjectId::parse(s).ok());
+        let player_at = |i: usize| segs.get(i).and_then(|s| PlayerId::parse(s).ok());
+        let (family, object, player) = match segs.as_slice() {
+            ["consensus", ..] => (SubjectFamily::Consensus, None, None),
+            ["structs", "planet", ..] => (SubjectFamily::Planet, obj(2), player_at(3)),
+            ["structs", "grid", ..] => (SubjectFamily::Grid, obj(3), player_at(4)),
+            ["structs", "inventory", ..] => (SubjectFamily::Inventory, player_at(4).map(|p| ObjectId { kind: ObjectKind::Player, index: p.index() }), player_at(4)),
+            _ => (SubjectFamily::Other, None, None),
+        };
+        Self { raw: raw.to_string(), family, object, player }
+    }
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+    /// Does a WHOLE dot-delimited segment equal `token`?
+    pub fn has_token(&self, token: &str) -> bool {
+        self.raw.split('.').any(|seg| seg == token)
+    }
+}
+
+impl fmt::Display for Subject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+
+// ── LCD entity view ─────────────────────────────────────────────────────
+
+/// Typed reads over an LCD entity (`{"Struct": {...}, "structAttributes":
+/// {...}, "gridAttributes": {...}}` / `{"Planet": ..., "planetAttributes":
+/// ...}` / `{"Player": ...}`). The chain serialises every number as a
+/// string; this is the one place that fact is handled.
+pub struct EntityView<'a>(pub &'a serde_json::Value);
+
+impl<'a> EntityView<'a> {
+    pub fn new(v: &'a serde_json::Value) -> Self {
+        Self(v)
+    }
+    fn field_u64(&self, section: &str, name: &str) -> u64 {
+        self.0
+            .get(section)
+            .and_then(|s| s.get(name))
+            .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|t| t.trim().parse().ok())))
+            .unwrap_or(0)
+    }
+    fn field_f64(&self, section: &str, name: &str) -> f64 {
+        self.0
+            .get(section)
+            .and_then(|s| s.get(name))
+            .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|t| t.trim().parse().ok())))
+            .unwrap_or(0.0)
+    }
+    fn field_str(&self, section: &str, name: &str) -> Option<&'a str> {
+        self.0.get(section).and_then(|s| s.get(name)).and_then(|x| x.as_str()).filter(|s| !s.is_empty())
+    }
+    /// A struct attribute that is a block (build / mine / refine clocks).
+    pub fn struct_block(&self, name: &str) -> Block {
+        Block::new(self.field_u64("structAttributes", name))
+    }
+    pub fn struct_attr_u64(&self, name: &str) -> u64 {
+        self.field_u64("structAttributes", name)
+    }
+    /// A planet attribute that is a block (ore clocks, raid start).
+    pub fn planet_block(&self, name: &str) -> Block {
+        Block::new(self.field_u64("planetAttributes", name))
+    }
+    pub fn planet_attr_u64(&self, name: &str) -> u64 {
+        self.field_u64("planetAttributes", name)
+    }
+    /// The player's last charged action, as a block.
+    pub fn last_action(&self) -> Block {
+        Block::new(self.field_u64("gridAttributes", "lastAction"))
+    }
+    pub fn grid_u64(&self, name: &str) -> u64 {
+        self.field_u64("gridAttributes", name)
+    }
+    pub fn grid_f64(&self, name: &str) -> f64 {
+        self.field_f64("gridAttributes", name)
+    }
+    pub fn struct_owner(&self) -> Option<PlayerId> {
+        self.field_str("Struct", "owner").and_then(|s| PlayerId::parse(s).ok())
+    }
+    pub fn struct_location(&self) -> Option<ObjectId> {
+        self.field_str("Struct", "locationId").and_then(|s| ObjectId::parse(s).ok())
+    }
+    pub fn player_planet(&self) -> Option<PlanetId> {
+        self.field_str("Player", "planetId").and_then(|s| PlanetId::parse(s).ok())
+    }
+    pub fn player_fleet(&self) -> Option<FleetId> {
+        self.field_str("Player", "fleetId").and_then(|s| FleetId::parse(s).ok())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +552,44 @@ mod tests {
         assert_eq!(now.since(Block::new(2_463_969)), 6_565);
         assert_eq!(Block::new(10).since(now), 0, "a clock ahead of us is age 0, never a wrap");
         assert!(Charge::new(8).covers(8) && !Charge::new(7).covers(8));
+    }
+
+    #[test]
+    fn subjects_parse_by_family_and_match_whole_tokens() {
+        let s = Subject::parse("structs.planet.2-28299.1-1053");
+        assert_eq!(s.family, SubjectFamily::Planet);
+        assert_eq!(s.object.as_ref().and_then(|o| o.as_planet()).unwrap().as_str(), "2-28299");
+        assert_eq!(s.player.as_ref().unwrap().as_str(), "1-1053");
+        assert!(s.has_token("1-1053") && !s.has_token("1-105") && !s.has_token("1-10530"));
+        let g = Subject::parse("structs.grid.player.1-1404.1-1404");
+        assert_eq!(g.family, SubjectFamily::Grid);
+        assert_eq!(g.object.unwrap().kind, ObjectKind::Player);
+        let i = Subject::parse("structs.inventory.ualpha.0-1.1-194.structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne");
+        assert_eq!(i.family, SubjectFamily::Inventory);
+        assert_eq!(i.player.unwrap().as_str(), "1-194");
+        assert_eq!(Subject::parse("consensus").family, SubjectFamily::Consensus);
+        assert_eq!(Subject::parse("structs.planet.noPlanet.noPlayer").object, None);
+        assert_eq!(Subject::parse("structs.planet.2-1.noPlayer").player, None, "'noPlayer' is the trigger's placeholder, not an id");
+        assert_eq!(Subject::parse("x.y").family, SubjectFamily::Other);
+    }
+
+    #[test]
+    fn entity_view_reads_the_chains_stringly_numbers_once() {
+        let e = serde_json::json!({
+            "Struct": {"id": "5-234309", "owner": "1-2477", "locationId": "2-27693", "locationType": "planet"},
+            "structAttributes": {"blockStartBuild": "2458278", "protectedStructIndex": "0", "status": "7"},
+            "gridAttributes": {"lastAction": "2470534", "ore": "3"}
+        });
+        let v = EntityView::new(&e);
+        assert_eq!(v.struct_block("blockStartBuild"), Block::new(2_458_278));
+        assert_eq!(v.struct_attr_u64("status"), 7);
+        assert_eq!(v.last_action(), Block::new(2_470_534));
+        assert_eq!(v.grid_f64("ore"), 3.0);
+        assert_eq!(v.struct_owner().unwrap().as_str(), "1-2477");
+        assert_eq!(v.struct_location().unwrap().as_planet().unwrap().as_str(), "2-27693");
+        assert_eq!(v.struct_block("missing"), Block::new(0), "absent is zero, as every caller already assumed");
+        let p = serde_json::json!({"Planet": {"id": "2-1"}, "planetAttributes": {"blockStartOreMine": 2471194}});
+        assert_eq!(EntityView::new(&p).planet_block("blockStartOreMine").get(), 2_471_194, "numbers are accepted too");
     }
 
     #[test]

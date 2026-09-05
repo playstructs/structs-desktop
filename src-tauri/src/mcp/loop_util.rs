@@ -60,7 +60,7 @@ pub fn planet_ore_anchor(planet: Option<&Value>, task_type: &str) -> u64 {
         "REFINE" => "blockStartOreRefine",
         _ => return 0,
     };
-    read_u64_field(planet.and_then(|p| p.get("planetAttributes")), field)
+    planet.map(|p| crate::mcp::types::EntityView::new(p).planet_block(field).get()).unwrap_or(0)
 }
 
 /// Struct type id as a string, from `"type"` or the `"struct_type"` fallback,

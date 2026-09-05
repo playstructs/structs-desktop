@@ -167,6 +167,11 @@ pub struct Snapshot {
     pub events_applied: u64,
     pub events_skipped_stale: u64,
     pub last_event_ms: f64,
+    /// Rows the ingest edge refused because an id did not parse (a struct
+    /// with no valid id, an owner that is not a player, a location that is
+    /// not an object). Counted, never silently absorbed; a refresh with more
+    /// than one in a thousand is refused as a broken feed.
+    pub rejected_rows: u64,
 }
 
 /// Outcome of applying one GRASS frame.
@@ -271,11 +276,24 @@ impl Snapshot {
         fleet_rows: &[Value],
     ) -> Snapshot {
         let mut s = Snapshot::default();
+        use crate::mcp::types::{ObjectId, ObjectKind, PlayerId};
         for r in struct_rows {
-            let id = str_of(r, "id");
-            if id.is_empty() {
+            // The ingest edge: ids are parsed here and nowhere downstream.
+            let Ok(sid) = crate::mcp::types::StructId::parse(&str_of(r, "id")) else {
+                s.rejected_rows += 1;
+                continue;
+            };
+            let owner = str_of(r, "owner");
+            if !owner.is_empty() && PlayerId::parse(&owner).is_err() {
+                s.rejected_rows += 1;
                 continue;
             }
+            let location_id = str_of(r, "locationId");
+            if !location_id.is_empty() && ObjectId::parse(&location_id).is_err() {
+                s.rejected_rows += 1;
+                continue;
+            }
+            let id = sid.to_string();
             s.structs.insert(
                 id.clone(),
                 StructRow {
@@ -305,19 +323,27 @@ impl Snapshot {
         fill(&mut s.struct_attrs, struct_attr_rows);
         fill(&mut s.planet_attrs, planet_attr_rows);
         fill(&mut s.grid, grid_rows);
-        for (store, rows) in [
-            (&mut s.players, player_rows),
-            (&mut s.planets, planet_rows),
-            (&mut s.fleets, fleet_rows),
+        for (store, rows, kind) in [
+            (&mut s.players, player_rows, ObjectKind::Player),
+            (&mut s.planets, planet_rows, ObjectKind::Planet),
+            (&mut s.fleets, fleet_rows, ObjectKind::Fleet),
         ] {
             for r in rows {
-                let id = str_of(r, "id");
-                if !id.is_empty() {
-                    store.insert(id, r.clone());
+                match ObjectId::parse(&str_of(r, "id")) {
+                    Ok(o) if o.kind == kind => {
+                        store.insert(o.to_string(), r.clone());
+                    }
+                    _ => s.rejected_rows += 1,
                 }
             }
         }
         s
+    }
+
+    /// The ingest edge refused too many rows to trust this snapshot.
+    pub fn rejection_rate_too_high(&self) -> bool {
+        let n = self.structs.len() + self.players.len() + self.planets.len() + self.fleets.len();
+        n >= 100 && self.rejected_rows as usize * 1000 > n
     }
 
     fn sattr(&self, sid: &str, i: usize) -> u64 {
@@ -581,7 +607,8 @@ impl Snapshot {
             self.events_skipped_stale += 1;
             return Applied::Stale;
         }
-        let res = if subject.starts_with("structs.grid.") {
+        let subj = crate::mcp::types::Subject::parse(subject);
+        let res = if subj.family == crate::mcp::types::SubjectFamily::Grid {
             let Some(idx) = detail
                 .get("attribute_type")
                 .and_then(|x| x.as_str())
@@ -630,7 +657,7 @@ impl Snapshot {
                 "struct_defense_add" => {
                     let defender = str_of(detail, "defender_struct_id");
                     let protected = str_of(detail, "protected_struct_id");
-                    let idx = protected.split('-').nth(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                    let idx = crate::mcp::types::StructId::parse(&protected).map(|p| p.index()).unwrap_or(0);
                     if defender.is_empty() {
                         return Applied::Ignored;
                     }
@@ -760,6 +787,7 @@ impl Snapshot {
             "grid_objects": self.grid.len(),
             "events_applied": self.events_applied,
             "events_skipped_stale": self.events_skipped_stale,
+            "rejected_rows": self.rejected_rows,
             "pending_new_structs": self.pending_new.len(),
             "fed_by": fed_by(),
             "hot_age_s": hot_age_ms().map(|a| (a / 1000.0) as u64),
@@ -1194,6 +1222,9 @@ async fn guild_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String>
     let prev = with_snapshot(|s| (s.structs.len(), s.players.len(), s.planets.len()));
     snapshot_plausible(prev, (structs.len(), players.len(), planets.len()))?;
     let mut snap = Snapshot::from_pages(&structs, &sattr, &pattr, &grid, &players, &planets, &fleets);
+    if snap.rejection_rate_too_high() {
+        return Err(format!("guild feed: {} rows refused at the ingest edge — not trusting this snapshot", snap.rejected_rows));
+    }
     let heights = [st.1, sa.1, pa.1, gr.1, pl.1, pn.1, fl.1];
     snap.height = heights.iter().copied().max().unwrap_or(0);
     if snap.height == 0 {
@@ -1578,6 +1609,9 @@ async fn lcd_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String> {
     let (st, sa, pa, gr, pl, pn, fl) = (result.0?, result.1?, result.2?, result.3?, result.4?, result.5?, result.6?);
     let heights = [st.1, sa.1, pa.1, gr.1, pl.1, pn.1, fl.1];
     let mut snap = Snapshot::from_pages(&st.0, &sa.0, &pa.0, &gr.0, &pl.0, &pn.0, &fl.0);
+    if snap.rejection_rate_too_high() {
+        return Err(format!("LCD stores: {} rows refused at the ingest edge — not trusting this snapshot", snap.rejected_rows));
+    }
     snap.height = heights.iter().copied().max().unwrap_or(0);
     snap.min_height = heights.iter().copied().filter(|h| *h > 0).min().unwrap_or(0);
     snap.taken_ms = t0;
@@ -1999,6 +2033,27 @@ mod tests {
 #[cfg(test)]
 mod guild_ingest_tests {
     use super::*;
+
+    #[test]
+    fn the_ingest_edge_refuses_malformed_ids_and_counts_them() {
+        let good = json!({"id": "5-1", "type": 14, "owner": "1-2477", "locationType": "planet", "locationId": "2-27693"});
+        let bad_id = json!({"id": "struct-1", "type": 14, "owner": "1-2477"});
+        let bad_owner = json!({"id": "5-2", "type": 14, "owner": "5-2477"});
+        let bad_loc = json!({"id": "5-3", "type": 14, "owner": "1-2477", "locationId": "planet"});
+        let snap = Snapshot::from_pages(&[good, bad_id, bad_owner, bad_loc], &[], &[], &[], &[json!({"id": "1-2477"}), json!({"id": "2-9"})], &[json!({"id": "2-27693"})], &[]);
+        assert_eq!(snap.structs.len(), 1);
+        assert_eq!(snap.players.len(), 1, "a planet id in the player store is refused");
+        assert_eq!(snap.rejected_rows, 4);
+        assert!(!snap.rejection_rate_too_high(), "the ratio guard needs a real population");
+        let mut big = Snapshot::default();
+        for i in 0..1000 {
+            big.structs.insert(format!("5-{i}"), StructRow::default());
+        }
+        big.rejected_rows = 2;
+        assert!(big.rejection_rate_too_high(), "2 in 1000 is over one per thousand");
+        big.rejected_rows = 1;
+        assert!(!big.rejection_rate_too_high());
+    }
 
     #[test]
     fn work_rows_come_from_the_snapshot_in_the_views_shape() {
