@@ -1024,6 +1024,16 @@ async fn scan(
                         Err(e) if is_count_cap_reject(&e) => {
                             // We actually do have one (stale read) — benign; no backoff.
                         }
+                        Err(e) if e.starts_with("skipped:") => {
+                            // Charge was spent by a sibling loop while this sat in
+                            // the gate: nothing hit the chain, nothing to back off.
+                            crate::mcp::telemetry::tlog(
+                                "auto_build",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("initiate for {pid} deferred to the next scan: {e}"),
+                            );
+                            return; // the CMD ship is the only thing buildable this scan
+                        }
                         Err(e) => {
                             run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let until = now_millis() + INITIATE_BACKOFF_MS;
@@ -1138,6 +1148,16 @@ async fn scan(
                                 format!("{pid} already has {type_name} (count cap) — advancing to next type"),
                             );
                             continue; // try the next loadout item, no backoff/break
+                        }
+                        Err(e) if e.starts_with("skipped:") => {
+                            // Charge was spent by a sibling loop while this sat in
+                            // the gate: nothing hit the chain, nothing to back off.
+                            crate::mcp::telemetry::tlog(
+                                "auto_build",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("initiate for {pid} deferred to the next scan: {e}"),
+                            );
+                            break;
                         }
                         Err(e) => {
                             run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

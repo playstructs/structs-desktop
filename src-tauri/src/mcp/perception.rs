@@ -1305,21 +1305,39 @@ pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, Stri
             .map(|c| c.guild_id)
             .filter(|g| !g.is_empty())
             .ok_or("no active guild")?;
-        let (rows, _, complete) = client
-            .guild
-            .walk_list(&format!("/api/work/guild/{guild_id}"), GUILD_PAGE_LIMIT, GUILD_MAX_PAGES)
-            .await?;
-        if !complete {
-            return Err(format!("work view capped at {GUILD_MAX_PAGES} pages — refusing a truncated sweep"));
+        let guild = async {
+            let (rows, _, complete) = client
+                .guild
+                .walk_list(&format!("/api/work/guild/{guild_id}"), GUILD_PAGE_LIMIT, GUILD_MAX_PAGES)
+                .await?;
+            if !complete {
+                return Err(format!("work view capped at {GUILD_MAX_PAGES} pages — refusing a truncated sweep"));
+            }
+            if rows.is_empty() {
+                // A guild with 2,400 rigs never has zero outstanding work; an
+                // empty answer is a route or session problem, not a quiet galaxy.
+                return Err("work view returned no rows".to_string());
+            }
+            let mut g = CURRENT.write().map_err(|_| "snapshot lock poisoned".to_string())?;
+            let s = g.as_mut().ok_or("no snapshot to patch")?;
+            Ok::<usize, String>(apply_work_rows(s, &rows, &guild_id))
         }
-        if rows.is_empty() {
-            // A guild with 2,400 rigs never has zero outstanding work; an
-            // empty answer is a route or session problem, not a quiet galaxy.
-            return Err("work view returned no rows".to_string());
+        .await;
+        match guild {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                // The guild work view pages at 100 rows and 500s on deep
+                // pages (2026-09-05). The chain's planet_attribute store is
+                // two or three requests and exactly right: sweep it instead.
+                let n = lcd_planet_clock_sweep(client).await.map_err(|e2| format!("{e}; LCD sweep also failed: {e2}"))?;
+                crate::mcp::telemetry::tlog(
+                    "perception",
+                    crate::mcp::telemetry::Sev::Info,
+                    format!("ore clocks swept from the LCD planet_attribute store ({n} changed) — guild work view: {e}"),
+                );
+                Ok(n)
+            }
         }
-        let mut g = CURRENT.write().map_err(|_| "snapshot lock poisoned".to_string())?;
-        let s = g.as_mut().ok_or("no snapshot to patch")?;
-        Ok(apply_work_rows(s, &rows, &guild_id))
     }
     .await;
     if result.is_ok() {
@@ -1327,6 +1345,44 @@ pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, Stri
     }
     HOT_REFRESHING.store(false, Ordering::SeqCst);
     result
+}
+
+/// Sweep the mine/refine clocks from the chain's own planet_attribute
+/// store. Clocks only move forward, so a value below the one held is the
+/// store lagging our stream and is refused, exactly as for the work view.
+async fn lcd_planet_clock_sweep(client: &CosmosClient) -> Result<usize, String> {
+    let (rows, _, _) = walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", None).await?;
+    if rows.is_empty() {
+        return Err("planet_attribute store returned no rows".into());
+    }
+    let mut g = CURRENT.write().map_err(|_| "snapshot lock poisoned".to_string())?;
+    let s = g.as_mut().ok_or("no snapshot to patch")?;
+    Ok(apply_clock_rows(s, &rows))
+}
+
+/// Fold `{attributeId, value}` rows (LCD shape) for attributes 12/13 into
+/// the snapshot, forward-only. Returns how many clocks changed.
+pub(crate) fn apply_clock_rows(snap: &mut Snapshot, rows: &[Value]) -> usize {
+    let mut changed = 0;
+    for r in rows {
+        let Some(id) = r.get("attributeId").and_then(|x| x.as_str()) else { continue };
+        let Some((attr, planet)) = parse_attribute_id(id) else { continue };
+        if attr != P_MINE && attr != P_REFINE {
+            continue;
+        }
+        if !snap.planets.contains_key(&planet) {
+            continue;
+        }
+        let block = to_u64(r.get("value"));
+        let held = snap.planet_attrs.get(&planet).map(|a| a[attr]).unwrap_or(0);
+        if block != 0 && block < held {
+            continue;
+        }
+        if Snapshot::set(&mut snap.planet_attrs, &planet, attr, block) == Applied::Changed {
+            changed += 1;
+        }
+    }
+    changed
 }
 
 /// A completion we signed landed: the chain restarted that planet's clock at
@@ -1979,6 +2035,26 @@ mod guild_ingest_tests {
         assert_eq!(snap.sattr("5-240169", S_BUILD), 0, "build clock clears with the status, as apply() does");
         assert!(!snap.mark_built("5-240169"), "already built is no change");
         assert!(!snap.mark_built("5-999999"), "unknown struct is never invented");
+    }
+
+    #[test]
+    fn the_lcd_clock_sweep_is_forward_only_too() {
+        let mut snap = Snapshot::default();
+        snap.planets.insert("2-27693".into(), json!({"id": "2-27693"}));
+        snap.planet_attrs.insert("2-27693".into(), { let mut a = [0u64; 16]; a[P_MINE] = 2_470_534; a });
+        let rows = vec![
+            json!({"attributeId": "12-2-27693", "value": "2463969"}),
+            json!({"attributeId": "13-2-27693", "value": "2471464"}),
+            json!({"attributeId": "0-2-27693", "value": "212"}),
+            json!({"attributeId": "12-2-99999", "value": "5"}),
+        ];
+        assert_eq!(apply_clock_rows(&mut snap, &rows), 1, "behind is refused, refine lands, shield ignored, unknown planet ignored");
+        assert_eq!(snap.planet_attrs["2-27693"][P_MINE], 2_470_534);
+        assert_eq!(snap.planet_attrs["2-27693"][P_REFINE], 2_471_464);
+        assert!(!snap.planets.contains_key("2-99999"));
+        let rows = vec![json!({"attributeId": "12-2-27693", "value": "2472000"})];
+        assert_eq!(apply_clock_rows(&mut snap, &rows), 1);
+        assert_eq!(snap.planet_attrs["2-27693"][P_MINE], 2_472_000);
     }
 
     #[test]

@@ -30,13 +30,17 @@
 //! the game window keeps doing what it does.
 
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::mcp::guild_api::GuildApiClient;
 use crate::mcp::telemetry::{tlog, Sev};
 
-static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// One login at a time. Concurrent 401s — the seven parallel page walks of
+/// a snapshot refresh — all WAIT here for the one login in flight and then
+/// retry, instead of the first caller logging in and the rest failing over
+/// to the LCD 70 ms too early (observed on the first build).
+static LOGIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static LAST_ATTEMPT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_OK_MS: AtomicU64 = AtomicU64::new(0);
 static LOGINS_OK: AtomicU64 = AtomicU64::new(0);
@@ -102,16 +106,19 @@ pub async fn recover(client: &GuildApiClient) -> bool {
     if !crate::mcp::native_signer::is_ready() {
         return false;
     }
+    let _guard = LOGIN_LOCK.lock().await;
     let now = now_ms();
-    if now.saturating_sub(LAST_ATTEMPT_MS.load(Ordering::Relaxed)) < MIN_GAP_MS {
-        return false;
+    // A login that just succeeded (possibly while we waited for the lock)
+    // is our answer: the session is fresh, retry.
+    if now.saturating_sub(LAST_OK_MS.load(Ordering::Relaxed)) < MIN_GAP_MS {
+        return true;
     }
-    if IN_FLIGHT.swap(true, Ordering::SeqCst) {
+    // A login that just FAILED is not retried in a burst.
+    if now.saturating_sub(LAST_ATTEMPT_MS.load(Ordering::Relaxed)) < MIN_GAP_MS {
         return false;
     }
     LAST_ATTEMPT_MS.store(now, Ordering::Relaxed);
     let result = login(client).await;
-    IN_FLIGHT.store(false, Ordering::SeqCst);
     match result {
         Ok(()) => {
             LOGINS_OK.fetch_add(1, Ordering::Relaxed);

@@ -837,7 +837,7 @@ async fn scan(
                         );
                         return;
                     }
-                    let Ok(live_target) = crate::mcp::verify::defender_target(&client, &edge.defender).await else {
+                    let Ok(live_target) = crate::mcp::verify::defender_target_live(&client, &edge.defender).await else {
                         return; // never sign blind
                     };
                     if live_target.as_deref() == Some(edge.protected.as_str()) {
@@ -909,7 +909,7 @@ async fn scan(
                         //  · "cannot defend": the defender is a type the chain
                         //    no longer accepts — un-cache it so the planner
                         //    stops re-proposing a doomed edge on stale state.
-                        let benign = e.contains("not_defending");
+                        let benign = e.contains("not_defending") || e.starts_with("skipped:");
                         if benign || e.contains("cannot defend") {
                             ASSIGNED_CACHE.lock().unwrap().remove(&edge.defender);
                         }

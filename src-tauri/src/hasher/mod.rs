@@ -406,6 +406,24 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         // undetected precisely because of that blind spot. Now every completion
         // is ledgered like any other tx (sequence-mismatch retry only).
         let context = format!("pow_complete:{}", object_id);
+        // A completion is a charged action like any other: hold the owner's
+        // charge window for it, and do not queue into a block in which a
+        // build initiate or defense set is already spending it. The wait is
+        // short (a block is ~5 s); a proof is never abandoned for it.
+        let _charge = match owner.as_deref().filter(|_| crate::mcp::loop_util::is_charged_type(type_url)) {
+            Some(pid) => {
+                let r = crate::mcp::loop_util::reserve_charge_when_free(pid, 20_000).await;
+                if r.is_none() {
+                    crate::mcp::telemetry::tlog(
+                        "hasher",
+                        crate::mcp::telemetry::Sev::Notice,
+                        format!("{task_type} completion for {object_id}: {pid}'s charge window stayed busy for 20 s — queuing anyway"),
+                    );
+                }
+                r
+            }
+            None => None,
+        };
         // Claim this cycle so the harvest loop doesn't re-issue the same proof
         // while this one waits its turn at the gate. Released below, on every
         // path, so a struct is never locked out of its next cycle.

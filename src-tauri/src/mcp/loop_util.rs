@@ -633,6 +633,33 @@ pub fn reserve_charge(player_id: &str) -> Option<ChargeReservation> {
     Some(ChargeReservation(player_id.to_string()))
 }
 
+/// Charge a message type consumes on the keeper. A build initiate costs the
+/// struct's build charge (8 for every type the loops build); everything
+/// else charged costs one.
+pub fn charge_cost(type_url: &str) -> u64 {
+    if type_url.ends_with("MsgStructBuildInitiate") {
+        8
+    } else {
+        1
+    }
+}
+
+/// Live charge reservations for a player (ours included).
+pub fn charge_reservations(player_id: &str) -> usize {
+    PENDING_CHARGE.lock().map(|m| m.get(player_id).copied().unwrap_or(0)).unwrap_or(0)
+}
+
+/// A charged action of this player's LANDED within the last block window.
+pub fn charged_this_block(player_id: &str) -> bool {
+    CHARGE_LEDGER
+        .lock()
+        .map(|m| {
+            m.get(player_id)
+                .is_some_and(|at| crate::hasher::types::now_millis() - *at < BLOCK_WINDOW_MS)
+        })
+        .unwrap_or(false)
+}
+
 /// Has this player already taken — or queued — its one charged action this
 /// block?
 pub fn acted_this_block(player_id: &str) -> bool {
@@ -650,11 +677,64 @@ pub fn acted_this_block(player_id: &str) -> bool {
 
 /// The player id embedded in a telemetry context like `auto_defend:1-635`.
 pub fn player_from_context(context: &str) -> Option<&str> {
-    context.split_once(':').map(|(_, p)| p).filter(|p| !p.is_empty())
+    // Only a player id reserves charge. `pow_complete:5-234309` names the
+    // STRUCT, and keying a reservation on it let completions and initiates
+    // for the same player race into the same block ("already discharged",
+    // "required charge of 8 but player only had 3": 23 in the first hour of
+    // the native build). The hasher reserves on the owner explicitly.
+    context
+        .split_once(':')
+        .map(|(_, p)| p)
+        .filter(|p| p.starts_with("1-") && p[2..].chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Wait (up to `max_ms`) for a player's charged-action window to be free —
+/// no reservation alive and no charged action landed this block — then
+/// reserve it. Returns None only when the wait ran out.
+pub async fn reserve_charge_when_free(player_id: &str, max_ms: u64) -> Option<ChargeReservation> {
+    let t0 = crate::hasher::types::now_millis();
+    loop {
+        if !acted_this_block(player_id) {
+            return reserve_charge(player_id);
+        }
+        if crate::hasher::types::now_millis() - t0 > max_ms as f64 {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn charge_costs_and_reservation_counts() {
+        use super::*;
+        assert_eq!(charge_cost("/structs.structs.MsgStructBuildInitiate"), 8);
+        assert_eq!(charge_cost("/structs.structs.MsgStructDefenseSet"), 1);
+        assert_eq!(charge_cost("/structs.structs.MsgStructAttack"), 1);
+        let pid = "1-777001";
+        assert_eq!(charge_reservations(pid), 0);
+        let a = reserve_charge(pid).unwrap();
+        let b = reserve_charge(pid).unwrap();
+        assert_eq!(charge_reservations(pid), 2, "two loops queued for one player are visible to each other");
+        drop(a);
+        assert_eq!(charge_reservations(pid), 1);
+        drop(b);
+        assert_eq!(charge_reservations(pid), 0);
+        assert!(!charged_this_block(pid));
+        note_charged_action(pid);
+        assert!(charged_this_block(pid));
+    }
+
+    #[test]
+    fn a_context_names_a_player_or_reserves_nothing() {
+        use super::player_from_context;
+        assert_eq!(player_from_context("auto_defend:1-635"), Some("1-635"));
+        assert_eq!(player_from_context("auto_build:1-2477"), Some("1-2477"));
+        assert_eq!(player_from_context("pow_complete:5-234309"), None, "a struct id is not a player");
+        assert_eq!(player_from_context("pow_complete:"), None);
+        assert_eq!(player_from_context("nocolon"), None);
+    }
 
     /// Chain v0.21.0 moved the ore clocks from the struct to the planet. The
     /// struct's fields survive and read 0 forever, so a reader left pointed at

@@ -132,7 +132,16 @@ fn snap<R>(f: impl FnOnce(&Snapshot) -> Option<R>) -> Option<R> {
 }
 
 fn clocks_hot() -> bool {
+    // Either the work-view sweep is recent, or the native GRASS stream is
+    // live: every clock restart arrives as a struct_block_ore_*_start frame
+    // and is folded into the snapshot within a second, which is fresher
+    // than any sweep. (The guild work view now pages at 100 rows and 500s
+    // on deep pages, so the sweep alone left the clocks "untrusted" for
+    // most of an hour on 2026-09-05 — 1,802 per-entity guild reads it did
+    // not need.)
     perception::hot_age_ms().is_some_and(|a| a <= HOT_TRUST_MS)
+        || (crate::mcp::grass_native::authoritative()
+            && perception::with_snapshot(|s| s.age_ms() <= SNAPSHOT_TRUST_MS).unwrap_or(false))
 }
 
 /// Run the guild read; on error fall back to the LCD read. Both futures are
@@ -279,6 +288,16 @@ pub async fn defender_target(client: &CosmosClient, defender: &str) -> Result<Op
     }) {
         return Ok(t);
     }
+    defender_target_live(client, defender).await
+}
+
+/// [`defender_target`] that skips the snapshot — the pre-sign read for a
+/// defense clear. The indexer's `struct_attribute` rows for
+/// `protectedStructIndex` were left stale by the v0.21.0 wipe of planetary
+/// defenders (an upsert never revisits an unchanged row), so the snapshot
+/// can hold a link the chain dropped: "is not_defending but must be
+/// defending for defense_clear", 15 in the first hour of the native build.
+pub async fn defender_target_live(client: &CosmosClient, defender: &str) -> Result<Option<String>, String> {
     with_failover!(
         "defender",
         async {

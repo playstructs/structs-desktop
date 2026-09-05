@@ -55,9 +55,53 @@ pub fn lcd_top_paths(n: usize) -> Value {
     Value::Array(v.into_iter().take(n).map(|(k, c)| serde_json::json!({ "path": k, "count": c })).collect())
 }
 
+// ── Who reads players from the chain? ───────────────────────────────────
+// `structs/player/{id}` has been the last LCD route left standing (~44/min
+// steady, ~6,000 in the first minute after launch) with no caller in sight
+// — every suspect ruled out by reading code. So ask the stack instead: the
+// first few reads after launch and then one in fifty capture a backtrace and
+// keep the chain of app frames above the client, exposed in `structs_system
+// status` as `lcd_player_callers`. Cost: a symbolized backtrace every ~50
+// reads, well under a millisecond each at these rates.
+static PLAYER_READ_SAMPLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PLAYER_CALLERS: std::sync::LazyLock<std::sync::Mutex<PathCounts>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(PathCounts::new()));
+
+fn sample_player_caller() {
+    let n = PLAYER_READ_SAMPLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n >= 6 && n % 50 != 0 {
+        return;
+    }
+    let bt = std::backtrace::Backtrace::force_capture().to_string();
+    let frames: Vec<String> = bt
+        .lines()
+        .filter(|l| l.contains("structs_app::"))
+        .filter_map(|l| l.split_once(": ").map(|(_, sym)| sym.trim().to_string()))
+        .filter(|sym| !sym.contains("cosmos_client") && !sym.contains("{{closure}}::{{closure}}"))
+        .map(|sym| sym.trim_end_matches("::{{closure}}").to_string())
+        .take(4)
+        .collect();
+    let chain = if frames.is_empty() { "(no app frames — symbols stripped?)".to_string() } else { frames.join(" < ") };
+    *PLAYER_CALLERS.lock().unwrap_or_else(|e| e.into_inner()).entry(chain.clone()).or_insert(0) += 1;
+    if n < 6 {
+        crate::mcp::telemetry::tlog("lcd", crate::mcp::telemetry::Sev::Info, format!("player read sample #{n}: {chain}"));
+    }
+}
+
+/// Sampled caller chains for `structs/player/{id}` reads since launch.
+pub fn lcd_player_callers(n: usize) -> Value {
+    let g = PLAYER_CALLERS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<(&String, &u64)> = g.iter().collect();
+    v.sort_by(|a, b| b.1.cmp(a.1));
+    Value::Array(v.into_iter().take(n).map(|(k, c)| serde_json::json!({ "caller": k, "samples": c })).collect())
+}
+
 fn note_lcd_request_for(url: &str) {
     note_lcd_path(url);
     note_lcd_request();
+    if lcd_path_key(url) == "structs/player/{id}" {
+        sample_player_caller();
+    }
 }
 
 fn note_lcd_request() {

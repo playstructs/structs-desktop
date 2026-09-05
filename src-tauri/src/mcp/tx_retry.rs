@@ -358,6 +358,49 @@ pub async fn sign_with_retry_guarded(
                 return Err("stale: the planet's ore clock moved while this proof waited to be signed".into());
             }
         }
+        // The same re-test for CHARGE. The pre-sign check ran before the gate
+        // wait; while this tx sat in the queue another loop's charged action
+        // for the same player could land (auto_build's initiate and
+        // auto_defend's set/clear are decided in the same tick): the chain
+        // then answers "already discharged" or "required charge of 8 but
+        // player only had 3", and the build loop backs the player off for
+        // 30 minutes. 23 of those in the first hour of 2026-09-05. So: let a
+        // sibling's in-flight or just-landed action clear the block window,
+        // then re-read the charge and SKIP (no tx, no back-off) if it no
+        // longer covers this message.
+        if loop_util::is_charged_type(type_url) {
+            if let Some(pid) = loop_util::player_from_context(context) {
+                let t0 = now_millis();
+                while (loop_util::charge_reservations(pid) > 1 || loop_util::charged_this_block(pid))
+                    && now_millis() - t0 < 12_000.0
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                let need = loop_util::charge_cost(type_url);
+                let block = crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0);
+                if block > 0 {
+                    let client = crate::mcp::cosmos_client::CosmosClient::new();
+                    if let Ok(have) = crate::mcp::verify::player_charge(&client, pid, block).await {
+                        if have < need {
+                            telemetry::record_tx_attempt(TxAttemptRow {
+                                ts_ms: now_millis(),
+                                context: context.to_string(),
+                                action: type_url.to_string(),
+                                player_id: Some(pid.to_string()),
+                                attempt,
+                                outcome: "skipped",
+                                tx_hash: None,
+                                code: None,
+                                raw_error: Some(format!("charge {have} < {need} needed when the sign slot came up")),
+                                translated: None,
+                                duration_ms: now_millis() - slot_won,
+                            });
+                            return Err(format!("skipped: {pid} has charge {have} < {need} needed for this message (spent while queued)"));
+                        }
+                    }
+                }
+            }
+        }
         let started = now_millis();
         log_build(context, type_url, attempt, Some(&payload));
         let res = vplayer_bridge::sign_action(app, index, type_url, payload.clone(), 60).await;
