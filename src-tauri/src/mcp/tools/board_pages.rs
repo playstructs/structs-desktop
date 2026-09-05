@@ -1257,7 +1257,11 @@ pub async fn mcp_allocation_connect_impl(
     allocation_id: String,
     destination_id: String,
 ) -> Result<Value, String> {
-    if !destination_id.starts_with("4-") {
+    // The one place a substation id is taken from the board: validate the
+    // whole id, not its prefix (a "4-" prefix let "4-abc" through).
+    if !crate::mcp::types::ObjectId::parse(&destination_id)
+        .is_ok_and(|o| o.kind == crate::mcp::types::ObjectKind::Substation)
+    {
         return Err(format!(
             "'{destination_id}' is not a substation id (they look like 4-1)"
         ));

@@ -423,13 +423,7 @@ impl Target {
 /// Ids look like `<type>-<index>`: planets are `2-…`, fleets `9-…`. Validating
 /// the shape here keeps a malformed id from reaching a window label or a URL.
 fn valid_entity_id(id: &str, expect_prefix: &str) -> bool {
-    let mut parts = id.split('-');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(p), Some(idx), None) => {
-            p == expect_prefix && !idx.is_empty() && idx.chars().all(|c| c.is_ascii_digit())
-        }
-        _ => false,
-    }
+    crate::mcp::types::ObjectId::parse(id).is_ok_and(|o| o.kind.digit().to_string() == expect_prefix)
 }
 
 /// Resolve the caller's arguments into a target, rejecting anything malformed.

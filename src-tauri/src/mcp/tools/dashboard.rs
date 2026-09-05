@@ -418,7 +418,7 @@ fn build_sync(
         .structs
         .values()
         .filter_map(|s| s.location_id.clone())
-        .filter(|id| id.starts_with("2-"))
+        .filter(|id| crate::mcp::types::PlanetId::parse(id).is_ok())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();

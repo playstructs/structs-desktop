@@ -266,7 +266,9 @@ pub fn force_reset_running() {
 // ─────────────────────────────── state ──────────────────────────────────────
 
 /// One swept candidate: (player_id, guild_id).
-type RosterEntry = (String, String);
+/// (player, guild id or "" when unknown). The player is parsed once, where
+/// the roster is built; a guild may legitimately be unknown for a grudge.
+type RosterEntry = (crate::mcp::types::PlayerId, String);
 /// Swept roster of non-team players worth evaluating, with its fetch timestamp.
 static ROSTER: LazyLock<Mutex<(f64, Vec<RosterEntry>)>> =
     LazyLock::new(|| Mutex::new((0.0, Vec::new())));
@@ -367,38 +369,58 @@ pub struct Expedition {
 }
 
 /// One scored raid target.
-#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
-#[serde(default)]
+// No struct-level Default: a candidate without a player is not a candidate,
+// so `player_id` is required and every other field defaults on its own.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Candidate {
-    pub player_id: String,
+    pub player_id: crate::mcp::types::PlayerId,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub guild_id: String,
+    #[serde(default)]
     pub planet_id: String,
+    #[serde(default)]
     pub fleet_id: String,
     /// The prize — a raid takes all of it.
+    #[serde(default)]
     pub stored_ore: f64,
     /// Ore left in the target PLANET's crust. A raid dies if the defender
     /// re-planets, and a planet is exhaustible — see the `gate` that reads this.
+    #[serde(default)]
     pub planet_ore_remaining: f64,
     /// A fleet already parked at the target, if any. Someone else's raid.
+    #[serde(default)]
     pub occupied_by: Option<String>,
+    #[serde(default)]
     pub planetary_shield: u64,
     /// Minutes until the raid proof decays to `raid_difficulty`.
+    #[serde(default)]
     pub raid_minutes: f64,
+    #[serde(default)]
     pub vulnerable: bool,
+    #[serde(default)]
     pub vulnerability_reason: String,
+    #[serde(default)]
     pub command_struct: Option<String>,
     /// The ambit the target's Command Ship STANDS in. A Command Ship may sit in
     /// any of water/land/air/space, and a raider that cannot put a viable shot
     /// into that ambit has flown out for nothing — see `dispatch`.
+    #[serde(default)]
     pub command_ambit: String,
+    #[serde(default)]
     pub defenders_on_cmd: usize,
     /// Occupied fleet slots — a crude but effective measure of return fire.
+    #[serde(default)]
     pub enemy_fleet_structs: usize,
+    #[serde(default)]
     pub last_action_block: u64,
+    #[serde(default)]
     pub blocks_since_action: u64,
+    #[serde(default)]
     pub score: f64,
     /// `None` = GO. `Some(reason)` = NO-GO, shown verbatim on the board.
+    #[serde(default)]
     pub blocked_by: Option<String>,
 }
 
@@ -449,7 +471,7 @@ pub fn score(c: &Candidate, cfg: &AutoRaidConfig) -> f64 {
     // of the fleet that would shoot back.
     let pressure = ((c.defenders_on_cmd as f64) / 8.0 + (c.enemy_fleet_structs as f64) / 16.0).min(1.0);
     let weakness_term = 1.0 - pressure;
-    let grudge_term = crate::mcp::combat_lists::grudge_heat(&c.player_id).min(1.0);
+    let grudge_term = crate::mcp::combat_lists::grudge_heat(c.player_id.as_str()).min(1.0);
     let guild_term = crate::mcp::combat_lists::guild_weight(Some(&c.guild_id)).min(1.0);
     let speed_term = if cfg.max_raid_minutes == 0 {
         0.0
@@ -503,7 +525,7 @@ fn raids(p: &crate::mcp::virtual_players::VirtualPlayer) -> bool {
 pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -> Option<String> {
     // Friend-or-foe first: our own accounts, allied guilds and protected players
     // are never targets, whatever they're holding.
-    if crate::mcp::combat_lists::is_vetoed(&c.player_id, Some(&c.guild_id)) {
+    if crate::mcp::combat_lists::is_vetoed(c.player_id.as_str(), Some(&c.guild_id)) {
         return Some("vetoed (own team, allied guild, or protected)".into());
     }
     if c.planet_id.is_empty() {
@@ -838,6 +860,7 @@ async fn refresh_roster(client: &CosmosClient, cfg: &AutoRaidConfig) -> Vec<Rost
     let mut out: Vec<RosterEntry> = Vec::new();
     let consider = |out: &mut Vec<RosterEntry>, p: &serde_json::Value| {
         let Some(id) = p.get("id").and_then(|x| x.as_str()) else { return };
+        let Ok(pid) = crate::mcp::types::PlayerId::parse(id) else { return };
         // A player with no planet has nothing to raid.
         if p.get("planetId").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
             return;
@@ -846,7 +869,7 @@ async fn refresh_roster(client: &CosmosClient, cfg: &AutoRaidConfig) -> Vec<Rost
         if crate::mcp::combat_lists::is_vetoed(id, Some(&guild)) {
             return;
         }
-        out.push((id.to_string(), guild));
+        out.push((pid, guild));
     };
     // The whole player table is in the perception snapshot (every player,
     // GRASS-fresh); walking the chain's player store in pages of 100 — up to
@@ -881,10 +904,11 @@ async fn refresh_roster(client: &CosmosClient, cfg: &AutoRaidConfig) -> Vec<Rost
     // Anyone we hold a grudge against is always a candidate, even if the bounded
     // sweep never reached their page.
     for g in crate::mcp::combat_lists::get().grudges {
-        if g.muted || out.iter().any(|(id, _)| *id == g.player_id) {
+        if g.muted || out.iter().any(|(id, _)| id.as_str() == g.player_id) {
             continue;
         }
-        out.push((g.player_id.clone(), g.guild_id.clone().unwrap_or_default()));
+        let Ok(pid) = crate::mcp::types::PlayerId::parse(&g.player_id) else { continue };
+        out.push((pid, g.guild_id.clone().unwrap_or_default()));
     }
     if !out.is_empty() {
         *ROSTER.lock().unwrap() = (now_millis(), out.clone());
@@ -906,7 +930,7 @@ fn next_batch(roster: &[RosterEntry], n: usize) -> Vec<RosterEntry> {
         if out.len() >= n {
             break;
         }
-        if lists.grudges.iter().any(|g| &g.player_id == id && !g.muted) {
+        if lists.grudges.iter().any(|g| g.player_id == id.as_str() && !g.muted) {
             out.push((id.clone(), guild.clone()));
         }
     }
@@ -925,26 +949,26 @@ fn next_batch(roster: &[RosterEntry], n: usize) -> Vec<RosterEntry> {
 
 /// Resolve everything the gates and score need for one candidate.
 /// Four reads: player, planet, fleet, Command Ship.
-async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Option<Candidate> {
-    let pl = client.entity("player", player_id).await.ok()?;
+async fn evaluate(client: &CosmosClient, player_id: &crate::mcp::types::PlayerId, guild_id: &str) -> Option<Candidate> {
+    use crate::mcp::types::EntityView;
+    let pl = client.entity("player", player_id.as_str()).await.ok()?;
     let p = pl.get("Player")?;
     let planet_id = p.get("planetId").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let fleet_id = p.get("fleetId").and_then(|x| x.as_str()).unwrap_or("").to_string();
     if planet_id.is_empty() {
         return None;
     }
-    let ga = pl.get("gridAttributes");
-    let stored_ore = crate::mcp::loop_util::parse_f64(ga.and_then(|x| x.get("ore")));
-    let last_action = crate::mcp::loop_util::read_u64_field(ga, "lastAction");
+    let pv = EntityView::new(&pl);
+    let stored_ore = pv.grid_f64("ore");
+    let last_action = pv.last_action().get();
     let current_block = crate::game_state::GAME_STATE
         .read()
         .map(|g| g.current_block_height)
         .unwrap_or(0);
 
     let planet = client.entity("planet", &planet_id).await.ok()?;
-    let planetary_shield = crate::mcp::loop_util::read_u64_field(planet.get("planetAttributes"), "planetaryShield");
-    let planet_ore_remaining =
-        crate::mcp::loop_util::parse_f64(planet.get("gridAttributes").and_then(|g| g.get("ore")));
+    let planetary_shield = EntityView::new(&planet).planet_attr_u64("planetaryShield");
+    let planet_ore_remaining = EntityView::new(&planet).grid_f64("ore");
     // Is somebody else already raiding here? A planet hosts ONE raid: a second
     // fleet that arrives is completely inert — it creates no raid, cannot
     // attack, and cannot be attacked. Verified live on 2-7324, where a third
@@ -1033,12 +1057,12 @@ async fn evaluate(client: &CosmosClient, player_id: &str, guild_id: &str) -> Opt
     };
 
     Some(Candidate {
-        player_id: player_id.to_string(),
+        player_id: player_id.clone(),
         name: p
             .get("name")
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(player_id)
+            .unwrap_or(player_id.as_str())
             .to_string(),
         guild_id: guild_id.to_string(),
         planet_id,
@@ -1187,7 +1211,7 @@ async fn dispatch(
             fleet_id,
             home_planet,
             target_planet: target.planet_id.clone(),
-            target_player: target.player_id.clone(),
+            target_player: target.player_id.to_string(),
             started_ms: now_millis(),
             hashing: false,
             ongoing_since_block: None,
@@ -1412,7 +1436,7 @@ async fn supervise(
                     if crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isDestroyed"))) {
                         abort = Some("raider Command Ship destroyed".into());
                     } else {
-                        let hp = crate::mcp::loop_util::parse_f64(sa.and_then(|x| x.get("health")));
+                        let hp = crate::mcp::types::EntityView::new(&e).struct_attr_u64("health") as f64;
                         if hp > 0.0 && hp < cfg.abort_cmd_hp_below {
                             abort = Some(format!("raider Command Ship at {hp:.0} HP"));
                         }
@@ -1433,11 +1457,8 @@ async fn supervise(
                 .await
                 .ok()
                 .map(|e| {
-                    let pa = e.get("planetAttributes");
-                    (
-                        crate::mcp::loop_util::read_u64_field(pa, "blockStartRaid"),
-                        crate::mcp::loop_util::read_u64_field(pa, "planetaryShield"),
-                    )
+                    let v = crate::mcp::types::EntityView::new(&e);
+                    (v.planet_block("blockStartRaid").get(), v.planet_attr_u64("planetaryShield"))
                 })
                 .unwrap_or((0, 0));
             if clock == 0 {
@@ -1903,7 +1924,7 @@ mod tests {
 
     fn cand() -> Candidate {
         Candidate {
-            player_id: "1-61".into(),
+            player_id: crate::mcp::types::PlayerId::parse("1-61").unwrap(),
             name: "JPEG".into(),
             guild_id: "0-1".into(),
             planet_id: "2-855".into(),
@@ -2262,7 +2283,7 @@ mod tests {
     fn round_robin_covers_the_roster_across_scans() {
         isolate_lists();
         let roster: Vec<RosterEntry> = (0..10)
-            .map(|i| (format!("1-{i}"), "0-9".to_string()))
+            .map(|i| (crate::mcp::types::PlayerId::from_index(i), "0-9".to_string()))
             .collect();
         let mut seen = std::collections::HashSet::new();
         for _ in 0..5 {

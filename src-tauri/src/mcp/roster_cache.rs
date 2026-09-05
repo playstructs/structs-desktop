@@ -295,7 +295,8 @@ fn parse_row(
             .filter(|s| !s.is_empty())
             .map(String::from)
     };
-    let last_action = loop_util::read_u64_field(ga, "lastAction");
+    let v = crate::mcp::types::EntityView::new(entity);
+    let last_action = v.last_action();
     RosterRow {
         index,
         player_id: pid.to_string(),
@@ -309,12 +310,12 @@ fn parse_row(
                 .and_then(|i| i.get("rocks"))
                 .and_then(|r| r.get("amount")),
         ),
-        ore: parse_f64(ga.and_then(|g| g.get("ore"))),
-        load: parse_f64(ga.and_then(|g| g.get("load"))),
-        capacity: parse_f64(ga.and_then(|g| g.get("capacity"))),
-        structs_load: parse_f64(ga.and_then(|g| g.get("structsLoad"))),
-        charge: current_block.saturating_sub(last_action),
-        last_action_block: last_action,
+        ore: v.grid_f64("ore"),
+        load: v.grid_f64("load"),
+        capacity: v.grid_f64("capacity"),
+        structs_load: v.grid_f64("structsLoad"),
+        charge: crate::mcp::types::Block::new(current_block).since(last_action),
+        last_action_block: last_action.get(),
         fetched_at_ms: now_ms,
         pfp_attrs: gets("pfpClientRenderAttributes"),
         chain_name: gets("name"),
@@ -355,9 +356,7 @@ async fn harvest_enrich(
     let Ok(planet) = client.query_entity("planet", planet_id).await else {
         return (None, None, None);
     };
-    let planet_ore = Some(parse_f64(
-        planet.get("gridAttributes").and_then(|g| g.get("ore")),
-    ));
+    let planet_ore = Some(crate::mcp::types::EntityView::new(&planet).grid_f64("ore"));
     let threshold = crate::mcp::auto_harvest::get().difficulty_threshold;
     let eta = |anchor: u64, target: u64| -> Option<i64> {
         cycle_eta(anchor, target, threshold, current_block)

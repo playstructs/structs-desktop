@@ -224,22 +224,8 @@ pub fn format_duration(ms: f64) -> String {
 }
 
 /// Resolve an entity ID prefix to its type name
-pub fn entity_type_from_id(id: &str) -> &str {
-    match id.split('-').next().unwrap_or("") {
-        "0" => "Guild",
-        "1" => "Player",
-        "2" => "Planet",
-        "3" => "Reactor",
-        "4" => "Substation",
-        "5" => "Struct",
-        "6" => "Allocation",
-        "7" => "Infusion",
-        "8" => "Address",
-        "9" => "Fleet",
-        "10" => "Provider",
-        "11" => "Agreement",
-        _ => "Unknown",
-    }
+pub fn entity_type_from_id(id: &str) -> &'static str {
+    crate::mcp::types::ObjectId::parse(id).map(|o| o.kind.name()).unwrap_or("Unknown")
 }
 
 #[cfg(test)]

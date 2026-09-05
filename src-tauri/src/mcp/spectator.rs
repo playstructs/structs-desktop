@@ -815,8 +815,8 @@ fn mark_defended(structs: &mut [SpectatorStruct]) {
         return;
     }
     for s in structs.iter_mut() {
-        if let Some(idx) = s.id.rsplit('-').next().and_then(|n| n.parse::<u64>().ok()) {
-            s.defended = guarded.contains(&idx);
+        if let Ok(sid) = crate::mcp::types::StructId::parse(&s.id) {
+            s.defended = guarded.contains(&sid.index());
         }
     }
 }

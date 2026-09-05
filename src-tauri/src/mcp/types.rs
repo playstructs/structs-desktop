@@ -58,6 +58,23 @@ impl ObjectKind {
     pub fn digit(self) -> u8 {
         self as u8
     }
+    /// The human name the tools print for this kind.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Guild => "Guild",
+            Self::Player => "Player",
+            Self::Planet => "Planet",
+            Self::Reactor => "Reactor",
+            Self::Substation => "Substation",
+            Self::Struct => "Struct",
+            Self::Allocation => "Allocation",
+            Self::Infusion => "Infusion",
+            Self::Address => "Address",
+            Self::Fleet => "Fleet",
+            Self::Provider => "Provider",
+            Self::Agreement => "Agreement",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

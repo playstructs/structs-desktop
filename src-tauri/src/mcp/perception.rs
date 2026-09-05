@@ -441,7 +441,7 @@ impl Snapshot {
         Some(json!({
             "Struct": {
                 "id": row.id,
-                "index": row.id.split('-').nth(1).unwrap_or(""),
+                "index": crate::mcp::types::StructId::parse(&row.id).map(|s| s.index().to_string()).unwrap_or_default(),
                 "type": row.type_id,
                 "owner": row.owner,
                 "locationType": row.location_type,

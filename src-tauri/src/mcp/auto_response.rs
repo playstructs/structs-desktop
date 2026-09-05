@@ -369,7 +369,9 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
 #[derive(Debug, Clone)]
 struct Alarm {
     planet_id: String,
-    defender_player: String,
+    /// The defending roster player, when the planet is one of ours and the
+    /// owner is known. None = respond as the primary / unknown.
+    defender_player: Option<crate::mcp::types::PlayerId>,
     label: String,
     /// A raid alarm is the urgent one — the 22-block clock is running.
     is_raid: bool,
@@ -407,7 +409,7 @@ async fn scan(
             || e.category.contains("raid");
         let entry = alarms.entry(planet.clone()).or_insert_with(|| Alarm {
             planet_id: planet.clone(),
-            defender_player: owned.player_by_planet.get(&planet).cloned().unwrap_or_default(),
+            defender_player: owned.player_by_planet.get(&planet).and_then(|p| crate::mcp::types::PlayerId::parse(p).ok()),
             label: owned.label_by_planet.get(&planet).cloned().unwrap_or_else(|| "you".into()),
             is_raid,
         });
@@ -491,7 +493,7 @@ async fn scan(
         }
         alarms.entry(planet_id.clone()).or_insert_with(|| Alarm {
             planet_id: planet_id.clone(),
-            defender_player: defender.clone(),
+            defender_player: crate::mcp::types::PlayerId::parse(&defender).ok(),
             label: owned
                 .label_by_planet
                 .get(&planet_id)
@@ -525,9 +527,9 @@ async fn scan(
         // fires another shot. `is_raid` covers both phases: `classify` returns
         // RaidArmed for any non-terminal raid_status on our planet, which
         // includes `initiated`.
-        if alarm.is_raid && !alarm.defender_player.is_empty() {
+        if let (true, Some(defender)) = (alarm.is_raid, &alarm.defender_player) {
             if let Ok(mut w) = RAID_WATCH.lock() {
-                w.insert(alarm.planet_id.clone(), alarm.defender_player.clone());
+                w.insert(alarm.planet_id.clone(), defender.to_string());
             }
         }
         run.players.fetch_add(1, Ordering::Relaxed);
@@ -612,8 +614,8 @@ async fn handle_alarm(
     // weapon costs several charge, so without this they spend exactly what the
     // response needs — observed live at 2-14676, where auto_response found a
     // co-located shooter with no charge ready while the raid ran.
-    if !alarm.defender_player.is_empty() {
-        crate::mcp::combat_lists::hold_for_combat(&alarm.defender_player);
+    if let Some(defender) = &alarm.defender_player {
+        crate::mcp::combat_lists::hold_for_combat(defender.as_str());
     }
 
     // ── 3. Hardening. ──
@@ -646,19 +648,19 @@ async fn handle_alarm(
     // So whenever we are raided while our own fleet is away, recall it. This is
     // deliberately not gated on `mode`: like `panic_refine` it is purely
     // defensive and never fires a shot.
-    if alarm.is_raid && !alarm.defender_player.is_empty() && !cfg.dry_run {
+    if let (true, Some(defender), false) = (alarm.is_raid, &alarm.defender_player, cfg.dry_run) {
         // Power first, then position. A Command Ship that is merely switched
         // OFF arms `blockStartRaid` with the fleet still on station, and it is
         // also the precondition the chain checks before allowing a recall — so
         // doing this first fixes the standalone case and unblocks the other.
-        if let Err(e) = restore_command_ship(app, client, &alarm.defender_player).await {
+        if let Err(e) = restore_command_ship(app, client, defender.as_str()).await {
             crate::mcp::telemetry::tlog(
                 "auto_response",
                 crate::mcp::telemetry::Sev::Warn,
                 format!("{}: could not reactivate Command Ship: {e}", alarm.planet_id),
             );
         }
-        if let Err(e) = recall_fleet(app, client, &alarm.defender_player).await {
+        if let Err(e) = recall_fleet(app, client, defender.as_str()).await {
             crate::mcp::telemetry::tlog(
                 "auto_response",
                 crate::mcp::telemetry::Sev::Warn,
@@ -707,11 +709,11 @@ async fn handle_alarm(
         let reg = crate::mcp::virtual_players::REGISTRY
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        reg.find(&alarm.defender_player).map(|p| p.index)
+        alarm.defender_player.as_ref().and_then(|d| reg.find(d.as_str()).map(|p| p.index))
     };
     if let Some(idx) = defender_index {
         let app2 = app.clone();
-        let pid = crate::mcp::types::PlayerId::parse(&alarm.defender_player).ok();
+        let pid = alarm.defender_player.clone();
         tauri::async_runtime::spawn(async move {
             let Some(pid) = pid else { return };
             let client = crate::mcp::cosmos_client::CosmosClient::new();
@@ -917,7 +919,7 @@ async fn handle_alarm(
     // first, so `-(position)` scores the sorted list and temperature 0 leaves it
     // untouched.
     let temperament = crate::mcp::variance::for_role(
-        crate::mcp::virtual_players::role_of(&alarm.defender_player),
+        crate::mcp::virtual_players::role_of(alarm.defender_player.as_ref().map(|d| d.as_str()).unwrap_or("")),
     );
     if temperament.temperature > 0.0 || temperament.mistake_rate > 0.0 {
         // Score by position in the already-sorted list: earlier is better, so
