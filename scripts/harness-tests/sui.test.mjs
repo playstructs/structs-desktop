@@ -49,13 +49,25 @@ const BUDGET = {
   // people use, so it wants doing deliberately rather than in a sweep.
   'chat.html':          [0, 65],
   'chat.js':            [0, 0],
+  // The sections extracted from chat.js (2026-09-05) and the shared
+  // listener helper: built with textContent and tokens, no pixels of their own.
+  'chat-commands.js':   [0, 0],
+  'chat-complete.js':   [0, 0],
+  'chat-reactions.js':  [0, 0],
+  'chat-refs.js':       [0, 0],
+  'chat-work.js':       [0, 0],
+  'events.js':          [0, 0],
   'raidview.html':      [3, 45],
   // Four ambit background colours, copied from main.css and commented as
   // such. Only `space` (#222034) has a token — it is `--surface-default` —
   // and swapping one of four for a token would make the group inconsistent
   // for no gain. This is the "a count is not a bug" case in the header.
   'raidview.js':        [4, 0],
-  'board.html':         [2, 87],
+  // 2026-09-06: +8 for the Game Stats chart family (axis figures, ticks,
+  // meter, battery columns) — the type sizes are 8/16 on the scale and the
+  // rest are sizes SUI has no token for (a 6px track, a 20px column). Raised
+  // deliberately, once; the ratchet holds from here.
+  'board.html':         [2, 95],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not

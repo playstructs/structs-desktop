@@ -80,11 +80,30 @@ const AUTH_RETRY_MS: f64 = 60_000.0;
 
 // ── Cache ───────────────────────────────────────────────────────────────────
 
+/// What one block's worth of GRASS frames — and our own engine — added up to.
+/// Reset on every block frame; the point pushed into the series is the tally.
 #[derive(Default)]
 struct BlockCounters {
-    events: u64,
+    /// Every non-block frame, by the family its subject names.
+    frames: u64,
+    frames_planet: u64,
+    frames_grid: u64,
+    frames_inventory: u64,
     combat: u64,
-    tx: u64,
+    /// Bank sends seen on the inventory feed (`sent`/`received`). This was
+    /// the whole of the old "transactions / block" — which is why that chart
+    /// sat near zero while the chain carried 0–4 transactions a block.
+    transfers: u64,
+    /// Transactions THIS app signed and the chain accepted (tx_retry hook).
+    our_tx: u64,
+    /// Proofs of work solved here (hasher hook).
+    proofs: u64,
+    /// Ore cycle restarts on the planet clocks = completions landing.
+    mine_starts: u64,
+    refine_starts: u64,
+    /// Raid clocks ARMED this block (a `block_raid_start` frame with a
+    /// non-zero clock; the zero ones are raids ending).
+    raid_starts: u64,
 }
 
 #[derive(Default)]
@@ -110,8 +129,31 @@ struct Cache {
     // 7-day hourly LOCF aggregates from /api/stat/{m}/aggregate/range —
     // {ore: [rows], structs_load: [rows]}, rows {bucket, sum, avg, ...}.
     history: Value,
-    series: VecDeque<Value>, // {height, events, combat, tx, raids, structs, fuel}
+    series: VecDeque<Value>, // one point per block; see `note_event`
     counters: BlockCounters,
+    /// Hourly liveness samples from the perception snapshot, 7 days deep:
+    /// `{ts_ms, height, players, live_1h, live_24h, max_index}`. The one
+    /// history that survives restarts and needs no server aggregate.
+    liveness: VecDeque<Value>,
+    /// The block the galaxy pass last ran at (it runs every 12 blocks).
+    last_pass_height: u64,
+}
+
+/// Hourly liveness ring: 7 days.
+const LIVENESS_CAP: usize = 168;
+/// The galaxy pass walks the whole snapshot (3k players, 29k planets, 3k
+/// fleets); once a minute is plenty and costs a few milliseconds.
+const PASS_EVERY_BLOCKS: u64 = 12;
+/// Blocks in an hour / a day at the measured 5.30 s block time.
+const BLOCKS_PER_HOUR: u64 = 680;
+const BLOCKS_PER_DAY: u64 = 16_300;
+/// The HUD's battery: raw charge → the first threshold it does not exceed,
+/// five chunks. Copied from the webapp's ChargeCalculator (playercard.js
+/// pins the same table against the webapp's file).
+const CHARGE_LEVEL_THRESHOLDS: [u64; 6] = [0, 1, 2, 3, 5, 8];
+
+fn charge_level(charge: u64) -> usize {
+    CHARGE_LEVEL_THRESHOLDS.iter().position(|t| charge <= *t).unwrap_or(CHARGE_LEVEL_THRESHOLDS.len() - 1)
 }
 
 static CACHE: RwLock<Option<Cache>> = RwLock::new(None);
@@ -167,6 +209,8 @@ struct Persisted {
     /// ten minutes after every launch, waiting on the heavy tier.
     #[serde(default)]
     history: Value,
+    #[serde(default)]
+    liveness: Vec<Value>,
 }
 
 fn persist() {
@@ -183,6 +227,7 @@ fn persist() {
         guild_energy: c.guild_energy.clone(),
         series: c.series.iter().cloned().collect(),
         history: c.history.clone(),
+        liveness: c.liveness.iter().cloned().collect(),
     });
     let Ok(body) = serde_json::to_vec(&snap) else { return };
     if let Some(dir) = path.parent() {
@@ -217,7 +262,18 @@ fn restore() {
         c.guild_energy = p.guild_energy;
         c.series = p.series.into_iter().collect();
         c.history = p.history;
+        c.liveness = p.liveness.into_iter().collect();
     });
+}
+
+/// A transaction this app signed landed (tx_retry's success path).
+pub fn note_our_tx() {
+    with_cache(|c| c.counters.our_tx += 1);
+}
+
+/// A proof of work was solved here (the hasher's completion path).
+pub fn note_proof() {
+    with_cache(|c| c.counters.proofs += 1);
 }
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -297,15 +353,40 @@ pub fn note_event(app: &tauri::AppHandle, event: &GameEvent) {
             .get("height")
             .map(|h| num(Some(h)) as u64)
             .unwrap_or(0);
-        let point = with_cache(|c| {
+        // Engine gauges at the block boundary — the same numbers status
+        // shows, sampled once a block so they can be drawn against time.
+        let gate = crate::mcp::tx_gate::snapshot();
+        let pool_pending = crate::hasher::pool::pending_len();
+        let pool_running = crate::hasher::scheduler::running();
+        let (point, pass_due) = with_cache(|c| {
             if height > 0 {
                 c.block_height = height;
             }
+            let k = &c.counters;
             let point = json!({
                 "height": c.block_height,
-                "events": c.counters.events,
-                "combat": c.counters.combat,
-                "tx": c.counters.tx,
+                // `events` keeps its name for the window; it is every frame.
+                "events": k.frames,
+                "frames_planet": k.frames_planet,
+                "frames_grid": k.frames_grid,
+                "frames_inventory": k.frames_inventory,
+                "combat": k.combat,
+                "transfers": k.transfers,
+                "our_tx": k.our_tx,
+                // Filled in a moment by `finish_block` from the block itself;
+                // null until then, and null for good when nobody is looking.
+                "chain_tx": Value::Null,
+                "proofs": k.proofs,
+                "mine_starts": k.mine_starts,
+                "refine_starts": k.refine_starts,
+                "raid_starts": k.raid_starts,
+                "gate_cap": crate::mcp::tx_gate::cap(),
+                "gate_in_flight": gate.get("in_flight").cloned().unwrap_or(Value::Null),
+                "gate_queued": gate.get("queued_critical").and_then(|v| v.as_u64()).unwrap_or(0)
+                    + gate.get("queued_interactive").and_then(|v| v.as_u64()).unwrap_or(0)
+                    + gate.get("queued_bulk").and_then(|v| v.as_u64()).unwrap_or(0),
+                "pool_pending": pool_pending,
+                "pool_running": pool_running,
                 // `opt_num`, not `num`: a total we have not swept yet is
                 // null, never 0. See its doc comment.
                 "raids": opt_num(c.totals.get("raids_active")),
@@ -317,25 +398,167 @@ pub fn note_event(app: &tauri::AppHandle, event: &GameEvent) {
                 c.series.pop_front();
             }
             c.series.push_back(point.clone());
-            point
+            let due = c.block_height >= c.last_pass_height + PASS_EVERY_BLOCKS;
+            if due {
+                c.last_pass_height = c.block_height;
+            }
+            (point, due)
         });
-        // Tiny per-block delta, and only when someone is looking. The full
-        // snapshot travels over the pull command and the sweep pushes.
+        if pass_due {
+            galaxy_pass(height);
+        }
+        // The chain's own transaction count comes from the block itself: one
+        // LCD read per block, only while the window is open. The point is
+        // pushed once that read is back (or has failed), so the window
+        // draws it once, complete.
         if app.get_webview_window(WINDOW_LABEL).is_some() {
-            emit_board(
-                app,
-                "game-stats-update",
-                &json!({ "tier": "block", "height": height, "point": point }),
-            );
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move { finish_block(app, height, point).await });
         }
         return;
     }
+    let family = crate::mcp::types::Subject::parse(&event.subject).family;
+    let raid_armed = event.category == "block_raid_start"
+        && crate::mcp::types::numeric_u64(event.detail.get("block_start_raid")).unwrap_or(0) > 0;
     with_cache(|c| {
-        c.counters.events += 1;
+        c.counters.frames += 1;
+        use crate::mcp::types::SubjectFamily;
+        match family {
+            SubjectFamily::Planet => c.counters.frames_planet += 1,
+            SubjectFamily::Grid => c.counters.frames_grid += 1,
+            SubjectFamily::Inventory => c.counters.frames_inventory += 1,
+            _ => {}
+        }
         match event.category.as_str() {
             "struct_attack" | "raid_status" => c.counters.combat += 1,
-            "tx_settled" | "sent" | "received" => c.counters.tx += 1,
+            "sent" | "received" => c.counters.transfers += 1,
+            "struct_block_ore_mine_start" => c.counters.mine_starts += 1,
+            "struct_block_ore_refine_start" => c.counters.refine_starts += 1,
+            "block_raid_start" if raid_armed => c.counters.raid_starts += 1,
             _ => {}
+        }
+    });
+}
+
+/// Count the block's transactions from the block itself, store it on the
+/// point, and push the point to the window.
+async fn finish_block(app: tauri::AppHandle, height: u64, mut point: Value) {
+    if height > 0 {
+        let client = CosmosClient::new();
+        let path = format!("/cosmos/base/tendermint/v1beta1/blocks/{height}");
+        if let Ok(v) = client.lcd_get(&path).await {
+            if let Some(n) = v.get("block").and_then(|b| b.get("data")).and_then(|d| d.get("txs")).and_then(|t| t.as_array()).map(|a| a.len()) {
+                point["chain_tx"] = json!(n);
+                with_cache(|c| {
+                    if let Some(p) = c.series.iter_mut().rev().find(|p| p.get("height").and_then(|h| h.as_u64()) == Some(height)) {
+                        p["chain_tx"] = json!(n);
+                    }
+                });
+            }
+        }
+    }
+    emit_board(&app, "game-stats-update", &json!({ "tier": "block", "height": height, "point": point }));
+}
+
+/// Everything the perception snapshot can say about the galaxy's pulse,
+/// once a minute: who is alive, how full the roster's batteries are, how
+/// much ore is left where, and where the fleets are. No network.
+fn galaxy_pass(height: u64) {
+    use crate::mcp::perception::with_snapshot;
+    let Some(read) = with_snapshot(|s| {
+        // ── Liveness ──
+        let mut players = 0u64;
+        let mut live_1h = 0u64;
+        let mut live_24h = 0u64;
+        let mut max_index = 0u64;
+        for (pid, _) in s.players.iter() {
+            players += 1;
+            if let Some(i) = pid.split_once('-').and_then(|(_, i)| i.parse::<u64>().ok()) {
+                max_index = max_index.max(i);
+            }
+            if let Some(la) = s.grid_attr(pid, "lastAction").filter(|la| *la > 0) {
+                if height.saturating_sub(la) <= BLOCKS_PER_HOUR {
+                    live_1h += 1;
+                }
+                if height.saturating_sub(la) <= BLOCKS_PER_DAY {
+                    live_24h += 1;
+                }
+            }
+        }
+        // ── Our roster's batteries ──
+        let mut levels = [0u64; 6];
+        for (pid, _, _) in crate::mcp::virtual_players::collect_targets(true) {
+            let la = s.grid_attr(pid.as_str(), "lastAction").unwrap_or(0);
+            levels[charge_level(height.saturating_sub(la))] += 1;
+        }
+        // ── Ore economy ──
+        let mut planets_with_ore = 0u64;
+        let mut planets_exhausted = 0u64;
+        let mut rigs_mining = 0u64;
+        let mut rigs_refining = 0u64;
+        for (pid, _) in s.planets.iter() {
+            match s.grid_attr(pid, "ore") {
+                Some(o) if o > 0 => planets_with_ore += 1,
+                _ => planets_exhausted += 1,
+            }
+            rigs_mining += s.planet_attr(pid, "oreMiningActiveQuantity").unwrap_or(0);
+            rigs_refining += s.planet_attr(pid, "oreRefiningActiveQuantity").unwrap_or(0);
+        }
+        // ── Fleets ──
+        let mut away = 0u64;
+        let mut on_station = 0u64;
+        for f in s.fleets.values() {
+            match f.get("status").and_then(|x| x.as_str()) {
+                Some("away") => away += 1,
+                _ => on_station += 1,
+            }
+        }
+        (players, live_1h, live_24h, max_index, levels, planets_with_ore, planets_exhausted, rigs_mining, rigs_refining, away, on_station)
+    }) else {
+        return;
+    };
+    let (players, live_1h, live_24h, max_index, levels, planets_with_ore, planets_exhausted, rigs_mining, rigs_refining, away, on_station) = read;
+    let now = crate::hasher::types::now_millis();
+    let funnel = crate::mcp::auto_raid::last_funnel();
+    with_cache(|c| {
+        // Hourly sample, 7 days deep.
+        let due = c.liveness.back().and_then(|l| l.get("ts_ms")).and_then(|t| t.as_f64()).map(|t| now - t >= 3_600_000.0).unwrap_or(true);
+        if due {
+            if c.liveness.len() >= LIVENESS_CAP {
+                c.liveness.pop_front();
+            }
+            c.liveness.push_back(json!({
+                "ts_ms": now, "height": height, "players": players,
+                "live_1h": live_1h, "live_24h": live_24h, "max_index": max_index,
+            }));
+        }
+        // New players: the highest id now against the highest id a day / a
+        // week ago. Ids are minted in order, so the difference is the count.
+        let index_ago = |ms: f64| -> Option<u64> {
+            c.liveness.iter().filter(|l| l.get("ts_ms").and_then(|t| t.as_f64()).map(|t| now - t >= ms).unwrap_or(false))
+                .last().and_then(|l| l.get("max_index")).and_then(|v| v.as_u64())
+        };
+        let new_24h = index_ago(24.0 * 3_600_000.0).map(|i| max_index.saturating_sub(i));
+        let new_7d = index_ago(7.0 * 24.0 * 3_600_000.0).map(|i| max_index.saturating_sub(i));
+        if !c.totals.is_object() {
+            c.totals = json!({});
+        }
+        if let Some(m) = c.totals.as_object_mut() {
+            m.insert("players_known".into(), json!(players));
+            m.insert("live_1h".into(), json!(live_1h));
+            m.insert("live_24h".into(), json!(live_24h));
+            m.insert("max_player_index".into(), json!(max_index));
+            m.insert("new_players_24h".into(), new_24h.map(|n| json!(n)).unwrap_or(Value::Null));
+            m.insert("new_players_7d".into(), new_7d.map(|n| json!(n)).unwrap_or(Value::Null));
+            m.insert("charge_levels".into(), json!(levels));
+            m.insert("planets_with_ore".into(), json!(planets_with_ore));
+            m.insert("planets_exhausted".into(), json!(planets_exhausted));
+            m.insert("rigs_mining".into(), json!(rigs_mining));
+            m.insert("rigs_refining".into(), json!(rigs_refining));
+            m.insert("fleets_away_now".into(), json!(away));
+            m.insert("fleets_on_station".into(), json!(on_station));
+            m.insert("raid_funnel".into(), funnel);
+            m.insert("galaxy_pass_height".into(), json!(height));
         }
     });
 }
@@ -358,6 +581,7 @@ fn snapshot() -> Value {
             "guild_energy": c.guild_energy,
             "history": c.history,
             "series": c.series.iter().cloned().collect::<Vec<_>>(),
+            "liveness": c.liveness.iter().cloned().collect::<Vec<_>>(),
         })
     })
 }

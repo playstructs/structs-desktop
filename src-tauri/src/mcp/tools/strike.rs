@@ -155,18 +155,21 @@ pub(crate) async fn resolve_fire_target(
     for d in &defenders {
         let Some(did) = d.get("defending_struct_id").and_then(|x| x.as_str()) else { continue };
         if let Ok(de) = client.query_entity("struct", did).await {
-            let dead = de
-                .get("structAttributes")
-                .and_then(|a| a.get("isDestroyed"))
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false);
+            let flag = |k: &str| de.get("structAttributes").and_then(|a| a.get(k)).and_then(|x| x.as_bool()).unwrap_or(false);
+            let dead = flag("isDestroyed");
+            // A HIDDEN blocker cannot be named as a target at all: the chain
+            // answers "target struct X is hidden from attacker struct Y" to
+            // every shot (1-2615's siege spent eight rejected shots on 5-4559
+            // in twenty minutes, 2026-09-06). Whatever it absorbs, it absorbs
+            // from fire aimed at what it shields — so aim there instead.
+            let hidden = flag("isHidden");
             let damb = de
                 .get("Struct")
                 .and_then(|s| s.get("operatingAmbit"))
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
-            // Same-ambit, alive defender = a real blocker that must die first.
-            if !dead && !damb.is_empty() && damb == target_ambit {
+            // Same-ambit, alive, targetable defender = a blocker that must die first.
+            if !dead && !hidden && !damb.is_empty() && damb == target_ambit {
                 blockers.push(did.to_string());
             }
         }

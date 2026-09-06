@@ -169,6 +169,15 @@ fn player_card(id: &str, v: &Value) -> Value {
     let tag = ident.as_ref().map(|i| i.tag.clone()).unwrap_or_default();
     let load = num(grid.get("load")) + num(grid.get("structsLoad"));
     let capacity = num(grid.get("capacity")) + num(grid.get("connectionCapacity"));
+    // The player card draws the game's battery from RAW charge — blocks
+    // since the last charged action, the same figure the roster carries.
+    let current_block = crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .map(|gs| gs.current_block_height)
+        .unwrap_or(0);
+    let charge = crate::mcp::types::Block::new(current_block)
+        .since(crate::mcp::types::EntityView::new(v).last_action());
 
     // Somebody named in chat is somebody you may want to look at or talk to.
     let mut actions = Vec::new();
@@ -201,6 +210,7 @@ fn player_card(id: &str, v: &Value) -> Value {
             row("Energy", format!("{}/{}", format_power(load), format_power(capacity))),
         ],
         "actions": actions,
+        "charge": if current_block > 0 { json!(charge) } else { Value::Null },
         "planet_id": text(p.get("planetId")),
         "fleet_id": text(p.get("fleetId")),
     })

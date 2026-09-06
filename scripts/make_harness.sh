@@ -52,6 +52,12 @@ cat > "$FIX" <<'EOF'
         raids: i < 3 ? null : ((i > n - 40) ? 2 : 1),
         structs: i < 3 ? null : 5980 + Math.floor(i / 12),
         draw: i < 3 ? null : 1.05e10 + i * 1.4e6,
+        // The 2026-09-06 point shape: frames by family, the chain's own
+        // transaction count (null until read), ours, proofs, cycle restarts.
+        frames_planet: 8 + (i % 5), frames_grid: 10 + (i % 4), frames_inventory: i % 3,
+        transfers: i % 2, our_tx: 1 + (i % 3), chain_tx: i < 3 ? null : (i % 5),
+        proofs: i % 4, mine_starts: i % 6 === 0 ? 2 : 0, refine_starts: i % 9 === 0 ? 1 : 0, raid_starts: i % 40 === 0 ? 1 : 0,
+        gate_cap: 4, gate_in_flight: i % 5, gate_queued: i % 7, pool_pending: 300 + (i % 50), pool_running: i % 12,
       });
     }
     return out;
@@ -111,7 +117,17 @@ cat > "$FIX" <<'EOF'
       raids_active: 3, work_queue: 3976,
       total_alpha: 3.301e9, stored_ore: 9304, ground_ore: 4841,
       structs_draw: 1.079e10, alloc_load: 2.364e10, player_capacity: 2.855e10,
+      // Galaxy pass (snapshot-derived, 2026-09-06).
+      players_known: 3273, live_1h: 214, live_24h: 1180, max_player_index: 3275,
+      new_players_24h: 12, new_players_7d: 91,
+      charge_levels: [40, 120, 300, 500, 900, 600],
+      planets_with_ore: 7100, planets_exhausted: 22029, rigs_mining: 1450, rigs_refining: 720,
+      fleets_away_now: 4, fleets_on_station: 3157,
+      raid_funnel: { at_ms: Date.now(), scored: 484, eligible: 53, dispatching: false, top_gate: { gate: 'ore', count: 429 } },
     },
+    liveness: (function () { var out = []; for (var i = 0; i < 168; i++) {
+      out.push({ ts_ms: Date.now() - (168 - i) * 3600000, height: 4100000 + i * 680, players: 3100 + i,
+        live_1h: 150 + Math.round(60 * Math.abs(Math.sin(i / 4))), live_24h: 1000 + i, max_index: 3100 + i }); } return out; })(),
     guilds: GUILDS,
     guild_energy: GUILDS.map(function (g, i) {
       return { guild_id: g.guild_id, name: g.name,

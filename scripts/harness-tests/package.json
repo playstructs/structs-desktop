@@ -7,7 +7,7 @@
     "test": "node gamestats.test.mjs",
     "test:profiles": "node profiles.test.mjs",
     "test:grassparse": "node grassparse.test.mjs",
-    "test:all": "node structsevents.test.mjs && node chatwork.test.mjs && node chatrefs.test.mjs && node playercard.test.mjs && node guildcard.test.mjs && node providercard.test.mjs && node gamestats.test.mjs && node profiles.test.mjs && node raidview.test.mjs && node infusions.test.mjs && node chat.test.mjs && node notifications.test.mjs && node grassparse.test.mjs",
+    "test:all": "node structsevents.test.mjs && node chatwork.test.mjs && node chatrefs.test.mjs && node chatcomplete.test.mjs && node chatreactions.test.mjs && node chatcommands.test.mjs && node playercard.test.mjs && node guildcard.test.mjs && node providercard.test.mjs && node gamestats.test.mjs && node profiles.test.mjs && node raidview.test.mjs && node infusions.test.mjs && node chat.test.mjs && node notifications.test.mjs && node grassparse.test.mjs",
     "test:playercard": "node playercard.test.mjs",
     "test:guildcard": "node guildcard.test.mjs",
     "test:providercard": "node providercard.test.mjs",
@@ -17,7 +17,10 @@
     "test:notifications": "node notifications.test.mjs",
     "test:structsevents": "node structsevents.test.mjs",
     "test:chatwork": "node chatwork.test.mjs",
-    "test:chatrefs": "node chatrefs.test.mjs"
+    "test:chatrefs": "node chatrefs.test.mjs",
+    "test:chatcomplete": "node chatcomplete.test.mjs",
+    "test:chatreactions": "node chatreactions.test.mjs",
+    "test:chatcommands": "node chatcommands.test.mjs"
   },
   "devDependencies": {
     "jsdom": "^24.0.0"

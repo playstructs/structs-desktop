@@ -187,8 +187,33 @@ pub fn note_listening(label: &str, names: Vec<String>) {
     }
 }
 
+/// Which window labels are expected to listen for `name`, by the naming
+/// conventions the variants follow. Used only to judge "unheard": a Comms
+/// event with no Comms window open is not a dead listener, it is a closed
+/// window.
+fn expected_listeners(name: &str, announced: &[String]) -> Vec<String> {
+    let pick = |f: &dyn Fn(&str) -> bool| announced.iter().filter(|l| f(l)).cloned().collect::<Vec<_>>();
+    if name.starts_with("matrix::") {
+        return pick(&|l| l.starts_with("chat"));
+    }
+    if name.starts_with("raid:") {
+        return name.rsplit("::").next().map(|l| pick(&|x| x == l)).unwrap_or_default();
+    }
+    if name == "transfer-intent" {
+        return pick(&|l| l == "transfer");
+    }
+    if name.starts_with("board-") || name.starts_with("grass-") || name == "game-stats-update" {
+        return pick(&|l| crate::mcp::web_board::BOARD_WINDOWS.contains(&l));
+    }
+    if name == "mcp_ui_directive" {
+        return pick(&|l| l == "main" || crate::mcp::web_board::BOARD_WINDOWS.contains(&l));
+    }
+    pick(&|l| l == "main")
+}
+
 /// For `structs_system status`: every name emitted or listened for, who
-/// listens, and the names that were emitted with no listener anywhere.
+/// listens, and the names that were emitted while a window of their audience
+/// was open and not listening.
 pub fn table() -> Value {
     let now = now_millis();
     let emitted = EMITTED.lock().map(|m| m.clone()).unwrap_or_default();
@@ -202,13 +227,15 @@ pub fn table() -> Value {
         }
     }
     names.sort();
+    let announced: Vec<String> = listening.keys().cloned().collect();
     let mut rows = Vec::new();
     let mut unheard = Vec::new();
     for n in names {
         let (count, last) = emitted.get(&n).copied().unwrap_or((0, 0.0));
         let mut listeners: Vec<&String> = listening.iter().filter(|(_, ns)| ns.contains(&n)).map(|(l, _)| l).collect();
         listeners.sort();
-        if count > 0 && listeners.is_empty() {
+        let expected = expected_listeners(&n, &announced);
+        if count > 0 && !expected.is_empty() && !expected.iter().any(|l| listeners.iter().any(|x| *x == l)) {
             unheard.push(n.clone());
         }
         rows.push(json!({
@@ -268,21 +295,36 @@ mod tests {
     }
 
     #[test]
-    fn the_table_names_what_nobody_hears() {
-        record("test:only-emitted");
-        record("test:only-emitted");
-        record("test:heard");
-        note_listening("test-window", vec!["test:heard".into(), "test:only-listened".into()]);
+    fn the_table_names_what_an_open_window_does_not_hear() {
+        // Global registries: use names no other test emits.
+        record("structs:only-emitted");
+        record("structs:only-emitted");
+        record("structs:heard");
+        record("matrix::nobody-open");
+        record("board-nobody-listens");
+        note_listening("main", vec!["structs:heard".into(), "structs:only-listened".into()]);
+        note_listening("board", vec!["board-update".into()]);
         let t = table();
         let rows = t["events"].as_array().unwrap();
         let row = |n: &str| rows.iter().find(|r| r["name"] == n).cloned().unwrap();
-        assert_eq!(row("test:only-emitted")["emitted"], 2);
-        assert!(row("test:only-emitted")["listeners"].as_array().unwrap().is_empty());
-        assert_eq!(row("test:heard")["listeners"][0], "test-window");
-        assert_eq!(row("test:only-listened")["emitted"], 0);
+        assert_eq!(row("structs:only-emitted")["emitted"], 2);
+        assert_eq!(row("structs:heard")["listeners"][0], "main");
+        assert_eq!(row("structs:only-listened")["emitted"], 0);
         let unheard: Vec<&str> = t["unheard"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(unheard.contains(&"test:only-emitted"));
-        assert!(!unheard.contains(&"test:heard"));
-        assert!(!unheard.contains(&"test:only-listened"), "never emitted is not unheard");
+        assert!(unheard.contains(&"structs:only-emitted"), "main is open and does not listen");
+        assert!(unheard.contains(&"board-nobody-listens"), "a board window is open and does not listen");
+        assert!(!unheard.contains(&"matrix::nobody-open"), "no Comms window announced: closed, not dead");
+        assert!(!unheard.contains(&"structs:heard"));
+        assert!(!unheard.contains(&"structs:only-listened"), "never emitted is not unheard");
+    }
+
+    #[test]
+    fn expected_listeners_follow_the_naming_conventions() {
+        let open: Vec<String> = ["main", "board", "gamestats", "chat-0-1", "raid-2-9"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(expected_listeners("matrix::rooms", &open), vec!["chat-0-1"]);
+        assert_eq!(expected_listeners("raid:attack::raid-2-9", &open), vec!["raid-2-9"]);
+        assert_eq!(expected_listeners("board-update", &open), vec!["board", "gamestats"]);
+        assert_eq!(expected_listeners("structs:force-resync", &open), vec!["main"]);
+        assert!(expected_listeners("transfer-intent", &open).is_empty(), "Pay window closed");
     }
 }

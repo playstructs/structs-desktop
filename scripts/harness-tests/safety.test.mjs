@@ -26,6 +26,9 @@ const root = process.cwd();
 const FEDERATED = [
   'frontend/chat.js',
   'frontend/chat-refs.js',
+  'frontend/chat-complete.js',
+  'frontend/chat-reactions.js',
+  'frontend/chat-commands.js',
   'frontend/chat-work.js',
   'frontend/raidview.js',
   'frontend/board-pages.js',
@@ -145,7 +148,7 @@ for (const file of FEDERATED) {
 // stops it. A CLEAR (`= ''`) is allowed: it writes no markup.
 {
   console.log('\n— windows that never build markup');
-  for (const file of ['frontend/chat.js', 'frontend/chat-refs.js', 'frontend/chat-work.js', 'frontend/transfer.js']) {
+  for (const file of ['frontend/chat.js', 'frontend/chat-refs.js', 'frontend/chat-complete.js', 'frontend/chat-reactions.js', 'frontend/chat-commands.js', 'frontend/chat-work.js', 'frontend/transfer.js']) {
     const code = readFileSync(root + '/' + file, 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
@@ -194,7 +197,7 @@ for (const file of FEDERATED) {
   const pages = readFileSync(root + '/src-tauri/src/mcp/tools/board_pages.rs', 'utf8');
   // The Comms window is chat.js plus the sections extracted from it; the
 // rules below hold across all of them.
-const chat = ['chat.js', 'chat-refs.js', 'chat-work.js']
+const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js']
   .map((f) => readFileSync(root + '/frontend/' + f, 'utf8')).join('\n');
 
   // 1. The gate on the command that actually moves funds. It is an explicit
@@ -228,7 +231,23 @@ const chat = ['chat.js', 'chat-refs.js', 'chat-work.js']
   check('chat sends only a player id to the transfer hand-off',
     /invoke\('matrix_open_transfer', \{ playerId: card\.id \}\)/.test(call), call);
 
-  // 4. The hand-off has to ARRIVE. The focused window claims the parked intent
+  // 3b. Federated TEXT is sanitised as it enters. A bidi override in a message
+// body would make `pay 1-195` read as a different id; the body, the edit and
+// the reply fallback all pass through `identity::sanitize_body` in Rust, and
+// no window ever renders `formatted_body` (the protocol's HTML surface).
+{
+  const client = readFileSync(root + '/src-tauri/src/matrix/client.rs', 'utf8');
+  const sites = (client.match(/identity::sanitize_body\(/g) || []).length;
+  check('message bodies, edits and reply fallbacks are sanitised at ingestion (3+ sites)', sites >= 3, String(sites));
+  const windows = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js', 'chatrow.js', 'raidview.js', 'transfer.js']
+    .map((f) => readFileSync(root + '/frontend/' + f, 'utf8')).join('\n');
+  check('no window reads formatted_body', !/formatted_body/.test(windows));
+  const ident = readFileSync(root + '/src-tauri/src/matrix/identity.rs', 'utf8');
+  check('the body sanitiser keeps the emoji joiner (a family emoji is spelled with it)',
+    /fn reorders_or_hides[\s\S]*?\}\n/.test(ident) && !/'\\u\{200D\}'/.test(ident.slice(ident.indexOf('fn reorders_or_hides'), ident.indexOf('pub fn sanitize_body'))));
+}
+
+// 4. The hand-off has to ARRIVE. The focused window claims the parked intent
   //    on boot AND listens for a re-address, because the ask usually OPENS the
   //    window and an event fired at a window that is still booting reaches
   //    nobody. An earlier version wired this on the board at module load —
@@ -322,7 +341,7 @@ const chat = ['chat.js', 'chat-refs.js', 'chat-work.js']
     sourced.length > 0 && sourced.every((a) => /ident\.as_ref\(\)/.test(a)),
     sourced.join(' | '));
 
-  const chat = ['chat.js', 'chat-refs.js', 'chat-work.js']
+  const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js']
     .map((f) => readFileSync(root + '/frontend/' + f, 'utf8')).join('\n');
   const srcs = [...chat.matchAll(/\.src\s*=\s*([^;\n]+)/g)].map((m) => m[1].trim());
   // Everything the window points an <img> at is either a bundled path built

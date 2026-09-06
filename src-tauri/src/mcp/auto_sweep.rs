@@ -27,10 +27,14 @@ use crate::mcp::tools::mass_action::SweepArgs;
 
 const FILENAME: &str = "auto_sweep.json";
 
-/// player_id → the CACHED balance at which the chain rejected their sweep with
-/// "insufficient funds". The roster cache lags a successful sweep, so the same
-/// stale row would otherwise be re-sent every scan; the entry clears itself as
-/// soon as the cache reports any different balance for that player.
+/// player_id → the CACHED balance this loop has already ACTED on: the chain
+/// rejected a sweep at it ("insufficient funds"), or a sweep from it
+/// SUCCEEDED. The roster cache lags a successful sweep by a scan, so the same
+/// stale row was re-sent ten minutes later and rejected — 121 "spendable
+/// balance 0ualpha" rejects from 121 different players in one day
+/// (2026-09-06), every one of them the second sweep of a freshly-emptied
+/// player. The entry clears itself as soon as the cache reports any different
+/// balance for that player.
 static BROKE_AT_BALANCE: LazyLock<Mutex<std::collections::HashMap<String, f64>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
@@ -321,6 +325,9 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
                         ok.fetch_add(1, Ordering::Relaxed);
                         let alpha = crate::mcp::types::Ualpha::new(e.amount_ualpha.parse().unwrap_or(0)).to_alpha().get();
                         *swept.lock().unwrap_or_else(|p| p.into_inner()) += alpha;
+                        // This cached balance is spent; do not sweep it again
+                        // until the cache shows the player's new balance.
+                        lock_recover(&BROKE_AT_BALANCE).insert(e.player_id.clone(), e.alpha_before);
                     }
                     Err(err) => {
                         failed.fetch_add(1, Ordering::Relaxed);

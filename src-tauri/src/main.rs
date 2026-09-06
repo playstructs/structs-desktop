@@ -495,6 +495,9 @@ try {{
         window.__TAURI__.event.listen('structs://sync-tick', function() {{
             window.dispatchEvent(new CustomEvent('structs:sync-tick'));
         }});
+        // Registered before events.js exists in this window: announce by hand
+        // so the events table does not list the tick as unheard.
+        try {{ window.__TAURI__.core.invoke('events_listening', {{ names: ['structs://sync-tick'] }}).catch(function () {{}}); }} catch (e) {{}}
     }}
     attach();
 }})();

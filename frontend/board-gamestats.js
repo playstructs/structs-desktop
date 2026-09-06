@@ -43,76 +43,214 @@
     return METRICS[0];
   }
 
-  // ── Sparkline ─────────────────────────────────────────────────────────────
-  // SUI has no graph component, so this is the one hand-rolled visual: a
-  // single-path inline SVG. Colors are semantic tokens only.
+  // ── Charts ────────────────────────────────────────────────────────────────
+  // SUI has no graph component, so this is the one hand-rolled visual. What
+  // it draws is fixed by the dataviz method: a 2px line per series, a zero
+  // baseline for counts (a chart that autoscales 4→5 to its full height
+  // turns noise into a swing), the min/max/last figures at the edges, time
+  // ticks along the baseline, gaps broken rather than bridged, and a hover
+  // layer — crosshair plus one tooltip listing every series at that X. Text
+  // lives in HTML beside the stretched SVG so it never distorts, and it wears
+  // text tokens; only the marks carry the series colour.
   var SVG_NS = 'http://www.w3.org/2000/svg';
-  function sparkline(values, strokeVar) {
-    var w = 900, h = 56;
-    var svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-    svg.setAttribute('preserveAspectRatio', 'none');
-    svg.style.cssText = 'display:block;width:100%;height:' + h + 'px;';
+  var CHART_H = 56;
+
+  function svgEl(tag, attrs) {
+    var n = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { n.setAttribute(k, String(attrs[k])); });
+    return n;
+  }
+  function finite(v) { return typeof v === 'number' && isFinite(v); }
+  function fmtDefault(v) { return H.fmtNum ? H.fmtNum(v) : String(v); }
+
+  /* Minutes-ago captions for a per-block window: three ticks, the last one
+   * "now". Blocks run 5.30 s, so 720 of them are the last hour. */
+  /* One ladder for every "how long ago" on this page: units.js's, reached
+   * through a block count. `zero: 'now'` is the current block. */
+  function blocksAgo(blocks, secs) {
+    var t = window.StructsUnits.fmtDuration(blocks * (secs || 5.3), { zero: 'now' });
+    return t === 'now' ? t : '−' + t;
+  }
+  function blockTicks(n) {
+    if (n < 2) return [];
+    var secs = 5.3;
+    function ago(i) { return blocksAgo(n - 1 - i, secs); }
+    return [{ at: 0, text: ago(0) }, { at: 0.5, text: ago(Math.floor((n - 1) / 2)) }, { at: 1, text: 'now' }];
+  }
+
+  /* spec: { series: [{ values, stroke, label }], zero, fmt, ticks: [{at 0..1, text}] }
+   * Returns a .gs-chart element. `zero` pins the floor at 0 for counts. */
+  function chart(spec) {
+    var series = (spec.series || []).filter(function (sr) { return sr && sr.values; });
+    var fmt = spec.fmt || fmtDefault;
+    var box = H.el('div', 'gs-chart');
+    var n = 0;
+    series.forEach(function (sr) { n = Math.max(n, sr.values.length); });
+    var nums = [];
+    series.forEach(function (sr) { sr.values.forEach(function (v) { if (finite(v)) nums.push(v); }); });
     function collecting() {
-      var t = document.createElementNS(SVG_NS, 'text');
-      t.setAttribute('x', '4'); t.setAttribute('y', String(h - 6));
-      t.setAttribute('fill', 'var(--text-hint)');
-      // 8, not 10: SUI's type roles are 8/12/16 and this is a hint label,
-      // which is the 8px role. 10 rendered a pixel face at 1.25x.
-      t.setAttribute('font-size', '8');
-      t.textContent = 'collecting…';
-      svg.appendChild(t);
-      return svg;
+      box.appendChild(H.el('div', 'gs-chart-empty sui-text-hint', 'collecting…'));
+      return box;
     }
-    var nums = values.filter(function (v) { return typeof v === 'number' && isFinite(v); });
     if (nums.length < 2) return collecting();
     var min = Math.min.apply(null, nums), max = Math.max.apply(null, nums);
-    var span = (max - min) || 1;
-    var step = values.length > 1 ? w / (values.length - 1) : w;
-    /* Gaps BREAK the line; they are not drawn through and not drawn as zero.
-     *
-     * A gap means "no sample", and both alternatives assert something false:
-     * a zero invents a crash, and a straight line across invents readings
-     * nobody took. Starting a fresh `M` after a gap leaves a visible break,
-     * which is the honest shape.
-     *
-     * It also keeps NaN out of the path. `d` is one attribute — a single
-     * non-finite value anywhere in it invalidates the whole path and the
-     * chart silently renders nothing.
-     */
-    var d = '';
-    var pen = 'M';
-    var drew = false;
-    values.forEach(function (v, i) {
-      if (typeof v !== 'number' || !isFinite(v)) { pen = 'M'; return; }
-      var y = h - 3 - ((v - min) / span) * (h - 6);
-      d += pen + (i * step).toFixed(1) + ' ' + y.toFixed(1);
-      if (pen === 'L') drew = true;
-      pen = 'L';
+    if (spec.zero && min > 0) min = 0;
+    if (max === min) max = min + 1;           // a flat line still needs a band
+    var span = max - min;
+
+    // Legend for ≥ 2 series: identity never rides on colour alone.
+    if (series.length > 1) {
+      var legend = H.el('div', 'gs-legend');
+      series.forEach(function (sr) {
+        var item = H.el('span', 'gs-legend-item');
+        var key = H.el('span', 'gs-legend-key');
+        key.style.background = sr.stroke;
+        item.appendChild(key);
+        item.appendChild(H.el('span', 'fstat-l', sr.label || ''));
+        legend.appendChild(item);
+      });
+      box.appendChild(legend);
+    }
+
+    var plot = H.el('div', 'gs-plot');
+    // A grid: gutters and the plot area on the first row, the time ticks on
+    // the second under the plot only — so the floor figure sits on the
+    // baseline, not under the tick row.
+    var gutterL = H.el('div', 'gs-gutter');
+    var area = H.el('div', 'gs-area');
+    var gutterR = H.el('div', 'gs-gutter gs-gutter-r');
+    var ticks = H.el('div', 'gs-ticks');
+    plot.appendChild(gutterL); plot.appendChild(area); plot.appendChild(gutterR); plot.appendChild(ticks);
+    var w = 900, h = CHART_H;
+    var svg = svgEl('svg', { viewBox: '0 0 ' + w + ' ' + h, preserveAspectRatio: 'none' });
+    svg.style.cssText = 'display:block;width:100%;height:' + h + 'px;';
+    // Recessive hairlines: the baseline and the top of the band.
+    svg.appendChild(svgEl('line', { x1: 0, x2: w, y1: h - 1, y2: h - 1, stroke: 'var(--border-subtle)', 'stroke-width': 0.5 }));
+    svg.appendChild(svgEl('line', { x1: 0, x2: w, y1: 1, y2: 1, stroke: 'var(--border-subtle)', 'stroke-width': 0.5, 'stroke-opacity': 0.5 }));
+    var step = n > 1 ? w / (n - 1) : w;
+    function yOf(v) { return h - 3 - ((v - min) / span) * (h - 6); }
+    var drewAny = false;
+    series.forEach(function (sr) {
+      /* Gaps BREAK the line; they are not drawn through and not drawn as
+       * zero. A gap means "no sample": a zero invents a crash, a bridge
+       * invents readings nobody took. It also keeps NaN out of `d` — one
+       * non-finite value invalidates the whole path silently. */
+      var d = '', pen = 'M', drew = false;
+      sr.values.forEach(function (v, i) {
+        if (!finite(v)) { pen = 'M'; return; }
+        d += pen + (i * step).toFixed(1) + ' ' + yOf(v).toFixed(1);
+        if (pen === 'L') drew = true;
+        pen = 'L';
+      });
+      if (!drew) return;
+      drewAny = true;
+      svg.appendChild(svgEl('path', { d: d, fill: 'none', stroke: sr.stroke || 'var(--text-player-primary)',
+        'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke' }));
     });
-    /* Two samples are not two samples if a gap sits between them.
-     *
-     * `nums.length >= 2` was the test for "there is a line to draw", and it is
-     * not: `[5, null, 7]` passes it and produces two lone movetos, which SVG
-     * draws as nothing at all. An empty chart with no caption reads as broken.
-     * Ask the real question — did any segment get drawn — instead of a proxy
-     * for it.
-     */
-    if (!drew) return collecting();
-    var base = document.createElementNS(SVG_NS, 'line');
-    base.setAttribute('x1', '0'); base.setAttribute('x2', String(w));
-    base.setAttribute('y1', String(h - 1)); base.setAttribute('y2', String(h - 1));
-    base.setAttribute('stroke', 'var(--border-subtle)');
-    base.setAttribute('stroke-width', '0.5');
-    svg.appendChild(base);
-    var path = document.createElementNS(SVG_NS, 'path');
-    path.setAttribute('d', d);
-    path.setAttribute('fill', 'none');
-    path.setAttribute('stroke', strokeVar || 'var(--text-player-primary)');
-    path.setAttribute('stroke-width', '1.5');
-    path.setAttribute('vector-effect', 'non-scaling-stroke');
-    svg.appendChild(path);
-    return svg;
+    if (!drewAny) { box.innerHTML = ''; return collecting(); }
+    // The crosshair, hidden until the pointer is over the plot.
+    var cross = svgEl('line', { x1: 0, x2: 0, y1: 0, y2: h, stroke: 'var(--text-hint)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' });
+    cross.setAttribute('class', 'gs-cross');
+    cross.style.display = 'none';
+    svg.appendChild(cross);
+    area.appendChild(svg);
+
+    // Axis figures live in the gutters beside the plot, in HTML, so the
+    // pixel face stays crisp and never sits on top of the line.
+    gutterL.appendChild(H.el('div', 'gs-axis gs-axis-top fstat-l', fmt(max)));
+    gutterL.appendChild(H.el('div', 'gs-axis gs-axis-bot fstat-l', fmt(min)));
+    // The last reading of the first series, at the right edge.
+    var lastVal = null;
+    for (var i = series[0].values.length - 1; i >= 0; i--) { if (finite(series[0].values[i])) { lastVal = series[0].values[i]; break; } }
+    gutterR.appendChild(H.el('div', 'gs-axis gs-axis-last ops-val', lastVal == null ? '' : fmt(lastVal)));
+    box.appendChild(plot);
+
+    (spec.ticks || blockTicks(n)).forEach(function (t) {
+      var tk = H.el('span', 'gs-tick fstat-l', t.text);
+      tk.style.left = (t.at * 100) + '%';
+      ticks.appendChild(tk);
+    });
+
+    // Hover: the crosshair finds the X, one tooltip lists every series.
+    var tip = H.el('div', 'gs-tip');
+    tip.hidden = true;
+    area.appendChild(tip);
+    function indexAt(clientX) {
+      var r = area.getBoundingClientRect();
+      if (!r.width) return 0;
+      var f = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+      return Math.round(f * (n - 1));
+    }
+    function showAt(i) {
+      cross.setAttribute('x1', String(i * step)); cross.setAttribute('x2', String(i * step));
+      cross.style.display = '';
+      tip.innerHTML = '';
+      var head = H.el('div', 'gs-tip-x sui-text-hint', spec.xLabel ? spec.xLabel(i) : ('block ' + (spec.heights && spec.heights[i] != null ? H.fmtInt(spec.heights[i]) : blocksAgo(n - 1 - i))));
+      tip.appendChild(head);
+      series.forEach(function (sr) {
+        var row = H.el('div', 'gs-tip-row');
+        var key = H.el('span', 'gs-legend-key'); key.style.background = sr.stroke;
+        row.appendChild(key);
+        row.appendChild(H.el('span', 'ops-val', finite(sr.values[i]) ? fmt(sr.values[i]) : '—'));
+        if (sr.label) row.appendChild(H.el('span', 'sui-text-hint', sr.label));
+        tip.appendChild(row);
+      });
+      tip.hidden = false;
+      var f = n > 1 ? i / (n - 1) : 0;
+      tip.style.left = (f * 100) + '%';
+      tip.classList.toggle('gs-tip-flip', f > 0.6);
+    }
+    function hide() { cross.style.display = 'none'; tip.hidden = true; }
+    plot.addEventListener('pointermove', function (e) { showAt(indexAt(e.clientX)); });
+    plot.addEventListener('pointerleave', hide);
+    plot.tabIndex = 0;
+    plot.addEventListener('focus', function () { showAt(n - 1); });
+    plot.addEventListener('blur', hide);
+    box._chart = { showAt: showAt, min: min, max: max, n: n };
+    return box;
+  }
+
+  /* One series, the old name: the test hooks and the block-tick path use it. */
+  function sparkline(values, strokeVar, opts) {
+    var o = opts || {};
+    return chart({ series: [{ values: values, stroke: strokeVar }], zero: o.zero, fmt: o.fmt, ticks: o.ticks });
+  }
+
+  /* A single ratio against a limit: a meter, filled from the same ramp. */
+  function meter(label, part, whole, fmt) {
+    var box = H.el('div', 'gs-meter');
+    var cap = H.el('div', 'gs-meter-cap');
+    cap.appendChild(H.el('span', 'fstat-l', label));
+    var f = fmt || H.fmtInt;
+    cap.appendChild(H.el('span', 'ops-val', (part == null || whole == null) ? '—' : f(part) + ' / ' + f(whole)));
+    box.appendChild(cap);
+    var track = H.el('div', 'gs-meter-track');
+    var fill = H.el('div', 'gs-meter-fill');
+    var pct = (part != null && whole > 0) ? Math.max(0, Math.min(100, part / whole * 100)) : 0;
+    fill.style.width = pct.toFixed(1) + '%';
+    fill.title = pct.toFixed(0) + '%';
+    track.appendChild(fill);
+    box.appendChild(track);
+    return box;
+  }
+
+  /* Columns for a small ordered distribution (the battery levels): ≤ 24px
+   * thick, rounded data-end, square at the baseline, value on the cap. */
+  function columns(values, labels, stroke) {
+    var box = H.el('div', 'gs-cols');
+    var max = Math.max.apply(null, values.map(function (v) { return finite(v) ? v : 0; }).concat([1]));
+    values.forEach(function (v, i) {
+      var col = H.el('div', 'gs-col');
+      col.appendChild(H.el('div', 'gs-col-v ops-val', finite(v) ? H.fmtInt(v) : '—'));
+      var bar = H.el('div', 'gs-col-bar');
+      bar.style.height = (finite(v) ? Math.max(2, v / max * 40) : 2).toFixed(0) + 'px';
+      bar.style.background = stroke || 'var(--text-player-primary)';
+      col.appendChild(bar);
+      col.appendChild(H.el('div', 'gs-col-l sui-text-hint', labels[i]));
+      col.title = labels[i] + ': ' + (finite(v) ? H.fmtInt(v) : '—');
+      box.appendChild(col);
+    });
+    return box;
   }
 
   /* Samples for one series, with NULL for "not known at that block".
@@ -143,7 +281,6 @@
     var strip = H.el('div', 'hstrip');
     strip.appendChild(H.statTile('Block', H.fmtInt(state.snap.block_height), null, 'ok'));
     strip.appendChild(H.statTile('Players', H.fmtInt(num(t.players)), 'sui-icon-players'));
-    strip.appendChild(H.statTile(['Active', 'last 24h'], H.fmtInt(num(t.active_24h)), null, 'ok'));
     strip.appendChild(H.statTile('Guilds', H.fmtInt(num(t.guilds))));
     strip.appendChild(H.statTile(['Planets', 'complete / found'],
       H.fmtInt(num(t.planets_complete)) + ' / ' + H.fmtInt(num(t.planets_total))));
@@ -180,6 +317,7 @@
       body.appendChild(hint);
     }
     var c = H.card('UNIVERSE', body);
+    c.id = 'gs-universe';
     c.style.marginBottom = '10px';
     return c;
   }
@@ -268,15 +406,148 @@
     return H.card('BEST GUILDS', body);
   }
 
+  /* Each trend is a chart spec over the per-block ring. `keys` names one
+   * series per entry (a legend appears for two or more); `zero` pins the
+   * floor for counts. The colours are SUI's own semantic tokens — the only
+   * palette this window may use — assigned in a fixed order and never
+   * cycled: teal, lavender, amber, then red for danger. */
+  var TEAL = 'var(--text-player-primary)', LAVENDER = 'var(--accent-secondary)', AMBER = 'var(--text-warning)', RED = 'var(--text-enemy-primary)', HINT = 'var(--text-hint)';
   var TRENDS = [
-    { key: 'events', label: 'events / block', stroke: 'var(--text-player-primary)' },
-    { key: 'combat', label: 'combat / block', stroke: 'var(--text-enemy-primary)' },
-    { key: 'tx', label: 'transactions / block', stroke: 'var(--accent-primary)' },
-    { key: 'raids', label: 'live raids', stroke: 'var(--text-warning)' },
+    // Real transactions, from the block itself (null while nobody is looking).
+    { label: 'chain transactions / block', zero: true, keys: [{ key: 'chain_tx', stroke: TEAL }] },
+    { label: 'our transactions / block', zero: true,
+      keys: [{ key: 'our_tx', stroke: TEAL, label: 'signed' }, { key: 'gate_cap', stroke: HINT, label: 'gate cap' }] },
+    { label: 'grass frames / block', zero: true,
+      keys: [{ key: 'frames_planet', stroke: TEAL, label: 'planet' }, { key: 'frames_grid', stroke: LAVENDER, label: 'grid' }, { key: 'frames_inventory', stroke: AMBER, label: 'inventory' }] },
+    { label: 'combat / block', zero: true, keys: [{ key: 'combat', stroke: RED }] },
+    { label: 'live raids', zero: true, keys: [{ key: 'raids', stroke: AMBER }] },
+    { label: 'alpha transfers / block', zero: true, keys: [{ key: 'transfers', stroke: LAVENDER }] },
     // Steps between heavy sweeps rather than moving per block — still the
     // right place to see the galaxy powering up over an hour.
-    { key: 'draw', label: 'structs draw', stroke: 'var(--accent-secondary)', fmt: function (v) { return H.fmtWatts(v); } },
+    { label: 'structs draw', keys: [{ key: 'draw', stroke: LAVENDER }], fmt: function (v) { return H.fmtWatts(v); } },
   ];
+  function trendChart(t) {
+    return chart({
+      series: t.keys.map(function (k) { return { values: seriesValues(k.key), stroke: k.stroke, label: k.label }; }),
+      zero: t.zero, fmt: t.fmt,
+      heights: ((state.snap && state.snap.series) || []).map(function (p) { return p && p.height; }),
+    });
+  }
+
+  // ── The headline: is the galaxy alive? ──────────────────────────────────
+  // One hero figure — players who acted in the last hour — read straight off
+  // the perception snapshot's lastAction store, with the day, the roster and
+  // the newcomers beside it, and the week's shape beneath.
+  function livenessCard(t) {
+    var body = H.el('div');
+    var hero = H.el('div', 'gs-hero');
+    var big = H.el('div', 'gs-hero-v', t.live_1h == null ? '—' : H.fmtInt(num(t.live_1h)));
+    hero.appendChild(big);
+    hero.appendChild(H.el('div', 'gs-hero-l', 'players acted in the last hour'));
+    body.appendChild(hero);
+    var strip = H.el('div', 'hstrip');
+    strip.appendChild(H.statTile(['Active', 'last 24h'], H.fmtInt(num(t.live_24h)), null, 'ok'));
+    strip.appendChild(H.statTile(['Known', 'players'], H.fmtInt(num(t.players_known)), 'sui-icon-players'));
+    strip.appendChild(H.statTile(['New', 'last 24h'], t.new_players_24h == null ? '—' : H.fmtInt(num(t.new_players_24h)), null,
+      num(t.new_players_24h) > 0 ? 'live' : null));
+    strip.appendChild(H.statTile(['New', 'last 7 days'], t.new_players_7d == null ? '—' : H.fmtInt(num(t.new_players_7d))));
+    body.appendChild(strip);
+    var ring = (state.snap && state.snap.liveness) || [];
+    var line = H.el('div', 'gs-line');
+    var cap = H.el('div', 'gs-cap');
+    cap.appendChild(H.el('span', 'fstat-l', 'players active per hour — 7 days'));
+    line.appendChild(cap);
+    var ticks = [{ at: 0, text: '−7d' }, { at: 0.5, text: '−3.5d' }, { at: 1, text: 'now' }];
+    if (ring.length < LIVENESS_MIN) {
+      line.appendChild(chart({ series: [{ values: [] }] }));
+    } else {
+      // One axis: the per-day count is five times the per-hour one and would
+      // squash it to a flat line; the tile above carries the day.
+      line.appendChild(chart({
+        series: [{ values: ring.map(function (r) { return num(r.live_1h); }), stroke: TEAL }],
+        zero: true, ticks: ticks,
+        xLabel: function (i) { var r = ring[i]; return r && r.ts_ms ? new Date(r.ts_ms).toLocaleString() : ''; },
+      }));
+    }
+    body.appendChild(line);
+    var c = H.card('GALAXY LIVENESS', body);
+    c.id = 'gs-liveness';
+    c.style.marginBottom = 'var(--spacing-lg)';
+    return c;
+  }
+  var LIVENESS_MIN = 2;
+
+  function trendLine(label, node) {
+    var line = H.el('div', 'gs-line');
+    var cap = H.el('div', 'gs-cap');
+    cap.appendChild(H.el('span', 'fstat-l', label));
+    line.appendChild(cap);
+    line.appendChild(node);
+    return line;
+  }
+  var GRID_CSS = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:0 var(--spacing-xl);align-items:start;';
+
+  // ── Our engine: what this app is doing with the chain ──────────────────
+  function engineCard(t) {
+    var body = H.el('div');
+    var grid = H.el('div'); grid.style.cssText = GRID_CSS;
+    grid.appendChild(trendLine('proofs solved / block', chart({ series: [{ values: seriesValues('proofs'), stroke: TEAL }], zero: true })));
+    grid.appendChild(trendLine('proofs waiting for ripeness', chart({ series: [{ values: seriesValues('pool_pending'), stroke: LAVENDER }], zero: true })));
+    grid.appendChild(trendLine('proofs grinding', chart({ series: [{ values: seriesValues('pool_running'), stroke: TEAL }], zero: true })));
+    grid.appendChild(trendLine('signing queue depth', chart({ series: [{ values: seriesValues('gate_queued'), stroke: AMBER, label: 'queued' }, { values: seriesValues('gate_in_flight'), stroke: TEAL, label: 'in flight' }], zero: true })));
+    body.appendChild(grid);
+    // The roster's batteries: how many of OUR players sit at each of the
+    // HUD's five charge levels (0 = spent this block).
+    var levels = Array.isArray(t.charge_levels) ? t.charge_levels.map(num) : null;
+    var bat = H.el('div', 'gs-line');
+    var cap = H.el('div', 'gs-cap');
+    cap.appendChild(H.el('span', 'fstat-l', 'our players by battery level'));
+    bat.appendChild(cap);
+    bat.appendChild(levels ? columns(levels, ['0', '1', '2', '3', '4', '5'], TEAL) : H.el('div', 'gs-chart-empty sui-text-hint', 'collecting…'));
+    body.appendChild(bat);
+    var c = H.card('OUR ENGINE', body);
+    c.id = 'gs-engine';
+    return c;
+  }
+
+  // ── Ore economy ────────────────────────────────────────────────────────
+  function oreCard(t) {
+    var body = H.el('div');
+    var withOre = num(t.planets_with_ore), exhausted = num(t.planets_exhausted);
+    body.appendChild(meter('planets with ore left', withOre, withOre != null && exhausted != null ? withOre + exhausted : null));
+    var strip = H.el('div', 'hstrip');
+    strip.appendChild(H.statTile(['Rigs', 'mining'], H.fmtInt(num(t.rigs_mining)), 'icon-mine'));
+    strip.appendChild(H.statTile(['Rigs', 'refining'], H.fmtInt(num(t.rigs_refining)), 'icon-refine'));
+    strip.appendChild(H.statTile(['Stored Ore', 'stealable'], H.fmtOre(num(t.stored_ore)), 'sui-icon-alpha-ore'));
+    body.appendChild(strip);
+    body.appendChild(trendLine('ore cycles completing / block', chart({
+      series: [{ values: seriesValues('mine_starts'), stroke: TEAL, label: 'mine' }, { values: seriesValues('refine_starts'), stroke: LAVENDER, label: 'refine' }],
+      zero: true,
+    })));
+    var c = H.card('ORE ECONOMY', body);
+    c.id = 'gs-ore';
+    return c;
+  }
+
+  // ── Raid pressure ──────────────────────────────────────────────────────
+  function raidCard(t) {
+    var body = H.el('div');
+    var strip = H.el('div', 'hstrip');
+    strip.appendChild(H.statTile(['Fleets', 'away'], H.fmtInt(num(t.fleets_away_now)), 'sui-icon-md icon-fleet-tile', num(t.fleets_away_now) > 0 ? 'live' : null));
+    strip.appendChild(H.statTile(['Fleets', 'on station'], H.fmtInt(num(t.fleets_on_station))));
+    strip.appendChild(H.statTile('Live Raids', H.fmtInt(num(t.raids_active)), 'icon-raid', num(t.raids_active) > 0 ? 'live' : null));
+    var f = t.raid_funnel && typeof t.raid_funnel === 'object' ? t.raid_funnel : null;
+    strip.appendChild(H.statTile(['Our funnel', 'scored → eligible'],
+      f ? H.fmtInt(num(f.scored)) + ' → ' + H.fmtInt(num(f.eligible)) : '—', null, f && f.dispatching ? 'live' : 'muted'));
+    if (f && f.top_gate && f.top_gate.gate) {
+      strip.appendChild(H.statTile(['Top gate', String(f.top_gate.gate)], H.fmtInt(num(f.top_gate.count)), null, 'muted'));
+    }
+    body.appendChild(strip);
+    body.appendChild(trendLine('raids armed / block', chart({ series: [{ values: seriesValues('raid_starts'), stroke: RED }], zero: true })));
+    var c = H.card('RAID PRESSURE', body);
+    c.id = 'gs-raids';
+    return c;
+  }
   // 7-day hourly galaxy totals from the server's LOCF aggregate — history
   // that survives app restarts, unlike the per-block ring. Older guild APIs
   // don't serve it; the section simply doesn't render then.
@@ -302,15 +573,8 @@
     HISTORY_SERIES.forEach(function (t) {
       var vals = historyValues(t.key);
       if (vals.length < 2) return;
-      var line = H.el('div');
-      line.style.marginBottom = '8px';
-      var cap = H.el('div');
-      cap.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;';
-      cap.appendChild(H.el('span', 'sui-text-hint', t.label));
-      cap.appendChild(H.el('span', 'ops-val', (t.fmt || H.fmtNum)(vals[vals.length - 1])));
-      line.appendChild(cap);
-      line.appendChild(sparkline(vals, t.stroke));
-      body.appendChild(line);
+      var ticks = [{ at: 0, text: '−7d' }, { at: 0.5, text: '−3.5d' }, { at: 1, text: 'now' }];
+      body.appendChild(trendLine(t.label, chart({ series: [{ values: vals, stroke: t.stroke }], fmt: t.fmt, ticks: ticks })));
     });
   }
   function trendsCard() {
@@ -333,17 +597,7 @@
       + 'grid-template-columns:repeat(auto-fit,minmax(320px,1fr));'
       + 'gap:0 var(--spacing-xl);align-items:start;';
     TRENDS.forEach(function (t) {
-      var vals = seriesValues(t.key);
-      var line = H.el('div');
-      line.style.marginBottom = '8px';
-      var cap = H.el('div');
-      cap.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;';
-      cap.appendChild(H.el('span', 'sui-text-hint', t.label));
-      cap.appendChild(H.el('span', 'ops-val',
-        vals.length ? (t.fmt || H.fmtNum)(vals[vals.length - 1]) : '—'));
-      line.appendChild(cap);
-      line.appendChild(sparkline(vals, t.stroke));
-      body.appendChild(line);
+      body.appendChild(trendLine(t.label, trendChart(t)));
     });
     // The 7-day server aggregates render after the per-block hour: freshest
     // context first, the week's shape beneath it.
@@ -362,13 +616,21 @@
           'The Guild API needs your game session — log in to Structs first, then this window recovers on its own.'));
         return;
       }
-      host.appendChild(universeCard(state.snap.totals || {}));
+      var totals = state.snap.totals || {};
+      host.appendChild(livenessCard(totals));
+      host.appendChild(universeCard(totals));
 
       // Trends stretch the full row — the sparklines are the best thing on
       // the page and cramped in a half column. They also sit above the
       // leaderboards so the scroll path never threads through the boards'
       // inner scrollbars.
       host.appendChild(trendsCard());
+      var ops = H.el('div');
+      ops.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:var(--spacing-lg);align-items:start;margin-bottom:var(--spacing-lg);';
+      ops.appendChild(engineCard(totals));
+      ops.appendChild(oreCard(totals));
+      ops.appendChild(raidCard(totals));
+      host.appendChild(ops);
 
       var cols = H.el('div');
         /* 560px, not 420. A leaderboard row is a portrait, a name and four stat
@@ -407,10 +669,10 @@
     if (height) state.snap.block_height = height;
     var host = document.getElementById('gamestats-body');
     if (!host) return;
-    var tiles = host.querySelectorAll('.fstat');
-    // The Block tile is always first in the strip.
-    if (tiles.length) {
-      var v = tiles[0].querySelector('.fstat-v');
+    // The Block tile is the first tile of the UNIVERSE strip.
+    var universe = host.querySelector('#gs-universe .fstat');
+    if (universe) {
+      var v = universe.querySelector('.fstat-v');
       if (v) v.textContent = H.fmtInt(state.snap.block_height);
     }
   }
@@ -478,7 +740,7 @@
   // Test hooks. The two functions that turn samples into a picture are where
   // a chart can lie without erroring, so they are asserted directly on inputs
   // the fixture cannot produce — an all-gap series, a lone island sample.
-  Board._gamestats = { sparkline: sparkline, seriesValues: seriesValues, state: state };
+  Board._gamestats = { sparkline: sparkline, chart: chart, meter: meter, columns: columns, seriesValues: seriesValues, state: state };
 
   Board.registerPage('gamestats', {
     onEnter: enter,

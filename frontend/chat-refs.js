@@ -142,7 +142,9 @@
       var pc = window.StructsPlayerCard.card({
         id: card.id,
         name: card.title || card.id,
-        pfp: card.pfp_attrs,
+        pfp: card.pfp_attrs || null,
+        // RAW charge from Rust; the card draws the game's 5-chunk battery.
+        charge: card.charge == null ? null : card.charge,
         sub: tag ? '[' + tag[1] + ']' : null,
         presence: presenceDot(card.id),
         readings: (card.rows || []).map(function (r) {
@@ -238,7 +240,10 @@
     function refCard(card) {
       if (card.kind === 'provider' && window.StructsProviderCard) return providerRefCard(card);
       if (card.kind === 'guild' && window.StructsGuildCard) return guildRefCard(card);
-      if (card.kind === 'player' && card.pfp_attrs && window.StructsPlayerCard) return playerRefCard(card);
+      // Every player, portrait or not: a player who never set one gets the
+      // placeholder portrait the roster shows, not the generic thing-card
+      // (which is what 1-195 was drawn as until 2026-09-06).
+      if (card.kind === 'player' && window.StructsPlayerCard) return playerRefCard(card);
       // ONE frame, not three. The card used to nest a bordered header, a
       // bordered body and bordered buttons inside a bordered card — four
       // competing rectangles for one summary. Now: a single surface with a

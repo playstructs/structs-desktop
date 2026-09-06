@@ -974,12 +974,12 @@ fn edited_body(content: &Value) -> Option<String> {
         .and_then(|n| n.get("body"))
         .and_then(|b| b.as_str())
     {
-        return Some(b.to_string());
+        return Some(super::identity::sanitize_body(b));
     }
     content
         .get("body")
         .and_then(|b| b.as_str())
-        .map(|b| b.strip_prefix("* ").unwrap_or(b).to_string())
+        .map(|b| super::identity::sanitize_body(b.strip_prefix("* ").unwrap_or(b)))
 }
 
 /// Apply an edit to the message it replaces. Returns whether one was found.
@@ -1207,10 +1207,13 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
             .and_then(|e| e.as_str())
             .map(|s| s.to_string())
     };
+    // Federated text is sanitised HERE, once, as it enters: the reply
+    // fallback, the body and (below) the edit all go through
+    // `identity::sanitize_body`, so a bidi override cannot make an id read
+    // as another id anywhere downstream.
+    let raw_body = super::identity::sanitize_body(content.get("body").and_then(|b| b.as_str()).unwrap_or(""));
     let (reply_sender, reply_excerpt) = match reply_to.as_ref() {
-        Some(_) => quoted_from_fallback(
-            content.get("body").and_then(|b| b.as_str()).unwrap_or(""),
-        ),
+        Some(_) => quoted_from_fallback(&raw_body),
         None => (None, None),
     };
 
@@ -1221,11 +1224,7 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
             .get("msgtype")
             .and_then(|m| m.as_str())
             .unwrap_or("m.text");
-        let text = content
-            .get("body")
-            .and_then(|b| b.as_str())
-            .unwrap_or("")
-            .to_string();
+        let text = raw_body.clone();
         // A rich reply repeats what it answers INSIDE its own body, as
         // `> <@who> what\n\n` lines. That is the fallback for clients with no
         // reply rendering; this one has, so leaving it in would print the

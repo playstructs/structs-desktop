@@ -105,12 +105,38 @@ async function until(fn, ms = 5000) {
   check('totals live in a titled UNIVERSE card', universe);
   check('ore is split stored vs in-ground', /Stored Ore/.test(body.textContent) && /Ore In Ground/.test(body.textContent));
 
+  // ── The 2026-09-06 charts ──
+  const live = body.querySelector('#gs-liveness');
+  check('liveness is the headline card, first on the page', live && body.firstElementChild === live);
+  check('the hero figure is players active in the last hour', live && live.querySelector('.gs-hero-v')?.textContent === '214');
+  check('…with the day, the roster and the newcomers beside it',
+    live && /Active/.test(live.textContent) && /Known/.test(live.textContent) && /New/.test(live.textContent) && live.textContent.includes('1,180'));
+  check('the week of liveness is one series on one axis (the day is a tile)', live && live.querySelectorAll('svg path').length === 1 && live.querySelectorAll('.gs-legend-item').length === 0);
+  const trends = body.querySelector('#gs-trends');
+  const captions = [...trends.querySelectorAll('.gs-cap .fstat-l')].map((n) => n.textContent);
+  check('transactions are the chain\'s own and ours, separately', captions.includes('chain transactions / block') && captions.includes('our transactions / block'));
+  check('frames are split by family with a legend', trends.querySelectorAll('.gs-legend').length >= 2);
+  const firstChart = trends.querySelector('.gs-chart');
+  check('every chart prints its floor and ceiling', !!firstChart.querySelector('.gs-axis-top') && !!firstChart.querySelector('.gs-axis-bot'));
+  check('counts sit on a zero floor', firstChart.querySelector('.gs-axis-bot').textContent === '0');
+  check('…and the current value at the right edge', !!firstChart.querySelector('.gs-axis-last'));
+  check('time ticks end at now', firstChart.querySelector('.gs-ticks')?.lastElementChild?.textContent === 'now');
+  // Hover layer: the crosshair finds the X and one tooltip lists every series.
+  const plot = firstChart.querySelector('.gs-plot');
+  plot.dispatchEvent(new w.Event('pointermove', { bubbles: true }));
+  check('hover shows a tooltip with a value', !plot.querySelector('.gs-tip').hidden && !!plot.querySelector('.gs-tip .ops-val'));
+  plot.dispatchEvent(new w.Event('pointerleave'));
+  check('…that hides on leave', plot.querySelector('.gs-tip').hidden);
+  check('the engine card shows the five battery levels as columns', body.querySelectorAll('#gs-engine .gs-col').length === 6);
+  check('the ore card has a meter of planets with ore', /planets with ore left/.test(body.querySelector('#gs-ore').textContent) && !!body.querySelector('#gs-ore .gs-meter-fill'));
+  check('the raid card shows the funnel and its top gate', /484 → 53/.test(body.querySelector('#gs-raids').textContent) && /ore/.test(body.querySelector('#gs-raids').textContent));
+
   // Synthetic block tick: height updates, no new invoke, series grows.
   const before = w.__HARNESS_CALLS__.length;
   const svgBefore = body.querySelector('#gs-trends svg path').getAttribute('d');
   w.__HARNESS_EMIT__('game-stats-update', { tier: 'block', height: 4300001,
     point: { height: 4300001, events: 99, combat: 1, tx: 2, raids: 1, structs: 6041, fuel: 1 } });
-  const blockTile = body.querySelector('.fstat .fstat-v');
+  const blockTile = body.querySelector('#gs-universe .fstat .fstat-v');
   check('block tick bumps header height', blockTile.textContent === '4,300,001', blockTile.textContent);
   check('block tick causes no invoke', w.__HARNESS_CALLS__.length === before);
   check('block tick extends the sparkline', body.querySelector('#gs-trends svg path').getAttribute('d') !== svgBefore);

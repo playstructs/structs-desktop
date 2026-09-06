@@ -199,6 +199,13 @@ fn init_writer() -> Option<SyncSender<Msg>> {
 }
 
 fn send(msg: Msg) {
+    // A `cargo test` process must never write into the LIVE app's telemetry:
+    // it shares the same state.db path, and on 2026-09-06 a capacity test's
+    // 90 "test pressure" adjustments landed in the running app's feed as
+    // real warnings. Tests exercise the callers; the writer stays quiet.
+    if cfg!(test) {
+        return;
+    }
     match WRITER.as_ref() {
         Some(tx) => match tx.try_send(msg) {
             Ok(()) => {}
@@ -710,6 +717,7 @@ pub fn record_solve(snap: &crate::hasher::types::TaskStateSnapshot, engine: &'st
     if !snap.result_exists {
         return;
     }
+    crate::mcp::game_stats::note_proof();
     let end = snap.process_end_time.unwrap_or(snap.last_status_change_time);
     // Measure the SOLVE, not the wait. `process_start_time` is stamped when the
     // task is created, so using it folds queue depth into every sample — and

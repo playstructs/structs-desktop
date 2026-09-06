@@ -208,6 +208,7 @@ fn record(
     let duration_ms = now_millis() - started_ms;
     match res {
         AttemptResult::Success { tx_hash, .. } => {
+            crate::mcp::game_stats::note_our_tx();
             telemetry::record_tx_attempt(TxAttemptRow {
                 ts_ms: now_millis(),
                 context: context.to_string(),

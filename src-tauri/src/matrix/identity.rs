@@ -96,6 +96,37 @@ pub fn fold(name: &str) -> String {
         .collect()
 }
 
+/// Characters that reorder or hide text in a message BODY.
+///
+/// Narrower than [`is_invisible`], on purpose: a body is prose, not a label.
+/// The zero-width joiner and non-joiner stay — the joiner is how a family
+/// emoji is spelled, the non-joiner is orthography in Persian and others —
+/// and every line break and tab stays. What goes is the machinery an
+/// attacker uses to make `pay 1-195` READ as a different id: the bidi
+/// overrides, embeddings and isolates, the zero-width space, the marks, and
+/// the rest of the control range.
+fn reorders_or_hides(c: char) -> bool {
+    matches!(c,
+        '\u{200B}'                // zero-width space
+        | '\u{200E}'..='\u{200F}' // LRM / RLM
+        | '\u{202A}'..='\u{202E}' // bidi embedding and OVERRIDE
+        | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+        | '\u{2066}'..='\u{2069}' // bidi isolates
+        | '\u{FEFF}'              // BOM / zero-width no-break
+        | '\u{00AD}'              // soft hyphen
+        | '\u{180E}'              // Mongolian vowel separator
+    ) || (c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+}
+
+/// What a message body is allowed to LOOK like: itself, minus the characters
+/// that could make the reader see a different id, name or amount than the
+/// one that was sent. Applied once, where a body enters from a homeserver,
+/// so every reader downstream — the id regex, the mention matcher, the
+/// screen — sees the same string.
+pub fn sanitize_body(body: &str) -> String {
+    body.chars().filter(|c| !reorders_or_hides(*c)).collect()
+}
+
 /// Does this name try to wear a guild?
 ///
 /// The window renders a real tag as `[SN.C]` from the CHAIN, beside the name.
@@ -109,6 +140,21 @@ pub fn claims_a_guild_tag(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_body_keeps_its_shape_but_cannot_reorder_or_hide_an_id() {
+        // A right-to-left OVERRIDE paints `1-195` backwards on screen.
+        assert_eq!(sanitize_body("pay 1-195\u{202E} now"), "pay 1-195 now");
+        // A zero-width space splits an id for the regex and the eye disagrees.
+        assert_eq!(sanitize_body("raid 2-15\u{200B}361"), "raid 2-15361");
+        // Isolates and marks are the same trick with newer characters.
+        assert_eq!(sanitize_body("\u{2067}send\u{2069} \u{200F}5"), "send 5");
+        // What must survive: line breaks, tabs, the emoji joiner, the non-joiner.
+        assert_eq!(sanitize_body("line one\nline\ttwo"), "line one\nline\ttwo");
+        assert_eq!(sanitize_body("👩\u{200D}👩\u{200D}👧"), "👩\u{200D}👩\u{200D}👧");
+        assert_eq!(sanitize_body("می\u{200C}خواهم"), "می\u{200C}خواهم");
+        assert_eq!(sanitize_body(""), "");
+    }
 
     #[test]
     fn invisible_characters_never_reach_the_screen() {

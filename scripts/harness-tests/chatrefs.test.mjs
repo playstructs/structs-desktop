@@ -74,4 +74,21 @@ function boot(fixtures) {
   void note; void calls;
 }
 
+// 4. A player is ALWAYS the shared player card — with no portrait too — and gets its charge.
+{
+  const { refs, w } = boot({});
+  const drawn = [];
+  w.StructsPlayerCard = { card: (p, opts) => { drawn.push([p, opts]); const n = w.document.createElement('div'); n.className = 'pc-card'; return n; } };
+  const box = refs.refCard({ id: '1-195', kind: 'player', title: '1-195', subtitle: '[OH] PID #1-195', pfp_attrs: '', charge: 3, rows: [{ label: 'Alpha', value: '0µg' }], actions: [{ key: 'message', label: 'Message', icon: 'icon-phone' }] });
+  assert.ok(box.querySelector('.pc-card'), 'the shared player card, not the generic thing-card');
+  assert.equal(drawn[0][0].id, '1-195');
+  assert.equal(drawn[0][0].pfp, null, 'no portrait → the component draws its placeholder');
+  assert.equal(drawn[0][0].charge, 3, 'raw charge reaches the battery');
+  assert.equal(drawn[0][0].sub, '[OH]');
+  assert.equal(drawn[0][1].actions[0].title, 'Message');
+  const noCharge = refs.refCard({ id: '1-9', kind: 'player', title: 'X', subtitle: 'PID #1-9' });
+  assert.ok(noCharge.querySelector('.pc-card'));
+  assert.equal(drawn[1][0].charge, null, 'an unknown charge draws no battery rather than an empty one');
+}
+
 console.log('chatrefs: ok');

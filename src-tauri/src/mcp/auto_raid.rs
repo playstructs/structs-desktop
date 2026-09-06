@@ -244,6 +244,22 @@ impl AutoRaidConfig {
 static CONFIG: LazyLock<RwLock<AutoRaidConfig>> =
     LazyLock::new(|| RwLock::new(crate::mcp::config_store::load_config::<AutoRaidConfig>(FILENAME)));
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
+/// The last scan's funnel — scored → eligible → dispatching, and the gate
+/// that stopped the most — for the Game Stats window.
+static LAST_FUNNEL: LazyLock<Mutex<serde_json::Value>> = LazyLock::new(|| Mutex::new(serde_json::Value::Null));
+
+pub fn last_funnel() -> serde_json::Value {
+    LAST_FUNNEL.lock().map(|f| f.clone()).unwrap_or(serde_json::Value::Null)
+}
+
+fn note_funnel(scanned: usize, eligible: usize, dispatching: bool, top_gate: Option<(&str, usize)>) {
+    if let Ok(mut f) = LAST_FUNNEL.lock() {
+        *f = serde_json::json!({
+            "at_ms": now_millis(), "scored": scanned, "eligible": eligible, "dispatching": dispatching,
+            "top_gate": top_gate.map(|(g, n)| serde_json::json!({ "gate": g, "count": n })),
+        });
+    }
+}
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static RUN_GEN: AtomicU64 = AtomicU64::new(0);
 
@@ -755,6 +771,16 @@ async fn scan(
         .iter()
         .find(|c| c.blocked_by.is_none() && c.score >= cfg.min_score))
         .cloned();
+    {
+        let mut tally: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for c in &board {
+            if let Some(why) = c.blocked_by.as_deref() {
+                *tally.entry(why.split_whitespace().next().unwrap_or(why)).or_default() += 1;
+            }
+        }
+        let top = tally.iter().max_by_key(|(_, n)| **n).map(|(k, n)| (*k, *n));
+        note_funnel(scanned, eligible.len(), best.is_some(), top);
+    }
     let Some(target) = best else {
         if scanned == 0 {
             run.blocked("no candidate planets in range this scan");
