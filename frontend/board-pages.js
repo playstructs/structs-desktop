@@ -4761,6 +4761,9 @@
     return box;
   }
 
+  // Shared with the Terminal's planet card, which draws the same portraits.
+  Board._structArt = { portrait: structPortrait, slug: artSlug };
+
   // SUI ships an icon per ambit (sui-icon-water/land/air/space); using them
   // rather than the word makes an ambit readable at a glance in a 332px drawer.
   function ambitChip(ambit) {

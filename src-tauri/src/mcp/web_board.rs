@@ -598,6 +598,67 @@ async fn board_invoke(
             }
         }
         "mcp_vplayer_list" => ok_json(board::mcp_vplayer_list()),
+        // The Terminal (board.html?view=terminal) over the web. Layouts and
+        // workspaces are the operator's own state, so the token (= operator)
+        // may read AND write them; the store is the same terminal.json the
+        // native windows use, so a layout arranged in a browser is the one the
+        // host's window shows next. Leaving these out served the page with a
+        // default layout and "unknown command" on every card that reads
+        // through Rust — which looked like the cards were broken, not absent.
+        "terminal_layout_get" => ok_json(crate::mcp::terminal::terminal_layout_get(s("workspace"))),
+        "terminal_layout_set" => match body.get("layout").cloned() {
+            Some(l) => match serde_json::from_value(l) {
+                Ok(layout) => from_result(crate::mcp::terminal::terminal_layout_set(s("workspace"), layout)),
+                Err(e) => err_json(format!("bad layout: {e}")),
+            },
+            None => err_json("layout required".into()),
+        },
+        "terminal_workspaces" => ok_json(crate::mcp::terminal::terminal_workspaces()),
+        "terminal_workspace_activate" => match s("name") {
+            Some(n) => from_result(crate::mcp::terminal::terminal_workspace_activate(n)),
+            None => err_json("name required".into()),
+        },
+        "terminal_workspace_delete" => match s("name") {
+            Some(n) => from_result(crate::mcp::terminal::terminal_workspace_delete(n)),
+            None => err_json("name required".into()),
+        },
+        "terminal_windows" => ok_json(crate::mcp::terminal::terminal_windows(st.app.clone())),
+        "open_terminal_window" | "open_terminal_workspace" | "open_terminal_card" => err_json(
+            "Terminal windows are native — they open on the machine running Structs. \
+             In this browser, open a workspace or card at \
+             /board/board.html?view=terminal&ws=<name>&card=<id> instead."
+                .into(),
+        ),
+        "terminal_market" => from_result(crate::mcp::terminal::terminal_market().await),
+        "terminal_ore_radar" => ok_json(crate::mcp::terminal::terminal_ore_radar(
+            body.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize),
+        )),
+        "terminal_agreements" => match s("player") {
+            Some(p) => from_result(crate::mcp::terminal::terminal_agreements(p).await),
+            None => err_json("player required".into()),
+        },
+        "terminal_guild_banks" => from_result(crate::mcp::terminal::terminal_guild_banks().await),
+        "terminal_guild_bank_history" => match s("guildId") {
+            Some(g) => from_result(crate::mcp::terminal::terminal_guild_bank_history(g).await),
+            None => err_json("guildId required".into()),
+        },
+        "terminal_tearsheet" => match s("id") {
+            Some(i) => from_result(crate::mcp::terminal::terminal_tearsheet(i).await),
+            None => err_json("id required".into()),
+        },
+        // Money moves: the token is the operator, and the impl signs as the
+        // primary exactly as the native door does.
+        "terminal_guild_bank_mint" => match (
+            body.get("amountAlpha").and_then(|v| v.as_u64()),
+            body.get("amountToken").and_then(|v| v.as_u64()),
+        ) {
+            (Some(a), Some(t)) => from_result(crate::mcp::terminal::terminal_guild_bank_mint(st.app.clone(), a, t).await),
+            _ => err_json("amountAlpha + amountToken required".into()),
+        },
+        "terminal_guild_bank_redeem" => match (s("denom"), body.get("amount").and_then(|v| v.as_u64())) {
+            (Some(d), Some(a)) => from_result(crate::mcp::terminal::terminal_guild_bank_redeem(st.app.clone(), d, a).await),
+            _ => err_json("denom + amount required".into()),
+        },
         "mcp_render_map" => match s("player") {
             Some(p) => from_result(map::mcp_render_map(st.app.clone(), p).await),
             None => err_json("player required".into()),

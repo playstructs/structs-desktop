@@ -455,6 +455,18 @@ cat > "$FIX" <<'EOF'
       standing: { planet_id: '2-223', fleet_id: '9-61', guild_id: '0-2', last_action: 4200700, ago_blocks: 19, charge: 19, known: true },
       ranks: { alpha: { rank: 1, value: 49340000000 }, ore: null, structs_load: { rank: 4, value: 12000 } },
       ore: { mined: '1200', refined: '900' }, planets: { count: 14 }, raids: { launched: 33, won: 30 }, ledger: { unavailable: 'Login required' } },
+    // The planet card reads the spectator snapshot the raid view draws from.
+    mcp_raid_state: { snapshot: {
+      planet_id: '2-15361', owner: '1-61', owner_name: 'JPEG', owner_pfp: '{"head":3,"neck":2,"body":4,"arms":5,"background":1}',
+      planetary_shield: 225, block_start_raid: 4200690, raid_status: 'shieldsVulnerable', raiding_fleet: '9-61', raider_id: '1-194', raider_name: 'Marklifer',
+      fleets: ['9-12'], slots: { space: 2, air: 2, land: 4, water: 4 }, stored_ore: 12, struct_types: {},
+      structs: [
+        { id: '5-1', type_name: 'Tank', category: 'planet', ambit: 'land', slot: 0, health: 2, max_health: 3, destroyed: false, online: true, defending: true, protects: '5-3', side: 'defender' },
+        { id: '5-3', type_name: 'Planetary Defense Cannon', category: 'planet', ambit: 'land', slot: 2, health: 3, max_health: 3, destroyed: false, online: true, defended: true, side: 'defender' },
+        { id: '5-4', type_name: 'SAM Launcher', category: 'planet', ambit: 'air', slot: 0, health: 3, max_health: 3, destroyed: false, online: false, side: 'defender' },
+        { id: '5-9', type_name: 'Command Ship', category: 'fleet', ambit: 'space', slot: 0, health: 6, max_health: 6, destroyed: false, online: true, is_command: true, side: 'attacker' },
+      ],
+    } },
     // The battle log card asks the raid view's command for a planet's rows.
     mcp_raid_log: { planet_id: '2-15361', rows: [
       { time: '14:46', date: '2026-09-06', category: 'raid_struct_attack', kind: 'combat', detail: 'Tank 5-88 hit Mining Rig 5-12 for 2', block: 4200700 },
@@ -508,6 +520,66 @@ cat > "$FIX" <<'EOF'
     mcp_board_html: '<div class="sui-data-card-row">harness ops snapshot</div>',
     mcp_board_feed: [],
     mcp_health: { ok: true },
+    // The ops cards read what the Team Ops pages read.
+    mcp_work: {
+      counts: { running: 2, waiting: 5, completed: 40 },
+      hash_config: { effective_engine: 'gpu', gpu_available: true, difficulty_start: 8, auto_tune: true, max_concurrent: 12 },
+      tasks: [
+        { task_id: '5-12:mine', task_type: 'MINE', status: 'running', percent_complete: 62, current_difficulty: 12, difficulty_target: 4200, eta: '2m' },
+        { task_id: '5-14:refine', task_type: 'REFINE', status: 'waiting', percent_complete: 0, current_difficulty: null, difficulty_target: null, eta: null },
+        { task_id: '5-9:build', task_type: 'BUILD', status: 'completed', percent_complete: 100, current_difficulty: 20, difficulty_target: 100, eta: null },
+      ],
+      pow_stats: [{ engine: 'gpu', solves: 310, median_duration_ms: 1800, p90_duration_ms: 4200, p90_min_samples: 10, median_difficulty: 12, est_hashrate_hps: 1.2e9 }],
+    },
+    mcp_tx_snapshot: {
+      queue: {
+        in_flight: { id: 't1', type_short: 'StructMine', charge_cost: 1, attempts: 0 },
+        action_queue: [
+          { id: 't2', type_short: 'StructBuildInitiate', charge_cost: 5, attempts: 1, retry_limit: 3 },
+          { id: 't3', type_short: 'PlayerSend', charge_cost: 0, attempts: 0 },
+        ],
+        immediate_queue: [],
+        etas: { t2: { blocksRemaining: 3, etaMs: 16000 }, t3: { blocksRemaining: 9, etaMs: 48000 } },
+        percents: { t2: 40, t3: 10 },
+      },
+      queue_error: null,
+      history: [
+        { outcome: 'success', action: '/structs.structs.MsgStructMine', player_id: '1-287', tx_hash: 'ABCDEF0123456789', ts_ms: Date.now() - 60000 },
+        { outcome: 'failed', action: '/structs.structs.MsgStructBuildInitiate', player_id: '1-271', translated: 'insufficient charge', ts_ms: Date.now() - 120000 },
+        { outcome: 'skipped', action: '/structs.structs.MsgPlayerSend', context: 'sweep', translated: 'below threshold', ts_ms: Date.now() - 180000 },
+      ],
+      history_error: null,
+    },
+    mcp_tx_mutate: { ok: true },
+    mcp_roster_refresh: true,
+    mcp_mass_action: { entries: [{ player_id: '1-287' }], total_alpha: 2.1, job_id: 'job-1' },
+    mcp_raids: { live: 1, ours: 1, finished: 1, unidentified: 0, raids: [
+      { planet_id: '2-15361', fleet_id: '9-61', status: 'shieldsVulnerable', updated_ms: Date.now() - 30000, seized_ore: 0, defender: 'JPEG', attacker: 'Marklifer', our_side: 'attacker', live: true, stale: false },
+      { planet_id: '2-223', fleet_id: '9-12', status: 'raidSuccessful', updated_ms: Date.now() - 3600000, seized_ore: 4, defender: 'Phoniffer', attacker: 'beezhan', our_side: 'none', live: false, stale: false },
+    ] },
+    mcp_war_bundle: {
+      response: { enabled: true, autonomy: 'act', dry_run: false },
+      raid: { enabled: false, autonomy: 'advise', posture: 'opportunist', dry_run: false, min_ore: 1 },
+      shot_budget: { used: 3, cap: 20 },
+      targets: [
+        { player_id: '1-61', name: 'JPEG', planet_id: '2-15361', guild_id: '0-2', blocked_by: null, vulnerability_reason: 'shield 225, cmd online', stored_ore: 12, planetary_shield: 225, raid_minutes: 4.2, defenders_on_cmd: 2, score: 71 },
+        { player_id: '1-248', name: 'Phoniffer', planet_id: '2-223', guild_id: '0-1', blocked_by: 'protected', vulnerability_reason: '', stored_ore: 30, planetary_shield: 400, raid_minutes: 9, defenders_on_cmd: 5, score: 12 },
+      ],
+      lists: {
+        grudges: [{ player_id: '1-1957', label: 'beezhan', guild_id: '0-5', attacks: 3, structs_lost: 2, source: 'auto', muted: false, expired: false, damage_taken: 6, weight: 1.5, heat: 0.8 }],
+        priority_guilds: [{ guild_id: '0-5', weight: 2 }], allies: ['0-1'], protected_players: ['1-248'],
+      },
+      incidents: [{ defender_player: '1-287', planet_id: '2-287', attacker_player: '1-1957', mode: 'act', fire_target: '5-88', target_kind: 'cmd', note: '', shots_fired: 2, shots_planned: 2, projected_damage: 4, at_ms: Date.now() - 900000 }],
+      expeditions: [],
+    },
+    mcp_inventory: {
+      player: { player_id: '1-194', name: 'Marklifer', address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne' },
+      assets: [
+        { denom: 'ualpha', amount: 40230, amount_p: 40230000000, sendable: true, display_name: 'Alpha', base_name: 'ualpha', exponent: 6 },
+        { denom: 'uguild.0-1', amount: 12, amount_p: 12000000, sendable: true, display_name: 'Hydro', base_name: 'uhydro', exponent: 6, guild_id: '0-1', guild_tag: 'OH' },
+        { denom: 'ore', amount: 3, sendable: false, display_name: 'Ore', base_name: 'g', exponent: 0 },
+      ],
+    },
     mcp_grass_recent: [],
     // The Armada roster, in the shape `mcp_roster` really answers with (the
     // fields armadaRow reads). Six players covering every role, one with a

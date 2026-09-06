@@ -34,7 +34,8 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => d.querySelectorAll('#tm-grid .tm-card').length >= 5);
   check('solo attribute set', d.documentElement.getAttribute('data-solo') === 'terminal');
   const cards = [...d.querySelectorAll('#tm-grid .tm-card')];
-  check('the saved layout is drawn, in its order', cards.map((c) => c.getAttribute('data-card')).join(',') === 'people-1,market-1,work-1,player-1,stats-1', cards.map((c) => c.getAttribute('data-card')).join(','));
+  check('the saved layout is drawn, in its order — a saved whole-page card migrated into the cards that carry its data', cards.map((c) => c.getAttribute('data-card')).join(',') === 'people-1,market-1,pow-1,tasks-1,player-1,stats-1', cards.map((c) => c.getAttribute('data-card')).join(','));
+  check('no card is titled after a window', [...d.querySelectorAll('#tm-grid .tm-title')].every((t) => !/Team Ops|Game Stats/.test(t.textContent)));
   check('widths come from the layout', cards[1].classList.contains('tm-w2') && cards[0].classList.contains('tm-w1'));
   check('the toolbar offers every registered type', d.querySelectorAll('.tm-toolbar select option').length >= 12);
   check('every card is the game\'s data card with its doors in the header', cards.every((c) => c.classList.contains('sui-data-card') && c.querySelector('.sui-data-card-header .tm-doors')));
@@ -47,7 +48,11 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const offers = [...d.querySelectorAll('#tm-market-1 .sui-planet-card')];
   check('market card: one provider card per offer, from terminal_market', offers.length === 2);
   check('…an open offer can be rented, a guild-market one cannot', d.querySelectorAll('#tm-market-1 .tm-offer')[0].querySelector('[title="Rent capacity"]') !== null && d.querySelectorAll('#tm-market-1 .tm-offer')[1].querySelector('[title="Rent capacity"]') === null);
-  check('page card: the Work page moved in whole', d.querySelector('#tm-work-1 #page-work') !== null && !d.getElementById('page-work').hidden);
+  await until(() => d.querySelector('#tm-pow-1 .fstat'));
+  check('proof queue card: counts as tiles, the engine as rows', d.querySelectorAll('#tm-pow-1 .fstat').length === 3 && /GPU/.test(d.querySelector('#tm-pow-1').textContent) && /auto-tuned/.test(d.querySelector('#tm-pow-1').textContent));
+  await until(() => d.querySelector('#tm-tasks-1 .sui-result-row'));
+  check('tasks card: one row per proof, progress first', d.querySelectorAll('#tm-tasks-1 .sui-result-row').length === 3 && /5-12:mine/.test(d.querySelector('#tm-tasks-1 .sui-result-row').textContent));
+  check('the Team Ops pages themselves are not offered as cards (only the settings forms)', ![...d.querySelectorAll('.tm-toolbar select option')].some((o) => /Team Ops/.test(o.textContent)) && !w.Board.Terminal.types().some((t) => t.type === 'page'));
   await until(() => d.querySelector('#tm-player-1 .pc-card'));
   check('player card: the shared card for the named player', /JPEG/.test(d.querySelector('#tm-player-1 .pc-card')?.textContent || ''));
   await until(() => d.querySelector('#tm-stats-1 .fstat'));
@@ -58,7 +63,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   d.querySelector('#tm-people-1 [title="Move down"]').click();
   check('move down reorders', d.querySelectorAll('#tm-grid .tm-card')[1].getAttribute('data-card') === 'people-1');
   d.querySelector('#tm-stats-1 [title="Remove"]').click();
-  check('remove takes the card off the page', d.getElementById('tm-stats-1') === null && w.Board.Terminal.state.layout.cards.length === 4);
+  check('remove takes the card off the page', d.getElementById('tm-stats-1') === null && w.Board.Terminal.state.layout.cards.length === 5);
   d.querySelector('#tm-market-1 [title="Pop out"]').click();
   await tick(20);
   check('pop out asks Rust for a window on that card, in this workspace, named as the card is', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'open_terminal_card' && c.args && c.args.cardId === 'market-1' && c.args.workspace === 'main' && c.args.title === 'Energy market'));
@@ -81,10 +86,10 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const idBox = d.querySelector('.tm-toolbar-param input');
   check('a type that needs an id asks for it', idBox !== null);
   d.getElementById('tm-add').click();
-  check('…and refuses to add without one', d.querySelectorAll('#tm-grid .tm-card').length === 4);
+  check('…and refuses to add without one', d.querySelectorAll('#tm-grid .tm-card').length === 5);
   idBox.value = '0-1';
   d.getElementById('tm-add').click();
-  check('adding places the card last with a fresh id', d.querySelectorAll('#tm-grid .tm-card').length === 5 && d.querySelectorAll('#tm-grid .tm-card')[4].getAttribute('data-card') === 'guild-1');
+  check('adding places the card last with a fresh id', d.querySelectorAll('#tm-grid .tm-card').length === 6 && d.querySelectorAll('#tm-grid .tm-card')[5].getAttribute('data-card') === 'guild-1');
   await tick(400);
   const saved = set();
   check('every change is saved through Rust, debounced', saved.length >= 1 && saved[saved.length - 1].args.layout.cards.some((c) => c.id === 'guild-1'));
@@ -100,7 +105,19 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   run('GUILD 0-2');
   check('GUILD opens a guild', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'guild' && c.params.id === '0-2'));
   run('2-15361');
-  check('a planet id opens the map', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'map')?.params.id === '2-15361');
+  check('a planet id opens the planet view', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'planet')?.params.id === '2-15361');
+  await until(() => d.querySelector('#tm-grid [data-type="planet"] .tm-planet-row'));
+  {
+    const pc = d.querySelector('#tm-grid [data-type="planet"]');
+    check('…drawing the owner as a person line and the readings strip', pc.querySelector('.pc-person')?.getAttribute('data-player-id') === '1-61' && pc.querySelectorAll('.tm-planet-strip .fstat').length === 3);
+    check('…a row per ambit with a slot tile for every slot, open ones marked', pc.querySelectorAll('.tm-planet-row').length === 5 && pc.querySelectorAll('.tm-planet-slot').length === 13 && pc.querySelectorAll('.tm-planet-slot.tm-empty').length === 9);
+    check('…struct portraits from the shared art map, offline dimmed, the enemy fleet marked', [...pc.querySelectorAll('.tm-planet-slot img')].some((i) => i.getAttribute('src') === 'img/structs/tank/tank-struct-base.png') && pc.querySelectorAll('.tm-planet-slot.tm-off').length === 1 && pc.querySelectorAll('.tm-planet-slot.tm-enemy').length === 1);
+    check('…and the live raid as an alert line', /shields vulnerable · Marklifer/.test(pc.querySelector('.tm-body').textContent));
+    [...pc.querySelectorAll('.tm-planet-doors a')].find((a) => a.textContent === 'Map').click();
+    check('its doors open the sibling cards for the same planet', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'map')?.params.id === '2-15361');
+  }
+  run('9-61');
+  check('a fleet id opens the map', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'map' && c.params.id === '9-61'));
   run('5-4559');
   check('any other id opens the inspector, which asks Comms\' reference cards', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'inspector')?.params.id === '5-4559');
   await tick(80);
@@ -113,7 +130,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('HALT lists the roster by margin, worst first', haltRows.length === 2 && /Marklifer/.test(haltRows[0].textContent) && /thin margin/.test(haltRows[0].textContent) && /1 under 20% margin/.test(d.querySelector('#tm-grid [data-type="halt"]').textContent));
   run('ORE');
   await until(() => d.querySelector('#tm-grid [data-type="ore"] .pc-row'));
-  check('ORE lists planets with ore, richest first, owner named', /JPEG/.test(d.querySelector('#tm-grid [data-type="ore"] .pc-row').textContent) && /7,100 planets with ore/.test(d.querySelector('#tm-grid [data-type="ore"]').textContent));
+  check('ORE lists who HOLDS ore, richest first, from the stats leaderboard', /#1/.test(d.querySelector('#tm-grid [data-type="ore"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="ore"] .pc-row').getAttribute('data-player-id') === '1-101' && /25 holders shown/.test(d.querySelector('#tm-grid [data-type="ore"]').textContent) && !/planets with ore/.test(d.querySelector('#tm-grid [data-type="ore"]').textContent));
   run('BOOK 1-194');
   await until(() => d.querySelector('#tm-grid [data-type="book"] .pc-row'));
   const book = d.querySelector('#tm-grid [data-type="book"]');
@@ -157,7 +174,23 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('dragging a card onto another lands it after that card', order().split(',').pop() === first, order());
   w.Board.Terminal.dropOn(first, null, true);
   check('…and a drop on the grid keeps it last', order().split(',').pop() === first);
-  check('the header is the drag handle', d.querySelector('#tm-grid .tm-card .tm-head').getAttribute('draggable') === 'true');
+  // The drag itself, driven by pointer events: press on a header, move past
+  // the 4px arm, release over the right half of another card.
+  {
+    const ids = order().split(',');
+    const src = d.querySelector('#tm-' + ids[1]), dst = d.querySelector('#tm-' + ids[3]);
+    d.elementFromPoint = (x) => (x >= 500 ? dst.querySelector('.tm-body') : null);
+    dst.getBoundingClientRect = () => ({ left: 400, width: 300, top: 0, height: 100, right: 700, bottom: 100 });
+    const ev = (type, x, y, el) => (el || w).dispatchEvent(new w.MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 }));
+    ev('pointerdown', 10, 10, src.querySelector('.tm-head'));
+    ev('pointermove', 12, 10);
+    check('a press that barely moves is not a drag', !w.Board.Terminal.state.drag);
+    ev('pointermove', 650, 50);
+    check('past the arm the card is dragging and the card under the pointer shows the drop side', w.Board.Terminal.state.drag === ids[1] && dst.classList.contains('tm-drop-after'));
+    ev('pointerup', 650, 50);
+    check('release lands it after that card, and saves', order().split(',').indexOf(ids[1]) === order().split(',').indexOf(ids[3]) + 1 && !w.Board.Terminal.state.drag && !d.querySelector('.tm-drop-after, .tm-dragging'));
+    delete d.elementFromPoint;
+  }
   check('every card carries a resize grip and its move doors are quiet', d.querySelectorAll('#tm-grid .tm-card .tm-resize').length === d.querySelectorAll('#tm-grid .tm-card').length && d.querySelectorAll('.tm-door-quiet').length >= 2);
   w.Board.Terminal.resizeTo(first, 3, false);
   check('a resize commits the width to the layout', d.querySelector('#tm-' + first).classList.contains('tm-w3') && w.Board.Terminal.state.layout.cards.find((c) => c.id === first).w === 3);
@@ -165,8 +198,42 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…clamped to the grid', w.Board.Terminal.state.layout.cards.find((c) => c.id === first).w === 3);
 
   // Page views and the battle log.
-  run('PRODUCTION');
-  check('PRODUCTION opens the energy page on its production view', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'page' && c.params.page === 'energy:production'));
+  // The ops cards: every one renders from the page's own command, no whole page.
+  for (const [word, type, expect] of [
+    ['QUEUE', 'queue', /StructBuildInitiate/], ['RESULTS', 'results', /insufficient charge/], ['SOLVE', 'solve', /GPU/],
+    ['GRID', 'grid', /connections/i], ['FUEL', 'fuel', /Auto infuse/], ['ALLOC', 'allocations', /6-53/], ['FLEET', 'fleet', /MARKLIFER/],
+    ['RAIDS', 'raids', /shields vulnerable/], ['POSTURE', 'posture', /Response/], ['TARGETS', 'targets', /NO-GO — protected/],
+    ['GRUDGES', 'grudges', /beezhan/], ['VETOES', 'vetoes', /player 1-248/], ['INCIDENTS', 'incidents', /1-287 @ 2-287/],
+    ['WALLET', 'wallet', /Hydro \[OH\]/], ['HEALTH', 'health', /./],
+  ]) {
+    run(word);
+    const sel = '#tm-grid [data-type="' + type + '"]';
+    await until(() => d.querySelector(sel) && !/…$/.test(d.querySelector(sel + ' .tm-body').textContent.trim()) && d.querySelector(sel + ' .tm-body').textContent.trim() !== '');
+    const body = d.querySelector(sel + ' .tm-body');
+    check(word + ' renders the ' + type + ' card from its own data', !!body && expect.test(body.textContent) && !/unavailable/.test(body.textContent), body && body.textContent.slice(0, 120));
+  }
+  // Actionable: a queued signing can be cancelled from its row…
+  [...d.querySelectorAll('#tm-grid [data-type="queue"] .tx-btns a')].find((a) => a.title === 'Cancel').click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_tx_mutate' && c.args.op === 'cancel'));
+  check('…the queue card cancels through the same command as the page', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_tx_mutate' && c.args.op === 'cancel' && c.args.id === 't2'));
+  // …a combat loop toggles from the posture card…
+  [...d.querySelectorAll('#tm-grid [data-type="posture"] a')].find((a) => a.textContent === 'Raiding on').click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'loop'));
+  const loopCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'loop');
+  check('…the posture card switches a loop by sending its whole config back', loopCall.args.payload.loop === 'raid' && loopCall.args.payload.config.enabled === true && loopCall.args.payload.config.posture === 'opportunist');
+  // …and a target can be grudged from the board.
+  d.querySelector('#tm-grid [data-type="targets"] .tx-btns a[title^="Add 1-61"]').click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'combat_lists'));
+  check('…the target board adds a grudge through combat_lists', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'combat_lists' && c.args.payload.kind === 'grudge' && c.args.payload.id === '1-61'));
+  // The sweep prices itself before it moves anything.
+  const sweepBtn = [...d.querySelectorAll('#tm-grid [data-type="fleet"] a')].find((a) => a.textContent === 'Sweep Alpha');
+  sweepBtn.click();
+  await until(() => /Confirm sweep/.test(sweepBtn.textContent));
+  check('the fleet card\'s sweep is a dry run first, and says what a second click will do', /Confirm sweep of 1/.test(sweepBtn.textContent) && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_mass_action' && c.args.request.mode === 'execute'));
+  run('TAPE');
+  check('TAPE is a live stream with a filter, economy by default', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'tape') && w.Board.Terminal.types().find((t) => t.type === 'tape').params[0].options.map((o) => o.value).join(',') === 'economy,combat,all');
+  run('SETTINGS');
+  check('SETTINGS is the one page still reached as a page, plainly titled', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'page' && c.params.page === 'config') && !/Team Ops/.test(d.querySelector('#tm-grid [data-type="page"] .tm-title').textContent));
   run('LOG 2-15361');
   await until(() => d.querySelector('#tm-grid [data-type="log"] #rv-log-body'));
   check('LOG draws the raid view\'s battle log for a planet, asking the same command', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_raid_log' && c.args.planetId === '2-15361'));
@@ -184,6 +251,13 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const before = w.Board.Terminal.state.ws;
   await w.Board.Terminal.importWorkspace(code);
   check('IMPORT makes a new workspace beside the old one', w.Board.Terminal.state.ws !== before && w.Board.Terminal.state.ws.startsWith(before) && w.Board.Terminal.state.workspaces.includes(w.Board.Terminal.state.ws));
+  // Role presets: a starting workspace per kind of player.
+  run('PRESET trader');
+  await tick(20);
+  check('PRESET makes the role\'s workspace and goes there', w.Board.Terminal.state.ws === 'trader' && w.Board.Terminal.state.layout.cards.some((c) => c.type === 'market') && w.Board.Terminal.state.layout.cards.some((c) => c.type === 'book'));
+  check('every preset names only registered card types and unique ids', Object.keys(w.Board.Terminal.PRESETS).every((k) => { const l = w.Board.Terminal.presetLayout(k); const ids = l.cards.map((c) => c.id); return l.cards.every((c) => w.Board.Terminal.known(c.type)) && new Set(ids).size === ids.length; }));
+  [...d.querySelectorAll('#tm-ws-nav .sui-screen-nav-item')].find((a) => a.textContent === '+').click();
+  check('the new-workspace row offers the presets', !!d.querySelector('#tm-ws-preset') && d.querySelectorAll('#tm-ws-preset option').length === Object.keys(w.Board.Terminal.PRESETS).length + 1);
   run('SHARE');
   check('SHARE opens the share row with the code and a door to Comms', d.querySelector('#tm-ws-share input')?.value === w.Board.Terminal.exportWorkspace() && [...d.querySelectorAll('#tm-ws-share a')].some((a) => a.textContent === 'Send to Comms'));
   [...d.querySelectorAll('#tm-ws-share a')].find((a) => a.textContent === 'Send to Comms').click();

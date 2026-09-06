@@ -85,13 +85,16 @@ const BUDGET = {
   // deliberately, once; the ratchet holds from here.
   // board.html +5 (2026-09-06): the Terminal — two grid breakpoints, the map frame height, the comms scroll box, one card border.
   // board.html +2 (2026-09-06): the resize preview outline and the battle log's row rule, both 1px hairlines.
-  'board.html':         [2, 102],
+  // board.html +1 (2026-09-06): the Terminal grid's 1px row unit (packing precision; the gap itself is a token).
+  // board.html +4 (2026-09-06): the planet card — its ambit-row hairline, the slot tile's 64px basis and 128px cap (2× and 4× the 32px art).
+  'board.html':         [2, 107],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not
   // spacing and has no token.
   'board-gamestats.js': [0, 1],
   'board-terminal.js':  [0, 0],
+  'board-terminal-ops.js': [0, 0],
   'board-shim.js':      [0, 0],
   // The debug-tab patch INJECTED INTO THE GAME'S OWN WINDOW, so it renders
   // inches from the real UI — and it was the least audited file in the repo.

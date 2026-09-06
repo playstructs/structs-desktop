@@ -47,7 +47,8 @@
   // ── Registry ────────────────────────────────────────────────────────────
   var Terminal = {
     register: function (type, spec) { spec.type = type; TYPES[type] = spec; return spec; },
-    types: function () { return Object.keys(TYPES).map(function (k) { return TYPES[k]; }); },
+    types: function () { return Object.keys(TYPES).map(function (k) { return TYPES[k]; }).filter(function (t) { return !t.hidden; }); },
+    known: function (type) { return !!TYPES[type]; },
     state: state,
   };
   Board.Terminal = Terminal;
@@ -61,9 +62,9 @@
       { id: 'market-1', type: 'market', params: {}, w: 2 },
       { id: 'tape-1', type: 'tape', params: {}, w: 1 },
       { id: 'stats-1', type: 'stats', params: { section: 'universe' }, w: 2 },
-      { id: 'work-1', type: 'page', params: { page: 'work' }, w: 1 },
-      { id: 'tx-1', type: 'page', params: { page: 'tx' }, w: 1 },
-      { id: 'raids-1', type: 'stats', params: { section: 'raids' }, w: 1 },
+      { id: 'pow-1', type: 'pow', params: {}, w: 1 },
+      { id: 'queue-1', type: 'queue', params: {}, w: 1 },
+      { id: 'raids-1', type: 'raids', params: {}, w: 1 },
     ] };
   }
 
@@ -84,10 +85,33 @@
       } catch (e) { /* storage may be unavailable */ }
       return null;
     }).then(function (l) {
-      state.layout = (l && l.cards.length) ? l : defaultLayout();
+      state.layout = (l && l.cards.length) ? migrate(l) : defaultLayout();
       return state.layout;
     });
   }
+  // Saved layouts from when a Team Ops PAGE was a card. A page card becomes
+  // the cards that now carry its data, in place; ids stay unique.
+  var PAGE_TO_CARDS = {
+    work: [['pow', {}, 1], ['tasks', {}, 2]], tx: [['queue', {}, 1], ['results', {}, 1]],
+    energy: [['grid', {}, 1], ['halt', {}, 2]], 'energy:production': [['fuel', {}, 1]], 'energy:distribution': [['grid', {}, 1], ['allocations', {}, 1]],
+    armada: [['fleet', {}, 2]], raids: [['raids', {}, 1]], inventory: [['wallet', {}, 1]], diagnostics: [['health', {}, 1]],
+    war: [['posture', {}, 1], ['targets', {}, 2]], 'war:doctrine': [['posture', {}, 1]], 'war:targets': [['targets', {}, 2]],
+    'war:lists': [['grudges', {}, 1], ['vetoes', {}, 1]], 'war:incidents': [['incidents', {}, 2]], grass: [['tape', { filter: 'all' }, 1]],
+    ops: [['health', {}, 1], ['pow', {}, 1]], explore: [['people', {}, 1]],
+  };
+  function migrate(l) {
+    var out = [], seen = {};
+    l.cards.forEach(function (c) { seen[c.id] = true; });
+    var fresh = function (type) { var n = 1; while (seen[type + '-' + n]) n++; seen[type + '-' + n] = true; return type + '-' + n; };
+    l.cards.forEach(function (c) {
+      var into = c.type === 'page' ? PAGE_TO_CARDS[String((c.params || {}).page || 'work')] : null;
+      if (!into) { out.push(c); return; }
+      into.forEach(function (n) { out.push({ id: fresh(n[0]), type: n[0], params: n[1], w: n[2] }); });
+    });
+    l.cards = out;
+    return l;
+  }
+  Terminal.migrate = migrate;
 
   function save() {
     if (state.saveTimer) clearTimeout(state.saveTimer);
@@ -168,30 +192,50 @@
       doors.appendChild(door('icon-link-out', 'Pop out', function () { popOut(card.id); }));
       doors.appendChild(door('icon-close', 'Remove', function () { remove(card.id); }));
       // Drag the header to move the card; drop on another card to land
-      // before or after it (left or right half), or on the grid to go last.
-      head.draggable = true;
+      // before or after it (left or right half), or on the grid floor to go
+      // last. Pointer events, not HTML5 drag-and-drop: they behave the same in
+      // WebKit and Chromium, need no ghost image, and can be driven by any
+      // synthetic mouse — which is also how the tests reach them.
       head.title = 'Drag to move';
-      head.addEventListener('dragstart', function (ev) {
-        state.drag = card.id;
-        node.classList.add('tm-dragging');
-        try { ev.dataTransfer.effectAllowed = 'move'; ev.dataTransfer.setData('text/plain', card.id); } catch (e) { /* jsdom */ }
-      });
-      head.addEventListener('dragend', function () { state.drag = null; node.classList.remove('tm-dragging'); clearDrop(); });
-      node.addEventListener('dragover', function (ev) {
-        if (!state.drag || state.drag === card.id) return;
-        ev.preventDefault();
-        var r = node.getBoundingClientRect();
-        var after = r.width > 0 ? (ev.clientX - r.left) > r.width / 2 : true;
-        clearDrop();
-        node.classList.add(after ? 'tm-drop-after' : 'tm-drop-before');
-      });
-      node.addEventListener('dragleave', function () { node.classList.remove('tm-drop-before', 'tm-drop-after'); });
-      node.addEventListener('drop', function (ev) {
-        if (!state.drag || state.drag === card.id) return;
-        ev.preventDefault();
-        var r = node.getBoundingClientRect();
-        var after = r.width > 0 ? (ev.clientX - r.left) > r.width / 2 : true;
-        dropOn(state.drag, card.id, after);
+      head.addEventListener('pointerdown', function (ev) {
+        if (ev.button !== 0 || (ev.target.closest && ev.target.closest('.tm-door'))) return;
+        var sx = ev.clientX, sy = ev.clientY, live = false, target = null, after = false;
+        var onMove = function (e) {
+          if (!live) {
+            if (Math.abs(e.clientX - sx) < 4 && Math.abs(e.clientY - sy) < 4) return;
+            live = true;
+            state.drag = card.id;
+            node.classList.add('tm-dragging');
+          }
+          e.preventDefault();
+          var hit = document.elementFromPoint ? document.elementFromPoint(e.clientX, e.clientY) : null;
+          var over = hit && hit.closest ? hit.closest('.tm-card') : null;
+          clearDrop();
+          if (over && over !== node) {
+            var r = over.getBoundingClientRect();
+            after = r.width > 0 ? (e.clientX - r.left) > r.width / 2 : true;
+            target = over.getAttribute('data-card');
+            over.classList.add(after ? 'tm-drop-after' : 'tm-drop-before');
+          } else {
+            target = null;
+          }
+        };
+        var onUp = function (e) {
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+          window.removeEventListener('pointercancel', onUp);
+          if (!live) return;
+          node.classList.remove('tm-dragging');
+          var grid = document.getElementById('tm-grid');
+          var hit = document.elementFromPoint ? document.elementFromPoint(e.clientX, e.clientY) : null;
+          var onFloor = grid && hit && (hit === grid || grid.contains(hit));
+          if (target) dropOn(card.id, target, after);
+          else if (onFloor) dropOn(card.id, null, true);
+          else { state.drag = null; clearDrop(); }
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
       });
       // Drag the right edge to change the width, one column at a time.
       var grip = H.el('span', 'tm-resize');
@@ -256,17 +300,18 @@
   Terminal.resizeTo = resizeTo;
 
   // ── Dense packing ──────────────────────────────────────────────────────
-  // The grid's rows are one small unit tall (--spacing-sm, 4px) with the
-  // row gap --spacing-md (8px); each card spans as many units as its content
-  // measures, so cards of different heights pack without the holes a
-  // row-aligned grid leaves under the short ones. Measured, never guessed: a
-  // ResizeObserver on each card re-fits it when its content changes.
-  var ROW_UNIT = 4, ROW_GAP = 8;
+  // The grid's rows are 1px tall with no row gap; each card spans its
+  // measured height plus one gap, so cards of different heights pack without
+  // the holes a row-aligned grid leaves under the short ones. Measured, never
+  // guessed: a ResizeObserver on each card re-fits it when its content changes.
+  // Rows are 1px (row-gap 0), so a card spans its own height plus the gap it
+  // leaves below (--spacing-md, 8px). ROW_GAP must match that token.
+  var ROW_GAP = 8;
   function fitRows(m) {
     if (!m || !m.node || !m.node.isConnected) return;
     var h = m.node.getBoundingClientRect().height;
     if (!h) return;
-    var span = Math.max(1, Math.ceil((h + ROW_GAP) / (ROW_UNIT + ROW_GAP)));
+    var span = Math.max(1, Math.ceil(h) + ROW_GAP);
     if (m.span !== span) { m.span = span; m.node.style.gridRowEnd = 'span ' + span; }
   }
   Terminal.fitRows = fitRows;
@@ -610,15 +655,54 @@
     code.focus();
   }
 
+  // ── Role presets ────────────────────────────────────────────────────────
+  // Starting layouts for the people this page is for. Each is an ordinary
+  // workspace once made, and exports as a `terminal:` code like any other.
+  var PRESETS = {
+    trader:    { label: 'Energy trader',   cards: [['market', {}, 2], ['book', { id: 'primary' }, 1], ['banks', {}, 2], ['grid', {}, 1], ['halt', {}, 2], ['alerts', {}, 1], ['tape', { filter: 'economy' }, 1], ['wallet', {}, 1]] },
+    admin:     { label: 'Guild admin',     cards: [['people', {}, 1], ['banks', {}, 2], ['stats', { section: 'guilds' }, 2], ['grid', {}, 1], ['fleet', {}, 2], ['chat', {}, 1]] },
+    botter:    { label: 'Botter',          cards: [['health', {}, 1], ['queue', {}, 1], ['results', {}, 1], ['pow', {}, 1], ['fleet', {}, 2], ['tape', { filter: 'all' }, 1], ['page', { page: 'config:profiles' }, 2]] },
+    hasher:    { label: 'Hasher',          cards: [['pow', {}, 1], ['solve', {}, 1], ['stats', { section: 'engine' }, 1], ['tasks', {}, 2], ['fuel', {}, 1], ['queue', {}, 1]] },
+    raider:    { label: 'Raider',          cards: [['posture', {}, 1], ['targets', {}, 2], ['raids', { scope: 'live' }, 1], ['ore', {}, 2], ['grudges', {}, 1], ['incidents', {}, 2], ['tape', { filter: 'combat' }, 1]] },
+  };
+  Terminal.PRESETS = PRESETS;
+  function presetLayout(key) {
+    var pr = PRESETS[key];
+    if (!pr) return null;
+    var seen = {};
+    return { version: 0, cards: pr.cards.map(function (c) {
+      seen[c[0]] = (seen[c[0]] || 0) + 1;
+      return { id: c[0] + '-' + seen[c[0]], type: c[0], params: c[1], w: c[2] };
+    }) };
+  }
+  Terminal.presetLayout = presetLayout;
+  /* Make (or replace) the workspace named after the preset and go there. */
+  function applyPreset(key) {
+    var layout = presetLayout(key);
+    if (!layout) { Board.stamp && Board.stamp('presets: ' + Object.keys(PRESETS).join(', ')); return Promise.resolve(false); }
+    var name = key;
+    if (state.workspaces.indexOf(name) < 0) state.workspaces.push(name);
+    Object.keys(state.mounted).forEach(function (id) { unmountCard(id); });
+    state.ws = name;
+    state.layout = layout;
+    if (!state.solo) invoke('terminal_workspace_activate', { name: name }).catch(function () {});
+    return persist().then(function () { renderAll(); return true; });
+  }
+  Terminal.applyPreset = applyPreset;
+
   function newWorkspaceRow(strip) {
     if (strip.querySelector('#tm-ws-new')) return;
     var box = H.textBox('', 'new workspace name', function () {});
     box.id = 'tm-ws-new';
     box.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') { e.preventDefault(); createWorkspace(box.value); }
-      if (e.key === 'Escape') { box.parentNode.removeChild(box); }
+      if (e.key === 'Escape') { box.parentNode.removeChild(box); if (pick.parentNode) pick.parentNode.removeChild(pick); }
     });
     strip.appendChild(box);
+    // Or start from a role's layout.
+    var pick = H.selectBox('', [{ value: '', label: 'or a preset…' }].concat(Object.keys(PRESETS).map(function (k) { return { value: k, label: PRESETS[k].label }; })), function (v) { if (v) applyPreset(v); });
+    pick.id = 'tm-ws-preset';
+    strip.appendChild(pick);
     box.focus();
   }
 
@@ -631,13 +715,17 @@
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['tape'], FLOW: ['tape'],
     PAY: ['pay'], CHAT: ['chat'], COMMS: ['comms', 'id'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
     BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
-    PLAYER: ['player', 'id'], MAP: ['map', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
+    PLAYER: ['player', 'id'], MAP: ['map', 'id'], PLANET: ['planet', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
+    PRESET: ['preset'], PRESETS: ['preset'],
     ORE: ['ore'], HALT: ['halt'], BOOK: ['book', 'id'], ALERTS: ['alerts', 'rules'], ALERT: ['alerts', 'rules'],
-    LOG: ['log', 'id'], BATTLE: ['log', 'id'], PRODUCTION: ['page', 'energy:production'], DISTRIBUTION: ['page', 'energy:distribution'],
-    DOCTRINE: ['page', 'war:doctrine'], TARGETS: ['page', 'war:targets'], INCIDENTS: ['page', 'war:incidents'], HASH: ['page', 'work'],
-    STATS: ['stats', 'section'], WORK: ['page', 'work'], TX: ['page', 'tx'], ENERGY: ['page', 'energy'],
-    ROSTER: ['page', 'armada'], ARMADA: ['page', 'armada'], RAIDS: ['page', 'raids'], STREAM: ['page', 'grass'],
-    INVENTORY: ['page', 'inventory'], WAR: ['page', 'war'], OPS: ['page', 'ops'], CONFIG: ['page', 'config'],
+    LOG: ['log', 'id'], BATTLE: ['log', 'id'],
+    POW: ['pow'], HASH: ['pow'], SOLVE: ['solve'], TASKS: ['tasks'], QUEUE: ['queue'], TX: ['queue'], RESULTS: ['results'],
+    GRID: ['grid'], FUEL: ['fuel'], ALLOC: ['allocations'], ALLOCATIONS: ['allocations'], MARGINS: ['halt'],
+    FLEET: ['fleet'], ROSTER: ['fleet'], RAIDS: ['raids'], POSTURE: ['posture'], WAR: ['posture'], TARGETS: ['targets'],
+    GRUDGES: ['grudges'], VETOES: ['vetoes'], INCIDENTS: ['incidents'], WALLET: ['wallet', 'optid'], HEALTH: ['health'],
+    SETTINGS: ['page', 'config'],
+    STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], ARMADA: ['fleet'], STREAM: ['tape'],
+    INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
   };
   Terminal.execute = function (line) {
     var parts = String(line || '').trim().split(/\s+/).filter(Boolean);
@@ -649,9 +737,11 @@
       var kind = Number(idm[1]);
       if (kind === 1) return !!add('player', { id: parts[0] });
       if (kind === 0) return !!add('guild', { id: parts[0] });
-      if (kind === 2 || kind === 9) return !!add('map', { id: parts[0] });
+      if (kind === 2) return !!add('planet', { id: parts[0] });
+      if (kind === 9) return !!add('map', { id: parts[0] });
       return !!add('inspector', { id: parts[0] });
     }
+    if (head === 'PRESET' || head === 'PRESETS') { applyPreset(String(rest || '').toLowerCase()); return true; }
     if (head === 'SHARE') { var strip = document.querySelector('.tm-workspaces'); if (strip) shareRow(strip); return true; }
     if (head === 'IMPORT') { if (!rest) return false; Terminal.importWorkspace(rest); return true; }
     var w = WORDS[head];
@@ -659,6 +749,7 @@
     var type = w[0], arg = w[1];
     if (!arg) return !!add(type, {});
     if (arg === 'id' || arg === 'ids' || arg === 'rules') { if (!rest) return false; var p = {}; p[arg] = rest; return !!add(type, p); }
+    if (arg === 'optid') return !!add(type, rest ? { id: rest } : {});
     if (arg === 'section') return !!add(type, { section: (rest || 'universe').toLowerCase() });
     return !!add(type, { page: arg });
   };
@@ -717,8 +808,8 @@
     { value: 'guilds', label: 'Best guilds' },
   ];
   Terminal.register('stats', {
-    label: 'Game Stats section', defaultWidth: 2,
-    describe: function (p) { var s = STATS_SECTIONS.filter(function (x) { return x.value === p.section; })[0]; return 'Game Stats · ' + (s ? s.label : p.section || '?'); },
+    label: 'Galaxy statistics', defaultWidth: 2,
+    describe: function (p) { var s = STATS_SECTIONS.filter(function (x) { return x.value === p.section; })[0]; return s ? s.label : (p.section || '?'); },
     params: [{ key: 'section', label: 'Section', kind: 'choice', options: STATS_SECTIONS }],
     cadenceMs: 30000,
     render: function (host, p) {
@@ -856,15 +947,22 @@
   });
 
   // The flow tape: the live stream's economic frames, as the stream draws them.
-  var ECONOMY = /transfer|sent|received|settled|mint|burn|refine|seized|infus|agreement|provider|allocation|ore/i;
+  var STREAMS = {
+    economy: /transfer|sent|received|settled|mint|burn|refine|seized|infus|agreement|provider|allocation|ore/i,
+    combat: /raid|attack|struct_health|destroy|defen|shield|fleet/i,
+    all: /./,
+  };
   var tape = { rows: [], listening: false };
   Terminal.register('tape', {
-    label: 'Flow tape', describe: function () { return 'Flow tape'; }, cadenceMs: 15000,
-    render: function (host) {
+    label: 'Live tape', describe: function (p) { return 'Live tape · ' + (p.filter || 'economy'); },
+    params: [{ key: 'filter', label: 'Stream', kind: 'choice', options: [{ value: 'economy', label: 'economy' }, { value: 'combat', label: 'combat' }, { value: 'all', label: 'everything' }] }],
+    cadenceMs: 15000,
+    render: function (host, p) {
+      var want = STREAMS[p.filter] || STREAMS.economy;
       var draw = function () {
         host.innerHTML = '';
         var ul = H.el('ul', 'ops-feed sui-text-ticker tm-tape');
-        var rows = tape.rows.filter(function (ev) { return ECONOMY.test(String(ev.category || '')); }).slice(0, 40);
+        var rows = tape.rows.filter(function (ev) { return want.test(String(ev.category || '')); }).slice(0, 40);
         if (!rows.length) ul.appendChild(H.el('li', 'ops-muted', 'no economic frames yet'));
         rows.forEach(function (ev) { ul.appendChild(Board._grass && Board._grass.row ? Board._grass.row(ev) : H.el('li', null, ev.category)); });
         host.appendChild(ul);
@@ -873,7 +971,7 @@
         tape.listening = true;
         window.StructsEvents.listen('grass-event', function (e) {
           var ev = e && e.payload;
-          if (!ev || !ECONOMY.test(String(ev.category || ''))) return;
+          if (!ev) return;
           tape.rows.unshift(ev);
           if (tape.rows.length > 200) tape.rows.length = 200;
           if (state.mounted['tape-1'] || Object.keys(state.mounted).some(function (id) { return state.mounted[id].def && state.mounted[id].def.type === 'tape'; })) draw();
@@ -888,20 +986,16 @@
   // A page, or a page's VIEW (`energy:production`), the way the board's own
   // sub-nav reaches them. Ordered by who reaches for them: hashers and
   // botters first, then energy, then war.
+  // Only the settings pages are still reached as pages (forms are not data);
+  // every data page became cards of its own (board-terminal-ops.js), and a
+  // saved layout that names one is migrated on load (PAGE_TO_CARDS).
   var PAGES = [
-    { value: 'work', label: 'Work queue (hashing)' }, { value: 'tx', label: 'Transactions' },
-    { value: 'energy:production', label: 'Energy · production' }, { value: 'energy:distribution', label: 'Energy · distribution' },
-    { value: 'inventory', label: 'Inventory' }, { value: 'armada', label: 'Armada roster' },
-    { value: 'raids', label: 'Raids' }, { value: 'war:doctrine', label: 'War · doctrine' }, { value: 'war:targets', label: 'War · targets' },
-    { value: 'war:lists', label: 'War · lists' }, { value: 'war:incidents', label: 'War · incidents' },
-    { value: 'grass', label: 'Live stream' }, { value: 'ops', label: 'Overview' }, { value: 'explore', label: 'Explore' },
-    { value: 'config', label: 'Settings' }, { value: 'config:appearance', label: 'Settings · squads' }, { value: 'config:profiles', label: 'Settings · profiles' },
-    { value: 'diagnostics', label: 'Diagnostics' },
+    { value: 'config', label: 'Settings' }, { value: 'config:appearance', label: 'Squad appearance' }, { value: 'config:profiles', label: 'Behaviour profiles' },
   ];
   function pageOf(p) { var parts = String(p.page || 'work').split(':'); return { name: parts[0], view: parts[1] || p.view || undefined }; }
   Terminal.register('page', {
-    label: 'Team Ops page', defaultWidth: 2,
-    describe: function (p) { var s = PAGES.filter(function (x) { return x.value === p.page; })[0]; return 'Team Ops · ' + (s ? s.label : p.page || '?'); },
+    label: 'Settings page', defaultWidth: 2, hidden: true,
+    describe: function (p) { var s = PAGES.filter(function (x) { return x.value === p.page; })[0]; return s ? s.label : (p.page || '?'); },
     params: [{ key: 'page', label: 'Page', kind: 'choice', options: PAGES }],
     cadenceMs: 5000,
     render: function (host, p) {
@@ -930,7 +1024,7 @@
 
   // Who is closest to brownout: our roster's power margins, worst first.
   Terminal.register('halt', {
-    label: 'Halt watch', defaultWidth: 2, describe: function () { return 'Halt watch'; }, cadenceMs: 30000,
+    label: 'Power margins', defaultWidth: 2, describe: function () { return 'Power margins'; }, cadenceMs: 30000,
     render: function (host) {
       return invoke('mcp_energy').then(function (e) {
         host.innerHTML = '';
@@ -957,28 +1051,31 @@
     },
   });
 
-  // Where the ore is: every planet with ore left, richest first, owner named.
+  // Who holds ore: the galaxy's ore leaderboard (the stats engine's grid
+  // read), richest first. Ore is what a raid takes and what a refinery
+  // turns into Alpha, so the holder matters and the planet does not.
   Terminal.register('ore', {
-    label: 'Ore radar', defaultWidth: 2, describe: function () { return 'Ore radar'; }, cadenceMs: 60000,
+    label: 'Ore holders', defaultWidth: 2, describe: function () { return 'Ore holders'; }, cadenceMs: 60000,
     render: function (host) {
-      return invoke('terminal_ore_radar', { limit: 30 }).then(function (r) {
+      return invoke('mcp_game_stats_snapshot').then(function (r) {
         host.innerHTML = '';
-        var rows = (r && r.planets) || [];
+        var rows = ((r && r.players_top) || {}).ore || [];
+        var t = (r && r.totals) || {};
         var cap = H.el('div', 'tm-cap');
-        cap.appendChild(H.el('span', 'fstat-l', H.fmtInt((r && r.planets_with_ore) || 0) + ' planets with ore' + (r && r.height ? ' · block ' + H.fmtInt(r.height) : '')));
+        cap.appendChild(H.el('span', 'fstat-l', rows.length + ' holders shown' + (t.ore != null ? ' · ' + H.fmtOre(t.ore) + ' in the galaxy' : '')));
         host.appendChild(cap);
-        if (!rows.length) { host.appendChild(H.stateBlock('info', 'The snapshot has no ore readings yet.')); return; }
+        if (!rows.length) { host.appendChild(H.stateBlock('info', 'No ore readings yet.')); return; }
         var table = H.resultTable();
-        rows.forEach(function (p) {
-          var attrs = p.owner_pfp; if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
+        rows.slice(0, 30).forEach(function (p) {
+          var attrs = p.pfp_attrs; if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
           table.appendChild(window.StructsPlayerCard.row({
-            id: p.owner || '?', name: p.owner_name || p.owner || 'unowned', pfp: attrs, sub: p.planet_id,
-            guild: ((p.owner_tag ? '[' + p.owner_tag + '] ' : '') + (p.owner_guild || '')).trim() || null,
-            readings: [
-              { value: H.fmtOre(p.ore), icon: 'sui-icon-alpha-ore', title: 'Ore on the planet' },
-              { value: H.fmtInt(p.shield), icon: 'icon-planetary-shield', title: 'Planetary shield' },
-            ],
-          }, { actions: [{ icon: 'icon-planet', title: 'Map this planet', onClick: function () { add('map', { id: p.planet_id }); } }] }));
+            id: p.player_id, name: p.username || p.player_id, pfp: attrs, sub: '#' + p.rank,
+            guild: ((p.tag ? '[' + p.tag + '] ' : '') + (p.guild_name || '')).trim() || null,
+            readings: [{ value: H.fmtOre(p.value), icon: 'sui-icon-alpha-ore', title: 'Ore held' }],
+          }, { actions: [
+            { icon: 'icon-member', title: 'Watch this player', onClick: function () { add('player', { id: p.player_id }); } },
+            { icon: 'icon-planet', title: p.planet_id ? 'Open planet ' + p.planet_id : 'No planet known', onClick: function () { if (p.planet_id) add('planet', { id: p.planet_id }); } },
+          ] }));
         });
         host.appendChild(table);
       });
@@ -1034,7 +1131,7 @@
     'halt.min_margin': function () { return invoke('mcp_energy').then(function (e) { var m = ((e && e.players) || []).map(function (p) { return Number(p.margin_pct); }).filter(isFinite); return m.length ? Math.min.apply(null, m) : null; }); },
     'raids.live': function () { return Board._gamestats.ensureBoot().then(function () { var t = Board._gamestats.state.snap && Board._gamestats.state.snap.totals; return t ? Number(t.raids_active) : null; }); },
     'people.live_1h': function () { return Board._gamestats.ensureBoot().then(function () { var t = Board._gamestats.state.snap && Board._gamestats.state.snap.totals; return t ? Number(t.live_1h) : null; }); },
-    'ore.top': function () { return invoke('terminal_ore_radar', { limit: 1 }).then(function (r) { var p = r && r.planets && r.planets[0]; return p ? Number(p.ore) : null; }); },
+    'ore.top': function () { return invoke('mcp_game_stats_snapshot').then(function (r) { var p = r && r.players_top && r.players_top.ore && r.players_top.ore[0]; return p ? Number(p.value) : null; }); },
     'book.first_expiry': function () { return invoke('terminal_agreements', { player: Board.primaryId ? Board.primaryId() : '' }).then(function (b) { return b && b.first_expiry_block != null && b.height ? b.first_expiry_block - b.height : null; }); },
   };
   var OPS = { '<': function (a, b) { return a < b; }, '>': function (a, b) { return a > b; }, '<=': function (a, b) { return a <= b; }, '>=': function (a, b) { return a >= b; }, '=': function (a, b) { return a === b; } };
@@ -1332,6 +1429,96 @@
     f.src = url;
     return f;
   }
+  // A planet as a card, not a window: who holds it, what it is worth, what is
+  // happening to it, and every slot by ambit — the spectator snapshot the raid
+  // view draws from, laid out to be read in a column. The doors open the
+  // map, the battle log and the object's Comms for the same planet.
+  var AMBITS = ['space', 'air', 'land', 'water'];
+  Terminal.register('planet', {
+    label: 'Planet view', defaultWidth: 1,
+    describe: function (p) { return 'Planet ' + (p.id || '?'); },
+    params: [{ key: 'id', label: 'Planet id', kind: 'id', placeholder: '2-15361' }],
+    cadenceMs: 30000,
+    render: function (host, p) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet id.')); return; }
+      return invoke('mcp_raid_state', { planetId: p.id }).then(function (r) {
+        var snap = r && r.snapshot;
+        host.innerHTML = '';
+        if (!snap) { host.appendChild(H.stateBlock('error', 'No snapshot for ' + p.id + '.')); return; }
+        var parts = window.StructsPlayerCard && StructsPlayerCard.parts;
+        var owner = parts && parts.personLine({ id: snap.owner, name: snap.owner_name, pfp: snap.owner_pfp }, { cls: 'tm-planet-owner' });
+        var cap = H.el('div', 'tm-cap');
+        if (owner) cap.appendChild(owner); else cap.appendChild(H.el('span', 'fstat-l', snap.owner ? 'owner ' + snap.owner : 'unclaimed'));
+        cap.appendChild(H.el('span', 'fstat-l', 'planet ' + snap.planet_id));
+        host.appendChild(cap);
+        var strip = H.el('div', 'hstrip tm-planet-strip');
+        strip.appendChild(H.statTile('shield', H.fmtInt(snap.planetary_shield || 0), 'icon-planetary-shield'));
+        strip.appendChild(H.statTile('ore', snap.stored_ore == null ? '\u2014' : H.fmtOre(snap.stored_ore), 'icon-ore-ready'));
+        strip.appendChild(H.statTile('fleets', H.fmtInt((snap.fleets || []).length), 'icon-fleet-tile'));
+        host.appendChild(strip);
+        if (snap.raid_status) {
+          var who = snap.raider_name || snap.raider_id || snap.raiding_fleet || 'unknown';
+          host.appendChild(H.alertLine(String(snap.raid_status).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase() + ' \u00b7 ' + who, 'icon-raid'));
+        }
+        var structs = snap.structs || [];
+        var slots = snap.slots || {};
+        var art = Board._structArt;
+        AMBITS.forEach(function (ambit) {
+          var n = Number(slots[ambit] || 0);
+          var here = structs.filter(function (x) { return x.ambit === ambit && x.category === 'planet' && !x.destroyed; });
+          if (!n && !here.length) return;
+          var row = H.el('div', 'tm-planet-row');
+          var chip = H.el('span', 'prof-ambit');
+          chip.appendChild(H.el('i', 'sui-icon sui-icon-sm sui-icon-' + ambit));
+          chip.appendChild(H.el('span', 'fstat-l', ambit));
+          row.appendChild(chip);
+          var tiles = H.el('div', 'tm-planet-slots');
+          for (var i = 0; i < Math.max(n, here.length); i++) {
+            var st = here.find(function (x) { return x.slot === i; }) || (i < here.length && !here.some(function (x) { return typeof x.slot === 'number'; }) ? here[i] : null);
+            var tile = H.el('div', 'tm-planet-slot' + (st ? (st.online ? '' : ' tm-off') : ' tm-empty'));
+            if (st) {
+              tile.appendChild(art ? art.portrait(st.type_name) : H.el('span', 'fstat-l', st.type_name));
+              tile.appendChild(H.el('span', 'fstat-l', st.type_name));
+              if (st.health != null) tile.appendChild(H.el('span', 'fstat-l', st.health + '/' + (st.max_health || '?')));
+              tile.title = st.type_name + ' ' + st.id + (st.defending ? ' · defending ' + st.protects : '') + (st.defended ? ' · defended' : '');
+            } else {
+              tile.appendChild(H.el('span', 'fstat-l', 'open'));
+              tile.title = ambit + ' slot ' + (i + 1) + ' is open';
+            }
+            tiles.appendChild(tile);
+          }
+          row.appendChild(tiles);
+          host.appendChild(row);
+        });
+        var fleet = structs.filter(function (x) { return x.category === 'fleet' && !x.destroyed; });
+        if (fleet.length) {
+          var frow = H.el('div', 'tm-planet-row');
+          var fchip = H.el('span', 'prof-ambit'); fchip.appendChild(H.el('i', H.iconClass('icon-fleet-tile', 'sui-icon-sm'))); fchip.appendChild(H.el('span', 'fstat-l', 'fleet'));
+          frow.appendChild(fchip);
+          var ftiles = H.el('div', 'tm-planet-slots');
+          fleet.forEach(function (st) {
+            var tile = H.el('div', 'tm-planet-slot' + (st.online ? '' : ' tm-off') + (st.side === 'attacker' ? ' tm-enemy' : ''));
+            tile.appendChild(art ? art.portrait(st.type_name) : H.el('span', 'fstat-l', st.type_name));
+            tile.appendChild(H.el('span', 'fstat-l', st.type_name));
+            if (st.health != null) tile.appendChild(H.el('span', 'fstat-l', st.health + '/' + (st.max_health || '?')));
+            tile.title = st.type_name + ' ' + st.id + ' · ' + st.ambit + (st.is_command ? ' · command' : '');
+            ftiles.appendChild(tile);
+          });
+          frow.appendChild(ftiles);
+          host.appendChild(frow);
+        }
+        var doors = H.el('div', 'tm-planet-doors');
+        [['Map', 'map'], ['Battle log', 'log'], ['Comms', 'comms']].forEach(function (d) {
+          var a = H.el('a', 'sui-screen-btn sui-mod-secondary', d[0]);
+          a.href = 'javascript:void(0)';
+          a.addEventListener('click', function () { add(d[1], { id: p.id }); });
+          doors.appendChild(a);
+        });
+        host.appendChild(doors);
+      });
+    },
+  });
+
   Terminal.register('map', {
     label: 'Map viewer', defaultWidth: 2,
     describe: function (p) { return 'Map · ' + (String(p.id || '').indexOf('9-') === 0 ? 'fleet ' : 'planet ') + (p.id || '?'); },
