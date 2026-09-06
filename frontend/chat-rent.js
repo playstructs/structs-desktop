@@ -41,17 +41,44 @@
         var d = Number(dur.input.value) || 0;
         return (Number(p.rate_amount) || 0) * c * d;
       }
+      /* Can this deal be escrowed? The whole cost is debited at open in the
+       * provider's rate denom, which is usually a GUILD token — a buyer flush
+       * with alpha and holding none of that token is rejected at broadcast
+       * with a bare code. So the primary's balance in that denom is read once
+       * the form opens, and Confirm stays off while it is short, saying by how
+       * much. Unknown (no inventory yet) never blocks: a false refusal is a
+       * lie the player cannot argue with. */
+      var balance = null;                       // base units of p.rate_denom, or null
       function reprice() {
         var total = cost();
+        var short = balance != null && total > balance ? total - balance : 0;
         quote.textContent = total > 0
           ? 'Costs ' + fmtCount(total) + ' ' + (p.denom_label || '') + ' now, in full'
+            + (balance == null ? '' : ' · you hold ' + fmtCount(balance))
+            + (short ? ' · short ' + fmtCount(short) : '')
           : 'Enter a capacity and duration';
-        go.disabled = !(total > 0);
-        go.classList.toggle('sui-mod-disabled', !(total > 0));
+        quote.classList.toggle('chat-rent-short', !!short);
+        var can = total > 0 && !short;
+        go.disabled = !can;
+        go.classList.toggle('sui-mod-disabled', !can);
       }
       cap.input.addEventListener('input', reprice);
       dur.input.addEventListener('input', reprice);
       reprice();
+      if (p.rate_denom) {
+        invoke('mcp_inventory', { player: 'primary' }).then(function (inv) {
+          var rows = (inv && inv.assets) || [];
+          for (var i = 0; i < rows.length; i++) {
+            if (rows[i] && rows[i].denom === p.rate_denom) {
+              // `amount_p` is the precise base-unit figure; `amount` is floored for display.
+              var v = rows[i].amount_p != null ? Number(rows[i].amount_p) : Number(rows[i].amount);
+              if (isFinite(v)) balance = v;
+            }
+          }
+          if (balance == null && rows.length) balance = 0;   // a loaded set that lacks the denom holds none of it
+          reprice();
+        }).catch(function () { /* unknown stays unknown */ });
+      }
 
       cancel.addEventListener('click', function (ev) {
         ev.stopPropagation();

@@ -20,7 +20,7 @@ function boot(fixtures = {}) {
   };
   return { w, rent: w.ChatRent(ctx), calls, el };
 }
-const card = { id: '10-7', provider: { capacity_min: 100, duration_min: 10, rate_amount: 2, denom_label: 'OHM' } };
+const card = { id: '10-7', provider: { capacity_min: 100, duration_min: 10, rate_amount: 2, denom_label: 'OHM', rate_denom: 'ualpha' } };
 
 // 1. The quote is the whole cost, in the provider's denom, before anything is signed.
 {
@@ -59,6 +59,33 @@ const card = { id: '10-7', provider: { capacity_min: 100, duration_min: 10, rate
   assert.ok(calls.some((c) => c[0] === 'note' && /insufficient funds/.test(c[1]) && c[2] === true));
   [...box.querySelectorAll('button')].find((b) => b.textContent === 'Cancel').click();
   assert.ok(!box.querySelector('.chat-rent'));
+}
+
+// 3. Affordability: the escrow is checked against the primary's balance in the RATE denom.
+{
+  const { rent, el, w } = boot({ mcp_inventory: { assets: [{ denom: 'ualpha', amount: 1, amount_p: 500 }, { denom: 'uguild.0-1', amount_p: 9 }] } });
+  const box = el('div');
+  rent.rentForm(card, box);
+  await tick(5);
+  const quote = box.querySelector('.chat-rent-quote');
+  const confirm = [...box.querySelectorAll('button')].find((b) => b.textContent === 'Confirm');
+  assert.equal(quote.textContent, 'Costs 2000 OHM now, in full · you hold 500 · short 1500');
+  assert.ok(confirm.disabled && quote.classList.contains('chat-rent-short'), 'a deal that cannot be escrowed cannot be confirmed');
+  const inputs = box.querySelectorAll('input');
+  inputs[0].value = '20'; inputs[0].dispatchEvent(new w.Event('input'));
+  assert.equal(quote.textContent, 'Costs 400 OHM now, in full · you hold 500');
+  assert.ok(!confirm.disabled, '…and affordable again once it fits');
+}
+{
+  const { rent, el } = boot({ mcp_inventory: { assets: [{ denom: 'uguild.0-1', amount_p: 9 }] } });
+  const box = el('div'); rent.rentForm(card, box); await tick(5);
+  assert.ok(/short 2000/.test(box.querySelector('.chat-rent-quote').textContent), 'a loaded set without the denom holds none of it');
+}
+{
+  const { rent, el } = boot({ mcp_inventory: new Error('not signed in') });
+  const box = el('div'); rent.rentForm(card, box); await tick(5);
+  const confirm = [...box.querySelectorAll('button')].find((b) => b.textContent === 'Confirm');
+  assert.ok(!confirm.disabled && !/short/.test(box.querySelector('.chat-rent-quote').textContent), 'unknown never blocks');
 }
 
 console.log('chat-rent: all checks passed');
