@@ -246,7 +246,8 @@
   }
 
   function popOut(id) {
-    invoke('open_terminal_card', { workspace: state.ws, cardId: id }).catch(function (e) {
+    var m = state.mounted[id];
+    invoke('open_terminal_card', { workspace: state.ws, cardId: id, title: m && m.title ? m.title.textContent : null }).catch(function (e) {
       Board.stamp && Board.stamp('pop-out needs the app: ' + e);
     });
   }

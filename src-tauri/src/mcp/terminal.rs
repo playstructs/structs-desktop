@@ -289,7 +289,7 @@ pub fn open_terminal_workspace(app: tauri::AppHandle, name: String) -> Result<()
 /// Pop one card out into its own window. The window shows the same card,
 /// full-size, from the same workspace; it is remembered and reopened at boot.
 #[tauri::command]
-pub fn open_terminal_card(app: tauri::AppHandle, workspace: Option<String>, card_id: String) -> Result<(), String> {
+pub fn open_terminal_card(app: tauri::AppHandle, workspace: Option<String>, card_id: String, title: Option<String>) -> Result<(), String> {
     let id = sane_card_id(&card_id).ok_or_else(|| format!("card id {card_id:?} is not a plain id"))?;
     let ws_name = match workspace {
         Some(n) => sane_card_id(&n).ok_or_else(|| format!("workspace {n:?} is not a plain name"))?,
@@ -300,11 +300,20 @@ pub fn open_terminal_card(app: tauri::AppHandle, workspace: Option<String>, card
         focus(&w);
         return Ok(());
     }
-    let title = lock(&STORE)
-        .workspaces
-        .get(&ws_name)
-        .and_then(|l| l.cards.iter().find(|c| c.id == id))
-        .map(|c| format!("Structs — {}", c.kind))
+    // The page names the card the way it names it on screen ("Energy
+    // market", "Player 1-61"); the type name is the fallback for a boot-time
+    // reopen, which has no page yet.
+    let title = title
+        .map(|t| t.chars().filter(|c| !c.is_control()).take(60).collect::<String>())
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| {
+            lock(&STORE)
+                .workspaces
+                .get(&ws_name)
+                .and_then(|l| l.cards.iter().find(|c| c.id == id))
+                .map(|c| c.kind.clone())
+        })
+        .map(|t| format!("Structs — {t}"))
         .unwrap_or_else(|| "Structs — Terminal card".into());
     let w = build(&app, &label, &format!("board.html?view=terminal&ws={ws_name}&card={id}"), &title, (640.0, 620.0))?;
     let key = format!("{ws_name}/{id}");
@@ -354,7 +363,7 @@ pub fn reopen_if_persisted(app: &tauri::AppHandle) {
     }
     for key in ws.cards {
         let (w, id) = key.split_once('/').unwrap_or(("main", key.as_str()));
-        if let Err(e) = open_terminal_card(app.clone(), Some(w.to_string()), id.to_string()) {
+        if let Err(e) = open_terminal_card(app.clone(), Some(w.to_string()), id.to_string(), None) {
             eprintln!("[Terminal] couldn't reopen card {key}: {e}");
         }
     }

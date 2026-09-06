@@ -61,7 +61,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('remove takes the card off the page', d.getElementById('tm-stats-1') === null && w.Board.Terminal.state.layout.cards.length === 4);
   d.querySelector('#tm-market-1 [title="Pop out"]').click();
   await tick(20);
-  check('pop out asks Rust for a window on that card, in this workspace', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'open_terminal_card' && c.args && c.args.cardId === 'market-1' && c.args.workspace === 'main'));
+  check('pop out asks Rust for a window on that card, in this workspace, named as the card is', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'open_terminal_card' && c.args && c.args.cardId === 'market-1' && c.args.workspace === 'main' && c.args.title === 'Energy market'));
 
   // Configure: change the player, widen the card.
   d.querySelector('#tm-player-1 [title="Configure"]').click();

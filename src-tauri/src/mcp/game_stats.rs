@@ -36,6 +36,18 @@ use crate::mcp::web_board::emit_board;
 
 pub const WINDOW_LABEL: &str = "gamestats";
 
+/// Is anyone looking? The Game Stats window, or any Terminal window — the
+/// Terminal draws these cards too, and an engine that only sweeps for one
+/// of its two readers leaves the other on dashes. Minimized does not count:
+/// a parked window must not cost the shared API anything.
+pub fn watched(app: &tauri::AppHandle) -> bool {
+    use tauri::Manager;
+    app.webview_windows()
+        .iter()
+        .filter(|(label, _)| label.as_str() == WINDOW_LABEL || crate::mcp::terminal::is_terminal_label(label))
+        .any(|(_, w)| !w.is_minimized().unwrap_or(false))
+}
+
 /// Series ring capacity. One point per block at ~5.28s is roughly an hour of
 /// trend — enough for the sparklines to say something without holding the
 /// window's whole history in memory forever.
@@ -417,7 +429,7 @@ pub fn note_event(app: &tauri::AppHandle, event: &GameEvent) {
         // LCD read per block, only while the window is open. The point is
         // pushed once that read is back (or has failed), so the window
         // draws it once, complete.
-        if app.get_webview_window(WINDOW_LABEL).is_some() {
+        if watched(app) {
             let app = app.clone();
             tauri::async_runtime::spawn(async move { finish_block(app, height, point).await });
         }
@@ -1688,10 +1700,7 @@ pub fn ensure_running(app: &tauri::AppHandle) {
             // 40 req/min is exactly the "hammering" the infra team flagged.
             // Block-tick counters (note_event) keep running either way, so the
             // series has no gap when the window comes back.
-            let visible = app
-                .get_webview_window(WINDOW_LABEL)
-                .map(|w| !w.is_minimized().unwrap_or(false))
-                .unwrap_or(false);
+            let visible = watched(&app);
             if !visible {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 continue;
