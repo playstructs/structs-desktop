@@ -299,7 +299,10 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
    * the glue around it is the same fork, one level lower.
    */
   {
-    const rv = readFileSync(repo + '/frontend/raidview.js', 'utf8');
+    // The rail lives in raidview-comms.js now; its portrait counts with the rest.
+    const rv = readFileSync(repo + '/frontend/raidview.js', 'utf8')
+      + readFileSync(repo + '/frontend/raidview-comms.js', 'utf8')
+      + readFileSync(repo + '/frontend/raidview-hud.js', 'utf8');
     check('one place composes a portrait',
       (rv.match(/StructsPfp\.fillPortrait\(/g) || []).length === 1,
       String((rv.match(/StructsPfp\.fillPortrait\(/g) || []).length) + ' call sites');

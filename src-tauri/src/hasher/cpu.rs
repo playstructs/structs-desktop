@@ -86,7 +86,7 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
     // Priority admission: cap concurrent grinders at max_concurrent and admit the
     // easiest-difficulty task first (see hasher::scheduler). Held for the whole
     // grind; freed on drop. `None` = cancelled while queued for a slot.
-    let _permit = match crate::hasher::scheduler::admit(admit_difficulty, &|| handle.is_cancelled()) {
+    let _permit = match crate::mcp::capacity::admit_gpu(admit_difficulty, &|| handle.is_cancelled()) {
         Some(p) => p,
         None => return,
     };

@@ -41,6 +41,9 @@
       // section — but the router still needs an area/section to resolve the
       // solo view, and PAGE_NAMES needs the page div registered.
       { key: 'universe', label: 'Universe', page: 'gamestats', hidden: true },
+      // The Terminal: one customizable page of cards, its own window
+      // (`board.html?view=terminal`), opened from the game's Debug tab.
+      { key: 'terminal', label: 'Terminal', page: 'terminal', hidden: true },
     ] },
     // "Armada", not "Fleet": a fleet is a specific game entity (9-xxx, the
     // thing that moves between planets). This is our roster of players.
@@ -142,7 +145,7 @@
   // `board.html?view=stream` runs this SAME page as a standalone window
   // showing one section and nothing else. One renderer, one set of event
   // listeners — a second implementation of the stream would drift immediately.
-  var SOLO_VIEWS = { stream: 'command/stream', gamestats: 'command/universe' };
+  var SOLO_VIEWS = { stream: 'command/stream', gamestats: 'command/universe', terminal: 'command/terminal' };
   function soloView() {
     var m = /[?&]view=([a-z]+)/.exec(location.search || '');
     return (m && SOLO_VIEWS[m[1]]) ? m[1] : null;

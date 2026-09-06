@@ -837,7 +837,7 @@ async fn run_sweep_inner(app: &tauri::AppHandle) {
     let app_c = app.clone();
     loop_util::for_each_player_concurrent(
         targets,
-        loop_util::effective_max_concurrent(),
+        crate::mcp::capacity::reads_fanout(),
         move |(pid, index, name, role)| {
             let client = client.clone();
             let app = app_c.clone();

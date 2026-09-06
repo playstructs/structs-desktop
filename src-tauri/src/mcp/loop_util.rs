@@ -417,7 +417,7 @@ pub async fn verify_struct_entity(client: &CosmosClient, sid: &str) -> Result<Va
 pub const MAX_CONCURRENT_PLAYERS: usize = 10;
 
 /// AIMD floor — never drop below this or long scans starve entirely.
-const MIN_CONCURRENT_PLAYERS: usize = 2;
+pub const MIN_CONCURRENT_PLAYERS: usize = 2;
 /// Halve when this many pressure failures land inside the window…
 const FAILURE_WINDOW_MS: f64 = 60_000.0;
 const FAILURES_TO_HALVE: usize = 3;

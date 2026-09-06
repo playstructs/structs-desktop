@@ -16,6 +16,7 @@ pub mod auto_build;
 pub mod auto_defend;
 pub mod auto_harvest;
 pub mod board_feed;
+pub mod terminal;
 pub mod auto_infuse;
 pub mod auto_sweep;
 pub mod game_stats;

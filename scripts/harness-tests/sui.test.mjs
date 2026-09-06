@@ -62,6 +62,11 @@ const BUDGET = {
   'chat-connection.js': [0, 0],
   'chat-pins.js':       [0, 0],
   'chat-presence.js':   [0, 0],
+  'chat-message.js':    [0, 0],
+  'chat-scroll.js':     [0, 0],
+  'chat-room.js':       [0, 0],
+  'chat-tabs.js':       [0, 0],
+  'chat-rent.js':       [0, 0],
   'events.js':          [0, 0],
   'raidview.html':      [3, 45],
   // Four ambit background colours, copied from main.css and commented as
@@ -69,16 +74,23 @@ const BUDGET = {
   // and swapping one of four for a token would make the group inconsistent
   // for no gain. This is the "a count is not a bug" case in the header.
   'raidview.js':        [4, 0],
+  'raidview-comms.js':  [0, 0],
+  'raidview-log.js':    [0, 0],
+  'raidview-sheet.js':  [0, 0],
+  'raidview-hud.js':    [0, 0],
+  'raidview-pip.js':    [0, 0],
   // 2026-09-06: +8 for the Game Stats chart family (axis figures, ticks,
   // meter, battery columns) — the type sizes are 8/16 on the scale and the
   // rest are sizes SUI has no token for (a 6px track, a 20px column). Raised
   // deliberately, once; the ratchet holds from here.
-  'board.html':         [2, 95],
+  // board.html +5 (2026-09-06): the Terminal — two grid breakpoints, the map frame height, the comms scroll box, one card border.
+  'board.html':         [2, 100],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not
   // spacing and has no token.
   'board-gamestats.js': [0, 1],
+  'board-terminal.js':  [0, 0],
   'board-shim.js':      [0, 0],
   // The debug-tab patch INJECTED INTO THE GAME'S OWN WINDOW, so it renders
   // inches from the real UI — and it was the least audited file in the repo.

@@ -456,18 +456,26 @@
     hero.appendChild(H.el('div', 'gs-hero-l', 'players acted in the last hour'));
     body.appendChild(hero);
     var ring = (state.snap && state.snap.liveness) || [];
-    var strip = H.el('div', 'hstrip gs-strip');
-    strip.appendChild(H.statTile(['Active', 'last 24h'], H.fmtInt(num(t.live_24h)), null, 'ok'));
-    strip.appendChild(H.statTile(['Known', 'players'], H.fmtInt(num(t.players_known)), 'sui-icon-players'));
-    /* Newcomers are the highest player id now against the highest id back
-     * then, so they need a sample from back then. Until the hourly ring is a
-     * day deep the tile shows the same difference over the span it HAS —
-     * "last 3h" — rather than a dash for a day. */
+    /* The players themselves, newest action first — the same inline person
+     * line Comms draws for a player it names (playercard.js), so a face here
+     * is the face everywhere. Each says how long ago it acted; a click goes
+     * where the leaderboard's would: their planet, or a way to reach them. */
+    var people = Array.isArray(t.live_players) ? t.live_players : [];
+    if (people.length) body.appendChild(livePeople(people));
+    /* The counts, in one quiet line under the people. Newcomers are the
+     * highest player id now against the highest id back then, so they need a
+     * sample from back then; until the hourly ring is a day deep the line
+     * shows the same difference over the span it HAS — "last 3h". */
     var fresh = newcomers(t, ring);
-    strip.appendChild(H.statTile(['New', fresh.span], fresh.count == null ? '—' : H.fmtInt(fresh.count), null,
-      fresh.count > 0 ? 'live' : null));
-    strip.appendChild(H.statTile(['New', 'last 7 days'], t.new_players_7d == null ? '—' : H.fmtInt(num(t.new_players_7d))));
-    body.appendChild(strip);
+    var counts = [
+      H.fmtInt(num(t.live_24h)) + ' active today',
+      H.fmtInt(num(t.players_known)) + ' known',
+      (fresh.count == null ? '—' : H.fmtInt(fresh.count)) + ' new ' + fresh.span,
+      (t.new_players_7d == null ? '—' : H.fmtInt(num(t.new_players_7d))) + ' new last 7 days',
+    ];
+    var line = H.el('div', 'gs-counts fstat-l', counts.join(' · '));
+    line.id = 'gs-live-counts';
+    body.appendChild(line);
     var line = H.el('div', 'gs-line');
     var cap = H.el('div', 'gs-cap');
     cap.appendChild(H.el('span', 'fstat-l', 'players active per hour — 7 days'));
@@ -492,6 +500,24 @@
   }
   var LIVENESS_MIN = 2;
   var HERO_CHART_H = 88;
+  function livePeople(people) {
+    var box = H.el('div', 'gs-people');
+    box.id = 'gs-live-people';
+    people.forEach(function (r) {
+      var attrs = r.pfp_attrs;
+      if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
+      var acts = (Board.watchActions ? Board.watchActions(r) : []).concat(Board.reachActions ? Board.reachActions(r) : []);
+      var ago = window.StructsUnits.fmtDuration(num(r.ago_blocks) * 5.3, { zero: 'now' });
+      var wrap = H.el('span', 'gs-person');
+      wrap.appendChild(window.StructsPlayerCard.parts.personLine(
+        { id: r.player_id, name: r.username || null, tag: r.tag || null, pfp: attrs },
+        { title: (r.username || r.player_id) + (r.guild_name ? ' · ' + r.guild_name : '') + '\nacted ' + (ago === 'now' ? 'this block' : ago + ' ago'),
+          onClick: acts.length ? function (ev) { acts[0].onClick(ev); } : null }));
+      wrap.appendChild(H.el('span', 'gs-person-ago', ago === 'now' ? 'now' : ago));
+      box.appendChild(wrap);
+    });
+    return box;
+  }
   function newcomers(t, ring) {
     if (t.new_players_24h != null) return { count: num(t.new_players_24h), span: 'last 24h' };
     var first = ring.length ? ring[0] : null;
@@ -771,7 +797,12 @@
   // Test hooks. The two functions that turn samples into a picture are where
   // a chart can lie without erroring, so they are asserted directly on inputs
   // the fixture cannot produce — an all-gap series, a lone island sample.
-  Board._gamestats = { sparkline: sparkline, chart: chart, meter: meter, columns: columns, seriesValues: seriesValues, state: state };
+  Board._gamestats = { sparkline: sparkline, chart: chart, meter: meter, columns: columns, seriesValues: seriesValues, state: state,
+    // The Terminal places these one at a time; each returns a finished card.
+    ensureBoot: ensureBoot,
+    cards: { liveness: livenessCard, universe: universeCard, trends: function () { return trendsCard(); }, engine: engineCard,
+             ore: oreCard, raids: raidCard, players: function () { return playersCard(); }, guilds: function () { return guildsCard(); } },
+  };
 
   Board.registerPage('gamestats', {
     onEnter: enter,

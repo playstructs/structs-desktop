@@ -451,7 +451,7 @@ fn with_commas(n: f64) -> String {
 /// A provider is an OFFER: someone renting energy capacity at a price. It is
 /// the one object in the game whose card should let you close the deal where
 /// you read about it — which is why chat is a good place for it.
-fn provider_card(id: &str, v: &Value) -> Value {
+pub(crate) fn provider_card(id: &str, v: &Value) -> Value {
     let p = v.get("Provider").unwrap_or(&Value::Null);
     let rate = p.get("rate").cloned().unwrap_or(Value::Null);
     let rate_amount = num(rate.get("amount"));

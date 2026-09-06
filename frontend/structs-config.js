@@ -2284,6 +2284,10 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         + ' gap:var(--spacing-md); align-items:center;">';
       html += '<a href="javascript:void(0)" id="debug-download-logs" class="sui-screen-btn sui-mod-secondary">Download logs</a>';
       html += '<a href="javascript:void(0)" id="debug-gamestats" class="sui-screen-btn sui-mod-secondary">Game Stats</a>';
+      // The Terminal: one customizable page of cards — markets, stats, the
+      // team, comms, the map — that pops out into windows which come back
+      // on relaunch. Same direct-invoke door as Game Stats.
+      html += '<a href="javascript:void(0)" id="debug-terminal" class="sui-screen-btn sui-mod-secondary">Terminal</a>';
       // The unread count rides INSIDE the Comms button: it is a fact about
       // what is behind that door, and anywhere else it would need a label to
       // say which door it belonged to.
@@ -2495,6 +2499,15 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           gameStatsEl.addEventListener('click', function() {
             window.__TAURI__.core.invoke('open_game_stats_window').catch(function(e) {
               flashBtn(gameStatsEl, 'Could not open: ' + e);
+            });
+          });
+        }
+
+        var terminalEl = document.getElementById('debug-terminal');
+        if (terminalEl) {
+          terminalEl.addEventListener('click', function() {
+            window.__TAURI__.core.invoke('open_terminal_window').catch(function(e) {
+              flashBtn(terminalEl, 'Could not open: ' + e);
             });
           });
         }

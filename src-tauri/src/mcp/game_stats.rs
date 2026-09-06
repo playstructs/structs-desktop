@@ -137,10 +137,16 @@ struct Cache {
     liveness: VecDeque<Value>,
     /// The block the galaxy pass last ran at (it runs every 12 blocks).
     last_pass_height: u64,
+    /// Who a player id IS — username, portrait, guild — from the guild
+    /// rosters the heavy sweep reads. The galaxy pass decorates the live
+    /// player list from it, so the liveness card shows people, not ids.
+    identities: HashMap<String, Value>,
 }
 
 /// Hourly liveness ring: 7 days.
 const LIVENESS_CAP: usize = 168;
+/// How many of the hour's players the liveness card names (newest first).
+const LIVE_PLAYERS_SHOWN: usize = 60;
 /// The galaxy pass walks the whole snapshot (3k players, 29k planets, 3k
 /// fleets); once a minute is plenty and costs a few milliseconds.
 const PASS_EVERY_BLOCKS: u64 = 12;
@@ -471,6 +477,9 @@ fn galaxy_pass(height: u64) {
         let mut live_1h = 0u64;
         let mut live_24h = 0u64;
         let mut max_index = 0u64;
+        // The players behind the hour's count, newest action first. The card
+        // shows THEM rather than a number.
+        let mut live: Vec<(String, u64)> = Vec::new();
         for (pid, _) in s.players.iter() {
             players += 1;
             if let Some(i) = pid.split_once('-').and_then(|(_, i)| i.parse::<u64>().ok()) {
@@ -479,6 +488,7 @@ fn galaxy_pass(height: u64) {
             if let Some(la) = s.grid_attr(pid, "lastAction").filter(|la| *la > 0) {
                 if height.saturating_sub(la) <= BLOCKS_PER_HOUR {
                     live_1h += 1;
+                    live.push((pid.clone(), la));
                 }
                 if height.saturating_sub(la) <= BLOCKS_PER_DAY {
                     live_24h += 1;
@@ -513,11 +523,13 @@ fn galaxy_pass(height: u64) {
                 _ => on_station += 1,
             }
         }
-        (players, live_1h, live_24h, max_index, levels, planets_with_ore, planets_exhausted, rigs_mining, rigs_refining, away, on_station)
+        live.sort_by(|a, b| b.1.cmp(&a.1));
+        live.truncate(LIVE_PLAYERS_SHOWN);
+        (players, live_1h, live_24h, max_index, levels, planets_with_ore, planets_exhausted, rigs_mining, rigs_refining, away, on_station, live)
     }) else {
         return;
     };
-    let (players, live_1h, live_24h, max_index, levels, planets_with_ore, planets_exhausted, rigs_mining, rigs_refining, away, on_station) = read;
+    let (players, live_1h, live_24h, max_index, levels, planets_with_ore, planets_exhausted, rigs_mining, rigs_refining, away, on_station, live) = read;
     let now = crate::hasher::types::now_millis();
     let funnel = crate::mcp::auto_raid::last_funnel();
     with_cache(|c| {
@@ -547,6 +559,22 @@ fn galaxy_pass(height: u64) {
             m.insert("players_known".into(), json!(players));
             m.insert("live_1h".into(), json!(live_1h));
             m.insert("live_24h".into(), json!(live_24h));
+            let live_players: Vec<Value> = live
+                .iter()
+                .map(|(pid, la)| {
+                    let ident = c.identities.get(pid);
+                    let get = |k: &str| ident.and_then(|i| i.get(k)).cloned().unwrap_or(Value::Null);
+                    json!({
+                        "player_id": pid,
+                        "last_action": la,
+                        "ago_blocks": height.saturating_sub(*la),
+                        "charge": height.saturating_sub(*la),
+                        "username": get("username"), "pfp_attrs": get("pfp_attrs"), "tag": get("tag"),
+                        "guild_name": get("guild_name"), "planet_id": get("planet_id"), "fleet_id": get("fleet_id"),
+                    })
+                })
+                .collect();
+            m.insert("live_players".into(), json!(live_players));
             m.insert("max_player_index".into(), json!(max_index));
             m.insert("new_players_24h".into(), new_24h.map(|n| json!(n)).unwrap_or(Value::Null));
             m.insert("new_players_7d".into(), new_7d.map(|n| json!(n)).unwrap_or(Value::Null));
@@ -1310,6 +1338,22 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
             );
         }
     }
+
+    // Keep who-is-who for the galaxy pass (the liveness card names players).
+    with_cache(|c| {
+        c.identities = identities
+            .iter()
+            .map(|(pid, i)| {
+                (
+                    pid.clone(),
+                    json!({
+                        "username": i.username, "pfp_attrs": i.pfp_attrs, "tag": i.tag,
+                        "guild_name": i.guild_name, "planet_id": i.planet_id, "fleet_id": i.fleet_id,
+                    }),
+                )
+            })
+            .collect();
+    });
 
     // Alpha board: PR #121's `/api/leaderboard/player` is the server ranking
     // over the denom-correct api_leaderboard_player table — one request,

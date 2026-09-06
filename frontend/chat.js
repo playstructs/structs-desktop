@@ -289,7 +289,7 @@
   // is passed as a thunk out of caution.
   var refs = window.ChatRefs({
     el: el, icon: icon, invoke: invoke, fmtCount: fmtCount, go: go, pfpPortrait: pfpPortrait,
-    presenceDot: presenceDot, render: function () { render(); }, rentForm: rentForm,
+    presenceDot: presenceDot, render: function () { render(); }, rentForm: function (card, box) { return rentForm(card, box); },
     startDm: function (who, body) { return startDm(who, body); },
     S: S, Chat: Chat,
   });
@@ -297,101 +297,12 @@
   var refCard = refs.refCard, wantRefs = refs.wantRefs, cardNote = refs.cardNote;
 
   // ── Renting capacity ──────────────────────────────────────────────────────
-  // The whole cost is debited AT OPEN, in the provider's own denom — which is
-  // often a guild token rather than Alpha. So the quote is shown before the
-  // commit, and the button says the number it is about to spend.
-  function rentForm(card, box) {
-    if (box.querySelector('.chat-rent')) return;      // already open
-    var p = card.provider || {};
-    var form = el('div', 'chat-rent');
-
-    var cap = numberField('Capacity (W)', p.capacity_min || 0);
-    var dur = numberField('Duration (blocks)', p.duration_min || 0);
-    form.appendChild(cap.wrap);
-    form.appendChild(dur.wrap);
-
-    var quote = el('div', 'chat-rent-quote');
-    form.appendChild(quote);
-
-    var go = el('button', 'sui-screen-btn sui-mod-primary', 'Confirm');
-    var cancel = el('button', 'sui-screen-btn sui-mod-secondary', 'Cancel');
-    var bar = el('div', 'chat-ref-actions');
-    bar.appendChild(cancel);
-    bar.appendChild(go);
-    form.appendChild(bar);
-
-    function cost() {
-      var c = Number(cap.input.value) || 0;
-      var d = Number(dur.input.value) || 0;
-      return (Number(p.rate_amount) || 0) * c * d;
-    }
-    function reprice() {
-      var total = cost();
-      quote.textContent = total > 0
-        ? 'Costs ' + fmtCount(total) + ' ' + (p.denom_label || '') + ' now, in full'
-        : 'Enter a capacity and duration';
-      go.disabled = !(total > 0);
-      go.classList.toggle('sui-mod-disabled', !(total > 0));
-    }
-    cap.input.addEventListener('input', reprice);
-    dur.input.addEventListener('input', reprice);
-    reprice();
-
-    cancel.addEventListener('click', function (ev) {
-      ev.stopPropagation();
-      form.parentNode.removeChild(form);
-    });
-    go.addEventListener('click', function (ev) {
-      ev.stopPropagation();
-      if (go.disabled) return;
-      go.disabled = true;
-      go.textContent = 'Signing…';
-      invoke('matrix_agreement_open', {
-        providerId: card.id,
-        capacity: Math.round(Number(cap.input.value) || 0),
-        duration: Math.round(Number(dur.input.value) || 0),
-      })
-        .then(function (res) {
-          form.parentNode.removeChild(form);
-          cardNote(box, 'Agreement opened · ' + ((res && res.tx) || ''));
-        })
-        .catch(function (e) {
-          go.disabled = false;
-          go.textContent = 'Confirm';
-          cardNote(box, String(e), true);
-        });
-    });
-    // Inside the card's own body when the provider is drawn as a card, so
-    // the form reads as part of the offer rather than a box under it.
-    (box.querySelector('.sui-planet-card-body') || box).appendChild(form);
-    cap.input.focus();
-  }
-
-  function numberField(label, initial) {
-    var wrap = el('div', 'chat-rent-field');
-    var lab = el('label', 'sui-input-text');
-    var id = 'rent-' + label.replace(/[^a-z]/gi, '').toLowerCase();
-    lab.setAttribute('for', id);
-    lab.appendChild(el('span', null, label));
-    var input = el('input');
-    // TEXT, not number: SUI styles `label.sui-input-text input[type=text]`, so
-    // a number input falls outside the game's art entirely and renders as a
-    // raw browser box. `inputmode` still brings up a numeric keypad, and the
-    // spinner arrows are no loss.
-    input.type = 'text';
-    input.setAttribute('inputmode', 'numeric');
-    input.id = id;
-    input.value = String(initial || '');
-    input.addEventListener('input', function () {
-      // Keep it a number without fighting the caret: strip anything that is
-      // not a digit, in place.
-      var clean = input.value.replace(/[^0-9]/g, '');
-      if (clean !== input.value) input.value = clean;
-    });
-    lab.appendChild(input);
-    wrap.appendChild(lab);
-    return { wrap: wrap, input: input };
-  }
+  // Lives in chat-rent.js. `cardNote` is the refs module's, assigned just
+  // above; `fmtCount` is a declaration.
+  var rent = window.ChatRent({
+    el: el, invoke: invoke, fmtCount: fmtCount, cardNote: function (box, text, bad) { return cardNote(box, text, bad); },
+  });
+  var rentForm = rent.rentForm, numberField = rent.numberField;
 
   // ── Time ──────────────────────────────────────────────────────────────────
   // 24-hour, zero-padded: this is a HUD, not prose, and a stable width keeps
@@ -436,112 +347,16 @@
     return String(n);
   }
 
-  // ── Nav ───────────────────────────────────────────────────────────────────
-  // Left slot = the networks this player can reach. In the game this slot
-  // holds the menu's sections; here it answers the same "where am I" question
-  // for a federated client that can be on more than one homeserver.
-  // ── Tabs ──────────────────────────────────────────────────────────────────
-  // The conversations you have open, in the slot the game uses for its menu
-  // sections. It replaces the network name, which was a single inert word
-  // once only your own guild could be signed into.
-  //
-  // A tab is a VIEW, not a membership: closing one puts the conversation away,
-  // it does not leave the room. Leaving is `/leave`, and it should stay that
-  // way — a stray click on an × must never remove you from a channel.
-  var MAX_TABS = 8;
-
-  function openTab(roomId) {
-    if (!roomId) return;
-    if (S.tabs.indexOf(roomId) === -1) S.tabs.push(roomId);
-    // Bounded: a long session opening every room would otherwise turn the
-    // strip into a scrollbar. Oldest tab goes first — but never the one being
-    // opened, and never the room currently on screen, which would leave the
-    // strip disagreeing with the view.
-    while (S.tabs.length > MAX_TABS) {
-      var victim = null;
-      for (var i = 0; i < S.tabs.length; i++) {
-        if (S.tabs[i] !== roomId && S.tabs[i] !== S.roomId) { victim = S.tabs[i]; break; }
-      }
-      if (!victim) break;                 // everything left is in use
-      S.tabs.splice(S.tabs.indexOf(victim), 1);
-    }
-  }
-  Chat.openTab = openTab;
-
-  function closeTab(roomId) {
-    var at = S.tabs.indexOf(roomId);
-    if (at === -1) return;
-    S.tabs.splice(at, 1);
-    if (S.roomId !== roomId) { render(); return; }
-    // Closing the one you are looking at hands you the neighbour, the way
-    // every tabbed thing does — falling back to the channel list.
-    var next = S.tabs[at] || S.tabs[at - 1];
-    if (next) openRoom(next); else go('channels');
-  }
-  Chat.closeTab = closeTab;
-
-  function tabLabel(roomId) {
-    for (var i = 0; i < S.rooms.length; i++) {
-      if (S.rooms[i].room_id === roomId) return S.rooms[i].name || roomId;
-    }
-    if (S.roomId === roomId && S.room) return S.room.name || roomId;
-    return roomId;
-  }
-
-  function unreadFor(roomId) {
-    for (var i = 0; i < S.rooms.length; i++) {
-      if (S.rooms[i].room_id === roomId) return S.rooms[i];
-    }
-    return null;
-  }
-
-  function renderNav() {
-    var box = byId('menu-page-nav-items');
-    if (!box) return;
-    clear(box);
-
-    if (!S.tabs.length) {
-      // Nothing open yet: name the network, as the slot did before.
-      var net = activeNetwork();
-      box.appendChild(el('a', 'sui-screen-nav-item sui-mod-active',
-        (net && (net.tag || net.guild_name)) || 'COMMS'));
-    } else {
-      S.tabs.forEach(function (roomId) {
-        var active = S.view === 'room' && S.roomId === roomId;
-        var a = el('a', 'sui-screen-nav-item chat-tab' + (active ? ' sui-mod-active' : ''));
-        a.href = 'javascript:void(0)';
-        a.title = tabLabel(roomId);
-
-        var room = unreadFor(roomId);
-        if (room && room.unread) {
-          // A dot, not a count: the strip is for switching, and the number is
-          // already on the row in the channel list.
-          a.appendChild(el('span',
-            'chat-tab-dot' + (room.mention ? ' chat-mod-mention' : '')));
-        }
-        a.appendChild(el('span', 'chat-tab-label', tabLabel(roomId)));
-
-        var x = el('span', 'chat-tab-close');
-        x.title = 'Close';
-        x.appendChild(icon('icon-close', 'sui-icon-sm'));
-        x.addEventListener('click', function (ev) {
-          // Without this the tab underneath would also fire and re-open what
-          // was just closed.
-          ev.stopPropagation();
-          closeTab(roomId);
-        });
-        a.appendChild(x);
-
-        a.addEventListener('click', function () { openRoom(roomId); });
-        box.appendChild(a);
-      });
-    }
-
-    var comms = byId('chat-nav-comms');
-    var settings = byId('chat-nav-settings');
-    if (comms) comms.className = (S.view === 'channels' || S.view === 'room') ? 'sui-mod-active' : '';
-    if (settings) settings.className = S.view === 'connection' ? 'sui-mod-active' : '';
-  }
+  // ── Nav + tabs ─────────────────────────────────────────────────────────────
+  // Lives in chat-tabs.js: the conversations you have open, in the slot the
+  // game uses for its menu sections. `openRoom`, `go` and `activeNetwork`
+  // are declarations (hoisted); `render` a thunk.
+  var tabs = window.ChatTabs({
+    el: el, icon: icon, byId: byId, clear: clear, render: function () { render(); },
+    openRoom: openRoom, go: go, activeNetwork: activeNetwork, S: S, Chat: Chat,
+  });
+  var openTab = tabs.openTab, closeTab = tabs.closeTab, tabLabel = tabs.tabLabel;
+  var unreadFor = tabs.unreadFor, renderNav = tabs.renderNav;
 
   // ── Page header ───────────────────────────────────────────────────────────
   // `label` sits in the game's .sui-nav-btn slot; `back` adds the chevron the
@@ -622,307 +437,31 @@
   // Lives in chat-search.js. `messageNode` is a declaration (hoisted).
   var searchModule = window.ChatSearch({
     el: el, icon: icon, invoke: invoke, go: go, pageHeader: pageHeader, noticeBlock: noticeBlock,
-    unreadFor: unreadFor, messageNode: messageNode, openRoom: openRoom,
+    unreadFor: unreadFor, messageNode: function (m, prev) { return messageNode(m, prev); }, openRoom: openRoom,
     render: function () { render(); }, showError: showError, S: S, Chat: Chat,
   });
   var renderSearch = searchModule.renderSearch, runSearch = searchModule.runSearch, openSearch = searchModule.openSearch;
 
-  // ── Room view ─────────────────────────────────────────────────────────────
-  function messageNode(m, prev) {
-    /* The shared row from `chatrow.js`, plus what only a full timeline has.
-     *
-     * The presentation — event lines, emotes, run-collapsing, the mention
-     * rail, the clock — moved there so the raid viewer's rail could draw the
-     * SAME rows instead of a lookalike that had already drifted from these.
-     * What stays here is what the rail does not have: react, reply, pin, edit
-     * and delete, handed over as a `controls` hook.
-     */
-    var wrap = window.StructsChatRow.render(m, prev, {
-      gapNode: function () { return ruleNode('some messages are missing', true); },
-      mentionsMe: mentionsMe,
-      // Any player is directly addressable, so their name is the affordance.
-      onSender: function (msg) { startDm(msg.player_id); },
-      controls: function (msg, meta) {
-        // Pinning lives on the message, revealed on hover — always visible it
-        // would be a column of beacons down a conversation nobody is pinning.
-        // The id the SERVER knows this by: a message you just sent still
-        // carries its local echo id, but the send already came back with the
-        // real one — and without this, the message you most want to take back
-        // is the one message with no controls at all.
-        var serverId = serverIdOf(msg);
-        if (S.view !== 'room' || msg.pending || !serverId) return;
-        meta.appendChild(reactButton(msg, serverId));
-        meta.appendChild(replyButton(msg));
-        meta.appendChild(pinToggle(msg, isPinned(serverId), serverId));
-        // Your own only. A moderator could redact anyone's, but offering that
-        // to everybody is an invitation to click and be refused.
-        if (msg.self && msg.kind !== 'notice') {
-          meta.appendChild(editButton(msg, serverId));
-          meta.appendChild(deleteButton(msg, serverId));
-        }
-      },
-    });
-    // Events and emotes are complete rows on their own — the rest of this
-    // function is the body, the quote line and the attachments beneath a head.
-    var kind = m.kind || 'text';
-    if (kind === 'gap' || kind === 'event' || kind === 'emote') return wrap;
-
-    // Part of a thread, which this window does not group. Saying so is honest;
-    // showing the quote Matrix attaches for compatibility would put words in
-    // the sender's mouth they never chose — see `render_event`.
-    if (m.thread_root && !m.reply_to) {
-      var th = el('a', 'chat-reply-quote chat-mod-thread');
-      th.href = 'javascript:void(0)';
-      th.appendChild(el('span', 'chat-reply-who', 'In a thread'));
-      th.title = 'Go to what this thread is about';
-      th.addEventListener('click', function () { jumpTo(m.thread_root); });
-      wrap.insertBefore(th, wrap.firstChild);
-      wrap.classList.add('chat-mod-reply');
-    }
-
-    // What this answers. One line, above the message: a pointer back, not a
-    // copy — the full text is already up there in the room.
-    if (m.reply_to) {
-      var q = el('a', 'chat-reply-quote');
-      q.href = 'javascript:void(0)';
-      q.appendChild(el('span', 'chat-reply-who', replyWho(m)));
-      q.appendChild(el('span', 'chat-reply-text', m.reply_excerpt || '…'));
-      q.title = 'Go to the message this answers';
-      q.addEventListener('click', function () { jumpTo(m.reply_to); });
-      wrap.insertBefore(q, wrap.firstChild);
-      wrap.classList.add('chat-mod-reply');
-    }
-
-    var kind = m.kind || 'text';
-
-    // A picture is shown, not described. The filename stays as the alt text
-    // and the tooltip, so it is still knowable.
-    if (kind === 'image' && m.mxc) {
-      wrap.appendChild(imageNode(m));
-      var imgReacts = reactionRow(m);
-      if (imgReacts) wrap.appendChild(imgReacts);
-      return wrap;
-    }
-
-    var body = el('div', 'chat-msg-body');
-    if (kind === 'emote') body.classList.add('chat-mod-emote');
-    else if (kind === 'notice') body.classList.add('chat-mod-notice');
-    else if (kind === 'unknown') body.classList.add('chat-mod-unknown');
-    fillBody(body, m.body || '', m.local);
-    wrap.appendChild(body);
-
-    // Cards for whatever the message named, under it. Local lines get them too
-    // — /whois is exactly "show me this card".
-    //
-    // Only the FIRST reference expands on its own. A message naming four
-    // objects would otherwise bury itself under four cards, and the point of a
-    // summary is to be an aside. The rest are chips you can open.
-    {
-      var ids = refIdsIn(m.body);
-      if (ids.length) {
-        wantRefs(ids);
-        var cards = el('div', 'chat-refs');
-        ids.forEach(function (id, i) {
-          if (i > 0 && !S.openRefs[id]) return;
-          var card = refCards[id];
-          if (card) cards.appendChild(refCard(card));
-        });
-        if (cards.childNodes.length) wrap.appendChild(cards);
-      }
-    }
-
-    // Why it did not send, and a way to send it again. The text itself is
-    // untouched, so retrying needs no un-mangling and copying it copies only
-    // what was written.
-    if (m.failed && m.retry) {
-      var fail = el('div', 'chat-send-failed');
-      fail.appendChild(el('span', 'chat-send-failed-why', 'Not sent — ' + (m.error || '')));
-      var again = el('a', 'chat-ref-action');
-      again.href = 'javascript:void(0)';
-      again.appendChild(el('span', null, 'Try again'));
-      again.addEventListener('click', function () { retrySend(m); });
-      fail.appendChild(again);
-      wrap.appendChild(fail);
-    }
-
-    var work = workCard(m);
-    if (work) wrap.appendChild(work);
-
-    // Last, under everything: reactions are about the message, so they belong
-    // below all of it rather than between the text and its cards.
-    var reacts = reactionRow(m);
-    if (reacts) wrap.appendChild(reacts);
-    return wrap;
-  }
-
-  // Links. Only http/https are even looked for — Rust refuses anything else,
-  // but not offering it in the first place is the better half of that.
-  var URL_RE = /https?:\/\/[^\s<>"'`]+/g;
-  // Trailing punctuation is almost always the sentence, not the link:
-  // "see https://example.com." should not open ".com."
-  function trimUrl(u) {
-    return u.replace(/[.,;:!?)\]}'"]+$/, '');
-  }
-
-  // Everything in a body worth marking, in the order it appears.
-  // The ids a message REFERENCES — spans of kind 'id', deduped in order.
-  // Not `idsIn`: that one does not know about links, and an id inside a URL is
-  // part of the URL. Using different answers for "mark it" and "card it" made
-  // a linked planet id produce a card it had no visible chip for.
-  function refIdsIn(body) {
-    var out = [];
-    spansIn(body).forEach(function (sp) {
-      if (sp.kind === 'id' && out.indexOf(sp.text) === -1) out.push(sp.text);
-    });
-    return out;
-  }
-  Chat.refIdsIn = refIdsIn;
-
-  function spansIn(body) {
-    var out = [];
-    var m;
-    URL_RE.lastIndex = 0;
-    while ((m = URL_RE.exec(body)) !== null) {
-      var url = trimUrl(m[0]);
-      if (url) out.push({ at: m.index, len: url.length, kind: 'url', text: url });
-    }
-    ID_RE.lastIndex = 0;
-    while ((m = ID_RE.exec(body)) !== null) {
-      var id = m[2];
-      var at = m.index + m[1].length;
-      if (!REF_KINDS[parseInt(id.split('-')[0], 10)]) continue;
-      // An id inside a URL is part of the URL, not a reference.
-      var inUrl = out.some(function (s) {
-        return s.kind === 'url' && at >= s.at && at < s.at + s.len;
-      });
-      if (!inUrl) out.push({ at: at, len: id.length, kind: 'id', text: id });
-    }
-    out.sort(function (a, b) { return a.at - b.at; });
-    return out;
-  }
-  Chat.spansIn = spansIn;
-
-  // Write a message body, marking the ids and links inside it.
-  //
-  // Still textContent for every character: the body is split on span
-  // boundaries and each piece is set as text, so no markup from a federated
-  // homeserver is ever parsed. The only nodes added are ones this function
-  // creates.
-  function fillBody(node, body, isLocal) {
-    if (isLocal) { node.textContent = body; return; }
-    var spans = spansIn(body);
-    if (!spans.length) { node.textContent = body; return; }
-
-    var ids = refIdsIn(body);
-    var at = 0;
-    spans.forEach(function (sp) {
-      if (sp.at < at) return;                    // overlapped by an earlier span
-      if (sp.at > at) node.appendChild(document.createTextNode(body.slice(at, sp.at)));
-      node.appendChild(sp.kind === 'url'
-        ? linkChip(sp.text)
-        // Built in a helper so each chip's handler closes over ITS id: `var`
-        // in a loop is function-scoped, and inline closures would every one of
-        // them capture the last id in the message.
-        : idChip(sp.text, ids[0] === sp.text));
-      at = sp.at + sp.len;
-    });
-    if (at < body.length) node.appendChild(document.createTextNode(body.slice(at)));
-  }
-
-  // A link opens in the SYSTEM browser, never in the app. The full target is
-  // the tooltip, because the text of a link in a chat message is written by a
-  // stranger and the destination is the only thing worth trusting.
-  function linkChip(url) {
-    var a = el('a', 'chat-link', url);
-    a.href = 'javascript:void(0)';
-    a.title = url;
-    a.addEventListener('click', function (ev) {
-      ev.stopPropagation();
-      invoke('matrix_open_url', { url: url }).catch(function (e) {
-        a.classList.add('chat-mod-refused');
-        a.title = String(e);
-      });
-    });
-    return a;
-  }
-
-  function idChip(id, isFirst) {
-    var chip = el('span', 'chat-id', id);
-    if (isFirst) { chip.title = id; return chip; }
-    chip.classList.add('chat-mod-openable');
-    chip.title = (S.openRefs[id] ? 'Hide ' : 'Show ') + id;
-    chip.addEventListener('click', function (ev) {
-      ev.stopPropagation();
-      if (S.openRefs[id]) delete S.openRefs[id]; else S.openRefs[id] = 1;
-      render();
-    });
-    return chip;
-  }
-
-  // Scrolling up loads history on its own; this is for anyone who would rather
-  // ask, and it doubles as the marker saying more exists.
-  function historyButton() {
-    var wrap = el('div', 'chat-history');
-    var btn = el('button', 'sui-screen-btn sui-mod-secondary', 'Load earlier');
-    btn.id = 'chat-load-earlier';
-    btn.addEventListener('click', loadHistory);
-    wrap.appendChild(btn);
-    return wrap;
-  }
-
-  // ── Pictures ──────────────────────────────────────────────────────────────
-  // Media is authenticated on a modern homeserver, so the bytes come through
-  // Rust (which holds the token) as a data URI. The element is laid out from
-  // the event's own dimensions BEFORE they arrive, so the timeline does not
-  // jump when each picture lands.
-  var mediaCache = {};
-
-  function imageNode(m) {
-    var box = el('div', 'chat-image');
-    var img = el('img', 'chat-image-img');
-    img.alt = m.body || 'image';
-    img.title = m.body || '';
-    // Reserve the space the picture will take, scaled into the column.
-    var w = Number(m.width) || 0;
-    var h = Number(m.height) || 0;
-    if (w > 0 && h > 0) {
-      var shown = Math.min(w, 320);
-      box.style.width = shown + 'px';
-      box.style.aspectRatio = w + ' / ' + h;
-    }
-
-    var have = mediaCache[m.mxc];
-    if (have && have.data_url) {
-      img.src = have.data_url;
-      box.appendChild(img);
-    } else if (have && have.error) {
-      box.appendChild(el('div', 'chat-image-failed', have.error));
-    } else {
-      box.appendChild(el('div', 'chat-image-loading', m.body || 'image'));
-      if (!have) {
-        mediaCache[m.mxc] = { pending: true };
-        invoke('matrix_media', { guildId: S.guildId, mxc: m.mxc, size: 320 })
-          .then(function (res) { mediaCache[m.mxc] = res; render(); })
-          .catch(function (e) {
-            // Refused (an SVG, something oversized) or simply unreachable:
-            // say so in place rather than leaving an empty frame.
-            mediaCache[m.mxc] = { error: String(e) };
-            render();
-          });
-      }
-    }
-    return box;
-  }
-
-  // A labelled hairline across the timeline. `alert` makes it the unread
-  // divider rather than a date.
-  function ruleNode(label, alert) {
-    var rule = el('div', 'chat-rule' + (alert ? ' chat-mod-alert' : ''));
-    rule.appendChild(el('span', 'chat-rule-line'));
-    rule.appendChild(el('span', 'chat-rule-label', label));
-    rule.appendChild(el('span', 'chat-rule-line'));
-    return rule;
-  }
+  // ── Room view: the message ─────────────────────────────────────────────────
+  // Lives in chat-message.js: the timeline row with its controls, the body
+  // with ids and links marked, pictures, rules. Every collaborator that is a
+  // module value assigned further down (reactions, pins, work, commands) is a
+  // thunk; declarations and the refs wiring above are passed as they are.
+  var message = window.ChatMessage({
+    el: el, invoke: invoke, render: function () { render(); }, mentionsMe: mentionsMe,
+    startDm: function (who, body) { return startDm(who, body); },
+    refCards: refCards, refCard: refCard, wantRefs: wantRefs, ID_RE: ID_RE, REF_KINDS: REF_KINDS,
+    loadHistory: function () { return loadHistory(); }, retrySend: function (m) { return retrySend(m); },
+    workCard: function (m) { return workCard(m); }, serverIdOf: function (m) { return serverIdOf(m); },
+    reactButton: function (m, id) { return reactButton(m, id); }, reactionRow: function (m) { return reactionRow(m); },
+    editButton: function (m, id) { return editButton(m, id); }, deleteButton: function (m, id) { return deleteButton(m, id); },
+    replyButton: function (m) { return replyButton(m); }, pinToggle: function (m, p, id) { return pinToggle(m, p, id); },
+    isPinned: function (id) { return isPinned(id); }, jumpTo: function (id) { return jumpTo(id); },
+    replyWho: function (m) { return replyWho(m); }, S: S, Chat: Chat,
+  });
+  var messageNode = message.messageNode, trimUrl = message.trimUrl, refIdsIn = message.refIdsIn, spansIn = message.spansIn;
+  var fillBody = message.fillBody, linkChip = message.linkChip, idChip = message.idChip, historyButton = message.historyButton;
+  var imageNode = message.imageNode, ruleNode = message.ruleNode;
 
   // ── Pinned ────────────────────────────────────────────────────────────────
   // Lives in chat-pins.js: the strip, pin/unpin, and the small message
@@ -930,7 +469,8 @@
   // the reactions wiring below, so it is a thunk; the rest are declarations.
   var pinsModule = window.ChatPins({
     el: el, icon: icon, invoke: invoke, render: function () { render(); }, showError: showError,
-    messageNode: messageNode, unreadFor: unreadFor, say: say,
+    messageNode: function (m, prev) { return messageNode(m, prev); }, unreadFor: unreadFor,
+    say: function (text, alert) { say(text, alert); },
     serverIdOf: function (m) { return serverIdOf(m); }, S: S, Chat: Chat,
   });
   var pinnedStrip = pinsModule.pinnedStrip, pinsOf = pinsModule.pinsOf, replyWho = pinsModule.replyWho;
@@ -960,280 +500,25 @@
   });
   var workCard = work.workCard;
 
-  function renderRoom() {
-    var page = el('div', 'chat-page');
-    var name = (S.room && (S.room.name || S.room.canonical_alias)) || S.roomId || '';
-
-    var right = el('div', 'chat-header-actions');
-
-    var who = el('a', 'sui-nav-btn');
-    who.id = 'chat-room-people';
-    who.href = 'javascript:void(0)';
-    who.title = 'Who is here';
-    who.appendChild(icon('icon-member sui-text-secondary'));
-    who.addEventListener('click', function () { go('members'); });
-    right.appendChild(who);
-
-    var muted = !!(S.room && S.room.muted);
-    var quiet = el('a', 'sui-nav-btn');
-    quiet.id = 'chat-room-mute';
-    quiet.href = 'javascript:void(0)';
-    quiet.title = muted ? 'This room is silenced — let it speak again'
-                        : 'Silence this room';
-    quiet.appendChild(icon((muted ? 'icon-disabled sui-text-warning'
-                                  : 'icon-alert sui-text-secondary')));
-    quiet.addEventListener('click', function () { setMuted(!muted); });
-    right.appendChild(quiet);
-
-    var find = el('a', 'sui-nav-btn');
-    find.id = 'chat-room-search';
-    find.href = 'javascript:void(0)';
-    find.title = 'Search this conversation';
-    find.appendChild(icon('icon-guild-directory sui-text-secondary'));
-    find.addEventListener('click', function () { openSearch(true); });
-    right.appendChild(find);
-
-    var gear = el('a', 'sui-nav-btn');
-    gear.href = 'javascript:void(0)';
-    gear.title = 'Connection';
-    gear.appendChild(icon('icon-menu sui-text-secondary'));
-    gear.addEventListener('click', function () { go('connection'); });
-    right.appendChild(gear);
-
-    page.appendChild(pageHeader(name, function () { go('channels'); }, right));
-
-    // IRC has shown the topic since the beginning: it is the room's own
-    // statement of what it is for, and hiding it behind a command wastes it.
-    if (S.room && S.room.topic) {
-      page.appendChild(el('div', 'chat-topic', S.room.topic));
-    }
-
-    // The room has been upgraded and the conversation is somewhere else. The
-    // old room stays joinable and stays in the list, so nothing else would
-    // tell a player they are talking to an empty room.
-    if (S.room && S.room.replaced_by) {
-      var moved = el('div', 'chat-encrypted chat-mod-moved');
-      moved.appendChild(icon('icon-link-out sui-text-warning', 'sui-icon-md'));
-      moved.appendChild(el('span', null,
-        'This room has been replaced. The conversation continues in a new one.'));
-      // NOT `go` — `var` hoists to the whole function, and a local of that
-      // name shadows the module's `go()` navigator for every other handler in
-      // this render, including the member-list button that has nothing to do
-      // with upgrades.
-      var goThere = el('a', 'chat-ref-action');
-      goThere.href = 'javascript:void(0)';
-      goThere.appendChild(el('span', null, 'Go there'));
-      goThere.addEventListener('click', function () {
-        var target = S.room.replaced_by;
-        // Joining first: an upgraded room is usually one this account has
-        // never been in, and opening it without joining shows an empty
-        // screen that looks like the upgrade lost the history.
-        invoke('matrix_join', { guildId: S.guildId, roomId: target })
-          .catch(function () {})            // already in it is not a failure
-          .then(function () { return refreshRooms(); })
-          .then(function () { openRoom(target); });
-      });
-      moved.appendChild(goThere);
-      page.appendChild(moved);
-    }
-
-    // Said once, at the top, because the alternative is a player scrolling a
-    // wall of "encrypted message" wondering what is broken. Element makes
-    // direct messages encrypted by default, so this is not a rare corner.
-    if (S.room && S.room.encrypted) {
-      var enc = el('div', 'chat-encrypted');
-      enc.appendChild(icon('icon-key sui-text-warning', 'sui-icon-md'));
-      enc.appendChild(el('span', null,
-        'This conversation is end-to-end encrypted. Structs cannot read it \u2014 '
-        + 'use a Matrix client with encryption to follow it.'));
-      page.appendChild(enc);
-    }
-
-    var pins = pinnedStrip();
-    if (pins) page.appendChild(pins);
-
-    var scroll = el('div', 'chat-scroll');
-    scroll.id = 'chat-timeline';
-    scroll.addEventListener('scroll', maybeLoadHistory);
-    // The top of the log says what is above it: more to come, or the beginning
-    // of the room. Shown even when the visible log is EMPTY — a room whose
-    // recent window happens to be quiet may still have history, and offering
-    // no way to reach it is indistinguishable from having none.
-    if (S.messages.length || S.moreHistory || S.loadingHistory) {
-      scroll.appendChild(S.loadingHistory
-        ? ruleNode('Loading')
-        : (S.moreHistory ? historyButton() : ruleNode('Beginning')));
-    }
-    if (!S.messages.length) {
-      scroll.appendChild(noticeBlock('Quiet', 'Nothing has been said here yet.'));
-    } else {
-      var dividerDone = false;
-      S.messages.forEach(function (m, i) {
-        var prev = i > 0 ? S.messages[i - 1] : null;
-
-        // Day separator: a timeline with no dates is a timeline you cannot
-        // date. Only between days, never above the first message.
-        // An event line carries its own time, so a date rule between two of
-        // them is noise on noise.
-        // A gap has no time — it is a hole, not a moment — so it must not
-        // drag a date rule in with it. Its `ts` of 0 dated it to the epoch
-        // and printed "31 Dec 1969" above every break in the record.
-        var timeless = m.kind === 'gap' || (prev && prev.kind === 'gap');
-        if (prev && !timeless && dayKey(m.ts) !== dayKey(prev.ts)
-            && !((m.kind === 'event') && (prev.kind === 'event'))) {
-          scroll.appendChild(ruleNode(dayLabel(m.ts)));
-        }
-
-        // Unread divider: where you stopped reading, held still while you
-        // read on. IRC has drawn this line since ircII and it is still the
-        // fastest way to answer "what did I miss".
-        if (!dividerDone && S.dividerTs && prev && Number(m.ts) > S.dividerTs
-            && Number(prev.ts) <= S.dividerTs) {
-          scroll.appendChild(ruleNode('New', true));
-          dividerDone = true;
-        }
-
-        scroll.appendChild(messageNode(m, prev));
-      });
-    }
-    page.appendChild(scroll);
-
-    // Everything on screen counts as read from here on — locally, and on the
-    // homeserver so the player's other Matrix clients agree.
-    if (S.messages.length) {
-      var newest = S.messages[S.messages.length - 1];
-      S.lastRead[S.roomId] = Number(newest.ts) || 0;
-      markRead(S.roomId, newest.event_id);
-    }
-
-    // Between the log and the composer, where MSN put it: the one line that
-    // tells you an answer is already being written.
-    var typing = el('div', 'chat-typing');
-    typing.id = 'chat-typing';
-    typing.textContent = typingLine(S.typing);
-    if (!S.typing.length) typing.classList.add('hidden');
-    page.appendChild(typing);
-
-    // Below it: who has seen what you last said. Both lines are about what
-    // other people are doing right now, and neither is part of the
-    // conversation — so neither belongs in the log itself.
-    var seen = seenLine();
-    if (seen) page.appendChild(seen);
-
-    // The composer is mounted OUTSIDE the page, in its own host at the foot of
-    // the panel — see chat.html. Rendering it into the page would put it back
-    // inside the screen's border.
-    var host = byId('chat-composer-host');
-    if (host) { clear(host); host.appendChild(composer()); }
-    return page;
-  }
-
-  // ── Composer ────────────────────────────────────────────────────────────
-  // The game's ACTION BAR, not a form: a .sui-panel of chunks between two
-  // panel edges — portrait chunk, connector, screen chunk, connector, button
-  // chunk — exactly as ActionBarComponent assembles the HUD's bottom bars.
-  // The metal frame, the inset screen and the button face are all the panel's
-  // own art; nothing here draws a control of its own.
-  // A chip above the bar naming what is being answered, with a way out. A
-  // reply target you cannot see is one you forget you set, and the next
-  // message goes somewhere surprising.
-  function replyChip() {
-    if (!S.replyTo) return null;
-    var m = S.replyTo;
-    var chip = el('div', 'chat-reply-chip');
-    chip.id = 'chat-reply-chip';
-    chip.appendChild(icon('icon-incoming sui-text-secondary', 'sui-icon-sm'));
-    chip.appendChild(el('span', 'chat-reply-who', m.sender_name || m.sender));
-    chip.appendChild(el('span', 'chat-reply-text', excerpt(m.body)));
-    var x = el('a', 'chat-reply-cancel');
-    x.href = 'javascript:void(0)';
-    x.title = 'Stop replying';
-    x.appendChild(icon('icon-close sui-text-secondary', 'sui-icon-sm'));
-    x.addEventListener('click', function () { S.replyTo = null; render(); });
-    chip.appendChild(x);
-    return chip;
-  }
-
-  function composer() {
-    var wrap = el('div', 'sui-panel-wrapper-fit-content');
-    wrap.id = 'chat-composer';
-    var chip = editChip() || replyChip();
-    if (chip) wrap.appendChild(chip);
-    // Filled in by `applyCompletion` while Tab is cycling. Written to
-    // directly rather than through render(), which would rebuild the field
-    // and throw away the caret mid-completion.
-    var hint = el('div', 'chat-complete-hint');
-    hint.id = 'chat-complete-hint';
-    wrap.appendChild(hint);
-    /* The shared composer in `chatrow.js`, which is this window's own panel.
-     *
-     * It was built inline here while `StructsChatRow.composer()` built a
-     * near-copy for the raid rail — so the two drifted, and the rail grew a
-     * `.sui-panel-chunk-spacer-indicator` bar under the face and a different
-     * send-button wrapper. Same code now; the differences cannot come back. */
-    var made = window.StructsChatRow.composer({
-      inputId: 'chat-input',
-      sendId: 'chat-send',
-      portraitId: 'chat-composer-portrait',
-      placeholder: 'Message, or /help',
-      pfpAttrs: S.profile && S.profile.pfp_attrs,
-    });
-    var panel = made.node.firstChild;
-    var input = made.input;
-    var send = made.send;
-    var portrait = made.portrait;
-
-    // Your face always renders in HERE. Whether anyone else can see it is a
-    // different question — other clients read the homeserver's avatar, which
-    // the app publishes for you. Say which state you are in, on the one
-    // element that is already the subject.
-    portrait.setAttribute('data-sui-mod-placement', 'top');
-    portrait.setAttribute('data-sui-tooltip',
-      S.profile && S.profile.avatar_published
-        ? 'Your portrait is published — other clients see this face'
-        : 'Your portrait is not published yet; it will be shortly');
-
-    input.addEventListener('input', function () {
-      resetCompletion();
-      clearCompletionHint();
-      noteTyping(input.value);
-    });
-    // The shared builder returns its own fit-content wrapper; this window
-    // already has one (it carries the reply chip and the completion hint), so
-    // only the panel moves across.
-    wrap.appendChild(panel);
-
-
-    input.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); return; }
-      // Escape drops the reply first. Only once there is none does Escape
-      // mean "leave the room" — the usual innermost-thing-first rule.
-      if (e.key === 'Escape' && S.editing) {
-        e.preventDefault(); e.stopPropagation();
-        cancelEdit();
-        return;
-      }
-      if (e.key === 'Escape' && S.replyTo) {
-        e.preventDefault(); e.stopPropagation();
-        S.replyTo = null; render();
-        var again = byId('chat-input');
-        if (again) again.focus();
-        return;
-      }
-      if (e.key === 'Tab') { e.preventDefault(); complete(input, e.shiftKey); return; }
-      // Up/Down walk what you have already sent — every IRC client and every
-      // shell does this, and it is the fastest way to fix a typo or repeat a
-      // command. Only from the ends of the line, so it never fights editing.
-      if (e.key === 'ArrowUp' && input.selectionStart === 0) {
-        e.preventDefault(); recall(input, -1); return;
-      }
-      if (e.key === 'ArrowDown' && input.selectionStart === input.value.length) {
-        e.preventDefault(); recall(input, 1);
-      }
-    });
-    send.addEventListener('click', submit);
-    return wrap;
-  }
+  // ── Room page + composer ───────────────────────────────────────────────────
+  // Lives in chat-room.js. Every module value assigned further down
+  // (completion, commands, scroll) is a thunk; the rest are declarations or
+  // module values already assigned above.
+  var roomPage = window.ChatRoom({
+    el: el, icon: icon, byId: byId, clear: clear, invoke: invoke, go: go, S: S, Chat: Chat,
+    render: function () { render(); }, pageHeader: pageHeader, noticeBlock: noticeBlock, dayKey: dayKey, dayLabel: dayLabel,
+    refreshRooms: refreshRooms, openRoom: openRoom, markRead: markRead, typingLine: typingLine,
+    setMuted: function (m) { return setMuted(m); }, openSearch: function (x) { return openSearch(x); },
+    pinnedStrip: function () { return pinnedStrip(); }, seenLine: function () { return seenLine(); },
+    ruleNode: function (l, a) { return ruleNode(l, a); }, historyButton: function () { return historyButton(); },
+    messageNode: function (m, prev) { return messageNode(m, prev); }, excerpt: function (t) { return excerpt(t); },
+    editChip: function () { return editChip(); }, cancelEdit: function () { return cancelEdit(); },
+    maybeLoadHistory: function () { return maybeLoadHistory(); }, noteTyping: function (v) { return noteTyping(v); },
+    submit: function () { return submit(); }, complete: function (i, back) { return complete(i, back); },
+    recall: function (i, d) { return recall(i, d); }, resetCompletion: function () { return resetCompletion(); },
+    clearCompletionHint: function () { return clearCompletionHint(); },
+  });
+  var renderRoom = roomPage.renderRoom, composer = roomPage.composer, replyChip = roomPage.replyChip;
 
   // ── Tab completion + input history ────────────────────────────────────────
   // Live in chat-complete.js. `COMMANDS` is declared further down, so it is
@@ -1247,50 +532,16 @@
   var applyCompletion = completion.applyCompletion, clearCompletionHint = completion.clearCompletionHint;
   var recall = completion.recall, rememberSent = completion.rememberSent, moveCaretToEnd = completion.moveCaretToEnd;
 
-  // ── Announcing that we are typing ────────────────────────────────────────
-  // Throttled hard. The homeserver keeps believing a notice for 20 seconds, so
-  // one every 8 is plenty — sending on every keystroke would put a request on
-  // the wire per character.
-  var typingSentAt = 0;
-  var typingStopTimer = null;
-  // WHICH room we told we were typing. Not S.roomId at retraction time: leaving
-  // a room mid-sentence would otherwise retract in the room you arrived at and
-  // leave you shown as typing, for twenty seconds, in the one you left.
-  var typingRoom = null;
-  var TYPING_REFRESH_MS = 8000;
-  var TYPING_IDLE_MS = 5000;
-
-  function noteTyping(value) {
-    if (!S.roomId) return;
-    // A slash command is not a message being written to the room, and a
-    // cleared box means the thought was abandoned.
-    var writing = !!String(value || '').trim() && String(value).charAt(0) !== '/';
-    if (typingStopTimer) { clearTimeout(typingStopTimer); typingStopTimer = null; }
-
-    if (!writing) { stopTyping(); return; }
-    var now = Date.now();
-    if (now - typingSentAt > TYPING_REFRESH_MS) {
-      typingSentAt = now;
-      typingRoom = S.roomId;
-      invoke('matrix_typing', { guildId: S.guildId, roomId: typingRoom, typing: true })
-        .catch(function () {});
-    }
-    // Stop claiming to type once the keyboard goes quiet, rather than waiting
-    // for the server's timeout to lapse.
-    typingStopTimer = setTimeout(stopTyping, TYPING_IDLE_MS);
-  }
-
-  function stopTyping() {
-    if (typingStopTimer) { clearTimeout(typingStopTimer); typingStopTimer = null; }
-    if (!typingSentAt || !typingRoom) return;
-    var room = typingRoom;
-    typingSentAt = 0;
-    typingRoom = null;
-    invoke('matrix_typing', { guildId: S.guildId, roomId: room, typing: false })
-      .catch(function () {});
-  }
-  Chat.noteTyping = noteTyping;
-  Chat.stopTyping = stopTyping;
+  // ── Typing + scroll anchoring ──────────────────────────────────────────────
+  // Lives in chat-scroll.js: what the READER is doing — announcing that we
+  // are typing, following the conversation only while at it, loading history
+  // on the way up. `following(true)` is the one write into its state.
+  var scrolling = window.ChatScroll({
+    byId: byId, invoke: invoke, render: function () { render(); }, S: S, Chat: Chat,
+  });
+  var noteTyping = scrolling.noteTyping, stopTyping = scrolling.stopTyping, atBottom = scrolling.atBottom;
+  var scrollToEnd = scrolling.scrollToEnd, maybeLoadHistory = scrolling.maybeLoadHistory, loadHistory = scrolling.loadHistory;
+  var noteScrollPosition = scrolling.noteScrollPosition, keepPlace = scrolling.keepPlace, following = scrolling.following;
 
   // ── Commands ──────────────────────────────────────────────────────────────
   // Live in chat-commands.js. Every collaborator is handed over as a thunk,
@@ -1310,86 +561,10 @@
     scrollToEnd: function () { return scrollToEnd(); },
     stopTyping: function () { return stopTyping(); },
     mentionsIn: function (t) { return mentionsIn(t); },
-    atBottom: function () { wasAtBottom = true; },
+    atBottom: function () { following(true); },
   });
   var SHORTCUTS = commands.SHORTCUTS, COMMANDS = commands.COMMANDS;
   var submit = commands.submit, say = commands.say, sendMessage = commands.sendMessage, retrySend = commands.retrySend;
-
-  // ── Scroll anchoring ──────────────────────────────────────────────────────
-  // Follow the conversation only while the reader is AT the conversation.
-  // Yanking someone to the bottom because a message arrived while they were
-  // reading scrollback is the single most annoying thing a chat client does.
-  var STICK_SLACK_PX = 48;
-
-  function atBottom() {
-    var t = byId('chat-timeline');
-    if (!t) return true;
-    // jsdom has no layout — every measurement is 0, which reads as "at the
-    // bottom", which is the right default for a fresh room.
-    return t.scrollHeight - t.scrollTop - t.clientHeight <= STICK_SLACK_PX;
-  }
-
-  function scrollToEnd() {
-    var t = byId('chat-timeline');
-    if (t) t.scrollTop = t.scrollHeight;
-  }
-
-  // Near the top means "show me what came before". 120px of lead-in so the
-  // page is already arriving by the time the reader gets there.
-  var HISTORY_TRIGGER_PX = 120;
-
-  function maybeLoadHistory() {
-    var t = byId('chat-timeline');
-    if (!t || S.view !== 'room' || !S.roomId) return;
-    if (S.loadingHistory || !S.moreHistory) return;
-    if (t.scrollTop > HISTORY_TRIGGER_PX) return;
-    loadHistory();
-  }
-
-  function loadHistory() {
-    var room = S.roomId;
-    S.loadingHistory = true;
-    render();
-    var t = byId('chat-timeline');
-    // Anchor on the distance from the BOTTOM: prepending changes scrollHeight,
-    // and holding scrollTop would drop the reader wherever the new content
-    // happened to push their line.
-    var fromBottom = t ? t.scrollHeight - t.scrollTop : 0;
-
-    return invoke('matrix_backfill', { guildId: S.guildId, roomId: room, limit: 40 })
-      .then(function (res) {
-        if (S.roomId !== room) return;          // they moved on while we waited
-        var older = (res && res.messages) || [];
-        S.moreHistory = !!(res && res.more);
-        S.loadingHistory = false;
-        if (older.length) S.messages = older.concat(S.messages);
-        wasAtBottom = false;                     // reading history, not following
-        render();
-        var back = byId('chat-timeline');
-        if (back) back.scrollTop = back.scrollHeight - fromBottom;
-      })
-      .catch(function () {
-        S.loadingHistory = false;
-        // Stop asking: a failing page will fail again on the next scroll and
-        // the reader would get a stutter instead of a log.
-        S.moreHistory = false;
-        render();
-      });
-  }
-  Chat.loadHistory = loadHistory;
-
-  // Called before a re-render decides whether to follow.
-  var wasAtBottom = true;
-  function noteScrollPosition() { wasAtBottom = atBottom(); }
-
-  function keepPlace(prevTop) {
-    var t = byId('chat-timeline');
-    if (!t) return;
-    if (wasAtBottom) { t.scrollTop = t.scrollHeight; return; }
-    // Hold the reader where they were. Not perfect across a height change,
-    // but vastly better than jumping to either end.
-    t.scrollTop = prevTop;
-  }
 
   // ── Connection view ───────────────────────────────────────────────────────
   // Lives in chat-connection.js: the sign-in ladder, identity, sharing.
@@ -1637,7 +812,7 @@
         if (res && res.room) S.room = res.room;
         S.messages = (res && res.messages) || [];
         S.seen = (res && res.seen) || null;
-        wasAtBottom = true;              // a room you just opened starts at the end
+        following(true);                 // a room you just opened starts at the end
         render();
         scrollToEnd();
         // Something was shared while no room was open; this is the room it

@@ -120,6 +120,9 @@ cat > "$FIX" <<'EOF'
       // Galaxy pass (snapshot-derived, 2026-09-06).
       players_known: 3273, live_1h: 214, live_24h: 1180, max_player_index: 3275,
       new_players_24h: 12, new_players_7d: 91,
+      live_players: (function () { var out = []; var names = ['MARKLIFER', 'PHONIFFER', 'JPEG', '', 'BEEZHAN', 'NETLAG', 'OYMOP', 'VEX', 'KORR', 'ASTRA', 'DUNE', 'IRIS'];
+        for (var i = 0; i < 12; i++) { out.push({ player_id: '1-' + (100 + i), username: names[i], tag: i % 3 ? 'SNC' : 'OH', guild_name: i % 3 ? 'SN Corp' : 'Orbital Hydro',
+          pfp_attrs: '{"head":1,"body":2}', planet_id: '2-' + (500 + i), fleet_id: '9-' + (100 + i), last_action: 4300000 - i * 17, ago_blocks: i * 17, charge: i * 17 }); } return out; })(),
       charge_levels: [40, 120, 300, 500, 900, 600],
       planets_with_ore: 7100, planets_exhausted: 22029, rigs_mining: 1450, rigs_refining: 720,
       fleets_away_now: 4, fleets_on_station: 3157,
@@ -427,6 +430,27 @@ cat > "$FIX" <<'EOF'
 
   var F = {
     mcp_game_stats_snapshot: SNAPSHOT,
+    // The Terminal: a saved layout, the market, and the windows it has open.
+    terminal_layout_get: { version: 3, cards: [
+      { id: 'people-1', type: 'people', params: {}, w: 1 },
+      { id: 'market-1', type: 'market', params: {}, w: 2 },
+      { id: 'work-1', type: 'page', params: { page: 'work' }, w: 1 },
+      { id: 'player-1', type: 'player', params: { id: '1-61' }, w: 1 },
+      { id: 'stats-1', type: 'stats', params: { section: 'raids' }, w: 1 },
+    ] },
+    terminal_layout_set: { version: 4, cards: [] },
+    terminal_windows: { open: true, cards: [] },
+    open_terminal_card: null,
+    terminal_market: { at_ms: 0, height: 4200719, providers: [
+      { id: '10-1', kind: 'provider', policy: 'openMarket', substation_id: '4-4',
+        owner: { id: '1-170', name: 'TRACINGVIOLET', tag: 'SNC', pfp_attrs: '{"head":3,"neck":2,"body":4,"arms":5,"background":1}' },
+        provider: { rate_amount: 1, rate_denom: 'ualpha', denom_label: 'alpha', capacity_min: 1000, capacity_max: 1000000000,
+          capacity_min_text: '1KW', capacity_max_text: '1GW', duration_min: 100, duration_max: 1000000, duration_min_text: '9m', duration_max_text: '61d', open: true } },
+      { id: '10-2', kind: 'provider', policy: 'guildMarket', substation_id: '4-9',
+        owner: { id: '1-61', name: 'JPEG', tag: 'OH', pfp_attrs: null },
+        provider: { rate_amount: 3, rate_denom: 'uguild.0-2', denom_label: 'ohm', capacity_min: 500, capacity_max: 50000,
+          capacity_min_text: '500W', capacity_max_text: '50KW', duration_min: 50, duration_max: 5000, duration_min_text: '4m', duration_max_text: '7h', open: false } },
+    ] },
     // Nothing parked. The board claims a Comms hand-off on every boot, so the
     // quiet answer is the normal one and must not reject into the console.
     matrix_take_pending_transfer: null,

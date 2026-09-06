@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="css/sui/sui.css" />
   <link rel="stylesheet" href="css/main.css" />
   <link rel="stylesheet" href="playercard.css" />
+  <link rel="stylesheet" href="chat-rows.css" />
   <link rel="stylesheet" href="guildcard.css" />
   <link rel="stylesheet" href="providercard.css" />
   <style>
@@ -892,6 +893,28 @@
                                   overflow-y: auto; }
     /* Game Stats is a long dashboard, not a pinned log: the window scrolls. */
     html[data-solo="gamestats"] .ops-scroll { overflow-y: auto; }
+    html[data-solo="terminal"] .ops-scroll { overflow-y: auto; }
+    /* ── The Terminal (board-terminal.js) ──────────────────────────────── */
+    .tm-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-md) var(--spacing-lg); margin-bottom: var(--spacing-lg); text-align: left; }
+    .tm-toolbar .sui-input-text { min-width: 0; }
+    .tm-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--spacing-lg); align-items: start; text-align: left; }
+    .tm-grid.tm-solo { grid-template-columns: minmax(0, 1fr); }
+    .tm-card { min-width: 0; border: 1px solid var(--border-subtle); background: var(--surface-panel); }
+    .tm-w2 { grid-column: span 2; }
+    .tm-w3 { grid-column: span 3; }
+    @media (max-width: 900px) { .tm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tm-w3 { grid-column: span 2; } }
+    @media (max-width: 600px) { .tm-grid { grid-template-columns: minmax(0, 1fr); } .tm-w2, .tm-w3 { grid-column: span 1; } }
+    .tm-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-sm); padding: var(--spacing-xs) var(--spacing-sm); border-bottom: 1px solid var(--border-subtle); }
+    .tm-title { color: var(--text-body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tm-doors { display: inline-flex; gap: var(--spacing-xs); flex: none; }
+    .tm-door { padding: var(--spacing-xs); }
+    .tm-config { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm); background: var(--surface-default); }
+    .tm-body { padding: var(--spacing-sm); min-height: var(--spacing-xxl); }
+    .tm-body .page { display: block; }
+    .tm-market-head { margin-bottom: var(--spacing-sm); }
+    .tm-market { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--spacing-md); }
+    .tm-map { width: 100%; height: 520px; border: 0 none; background: var(--page-background); }
+    .tm-comms-body { max-height: 360px; overflow-y: auto; }
     /* ── Game Stats charts (board-gamestats.js) ─────────────────────────── */
     /* The hero figure: the one number the page leads with. DirectiveZero at
        32px is an exact 2× of the tile face, so the pixel art stays crisp. */
@@ -923,6 +946,12 @@
     .gs-ticks { position: relative; height: var(--spacing-lg); margin-top: var(--spacing-xs); }
     /* Tile strips that sit above a chart caption need air under them. */
     .gs-strip { margin-bottom: var(--spacing-md); }
+    /* The hour's players: inline person lines, wrapping, each with how long
+       ago it acted in the hint colour. */
+    .gs-people { display: flex; flex-wrap: wrap; gap: var(--spacing-sm) var(--spacing-lg); margin-bottom: var(--spacing-md); text-align: left; }
+    .gs-person { display: inline-flex; align-items: center; gap: var(--spacing-sm); min-width: 0; }
+    .gs-person-ago { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; color: var(--text-hint); white-space: nowrap; }
+    .gs-counts { margin-bottom: var(--spacing-md); text-align: left; }
     .gs-tick { position: absolute; top: 0; transform: translateX(-50%); font-family: 'ExtremeHazard', sans-serif; font-size: 8px; white-space: nowrap; }
     .gs-tick:first-child { transform: none; }
     .gs-tick:last-child { transform: translateX(-100%); }
@@ -1116,6 +1145,9 @@
                  drawn continuously, without borrowing the game view. -->
 
             <!-- ═══ GAME STATS — whole-universe dashboard (pop-out only) ═══ -->
+            <div class="page" id="page-terminal" hidden>
+              <div id="terminal-body"></div>
+            </div>
             <div class="page" id="page-gamestats" hidden>
               <div id="gamestats-body">
                 <div class="sui-message-inline-alert sui-mod-secondary"><i class="icon-in-progress"></i>
@@ -1165,5 +1197,8 @@
   <script src="board.js"></script>
   <script src="board-pages.js"></script>
   <script src="board-gamestats.js"></script>
+  <script src="chatrow.js"></script>
+  <script src="raidview-comms.js"></script>
+  <script src="board-terminal.js"></script>
 </body>
 </html>

@@ -36,9 +36,20 @@ const FEDERATED = [
   'frontend/chat-connection.js',
   'frontend/chat-pins.js',
   'frontend/chat-presence.js',
+  'frontend/chat-message.js',
+  'frontend/chat-scroll.js',
+  'frontend/chat-room.js',
+  'frontend/chat-tabs.js',
+  'frontend/chat-rent.js',
   'frontend/raidview.js',
+  'frontend/raidview-comms.js',
+  'frontend/raidview-log.js',
+  'frontend/raidview-sheet.js',
+  'frontend/raidview-hud.js',
+  'frontend/raidview-pip.js',
   'frontend/board-pages.js',
   'frontend/board-gamestats.js',
+  'frontend/board-terminal.js',
   'frontend/playercard.js',
   'frontend/guildcard.js',
   'frontend/providercard.js',
@@ -154,7 +165,7 @@ for (const file of FEDERATED) {
 // stops it. A CLEAR (`= ''`) is allowed: it writes no markup.
 {
   console.log('\n— windows that never build markup');
-  for (const file of ['frontend/chat.js', 'frontend/chat-refs.js', 'frontend/chat-complete.js', 'frontend/chat-reactions.js', 'frontend/chat-commands.js', 'frontend/chat-work.js', 'frontend/chat-channels.js', 'frontend/chat-search.js', 'frontend/chat-people.js', 'frontend/chat-connection.js', 'frontend/chat-pins.js', 'frontend/chat-presence.js', 'frontend/transfer.js']) {
+  for (const file of ['frontend/chat.js', 'frontend/chat-refs.js', 'frontend/chat-complete.js', 'frontend/chat-reactions.js', 'frontend/chat-commands.js', 'frontend/chat-work.js', 'frontend/chat-channels.js', 'frontend/chat-search.js', 'frontend/chat-people.js', 'frontend/chat-connection.js', 'frontend/chat-pins.js', 'frontend/chat-presence.js', 'frontend/chat-message.js', 'frontend/chat-scroll.js', 'frontend/chat-room.js', 'frontend/chat-tabs.js', 'frontend/chat-rent.js', 'frontend/transfer.js']) {
     const code = readFileSync(root + '/' + file, 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
@@ -203,7 +214,7 @@ for (const file of FEDERATED) {
   const pages = readFileSync(root + '/src-tauri/src/mcp/tools/board_pages.rs', 'utf8');
   // The Comms window is chat.js plus the sections extracted from it; the
 // rules below hold across all of them.
-const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js', 'chat-channels.js', 'chat-search.js', 'chat-people.js', 'chat-connection.js', 'chat-pins.js', 'chat-presence.js']
+const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js', 'chat-channels.js', 'chat-search.js', 'chat-people.js', 'chat-connection.js', 'chat-pins.js', 'chat-presence.js', 'chat-message.js', 'chat-scroll.js', 'chat-room.js', 'chat-tabs.js', 'chat-rent.js']
   .map((f) => readFileSync(root + '/frontend/' + f, 'utf8')).join('\n');
 
   // 1. The gate on the command that actually moves funds. It is an explicit
@@ -245,7 +256,7 @@ const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js'
   const client = readFileSync(root + '/src-tauri/src/matrix/client.rs', 'utf8');
   const sites = (client.match(/identity::sanitize_body\(/g) || []).length;
   check('message bodies, edits and reply fallbacks are sanitised at ingestion (3+ sites)', sites >= 3, String(sites));
-  const windows = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js', 'chat-channels.js', 'chat-search.js', 'chat-people.js', 'chat-connection.js', 'chat-pins.js', 'chat-presence.js', 'chatrow.js', 'raidview.js', 'transfer.js']
+  const windows = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js', 'chat-channels.js', 'chat-search.js', 'chat-people.js', 'chat-connection.js', 'chat-pins.js', 'chat-presence.js', 'chat-message.js', 'chat-scroll.js', 'chat-room.js', 'chat-tabs.js', 'chat-rent.js', 'chatrow.js', 'raidview.js', 'raidview-comms.js', 'raidview-log.js', 'raidview-sheet.js', 'raidview-hud.js', 'raidview-pip.js', 'transfer.js']
     .map((f) => readFileSync(root + '/frontend/' + f, 'utf8')).join('\n');
   check('no window reads formatted_body', !/formatted_body/.test(windows));
   const ident = readFileSync(root + '/src-tauri/src/matrix/identity.rs', 'utf8');
@@ -347,7 +358,7 @@ const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js'
     sourced.length > 0 && sourced.every((a) => /ident\.as_ref\(\)/.test(a)),
     sourced.join(' | '));
 
-  const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js', 'chat-channels.js', 'chat-search.js', 'chat-people.js', 'chat-connection.js', 'chat-pins.js', 'chat-presence.js']
+  const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js', 'chat-channels.js', 'chat-search.js', 'chat-people.js', 'chat-connection.js', 'chat-pins.js', 'chat-presence.js', 'chat-message.js', 'chat-scroll.js', 'chat-room.js', 'chat-tabs.js', 'chat-rent.js']
     .map((f) => readFileSync(root + '/frontend/' + f, 'utf8')).join('\n');
   const srcs = [...chat.matchAll(/\.src\s*=\s*([^;\n]+)/g)].map((m) => m[1].trim());
   // Everything the window points an <img> at is either a bundled path built

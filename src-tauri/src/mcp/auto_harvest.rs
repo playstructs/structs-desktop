@@ -148,7 +148,7 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     }
     run.finish(Some(format!(
         "eff_conc={}",
-        crate::mcp::loop_util::effective_max_concurrent()
+        crate::mcp::capacity::reads_fanout()
     )));
     if run.errors.load(Ordering::Relaxed) == 0 {
         crate::mcp::loop_util::report_clean_scan();
@@ -234,7 +234,7 @@ async fn scan(
     crate::mcp::perception::resolve_pending(&client, 50).await;
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
-        crate::mcp::loop_util::effective_max_concurrent(),
+        crate::mcp::capacity::reads_fanout(),
         move |(pid, idx_opt, caps)| {
             let app = app.clone();
             let client = client.clone();

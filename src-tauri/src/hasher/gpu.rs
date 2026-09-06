@@ -163,7 +163,7 @@ pub fn run_gpu_hash(
     // easiest-difficulty task first, so a cheap build never waits behind an
     // expensive refine. Held for the whole grind; freed on drop. `None` = the
     // task was cancelled while queued for a slot.
-    let _permit = match crate::hasher::scheduler::admit(admit_difficulty, &|| handle.is_cancelled()) {
+    let _permit = match crate::mcp::capacity::admit_gpu(admit_difficulty, &|| handle.is_cancelled()) {
         Some(p) => p,
         None => return,
     };

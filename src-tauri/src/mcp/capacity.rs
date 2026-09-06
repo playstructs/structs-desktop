@@ -98,6 +98,89 @@ pub fn set_gpu_difficulty(to: u64, because: impl Into<String>) {
     adjust(Resource::Gpu, "difficulty_start", from, to, because);
 }
 
+// ── Admission: the three doors, one module ──────────────────────────────────
+// The scheduler, the transaction gate and the loop fan-out keep their own
+// mechanics (a priority heap, priority queues, a per-scan JoinSet); every
+// caller comes through here so there is one place to read, one to change.
+
+/// Wait for a signing slot. Held for the whole attempt; dropping releases it.
+pub async fn acquire_tx(context: &str) -> crate::mcp::tx_gate::Permit {
+    crate::mcp::tx_gate::acquire(context).await
+}
+
+/// Wait for a grinder slot, easiest difficulty first. `None` if cancelled
+/// while waiting.
+pub fn admit_gpu(difficulty: u64, cancelled: &dyn Fn() -> bool) -> Option<crate::hasher::scheduler::Permit> {
+    crate::hasher::scheduler::admit(difficulty, cancelled)
+}
+
+/// How many player bodies a scan may have in flight right now.
+pub fn reads_fanout() -> usize {
+    crate::mcp::loop_util::effective_max_concurrent()
+}
+
+// ── Saturation: the one measured signal per resource ─────────────────────────
+
+/// Why a resource is saturated right now, or `None`. The watchdog reads this
+/// rather than inferring pressure from loop timings.
+pub fn saturation(resource: Resource) -> Option<String> {
+    match resource {
+        Resource::Gpu => gpu_saturated(&crate::hasher::tuner::last_signal()),
+        Resource::TxInclusion => {
+            let g = crate::mcp::tx_gate::snapshot();
+            let n = |k: &str| g.get(k).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            tx_saturated(n("in_flight"), n("queued_critical") + n("queued_interactive") + n("queued_bulk"), crate::mcp::tx_gate::cap())
+        }
+        Resource::Reads => reads_saturated(
+            crate::mcp::loop_util::recent_pressure_failures(),
+            crate::mcp::loop_util::effective_max_concurrent(),
+            crate::mcp::loop_util::MIN_CONCURRENT_PLAYERS,
+        ),
+    }
+}
+
+/// Every resource that is saturated, with its reason.
+pub fn saturated() -> Vec<(Resource, String)> {
+    [Resource::Gpu, Resource::TxInclusion, Resource::Reads]
+        .into_iter()
+        .filter_map(|r| saturation(r).map(|why| (r, why)))
+        .collect()
+}
+
+fn gpu_saturated(signal: &Value) -> Option<String> {
+    if signal.get("wedged").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Some("grinder wedged: p90 solve over the wedge threshold".into());
+    }
+    let t = signal.get("throughput")?;
+    if t.get("verdict").and_then(|v| v.as_str()) == Some("degraded") {
+        let ratio = t.get("ratio").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        return Some(format!("grind throughput {ratio:.2}× baseline"));
+    }
+    None
+}
+
+/// Saturated when the gate is full AND the queue behind it is at least two
+/// gates deep — one gate's worth queued is a normal burst.
+fn tx_saturated(in_flight: usize, queued: usize, cap: usize) -> Option<String> {
+    if cap > 0 && in_flight >= cap && queued >= cap * 2 {
+        Some(format!("{queued} signs queued behind {in_flight} in flight (cap {cap})"))
+    } else {
+        None
+    }
+}
+
+/// Saturated when failures are clustering (the AIMD's own trigger) or the
+/// fan-out has already been driven to its floor.
+fn reads_saturated(failures_last_minute: usize, current: usize, floor: usize) -> Option<String> {
+    if failures_last_minute >= 3 {
+        return Some(format!("{failures_last_minute} endpoint failures in a minute"));
+    }
+    if current <= floor {
+        return Some(format!("fan-out pinned at its floor of {floor}"));
+    }
+    None
+}
+
 pub fn recent_changes() -> Vec<Change> {
     CHANGES.lock().map(|c| c.iter().cloned().collect()).unwrap_or_default()
 }
@@ -114,9 +197,11 @@ pub fn snapshot() -> Value {
             "pending": crate::hasher::pool::pending_len(),
             "difficulty_start": crate::hasher::difficulty_start(),
             "signal": tuner.get("throughput").cloned().unwrap_or(Value::Null),
+            "saturated": saturation(Resource::Gpu),
         },
         "tx": {
             "cap": crate::mcp::tx_gate::cap(),
+            "saturated": saturation(Resource::TxInclusion),
             "in_flight": gate.get("in_flight").cloned().unwrap_or(Value::Null),
             "queued": {
                 "critical": gate.get("queued_critical").cloned().unwrap_or(Value::Null),
@@ -126,6 +211,7 @@ pub fn snapshot() -> Value {
         },
         "reads": {
             "max_concurrent": crate::mcp::loop_util::effective_max_concurrent(),
+            "saturated": saturation(Resource::Reads),
             "ceiling": crate::mcp::loop_util::MAX_CONCURRENT_PLAYERS,
             "signal": { "pressure_failures_last_minute": crate::mcp::loop_util::recent_pressure_failures() },
         },
@@ -135,6 +221,31 @@ pub fn snapshot() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_gate_with_a_burst_behind_it_is_not_saturated_but_two_gates_deep_is() {
+        assert_eq!(tx_saturated(4, 4, 4), None, "one gate's worth queued is a burst");
+        assert_eq!(tx_saturated(3, 40, 4), None, "the gate is not even full");
+        assert!(tx_saturated(4, 8, 4).unwrap().contains("8 signs queued"));
+        assert_eq!(tx_saturated(0, 0, 0), None);
+    }
+
+    #[test]
+    fn reads_saturate_on_clustered_failures_or_at_the_floor() {
+        assert_eq!(reads_saturated(0, 10, 2), None);
+        assert!(reads_saturated(3, 10, 2).unwrap().contains("3 endpoint failures"));
+        assert!(reads_saturated(0, 2, 2).unwrap().contains("floor"));
+    }
+
+    #[test]
+    fn the_gpu_saturates_on_the_tuner_verdict_only() {
+        assert_eq!(gpu_saturated(&Value::Null), None, "no signal yet is not saturation");
+        assert_eq!(gpu_saturated(&json!({"throughput": {"verdict": "healthy", "ratio": 1.2}})), None);
+        assert!(gpu_saturated(&json!({"throughput": {"verdict": "degraded", "ratio": 0.42}})).unwrap().contains("0.42"));
+        assert!(gpu_saturated(&json!({"wedged": true})).unwrap().contains("wedged"));
+    }
+
     use super::*;
 
     #[test]

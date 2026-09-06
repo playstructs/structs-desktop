@@ -94,6 +94,7 @@ static APP_QUITTING: AtomicBool = AtomicBool::new(false);
 /// handler, before windows are destroyed.
 pub fn mark_app_quitting() {
     APP_QUITTING.store(true, Ordering::SeqCst);
+    crate::mcp::terminal::note_app_quitting();
 }
 
 fn persist_path() -> Option<std::path::PathBuf> {

@@ -716,7 +716,7 @@ async fn scan(
     let client_c = client.clone();
     let mut board: Vec<Candidate> = crate::mcp::loop_util::map_concurrent(
         batch,
-        crate::mcp::loop_util::effective_max_concurrent(),
+        crate::mcp::capacity::reads_fanout(),
         move |(pid, guild)| {
             let client = client_c.clone();
             async move { evaluate(&client, &pid, &guild).await }

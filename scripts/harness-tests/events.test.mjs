@@ -27,7 +27,9 @@ const root = process.cwd();
 const emitted = new Map();          // name → files
 for (const f of rustFiles(root + '/src-tauri/src')) {
   const src = readFileSync(f, 'utf8');
-  const re = /\.emit(?:_to|_filter)?\s*\(\s*(?:[^,]+,\s*)?"(matrix::[a-z_]+)"/g;
+  // `events::emit_matrix(&app, "matrix::x", …)` is the one emit path now; the
+  // older `.emit(` / `.emit_to(` forms are kept so a stray one still counts.
+  const re = /\b(?:emit_matrix|emit(?:_to|_filter)?)\s*\(\s*(?:[^,]+,\s*)?"(matrix::[a-z_]+)"/g;
   let m;
   while ((m = re.exec(src))) {
     if (!emitted.has(m[1])) emitted.set(m[1], []);
@@ -75,7 +77,7 @@ check('every matrix event Rust emits has a listener',
 const payloadKeys = new Map();      // event → set of keys Rust can send
 for (const f of rustFiles(root + '/src-tauri/src')) {
   const src = readFileSync(f, 'utf8');
-  const re = /\.emit(?:_to|_filter)?\s*\(\s*(?:[^,]+,\s*)?"(matrix::[a-z_]+)"\s*,\s*json!\s*\(/g;
+  const re = /\b(?:emit_matrix|emit(?:_to|_filter)?)\s*\(\s*(?:[^,]+,\s*)?"(matrix::[a-z_]+)"\s*,\s*json!\s*\(/g;
   let m;
   while ((m = re.exec(src))) {
     // Start at the `{`, not at the `(` of `json!(`. Starting a brace counter

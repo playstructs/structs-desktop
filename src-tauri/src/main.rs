@@ -86,6 +86,12 @@ fn main() {
             mcp::tools::board_pages::mcp_work,
             mcp::board_feed::open_stream_window,
             mcp::board_feed::open_board_window,
+            mcp::terminal::open_terminal_window,
+            mcp::terminal::open_terminal_card,
+            mcp::terminal::terminal_windows,
+            mcp::terminal::terminal_layout_get,
+            mcp::terminal::terminal_layout_set,
+            mcp::terminal::terminal_market,
             mcp::game_stats::open_game_stats_window,
             // Comms (federated Matrix chat). Reachable only from the Debug
             // panel for now — see src/matrix/mod.rs.
@@ -547,6 +553,8 @@ try {{
             // opened the board via MCP, so this never opens for a player who
             // hasn't — it only restores a board they chose to have open.
             mcp::board_feed::reopen_if_persisted(app.handle());
+            // Likewise the Terminal and any card it had popped out.
+            mcp::terminal::reopen_if_persisted(app.handle());
 
             // On-chain guild directory refresh (non-blocking; persisted config
             // is authoritative at boot). Keeps guild infra URLs fresh and

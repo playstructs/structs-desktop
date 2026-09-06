@@ -848,7 +848,7 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
         let client = client.clone();
         crate::mcp::loop_util::map_concurrent(
             vplayers,
-            crate::mcp::loop_util::effective_max_concurrent(),
+            crate::mcp::capacity::reads_fanout(),
             move |(name, pid, index)| {
                 let client = client.clone();
                 async move {
@@ -2917,7 +2917,7 @@ async fn query_raid_readiness(client: &CosmosClient, args: &Value) -> Vec<Conten
     // property of the type, not of any one player.
     let cmd_ambits = command_ship_ambits();
 
-    let max = crate::mcp::loop_util::effective_max_concurrent();
+    let max = crate::mcp::capacity::reads_fanout();
     let c = client.clone();
     let results = crate::mcp::loop_util::map_concurrent(rows, max, move |row| {
         let client = c.clone();

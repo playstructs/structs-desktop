@@ -81,6 +81,12 @@ pub static BOARD_BUS: LazyLock<broadcast::Sender<(String, Value)>> =
 /// listens for exactly the same `grass-event` / `grass-lookups` traffic.
 pub const BOARD_WINDOWS: &[&str] = &["board", "stream", "gamestats"];
 
+/// A window that runs board.html — the fixed labels above plus the Terminal
+/// and every card it pops out (`terminal-<id>`).
+pub fn is_board_window(label: &str) -> bool {
+    BOARD_WINDOWS.contains(&label) || crate::mcp::terminal::is_terminal_label(label)
+}
+
 /// Single choke point replacing every `emit_to("board", …)`. The broadcast
 /// always fires (web viewers may exist with no native window); the native emit
 /// keeps its window-existence guard.
@@ -99,17 +105,14 @@ pub fn emit_board<S: serde::Serialize>(app: &tauri::AppHandle, event: &str, payl
     crate::mcp::events::record(event);
     let _ = BOARD_BUS.send((event.to_string(), value.clone()));
     use tauri::{Emitter, EventTarget, Manager};
-    if BOARD_WINDOWS
-        .iter()
-        .any(|l| app.get_webview_window(l).is_some())
-    {
+    if app.webview_windows().keys().any(|l| is_board_window(l)) {
         let _ = app.emit_filter(event, value, |t| {
             matches!(t,
                 EventTarget::Window { label }
                 | EventTarget::Webview { label }
                 | EventTarget::WebviewWindow { label }
                 | EventTarget::AnyLabel { label }
-                    if BOARD_WINDOWS.contains(&label.as_str()))
+                    if is_board_window(label.as_str()))
         });
     }
 }

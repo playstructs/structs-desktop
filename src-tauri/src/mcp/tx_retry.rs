@@ -323,7 +323,7 @@ pub async fn sign_with_retry_guarded(
         // Admission gate: keeps the signing façade's own FIFO shallow so a
         // deadline-bound combat answer isn't stuck behind hundreds of bulk
         // builds. Held for the attempt; released on success, failure or cancel.
-        let _slot = crate::mcp::tx_gate::acquire(context.as_str()).await;
+        let _slot = crate::mcp::capacity::acquire_tx(context.as_str()).await;
         let slot_won = now_millis();
         // The wait above can be an hour deep. Re-test the proof's anchor now
         // that we hold the slot, so a message the chain is guaranteed to reject
@@ -460,7 +460,7 @@ pub async fn submit_with_retry(
     let mut last_err = String::new();
     for attempt in 1..=MAX_ATTEMPTS {
         // Primary-player txs share the same façade, so they share the gate.
-        let _slot = crate::mcp::tx_gate::acquire(context.as_str()).await;
+        let _slot = crate::mcp::capacity::acquire_tx(context.as_str()).await;
         let started = now_millis();
         log_build(context, action, attempt, Some(&args));
         let res = tx_queue::submit_tx(app, action.to_string(), args.clone()).await;

@@ -327,7 +327,7 @@ async fn scan(app: &tauri::AppHandle, cfg: &DelegationConfig, run: &LoopRun) {
     let (ok_c, failed_c) = (ok.clone(), failed.clone());
     crate::mcp::loop_util::for_each_player_concurrent(
         missing,
-        crate::mcp::loop_util::effective_max_concurrent(),
+        crate::mcp::capacity::reads_fanout(),
         move |(index, pid)| {
             let app = app_c.clone();
             let primary = primary_c.clone();

@@ -1359,7 +1359,7 @@ pub async fn mcp_health() -> Result<Value, String> {
         obj.insert(
             "concurrency".into(),
             json!({
-                "effective": crate::mcp::loop_util::effective_max_concurrent(),
+                "effective": crate::mcp::capacity::reads_fanout(),
                 "max": crate::mcp::loop_util::MAX_CONCURRENT_PLAYERS,
             }),
         );
@@ -2110,7 +2110,7 @@ pub async fn mcp_role_pfp_set_impl(
         let (fa, fr) = (app2.clone(), role2.clone());
         crate::mcp::loop_util::for_each_player_concurrent(
             targets,
-            crate::mcp::loop_util::effective_max_concurrent(),
+            crate::mcp::capacity::reads_fanout(),
             move |(index, pid)| {
                 let app = fa.clone();
                 let role = fr.clone();

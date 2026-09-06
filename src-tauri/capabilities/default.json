@@ -6,6 +6,8 @@
     "board",
     "stream",
     "gamestats",
+    "terminal",
+    "terminal-*",
     "chat",
     "chat-*",
     "transfer",

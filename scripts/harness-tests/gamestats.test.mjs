@@ -100,7 +100,7 @@ async function until(fn, ms = 5000) {
     (function () { var tr = [...body.querySelectorAll('.sui-data-card-header')].find((h) => /TRENDS/.test(h.textContent));
       return tr && !tr.closest('div[style*="grid-template-columns"]'); })());
   check('all three metrics offered', [...body.querySelectorAll('select option')].length === 3);
-  check('24h tiles render', /Active/.test(body.textContent) && /Destroyed/.test(body.textContent));
+  check('24h figures render', /active today/.test(body.textContent) && /Destroyed/.test(body.textContent));
   const universe = [...body.querySelectorAll('.sui-data-card-header')].some((h) => h.textContent === 'UNIVERSE');
   check('totals live in a titled UNIVERSE card', universe);
   check('ore is split stored vs in-ground', /Stored Ore/.test(body.textContent) && /Ore In Ground/.test(body.textContent));
@@ -109,8 +109,13 @@ async function until(fn, ms = 5000) {
   const live = body.querySelector('#gs-liveness');
   check('liveness is the headline card, first on the page', live && body.firstElementChild === live);
   check('the hero figure is players active in the last hour', live && live.querySelector('.gs-hero-v')?.textContent === '214');
-  check('…with the day, the roster and the newcomers beside it',
-    live && /Active/.test(live.textContent) && /Known/.test(live.textContent) && /New/.test(live.textContent) && live.textContent.includes('1,180'));
+  const people = live && live.querySelectorAll('#gs-live-people .pc-person');
+  check('…and the players themselves, as the shared person line', people && people.length === 12);
+  check('newest action first, saying how long ago', people && /MARKLIFER/.test(people[0].textContent) && live.querySelector('.gs-person-ago')?.textContent === 'now');
+  check('a player with no name is still the id', people && [...people].some((p) => /#1-103/.test(p.textContent) && /1-103/.test(p.querySelector('.pc-nm').textContent)));
+  check('a portrait per player, from the on-chain attrs', people && people[0].querySelector('.pc-pfp') !== null);
+  check('the counts are one quiet line under the people',
+    live && /1,180 active today/.test(live.querySelector('#gs-live-counts')?.textContent) && /3,273 known/.test(live.querySelector('#gs-live-counts')?.textContent));
   check('the week of liveness is one series on one axis (the day is a tile)', live && live.querySelectorAll('svg path').length === 1 && live.querySelectorAll('.gs-legend-item').length === 0);
   const trends = body.querySelector('#gs-trends');
   const captions = [...trends.querySelectorAll('.gs-cap .fstat-l')].map((n) => n.textContent);
@@ -128,7 +133,7 @@ async function until(fn, ms = 5000) {
   check('a 0/1 count series is drawn on a band of at least 0..2', raidsChart?.querySelector('.gs-axis-top')?.textContent === '2', raidsChart?.querySelector('.gs-axis-top')?.textContent);
   check('the last reading sits at the height the line ends, not the corner', /px$/.test(firstChart.querySelector('.gs-axis-last').style.top));
   check('the hero chart is taller than a trend chart', parseInt(live.querySelector('svg').style.height) > parseInt(firstChart.querySelector('svg').style.height));
-  check('the newcomer tile names its span', /last 24h|last \d+(\.\d+)?[smhd]/.test(live.textContent));
+  check('the newcomer count names its span', /new last 24h|new last \d+(\.\d+)?[smhd]/.test(live.querySelector('#gs-live-counts')?.textContent));
   check('ore and raids stack beside the engine', body.querySelector('#gs-ore').parentElement === body.querySelector('#gs-raids').parentElement && body.querySelector('#gs-ore').parentElement !== body.querySelector('#gs-engine').parentElement);
   // Hover layer: the crosshair finds the X and one tooltip lists every series.
   const plot = firstChart.querySelector('.gs-plot');

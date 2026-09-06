@@ -261,6 +261,19 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
         });
     }
 
+    // Saturation, read from the capacity façade rather than inferred from
+    // loop timings: a resource whose own measured signal says it is full.
+    // Informational — the tuner and the AIMD are the policies that act; this
+    // is where an operator sees that they are acting, and why.
+    for (resource, why) in crate::mcp::capacity::saturated() {
+        findings.push(Finding {
+            key: format!("capacity:{}", resource.as_str()),
+            severity: Sev::Warn,
+            message: format!("{} saturated: {why}", resource.as_str()),
+            remedy: None,
+        });
+    }
+
     // Per-loop overdue / wedged.
     let stats = lock_recover(&LOOPS).clone();
     for (name, enabled, interval_ms) in loop_configs() {

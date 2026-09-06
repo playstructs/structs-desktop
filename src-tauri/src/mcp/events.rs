@@ -209,10 +209,10 @@ fn expected_listeners(name: &str, announced: &[String]) -> Vec<String> {
         return Vec::new();
     }
     if name.starts_with("board-") || name.starts_with("grass-") || name == "game-stats-update" {
-        return pick(&|l| crate::mcp::web_board::BOARD_WINDOWS.contains(&l));
+        return pick(&|l| crate::mcp::web_board::is_board_window(l));
     }
     if name == "mcp_ui_directive" {
-        return pick(&|l| l == "main" || crate::mcp::web_board::BOARD_WINDOWS.contains(&l));
+        return pick(&|l| l == "main" || crate::mcp::web_board::is_board_window(l));
     }
     pick(&|l| l == "main")
 }

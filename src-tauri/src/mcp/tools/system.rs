@@ -89,7 +89,7 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 "loops_last_hour": loops.unwrap_or_else(|e| vec![json!({"error": e})]),
                 "tx_last_hour": tx.unwrap_or_else(|e| json!({"error": e})),
                 "adaptive": {
-                    "effective_loop_concurrency": loop_util::effective_max_concurrent(),
+                    "effective_loop_concurrency": crate::mcp::capacity::reads_fanout(),
                     "hash_enabled": crate::hasher::hash_enabled(),
                     "hash_engine": crate::hasher::engine_pref_label(),
                     "hash_difficulty_start": crate::hasher::difficulty_start(),
@@ -274,7 +274,7 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 return text(json!({ "applied": applied }));
             }
             text(json!({
-                "effective_loop_concurrency": loop_util::effective_max_concurrent(),
+                "effective_loop_concurrency": crate::mcp::capacity::reads_fanout(),
                 "loop_concurrency_ceiling": loop_util::MAX_CONCURRENT_PLAYERS,
                 "sign_mode": crate::mcp::vplayer_bridge::sign_mode(),
                 "grass_source": crate::mcp::grass_native::source().name(),
