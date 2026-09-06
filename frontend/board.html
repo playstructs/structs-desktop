@@ -896,10 +896,11 @@
     /* The hero figure: the one number the page leads with. DirectiveZero at
        32px is an exact 2× of the tile face, so the pixel art stays crisp. */
     .gs-hero { display: flex; flex-direction: column; align-items: flex-start; gap: var(--spacing-xs); margin-bottom: var(--spacing-lg); text-align: left; }
-    /* 16px is the largest type role SUI has (it renders at 32px under the
-       app's 2× scale); the figure is the hero by standing alone on its own
-       row in the player colour, not by breaking the type scale. */
-    .gs-hero-v { font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: 1; color: var(--text-player-primary); }
+    /* This window renders 1:1 (no 2× transform), so 16px — the largest type
+       role — is a tile value, not a headline. 32px is exactly 2× the face,
+       so the pixel art stays crisp; it is the one figure on the page allowed
+       above the scale, and sui.test.mjs names it. */
+    .gs-hero-v { font-family: 'DirectiveZero', sans-serif; font-size: 32px; line-height: 1; color: var(--text-player-primary); }
     .gs-hero-l { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-hint); }
     .gs-line { margin-bottom: var(--spacing-md); text-align: left; }
     .gs-cap { display: flex; justify-content: space-between; align-items: baseline; }
@@ -907,7 +908,11 @@
     .gs-chart-empty { padding: var(--spacing-md) 0; }
     .gs-plot { display: grid; grid-template-columns: auto 1fr auto; column-gap: var(--spacing-xs); }
     .gs-gutter { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; grid-row: 1; }
-    .gs-gutter-r { align-items: flex-start; }
+    /* The right gutter holds the last reading at the height the line ends. */
+    /* Relative, not absolute: the figure keeps its width in the grid (so
+       "14.13MW" is never clipped) and only its vertical position moves. */
+    .gs-gutter-r { align-items: flex-start; justify-content: flex-start; }
+    .gs-gutter-r .gs-axis-last { position: relative; transform: translateY(-50%); }
     .gs-area { position: relative; min-width: 0; outline: none; grid-row: 1; grid-column: 2; }
     .gs-area svg { display: block; }
     .gs-ticks { grid-row: 2; grid-column: 2; }
@@ -915,7 +920,9 @@
        never distorted; they wear text tokens, never the series colour. */
     .gs-axis { white-space: nowrap; pointer-events: none; line-height: 1; }
     .gs-axis-last { color: var(--text-body); }
-    .gs-ticks { position: relative; height: var(--spacing-lg); }
+    .gs-ticks { position: relative; height: var(--spacing-lg); margin-top: var(--spacing-xs); }
+    /* Tile strips that sit above a chart caption need air under them. */
+    .gs-strip { margin-bottom: var(--spacing-md); }
     .gs-tick { position: absolute; top: 0; transform: translateX(-50%); font-family: 'ExtremeHazard', sans-serif; font-size: 8px; white-space: nowrap; }
     .gs-tick:first-child { transform: none; }
     .gs-tick:last-child { transform: translateX(-100%); }
@@ -932,11 +939,13 @@
     .gs-meter-cap { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: var(--spacing-xs); }
     .gs-meter-track { height: var(--spacing-sm); background: var(--border-subtle); }
     .gs-meter-fill { height: 100%; background: var(--text-player-primary); }
-    .gs-cols { display: flex; align-items: flex-end; gap: var(--spacing-md); height: 72px; }
+    /* Columns grow from a shared baseline; the value rides each cap, so the
+       row is as tall as its tallest column and never overlaps the caption. */
+    .gs-cols { display: flex; align-items: flex-end; gap: var(--spacing-md); margin-top: var(--spacing-sm); }
     .gs-col { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: var(--spacing-xs); width: var(--icon-lg); }
     /* Square ends: SUI is pixel art and rounds no corner anywhere. */
     .gs-col-bar { width: 20px; }
-    .gs-col-v { font-size: 8px; font-family: 'ExtremeHazard', sans-serif; }
+    .gs-col-v { font-size: 8px; font-family: 'ExtremeHazard', sans-serif; color: var(--text-body); }
     .gs-col-l { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; }
   </style>
 </head>

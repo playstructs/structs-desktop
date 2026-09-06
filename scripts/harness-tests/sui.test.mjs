@@ -400,7 +400,10 @@ console.log('\n— type sizes are SUI roles');
 // 15px is the π door and only the π door — a serif glyph neither bundled
 // face has, kept on purpose. 11px was three hand-styled notes under the
 // panel's door buttons; they are `.sui-text-tiny` now.
-const TYPE_DEBT = { 'structs-config.js': ['15'] };
+// 32px is the Game Stats hero figure and only that: the one number the page
+// leads with, in a window that renders 1:1 with no 2× transform, at exactly
+// twice the DirectiveZero face so the pixels stay whole (.gs-hero-v).
+const TYPE_DEBT = { 'structs-config.js': ['15'], 'board.html': ['32'] };
 for (const file of windowFiles) {
   const src = readFileSync(root + '/frontend/' + file, 'utf8');
   const sizes = [

@@ -89,13 +89,19 @@
     var nums = [];
     series.forEach(function (sr) { sr.values.forEach(function (v) { if (finite(v)) nums.push(v); }); });
     function collecting() {
-      box.appendChild(H.el('div', 'gs-chart-empty sui-text-hint', 'collecting…'));
+      box.appendChild(H.el('div', 'gs-chart-empty fstat-l', 'collecting…'));
       return box;
     }
     if (nums.length < 2) return collecting();
     var min = Math.min.apply(null, nums), max = Math.max.apply(null, nums);
     if (spec.zero && min > 0) min = 0;
-    if (max === min) max = min + 1;           // a flat line still needs a band
+    /* A count series gets a floor on its CEILING too (`least`): one raid in
+     * an hour is a single block at 1, and on a band of 0..1 that is a spike
+     * the full height of the plot. On 0..2 it is half, which is what one
+     * event looks like beside a busy hour. A flat line still needs a band. */
+    var least = spec.least != null ? spec.least : (spec.zero ? 2 : 0);
+    if (max < min + least) max = min + least;
+    if (max === min) max = min + 1;
     var span = max - min;
 
     // Legend for ≥ 2 series: identity never rides on colour alone.
@@ -121,7 +127,7 @@
     var gutterR = H.el('div', 'gs-gutter gs-gutter-r');
     var ticks = H.el('div', 'gs-ticks');
     plot.appendChild(gutterL); plot.appendChild(area); plot.appendChild(gutterR); plot.appendChild(ticks);
-    var w = 900, h = CHART_H;
+    var w = 900, h = spec.height || CHART_H;
     var svg = svgEl('svg', { viewBox: '0 0 ' + w + ' ' + h, preserveAspectRatio: 'none' });
     svg.style.cssText = 'display:block;width:100%;height:' + h + 'px;';
     // Recessive hairlines: the baseline and the top of the band.
@@ -162,7 +168,11 @@
     // The last reading of the first series, at the right edge.
     var lastVal = null;
     for (var i = series[0].values.length - 1; i >= 0; i--) { if (finite(series[0].values[i])) { lastVal = series[0].values[i]; break; } }
-    gutterR.appendChild(H.el('div', 'gs-axis gs-axis-last ops-val', lastVal == null ? '' : fmt(lastVal)));
+    var lastEl = H.el('div', 'gs-axis gs-axis-last ops-val', lastVal == null ? '' : fmt(lastVal));
+    // Where the line ENDS, not the top corner: a "0" floating at the top of
+    // a chart whose line sits on the floor reads as the wrong number.
+    if (lastVal != null) lastEl.style.top = yOf(lastVal).toFixed(0) + 'px';
+    gutterR.appendChild(lastEl);
     box.appendChild(plot);
 
     (spec.ticks || blockTicks(n)).forEach(function (t) {
@@ -241,7 +251,7 @@
     var max = Math.max.apply(null, values.map(function (v) { return finite(v) ? v : 0; }).concat([1]));
     values.forEach(function (v, i) {
       var col = H.el('div', 'gs-col');
-      col.appendChild(H.el('div', 'gs-col-v ops-val', finite(v) ? H.fmtInt(v) : '—'));
+      col.appendChild(H.el('div', 'gs-col-v', finite(v) ? H.fmtInt(v) : '—'));
       var bar = H.el('div', 'gs-col-bar');
       bar.style.height = (finite(v) ? Math.max(2, v / max * 40) : 2).toFixed(0) + 'px';
       bar.style.background = stroke || 'var(--text-player-primary)';
@@ -414,10 +424,10 @@
   var TEAL = 'var(--text-player-primary)', LAVENDER = 'var(--accent-secondary)', AMBER = 'var(--text-warning)', RED = 'var(--text-enemy-primary)', HINT = 'var(--text-hint)';
   var TRENDS = [
     // Real transactions, from the block itself (null while nobody is looking).
-    { label: 'chain transactions / block', zero: true, keys: [{ key: 'chain_tx', stroke: TEAL }] },
-    { label: 'our transactions / block', zero: true,
+    { label: 'chain transactions / block', zero: true, least: 4, keys: [{ key: 'chain_tx', stroke: TEAL }] },
+    { label: 'our transactions / block', zero: true, least: 4,
       keys: [{ key: 'our_tx', stroke: TEAL, label: 'signed' }, { key: 'gate_cap', stroke: HINT, label: 'gate cap' }] },
-    { label: 'grass frames / block', zero: true,
+    { label: 'grass frames / block', zero: true, least: 4,
       keys: [{ key: 'frames_planet', stroke: TEAL, label: 'planet' }, { key: 'frames_grid', stroke: LAVENDER, label: 'grid' }, { key: 'frames_inventory', stroke: AMBER, label: 'inventory' }] },
     { label: 'combat / block', zero: true, keys: [{ key: 'combat', stroke: RED }] },
     { label: 'live raids', zero: true, keys: [{ key: 'raids', stroke: AMBER }] },
@@ -429,7 +439,7 @@
   function trendChart(t) {
     return chart({
       series: t.keys.map(function (k) { return { values: seriesValues(k.key), stroke: k.stroke, label: k.label }; }),
-      zero: t.zero, fmt: t.fmt,
+      zero: t.zero, fmt: t.fmt, least: t.least,
       heights: ((state.snap && state.snap.series) || []).map(function (p) { return p && p.height; }),
     });
   }
@@ -445,14 +455,19 @@
     hero.appendChild(big);
     hero.appendChild(H.el('div', 'gs-hero-l', 'players acted in the last hour'));
     body.appendChild(hero);
-    var strip = H.el('div', 'hstrip');
+    var ring = (state.snap && state.snap.liveness) || [];
+    var strip = H.el('div', 'hstrip gs-strip');
     strip.appendChild(H.statTile(['Active', 'last 24h'], H.fmtInt(num(t.live_24h)), null, 'ok'));
     strip.appendChild(H.statTile(['Known', 'players'], H.fmtInt(num(t.players_known)), 'sui-icon-players'));
-    strip.appendChild(H.statTile(['New', 'last 24h'], t.new_players_24h == null ? '—' : H.fmtInt(num(t.new_players_24h)), null,
-      num(t.new_players_24h) > 0 ? 'live' : null));
+    /* Newcomers are the highest player id now against the highest id back
+     * then, so they need a sample from back then. Until the hourly ring is a
+     * day deep the tile shows the same difference over the span it HAS —
+     * "last 3h" — rather than a dash for a day. */
+    var fresh = newcomers(t, ring);
+    strip.appendChild(H.statTile(['New', fresh.span], fresh.count == null ? '—' : H.fmtInt(fresh.count), null,
+      fresh.count > 0 ? 'live' : null));
     strip.appendChild(H.statTile(['New', 'last 7 days'], t.new_players_7d == null ? '—' : H.fmtInt(num(t.new_players_7d))));
     body.appendChild(strip);
-    var ring = (state.snap && state.snap.liveness) || [];
     var line = H.el('div', 'gs-line');
     var cap = H.el('div', 'gs-cap');
     cap.appendChild(H.el('span', 'fstat-l', 'players active per hour — 7 days'));
@@ -465,7 +480,7 @@
       // squash it to a flat line; the tile above carries the day.
       line.appendChild(chart({
         series: [{ values: ring.map(function (r) { return num(r.live_1h); }), stroke: TEAL }],
-        zero: true, ticks: ticks,
+        zero: true, ticks: ticks, height: HERO_CHART_H,
         xLabel: function (i) { var r = ring[i]; return r && r.ts_ms ? new Date(r.ts_ms).toLocaleString() : ''; },
       }));
     }
@@ -476,6 +491,16 @@
     return c;
   }
   var LIVENESS_MIN = 2;
+  var HERO_CHART_H = 88;
+  function newcomers(t, ring) {
+    if (t.new_players_24h != null) return { count: num(t.new_players_24h), span: 'last 24h' };
+    var first = ring.length ? ring[0] : null;
+    var now = num(t.max_player_index), then = first ? num(first.max_index) : null;
+    if (now == null || then == null || !first.ts_ms) return { count: null, span: 'last 24h' };
+    var age = (Date.now() - num(first.ts_ms)) / 1000;
+    if (age < 60) return { count: null, span: 'last 24h' };
+    return { count: Math.max(0, now - then), span: 'last ' + window.StructsUnits.fmtDuration(age) };
+  }
 
   function trendLine(label, node) {
     var line = H.el('div', 'gs-line');
@@ -503,7 +528,7 @@
     var cap = H.el('div', 'gs-cap');
     cap.appendChild(H.el('span', 'fstat-l', 'our players by battery level'));
     bat.appendChild(cap);
-    bat.appendChild(levels ? columns(levels, ['0', '1', '2', '3', '4', '5'], TEAL) : H.el('div', 'gs-chart-empty sui-text-hint', 'collecting…'));
+    bat.appendChild(levels ? columns(levels, ['0', '1', '2', '3', '4', '5'], TEAL) : H.el('div', 'gs-chart-empty fstat-l', 'collecting…'));
     body.appendChild(bat);
     var c = H.card('OUR ENGINE', body);
     c.id = 'gs-engine';
@@ -515,7 +540,7 @@
     var body = H.el('div');
     var withOre = num(t.planets_with_ore), exhausted = num(t.planets_exhausted);
     body.appendChild(meter('planets with ore left', withOre, withOre != null && exhausted != null ? withOre + exhausted : null));
-    var strip = H.el('div', 'hstrip');
+    var strip = H.el('div', 'hstrip gs-strip');
     strip.appendChild(H.statTile(['Rigs', 'mining'], H.fmtInt(num(t.rigs_mining)), 'icon-mine'));
     strip.appendChild(H.statTile(['Rigs', 'refining'], H.fmtInt(num(t.rigs_refining)), 'icon-refine'));
     strip.appendChild(H.statTile(['Stored Ore', 'stealable'], H.fmtOre(num(t.stored_ore)), 'sui-icon-alpha-ore'));
@@ -532,7 +557,7 @@
   // ── Raid pressure ──────────────────────────────────────────────────────
   function raidCard(t) {
     var body = H.el('div');
-    var strip = H.el('div', 'hstrip');
+    var strip = H.el('div', 'hstrip gs-strip');
     strip.appendChild(H.statTile(['Fleets', 'away'], H.fmtInt(num(t.fleets_away_now)), 'sui-icon-md icon-fleet-tile', num(t.fleets_away_now) > 0 ? 'live' : null));
     strip.appendChild(H.statTile(['Fleets', 'on station'], H.fmtInt(num(t.fleets_on_station))));
     strip.appendChild(H.statTile('Live Raids', H.fmtInt(num(t.raids_active)), 'icon-raid', num(t.raids_active) > 0 ? 'live' : null));
@@ -628,8 +653,14 @@
       var ops = H.el('div');
       ops.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:var(--spacing-lg);align-items:start;margin-bottom:var(--spacing-lg);';
       ops.appendChild(engineCard(totals));
-      ops.appendChild(oreCard(totals));
-      ops.appendChild(raidCard(totals));
+      // Ore and raids stack in the second column: three cards in two columns
+      // otherwise leave the third alone under a tall engine card, beside a
+      // hole the height of it.
+      var side = H.el('div');
+      side.style.cssText = 'display:flex;flex-direction:column;gap:var(--spacing-lg);min-width:0;';
+      side.appendChild(oreCard(totals));
+      side.appendChild(raidCard(totals));
+      ops.appendChild(side);
       host.appendChild(ops);
 
       var cols = H.el('div');

@@ -121,6 +121,15 @@ async function until(fn, ms = 5000) {
   check('counts sit on a zero floor', firstChart.querySelector('.gs-axis-bot').textContent === '0');
   check('…and the current value at the right edge', !!firstChart.querySelector('.gs-axis-last'));
   check('time ticks end at now', firstChart.querySelector('.gs-ticks')?.lastElementChild?.textContent === 'now');
+  // The ceiling has a floor: the fixture's chain_tx tops out at 4 already, so
+  // the busier fixture on 'live raids' (0/1) is where `least` shows — a lone
+  // 1 must not fill the band.
+  const raidsChart = [...trends.querySelectorAll('.gs-line')].find((l) => /live raids/.test(l.querySelector('.gs-cap')?.textContent))?.querySelector('.gs-chart');
+  check('a 0/1 count series is drawn on a band of at least 0..2', raidsChart?.querySelector('.gs-axis-top')?.textContent === '2', raidsChart?.querySelector('.gs-axis-top')?.textContent);
+  check('the last reading sits at the height the line ends, not the corner', /px$/.test(firstChart.querySelector('.gs-axis-last').style.top));
+  check('the hero chart is taller than a trend chart', parseInt(live.querySelector('svg').style.height) > parseInt(firstChart.querySelector('svg').style.height));
+  check('the newcomer tile names its span', /last 24h|last \d+(\.\d+)?[smhd]/.test(live.textContent));
+  check('ore and raids stack beside the engine', body.querySelector('#gs-ore').parentElement === body.querySelector('#gs-raids').parentElement && body.querySelector('#gs-ore').parentElement !== body.querySelector('#gs-engine').parentElement);
   // Hover layer: the crosshair finds the X and one tooltip lists every series.
   const plot = firstChart.querySelector('.gs-plot');
   plot.dispatchEvent(new w.Event('pointermove', { bubbles: true }));
