@@ -3441,11 +3441,16 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
       var msg = document.createElement('span');
       msg.style.flex = '1';
-      msg.textContent = 'A new version of Structs (' + info.latest_version +
-        ') is available. You’re on ' + info.current_version + '.';
+      msg.textContent = info.publishing
+        // The tag exists but this platform's installer is still uploading —
+        // offering "Update now" here answers "no update available".
+        ? 'Structs ' + info.latest_version + ' is publishing — its ' + (info.target || 'installer')
+          + ' build is not up yet. You’re on ' + info.current_version + '.'
+        : 'A new version of Structs (' + info.latest_version +
+          ') is available. You’re on ' + info.current_version + '.';
 
       var dl = document.createElement('button');
-      dl.textContent = 'Update now';
+      dl.textContent = info.publishing ? 'Check again' : 'Update now';
       dl.style.cssText = [
         'cursor:pointer', 'border:none',
         'padding:var(--spacing-md) var(--spacing-lg)',
@@ -3497,6 +3502,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       }
 
       dl.addEventListener('click', function handler() {
+        // Still publishing: ask again, and only then offer the install. The
+        // listener stays bound so "Check again" can be pressed until it is.
+        if (info.publishing) {
+          dl.disabled = true;
+          TAURI.core.invoke('check_for_update').then(function (again) {
+            dl.disabled = false;
+            if (again && again.available) { bar.remove(); showBanner(again); return; }
+            msg.textContent = 'Structs ' + (again && again.latest_version || info.latest_version)
+              + ' is still publishing — checked ' + new Date().toLocaleTimeString() + '. You’re on ' + info.current_version + '.';
+          }).catch(function () { dl.disabled = false; });
+          return;
+        }
         // Only the first click drives a flow; subsequent behavior is rebound
         // via dl.onclick above (Restart / open page).
         dl.removeEventListener('click', handler);
@@ -3527,9 +3544,20 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
     function runCheck() {
       TAURI.core.invoke('check_for_update').then(function (info) {
-        if (!info || !info.available) return;
+        if (!info || (!info.available && !info.publishing)) return;
         if (alreadyDismissed(info.latest_version)) return;
         showBanner(info);
+        // A release mid-publish comes back on its own: ask again in five
+        // minutes, and swap the banner for the real offer when it lands.
+        if (info.publishing) {
+          setTimeout(function () {
+            var old = document.getElementById('structs-update-banner');
+            TAURI.core.invoke('check_for_update').then(function (again) {
+              if (again && again.available && old) { old.remove(); showBanner(again); }
+            }).catch(function () {});
+          }, 5 * 60 * 1000);
+          return;
+        }
         // One desktop notification per launch, reusing the existing command.
         TAURI.core.invoke('send_notification', {
           title: 'Structs update available',

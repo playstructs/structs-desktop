@@ -124,5 +124,28 @@ const ignore = readFileSync(`${root}/.gitignore`, 'utf8');
 check('.gitignore globs them rather than listing each one',
   /^frontend\/_harness\*$/m.test(ignore) && /^frontend\/_fixtures\*$/m.test(ignore));
 
+/* Does every hand-authored file a page references exist in GIT?
+ *
+ * Release builds come from the CI checkout of the tag, not from this working
+ * tree. A file that is on disk but never `git add`ed passes every suite here,
+ * ships missing, and Tauri's SPA fallback then serves index.html in its place
+ * — so the window's <script> loads HTML, throws "Unexpected token '<'", and
+ * the page is blank. v0.1.351 shipped the Terminal window that way:
+ * frontend/board-terminal.js was untracked. */
+{
+  const tracked = new Set(execFileSync('git', ['ls-files', 'frontend'], { cwd: root }).toString().split('\n').filter(Boolean));
+  const untracked = new Set();
+  for (const html of readdirSync(root + '/frontend').filter((n) => n.endsWith('.html') && !n.startsWith('_'))) {
+    const src = readFileSync(root + '/frontend/' + html, 'utf8');
+    for (const m of src.matchAll(/(?:src|href)="([^"]+\.(?:js|css))"/g)) {
+      const rel = 'frontend/' + m[1];
+      if (/^https?:/.test(m[1]) || isGenerated(rel) || !existsSync(root + '/' + rel)) continue;
+      if (!tracked.has(rel)) untracked.add(rel + ' (from ' + html + ')');
+    }
+  }
+  check('every page-referenced hand-authored file is tracked by git, so a release build can ship it',
+    untracked.size === 0, [...untracked].join(', ') + ' — git add it');
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

@@ -22,16 +22,67 @@ const RELEASES_API: &str =
 /// Human-facing fallback if the API response lacks an html_url for some reason.
 const RELEASES_PAGE: &str = "https://github.com/playstructs/structs-desktop/releases/latest";
 
+/// The manifest tauri's updater reads (`latest.json` on the latest release).
+/// Read HERE too, so the banner and the installer agree: a release is only
+/// "available" once this manifest carries a build for THIS platform.
+const MANIFEST_URL: &str =
+    "https://github.com/playstructs/structs-desktop/releases/latest/download/latest.json";
+
 #[derive(Debug, Serialize)]
 pub struct UpdateInfo {
-    /// True only when the latest release parses as a semver strictly greater
-    /// than the running build. Any parse/network ambiguity returns false so we
-    /// never nag the user about a non-update.
+    /// True only when the release manifest names a version strictly greater
+    /// than the running build AND carries a build for this platform. Any
+    /// parse/network ambiguity returns false so we never nag about a non-update.
     pub available: bool,
+    /// A newer release exists but its installer for this platform is not in
+    /// the manifest yet — the three platform builds upload one at a time and
+    /// the last can land twenty minutes after the tag (v0.1.351: tag 09:50,
+    /// mac build 10:04, manifest 10:08). Say so rather than offering a button
+    /// that will answer "no update available".
+    pub publishing: bool,
     pub current_version: String,
     pub latest_version: String,
     /// The release page to open in the browser (Phase 1 "download" action).
     pub url: String,
+    /// The manifest platform key this build looks itself up by.
+    pub target: String,
+}
+
+/// The platform key the updater plugin looks up in the manifest, spelled the
+/// way it spells it: `darwin-aarch64`, `linux-x86_64`, `windows-x86_64`.
+pub fn target_key() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86" => "i686",
+        "arm" => "armv7",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
+/// What the two sources say, decided once. `tag` is the latest release's tag
+/// (the release exists), `manifest` its `latest.json` if it could be read.
+/// Available needs BOTH a newer manifest version and this platform in it;
+/// publishing is a newer tag without that.
+pub fn judge(current: &str, tag: &str, manifest: Option<&serde_json::Value>, target: &str) -> (bool, bool, String) {
+    let cur = semver::Version::parse(current).ok();
+    let newer = |v: &str| matches!((semver::Version::parse(v), cur.as_ref()), (Ok(l), Some(c)) if l > *c);
+    let tag_v = tag.trim_start_matches('v');
+    let man_v = manifest.and_then(|m| m.get("version")).and_then(|v| v.as_str()).unwrap_or("");
+    let has_platform = manifest
+        .and_then(|m| m.get("platforms"))
+        .and_then(|p| p.get(target))
+        .and_then(|t| t.get("url"))
+        .and_then(|u| u.as_str())
+        .map(|u| !u.is_empty())
+        .unwrap_or(false);
+    let available = newer(man_v) && has_platform;
+    let publishing = !available && newer(tag_v);
+    let latest = if available { man_v.to_string() } else { tag_v.to_string() };
+    (available, publishing, latest)
 }
 
 #[tauri::command]
@@ -60,26 +111,34 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
         .get("tag_name")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let latest_raw = tag.trim_start_matches('v');
     let url = json
         .get("html_url")
         .and_then(|v| v.as_str())
         .unwrap_or(RELEASES_PAGE)
         .to_string();
 
-    let available = match (
-        semver::Version::parse(latest_raw),
-        semver::Version::parse(current),
-    ) {
-        (Ok(latest), Ok(cur)) => latest > cur,
-        _ => false,
+    // The manifest, if it is there yet. A 404 here is the normal state for
+    // the minutes between a tag and its last uploaded build.
+    let manifest = crate::http_proxy::shared_client()
+        .get(MANIFEST_URL)
+        .header("User-Agent", "structs-desktop")
+        .send()
+        .await
+        .ok()
+        .filter(|r| r.status().is_success());
+    let manifest: Option<serde_json::Value> = match manifest {
+        Some(r) => r.json().await.ok(),
+        None => None,
     };
-
+    let target = target_key();
+    let (available, publishing, latest) = judge(current, tag, manifest.as_ref(), &target);
     Ok(UpdateInfo {
         available,
+        publishing,
         current_version: current.to_string(),
-        latest_version: latest_raw.to_string(),
+        latest_version: latest,
         url,
+        target,
     })
 }
 
@@ -123,11 +182,26 @@ pub fn updater_supported() -> bool {
 #[tauri::command]
 pub async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String> {
     let updater = app.updater().map_err(|e| e.to_string())?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "No update available".to_string())?;
+    let update = match updater.check().await.map_err(|e| e.to_string())? {
+        Some(u) => u,
+        None => {
+            // Nothing newer in the manifest for this platform. Say which of
+            // the two that is: the release still publishing (the banner saw
+            // its tag), or genuinely nothing newer.
+            let info = check_for_update().await.unwrap_or(UpdateInfo {
+                available: false, publishing: false, current_version: env!("CARGO_PKG_VERSION").into(),
+                latest_version: String::new(), url: RELEASES_PAGE.into(), target: target_key(),
+            });
+            return Err(if info.publishing {
+                format!(
+                    "v{} is still publishing — its build for {} has not been uploaded yet. Try again in a few minutes.",
+                    info.latest_version, info.target
+                )
+            } else {
+                format!("No update available: v{} is the latest build for {}", info.current_version, info.target)
+            });
+        }
+    };
     stage_update(&app, update, true).await
 }
 
@@ -264,4 +338,59 @@ async fn run_startup_update(app: &tauri::AppHandle) -> Result<Option<String>, St
 #[tauri::command]
 pub fn relaunch_app(app: tauri::AppHandle) {
     app.restart();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn manifest(version: &str, platforms: &[&str]) -> serde_json::Value {
+        let mut p = serde_json::Map::new();
+        for k in platforms {
+            p.insert((*k).into(), json!({ "url": format!("https://x/{k}"), "signature": "sig" }));
+        }
+        json!({ "version": version, "platforms": p })
+    }
+
+    #[test]
+    fn the_target_key_is_spelled_the_way_the_plugin_spells_it() {
+        let t = target_key();
+        assert!(t.contains('-'));
+        if cfg!(target_os = "macos") {
+            assert!(t.starts_with("darwin-"));
+        }
+        assert!(!t.contains("macos") && !t.contains("x86-"));
+    }
+
+    #[test]
+    fn a_tag_without_a_build_for_this_platform_is_publishing_not_available() {
+        // The v0.1.351 race: tag at 09:50, mac build at 10:04, manifest at 10:08.
+        let (a, p, latest) = judge("0.1.350", "v0.1.351", None, "darwin-aarch64");
+        assert!(!a && p, "no manifest yet");
+        assert_eq!(latest, "0.1.351");
+        let linux_only = manifest("0.1.351", &["linux-x86_64", "linux-x86_64-appimage"]);
+        let (a, p, _) = judge("0.1.350", "v0.1.351", Some(&linux_only), "darwin-aarch64");
+        assert!(!a && p, "the manifest is there but not our platform");
+        let stale = manifest("0.1.350", &["darwin-aarch64"]);
+        let (a, p, _) = judge("0.1.350", "v0.1.351", Some(&stale), "darwin-aarch64");
+        assert!(!a && p, "the previous release's manifest still answers");
+    }
+
+    #[test]
+    fn a_manifest_with_our_platform_is_available() {
+        let m = manifest("0.1.351", &["darwin-aarch64", "linux-x86_64"]);
+        let (a, p, latest) = judge("0.1.350", "v0.1.351", Some(&m), "darwin-aarch64");
+        assert!(a && !p);
+        assert_eq!(latest, "0.1.351");
+    }
+
+    #[test]
+    fn nothing_newer_is_neither() {
+        let m = manifest("0.1.351", &["darwin-aarch64"]);
+        let (a, p, _) = judge("0.1.351", "v0.1.351", Some(&m), "darwin-aarch64");
+        assert!(!a && !p);
+        let (a, p, _) = judge("0.1.352", "v0.1.351", Some(&m), "darwin-aarch64");
+        assert!(!a && !p, "a local build ahead of the release");
+    }
 }
