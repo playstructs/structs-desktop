@@ -96,6 +96,7 @@ pub const BOARD_WINDOWS: &[&str] = &["board", "stream", "gamestats"];
 /// windows without a listener for the event name receive nothing at all.
 pub fn emit_board<S: serde::Serialize>(app: &tauri::AppHandle, event: &str, payload: S) {
     let value = serde_json::to_value(&payload).unwrap_or(Value::Null);
+    crate::mcp::events::record(event);
     let _ = BOARD_BUS.send((event.to_string(), value.clone()));
     use tauri::{Emitter, EventTarget, Manager};
     if BOARD_WINDOWS

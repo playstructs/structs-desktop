@@ -602,7 +602,7 @@
     // repainting it for every message in the guild would be a busy panel
     // saying nothing.
     if (window.__TAURI__ && window.__TAURI__.event) {
-      window.__TAURI__.event.listen('matrix::timeline', function (e) {
+      window.StructsEvents.listen('matrix::timeline', function (e) {
         var p = (e && e.payload) || {};
         if (!TARGET || !p.messages) return;
         // In the object's own room, BELONGING is the test — every message
@@ -3799,16 +3799,16 @@
     // whichever planet emitted last. The label arrives in the window URL.
     var LABEL = params.label || ('raid-' + (TARGET ? TARGET.id : 'none'));
     function scoped(name) { return name + '::' + LABEL; }
-    T.event.listen(scoped('raid-snapshot'), function (e) { applySnapshot(e.payload || {}); });
-    T.event.listen(scoped('raid-delta'), function (e) { applyDelta(e.payload || {}); });
-    T.event.listen(scoped('raid-attacks'), function (e) { applyAttacks(e.payload || {}); });
-    T.event.listen(scoped('raid-log'), function (e) { applyLog(e.payload || {}); });
-    T.event.listen(scoped('raid-target-moved'), function (e) {
+    window.StructsEvents.listen(scoped('raid-snapshot'), function (e) { applySnapshot(e.payload || {}); });
+    window.StructsEvents.listen(scoped('raid-delta'), function (e) { applyDelta(e.payload || {}); });
+    window.StructsEvents.listen(scoped('raid-attacks'), function (e) { applyAttacks(e.payload || {}); });
+    window.StructsEvents.listen(scoped('raid-log'), function (e) { applyLog(e.payload || {}); });
+    window.StructsEvents.listen(scoped('raid-target-moved'), function (e) {
       var p = e.payload || {};
       note('Fleet ' + p.fleet_id + (p.planet_id ? ' arrived at planet ' + p.planet_id : ' left orbit'),
         'sui-mod-primary');
     });
-    T.event.listen(scoped('raid-detached'), function (e) {
+    window.StructsEvents.listen(scoped('raid-detached'), function (e) {
       note((e.payload && e.payload.reason) || 'No live location.', 'sui-mod-warning');
     });
     // Keep the "feed" freshness readout honest between events.

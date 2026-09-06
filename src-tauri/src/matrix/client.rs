@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::Duration;
-use tauri::Emitter;
 
 use super::auth;
 use super::avatar;
@@ -2574,7 +2573,7 @@ async fn join_pinned_channels(app: &tauri::AppHandle, guild_id: &str) {
         // The rooms exist for us now, but sync will not mention them again
         // until something happens in them — so the list would stay as it was
         // until somebody spoke. Push the current one.
-        let _ = app.emit(
+        let _ = crate::mcp::events::emit_matrix(&app, 
             "matrix::rooms",
             json!({ "guild_id": guild_id, "rooms": rooms_of(guild_id) }),
         );
@@ -2630,7 +2629,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     // Back from a stall we announced. Nothing to say if we
                     // never said anything.
                     if failures >= 2 {
-                        let _ = app.emit(
+                        let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::sync_health",
                             json!({ "guild_id": guild_id, "ok": true }),
                         );
@@ -2651,7 +2650,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                         directory::resolve_many(&pending).await;
                     }
                     for (room_id, users) in d.typing {
-                        let _ = app.emit(
+                        let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::typing",
                             json!({
                                 "guild_id": guild_id,
@@ -2662,7 +2661,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     }
                     for (room_id, messages) in d.deltas {
                         maybe_notify(&app, &guild_id, &room_id, &messages, &session);
-                        let _ = app.emit(
+                        let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::timeline",
                             json!({
                                 "guild_id": guild_id,
@@ -2672,7 +2671,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                         );
                     }
                     if d.presence {
-                        let _ = app.emit(
+                        let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::presence",
                             json!({
                                 "guild_id": guild_id,
@@ -2690,7 +2689,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                             })
                         };
                         if let Some(p) = payload {
-                            let _ = app.emit("matrix::seen", p);
+                            let _ = crate::mcp::events::emit_matrix(&app, "matrix::seen", p);
                         }
                     }
                     // An edit carries the new text, so the window does not
@@ -2704,7 +2703,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                                 .map(|m| m.body.clone())
                         };
                         if let Some(body) = body {
-                            let _ = app.emit(
+                            let _ = crate::mcp::events::emit_matrix(&app, 
                                 "matrix::edited",
                                 json!({
                                     "guild_id": guild_id, "room_id": room,
@@ -2714,7 +2713,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                         }
                     }
                     for (room, event_id) in &d.redacted {
-                        let _ = app.emit(
+                        let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::redacted",
                             json!({ "guild_id": guild_id, "room_id": room, "event_id": event_id }),
                         );
@@ -2734,11 +2733,11 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                             })
                         };
                         if let Some(p) = payload {
-                            let _ = app.emit("matrix::reactions", p);
+                            let _ = crate::mcp::events::emit_matrix(&app, "matrix::reactions", p);
                         }
                     }
                     if d.rooms_changed {
-                        let _ = app.emit(
+                        let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::rooms",
                             json!({ "guild_id": guild_id, "rooms": rooms_of(&guild_id) }),
                         );
@@ -2747,7 +2746,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                         // payload aimed at a window that may not be open; this
                         // is two numbers any part of the app can consume.
                         let (count, mention) = unread_totals();
-                        let _ = app.emit(
+                        let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::unread",
                             json!({ "count": count, "mention": mention }),
                         );
@@ -2765,7 +2764,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                         // Partial by necessity (there is no async here to
                         // rebuild the full snapshot); the window re-reads
                         // status when it sees an error-only push.
-                        let _ = app.emit("matrix::status", json!({ "error": reason }));
+                        let _ = crate::mcp::events::emit_matrix(&app, "matrix::status", json!({ "error": reason }));
                         break;
                     }
                     eprintln!("[Comms] {} sync: {} (retry in {}s)", guild_id, e, backoff);
@@ -2782,7 +2781,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     // would make an ordinary thing look broken.
                     failures += 1;
                     if failures == 2 {
-                        let _ = app.emit(
+                        let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::sync_health",
                             json!({ "guild_id": guild_id, "ok": false, "reason": e }),
                         );

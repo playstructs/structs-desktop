@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tauri::Emitter;
 use tokio::sync::oneshot;
 
 /// Request sent from Rust to JS webview for signing
@@ -48,8 +47,7 @@ pub async fn submit_tx(
         args,
     };
 
-    app_handle
-        .emit("mcp_transaction_request", &request)
+    crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::TxRequest(serde_json::to_value(&request).unwrap_or_default()))
         .map_err(|e| format!("Failed to emit tx request: {}", e))?;
 
     crate::mcp::telemetry::tlog(

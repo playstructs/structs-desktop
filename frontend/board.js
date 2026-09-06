@@ -1421,7 +1421,7 @@
     // the first live recompute is in flight.
     T.core.invoke('mcp_board_html').then(render).catch(function () {});
     // A structs_board tool call still pushes updates; keep listening for them.
-    T.event.listen('board-update', function (e) {
+    window.StructsEvents.listen('board-update', function (e) {
       render(e && e.payload && e.payload.html);
     });
 
@@ -1571,7 +1571,7 @@
     T.core.invoke('mcp_board_feed').then(function (entries) {
       (entries || []).forEach(feedAdd); // oldest→newest, so newest ends on top
     }).catch(function () {});
-    T.event.listen('board-feed', function (e) { feedAdd(e && e.payload); });
+    window.StructsEvents.listen('board-feed', function (e) { feedAdd(e && e.payload); });
   }
 
   // ── AGENT UI directives (global; visible on every tab) ──────────────────
@@ -1632,7 +1632,7 @@
       }
       return cardEl;
     }
-    T.event.listen('mcp_ui_directive', function (e) {
+    window.StructsEvents.listen('mcp_ui_directive', function (e) {
       var d = e && e.payload;
       if (!d || !d.directive_id || agentSeen[d.directive_id]) return;
       var c = d.component || {};

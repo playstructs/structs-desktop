@@ -404,6 +404,34 @@ where
     }
 }
 
+/// Number-or-numeric-string → u64, the ONE place that rule lives. The LCD
+/// serialises every integer as a string; GRASS payloads use JSON numbers;
+/// a float is floored at zero. `None` for absent, null, empty, or anything
+/// that is not a number. Every reader that used to coerce by hand
+/// (`to_u64`, `read_u64_field`) delegates here.
+pub fn numeric_u64(v: Option<&serde_json::Value>) -> Option<u64> {
+    match v? {
+        serde_json::Value::Number(n) => n.as_u64().or_else(|| n.as_f64().map(|f| f.max(0.0) as u64)),
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return None;
+            }
+            t.parse::<u64>().ok().or_else(|| t.parse::<f64>().ok().map(|f| f.max(0.0) as u64))
+        }
+        _ => None,
+    }
+}
+
+/// Number-or-numeric-string → f64; see [`numeric_u64`].
+pub fn numeric_f64(v: Option<&serde_json::Value>) -> Option<f64> {
+    match v? {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
 // ── GRASS subjects ──────────────────────────────────────────────────────
 
 /// Which stream a GRASS subject belongs to.

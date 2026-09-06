@@ -24,7 +24,7 @@ pub mod store;
 
 use serde_json::{json, Value};
 use std::sync::RwLock;
-use tauri::{Emitter, Manager};
+use tauri::{Manager};
 
 /// Which network the window is looking at. Session-scoped: it is a view
 /// preference, not something worth persisting across restarts.
@@ -220,7 +220,7 @@ pub async fn matrix_connect(app: tauri::AppHandle, guild_id: String) -> Result<V
     let who = store::player_of(&guild_id).map(|p| p.to_string());
     let emit_who = who.clone();
     let emit = move |l: &auth::Ladder| {
-        let _ = emit_app.emit(
+        let _ = crate::mcp::events::emit_matrix(&emit_app, 
             "matrix::status",
             json!({ "connecting": true, "steps": l.steps(), "as_player": emit_who }),
         );
@@ -235,7 +235,7 @@ pub async fn matrix_connect(app: tauri::AppHandle, guild_id: String) -> Result<V
             // A real id from this homeserver settles what it is called.
             directory::learn_server_name(&guild_id, &connected.user_id);
             client::start_sync(app.clone(), guild_id.clone());
-            let _ = app.emit(
+            let _ = crate::mcp::events::emit_matrix(&app, 
                 "matrix::status",
                 json!({ "connecting": false, "steps": steps, "error": null,
                         "as_player": who }),
@@ -244,7 +244,7 @@ pub async fn matrix_connect(app: tauri::AppHandle, guild_id: String) -> Result<V
         }
         Err(e) => {
             note_error(&guild_id, e.clone());
-            let _ = app.emit(
+            let _ = crate::mcp::events::emit_matrix(&app, 
                 "matrix::status",
                 json!({ "connecting": false, "steps": steps, "error": e,
                         "as_player": who }),
@@ -270,7 +270,7 @@ pub async fn matrix_disconnect(app: tauri::AppHandle, guild_id: String) -> Resul
     // For the identity that signed out. The emit is a broadcast and every chat
     // window receives it, so the payload names whose status it is and a window
     // for another identity ignores it.
-    let _ = app.emit(
+    let _ = crate::mcp::events::emit_matrix(&app, 
         "matrix::status",
         status_payload_as(store::player_of(&guild_id)).await,
     );
@@ -487,7 +487,7 @@ pub async fn matrix_join(app: tauri::AppHandle, guild_id: String, room_id: Strin
     if let Err(e) = client::refresh_directory(&guild_id, &session).await {
         eprintln!("[Comms] {} directory after join: {}", guild_id, e);
     }
-    let _ = app.emit(
+    let _ = crate::mcp::events::emit_matrix(&app, 
         "matrix::rooms",
         json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
     );
@@ -498,7 +498,7 @@ pub async fn matrix_join(app: tauri::AppHandle, guild_id: String, room_id: Strin
 pub async fn matrix_leave(app: tauri::AppHandle, guild_id: String, room_id: String) -> Result<Value, String> {
     let session = session_for(&guild_id)?;
     client::leave(&session, &room_id).await?;
-    let _ = app.emit(
+    let _ = crate::mcp::events::emit_matrix(&app, 
         "matrix::rooms",
         json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
     );
@@ -544,11 +544,11 @@ pub async fn matrix_dm(
     // room appears in a sync RESPONSE, and a DM nobody has spoken in yet never
     // does — so without this nudge the window keeps the entry it built before
     // it knew who the room was for, however long you stare at it.
-    let _ = app.emit(
+    let _ = crate::mcp::events::emit_matrix(&app, 
         "matrix::rooms",
         json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
     );
-    let _ = app.emit(
+    let _ = crate::mcp::events::emit_matrix(&app, 
         "matrix::rooms",
         json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
     );
@@ -707,7 +707,7 @@ pub async fn matrix_mute(
     client::note_muted(&guild_id, &room_id, muted);
     // The room list carries the flag, so push the new one rather than making
     // the window wait for a sync to tell it what it just did.
-    let _ = app.emit(
+    let _ = crate::mcp::events::emit_matrix(&app, 
         "matrix::rooms",
         json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
     );
@@ -1701,7 +1701,7 @@ pub async fn matrix_message_player(
     // The window may still be booting, so this is also replayed: chat.js asks
     // for any pending target once it is ready.
     set_pending_room(&guild_id, &room_id);
-    let _ = app.emit(
+    let _ = crate::mcp::events::emit_matrix(&app, 
         "matrix::show_room",
         json!({ "guild_id": guild_id, "room_id": room_id }),
     );
@@ -1726,7 +1726,7 @@ pub async fn matrix_share(app: tauri::AppHandle, text: String) -> Result<Value, 
     }
     open_chat_window(app.clone())?;
     set_pending_draft(&text);
-    let _ = app.emit("matrix::compose", json!({ "text": text }));
+    let _ = crate::mcp::events::emit_matrix(&app, "matrix::compose", json!({ "text": text }));
     Ok(json!({ "ok": true, "text": text }))
 }
 
@@ -1804,7 +1804,7 @@ pub async fn matrix_open_transfer(
         let _ = w.set_focus();
         // Already open: re-address it instead of stacking a second window. The
         // parked intent is the fallback for a window still booting.
-        let _ = w.emit("transfer-intent", intent.clone());
+        let _ = crate::mcp::events::emit(&app, crate::mcp::events::AppEvent::TransferIntent(intent.clone()));
     } else {
         use tauri::{WebviewUrl, WebviewWindowBuilder};
         WebviewWindowBuilder::new(&app, "transfer", WebviewUrl::App("transfer.html".into()))

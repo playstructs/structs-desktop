@@ -255,7 +255,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
             ),
             remedy: Some(Box::new(|app: &tauri::AppHandle| {
                 // The JS handler is debounced, so an extra tick is always safe.
-                let _ = app.emit("structs://sync-tick", ());
+                let _ = crate::mcp::events::emit(app, crate::mcp::events::AppEvent::SyncTick);
                 "re-emitted structs://sync-tick".into()
             })),
         });
@@ -376,7 +376,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                         // event rung makes sense again.
                         did
                     } else {
-                        let _ = app.emit("structs:force-resync", json!({ "hard": true }));
+                        let _ = crate::mcp::events::emit(app, crate::mcp::events::AppEvent::ForceResync { hard: true });
                         "requested webview reload (structs:force-resync hard)".into()
                     }
                 }))
@@ -417,7 +417,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                             })
                             .unwrap_or_else(|| "native reload skipped: no main window".into())
                     } else {
-                        let _ = app.emit("structs:force-resync", json!({ "hard": true }));
+                        let _ = crate::mcp::events::emit(app, crate::mcp::events::AppEvent::ForceResync { hard: true });
                         "requested webview reload (client saturated)".into()
                     }
                 }))

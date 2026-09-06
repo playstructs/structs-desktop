@@ -310,7 +310,7 @@ pub async fn call(
         op: op.to_string(),
         args,
     };
-    if let Err(e) = app_handle.emit("structs:vplayer-request", &request) {
+    if let Err(e) = crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::VplayerRequest(serde_json::to_value(&request).unwrap_or_default())) {
         cleanup(&req_id).await;
         return Err(format!("Failed to emit vplayer request: {}", e));
     }

@@ -94,7 +94,10 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                     "hash_engine": crate::hasher::engine_pref_label(),
                     "hash_difficulty_start": crate::hasher::difficulty_start(),
                     "hash_max_concurrent": crate::hasher::max_concurrent(),
+                    "tuner": crate::hasher::tuner::last_signal(),
                 },
+                "events": crate::mcp::events::table(),
+                "capacity": crate::mcp::capacity::snapshot(),
                 "telemetry": {
                     "dropped_messages": telemetry::dropped_count(),
                     "db_bytes": telemetry::db_size_bytes(),

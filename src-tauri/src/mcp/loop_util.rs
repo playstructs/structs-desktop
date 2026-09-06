@@ -39,9 +39,7 @@ pub fn parse_bool(v: Option<&Value>) -> bool {
 /// Read a u64 sub-field (number or numeric string) from an optional JSON object,
 /// else 0 — used for the block-anchor / lastAction fields.
 pub fn read_u64_field(v: Option<&Value>, field: &str) -> u64 {
-    v.and_then(|x| x.get(field))
-        .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
-        .unwrap_or(0)
+    crate::mcp::types::numeric_u64(v.and_then(|x| x.get(field))).unwrap_or(0)
 }
 
 /// Read a PLANET entity's shared ore clock — the block a MINE or REFINE proof
@@ -454,11 +452,12 @@ pub fn report_failure() {
             let next = (cur / 2).max(MIN_CONCURRENT_PLAYERS);
             if next < cur {
                 EFFECTIVE_MAX.store(next, Ordering::Relaxed);
-                crate::mcp::telemetry::tlog_kv(
-                    "auto",
-                    crate::mcp::telemetry::Sev::Warn,
-                    "endpoint pressure: lowering loop concurrency",
-                    serde_json::json!({ "from": cur, "to": next, "failures_in_window": window.len() }),
+                crate::mcp::capacity::adjust(
+                    crate::mcp::capacity::Resource::Reads,
+                    "max_concurrent",
+                    cur as u64,
+                    next as u64,
+                    format!("endpoint pressure: {} failures in a minute", window.len()),
                 );
             }
         }
@@ -470,7 +469,14 @@ pub fn report_clean_scan() {
     let cur = EFFECTIVE_MAX.load(Ordering::Relaxed);
     if cur < MAX_CONCURRENT_PLAYERS {
         EFFECTIVE_MAX.store(cur + 1, Ordering::Relaxed);
+        crate::mcp::capacity::adjust(crate::mcp::capacity::Resource::Reads, "max_concurrent", cur as u64, cur as u64 + 1, "clean scan");
     }
+}
+
+/// Pressure failures (429 / timeout / bridge) seen in the last minute.
+pub fn recent_pressure_failures() -> usize {
+    let now = crate::hasher::types::now_millis();
+    RECENT_FAILURES.lock().map(|w| w.iter().filter(|t| now - **t <= FAILURE_WINDOW_MS).count()).unwrap_or(0)
 }
 
 /// Run `body` for every target with at most `max` in flight. Each task gets an

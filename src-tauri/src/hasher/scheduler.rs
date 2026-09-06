@@ -76,6 +76,11 @@ fn remove_waiting(waiting: &mut BinaryHeap<Reverse<(u64, u64)>>, me: (u64, u64))
 /// `is_cancelled` is polled on a short timeout so a task killed mid-wait exits
 /// promptly and a live change to `max_concurrent` takes effect without a stuck
 /// slot.
+/// Grinders holding a permit right now (for the capacity snapshot).
+pub fn running() -> usize {
+    STATE.lock().map(|s| s.running as usize).unwrap_or(0)
+}
+
 pub fn admit(difficulty: u64, is_cancelled: &dyn Fn() -> bool) -> Option<Permit> {
     let me = (difficulty, SEQ.fetch_add(1, Ordering::Relaxed));
 

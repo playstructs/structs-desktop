@@ -166,10 +166,10 @@ async fn stage_update(
                 let pct = content_len
                     .map(|c| if c > 0 { (total as f64 / c as f64) * 100.0 } else { 0.0 })
                     .unwrap_or(0.0);
-                let _ = progress_app.emit("structs://update-progress", pct);
+                let _ = crate::mcp::events::emit(&progress_app, crate::mcp::events::AppEvent::UpdateProgress(pct));
             },
             move || {
-                let _ = finish_app.emit("structs://update-ready", ());
+                let _ = crate::mcp::events::emit(&finish_app, crate::mcp::events::AppEvent::UpdateReady);
             },
         )
         .await

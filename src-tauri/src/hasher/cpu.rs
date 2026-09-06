@@ -1,7 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::Emitter;
 
 use crate::hasher::difficulty::{
     calculate_difficulty, check_difficulty, estimate_age, refresh_checkpoint, CHECKPOINT_COMMIT,
@@ -286,12 +285,12 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
 
 fn emit_progress(app_handle: &tauri::AppHandle, handle: &TaskHandle, _pid: &str) {
     let snapshot = handle.snapshot();
-    let _ = app_handle.emit("hash_progress", &snapshot);
+    let _ = crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::HashProgress(serde_json::to_value(&snapshot).unwrap_or_default()));
 }
 
 fn emit_complete(app_handle: &tauri::AppHandle, handle: &TaskHandle, _pid: &str) {
     let snapshot = handle.snapshot();
-    let _ = app_handle.emit("hash_complete", &snapshot);
+    let _ = crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::HashComplete(serde_json::to_value(&snapshot).unwrap_or_default()));
     // Solve history feeds the adaptive tuner (difficulty_start / max_concurrent).
     crate::mcp::telemetry::record_solve(&snapshot, "cpu");
     // If this hash belongs to a virtual player, sign its completion tx.

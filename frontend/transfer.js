@@ -505,7 +505,7 @@
 
   // A second Pay while this window is already open re-addresses it rather than
   // opening another one. The window is focused by Rust; this repaints it.
-  if (T.event) T.event.listen('transfer-intent', function (e) { applyIntent(e.payload); });
+  if (T.event) window.StructsEvents.listen('transfer-intent', function (e) { applyIntent(e.payload); });
 
   loadInventory().then(claim);
 })();

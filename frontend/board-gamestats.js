@@ -431,7 +431,7 @@
   function ensureBoot() {
     if (state.booted) return Promise.resolve();
     state.booted = true;
-    Board.T.event.listen('game-stats-update', function (e) {
+    window.StructsEvents.listen('game-stats-update', function (e) {
       var p = e && e.payload;
       if (!p || !state.snap) return;
       if (p.tier === 'block') {
@@ -462,7 +462,7 @@
     });
     // Height liveness even if a stats push is ever dropped: the raw block
     // tick travels the same relay this window already receives.
-    Board.T.event.listen('grass-event', function (e) {
+    window.StructsEvents.listen('grass-event', function (e) {
       var ev = e && e.payload;
       if (!ev || ev.category !== 'block') return;
       var h = ev.detail && Number(ev.detail.height);

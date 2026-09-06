@@ -56,7 +56,10 @@ pub fn cap() -> usize {
 /// Set the cap; returns the value actually applied (clamped).
 pub fn set_cap(n: usize) -> usize {
     let n = clamp_cap(n);
-    CAP.store(n, std::sync::atomic::Ordering::Relaxed);
+    let was = CAP.swap(n, std::sync::atomic::Ordering::Relaxed);
+    if was != n {
+        crate::mcp::capacity::adjust(crate::mcp::capacity::Resource::TxInclusion, "cap", was as u64, n as u64, "set by config");
+    }
     // A raised cap admits waiters immediately; a lowered one drains naturally.
     release_waiters();
     n
@@ -237,7 +240,7 @@ pub fn snapshot() -> serde_json::Value {
     let st = lock();
     serde_json::json!({
         "in_flight": st.in_flight,
-        "cap": MAX_IN_FLIGHT,
+        "cap": cap(),
         "queued_critical": st.queues[0].len(),
         "queued_interactive": st.queues[1].len(),
         "queued_bulk": st.queues[2].len(),

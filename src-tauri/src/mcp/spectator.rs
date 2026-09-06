@@ -1658,11 +1658,8 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
 /// every window (each would replace its state with whichever planet emitted
 /// last). Distinct names make cross-delivery impossible regardless of listener
 /// target semantics. raidview.js learns its label from the window URL.
-fn emit(app: &tauri::AppHandle, label: &str, event: &str, payload: Value) {
-    use tauri::{Emitter, Manager};
-    if app.get_webview_window(label).is_some() {
-        let _ = app.emit_to(label, format!("{event}::{label}").as_str(), payload);
-    }
+fn emit(app: &tauri::AppHandle, label: &str, event: &'static str, payload: Value) {
+    let _ = crate::mcp::events::emit(app, crate::mcp::events::AppEvent::Raid { label: label.to_string(), name: event, payload });
 }
 
 /// Pull `struct_attack` rows newer than `cursor` into renderer-ready attacks,

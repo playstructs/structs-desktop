@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tauri::Emitter;
 use wgpu::util::DeviceExt;
 
 use crate::hasher::difficulty::{
@@ -547,7 +546,11 @@ pub fn run_gpu_hash(
 
 fn emit_event(app_handle: &tauri::AppHandle, event: &str, handle: &TaskHandle) {
     let snapshot = handle.snapshot();
-    let _ = app_handle.emit(event, &snapshot);
+    let payload = serde_json::to_value(&snapshot).unwrap_or_default();
+    let _ = crate::mcp::events::emit(
+        app_handle,
+        if event == "hash_complete" { crate::mcp::events::AppEvent::HashComplete(payload) } else { crate::mcp::events::AppEvent::HashProgress(payload) },
+    );
     // If this hash belongs to a virtual player, sign its completion tx.
     if event == "hash_complete" {
         // Solve history feeds the adaptive tuner (difficulty_start / max_concurrent).

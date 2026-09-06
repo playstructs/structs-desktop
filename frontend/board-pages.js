@@ -720,18 +720,18 @@
   Board.registerPage('armada', {
     onBoot: function () {
       var T = Board.T;
-      T.event.listen('board-roster-progress', function (e) {
+      window.StructsEvents.listen('board-roster-progress', function (e) {
         var p = e && e.payload;
         if (p && Board.current === 'armada') showProgress('roster sweep ' + p.done + '/' + p.total, p.done / p.total);
       });
-      T.event.listen('board-roster-updated', function () {
+      window.StructsEvents.listen('board-roster-updated', function () {
         if (Board.current === 'armada') { loadRoster(null); hideProgressSoon(); }
       });
-      T.event.listen('board-mass-progress', function (e) {
+      window.StructsEvents.listen('board-mass-progress', function (e) {
         var p = e && e.payload;
         if (p) showProgress(p.action + ' ' + p.done + '/' + p.total + ' (' + p.ok + ' ok, ' + p.failed + ' failed)', p.done / p.total);
       });
-      T.event.listen('board-mass-done', function (e) {
+      window.StructsEvents.listen('board-mass-done', function (e) {
         var p = e && e.payload;
         setJobRunning(false);
         if (p) showProgress(p.action + ' done: ' + p.ok + '/' + p.total + ' ok', 1);
@@ -3650,7 +3650,7 @@
       // listener lives for the window's lifetime and buffers even while other
       // tabs are showing, so switching to Grass is instant.
       grassBackfill().then(function () { renderGrassList({ full: true }); });
-      Board.T.event.listen('grass-event', function (e) {
+      window.StructsEvents.listen('grass-event', function (e) {
         var ev = e && e.payload;
         if (!ev || !ev.category) return;
         grassState.rows.unshift(ev);
@@ -3659,7 +3659,7 @@
         queueGrassRender();
       });
       // Lazily-resolved names arrive here; visible rows upgrade in place.
-      Board.T.event.listen('grass-lookups', function (e) {
+      window.StructsEvents.listen('grass-lookups', function (e) {
         grassMergeLookups(e && e.payload);
         // Names resolving must upgrade rows ALREADY in the DOM, which an
         // incremental prepend would never touch.

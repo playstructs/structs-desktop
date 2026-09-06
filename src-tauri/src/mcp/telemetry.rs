@@ -951,7 +951,7 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
     let since = now_millis() - window_ms;
     let mut stmt = conn
         .prepare(
-            "SELECT engine, difficulty, duration_ms, iterations FROM pow_solves WHERE ts_ms >= ?1",
+            "SELECT engine, difficulty, duration_ms, iterations, hashrate FROM pow_solves WHERE ts_ms >= ?1",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -961,27 +961,36 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
                 r.get::<_, i64>(1)?,
                 r.get::<_, f64>(2)?,
                 r.get::<_, Option<i64>>(3)?,
+                r.get::<_, Option<f64>>(4)?,
             ))
         })
         .map_err(|e| e.to_string())?;
 
     use std::collections::HashMap;
-    let mut per: HashMap<String, Vec<(i64, f64, Option<i64>)>> = HashMap::new();
+    let mut per: HashMap<String, Vec<(i64, f64, Option<i64>, Option<f64>)>> = HashMap::new();
     for row in rows {
-        let (engine, diff, dur, iters) = row.map_err(|e| e.to_string())?;
-        per.entry(engine).or_default().push((diff, dur, iters));
+        let (engine, diff, dur, iters, rate) = row.map_err(|e| e.to_string())?;
+        per.entry(engine).or_default().push((diff, dur, iters, rate));
     }
+    const MIN_P90_SAMPLES: usize = 10;
     let mut out = Vec::new();
     for (engine, mut solves) in per {
         solves.sort_by(|a, b| a.1.total_cmp(&b.1));
         let n = solves.len();
         let median = solves[n / 2].1;
+        // The GRIND throughput: each solve's own `hashrate` (hashes per ms,
+        // measured from the moment it started running to completion). This
+        // is what the GPU actually did, independent of how long the task
+        // waited in a queue or slept on an unripe anchor — and independent
+        // of the difficulty, which multiplies duration 16× per digit.
+        let mut grind: Vec<f64> = solves.iter().filter_map(|s| s.3).filter(|r| *r > 0.0).map(|r| r * 1000.0).collect();
+        grind.sort_by(|a, b| a.total_cmp(b));
+        let median_grind_hps = if grind.len() > MIN_P90_SAMPLES { Some(grind[grind.len() / 2]) } else { None };
         // A percentile needs a sample. `(n*9/10).min(n-1)` lands on the LAST
         // element for every n <= 10, so "p90" was literally the maximum — one
         // CPU solve that spanned a machine sleep reported a p90 of 7.9 hours
         // from 8 samples and made the engine look broken. Below the threshold
         // we report nothing rather than something false.
-        const MIN_P90_SAMPLES: usize = 10;
         let p90 = if n > MIN_P90_SAMPLES {
             Some(solves[(n * 9 / 10).min(n - 1)].1)
         } else {
@@ -992,7 +1001,7 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
         // Sustained hashrate estimate from iterations/duration where available.
         let mut rate_num = 0.0;
         let mut rate_den = 0.0;
-        for (_, dur, iters) in &solves {
+        for (_, dur, iters, _) in &solves {
             if let Some(i) = iters {
                 rate_num += *i as f64;
                 rate_den += dur / 1000.0;
@@ -1003,6 +1012,7 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
             "solves": n,
             "median_duration_ms": median,
             "p90_duration_ms": p90,
+            "median_grind_hps": median_grind_hps,
             // So a caller can say "n too small" rather than guessing why p90 is null.
             "p90_min_samples": MIN_P90_SAMPLES,
             "median_difficulty": diffs[n / 2],

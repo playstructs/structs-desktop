@@ -249,7 +249,6 @@ pub async fn execute(
         }
 
         "config" => {
-            use tauri::Emitter;
             let mut changes: Vec<String> = vec![];
             let mut errors: Vec<String> = vec![];
 
@@ -271,7 +270,7 @@ pub async fn execute(
                 } else {
                     changes.push("hashing → enabled".into());
                 }
-                let _ = app_handle.emit("structs:hash-enabled", json!({ "enabled": enabled }));
+                let _ = crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::HashEnabled { enabled });
             }
 
             // Engine: auto | cpu | gpu
@@ -300,7 +299,7 @@ pub async fn execute(
                 if (1..=64).contains(&mc) {
                     hasher::set_max_concurrent(mc);
                     hasher::tuner::note_user_max(mc);
-                    let _ = app_handle.emit("structs:task-overrides", json!({ "maxConcurrent": mc }));
+                    let _ = crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::TaskOverrides { max_concurrent: mc });
                     changes.push(format!("max_concurrent → {}", mc));
                 } else {
                     errors.push(format!("max_concurrent {} out of range (1..=64)", mc));

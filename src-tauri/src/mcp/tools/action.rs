@@ -797,9 +797,8 @@ async fn action_update_primary_reactor(app_handle: &tauri::AppHandle, args: &Val
 /// it re-runs the sync + grass-resume path. Helps when the app's data layer looks
 /// stale after a slow load.
 fn action_resync(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
-    use tauri::Emitter;
     let hard = args.get("hard").and_then(|v| v.as_bool()).unwrap_or(false);
-    match app_handle.emit("structs:force-resync", serde_json::json!({ "hard": hard })) {
+    match crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::ForceResync { hard }) {
         Ok(()) => vec![Content::text(format!(
             "Resync requested ({}). The app will {}.",
             if hard { "hard" } else { "soft" },

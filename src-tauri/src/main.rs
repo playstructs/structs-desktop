@@ -182,6 +182,7 @@ fn main() {
             game_state::conn_log,
             hasher::list_hash_tasks,
             mcp::policy::list_policies,
+            mcp::events::events_listening,
             updater::check_for_update,
             updater::open_url,
             updater::updater_supported,
@@ -571,7 +572,7 @@ try {{
                     loop {
                         let interval_ms = game_state::current_sync_interval_ms();
                         tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
-                        let _ = app_handle_tick.emit("structs://sync-tick", ());
+                        let _ = mcp::events::emit(&app_handle_tick, mcp::events::AppEvent::SyncTick);
                         // Watchdog lives on THIS timer (not the sync tick) so a
                         // dead webview/sync pipeline is still detected. Cheap:
                         // self-throttles to one detection pass per minute.

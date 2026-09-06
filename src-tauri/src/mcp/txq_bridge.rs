@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
-use tauri::Emitter;
 use tokio::sync::oneshot;
 
 /// A request sent to the webapp façade.
@@ -54,7 +53,7 @@ pub async fn call(
         op: op.to_string(),
         args,
     };
-    if let Err(e) = app_handle.emit("structs:txq-request", &request) {
+    if let Err(e) = crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::TxqRequest(serde_json::to_value(&request).unwrap_or_default())) {
         cleanup(&req_id).await;
         return Err(format!("Failed to emit txq request: {}", e));
     }

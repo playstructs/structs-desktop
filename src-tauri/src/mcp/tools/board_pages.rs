@@ -1665,8 +1665,7 @@ pub async fn mcp_config_set_impl(
                         reg.tasks.clear();
                     }
                 }
-                use tauri::Emitter;
-                let _ = app.emit("structs:hash-enabled", json!({ "enabled": enabled }));
+                let _ = crate::mcp::events::emit(&app, crate::mcp::events::AppEvent::HashEnabled { enabled });
                 changes.push(format!("hashing → {}", if enabled { "on" } else { "OFF" }));
             }
             if let Some(engine) = payload.get("engine").and_then(|v| v.as_str()) {
@@ -1688,8 +1687,7 @@ pub async fn mcp_config_set_impl(
                 if (1..=64).contains(&mc) {
                     crate::hasher::set_max_concurrent(mc);
                     crate::hasher::tuner::note_user_max(mc);
-                    use tauri::Emitter;
-                    let _ = app.emit("structs:task-overrides", json!({ "maxConcurrent": mc }));
+                    let _ = crate::mcp::events::emit(&app, crate::mcp::events::AppEvent::TaskOverrides { max_concurrent: mc });
                     changes.push(format!("max_concurrent → {mc}"));
                 }
             }

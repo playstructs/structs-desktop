@@ -149,9 +149,11 @@ async fn deliver(
     // listener and draw the overlay on the game view. Use `emit_to(<label>, …)`
     // so each directive lands on exactly ONE window.
     if is_main_window_kind(&directive.component) {
-        return app_handle
-            .emit_to("main", "mcp_ui_directive", directive)
-            .map_err(|e| format!("Failed to emit UI directive: {}", e));
+        return crate::mcp::events::emit(
+            app_handle,
+            crate::mcp::events::AppEvent::UiDirective { main: true, directive: serde_json::to_value(directive).unwrap_or_default() },
+        )
+        .map_err(|e| format!("Failed to emit UI directive: {}", e));
     }
     let mut just_spawned = false;
     if app_handle.get_webview_window("board").is_none() {
@@ -179,7 +181,10 @@ async fn deliver(
     let attempts = if just_spawned { 8 } else { 1 };
     for i in 0..attempts {
         if app_handle.get_webview_window("board").is_some() {
-            crate::mcp::web_board::emit_board(app_handle, "mcp_ui_directive", directive);
+            let _ = crate::mcp::events::emit(
+                app_handle,
+                crate::mcp::events::AppEvent::UiDirective { main: false, directive: serde_json::to_value(directive).unwrap_or_default() },
+            );
         }
         if i + 1 < attempts {
             tokio::time::sleep(Duration::from_millis(300)).await;

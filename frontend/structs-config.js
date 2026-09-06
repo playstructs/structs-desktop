@@ -248,6 +248,49 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   }
   console.info('Guild config loaded:', window.__STRUCTS_CONFIG__);
 
+  // ── StructsEvents: the one way this window listens (see frontend/events.js) ──
+// StructsEvents — the one way a window listens for a Rust event.
+//
+// Wraps `__TAURI__.event.listen` (or the web board's SSE shim, whichever is
+// installed) and, half a second after the last registration, tells Rust which
+// names this window listens for (`events_listening`). Rust shows that next to
+// its own emit counts in `structs_system status` → `events`, so a listener
+// that never registers — the board's were silently dead for lack of a
+// capability entry, 2026-07 — is a visible finding instead of a mystery.
+//
+// Always defined, even without Tauri (the jsdom harness), so a window's boot
+// never depends on the runtime being there: without it, listen() is a no-op.
+(function () {
+  if (window.StructsEvents) return;
+  var names = [];
+  var timer = null;
+  function tauri() { return window.__TAURI__ || null; }
+  function announce() {
+    timer = null;
+    var T = tauri();
+    if (!T || !T.core || typeof T.core.invoke !== 'function') return;
+    try {
+      var p = T.core.invoke('events_listening', { names: names.slice() });
+      if (p && typeof p.catch === 'function') p.catch(function () {});
+    } catch (e) { /* a window without the command (web board) just isn't counted */ }
+  }
+  window.StructsEvents = {
+    listen: function (name, cb) {
+      if (names.indexOf(name) < 0) names.push(name);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(announce, 500);
+      var T = tauri();
+      if (!T || !T.event || typeof T.event.listen !== 'function') {
+        return Promise.resolve(function unlisten() {});
+      }
+      return T.event.listen(name, cb);
+    },
+    names: function () { return names.slice(); },
+    // For tests: flush the pending announcement now.
+    announceNow: function () { if (timer) clearTimeout(timer); announce(); }
+  };
+})();
+
   // ── Connection-health shared state ──
   // Populated by the WebSocket proxy (grass) and the sync path (signing),
   // consumed by setupConnectionMonitor. Declared early so the proxy below
@@ -1069,14 +1112,14 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
           // Register listeners FIRST, then start the task to avoid race conditions
           Promise.all([
-            window.__TAURI__.event.listen('hash_progress', function(event) {
+            window.StructsEvents.listen('hash_progress', function(event) {
               if (_terminated) return;
               if (event.payload.object_id !== pid) return;
               if (!ws.onmessage) return;
               var snapshot = convertSnapshotDates(event.payload);
               ws.onmessage({ data: [snapshot] });
             }),
-            window.__TAURI__.event.listen('hash_complete', function(event) {
+            window.StructsEvents.listen('hash_complete', function(event) {
               if (_terminated) return;
               if (event.payload.object_id !== pid) return;
               if (!ws.onmessage) return;
@@ -1387,7 +1430,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   // Listens for transaction requests from the Rust MCP server and
   // routes them through the webapp's SigningClientManager queue.
   (function setupTransactionBridge() {
-    window.__TAURI__.event.listen('mcp_transaction_request', function(event) {
+    window.StructsEvents.listen('mcp_transaction_request', function(event) {
       var req = event.payload;
       var requestId = req.request_id;
       var action = req.action;
@@ -1630,7 +1673,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
   (function setupCommsUnread() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
-    window.__TAURI__.event.listen('matrix::unread', function (event) {
+    window.StructsEvents.listen('matrix::unread', function (event) {
       var p = (event && event.payload) || {};
       COMMS_UNREAD = { count: Number(p.count) || 0, mention: !!p.mention };
       paintCommsUnread();
@@ -1639,7 +1682,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
   (function setupForceResync() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
-    window.__TAURI__.event.listen('structs:force-resync', function(event) {
+    window.StructsEvents.listen('structs:force-resync', function(event) {
       var hard = event && event.payload && event.payload.hard;
       console.info('[Structs] force-resync (' + (hard ? 'hard' : 'soft') + ')');
       if (hard) {
@@ -1657,7 +1700,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   (function setupTaskOverrides() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
     window.__STRUCTS_TASK_OVERRIDES__ = window.__STRUCTS_TASK_OVERRIDES__ || {};
-    window.__TAURI__.event.listen('structs:task-overrides', function (event) {
+    window.StructsEvents.listen('structs:task-overrides', function (event) {
       var p = (event && event.payload) || {};
       Object.keys(p).forEach(function (k) { window.__STRUCTS_TASK_OVERRIDES__[k] = p[k]; });
       console.info('[Structs] task overrides updated:', JSON.stringify(window.__STRUCTS_TASK_OVERRIDES__));
@@ -1666,7 +1709,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     // Master hashing on/off: pause/resume the webapp TaskManager so it stops (or
     // resumes) spawning workers. These are plain window events the manager already
     // listens for — no webapp patch needed. (The Rust gate stops MCP-started tasks.)
-    window.__TAURI__.event.listen('structs:hash-enabled', function (event) {
+    window.StructsEvents.listen('structs:hash-enabled', function (event) {
       var on = !!(event && event.payload && event.payload.enabled === true);
       window.dispatchEvent(new CustomEvent(on ? 'TASK_CMD_MANAGER_RESUME' : 'TASK_CMD_MANAGER_PAUSE'));
       console.info('[Structs] hashing ' + (on ? 'enabled — TaskManager resume' : 'disabled — TaskManager pause'));
@@ -1679,7 +1722,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   // façade (which holds the keys) and reply via the vplayer_response command.
   (function setupVPlayerBridge() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
-    window.__TAURI__.event.listen('structs:vplayer-request', async function (event) {
+    window.StructsEvents.listen('structs:vplayer-request', async function (event) {
       var req = event.payload || {};
       var reqId = req.req_id;
       var op = req.op;
@@ -1760,7 +1803,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   // primary's SigningQueueManager) and reply via txq_response.
   (function setupTxqBridge() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
-    window.__TAURI__.event.listen('structs:txq-request', function (event) {
+    window.StructsEvents.listen('structs:txq-request', function (event) {
       var req = event.payload || {};
       var reqId = req.req_id;
       var op = req.op;
@@ -3330,7 +3373,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       }
     }
 
-    TAURI.event.listen('mcp_ui_directive', function (event) {
+    window.StructsEvents.listen('mcp_ui_directive', function (event) {
       var d = event.payload;
       try { renderDirective(d); }
       catch (e) {
@@ -3406,7 +3449,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         dl.style.cursor = 'default';
         dl.textContent = 'Downloading… 0%';
 
-        var unlistenProgress = TAURI.event.listen('structs://update-progress', function (e) {
+        var unlistenProgress = window.StructsEvents.listen('structs://update-progress', function (e) {
           var pct = Math.max(0, Math.min(100, Math.round(e.payload || 0)));
           dl.textContent = 'Downloading… ' + pct + '%';
         });

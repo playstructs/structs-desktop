@@ -166,6 +166,8 @@ pub struct Snapshot {
     pub pending_new: HashSet<String>,
     pub events_applied: u64,
     pub events_skipped_stale: u64,
+    /// Frames of a known category whose number fields were not numbers.
+    pub events_malformed: u64,
     /// When a frame last CHANGED something here.
     pub last_event_ms: f64,
     /// When ANY frame last arrived, block heartbeats included. This is the
@@ -201,10 +203,139 @@ pub enum Applied {
 /// Number-or-numeric-string → u64 (the LCD serialises every integer as a
 /// string; GRASS payloads use real numbers). Anything else → 0.
 pub fn to_u64(v: Option<&Value>) -> u64 {
-    match v {
-        Some(Value::Number(n)) => n.as_u64().or_else(|| n.as_f64().map(|f| f.max(0.0) as u64)).unwrap_or(0),
-        Some(Value::String(s)) => s.parse::<u64>().or_else(|_| s.parse::<f64>().map(|f| f.max(0.0) as u64)).unwrap_or(0),
-        _ => 0,
+    crate::mcp::types::numeric_u64(v).unwrap_or(0)
+}
+
+/// The shapes the ingest edge accepts, deserialised ONCE with serde and the
+/// shared [`crate::mcp::types::numeric`] coercer. Unknown fields are
+/// ignored; a known number field that is not a number fails the whole row
+/// or frame, which is counted (`rejected_rows` / `events_malformed`) rather
+/// than silently read as 0 — the old `to_u64(…)` did the latter, and a
+/// frame with a garbage status would have written status 0 into the store.
+pub(crate) mod frame {
+    use crate::mcp::types::numeric;
+    use serde::Deserialize;
+
+    /// A bare struct row as the LCD (and the adapted guild page) shape it.
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct StructIn {
+        #[serde(default)]
+        pub id: String,
+        #[serde(rename = "type", default, deserialize_with = "numeric")]
+        pub type_id: Option<u64>,
+        #[serde(default)]
+        pub owner: String,
+        #[serde(default)]
+        pub location_type: String,
+        #[serde(default)]
+        pub location_id: String,
+        #[serde(default)]
+        pub operating_ambit: String,
+        #[serde(default, deserialize_with = "numeric")]
+        pub slot: Option<u64>,
+    }
+
+    /// One attribute-store row: `{attributeId, value}`.
+    #[derive(Deserialize)]
+    pub struct AttrIn {
+        #[serde(rename = "attributeId", default)]
+        pub attribute_id: String,
+        #[serde(default, deserialize_with = "numeric")]
+        pub value: Option<u64>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Status {
+        #[serde(default)]
+        pub struct_id: String,
+        #[serde(default, deserialize_with = "numeric")]
+        pub status: Option<u64>,
+    }
+    #[derive(Deserialize)]
+    pub struct Health {
+        #[serde(default)]
+        pub struct_id: String,
+        #[serde(default, deserialize_with = "numeric")]
+        pub health: Option<u64>,
+    }
+    /// `block` is the anchor; `block_height` the frame's own height, which
+    /// the webview tap used to substitute. Either names the same block.
+    #[derive(Deserialize)]
+    pub struct Clock {
+        #[serde(default)]
+        pub struct_id: String,
+        #[serde(default)]
+        pub planet_id: String,
+        #[serde(default, deserialize_with = "numeric")]
+        pub block: Option<u64>,
+        #[serde(default, deserialize_with = "numeric")]
+        pub block_height: Option<u64>,
+    }
+    /// A raid clock frame carries the clock ITSELF (`block_start_raid`, 0
+    /// when the raid ended) next to the frame height; the old reader took
+    /// the height and wrote a live raid clock for a raid that had ended.
+    #[derive(Deserialize)]
+    pub struct RaidStart {
+        #[serde(default)]
+        pub planet_id: String,
+        #[serde(default, deserialize_with = "numeric")]
+        pub block_start_raid: Option<u64>,
+        #[serde(default, deserialize_with = "numeric")]
+        pub block: Option<u64>,
+        #[serde(default, deserialize_with = "numeric")]
+        pub block_height: Option<u64>,
+    }
+    #[derive(Deserialize)]
+    pub struct Defense {
+        #[serde(default)]
+        pub defender_struct_id: String,
+        #[serde(default)]
+        pub protected_struct_id: String,
+    }
+    #[derive(Deserialize)]
+    pub struct Move {
+        #[serde(default)]
+        pub struct_id: String,
+        #[serde(default)]
+        pub location_type: String,
+        #[serde(default)]
+        pub location_id: String,
+        #[serde(default)]
+        pub ambit: String,
+        #[serde(default, deserialize_with = "numeric")]
+        pub slot: Option<u64>,
+    }
+    #[derive(Deserialize)]
+    pub struct Shield {
+        #[serde(default)]
+        pub planet_id: String,
+        #[serde(default, deserialize_with = "numeric")]
+        pub planetary_shield: Option<u64>,
+    }
+    #[derive(Deserialize)]
+    pub struct FleetArrive {
+        #[serde(default)]
+        pub fleet_id: String,
+    }
+    /// A grid-store delta. `value_p` is the precise base-unit value; `value`
+    /// is a floored display figure (structsLoad 2935 vs 2935000). Never mix.
+    #[derive(Deserialize)]
+    pub struct Grid {
+        #[serde(default)]
+        pub attribute_type: String,
+        #[serde(default)]
+        pub object_id: String,
+        #[serde(default, deserialize_with = "numeric")]
+        pub value_p: Option<u64>,
+        #[serde(default, deserialize_with = "numeric")]
+        pub value: Option<u64>,
+        #[serde(default)]
+        pub updated_at: Option<String>,
+    }
+
+    pub fn parse<T: serde::de::DeserializeOwned>(detail: &serde_json::Value) -> Option<T> {
+        serde_json::from_value(detail.clone()).ok()
     }
 }
 
@@ -287,18 +418,22 @@ impl Snapshot {
         let mut s = Snapshot::default();
         use crate::mcp::types::{ObjectId, ObjectKind, PlayerId};
         for r in struct_rows {
-            // The ingest edge: ids are parsed here and nowhere downstream.
-            let Ok(sid) = crate::mcp::types::StructId::parse(&str_of(r, "id")) else {
+            // The ingest edge: shapes and ids are parsed here, once, and
+            // nowhere downstream. A row that does not deserialise (a slot or
+            // type that is not a number) is refused and counted.
+            let Some(row) = frame::parse::<frame::StructIn>(r) else {
                 s.rejected_rows += 1;
                 continue;
             };
-            let owner = str_of(r, "owner");
-            if !owner.is_empty() && PlayerId::parse(&owner).is_err() {
+            let Ok(sid) = crate::mcp::types::StructId::parse(&row.id) else {
+                s.rejected_rows += 1;
+                continue;
+            };
+            if !row.owner.is_empty() && PlayerId::parse(&row.owner).is_err() {
                 s.rejected_rows += 1;
                 continue;
             }
-            let location_id = str_of(r, "locationId");
-            if !location_id.is_empty() && ObjectId::parse(&location_id).is_err() {
+            if !row.location_id.is_empty() && ObjectId::parse(&row.location_id).is_err() {
                 s.rejected_rows += 1;
                 continue;
             }
@@ -307,31 +442,31 @@ impl Snapshot {
                 id.clone(),
                 StructRow {
                     id,
-                    type_id: match r.get("type") {
-                        Some(Value::Number(n)) => n.to_string(),
-                        other => other.and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    },
-                    owner: str_of(r, "owner"),
-                    location_type: str_of(r, "locationType"),
-                    location_id: str_of(r, "locationId"),
-                    operating_ambit: str_of(r, "operatingAmbit"),
-                    slot: to_u64(r.get("slot")),
+                    type_id: row.type_id.map(|t| t.to_string()).unwrap_or_default(),
+                    owner: row.owner,
+                    location_type: row.location_type,
+                    location_id: row.location_id,
+                    operating_ambit: row.operating_ambit,
+                    slot: row.slot.unwrap_or(0),
                 },
             );
         }
-        fn fill<const N: usize>(store: &mut HashMap<String, [u64; N]>, rows: &[Value]) {
+        fn fill<const N: usize>(store: &mut HashMap<String, [u64; N]>, rows: &[Value], rejected: &mut u64) {
             for r in rows {
-                let Some(id) = r.get("attributeId").and_then(|x| x.as_str()) else { continue };
-                let Some((attr, oid)) = parse_attribute_id(id) else { continue };
+                let Some(row) = frame::parse::<frame::AttrIn>(r) else {
+                    *rejected += 1;
+                    continue;
+                };
+                let Some((attr, oid)) = parse_attribute_id(&row.attribute_id) else { continue };
                 if attr >= N {
                     continue;
                 }
-                store.entry(oid).or_insert([0; N])[attr] = to_u64(r.get("value"));
+                store.entry(oid).or_insert([0; N])[attr] = row.value.unwrap_or(0);
             }
         }
-        fill(&mut s.struct_attrs, struct_attr_rows);
-        fill(&mut s.planet_attrs, planet_attr_rows);
-        fill(&mut s.grid, grid_rows);
+        fill(&mut s.struct_attrs, struct_attr_rows, &mut s.rejected_rows);
+        fill(&mut s.planet_attrs, planet_attr_rows, &mut s.rejected_rows);
+        fill(&mut s.grid, grid_rows, &mut s.rejected_rows);
         for (store, rows, kind) in [
             (&mut s.players, player_rows, ObjectKind::Player),
             (&mut s.planets, planet_rows, ObjectKind::Planet),
@@ -620,19 +755,28 @@ impl Snapshot {
             return Applied::Stale;
         }
         let subj = crate::mcp::types::Subject::parse(subject);
+        // A known category whose frame does not deserialise is counted and
+        // ignored — never applied as zeros.
+        macro_rules! parsed {
+            ($t:ty) => {
+                match frame::parse::<$t>(detail) {
+                    Some(f) => f,
+                    None => {
+                        self.events_malformed += 1;
+                        return Applied::Ignored;
+                    }
+                }
+            };
+        }
         let res = if subj.family == crate::mcp::types::SubjectFamily::Grid {
-            let Some(idx) = detail
-                .get("attribute_type")
-                .and_then(|x| x.as_str())
-                .and_then(|n| GRID_ATTRS.iter().position(|g| *g == n))
-            else {
+            let g = parsed!(frame::Grid);
+            let Some(idx) = GRID_ATTRS.iter().position(|n| *n == g.attribute_type) else {
                 return Applied::Ignored;
             };
-            let oid = str_of(detail, "object_id");
-            if oid.is_empty() {
+            if g.object_id.is_empty() {
                 return Applied::Ignored;
             }
-            if let Some(ts) = detail.get("updated_at").and_then(|x| x.as_str()).and_then(iso_to_unix) {
+            if let Some(ts) = g.updated_at.as_deref().and_then(iso_to_unix) {
                 if self.taken_unix_s > 0.0 && ts + 2.0 < self.taken_unix_s {
                     self.events_skipped_stale += 1;
                     return Applied::Stale;
@@ -640,13 +784,13 @@ impl Snapshot {
             }
             // `value_p` is the precise base-unit value; `value` is a floored
             // display figure (structsLoad 2935 vs 2935000). Never mix them.
-            let v = detail.get("value_p").or_else(|| detail.get("value"));
-            Self::set(&mut self.grid, &oid, idx, to_u64(v))
+            Self::set(&mut self.grid, &g.object_id, idx, g.value_p.or(g.value).unwrap_or(0))
         } else {
-            let sid = str_of(detail, "struct_id");
             match category {
                 "struct_status" => {
-                    let new = to_u64(detail.get("status"));
+                    let f = parsed!(frame::Status);
+                    let sid = f.struct_id;
+                    let new = f.status.unwrap_or(0);
                     let was = self.sattr(&sid, S_STATUS);
                     let r = Self::set(&mut self.struct_attrs, &sid, S_STATUS, new);
                     // Build completion is announced only as 1→7; the chain
@@ -658,51 +802,57 @@ impl Snapshot {
                     }
                     r
                 }
-                "struct_health" => Self::set(&mut self.struct_attrs, &sid, S_HEALTH, to_u64(detail.get("health"))),
+                "struct_health" => {
+                    let f = parsed!(frame::Health);
+                    Self::set(&mut self.struct_attrs, &f.struct_id, S_HEALTH, f.health.unwrap_or(0))
+                }
                 "struct_block_build_start" => {
-                    if !sid.is_empty() && !self.structs.contains_key(&sid) {
-                        self.pending_new.insert(sid.clone());
+                    let f = parsed!(frame::Clock);
+                    if !f.struct_id.is_empty() && !self.structs.contains_key(&f.struct_id) {
+                        self.pending_new.insert(f.struct_id.clone());
                     }
-                    let b = to_u64(detail.get("block").or_else(|| detail.get("block_height")));
-                    Self::set(&mut self.struct_attrs, &sid, S_BUILD, b)
+                    let b = f.block.or(f.block_height).unwrap_or(0);
+                    Self::set(&mut self.struct_attrs, &f.struct_id, S_BUILD, b)
                 }
                 "struct_defense_add" => {
-                    let defender = str_of(detail, "defender_struct_id");
-                    let protected = str_of(detail, "protected_struct_id");
-                    let idx = crate::mcp::types::StructId::parse(&protected).map(|p| p.index()).unwrap_or(0);
-                    if defender.is_empty() {
+                    let f = parsed!(frame::Defense);
+                    let idx = crate::mcp::types::StructId::parse(&f.protected_struct_id).map(|p| p.index()).unwrap_or(0);
+                    if f.defender_struct_id.is_empty() {
                         return Applied::Ignored;
                     }
-                    Self::set(&mut self.struct_attrs, &defender, S_PROTECTED, idx)
+                    Self::set(&mut self.struct_attrs, &f.defender_struct_id, S_PROTECTED, idx)
                 }
                 "struct_defense_remove" => {
-                    let defender = str_of(detail, "defender_struct_id");
-                    if defender.is_empty() {
+                    let f = parsed!(frame::Defense);
+                    if f.defender_struct_id.is_empty() {
                         return Applied::Ignored;
                     }
-                    Self::set(&mut self.struct_attrs, &defender, S_PROTECTED, 0)
+                    Self::set(&mut self.struct_attrs, &f.defender_struct_id, S_PROTECTED, 0)
                 }
-                "struct_move" => match self.structs.get_mut(&sid) {
-                    Some(row) => {
-                        let next = StructRow {
-                            location_type: str_of(detail, "location_type"),
-                            location_id: str_of(detail, "location_id"),
-                            operating_ambit: str_of(detail, "ambit"),
-                            slot: to_u64(detail.get("slot")),
-                            ..row.clone()
-                        };
-                        if *row == next {
-                            Applied::NoChange
-                        } else {
-                            *row = next;
-                            Applied::Changed
+                "struct_move" => {
+                    let f = parsed!(frame::Move);
+                    match self.structs.get_mut(&f.struct_id) {
+                        Some(row) => {
+                            let next = StructRow {
+                                location_type: f.location_type,
+                                location_id: f.location_id,
+                                operating_ambit: f.ambit,
+                                slot: f.slot.unwrap_or(0),
+                                ..row.clone()
+                            };
+                            if *row == next {
+                                Applied::NoChange
+                            } else {
+                                *row = next;
+                                Applied::Changed
+                            }
                         }
+                        None => Applied::Ignored,
                     }
-                    None => Applied::Ignored,
-                },
+                }
                 "shield_change" => {
-                    let pid = str_of(detail, "planet_id");
-                    Self::set(&mut self.planet_attrs, &pid, P_SHIELD, to_u64(detail.get("planetary_shield")))
+                    let f = parsed!(frame::Shield);
+                    Self::set(&mut self.planet_attrs, &f.planet_id, P_SHIELD, f.planetary_shield.unwrap_or(0))
                 }
                 // The planet ore clocks. `structs.planet_activity` records these
                 // (`{block, planet_id}`, ~10k rows/day) and the local stack's
@@ -711,18 +861,25 @@ impl Snapshot {
                 // stays as the backstop. When they do arrive, they are the
                 // freshest source there is.
                 "struct_block_ore_mine_start" | "struct_block_ore_refine_start" => {
-                    let pid = str_of(detail, "planet_id");
-                    if pid.is_empty() {
+                    let f = parsed!(frame::Clock);
+                    if f.planet_id.is_empty() {
                         return Applied::Ignored;
                     }
-                    let b = to_u64(detail.get("block").or_else(|| detail.get("block_height")));
+                    let b = f.block.or(f.block_height).unwrap_or(0);
                     let idx = if category == "struct_block_ore_mine_start" { P_MINE } else { P_REFINE };
-                    Self::set(&mut self.planet_attrs, &pid, idx, b)
+                    Self::set(&mut self.planet_attrs, &f.planet_id, idx, b)
                 }
+                // The raid clock frame carries the clock itself
+                // (`block_start_raid`, 0 when the raid ended). Reading the frame
+                // height instead — as this did until 2026-09-05 — wrote a LIVE
+                // raid clock for every raid that had just ended.
                 "block_raid_start" => {
-                    let pid = str_of(detail, "planet_id");
-                    let b = to_u64(detail.get("block").or_else(|| detail.get("block_height")));
-                    Self::set(&mut self.planet_attrs, &pid, P_RAID, b)
+                    let f = parsed!(frame::RaidStart);
+                    if f.planet_id.is_empty() {
+                        return Applied::Ignored;
+                    }
+                    let b = f.block_start_raid.or(f.block).or(f.block_height).unwrap_or(0);
+                    Self::set(&mut self.planet_attrs, &f.planet_id, P_RAID, b)
                 }
                 // An explore lands the player's OWN fleet (fleet 9-N belongs to
                 // player 1-N) on the new planet; nothing else in the stream says
@@ -733,9 +890,9 @@ impl Snapshot {
                 // day) and auto_build to a slot on a planet that no longer
                 // existed. Move the player now.
                 "fleet_arrive" => {
-                    let fleet = str_of(detail, "fleet_id");
+                    let f = parsed!(frame::FleetArrive);
                     let planet = subj.object.as_ref().and_then(|o| o.as_planet());
-                    match (crate::mcp::types::FleetId::parse(&fleet), planet, subj.player.as_ref()) {
+                    match (crate::mcp::types::FleetId::parse(&f.fleet_id), planet, subj.player.as_ref()) {
                         (Ok(f), Some(planet), Some(owner)) if f.index() == owner.index() => {
                             let pid = owner.to_string();
                             let planet_s = planet.to_string();
@@ -831,6 +988,7 @@ impl Snapshot {
             "grid_objects": self.grid.len(),
             "events_applied": self.events_applied,
             "events_skipped_stale": self.events_skipped_stale,
+            "events_malformed": self.events_malformed,
             "rejected_rows": self.rejected_rows,
             "pending_new_structs": self.pending_new.len(),
             "fed_by": fed_by(),
@@ -2096,6 +2254,52 @@ mod guild_ingest_tests {
         assert_eq!(event, 0.0, "a heartbeat changes nothing");
         assert!(usable, "a quiet galaxy with a beating feed is scannable");
         *CURRENT.write().unwrap() = None;
+    }
+
+    #[test]
+    fn frames_are_read_through_one_numeric_rule_and_garbage_is_counted() {
+        let mut snap = Snapshot::from_pages(&[], &[], &[], &[], &[], &[json!({"id": "2-21740"})], &[]);
+        snap.min_height = 1;
+        // A numeric STRING status (the LCD's habit) applies like a number.
+        assert_eq!(snap.apply("struct_status", "structs.planet.2-1.1-1", &json!({"struct_id": "5-9", "status": "7"})), Applied::Changed);
+        assert_eq!(snap.struct_status("5-9"), 7);
+        // Garbage in a number field is refused and counted, never written as 0.
+        assert_eq!(snap.apply("struct_status", "structs.planet.2-1.1-1", &json!({"struct_id": "5-9", "status": "seven"})), Applied::Ignored);
+        assert_eq!(snap.struct_status("5-9"), 7, "the store keeps what it had");
+        assert_eq!(snap.events_malformed, 1);
+        // Unknown extra fields are fine.
+        assert_eq!(snap.apply("struct_health", "structs.planet.2-1.1-1", &json!({"struct_id": "5-9", "health": 6, "health_old": 0, "seq": 31})), Applied::Changed);
+    }
+
+    /// Live frame 2026-09-05 22:34: `{"block_height":2488757,"block_start_raid":0,
+    /// "block_start_raid_old":2488550,"planet_id":"2-21740"}` — the raid ENDED.
+    /// The old reader took the height and left a live clock in the store.
+    #[test]
+    fn a_raid_clock_frame_records_the_clock_not_the_frame_height() {
+        let mut snap = Snapshot::from_pages(&[], &[], &[], &[], &[], &[json!({"id": "2-21740"})], &[]);
+        snap.min_height = 1;
+        let armed = json!({"block_height": 2_488_550, "block_start_raid": 2_488_550, "block_start_raid_old": 0, "planet_id": "2-21740"});
+        assert_eq!(snap.apply("block_raid_start", "structs.planet.2-21740.1-61", &armed), Applied::Changed);
+        assert_eq!(snap.planet_attr("2-21740", "blockStartRaid"), Some(2_488_550));
+        let ended = json!({"block_height": 2_488_757, "block_start_raid": 0, "block_start_raid_old": 2_488_550, "planet_id": "2-21740"});
+        assert_eq!(snap.apply("block_raid_start", "structs.planet.2-21740.1-61", &ended), Applied::Changed);
+        assert_eq!(snap.planet_attr("2-21740", "blockStartRaid"), Some(0), "the raid is over");
+    }
+
+    #[test]
+    fn struct_pages_deserialise_once_and_refuse_non_numeric_slots() {
+        let rows = vec![
+            json!({"id":"5-1","type":"14","owner":"1-194","locationType":"planet","locationId":"2-223","operatingAmbit":"land","slot":"3"}),
+            json!({"id":"5-2","type":14,"owner":"1-194","locationType":"planet","locationId":"2-223","operatingAmbit":"land","slot":0}),
+            json!({"id":"5-3","type":"14","owner":"1-194","locationType":"planet","locationId":"2-223","operatingAmbit":"land","slot":"x"}),
+        ];
+        let snap = Snapshot::from_pages(&rows, &[json!({"attributeId": "1-5-1", "value": "7"}), json!({"attributeId": "1-5-2", "value": "many"})], &[], &[], &[], &[], &[]);
+        assert_eq!(snap.structs["5-1"].slot, 3);
+        assert_eq!(snap.structs["5-1"].type_id, "14");
+        assert_eq!(snap.structs["5-2"].type_id, "14", "a JSON number and a numeric string key the same type");
+        assert!(!snap.structs.contains_key("5-3"), "a slot that is not a number refuses the row");
+        assert_eq!(snap.struct_status("5-1"), 7);
+        assert_eq!(snap.rejected_rows, 2, "one struct row and one attribute row");
     }
 
     #[test]

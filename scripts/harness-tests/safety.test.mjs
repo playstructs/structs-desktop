@@ -25,6 +25,8 @@ const root = process.cwd();
 // hundreds of other players' names.
 const FEDERATED = [
   'frontend/chat.js',
+  'frontend/chat-refs.js',
+  'frontend/chat-work.js',
   'frontend/raidview.js',
   'frontend/board-pages.js',
   'frontend/board-gamestats.js',
@@ -143,7 +145,7 @@ for (const file of FEDERATED) {
 // stops it. A CLEAR (`= ''`) is allowed: it writes no markup.
 {
   console.log('\n— windows that never build markup');
-  for (const file of ['frontend/chat.js', 'frontend/transfer.js']) {
+  for (const file of ['frontend/chat.js', 'frontend/chat-refs.js', 'frontend/chat-work.js', 'frontend/transfer.js']) {
     const code = readFileSync(root + '/' + file, 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
@@ -190,7 +192,10 @@ for (const file of FEDERATED) {
 {
   const mod = readFileSync(root + '/src-tauri/src/matrix/mod.rs', 'utf8');
   const pages = readFileSync(root + '/src-tauri/src/mcp/tools/board_pages.rs', 'utf8');
-  const chat = readFileSync(root + '/frontend/chat.js', 'utf8');
+  // The Comms window is chat.js plus the sections extracted from it; the
+// rules below hold across all of them.
+const chat = ['chat.js', 'chat-refs.js', 'chat-work.js']
+  .map((f) => readFileSync(root + '/frontend/' + f, 'utf8')).join('\n');
 
   // 1. The gate on the command that actually moves funds. It is an explicit
   //    allowlist of window labels — the hand-off was designed AROUND it rather
@@ -214,7 +219,7 @@ for (const file of FEDERATED) {
   check('matrix_open_transfer takes no caller-supplied address',
     !/addr|address|to\s*:/i.test(sig), sig.replace(/\s+/g, ' ').slice(0, 120));
   check('matrix_open_transfer resolves the address from the chain',
-    /query_entity\("player"/.test(open.slice(0, 2000))
+    /(query_)?entity\("player"/.test(open.slice(0, 2000))
     && /primaryAddress/.test(open.slice(0, 2000)));
 
   // 3. The window side sends the id and nothing else.
@@ -317,7 +322,8 @@ for (const file of FEDERATED) {
     sourced.length > 0 && sourced.every((a) => /ident\.as_ref\(\)/.test(a)),
     sourced.join(' | '));
 
-  const chat = readFileSync(root + '/frontend/chat.js', 'utf8');
+  const chat = ['chat.js', 'chat-refs.js', 'chat-work.js']
+    .map((f) => readFileSync(root + '/frontend/' + f, 'utf8')).join('\n');
   const srcs = [...chat.matchAll(/\.src\s*=\s*([^;\n]+)/g)].map((m) => m[1].trim());
   // Everything the window points an <img> at is either a bundled path built
   // from a literal, or bytes we fetched and re-encoded ourselves. A bare
