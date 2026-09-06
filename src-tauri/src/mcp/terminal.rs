@@ -224,9 +224,14 @@ fn focus(w: &tauri::WebviewWindow) {
 
 fn spine(app: &tauri::AppHandle) {
     // The board's data spine (roster sweeps, background refresh) serves the
-    // terminal's cards too.
+    // terminal's cards too — and so does the Game Stats engine, whose sweep
+    // loop only ever started from the Game Stats window's own door. With a
+    // Terminal open and that window closed the liveness, universe and raid
+    // cards sat on dashes for good (0.1.354). `watched()` already counts a
+    // Terminal window; this is the start it was waiting for.
     crate::mcp::roster_cache::trigger_sweep(app.clone(), 60_000.0);
     crate::mcp::roster_cache::ensure_background_refresh(app.clone());
+    crate::mcp::game_stats::ensure_running(app);
 }
 
 /// Open (or raise) the Terminal on the active workspace. Remembers that it is
@@ -332,6 +337,7 @@ pub fn open_terminal_card(app: tauri::AppHandle, workspace: Option<String>, card
         }
         save_windows(&ws);
     }
+    spine(&app);
     focus(&w);
     Ok(())
 }

@@ -137,7 +137,16 @@ pub const HEALTHY_THROUGHPUT: f64 = 0.8;
 /// sleeping (an unripe pop, a queue). Logged, never acted on.
 pub const WEDGE_P90_MS: f64 = 60_000.0;
 
+/// A grind shorter than this cannot measure a rate: at difficulty 4 a solve
+/// takes ~16 ms, the timer quantises, and `median_grind_hps` reads 20 MH/s
+/// against a 45 MH/s baseline measured on real grinds — a 0.44× "degraded"
+/// verdict every minute after a relaunch (0.1.354), and a pool cut for it.
+pub const MIN_MEASURABLE_MS: f64 = 100.0;
+
 pub fn judge_throughput(recent: &EngineStats, baseline: &EngineStats) -> Throughput {
+    if recent.median_duration_ms < MIN_MEASURABLE_MS {
+        return Throughput::Unknown;
+    }
     match (recent.median_grind_hps, baseline.median_grind_hps) {
         (Some(r), Some(b)) if b > 0.0 && recent.solves >= MIN_SAMPLES && baseline.solves >= MIN_SAMPLES => {
             let ratio = r / b;
@@ -328,6 +337,18 @@ mod tests {
         let baseline = stats(500, 170.0, Some(400.0), Some(1.0e8));
         let recent = stats(40, 43_000.0, Some(60_000.0), Some(1.0e8));
         assert_eq!(judge_throughput(&recent, &baseline), Throughput::Healthy { ratio: 1.0 });
+    }
+
+    /// 0.1.354 after a relaunch: difficulty back at 4, solves of ~16 ms, the
+    /// timer quantising the rate to 20 MH/s against a 45 MH/s baseline. No
+    /// verdict can be read from a grind that short — the pool must not be cut.
+    #[test]
+    fn a_solve_too_short_to_time_is_no_verdict() {
+        let baseline = stats(500, 170.0, Some(400.0), Some(4.5e7));
+        let recent = stats(17, 15.8, Some(29.0), Some(2.0e7));
+        assert_eq!(judge_throughput(&recent, &baseline), Throughput::Unknown);
+        let long_enough = stats(17, MIN_MEASURABLE_MS, Some(200.0), Some(2.0e7));
+        assert!(matches!(judge_throughput(&long_enough, &baseline), Throughput::Degraded { .. }), "at a measurable length the same ratio IS a verdict");
     }
 
     #[test]
