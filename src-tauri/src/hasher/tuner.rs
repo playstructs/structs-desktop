@@ -202,8 +202,7 @@ fn tune_pass() {
     match verdict {
         Throughput::Degraded { ratio } if cur_conc > MIN_CONCURRENT => {
             HEALTHY_STREAK.store(0, Ordering::Relaxed);
-            crate::hasher::set_max_concurrent(cur_conc - 1);
-            crate::mcp::capacity::adjust(crate::mcp::capacity::Resource::Gpu, "max_concurrent", cur_conc, cur_conc - 1, format!("grind throughput {ratio:.2}× baseline"));
+            crate::mcp::capacity::set_gpu_concurrency(cur_conc - 1, format!("grind throughput {ratio:.2}× baseline"));
             telemetry::tlog_kv(
                 "hasher",
                 Sev::Warn,
@@ -220,8 +219,7 @@ fn tune_pass() {
             let user_cap = USER_MAX.load(Ordering::Relaxed);
             if streak >= HEALTHY_STREAK_TO_GROW && cur_conc < user_cap {
                 HEALTHY_STREAK.store(0, Ordering::Relaxed);
-                crate::hasher::set_max_concurrent(cur_conc + 1);
-                crate::mcp::capacity::adjust(crate::mcp::capacity::Resource::Gpu, "max_concurrent", cur_conc, cur_conc + 1, "grind throughput healthy for three passes");
+                crate::mcp::capacity::set_gpu_concurrency(cur_conc + 1, "grind throughput healthy for three passes");
                 telemetry::tlog_kv(
                     "hasher",
                     Sev::Notice,
@@ -256,8 +254,7 @@ fn tune_pass() {
     if let (Some(rate), Some(ideal)) = (rate, ideal) {
         if !matches!(verdict, Throughput::Degraded { .. }) && ideal.abs_diff(cur) >= 2 {
             let next = if ideal > cur { cur + 1 } else { cur - 1 };
-            crate::hasher::set_difficulty_start(next);
-            crate::mcp::capacity::adjust(crate::mcp::capacity::Resource::Gpu, "difficulty_start", cur, next, format!("ideal {ideal} at {:.0} MH/s ({:.1} s per proof at {next})", rate / 1e6, expected_solve_secs(next, rate)));
+            crate::mcp::capacity::set_gpu_difficulty(next, format!("ideal {ideal} at {:.0} MH/s ({:.1} s per proof at {next})", rate / 1e6, expected_solve_secs(next, rate)));
             telemetry::tlog_kv(
                 "hasher",
                 Sev::Notice,

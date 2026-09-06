@@ -286,7 +286,7 @@ pub async fn execute(
             // DIFFICULTY_START — sane range 1..=64 (difficulty is a 0..64-ish scale).
             if let Some(ds) = params.difficulty_start {
                 if (1..=64).contains(&ds) {
-                    hasher::set_difficulty_start(ds);
+                    crate::mcp::capacity::set_gpu_difficulty(ds, "set by structs_hash config");
                     changes.push(format!("difficulty_start → {}", ds));
                 } else {
                     errors.push(format!("difficulty_start {} out of range (1..=64)", ds));
@@ -297,7 +297,7 @@ pub async fn execute(
             // admission gate; also pushed to the webapp TaskManager spawner cap.
             if let Some(mc) = params.max_concurrent {
                 if (1..=64).contains(&mc) {
-                    hasher::set_max_concurrent(mc);
+                    crate::mcp::capacity::set_gpu_concurrency(mc, "set by structs_hash config");
                     hasher::tuner::note_user_max(mc);
                     let _ = crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::TaskOverrides { max_concurrent: mc });
                     changes.push(format!("max_concurrent → {}", mc));

@@ -202,6 +202,12 @@ fn expected_listeners(name: &str, announced: &[String]) -> Vec<String> {
     if name == "transfer-intent" {
         return pick(&|l| l == "transfer");
     }
+    // The game's TaskManager listens for these only while it owns a hash
+    // task; under the native pool it never does, so nobody listening is the
+    // normal state, not a dead listener.
+    if name == "hash_progress" || name == "hash_complete" {
+        return Vec::new();
+    }
     if name.starts_with("board-") || name.starts_with("grass-") || name == "game-stats-update" {
         return pick(&|l| crate::mcp::web_board::BOARD_WINDOWS.contains(&l));
     }
@@ -326,5 +332,6 @@ mod tests {
         assert_eq!(expected_listeners("board-update", &open), vec!["board", "gamestats"]);
         assert_eq!(expected_listeners("structs:force-resync", &open), vec!["main"]);
         assert!(expected_listeners("transfer-intent", &open).is_empty(), "Pay window closed");
+        assert!(expected_listeners("hash_progress", &open).is_empty(), "the game listens per task, optionally");
     }
 }

@@ -56,6 +56,12 @@ const BUDGET = {
   'chat-reactions.js':  [0, 0],
   'chat-refs.js':       [0, 0],
   'chat-work.js':       [0, 0],
+  'chat-channels.js':   [0, 0],
+  'chat-search.js':     [0, 0],
+  'chat-people.js':     [0, 0],
+  'chat-connection.js': [0, 0],
+  'chat-pins.js':       [0, 0],
+  'chat-presence.js':   [0, 0],
   'events.js':          [0, 0],
   'raidview.html':      [3, 45],
   // Four ambit background colours, copied from main.css and commented as

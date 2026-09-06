@@ -76,6 +76,28 @@ pub fn adjust(resource: Resource, knob: &'static str, from: u64, to: u64, becaus
     );
 }
 
+/// The GPU grinder's two knobs change HERE and nowhere else — the tuner, the
+/// `structs_hash config` command and the board's CONFIG page all come
+/// through, so every change is recorded with its reason and the raw setters
+/// in `hasher` are only for boot. A no-op change is not recorded.
+pub fn set_gpu_concurrency(to: u64, because: impl Into<String>) {
+    let from = crate::hasher::max_concurrent();
+    if from == to {
+        return;
+    }
+    crate::hasher::set_max_concurrent(to);
+    adjust(Resource::Gpu, "max_concurrent", from, to, because);
+}
+
+pub fn set_gpu_difficulty(to: u64, because: impl Into<String>) {
+    let from = crate::hasher::difficulty_start();
+    if from == to {
+        return;
+    }
+    crate::hasher::set_difficulty_start(to);
+    adjust(Resource::Gpu, "difficulty_start", from, to, because);
+}
+
 pub fn recent_changes() -> Vec<Change> {
     CHANGES.lock().map(|c| c.iter().cloned().collect()).unwrap_or_default()
 }

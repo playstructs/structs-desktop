@@ -1679,13 +1679,13 @@ pub async fn mcp_config_set_impl(
             }
             if let Some(ds) = payload.get("difficulty_start").and_then(|v| v.as_u64()) {
                 if (1..=64).contains(&ds) {
-                    crate::hasher::set_difficulty_start(ds);
+                    crate::mcp::capacity::set_gpu_difficulty(ds, "set on the board's CONFIG page");
                     changes.push(format!("difficulty_start → {ds}"));
                 }
             }
             if let Some(mc) = payload.get("max_concurrent").and_then(|v| v.as_u64()) {
                 if (1..=64).contains(&mc) {
-                    crate::hasher::set_max_concurrent(mc);
+                    crate::mcp::capacity::set_gpu_concurrency(mc, "set on the board's CONFIG page");
                     crate::hasher::tuner::note_user_max(mc);
                     let _ = crate::mcp::events::emit(&app, crate::mcp::events::AppEvent::TaskOverrides { max_concurrent: mc });
                     changes.push(format!("max_concurrent → {mc}"));
