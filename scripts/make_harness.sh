@@ -455,6 +455,12 @@ cat > "$FIX" <<'EOF'
       standing: { planet_id: '2-223', fleet_id: '9-61', guild_id: '0-2', last_action: 4200700, ago_blocks: 19, charge: 19, known: true },
       ranks: { alpha: { rank: 1, value: 49340000000 }, ore: null, structs_load: { rank: 4, value: 12000 } },
       ore: { mined: '1200', refined: '900' }, planets: { count: 14 }, raids: { launched: 33, won: 30 }, ledger: { unavailable: 'Login required' } },
+    // The battle log card asks the raid view's command for a planet's rows.
+    mcp_raid_log: { planet_id: '2-15361', rows: [
+      { time: '14:46', date: '2026-09-06', category: 'raid_struct_attack', kind: 'combat', detail: 'Tank 5-88 hit Mining Rig 5-12 for 2', block: 4200700 },
+      { time: '14:44', date: '2026-09-06', category: 'fleet_move', kind: 'movement', detail: 'Fleet 9-61 arrived', block: 4200690 },
+      { time: '19:28', date: '2026-09-05', category: 'struct_defense_set', kind: 'defense', detail: 'Tank 5-88 now defends Mining Rig 5-12', block: 4199000 },
+    ] },
     terminal_ore_radar: { height: 4200719, planets_with_ore: 7100, planets: [
       { planet_id: '2-223', ore: 4000, shield: 12, owner: '1-61', owner_name: 'JPEG', owner_tag: 'OH', owner_guild: 'Orbital Hydro', owner_pfp: null },
       { planet_id: '2-15361', ore: 900, shield: 0, owner: '1-2940', owner_name: null, owner_tag: null, owner_guild: null, owner_pfp: null },

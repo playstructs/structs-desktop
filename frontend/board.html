@@ -917,9 +917,40 @@
     .tm-toolbar .sui-screen-btn { transform: translateY(var(--spacing-xs)); }
     .tm-toolbar-param:empty { display: none; }
     #tm-cmd.is-err { border-color: var(--text-enemy-primary); }
-    .tm-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--spacing-lg); align-items: start; text-align: left; }
+    /* Dense packing: rows are one small unit, every card spans what it
+       measures (board-terminal.js fitRows), and the flow is dense so a short
+       card never leaves a hole under it. */
+    .tm-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: var(--spacing-sm); grid-auto-flow: dense; gap: var(--spacing-md) var(--spacing-lg); text-align: left; }
     .tm-grid.tm-solo { grid-template-columns: minmax(0, 1fr); }
-    .tm-card { min-width: 0; margin: 0; }
+    /* #board-layout .sui-data-card says align-self: stretch, which in a 4px
+       track squashes a card to nothing (and fitRows measures 0); the id wins. */
+    #board-layout .tm-card { min-width: 0; margin: 0; position: relative; align-self: start; }
+    .tm-card.tm-dragging { opacity: .5; }
+    .tm-card.tm-drop-before { box-shadow: inset var(--spacing-xs) 0 0 var(--accent-primary); }
+    .tm-card.tm-drop-after { box-shadow: inset calc(-1 * var(--spacing-xs)) 0 0 var(--accent-primary); }
+    .tm-card.tm-resizing { outline: 1px solid var(--accent-primary); }
+    .tm-head[draggable="true"] { cursor: grab; }
+    .tm-resize { position: absolute; top: 0; right: 0; bottom: 0; width: var(--spacing-sm); cursor: col-resize; }
+    .tm-resize:hover { background: var(--border-strong); }
+    /* a.sui-nav-btn:link out-specifies a bare class, so the door's rest state
+       needs the grid id in front of it. */
+    #tm-grid a.tm-door-quiet { display: none; }
+    #tm-grid .tm-card:hover a.tm-door-quiet, #tm-grid .tm-card:focus-within a.tm-door-quiet { display: inline-flex; }
+    .tm-share { display: inline-flex; align-items: center; gap: var(--spacing-sm); flex: 1 1 auto; min-width: 0; }
+    .tm-share input { flex: 1 1 auto; min-width: 0; }
+    /* The battle log, as the raid view styles it. */
+    .tm-log { max-height: 60vh; overflow-y: auto; }
+    .tm-log-filters { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-md); margin-bottom: var(--spacing-sm); }
+    .rv-log-chip { display: inline-flex; gap: var(--spacing-xs); text-decoration: none; opacity: .55; }
+    .rv-log-chip.rv-on { opacity: 1; }
+    .rv-log-day { margin: var(--spacing-sm) 0 var(--spacing-xs); color: var(--text-hint); }
+    .rv-log-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: var(--spacing-md); align-items: baseline; padding: var(--spacing-xs) 0; border-bottom: 1px solid var(--border-subtle); }
+    .rv-log-t { color: var(--text-hint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .rv-log-d { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rv-log-row.rv-bad .rv-log-cat { color: var(--text-enemy-primary); }
+    .rv-log-row.rv-warn .rv-log-cat { color: var(--text-warning); }
+    .rv-log-row.rv-dim { opacity: .6; }
+    .rv-log-empty { color: var(--text-hint); }
     .tm-w2 { grid-column: span 2; }
     .tm-w3 { grid-column: span 3; }
     @media (max-width: 900px) {
@@ -1235,6 +1266,7 @@
   <script src="chat-refs.js"></script>
   <script src="chat-rent.js"></script>
   <script src="raidview-comms.js"></script>
+  <script src="raidview-log.js"></script>
   <script src="board-terminal.js"></script>
 </body>
 </html>

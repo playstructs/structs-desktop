@@ -84,7 +84,8 @@ const BUDGET = {
   // rest are sizes SUI has no token for (a 6px track, a 20px column). Raised
   // deliberately, once; the ratchet holds from here.
   // board.html +5 (2026-09-06): the Terminal — two grid breakpoints, the map frame height, the comms scroll box, one card border.
-  'board.html':         [2, 100],
+  // board.html +2 (2026-09-06): the resize preview outline and the battle log's row rule, both 1px hairlines.
+  'board.html':         [2, 102],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not

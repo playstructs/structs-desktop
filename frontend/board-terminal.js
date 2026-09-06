@@ -160,10 +160,54 @@
       if (def && def.params && def.params.length) {
         doors.appendChild(door('icon-menu', 'Configure', function () { toggleConfig(card.id); }));
       }
-      doors.appendChild(door('icon-chevron-up', 'Move up', function () { move(card.id, -1); }));
-      doors.appendChild(door('icon-chevron-down', 'Move down', function () { move(card.id, 1); }));
+      // The keyboard's way to move; the header itself drags. Quiet until the
+      // pointer is over the card, so a page of cards is not a page of arrows.
+      var up = door('icon-chevron-up', 'Move up', function () { move(card.id, -1); }); up.classList.add('tm-door-quiet');
+      var down = door('icon-chevron-down', 'Move down', function () { move(card.id, 1); }); down.classList.add('tm-door-quiet');
+      doors.appendChild(up); doors.appendChild(down);
       doors.appendChild(door('icon-link-out', 'Pop out', function () { popOut(card.id); }));
       doors.appendChild(door('icon-close', 'Remove', function () { remove(card.id); }));
+      // Drag the header to move the card; drop on another card to land
+      // before or after it (left or right half), or on the grid to go last.
+      head.draggable = true;
+      head.title = 'Drag to move';
+      head.addEventListener('dragstart', function (ev) {
+        state.drag = card.id;
+        node.classList.add('tm-dragging');
+        try { ev.dataTransfer.effectAllowed = 'move'; ev.dataTransfer.setData('text/plain', card.id); } catch (e) { /* jsdom */ }
+      });
+      head.addEventListener('dragend', function () { state.drag = null; node.classList.remove('tm-dragging'); clearDrop(); });
+      node.addEventListener('dragover', function (ev) {
+        if (!state.drag || state.drag === card.id) return;
+        ev.preventDefault();
+        var r = node.getBoundingClientRect();
+        var after = r.width > 0 ? (ev.clientX - r.left) > r.width / 2 : true;
+        clearDrop();
+        node.classList.add(after ? 'tm-drop-after' : 'tm-drop-before');
+      });
+      node.addEventListener('dragleave', function () { node.classList.remove('tm-drop-before', 'tm-drop-after'); });
+      node.addEventListener('drop', function (ev) {
+        if (!state.drag || state.drag === card.id) return;
+        ev.preventDefault();
+        var r = node.getBoundingClientRect();
+        var after = r.width > 0 ? (ev.clientX - r.left) > r.width / 2 : true;
+        dropOn(state.drag, card.id, after);
+      });
+      // Drag the right edge to change the width, one column at a time.
+      var grip = H.el('span', 'tm-resize');
+      grip.title = 'Drag to resize';
+      grip.addEventListener('pointerdown', function (ev) {
+        ev.preventDefault();
+        var grid = document.getElementById('tm-grid');
+        var col = grid ? columnWidth(grid) : 0;
+        if (!col) return;
+        var start = node.getBoundingClientRect().left;
+        var onMove = function (e) { resizeTo(card.id, Math.round((e.clientX - start) / col), true); };
+        var onUp = function (e) { resizeTo(card.id, Math.round((e.clientX - start) / col), false); window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+      });
+      node.appendChild(grip);
     }
     head.appendChild(doors);
     node.appendChild(head);
@@ -173,6 +217,64 @@
     var body = H.el('div', 'sui-data-card-body tm-body');
     node.appendChild(body);
     return { node: node, body: body, config: config, title: title };
+  }
+
+  // ── Moving and sizing by hand ──────────────────────────────────────────
+  function clearDrop() {
+    document.querySelectorAll('.tm-drop-before, .tm-drop-after').forEach(function (n) { n.classList.remove('tm-drop-before', 'tm-drop-after'); });
+  }
+  /* Put `id` before or after `targetId` in the layout (no target: last). */
+  function dropOn(id, targetId, after) {
+    clearDrop();
+    state.drag = null;
+    var cards = state.layout.cards;
+    var from = cards.map(function (c) { return c.id; }).indexOf(id);
+    if (from < 0) return;
+    var moving = cards.splice(from, 1)[0];
+    var to = targetId ? cards.map(function (c) { return c.id; }).indexOf(targetId) : cards.length;
+    if (to < 0) to = cards.length; else if (after) to += 1;
+    cards.splice(to, 0, moving);
+    save();
+    renderGrid();
+  }
+  Terminal.dropOn = dropOn;
+  function columnWidth(grid) {
+    var cols = getComputedStyle(grid).gridTemplateColumns.split(' ').map(parseFloat).filter(isFinite);
+    if (!cols.length) return 0;
+    var gap = parseFloat(getComputedStyle(grid).columnGap) || 0;
+    return cols[0] + gap;
+  }
+  /* Width by drag: preview while the pointer moves, commit on release. */
+  function resizeTo(id, w, preview) {
+    var c = findCard(id), m = state.mounted[id];
+    if (!c || !m) return;
+    w = Math.max(1, Math.min(3, w || 1));
+    m.node.className = 'sui-data-card sui-theme-player tm-card tm-w' + w + (preview ? ' tm-resizing' : '');
+    if (!preview && w !== c.w) { c.w = w; save(); }
+    fitRows(m);
+  }
+  Terminal.resizeTo = resizeTo;
+
+  // ── Dense packing ──────────────────────────────────────────────────────
+  // The grid's rows are one small unit tall (--spacing-sm, 4px) with the
+  // row gap --spacing-md (8px); each card spans as many units as its content
+  // measures, so cards of different heights pack without the holes a
+  // row-aligned grid leaves under the short ones. Measured, never guessed: a
+  // ResizeObserver on each card re-fits it when its content changes.
+  var ROW_UNIT = 4, ROW_GAP = 8;
+  function fitRows(m) {
+    if (!m || !m.node || !m.node.isConnected) return;
+    var h = m.node.getBoundingClientRect().height;
+    if (!h) return;
+    var span = Math.max(1, Math.ceil((h + ROW_GAP) / (ROW_UNIT + ROW_GAP)));
+    if (m.span !== span) { m.span = span; m.node.style.gridRowEnd = 'span ' + span; }
+  }
+  Terminal.fitRows = fitRows;
+  function watchSize(m) {
+    if (typeof ResizeObserver === 'undefined') return;
+    m.ro = new ResizeObserver(function () { fitRows(m); });
+    m.ro.observe(m.body);
+    if (m.config) m.ro.observe(m.config);
   }
 
   // ── Card operations ─────────────────────────────────────────────────────
@@ -200,6 +302,7 @@
     var m = state.mounted[id];
     if (!m) return;
     if (m.def && m.def.unmount) { try { m.def.unmount(m.body, m.params); } catch (e) { /* a card must not take the page down */ } }
+    if (m.ro) { try { m.ro.disconnect(); } catch (e) { /* fine */ } }
     if (m.node.parentNode) m.node.parentNode.removeChild(m.node);
     delete state.mounted[id];
   }
@@ -303,6 +406,7 @@
       return m.def.render(m.body, m.params, { card: m.node, id: id, first: !m.rendered, invoke: invoke });
     }).then(function () {
       m.rendered = true;
+      fitRows(m);
       // One header per card, the frame's: content that arrives as a titled
       // SUI card gives its own header up and the frame's title takes its name.
       var first = m.body.firstElementChild;
@@ -323,6 +427,7 @@
     if (!def) f.body.appendChild(H.stateBlock('error', 'Unknown card type: ' + card.type));
     grid.appendChild(f.node);
     state.mounted[card.id] = { node: f.node, body: f.body, config: f.config, title: f.title, def: def, params: card.params || {}, lastRun: 0, rendered: false };
+    watchSize(state.mounted[card.id]);
     if (def) refresh(card.id, true);
   }
 
@@ -341,6 +446,7 @@
       if (!m) { mount(c, grid); m = state.mounted[c.id]; }
       m.node.className = 'sui-data-card sui-theme-player tm-card tm-w' + (state.solo ? 3 : (c.w || 1));
       if (grid.children[i] !== m.node) grid.insertBefore(m.node, grid.children[i] || null);
+      fitRows(m);
     });
     if (state.solo && !want.length) grid.appendChild(H.stateBlock('info', 'This card is no longer on the workspace.'));
     if (!state.solo && !want.length) grid.appendChild(H.stateBlock('info', 'An empty workspace. Add a card above, or type a command.'));
@@ -353,6 +459,8 @@
     if (!state.solo) host.appendChild(chrome());
     var grid = H.el('div', 'tm-grid' + (state.solo ? ' tm-solo' : ''));
     grid.id = 'tm-grid';
+    grid.addEventListener('dragover', function (ev) { if (state.drag && ev.target === grid) ev.preventDefault(); });
+    grid.addEventListener('drop', function (ev) { if (state.drag && ev.target === grid) { ev.preventDefault(); dropOn(state.drag, null, true); } });
     host.appendChild(grid);
     renderGrid();
   }
@@ -375,6 +483,7 @@
     wsDoors.appendChild(door('icon-link-out', 'Open this workspace in its own window', function () {
       invoke('open_terminal_workspace', { name: state.ws }).catch(function (e) { Board.stamp && Board.stamp('needs the app: ' + e); });
     }));
+    wsDoors.appendChild(door('icon-send-alpha', 'Share this workspace', function () { shareRow(strip); }));
     if (state.workspaces.length > 1) {
       wsDoors.appendChild(door('icon-close', 'Delete this workspace', function () { deleteWorkspace(state.ws); }));
     }
@@ -442,6 +551,65 @@
     return top;
   }
 
+  /* A workspace as text anyone can paste: `terminal:` + the layout, base64.
+   * Shared into Comms as a message, or copied; pasted into the command line
+   * (`IMPORT terminal:…`) it becomes a workspace here. */
+  Terminal.exportWorkspace = function (name) {
+    var payload = { name: name || state.ws, cards: state.layout.cards.map(function (c) { return { id: c.id, type: c.type, params: c.params || {}, w: c.w || 1 }; }) };
+    return 'terminal:' + btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+  };
+  Terminal.parseShared = function (text) {
+    var t = String(text || '').trim();
+    var m = /terminal:([A-Za-z0-9+/=]+)/.exec(t);
+    var raw;
+    try { raw = m ? decodeURIComponent(escape(atob(m[1]))) : t; } catch (e) { return null; }
+    var payload;
+    try { payload = JSON.parse(raw); } catch (e) { return null; }
+    if (!payload || !Array.isArray(payload.cards)) return null;
+    var cards = payload.cards.filter(function (c) { return c && typeof c.type === 'string' && TYPES[c.type]; }).map(function (c, i) {
+      return { id: String(c.id || (c.type + '-' + (i + 1))).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || (c.type + '-' + (i + 1)), type: c.type, params: c.params && typeof c.params === 'object' ? c.params : {}, w: Math.max(1, Math.min(3, Number(c.w) || 1)) };
+    });
+    return { name: String(payload.name || 'shared').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'shared', cards: cards };
+  };
+  Terminal.importWorkspace = function (text) {
+    var parsed = Terminal.parseShared(text);
+    if (!parsed || !parsed.cards.length) return Promise.resolve(false);
+    var name = parsed.name, n = 2;
+    while (state.workspaces.indexOf(name) >= 0) name = parsed.name + '-' + n++;
+    state.workspaces.push(name);
+    Object.keys(state.mounted).forEach(function (id) { unmountCard(id); });
+    state.ws = name;
+    state.layout = { version: 0, cards: parsed.cards };
+    if (!state.solo) invoke('terminal_workspace_activate', { name: name }).catch(function () {});
+    return persist().then(function () { renderAll(); return true; });
+  };
+  function shareRow(strip) {
+    var old = strip.querySelector('#tm-ws-share');
+    if (old) { old.parentNode.removeChild(old); return; }
+    var row = H.el('span', 'tm-share'); row.id = 'tm-ws-share';
+    var code = H.textBox(Terminal.exportWorkspace(), '', function () {});
+    code.readOnly = true;
+    code.addEventListener('focus', function () { code.select(); });
+    row.appendChild(code);
+    var copy = H.el('a', 'sui-screen-btn sui-mod-secondary', 'Copy');
+    copy.href = 'javascript:void(0)';
+    copy.addEventListener('click', function () {
+      var done = function () { copy.textContent = 'Copied'; };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(code.value).then(done, function () { code.select(); });
+      else { code.select(); done(); }
+    });
+    row.appendChild(copy);
+    var send = H.el('a', 'sui-screen-btn sui-mod-primary', 'Send to Comms');
+    send.href = 'javascript:void(0)';
+    send.addEventListener('click', function () {
+      invoke('matrix_share', { text: 'Terminal workspace "' + state.ws + '" — paste into the Terminal command line: IMPORT ' + code.value })
+        .then(function () { send.textContent = 'Sent'; }).catch(function (e) { Board.stamp && Board.stamp('needs Comms: ' + e); });
+    });
+    row.appendChild(send);
+    strip.appendChild(row);
+    code.focus();
+  }
+
   function newWorkspaceRow(strip) {
     if (strip.querySelector('#tm-ws-new')) return;
     var box = H.textBox('', 'new workspace name', function () {});
@@ -465,6 +633,8 @@
     BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
     PLAYER: ['player', 'id'], MAP: ['map', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
     ORE: ['ore'], HALT: ['halt'], BOOK: ['book', 'id'], ALERTS: ['alerts', 'rules'], ALERT: ['alerts', 'rules'],
+    LOG: ['log', 'id'], BATTLE: ['log', 'id'], PRODUCTION: ['page', 'energy:production'], DISTRIBUTION: ['page', 'energy:distribution'],
+    DOCTRINE: ['page', 'war:doctrine'], TARGETS: ['page', 'war:targets'], INCIDENTS: ['page', 'war:incidents'], HASH: ['page', 'work'],
     STATS: ['stats', 'section'], WORK: ['page', 'work'], TX: ['page', 'tx'], ENERGY: ['page', 'energy'],
     ROSTER: ['page', 'armada'], ARMADA: ['page', 'armada'], RAIDS: ['page', 'raids'], STREAM: ['page', 'grass'],
     INVENTORY: ['page', 'inventory'], WAR: ['page', 'war'], OPS: ['page', 'ops'], CONFIG: ['page', 'config'],
@@ -482,6 +652,8 @@
       if (kind === 2 || kind === 9) return !!add('map', { id: parts[0] });
       return !!add('inspector', { id: parts[0] });
     }
+    if (head === 'SHARE') { var strip = document.querySelector('.tm-workspaces'); if (strip) shareRow(strip); return true; }
+    if (head === 'IMPORT') { if (!rest) return false; Terminal.importWorkspace(rest); return true; }
     var w = WORDS[head];
     if (!w) return false;
     var type = w[0], arg = w[1];
@@ -713,19 +885,27 @@
     },
   });
 
+  // A page, or a page's VIEW (`energy:production`), the way the board's own
+  // sub-nav reaches them. Ordered by who reaches for them: hashers and
+  // botters first, then energy, then war.
   var PAGES = [
-    { value: 'work', label: 'Work queue' }, { value: 'tx', label: 'Transactions' }, { value: 'energy', label: 'Energy' },
-    { value: 'armada', label: 'Armada roster' }, { value: 'raids', label: 'Raids' }, { value: 'grass', label: 'Live stream' },
-    { value: 'inventory', label: 'Inventory' }, { value: 'war', label: 'War' }, { value: 'ops', label: 'Overview' },
-    { value: 'config', label: 'Settings' }, { value: 'explore', label: 'Explore' }, { value: 'diagnostics', label: 'Diagnostics' },
+    { value: 'work', label: 'Work queue (hashing)' }, { value: 'tx', label: 'Transactions' },
+    { value: 'energy:production', label: 'Energy · production' }, { value: 'energy:distribution', label: 'Energy · distribution' },
+    { value: 'inventory', label: 'Inventory' }, { value: 'armada', label: 'Armada roster' },
+    { value: 'raids', label: 'Raids' }, { value: 'war:doctrine', label: 'War · doctrine' }, { value: 'war:targets', label: 'War · targets' },
+    { value: 'war:lists', label: 'War · lists' }, { value: 'war:incidents', label: 'War · incidents' },
+    { value: 'grass', label: 'Live stream' }, { value: 'ops', label: 'Overview' }, { value: 'explore', label: 'Explore' },
+    { value: 'config', label: 'Settings' }, { value: 'config:appearance', label: 'Settings · squads' }, { value: 'config:profiles', label: 'Settings · profiles' },
+    { value: 'diagnostics', label: 'Diagnostics' },
   ];
+  function pageOf(p) { var parts = String(p.page || 'work').split(':'); return { name: parts[0], view: parts[1] || p.view || undefined }; }
   Terminal.register('page', {
     label: 'Team Ops page', defaultWidth: 2,
     describe: function (p) { var s = PAGES.filter(function (x) { return x.value === p.page; })[0]; return 'Team Ops · ' + (s ? s.label : p.page || '?'); },
     params: [{ key: 'page', label: 'Page', kind: 'choice', options: PAGES }],
     cadenceMs: 5000,
     render: function (host, p) {
-      var name = p.page || 'work';
+      var pv = pageOf(p), name = pv.name;
       var page = document.getElementById('page-' + name);
       var def = Board.pages[name];
       if (!page || !def) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', 'No page ' + name)); return; }
@@ -733,7 +913,7 @@
         host.innerHTML = '';
         page.hidden = false;
         host.appendChild(page);
-        if (def.onEnter) return Promise.resolve(def.onEnter({}, p.view)).then(function () { def.lastRun = Date.now(); });
+        if (def.onEnter) return Promise.resolve(def.onEnter({}, pv.view)).then(function () { def.lastRun = Date.now(); });
         return;
       }
       if (def.refresh && (!def.cadenceMs || Date.now() - def.lastRun >= def.cadenceMs)) {
@@ -742,7 +922,7 @@
       }
     },
     unmount: function (host, p) {
-      var page = document.getElementById('page-' + (p.page || 'work'));
+      var page = document.getElementById('page-' + pageOf(p).name);
       var home = document.querySelector('.ops-scroll');
       if (page && home) { page.hidden = true; home.appendChild(page); }
     },
@@ -1106,6 +1286,41 @@
           });
         }
       });
+    },
+  });
+
+  // The battle log: every recorded row for one planet, as the raid view
+  // draws it (raidview-log.js — kinds, day groups, the filter strip). It
+  // owns fixed DOM ids, so one per window.
+  Terminal.register('log', {
+    label: 'Battle log', single: true, defaultWidth: 2,
+    describe: function (p) { return 'Battle log · ' + (p.id || '?'); },
+    params: [{ key: 'id', label: 'Planet id', kind: 'id', placeholder: '2-15361' }],
+    cadenceMs: 30000,
+    render: function (host, p, ctx) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet id.')); return; }
+      if (!window.RaidLog) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', 'Battle log not loaded.')); return; }
+      var m = state.mounted[ctx.id];
+      if (!m.log || m.log.planet !== p.id) {
+        host.innerHTML = '';
+        var cap = H.el('div', 'tm-cap');
+        cap.appendChild(H.el('span', 'fstat-l', 'planet ' + p.id));
+        var count = H.el('span', 'fstat-l'); count.id = 'rv-log-count';
+        cap.appendChild(count);
+        host.appendChild(cap);
+        var filters = H.el('div', 'tm-log-filters'); filters.id = 'rv-log-filters';
+        host.appendChild(filters);
+        var body = H.el('div', 'tm-log'); body.id = 'rv-log-body';
+        host.appendChild(body);
+        var lg = window.RaidLog({
+          el: H.el,
+          humanStatus: function (s) { return String(s).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase(); },
+          state: function () { return { snapshot: { planet_id: p.id }, generation: 1 }; },
+        });
+        lg.logState.open = true;
+        m.log = { planet: p.id, lg: lg };
+      }
+      return m.log.lg.refreshLog();
     },
   });
 

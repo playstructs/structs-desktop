@@ -149,6 +149,47 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => d.querySelector('#tm-grid [data-type="sheet"] .pc-card'));
   const sheet = d.querySelector('#tm-grid [data-type="sheet"]');
   check('TS is the tearsheet: the card with ranks, standing, and the guild API\'s sections as they arrive', /JPEG/.test(sheet.textContent) && /#1/.test(sheet.textContent) && /Raids launched/.test(sheet.textContent) && /launched/.test(sheet.textContent) && /unavailable: Login required/.test(sheet.textContent));
+  // Moving by hand: a drop lands before or after the target; a grid drop goes last.
+  const order = () => [...d.querySelectorAll('#tm-grid .tm-card')].map((c) => c.getAttribute('data-card')).join(',');
+  const first = d.querySelector('#tm-grid .tm-card').getAttribute('data-card');
+  const last = [...d.querySelectorAll('#tm-grid .tm-card')].pop().getAttribute('data-card');
+  w.Board.Terminal.dropOn(first, last, true);
+  check('dragging a card onto another lands it after that card', order().split(',').pop() === first, order());
+  w.Board.Terminal.dropOn(first, null, true);
+  check('…and a drop on the grid keeps it last', order().split(',').pop() === first);
+  check('the header is the drag handle', d.querySelector('#tm-grid .tm-card .tm-head').getAttribute('draggable') === 'true');
+  check('every card carries a resize grip and its move doors are quiet', d.querySelectorAll('#tm-grid .tm-card .tm-resize').length === d.querySelectorAll('#tm-grid .tm-card').length && d.querySelectorAll('.tm-door-quiet').length >= 2);
+  w.Board.Terminal.resizeTo(first, 3, false);
+  check('a resize commits the width to the layout', d.querySelector('#tm-' + first).classList.contains('tm-w3') && w.Board.Terminal.state.layout.cards.find((c) => c.id === first).w === 3);
+  w.Board.Terminal.resizeTo(first, 9, false);
+  check('…clamped to the grid', w.Board.Terminal.state.layout.cards.find((c) => c.id === first).w === 3);
+
+  // Page views and the battle log.
+  run('PRODUCTION');
+  check('PRODUCTION opens the energy page on its production view', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'page' && c.params.page === 'energy:production'));
+  run('LOG 2-15361');
+  await until(() => d.querySelector('#tm-grid [data-type="log"] #rv-log-body'));
+  check('LOG draws the raid view\'s battle log for a planet, asking the same command', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_raid_log' && c.args.planetId === '2-15361'));
+  await until(() => d.querySelectorAll('#rv-log-body .rv-log-row').length);
+  check('…and draws its rows under day headings with the category chips', d.querySelectorAll('#rv-log-body .rv-log-row').length === 3 && d.querySelectorAll('#rv-log-body .rv-log-day').length === 2 && d.querySelectorAll('#rv-log-filters .rv-log-chip').length >= 3);
+  run('LOG 2-1');
+  check('…one battle log per window', w.Board.Terminal.state.layout.cards.filter((c) => c.type === 'log').length === 1);
+
+  // Sharing: export → import round-trips into a new workspace.
+  const code = w.Board.Terminal.exportWorkspace();
+  check('a workspace exports as a terminal: code', /^terminal:[A-Za-z0-9+/=]+$/.test(code));
+  const parsed = w.Board.Terminal.parseShared('please IMPORT ' + code + ' thanks');
+  check('…that parses back with every card, even from inside a chat message', parsed && parsed.name === w.Board.Terminal.state.ws && parsed.cards.length === w.Board.Terminal.state.layout.cards.length);
+  check('a bad code is refused, not thrown', w.Board.Terminal.parseShared('terminal:!!!') === null && w.Board.Terminal.parseShared('{"cards":"x"}') === null);
+  const before = w.Board.Terminal.state.ws;
+  await w.Board.Terminal.importWorkspace(code);
+  check('IMPORT makes a new workspace beside the old one', w.Board.Terminal.state.ws !== before && w.Board.Terminal.state.ws.startsWith(before) && w.Board.Terminal.state.workspaces.includes(w.Board.Terminal.state.ws));
+  run('SHARE');
+  check('SHARE opens the share row with the code and a door to Comms', d.querySelector('#tm-ws-share input')?.value === w.Board.Terminal.exportWorkspace() && [...d.querySelectorAll('#tm-ws-share a')].some((a) => a.textContent === 'Send to Comms'));
+  [...d.querySelectorAll('#tm-ws-share a')].find((a) => a.textContent === 'Send to Comms').click();
+  await tick(10);
+  check('…which shares it as a message', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_share' && /IMPORT terminal:/.test(c.args.text)));
+
   run('NOPE');
   check('an unknown word is refused in place, not swallowed', cmd.classList.contains('is-err') && cmd.value === 'NOPE');
 
