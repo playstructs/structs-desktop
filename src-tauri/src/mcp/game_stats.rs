@@ -593,7 +593,7 @@ fn galaxy_pass(height: u64) {
 
 // ── Snapshot (pull command payload) ─────────────────────────────────────────
 
-fn snapshot() -> Value {
+pub(crate) fn snapshot() -> Value {
     with_cache(|c| {
         json!({
             "auth_ok": c.auth_ok,
@@ -827,6 +827,12 @@ async fn fast_sweep(client: &CosmosClient) -> Result<(), String> {
         c.fast_updated_ms = crate::hasher::types::now_millis();
     });
     Ok(())
+}
+
+/// Who a player id is, as the heavy sweep last learned it (username, portrait
+/// attrs, tag, guild, planet, fleet). `None` until the first sweep.
+pub fn identity(pid: &str) -> Option<Value> {
+    with_cache(|c| c.identities.get(pid).cloned())
 }
 
 /// Identity row for leaderboard display, keyed by player id.

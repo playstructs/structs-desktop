@@ -895,25 +895,58 @@
     html[data-solo="gamestats"] .ops-scroll { overflow-y: auto; }
     html[data-solo="terminal"] .ops-scroll { overflow-y: auto; }
     /* ── The Terminal (board-terminal.js) ──────────────────────────────── */
-    .tm-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-md) var(--spacing-lg); margin-bottom: var(--spacing-lg); text-align: left; }
-    .tm-toolbar .sui-input-text { min-width: 0; }
+    /* One grid of the game's data cards: three equal columns, one gutter,
+       every card the same frame — header with the doors, body with the
+       content. Wide (2) and full (3) spans keep the column rhythm. */
+    .tm-chrome { display: flex; flex-direction: column; gap: var(--spacing-md); margin-bottom: var(--spacing-lg); text-align: left; }
+    .tm-workspaces { display: flex; align-items: center; gap: var(--spacing-md); }
+    .tm-workspaces .subnav { flex: 1 1 auto; min-width: 0; }
+    .tm-workspaces #tm-ws-new { width: 160px; }
+    /* One row on a wide window: command · add-a-card · its param · Add · Reset,
+       all on one baseline (SUI buttons stand 2px shorter than a labelled
+       field, so they carry that as a bottom margin). Under 900px the command
+       takes a row of its own and the add controls share the second. */
+    .tm-toolbar { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) auto auto; align-items: end; gap: var(--spacing-md); }
+    /* SUI's own field shape here — caption above, control below — so every
+       control in the row shares one baseline; the board's row-shaped
+       cfg-field is for settings lists. The input's 2px underline is the
+       last thing in a field, so a button (2px shorter) drops by that much. */
+    #board-layout .tm-toolbar label.sui-input-text.cfg-field { min-width: 0; width: 100%; flex-direction: column; align-items: stretch; gap: 0; padding: 0; }
+    #board-layout .tm-toolbar label.sui-input-text.cfg-field > span:first-child { flex: none; min-height: 0; white-space: nowrap; }
+    .tm-toolbar label.sui-input-text input[type=text], .tm-toolbar label.sui-input-text select { width: 100%; }
+    .tm-toolbar .sui-screen-btn { transform: translateY(var(--spacing-xs)); }
+    .tm-toolbar-param:empty { display: none; }
+    #tm-cmd.is-err { border-color: var(--text-enemy-primary); }
     .tm-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--spacing-lg); align-items: start; text-align: left; }
     .tm-grid.tm-solo { grid-template-columns: minmax(0, 1fr); }
-    .tm-card { min-width: 0; border: 1px solid var(--border-subtle); background: var(--surface-panel); }
+    .tm-card { min-width: 0; margin: 0; }
     .tm-w2 { grid-column: span 2; }
     .tm-w3 { grid-column: span 3; }
-    @media (max-width: 900px) { .tm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tm-w3 { grid-column: span 2; } }
-    @media (max-width: 600px) { .tm-grid { grid-template-columns: minmax(0, 1fr); } .tm-w2, .tm-w3 { grid-column: span 1; } }
-    .tm-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-sm); padding: var(--spacing-xs) var(--spacing-sm); border-bottom: 1px solid var(--border-subtle); }
-    .tm-title { color: var(--text-body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .tm-doors { display: inline-flex; gap: var(--spacing-xs); flex: none; }
+    @media (max-width: 900px) {
+      .tm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tm-w3 { grid-column: span 2; }
+      .tm-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; }
+      .tm-toolbar > .tm-cmd-field { grid-column: 1 / -1; }
+    }
+    @media (max-width: 600px) {
+      .tm-grid { grid-template-columns: minmax(0, 1fr); } .tm-w2, .tm-w3 { grid-column: span 1; }
+      .tm-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+      .tm-toolbar > .tm-cmd-field, .tm-toolbar > .tm-toolbar-param { grid-column: 1 / -1; }
+    }
+    .tm-head { justify-content: space-between; gap: var(--spacing-md); align-self: stretch; width: 100%; box-sizing: border-box; }
+    .tm-toolbar .sui-screen-btn { justify-self: start; }
+    .tm-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .tm-doors { display: inline-flex; align-items: center; gap: var(--spacing-xs); flex: none; }
     .tm-door { padding: var(--spacing-xs); }
-    .tm-config { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm); background: var(--surface-default); }
-    .tm-body { padding: var(--spacing-sm); min-height: var(--spacing-xxl); }
+    .tm-config { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md); background: var(--surface-default); }
+    .tm-body { width: 100%; flex-direction: column; align-items: stretch; padding: var(--spacing-md); }
+    .tm-body > .sui-data-card { margin: 0; }
     .tm-body .page { display: block; }
-    .tm-market-head { margin-bottom: var(--spacing-sm); }
+    .tm-cap { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: var(--spacing-sm); }
+    /* A chart caption inside a card clears the axis figure below it. */
+    .tm-body .gs-cap { margin-bottom: var(--spacing-sm); }
     .tm-market { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--spacing-md); }
-    .tm-map { width: 100%; height: 520px; border: 0 none; background: var(--page-background); }
+    .tm-frame { width: 100%; height: 520px; border: 0 none; background: var(--page-background); }
+    .tm-tape { max-height: 420px; overflow-y: auto; margin: 0; }
     .tm-comms-body { max-height: 360px; overflow-y: auto; }
     /* ── Game Stats charts (board-gamestats.js) ─────────────────────────── */
     /* The hero figure: the one number the page leads with. DirectiveZero at
@@ -1198,6 +1231,8 @@
   <script src="board-pages.js"></script>
   <script src="board-gamestats.js"></script>
   <script src="chatrow.js"></script>
+  <script src="chat-refs.js"></script>
+  <script src="chat-rent.js"></script>
   <script src="raidview-comms.js"></script>
   <script src="board-terminal.js"></script>
 </body>

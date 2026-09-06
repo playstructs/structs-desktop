@@ -946,6 +946,16 @@ impl GuildApiClient {
     /// One guild's record — its NAME and TAG, which the chain's player entity
     /// does not carry. A profile that can only say "0-1" is naming the row in
     /// a database rather than the guild the player belongs to.
+    /// Every guild's bank: `{guild_id, denom, collateral, supply, ratio}` —
+    /// collateral and supply are base-unit strings, ratio a number.
+    pub async fn guild_bank(&self) -> Result<Value, String> {
+        self.get("/api/guild-bank").await
+    }
+    /// Thirty days of a guild's token movements, bucketed by hour or day:
+    /// `{bucket, action (minted|burned|infused|defusion_completed), denom, volume}`.
+    pub async fn guild_bank_history(&self, guild_id: &str, hourly: bool) -> Result<Value, String> {
+        self.get(&format!("/api/guild-bank/{}/history?bucket={}", guild_id, if hourly { "1h" } else { "1d" })).await
+    }
     pub async fn guild_by_id(&self, guild_id: &str) -> Result<Value, String> {
         self.get(&format!("/api/guild/{}", guild_id)).await
     }

@@ -3644,6 +3644,9 @@
     return Promise.resolve();
   }
 
+  // The Terminal's flow tape draws the same rows.
+  Board._grass = { row: grassRow };
+
   Board.registerPage('grass', {
     onBoot: function () {
       // Back-fill from the Rust ring buffer, then tail the live relay. The
