@@ -157,6 +157,13 @@
   S.embed = /[?&]embed=1(&|$)/.test(String(location.search || ''));
   if (S.embed) document.documentElement.setAttribute('data-embed', '');
   S.embedCard = (function () { var m = /[?&]card=([A-Za-z0-9_-]{1,40})(&|$)/.exec(String(location.search || '')); return m ? m[1] : null; })();
+  /* `?list=direct` or `?list=rooms` — one list instead of both.
+   *
+   * Rooms and people are two different questions ("what is being discussed"
+   * and "who am I talking to"), and a card that answers one of them is a
+   * card you can keep open. Unset shows both, which is the window's default.
+   */
+  S.listOnly = (function () { var m = /[?&]list=(direct|rooms)(&|$)/.exec(String(location.search || '')); return m ? m[1] : null; })();
   // Ask the Terminal that embeds us to act on our card. Same origin only.
   function tellCard(act) {
     if (!S.embed || !S.embedCard || !window.parent) return;

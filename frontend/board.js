@@ -581,14 +581,27 @@
   // field() is what carries that class.
   function selectBox(value, options, onChange) {
     var s = el('select');
-    (options || []).forEach(function (o) {
-      var val = (o && o.value != null) ? o.value : o;
-      var lbl = (o && o.label != null) ? o.label : o;
-      var op = el('option', null, String(lbl));
-      op.value = val;
-      if (val === value) op.selected = true;
-      s.appendChild(op);
-    });
+    // An entry may be a GROUP — `{ group: 'War', options: [...] }` — which
+    // becomes an <optgroup>. A list long enough to need one (the Terminal's
+    // card menu is forty-odd entries) is unreadable as a flat scroll.
+    function put(into, list) {
+      (list || []).forEach(function (o) {
+        if (o && o.group) {
+          var g = el('optgroup');
+          g.label = String(o.group);
+          put(g, o.options);
+          if (g.childNodes.length) into.appendChild(g);
+          return;
+        }
+        var val = (o && o.value != null) ? o.value : o;
+        var lbl = (o && o.label != null) ? o.label : o;
+        var op = el('option', null, String(lbl));
+        op.value = val;
+        if (val === value) op.selected = true;
+        into.appendChild(op);
+      });
+    }
+    put(s, options);
     s.addEventListener('change', function () { onChange(s.value); });
     return s;
   }

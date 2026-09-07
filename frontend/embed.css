@@ -1,0 +1,49 @@
+/* A whole page shown inside a Terminal card.
+ *
+ * The game's window chrome is a PANEL: two fill bands, a left and a right
+ * edge, and a chunk whose background is the metal the screens are inset into.
+ * A card already draws that frame, so a page carrying its own put a second
+ * container inside the first — two sets of borders around one surface, which
+ * is what the Comms and Pay cards looked like until 2026-09-07.
+ *
+ * Here the page keeps its CONTENT (its nav bar is the card's header, its body
+ * screen is the card's surface) and gives up its FRAME. One file rather than
+ * three copies: chat.html, transfer.html and raidview.html all link it, and
+ * `frontend/css/` is regenerated on release so it cannot live there.
+ *
+ * Set `?embed=1`; each page stamps `data-embed` on its root from that.
+ */
+html[data-embed],
+html[data-embed] body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
+/* The frame: the card is already it. */
+html[data-embed] .sui-panel-top-fill-background,
+html[data-embed] .sui-panel-bottom-fill-background,
+html[data-embed] .sui-panel-edge-left,
+html[data-embed] .sui-panel-edge-right {
+  display: none;
+}
+html[data-embed] .sui-panel-chunk {
+  padding: 0;
+  border-width: 0;
+  background: transparent;
+}
+
+/* The 4px inset that floats a screen inside the frame. With no frame there is
+ * nothing to float inside, and it read as the second border. Direct children
+ * only: a screen nested in the CONTENT is content, and keeps its own inset. */
+html[data-embed] .sui-panel-chunk > .sui-screen {
+  border-width: 0;
+}
+
+/* A page header's energy and alpha readings are the GAME's status bar. In a
+ * card they are a third copy of something the wallet and grid cards already
+ * show, in the corner of a window that is about something else. */
+html[data-embed] .sui-page-header-resources {
+  display: none;
+}

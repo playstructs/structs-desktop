@@ -106,16 +106,27 @@
 /* ── the switch (loops) is the game's checkbox ────────────────────────── */
 .sc-switch { display: inline-flex; align-items: center; gap: var(--spacing-sm); }
 
-/* ── the tape: time · kind · body · block, one grid line ──────────────── */
-.sc-tape { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: var(--spacing-md);
+/* ── the tape: a header band you scan, figures under it when there are any ─
+ * One clipped line could only ever show a timestamp, a category and the head
+ * of a subject — the values the frame carried (amount 4 → 5) were never on
+ * screen. The header keeps its columns; the figures get the full width. */
+.sc-tape { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;
+  gap: var(--spacing-xs) var(--spacing-md);
   padding: var(--spacing-xs) var(--spacing-md); border-bottom: 1px solid var(--border-subtle); text-align: left; }
 .sc-tape-t, .sc-tape-blk { color: var(--text-hint); font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* One visible line: the body wraps but is clipped to a single line, so a
- * narrow card shows the subject and as many WHOLE figures as fit — never a
- * row of one-character stubs. The whole event is the body's title. */
-.sc-tape-body { display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center; align-content: flex-start; min-width: 0; overflow: hidden; white-space: nowrap; line-height: 16px; max-height: 16px; }
+.sc-tape-head { display: flex; align-items: center; gap: var(--spacing-md); min-width: 0; }
+/* A kind is one token, never two lines: "ORE MINE" broke in half and made the
+ * header band twice as tall as the figures under it. */
+.sc-tape-head .sui-badge { white-space: nowrap; flex: none; }
+.sc-tape-subj { display: flex; align-items: baseline; gap: var(--spacing-sm); min-width: 0; white-space: nowrap; }
+.sc-tape-word { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-hint); }
+.sc-tape-ids { flex: none; }
+/* Second band, under the header, spanning to the right wall: as many WHOLE
+ * figures as fit on one line. */
+.sc-tape-body { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center;
+  min-width: 0; overflow: hidden; white-space: nowrap; line-height: 16px; max-height: 16px; }
+.sc-tape-body:empty { display: none; }
 .sc-tape-body > * { flex: none; }
-.sc-tape-body > :first-child { flex: 0 1 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .sc-tape-kv .pc-id { color: var(--text-hint); }
 li > .sc-tape { list-style: none; }
 .tm-tape > li { list-style: none; padding: 0; }

@@ -240,9 +240,25 @@ const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js'
   const sig = open.slice(0, open.indexOf(')'));
   check('matrix_open_transfer takes no caller-supplied address',
     !/addr|address|to\s*:/i.test(sig), sig.replace(/\s+/g, ' ').slice(0, 120));
-  check('matrix_open_transfer resolves the address from the chain',
-    /(query_)?entity\("player"/.test(open.slice(0, 2000))
-    && /primaryAddress/.test(open.slice(0, 2000)));
+  // The lookup lives in ONE function now, because the Pay window's own
+  // recipient search needs the same answer and must not grow a second way of
+  // getting it. Both callers go through it; it is the only thing that decides
+  // where money goes.
+  check('matrix_open_transfer asks the shared resolver rather than reading an address itself',
+    /resolve_payable\(/.test(open.slice(0, 1200)));
+  const resolver = mod.slice(mod.indexOf('pub async fn resolve_payable'));
+  check('…and that resolver reads the address from the chain',
+    /(query_)?entity\("player"/.test(resolver.slice(0, 1600))
+    && /primaryAddress/.test(resolver.slice(0, 1600)));
+  const bySearch = mod.slice(mod.indexOf('pub async fn matrix_resolve_payable'));
+  check('the recipient search resolves by id too, taking no caller-supplied address',
+    !/addr|address|to\s*:/i.test(bySearch.slice(0, bySearch.indexOf(')')))
+    && /resolve_payable\(/.test(bySearch.slice(0, 900)));
+  // The window sends the id it was given, never an address it holds.
+  const pay = readFileSync(root + '/frontend/transfer.js', 'utf8');
+  const askLine = pay.slice(pay.indexOf("invoke('matrix_resolve_payable'")).slice(0, 90).replace(/\s+/g, ' ');
+  check('the Pay window asks by player id alone',
+    /invoke\('matrix_resolve_payable', \{ playerId: r\.player_id \}\)/.test(askLine), askLine);
 
   // 3. The window side sends the id and nothing else.
   const call = chat.slice(chat.indexOf("invoke('matrix_open_transfer'"), )

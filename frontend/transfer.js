@@ -9,9 +9,12 @@
  * command's allowlist explicitly rather than by widening `require_board`, so it
  * has gained the ability to run ONE command and nothing else.
  *
- * The recipient is never typed and never editable here: it arrives already
- * resolved from the CHAIN by `matrix_open_transfer`, because the request came
- * from a chat message and a message must not be able to name a destination.
+ * The recipient's ADDRESS is never typed and never carried in: it is resolved
+ * from the CHAIN, by `matrix_open_transfer` when a chat message asked for the
+ * payment, and by `matrix_resolve_payable` when the player searches for someone
+ * here. A message must not be able to name a destination; the player choosing a
+ * face and the chain supplying the address is a different thing entirely — and
+ * without it the window opened from the Terminal with no way to name anyone.
  */
 (function () {
   // `?embed=1&card=<id>` — inside a Terminal card; this page's own bar is the
@@ -179,8 +182,18 @@
    * `-subtitle`. None exist, so the card rendered as unstyled text beside a
    * portrait — which is what "you re-implemented a player card again" was.
    */
+  /* A bech32 address is 44 characters — three times the width of anything
+   * else on the row, and it wrapped. Head and tail are what anyone actually
+   * compares; the whole of it is on the row's title. Same shape as the Grass
+   * tab's shortAddr. */
+  function shortAddr(a) {
+    a = String(a || '');
+    return a.length > 24 ? a.slice(0, 12) + '…' + a.slice(-6) : a;
+  }
+
   function partyCard(role, name, playerId, address, pfpAttrs) {
     var row = el('div', 'sui-result-row');
+    if (address) row.title = address;
 
     var left = el('div', 'sui-result-row-left-section');
     var box = el('div', 'sui-result-row-portrait');
@@ -197,7 +210,7 @@
     var pid = el('span', 'sui-text-hint');
     // The id AND the address: the id is who, the address is where the money
     // actually goes, and only one of them can be checked against the chain.
-    pid.textContent = (playerId ? 'PID #' + playerId + ' · ' : '') + (address || '');
+    pid.textContent = (playerId ? 'PID #' + playerId + ' · ' : '') + shortAddr(address);
     block.appendChild(pid);
     info.appendChild(block);
     left.appendChild(info);
@@ -242,6 +255,67 @@
     });
   }
 
+  /* Choose who to pay.
+   *
+   * Shown only when nothing has named a recipient — the Pay card in the
+   * Terminal, or the window opened by hand. Picking a result does NOT take the
+   * address from it: the id goes to the chain and the chain answers with the
+   * address, which is the same path the message hand-off takes.
+   */
+  function recipientSearch(box) {
+    var wrap = el('div', 'tx-find');
+    var field = el('label', 'sui-input-text');
+    field.appendChild(el('span', null, 'To'));
+    var input = el('input');
+    input.type = 'text';
+    input.id = 'tx-find-input';
+    input.placeholder = 'a name or a player id';
+    field.appendChild(input);
+    wrap.appendChild(field);
+    var results = el('div', 'tx-find-results');
+    wrap.appendChild(results);
+    box.appendChild(wrap);
+
+    var timer = null, seq = 0;
+    var run = function () {
+      var q = input.value.trim();
+      results.textContent = '';
+      if (q.length < 2) return;
+      var mine = ++seq;
+      invoke('mcp_player_search', { query: q }).then(function (res) {
+        if (mine !== seq) return;
+        results.textContent = '';
+        var rows = (res && res.results) || [];
+        if (!rows.length) { results.appendChild(el('div', 'sui-text-hint', 'nobody by that name')); return; }
+        rows.slice(0, 6).forEach(function (r) {
+          var attrs = r.pfp_attrs || r.pfp;
+          if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
+          var card = partyCard('PAY', r.username || r.player_id, r.player_id, '', attrs);
+          card.classList.add('tx-find-hit');
+          card.addEventListener('click', function () {
+            results.textContent = '';
+            results.appendChild(el('div', 'sui-text-hint', 'asking the chain where ' + (r.username || r.player_id) + ' is paid…'));
+            invoke('matrix_resolve_payable', { playerId: r.player_id })
+              .then(function (intent) { applyIntent(Object.assign({ pfp_attrs: attrs }, intent)); })
+              .catch(function (e) { results.textContent = ''; results.appendChild(el('div', 'sui-text-warning', String(e))); });
+          });
+          results.appendChild(card);
+        });
+      }).catch(function (e) {
+        if (mine !== seq) return;
+        results.textContent = '';
+        results.appendChild(el('div', 'sui-text-warning', String(e)));
+      });
+    };
+    input.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(run, 250); });
+    input.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      clearTimeout(timer);
+      run();
+    });
+  }
+
   function renderParties() {
     var box = document.getElementById('tx-parties');
     box.textContent = '';
@@ -249,6 +323,7 @@
       box.appendChild(partyCard('FROM', S.me.name, S.me.player_id,
         S.me.address, S.me.pfp_attrs));
     }
+    if (!S.intent) recipientSearch(box);
     if (S.intent) {
       // The recipient's face arrives with the PREVIEW, because only the server
       // resolves an address to one of our players. Until then the card shows
@@ -471,6 +546,21 @@
   function claim() {
     return invoke('matrix_take_pending_transfer').then(applyIntent).catch(function () {});
   }
+
+  /* Pay someone else instead. The amount and the asset stay; only the
+   * destination is given up, which is the thing that must be re-decided. */
+  window.StructsPay = {
+    clearRecipient: function () {
+      S.intent = null;
+      S.preview = null;
+      S.exact = null;
+      var who = document.getElementById('tx-who');
+      if (who) who.textContent = '';
+      clearOut();
+      renderParties();
+      renderFacts();
+    },
+  };
 
   document.getElementById('tx-amount').addEventListener('input', function () {
     // The moment they type, the number is theirs again rather than the

@@ -173,8 +173,15 @@ a.pc-person.pc-mod-clickable:hover .pc-nm { color: var(--text-player-primary); }
 }
 .pc-row .pc-reads .pc-batt { grid-column: 1 / span 2; justify-self: end; }
 .pc-row .pc-reads .pc-res:only-child { grid-column: 1 / span 2; }
+/* Doors size to what is THERE. A fixed two-column grid reserved a second
+ * 32px column on every row, so a row carrying one door (copy the hash) drew
+ * it a whole door's width off the right wall and took that width from the
+ * name — long message types ellipsed to "StructBuildComp…". Here they sit
+ * against the wall, and a row's doors are the row's smaller glyph. */
 .pc-row .pc-actions {
-  display: grid; grid-template-columns: 32px 32px; gap: var(--spacing-xs);
-  padding-left: var(--spacing-lg); border-left: 1px solid var(--border-subtle);
+  display: flex; gap: var(--spacing-xs);
+  padding-left: var(--spacing-md); border-left: 1px solid var(--border-subtle);
 }
+.pc-row .pc-act { width: var(--icon-md); height: var(--icon-md); }
+.pc-row .pc-act .sui-icon-md { width: var(--icon-sm); height: var(--icon-sm); font-size: var(--icon-sm); }
 .pc-row .pc-actions:empty { display: none; }

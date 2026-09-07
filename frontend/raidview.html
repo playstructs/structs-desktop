@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="css/main.css" />
   <!-- The chat message row, shared with the other window that draws one. -->
   <link rel="stylesheet" href="chat-rows.css" />
+  <link rel="stylesheet" href="embed.css" />
   <style>
     /* ── Raid View ────────────────────────────────────────────────────────
        A read-only spectator. This document deliberately does NOT load the
@@ -645,7 +646,6 @@
     html[data-only="log"] #rv-log.rv-collapsed { flex: 1 1 auto; }
     html[data-only="comms"] #rv-chat { display: flex; width: 100%; }
     html[data-only="comms"] #rv-left { display: none; }
-    html[data-embed], html[data-embed] body { margin: 0; padding: 0; background: transparent; height: 100%; }
     html[data-embed] #rv-left { height: 100%; }
 </style>
 </head>

@@ -267,6 +267,11 @@
     Chat.filteredRooms = filteredRooms;
 
     function matchesFilter(r) {
+      // The list split lives HERE and nowhere else: `filteredRooms` (what
+      // Enter opens) and the render below both run through this, and the one
+      // thing this file already warns about is deriving the list twice.
+      if (S.listOnly === 'direct' && (r.section !== 'direct' || r.home_rank != null)) return false;
+      if (S.listOnly === 'rooms' && r.section === 'direct') return false;
       var q = String(S.roomFilter || '').trim().toLowerCase();
       if (!q) return true;
       return String(r.name || '').toLowerCase().indexOf(q) !== -1 ||
@@ -286,7 +291,9 @@
       browse.title = 'Browse channels';
       browse.appendChild(icon('icon-guild-directory sui-text-secondary'));
       browse.addEventListener('click', function () { go('browse'); });
-      right.appendChild(browse);
+      // Each list keeps the door that belongs to it: browsing finds rooms,
+      // and the new-message door finds people.
+      if (S.listOnly !== 'direct') right.appendChild(browse);
 
       var newMsg = el('a', 'sui-nav-btn');
       newMsg.id = 'chat-new-message';
@@ -294,11 +301,11 @@
       newMsg.title = 'Message a player';
       newMsg.appendChild(icon('icon-add sui-text-secondary'));
       newMsg.addEventListener('click', function () { go('people'); });
-      right.appendChild(newMsg);
+      if (S.listOnly !== 'rooms') right.appendChild(newMsg);
       var res = headerResources();
       if (res) right.appendChild(res);
 
-      page.appendChild(pageHeader('Channels', null, right));
+      page.appendChild(pageHeader(S.listOnly === 'direct' ? 'Direct' : 'Channels', null, right));
 
       // Only once the list is long enough to need it. A filter box above four
       // rooms is a control that costs more attention than it saves.

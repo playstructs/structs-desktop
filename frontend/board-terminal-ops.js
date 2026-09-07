@@ -147,9 +147,14 @@
           ['waiting', H.fmtInt(c.waiting || 0), null, (c.waiting || 0) > (hc.max_concurrent || 0) * 4 ? 'bad' : null],
           ['done', H.fmtInt(c.completed || 0), null, 'muted'],
         ]));
-        host.appendChild(H.row('Engine', (hc.effective_engine || '?') + (hc.gpu_available ? ' · GPU' : ''), 'icon-computer'));
-        host.appendChild(H.row('Start difficulty', (hc.difficulty_start == null ? '—' : hc.difficulty_start + ' of 64') + (hc.auto_tune ? ' · auto-tuned' : '')));
-        host.appendChild(H.row('Concurrent proofs', hc.max_concurrent == null ? '—' : String(hc.max_concurrent)));
+        // Engine, difficulty and concurrency are three short facts, not three
+        // sentences: as label/value rows they wrapped in a one-wide card.
+        host.appendChild(tiles([
+          [['difficulty', hc.auto_tune ? 'auto-tuned' : 'fixed'], hc.difficulty_start == null ? '—' : String(hc.difficulty_start), null,
+            hc.difficulty_start != null && hc.difficulty_start > 32 ? 'bad' : null],
+          ['concurrent', hc.max_concurrent == null ? '—' : String(hc.max_concurrent)],
+          ['engine', String(hc.effective_engine || '?').toUpperCase(), null, hc.gpu_available ? 'ok' : 'muted'],
+        ]));
         if (d.error) host.appendChild(H.alertLine(String(d.error), 'icon-alert'));
         // Hashing is the one engine a player may want to stop dead — a laptop
         // on battery, a machine needed for something else.
@@ -292,7 +297,15 @@
         iq.forEach(function (t) { table.appendChild(txRow(t, null, 0, null, 'immediate', mutate)); });
         aq.forEach(function (t, i) { table.appendChild(txRow(t, i + 1, aq.length, q, 'queued', mutate)); });
         host.appendChild(table);
-        if (!q.in_flight && !aq.length && !iq.length) host.appendChild(H.el('div', 'ops-muted', 'nothing waiting to sign'));
+        /* An empty queue and a dead one look identical — three zeroes and a
+         * line of grey text — and the queue drains between polls all day. The
+         * last result is in the same snapshot, so say when signing last
+         * happened rather than leaving the card to be read as broken. */
+        if (!q.in_flight && !aq.length && !iq.length) {
+          var last = ((d && d.history) || []).filter(function (h) { return !p.signer || String(h.player_id || h.context || '') === p.signer; })[0];
+          host.appendChild(H.el('div', 'ops-muted', 'nothing waiting to sign' +
+            (last ? ' · last signed ' + H.ago(last.ts_ms) + ' ago' : '')));
+        }
       }).catch(function (e) { fail(host, 'tx', e); });
     },
   });
@@ -339,6 +352,91 @@
         });
         host.appendChild(table);
       }).catch(function (e) { fail(host, 'tx', e); });
+    },
+  });
+
+  /* ── A chart of one object, from the guild's own stat store ──────────────
+   *
+   * The guild indexes a time series per object — ore on a planet, load on a
+   * substation, health on a struct — and until now the only charts here came
+   * from an hour-long ring of galaxy counters. `terminal_series` reads that
+   * store and resamples it, so this card is the chart helper over real
+   * history: point it at any id and pick what to watch.
+   *
+   * The metric list comes from Rust, which also says which ids each metric
+   * accepts, so the choices a card offers cannot drift from what the API
+   * will answer.
+   */
+  var SERIES_WINDOWS = [
+    { value: '21600', label: '6 hours' },
+    { value: '86400', label: '24 hours' },
+    { value: '604800', label: '7 days' },
+    { value: '2592000', label: '30 days' },
+  ];
+  var seriesMetrics = null;
+  var SERIES_UNIT_FMT = {
+    ore: function (v) { return H.fmtOre(v); },
+    alpha: function (v) { return H.fmtAlpha(v); },
+    power: function (v) { return H.fmtWatts(v); },
+  };
+  T.register('series', {
+    label: 'History chart',
+    describe: function (p) { return (p.metric || 'ore') + (p.id ? ' · ' + p.id : ''); },
+    params: [
+      { key: 'id', label: 'Object', kind: 'id', placeholder: '2-29604' },
+      { key: 'metric', label: 'Metric', kind: 'choice', options: [
+        { value: 'ore', label: 'ore' }, { value: 'fuel', label: 'fuel' },
+        { value: 'capacity', label: 'capacity' }, { value: 'load', label: 'load' },
+        { value: 'power', label: 'power' }, { value: 'structs_load', label: 'structs load' },
+        { value: 'connection_count', label: 'connections' }, { value: 'connection_capacity', label: 'connection capacity' },
+        { value: 'struct_health', label: 'struct health' }, { value: 'struct_status', label: 'struct status' },
+      ] },
+      { key: 'window', label: 'Window', kind: 'choice', options: SERIES_WINDOWS },
+    ],
+    cadenceMs: 60000,
+    defaultWidth: 2,
+    render: function (host, p) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with an object id.')); return; }
+      var metric = p.metric || 'ore';
+      var windowS = Number(p.window || 86400) || 86400;
+      // Kept for the metric list the card COULD offer for this id; one read,
+      // cached for the window's life.
+      var metricsFirst = seriesMetrics ? Promise.resolve(seriesMetrics)
+        : invoke('terminal_series_metrics').then(function (m) { seriesMetrics = m; return m; }).catch(function () { return null; });
+      return metricsFirst.then(function () {
+        return invoke('terminal_series', { metric: metric, object: p.id, windowS: windowS, points: 120 });
+      }).then(function (d) {
+        host.innerHTML = '';
+        var fmt = SERIES_UNIT_FMT[d.unit] || H.fmtInt;
+        var vals = (d.values || []).map(function (v) { return v == null ? null : Number(v); });
+        var known = vals.filter(function (v) { return v != null; }).length;
+        host.appendChild(tiles([
+          ['now', d.last == null ? '—' : fmt(d.last), null, d.last == null ? 'muted' : null],
+          ['samples', H.fmtInt(d.samples || 0), null, d.samples ? null : 'muted'],
+          [['window', d.bucket ? d.bucket + ' buckets' : 'raw'], (SERIES_WINDOWS.filter(function (o) { return Number(o.value) === windowS; })[0] || {}).label || '—'],
+        ]));
+        if (!known) {
+          // Nothing recorded is not nothing happening: this store samples on
+          // CHANGE, so an object that has not moved in the window has no row.
+          host.appendChild(H.stateBlock('info', 'No ' + metric + ' recorded for ' + p.id + ' in this window.'));
+          return;
+        }
+        var clock = function (ms) {
+          var t = new Date(ms);
+          return windowS > 172800
+            ? (t.getMonth() + 1) + '/' + t.getDate()
+            : ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2);
+        };
+        var at = function (i) { return d.start_ms + i * d.step_ms; };
+        host.appendChild(Board._gamestats.chart({
+          series: [{ values: vals, stroke: 'var(--text-player-primary)', label: metric }],
+          fmt: fmt,
+          // The last tick is the window's END, not the last slot's start —
+          // a chart whose right edge is now must not label it a step ago.
+          ticks: [0, 0.5, 1].map(function (f) { return { at: f, text: clock(d.start_ms + f * (d.end_ms - d.start_ms)) }; }),
+          xLabel: function (i) { return clock(at(i)); },
+        }));
+      }).catch(function (e) { fail(host, metric + ' history', e); });
     },
   });
 
@@ -531,9 +629,12 @@
   // ── Roster (mcp_roster / mcp_mass_action) ────────────────────────────────
   var ROLE_OPTS = [{ value: '', label: 'every role' }, { value: 'primary', label: 'primary' }, { value: 'productive', label: 'productive' }, { value: 'raider', label: 'raider' }, { value: 'bait', label: 'bait' }];
   var SORT_OPTS = [{ value: 'alpha', label: 'by Alpha' }, { value: 'ore', label: 'by ore' }, { value: 'charge', label: 'by charge' }, { value: 'stale', label: 'stalest read' }];
-  T.register('fleet', {
-    label: 'Fleet roster', defaultWidth: 2,
-    describe: function (p) { return 'Fleet' + (p.role ? ' · ' + p.role : '') + (p.sort ? ' · ' + p.sort : ''); },
+  // "Armada", not "Fleet": a FLEET is a thing in the game — a 9-… object that
+  // sits at a planet and carries structs — and this card is the roster of the
+  // players we run. Naming it Fleet made the word mean two things.
+  T.register('armada', {
+    label: 'Armada', defaultWidth: 2,
+    describe: function (p) { return 'Armada' + (p.role ? ' · ' + p.role : '') + (p.sort ? ' · ' + p.sort : ''); },
     params: [{ key: 'role', label: 'Role', kind: 'choice', options: ROLE_OPTS }, { key: 'sort', label: 'Order', kind: 'choice', options: SORT_OPTS }],
     cadenceMs: 30000,
     render: function (host, p, ctx) {
@@ -557,8 +658,38 @@
         ]));
         // Sweep: the first click is a dry run that prices the click; the
         // second click executes exactly what the first one said.
+        // Creating a virtual player lived only in the agent's tool surface;
+        // the Armada page names and styles the roster but cannot add to it.
+        var slot = H.el('div', 'tm-ticket-slot');
+        var newPlayer = function () {
+          slot.innerHTML = '';
+          slot.appendChild(ticket({
+            cta: 'Create',
+            fields: [
+              { key: 'name', label: 'Name', placeholder: 'named from its index if blank' },
+              { key: 'role', label: 'Role', kind: 'choice', options: ROLE_OPTS.filter(function (o) { return o.value; }) },
+              { key: 'index', label: 'HD index', placeholder: 'next free' },
+            ],
+            confirm: function (v) {
+              return { title: 'Create a virtual player?', cta: 'Create', rows: [
+                ['Name', v.name || 'from its HD index'],
+                ['Role', v.role || 'productive'],
+                ['Index', v.index || 'next free'],
+              ] };
+            },
+            submit: function (v) {
+              var args = { command: 'create', role: v.role || null };
+              if (v.name) args.name = v.name;
+              if (v.index) args.index = Math.max(1, Number(v.index) || 0);
+              return invoke('mcp_players', args);
+            },
+            done: function () { invoke('mcp_roster_refresh', {}).catch(function () {}); T.refresh(ctx.id, true); },
+          }));
+        };
         var sweep = { armed: false };
+        host.appendChild(slot);
         host.appendChild(doorRow([
+          { label: 'New player', onClick: newPlayer },
           { label: 'Sweep Alpha', primary: true, onClick: function (a) {
             if (!sweep.armed) {
               invoke('mcp_mass_action', { request: { action: 'sweep_alpha', mode: 'dry_run' } }).then(function (r) {

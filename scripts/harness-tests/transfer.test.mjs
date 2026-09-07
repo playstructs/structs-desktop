@@ -217,6 +217,27 @@ const pick = async (id, value) => {
     tallest > 460 && tallest <= 900, String(tallest));
 }
 
+{
+  console.log('\n— choosing a recipient');
+  // Opened with nobody named (the Terminal's Pay card, or by hand) the window
+  // had no way to name one. Picking a face asks the CHAIN for the address.
+  w.StructsPay.clearRecipient();
+  await settle(60);
+  check('with no recipient the window offers a search', d.getElementById('tx-find-input') !== null);
+  const box = d.getElementById('tx-find-input');
+  box.value = 'JP';
+  box.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await settle(400);
+  check('…searching lists players as the game draws them', d.querySelectorAll('.tx-find-hit .sui-result-row-portrait').length > 0, String(d.querySelectorAll('.tx-find-hit').length));
+  d.querySelector('.tx-find-hit').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await settle(200);
+  const ask = calls().find((c) => c.cmd === 'matrix_resolve_payable');
+  check('…and the ADDRESS comes from the chain, by id, never from the result text', !!ask && ask.args.playerId === '1-61' && !('to' in ask.args), JSON.stringify(ask && ask.args));
+  check('…then the search gives way to the recipient card', d.getElementById('tx-find-input') === null && d.querySelector('#tx-parties .sui-result-row') !== null);
+  const pid = [...d.querySelectorAll('#tx-parties .sui-text-hint')].map((n) => n.textContent).join(' ');
+  check('an address is shortened, and the row carries the whole of it', /…/.test(pid) && !/qqqqqqqqqqqqqqqqqqqqqq/.test(pid) && [...d.querySelectorAll('#tx-parties .sui-result-row')].some((r) => /^structs1/.test(r.title || '')), pid.slice(0, 70));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 w.close();
 process.exit(failures ? 1 : 0);

@@ -900,7 +900,26 @@
        board-terminal.js) where the area tabs are in the main window. */
     html[data-solo="terminal"] .sui-screen-nav:has(> #tm-ws-items) { justify-content: space-between; }
     #tm-ws-items { display: flex; min-width: 0; overflow-x: auto; }
-    #tm-ws-doors { display: inline-flex; align-items: center; gap: var(--spacing-xs); }
+    /* The workspace doors live in the board's own nav bar, where the card
+       rule below (`#tm-grid a.tm-door`) never reached — so three glyphs sat
+       with no padding and no gap and read as one shape. */
+    #tm-ws-doors { display: inline-flex; align-items: center; gap: var(--spacing-md); }
+    /* ── One card in its own window (board.html?view=terminal&card=…) ─────
+       The window IS the card. The card already draws the game's frame with
+       its own header, so the board's panel (two fill bands, two edges, the
+       chunk they are inset into) and its nav bar — empty here, a card window
+       has no workspace tabs — only wrapped a second container around it, with
+       the bottom fill lying across the card's own bottom border. Same trade
+       as embed.css: keep the content, give up the frame. */
+    html[data-card] #board-layout > .sui-panel > .sui-panel-chunk > .sui-screen:has(> .sui-screen-nav),
+    html[data-card] .sui-panel-top-fill-background,
+    html[data-card] .sui-panel-bottom-fill-background,
+    html[data-card] .sui-panel-edge-left,
+    html[data-card] .sui-panel-edge-right { display: none; }
+    html[data-card] .sui-panel-chunk { padding: 0; border-width: 0; background: transparent; }
+    html[data-card] .sui-panel-chunk > .sui-screen { border-width: 0; }
+    html[data-card] .ops-scroll { padding: 0; }
+
     /* A card that embeds a whole page (Comms, Pay) keeps that page's own bar
        as its header; the frame draws none and only the resize grip remains. */
     #tm-grid .tm-card.tm-frameless .tm-head, .tm-card.tm-frameless .tm-head { display: none; }
@@ -913,9 +932,8 @@
        a page that scrolls, so typing a command meant scrolling back to find
        the box. It stays put and the cards scroll under it. (The workspace tabs
        above it are outside this scroller and never moved.) */
-    .tm-chrome { display: flex; flex-direction: column; gap: var(--spacing-md); margin-bottom: var(--spacing-lg); text-align: left;
-      position: sticky; top: 0; z-index: 5; background: var(--surface-default);
-      padding-top: var(--spacing-sm); }
+    .tm-chrome { display: flex; flex-direction: column; gap: var(--spacing-sm); margin-bottom: var(--spacing-md); text-align: left;
+      position: sticky; top: 0; z-index: 5; background: var(--surface-default); }
     .tm-workspaces { display: flex; align-items: center; gap: var(--spacing-md); }
     .tm-workspaces .subnav { flex: 1 1 auto; min-width: 0; }
     .tm-workspaces #tm-ws-new { width: 160px; }
@@ -923,16 +941,27 @@
        all on one baseline (SUI buttons stand 2px shorter than a labelled
        field, so they carry that as a bottom margin). Under 900px the command
        takes a row of its own and the add controls share the second. */
+    /* The command line and the card picker ride SUI's own nav bar, directly
+       under the workspace tabs, so the console's controls read as one header
+       rather than a slab floating over the cards. */
+    .tm-bar-screen { flex: none; }
+    .tm-bar { display: flex; align-items: center; gap: var(--spacing-md); flex-wrap: wrap; padding: var(--spacing-xs) var(--spacing-md); }
+    .tm-bar > .cfg-field:first-child { flex: 2 1 220px; }
+    .tm-bar > .cfg-field { flex: 1 1 140px; }
+    .tm-bar > .tm-toolbar-param { flex: 1 1 120px; }
     .tm-toolbar { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) auto auto; align-items: end; gap: var(--spacing-md); }
     /* SUI's own field shape here — caption above, control below — so every
        control in the row shares one baseline; the board's row-shaped
        cfg-field is for settings lists. The input's 2px underline is the
        last thing in a field, so a button (2px shorter) drops by that much. */
-    #board-layout .tm-toolbar label.sui-input-text.cfg-field { min-width: 0; width: 100%; flex-direction: column; align-items: stretch; gap: 0; padding: 0; }
-    #board-layout .tm-toolbar label.sui-input-text.cfg-field > span:first-child { flex: none; min-height: 0; white-space: nowrap; }
-    .tm-toolbar label.sui-input-text input[type=text], .tm-toolbar label.sui-input-text select { width: 100%; }
+    #board-layout .tm-toolbar label.sui-input-text.cfg-field,
+    #board-layout .tm-bar label.sui-input-text.cfg-field { min-width: 0; width: 100%; flex-direction: column; align-items: stretch; gap: 0; padding: 0; }
+    #board-layout .tm-toolbar label.sui-input-text.cfg-field > span:first-child,
+    #board-layout .tm-bar label.sui-input-text.cfg-field > span:first-child { flex: none; min-height: 0; white-space: nowrap; }
+    .tm-toolbar label.sui-input-text input[type=text], .tm-toolbar label.sui-input-text select,
+    .tm-bar label.sui-input-text input[type=text], .tm-bar label.sui-input-text select { width: 100%; }
     .tm-toolbar .sui-screen-btn { transform: translateY(var(--spacing-xs)); }
-    .tm-toolbar-param:empty { display: none; }
+    .tm-toolbar-param:empty, .tm-bar .tm-toolbar-param:empty { display: none; }
     #tm-cmd.is-err { border-color: var(--text-enemy-primary); }
     .tm-help { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 0 var(--spacing-lg); }
     .tm-help-row { display: flex; justify-content: space-between; gap: var(--spacing-md); text-decoration: none; color: var(--text-body); }
@@ -962,6 +991,24 @@
     .tm-card.tm-dragging { opacity: .5; }
     .tm-card.tm-drop-before { box-shadow: inset var(--spacing-xs) 0 0 var(--accent-primary); }
     .tm-card.tm-drop-after { box-shadow: inset calc(-1 * var(--spacing-xs)) 0 0 var(--accent-primary); }
+    /* The silhouette a dragged card would drop into: its exact width and row
+       span, so the cards around it move aside into the arrangement you are
+       about to commit. */
+    .tm-ghost {
+      border: 2px dashed var(--accent-primary);
+      /* The page's own surface, not the highlight: at a whole card's size a
+         bright fill reads as a card rather than as the space for one. */
+      background: var(--surface-default);
+      min-height: var(--spacing-xxxl);
+    }
+    /* A drag must not also be a text selection: the pixels spent reaching the
+       threshold have usually started one, and it then drags along under the
+       cursor. The descendant selector overrides the cursors the cards set. */
+    body.tm-dragging-cards, body.tm-dragging-cards * {
+      cursor: grabbing !important;
+      -webkit-user-select: none;
+      user-select: none;
+    }
     .tm-card.tm-resizing { outline: 1px solid var(--accent-primary); }
     .tm-head { cursor: grab; user-select: none; -webkit-user-select: none; }
     .tm-card.tm-dragging .tm-head { cursor: grabbing; }
@@ -1010,8 +1057,8 @@
     #tm-ws-nav .sui-screen-nav-item.tm-drop-after { box-shadow: inset -2px 0 0 var(--accent-primary); }
     .tm-doors { display: inline-flex; align-items: stretch; align-self: stretch; gap: 0; flex: none; }
     /* Doors as the Comms window draws its nav actions (#chat-nav-actions a). */
-    #tm-grid a.tm-door, #tm-grid a.tm-door:link, #tm-grid a.tm-door:visited { display: inline-flex; align-items: center; padding: var(--spacing-sm) var(--spacing-sm); text-decoration: none; color: var(--accent-primary); }
-    #tm-grid a.tm-door:hover { color: var(--accent-primary-active); }
+    #board-layout a.tm-door, #board-layout a.tm-door:link, #board-layout a.tm-door:visited { display: inline-flex; align-items: center; padding: var(--spacing-sm) var(--spacing-sm); text-decoration: none; color: var(--accent-primary); }
+    #board-layout a.tm-door:hover { color: var(--accent-primary-active); }
     .tm-config { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md); background: var(--surface-default); }
     /* Each field is a full-width label/control pair, so in a flex column they
        stacked one per row with the control marooned on the far right. Given a
@@ -1050,6 +1097,12 @@
        the map's own action bar. The frame decides, and it never asks for more
        than the window has. */
     #board-layout .tm-body:has(> iframe.tm-frame) { max-height: none; overflow: visible; padding: 0; }
+    /* Content that arrives as a whole SUI card gives up its header to the
+       frame (see refresh()) — and its body's frame too, or the card holds a
+       second bordered box around the same surface. */
+    #board-layout .tm-body > .tm-unwrapped > .sui-data-card-body {
+      padding: 0; border-width: 0; background: transparent;
+    }
     /* A map wants vertical room: four ambit bands and the HUD over them. */
     .tm-frame-map { height: min(620px, 76vh); min-height: 320px; }
     .tm-w1 .tm-frame-map { height: min(420px, 76vh); }

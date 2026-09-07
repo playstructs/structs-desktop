@@ -106,6 +106,8 @@ fn main() {
             mcp::terminal::terminal_guild_banks,
             mcp::terminal::terminal_guild_bank_history,
             mcp::terminal::terminal_guild_bank_redeem,
+            mcp::terminal::terminal_series,
+            mcp::terminal::terminal_series_metrics,
             mcp::game_stats::open_game_stats_window,
             // Comms (federated Matrix chat). Reachable only from the Debug
             // panel for now — see src/matrix/mod.rs.
@@ -161,6 +163,7 @@ fn main() {
             matrix::matrix_object_room,
             matrix::matrix_object_room_create,
             matrix::matrix_open_transfer,
+            matrix::matrix_resolve_payable,
             matrix::matrix_take_pending_transfer,
             mcp::game_stats::mcp_game_stats_snapshot,
             mcp::tools::board_pages::mcp_health,
@@ -185,6 +188,7 @@ fn main() {
             mcp::raid_view::mcp_raids,
             mcp::raid_view::mcp_raid_view_open,
             mcp::tools::action::mcp_action,
+            mcp::tools::players::mcp_players,
             mcp::raid_view::mcp_raid_view_watch,
             mcp::raid_view::mcp_raid_view_unwatch,
             mcp::raid_view::mcp_raid_state,

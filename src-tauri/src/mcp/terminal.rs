@@ -1001,9 +1001,224 @@ pub async fn terminal_guild_bank_redeem(app: tauri::AppHandle, denom: String, am
                "tx": res.get("transactionHash").and_then(|h| h.as_str()).unwrap_or("(pending)") }))
 }
 
+/* ── The stat store (`/api/stat/...`) ───────────────────────────────────────
+ *
+ * The guild indexes a time series per object — ten metrics, sampled whenever
+ * the value MOVES — and until now nothing in this app read it: the charts we
+ * drew came from an hour-long in-memory ring of galaxy counters. This is the
+ * one read behind every chart of a real object.
+ *
+ * Three things about the data decide the shape of this command:
+ *
+ * 1. Samples are change-triggered. A quiet stretch means "nothing moved", not
+ *    "nothing was recorded", so the value is carried forward (LOCF) rather
+ *    than drawn as a gap or a zero. Before the FIRST sample there is genuinely
+ *    no reading, and that stays null so the line starts where knowledge does.
+ * 2. The windows are capped server-side, and differently per shape: 7 days of
+ *    raw samples, 30 days once a bucket is named. The bucket is chosen from
+ *    the window here so a caller cannot discover the cap as a 400.
+ * 3. The samples are irregular in time. The chart helper plots a values ARRAY
+ *    at even spacing, so the series is resampled into even slots here; drawing
+ *    raw samples evenly would have squashed a busy hour and stretched a quiet
+ *    day into the same width.
+ */
+
+/// metric → (what it measures, which object types carry it)
+/// Family two omits `object_type` in the store, so those metrics accept
+/// exactly one kind of id; the API answers a 400 for any other, and the card
+/// uses this to say so before spending the round trip.
+pub const STAT_METRICS: &[(&str, &str, &[&str])] = &[
+    ("ore", "ore", &["planet", "player", "struct", "fleet"]),
+    ("fuel", "alpha", &["reactor", "infusion", "player", "guild"]),
+    ("capacity", "power", &["reactor", "substation", "player", "guild"]),
+    ("load", "power", &["substation", "player", "guild", "struct"]),
+    ("power", "power", &["allocation", "provider", "agreement", "substation"]),
+    ("structs_load", "power", &["player"]),
+    ("connection_count", "count", &["substation"]),
+    ("connection_capacity", "power", &["substation"]),
+    ("struct_health", "count", &["struct"]),
+    ("struct_status", "raw", &["struct"]),
+];
+
+/// The object type an id names, by its prefix — the same table the guild API
+/// keys `object_key` on (ObjectTypes::PREFIXES). Longest prefix first: 10 and
+/// 11 must be matched before 1.
+fn object_type_of(id: &str) -> Option<&'static str> {
+    const PREFIXES: &[(&str, &str)] = &[
+        ("10-", "provider"), ("11-", "agreement"), ("0-", "guild"), ("1-", "player"),
+        ("2-", "planet"), ("3-", "reactor"), ("4-", "substation"), ("5-", "struct"),
+        ("6-", "allocation"), ("7-", "infusion"), ("8-", "address"), ("9-", "fleet"),
+    ];
+    PREFIXES.iter().find(|(p, _)| id.starts_with(p)).map(|(_, t)| *t)
+}
+
+/// The bucket a window needs: none while the raw window allows it, then the
+/// coarsest that keeps the whole window inside the server's cap.
+fn stat_bucket_for(window_s: u64) -> (Option<&'static str>, u64) {
+    use crate::mcp::guild_api::GuildApiClient;
+    if window_s <= GuildApiClient::STAT_MAX_RAW_SECONDS {
+        (None, window_s)
+    } else if window_s <= GuildApiClient::STAT_MAX_BUCKET_SECONDS {
+        (Some("1h"), window_s)
+    } else {
+        (Some("1d"), GuildApiClient::STAT_MAX_BUCKET_SECONDS)
+    }
+}
+
+/// Carry each sample forward into evenly spaced slots. `None` until the first
+/// sample: a reading nobody took is not a zero.
+fn locf(samples: &[(f64, f64)], start_ms: f64, step_ms: f64, points: usize) -> Vec<Option<f64>> {
+    let mut out = vec![None; points];
+    let mut i = 0usize;
+    let mut held: Option<f64> = None;
+    for (slot, cell) in out.iter_mut().enumerate() {
+        let edge = start_ms + (slot as f64 + 1.0) * step_ms;
+        while i < samples.len() && samples[i].0 < edge {
+            held = Some(samples[i].1);
+            i += 1;
+        }
+        *cell = held;
+    }
+    out
+}
+
+/// One object's series for one metric, resampled for a chart.
+#[tauri::command]
+pub async fn terminal_series(
+    metric: String,
+    object: String,
+    window_s: u64,
+    points: Option<u32>,
+) -> Result<Value, String> {
+    let object = object.trim().to_string();
+    let Some((_, unit, types)) = STAT_METRICS.iter().find(|(m, _, _)| *m == metric) else {
+        return Err(format!("unknown metric {metric}"));
+    };
+    let Some(otype) = object_type_of(&object) else {
+        return Err(format!("{object} is not an object id"));
+    };
+    if !types.contains(&otype) {
+        return Err(format!("{metric} is not recorded for a {otype}"));
+    }
+    let (bucket, window_s) = stat_bucket_for(window_s.max(60));
+    let end_s = (crate::hasher::types::now_millis() / 1000.0) as u64;
+    let start_s = end_s.saturating_sub(window_s);
+
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let rows = client
+        .guild
+        .stat_range(&metric, &object, start_s, end_s, bucket, 1000)
+        .await?;
+
+    // `time` is a Postgres timestamptz with a two-digit offset; `value` is a
+    // string like every other numeric the guild API sends.
+    let mut samples: Vec<(f64, f64)> = rows
+        .iter()
+        .filter_map(|r| {
+            let t = r.get("time").and_then(|v| v.as_str()).and_then(crate::mcp::raid_view::parse_guild_time)?;
+            let v = parse_num(r.get("value"))?;
+            Some((t, v))
+        })
+        .collect();
+    samples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let points = points.unwrap_or(120).clamp(8, 600) as usize;
+    let start_ms = start_s as f64 * 1000.0;
+    let step_ms = (window_s as f64 * 1000.0) / points as f64;
+    let values = locf(&samples, start_ms, step_ms, points);
+
+    Ok(json!({
+        "metric": metric,
+        "unit": unit,
+        "object": object,
+        "object_type": otype,
+        "bucket": bucket,
+        "start_ms": start_ms,
+        "end_ms": start_ms + window_s as f64 * 1000.0,
+        "step_ms": step_ms,
+        "samples": samples.len(),
+        "first_ms": samples.first().map(|s| s.0),
+        "last": samples.last().map(|s| s.1),
+        "values": values,
+    }))
+}
+
+/// What a series card may offer: the metrics, and the ids each one accepts.
+#[tauri::command]
+pub fn terminal_series_metrics() -> Value {
+    Value::Array(
+        STAT_METRICS
+            .iter()
+            .map(|(m, unit, types)| json!({ "metric": m, "unit": unit, "object_types": types }))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* The stat store's samples are change-triggered, so the resampler is the
+     * one place a quiet object can be turned into a lie: a zero where nothing
+     * was recorded reads as a crash, and a value before the first sample
+     * claims a reading nobody took. */
+    #[test]
+    fn a_series_carries_forward_and_starts_where_knowledge_does() {
+        // Slots of 10ms from t=0; samples at 25 (value 5) and 55 (value 9).
+        let out = locf(&[(25.0, 5.0), (55.0, 9.0)], 0.0, 10.0, 8);
+        assert_eq!(
+            out,
+            vec![None, None, Some(5.0), Some(5.0), Some(5.0), Some(9.0), Some(9.0), Some(9.0)],
+            "before the first sample is null; after it the value holds until it moves"
+        );
+        assert_eq!(locf(&[], 0.0, 10.0, 3), vec![None, None, None], "no samples is not zero");
+    }
+
+    #[test]
+    fn a_window_picks_the_bucket_that_keeps_it_inside_the_servers_cap() {
+        assert_eq!(stat_bucket_for(3600), (None, 3600), "an hour is raw");
+        assert_eq!(stat_bucket_for(604_800), (None, 604_800), "seven days is the raw cap");
+        assert_eq!(stat_bucket_for(604_801), (Some("1h"), 604_801), "past it, bucket");
+        assert_eq!(
+            stat_bucket_for(90 * 86_400),
+            (Some("1d"), 2_592_000),
+            "and a window past the bucketed cap is clamped, not sent to be refused"
+        );
+    }
+
+    #[test]
+    fn an_id_names_its_object_type_longest_prefix_first() {
+        assert_eq!(object_type_of("2-29604"), Some("planet"));
+        assert_eq!(object_type_of("1-194"), Some("player"));
+        assert_eq!(object_type_of("10-3"), Some("provider"), "10 is not 1");
+        assert_eq!(object_type_of("11-3"), Some("agreement"), "11 is not 1");
+        assert_eq!(object_type_of("nope"), None);
+    }
+
+    /// Every metric the card can offer must name the object types it accepts,
+    /// or the card offers a choice the API answers with a 400.
+    #[test]
+    fn every_metric_declares_what_it_is_recorded_for() {
+        assert_eq!(STAT_METRICS.len(), 10);
+        for (m, unit, types) in STAT_METRICS {
+            assert!(!types.is_empty(), "{m} accepts no object type");
+            assert!(!unit.is_empty(), "{m} has no unit");
+            for t in *types {
+                assert!(
+                    crate::mcp::terminal::object_type_of(&format!(
+                        "{}-1",
+                        match *t {
+                            "guild" => "0", "player" => "1", "planet" => "2", "reactor" => "3",
+                            "substation" => "4", "struct" => "5", "allocation" => "6",
+                            "infusion" => "7", "address" => "8", "fleet" => "9",
+                            "provider" => "10", "agreement" => "11", other => panic!("unknown type {other}"),
+                        }
+                    )) == Some(*t),
+                    "{m} names an object type no id can produce: {t}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn card_ids_are_plain_or_refused() {

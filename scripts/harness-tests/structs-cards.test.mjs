@@ -152,7 +152,7 @@ const OWNER = { id: '1-248', name: 'Phoniffer', tag: 'SN.C', pfp: '{"head":4,"ne
 {
   console.log('\n— task and transaction rows');
   const running = C.task.row({ id: '5-12:mine', type: 'MINE', status: 'running', frac: 0.62, difficulty: 12, eta: '2m', structType: 'Ore Extractor' });
-  check('a running task: RUNNING badge, live stripe, 6 of 10 chunks, difficulty of 64 in teal', text(running.querySelector('.sui-badge')) === 'RUNNING' && running.classList.contains('sc-live') && running.querySelectorAll('.sui-mod-filled').length === 6 && /12 \/ 64/.test(text(running)) && running.querySelector('.sc-ok') !== null);
+  check('a running task: RUNNING badge, live stripe, 6 of 10 chunks, the difficulty alone (no constant 64, no key glyph) in teal', text(running.querySelector('.sui-badge')) === 'RUNNING' && running.classList.contains('sc-live') && running.querySelectorAll('.sui-mod-filled').length === 6 && /\b12\b/.test(text(running)) && !/64/.test(text(running)) && running.querySelector('i.icon-key') === null && running.querySelector('.sc-ok') !== null);
   check('the status word is not repeated when the badge says it', !/running/.test(text(running.querySelector('.pc-id'))));
   const waiting = C.task.row({ id: '5-14:refine', type: 'REFINE', status: 'waiting', frac: 0, difficulty: null, eta: null });
   check('a waiting task says so on its id line, eta reads as a dash', /waiting/.test(text(waiting.querySelector('.pc-id'))) && /—/.test(text(waiting)));
@@ -170,7 +170,7 @@ const OWNER = { id: '1-248', name: 'Phoniffer', tag: 'SN.C', pfp: '{"head":4,"ne
   const flight = C.tx.row({ id: 't1', type: 'PlayerSend', state: 'flight' });
   check('in flight: IN FLIGHT, live stripe, no doors, its own id when no signer is known', text(flight.querySelector('.sui-badge')) === 'IN FLIGHT' && flight.classList.contains('sc-live') && flight.querySelectorAll('.pc-act').length === 0 && /#t1/.test(text(flight.querySelector('.pc-id'))));
   const failed = C.tx.row({ id: 'h1', type: 'StructBuildInitiate', signer: '1-194', state: 'failed', error: 'insufficient charge', ago: '3m' });
-  check('a failed result: FAILED, red stripe, the error as attention, the alert glyph', text(failed.querySelector('.sui-badge')) === 'FAILED' && failed.classList.contains('sc-bad') && /insufficient charge/.test(text(failed.querySelector('.pc-attn'))) && failed.querySelector('.gc-emblem i.icon-alert') !== null);
+  check('a failed result: FAILED, red stripe, the error as attention, and no emblem stealing the type\'s width', text(failed.querySelector('.sui-badge')) === 'FAILED' && failed.classList.contains('sc-bad') && /insufficient charge/.test(text(failed.querySelector('.pc-attn'))) && failed.querySelector('.gc-emblem') === null);
   const ok = C.tx.row({ id: 'h2', type: 'PlayerSend', signer: '1-194', state: 'ok', hash: 'ABCDEF0123456789', ago: '1m' });
   check('a success keeps the hash, shortened', text(ok.querySelector('.sui-badge')) === 'SUCCESS' && /ABCDEF01…/.test(text(ok.querySelector('.pc-id'))));
 }
@@ -220,9 +220,11 @@ const OWNER = { id: '1-248', name: 'Phoniffer', tag: 'SN.C', pfp: '{"head":4,"ne
 
 {
   console.log('\n— tape and workspace');
-  const line = C.tape.row({ time: '14:02', kind: 'transfer', tone: 'default', parts: ['player', C.planet.chip({ id: '2-223', name: 'Kepler' }), 'sent 4Kg'], block: '4,200,719', fresh: true });
-  check('a tape line is a grid: time, kind badge, body, block', line.classList.contains('sc-tape') && text(line.querySelector('.sc-tape-t')) === '14:02' && text(line.querySelector('.sui-badge')) === 'transfer' && /#4,200,719/.test(text(line.querySelector('.sc-tape-blk'))));
-  check('chips ride inside the body', line.querySelector('.sc-tape-body .sc-chip') !== null);
+  const line = C.tape.row({ time: '14:02', kind: 'ore mine', kindTitle: 'struct_block_ore_mine_status', tone: 'default', subject: 'planet', ids: ['2-29604', '1-2655'], parts: ['amount 4 \u2192 5', C.planet.chip({ id: '2-223', name: 'Kepler' })], block: '4,200,719', fresh: true });
+  check('a tape header is time, a SHORT kind badge (the full category on hover), the subject word and its ids, and the block', line.classList.contains('sc-tape') && text(line.querySelector('.sc-tape-t')) === '14:02' && text(line.querySelector('.sui-badge')) === 'ore mine' && line.querySelector('.sui-badge').title === 'struct_block_ore_mine_status' && /planet/.test(text(line.querySelector('.sc-tape-subj'))) && /2-29604/.test(text(line.querySelector('.sc-tape-subj'))) && /#4,200,719/.test(text(line.querySelector('.sc-tape-blk'))));
+  check('the figures the frame carried get a band of their own, under the header', /amount 4 \u2192 5/.test(text(line.querySelector('.sc-tape-body'))) && line.querySelector('.sc-tape-body .sc-chip') !== null);
+  const bare = C.tape.row({ time: '14:03', kind: 'block', subject: 'height', ids: [], parts: [] });
+  check('a frame with no figures draws no second band', text(bare.querySelector('.sc-tape-body')) === '');
   check('the newest line wears the accent stripe', line.classList.contains('is-new'));
   const ws = C.workspace.card({ name: 'trader', cards: ['market', 'book', 'banks'], open: true, windows: 1, changed: '2m' });
   check('a workspace card lists its cards as badges and says OPEN', ws.querySelectorAll('.sc-ws-cards .sui-badge').length === 3 && [...ws.querySelectorAll('.sui-badge')].some((b) => text(b) === 'OPEN'), ws.textContent);

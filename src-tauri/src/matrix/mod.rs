@@ -1743,6 +1743,57 @@ pub async fn matrix_share(app: tauri::AppHandle, text: String) -> Result<Value, 
 /// hostile message cannot name where the money goes — the worst a forged card
 /// can do is pre-fill a real player the sender did not mean to pay, which the
 /// preview then shows by name before anything is signed.
+/// A player id to the address the chain says they are paid at.
+///
+/// The one place a payment destination is decided. It is deliberately not
+/// derived from anything typed, quoted or messaged: a chat message must never
+/// be able to name where money goes, and neither must a search result's text.
+/// Both the message hand-off and the Pay window's own recipient search come
+/// through here, so both get the same lookup and the same refusals.
+pub async fn resolve_payable(player_id: &str) -> Result<Value, String> {
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let record = client.entity("player", player_id).await?;
+    let address = record
+        .get("Player")
+        .and_then(|p| p.get("primaryAddress"))
+        .and_then(|a| a.as_str())
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| format!("the chain has no payable address for {player_id}"))?
+        .to_string();
+    // The same shape `mcp_transfer_preview` insists on. Checked here too, so a
+    // malformed chain record fails with a readable message instead of
+    // pre-filling a form with something that can never validate.
+    if !address.starts_with("structs1") || address.len() < 39 {
+        return Err(format!(
+            "{player_id} has an unusable address on chain — nothing was pre-filled"
+        ));
+    }
+    let name = crate::mcp::enrich::addresses_map()
+        .get(&address)
+        .cloned()
+        .unwrap_or_else(|| player_id.to_string());
+    Ok(json!({ "to": address, "playerId": player_id, "name": name }))
+}
+
+/// Resolve a recipient for a Pay surface that is ALREADY open — the window's
+/// own search, or the Terminal's Pay card. Opens nothing.
+#[tauri::command]
+pub async fn matrix_resolve_payable(player_id: String) -> Result<Value, String> {
+    let player_id = player_id.trim();
+    let ok = {
+        let mut parts = player_id.split('-');
+        matches!((parts.next(), parts.next(), parts.next()),
+                 (Some(a), Some(b), None) if !a.is_empty() && !b.is_empty()
+                     && a.chars().all(|c| c.is_ascii_digit())
+                     && b.chars().all(|c| c.is_ascii_digit()))
+    };
+    if !ok {
+        return Err(format!("{player_id} is not a player id"));
+    }
+    resolve_payable(player_id).await
+}
+
 #[tauri::command]
 pub async fn matrix_open_transfer(
     app: tauri::AppHandle,
@@ -1767,31 +1818,8 @@ pub async fn matrix_open_transfer(
         return Err(format!("{player_id} is not a player id"));
     }
 
-    let client = crate::mcp::cosmos_client::CosmosClient::new();
-    let record = client.entity("player", &player_id).await?;
-    let address = record
-        .get("Player")
-        .and_then(|p| p.get("primaryAddress"))
-        .and_then(|a| a.as_str())
-        .map(str::trim)
-        .filter(|a| !a.is_empty())
-        .ok_or_else(|| format!("the chain has no payable address for {player_id}"))?
-        .to_string();
-    // The same shape `mcp_transfer_preview` insists on. Checked here too, so a
-    // malformed chain record fails with a readable message instead of
-    // pre-filling a form with something that can never validate.
-    if !address.starts_with("structs1") || address.len() < 39 {
-        return Err(format!(
-            "{player_id} has an unusable address on chain — nothing was pre-filled"
-        ));
-    }
-
-    let name = crate::mcp::enrich::addresses_map()
-        .get(&address)
-        .cloned()
-        .unwrap_or_else(|| player_id.clone());
-
-    let intent = json!({ "to": address, "playerId": player_id, "name": name });
+    let intent = resolve_payable(&player_id).await?;
+    let name = intent.get("name").and_then(|v| v.as_str()).unwrap_or(&player_id).to_string();
     set_pending_transfer(&intent);
 
     // A SMALL window that does this one thing, rather than the six-area

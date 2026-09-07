@@ -38,7 +38,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('the saved layout is drawn, in its order — a saved whole-page card migrated into the cards that carry its data', cards.map((c) => c.getAttribute('data-card')).join(',') === 'people-1,market-1,pow-1,tasks-1,player-1,stats-1', cards.map((c) => c.getAttribute('data-card')).join(','));
   check('no card is titled after a window', [...d.querySelectorAll('#tm-grid .tm-title')].every((t) => !/Team Ops|Game Stats/.test(t.textContent)));
   check('widths come from the layout', cards[1].classList.contains('tm-w2') && cards[0].classList.contains('tm-w1'));
-  check('the toolbar offers every registered type', d.querySelectorAll('.tm-toolbar select option').length >= 12);
+  check('the command bar offers every registered type, and rides SUI\'s own nav bar rather than a slab of its own', d.querySelectorAll('.tm-bar select option').length >= 12 && d.querySelector('.tm-chrome > .sui-screen > .sui-screen-nav.tm-bar') !== null);
   check('every card is the game\'s own panel: edges, chunk, a nav screen for the header with the title as the active tab and the doors beside it, a page-body screen for the body', cards.every((c) => c.classList.contains('sui-panel') && c.classList.contains('sui-theme-player') && c.querySelector(':scope > .sui-panel-edge-left') && c.querySelector(':scope > .sui-panel-edge-right') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-screen-nav .sui-screen-nav-item.sui-mod-active.tm-title') && c.querySelector('.sui-screen-nav .tm-doors') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-page-body-screen.tm-body')));
   const wsItems = [...d.querySelectorAll('#tm-ws-items .sui-screen-nav-item')].map((a) => a.textContent);
   check('the workspace strip lists every workspace and a door to a new one', wsItems.join(',') === 'main,war-room,+' && d.querySelector('#tm-ws-items .sui-mod-active').textContent === 'main', wsItems.join(','));
@@ -50,17 +50,61 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('market card: one provider card per offer, from terminal_market', offers.length === 2);
   check('…an open offer can be rented, a guild-market one cannot', d.querySelectorAll('#tm-market-1 .tm-offer')[0].querySelector('[title="Rent capacity"]') !== null && d.querySelectorAll('#tm-market-1 .tm-offer')[1].querySelector('[title="Rent capacity"]') === null);
   await until(() => d.querySelector('#tm-pow-1 .fstat'));
-  check('proof queue card: counts as tiles, the engine as rows', d.querySelectorAll('#tm-pow-1 .fstat').length === 3 && /GPU/.test(d.querySelector('#tm-pow-1').textContent) && /auto-tuned/.test(d.querySelector('#tm-pow-1').textContent));
+  check('proof queue card: six tiles, not three tiles over three wrapping label rows, and no constant 64 anywhere', d.querySelectorAll('#tm-pow-1 .fstat').length === 6 && /GPU/.test(d.querySelector('#tm-pow-1').textContent) && /auto-tuned/.test(d.querySelector('#tm-pow-1').textContent) && !/64/.test(d.querySelector('#tm-pow-1').textContent), d.querySelector('#tm-pow-1').textContent);
   await until(() => d.querySelector('#tm-tasks-1 .pc-row'));
-  check('tasks card: a row per UNFINISHED proof, the running one first with its progress bar and difficulty of 64', d.querySelectorAll('#tm-tasks-1 .pc-row').length === 2 && /5-12:mine/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent) && d.querySelector('#tm-tasks-1 .pc-row .sui-action-bar-progress-bar') !== null && /12 \/ 64/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent), d.querySelector('#tm-tasks-1 .pc-row') && d.querySelector('#tm-tasks-1 .pc-row').textContent);
+  check('tasks card: a row per UNFINISHED proof, the running one first with its progress bar and its difficulty (the constant 64 dropped)', d.querySelectorAll('#tm-tasks-1 .pc-row').length === 2 && /5-12:mine/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent) && d.querySelector('#tm-tasks-1 .pc-row .sui-action-bar-progress-bar') !== null && /12difficulty/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent) && !/64/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent), d.querySelector('#tm-tasks-1 .pc-row') && d.querySelector('#tm-tasks-1 .pc-row').textContent);
   check('…finished proofs are set aside, and the caption says how many', /1 finished hidden/.test(d.querySelector('#tm-tasks-1 .tm-cap').textContent), d.querySelector('#tm-tasks-1 .tm-cap').textContent);
   check('…and an unfinished proof can be cancelled', d.querySelector('#tm-tasks-1 .pc-row .pc-act[title="Cancel this proof"]') !== null);
   check('…the running proof wears the struct it is for as its emblem', d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img') !== null && /img\/structs\/extractor\//.test(d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img').getAttribute('src') || ''), d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img') && d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img').getAttribute('src'));
-  check('the Team Ops pages themselves are not offered as cards (only the settings forms)', ![...d.querySelectorAll('.tm-toolbar select option')].some((o) => /Team Ops/.test(o.textContent)) && !w.Board.Terminal.types().some((t) => t.type === 'page'));
+  check('the Team Ops pages themselves are not offered as cards (only the settings forms)', ![...d.querySelectorAll('.tm-bar select option')].some((o) => /Team Ops/.test(o.textContent)) && !w.Board.Terminal.types().some((t) => t.type === 'page'));
+  /* Forty-two cards in one flat scroll is an inventory, not a menu. They are
+   * filed under the board's OWN area names, so the vocabulary the tabs teach
+   * is the vocabulary that finds a card — and nothing may fall through: a
+   * card nobody filed is a card nobody will find. */
+  {
+    const groups = w.Board.Terminal.groups();
+    const filed = groups.flatMap((g) => g.options.map((o) => o.value));
+    const all = w.Board.Terminal.types().map((t) => t.type);
+    check('the card menu is grouped by the board\'s areas, not one flat list', groups.length >= 6 && groups.every((g) => g.group && g.options.length) && d.querySelectorAll('.tm-bar optgroup').length === groups.length);
+    check('…every registered card is filed in exactly one named group', groups.every((g) => g.group !== 'More') && all.every((t) => filed.filter((f) => f === t).length === 1) && filed.length === all.length, all.filter((t) => !filed.includes(t)).join(','));
+    check('…and the menu still offers every card it did as a flat list', [...d.querySelectorAll('.tm-bar select option')].length === all.length);
+  }
   await until(() => d.querySelector('#tm-player-1 .pc-card'));
-  check('player card: the shared card for the named player', /JPEG/.test(d.querySelector('#tm-player-1 .pc-card')?.textContent || ''));
+  {
+    const pc = d.querySelector('#tm-player-1 .pc-card');
+    // The card reads the PROFILE, not the roster's `mcp_player_detail` —
+    // which answers "primary" with no figures at all for anybody outside our
+    // own virtual roster, and drew a card that was a title over an empty
+    // frame. Name, guild, portrait, alpha, ore, energy and struct count all
+    // come off the one read Explore uses.
+    check('player card: the shared card for the named player, filled from the profile', /JPEG/.test(pc?.textContent || '') && !/PRIMARY/i.test(pc?.textContent || ''));
+    check('…the guild is named and tagged, not left as an id', /\[OH\]/.test(pc.textContent) && /Orbital Hydro/.test(pc.textContent));
+    check('…the portrait is the player\'s own on-chain one', pc.querySelector('.pc-pfp img') !== null, pc.querySelector('.pc-pfp')?.innerHTML.slice(0, 120));
+    check('…alpha, ore, energy and the struct count are all readings', pc.querySelectorAll('.pc-res').length >= 4 && /13/.test(pc.textContent));
+    const strip = d.querySelector('#tm-player-1 .tm-tiles');
+    check('…and the guild\'s record of what they have done rides under it', strip !== null && /planets/.test(strip.textContent) && /raids/.test(strip.textContent) && /mined/.test(strip.textContent));
+    const chips = d.querySelectorAll('#tm-player-1 .tm-player-chips .sc-chip, #tm-player-1 .tm-player-chips .gc-chip');
+    check('…with their guild, planet and fleet as chips that open cards of their own', chips.length === 3);
+  }
   await until(() => d.querySelector('#tm-stats-1 .fstat'));
   check('stats card: one Game Stats section', /RAID PRESSURE/i.test(d.querySelector('#tm-stats-1')?.textContent || ''));
+
+  /* The guild's stat store, which nothing but the galaxy roll-up on Game
+   * Stats had ever read. A chart of ONE object's history, from
+   * `terminal_series` — and the nulls before the first sample must break the
+   * line, never land on the floor as zeros. */
+  {
+    w.Board.Terminal.add('series', { id: '2-29604', metric: 'ore', window: '86400' }, 2);
+    const id = w.Board.Terminal.state.layout.cards.slice(-1)[0].id;
+    await until(() => d.querySelector('#tm-' + id + ' .gs-chart svg path'));
+    const node = d.querySelector('#tm-' + id);
+    const call = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_series').slice(-1)[0];
+    check('history card: asks the stat store for that object, metric and window', call && call.args.object === '2-29604' && call.args.metric === 'ore' && call.args.windowS === 86400);
+    check('…and draws it with the Game Stats chart, in the metric\'s own unit', node.querySelector('.gs-chart svg path') !== null && /Kg|g\b/.test(node.querySelector('.gs-axis-top').textContent), node.querySelector('.gs-axis-top')?.textContent);
+    const dpath = node.querySelector('.gs-chart svg path').getAttribute('d');
+    check('…with the slots before the first sample left out of the line, not drawn as zero', dpath.split('M').length === 2 && !/NaN/.test(dpath));
+    w.Board.Terminal.remove(id);   // the layout below is the default one
+  }
 
   // Doors.
   const set = () => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_layout_set');
@@ -108,7 +152,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('auto restores the type\'s own cadence and title', (w.Board.Terminal.setCadence('pow-1', ''), w.Board.Terminal.setTitle('pow-1', ''), w.Board.Terminal.cadenceOf('pow-1') > 0 && d.querySelector('#tm-pow-1 .tm-title').textContent === 'Proof queue' && !d.getElementById('tm-pow-1').classList.contains('tm-paused')));
 
   // Add from the toolbar.
-  const pick = d.querySelector('.tm-toolbar select');
+  const pick = d.querySelector('.tm-bar select');
   pick.value = 'guild'; pick.dispatchEvent(new w.Event('change', { bubbles: true }));
   await tick(10);
   const idBox = d.querySelector('.tm-toolbar-param input');
@@ -164,6 +208,10 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   run('9-61');
   check('a fleet id opens the map', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'map' && c.params.id === '9-61'));
+  // FLEET is the game's word for a 9-… object; the roster is the ARMADA.
+  run('FLEET 9-12');
+  check('FLEET with an id opens that fleet on the map, not the roster', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'map' && c.params.id === '9-12'));
+  check('…and a layout saved when the roster was called `fleet` still opens', w.Board.Terminal.migrate({ cards: [{ id: 'fleet-9', type: 'fleet', params: {}, w: 2 }] }).cards[0].type === 'armada');
   run('5-4559');
   check('any other id opens the inspector, which asks Comms\' reference cards', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'inspector')?.params.id === '5-4559');
   await tick(80);
@@ -241,9 +289,16 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     ev('pointermove', 12, 10);
     check('a press that barely moves is not a drag', !w.Board.Terminal.state.drag);
     ev('pointermove', 650, 50);
-    check('past the arm the card is dragging and the card under the pointer shows the drop side', w.Board.Terminal.state.drag === ids[1] && dst.classList.contains('tm-drop-after'));
+    // A silhouette of the card's exact size stands where it would land, the
+    // card itself leaves the flow, and nothing can be text-selected meanwhile.
+    const ghost = d.querySelector('#tm-grid .tm-ghost');
+    check('past the arm a silhouette shows where it would land, sized like the card', w.Board.Terminal.state.drag === ids[1] && ghost !== null && ghost.classList.contains('tm-w' + (w.Board.Terminal.state.layout.cards.find((c) => c.id === ids[1]).w || 1)));
+    check('…the card leaves the flow so the others move aside', src.hidden === true && src.classList.contains('tm-dragging'));
+    check('…and the drag cannot also select text', d.body.classList.contains('tm-dragging-cards') && /body\.tm-dragging-cards \*/.test(read('frontend/board.html')));
+    check('…the silhouette sits after the card the pointer is over', ghost.previousElementSibling === dst);
     ev('pointerup', 650, 50);
-    check('release lands it after that card, and saves', order().split(',').indexOf(ids[1]) === order().split(',').indexOf(ids[3]) + 1 && !w.Board.Terminal.state.drag && !d.querySelector('.tm-drop-after, .tm-dragging'));
+    check('release lands it after that card, and saves', order().split(',').indexOf(ids[1]) === order().split(',').indexOf(ids[3]) + 1 && !w.Board.Terminal.state.drag && !d.querySelector('.tm-ghost, .tm-dragging'));
+    check('…and the card is back in the flow, selection allowed again', src.hidden === false && !d.body.classList.contains('tm-dragging-cards'));
     delete d.elementFromPoint;
   }
   check('every card carries a resize grip', d.querySelectorAll('#tm-grid .tm-card .tm-resize').length === d.querySelectorAll('#tm-grid .tm-card').length);
@@ -256,7 +311,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   // The ops cards: every one renders from the page's own command, no whole page.
   for (const [word, type, expect] of [
     ['QUEUE', 'queue', /StructBuildInitiate/], ['RESULTS', 'results', /insufficient charge/], ['SOLVE', 'solve', /GPU/],
-    ['GRID', 'grid', /connections/i], ['FUEL', 'fuel', /Auto infuse/], ['ALLOC', 'allocations', /6-53/], ['FLEET', 'fleet', /MARKLIFER/],
+    ['GRID', 'grid', /connections/i], ['FUEL', 'fuel', /Auto infuse/], ['ALLOC', 'allocations', /6-53/], ['ARMADA', 'armada', /MARKLIFER/],
     ['RAIDS', 'raids', /shields vulnerable/], ['POSTURE', 'posture', /Auto response/], ['TARGETS', 'targets', /NO-GO/],
     ['GRUDGES', 'grudges', /beezhan/], ['VETOES', 'vetoes', /Protected player/], ['INCIDENTS', 'incidents', /2-287/],
     ['WALLET', 'wallet', /\[OH\]\s*Hydro/], ['HEALTH', 'health', /./],
@@ -340,14 +395,39 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('…previewing the change against the budget', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_allocation_preview' && c.args.powerMw === 5000 && c.args.allocationId === '6-53'));
     check('…and a locked allocation offers nothing', [...alloc.querySelectorAll('.pc-row')].every((r) => !/locked/.test(r.textContent) || !r.querySelector('.pc-act')));
   }
+  // The roster can be added to, not only managed.
+  {
+    const armada = d.querySelector('#tm-grid [data-type="armada"]');
+    [...armada.querySelectorAll('a.sui-screen-btn')].find((a) => a.textContent === 'New player').click();
+    await until(() => armada.querySelector('.tm-ticket-slot .tm-ticket'));
+    const t = armada.querySelector('.tm-ticket-slot');
+    t.querySelector('input').value = 'Test Pilot';
+    t.querySelector('a.sui-screen-btn').click();
+    await until(() => d.querySelector('.ops-modal-overlay'));
+    check('a new virtual player is asked about before it is made', /Create a virtual player/.test(d.querySelector('.ops-modal-overlay').textContent));
+    [...d.querySelectorAll('.ops-modal-overlay .sui-message-system-modal-cta-btn-wrapper a')][1].click();
+    await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_players'));
+    const made = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_players');
+    check('…through the roster\'s own create, which picks the HD index and joins the guild', made.args.command === 'create' && made.args.name === 'Test Pilot');
+  }
+  // Comms splits into rooms and people, each its own card.
+  {
+    const before = w.Board.Terminal.state.layout.cards.length;
+    run('DMS');
+    const dm = w.Board.Terminal.state.layout.cards[w.Board.Terminal.state.layout.cards.length - 1];
+    check('DMS opens a Comms card showing only direct messages', w.Board.Terminal.state.layout.cards.length === before + 1 && dm.type === 'chat' && dm.params.list === 'direct');
+    await until(() => d.querySelector('#tm-' + dm.id + ' iframe'));
+    check('…and the page is asked for that list', /list=direct/.test(d.querySelector('#tm-' + dm.id + ' iframe').getAttribute('src')));
+    w.Board.Terminal.remove(dm.id);
+  }
   check('an incident row names the attacker as a person and the shots as its badge', /1-1957/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && /2-287/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="incidents"] .pc-row .sui-badge') !== null);
   check('a raid row stacks attacker vs defender and keeps the live one\'s status word', /Marklifer/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && /JPEG/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="raids"] .pc-row.sc-bad') !== null);
   check('a wallet row is an asset row: ore marked not sendable and without a Pay door', [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => /not sendable/.test(r.textContent) && !r.querySelector('.pc-act[title="Pay"]')) && [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => r.querySelector('.pc-act[title="Pay"]')));
   // The sweep prices itself before it moves anything.
-  const sweepBtn = [...d.querySelectorAll('#tm-grid [data-type="fleet"] a')].find((a) => a.textContent === 'Sweep Alpha');
+  const sweepBtn = [...d.querySelectorAll('#tm-grid [data-type="armada"] a')].find((a) => a.textContent === 'Sweep Alpha');
   sweepBtn.click();
   await until(() => /Confirm sweep/.test(sweepBtn.textContent));
-  check('the fleet card\'s sweep is a dry run first, and says what a second click will do', /Confirm sweep of 1/.test(sweepBtn.textContent) && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_mass_action' && c.args.request.mode === 'execute'));
+  check('the Armada card\'s sweep is a dry run first, and says what a second click will do', /Confirm sweep of 1/.test(sweepBtn.textContent) && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_mass_action' && c.args.request.mode === 'execute'));
   // Embedded pages: one header. The Comms card's frame carries the Comms nav
   // as doors and the page is asked to drop its own bar (`?embed=1`).
   run('CHAT');
@@ -573,8 +653,17 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const w = dom.window, d = w.document;
   await until(() => d.querySelectorAll('#tm-grid .tm-card').length >= 1);
   check('a pop-out shows exactly its card', d.querySelectorAll('#tm-grid .tm-card').length === 1 && d.querySelector('#tm-grid .tm-card').getAttribute('data-card') === 'market-1');
-  check('…full width, with no toolbar and no layout doors', d.querySelector('.tm-toolbar') === null && d.querySelector('#tm-market-1').classList.contains('tm-w3') && d.querySelector('#tm-market-1 [title="Remove"]') === null);
+  check('…full width, with no command bar and no layout doors', d.querySelector('.tm-bar') === null && d.querySelector('#tm-market-1').classList.contains('tm-w3') && d.querySelector('#tm-market-1 [title="Remove"]') === null);
   check('…and no refresh door either: it refreshes on its cadence', d.querySelector('#tm-market-1 [title="Refresh"]') === null && w.Board.Terminal.cadenceOf('market-1') > 0);
+  /* The window IS the card: it draws the game's frame itself, so the board's
+   * panel (two fill bands, two edges) and its nav bar — empty in a card
+   * window — must not wrap a second container around it, with the bottom fill
+   * lying over the card's own bottom border. The card's OWN header is a
+   * `.sui-screen-nav` too, so the rule has to name the board's top bar by its
+   * path and nothing else. */
+  const board = read('frontend/board.html');
+  check('…the window strips the board\'s panel frame and its empty nav bar off data-card', d.documentElement.getAttribute('data-card') === '1' && /html\[data-card\] #board-layout > \.sui-panel > \.sui-panel-chunk > \.sui-screen:has\(> \.sui-screen-nav\)/.test(board) && /html\[data-card\][^{]*\.sui-panel-bottom-fill-background/.test(board));
+  check('…and the card keeps its own header', d.querySelector('#tm-market-1 .tm-head') !== null && d.querySelector('#tm-market-1 .tm-title') !== null);
 }
 
 // ── No layout yet: the default page ────────────────────────────────────────
@@ -596,7 +685,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => d.querySelector('#tm-grid [data-type="tape"] .sc-tape'));
   const tapeLine = d.querySelector('#tm-grid [data-type="tape"] .sc-tape');
   check('…and a tape line opens what it is about', (() => { const before = w.Board.Terminal.state.layout.cards.length; d.querySelector('#tm-grid [data-type="tape"] .sc-tape').click(); return w.Board.Terminal.state.layout.cards.length === before + 1; })());
-  check('a tape event is one grid line: time, kind badge, subject, folded values, block', tapeLine.classList.contains('is-new') && /grid\.planet\.2-29577\.1-422/.test(tapeLine.textContent) && /11g → 12g/.test(tapeLine.textContent) && /#2,507,904/.test(tapeLine.querySelector('.sc-tape-blk').textContent) && tapeLine.querySelectorAll('.sc-tape-kv').length === 5 && !/block_height/.test(tapeLine.textContent), tapeLine.textContent);
+  check('a tape event reads as a header (time, short kind, what it is about) over the ONE figure that changed — the four chips restating the header are dropped', tapeLine.classList.contains('is-new') && /planet/.test(tapeLine.querySelector('.sc-tape-subj').textContent) && /2-29577/.test(tapeLine.querySelector('.sc-tape-subj').textContent) && /11g → 12g/.test(tapeLine.textContent) && /#2,507,904/.test(tapeLine.querySelector('.sc-tape-blk').textContent) && tapeLine.querySelectorAll('.sc-tape-kv').length === 1 && !/object_type/.test(tapeLine.textContent) && !/block_height/.test(tapeLine.textContent), tapeLine.textContent);
   check('…with the whole event on hover', /object_id 2-29577/.test(tapeLine.querySelector('.sc-tape-body').title));
 }
 

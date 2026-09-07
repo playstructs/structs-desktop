@@ -748,6 +748,25 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
 }
 
 {
+  console.log('\n— one list instead of both');
+  // Rooms and people are two questions; a card answering one is one you keep open.
+  {
+    const { w, d } = await open('?list=direct');
+    await until(() => d.querySelector('.chat-net-group'));
+    const labels = [...d.querySelectorAll('.chat-net-label')].map((n) => text(n));
+    check('list=direct shows only the people', labels.length > 0 && labels.every((l) => /direct/i.test(l)), labels.join(','));
+    check('…titled for what it is, with the new-message door and not the browse door', /Direct/.test(text(d.querySelector('.sui-page-header'))) && d.getElementById('chat-new-message') !== null && d.getElementById('chat-browse') === null);
+  }
+  {
+    const { w, d } = await open('?list=rooms');
+    await until(() => d.querySelector('.chat-net-group'));
+    const labels = [...d.querySelectorAll('.chat-net-label')].map((n) => text(n));
+    check('list=rooms shows only the rooms', labels.length > 0 && labels.every((l) => !/direct/i.test(l)), labels.join(','));
+    check('…with the browse door and not the new-message door', d.getElementById('chat-browse') !== null && d.getElementById('chat-new-message') === null);
+  }
+}
+
+{
   console.log('\n— embedded in a Terminal card');
   const { w, d } = await open('?embed=1&card=chat-1');
   check('embed marks the document and keeps this bar as the card\'s header',
@@ -762,7 +781,16 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await until(() => heard.length === 2);
   check('pop-out and close ask the Terminal by message, naming the card', heard.map((m) => m.card + ':' + m.act).join(',') === 'chat-1:popout,chat-1:remove', JSON.stringify(heard));
   check('…and close no longer closes the window', d.getElementById('menu-page-nav-close').title === 'Remove this card' && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'close_chat_window'));
-  check('embedded, the page is flat: no panel edge or fill of its own', /html\[data-embed\] #menu-page-panel > \.sui-panel-edge-left \{ display: none/.test(readFileSync(repo + '/frontend/chat.html', 'utf8').replace(/\s+/g, ' ')));
+  // The frame rules moved to one stylesheet the three embeddable pages share
+  // (frontend/embed.css), rather than a copy per page that could drift.
+  check('embedded, the page is flat: no panel edge, fill or inset of its own', (() => {
+    const css = readFileSync(repo + '/frontend/embed.css', 'utf8').replace(/\s+/g, ' ');
+    const html = readFileSync(repo + '/frontend/chat.html', 'utf8');
+    return /html\[data-embed\] \.sui-panel-edge-left,/.test(css)
+      && /html\[data-embed\] \.sui-panel-chunk \{[^}]*background: transparent/.test(css)
+      && /html\[data-embed\] \.sui-panel-chunk > \.sui-screen \{ border-width: 0/.test(css)
+      && html.includes('href="embed.css"');
+  })());
 }
 
 {

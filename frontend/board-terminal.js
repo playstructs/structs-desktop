@@ -49,9 +49,47 @@
     register: function (type, spec) { spec.type = type; TYPES[type] = spec; return spec; },
     types: function () { return Object.keys(TYPES).map(function (k) { return TYPES[k]; }).filter(function (t) { return !t.hidden; }); },
     known: function (type) { return !!TYPES[type]; },
+    groups: function () { return cardGroups(); },
     state: state,
   };
   Board.Terminal = Terminal;
+
+  /* The card menu, grouped the way Team Ops names its areas.
+   *
+   * Forty-two cards in one alphabet-free scroll is not a menu, it is an
+   * inventory: you either already knew the card's exact name or you read the
+   * whole list. These are the board's own areas, so the vocabulary a player
+   * learns on the tabs is the vocabulary that finds a card — and within a
+   * group the order is what you reach for first, not what registered first.
+   *
+   * A type missing from here still appears (under "More"), and the harness
+   * fails on it: a new card that nobody filed is a card nobody will find. */
+  var CARD_GROUPS = [
+    ['Command', ['help', 'next', 'alerts', 'watchlist', 'tape', 'feed']],
+    ['Explore', ['player', 'guild', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
+    ['Armada', ['armada', 'pow', 'tasks', 'solve', 'queue', 'results']],
+    ['Industry', ['grid', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'pay']],
+    ['War', ['posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
+    ['Comms', ['chat', 'comms']],
+    ['System', ['health']],
+  ];
+  function cardGroups() {
+    var seen = {}, out = [];
+    CARD_GROUPS.forEach(function (g) {
+      var opts = [];
+      g[1].forEach(function (t) {
+        var def = TYPES[t];
+        if (!def || def.hidden) return;
+        seen[t] = 1;
+        opts.push({ value: t, label: def.label || t });
+      });
+      if (opts.length) out.push({ group: g[0], options: opts });
+    });
+    var rest = Terminal.types().filter(function (t) { return !seen[t.type]; })
+      .map(function (t) { return { value: t.type, label: t.label || t.type }; });
+    if (rest.length) out.push({ group: 'More', options: rest });
+    return out;
+  }
 
   // ── Workspaces + layout persistence ─────────────────────────────────────
   var LOCAL_KEY = 'structs.terminal.';
@@ -95,7 +133,7 @@
   var PAGE_TO_CARDS = {
     work: [['pow', {}, 1], ['tasks', {}, 2]], tx: [['queue', {}, 1], ['results', {}, 1]],
     energy: [['grid', {}, 1], ['halt', {}, 2]], 'energy:production': [['fuel', {}, 1]], 'energy:distribution': [['grid', {}, 1], ['allocations', {}, 1]],
-    armada: [['fleet', {}, 2]], raids: [['raids', {}, 1]], inventory: [['wallet', {}, 1]], diagnostics: [['health', {}, 1]],
+    armada: [['armada', {}, 2]], raids: [['raids', {}, 1]], inventory: [['wallet', {}, 1]], diagnostics: [['health', {}, 1]],
     war: [['posture', {}, 1], ['targets', {}, 2]], 'war:doctrine': [['posture', {}, 1]], 'war:targets': [['targets', {}, 2]],
     'war:lists': [['grudges', {}, 1], ['vetoes', {}, 1]], 'war:incidents': [['incidents', {}, 2]], grass: [['tape', { filter: 'all' }, 1]],
     ops: [['health', {}, 1], ['pow', {}, 1]], explore: [['people', {}, 1]],
@@ -105,6 +143,9 @@
     l.cards.forEach(function (c) { seen[c.id] = true; });
     var fresh = function (type) { var n = 1; while (seen[type + '-' + n]) n++; seen[type + '-' + n] = true; return type + '-' + n; };
     l.cards.forEach(function (c) {
+      // The roster card was called `fleet` until the word was needed for the
+      // game's own fleets; a layout saved then still opens.
+      if (c.type === 'fleet') c.type = 'armada';
       var into = c.type === 'page' ? PAGE_TO_CARDS[String((c.params || {}).page || 'work')] : null;
       if (!into) { out.push(c); return; }
       into.forEach(function (n) { out.push({ id: fresh(n[0]), type: n[0], params: n[1], w: n[2] }); });
@@ -405,36 +446,59 @@
       head.title = 'Drag to move';
       head.addEventListener('pointerdown', function (ev) {
         if (ev.button !== 0 || (ev.target.closest && ev.target.closest('.tm-door'))) return;
-        var sx = ev.clientX, sy = ev.clientY, live = false, target = null, after = false;
+        var sx = ev.clientX, sy = ev.clientY, live = false, target = null, after = false, ghost = null;
         var onMove = function (e) {
           if (!live) {
             if (Math.abs(e.clientX - sx) < 4 && Math.abs(e.clientY - sy) < 4) return;
             live = true;
             state.drag = card.id;
+            // The card leaves the flow and a silhouette of exactly its size
+            // stands in its place, so the other cards move aside as you go and
+            // the landing spot is the shape you are about to fill — an edge
+            // mark on a neighbour only said "near here".
+            ghost = H.el('div', 'tm-ghost tm-w' + (state.solo ? 3 : (card.w || 1)));
+            ghost.style.gridRowEnd = node.style.gridRowEnd || '';
+            node.parentNode.insertBefore(ghost, node);
             node.classList.add('tm-dragging');
+            node.hidden = true;
+            // A press that becomes a drag has usually already begun selecting
+            // the header's text; without this the selection drags along.
+            document.body.classList.add('tm-dragging-cards');
+            var sel = window.getSelection && window.getSelection();
+            if (sel && sel.removeAllRanges) sel.removeAllRanges();
           }
           e.preventDefault();
           var hit = document.elementFromPoint ? document.elementFromPoint(e.clientX, e.clientY) : null;
           var over = hit && hit.closest ? hit.closest('.tm-card') : null;
-          clearDrop();
           if (over && over !== node) {
             var r = over.getBoundingClientRect();
             after = r.width > 0 ? (e.clientX - r.left) > r.width / 2 : true;
             target = over.getAttribute('data-card');
-            over.classList.add(after ? 'tm-drop-after' : 'tm-drop-before');
+            if (ghost) over.parentNode.insertBefore(ghost, after ? over.nextSibling : over);
           } else {
             target = null;
+            var grid0 = document.getElementById('tm-grid');
+            // Over the floor: it lands last, and the silhouette says so.
+            if (ghost && grid0 && hit && (hit === grid0 || grid0.contains(hit))) grid0.appendChild(ghost);
           }
         };
-        var onUp = function (e) {
+        var finish = function () {
           window.removeEventListener('pointermove', onMove);
           window.removeEventListener('pointerup', onUp);
           window.removeEventListener('pointercancel', onUp);
-          if (!live) return;
+          document.body.classList.remove('tm-dragging-cards');
+          node.hidden = false;
           node.classList.remove('tm-dragging');
+          if (ghost && ghost.parentNode) ghost.parentNode.removeChild(ghost);
+          ghost = null;
+        };
+        var onUp = function (e) {
+          var wasLive = live;
           var grid = document.getElementById('tm-grid');
           var hit = document.elementFromPoint ? document.elementFromPoint(e.clientX, e.clientY) : null;
           var onFloor = grid && hit && (hit === grid || grid.contains(hit));
+          finish();
+          if (!wasLive) return;
           if (target) dropOn(card.id, target, after);
           else if (onFloor) dropOn(card.id, null, true);
           else { state.drag = null; clearDrop(); }
@@ -443,6 +507,9 @@
         window.addEventListener('pointerup', onUp);
         window.addEventListener('pointercancel', onUp);
       });
+      // The header carries a title and doors, both of which the browser will
+      // happily drag as content of their own.
+      head.addEventListener('dragstart', function (e) { e.preventDefault(); });
       // Drag the right edge to change the width, one column at a time.
       var grip = H.el('span', 'tm-resize');
       grip.title = 'Drag to resize';
@@ -698,6 +765,9 @@
       if (first && first.classList && first.classList.contains('sui-data-card')) {
         var inner = first.querySelector(':scope > .sui-data-card-header');
         if (inner) { var own = findCard(id); if (inner.textContent.trim() && !(own && own.title)) m.title.textContent = inner.textContent.trim(); inner.parentNode.removeChild(inner); }
+        // Its header is gone, but its BODY still drew a frame inside this
+        // card's frame — a box in a box around one surface.
+        first.classList.add('tm-unwrapped');
       }
     }).catch(function (e) {
       m.body.innerHTML = '';
@@ -803,9 +873,15 @@
       strip.appendChild(wsDoors);
     }
     top.appendChild(strip);
+    // The command line and the card picker belong to the header, not to a
+    // slab floating over the cards. They ride a `sui-screen-nav` of their own,
+    // the same bar the workspace tabs sit in, so the two read as one stack.
+    var barScreen = H.el('div', 'sui-screen sui-screen-full-width tm-bar-screen');
+    var bar = H.el('div', 'sui-screen-nav tm-bar');
+    barScreen.appendChild(bar);
 
     // The command line and the add-a-card control, one row, symmetric.
-    var row = H.el('div', 'tm-toolbar');
+    var row = bar;
     var cmd = H.textBox('', 'HELP · MKT · GT 0-1 · 1-194 · 2-15361 · PEOPLE', function () {});
     cmd.id = 'tm-cmd';
     cmd.addEventListener('keydown', function (e) {
@@ -819,8 +895,9 @@
     cmdField.classList.add('tm-cmd-field');
     row.appendChild(cmdField);
 
-    var types = Terminal.types();
-    var pick = H.selectBox(types[0] ? types[0].type : '', types.map(function (t) { return { value: t.type, label: t.label }; }), function () { syncParamField(); });
+    var groups = Terminal.groups();
+    var first = groups[0] && groups[0].options[0] ? groups[0].options[0].value : '';
+    var pick = H.selectBox(first, groups, function () { syncParamField(); });
     row.appendChild(H.field('Add a card', pick));
     var paramHost = H.el('span', 'tm-toolbar-param');
     row.appendChild(paramHost);
@@ -861,7 +938,7 @@
       renderGrid();
     });
     row.appendChild(reset);
-    top.appendChild(row);
+    top.appendChild(barScreen);
     return top;
   }
 
@@ -929,8 +1006,8 @@
   // workspace once made, and exports as a `terminal:` code like any other.
   var PRESETS = {
     trader:    { label: 'Energy trader',   cards: [['market', {}, 2], ['book', { id: 'primary' }, 1], ['banks', {}, 2], ['grid', {}, 1], ['halt', {}, 2], ['alerts', {}, 1], ['tape', { filter: 'economy' }, 1], ['wallet', {}, 1]] },
-    admin:     { label: 'Guild admin',     cards: [['people', {}, 1], ['banks', {}, 2], ['stats', { section: 'guilds' }, 2], ['grid', {}, 1], ['fleet', {}, 2], ['chat', {}, 1]] },
-    botter:    { label: 'Botter',          cards: [['health', {}, 1], ['queue', {}, 1], ['results', {}, 1], ['pow', {}, 1], ['fleet', {}, 2], ['tape', { filter: 'all' }, 1], ['page', { page: 'config:profiles' }, 2]] },
+    admin:     { label: 'Guild admin',     cards: [['people', {}, 1], ['banks', {}, 2], ['stats', { section: 'guilds' }, 2], ['grid', {}, 1], ['armada', {}, 2], ['chat', {}, 1]] },
+    botter:    { label: 'Botter',          cards: [['health', {}, 1], ['queue', {}, 1], ['results', {}, 1], ['pow', {}, 1], ['armada', {}, 2], ['tape', { filter: 'all' }, 1], ['page', { page: 'config:profiles' }, 2]] },
     hasher:    { label: 'Hasher',          cards: [['pow', {}, 1], ['solve', {}, 1], ['stats', { section: 'engine' }, 1], ['tasks', {}, 2], ['fuel', {}, 1], ['queue', {}, 1]] },
     raider:    { label: 'Raider',          cards: [['posture', {}, 1], ['targets', {}, 2], ['raids', { scope: 'live' }, 1], ['ore', {}, 2], ['grudges', {}, 1], ['incidents', {}, 2], ['tape', { filter: 'combat' }, 1]] },
   };
@@ -990,13 +1067,14 @@
     LOG: ['log', 'id'], BATTLE: ['log', 'id'],
     POW: ['pow'], HASH: ['pow'], SOLVE: ['solve'], TASKS: ['tasks'], QUEUE: ['queue'], TX: ['queue'], RESULTS: ['results'],
     GRID: ['grid'], FUEL: ['fuel'], ALLOC: ['allocations'], ALLOCATIONS: ['allocations'], MARGINS: ['halt'],
-    FLEET: ['fleet'], ROSTER: ['fleet'], RAIDS: ['raids'], POSTURE: ['posture'], WAR: ['posture'], TARGETS: ['targets'],
+    ARMADA: ['armada'], ROSTER: ['armada'], SQUAD: ['armada'], RAIDS: ['raids'], POSTURE: ['posture'], WAR: ['posture'], TARGETS: ['targets'],
     GRUDGES: ['grudges'], VETOES: ['vetoes'], INCIDENTS: ['incidents'], WALLET: ['wallet', 'optid'], HEALTH: ['health'],
     SETTINGS: ['page', 'config'],
-    STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], ARMADA: ['fleet'], STREAM: ['tape'],
+    STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], STREAM: ['tape'],
     INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
     HELP: ['help'], COMMANDS: ['help'],
     FEED: ['feed'], EVENTS: ['feed'], NEXT: ['next'], MOVES: ['next'],
+    DMS: ['chat', 'direct'], DM: ['chat', 'direct'], CHANNELS: ['chat', 'rooms'],
   };
   Terminal.WORDS = WORDS;
   Terminal.execute = function (line) {
@@ -1014,6 +1092,9 @@
       return !!add('inspector', { id: parts[0] });
     }
     if (head === '?') return !!add('help', {});
+    // FLEET is the game's word: with an id it is that fleet, on the map. Bare,
+    // it is what people have always typed for the roster.
+    if (head === 'FLEET') return !!add(/^\d{1,2}-\d{1,9}$/.test(rest) ? 'map' : 'armada', rest ? { id: rest } : {});
     if (head === 'PRESET' || head === 'PRESETS') { applyPreset(String(rest || '').toLowerCase()); return true; }
     if (head === 'SHARE') { var strip = document.querySelector('.tm-workspaces'); if (strip) shareRow(strip); return true; }
     if (head === 'IMPORT') { if (!rest) return false; Terminal.importWorkspace(rest); return true; }
@@ -1023,6 +1104,7 @@
     if (!arg) return !!add(type, {});
     if (arg === 'id' || arg === 'ids' || arg === 'rules') { if (!rest) return false; var p = {}; p[arg] = rest; return !!add(type, p); }
     if (arg === 'optid') return !!add(type, rest ? { id: rest } : {});
+    if (arg === 'direct' || arg === 'rooms') return !!add(type, { list: arg });
     if (arg === 'section') return !!add(type, { section: (rest || 'universe').toLowerCase() });
     return !!add(type, { page: arg });
   };
@@ -1213,45 +1295,90 @@
     return box;
   }
 
+  // The player entity's own shape, the way Explore reads it (board-pages.js).
+  var entP = function (ent) { return (ent && ent.Player) || {}; };
+  var entS = function (ent, k) { var v = entP(ent)[k]; return v == null || v === '' ? null : String(v); };
+  var entN = function (ent, path) {
+    var cur = ent;
+    for (var i = 0; i < path.length && cur != null; i++) cur = cur[path[i]];
+    if (cur == null) return null;
+    var n = typeof cur === 'string' ? Number(cur) : cur;
+    return typeof n === 'number' && isFinite(n) ? n : null;
+  };
   Terminal.register('player', {
     label: 'Watch a player', describe: function (p) { return 'Player ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Player id', kind: 'id', placeholder: '1-194' }],
     cadenceMs: 60000,
-    // `mcp_player_detail` rather than the search row: the search endpoint
-    // carries a name and an alpha figure, and this card's whole job is one
-    // player — their structs, their planet, their fleet and their power.
+    /* `mcp_player_profile`, not `mcp_player_detail`.
+     *
+     * Detail answers a different question — it is the ROSTER's record, and for
+     * anybody who is not one of our virtual players it returns the literal
+     * name "primary" with no alpha, no ore, no portrait and no guild. That is
+     * exactly what this card drew: a title reading PRIMARY over an empty
+     * frame. Profile is the read Explore uses, so this card and that page
+     * cannot disagree; detail is still asked for the struct count, and a
+     * failure of either half leaves a blank field, never an error page. */
     render: function (host, p) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a player id.')); return; }
-      return invoke('mcp_player_detail', { player: p.id }).catch(function () {
-        return invoke('mcp_player_search', { query: p.id }).then(function (res) {
-          var rows = (res && res.results) || [];
-          return rows.filter(function (x) { return x.player_id === p.id; })[0] || rows[0] || null;
-        });
-      }).then(function (r) {
+      var soft = function (name, args) { return invoke(name, args).catch(function () { return null; }); };
+      return Promise.all([
+        soft('mcp_player_profile', { player: p.id }),
+        soft('mcp_player_detail', { player: p.id }),
+        soft('mcp_player_search', { query: p.id }),
+      ]).then(function (res) {
+        var d = res[0] || {}, det = res[1] || {};
+        var hit = ((res[2] && res[2].results) || []).filter(function (x) { return x.player_id === p.id; })[0] || null;
+        var ent = d.entity || {};
         host.innerHTML = '';
-        if (!r) { host.appendChild(H.stateBlock('info', 'No player ' + p.id)); return; }
-        var attrs = r.pfp_attrs || r.pfp;
-        if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
-        var id = r.player_id || p.id;
+        var id = d.player_id || det.player_id || p.id;
+        // Names: the chain's own first, then the roster's (which is the
+        // callsign we gave a virtual player), then the id.
+        var name = entS(ent, 'name') || (hit && hit.username) || (det.name && det.name !== 'primary' ? det.name : null) || id;
+        var attrs = entS(ent, 'pfpClientRenderAttributes') || (hit && hit.pfp) || null;
+        if (!res[0] && !res[1] && !hit) { host.appendChild(H.stateBlock('info', 'No player ' + p.id)); return; }
+        var alpha = entN(ent, ['playerInventory', 'rocks', 'amount']);
+        var ore = entN(ent, ['gridAttributes', 'ore']);
+        var load = (entN(ent, ['gridAttributes', 'load']) || 0) + (entN(ent, ['gridAttributes', 'structsLoad']) || 0);
+        var cap = (entN(ent, ['gridAttributes', 'capacity']) || 0) + (entN(ent, ['gridAttributes', 'connectionCapacity']) || 0);
         var reads = [];
-        if (r.alpha != null) reads.push({ value: H.fmtAlpha(r.alpha), icon: 'sui-icon-alpha-matter', title: 'Alpha' });
-        if (r.ore != null) reads.push({ value: H.fmtOre(r.ore), icon: 'sui-icon-alpha-ore', title: 'Ore' });
-        if (r.structs_load != null || r.load_mw != null) reads.push({ value: H.fmtWatts(r.load_mw != null ? r.load_mw : r.structs_load), icon: 'sui-icon-energy', title: 'Load' });
-        if (r.structs != null) reads.push({ value: H.fmtInt(Array.isArray(r.structs) ? r.structs.length : r.structs), icon: 'sui-icon-deployed-structs', title: 'Structs' });
-        var chips = [];
-        if (r.planet_id) chips.push(window.StructsCards.planet.chip({ id: r.planet_id }, { onClick: function () { add('planet', { id: r.planet_id }); } }));
-        if (r.fleet_id) chips.push(window.StructsCards.fleet.chip({ id: r.fleet_id }, { onClick: function () { add('map', { id: r.fleet_id }); } }));
+        if (alpha != null) reads.push({ value: H.fmtAlpha(alpha), icon: 'sui-icon-alpha-matter', title: 'Alpha matter' });
+        if (ore != null) reads.push({ value: H.fmtOre(ore), icon: 'sui-icon-alpha-ore', title: 'Ore held' });
+        if (cap || load) reads.push({ value: H.fmtWatts(load) + ' / ' + H.fmtWatts(cap), icon: 'sui-icon-energy', title: 'Energy used of available' });
+        if (det.struct_count != null) reads.push({ value: H.fmtInt(det.struct_count), icon: 'sui-icon-deployed-structs', title: 'Structs built' });
+        var gid = entS(ent, 'guildId') || (hit && hit.guild_id) || null;
+        var g = d.guild || null;
+        var planetId = entS(ent, 'planetId') || (hit && hit.planet_id) || null;
+        var fleetId = entS(ent, 'fleetId') || (hit && hit.fleet_id) || null;
         var card = window.StructsPlayerCard.card({
-          id: id, name: r.username || r.name || id, pfp: attrs,
+          id: id, name: name, pfp: attrs,
           presence: Board.presenceDot && Board.presenceDot(id),
-          guild: ((r.tag ? '[' + r.tag + '] ' : '') + (r.guild_name || r.guild_id || '')).trim() || null,
-          charge: r.charge, readings: reads,
-        }, { actions: (Board.watchActions ? Board.watchActions(r) : []).concat(Board.reachActions ? Board.reachActions(r) : []) });
+          guild: g ? ((g.tag ? '[' + g.tag + '] ' : '') + (g.name || gid || '')).trim() : gid,
+          badge: det.role && det.role !== 'primary' ? { text: String(det.role).toUpperCase(), mod: 'default' } : null,
+          readings: reads,
+        }, { actions: (Board.watchActions ? Board.watchActions({ player_id: id, planet_id: planetId, fleet_id: fleetId }) : [])
+          .concat(Board.reachActions ? Board.reachActions({ player_id: id, player_name: name }) : []) });
         host.appendChild(card);
+        var chips = [];
+        if (gid) chips.push(window.StructsGuildCard.chip({ id: gid, name: g && g.name, tag: g && g.tag }, { onClick: function () { add('guild', { id: gid }); } }));
+        if (planetId) chips.push(window.StructsCards.planet.chip({ id: planetId }, { onClick: function () { add('planet', { id: planetId }); } }));
+        if (fleetId) chips.push(window.StructsCards.fleet.chip({ id: fleetId }, { onClick: function () { add('map', { id: fleetId }); } }));
         if (chips.length) {
           var line = H.el('div', 'sc-chips tm-player-chips');
           chips.forEach(function (c) { line.appendChild(c); });
           host.appendChild(line);
+        }
+        // The guild's record of what this player has DONE. `null` is not zero:
+        // a guild that does not publish one of these leaves a dash.
+        var stat = function (v, key) { var n = v == null ? null : (key ? v[key] : v); if (n == null) return null; var f = Number(n); return isFinite(f) ? f : null; };
+        var mined = stat(d.ore_stats, 'mined'), seized = stat(d.ore_stats, 'seized');
+        var planets = stat(d.planets_completed, 'count'), raids = stat(d.raids_launched, 'count');
+        if (mined != null || seized != null || planets != null || raids != null) {
+          var strip = H.el('div', 'hstrip tm-tiles');
+          strip.appendChild(H.statTile('planets', planets == null ? '—' : H.fmtInt(planets)));
+          strip.appendChild(H.statTile('raids', raids == null ? '—' : H.fmtInt(raids)));
+          strip.appendChild(H.statTile('mined', mined == null ? '—' : H.fmtOre(mined)));
+          strip.appendChild(H.statTile('stolen', seized == null ? '—' : H.fmtOre(seized)));
+          host.appendChild(strip);
         }
         host.appendChild(doorRow([
           { label: 'Wallet', onClick: function () { add('wallet', { id: id }); } },
@@ -1360,6 +1487,29 @@
     all: /./,
   };
   var tape = { rows: [], listening: false };
+  /* A grass category is a chain event name, not a word: `struct_block_ore_
+   * mine_status` filled the whole line as a badge and left no room for what
+   * the frame said. Drop the tokens every event shares and keep the two that
+   * distinguish it. The full category stays on hover. */
+  var TAPE_NOISE = { structs: 1, struct: 1, block: 1, status: 1, event: 1, grid: 1, index: 1, id: 1, attributes: 1, msg: 1 };
+  var tapeKind = function (cat) {
+    var toks = String(cat || 'event').toLowerCase().split(/[._]/).filter(Boolean);
+    var keep = toks.filter(function (t) { return !TAPE_NOISE[t]; });
+    if (!keep.length) keep = toks;
+    return keep.slice(-2).join(' ') || 'event';
+  };
+  /* A grass subject is a store key — `grid.planet.2-29604.1-2655`. What it is
+   * about is the last word before the ids, and the ids themselves (an owner
+   * repeated as its own subject is one id, not two). */
+  var tapeSubject = function (subj) {
+    var toks = String(subj || '').split('.').filter(Boolean);
+    var ids = [], words = [];
+    toks.forEach(function (t) {
+      if (/^\d{1,2}-\d{1,9}$/.test(t)) { if (ids.indexOf(t) < 0) ids.push(t); }
+      else words.push(t);
+    });
+    return { word: words.length ? words[words.length - 1] : '', ids: ids };
+  };
   Terminal.register('tape', {
     label: 'Live tape', describe: function (p) { return 'Live tape · ' + (p.filter || 'economy'); },
     params: [{ key: 'filter', label: 'Stream', kind: 'choice', options: [{ value: 'economy', label: 'economy' }, { value: 'combat', label: 'combat' }, { value: 'all', label: 'everything' }] }],
@@ -1371,8 +1521,6 @@
         var ul = H.el('ul', 'ops-feed sui-text-ticker tm-tape');
         var rows = tape.rows.filter(function (ev) { return want.test(String(ev.category || '')); }).slice(0, 40);
         if (!rows.length) ul.appendChild(H.el('li', 'ops-muted', 'no economic frames yet'));
-        // One tape line per event (structs-cards.js): time · kind · what ·
-        // block on a grid, so lines never overlap the way the two-band row did.
         var clock = function (ts) { var d = new Date(Number(ts) || 0); return isNaN(d.getTime()) || !ts ? '' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); };
         var tone = function (cat) { var c = String(cat || ''); return /raid|combat|attack|destroy/i.test(c) ? 'destructive' : /defen|shield|alert/i.test(c) ? 'warning' : 'default'; };
         // The board's grass algorithm (Board._grass.parts) folds the detail
@@ -1381,19 +1529,36 @@
         rows.forEach(function (ev) {
           var li = H.el('li');
           var g = Board._grass && Board._grass.parts ? Board._grass.parts(ev) : { time: clock(ev.timestamp), category: ev.category, subject: String(ev.subject || ''), block: null, chips: [] };
-          var parts = [g.subject].concat(g.chips.map(function (c) {
+          var subj = tapeSubject(g.subject);
+          var kind = tapeKind(g.category);
+          /* A chip that restates the header is not news. An ore frame carries
+           * object_id, object_type, player_id and attribute_type — four chips
+           * that between them say "planet 2-29577, player 1-422, ore", which
+           * is exactly what the line above them already says. Dropping them
+           * leaves the one thing that changed. */
+          var shown = {};
+          var mark = function (v) { if (v == null || v === '') return; shown[String(v).trim().toLowerCase()] = 1; };
+          mark(subj.word); subj.ids.forEach(mark); mark(kind); mark(g.category);
+          /* And a change goes first, so the one line of figures a narrow card
+           * can show is the line that says something happened. */
+          var chips = (g.chips || []).filter(function (c) { return !shown[String(c.text).trim().toLowerCase()]; }).sort(function (a, b) {
+            var ca = /→/.test(a.text) ? 0 : 1, cb = /→/.test(b.text) ? 0 : 1;
+            return ca - cb;
+          });
+          var parts = chips.map(function (c) {
             var s = H.el('span', 'fig sc-tape-kv'); s.appendChild(H.el('span', 'pc-id', c.label + ' ')); s.appendChild(document.createTextNode(c.text));
             if (c.title) s.title = c.title;
             return s;
-          }));
+          });
           // The first id the frame names is what the line is ABOUT; a tape
           // you cannot follow is a tape you only watch.
-          var idm = /(?:^|[^0-9A-Za-z_-])(\d{1,2}-\d{1,9})(?![0-9-])/.exec(g.subject + ' ' + g.chips.map(function (c) { return c.text; }).join(' '));
-          var subject = idm ? idm[1] : null;
+          var idm = /(?:^|[^0-9A-Za-z_-])(\d{1,2}-\d{1,9})(?![0-9-])/.exec(g.subject + ' ' + (g.chips || []).map(function (c) { return c.text; }).join(' '));
+          var subject = subj.ids[0] || (idm ? idm[1] : null);
           li.appendChild(window.StructsCards.tape.row({
-            time: g.time, kind: g.category, tone: tone(g.category), parts: parts,
+            time: g.time, kind: kind, kindTitle: String(g.category || ''), tone: tone(g.category),
+            subject: subj.word, ids: subj.ids, parts: parts,
             block: g.block != null ? H.fmtInt(g.block) : null, fresh: ev === tape.fresh,
-            title: g.subject + (g.chips.length ? ' · ' + g.chips.map(function (c) { return c.label + ' ' + c.text; }).join(' · ') : ''),
+            title: g.subject + ((g.chips || []).length ? ' · ' + g.chips.map(function (c) { return c.label + ' ' + c.text; }).join(' · ') : ''),
           }, subject ? { onClick: function () {
             var kind = Number(String(subject).split('-')[0]);
             add(kind === 1 ? 'player' : kind === 0 ? 'guild' : kind === 2 ? 'planet' : 'inspector', { id: subject });
@@ -2051,8 +2216,17 @@
   // Whole pages as cards keep their OWN bar as the header (frameless): the
   // frame draws none, and the page's bar carries pop-out and close.
   Terminal.register('chat', {
-    label: 'Comms window', defaultWidth: 2, describe: function () { return 'Comms'; }, cadenceMs: 0, frameless: true,
-    render: function (host, p, ctx) { host.innerHTML = ''; host.appendChild(framed('chat.html', 'Comms', ctx.id)); },
+    label: 'Comms window', defaultWidth: 2, cadenceMs: 0, frameless: true,
+    describe: function (p) { return p.list === 'direct' ? 'Direct messages' : p.list === 'rooms' ? 'Channels' : 'Comms'; },
+    // Rooms and people are two questions; a card that answers one of them is
+    // a card you can leave open beside the other.
+    params: [{ key: 'list', label: 'Show', kind: 'choice', options: [
+      { value: '', label: 'rooms and people' }, { value: 'rooms', label: 'channels only' }, { value: 'direct', label: 'direct messages only' },
+    ] }],
+    render: function (host, p, ctx) {
+      host.innerHTML = '';
+      host.appendChild(framed('chat.html' + (p.list ? '?list=' + encodeURIComponent(p.list) : ''), 'Comms', ctx.id));
+    },
   });
   Terminal.register('pay', {
     label: 'Pay', describe: function () { return 'Pay'; }, cadenceMs: 0, frameless: true,
@@ -2079,6 +2253,9 @@
   // ── Boot ────────────────────────────────────────────────────────────────
   function enter() {
     state.solo = param('card');
+    // A one-card window is the card and nothing else: board.html strips its
+    // own panel frame and its (empty) nav bar off this attribute.
+    if (state.solo) document.documentElement.setAttribute('data-card', '1');
     return loadWorkspaces().then(function () {
       state.ws = param('ws') || state.active || 'main';
       if (state.workspaces.indexOf(state.ws) < 0) state.workspaces.push(state.ws);

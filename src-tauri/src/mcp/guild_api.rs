@@ -592,6 +592,51 @@ impl GuildApiClient {
             .await
     }
 
+    /* -- the stat store (`/api/stat/...`) --
+     *
+     * The guild indexes a TIME SERIES per object, not just the current value:
+     * ten metrics, sampled whenever the value moves. Two shapes — the
+     * galaxy-wide roll-up (`stat_aggregate`, below, which Game Stats has read
+     * since it was written) and this one, ONE object's own samples,
+     * `[{time, value}]`.
+     *
+     * `object_key` is the chain id itself (`1-194`, `2-29604`, `4-1`): the
+     * prefix is what tells the API which store to read.
+     *
+     * Windows are capped SERVER-side and differently per shape — 7 days of raw
+     * samples, 30 days once a bucket is named — so the caller picks the bucket
+     * from the window it wants rather than discovering the cap as a 400.
+     *
+     * Samples are change-triggered: a flat stretch means nothing moved, never
+     * that nothing was recorded, so a reader carries the last value forward
+     * rather than drawing a gap or a zero.
+     */
+    pub const STAT_MAX_RAW_SECONDS: u64 = 604_800;
+    pub const STAT_MAX_BUCKET_SECONDS: u64 = 2_592_000;
+
+    pub async fn stat_range(
+        &self,
+        metric: &str,
+        object_key: &str,
+        start_s: u64,
+        end_s: u64,
+        bucket: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Value>, String> {
+        let mut path = format!(
+            "/api/stat/{}/object/{}/range/page/1?start_time={}&end_time={}&limit={}",
+            metric, object_key, start_s, end_s, limit
+        );
+        if let Some(b) = bucket {
+            path.push_str(&format!("&bucket={}", b));
+        }
+        match self.get(&path).await? {
+            Value::Array(a) => Ok(a),
+            Value::Null => Ok(vec![]),
+            other => Err(format!("stat {metric}: expected a list, got {other}")),
+        }
+    }
+
     /* Find a player by id, name or address.
      *
      * The endpoint is named for the screen that first needed it — picking who

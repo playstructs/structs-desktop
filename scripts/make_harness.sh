@@ -618,6 +618,71 @@ cat > "$FIX" <<'EOF'
       { player_id: '1-248', username: 'PHONIFFER', guild_id: '0-1', pfp: '{"head":40,"neck":3,"body":30,"arms":20,"background":2}' },
       { player_id: '1-1957', username: null, guild_id: '0-5', pfp: null },
     ] },
+    /* Explore -> Player: the shape `mcp_player_profile` really answers with
+     * (board_pages.rs). Identity is nested under `Player`, the readings under
+     * `gridAttributes` and `playerInventory`, the guild is a separate read,
+     * and the counters come from the guild API. A FUNCTION of the argument:
+     * this is the read the player card re-issues when you point it at
+     * somebody else, and one static answer would hide a card that never
+     * re-read. */
+    mcp_player_profile: function (args) {
+      var who = String((args && args.player) || '1-61');
+      var P = {
+        '1-61': { name: 'JPEG', pfp: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}', ore: '4096', alpha: '250000000' },
+        '1-248': { name: 'PHONIFFER', pfp: '{"head":40,"neck":3,"body":30,"arms":20,"background":2}', ore: '512', alpha: '9000000' },
+      };
+      var p = P[who] || { name: null, pfp: null, ore: '0', alpha: '0' };
+      var n = who.split('-')[1];
+      return {
+        player_id: who,
+        entity: {
+          Player: { name: p.name, guildId: '0-1', planetId: '2-' + n, fleetId: '9-' + n,
+                    primaryAddress: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne',
+                    pfpClientRenderAttributes: p.pfp },
+          gridAttributes: { ore: p.ore, load: '1200', structsLoad: '800',
+                            capacity: '6000', connectionCapacity: '2000', lastAction: '2507900' },
+          playerInventory: { rocks: { amount: p.alpha, denom: 'ualpha' } },
+        },
+        guild: { guild_id: '0-1', name: 'Orbital Hydro', tag: 'OH' },
+        ore_stats: { mined: 91000, seized: 12000, forfeited: 3000 },
+        planets_completed: { count: 14 },
+        raids_launched: { count: 37 },
+        infusions: [], allocations: [],
+      };
+    },
+    /* The guild's stat store, as `terminal_series` hands it on: a value per
+     * EVEN slot (Rust carries each change-triggered sample forward), null
+     * before the first sample there ever was. The nulls are the point — one
+     * of them reaching the chart as a zero would invent a crash. */
+    terminal_series: function (args) {
+      var points = 120, windowS = Number((args && args.windowS) || 86400);
+      var end = Date.now(), start = end - windowS * 1000;
+      var vals = [];
+      for (var i = 0; i < points; i++) {
+        vals.push(i < 12 ? null : 4000 + Math.round(900 * Math.sin(i / 11)) + i * 3);
+      }
+      return {
+        metric: String((args && args.metric) || 'ore'), unit: 'ore',
+        object: String((args && args.object) || '2-29604'), object_type: 'planet',
+        bucket: windowS > 604800 ? '1h' : null,
+        start_ms: start, end_ms: end, step_ms: (windowS * 1000) / points,
+        samples: 46, first_ms: start + 12 * ((windowS * 1000) / points),
+        last: vals[points - 1], values: vals,
+      };
+    },
+    terminal_series_metrics: [
+      { metric: 'ore', unit: 'ore', object_types: ['planet', 'player', 'struct', 'fleet'] },
+      { metric: 'load', unit: 'power', object_types: ['substation', 'player', 'guild', 'struct'] },
+    ],
+    /* The ROSTER's record of the same player, exactly as Rust answers it: for
+     * anybody outside our virtual roster the name is the literal string
+     * "primary" and there is no alpha, no ore and no portrait. That is why the
+     * player card reads the profile and takes only the struct count here. */
+    mcp_player_detail: function (args) {
+      return { player_id: String((args && args.player) || '1-61'), index: null,
+               name: 'primary', role: 'primary', entity: {},
+               struct_ids: ['5-1', '5-2', '5-3'], struct_count: 13 };
+    },
     // renderConfig() fetches the bundle before ANY config section paints, so
     // the profiles view needs it even though it reads nothing from it.
     // The shape `mcp_config_bundle` really answers with. It used to claim
@@ -658,6 +723,8 @@ cat > "$FIX" <<'EOF'
     ],
     stop_hash_task: null,
     mcp_action: 'queued: raid on 2-15361',
+    mcp_players: 'created 1-999 at HD index 42',
+    matrix_resolve_payable: { to: 'structs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq', playerId: '1-61', name: 'JPEG' },
     mcp_infusion_preview: INFUSION_PREVIEW,
     mcp_infusion_infuse: { ok: true, tx: 'HARNESSTX' },
     mcp_infusion_defuse: { ok: true, tx: 'HARNESSTX' },
@@ -700,8 +767,12 @@ cat > "$FIX" <<'EOF'
         if (window.__HARNESS_REJECT__[cmd]) {
           return Promise.reject(window.__HARNESS_REJECT__[cmd]);
         }
+        // A fixture may be a FUNCTION of the arguments. Some commands answer
+        // about the thing they were asked for (a player profile), and one
+        // static answer would make a card that re-reads on a new id look
+        // exactly like a card that never re-read.
         return Object.prototype.hasOwnProperty.call(F, cmd)
-          ? Promise.resolve(F[cmd])
+          ? Promise.resolve(typeof F[cmd] === 'function' ? F[cmd](args || {}) : F[cmd])
           : Promise.reject('harness: no fixture for ' + cmd);
       },
     },
@@ -1478,6 +1549,15 @@ cat > "$TFIX" <<'TX_EOF'
     },
     mcp_transfer_preview: null,   // set per test
     mcp_transfer_execute: { ok: true },
+    // Choosing a recipient here rather than being handed one.
+    mcp_player_search: { results: [
+      { player_id: '1-61', username: 'JPEG', guild_id: '0-1', pfp: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}' },
+      { player_id: '1-248', username: 'PHONIFFER', guild_id: '0-1', pfp: null },
+    ] },
+    matrix_resolve_payable: {
+      to: 'structs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
+      playerId: '1-61', name: 'JPEG',
+    },
   };
   window.__HARNESS_FIXTURES__ = F;
   window.__TAURI__ = {

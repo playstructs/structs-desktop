@@ -544,7 +544,11 @@
         badge: running ? { text: 'RUNNING', mod: 'solid' } : done ? { text: 'DONE', mod: 'default' } : null,
         readings: [
           (function () { var r = el('span', 'pc-res'); r.title = 'Progress ' + Math.round((t.frac || 0) * 100) + '%'; r.appendChild(progress(t.frac)); return r; })(),
-          t.difficulty != null ? { value: t.difficulty + ' / 64', icon: 'sui-icon-md icon-key', title: 'Difficulty now, of 64', cls: t.difficulty <= 16 ? 'sc-ok' : (t.difficulty > 32 ? 'sc-bad-text' : null) } : null,
+          // Just the number. It was drawn as "7 / 64" behind a key glyph, and
+          // 64 is a constant (the difficulty every proof starts at before the
+          // clock ages) — a denominator that never moves is not a reading. The
+          // hint word labels it in place of the glyph.
+          t.difficulty != null ? { value: String(t.difficulty), title: 'difficulty', cls: t.difficulty <= 16 ? 'sc-ok' : (t.difficulty > 32 ? 'sc-bad-text' : null) } : null,
           { value: t.eta || '—', icon: 'sui-icon-md icon-in-progress', title: 'Estimated time to solve' },
         ],
       };
@@ -573,7 +577,10 @@
     emblemOf: function (t, size) {
       return t.state === 'failed' ? emblem.glyph('icon-alert', size, 'enemy') : t.state === 'ok' ? emblem.glyph('icon-success', size, 'player') : t.state === 'skipped' ? emblem.glyph('icon-blocked', size, 'warning') : emblem.glyph('icon-transfers', size, 'secondary');
     },
-    row: function (t, opts) { var d = tx.describe(t); d.emblem = tx.emblemOf(t, 'sm'); return row(d, opts); },
+    // No emblem in a row: the badge already says SUCCESS / FAILED / SKIPPED
+    // and the stripe already carries the colour, so a glyph saying it a third
+    // time only stole the width the message type needs (StructBuildComplete…).
+    row: function (t, opts) { return row(tx.describe(t), opts); },
     chip: function (t, opts) { var d = tx.describe(t); return chip({ kind: 'tx', emblem: tx.emblemOf(t, 'xs'), title: t.type || '?', id: t.hash ? str(t.hash).slice(0, 8) + '…' : null, badge: d.badge, state: d.state }, opts); },
   };
 
@@ -701,19 +708,35 @@
     chip: function (a, opts) { return chip({ kind: 'asset', emblem: asset.emblemOf(a, 'xs'), title: str(a.amount) + (a.kind === 'alpha' || a.kind === 'ore' ? '' : ' ' + str(a.name || a.denom)), hideId: true }, opts); },
   };
 
-  /* tape: { time, kind, tone, parts:[Node|string], block, fresh } — one grid line, never overlapping. */
+  /* tape: { time, kind, subject, ids:[id], parts:[Node|string], block, fresh,
+   *         tone, title } — two bands: a header you scan and, only when the
+   * frame carries figures, the figures under it. */
   var tape = {
     row: function (e, opts) {
       opts = opts || {};
       var r = el('div', 'sc-tape' + (e.fresh ? ' is-new' : ''));
       r.tabIndex = 0;
       r.appendChild(el('span', 'sc-tape-t fig', e.time || ''));
-      var b = badge({ text: e.kind || 'event', mod: e.tone || 'default' }); if (b) r.appendChild(b);
+      var head = el('span', 'sc-tape-head');
+      var b = badge({ text: e.kind || 'event', mod: e.tone || 'default' });
+      if (b) { if (e.kindTitle) b.title = e.kindTitle; head.appendChild(b); }
+      // The id is the half you can act on, so it is the half that survives a
+      // narrow card: the word ellipses, the ids never do.
+      var subj = el('span', 'sc-tape-subj fig');
+      if (e.subject) subj.appendChild(el('span', 'sc-tape-word pc-id', str(e.subject)));
+      var idbox = el('span', 'sc-tape-ids');
+      (e.ids || []).forEach(function (id, i) { idbox.appendChild(document.createTextNode((i ? ' ' : '') + str(id))); });
+      subj.appendChild(idbox);
+      if (e.title) subj.title = e.title;
+      head.appendChild(subj);
+      r.appendChild(head);
+      r.appendChild(el('span', 'sc-tape-blk fig', e.block != null ? '#' + str(e.block) : ''));
+      // The figures the frame actually carries. This is the news — an event
+      // whose values never appeared was a timestamp and a word.
       var body = el('span', 'sc-tape-body');
       (e.parts || []).forEach(function (x) { if (x == null) return; body.appendChild(typeof x === 'string' ? el('span', 'fig', x) : x); });
       if (e.title) body.title = e.title;
       r.appendChild(body);
-      r.appendChild(el('span', 'sc-tape-blk fig', e.block != null ? '#' + str(e.block) : ''));
       if (opts.onClick) { r.classList.add('pc-mod-clickable'); r.addEventListener('click', function (ev) { opts.onClick(ev, r); }); }
       return r;
     },

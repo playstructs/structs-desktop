@@ -25,6 +25,7 @@
   <link rel="stylesheet" href="guildcard.css" />
   <link rel="stylesheet" href="providercard.css" />
   <link rel="stylesheet" href="structs-cards.css" />
+  <link rel="stylesheet" href="embed.css" />
   <style>
     /* ── Comms ────────────────────────────────────────────────────────────
        Composition only. Every colour, font and spacing value below is a SUI
@@ -103,12 +104,6 @@
        appears beside the page icons and close removes the card. */
     #chat-nav-popout { display: none; }
     html[data-embed] #chat-nav-popout { display: flex; }
-    /* Inside a card the CARD is the panel: no second frame, no edge, no fill. */
-    html[data-embed] #menu-page-panel > .sui-panel-top-fill-background,
-    html[data-embed] #menu-page-panel > .sui-panel-bottom-fill-background,
-    html[data-embed] #menu-page-panel > .sui-panel-edge-left { display: none; }
-    html[data-embed] #menu-page-panel-chunk { border-width: 0; padding-bottom: 0; }
-    html[data-embed] body, html[data-embed] #menu-page-layout { margin: 0; padding: 0; background: transparent; }
     #chat-nav-actions a:hover { color: var(--accent-primary-active); }
 
     /* A page fills the body content box and scrolls in its middle band only,

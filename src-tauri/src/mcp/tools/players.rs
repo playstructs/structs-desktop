@@ -49,6 +49,60 @@ fn now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// The roster's own verbs, for a board window.
+///
+/// Creating a virtual player existed only as an agent tool: the Armada page
+/// names and styles the roster it already has, and nothing in the app could
+/// add to it. This is the same `execute` the agent calls — the HD-index pick,
+/// the count cap, the guild signup and the naming all included — gated to our
+/// own board windows.
+#[tauri::command]
+pub async fn mcp_players(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    registry: tauri::State<'_, Arc<TaskRegistry>>,
+    command: String,
+    player: Option<String>,
+    name: Option<String>,
+    index: Option<u32>,
+    role: Option<String>,
+    guild_id: Option<String>,
+) -> Result<String, String> {
+    crate::mcp::tools::board_pages::require_board(&window)?;
+    // Reads and creation only. Acting AS a virtual player goes through
+    // `mcp_action`, which has its own guards; widening this one would hand a
+    // window every verb for every player on the roster as a side effect.
+    if command != "list" && command != "create" && command != "state" {
+        return Err(format!("{command}: this window can list, inspect and create, nothing else"));
+    }
+    let client = CosmosClient::new();
+    let out = execute(
+        &app,
+        &client,
+        &registry,
+        PlayerParams {
+            command,
+            player,
+            action: None,
+            args: Value::Null,
+            name,
+            index,
+            role,
+            guild_id,
+        },
+    )
+    .await;
+    let text = out
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.starts_with("Error:") || text.starts_with("BLOCKED:") {
+        return Err(text);
+    }
+    Ok(text)
+}
+
 pub async fn execute(
     app_handle: &tauri::AppHandle,
     client: &CosmosClient,

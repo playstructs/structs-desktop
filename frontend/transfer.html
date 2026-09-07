@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="css/structicons.css">
   <link rel="stylesheet" href="css/sui/sui.css">
   <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="embed.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     /* The few SUI components sized to a FIXED content width — see the note in
@@ -102,11 +103,12 @@
     }
     .tx-actions { display: flex; gap: var(--spacing-sm); justify-content: flex-end; }
     .sui-screen-btn.tx-disabled { opacity: .4; pointer-events: none; }
-        html[data-embed] .sui-panel > .sui-panel-top-fill-background,
-    html[data-embed] .sui-panel > .sui-panel-bottom-fill-background,
-    html[data-embed] .sui-panel > .sui-panel-edge-left { display: none; }
-    html[data-embed] .sui-panel-chunk { border-width: 0; padding-bottom: 0; }
-    html[data-embed] body, html[data-embed] #tx-layout { margin: 0; padding: 0; background: transparent; }
+      /* Choosing a recipient: the search sits where the TO card will land, and
+       each hit is the same row the game shows when money is about to move. */
+    .tx-find { display: flex; flex-direction: column; gap: var(--spacing-sm); }
+    .tx-find-results { display: flex; flex-direction: column; gap: var(--spacing-xs); }
+    .tx-find-hit { cursor: pointer; }
+    .tx-find-hit:hover { background: var(--surface-player-highlight); }
   </style>
 </head>
 <body>
