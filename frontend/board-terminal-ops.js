@@ -32,17 +32,6 @@
     });
     return row;
   };
-  /* Row-end action doors for H.resultRow, which takes ONE node. */
-  var acts = function (list) {
-    var span = H.el('span', 'tx-btns');
-    list.forEach(function (it) {
-      var a = H.el('a', 'ops-refresh-btn'); a.href = 'javascript:void(0)'; a.title = it.title;
-      a.appendChild(H.el('i', it.icon));
-      a.addEventListener('click', function (ev) { ev.stopPropagation(); it.onClick(); });
-      span.appendChild(a);
-    });
-    return span;
-  };
   var human = function (s) { return String(s || '?').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase(); };
   var fail = function (host, what, e) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', what + ' unavailable: ' + e)); };
 
@@ -418,24 +407,34 @@
         var go = targets.filter(function (t) { return !t.blocked_by; }).length;
         cap(host, targets.length + ' scored · ' + go + ' GO' + (raid.enabled ? '' : ' · raiding is off'));
         if (!targets.length) { host.appendChild(H.stateBlock('info', 'No targets scored yet.')); return; }
+        // Catalogue rows (structs-cards.js): GO/NO-GO as the badge and the
+        // stripe, the reason on the id line, the planet as a chip, four
+        // readings, and the three verbs as doors — grudge and veto write
+        // combat_lists, the same path the WAR page uses.
+        var C = window.StructsCards;
         var table = H.resultTable();
         targets.slice(0, 20).forEach(function (t) {
           var ok = !t.blocked_by;
-          table.appendChild(H.resultRow({
-            icon: ok ? 'icon-raid' : 'icon-blocked',
-            title: (t.name || t.player_id) + '  ' + (t.planet_id || ''),
-            subtitle: ok ? 'GO — ' + (t.vulnerability_reason || '') : 'NO-GO — ' + t.blocked_by,
-            chips: [
-              H.statTile('ore', H.fmtOre(t.stored_ore || 0), 'sui-icon-alpha-ore', (t.stored_ore || 0) >= (raid.min_ore || 0) ? '' : 'bad'),
-              H.statTile('shield · proof', (t.planetary_shield || 0) + ' · ~' + Math.round(t.raid_minutes || 0) + 'm'),
-              H.statTile('defenders', String(t.defenders_on_cmd == null ? '—' : t.defenders_on_cmd), 'icon-defend', 'muted'),
-              H.statTile('score', String(Math.round(t.score || 0)), null, ok ? 'ok' : 'bad'),
+          var thin = (t.stored_ore || 0) < (raid.min_ore || 0);
+          table.appendChild(C.row({
+            kind: 'target', emblem: C.emblem.glyph(ok ? 'icon-raid' : 'icon-blocked', 'sm', ok ? 'enemy' : 'hint'),
+            title: t.name || t.player_id, id: t.player_id, sub: ok ? (t.vulnerability_reason || null) : null,
+            attn: ok ? null : t.blocked_by, state: ok ? 'bad' : null,
+            badge: ok ? { text: 'GO', mod: 'destructive' } : { text: 'NO-GO', mod: 'default' },
+            chips: t.planet_id ? [C.planet.chip({ id: t.planet_id }, { onClick: function () { add('planet', { id: t.planet_id }); } })] : null,
+            readings: [
+              { value: H.fmtOre(t.stored_ore || 0), icon: 'sui-icon-alpha-ore', title: thin ? 'Stored ore · under the raid minimum' : 'Stored ore', cls: thin ? 'sc-bad-text' : null },
+              { value: String(t.planetary_shield || 0) + ' · ~' + Math.round(t.raid_minutes || 0) + 'm', icon: 'sui-icon-md icon-planetary-shield', title: 'Shield · time to prove a raid' },
+              { value: t.defenders_on_cmd == null ? '—' : String(t.defenders_on_cmd), icon: 'sui-icon-md icon-defend', title: 'Defenders on the command ship' },
+              { value: String(Math.round(t.score || 0)), icon: 'sui-icon-md icon-range', title: 'Target score', cls: ok ? 'sc-ok' : null },
             ],
-            action: acts([
+          }, {
+            onClick: t.planet_id ? function () { add('planet', { id: t.planet_id }); } : null,
+            doors: [
               { icon: 'icon-planet', title: 'Open planet ' + t.planet_id, onClick: function () { add('planet', { id: t.planet_id }); } },
               { icon: 'icon-attention', title: 'Add ' + t.player_id + ' to the grudge list', onClick: function () { warSet({ action: 'add', kind: 'grudge', id: t.player_id, label: t.name, guild_id: t.guild_id, weight: 1.5 }, ctx); } },
-              { icon: 'icon-blocked', title: 'Never attack ' + t.player_id, onClick: function () { warSet({ action: 'add', kind: 'protected', id: t.player_id }, ctx); } },
-            ]),
+              { icon: 'icon-blocked', title: 'Never attack ' + t.player_id, destructive: true, onClick: function () { warSet({ action: 'add', kind: 'protected', id: t.player_id }, ctx); } },
+            ],
           }));
         });
         host.appendChild(table);
@@ -449,17 +448,26 @@
         host.innerHTML = '';
         var grudges = ((d.lists || {}).grudges) || [];
         if (!grudges.length) { host.appendChild(H.stateBlock('info', 'No grudges held.')); return; }
+        var C = window.StructsCards;
         var table = H.resultTable();
         grudges.forEach(function (g) {
-          table.appendChild(H.resultRow({
-            icon: g.muted ? 'icon-unknown' : 'icon-enemy-tile',
-            title: (g.label || g.player_id) + (g.guild_id ? '  [' + g.guild_id + ']' : ''),
-            subtitle: (g.attacks || 0) + ' attacks · ' + (g.structs_lost || 0) + ' structs lost · ' + (g.source || '') + (g.muted ? ' · MUTED' : '') + (g.expired ? ' · lapsed' : ''),
-            chips: [H.resource(g.damage_taken || 0, 'icon-dmg'), H.resource('×' + (Math.round((g.weight || 1) * 10) / 10), null), H.resource(Math.round((g.heat || 0) * 100) / 100, 'icon-attention', g.muted ? 'attn' : '')],
-            action: acts([
-              { icon: g.muted ? 'icon-okay' : 'icon-blocked', title: g.muted ? 'Unmute' : 'Mute — keep the record, stop acting on it', onClick: function () { warSet({ action: g.muted ? 'unmute' : 'mute', kind: 'grudge', id: g.player_id }, ctx); } },
-              { icon: 'icon-subtract', title: 'Forget this grudge', onClick: function () { warSet({ action: 'remove', kind: 'grudge', id: g.player_id }, ctx); } },
-            ]),
+          table.appendChild(C.row({
+            kind: 'grudge', emblem: C.emblem.glyph(g.muted ? 'icon-unknown' : 'icon-enemy-tile', 'sm', g.muted ? 'hint' : 'enemy'),
+            title: g.label || g.player_id, id: g.player_id, sub: [g.guild_id ? 'guild ' + g.guild_id : null, g.source || null].filter(Boolean).join(' · ') || null,
+            attn: g.muted ? 'muted' : (g.expired ? 'lapsed' : null), state: g.muted || g.expired ? null : 'bad',
+            badge: { text: '×' + (Math.round((g.weight || 1) * 10) / 10), mod: g.muted ? 'default' : 'destructive' },
+            readings: [
+              { value: String(g.attacks || 0), icon: 'sui-icon-md icon-counter', title: 'Attacks on us' },
+              { value: String(g.structs_lost || 0), icon: 'sui-icon-md icon-wreckage', title: 'Structs we lost to them' },
+              { value: String(g.damage_taken || 0), icon: 'sui-icon-md icon-dmg', title: 'Damage taken' },
+              { value: String(Math.round((g.heat || 0) * 100) / 100), icon: 'sui-icon-md icon-attention', title: 'Heat', cls: g.muted ? null : 'sc-bad-text' },
+            ],
+          }, {
+            onClick: function () { add('player', { id: g.player_id }); },
+            doors: [
+              { icon: g.muted ? 'icon-okay' : 'icon-blocked', title: g.muted ? 'Unmute' : 'Mute — keep the record, stop acting on it', on: g.muted, onClick: function () { warSet({ action: g.muted ? 'unmute' : 'mute', kind: 'grudge', id: g.player_id }, ctx); } },
+              { icon: 'icon-subtract', title: 'Forget this grudge', destructive: true, onClick: function () { warSet({ action: 'remove', kind: 'grudge', id: g.player_id }, ctx); } },
+            ],
           }));
         });
         host.appendChild(table);
@@ -474,18 +482,20 @@
         var l = d.lists || {};
         var prot = l.protected_players || [], allies = l.allies || [], prio = l.priority_guilds || [];
         host.appendChild(tiles([['protected', H.fmtInt(prot.length)], ['ally guilds', H.fmtInt(allies.length)], ['priority guilds', H.fmtInt(prio.length)]]));
-        var line = function (icon, text, kind, id) {
-          var r = H.el('div', 'sui-data-card-row tm-tx');
-          var left = H.el('span'); left.appendChild(H.el('i', H.iconClass(icon, 'sui-icon-sm'))); left.appendChild(document.createTextNode(' ' + text));
-          var right = H.el('span', 'ops-val');
-          var a = H.el('a', 'ops-refresh-btn'); a.href = 'javascript:void(0)'; a.title = 'Remove ' + id; a.appendChild(H.el('i', 'icon-subtract'));
-          a.addEventListener('click', function () { warSet({ action: 'remove', kind: kind, id: id }, ctx); });
-          right.appendChild(a); r.appendChild(left); r.appendChild(right);
-          return r;
+        var C = window.StructsCards;
+        var table = H.resultTable();
+        var line = function (icon, tone, title, id, kind, badge, open) {
+          return C.row({
+            kind: kind, emblem: C.emblem.glyph(icon, 'sm', tone), title: title, id: id, badge: badge || null,
+          }, {
+            onClick: open,
+            doors: [{ icon: 'icon-subtract', title: 'Remove ' + id, destructive: true, onClick: function () { warSet({ action: 'remove', kind: kind, id: id }, ctx); } }],
+          });
         };
-        prot.forEach(function (pid) { host.appendChild(line('icon-blocked', 'player ' + pid, 'protected', pid)); });
-        allies.forEach(function (gid) { host.appendChild(line('icon-guild', 'ally guild ' + gid, 'ally', gid)); });
-        prio.forEach(function (g) { host.appendChild(line('icon-attention', 'priority guild ' + g.guild_id + ' ×' + g.weight, 'priority_guild', g.guild_id)); });
+        prot.forEach(function (pid) { table.appendChild(line('icon-blocked', 'warning', 'Protected player', pid, 'protected', null, function () { add('player', { id: pid }); })); });
+        allies.forEach(function (gid) { table.appendChild(line('icon-guild', 'player', 'Ally guild', gid, 'ally', null, function () { add('guild', { id: gid }); })); });
+        prio.forEach(function (g) { table.appendChild(line('icon-attention', 'enemy', 'Priority guild', g.guild_id, 'priority_guild', { text: '×' + g.weight, mod: 'destructive' }, function () { add('guild', { id: g.guild_id }); })); });
+        if (prot.length || allies.length || prio.length) host.appendChild(table);
         if (!prot.length && !allies.length && !prio.length) host.appendChild(H.stateBlock('info', 'No vetoes or priorities set.'));
       }).catch(function (e) { fail(host, 'war', e); });
     },

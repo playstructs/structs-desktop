@@ -178,12 +178,105 @@
     return invoke('terminal_workspace_delete', { name: name }).then(function (w) {
       state.workspaces = (w && w.names) || state.workspaces.filter(function (n) { return n !== name; });
       state.active = (w && w.active) || state.workspaces[0];
+      // Its own window and its popped cards go with it.
+      invoke('terminal_workspace_windows_close', { name: name }).catch(function () {});
       if (state.ws === name) return switchWorkspace(state.active);
       renderAll();
     }).catch(function (e) { Board.stamp && Board.stamp(String(e)); });
   }
+  Terminal.deleteWorkspace = deleteWorkspace;
+
+  // A delete is the one door on the strip that cannot be undone: it asks
+  // first, naming the workspace and how many cards it holds.
+  function confirmDeleteWorkspace(name) {
+    var n = state.ws === name ? state.layout.cards.length : null;
+    var body = H.el('div', 'sui-text-label-block', name + (n != null ? ' · ' + n + ' card' + (n === 1 ? '' : 's') : ''));
+    H.confirmModal('Delete this workspace?', body, 'Delete', function () { deleteWorkspace(name); });
+  }
+
+  // Rename: the layout, the active mark and any remembered windows follow the
+  // new name. Open windows for the old name are closed first — they carry the
+  // old label — and the player reopens what they want under the new one.
+  function renameWorkspace(from, to) {
+    var clean = String(to || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+    if (!clean || clean === from) return Promise.resolve(false);
+    if (state.workspaces.indexOf(clean) >= 0) { Board.stamp && Board.stamp('a workspace named ' + clean + ' already exists'); return Promise.resolve(false); }
+    return Terminal.flushSave().then(function () {
+      return invoke('terminal_workspace_windows_close', { name: from }).catch(function () {});
+    }).then(function () {
+      return invoke('terminal_workspace_rename', { from: from, to: clean });
+    }).then(function (w) {
+      state.workspaces = (w && w.names) || state.workspaces.map(function (n) { return n === from ? clean : n; });
+      state.active = (w && w.active) || state.active;
+      if (state.ws === from) state.ws = clean;
+      try { localStorage.setItem(LOCAL_KEY + clean, JSON.stringify(state.layout)); localStorage.removeItem(LOCAL_KEY + from); } catch (e) { /* fine */ }
+      renderAll();
+      return true;
+    }).catch(function (e) { Board.stamp && Board.stamp(String(e)); return false; });
+  }
+  Terminal.renameWorkspace = renameWorkspace;
+
+  // The strip's order is the player's: nudge the current workspace left or
+  // right; Rust keeps the arrangement so every window and the next launch
+  // agree on it.
+  function moveWorkspace(name, dir) {
+    var i = state.workspaces.indexOf(name), j = i + dir;
+    if (i < 0 || j < 0 || j >= state.workspaces.length) return Promise.resolve(false);
+    var t = state.workspaces[i]; state.workspaces[i] = state.workspaces[j]; state.workspaces[j] = t;
+    renderAll();
+    return invoke('terminal_workspace_order', { names: state.workspaces.slice() }).then(function (w) {
+      if (w && Array.isArray(w.names) && w.names.length) state.workspaces = w.names;
+      return true;
+    }).catch(function (e) { Board.stamp && Board.stamp('order not saved: ' + e); return false; });
+  }
+  Terminal.moveWorkspace = moveWorkspace;
+  function renameRow(strip) {
+    var old = strip.querySelector('#tm-ws-rename');
+    if (old) { old.parentNode.removeChild(old); return; }
+    var row = H.el('span', 'tm-share'); row.id = 'tm-ws-rename';
+    var box = H.textBox(state.ws, 'name', function () {});
+    box.id = 'tm-ws-rename-name';
+    box.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { row.parentNode.removeChild(row); return; }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      renameWorkspace(state.ws, box.value).then(function (ok) { if (!ok) box.classList.add('is-err'); });
+    });
+    box.addEventListener('input', function () { box.classList.remove('is-err'); });
+    row.appendChild(box);
+    var go = H.el('a', 'sui-screen-btn sui-mod-primary', 'Rename');
+    go.href = 'javascript:void(0)';
+    go.addEventListener('click', function () { renameWorkspace(state.ws, box.value).then(function (ok) { if (!ok) box.classList.add('is-err'); }); });
+    row.appendChild(go);
+    strip.appendChild(row);
+    box.focus();
+    box.select();
+  }
 
   // ── The card frame: the game's data card, doors in its header ───────────
+  // The player's own name for a card, else the type's description of it.
+  function titleOf(card) {
+    var def = TYPES[card.type];
+    if (card.title) return card.title;
+    return def ? def.describe(card.params || {}) : card.type;
+  }
+  Terminal.titleOf = titleOf;
+  // Refresh cadence in ms for a card: the player's choice, else the type's;
+  // 0 means paused. A paused card says so on its frame and its refresh door.
+  var CADENCES = [{ value: '', label: 'Auto' }, { value: '5', label: '5s' }, { value: '15', label: '15s' }, { value: '60', label: '1m' }, { value: '300', label: '5m' }, { value: '0', label: 'Paused' }];
+  function cadenceOf(card) {
+    var def = TYPES[card.type];
+    if (card.cadence != null) return Number(card.cadence) * 1000;
+    return def && def.cadenceMs ? def.cadenceMs : 0;
+  }
+  Terminal.cadenceOf = function (id) { var c = findCard(id); return c ? cadenceOf(c) : 0; };
+  function markCadence(node, card) {
+    var paused = card.cadence != null && Number(card.cadence) === 0;
+    node.classList.toggle('tm-paused', paused);
+    var rd = node.querySelector('.tm-refresh');
+    if (rd) rd.title = paused ? 'Paused · refresh now' : 'Refresh';
+  }
+
   function door(iconName, title, onClick) {
     var a = H.el('a', 'sui-nav-btn tm-door');
     a.href = 'javascript:void(0)';
@@ -200,14 +293,17 @@
     node.setAttribute('data-card', card.id);
     node.setAttribute('data-type', card.type);
     var head = H.el('div', 'sui-data-card-header sui-text-header tm-head');
-    var title = H.el('span', 'tm-title', def ? def.describe(card.params || {}) : card.type);
+    var title = H.el('span', 'tm-title', titleOf(card));
     head.appendChild(title);
     var doors = H.el('span', 'tm-doors');
-    doors.appendChild(door('icon-in-progress', 'Refresh', function () { refresh(card.id, true); }));
+    var refreshDoor = door('icon-in-progress', 'Refresh', function () { refresh(card.id, true); });
+    refreshDoor.classList.add('tm-refresh');
+    doors.appendChild(refreshDoor);
+    markCadence(node, card);
     if (!state.solo) {
-      if (def && def.params && def.params.length) {
-        doors.appendChild(door('icon-menu', 'Configure', function () { toggleConfig(card.id); }));
-      }
+      // Every card configures: its name, its refresh cadence and its width,
+      // plus whatever params the type declares.
+      doors.appendChild(door('icon-menu', 'Configure', function () { toggleConfig(card.id); }));
       // The keyboard's way to move; the header itself drags. Quiet until the
       // pointer is over the card, so a page of cards is not a page of arrows.
       var up = door('icon-chevron-up', 'Move up', function () { move(card.id, -1); }); up.classList.add('tm-door-quiet');
@@ -412,10 +508,30 @@
     var m = state.mounted[id];
     if (m) {
       m.params = params;
-      m.title.textContent = m.def.describe(params);
+      m.title.textContent = titleOf(c);
       refresh(id, true);
     }
   }
+
+  function setTitle(id, title) {
+    var c = findCard(id);
+    if (!c) return;
+    var t = String(title || '').trim();
+    if (t) c.title = t; else delete c.title;
+    var m = state.mounted[id];
+    if (m) m.title.textContent = titleOf(c);
+    save();
+  }
+  Terminal.setTitle = setTitle;
+  function setCadence(id, secs) {
+    var c = findCard(id);
+    if (!c) return;
+    if (secs === '' || secs == null) delete c.cadence; else c.cadence = Math.max(0, Number(secs) || 0);
+    var m = state.mounted[id];
+    if (m) markCadence(m.node, c);
+    save();
+  }
+  Terminal.setCadence = setCadence;
 
   function popOut(id) {
     var m = state.mounted[id];
@@ -449,6 +565,12 @@
       inputs[p.key] = control(p, c.params[p.key]);
       m.config.appendChild(H.field(p.label, inputs[p.key]));
     });
+    var name = H.textBox(c.title || '', m.def ? m.def.describe(c.params || {}) : c.type, function () {});
+    name.classList.add('tm-config-name');
+    m.config.appendChild(H.field('Name', name));
+    var cadence = H.selectBox(c.cadence == null ? '' : String(c.cadence), CADENCES, function () {});
+    cadence.classList.add('tm-config-cadence');
+    m.config.appendChild(H.field('Refresh', cadence));
     var width = H.selectBox(String(c.w || 1), [{ value: '1', label: 'Narrow' }, { value: '2', label: 'Wide' }, { value: '3', label: 'Full' }], function () {});
     m.config.appendChild(H.field('Width', width));
     var apply = H.el('a', 'sui-screen-btn sui-mod-primary', 'Apply');
@@ -457,6 +579,8 @@
       var params = {};
       Object.keys(inputs).forEach(function (k) { params[k] = readControl(inputs[k]); });
       setWidth(id, readControl(width));
+      setTitle(id, readControl(name));
+      setCadence(id, readControl(cadence));
       setParams(id, params);
       m.config.hidden = true;
     });
@@ -481,7 +605,7 @@
       var first = m.body.firstElementChild;
       if (first && first.classList && first.classList.contains('sui-data-card')) {
         var inner = first.querySelector(':scope > .sui-data-card-header');
-        if (inner) { if (inner.textContent.trim()) m.title.textContent = inner.textContent.trim(); inner.parentNode.removeChild(inner); }
+        if (inner) { var own = findCard(id); if (inner.textContent.trim() && !(own && own.title)) m.title.textContent = inner.textContent.trim(); inner.parentNode.removeChild(inner); }
       }
     }).catch(function (e) {
       m.body.innerHTML = '';
@@ -504,6 +628,10 @@
     var grid = document.getElementById('tm-grid');
     if (!grid) return;
     var want = state.solo ? state.layout.cards.filter(function (c) { return c.id === state.solo; }) : state.layout.cards;
+    // The reconcile keeps mounted cards in place; an empty-workspace note from
+    // an earlier pass is not a card and would otherwise sit beside the first
+    // card added after it.
+    Array.prototype.slice.call(grid.children).forEach(function (n) { if (!n.classList.contains('tm-card')) grid.removeChild(n); });
     var keep = {};
     want.forEach(function (c) { keep[c.id] = 1; });
     Object.keys(state.mounted).forEach(function (id) { if (!keep[id]) unmountCard(id); });
@@ -514,6 +642,8 @@
       if (m && (m.def !== TYPES[c.type] || JSON.stringify(m.params || {}) !== JSON.stringify(c.params || {}))) { unmountCard(c.id); m = null; }
       if (!m) { mount(c, grid); m = state.mounted[c.id]; }
       m.node.className = 'sui-data-card sui-theme-player tm-card tm-w' + (state.solo ? 3 : (c.w || 1));
+      markCadence(m.node, c);
+      if (c.title) m.title.textContent = c.title;
       if (grid.children[i] !== m.node) grid.insertBefore(m.node, grid.children[i] || null);
       fitRows(m);
     });
@@ -553,15 +683,24 @@
       invoke('open_terminal_workspace', { name: state.ws }).catch(function (e) { Board.stamp && Board.stamp('needs the app: ' + e); });
     }));
     wsDoors.appendChild(door('icon-send-alpha', 'Share this workspace', function () { shareRow(strip); }));
+    wsDoors.appendChild(door('icon-edit', 'Rename this workspace', function () { renameRow(strip); }));
     if (state.workspaces.length > 1) {
-      wsDoors.appendChild(door('icon-close', 'Delete this workspace', function () { deleteWorkspace(state.ws); }));
+      var idx = state.workspaces.indexOf(state.ws);
+      var left = door('icon-caret-left', 'Move this workspace left', function () { moveWorkspace(state.ws, -1); });
+      var right = door('icon-caret-right', 'Move this workspace right', function () { moveWorkspace(state.ws, 1); });
+      if (idx <= 0) left.classList.add('tm-door-off');
+      if (idx < 0 || idx >= state.workspaces.length - 1) right.classList.add('tm-door-off');
+      wsDoors.appendChild(left); wsDoors.appendChild(right);
+    }
+    if (state.workspaces.length > 1) {
+      wsDoors.appendChild(door('icon-close', 'Delete this workspace', function () { confirmDeleteWorkspace(state.ws); }));
     }
     strip.appendChild(wsDoors);
     top.appendChild(strip);
 
     // The command line and the add-a-card control, one row, symmetric.
     var row = H.el('div', 'tm-toolbar');
-    var cmd = H.textBox('', 'MKT · GT 0-1 · 1-194 · 2-15361 · WORK · PEOPLE', function () {});
+    var cmd = H.textBox('', 'HELP · MKT · GT 0-1 · 1-194 · 2-15361 · PEOPLE', function () {});
     cmd.id = 'tm-cmd';
     cmd.addEventListener('keydown', function (e) {
       if (e.key !== 'Enter') return;
@@ -750,7 +889,9 @@
     SETTINGS: ['page', 'config'],
     STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], ARMADA: ['fleet'], STREAM: ['tape'],
     INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
+    HELP: ['help'], COMMANDS: ['help'],
   };
+  Terminal.WORDS = WORDS;
   Terminal.execute = function (line) {
     var parts = String(line || '').trim().split(/\s+/).filter(Boolean);
     if (!parts.length) return false;
@@ -765,6 +906,7 @@
       if (kind === 9) return !!add('map', { id: parts[0] });
       return !!add('inspector', { id: parts[0] });
     }
+    if (head === '?') return !!add('help', {});
     if (head === 'PRESET' || head === 'PRESETS') { applyPreset(String(rest || '').toLowerCase()); return true; }
     if (head === 'SHARE') { var strip = document.querySelector('.tm-workspaces'); if (strip) shareRow(strip); return true; }
     if (head === 'IMPORT') { if (!rest) return false; Terminal.importWorkspace(rest); return true; }
@@ -778,14 +920,76 @@
     return !!add(type, { page: arg });
   };
 
+  // ── HELP: every word the command line understands, as a card ───────────
+  // The reference is the words themselves: each row is a word, what it
+  // opens, and the argument it takes. Click a row: a word with no argument
+  // opens its card; one that needs an argument lands in the command box with
+  // the caret after it. The bare-id forms and the workspace verbs are rows too.
+  var ARG_LABEL = { id: '<id>', ids: '<id id …>', rules: '<rule …>', section: '<section>', optid: '[id]' };
+  function helpRows() {
+    var byTarget = {};
+    Object.keys(WORDS).forEach(function (word) {
+      var w = WORDS[word], key = w.join(':');
+      (byTarget[key] = byTarget[key] || { type: w[0], arg: w[1] || '', words: [] }).words.push(word);
+    });
+    var rows = Object.keys(byTarget).map(function (k) { return byTarget[k]; });
+    rows.sort(function (a, b) { var la = TYPES[a.type] ? TYPES[a.type].label : a.type, lb = TYPES[b.type] ? TYPES[b.type].label : b.type; return la < lb ? -1 : la > lb ? 1 : 0; });
+    return rows;
+  }
+  function helpLine(words, what, arg, onClick) {
+    var r = H.el('a', 'sui-data-card-row tm-help-row');
+    r.href = 'javascript:void(0)';
+    var left = H.el('span', 'tm-help-words');
+    left.appendChild(H.el('b', null, words));
+    if (arg) { left.appendChild(document.createTextNode(' ')); left.appendChild(H.el('span', 'ops-muted', arg)); }
+    r.appendChild(left);
+    r.appendChild(H.el('span', 'ops-val', what));
+    r.addEventListener('click', function (ev) { ev.preventDefault(); onClick(); });
+    return r;
+  }
+  function fillCommand(text) {
+    var box = document.getElementById('tm-cmd');
+    if (!box) return;
+    box.value = text;
+    box.classList.remove('is-err');
+    box.focus();
+  }
+  Terminal.register('help', {
+    label: 'Commands', single: true, defaultWidth: 2, describe: function () { return 'Commands'; },
+    render: function (host) {
+      host.innerHTML = '';
+      var list = H.el('div', 'tm-help');
+      helpRows().forEach(function (row) {
+        var def = TYPES[row.type];
+        var what = def ? def.label : row.type;
+        if (row.type === 'page') what = 'Settings';
+        if (row.type === 'stats') what = 'Galaxy statistics';
+        var arg = row.arg && row.arg !== 'config' ? ARG_LABEL[row.arg] || row.arg : '';
+        var first = row.words[0];
+        list.appendChild(helpLine(row.words.join(' · '), what, arg, function () {
+          if (arg) fillCommand(first + ' '); else Terminal.execute(first);
+        }));
+      });
+      list.appendChild(helpLine('1-…  ·  0-…  ·  2-…  ·  9-…', 'Player · Guild · Planet · Map by id', '', function () { fillCommand(''); }));
+      list.appendChild(helpLine('PRESET', Object.keys(PRESETS).join(' · '), '<name>', function () { fillCommand('PRESET '); }));
+      list.appendChild(helpLine('SHARE', 'Share this workspace', '', function () { Terminal.execute('SHARE'); }));
+      list.appendChild(helpLine('IMPORT', 'Import a shared workspace', '<code>', function () { fillCommand('IMPORT '); }));
+      host.appendChild(list);
+      return Promise.resolve();
+    },
+  });
+
   // ── Cadence: one 1s tick for every mounted card ─────────────────────────
   setInterval(function () {
     if (document.visibilityState === 'hidden' || Board.current !== 'terminal') return;
     var now = Date.now();
     Object.keys(state.mounted).forEach(function (id) {
       var m = state.mounted[id];
-      if (!m.def || !m.def.cadenceMs || m.busy) return;
-      if (now - m.lastRun >= m.def.cadenceMs) refresh(id, false);
+      if (!m.def || m.busy) return;
+      var c = findCard(id);
+      var every = c ? cadenceOf(c) : (m.def.cadenceMs || 0);
+      if (!every) return;
+      if (now - m.lastRun >= every) refresh(id, false);
     });
   }, 1000);
 
@@ -992,19 +1196,21 @@
         // block on a grid, so lines never overlap the way the two-band row did.
         var clock = function (ts) { var d = new Date(Number(ts) || 0); return isNaN(d.getTime()) || !ts ? '' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); };
         var tone = function (cat) { var c = String(cat || ''); return /raid|combat|attack|destroy/i.test(c) ? 'destructive' : /defen|shield|alert/i.test(c) ? 'warning' : 'default'; };
+        // The board's grass algorithm (Board._grass.parts) folds the detail
+        // keys the same way the Grass tab does: old→new pairs, precision twins
+        // hidden, ids resolved to names, the block lifted out.
         rows.forEach(function (ev) {
           var li = H.el('li');
-          var det = ev.detail && typeof ev.detail === 'object' ? ev.detail : {};
-          var parts = [String(ev.subject || '').replace(/^structs\./, '')];
-          Object.keys(det).slice(0, 6).forEach(function (k) {
-            if (/^block|_p$|^address$|^timestamp$/.test(k)) return;
-            var v = det[k]; if (v == null || v === '' || typeof v === 'object') return;
-            parts.push(k + ' ' + String(v));
-          });
+          var g = Board._grass && Board._grass.parts ? Board._grass.parts(ev) : { time: clock(ev.timestamp), category: ev.category, subject: String(ev.subject || ''), block: null, chips: [] };
+          var parts = [g.subject].concat(g.chips.map(function (c) {
+            var s = H.el('span', 'fig sc-tape-kv'); s.appendChild(H.el('span', 'pc-id', c.label + ' ')); s.appendChild(document.createTextNode(c.text));
+            if (c.title) s.title = c.title;
+            return s;
+          }));
           li.appendChild(window.StructsCards.tape.row({
-            time: clock(ev.timestamp || ev.ts_ms), kind: String(ev.category || 'event'), tone: tone(ev.category), parts: parts.slice(0, 5),
-            block: det.block != null ? H.fmtInt(det.block) : (det.block_height != null ? H.fmtInt(det.block_height) : (ev.block != null ? H.fmtInt(ev.block) : null)),
-            fresh: ev === tape.fresh,
+            time: g.time, kind: g.category, tone: tone(g.category), parts: parts,
+            block: g.block != null ? H.fmtInt(g.block) : null, fresh: ev === tape.fresh,
+            title: g.subject + (g.chips.length ? ' · ' + g.chips.map(function (c) { return c.label + ' ' + c.text; }).join(' · ') : ''),
           }));
           ul.appendChild(li);
         });

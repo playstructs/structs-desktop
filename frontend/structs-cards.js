@@ -310,8 +310,12 @@
     var ch = chipsLine(d.chips); if (ch) ident.appendChild(ch);
     var mk = marks(d.marks); if (mk) ident.appendChild(mk);
     node.appendChild(ident);
-    node.appendChild(d.readings && d.readings.nodeType ? d.readings : readings(d.readings));
-    node.appendChild(doors(opts.doors));
+    // Readings and doors travel together: in a narrow frame the whole tail
+    // wraps under the identity, right-aligned, never a door alone on a line.
+    var tail = el('div', 'sc-tail');
+    tail.appendChild(d.readings && d.readings.nodeType ? d.readings : readings(d.readings));
+    tail.appendChild(doors(opts.doors));
+    node.appendChild(tail);
     handle(node, opts, d.kind || 'row');
     return node;
   }
@@ -706,6 +710,7 @@
       var b = badge({ text: e.kind || 'event', mod: e.tone || 'default' }); if (b) r.appendChild(b);
       var body = el('span', 'sc-tape-body');
       (e.parts || []).forEach(function (x) { if (x == null) return; body.appendChild(typeof x === 'string' ? el('span', 'fig', x) : x); });
+      if (e.title) body.title = e.title;
       r.appendChild(body);
       r.appendChild(el('span', 'sc-tape-blk fig', e.block != null ? '#' + str(e.block) : ''));
       if (opts.onClick) { r.classList.add('pc-mod-clickable'); r.addEventListener('click', function (ev) { opts.onClick(ev, r); }); }

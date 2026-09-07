@@ -807,6 +807,41 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     opened.some((c) => text(c).includes('Mining')),
     opened.map((c) => text(c)).join(' | '));
 
+  // A fleet and a substation, named in one line: the catalogue draws them the
+  // way the Terminal does — the command ship's art, AWAY as the badge, the
+  // meter of load over capacity — with the owner as a person under each.
+  // Opening a chip re-renders the timeline, so the message node is re-found
+  // after each click rather than held.
+  const findRecruit = () => all(d, '.chat-msg').find((n) => text(n).includes('is recruiting'));
+  for (const [id, kind] of [['9-61', 'fleet'], ['4-4', 'substation']]) {
+    Array.from(findRecruit().querySelectorAll('.chat-id.chat-mod-openable')).find((c) => text(c) === id)
+      .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    // The card arrives from the reference lookup, not from cache.
+    await until(() => findRecruit().querySelector('.chat-kind-' + kind + ' .pc-card'));
+  }
+  const recruit = findRecruit();
+  const fleetCard = recruit.querySelector('.chat-kind-fleet .pc-card[data-kind="fleet"]');
+  check('a fleet reference is the catalogue fleet card', fleetCard !== null, recruit.innerHTML.slice(0, 200));
+  check('…AWAY as its badge, the command ship as its emblem, structs aboard as a reading',
+    fleetCard && text(fleetCard.querySelector('.sui-badge')) === 'AWAY'
+      && /cmd-ship/.test(fleetCard.querySelector('.gc-emblem img').getAttribute('src'))
+      && text(fleetCard.querySelector('.pc-res[title="Structs aboard / slots"]')) === '3 / 16'
+      && /2-15361/.test(text(fleetCard.querySelector('.pc-id'))),
+    fleetCard && text(fleetCard));
+  check('…the owner as a person, Follow as a door',
+    fleetCard && /JPEG/.test(text(fleetCard.querySelector('.pc-foot .pc-person')))
+      && fleetCard.querySelector('.pc-act[title="Follow"]') !== null);
+  const subCard = recruit.querySelector('.chat-kind-substation .pc-card[data-kind="substation"]');
+  check('a substation reference is the catalogue substation card', subCard !== null, recruit.innerHTML.slice(0, 200));
+  check('…with the meter of load over capacity, THIN past 90%, connections as a reading',
+    subCard && subCard.querySelector('.sc-meter') !== null
+      && /1\.1MW/.test(text(subCard.querySelector('.sc-meter'))) && /1\.2MW/.test(text(subCard.querySelector('.sc-meter')))
+      && text(subCard.querySelector('.sui-badge')) === 'THIN'
+      && text(subCard.querySelector('.pc-res[title="Connections"]')) === '12',
+    subCard && text(subCard));
+  check('…and its owner can be messaged from the card',
+    subCard && subCard.querySelector('.pc-act[title="Message the owner"]') !== null);
+
   // Clicking again closes it — the chip is a toggle, not a one-way door.
   all(d, '.chat-msg').find((n) => text(n).includes('hitting'))
     .querySelectorAll('.chat-id.chat-mod-openable')[0]

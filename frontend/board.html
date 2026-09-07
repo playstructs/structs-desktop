@@ -918,6 +918,10 @@
     .tm-toolbar .sui-screen-btn { transform: translateY(var(--spacing-xs)); }
     .tm-toolbar-param:empty { display: none; }
     #tm-cmd.is-err { border-color: var(--text-enemy-primary); }
+    .tm-help { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 0 var(--spacing-lg); }
+    .tm-help-row { display: flex; justify-content: space-between; gap: var(--spacing-md); text-decoration: none; color: var(--text-body); }
+    .tm-help-row:hover { background: var(--surface-player-highlight); }
+    .tm-help-words b { color: var(--text-player-primary); font-weight: normal; }
     /* Dense packing: rows are one small unit, every card spans what it
        measures (board-terminal.js fitRows), and the flow is dense so a short
        card never leaves a hole under it. */
@@ -974,9 +978,15 @@
     .tm-head { justify-content: space-between; gap: var(--spacing-md); align-self: stretch; width: 100%; box-sizing: border-box; }
     .tm-toolbar .sui-screen-btn { justify-self: start; }
     .tm-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .tm-paused .tm-refresh { opacity: .35; }
+    .tm-paused:hover .tm-refresh { opacity: 1; }
     .tm-doors { display: inline-flex; align-items: center; gap: var(--spacing-xs); flex: none; }
     .tm-door { padding: var(--spacing-xs); }
+    .tm-door-off { opacity: .3; pointer-events: none; }
     .tm-config { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md); background: var(--surface-default); }
+    /* `display: flex` beats the UA's [hidden] rule, so without this the
+     * configure strip never closed once opened — Apply left it on the card. */
+    .tm-config[hidden] { display: none; }
     .tm-body { width: 100%; flex-direction: column; align-items: stretch; padding: var(--spacing-md); max-height: 70vh; overflow-y: auto; }
     .tm-body > .sui-data-card { margin: 0; }
     .tm-body .page { display: block; max-height: 70vh; overflow-y: auto; }

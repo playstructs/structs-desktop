@@ -25,8 +25,13 @@
  * entirely. Here the row flexes instead: the identity keeps a floor, and the
  * readings and doors wrap under it, right-aligned, when there is no room. */
 .pc-row.sc-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
-.pc-row.sc-row .pc-ident { flex: 1 1 140px; min-width: 120px; }
-.pc-row.sc-row .pc-reads { flex: 0 1 auto; margin-left: auto; }
+/* 96px: emblem 44 + gaps + doors ~85 + this floor fits a one-wide card
+ * (~306px inner); at 140 the doors of a row with no readings wrapped alone. */
+.pc-row.sc-row .pc-ident { flex: 1 1 96px; min-width: 96px; }
+.pc-row.sc-row .pc-name { white-space: normal; flex-wrap: wrap; }
+.pc-row.sc-row .pc-name .pc-nm { white-space: nowrap; }
+.pc-row.sc-row .sc-tail { display: flex; align-items: center; gap: var(--spacing-xl); margin-left: auto; flex: 0 1 auto; min-width: 0; }
+.pc-row.sc-row .pc-reads { flex: 0 1 auto; }
 .pc-row.sc-row .pc-actions { flex: none; }
 
 /* ── selection and focus: the accent, never the browser's ring ─────────── */
@@ -103,7 +108,15 @@
 .sc-tape { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: var(--spacing-md);
   padding: var(--spacing-xs) var(--spacing-md); border-bottom: 1px solid var(--border-subtle); text-align: left; }
 .sc-tape-t, .sc-tape-blk { color: var(--text-hint); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.sc-tape-body { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); align-items: center; min-width: 0; }
+/* One visible line: the body wraps but is clipped to a single line, so a
+ * narrow card shows the subject and as many WHOLE figures as fit — never a
+ * row of one-character stubs. The whole event is the body's title. */
+.sc-tape-body { display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center; align-content: flex-start; min-width: 0; overflow: hidden; white-space: nowrap; line-height: 16px; max-height: 16px; }
+.sc-tape-body > * { flex: none; }
+.sc-tape-body > :first-child { flex: 0 1 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.sc-tape-kv .pc-id { color: var(--text-hint); }
+li > .sc-tape { list-style: none; }
+.tm-tape > li { list-style: none; padding: 0; }
 .sc-tape.is-new { box-shadow: inset 2px 0 0 var(--accent-primary); }
 
 /* ── the peek: a chip opened in place ─────────────────────────────────── */

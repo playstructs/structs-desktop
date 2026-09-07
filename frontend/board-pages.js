@@ -3347,6 +3347,38 @@
     return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
 
+  // The event as data: the same folding and lookups as grassRow's chips, with
+  // no DOM, so the Terminal's live tape (one line per event) draws from the
+  // one algorithm rather than a second reading of the detail keys.
+  function grassParts(ev) {
+    var det = ev.detail;
+    var out = { time: grassTime(ev.timestamp), category: String(ev.category || 'event'),
+                subject: String(ev.subject || '').replace(/^structs\./, ''), block: grassBlock(det), chips: [] };
+    if (det == null || typeof det !== 'object') {
+      if (det != null && det !== '') out.chips.push({ label: 'value', text: String(det) });
+      return out;
+    }
+    var keys = Object.keys(det), keySet = {};
+    keys.forEach(function (k) { keySet[k] = true; });
+    keys.forEach(function (k) {
+      var v = det[k];
+      if (v == null || v === '') return;
+      if (/_p$/.test(k)) return;
+      if (out.block != null && BLOCK_KEYS.indexOf(k) >= 0 && String(v) === String(out.block)) return;
+      if (k === 'address' && subjectHasToken(ev.subject, v)) return;
+      if (/_old$/.test(k) && keySet[k.replace(/_old$/, '')] && det[k.replace(/_old$/, '')] != null) return;
+      var text = grassVal(ev, det, k, v, 'new');
+      if (text == null) return;
+      if (keySet[k + '_old'] && det[k + '_old'] != null) {
+        var oldText = grassVal(ev, det, k, det[k + '_old'], 'old');
+        out.chips.push({ label: k, text: (oldText == null ? String(det[k + '_old']) : oldText) + ' → ' + text });
+        return;
+      }
+      out.chips.push({ label: k, text: text, title: (typeof v === 'string' && ADDR_RE.test(v)) ? v : null });
+    });
+    return out;
+  }
+
   function grassRow(ev) {
     // Two bands, not one flow: a header line you scan (time · category ·
     // subject) and a wrapped chip band you read only when the header caught
@@ -3645,7 +3677,7 @@
   }
 
   // The Terminal's flow tape draws the same rows.
-  Board._grass = { row: grassRow };
+  Board._grass = { row: grassRow, parts: grassParts };
 
   Board.registerPage('grass', {
     onBoot: function () {

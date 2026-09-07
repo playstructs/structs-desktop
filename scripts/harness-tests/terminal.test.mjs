@@ -7,10 +7,11 @@
 import { JSDOM } from 'jsdom';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const harness = resolve(repo, 'frontend', '_harness.html');
+const read = (p) => readFileSync(resolve(repo, p), 'utf8');
 if (!existsSync(harness)) { console.error('missing frontend/_harness.html — run: bash scripts/make_harness.sh'); process.exit(2); }
 
 let failures = 0;
@@ -80,6 +81,28 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…and the card re-renders on the new player', /PHONIFFER/.test(d.querySelector('#tm-player-1').textContent) && d.getElementById('tm-player-1').classList.contains('tm-w2'));
   check('the title follows the params', d.querySelector('#tm-player-1 .tm-title').textContent === 'Player 1-248');
 
+  // Every card configures — its name, its refresh cadence and its width —
+  // not only the ones with params. A player's name for a card outlives the
+  // type's own title; a paused card refreshes by hand only.
+  check('a card with no params still has a Configure door', d.querySelector('#tm-pow-1 [title="Configure"]') !== null);
+  d.querySelector('#tm-pow-1 [title="Configure"]').click();
+  const cfg2 = d.querySelector('#tm-pow-1 .tm-config');
+  check('…opening name, refresh and width', cfg2.querySelector('.tm-config-name') !== null && cfg2.querySelector('.tm-config-cadence') !== null && cfg2.querySelectorAll('select').length === 2);
+  cfg2.querySelector('.tm-config-name').value = 'GPU corner';
+  cfg2.querySelector('.tm-config-cadence').value = '0';
+  cfg2.querySelector('a.sui-mod-primary').click();
+  await tick();
+  check('the player\'s name is the title', d.querySelector('#tm-pow-1 .tm-title').textContent === 'GPU corner');
+  check('Apply closes the strip, and the stylesheet honours that (display:flex used to beat [hidden])', cfg2.hidden === true && /\.tm-config\[hidden\]\s*\{\s*display:\s*none/.test(read('frontend/board.html')));
+  // The harness answers terminal_layout_get with its fixture, so persistence
+  // is checked on what the page SENDS: the card carries both fields.
+  await w.Board.Terminal.flushSave();
+  const savedPow = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_layout_set').pop().args.layout.cards.find((c) => c.id === 'pow-1');
+  check('…and both are saved on the card', savedPow && savedPow.title === 'GPU corner' && savedPow.cadence === 0, JSON.stringify(savedPow));
+  check('paused: the frame says so and the tick will not refresh it', d.getElementById('tm-pow-1').classList.contains('tm-paused') && w.Board.Terminal.cadenceOf('pow-1') === 0 && /Paused/.test(d.querySelector('#tm-pow-1 .tm-refresh').title));
+  check('…both persisted on the card in the layout', (() => { const c = w.Board.Terminal.state.layout.cards.find((x) => x.id === 'pow-1'); return c.title === 'GPU corner' && c.cadence === 0; })());
+  check('auto restores the type\'s own cadence and title', (w.Board.Terminal.setCadence('pow-1', ''), w.Board.Terminal.setTitle('pow-1', ''), w.Board.Terminal.cadenceOf('pow-1') > 0 && d.querySelector('#tm-pow-1 .tm-title').textContent === 'Proof queue' && !d.getElementById('tm-pow-1').classList.contains('tm-paused')));
+
   // Add from the toolbar.
   const pick = d.querySelector('.tm-toolbar select');
   pick.value = 'guild'; pick.dispatchEvent(new w.Event('change', { bubbles: true }));
@@ -101,6 +124,27 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const run = (line) => { cmd.value = line; cmd.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); };
   run('MKT');
   check('MKT opens a market card', d.querySelectorAll('#tm-grid [data-type="market"]').length === 2 && cmd.value === '');
+  // HELP: every word, as a card. A row with no argument opens its card; one
+  // that needs an argument lands in the command box.
+  run('HELP');
+  await until(() => d.querySelector('#tm-grid [data-type="help"] .tm-help-row'));
+  const help = d.querySelector('#tm-grid [data-type="help"]');
+  const helpWords = [...help.querySelectorAll('.tm-help-row b')].map((b) => b.textContent);
+  check('HELP opens the command reference, one row per target, every word present', help !== null && Object.keys(w.Board.Terminal.WORDS).every((word) => helpWords.some((t) => t.split(' · ').includes(word))), helpWords.join(' | '));
+  check('…naming what each opens and the argument it takes', [...help.querySelectorAll('.tm-help-row')].some((r) => /GT/.test(r.textContent) && /<id>/.test(r.textContent) && /Guild token/i.test(r.textContent)), [...help.querySelectorAll('.tm-help-row')].map((r) => r.textContent).join(' | ').slice(0, 300));
+  const cardsBeforeHelp = d.querySelectorAll('#tm-grid .tm-card').length;
+  [...help.querySelectorAll('.tm-help-row')].find((r) => /^PEOPLE/.test(r.textContent)).click();
+  check('a word with no argument opens its card on click', d.querySelectorAll('#tm-grid [data-type="people"]').length === 2 && d.querySelectorAll('#tm-grid .tm-card').length === cardsBeforeHelp + 1);
+  [...help.querySelectorAll('.tm-help-row')].find((r) => /^GT/.test(r.textContent)).click();
+  check('a word that needs an id lands in the command box, ready for it', cmd.value === 'GT ' && d.activeElement === cmd, cmd.value);
+  cmd.value = '';
+  run('?');
+  check('? is HELP, and there is only ever one', d.querySelectorAll('#tm-grid [data-type="help"]').length === 1);
+  run('NONSENSE');
+  check('an unknown word is refused visibly and left to correct', cmd.classList.contains('is-err') && cmd.value === 'NONSENSE');
+  cmd.value = '';
+  w.Board.Terminal.remove(help.getAttribute('data-card'));
+  w.Board.Terminal.remove(d.querySelectorAll('#tm-grid [data-type="people"]')[1].getAttribute('data-card'));
   run('1-248');
   check('a bare player id opens that player', d.querySelector('#tm-grid [data-card="player-2"]')?.getAttribute('data-type') === 'player' && w.Board.Terminal.state.layout.cards.find((c) => c.id === 'player-2').params.id === '1-248');
   run('GUILD 0-2');
@@ -204,8 +248,8 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   for (const [word, type, expect] of [
     ['QUEUE', 'queue', /StructBuildInitiate/], ['RESULTS', 'results', /insufficient charge/], ['SOLVE', 'solve', /GPU/],
     ['GRID', 'grid', /connections/i], ['FUEL', 'fuel', /Auto infuse/], ['ALLOC', 'allocations', /6-53/], ['FLEET', 'fleet', /MARKLIFER/],
-    ['RAIDS', 'raids', /shields vulnerable/], ['POSTURE', 'posture', /Auto response/], ['TARGETS', 'targets', /NO-GO — protected/],
-    ['GRUDGES', 'grudges', /beezhan/], ['VETOES', 'vetoes', /player 1-248/], ['INCIDENTS', 'incidents', /2-287/],
+    ['RAIDS', 'raids', /shields vulnerable/], ['POSTURE', 'posture', /Auto response/], ['TARGETS', 'targets', /NO-GO/],
+    ['GRUDGES', 'grudges', /beezhan/], ['VETOES', 'vetoes', /Protected player/], ['INCIDENTS', 'incidents', /2-287/],
     ['WALLET', 'wallet', /\[OH\]\s*Hydro/], ['HEALTH', 'health', /./],
   ]) {
     run(word);
@@ -227,7 +271,12 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const loopCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'loop');
   check('…the posture card switches a loop by sending its whole config back', loopCall.args.payload.loop === 'raid' && loopCall.args.payload.config.enabled === true && loopCall.args.payload.config.posture === 'opportunist');
   // …and a target can be grudged from the board.
-  d.querySelector('#tm-grid [data-type="targets"] .tx-btns a[title^="Add 1-61"]').click();
+  const goRow = d.querySelector('#tm-grid [data-type="targets"] .pc-row.sc-bad');
+  check('the target board draws catalogue rows: GO as the stripe and badge, the planet as a chip, the veto as a destructive door', goRow !== null && /GO/.test(goRow.querySelector('.sui-badge').textContent) && goRow.querySelector('.sc-chip[data-kind="planet"]') !== null && goRow.querySelector('.pc-act[title^="Never attack"]').classList.contains('sc-destructive'));
+  check('a blocked target says why on its row', [...d.querySelectorAll('#tm-grid [data-type="targets"] .pc-row')].some((r) => /protected/.test(r.querySelector('.pc-attn')?.textContent || '') && r.querySelector('.sui-badge').textContent === 'NO-GO'));
+  check('grudges are rows with the weight as the badge and mute and forget as doors', d.querySelector('#tm-grid [data-type="grudges"] .pc-row .sui-badge')?.textContent.startsWith('×') && d.querySelector('#tm-grid [data-type="grudges"] .pc-act[title="Forget this grudge"]') !== null);
+  check('vetoes are rows with Remove as a destructive door', d.querySelector('#tm-grid [data-type="vetoes"] .pc-row .pc-act[title^="Remove"]')?.classList.contains('sc-destructive'));
+  d.querySelector('#tm-grid [data-type="targets"] .pc-act[title^="Add 1-61"]').click();
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'combat_lists'));
   check('…the target board adds a grudge through combat_lists', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'combat_lists' && c.args.payload.kind === 'grudge' && c.args.payload.id === '1-61'));
   check('an incident row names the attacker as a person and the shots as its badge', /1-1957/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && /2-287/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="incidents"] .pc-row .sui-badge') !== null);
@@ -297,6 +346,38 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   [...d.querySelectorAll('#tm-ws-nav .sui-screen-nav-item')].find((a) => a.textContent === 'war-room').click();
   await until(() => w.Board.Terminal.state.ws === 'war-room');
   check('picking a workspace switches the page and activates it', w.Board.Terminal.state.ws === 'war-room' && (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_workspace_activate' && c.args.name === 'war-room'));
+  // Delete asks first; the strip's delete door never acts on one click.
+  const delCallsBefore = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_workspace_delete').length;
+  d.querySelector('.tm-workspaces [title="Delete this workspace"]').click();
+  await until(() => d.querySelector('.ops-modal-overlay'));
+  check('delete asks first, naming the workspace', d.querySelector('.ops-modal-overlay') !== null && /war-room/.test(d.querySelector('.ops-modal-overlay').textContent) && (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_workspace_delete').length === delCallsBefore);
+  d.querySelector('.ops-modal-overlay .sui-message-system-modal-cta-btn-wrapper a').click();
+  check('…and Cancel keeps it', d.querySelector('.ops-modal-overlay') === null && w.Board.Terminal.state.workspaces.includes('war-room'));
+  // Rename: the door opens a name box; Enter renames through Rust, closes the
+  // old windows first, and the strip follows the new name.
+  await w.Board.Terminal.switchWorkspace('main');
+  d.querySelector('.tm-workspaces [title="Rename this workspace"]').click();
+  const renameBox = d.getElementById('tm-ws-rename-name');
+  check('rename opens a box holding the current name', renameBox !== null && renameBox.value === 'main');
+  renameBox.value = 'ops';
+  renameBox.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await until(() => w.Board.Terminal.state.ws === 'ops');
+  const renameCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_workspace_rename');
+  const calls = (w.__HARNESS_CALLS__ || []);
+  check('Enter renames through Rust, old windows closed first', renameCall && renameCall.args.from === 'main' && renameCall.args.to === 'ops' && calls.findIndex((c) => c.cmd === 'terminal_workspace_windows_close' && c.args.name === 'main') < calls.indexOf(renameCall));
+  check('…and the strip and the page follow the new name', w.Board.Terminal.state.ws === 'ops' && d.querySelector('#tm-ws-nav .sui-mod-active').textContent === 'ops' && [...d.querySelectorAll('#tm-ws-nav a, #tm-ws-nav button')].every((n) => n.textContent !== 'main'));
+  check('a taken name is refused without touching Rust', (w.Board.Terminal.renameWorkspace('ops', 'war-room'), (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_workspace_rename').length === 1));
+  await w.Board.Terminal.renameWorkspace('ops', 'main');
+  await w.Board.Terminal.switchWorkspace('war-room');
+  // Order: the strip is arranged by the player, through Rust, and the doors
+  // know the ends — war-room is last, so right is off and left is live.
+  check('the current workspace can be nudged along the strip; the door at the end is off', d.querySelector('.tm-workspaces [title="Move this workspace right"]').classList.contains('tm-door-off') && !d.querySelector('.tm-workspaces [title="Move this workspace left"]').classList.contains('tm-door-off'));
+  d.querySelector('.tm-workspaces [title="Move this workspace left"]').click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_workspace_order'));
+  const orderCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_workspace_order');
+  // (The rename fixture answers a fixed list, so only war-room's move is pinned, not its neighbour's name.)
+  check('a nudge sends the whole order to Rust and redraws the strip in it', orderCall.args.names[0] === 'war-room' && orderCall.args.names.length === w.Board.Terminal.state.workspaces.length && d.querySelector('#tm-ws-nav .sui-screen-nav-item').textContent === 'war-room', orderCall.args.names.join(','));
+  await w.Board.Terminal.moveWorkspace('war-room', 1);
   check('…loading that workspace\'s own layout', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_layout_get' && c.args && c.args.workspace === 'war-room'));
   d.querySelector('.tm-workspaces [title="Open this workspace in its own window"]').click();
   await tick(10);
@@ -332,6 +413,13 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => d.querySelector('#tm-grid [data-type="tape"] ul.tm-tape'));
   check('a card kept by id from the last layout is re-rendered for its new params', /UNIVERSE/.test(d.querySelector('#tm-stats-1')?.textContent || ''));
   check('…including the flow tape, drawn as the stream draws its rows', d.querySelector('#tm-grid [data-type="tape"] ul.tm-tape') !== null);
+  // A live frame arrives: ONE tape line (structs-cards.js), folded by the
+  // board's own grass algorithm (old→new, block lifted out), newest striped.
+  w.__HARNESS_EMIT__('grass-event', { category: 'ore', subject: 'structs.grid.planet.2-29577.1-422', timestamp: Date.now(), detail: { object_id: '2-29577', object_type: 'planet', player_id: '1-422', attribute_type: 'ore', value: 12, value_old: 11, block_height: 2507904 } });
+  await until(() => d.querySelector('#tm-grid [data-type="tape"] .sc-tape'));
+  const tapeLine = d.querySelector('#tm-grid [data-type="tape"] .sc-tape');
+  check('a tape event is one grid line: time, kind badge, subject, folded values, block', tapeLine.classList.contains('is-new') && /grid\.planet\.2-29577\.1-422/.test(tapeLine.textContent) && /11g → 12g/.test(tapeLine.textContent) && /#2,507,904/.test(tapeLine.querySelector('.sc-tape-blk').textContent) && tapeLine.querySelectorAll('.sc-tape-kv').length === 5 && !/block_height/.test(tapeLine.textContent), tapeLine.textContent);
+  check('…with the whole event on hover', /object_id 2-29577/.test(tapeLine.querySelector('.sc-tape-body').title));
 }
 
 console.log(failures ? failures + ' failing check(s)' : 'all checks passed');

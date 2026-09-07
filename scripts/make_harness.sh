@@ -443,6 +443,9 @@ cat > "$FIX" <<'EOF'
     terminal_workspaces: { active: 'main', names: ['main', 'war-room'] },
     terminal_workspace_activate: { active: 'main', names: ['main', 'war-room'] },
     terminal_workspace_delete: { active: 'main', names: ['main'] },
+    terminal_workspace_rename: { active: 'ops', names: ['ops', 'war-room'] },
+    terminal_workspace_order: { active: 'main', names: ['war-room', 'main'] },
+    terminal_workspace_windows_close: { closed: 0 },
     open_terminal_workspace: null,
     terminal_guild_banks: { at_ms: 0, height: 4200719, banks: [
       { guild_id: '0-1', name: 'SN Corp', tag: 'SNC', logo: null, denom: 'uguild.0-1', collateral: 9400000000, supply: 2000000, ratio: 4700 },
@@ -931,7 +934,7 @@ cat > "$CFIX" <<'EOF'
     // A guild named on its own: the card is the guild, not a person.
     { event_id: '$12g', sender: '@1-61:matrix.beta.playstructs.com', sender_name: 'JPEG',
       sender_tag: 'SN.C', player_id: '1-61', kind: 'text', self: false,
-      admin: false, ts: 1787900011500, body: '0-1 is recruiting' },
+      admin: false, ts: 1787900011500, body: '0-1 is recruiting — fleet 9-61 is parked on substation 4-4' },
     // A picture. Live rooms carry these; the client used to print the
     // filename and nothing else.
     { event_id: '$13', sender: '@1-42:matrix.beta.playstructs.com', sender_name: 'Netlag',
@@ -982,6 +985,18 @@ cat > "$CFIX" <<'EOF'
       comms: true, site: 'https://beta.playstructs.com',
       rows: [{ label: 'Owner', value: '[SNC] JPEG' }, { label: 'Comms', value: 'Yes' }],
       actions: [{ key: 'site', label: 'Guild site', icon: 'icon-link-out' }] },
+    // A fleet and a substation as refs.rs sends them since the catalogue.
+    '9-61': { id: '9-61', kind: 'fleet', icon: 'icon-fleet-tile',
+      title: 'Fleet 9-61', subtitle: 'Of [SN.C] JPEG',
+      rows: [{ label: 'Status', value: 'away' }, { label: 'Location', value: '2-15361' }, { label: 'Structs', value: '3 / 16' }],
+      owner: { id: '1-61', name: 'JPEG', tag: 'SN.C', pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}' },
+      away: true, location: '2-15361', structs_text: '3 / 16', fleet_id: '9-61',
+      actions: [{ key: 'watch_fleet', label: 'Follow', icon: 'icon-fleet-tile' }] },
+    '4-4': { id: '4-4', kind: 'substation', icon: 'icon-beacon',
+      title: 'Substation 4-4', subtitle: 'Power distribution',
+      rows: [{ label: 'Capacity', value: '1.2MW' }, { label: 'Load', value: '1.1MW' }, { label: 'Connections', value: '12' }],
+      owner: { id: '1-170', name: 'Someone', tag: 'OH', pfp_attrs: '{"head":40,"neck":3,"body":30,"arms":20,"background":2}' },
+      capacity_mw: 1200000, load_mw: 1100000, capacity_text: '1.2MW', load_text: '1.1MW', connections: 12 },
     // An offer you can close from the conversation that mentioned it.
     '10-1': { id: '10-1', kind: 'provider', icon: 'icon-transfers',
       title: 'Provider 10-1', subtitle: 'From [OH] Someone',

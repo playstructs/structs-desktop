@@ -39,6 +39,13 @@ pub struct Card {
     pub params: Value,
     #[serde(default = "one")]
     pub w: u8,
+    /// A name the player gave the card; None means the type's own title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Refresh cadence in seconds the player chose; None means the type's
+    /// default, 0 means paused (refresh by hand only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cadence: Option<u64>,
 }
 fn one() -> u8 {
     1
@@ -61,13 +68,17 @@ pub struct Store {
     pub workspaces: std::collections::BTreeMap<String, Layout>,
     #[serde(default = "main")]
     pub active: String,
+    /// The strip's order as the player arranged it. Names not listed here
+    /// (new ones) follow, alphabetically; names listed but gone are skipped.
+    #[serde(default)]
+    pub order: Vec<String>,
 }
 fn main() -> String {
     "main".into()
 }
 impl Default for Store {
     fn default() -> Self {
-        Store { workspaces: Default::default(), active: main() }
+        Store { workspaces: Default::default(), active: main(), order: Vec::new() }
     }
 }
 
@@ -200,11 +211,39 @@ pub fn layout_set_impl(workspace: Option<String>, layout: Layout) -> Result<(Str
 #[tauri::command]
 pub fn terminal_workspaces() -> Value {
     let st = lock(&STORE);
-    let mut names: Vec<String> = st.workspaces.keys().cloned().collect();
+    let names = ordered_names(&st);
+    json!({ "active": st.active, "names": names })
+}
+
+/// The workspaces in the player's order, then any the order does not name.
+fn ordered_names(st: &Store) -> Vec<String> {
+    let mut names: Vec<String> = st.order.iter().filter(|n| st.workspaces.contains_key(*n)).cloned().collect();
+    for n in st.workspaces.keys() {
+        if !names.contains(n) {
+            names.push(n.clone());
+        }
+    }
     if names.is_empty() {
         names.push(st.active.clone());
     }
-    json!({ "active": st.active, "names": names })
+    names
+}
+
+/// Arrange the strip. Unknown names are ignored, missing ones keep their
+/// place after the ones given, so a partial list is still a valid order.
+#[tauri::command]
+pub fn terminal_workspace_order(names: Vec<String>) -> Result<Value, String> {
+    let mut st = lock(&STORE);
+    let mut order: Vec<String> = Vec::new();
+    for n in names {
+        if st.workspaces.contains_key(&n) && !order.contains(&n) {
+            order.push(n);
+        }
+    }
+    st.order = order;
+    save_store(&st);
+    drop(st);
+    Ok(terminal_workspaces())
 }
 
 /// Make a workspace the one the main window shows.
@@ -226,12 +265,87 @@ pub fn terminal_workspace_delete(name: String) -> Result<Value, String> {
         return Err("the last workspace stays".into());
     }
     st.workspaces.remove(&name);
+    st.order.retain(|n| n != &name);
     if st.active == name {
-        st.active = st.workspaces.keys().next().cloned().unwrap_or_else(main);
+        st.active = ordered_names(&st).into_iter().next().unwrap_or_else(main);
     }
     save_store(&st);
     drop(st);
+    forget_windows_of(&name, None);
     Ok(terminal_workspaces())
+}
+
+/// Give a workspace a new name. Its layout, its place as the active one and
+/// its remembered windows all follow; the old name is gone. Refused when the
+/// new name is taken, so nothing is overwritten by a typo.
+#[tauri::command]
+pub fn terminal_workspace_rename(from: String, to: String) -> Result<Value, String> {
+    let to = sane_card_id(&to).ok_or_else(|| format!("workspace {to:?} is not a plain name"))?;
+    if to == from {
+        return Ok(terminal_workspaces());
+    }
+    let mut st = lock(&STORE);
+    if st.workspaces.contains_key(&to) {
+        return Err(format!("a workspace named {to} already exists"));
+    }
+    let layout = st.workspaces.remove(&from).ok_or_else(|| format!("no workspace named {from}"))?;
+    st.workspaces.insert(to.clone(), layout);
+    for n in st.order.iter_mut() {
+        if *n == from {
+            *n = to.clone();
+        }
+    }
+    if st.active == from {
+        st.active = to.clone();
+    }
+    save_store(&st);
+    drop(st);
+    forget_windows_of(&from, Some(&to));
+    Ok(terminal_workspaces())
+}
+
+/// Drop (or, with `rename_to`, re-key) the remembered windows of a workspace,
+/// so a deleted workspace does not reopen at boot and a renamed one reopens
+/// under its new name.
+fn forget_windows_of(name: &str, rename_to: Option<&str>) {
+    let mut ws = lock(&WINDOWS);
+    let prefix = format!("{name}/");
+    match rename_to {
+        Some(to) => {
+            for n in ws.workspaces.iter_mut() {
+                if n == name {
+                    *n = to.to_string();
+                }
+            }
+            for c in ws.cards.iter_mut() {
+                if let Some(rest) = c.strip_prefix(&prefix) {
+                    *c = format!("{to}/{rest}");
+                }
+            }
+        }
+        None => {
+            ws.workspaces.retain(|n| n != name);
+            ws.cards.retain(|c| !c.starts_with(&prefix));
+        }
+    }
+    save_windows(&ws);
+}
+
+/// Close the native windows of a workspace (its own window and every popped
+/// card) — after a delete, or before a rename re-labels them.
+#[tauri::command]
+pub fn terminal_workspace_windows_close(app: tauri::AppHandle, name: String) -> Result<Value, String> {
+    let name = sane_card_id(&name).ok_or_else(|| format!("workspace {name:?} is not a plain name"))?;
+    let ws_label = format!("{CARD_LABEL_PREFIX}ws-{name}");
+    let card_prefix = format!("{CARD_LABEL_PREFIX}card-{name}-");
+    let mut closed = 0;
+    for (label, w) in app.webview_windows() {
+        if label == ws_label || label.starts_with(&card_prefix) {
+            let _ = w.close();
+            closed += 1;
+        }
+    }
+    Ok(json!({ "closed": closed }))
 }
 
 // ── Windows ─────────────────────────────────────────────────────────────────
@@ -909,9 +1023,84 @@ mod tests {
     }
 
     #[test]
+    fn the_strip_order_is_the_players_and_survives_rename_and_delete() {
+        let (a, b, c) = ("order-test-a".to_string(), "order-test-b".to_string(), "order-test-c".to_string());
+        {
+            let mut st = lock(&STORE);
+            for n in [&a, &b, &c] {
+                st.workspaces.insert(n.clone(), Layout::default());
+            }
+            st.order.clear();
+        }
+        let names = |v: Value| v["names"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let alpha = names(terminal_workspaces());
+        let pa = alpha.iter().position(|n| n == &a).unwrap();
+        assert!(pa < alpha.iter().position(|n| n == &c).unwrap(), "no order yet: alphabetical");
+        let r = names(terminal_workspace_order(vec![c.clone(), "nope".into(), a.clone()]).unwrap());
+        let (pc, pa, pb) = (r.iter().position(|n| n == &c).unwrap(), r.iter().position(|n| n == &a).unwrap(), r.iter().position(|n| n == &b).unwrap());
+        assert!(pc < pa && pa < pb, "given order first, the unlisted one after, the unknown dropped: {r:?}");
+        let d = "order-test-d".to_string();
+        let r = names(terminal_workspace_rename(c.clone(), d.clone()).unwrap());
+        assert_eq!(r.iter().position(|n| n == &d).unwrap(), pc, "a renamed workspace keeps its place");
+        terminal_workspace_delete(d.clone()).unwrap();
+        {
+            let mut st = lock(&STORE);
+            assert!(!st.order.contains(&d));
+            for n in [&a, &b, &c, &d] {
+                st.workspaces.remove(n);
+            }
+            st.order.retain(|n| !n.starts_with("order-test-"));
+        }
+    }
+
+    #[test]
+    fn a_rename_moves_the_layout_the_active_mark_and_the_remembered_windows() {
+        let from = "rename-test-a".to_string();
+        let to = "rename-test-b".to_string();
+        {
+            let mut st = lock(&STORE);
+            st.workspaces.remove(&from);
+            st.workspaces.remove(&to);
+            st.workspaces.insert(from.clone(), Layout { version: 2, cards: vec![Card { id: "x".into(), kind: "people".into(), params: json!({}), w: 1, title: None, cadence: None }] });
+            st.active = from.clone();
+        }
+        {
+            let mut w = lock(&WINDOWS);
+            w.workspaces.push(from.clone());
+            w.cards.push(format!("{from}/x"));
+        }
+        let r = terminal_workspace_rename(from.clone(), to.clone()).unwrap();
+        assert_eq!(r["active"], to.as_str());
+        {
+            let st = lock(&STORE);
+            assert!(st.workspaces.get(&from).is_none());
+            assert_eq!(st.workspaces[&to].cards[0].id, "x");
+        }
+        {
+            let w = lock(&WINDOWS);
+            assert!(w.workspaces.contains(&to) && !w.workspaces.contains(&from));
+            assert!(w.cards.contains(&format!("{to}/x")) && !w.cards.contains(&format!("{from}/x")));
+        }
+        assert!(terminal_workspace_rename(to.clone(), "no spaces here".into()).is_err(), "a name with spaces is refused");
+        {
+            let mut st = lock(&STORE);
+            st.workspaces.insert("rename-test-c".into(), Layout::default());
+        }
+        assert!(terminal_workspace_rename(to.clone(), "rename-test-c".into()).is_err(), "an existing name is not overwritten");
+        {
+            let mut st = lock(&STORE);
+            st.workspaces.remove(&to);
+            st.workspaces.remove("rename-test-c");
+            let mut w = lock(&WINDOWS);
+            w.workspaces.retain(|n| n != &to);
+            w.cards.retain(|c| !c.starts_with(&format!("{to}/")));
+        }
+    }
+
+    #[test]
     fn a_stale_save_is_refused_and_a_newer_one_wins() {
         let ws = "conflict-test".to_string();
-        let mk = |v: u64, id: &str| Layout { version: v, cards: vec![Card { id: id.into(), kind: "people".into(), params: json!({}), w: 1 }] };
+        let mk = |v: u64, id: &str| Layout { version: v, cards: vec![Card { id: id.into(), kind: "people".into(), params: json!({}), w: 1, title: None, cadence: None }] };
         {
             let mut st = lock(&STORE);
             st.workspaces.remove(&ws);
