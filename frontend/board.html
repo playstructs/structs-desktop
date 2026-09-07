@@ -1017,20 +1017,9 @@
     .tm-body > .sui-data-card { margin: 0; }
     .tm-body .page { display: block; max-height: 70vh; overflow-y: auto; }
     .tm-cap { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: var(--spacing-sm); }
-    /* The planet card: a readings strip, then one row per ambit of slot
-       tiles (portrait over name), the fleet last; doors underneath. */
-    .tm-planet-strip { margin-bottom: var(--spacing-md); }
-    .tm-planet-row { display: flex; gap: var(--spacing-md); align-items: flex-start; padding: var(--spacing-sm) 0; border-top: 1px solid var(--border-subtle); }
-    /* The ambit chip stands as a narrow column (icon over word) so four land
-       tiles fit beside it in a one-column card without wrapping. */
-    .tm-planet-row .prof-ambit { flex: 0 0 auto; flex-direction: column; width: var(--spacing-xxxl); text-align: center; }
-    .tm-planet-slots { display: flex; flex-wrap: wrap; gap: var(--spacing-md); min-width: 0; }
-    .tm-planet-slot { display: flex; flex-direction: column; align-items: center; gap: var(--spacing-xs); flex: 1 1 64px; max-width: 128px; min-width: 0; text-align: center; }
-    .tm-planet-slot .fstat-l { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .tm-planet-slot.tm-off { opacity: .5; }
-    .tm-planet-slot.tm-empty { justify-content: center; min-height: var(--spacing-xxxl); color: var(--text-hint); }
-    .tm-planet-slot.tm-enemy .fstat-l { color: var(--text-enemy-primary); }
-    .tm-planet-doors, .tm-doors-row { display: flex; flex-wrap: wrap; gap: var(--spacing-md); margin-top: var(--spacing-md); }
+    /* The planet card draws no slots of its own any more: it embeds the live
+       map, which draws them as art and animates them (see `mapFrame`). */
+    .tm-doors-row { display: flex; flex-wrap: wrap; gap: var(--spacing-md); margin-top: var(--spacing-md); }
     /* The ops cards: a strip of readings first, rows under it. */
     .tm-tiles { margin-bottom: var(--spacing-md); gap: var(--spacing-md) var(--spacing-xl); }
     .tm-tx { text-align: left; }
@@ -1039,6 +1028,11 @@
     .tm-body .gs-cap { margin-bottom: var(--spacing-sm); }
     .tm-market { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--spacing-md); }
     .tm-frame { width: 100%; height: 520px; border: 0 none; background: var(--page-background); }
+    /* A map wants vertical room: four ambit bands and the HUD over them. */
+    .tm-frame-map { height: 620px; }
+    .tm-w1 .tm-frame-map { height: 420px; }
+    /* A rail (battle log, Comms) is a column, not a scene. */
+    .tm-frame-rail, .tm-w1 .tm-frame-rail { height: 460px; }
     .tm-tape { max-height: 420px; overflow-y: auto; margin: 0; }
     .tm-comms-body { max-height: 360px; overflow-y: auto; }
     .chat-rent-quote.chat-rent-short { color: var(--text-warning); }

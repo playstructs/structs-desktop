@@ -463,6 +463,53 @@ pub fn mcp_raid_view_open(
     })
 }
 
+/// Watch a location on behalf of a Terminal CARD rather than a window.
+///
+/// The spectator watcher is keyed by label; a window label reaches one window,
+/// and a `board:<card>` label reaches the board family — which is where a card
+/// lives. The card unwatches when it is removed or reconfigured, and the
+/// watcher stops when its last subscriber goes.
+#[tauri::command]
+pub fn mcp_raid_view_watch(
+    app: tauri::AppHandle,
+    planet_id: Option<String>,
+    fleet_id: Option<String>,
+    label: String,
+) -> Result<Value, String> {
+    let target = parse_target(planet_id.as_deref(), fleet_id.as_deref())?;
+    let label = card_label(&label)?;
+    crate::mcp::spectator::attach(&app, &target, &label);
+    Ok(serde_json::json!({ "ok": true, "label": label, "target": target }))
+}
+
+/// Stop watching for a card. Safe to call for a label that never watched.
+#[tauri::command]
+pub fn mcp_raid_view_unwatch(
+    planet_id: Option<String>,
+    fleet_id: Option<String>,
+    label: String,
+) -> Result<Value, String> {
+    let target = parse_target(planet_id.as_deref(), fleet_id.as_deref())?;
+    let label = card_label(&label)?;
+    crate::mcp::spectator::detach(&target, &label);
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+/// A card's label must say it is a card, and must survive being pasted into an
+/// event name: `board:` and then a plain card id.
+fn card_label(label: &str) -> Result<String, String> {
+    let rest = label
+        .strip_prefix(crate::mcp::events::BOARD_CARD_PREFIX)
+        .ok_or_else(|| format!("a card label starts with {:?}", crate::mcp::events::BOARD_CARD_PREFIX))?;
+    if rest.is_empty()
+        || rest.len() > 40
+        || !rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("card label {label:?} is not a plain id"));
+    }
+    Ok(label.to_string())
+}
+
 /// First-paint pull for the spectator window, invoked on load.
 ///
 /// Push alone loses the first snapshot: the watcher can emit before the

@@ -32,6 +32,8 @@
 .pc-row.sc-row .pc-name .pc-nm { white-space: nowrap; }
 .pc-row.sc-row .sc-tail { display: flex; align-items: center; gap: var(--spacing-xl); margin-left: auto; flex: 0 1 auto; min-width: 0; }
 .pc-row.sc-row .pc-reads { flex: 0 1 auto; }
+/* A row with no readings gives that space to its name, not to an empty box. */
+.pc-row.sc-row .pc-reads:empty { display: none; }
 .pc-row.sc-row .pc-actions { flex: none; }
 
 /* ── selection and focus: the accent, never the browser's ring ─────────── */

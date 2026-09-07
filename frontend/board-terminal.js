@@ -554,7 +554,7 @@
   function unmountCard(id) {
     var m = state.mounted[id];
     if (!m) return;
-    if (m.def && m.def.unmount) { try { m.def.unmount(m.body, m.params); } catch (e) { /* a card must not take the page down */ } }
+    if (m.def && m.def.unmount) { try { m.def.unmount(m.body, m.params, { id: id }); } catch (e) { /* a card must not take the page down */ } }
     if (m.def && m.def.frameless) dropFrameSubs(m.body);
     if (m.ro) { try { m.ro.disconnect(); } catch (e) { /* fine */ } }
     if (m.node.parentNode) m.node.parentNode.removeChild(m.node);
@@ -642,6 +642,9 @@
     var inner = node.querySelector && node.querySelector('select, input');
     return inner ? String(inner.value).trim() : '';
   }
+
+  // Shared with board-terminal-ops.js, whose tickets read the same controls.
+  Terminal.readControl = readControl;
 
   function toggleConfig(id) {
     var m = state.mounted[id];
@@ -993,6 +996,7 @@
     STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], ARMADA: ['fleet'], STREAM: ['tape'],
     INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
     HELP: ['help'], COMMANDS: ['help'],
+    FEED: ['feed'], EVENTS: ['feed'], NEXT: ['next'], MOVES: ['next'],
   };
   Terminal.WORDS = WORDS;
   Terminal.execute = function (line) {
@@ -1128,7 +1132,14 @@
       return G.ensureBoot().then(function () {
         host.innerHTML = '';
         if (!G.state.snap) { host.appendChild(H.stateBlock('info', 'Contacting the stats engine…')); return; }
-        host.appendChild(G.cards.liveness(G.state.snap.totals || {}));
+        var card = G.cards.liveness(G.state.snap.totals || {});
+        // A list of who is playing right now, where the names went nowhere.
+        card.addEventListener('click', function (ev) {
+          var line = ev.target && ev.target.closest ? ev.target.closest('.pc-person[data-player-id]') : null;
+          if (!line || (ev.target.closest && ev.target.closest('.pc-act'))) return;
+          add('player', { id: line.getAttribute('data-player-id') });
+        });
+        host.appendChild(card);
       });
     },
   });
@@ -1156,13 +1167,25 @@
   });
 
   Terminal.register('market', {
-    label: 'Energy market', defaultWidth: 2, describe: function () { return 'Energy market'; }, cadenceMs: 60000,
-    render: function (host) {
+    label: 'Energy market', defaultWidth: 2,
+    describe: function (p) { return 'Energy market' + (p.policy ? ' · ' + p.policy : ''); },
+    params: [{ key: 'policy', label: 'Offers', kind: 'choice', options: [
+      { value: '', label: 'every offer' }, { value: 'open', label: 'open market' }, { value: 'guild', label: 'guild only' },
+    ] }],
+    cadenceMs: 60000,
+    render: function (host, p) {
       return invoke('terminal_market').then(function (m) {
         host.innerHTML = '';
-        var list = (m && m.providers) || [];
+        var all = (m && m.providers) || [];
+        var list = all.filter(function (c) {
+          if (!p.policy) return true;
+          var open = (c.provider || {}).open === true || String(c.policy || '') === 'openMarket';
+          return p.policy === 'open' ? open : !open;
+        });
         var head = H.el('div', 'tm-cap');
-        head.appendChild(H.el('span', 'fstat-l', list.length + ' offers' + (m && m.height ? ' · block ' + H.fmtInt(m.height) : '')));
+        head.appendChild(H.el('span', 'fstat-l', list.length + ' offer' + (list.length === 1 ? '' : 's')
+          + (list.length !== all.length ? ' of ' + all.length : '')
+          + (m && m.height ? ' · block ' + H.fmtInt(m.height) : '')));
         host.appendChild(head);
         if (!list.length) { host.appendChild(H.stateBlock('info', 'No providers on the chain.')); return; }
         var grid = H.el('div', 'tm-market');
@@ -1194,22 +1217,46 @@
     label: 'Watch a player', describe: function (p) { return 'Player ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Player id', kind: 'id', placeholder: '1-194' }],
     cadenceMs: 60000,
+    // `mcp_player_detail` rather than the search row: the search endpoint
+    // carries a name and an alpha figure, and this card's whole job is one
+    // player — their structs, their planet, their fleet and their power.
     render: function (host, p) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a player id.')); return; }
-      return invoke('mcp_player_search', { query: p.id }).then(function (res) {
+      return invoke('mcp_player_detail', { player: p.id }).catch(function () {
+        return invoke('mcp_player_search', { query: p.id }).then(function (res) {
+          var rows = (res && res.results) || [];
+          return rows.filter(function (x) { return x.player_id === p.id; })[0] || rows[0] || null;
+        });
+      }).then(function (r) {
         host.innerHTML = '';
-        var rows = (res && res.results) || [];
-        var r = rows.filter(function (x) { return x.player_id === p.id; })[0] || rows[0];
         if (!r) { host.appendChild(H.stateBlock('info', 'No player ' + p.id)); return; }
         var attrs = r.pfp_attrs || r.pfp;
         if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
-        host.appendChild(window.StructsPlayerCard.card({
-          id: r.player_id, name: r.username || r.player_id, pfp: attrs,
-          presence: Board.presenceDot && Board.presenceDot(r.player_id),
+        var id = r.player_id || p.id;
+        var reads = [];
+        if (r.alpha != null) reads.push({ value: H.fmtAlpha(r.alpha), icon: 'sui-icon-alpha-matter', title: 'Alpha' });
+        if (r.ore != null) reads.push({ value: H.fmtOre(r.ore), icon: 'sui-icon-alpha-ore', title: 'Ore' });
+        if (r.structs_load != null || r.load_mw != null) reads.push({ value: H.fmtWatts(r.load_mw != null ? r.load_mw : r.structs_load), icon: 'sui-icon-energy', title: 'Load' });
+        if (r.structs != null) reads.push({ value: H.fmtInt(Array.isArray(r.structs) ? r.structs.length : r.structs), icon: 'sui-icon-deployed-structs', title: 'Structs' });
+        var chips = [];
+        if (r.planet_id) chips.push(window.StructsCards.planet.chip({ id: r.planet_id }, { onClick: function () { add('planet', { id: r.planet_id }); } }));
+        if (r.fleet_id) chips.push(window.StructsCards.fleet.chip({ id: r.fleet_id }, { onClick: function () { add('map', { id: r.fleet_id }); } }));
+        var card = window.StructsPlayerCard.card({
+          id: id, name: r.username || r.name || id, pfp: attrs,
+          presence: Board.presenceDot && Board.presenceDot(id),
           guild: ((r.tag ? '[' + r.tag + '] ' : '') + (r.guild_name || r.guild_id || '')).trim() || null,
-          charge: r.charge,
-          readings: r.alpha != null ? [{ value: H.fmtAlpha(r.alpha), icon: 'sui-icon-alpha-matter', title: 'Alpha' }] : [],
-        }, { actions: (Board.watchActions ? Board.watchActions(r) : []).concat(Board.reachActions ? Board.reachActions(r) : []) }));
+          charge: r.charge, readings: reads,
+        }, { actions: (Board.watchActions ? Board.watchActions(r) : []).concat(Board.reachActions ? Board.reachActions(r) : []) });
+        host.appendChild(card);
+        if (chips.length) {
+          var line = H.el('div', 'sc-chips tm-player-chips');
+          chips.forEach(function (c) { line.appendChild(c); });
+          host.appendChild(line);
+        }
+        host.appendChild(doorRow([
+          { label: 'Wallet', onClick: function () { add('wallet', { id: id }); } },
+          { label: 'Tearsheet', onClick: function () { add('sheet', { id: id }); } },
+        ]));
       });
     },
   });
@@ -1217,22 +1264,38 @@
   Terminal.register('guild', {
     label: 'Watch a guild', describe: function (p) { return 'Guild ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Guild id', kind: 'id', placeholder: '0-1' }],
-    cadenceMs: 60000,
+    cadenceMs: 60000, usesRefs: true,
+    // The chain's own record first (`matrix_refs`, the same read Comms uses):
+    // a guild absent from the leaderboard used to render nothing at all.
     render: function (host, p) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a guild id.')); return; }
+      var R = ensureRefs();
+      var ref = R && R.cards[p.id];
+      if (R && ref === undefined) R.wantRefs([p.id]);
       var G = Board._gamestats;
       return G.ensureBoot().then(function () {
         host.innerHTML = '';
         var g = ((G.state.snap && G.state.snap.guilds) || []).filter(function (x) { return x.guild_id === p.id; })[0];
-        if (!g) { host.appendChild(H.stateBlock('info', 'No guild ' + p.id + ' in the stats table yet.')); return; }
+        var st = (ref && ref.stats) || {};
+        if (!g && !ref) { host.appendChild(H.stateBlock('info', 'Looking up ' + p.id + '…')); return; }
+        var reads = [];
+        var push = function (v, icon, title) { if (v != null && v !== '') reads.push({ value: v, icon: icon, title: title }); };
+        push(g ? H.fmtInt(g.players) : st.members_text, 'sui-icon-players', 'Members');
+        push(g ? H.fmtAlpha(g.alpha) : st.alpha_text, 'sui-icon-alpha-matter', 'Alpha');
+        push(g ? H.fmtWatts(g.structs_load) : st.capacity_text, 'sui-icon-energy', 'Structs load');
+        push(g ? H.fmtInt(g.planets) : st.planets_text, 'sui-icon-md icon-planet', 'Planets');
         host.appendChild(window.StructsGuildCard.card({
-          id: g.guild_id, name: g.name || null, tag: g.tag || null, logo: g.logo || null,
-          readings: [
-            { value: H.fmtInt(g.players), icon: 'sui-icon-players', title: 'Members' },
-            { value: H.fmtAlpha(g.alpha), icon: 'sui-icon-alpha-matter', title: 'Alpha' },
-            { value: H.fmtWatts(g.structs_load), icon: 'sui-icon-energy', title: 'Structs load' },
-          ],
+          id: p.id,
+          name: (ref && ref.title) || (g && g.name) || null,
+          tag: (ref && ref.tag) || (g && g.tag) || null,
+          logo: (ref && ref.logo) || (g && g.logo) || null,
+          readings: reads,
+          owner: ref && ref.owner && ref.owner.id ? { id: ref.owner.id, name: ref.owner.name, tag: ref.owner.tag, pfp: ref.owner.pfp_attrs } : null,
         }, {}));
+        host.appendChild(doorRow([
+          { label: 'Guild token', onClick: function () { add('gt', { id: p.id }); } },
+          { label: 'Tearsheet', onClick: function () { add('sheet', { id: p.id }); } },
+        ]));
       });
     },
   });
@@ -1260,10 +1323,23 @@
     describe: function () { return 'Watchlist'; },
     params: [{ key: 'ids', label: 'Ids, space-separated', kind: 'text', placeholder: '1-194 0-1 2-15361 10-1' }],
     cadenceMs: 120000,
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       host.innerHTML = '';
       var ids = String(p.ids || '').split(/[\s,]+/).filter(function (s) { return /^\d{1,2}-\d{1,9}$/.test(s); });
-      if (!ids.length) { host.appendChild(H.stateBlock('info', 'Configure this card with the ids to watch.')); return; }
+      if (!ids.length) {
+        host.appendChild(H.stateBlock('info', 'Configure this card with the ids to watch.'));
+        // The commonest watchlist is your own things, and typing them out is
+        // the only reason not to have one.
+        host.appendChild(doorRow([{ label: 'Watch my own', primary: true, onClick: function () {
+          invoke('mcp_roster').then(function (snap) {
+            var me = ((snap && snap.rows) || []).filter(function (r) { return r.role === 'primary'; })[0] || ((snap && snap.rows) || [])[0];
+            var mine = [me && me.player_id, me && me.planet_id, me && me.fleet_id, me && me.guild_id].filter(Boolean);
+            if (!mine.length) { Board.stamp && Board.stamp('no roster yet'); return; }
+            setParams(ctx.id, { ids: mine.join(' ') });
+          }).catch(function (e) { Board.stamp && Board.stamp('roster: ' + e); });
+        } }]));
+        return;
+      }
       var R = ensureRefs();
       if (!R) { host.appendChild(H.stateBlock('error', 'Reference cards not loaded.')); return; }
       var missing = ids.filter(function (id) { return !R.cards[id]; });
@@ -1310,11 +1386,18 @@
             if (c.title) s.title = c.title;
             return s;
           }));
+          // The first id the frame names is what the line is ABOUT; a tape
+          // you cannot follow is a tape you only watch.
+          var idm = /(?:^|[^0-9A-Za-z_-])(\d{1,2}-\d{1,9})(?![0-9-])/.exec(g.subject + ' ' + g.chips.map(function (c) { return c.text; }).join(' '));
+          var subject = idm ? idm[1] : null;
           li.appendChild(window.StructsCards.tape.row({
             time: g.time, kind: g.category, tone: tone(g.category), parts: parts,
             block: g.block != null ? H.fmtInt(g.block) : null, fresh: ev === tape.fresh,
             title: g.subject + (g.chips.length ? ' · ' + g.chips.map(function (c) { return c.label + ' ' + c.text; }).join(' · ') : ''),
-          }));
+          }, subject ? { onClick: function () {
+            var kind = Number(String(subject).split('-')[0]);
+            add(kind === 1 ? 'player' : kind === 0 ? 'guild' : kind === 2 ? 'planet' : 'inspector', { id: subject });
+          } } : {}));
           ul.appendChild(li);
         });
         host.appendChild(ul);
@@ -1388,6 +1471,7 @@
         host.appendChild(cap);
         if (!players.length) { host.appendChild(H.stateBlock('info', 'No roster power readings yet.')); return; }
         var table = H.resultTable();
+        if (players.length > 20) cap.appendChild(H.el('span', 'fstat-l', ' · showing 20'));
         players.slice(0, 20).forEach(function (r) {
           var margin = Number(r.margin_pct);
           table.appendChild(window.StructsPlayerCard.row({
@@ -1397,7 +1481,9 @@
               { value: H.fmtWatts(r.load_mw) + ' / ' + H.fmtWatts(r.capacity_mw), icon: 'sui-icon-energy', title: 'Load / capacity' },
               { value: (isFinite(margin) ? margin.toFixed(0) : '—') + '%', icon: 'icon-alert', title: 'Margin' },
             ],
-          }, { actions: (Board.watchActions ? Board.watchActions(r) : []) }));
+          }, { actions: (Board.watchActions ? Board.watchActions(r) : []).concat([
+              { icon: 'sui-icon-energy', title: 'Route power to fix this', onClick: function () { add('allocations', {}); } },
+            ]) }));
         });
         host.appendChild(table);
       });
@@ -1408,27 +1494,38 @@
   // read), richest first. Ore is what a raid takes and what a refinery
   // turns into Alpha, so the holder matters and the planet does not.
   Terminal.register('ore', {
-    label: 'Ore holders', defaultWidth: 2, describe: function () { return 'Ore holders'; }, cadenceMs: 60000,
-    render: function (host) {
-      return invoke('mcp_game_stats_snapshot').then(function (r) {
+    label: 'Ore holders', defaultWidth: 2,
+    describe: function (p) { return 'Ore holders' + (p.limit ? ' · top ' + p.limit : ''); },
+    params: [{ key: 'limit', label: 'How many', kind: 'choice', options: [{ value: '30', label: 'top 30' }, { value: '60', label: 'top 60' }, { value: '120', label: 'top 120' }] }],
+    cadenceMs: 60000,
+    // `terminal_ore_radar` is the query built for this question: it reads the
+    // perception snapshot by PLANET, so every row carries the planet the ore
+    // is actually sitting on — which is what a raider needs and what the
+    // leaderboard could not say.
+    render: function (host, p) {
+      var limit = Math.max(1, Number(p.limit) || 30);
+      return invoke('terminal_ore_radar', { limit: limit }).then(function (r) {
         host.innerHTML = '';
-        var rows = ((r && r.players_top) || {}).ore || [];
-        var t = (r && r.totals) || {};
+        var rows = (r && r.planets) || [];
         var cap = H.el('div', 'tm-cap');
-        cap.appendChild(H.el('span', 'fstat-l', rows.length + ' holders shown' + (t.ore != null ? ' · ' + H.fmtOre(t.ore) + ' in the galaxy' : '')));
+        cap.appendChild(H.el('span', 'fstat-l', rows.length + ' planet' + (rows.length === 1 ? '' : 's') + ' holding ore'
+          + (r && r.planets_with_ore ? ' · ' + H.fmtInt(r.planets_with_ore) + ' in the galaxy' : '')));
         host.appendChild(cap);
         if (!rows.length) { host.appendChild(H.stateBlock('info', 'No ore readings yet.')); return; }
         var table = H.resultTable();
-        rows.slice(0, 30).forEach(function (p) {
-          var attrs = p.pfp_attrs; if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
-          table.appendChild(window.StructsPlayerCard.row({
-            id: p.player_id, name: p.username || p.player_id, pfp: attrs, sub: '#' + p.rank,
-            guild: ((p.tag ? '[' + p.tag + '] ' : '') + (p.guild_name || '')).trim() || null,
-            readings: [{ value: H.fmtOre(p.value), icon: 'sui-icon-alpha-ore', title: 'Ore held' }],
-          }, { actions: [
-            { icon: 'icon-member', title: 'Watch this player', onClick: function () { add('player', { id: p.player_id }); } },
-            { icon: 'icon-planet', title: p.planet_id ? 'Open planet ' + p.planet_id : 'No planet known', onClick: function () { if (p.planet_id) add('planet', { id: p.planet_id }); } },
-          ] }));
+        rows.forEach(function (o, i) {
+          var attrs = o.owner_pfp; if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
+          table.appendChild(window.StructsCards.planet.row({
+            id: o.planet_id, name: 'Planet ' + o.planet_id, shield: H.fmtInt(o.shield || 0), ore: H.fmtOre(o.ore || 0),
+            owner: o.owner ? { id: o.owner, name: o.owner_name, tag: o.owner_tag, pfp: attrs } : null,
+            sub: '#' + (i + 1),
+          }, {
+            onClick: function () { add('planet', { id: o.planet_id }); },
+            doors: [
+              { icon: 'icon-member', title: o.owner ? 'Watch ' + o.owner : 'No owner known', onClick: function () { if (o.owner) add('player', { id: o.owner }); } },
+              { icon: 'icon-raid', title: 'Target board', onClick: function () { add('targets', {}); } },
+            ],
+          }));
         });
         host.appendChild(table);
       });
@@ -1496,11 +1593,14 @@
   }
   Terminal.parseRules = parseRules;
   var alertsFired = {};
+  // Muted rules, by their text, until a wall-clock ms. A mute is a judgement
+  // about right now, so it is deliberately not saved with the layout.
+  var alertsMuted = {};
   Terminal.register('alerts', {
     label: 'Alerts', describe: function () { return 'Alerts'; },
     params: [{ key: 'rules', label: 'Rules, one per line', kind: 'text', placeholder: 'market.best_rate < 2; raids.live > 0' }],
     cadenceMs: 30000,
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       var rules = parseRules(p.rules);
       host.innerHTML = '';
       if (!rules.length) { host.appendChild(H.stateBlock('info', 'Configure this card with rules: ' + Object.keys(READINGS).join(' · '))); return; }
@@ -1517,9 +1617,26 @@
       })).then(function (results) {
         var VALUE_ICON = { 'market.best_rate': 'sui-icon-md icon-transfers', 'halt.min_margin': 'sui-icon-energy', 'raids.live': 'sui-icon-md icon-raid', 'people.live_1h': 'sui-icon-players', 'ore.top': 'sui-icon-alpha-ore', 'book.first_expiry': 'sui-icon-md icon-in-progress' };
         results.forEach(function (res) {
+          // A rule you cannot quiet is a rule you learn to ignore, and one you
+          // cannot delete from its own row is one you edit by retyping them all.
+          var until = alertsMuted[res.rule.text] || 0;
+          var muted = until > Date.now();
+          if (muted) res.state = 'quiet';
           var row = window.StructsCards.alert.row({
             text: res.rule.text, state: res.state, value: res.value != null ? res.value : null, valueIcon: VALUE_ICON[res.rule.metric] || null,
-            firedAgo: res.state === 'fired' && alertsFired[res.rule.text] ? H.ago(alertsFired[res.rule.text]) : null,
+            firedAgo: muted ? 'muted ' + window.StructsUnits.fmtDuration(Math.round((until - Date.now()) / 1000)) : (res.state === 'fired' && alertsFired[res.rule.text] ? H.ago(alertsFired[res.rule.text]) : null),
+          }, {
+            doors: [
+              { icon: muted ? 'icon-okay' : 'icon-blocked', title: muted ? 'Unmute this rule' : 'Mute for an hour', on: muted, onClick: function () {
+                if (muted) delete alertsMuted[res.rule.text]; else alertsMuted[res.rule.text] = Date.now() + 3600000;
+                refresh(ctx.id, true);
+              } },
+              { icon: 'icon-subtract', title: 'Remove this rule', destructive: true, onClick: function () {
+                var keep = String(p.rules || '').split(/[\n;]+/).map(function (x) { return x.trim(); })
+                  .filter(function (x) { return x && x !== res.rule.text; });
+                setParams(ctx.id, Object.assign({}, p, { rules: keep.join('\n') }));
+              } },
+            ],
           });
           row.classList.add('tm-alert', 'tm-alert-' + res.state);
           table.appendChild(row);
@@ -1537,11 +1654,17 @@
 
   // Guild banks: every token's ratio, collateral and supply — the screener.
   Terminal.register('banks', {
-    label: 'Guild banks', defaultWidth: 2, describe: function () { return 'Guild banks'; }, cadenceMs: 60000,
-    render: function (host) {
+    label: 'Guild banks', defaultWidth: 2,
+    describe: function (p) { return 'Guild banks' + (p.sort ? ' · ' + p.sort : ''); },
+    params: [{ key: 'sort', label: 'Order', kind: 'choice', options: [
+      { value: 'ratio', label: 'by ratio' }, { value: 'collateral', label: 'by collateral' }, { value: 'supply', label: 'by supply' },
+    ] }],
+    cadenceMs: 60000,
+    render: function (host, p) {
       return invoke('terminal_guild_banks').then(function (r) {
         host.innerHTML = '';
-        var banks = ((r && r.banks) || []).slice().sort(function (a, b) { return (b.ratio || 0) - (a.ratio || 0); });
+        var key = p.sort || 'ratio';
+        var banks = ((r && r.banks) || []).slice().sort(function (a, b) { return (Number(b[key]) || 0) - (Number(a[key]) || 0); });
         var cap = H.el('div', 'tm-cap');
         cap.appendChild(H.el('span', 'fstat-l', banks.length + ' guild tokens · ratio = collateral / supply'));
         host.appendChild(cap);
@@ -1605,6 +1728,11 @@
           }));
           host.appendChild(sl);
         }
+        // The card describes a token you can trade; the ticket is next door.
+        host.appendChild(doorRow([
+          { label: 'Mint or redeem', primary: true, onClick: function () { add('bank', {}); } },
+          { label: 'All banks', onClick: function () { add('banks', {}); } },
+        ]));
       });
     },
   });
@@ -1667,15 +1795,27 @@
   });
 
   // Tearsheet: everything the app knows about one player or guild.
-  function kvRows(obj, table) {
-    if (!obj || typeof obj !== 'object') return;
-    if (Array.isArray(obj)) { obj.slice(0, 12).forEach(function (row, i) { kvRows(row, table); if (i < obj.length - 1) table.appendChild(H.el('div', 'tm-kv-gap')); }); return; }
-    if (obj.unavailable) { table.appendChild(H.stateBlock('info', 'unavailable: ' + obj.unavailable)); return; }
-    Object.keys(obj).forEach(function (k) {
-      var v = obj[k];
-      if (v == null || typeof v === 'object') return;
-      table.appendChild(H.row ? H.row(k.replace(/_/g, ' '), String(v)) : H.el('div', null, k + ': ' + v));
-    });
+  // One tearsheet section as a STRIP of tiles. It was four tables of
+  // key-value pairs — a data dump on a card whose whole job is to be scanned.
+  function sheetSection(label, v) {
+    if (!v || typeof v !== 'object') return null;
+    var box = H.el('div', 'gs-line');
+    var cap = H.el('div', 'gs-cap'); cap.appendChild(H.el('span', 'fstat-l', label)); box.appendChild(cap);
+    if (v.unavailable) { box.appendChild(H.stateBlock('info', 'unavailable: ' + v.unavailable)); return box; }
+    var pairs = [];
+    var walk = function (o) {
+      Object.keys(o).forEach(function (k) {
+        var x = o[k];
+        if (x == null || typeof x === 'object' || x === '') return;
+        pairs.push([k.replace(/_/g, ' '), String(x)]);
+      });
+    };
+    if (Array.isArray(v)) v.slice(0, 4).forEach(walk); else walk(v);
+    if (!pairs.length) return null;
+    var strip = H.el('div', 'hstrip gs-strip');
+    pairs.slice(0, 8).forEach(function (kv) { strip.appendChild(H.statTile(kv[0], kv[1])); });
+    box.appendChild(strip);
+    return box;
   }
   Terminal.register('sheet', {
     label: 'Tearsheet', defaultWidth: 2, describe: function (p) { return 'Tearsheet · ' + (p.id || '?'); },
@@ -1704,10 +1844,8 @@
           strip.appendChild(H.statTile(['Fleet', 'id'], String(st.fleet_id || '—')));
           host.appendChild(strip);
           [['ore', 'Ore'], ['planets', 'Planets completed'], ['raids', 'Raids launched'], ['ledger', 'Ledger']].forEach(function (sec) {
-            var box = H.el('div', 'gs-line');
-            var cap = H.el('div', 'gs-cap'); cap.appendChild(H.el('span', 'fstat-l', sec[1])); box.appendChild(cap);
-            var table = H.el('div', 'tm-kv'); kvRows(t[sec[0]], table); box.appendChild(table);
-            host.appendChild(box);
+            var box = sheetSection(sec[1], t[sec[0]]);
+            if (box) host.appendChild(box);
           });
         } else {
           var g = t.board || {};
@@ -1720,10 +1858,8 @@
             ],
           }, {}));
           [['guild', 'Guild'], ['power', 'Power'], ['planets', 'Planets']].forEach(function (sec) {
-            var box = H.el('div', 'gs-line');
-            var cap = H.el('div', 'gs-cap'); cap.appendChild(H.el('span', 'fstat-l', sec[1])); box.appendChild(cap);
-            var table = H.el('div', 'tm-kv'); kvRows(t[sec[0]], table); box.appendChild(table);
-            host.appendChild(box);
+            var box = sheetSection(sec[1], t[sec[0]]);
+            if (box) host.appendChild(box);
           });
         }
       });
@@ -1733,41 +1869,40 @@
   // The battle log: every recorded row for one planet, as the raid view
   // draws it (raidview-log.js — kinds, day groups, the filter strip). It
   // owns fixed DOM ids, so one per window.
+  // The battle log and an object's Comms are the raid view's own rails, shown
+  // one at a time (`only=`). Embedding rather than re-hosting is what lets two
+  // of them coexist: each rail owns fixed element ids, so two in one document
+  // would fight over them — two documents cannot.
   Terminal.register('log', {
-    label: 'Battle log', single: true, defaultWidth: 2,
+    label: 'Battle log', defaultWidth: 2, cadenceMs: 0,
     describe: function (p) { return 'Battle log · ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Planet id', kind: 'id', placeholder: '2-15361' }],
-    cadenceMs: 30000,
+    doors: function (card) {
+      var id = (card.params || {}).id;
+      return id ? [{ icon: 'icon-planet', title: 'Open the planet', onClick: function () { add('planet', { id: id }); } }] : [];
+    },
     render: function (host, p, ctx) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet id.')); return; }
-      if (!window.RaidLog) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', 'Battle log not loaded.')); return; }
-      var m = state.mounted[ctx.id];
-      if (!m.log || m.log.planet !== p.id) {
-        host.innerHTML = '';
-        var cap = H.el('div', 'tm-cap');
-        cap.appendChild(H.el('span', 'fstat-l', 'planet ' + p.id));
-        var count = H.el('span', 'fstat-l'); count.id = 'rv-log-count';
-        cap.appendChild(count);
-        host.appendChild(cap);
-        var filters = H.el('div', 'tm-log-filters'); filters.id = 'rv-log-filters';
-        host.appendChild(filters);
-        var body = H.el('div', 'tm-log'); body.id = 'rv-log-body';
-        host.appendChild(body);
-        var lg = window.RaidLog({
-          el: H.el,
-          humanStatus: function (s) { return String(s).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase(); },
-          state: function () { return { snapshot: { planet_id: p.id }, generation: 1 }; },
-        });
-        lg.logState.open = true;
-        m.log = { planet: p.id, lg: lg };
-      }
-      return m.log.lg.refreshLog();
+      return mapFrame(host, ctx, p.id, 'log');
     },
+    unmount: mapUnmount,
   });
 
   // Whole windows, framed: the spectator map, the Comms window, the Pay window.
   // `embed=1`: the page drops its own nav bar (the card frame is the header)
   // and takes navigation from the frame's doors, by message.
+  // A row of labelled doors under a card's body (the ops module has its own).
+  function doorRow(items) {
+    var row = H.el('div', 'tm-doors-row');
+    items.forEach(function (it) {
+      var a = H.el('a', 'sui-screen-btn ' + (it.primary ? 'sui-mod-primary' : 'sui-mod-secondary'), it.label);
+      a.href = 'javascript:void(0)';
+      a.addEventListener('click', function () { it.onClick(a); });
+      row.appendChild(a);
+    });
+    return row;
+  }
+
   function framed(url, title, cardId) {
     var f = document.createElement('iframe');
     f.className = 'tm-frame';
@@ -1775,6 +1910,39 @@
     f.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'embed=1&card=' + encodeURIComponent(cardId || '');
     return f;
   }
+  // ── The live map, as a card ──────────────────────────────────────────
+  // The spectator view (raidview.html) drawn inside a card: the game's own
+  // map with its HUD over it, animating every shot as it lands. The feed is
+  // pushed by the same watcher that drives a raid window, addressed to
+  // `board:<card>` so two cards on two planets never cross-deliver, and
+  // stopped when the card goes.
+  function mapLabel(cardId) { return 'board:' + String(cardId).replace(/[^A-Za-z0-9_-]/g, '-'); }
+  function mapArgs(id) {
+    return String(id).indexOf('9-') === 0 ? { fleetId: id } : { planetId: id };
+  }
+  function mapFrame(host, ctx, id, only) {
+    var m = state.mounted[ctx.id];
+    var key = id + (only ? '#' + only : '');
+    // Rebuild only when the target changes: a reload would restart the map.
+    if (m && m.map === key) return Promise.resolve();
+    if (m && m.map) invoke('mcp_raid_view_unwatch', Object.assign({ label: mapLabel(ctx.id) }, mapArgs(String(m.map).split('#')[0]))).catch(function () {});
+    host.innerHTML = '';
+    var label = mapLabel(ctx.id);
+    var kind = String(id).indexOf('9-') === 0 ? 'fleet' : 'planet';
+    var f = framed('raidview.html?' + kind + '=' + encodeURIComponent(id) + '&label=' + encodeURIComponent(label) + (only ? '&only=' + only : ''), (only || 'map') + ' of ' + kind + ' ' + id, ctx.id);
+    f.classList.add('tm-frame-map');
+    if (only) f.classList.add('tm-frame-rail');
+    host.appendChild(f);
+    if (m) m.map = key;
+    return invoke('mcp_raid_view_watch', Object.assign({ label: label }, mapArgs(id))).catch(function (e) {
+      Board.stamp && Board.stamp('map feed: ' + e);
+    });
+  }
+  function mapUnmount(host, p, ctx) {
+    if (!p || !p.id || !ctx || !ctx.id) return;
+    invoke('mcp_raid_view_unwatch', Object.assign({ label: mapLabel(ctx.id) }, mapArgs(p.id))).catch(function () {});
+  }
+
   // The embedded page's own bar carries pop-out and close; it asks the card
   // by message, naming the card it was given. Same origin only.
   //
@@ -1840,90 +2008,28 @@
   // happening to it, and every slot by ambit — the spectator snapshot the raid
   // view draws from, laid out to be read in a column. The doors open the
   // map, the battle log and the object's Comms for the same planet.
-  var AMBITS = ['space', 'air', 'land', 'water'];
+  // A planet as a card: the LIVE MAP. Everything the old hand-drawn version
+  // approximated — owner, shield, ore, fleets, every slot by ambit — the map
+  // and its HUD show already, and show it moving. What the map has no room
+  // for are the doors to its neighbours, which stay on the card's header.
   Terminal.register('planet', {
-    label: 'Planet view', defaultWidth: 1,
+    label: 'Planet view', defaultWidth: 2, cadenceMs: 0,
     describe: function (p) { return 'Planet ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Planet id', kind: 'id', placeholder: '2-15361' }],
-    cadenceMs: 30000,
-    render: function (host, p) {
-      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet id.')); return; }
-      return invoke('mcp_raid_state', { planetId: p.id }).then(function (r) {
-        var snap = r && r.snapshot;
-        host.innerHTML = '';
-        if (!snap) { host.appendChild(H.stateBlock('error', 'No snapshot for ' + p.id + '.')); return; }
-        var parts = window.StructsPlayerCard && StructsPlayerCard.parts;
-        var owner = parts && parts.personLine({ id: snap.owner, name: snap.owner_name, pfp: snap.owner_pfp }, { cls: 'tm-planet-owner' });
-        var cap = H.el('div', 'tm-cap');
-        if (owner) cap.appendChild(owner); else cap.appendChild(H.el('span', 'fstat-l', snap.owner ? 'owner ' + snap.owner : 'unclaimed'));
-        cap.appendChild(H.el('span', 'fstat-l', 'planet ' + snap.planet_id));
-        host.appendChild(cap);
-        var strip = H.el('div', 'hstrip tm-planet-strip');
-        strip.appendChild(H.statTile('shield', H.fmtInt(snap.planetary_shield || 0), 'icon-planetary-shield'));
-        strip.appendChild(H.statTile('ore', snap.stored_ore == null ? '\u2014' : H.fmtOre(snap.stored_ore), 'icon-ore-ready'));
-        strip.appendChild(H.statTile('fleets', H.fmtInt((snap.fleets || []).length), 'icon-fleet-tile'));
-        host.appendChild(strip);
-        if (snap.raid_status) {
-          var who = snap.raider_name || snap.raider_id || snap.raiding_fleet || 'unknown';
-          host.appendChild(H.alertLine(String(snap.raid_status).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase() + ' \u00b7 ' + who, 'icon-raid'));
-        }
-        var structs = snap.structs || [];
-        var slots = snap.slots || {};
-        var art = Board._structArt;
-        AMBITS.forEach(function (ambit) {
-          var n = Number(slots[ambit] || 0);
-          var here = structs.filter(function (x) { return x.ambit === ambit && x.category === 'planet' && !x.destroyed; });
-          if (!n && !here.length) return;
-          var row = H.el('div', 'tm-planet-row');
-          var chip = H.el('span', 'prof-ambit');
-          chip.appendChild(H.el('i', 'sui-icon sui-icon-sm sui-icon-' + ambit));
-          chip.appendChild(H.el('span', 'fstat-l', ambit));
-          row.appendChild(chip);
-          var tiles = H.el('div', 'tm-planet-slots');
-          for (var i = 0; i < Math.max(n, here.length); i++) {
-            var st = here.find(function (x) { return x.slot === i; }) || (i < here.length && !here.some(function (x) { return typeof x.slot === 'number'; }) ? here[i] : null);
-            var tile = H.el('div', 'tm-planet-slot' + (st ? (st.online ? '' : ' tm-off') : ' tm-empty'));
-            if (st) {
-              tile.appendChild(art ? art.portrait(st.type_name) : H.el('span', 'fstat-l', st.type_name));
-              tile.appendChild(H.el('span', 'fstat-l', st.type_name));
-              if (st.health != null) tile.appendChild(H.el('span', 'fstat-l', st.health + '/' + (st.max_health || '?')));
-              tile.title = st.type_name + ' ' + st.id + (st.defending ? ' · defending ' + st.protects : '') + (st.defended ? ' · defended' : '');
-            } else {
-              tile.appendChild(H.el('span', 'fstat-l', 'open'));
-              tile.title = ambit + ' slot ' + (i + 1) + ' is open';
-            }
-            tiles.appendChild(tile);
-          }
-          row.appendChild(tiles);
-          host.appendChild(row);
-        });
-        var fleet = structs.filter(function (x) { return x.category === 'fleet' && !x.destroyed; });
-        if (fleet.length) {
-          var frow = H.el('div', 'tm-planet-row');
-          var fchip = H.el('span', 'prof-ambit'); fchip.appendChild(H.el('i', H.iconClass('icon-fleet-tile', 'sui-icon-sm'))); fchip.appendChild(H.el('span', 'fstat-l', 'fleet'));
-          frow.appendChild(fchip);
-          var ftiles = H.el('div', 'tm-planet-slots');
-          fleet.forEach(function (st) {
-            var tile = H.el('div', 'tm-planet-slot' + (st.online ? '' : ' tm-off') + (st.side === 'attacker' ? ' tm-enemy' : ''));
-            tile.appendChild(art ? art.portrait(st.type_name) : H.el('span', 'fstat-l', st.type_name));
-            tile.appendChild(H.el('span', 'fstat-l', st.type_name));
-            if (st.health != null) tile.appendChild(H.el('span', 'fstat-l', st.health + '/' + (st.max_health || '?')));
-            tile.title = st.type_name + ' ' + st.id + ' · ' + st.ambit + (st.is_command ? ' · command' : '');
-            ftiles.appendChild(tile);
-          });
-          frow.appendChild(ftiles);
-          host.appendChild(frow);
-        }
-        var doors = H.el('div', 'tm-planet-doors');
-        [['Map', 'map'], ['Battle log', 'log'], ['Comms', 'comms']].forEach(function (d) {
-          var a = H.el('a', 'sui-screen-btn sui-mod-secondary', d[0]);
-          a.href = 'javascript:void(0)';
-          a.addEventListener('click', function () { add(d[1], { id: p.id }); });
-          doors.appendChild(a);
-        });
-        host.appendChild(doors);
-      });
+    doors: function (card) {
+      var id = (card.params || {}).id;
+      if (!id) return [];
+      return [
+        { icon: 'icon-combat-log', title: 'Battle log', onClick: function () { add('log', { id: id }); } },
+        { icon: 'icon-phone', title: 'Comms about this planet', onClick: function () { add('comms', { id: id }); } },
+        { icon: 'icon-raid', title: 'Watch in its own window', onClick: function () { invoke('mcp_raid_view_open', { planetId: id }).catch(function (e) { Board.stamp && Board.stamp('raid view: ' + e); }); } },
+      ];
     },
+    render: function (host, p, ctx) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet id.')); return; }
+      return mapFrame(host, ctx, p.id);
+    },
+    unmount: mapUnmount,
   });
 
   Terminal.register('map', {
@@ -1931,12 +2037,11 @@
     describe: function (p) { return 'Map · ' + (String(p.id || '').indexOf('9-') === 0 ? 'fleet ' : 'planet ') + (p.id || '?'); },
     params: [{ key: 'id', label: 'Planet or fleet id', kind: 'id', placeholder: '2-15361' }],
     cadenceMs: 0,
-    render: function (host, p) {
-      host.innerHTML = '';
-      if (!p.id) { host.appendChild(H.stateBlock('info', 'Configure this card with a planet (2-…) or fleet (9-…) id.')); return; }
-      var kind = String(p.id).indexOf('9-') === 0 ? 'fleet' : 'planet';
-      host.appendChild(framed('raidview.html?' + kind + '=' + encodeURIComponent(p.id), 'Map of ' + kind + ' ' + p.id));
+    render: function (host, p, ctx) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet (2-…) or fleet (9-…) id.')); return; }
+      return mapFrame(host, ctx, p.id);
     },
+    unmount: mapUnmount,
   });
   // Whole pages as cards keep their OWN bar as the header (frameless): the
   // frame draws none, and the page's bar carries pop-out and close.
@@ -1952,44 +2057,18 @@
   // Comms about one object: the raid view's own rail, which IS the object's
   // room. It owns fixed DOM ids, so one per window.
   Terminal.register('comms', {
-    label: 'Comms about an object', single: true,
+    label: 'Comms about an object', cadenceMs: 0,
     describe: function (p) { return 'Comms · ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Planet or fleet id', kind: 'id', placeholder: '2-15361' }],
-    cadenceMs: 0,
-    render: function (host, p) {
-      host.innerHTML = '';
-      if (!p.id) { host.appendChild(H.stateBlock('info', 'Configure this card with a planet or fleet id.')); return; }
-      if (!window.RaidComms) { host.appendChild(H.stateBlock('error', 'Comms rail not loaded.')); return; }
-      var kind = String(p.id).indexOf('9-') === 0 ? 'fleet' : 'planet';
-      var target = { kind: kind, id: p.id };
-      var head = H.el('div', 'tm-cap'); head.id = 'rv-chat-head';
-      head.appendChild(H.el('span', 'rv-chat-title fstat-l'));
-      var count = H.el('span', 'rv-chat-count fstat-l'); count.id = 'rv-chat-count';
-      head.appendChild(count);
-      host.appendChild(head);
-      var body = H.el('div', 'tm-comms-body'); body.id = 'rv-chat-body';
-      host.appendChild(body);
-      var compose = H.el('div', 'rv-chat-compose'); compose.id = 'rv-chat-compose';
-      var entry = H.el('div', 'rv-chat-entry'); entry.id = 'rv-chat-entry';
-      compose.appendChild(entry);
-      var err = H.el('div', 'rv-chat-error sui-text-hint'); err.id = 'rv-chat-error';
-      compose.appendChild(err);
-      host.appendChild(compose);
-      var comms = window.RaidComms({
-        el: H.el, target: function () { return target; },
-        paintPfp: function (h, attrs) { if (h && window.StructsPfp) window.StructsPfp.fillPortrait(h, attrs); },
-        paintBattery: function (bat, charge) {
-          if (!bat) return;
-          var level = window.StructsPlayerCard.chargeLevel(charge);
-          for (var i = 0; i < bat.children.length; i++) bat.children[i].classList.toggle('sui-mod-filled', i + 1 <= level);
-        },
-        whoLine: function (n, i, u) { return n ? n + ' (' + (i || '?') + ')' : (i || u || 'unknown'); },
-        fmtNum: function (n) { return String(Math.round(Number(n) || 0)); },
-      });
-      comms.wireChat();
-      comms.wireComposer();
-      comms.renderChat();
+    doors: function (card) {
+      var id = (card.params || {}).id;
+      return id ? [{ icon: 'icon-planet', title: 'Open the object', onClick: function () { add(String(id).indexOf('9-') === 0 ? 'map' : 'planet', { id: id }); } }] : [];
     },
+    render: function (host, p, ctx) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet or fleet id.')); return; }
+      return mapFrame(host, ctx, p.id, 'comms');
+    },
+    unmount: mapUnmount,
   });
 
   // ── Boot ────────────────────────────────────────────────────────────────

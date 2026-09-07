@@ -286,6 +286,13 @@
     return out;
   })();
 
+  // `embed=1`: this view is inside a Terminal card. The card owns the frame,
+  // and the log and Comms rails are cards of their own — see raidview.html.
+  if (params.embed === '1') document.documentElement.setAttribute('data-embed', '');
+  // One rail only: the Terminal's `log` and `comms` cards are this page
+  // showing a single rail, which is also what lets two of them coexist.
+  if (params.only === 'log' || params.only === 'comms') document.documentElement.setAttribute('data-only', params.only);
+
   var TARGET = params.planet
     ? { kind: 'planet', id: params.planet }
     : (params.fleet ? { kind: 'fleet', id: params.fleet } : null);

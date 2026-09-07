@@ -18,6 +18,42 @@ pub struct ActionParams {
     pub args: Value,
 }
 
+/// The game's verbs, for a board window.
+///
+/// The audit of the Terminal found it could read the game but not play it:
+/// every write verb lived in the MCP tool surface and nothing on the frontend
+/// could reach it, so a raid could be scored on the target board and then only
+/// launched from somewhere else. This is the same `execute` the agent calls,
+/// with the same guards (home guard, approval surface, charge and PoW), gated
+/// to our own board windows.
+#[tauri::command]
+pub async fn mcp_action(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    registry: tauri::State<'_, Arc<TaskRegistry>>,
+    action: String,
+    args: Option<Value>,
+) -> Result<String, String> {
+    crate::mcp::tools::board_pages::require_board(&window)?;
+    let out = execute(
+        &app,
+        &registry,
+        ActionParams { action, args: args.unwrap_or(Value::Null) },
+    )
+    .await;
+    let text = out
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The tool answers in prose, including its refusals; a leading "Error:"
+    // is how it says no, and the caller should hear that as a rejection.
+    if text.starts_with("Error:") || text.starts_with("Blocked:") {
+        return Err(text);
+    }
+    Ok(text)
+}
+
 pub async fn execute(
     app_handle: &tauri::AppHandle,
     registry: &Arc<TaskRegistry>,

@@ -52,7 +52,9 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => d.querySelector('#tm-pow-1 .fstat'));
   check('proof queue card: counts as tiles, the engine as rows', d.querySelectorAll('#tm-pow-1 .fstat').length === 3 && /GPU/.test(d.querySelector('#tm-pow-1').textContent) && /auto-tuned/.test(d.querySelector('#tm-pow-1').textContent));
   await until(() => d.querySelector('#tm-tasks-1 .pc-row'));
-  check('tasks card: one catalogue row per proof, the running one first with its progress bar and difficulty of 64', d.querySelectorAll('#tm-tasks-1 .pc-row').length === 3 && /5-12:mine/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent) && d.querySelector('#tm-tasks-1 .pc-row .sui-action-bar-progress-bar') !== null && /12 \/ 64/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent), d.querySelector('#tm-tasks-1 .pc-row') && d.querySelector('#tm-tasks-1 .pc-row').textContent);
+  check('tasks card: a row per UNFINISHED proof, the running one first with its progress bar and difficulty of 64', d.querySelectorAll('#tm-tasks-1 .pc-row').length === 2 && /5-12:mine/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent) && d.querySelector('#tm-tasks-1 .pc-row .sui-action-bar-progress-bar') !== null && /12 \/ 64/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent), d.querySelector('#tm-tasks-1 .pc-row') && d.querySelector('#tm-tasks-1 .pc-row').textContent);
+  check('…finished proofs are set aside, and the caption says how many', /1 finished hidden/.test(d.querySelector('#tm-tasks-1 .tm-cap').textContent), d.querySelector('#tm-tasks-1 .tm-cap').textContent);
+  check('…and an unfinished proof can be cancelled', d.querySelector('#tm-tasks-1 .pc-row .pc-act[title="Cancel this proof"]') !== null);
   check('…the running proof wears the struct it is for as its emblem', d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img') !== null && /img\/structs\/extractor\//.test(d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img').getAttribute('src') || ''), d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img') && d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img').getAttribute('src'));
   check('the Team Ops pages themselves are not offered as cards (only the settings forms)', ![...d.querySelectorAll('.tm-toolbar select option')].some((o) => /Team Ops/.test(o.textContent)) && !w.Board.Terminal.types().some((t) => t.type === 'page'));
   await until(() => d.querySelector('#tm-player-1 .pc-card'));
@@ -153,15 +155,12 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('GUILD opens a guild', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'guild' && c.params.id === '0-2'));
   run('2-15361');
   check('a planet id opens the planet view', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'planet')?.params.id === '2-15361');
-  await until(() => d.querySelector('#tm-grid [data-type="planet"] .tm-planet-row'));
+  await until(() => d.querySelector('#tm-grid [data-type="planet"] iframe.tm-frame-map'));
   {
+    // The planet card is the live map: no hand-drawn slot grid any more.
     const pc = d.querySelector('#tm-grid [data-type="planet"]');
-    check('…drawing the owner as a person line and the readings strip', pc.querySelector('.pc-person')?.getAttribute('data-player-id') === '1-61' && pc.querySelectorAll('.tm-planet-strip .fstat').length === 3);
-    check('…a row per ambit with a slot tile for every slot, open ones marked', pc.querySelectorAll('.tm-planet-row').length === 5 && pc.querySelectorAll('.tm-planet-slot').length === 13 && pc.querySelectorAll('.tm-planet-slot.tm-empty').length === 9);
-    check('…struct portraits from the shared art map, offline dimmed, the enemy fleet marked', [...pc.querySelectorAll('.tm-planet-slot img')].some((i) => i.getAttribute('src') === 'img/structs/tank/tank-struct-base.png') && pc.querySelectorAll('.tm-planet-slot.tm-off').length === 1 && pc.querySelectorAll('.tm-planet-slot.tm-enemy').length === 1);
-    check('…and the live raid as an alert line', /shields vulnerable · Marklifer/.test(pc.querySelector('.tm-body').textContent));
-    [...pc.querySelectorAll('.tm-planet-doors a')].find((a) => a.textContent === 'Map').click();
-    check('its doors open the sibling cards for the same planet', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'map')?.params.id === '2-15361');
+    check('…as the live map, not a hand-drawn slot grid', pc.querySelector('iframe.tm-frame-map') !== null && pc.querySelectorAll('.tm-planet-row, .tm-planet-slot').length === 0);
+    check('…and the map is asked for THIS planet', /planet=2-15361/.test(pc.querySelector('iframe.tm-frame-map').getAttribute('src')));
   }
   run('9-61');
   check('a fleet id opens the map', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'map' && c.params.id === '9-61'));
@@ -177,7 +176,15 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('HALT lists the roster by margin, worst first', haltRows.length === 2 && /Marklifer/.test(haltRows[0].textContent) && /thin margin/.test(haltRows[0].textContent) && /1 under 20% margin/.test(d.querySelector('#tm-grid [data-type="halt"]').textContent));
   run('ORE');
   await until(() => d.querySelector('#tm-grid [data-type="ore"] .pc-row'));
-  check('ORE lists who HOLDS ore, richest first, from the stats leaderboard', /#1/.test(d.querySelector('#tm-grid [data-type="ore"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="ore"] .pc-row').getAttribute('data-player-id') === '1-101' && /25 holders shown/.test(d.querySelector('#tm-grid [data-type="ore"]').textContent) && !/planets with ore/.test(d.querySelector('#tm-grid [data-type="ore"]').textContent));
+  // The ore radar, not the leaderboard: rows are PLANETS, so each one names
+  // where the ore actually sits — which is what a raider needs.
+  {
+    const ore = d.querySelector('#tm-grid [data-type="ore"]');
+    const first = ore.querySelector('.pc-row');
+    check('ORE lists the planets holding ore, richest first, from the radar', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_ore_radar') && first.getAttribute('data-kind') === 'planet' && /#1/.test(first.textContent), first.textContent.slice(0, 80));
+    check('…saying how many planets hold ore across the galaxy', /holding ore/.test(ore.textContent) && /in the galaxy/.test(ore.textContent), ore.querySelector('.tm-cap').textContent);
+    check('…and each row opens the planet, its owner, or the target board', first.querySelector('.pc-act[title^="Watch"]') !== null && first.querySelector('.pc-act[title="Target board"]') !== null);
+  }
   run('BOOK 1-194');
   await until(() => d.querySelector('#tm-grid [data-type="book"] .pc-row'));
   const book = d.querySelector('#tm-grid [data-type="book"]');
@@ -273,6 +280,25 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const loopCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'loop');
   check('…the posture card switches a loop by sending its whole config back', loopCall.args.payload.loop === 'raid' && loopCall.args.payload.config.enabled === true && loopCall.args.payload.config.posture === 'opportunist');
   // …and a target can be grudged from the board.
+  // The board scores a target and can now launch it — the same verb the
+  // agent uses, behind a confirm because it seizes ore and starts a fight.
+  {
+    const go = d.querySelector('#tm-grid [data-type="targets"] .pc-row.sc-bad');
+    const raidDoor = go.querySelector('.pc-act[title^="Raid "]');
+    check('a GO target offers the raid itself, as a destructive door', raidDoor !== null && raidDoor.classList.contains('sc-destructive'));
+    check('…and a NO-GO target does not', [...d.querySelectorAll('#tm-grid [data-type="targets"] .pc-row')].filter((r) => !r.classList.contains('sc-bad')).every((r) => !r.querySelector('.pc-act[title^="Raid "]')));
+    raidDoor.click();
+    await until(() => d.querySelector('.ops-modal-overlay'));
+    check('…asking first, naming the ore at stake', /seizes their ore/i.test(d.querySelector('.ops-modal-overlay').textContent));
+    [...d.querySelectorAll('.ops-modal-overlay .sui-message-system-modal-cta-btn-wrapper a')][1].click();
+    await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_action'));
+    const act = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_action');
+    check('…then raids through the game\'s own action path', act.args.action === 'raid' && act.args.args.target_id === '2-15361', JSON.stringify(act.args));
+  }
+  {
+    const ore = [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].find((r) => /not sendable/.test(r.textContent));
+    check('ore offers the one thing you can do with it', ore.querySelector('.pc-act[title="Refine ore into alpha"]') !== null);
+  }
   const goRow = d.querySelector('#tm-grid [data-type="targets"] .pc-row.sc-bad');
   check('the target board draws catalogue rows: GO as the stripe and badge, the planet as a chip, the veto as a destructive door', goRow !== null && /GO/.test(goRow.querySelector('.sui-badge').textContent) && goRow.querySelector('.sc-chip[data-kind="planet"]') !== null && goRow.querySelector('.pc-act[title^="Never attack"]').classList.contains('sc-destructive'));
   check('a blocked target says why on its row', [...d.querySelectorAll('#tm-grid [data-type="targets"] .pc-row')].some((r) => /protected/.test(r.querySelector('.pc-attn')?.textContent || '') && r.querySelector('.sui-badge').textContent === 'NO-GO'));
@@ -281,6 +307,39 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   d.querySelector('#tm-grid [data-type="targets"] .pc-act[title^="Add 1-61"]').click();
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'combat_lists'));
   check('…the target board adds a grudge through combat_lists', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'combat_lists' && c.args.payload.kind === 'grudge' && c.args.payload.id === '1-61'));
+  // Energy acts now: the two cards that named a problem and offered no remedy.
+  {
+    const fuel = d.querySelector('#tm-grid [data-type="fuel"]');
+    check('the fuel card carries a ticket: op, reactor, amount', fuel.querySelector('.tm-ticket') !== null && fuel.querySelectorAll('.tm-ticket-fields select').length === 2 && fuel.querySelector('.tm-ticket-fields input') !== null);
+    const amount = fuel.querySelector('.tm-ticket-fields input');
+    amount.value = '1000000';
+    amount.dispatchEvent(new w.Event('input', { bubbles: true }));
+    await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_infusion_preview'));
+    const prev = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_infusion_preview');
+    check('…which previews before it signs, naming reactor and amount', prev.args.op === 'infuse' && prev.args.amountUalpha === 1000000 && !!prev.args.destinationId && !!prev.args.address);
+    await until(() => fuel.querySelector('.tm-ticket-note .fstat'));
+    check('…and shows what the chain would do', /capacity gained/i.test(fuel.querySelector('.tm-ticket-note').textContent));
+    fuel.querySelector('.tm-ticket a.sui-screen-btn').click();
+    await until(() => d.querySelector('.ops-modal-overlay'));
+    check('…asking before it signs', /Stake this alpha/i.test(d.querySelector('.ops-modal-overlay').textContent));
+    [...d.querySelectorAll('.ops-modal-overlay .sui-message-system-modal-cta-btn-wrapper a')][1].click();
+    await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_infusion_infuse'));
+    check('…then infuses', (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_infusion_infuse').args.amountUalpha === 1000000);
+  }
+  {
+    const alloc = d.querySelector('#tm-grid [data-type="allocations"]');
+    check('an allocation row offers to set its power', alloc.querySelector('.pc-row .pc-act[title^="Set the power"]') !== null);
+    alloc.querySelector('.pc-row .pc-act[title^="Set the power"]').click();
+    await until(() => alloc.querySelector('.tm-ticket-slot .tm-ticket'));
+    const mw = alloc.querySelector('.tm-ticket-slot input');
+    // It previews the CURRENT value on open, then again on every edit.
+    await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_allocation_preview'));
+    mw.value = '5000';
+    mw.dispatchEvent(new w.Event('input', { bubbles: true }));
+    await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_allocation_preview' && c.args.powerMw === 5000));
+    check('…previewing the change against the budget', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_allocation_preview' && c.args.powerMw === 5000 && c.args.allocationId === '6-53'));
+    check('…and a locked allocation offers nothing', [...alloc.querySelectorAll('.pc-row')].every((r) => !/locked/.test(r.textContent) || !r.querySelector('.pc-act')));
+  }
   check('an incident row names the attacker as a person and the shots as its badge', /1-1957/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && /2-287/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="incidents"] .pc-row .sui-badge') !== null);
   check('a raid row stacks attacker vs defender and keeps the live one\'s status word', /Marklifer/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && /JPEG/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="raids"] .pc-row.sc-bad') !== null);
   check('a wallet row is an asset row: ore marked not sendable and without a Pay door', [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => /not sendable/.test(r.textContent) && !r.querySelector('.pc-act[title="Pay"]')) && [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => r.querySelector('.pc-act[title="Pay"]')));
@@ -328,17 +387,63 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   // workspace tabs and their doors mounted into it.
   const boardNav = d.querySelector('.sui-screen-nav:has(> #board-tabs)');
   check('in a Terminal window the workspace tabs sit in the board\'s nav bar, doors beside the refresh, and no strip of their own', boardNav.querySelector('#tm-ws-items .sui-mod-active') !== null && boardNav.querySelector('.board-navaside #tm-ws-doors [title="Rename this workspace"]') !== null && d.querySelector('.tm-workspaces #tm-ws-nav') === null && d.getElementById('board-refresh') === null);
+  // A planet is the LIVE MAP: the spectator view embedded, fed by a watch
+  // addressed to this card, with the neighbouring surfaces as doors.
+  run('PLANET 2-15361');
+  await until(() => d.querySelector('#tm-grid [data-type="planet"] iframe.tm-frame-map'));
+  const planetCard = d.querySelector('#tm-grid [data-type="planet"]');
+  const planetId = planetCard.getAttribute('data-card');
+  const src = planetCard.querySelector('iframe.tm-frame-map').getAttribute('src');
+  check('the planet card embeds the map for that planet, labelled for this card', /^raidview\.html\?planet=2-15361&label=board%3A/.test(src) && src.includes('embed=1') && src.includes('card=' + planetId), src);
+  const watch = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_raid_view_watch');
+  check('…and asks Rust to push that planet\'s feed to this card', watch && watch.args.planetId === '2-15361' && watch.args.label === 'board:' + planetId);
+  check('…with the log, Comms and the full window as doors', [...planetCard.querySelectorAll('.tm-door-own')].map((a) => a.title).join(',') === 'Battle log,Comms about this planet,Watch in its own window');
+  w.Board.Terminal.remove(planetId);
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_raid_view_unwatch'));
+  const unwatch = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_raid_view_unwatch');
+  check('removing the card stops the feed', unwatch.args.label === 'board:' + planetId && unwatch.args.planetId === '2-15361');
+  // The two cards the audit said were missing entirely.
+  run('FEED');
+  await until(() => d.querySelector('#tm-grid [data-type="feed"] .sc-tape'));
+  {
+    const feed = d.querySelector('#tm-grid [data-type="feed"]');
+    check('FEED shows what the loops and the watchdog did, newest first', d.querySelectorAll('#tm-grid [data-type="feed"] .sc-tape').length === 2 && /watchdog/.test(feed.querySelector('.sc-tape').textContent) && /wedged/.test(feed.querySelector('.sc-tape').textContent), feed.querySelector('.sc-tape').textContent);
+    w.__HARNESS_EMIT__('board-feed', { ts_ms: Date.now(), severity: 'error', source: 'tx', message: 'signing bridge down' });
+    await until(() => /signing bridge down/.test(feed.textContent));
+    check('…and a live entry lands on top', /signing bridge down/.test(feed.querySelector('.sc-tape').textContent) && feed.querySelector('.sc-tape').classList.contains('is-new'));
+  }
+  run('NEXT');
+  await until(() => d.querySelector('#tm-grid [data-type="next"] .pc-row, #tm-grid [data-type="next"] .sui-message-inline-alert'));
+  {
+    const next = d.querySelector('#tm-grid [data-type="next"]');
+    const rows = [...next.querySelectorAll('.pc-row')];
+    // The fixture galaxy has no brownout and no raid against us, so the most
+    // urgent thing it CAN find is a warning — and that is what leads.
+    const RANK = { 'sc-bad': 0, 'sc-warn': 1, 'sc-live': 2 };
+    const order = rows.map((r) => ['sc-bad', 'sc-warn', 'sc-live'].find((c) => r.classList.contains(c)));
+    check('NEXT derives what needs doing from live readings, worst first', rows.length > 0 && order.every((c) => c !== undefined) && order.map((c) => RANK[c]).every((v, i, a) => i === 0 || a[i - 1] <= v), order.join(','));
+    check('…each naming what is wrong and why it matters', /earns nothing|waiting|failed|paused|GO/i.test(rows[0].textContent) && /\w/.test(rows[0].querySelector('.pc-id').textContent), rows.map((r) => r.textContent.replace(/\s+/g, ' ').slice(0, 40)).join(' | '));
+    check('…and opens the card that fixes it', rows[0].querySelector('.pc-act[title^="Open "]') !== null);
+    const before = d.querySelectorAll('#tm-grid .tm-card').length;
+    rows[0].querySelector('.pc-act[title^="Open "]').click();
+    check('…as a real card, not a description of one', d.querySelectorAll('#tm-grid .tm-card').length === before + 1);
+  }
   run('TAPE');
   check('TAPE is a live stream with a filter, economy by default', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'tape') && w.Board.Terminal.types().find((t) => t.type === 'tape').params[0].options.map((o) => o.value).join(',') === 'economy,combat,all');
   run('SETTINGS');
   check('SETTINGS is the one page still reached as a page, plainly titled', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'page' && c.params.page === 'config') && !/Team Ops/.test(d.querySelector('#tm-grid [data-type="page"] .tm-title').textContent));
+  // The battle log and Comms are the raid view's own rails, embedded: two of
+  // them can coexist because each is its own document.
   run('LOG 2-15361');
-  await until(() => d.querySelector('#tm-grid [data-type="log"] #rv-log-body'));
-  check('LOG draws the raid view\'s battle log for a planet, asking the same command', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_raid_log' && c.args.planetId === '2-15361'));
-  await until(() => d.querySelectorAll('#rv-log-body .rv-log-row').length);
-  check('…and draws its rows under day headings with the category chips', d.querySelectorAll('#rv-log-body .rv-log-row').length === 3 && d.querySelectorAll('#rv-log-body .rv-log-day').length === 2 && d.querySelectorAll('#rv-log-filters .rv-log-chip').length >= 3);
+  await until(() => d.querySelector('#tm-grid [data-type="log"] iframe.tm-frame-rail'));
+  {
+    const src = d.querySelector('#tm-grid [data-type="log"] iframe.tm-frame-rail').getAttribute('src');
+    check('LOG embeds the raid view showing only its battle log rail', /^raidview\.html\?planet=2-15361/.test(src) && src.includes('only=log') && src.includes('embed=1'), src);
+    check('…and asks Rust to feed that planet to this card', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_raid_view_watch' && c.args.planetId === '2-15361'));
+  }
   run('LOG 2-1');
-  check('…one battle log per window', w.Board.Terminal.state.layout.cards.filter((c) => c.type === 'log').length === 1);
+  check('…and a second battle log is allowed, because each rail is its own document', w.Board.Terminal.state.layout.cards.filter((c) => c.type === 'log').length === 2);
+  w.Board.Terminal.remove(w.Board.Terminal.state.layout.cards.filter((c) => c.type === 'log')[1].id);
 
   // Sharing: export → import round-trips into a new workspace.
   const code = w.Board.Terminal.exportWorkspace();
@@ -481,6 +586,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   w.__HARNESS_EMIT__('grass-event', { category: 'ore', subject: 'structs.grid.planet.2-29577.1-422', timestamp: Date.now(), detail: { object_id: '2-29577', object_type: 'planet', player_id: '1-422', attribute_type: 'ore', value: 12, value_old: 11, block_height: 2507904 } });
   await until(() => d.querySelector('#tm-grid [data-type="tape"] .sc-tape'));
   const tapeLine = d.querySelector('#tm-grid [data-type="tape"] .sc-tape');
+  check('…and a tape line opens what it is about', (() => { const before = w.Board.Terminal.state.layout.cards.length; d.querySelector('#tm-grid [data-type="tape"] .sc-tape').click(); return w.Board.Terminal.state.layout.cards.length === before + 1; })());
   check('a tape event is one grid line: time, kind badge, subject, folded values, block', tapeLine.classList.contains('is-new') && /grid\.planet\.2-29577\.1-422/.test(tapeLine.textContent) && /11g → 12g/.test(tapeLine.textContent) && /#2,507,904/.test(tapeLine.querySelector('.sc-tape-blk').textContent) && tapeLine.querySelectorAll('.sc-tape-kv').length === 5 && !/block_height/.test(tapeLine.textContent), tapeLine.textContent);
   check('…with the whole event on hover', /object_id 2-29577/.test(tapeLine.querySelector('.sc-tape-body').title));
 }

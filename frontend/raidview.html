@@ -630,7 +630,24 @@
     .rv-empty { display: flex; flex-direction: column; gap: var(--spacing-md);
       align-items: center; justify-content: center; padding: var(--spacing-xxxl) var(--spacing-xl);
       color: var(--text-hint); text-align: center; }
-  </style>
+  
+    /* ── Embedded in a Terminal card (`?embed=1`) ─────────────────────────
+       The card is the frame, and the battle log and the object's Comms are
+       cards of their own — so an embedded raid view is the STAGE alone: the
+       live map with the game's own HUD over it, edge to edge. */
+    html[data-embed] #rv-chat, html[data-embed] #rv-log { display: none; }
+    /* `only=log` / `only=comms`: one rail, full height, no map. Two of these
+       can live side by side because each is its own document — the rails own
+       fixed element ids, which is why they could not be duplicated in one. */
+    html[data-only] #rv-stage { display: none; }
+    html[data-only] #rv-left { height: 100%; }
+    html[data-only="log"] #rv-log { display: flex; flex: 1 1 auto; min-height: 0; }
+    html[data-only="log"] #rv-log.rv-collapsed { flex: 1 1 auto; }
+    html[data-only="comms"] #rv-chat { display: flex; width: 100%; }
+    html[data-only="comms"] #rv-left { display: none; }
+    html[data-embed], html[data-embed] body { margin: 0; padding: 0; background: transparent; height: 100%; }
+    html[data-embed] #rv-left { height: 100%; }
+</style>
 </head>
 <body>
   <!-- ── HUD ────────────────────────────────────────────────────────────
@@ -835,6 +852,7 @@
   <script src="js/vendor/lottie-5.12.2.min.js"></script>
   <!-- Portrait composer first: raidview.js calls it from the commander HUD. -->
   <!-- The shared chat row: this window draws the same one Comms does. -->
+  <script src="bridge.js"></script>
   <script src="events.js"></script>
   <script src="chatrow.js"></script>
   <script src="pfp.js"></script>

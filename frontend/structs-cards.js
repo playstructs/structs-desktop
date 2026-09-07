@@ -302,7 +302,8 @@
     var bd = badge(d.badge); if (bd) nm.appendChild(bd);
     ident.appendChild(nm);
     var idl = el('div', 'pc-id sui-text-label-block');
-    idl.appendChild(T('#' + str(d.id) + (d.sub ? ' · ' + str(d.sub) : '')));
+    // `hideId` for a row whose "id" is a name, not an id (a next move).
+    idl.appendChild(T((d.hideId ? '' : '#' + str(d.id) + (d.sub ? ' · ' : '')) + (d.sub ? str(d.sub) : '')));
     if (d.attn) { idl.appendChild(T(' · ')); idl.appendChild(el('span', 'pc-attn', d.attn)); }
     if (d.subTitle) idl.title = d.subTitle;
     ident.appendChild(idl);

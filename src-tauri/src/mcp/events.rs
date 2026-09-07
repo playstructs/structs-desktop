@@ -27,6 +27,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::hasher::types::now_millis;
 
 /// Who an event is for.
+/// A raid-feed label that names a board card, not a window.
+pub const BOARD_CARD_PREFIX: &str = "board:";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Audience {
     /// The game window only.
@@ -104,6 +107,12 @@ impl AppEvent {
             | Self::UpdateReady => Audience::Main,
             Self::UiDirective { main: true, .. } => Audience::Main,
             Self::UiDirective { main: false, .. } | Self::Board { .. } => Audience::Board,
+            // A raid feed for a Terminal CARD rather than a raid window:
+            // the label is `board:<card>`, so it goes to the board family
+            // (which the card's iframe hears through its parent), while the
+            // event NAME still carries the label — two cards on two planets
+            // can never cross-deliver.
+            Self::Raid { label, .. } if label.starts_with(BOARD_CARD_PREFIX) => Audience::Board,
             Self::Raid { label, .. } => Audience::Window(label.clone()),
             Self::TransferIntent(_) => Audience::Window("transfer".into()),
             Self::Matrix { .. } => Audience::All,
@@ -294,6 +303,10 @@ mod tests {
         assert_eq!(AppEvent::UiDirective { main: true, directive: Value::Null }.audience(), Audience::Main);
         assert_eq!(AppEvent::UiDirective { main: false, directive: Value::Null }.audience(), Audience::Board);
         assert_eq!(AppEvent::Raid { label: "raid-2-9".into(), name: "raid:state", payload: Value::Null }.audience(), Audience::Window("raid-2-9".into()));
+        // A card's feed goes to the board family, and keeps a name of its own.
+        let card = AppEvent::Raid { label: "board:planet-1".into(), name: "raid-snapshot", payload: Value::Null };
+        assert_eq!(card.audience(), Audience::Board);
+        assert_eq!(card.name(), "raid-snapshot::board:planet-1");
         assert_eq!(AppEvent::TransferIntent(Value::Null).audience(), Audience::Window("transfer".into()));
         assert_eq!(AppEvent::TxRequest(Value::Null).audience(), Audience::Main);
         assert_eq!(AppEvent::Matrix { name: "matrix::seen".into(), payload: Value::Null }.audience(), Audience::All);

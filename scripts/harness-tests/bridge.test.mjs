@@ -70,7 +70,9 @@ function fakeParent(w, answer) {
 {
   const html = readFileSync(resolve(repo, 'frontend/chat.html'), 'utf8');
   const html2 = readFileSync(resolve(repo, 'frontend/transfer.html'), 'utf8');
-  check('chat.html and transfer.html load bridge.js before events.js', html.indexOf('bridge.js') > 0 && html.indexOf('bridge.js') < html.indexOf('events.js') && html2.indexOf('bridge.js') > 0 && html2.indexOf('bridge.js') < html2.indexOf('events.js'));
+  const html3 = readFileSync(resolve(repo, 'frontend/raidview.html'), 'utf8');
+  const first = (s) => s.indexOf('bridge.js') > 0 && s.indexOf('bridge.js') < s.indexOf('events.js');
+  check('every page that can be embedded loads bridge.js before events.js', first(html) && first(html2) && first(html3));
 }
 await tick();
 console.log('');
