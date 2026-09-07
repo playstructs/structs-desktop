@@ -1008,3 +1008,40 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');
 w.close();
 process.exit(failures ? 1 : 0);
+{
+  // Click-and-drag panning, mirroring the game's own MapPanController: a mouse
+  // with no horizontal wheel cannot otherwise reach the far side of a planet.
+  console.log('\n— click-and-drag panning');
+  const sc = d.getElementById('rv-scroll');
+  Object.defineProperty(sc, 'scrollLeft', { value: 0, writable: true, configurable: true });
+  Object.defineProperty(sc, 'scrollTop', { value: 0, writable: true, configurable: true });
+  const tile = d.querySelector('#rv-map') || sc;
+  const pd = (type, x, y, opts) => {
+    const ev = new w.Event(type, { bubbles: true, cancelable: true });
+    Object.assign(ev, { pointerId: 1, pointerType: 'mouse', button: 0, clientX: x, clientY: y }, opts || {});
+    (opts && opts.on ? opts.on : tile).dispatchEvent(ev);
+    return ev;
+  };
+  pd('pointerdown', 200, 200);
+  pd('pointermove', 203, 200, { on: d });
+  check('a press that barely moves is not a pan', sc.scrollLeft === 0 && !d.body.classList.contains('is-map-panning'));
+  pd('pointermove', 150, 180, { on: d });
+  check('past the threshold the map tracks the cursor, and the body says it is panning', sc.scrollLeft === 50 && sc.scrollTop === 20 && d.body.classList.contains('is-map-panning'));
+  pd('pointermove', 140, 180, { on: d });
+  check('…and keeps tracking, one pixel per pixel', sc.scrollLeft === 60);
+  pd('pointerup', 140, 180, { on: d });
+  check('the pan ends with the body clean', !d.body.classList.contains('is-map-panning'));
+  const click = new w.MouseEvent('click', { bubbles: true, cancelable: true });
+  tile.dispatchEvent(click);
+  check('the click closing a pan is swallowed, so it does not open a tile', click.defaultPrevented);
+  const click2 = new w.MouseEvent('click', { bubbles: true, cancelable: true });
+  tile.dispatchEvent(click2);
+  check('…but the next click is a real click', !click2.defaultPrevented);
+  const drag = new w.Event('dragstart', { bubbles: true, cancelable: true });
+  pd('pointerdown', 200, 200);
+  tile.dispatchEvent(drag);
+  check('a press over a tile does not start a native drag', drag.defaultPrevented);
+  pd('pointerup', 200, 200, { on: d });
+}
+
+

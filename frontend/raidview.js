@@ -2323,6 +2323,104 @@
     renderHeader();
   }
 
+  // ── Click-and-drag panning ───────────────────────────────────────────────
+  // The same affordance the game added to its own maps (MapPanController): a
+  // mouse with no horizontal wheel cannot otherwise reach the far side of a
+  // planet, and in a Terminal card the map is smaller than the planet more
+  // often than not. The game pans the WINDOW because its maps are absolutely
+  // positioned; here the scroller is `#rv-scroll`, so the deltas go to it.
+  //
+  // Thresholds, capture, click suppression and the `is-map-panning` body class
+  // are the game's, so the two behave identically and share its cursor rule.
+  var DRAG_THRESHOLD_PX = 5;
+  // Inside a card, tell the page that embeds us to do something with this
+  // card. Same origin only; `card` comes from the URL the card built.
+  function tellCard(act, extra) {
+    if (params.embed !== '1' || !params.card || !window.parent || window.parent === window) return;
+    var origin = String(location.origin || '');
+    var msg = { structs: 'card', card: params.card, act: act };
+    if (extra) Object.keys(extra).forEach(function (k) { msg[k] = extra[k]; });
+    try { window.parent.postMessage(msg, origin === 'null' || !origin ? '*' : origin); } catch (e) { /* gone */ }
+  }
+
+  function wireMapPan() {
+    var sc = document.getElementById('rv-scroll');
+    if (!sc) return;
+
+    // A wheel over an iframe never reaches the page behind it, so a map card
+    // was a scroll trap: the page could not be scrolled past it. When the map
+    // has no more to give in that direction, the scroll goes back to the card.
+    sc.addEventListener('wheel', function (e) {
+      var canV = sc.scrollHeight > sc.clientHeight + 1;
+      var atTop = sc.scrollTop <= 0;
+      var atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 1;
+      if (canV && !((e.deltaY < 0 && atTop) || (e.deltaY > 0 && atBottom))) return;
+      if (!e.deltaY) return;
+      tellCard('scroll', { dy: e.deltaY });
+      e.preventDefault();
+    }, { passive: false });
+    var pointerId = null, panning = false, suppressClick = false;
+    var originX = 0, originY = 0, lastX = 0, lastY = 0;
+
+    document.addEventListener('pointerdown', function (e) {
+      // A fresh press voids suppression left by a pan that ended off-window.
+      suppressClick = false;
+      // Touch and pen already pan by dragging; this is for the mouse.
+      if (e.pointerType !== 'mouse' || e.button !== 0) return;
+      if (!(e.target && e.target.closest) || !e.target.closest('#rv-scroll')) return;
+      pointerId = e.pointerId;
+      originX = lastX = e.clientX;
+      originY = lastY = e.clientY;
+    });
+
+    document.addEventListener('pointermove', function (e) {
+      if (e.pointerId !== pointerId) return;
+      if (!panning) {
+        if (Math.abs(e.clientX - originX) < DRAG_THRESHOLD_PX && Math.abs(e.clientY - originY) < DRAG_THRESHOLD_PX) return;
+        panning = true;
+        document.body.classList.add('is-map-panning');
+        try { document.documentElement.setPointerCapture(pointerId); } catch (err) { /* released already */ }
+        // The pixels spent reaching the threshold may have begun a selection.
+        var sel = window.getSelection && window.getSelection();
+        if (sel && sel.removeAllRanges) sel.removeAllRanges();
+      }
+      // Against the pointer delta, so the map tracks the cursor 1:1 — which
+      // holds under the breakpoints that scale the HUD 2x and 4x.
+      sc.scrollLeft += lastX - e.clientX;
+      sc.scrollTop += lastY - e.clientY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+    });
+
+    var end = function (e) {
+      if (e.pointerId !== pointerId) return;
+      if (panning) {
+        document.body.classList.remove('is-map-panning');
+        try { document.documentElement.releasePointerCapture(pointerId); } catch (err) { /* fine */ }
+        // The click closing this press belongs to the pan, not to the tile
+        // under the cursor. A cancelled pointer is followed by no click.
+        suppressClick = e.type === 'pointerup';
+      }
+      pointerId = null;
+      panning = false;
+    };
+    document.addEventListener('pointerup', end);
+    document.addEventListener('pointercancel', end);
+
+    // Capture phase, so a click that was the end of a pan is stopped before it
+    // reaches the tile listeners.
+    document.addEventListener('click', function (e) {
+      if (!suppressClick) return;
+      suppressClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    }, true);
+
+    // Tiles are anchors, which browsers drag natively; the ghost image would
+    // otherwise appear as soon as a pan crossed one.
+    document.addEventListener('dragstart', function (e) { if (pointerId !== null) e.preventDefault(); });
+  }
+
   function boot() {
     var T = window.__TAURI__;
     if (!T || !T.event) { setTimeout(boot, 150); return; }
@@ -2343,6 +2441,7 @@
     // whichever planet emitted last. The label arrives in the window URL.
     var LABEL = params.label || ('raid-' + (TARGET ? TARGET.id : 'none'));
     function scoped(name) { return name + '::' + LABEL; }
+    wireMapPan();
     window.StructsEvents.listen(scoped('raid-snapshot'), function (e) { applySnapshot(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-delta'), function (e) { applyDelta(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-attacks'), function (e) { applyAttacks(e.payload || {}); });

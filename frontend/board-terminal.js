@@ -2003,6 +2003,11 @@
     if (!m || m.structs !== 'card' || !m.card || !state.mounted[m.card]) return;
     if (m.act === 'popout') popOut(m.card);
     else if (m.act === 'remove') remove(m.card);
+    else if (m.act === 'scroll') {
+      // A frame that has nothing left to scroll hands the wheel back.
+      var sc = document.querySelector('.ops-scroll');
+      if (sc) sc.scrollTop += Number(m.dy) || 0;
+    }
   });
   // A planet as a card, not a window: who holds it, what it is worth, what is
   // happening to it, and every slot by ambit — the spectator snapshot the raid

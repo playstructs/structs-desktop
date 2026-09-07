@@ -302,7 +302,10 @@
     params: [
       { key: 'outcome', label: 'Outcome', kind: 'choice', options: [{ value: '', label: 'all' }, { value: 'success', label: 'success' }, { value: 'failed', label: 'failed' }, { value: 'skipped', label: 'skipped' }] },
       // On an 800-player roster one player's failures are invisible in a
-      // shared list; this is how you ask about that player.
+      // shared list; this is how you ask about that player. (There is no
+      // retry door: the queue has no retry op, and a history row keeps the
+      // message type and the error but not the arguments, so there is nothing
+      // to replay — you redo the action from the card that owns it.)
       { key: 'signer', label: 'Signer', kind: 'id', placeholder: 'any player' },
     ],
     cadenceMs: 10000,

@@ -909,7 +909,13 @@
     /* One grid of the game's data cards: three equal columns, one gutter,
        every card the same frame — header with the doors, body with the
        content. Wide (2) and full (3) spans keep the column rhythm. */
-    .tm-chrome { display: flex; flex-direction: column; gap: var(--spacing-md); margin-bottom: var(--spacing-lg); text-align: left; }
+    /* The command line is the console's main control and it sat at the top of
+       a page that scrolls, so typing a command meant scrolling back to find
+       the box. It stays put and the cards scroll under it. (The workspace tabs
+       above it are outside this scroller and never moved.) */
+    .tm-chrome { display: flex; flex-direction: column; gap: var(--spacing-md); margin-bottom: var(--spacing-lg); text-align: left;
+      position: sticky; top: 0; z-index: 5; background: var(--surface-default);
+      padding-top: var(--spacing-sm); }
     .tm-workspaces { display: flex; align-items: center; gap: var(--spacing-md); }
     .tm-workspaces .subnav { flex: 1 1 auto; min-width: 0; }
     .tm-workspaces #tm-ws-new { width: 160px; }
@@ -1007,6 +1013,17 @@
     #tm-grid a.tm-door, #tm-grid a.tm-door:link, #tm-grid a.tm-door:visited { display: inline-flex; align-items: center; padding: var(--spacing-sm) var(--spacing-sm); text-decoration: none; color: var(--accent-primary); }
     #tm-grid a.tm-door:hover { color: var(--accent-primary-active); }
     .tm-config { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md); background: var(--surface-default); }
+    /* Each field is a full-width label/control pair, so in a flex column they
+       stacked one per row with the control marooned on the far right. Given a
+       basis they sit side by side and a card's whole strip is one or two rows. */
+    .tm-config > * { flex: 1 1 200px; min-width: 0; }
+    .tm-config > a.sui-screen-btn { flex: 0 0 auto; }
+    /* The control must not eat its own label. The Settings page gives a field
+       label `flex: 1 1 60%` for its stacked layout; in this strip the fields
+       sit side by side, and there that basis let a text box squeeze the label
+       to nothing so the two ran together ("NAMEProof tasks"). */
+    #board-layout .tm-config > label.sui-input-text.cfg-field > span:first-child { flex: 0 0 auto; }
+    .tm-config > .sui-input-text > input, .tm-config > .sui-input-text > select { min-width: 0; }
     /* `display: flex` beats the UA's [hidden] rule, so without this the
      * configure strip never closed once opened — Apply left it on the card. */
     .tm-config[hidden] { display: none; }
@@ -1028,11 +1045,16 @@
     .tm-body .gs-cap { margin-bottom: var(--spacing-sm); }
     .tm-market { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--spacing-md); }
     .tm-frame { width: 100%; height: 520px; border: 0 none; background: var(--page-background); }
+    /* An embedded page is not scrolling text: it lays itself out to the height
+       it is given, and the body's 70vh cap CLIPPED it — taking the bottom off
+       the map's own action bar. The frame decides, and it never asks for more
+       than the window has. */
+    #board-layout .tm-body:has(> iframe.tm-frame) { max-height: none; overflow: visible; padding: 0; }
     /* A map wants vertical room: four ambit bands and the HUD over them. */
-    .tm-frame-map { height: 620px; }
-    .tm-w1 .tm-frame-map { height: 420px; }
+    .tm-frame-map { height: min(620px, 76vh); min-height: 320px; }
+    .tm-w1 .tm-frame-map { height: min(420px, 76vh); }
     /* A rail (battle log, Comms) is a column, not a scene. */
-    .tm-frame-rail, .tm-w1 .tm-frame-rail { height: 460px; }
+    .tm-frame-rail, .tm-w1 .tm-frame-rail { height: min(460px, 76vh); }
     .tm-tape { max-height: 420px; overflow-y: auto; margin: 0; }
     .tm-comms-body { max-height: 360px; overflow-y: auto; }
     .chat-rent-quote.chat-rent-short { color: var(--text-warning); }

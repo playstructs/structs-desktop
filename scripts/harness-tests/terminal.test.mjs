@@ -386,6 +386,15 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   // A Terminal window has one header: the board's nav bar, with the
   // workspace tabs and their doors mounted into it.
   const boardNav = d.querySelector('.sui-screen-nav:has(> #board-tabs)');
+  // The console's own controls stay put while the cards scroll under them.
+  {
+    const css = read('frontend/board.html').replace(/\s+/g, ' ');
+    const chrome = d.querySelector('.tm-chrome');
+    const scroller = d.querySelector('.ops-scroll');
+    scroller.scrollTop = 400;
+    check('the command line is pinned inside the scroller, so it is reachable from anywhere on the page', /\.tm-chrome \{[^}]*position: sticky/.test(css) && chrome.closest('.ops-scroll') === scroller);
+    check('a configure strip lays its fields side by side rather than one per row', /\.tm-config > \* \{ flex: 1 1 200px/.test(css));
+  }
   check('in a Terminal window the workspace tabs sit in the board\'s nav bar, doors beside the refresh, and no strip of their own', boardNav.querySelector('#tm-ws-items .sui-mod-active') !== null && boardNav.querySelector('.board-navaside #tm-ws-doors [title="Rename this workspace"]') !== null && d.querySelector('.tm-workspaces #tm-ws-nav') === null && d.getElementById('board-refresh') === null);
   // A planet is the LIVE MAP: the spectator view embedded, fed by a watch
   // addressed to this card, with the neighbouring surfaces as doors.
