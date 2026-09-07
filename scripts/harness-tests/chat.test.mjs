@@ -748,6 +748,27 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
 }
 
 {
+  console.log('\n— embedded in a Terminal card');
+  const { w, d } = await open('?embed=1');
+  check('embed=1 marks the document, and the stylesheet hides the nav bar for it',
+    d.documentElement.hasAttribute('data-embed')
+      && /html\[data-embed\]:not\(\[data-embed-tabs\]\) #menu-page-nav\s*\{\s*display:\s*none/.test(readFileSync(repo + '/frontend/chat.html', 'utf8')));
+  check('one room open: no tab strip', !d.documentElement.hasAttribute('data-embed-tabs'));
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await w.Chat.openRoom('!alpha:matrix.beta.playstructs.com');
+  await tick();
+  check('two rooms open: the strip comes back as tabs', d.documentElement.hasAttribute('data-embed-tabs'));
+  // The frame's doors reach the page by message; only our origin, only the
+  // two pages the doors name.
+  w.postMessage({ structs: 'chat', go: 'channels' }, '*');
+  await until(() => w.Chat._state.view === 'channels');
+  check('a Channels message from the frame navigates', w.Chat._state.view === 'channels');
+  w.postMessage({ structs: 'chat', go: 'room' }, '*');
+  await tick();
+  check('…but a page the doors do not name is ignored', w.Chat._state.view === 'channels');
+}
+
+{
   console.log('\n— reference cards');
   const { w, d } = await open();
   await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');

@@ -39,7 +39,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('no card is titled after a window', [...d.querySelectorAll('#tm-grid .tm-title')].every((t) => !/Team Ops|Game Stats/.test(t.textContent)));
   check('widths come from the layout', cards[1].classList.contains('tm-w2') && cards[0].classList.contains('tm-w1'));
   check('the toolbar offers every registered type', d.querySelectorAll('.tm-toolbar select option').length >= 12);
-  check('every card is the game\'s data card with its doors in the header', cards.every((c) => c.classList.contains('sui-data-card') && c.querySelector('.sui-data-card-header .tm-doors')));
+  check('every card is the game\'s own panel: edges, chunk, a nav screen for the header with the title as the active tab and the doors beside it, a page-body screen for the body', cards.every((c) => c.classList.contains('sui-panel') && c.classList.contains('sui-theme-player') && c.querySelector(':scope > .sui-panel-edge-left') && c.querySelector(':scope > .sui-panel-edge-right') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-screen-nav .sui-screen-nav-item.sui-mod-active.tm-title') && c.querySelector('.sui-screen-nav .tm-doors') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-page-body-screen.tm-body')));
   const wsItems = [...d.querySelectorAll('#tm-ws-nav .sui-screen-nav-item')].map((a) => a.textContent);
   check('the workspace strip lists every workspace and a door to a new one', wsItems.join(',') === 'main,war-room,+' && d.querySelector('#tm-ws-nav .sui-mod-active').textContent === 'main', wsItems.join(','));
 
@@ -287,6 +287,15 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   sweepBtn.click();
   await until(() => /Confirm sweep/.test(sweepBtn.textContent));
   check('the fleet card\'s sweep is a dry run first, and says what a second click will do', /Confirm sweep of 1/.test(sweepBtn.textContent) && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_mass_action' && c.args.request.mode === 'execute'));
+  // Embedded pages: one header. The Comms card's frame carries the Comms nav
+  // as doors and the page is asked to drop its own bar (`?embed=1`).
+  run('CHAT');
+  await until(() => d.querySelector('#tm-grid [data-type="chat"] iframe.tm-frame'));
+  const chatCard = d.querySelector('#tm-grid [data-type="chat"]');
+  check('the Comms card embeds chat.html with embed=1, so the page hides its own nav bar', /chat\.html\?embed=1$/.test(chatCard.querySelector('iframe.tm-frame').getAttribute('src')));
+  check('…and carries Channels and Connection as doors on the frame', [...chatCard.querySelectorAll('.tm-door-own')].map((a) => a.title).join(',') === 'Channels,Connection');
+  check('a Terminal window hides the board\'s own nav bar so the workspace strip is the only header', /html\[data-solo="terminal"\] \.sui-screen-nav:has\(> #board-tabs\)\s*\{\s*display:\s*none/.test(read('frontend/board.html')));
+  w.Board.Terminal.remove(chatCard.getAttribute('data-card'));
   run('TAPE');
   check('TAPE is a live stream with a filter, economy by default', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'tape') && w.Board.Terminal.types().find((t) => t.type === 'tape').params[0].options.map((o) => o.value).join(',') === 'economy,combat,all');
   run('SETTINGS');
@@ -336,6 +345,17 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('…nor one for another workspace', w.Board.Terminal.state.layout.cards.length === before);
     w.__HARNESS_EMIT__('terminal-layout', { workspace: w.Board.Terminal.state.ws, version: 99 });
     await until(() => w.Board.Terminal.state.layout.cards.length !== before);
+    // A workspace change elsewhere: the list follows, and a window showing a
+    // deleted workspace moves to the active one rather than saving it back.
+    w.__HARNESS_EMIT__('terminal-workspaces', { active: 'main', names: ['main', 'war-room', 'ops-2'] });
+    await tick();
+    check('a workspace list announced by another window is taken up by the strip', w.Board.Terminal.state.workspaces.join(',') === 'main,war-room,ops-2' && [...d.querySelectorAll('#tm-ws-nav .sui-screen-nav-item')].some((n) => n.textContent === 'ops-2'));
+    const wsBefore = w.Board.Terminal.state.ws;
+    w.__HARNESS_EMIT__('terminal-workspaces', { active: 'war-room', names: ['war-room'] });
+    await until(() => w.Board.Terminal.state.ws === 'war-room');
+    check('…and a window whose workspace was deleted switches to the active one', wsBefore !== 'war-room' && w.Board.Terminal.state.ws === 'war-room' && w.Board.Terminal.state.workspaces.join(',') === 'war-room');
+    w.__HARNESS_EMIT__('terminal-workspaces', { active: 'main', names: ['main', 'war-room'] });
+    await w.Board.Terminal.switchWorkspace('main');
     check('…but a newer version for this workspace reloads the layout from Rust', w.Board.Terminal.state.layout.cards.length === 6 && d.querySelectorAll('#tm-grid .tm-card').length === 6);
   }
 

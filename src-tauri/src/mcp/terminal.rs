@@ -138,7 +138,14 @@ pub fn sane_card_id(id: &str) -> Option<String> {
     }
 }
 
+// Under `cargo test` the store and the windows list are in-memory only:
+// the tests exercise the real STORE, and a save from a test once wrote
+// order-test-* and rename-test-* workspaces into the player's terminal.json
+// (and three remembered windows for one of them) — seen live 2026-09-07.
 fn save_store(st: &Store) {
+    if cfg!(test) {
+        return;
+    }
     crate::mcp::config_store::save_config(LAYOUT_FILE, st);
 }
 
@@ -207,6 +214,17 @@ pub fn layout_set_impl(workspace: Option<String>, layout: Layout) -> Result<(Str
     Ok((name.clone(), st.workspaces[&name].clone()))
 }
 
+/// A workspace change (activate, delete, rename, order) told to every board
+/// window as `terminal-workspaces`, so a window still showing a workspace
+/// that is gone switches away instead of saving it back into existence.
+fn announce(app: &tauri::AppHandle, list: Value) -> Result<Value, String> {
+    let _ = crate::mcp::events::emit(
+        app,
+        crate::mcp::events::AppEvent::Board { name: "terminal-workspaces", payload: list.clone() },
+    );
+    Ok(list)
+}
+
 /// Every workspace by name, and the active one.
 #[tauri::command]
 pub fn terminal_workspaces() -> Value {
@@ -232,7 +250,10 @@ fn ordered_names(st: &Store) -> Vec<String> {
 /// Arrange the strip. Unknown names are ignored, missing ones keep their
 /// place after the ones given, so a partial list is still a valid order.
 #[tauri::command]
-pub fn terminal_workspace_order(names: Vec<String>) -> Result<Value, String> {
+pub fn terminal_workspace_order(app: tauri::AppHandle, names: Vec<String>) -> Result<Value, String> {
+    announce(&app, workspace_order_impl(names)?)
+}
+pub fn workspace_order_impl(names: Vec<String>) -> Result<Value, String> {
     let mut st = lock(&STORE);
     let mut order: Vec<String> = Vec::new();
     for n in names {
@@ -248,7 +269,10 @@ pub fn terminal_workspace_order(names: Vec<String>) -> Result<Value, String> {
 
 /// Make a workspace the one the main window shows.
 #[tauri::command]
-pub fn terminal_workspace_activate(name: String) -> Result<Value, String> {
+pub fn terminal_workspace_activate(app: tauri::AppHandle, name: String) -> Result<Value, String> {
+    announce(&app, workspace_activate_impl(name)?)
+}
+pub fn workspace_activate_impl(name: String) -> Result<Value, String> {
     let name = sane_card_id(&name).ok_or_else(|| format!("workspace {name:?} is not a plain name"))?;
     let mut st = lock(&STORE);
     st.active = name;
@@ -259,7 +283,10 @@ pub fn terminal_workspace_activate(name: String) -> Result<Value, String> {
 
 /// Forget a workspace. The last one cannot go; `main` is recreated empty.
 #[tauri::command]
-pub fn terminal_workspace_delete(name: String) -> Result<Value, String> {
+pub fn terminal_workspace_delete(app: tauri::AppHandle, name: String) -> Result<Value, String> {
+    announce(&app, workspace_delete_impl(name)?)
+}
+pub fn workspace_delete_impl(name: String) -> Result<Value, String> {
     let mut st = lock(&STORE);
     if st.workspaces.len() <= 1 {
         return Err("the last workspace stays".into());
@@ -279,7 +306,10 @@ pub fn terminal_workspace_delete(name: String) -> Result<Value, String> {
 /// its remembered windows all follow; the old name is gone. Refused when the
 /// new name is taken, so nothing is overwritten by a typo.
 #[tauri::command]
-pub fn terminal_workspace_rename(from: String, to: String) -> Result<Value, String> {
+pub fn terminal_workspace_rename(app: tauri::AppHandle, from: String, to: String) -> Result<Value, String> {
+    announce(&app, workspace_rename_impl(from, to)?)
+}
+pub fn workspace_rename_impl(from: String, to: String) -> Result<Value, String> {
     let to = sane_card_id(&to).ok_or_else(|| format!("workspace {to:?} is not a plain name"))?;
     if to == from {
         return Ok(terminal_workspaces());
@@ -351,6 +381,9 @@ pub fn terminal_workspace_windows_close(app: tauri::AppHandle, name: String) -> 
 // ── Windows ─────────────────────────────────────────────────────────────────
 
 fn save_windows(w: &Windows) {
+    if cfg!(test) {
+        return;
+    }
     crate::mcp::config_store::save_config(WINDOWS_FILE, w);
 }
 
@@ -1036,13 +1069,13 @@ mod tests {
         let alpha = names(terminal_workspaces());
         let pa = alpha.iter().position(|n| n == &a).unwrap();
         assert!(pa < alpha.iter().position(|n| n == &c).unwrap(), "no order yet: alphabetical");
-        let r = names(terminal_workspace_order(vec![c.clone(), "nope".into(), a.clone()]).unwrap());
+        let r = names(workspace_order_impl(vec![c.clone(), "nope".into(), a.clone()]).unwrap());
         let (pc, pa, pb) = (r.iter().position(|n| n == &c).unwrap(), r.iter().position(|n| n == &a).unwrap(), r.iter().position(|n| n == &b).unwrap());
         assert!(pc < pa && pa < pb, "given order first, the unlisted one after, the unknown dropped: {r:?}");
         let d = "order-test-d".to_string();
-        let r = names(terminal_workspace_rename(c.clone(), d.clone()).unwrap());
+        let r = names(workspace_rename_impl(c.clone(), d.clone()).unwrap());
         assert_eq!(r.iter().position(|n| n == &d).unwrap(), pc, "a renamed workspace keeps its place");
-        terminal_workspace_delete(d.clone()).unwrap();
+        workspace_delete_impl(d.clone()).unwrap();
         {
             let mut st = lock(&STORE);
             assert!(!st.order.contains(&d));
@@ -1069,7 +1102,7 @@ mod tests {
             w.workspaces.push(from.clone());
             w.cards.push(format!("{from}/x"));
         }
-        let r = terminal_workspace_rename(from.clone(), to.clone()).unwrap();
+        let r = workspace_rename_impl(from.clone(), to.clone()).unwrap();
         assert_eq!(r["active"], to.as_str());
         {
             let st = lock(&STORE);
@@ -1081,12 +1114,12 @@ mod tests {
             assert!(w.workspaces.contains(&to) && !w.workspaces.contains(&from));
             assert!(w.cards.contains(&format!("{to}/x")) && !w.cards.contains(&format!("{from}/x")));
         }
-        assert!(terminal_workspace_rename(to.clone(), "no spaces here".into()).is_err(), "a name with spaces is refused");
+        assert!(workspace_rename_impl(to.clone(), "no spaces here".into()).is_err(), "a name with spaces is refused");
         {
             let mut st = lock(&STORE);
             st.workspaces.insert("rename-test-c".into(), Layout::default());
         }
-        assert!(terminal_workspace_rename(to.clone(), "rename-test-c".into()).is_err(), "an existing name is not overwritten");
+        assert!(workspace_rename_impl(to.clone(), "rename-test-c".into()).is_err(), "an existing name is not overwritten");
         {
             let mut st = lock(&STORE);
             st.workspaces.remove(&to);

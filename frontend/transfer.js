@@ -14,6 +14,8 @@
  * from a chat message and a message must not be able to name a destination.
  */
 (function () {
+  // `?embed=1` — inside a Terminal card, whose frame is the header.
+  if (/[?&]embed=1(&|$)/.test(String(location.search || ''))) document.documentElement.setAttribute('data-embed', '');
   'use strict';
 
   var T = window.__TAURI__;

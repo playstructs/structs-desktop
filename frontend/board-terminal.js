@@ -147,6 +147,22 @@
       if (Number(p.version) === Number(state.layout.version || 0)) return;
       reloadLayout();
     });
+    // Another window activated, deleted, renamed or re-ordered a workspace.
+    // Take the list; if the one shown here is gone, go to the active one —
+    // a save from a stale window would otherwise recreate it.
+    window.StructsEvents.listen('terminal-workspaces', function (e) {
+      var p = e && e.payload;
+      if (!p || !Array.isArray(p.names) || !p.names.length) return;
+      state.workspaces = p.names;
+      state.active = p.active || p.names[0];
+      if (p.names.indexOf(state.ws) < 0) {
+        if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
+        state.ws = null;
+        switchWorkspace(state.active);
+      } else if (!state.solo) {
+        renderAll();
+      }
+    });
   }
   Terminal.flushSave = function () { if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; return persist(); } return Promise.resolve(); };
 
@@ -278,7 +294,7 @@
   }
 
   function door(iconName, title, onClick) {
-    var a = H.el('a', 'sui-nav-btn tm-door');
+    var a = H.el('a', 'tm-door');
     a.href = 'javascript:void(0)';
     a.title = title;
     a.appendChild(H.el('i', iconName + ' sui-icon-sm'));
@@ -286,18 +302,37 @@
     return a;
   }
 
+  // A card is the game's own panel (chat.html builds the Comms window from
+  // the same pieces): panel edges and chunk, a screen whose nav is the
+  // header — the title as the active nav tab, the doors where the window's
+  // icons go — and a screen whose page body holds the card.
+  var FRAME_CLS = 'sui-panel sui-theme-player tm-card';
+  function frameClass(w, extra) { return FRAME_CLS + ' tm-w' + w + (extra || ''); }
   function frame(card) {
     var def = TYPES[card.type];
-    var node = H.el('div', 'sui-data-card sui-theme-player tm-card tm-w' + (card.w || 1));
+    var node = H.el('div', frameClass(card.w || 1));
     node.id = 'tm-' + card.id;
     node.setAttribute('data-card', card.id);
     node.setAttribute('data-type', card.type);
-    var head = H.el('div', 'sui-data-card-header sui-text-header tm-head');
-    var title = H.el('span', 'tm-title', titleOf(card));
-    head.appendChild(title);
+    node.appendChild(H.el('div', 'sui-panel-top-fill-background'));
+    node.appendChild(H.el('div', 'sui-panel-bottom-fill-background'));
+    node.appendChild(H.el('div', 'sui-panel-edge-left'));
+    var chunk = H.el('div', 'sui-panel-chunk sui-mod-grow sui-mod-shrink tm-chunk');
+    node.appendChild(chunk);
+    node.appendChild(H.el('div', 'sui-panel-edge-right'));
+    var headScreen = H.el('div', 'sui-screen sui-screen-full-width tm-head-screen');
+    var head = H.el('div', 'sui-screen-nav tm-head');
+    var titles = H.el('div', 'sui-screen-nav-items');
+    var title = H.el('span', 'sui-screen-nav-item sui-mod-header sui-mod-active tm-title', titleOf(card));
+    titles.appendChild(title);
+    head.appendChild(titles);
+    headScreen.appendChild(head);
     var doors = H.el('span', 'tm-doors');
+    var own = def && def.doors ? def.doors(card, { get body() { var m = state.mounted[card.id]; return m ? m.body : null; } }) : [];
+    (own || []).forEach(function (d) { var a = door(d.icon, d.title, d.onClick); a.classList.add('tm-door-own'); doors.appendChild(a); });
     var refreshDoor = door('icon-in-progress', 'Refresh', function () { refresh(card.id, true); });
     refreshDoor.classList.add('tm-refresh');
+    if (def && def.cadenceMs === 0 && (own || []).length) refreshDoor.classList.add('tm-door-quiet');
     doors.appendChild(refreshDoor);
     markCadence(node, card);
     if (!state.solo) {
@@ -374,12 +409,14 @@
       node.appendChild(grip);
     }
     head.appendChild(doors);
-    node.appendChild(head);
+    chunk.appendChild(headScreen);
     var config = H.el('div', 'tm-config');
     config.hidden = true;
-    node.appendChild(config);
-    var body = H.el('div', 'sui-data-card-body tm-body');
-    node.appendChild(body);
+    chunk.appendChild(config);
+    var bodyScreen = H.el('div', 'sui-screen sui-screen-full-width sui-screen-shrink tm-body-screen');
+    var body = H.el('div', 'sui-page-body-screen tm-body');
+    bodyScreen.appendChild(body);
+    chunk.appendChild(bodyScreen);
     return { node: node, body: body, config: config, title: title };
   }
 
@@ -413,7 +450,7 @@
     var c = findCard(id), m = state.mounted[id];
     if (!c || !m) return;
     w = Math.max(1, Math.min(3, w || 1));
-    m.node.className = 'sui-data-card sui-theme-player tm-card tm-w' + w + (preview ? ' tm-resizing' : '');
+    m.node.className = frameClass(w, preview ? ' tm-resizing' : '');
     if (!preview && w !== c.w) { c.w = w; save(); }
     fitRows(m);
   }
@@ -496,7 +533,7 @@
     if (!c) return;
     c.w = Math.max(1, Math.min(3, Number(w) || 1));
     var m = state.mounted[id];
-    if (m) m.node.className = 'sui-data-card sui-theme-player tm-card tm-w' + c.w;
+    if (m) m.node.className = frameClass(c.w);
     save();
   }
 
@@ -641,7 +678,7 @@
       // stale card would wear a new title.
       if (m && (m.def !== TYPES[c.type] || JSON.stringify(m.params || {}) !== JSON.stringify(c.params || {}))) { unmountCard(c.id); m = null; }
       if (!m) { mount(c, grid); m = state.mounted[c.id]; }
-      m.node.className = 'sui-data-card sui-theme-player tm-card tm-w' + (state.solo ? 3 : (c.w || 1));
+      m.node.className = frameClass(state.solo ? 3 : (c.w || 1));
       markCadence(m.node, c);
       if (c.title) m.title.textContent = c.title;
       if (grid.children[i] !== m.node) grid.insertBefore(m.node, grid.children[i] || null);
@@ -1663,12 +1700,18 @@
   });
 
   // Whole windows, framed: the spectator map, the Comms window, the Pay window.
+  // `embed=1`: the page drops its own nav bar (the card frame is the header)
+  // and takes navigation from the frame's doors, by message.
   function framed(url, title) {
     var f = document.createElement('iframe');
     f.className = 'tm-frame';
     f.title = title;
-    f.src = url;
+    f.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'embed=1';
     return f;
+  }
+  function tellFrame(host, msg) {
+    var f = host && host.querySelector('iframe.tm-frame');
+    if (f && f.contentWindow) f.contentWindow.postMessage(msg, location.origin === 'null' ? '*' : location.origin);
   }
   // A planet as a card, not a window: who holds it, what it is worth, what is
   // happening to it, and every slot by ambit — the spectator snapshot the raid
@@ -1774,6 +1817,14 @@
   });
   Terminal.register('chat', {
     label: 'Comms window', defaultWidth: 2, describe: function () { return 'Comms'; }, cadenceMs: 0,
+    // The Comms nav (channels, connection) as doors on the frame, where the
+    // page's own bar used to repeat the card's header.
+    doors: function (card, m) {
+      return [
+        { icon: 'icon-phone', title: 'Channels', onClick: function () { tellFrame(m.body, { structs: 'chat', go: 'channels' }); } },
+        { icon: 'icon-menu', title: 'Connection', onClick: function () { tellFrame(m.body, { structs: 'chat', go: 'connection' }); } },
+      ];
+    },
     render: function (host) { host.innerHTML = ''; host.appendChild(framed('chat.html', 'Comms')); },
   });
   Terminal.register('pay', {

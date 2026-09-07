@@ -151,6 +151,11 @@
     sent: [],
     sentAt: -1,
   };
+  // `?embed=1` — inside a Terminal card. The page's own nav bar hides (the
+  // frame is the header) and the tab strip shows only when there is more
+  // than one room to switch between.
+  S.embed = /[?&]embed=1(&|$)/.test(String(location.search || ''));
+  if (S.embed) document.documentElement.setAttribute('data-embed', '');
 
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
   // Same idiom as board.js, kept local so this window loads no board code.
@@ -1138,6 +1143,21 @@
     if (comms) comms.addEventListener('click', function () { go('channels'); });
     var settings = byId('chat-nav-settings');
     if (settings) settings.addEventListener('click', function () { go('connection'); });
+    // Embedded in a Terminal card (`?embed=1`): the card frame is the header
+    // and its doors navigate here by message. Only our own origin is heard,
+    // and only the two pages the doors name.
+    if (S.embed) {
+      window.addEventListener('message', function (ev) {
+        // Same origin only. A file:// page (the harness) has the opaque origin
+        // 'null', which a same-window message reports as 'null' or ''.
+        var mine = String(location.origin || '');
+        var same = ev.origin === mine || (mine === 'null' && (ev.origin === 'null' || ev.origin === ''));
+        if (!same) return;
+        var m = ev.data;
+        if (!m || m.structs !== 'chat') return;
+        if (m.go === 'channels' || m.go === 'connection') go(m.go);
+      });
+    }
 
     listen('matrix::timeline', function (e) { onTimeline(e && e.payload); });
     listen('matrix::typing', function (e) { onTyping(e && e.payload); });

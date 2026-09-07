@@ -615,19 +615,19 @@ async fn board_invoke(
         },
         "terminal_workspaces" => ok_json(crate::mcp::terminal::terminal_workspaces()),
         "terminal_workspace_activate" => match s("name") {
-            Some(n) => from_result(crate::mcp::terminal::terminal_workspace_activate(n)),
+            Some(n) => from_result(crate::mcp::terminal::terminal_workspace_activate(st.app.clone(), n)),
             None => err_json("name required".into()),
         },
         "terminal_workspace_delete" => match s("name") {
-            Some(n) => from_result(crate::mcp::terminal::terminal_workspace_delete(n)),
+            Some(n) => from_result(crate::mcp::terminal::terminal_workspace_delete(st.app.clone(), n)),
             None => err_json("name required".into()),
         },
         "terminal_workspace_order" => match body.get("names").and_then(|v| v.as_array()) {
-            Some(a) => from_result(crate::mcp::terminal::terminal_workspace_order(a.iter().filter_map(|x| x.as_str().map(String::from)).collect())),
+            Some(a) => from_result(crate::mcp::terminal::terminal_workspace_order(st.app.clone(), a.iter().filter_map(|x| x.as_str().map(String::from)).collect())),
             None => err_json("names required".into()),
         },
         "terminal_workspace_rename" => match (s("from"), s("to")) {
-            (Some(f), Some(t)) => from_result(crate::mcp::terminal::terminal_workspace_rename(f, t)),
+            (Some(f), Some(t)) => from_result(crate::mcp::terminal::terminal_workspace_rename(st.app.clone(), f, t)),
             _ => err_json("from and to required".into()),
         },
         "terminal_windows" => ok_json(crate::mcp::terminal::terminal_windows(st.app.clone())),

@@ -895,6 +895,9 @@
     /* Game Stats is a long dashboard, not a pinned log: the window scrolls. */
     html[data-solo="gamestats"] .ops-scroll { overflow-y: auto; }
     html[data-solo="terminal"] .ops-scroll { overflow-y: auto; }
+    /* A Terminal window's only header is the workspace strip: the board's nav
+       bar (area tabs hidden, refresh door left) was a second, empty header. */
+    html[data-solo="terminal"] .sui-screen-nav:has(> #board-tabs) { display: none; }
     /* ── The Terminal (board-terminal.js) ──────────────────────────────── */
     /* One grid of the game's data cards: three equal columns, one gutter,
        every card the same frame — header with the doors, body with the
@@ -933,7 +936,16 @@
     .tm-grid.tm-solo { grid-template-columns: minmax(0, 1fr); }
     /* #board-layout .sui-data-card says align-self: stretch, which in a 4px
        track squashes a card to nothing (and fitRows measures 0); the id wins. */
-    #board-layout .tm-card { min-width: 0; margin: 0; position: relative; align-self: start; }
+    /* The card is a .sui-panel: its fill backgrounds sit at z-index -1, so
+       the card isolates its own stacking context to keep them inside it. */
+    #board-layout .tm-card { min-width: 0; margin: 0; position: relative; align-self: start; isolation: isolate; max-height: none; }
+    .tm-chunk { width: 100%; min-width: 0; }
+    /* The header IS the panel's nav screen (chat.html's #menu-page-nav): the
+       title stands as the active header tab, the doors as the window's icons. */
+    .tm-head-screen { line-height: 0; }
+    .tm-head { align-items: center; overflow: hidden; padding-right: var(--spacing-sm); line-height: normal; }
+    .tm-head .sui-screen-nav-items { min-width: 0; flex: 1 1 auto; justify-content: flex-start; }
+    .tm-title { display: block; }
     .tm-card.tm-dragging { opacity: .5; }
     .tm-card.tm-drop-before { box-shadow: inset var(--spacing-xs) 0 0 var(--accent-primary); }
     .tm-card.tm-drop-after { box-shadow: inset calc(-1 * var(--spacing-xs)) 0 0 var(--accent-primary); }
@@ -946,8 +958,9 @@
     .tm-resize:hover { background: var(--border-strong); }
     /* a.sui-nav-btn:link out-specifies a bare class, so the door's rest state
        needs the grid id in front of it. */
-    #tm-grid a.tm-door-quiet { display: none; }
-    #tm-grid .tm-card:hover a.tm-door-quiet, #tm-grid .tm-card:focus-within a.tm-door-quiet { display: inline-flex; }
+    /* a.tm-door:link below is (1,2,1); the rest state needs to out-rank it. */
+    #tm-grid .tm-doors a.tm-door.tm-door-quiet { display: none; }
+    #tm-grid .tm-card:hover .tm-doors a.tm-door.tm-door-quiet, #tm-grid .tm-card:focus-within .tm-doors a.tm-door.tm-door-quiet { display: inline-flex; }
     .tm-share { display: inline-flex; align-items: center; gap: var(--spacing-sm); flex: 1 1 auto; min-width: 0; }
     .tm-share input { flex: 1 1 auto; min-width: 0; }
     /* The battle log, as the raid view styles it. */
@@ -975,19 +988,24 @@
       .tm-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
       .tm-toolbar > .tm-cmd-field, .tm-toolbar > .tm-toolbar-param { grid-column: 1 / -1; }
     }
-    .tm-head { justify-content: space-between; gap: var(--spacing-md); align-self: stretch; width: 100%; box-sizing: border-box; }
+    .tm-head { justify-content: space-between; gap: var(--spacing-md); width: 100%; box-sizing: border-box; }
     .tm-toolbar .sui-screen-btn { justify-self: start; }
     .tm-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
     .tm-paused .tm-refresh { opacity: .35; }
     .tm-paused:hover .tm-refresh { opacity: 1; }
-    .tm-doors { display: inline-flex; align-items: center; gap: var(--spacing-xs); flex: none; }
-    .tm-door { padding: var(--spacing-xs); }
+    .tm-doors { display: inline-flex; align-items: stretch; align-self: stretch; gap: 0; flex: none; }
+    /* Doors as the Comms window draws its nav actions (#chat-nav-actions a). */
+    #tm-grid a.tm-door, #tm-grid a.tm-door:link, #tm-grid a.tm-door:visited { display: inline-flex; align-items: center; padding: var(--spacing-sm) var(--spacing-sm); text-decoration: none; color: var(--accent-primary); }
+    #tm-grid a.tm-door:hover { color: var(--accent-primary-active); }
     .tm-door-off { opacity: .3; pointer-events: none; }
     .tm-config { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md); background: var(--surface-default); }
     /* `display: flex` beats the UA's [hidden] rule, so without this the
      * configure strip never closed once opened — Apply left it on the card. */
     .tm-config[hidden] { display: none; }
-    .tm-body { width: 100%; flex-direction: column; align-items: stretch; padding: var(--spacing-md); max-height: 70vh; overflow-y: auto; }
+    /* The body is the panel's page-body screen; its own rule scrolls always,
+       this one only when it must, and caps the card at 70vh. */
+    .tm-body-screen { line-height: 0; }
+    #board-layout .tm-body { width: 100%; padding: var(--spacing-md); max-height: 70vh; overflow-y: auto; text-align: left; line-height: normal; }
     .tm-body > .sui-data-card { margin: 0; }
     .tm-body .page { display: block; max-height: 70vh; overflow-y: auto; }
     .tm-cap { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: var(--spacing-sm); }

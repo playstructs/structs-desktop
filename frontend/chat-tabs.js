@@ -78,6 +78,11 @@
       var box = byId('menu-page-nav-items');
       if (!box) return;
       clear(box);
+      // Embedded: the strip is worth a row only as TABS — two or more rooms.
+      if (S.embed) {
+        if (S.tabs.length > 1) document.documentElement.setAttribute('data-embed-tabs', '');
+        else document.documentElement.removeAttribute('data-embed-tabs');
+      }
 
       if (!S.tabs.length) {
         // Nothing open yet: name the network, as the slot did before.
