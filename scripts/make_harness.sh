@@ -438,7 +438,8 @@ cat > "$FIX" <<'EOF'
       { id: 'player-1', type: 'player', params: { id: '1-61' }, w: 1 },
       { id: 'stats-1', type: 'stats', params: { section: 'raids' }, w: 1 },
     ] },
-    terminal_layout_set: { version: 4, cards: [] },
+    // Answers the saved layout back (its version is what the page keeps).
+    get terminal_layout_set() { return { version: 4, cards: [] }; },
     terminal_workspaces: { active: 'main', names: ['main', 'war-room'] },
     terminal_workspace_activate: { active: 'main', names: ['main', 'war-room'] },
     terminal_workspace_delete: { active: 'main', names: ['main'] },

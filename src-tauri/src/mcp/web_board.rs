@@ -608,7 +608,7 @@ async fn board_invoke(
         "terminal_layout_get" => ok_json(crate::mcp::terminal::terminal_layout_get(s("workspace"))),
         "terminal_layout_set" => match body.get("layout").cloned() {
             Some(l) => match serde_json::from_value(l) {
-                Ok(layout) => from_result(crate::mcp::terminal::terminal_layout_set(s("workspace"), layout)),
+                Ok(layout) => from_result(crate::mcp::terminal::terminal_layout_set(st.app.clone(), s("workspace"), layout)),
                 Err(e) => err_json(format!("bad layout: {e}")),
             },
             None => err_json("layout required".into()),

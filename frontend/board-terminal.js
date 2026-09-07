@@ -77,7 +77,8 @@
   function load() {
     return invoke('terminal_layout_get', { workspace: state.ws }).then(function (l) {
       if (!l || !Array.isArray(l.cards)) throw new Error('no layout');
-      return l;
+      // Our own copy: the page edits the layout in place.
+      return JSON.parse(JSON.stringify(l));
     }).catch(function () {
       try {
         var raw = localStorage.getItem(LOCAL_KEY + state.ws);
@@ -120,8 +121,31 @@
   function persist() {
     state.layout.version = (state.layout.version || 0) + 1;
     try { localStorage.setItem(LOCAL_KEY + state.ws, JSON.stringify(state.layout)); } catch (e) { /* fine */ }
-    return invoke('terminal_layout_set', { workspace: state.ws, layout: state.layout }).catch(function (e) {
+    var ws = state.ws;
+    return invoke('terminal_layout_set', { workspace: ws, layout: state.layout }).then(function (saved) {
+      if (saved && saved.version != null && ws === state.ws) state.layout.version = saved.version;
+    }).catch(function (e) {
+      // Another window of this workspace saved first: its arrangement is the
+      // one that stands. Take it rather than fight over it.
+      if (/stale layout/.test(String(e)) && ws === state.ws) return reloadLayout();
       Board.stamp && Board.stamp('layout not saved: ' + e);
+    });
+  }
+  /* Re-read this workspace from Rust and redraw — after a refused save, or
+   * when another window announces one. A drag in progress is left alone. */
+  function reloadLayout() {
+    if (state.drag) return Promise.resolve();
+    return load().then(function () { renderGrid(); });
+  }
+  Terminal.reloadLayout = reloadLayout;
+  function listenForLayouts() {
+    if (state.listening || !window.StructsEvents) return;
+    state.listening = true;
+    window.StructsEvents.listen('terminal-layout', function (e) {
+      var p = e && e.payload;
+      if (!p || p.workspace !== state.ws) return;
+      if (Number(p.version) === Number(state.layout.version || 0)) return;
+      reloadLayout();
     });
   }
   Terminal.flushSave = function () { if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; return persist(); } return Promise.resolve(); };
@@ -1590,7 +1614,7 @@
       state.ws = param('ws') || state.active || 'main';
       if (state.workspaces.indexOf(state.ws) < 0) state.workspaces.push(state.ws);
       return load();
-    }).then(function () { renderAll(); });
+    }).then(function () { listenForLayouts(); renderAll(); });
   }
   Terminal.enter = enter;
 

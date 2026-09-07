@@ -264,6 +264,24 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await tick(10);
   check('…which shares it as a message', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_share' && /IMPORT terminal:/.test(c.args.text)));
 
+  // Two windows, one workspace: a save adopts the version Rust answers, an
+  // announced newer version from elsewhere reloads the page's copy.
+  await w.Board.Terminal.flushSave();
+  check('a save adopts the version Rust stored', w.Board.Terminal.state.layout.version === 4);
+  check('the page listens for other windows\' saves', w.StructsEvents.names().includes('terminal-layout'));
+  {
+    const before = w.Board.Terminal.state.layout.cards.length;
+    w.__HARNESS_EMIT__('terminal-layout', { workspace: w.Board.Terminal.state.ws, version: 4 });
+    await tick(30);
+    check('…an announcement at its own version changes nothing', w.Board.Terminal.state.layout.cards.length === before);
+    w.__HARNESS_EMIT__('terminal-layout', { workspace: 'somewhere-else', version: 99 });
+    await tick(30);
+    check('…nor one for another workspace', w.Board.Terminal.state.layout.cards.length === before);
+    w.__HARNESS_EMIT__('terminal-layout', { workspace: w.Board.Terminal.state.ws, version: 99 });
+    await until(() => w.Board.Terminal.state.layout.cards.length !== before);
+    check('…but a newer version for this workspace reloads the layout from Rust', w.Board.Terminal.state.layout.cards.length === 6 && d.querySelectorAll('#tm-grid .tm-card').length === 6);
+  }
+
   run('NOPE');
   check('an unknown word is refused in place, not swallowed', cmd.classList.contains('is-err') && cmd.value === 'NOPE');
 

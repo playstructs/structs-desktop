@@ -748,8 +748,15 @@
   // EVERY board-family window, and Team Ops should not pay for a page it only
   // reaches through a hand-typed hash.
   function ensureBoot() {
-    if (state.booted) return Promise.resolve();
+    // The boot is ONE promise, shared: a second caller (the Terminal mounts
+    // several stats cards at once) waits for the same first pull instead of
+    // resolving at once with no snapshot and drawing "contacting…".
+    if (state.booting) return state.booting;
     state.booted = true;
+    state.booting = bootOnce();
+    return state.booting;
+  }
+  function bootOnce() {
     window.StructsEvents.listen('game-stats-update', function (e) {
       var p = e && e.payload;
       if (!p || !state.snap) return;

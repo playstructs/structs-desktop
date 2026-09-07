@@ -145,8 +145,31 @@ pub fn terminal_layout_get(workspace: Option<String>) -> Layout {
 /// Replace one workspace's layout. The page is the authority on shape; this
 /// only refuses what cannot be a card at all (an id that would not survive a
 /// URL) and names that would not survive a window label.
+///
+/// Two windows can show one workspace (the main Terminal and a workspace
+/// window, or the native window and the web copy). Each carries its own
+/// copy and bumps `version` on save, so a save whose version is not newer
+/// than the stored one is a stale copy writing over someone else's
+/// arrangement: it is refused with [`STALE_LAYOUT`], and the page reloads.
+/// Every accepted save is announced to the board family as
+/// `terminal-layout` so the other windows catch up at once.
 #[tauri::command]
-pub fn terminal_layout_set(workspace: Option<String>, layout: Layout) -> Result<Layout, String> {
+pub fn terminal_layout_set(app: tauri::AppHandle, workspace: Option<String>, layout: Layout) -> Result<Layout, String> {
+    let (name, saved) = layout_set_impl(workspace, layout)?;
+    let _ = crate::mcp::events::emit(
+        &app,
+        crate::mcp::events::AppEvent::Board {
+            name: "terminal-layout",
+            payload: json!({ "workspace": name, "version": saved.version }),
+        },
+    );
+    Ok(saved)
+}
+
+/// The error a stale save gets; the page matches on this text.
+pub const STALE_LAYOUT: &str = "stale layout";
+
+pub fn layout_set_impl(workspace: Option<String>, layout: Layout) -> Result<(String, Layout), String> {
     for c in &layout.cards {
         if sane_card_id(&c.id).is_none() {
             return Err(format!("card id {:?} is not a plain id", c.id));
@@ -160,9 +183,17 @@ pub fn terminal_layout_set(workspace: Option<String>, layout: Layout) -> Result<
         Some(n) => sane_card_id(&n).ok_or_else(|| format!("workspace {n:?} is not a plain name"))?,
         None => st.active.clone(),
     };
+    if let Some(have) = st.workspaces.get(&name) {
+        if !have.cards.is_empty() && layout.version <= have.version {
+            return Err(format!(
+                "{STALE_LAYOUT}: {name} is at version {} and this save is version {}",
+                have.version, layout.version
+            ));
+        }
+    }
     st.workspaces.insert(name.clone(), layout);
     save_store(&st);
-    Ok(st.workspaces[&name].clone())
+    Ok((name.clone(), st.workspaces[&name].clone()))
 }
 
 /// Every workspace by name, and the active one.
@@ -875,6 +906,27 @@ mod tests {
         assert_eq!(st.workspaces["main"].version, 7);
         let back: Store = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
         assert_eq!(back, st);
+    }
+
+    #[test]
+    fn a_stale_save_is_refused_and_a_newer_one_wins() {
+        let ws = "conflict-test".to_string();
+        let mk = |v: u64, id: &str| Layout { version: v, cards: vec![Card { id: id.into(), kind: "people".into(), params: json!({}), w: 1 }] };
+        {
+            let mut st = lock(&STORE);
+            st.workspaces.remove(&ws);
+        }
+        layout_set_impl(Some(ws.clone()), mk(3, "a")).expect("first save lands");
+        let err = layout_set_impl(Some(ws.clone()), mk(3, "b")).expect_err("same version is stale");
+        assert!(err.starts_with(STALE_LAYOUT), "{err}");
+        let err = layout_set_impl(Some(ws.clone()), mk(2, "b")).expect_err("older is stale");
+        assert!(err.starts_with(STALE_LAYOUT), "{err}");
+        let (_, saved) = layout_set_impl(Some(ws.clone()), mk(4, "b")).expect("newer wins");
+        assert_eq!(saved.cards[0].id, "b");
+        // An empty stored layout never blocks a save (nothing to lose).
+        layout_set_impl(Some(ws.clone()), Layout { version: 0, cards: vec![] }).ok();
+        let mut st = lock(&STORE);
+        st.workspaces.remove(&ws);
     }
 
     #[test]
