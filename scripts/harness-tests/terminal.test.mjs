@@ -50,8 +50,9 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…an open offer can be rented, a guild-market one cannot', d.querySelectorAll('#tm-market-1 .tm-offer')[0].querySelector('[title="Rent capacity"]') !== null && d.querySelectorAll('#tm-market-1 .tm-offer')[1].querySelector('[title="Rent capacity"]') === null);
   await until(() => d.querySelector('#tm-pow-1 .fstat'));
   check('proof queue card: counts as tiles, the engine as rows', d.querySelectorAll('#tm-pow-1 .fstat').length === 3 && /GPU/.test(d.querySelector('#tm-pow-1').textContent) && /auto-tuned/.test(d.querySelector('#tm-pow-1').textContent));
-  await until(() => d.querySelector('#tm-tasks-1 .sui-result-row'));
-  check('tasks card: one row per proof, progress first', d.querySelectorAll('#tm-tasks-1 .sui-result-row').length === 3 && /5-12:mine/.test(d.querySelector('#tm-tasks-1 .sui-result-row').textContent));
+  await until(() => d.querySelector('#tm-tasks-1 .pc-row'));
+  check('tasks card: one catalogue row per proof, the running one first with its progress bar and difficulty of 64', d.querySelectorAll('#tm-tasks-1 .pc-row').length === 3 && /5-12:mine/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent) && d.querySelector('#tm-tasks-1 .pc-row .sui-action-bar-progress-bar') !== null && /12 \/ 64/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent), d.querySelector('#tm-tasks-1 .pc-row') && d.querySelector('#tm-tasks-1 .pc-row').textContent);
+  check('…the running proof wears the struct it is for as its emblem', d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img') !== null && /img\/structs\/extractor\//.test(d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img').getAttribute('src') || ''), d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img') && d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img').getAttribute('src'));
   check('the Team Ops pages themselves are not offered as cards (only the settings forms)', ![...d.querySelectorAll('.tm-toolbar select option')].some((o) => /Team Ops/.test(o.textContent)) && !w.Board.Terminal.types().some((t) => t.type === 'page'));
   await until(() => d.querySelector('#tm-player-1 .pc-card'));
   check('player card: the shared card for the named player', /JPEG/.test(d.querySelector('#tm-player-1 .pc-card')?.textContent || ''));
@@ -134,7 +135,8 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   run('BOOK 1-194');
   await until(() => d.querySelector('#tm-grid [data-type="book"] .pc-row'));
   const book = d.querySelector('#tm-grid [data-type="book"]');
-  check('BOOK shows what was bought and sold and when the first runs out', /buying from 1-170/.test(book.textContent) && /selling to 1-482/.test(book.textContent) && /First expiry/i.test(book.textContent) && (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_agreements' && c.args.player === '1-194'));
+  check('BOOK shows what was bought and sold and when the first runs out', /1-170/.test(book.textContent) && /1-482/.test(book.textContent) && /BOUGHT/.test(book.textContent) && /SOLD/.test(book.textContent) && /First expiry/i.test(book.textContent) && (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_agreements' && c.args.player === '1-194'), book.textContent.slice(0, 200));
+  check('…each agreement is a catalogue row with a countdown over its term', book.querySelectorAll('.pc-row[data-kind="agreement"] .sc-count').length === book.querySelectorAll('.pc-row').length && book.querySelectorAll('.pc-row').length > 0);
   run('ALERTS market.best_rate < 2; halt.min_margin > 50; nonsense');
   await until(() => d.querySelectorAll('#tm-grid [data-type="alerts"] .tm-alert').length === 3);
   const alerts = [...d.querySelectorAll('#tm-grid [data-type="alerts"] .tm-alert')].map((r) => r.className.replace(/.*tm-alert-/, ''));
@@ -202,9 +204,9 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   for (const [word, type, expect] of [
     ['QUEUE', 'queue', /StructBuildInitiate/], ['RESULTS', 'results', /insufficient charge/], ['SOLVE', 'solve', /GPU/],
     ['GRID', 'grid', /connections/i], ['FUEL', 'fuel', /Auto infuse/], ['ALLOC', 'allocations', /6-53/], ['FLEET', 'fleet', /MARKLIFER/],
-    ['RAIDS', 'raids', /shields vulnerable/], ['POSTURE', 'posture', /Response/], ['TARGETS', 'targets', /NO-GO — protected/],
-    ['GRUDGES', 'grudges', /beezhan/], ['VETOES', 'vetoes', /player 1-248/], ['INCIDENTS', 'incidents', /1-287 @ 2-287/],
-    ['WALLET', 'wallet', /Hydro \[OH\]/], ['HEALTH', 'health', /./],
+    ['RAIDS', 'raids', /shields vulnerable/], ['POSTURE', 'posture', /Auto response/], ['TARGETS', 'targets', /NO-GO — protected/],
+    ['GRUDGES', 'grudges', /beezhan/], ['VETOES', 'vetoes', /player 1-248/], ['INCIDENTS', 'incidents', /2-287/],
+    ['WALLET', 'wallet', /\[OH\]\s*Hydro/], ['HEALTH', 'health', /./],
   ]) {
     run(word);
     const sel = '#tm-grid [data-type="' + type + '"]';
@@ -213,11 +215,14 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check(word + ' renders the ' + type + ' card from its own data', !!body && expect.test(body.textContent) && !/unavailable/.test(body.textContent), body && body.textContent.slice(0, 120));
   }
   // Actionable: a queued signing can be cancelled from its row…
-  [...d.querySelectorAll('#tm-grid [data-type="queue"] .tx-btns a')].find((a) => a.title === 'Cancel').click();
+  check('queue rows are catalogue rows: rank first, cancel as a destructive door, in flight without doors', d.querySelectorAll('#tm-grid [data-type="queue"] .pc-row').length > 0 && d.querySelector('#tm-grid [data-type="queue"] .pc-act[title="Cancel"]').classList.contains('sc-destructive'));
+  [...d.querySelectorAll('#tm-grid [data-type="queue"] .pc-act')].find((a) => a.title === 'Cancel').click();
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_tx_mutate' && c.args.op === 'cancel'));
   check('…the queue card cancels through the same command as the page', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_tx_mutate' && c.args.op === 'cancel' && c.args.id === 't2'));
   // …a combat loop toggles from the posture card…
-  [...d.querySelectorAll('#tm-grid [data-type="posture"] a')].find((a) => a.textContent === 'Raiding on').click();
+  const raidSwitch = d.querySelector('#tm-grid [data-type="posture"] [data-loop="raid"] input');
+  check('the posture card draws each loop as a loop card with the game\'s own switch', raidSwitch !== null && d.querySelectorAll('#tm-grid [data-type="posture"] .pc-card').length === 2 && raidSwitch.checked === false);
+  raidSwitch.checked = true; raidSwitch.dispatchEvent(new w.Event('change', { bubbles: true }));
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'loop'));
   const loopCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'loop');
   check('…the posture card switches a loop by sending its whole config back', loopCall.args.payload.loop === 'raid' && loopCall.args.payload.config.enabled === true && loopCall.args.payload.config.posture === 'opportunist');
@@ -225,6 +230,9 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   d.querySelector('#tm-grid [data-type="targets"] .tx-btns a[title^="Add 1-61"]').click();
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'combat_lists'));
   check('…the target board adds a grudge through combat_lists', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_config_set' && c.args.domain === 'combat_lists' && c.args.payload.kind === 'grudge' && c.args.payload.id === '1-61'));
+  check('an incident row names the attacker as a person and the shots as its badge', /1-1957/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && /2-287/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="incidents"] .pc-row .sui-badge') !== null);
+  check('a raid row stacks attacker vs defender and keeps the live one\'s status word', /Marklifer/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && /JPEG/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="raids"] .pc-row.sc-bad') !== null);
+  check('a wallet row is an asset row: ore marked not sendable and without a Pay door', [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => /not sendable/.test(r.textContent) && !r.querySelector('.pc-act[title="Pay"]')) && [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => r.querySelector('.pc-act[title="Pay"]')));
   // The sweep prices itself before it moves anything.
   const sweepBtn = [...d.querySelectorAll('#tm-grid [data-type="fleet"] a')].find((a) => a.textContent === 'Sweep Alpha');
   sweepBtn.click();

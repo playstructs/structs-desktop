@@ -1,0 +1,115 @@
+/* The Terminal card catalogue (structs-cards.js): the shapes and readings the
+ * whole family shares beyond the player, guild and provider cards. Frames,
+ * readings and doors come from playercard.css; emblem frames and chips from
+ * guildcard.css. This file adds state, selection, the meter, health, the
+ * countdown, the sparkline, the versus block, the tape line and the peek.
+ *
+ * Hand-authored, top-level in frontend/ (css/ is regenerated on release).
+ */
+
+/* ── state: a 2px stripe on the header edge (card) or left edge (row) ──── */
+.sc-card.sc-live .sui-planet-card-header { box-shadow: inset 0 2px 0 var(--accent-primary); }
+.sc-card.sc-warn .sui-planet-card-header { box-shadow: inset 0 2px 0 var(--text-warning); }
+.sc-card.sc-bad  .sui-planet-card-header { box-shadow: inset 0 2px 0 var(--accent-destructive); }
+.sc-card.sc-enemy .sui-planet-card-header,
+.sc-card.sc-enemy .sui-planet-card-body { border-color: var(--border-enemy); }
+.sc-card.sc-enemy .sui-planet-card-body { background: var(--surface-enemy-body); }
+.sc-row.sc-live { box-shadow: inset 2px 0 0 var(--accent-primary); }
+.sc-row.sc-warn { box-shadow: inset 2px 0 0 var(--text-warning); }
+.sc-row.sc-bad  { box-shadow: inset 2px 0 0 var(--accent-destructive); }
+
+/* ── the row in a narrow frame: the name is never the thing that gives ───
+ * A one-wide Terminal card is ~330px. playercard.css's row is a four-column
+ * grid, and the identity column (minmax(0,1fr)) is the only one that can
+ * shrink, so at that width a name became "S…" and a rank row lost its title
+ * entirely. Here the row flexes instead: the identity keeps a floor, and the
+ * readings and doors wrap under it, right-aligned, when there is no room. */
+.pc-row.sc-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+.pc-row.sc-row .pc-ident { flex: 1 1 140px; min-width: 120px; }
+.pc-row.sc-row .pc-reads { flex: 0 1 auto; margin-left: auto; }
+.pc-row.sc-row .pc-actions { flex: none; }
+
+/* ── selection and focus: the accent, never the browser's ring ─────────── */
+.sc-row.is-selected { background: var(--surface-player-highlight); box-shadow: inset 2px 0 0 var(--accent-primary), inset 0 0 0 1px var(--accent-primary); }
+.sc-card.is-selected .sui-planet-card-body { box-shadow: inset 0 0 0 2px var(--accent-primary); }
+.sc-card:focus-visible, .sc-row:focus-visible, .sc-chip:focus-visible, .sc-tape:focus-visible, .pc-act:focus-visible { outline: 2px solid var(--accent-primary-active); outline-offset: 1px; }
+
+/* ── quiet doors: present, dim until the pointer or focus is on the card ── */
+.sc-quiet .pc-act { opacity: .35; }
+.sc-quiet:hover .pc-act, .sc-quiet:focus-within .pc-act { opacity: 1; }
+.pc-act.sc-destructive { color: var(--accent-destructive); }
+.pc-act.sc-on { color: var(--text-player-primary); }
+
+/* ── tones for glyph emblems ──────────────────────────────────────────── */
+.sc-tone-player { color: var(--text-player-primary); }
+.sc-tone-enemy { color: var(--accent-destructive); }
+.sc-tone-warning { color: var(--text-warning); }
+.sc-tone-secondary { color: var(--accent-secondary); }
+.sc-tone-hint { color: var(--text-hint); }
+
+/* ── card body: readings 2×2, wrapping under the emblem when narrow ─────── */
+.sc-card .sui-planet-card-body-content.pc-body { flex-wrap: wrap; }
+.sc-card .pc-reads { flex: 1 1 auto; display: grid; grid-template-columns: auto auto; gap: var(--spacing-md) var(--spacing-xl); justify-content: end; justify-items: end; align-items: center; }
+.sc-card .pc-reads .pc-res:only-child, .sc-card .pc-reads .sc-wide { grid-column: 1 / span 2; }
+.sc-card .pc-foot { flex-wrap: wrap; }
+.sc-card .pc-foot .pc-person { flex: 1 1 auto; min-width: 0; }
+.sc-card .pc-foot .pc-actions { flex: none; }
+.sc-row .pc-ident .pc-person { flex: none; max-width: 100%; }
+.sc-marks { opacity: 1; }
+.sc-marks .pc-mark i { color: var(--text-hint); }
+.sc-marks .pc-mark.pc-attn i { color: var(--text-warning); }
+.sc-chips { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); }
+.sc-ok { color: var(--text-player-primary); }
+.sc-bad-text { color: var(--accent-destructive); }
+
+/* ── art emblems ──────────────────────────────────────────────────────── */
+.gc-emblem.sc-art img { image-rendering: pixelated; width: 64px; height: 64px; max-width: 100%; max-height: 100%; }
+.gc-emblem.gc-sm.sc-art img { width: 40px; height: 40px; }
+.gc-emblem.gc-xs.sc-art img { width: 22px; height: 22px; }
+
+/* ── the game's 10-chunk bar, drawn where sui.css has no rule for it ───── */
+.sui-action-bar-progress-bar { display: inline-flex; gap: var(--spacing-xs); }
+.sui-action-bar-progress-bar-chunk { width: 6px; height: 12px; background: var(--surface-default); border: 1px solid var(--border-subtle); }
+.sui-action-bar-progress-bar-chunk.sui-mod-filled { background: var(--struct-progress-bar-fill); }
+.sc-health .sui-action-bar-progress-bar-chunk.sui-mod-filled { background: var(--struct-health-bar-health); }
+.sc-health.sc-bad .sui-action-bar-progress-bar-chunk.sui-mod-filled { background: var(--struct-health-bar-damage); }
+
+/* ── meter: load over capacity, ticks at 80 and 90 ─────────────────────── */
+.sc-meter { display: inline-flex; flex-direction: column; align-items: stretch; gap: var(--spacing-xs); min-width: 120px; }
+.sc-meter-cap { display: flex; justify-content: space-between; gap: var(--spacing-md); }
+.sc-meter-bar { position: relative; display: block; height: 8px; background: var(--surface-default); border: 1px solid var(--border-subtle); }
+.sc-meter-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent-primary); }
+.sc-meter.sc-warn .sc-meter-fill { background: var(--text-warning); }
+.sc-meter.sc-bad .sc-meter-fill { background: var(--accent-destructive); }
+.sc-meter-tick { position: absolute; top: -2px; bottom: -2px; width: 1px; background: var(--border-strong); }
+
+/* ── countdown, sparkline ─────────────────────────────────────────────── */
+.sc-count { font-variant-numeric: tabular-nums; }
+.sc-spark { width: 96px; height: 24px; display: block; color: var(--accent-primary); }
+.sc-spark.sc-tone-warning { color: var(--text-warning); }
+.sc-spark.sc-tone-enemy { color: var(--accent-destructive); }
+.sc-spark.sc-tone-hint { color: var(--text-hint); }
+
+/* ── versus: attacker over defender, each behind the game's glyph ────── */
+.sc-versus { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--spacing-sm) var(--spacing-md); align-items: center; width: 100%; }
+.sc-versus .pc-person { min-width: 0; }
+.sc-versus-row { display: flex; align-items: center; gap: var(--spacing-md); min-width: 0; }
+.sc-vs { color: var(--text-hint); }
+
+/* ── the switch (loops) is the game's checkbox ────────────────────────── */
+.sc-switch { display: inline-flex; align-items: center; gap: var(--spacing-sm); }
+
+/* ── the tape: time · kind · body · block, one grid line ──────────────── */
+.sc-tape { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: var(--spacing-md);
+  padding: var(--spacing-xs) var(--spacing-md); border-bottom: 1px solid var(--border-subtle); text-align: left; }
+.sc-tape-t, .sc-tape-blk { color: var(--text-hint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sc-tape-body { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); align-items: center; min-width: 0; }
+.sc-tape.is-new { box-shadow: inset 2px 0 0 var(--accent-primary); }
+
+/* ── the peek: a chip opened in place ─────────────────────────────────── */
+.sc-peek { margin: var(--spacing-sm) 0 var(--spacing-md); max-width: 420px; }
+.sc-chip.is-open { border-color: var(--accent-primary); }
+.sc-chip .sui-badge { flex: none; }
+
+/* ── workspace card ───────────────────────────────────────────────────── */
+.sc-ws-cards { display: flex; flex-wrap: wrap; gap: var(--spacing-xs); }

@@ -201,10 +201,14 @@
       nm.appendChild(el('span', 'gc-tag', '[' + str(o.tag) + ']'));
       nm.appendChild(document.createTextNode(' '));
     }
-    nm.appendChild(el('span', 'pc-nm', o.name != null && o.name !== '' ? str(o.name) : str(o.id)));
+    var named = o.name != null && o.name !== '';
+    nm.appendChild(el('span', 'pc-nm', named ? str(o.name) : str(o.id)));
     line.appendChild(nm);
-    line.appendChild(document.createTextNode(' '));
-    line.appendChild(el('span', 'pc-id', '#' + str(o.id)));
+    // An unnamed player is shown by id once, in the name slot, not "1-1957 #1-1957".
+    if (named) {
+      line.appendChild(document.createTextNode(' '));
+      line.appendChild(el('span', 'pc-id', '#' + str(o.id)));
+    }
     if (opts.title) line.title = opts.title;
     if (opts.onClick) {
       line.classList.add('pc-mod-clickable');

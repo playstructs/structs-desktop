@@ -112,7 +112,8 @@ async function until(fn, ms = 5000) {
   const people = live && live.querySelectorAll('#gs-live-people .pc-person');
   check('…and the players themselves, as the shared person line', people && people.length === 12);
   check('newest action first, saying how long ago', people && /MARKLIFER/.test(people[0].textContent) && live.querySelector('.gs-person-ago')?.textContent === 'now');
-  check('a player with no name is still the id', people && [...people].some((p) => /#1-103/.test(p.textContent) && /1-103/.test(p.querySelector('.pc-nm').textContent)));
+  // The id takes the name slot and is not repeated after it ("1-103 #1-103" was the old line).
+  check('a player with no name is still the id, once', people && [...people].some((p) => p.querySelector('.pc-nm').textContent === '1-103' && !/#1-103/.test(p.textContent)));
   check('a portrait per player, from the on-chain attrs', people && people[0].querySelector('.pc-pfp') !== null);
   check('the counts are one quiet line under the people',
     live && /1,180 active today/.test(live.querySelector('#gs-live-counts')?.textContent) && /3,273 known/.test(live.querySelector('#gs-live-counts')?.textContent));

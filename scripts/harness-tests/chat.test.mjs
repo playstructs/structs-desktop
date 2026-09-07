@@ -771,7 +771,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   let cards = msg.querySelectorAll('.chat-ref');
   check('only the first reference opens itself', cards.length === 1, String(cards.length));
   check('and it is the first one named',
-    text(cards[0]).includes('Shield') && text(cards[0]).includes('25'), text(cards[0]));
+    text(cards[0]).includes('2-15361') && text(cards[0]).includes('25'), text(cards[0]));
 
   // Design contract: ONE frame per card, typed by a class. The card used to
   // nest a bordered header, a bordered fact table and bordered buttons inside
@@ -780,8 +780,15 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     cards[0].className.includes('chat-kind-planet'), cards[0].className);
   check('…and is a single frame, not nested data-cards',
     cards[0].querySelectorAll('.sui-data-card').length === 0);
-  check('facts are a grid, not a bordered table',
-    cards[0].querySelector('.chat-ref-facts') !== null);
+  // Since the catalogue (structs-cards.js) a planet reference is the same
+  // planet card the Terminal draws: shield as a reading with its glyph, the
+  // owner as a person, the watch as an emblem click and a door.
+  check('a planet reference is the catalogue planet card',
+    cards[0].querySelector('.pc-card.sc-card[data-kind="planet"]') !== null
+      && cards[0].querySelector('.pc-res[title="Planetary shield"]') !== null
+      && text(cards[0]).includes('Phoniffer')
+      && cards[0].querySelector('.pc-act[title="Watch"]') !== null,
+    cards[0].innerHTML.slice(0, 300));
 
 
   // The rest are chips that open theirs.
@@ -814,7 +821,9 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await tick();
   const playerCard = Array.from(
     all(d, '.chat-msg').find((n) => text(n).includes('hitting')).querySelectorAll('.chat-ref'))
-    .find((c) => c.querySelector('.pfp-viewer-layer'));
+    // The planet card also carries a portrait now (its owner as a person),
+    // so the player card is found by its kind, not by having a face.
+    .find((c) => c.classList.contains('chat-kind-player'));
   check('a player card carries their portrait',
     playerCard.querySelectorAll('.pfp-viewer-layer').length === 5,
     String(playerCard.querySelectorAll('.pfp-viewer-layer').length));

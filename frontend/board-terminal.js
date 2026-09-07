@@ -988,7 +988,26 @@
         var ul = H.el('ul', 'ops-feed sui-text-ticker tm-tape');
         var rows = tape.rows.filter(function (ev) { return want.test(String(ev.category || '')); }).slice(0, 40);
         if (!rows.length) ul.appendChild(H.el('li', 'ops-muted', 'no economic frames yet'));
-        rows.forEach(function (ev) { ul.appendChild(Board._grass && Board._grass.row ? Board._grass.row(ev) : H.el('li', null, ev.category)); });
+        // One tape line per event (structs-cards.js): time · kind · what ·
+        // block on a grid, so lines never overlap the way the two-band row did.
+        var clock = function (ts) { var d = new Date(Number(ts) || 0); return isNaN(d.getTime()) || !ts ? '' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); };
+        var tone = function (cat) { var c = String(cat || ''); return /raid|combat|attack|destroy/i.test(c) ? 'destructive' : /defen|shield|alert/i.test(c) ? 'warning' : 'default'; };
+        rows.forEach(function (ev) {
+          var li = H.el('li');
+          var det = ev.detail && typeof ev.detail === 'object' ? ev.detail : {};
+          var parts = [String(ev.subject || '').replace(/^structs\./, '')];
+          Object.keys(det).slice(0, 6).forEach(function (k) {
+            if (/^block|_p$|^address$|^timestamp$/.test(k)) return;
+            var v = det[k]; if (v == null || v === '' || typeof v === 'object') return;
+            parts.push(k + ' ' + String(v));
+          });
+          li.appendChild(window.StructsCards.tape.row({
+            time: clock(ev.timestamp || ev.ts_ms), kind: String(ev.category || 'event'), tone: tone(ev.category), parts: parts.slice(0, 5),
+            block: det.block != null ? H.fmtInt(det.block) : (det.block_height != null ? H.fmtInt(det.block_height) : (ev.block != null ? H.fmtInt(ev.block) : null)),
+            fresh: ev === tape.fresh,
+          }));
+          ul.appendChild(li);
+        });
         host.appendChild(ul);
       };
       if (!tape.listening && window.StructsEvents) {
@@ -996,6 +1015,7 @@
         window.StructsEvents.listen('grass-event', function (e) {
           var ev = e && e.payload;
           if (!ev) return;
+          tape.fresh = ev;
           tape.rows.unshift(ev);
           if (tape.rows.length > 200) tape.rows.length = 200;
           if (state.mounted['tape-1'] || Object.keys(state.mounted).some(function (id) { return state.mounted[id].def && state.mounted[id].def.type === 'tape'; })) draw();
@@ -1131,15 +1151,15 @@
         if (!rows.length) { host.appendChild(H.stateBlock('info', 'No active agreements for ' + who + '.')); return; }
         var table = H.resultTable();
         rows.forEach(function (a) {
-          table.appendChild(window.StructsPlayerCard.row({
-            id: a.counterparty || '?', name: (a.side === 'bought' ? 'buying from ' : 'selling to ') + (a.counterparty || '?'), sub: 'agreement ' + a.id + ' · ' + a.provider_id,
-            attn: a.blocks_remaining < 680 ? 'ends ' + window.StructsUnits.fmtDuration(a.blocks_remaining * 5.3) : null,
-            readings: [
-              { value: H.fmtWatts(a.capacity), icon: 'sui-icon-energy', title: 'Capacity' },
-              { value: H.fmtInt(a.rate_amount) + (a.denom_label ? ' ' + a.denom_label : ''), icon: 'sui-icon-alpha-matter', title: 'Rate per W per block' },
-              { value: window.StructsUnits.fmtDuration(a.blocks_remaining * 5.3), icon: 'icon-in-progress', title: 'Remaining' },
-            ],
-          }, {}));
+          var term = Math.max(1, (a.end_block || 0) - (a.start_block || 0));
+          table.appendChild(window.StructsCards.agreement.row({
+            id: a.id, side: a.side, sub: a.provider_id ? 'provider ' + a.provider_id : null,
+            capacity: H.fmtWatts(a.capacity),
+            rate: { value: H.fmtInt(a.rate_amount), denomLabel: a.denom_label || null },
+            left: { text: window.StructsUnits.fmtDuration(a.blocks_remaining * 5.3), frac: Math.max(0, Math.min(1, 1 - a.blocks_remaining / term)), title: H.fmtInt(a.blocks_remaining) + ' blocks left of ' + H.fmtInt(term) },
+            ending: a.blocks_remaining < 680,
+            counterparty: a.counterparty ? { id: a.counterparty } : null,
+          }, { onClick: a.provider_id ? function () { add('inspector', { id: a.provider_id }); } : null }));
         });
         host.appendChild(table);
       });
@@ -1186,18 +1206,13 @@
           return { rule: r, value: v, state: v == null ? 'unknown' : (fired ? 'fired' : 'quiet') };
         }).catch(function () { return { rule: r, state: 'unknown' }; });
       })).then(function (results) {
+        var VALUE_ICON = { 'market.best_rate': 'sui-icon-md icon-transfers', 'halt.min_margin': 'sui-icon-energy', 'raids.live': 'sui-icon-md icon-raid', 'people.live_1h': 'sui-icon-players', 'ore.top': 'sui-icon-alpha-ore', 'book.first_expiry': 'sui-icon-md icon-in-progress' };
         results.forEach(function (res) {
-          var row = H.el('div', 'sui-result-row tm-alert tm-alert-' + res.state);
-          var left = H.el('div', 'sui-result-row-left-section');
-          var block = H.el('div', 'sui-text-label-block');
-          block.appendChild(H.el('span', null, res.rule.text));
-          block.appendChild(H.el('br'));
-          block.appendChild(H.el('span', 'sui-text-hint', res.state === 'bad' ? 'not a rule' : res.state === 'unknown' ? 'no reading yet' : ('now ' + res.value)));
-          left.appendChild(block);
-          row.appendChild(left);
-          var right = H.el('div', 'sui-result-row-right-section');
-          right.appendChild(H.badge ? H.badge(res.state === 'fired' ? 'FIRED' : res.state.toUpperCase(), res.state === 'fired' ? 'warning' : 'default') : H.el('span', null, res.state));
-          row.appendChild(right);
+          var row = window.StructsCards.alert.row({
+            text: res.rule.text, state: res.state, value: res.value != null ? res.value : null, valueIcon: VALUE_ICON[res.rule.metric] || null,
+            firedAgo: res.state === 'fired' && alertsFired[res.rule.text] ? H.ago(alertsFired[res.rule.text]) : null,
+          });
+          row.classList.add('tm-alert', 'tm-alert-' + res.state);
           table.appendChild(row);
           if (res.state === 'fired') {
             if (!alertsFired[res.rule.text]) alertsFired[res.rule.text] = Date.now();
@@ -1223,15 +1238,11 @@
         host.appendChild(cap);
         if (!banks.length) { host.appendChild(H.stateBlock('info', 'No guild banks reported yet.')); return; }
         var table = H.resultTable();
-        banks.forEach(function (b) {
-          table.appendChild(window.StructsGuildCard.row({
-            id: b.guild_id, name: b.name || null, tag: b.tag || null, logo: b.logo || null, sub: b.denom || null,
-            readings: [
-              { value: b.ratio == null ? '—' : Number(b.ratio).toFixed(3), icon: 'sui-icon-alpha-matter', title: 'Alpha per token' },
-              { value: H.fmtAlpha(b.collateral), icon: 'icon-planetary-shield', title: 'Collateral' },
-              { value: H.fmtInt(b.supply), icon: 'sui-icon-players', title: 'Tokens minted' },
-            ],
-          }, { actions: [{ icon: 'icon-link-out', title: 'Token chart', onClick: function () { add('gt', { id: b.guild_id }); } }] }));
+        banks.forEach(function (b, i) {
+          table.appendChild(window.StructsCards.token.row({
+            guildId: b.guild_id, tag: b.tag || null, name: b.name || null, denom: b.denom || null, logo: b.logo || null, prefix: '#' + (i + 1),
+            ratio: b.ratio == null ? '—' : Number(b.ratio).toFixed(3), collateral: H.fmtAlpha(b.collateral), supply: H.fmtInt(b.supply),
+          }, { onClick: function () { add('gt', { id: b.guild_id }); }, doors: [{ icon: 'icon-link-out', title: 'Token chart', onClick: function () { add('gt', { id: b.guild_id }); } }] }));
         });
         host.appendChild(table);
       });

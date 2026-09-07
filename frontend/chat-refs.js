@@ -237,8 +237,61 @@
       return box;
     }
 
+    // Planet, fleet, struct and substation references draw with the Terminal
+    // card catalogue (structs-cards.js), so a thing looks the same in a room
+    // as it does on the board. Rust ships the structured fields beside the
+    // legacy rows; a card without them falls through to the generic frame.
+    function ownerOf(o) {
+      return o && o.id ? { id: o.id, name: o.name, tag: o.tag, pfp: o.pfp_attrs } : null;
+    }
+    function catalogueRefCard(card) {
+      var C = window.StructsCards;
+      var box = el('div', 'chat-ref chat-mod-card chat-kind-' + card.kind);
+      var acts = cardActions(card).map(function (a) {
+        return { icon: a.icon || 'icon-info', title: a.label,
+                 onClick: function () { runCardAction(card, a.key, box); } };
+      });
+      if (card.owner && card.owner.id && card.owner.id !== S.playerId) {
+        acts.push({ icon: 'icon-chat', title: 'Message the owner', onClick: function () { startDm(card.owner.id); } });
+      }
+      var opts = { doors: acts };
+      var node;
+      if (card.kind === 'planet') {
+        opts.onEmblem = card.planet_id ? function () { runCardAction(card, 'watch_planet', box); } : null;
+        // refs.rs titles a planet "Planet <id>"; the card prints the id itself.
+        node = C.planet.card({
+          id: card.id, name: /^Planet \d/.test(String(card.title || '')) ? null : card.title, shield: card.shield, ore: card.ore_text, structs: card.structs_text,
+          raided: !!card.raided, owner: ownerOf(card.owner),
+        }, opts);
+      } else if (card.kind === 'fleet') {
+        opts.onEmblem = card.fleet_id ? function () { runCardAction(card, 'watch_fleet', box); } : null;
+        node = C.fleet.card({
+          id: card.id, at: card.location || null, away: !!card.away, structs: card.structs_text, owner: ownerOf(card.owner),
+        }, opts);
+      } else if (card.kind === 'struct') {
+        opts.onEmblem = card.planet_id ? function () { runCardAction(card, 'watch_planet', box); } : null;
+        node = C.struct.card({
+          id: card.id, type: card.type_name, ambit: card.ambit || null, location: card.planet_id || null,
+          health: card.health, maxHealth: card.max_health != null ? card.max_health : null,
+          online: !!card.online, built: !!card.built, destroyed: !!card.destroyed,
+          work: card.work_text ? { icon: 'icon-in-progress', text: card.work_text, title: 'Work' } : null,
+          owner: ownerOf(card.owner_ref),
+        }, opts);
+      } else {
+        node = C.substation.card({
+          id: card.id, load: card.load_mw, capacity: card.capacity_mw, connections: card.connections,
+          fmt: function (v) { return v === card.load_mw ? card.load_text : card.capacity_text; },
+          owner: ownerOf(card.owner),
+        }, opts);
+      }
+      box.appendChild(node);
+      return box;
+    }
+
     function refCard(card) {
       if (card.kind === 'provider' && window.StructsProviderCard) return providerRefCard(card);
+      if (window.StructsCards && ((card.kind === 'planet' && card.planet_id) || (card.kind === 'fleet' && card.fleet_id) ||
+          (card.kind === 'struct' && card.type_name) || (card.kind === 'substation' && card.capacity_text))) return catalogueRefCard(card);
       if (card.kind === 'guild' && window.StructsGuildCard) return guildRefCard(card);
       // Every player, portrait or not: a player who never set one gets the
       // placeholder portrait the roster shows, not the generic thing-card

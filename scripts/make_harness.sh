@@ -526,7 +526,7 @@ cat > "$FIX" <<'EOF'
       counts: { running: 2, waiting: 5, completed: 40 },
       hash_config: { effective_engine: 'gpu', gpu_available: true, difficulty_start: 8, auto_tune: true, max_concurrent: 12 },
       tasks: [
-        { task_id: '5-12:mine', task_type: 'MINE', status: 'running', percent_complete: 62, current_difficulty: 12, difficulty_target: 4200, eta: '2m' },
+        { task_id: '5-12:mine', task_type: 'MINE', status: 'running', percent_complete: 62, current_difficulty: 12, difficulty_target: 4200, eta: '2m', struct_type_name: 'Ore Extractor' },
         { task_id: '5-14:refine', task_type: 'REFINE', status: 'waiting', percent_complete: 0, current_difficulty: null, difficulty_target: null, eta: null },
         { task_id: '5-9:build', task_type: 'BUILD', status: 'completed', percent_complete: 100, current_difficulty: 20, difficulty_target: 100, eta: null },
       ],
@@ -946,14 +946,23 @@ cat > "$CFIX" <<'EOF'
   ];
 
   var REFS = {
+    // Planet and struct as refs.rs sends them since the catalogue: the legacy
+    // rows AND the structured fields the catalogue card draws from.
     '2-15361': { id: '2-15361', kind: 'planet', icon: 'icon-planet',
       title: 'Planet 2-15361', subtitle: 'Owned by [SN.C] Phoniffer',
       rows: [{ label: 'Shield', value: '25' }, { label: 'Ore', value: '0g' },
-             { label: 'Structs', value: '3/16' }, { label: 'Status', value: 'complete' }] },
+             { label: 'Structs', value: '3/16' }, { label: 'Status', value: 'complete' }],
+      owner: { id: '1-248', name: 'Phoniffer', tag: 'SN.C', pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}' },
+      shield: 25, ore_text: '0g', structs_text: '3 / 16', raided: false, planet_id: '2-15361',
+      actions: [{ key: 'watch_planet', label: 'Watch', icon: 'icon-planet' }] },
     '5-2184': { id: '5-2184', kind: 'struct', icon: 'icon-cmd-post',
       title: 'Ore Mining Rig', subtitle: '5-2184 · [SN.C] Marklifer',
       rows: [{ label: 'Work', value: 'Mining · 42m' }, { label: 'Health', value: '6' },
-             { label: 'Ambit', value: 'space' }, { label: 'Location', value: '2-223' }] },
+             { label: 'Ambit', value: 'space' }, { label: 'Location', value: '2-223' }],
+      owner: '1-194', owner_ref: { id: '1-194', name: 'Marklifer', tag: 'SN.C', pfp_attrs: null },
+      planet_id: '2-223', type_name: 'Ore Extractor', ambit: 'space', health: 6, max_health: 6,
+      built: true, online: true, destroyed: false, work_text: 'Mining · 42m',
+      actions: [{ key: 'watch_planet', label: 'Watch', icon: 'icon-planet' }] },
     '1-61': { id: '1-61', kind: 'player', icon: 'icon-member',
       title: 'JPEG', subtitle: '[SN.C] PID #1-61',
       pfp_attrs: '{"head":4,"neck":2,"body":1,"arms":3,"background":1}',

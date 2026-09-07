@@ -114,16 +114,14 @@
         });
         cap(host, rows.length + ' task' + (rows.length === 1 ? '' : 's') + (rows.length > 25 ? ' · showing 25' : ''));
         if (!rows.length) { host.appendChild(H.stateBlock('info', 'Nothing in the queue.')); return; }
+        // One task row from the catalogue (structs-cards.js): the struct's
+        // art or the task glyph, the id, progress, difficulty of 64, the eta.
         var table = H.resultTable();
         rows.slice(0, 25).forEach(function (t) {
-          var dd = t.current_difficulty;
-          table.appendChild(H.resultRow({
-            icon: TASK_ICON[t.task_type] || 'icon-in-progress', title: t.task_id || '?', subtitle: (t.task_type || '?') + ' · ' + (t.status || '?'),
-            chips: [
-              H.resource(H.progressBar(pct(t.percent_complete) / 100)),
-              H.statTile('difficulty', dd == null ? '—' : dd + '/64', null, dd == null ? 'muted' : (dd <= 16 ? 'ok' : (dd <= 32 ? 'live' : 'bad'))),
-              H.statTile('eta', t.eta || '—', null, 'muted'),
-            ],
+          table.appendChild(window.StructsCards.task.row({
+            id: t.task_id || '?', type: t.task_type, status: String(t.status || 'waiting'),
+            frac: pct(t.percent_complete) / 100, difficulty: t.current_difficulty, eta: t.eta,
+            structType: t.struct_type_name || t.struct_type || null,
           }));
         });
         host.appendChild(table);
@@ -132,32 +130,25 @@
   });
 
   // ── Signing (mcp_tx_snapshot / mcp_tx_mutate) ────────────────────────────
-  function txLine(t, pos, total, etas, percents, onMutate) {
-    var r = H.el('div', 'sui-data-card-row tm-tx');
-    var left = H.el('span');
-    if (pos != null) left.appendChild(H.el('span', 'tx-pos', pos + '.'));
-    left.appendChild(document.createTextNode(' ' + (t.type_short || t.type_url || '?')));
-    if (t.charge_cost > 0) { left.appendChild(H.el('span', 'ops-muted', ' charge ' + t.charge_cost)); }
-    if (t.attempts > 0) left.appendChild(H.el('span', 'attn', ' try ' + t.attempts + (t.retry_limit > 0 ? '/' + t.retry_limit : '')));
-    var right = H.el('span', 'ops-val');
-    var eta = etas && etas[t.id];
-    if (eta && eta.blocksRemaining != null) right.appendChild(H.el('span', 'ops-muted', eta.blocksRemaining + ' blk · ~' + Math.max(0, Math.round((eta.etaMs || 0) / 1000)) + 's '));
-    if (percents && percents[t.id] != null) { var bar = H.progressBar((percents[t.id] || 0) / 100); bar.classList.add('tm-tx-bar'); right.appendChild(bar); }
-    if (onMutate) {
-      var btns = H.el('span', 'tx-btns');
-      var ctl = function (icon, title, op, hidden) {
-        if (hidden) return;
-        var a = H.el('a', 'ops-refresh-btn'); a.href = 'javascript:void(0)'; a.title = title;
-        a.appendChild(H.el('i', icon));
-        a.addEventListener('click', function (ev) { ev.stopPropagation(); onMutate(op, t.id); });
-        btns.appendChild(a);
-      };
-      if (pos != null) { ctl('icon-caret-up', 'Move up', 'move_up', pos === 1); ctl('icon-caret-down', 'Move down', 'move_down', pos === total); }
-      ctl('icon-close', 'Cancel', 'cancel', false);
-      right.appendChild(btns);
+  // One transaction row from the catalogue (structs-cards.js): rank, type,
+  // signer, charge and attempts; the countdown in blocks; move and cancel as
+  // doors. In flight has no doors.
+  function txRow(t, pos, total, q, state, mutate) {
+    var eta = q && q.etas && q.etas[t.id];
+    var pctv = q && q.percents && q.percents[t.id];
+    var doors = [];
+    if (mutate && state === 'queued' && pos != null) {
+      if (pos > 1) doors.push({ icon: 'icon-caret-up', title: 'Move up', onClick: function () { mutate('move_up', t.id); } });
+      if (pos < total) doors.push({ icon: 'icon-caret-down', title: 'Move down', onClick: function () { mutate('move_down', t.id); } });
     }
-    r.appendChild(left); r.appendChild(right);
-    return r;
+    if (mutate && state !== 'flight') doors.push({ icon: 'icon-close', title: 'Cancel', destructive: true, onClick: function () { mutate('cancel', t.id); } });
+    return window.StructsCards.tx.row({
+      id: t.id, type: t.type_short || t.type_url || '?', signer: t.player_id || t.signer || null, position: pos,
+      charge: t.charge_cost > 0 ? t.charge_cost : null, attempts: t.attempts, retryLimit: t.retry_limit, state: state,
+      eta: eta && eta.blocksRemaining != null
+        ? { text: eta.blocksRemaining + ' blk', frac: pctv != null ? pctv / 100 : 0, title: '~' + Math.max(0, Math.round((eta.etaMs || 0) / 1000)) + 's' }
+        : (pctv != null ? { text: '', frac: pctv / 100 } : null),
+    }, { doors: doors });
   }
   T.register('queue', {
     label: 'Signing queue', describe: function () { return 'Signing queue'; }, cadenceMs: 2500,
@@ -178,9 +169,11 @@
             T.refresh(ctx.id, true);
           }).catch(function (e) { Board.stamp && Board.stamp('tx: ' + e); });
         };
-        if (q.in_flight) host.appendChild(txLine(q.in_flight, null, 0, null, null, null));
-        iq.forEach(function (t) { host.appendChild(txLine(t, null, 0, null, null, mutate)); });
-        aq.forEach(function (t, i) { host.appendChild(txLine(t, i + 1, aq.length, q.etas, q.percents, mutate)); });
+        var table = H.resultTable();
+        if (q.in_flight) table.appendChild(txRow(q.in_flight, null, 0, null, 'flight', null));
+        iq.forEach(function (t) { table.appendChild(txRow(t, null, 0, null, 'immediate', mutate)); });
+        aq.forEach(function (t, i) { table.appendChild(txRow(t, i + 1, aq.length, q, 'queued', mutate)); });
+        host.appendChild(table);
         if (!q.in_flight && !aq.length && !iq.length) host.appendChild(H.el('div', 'ops-muted', 'nothing waiting to sign'));
       }).catch(function (e) { fail(host, 'tx', e); });
     },
@@ -204,19 +197,16 @@
         ]));
         var rows = hist.filter(function (h) { return !p.outcome || (p.outcome === 'failed' ? (h.outcome !== 'success' && h.outcome !== 'skipped') : h.outcome === p.outcome); });
         if (!rows.length) { host.appendChild(H.stateBlock('info', 'No recent transactions.')); return; }
+        var table = H.resultTable();
         rows.slice(0, 25).forEach(function (h) {
-          var r = H.el('div', 'sui-data-card-row tm-tx');
-          var left = H.el('span');
           var ok = h.outcome === 'success';
-          left.appendChild(H.badge(String(h.outcome || '?').replace('_', ' ').toUpperCase(), ok ? 'default' : h.outcome === 'skipped' ? 'warning' : 'destructive'));
-          left.appendChild(document.createTextNode(' ' + String(h.action || '').replace(/^.*Msg/, '') + ' · ' + (h.player_id || h.context || '?')));
-          var note = ok ? (h.tx_hash ? String(h.tx_hash).slice(0, 10) + '…' : 'ok')
-            : String(h.translated || h.raw_error || '').replace(/^failed to execute message; message index: \d+: /, '').slice(0, 120);
-          var right = H.el('span', 'ops-val');
-          right.appendChild(H.el('span', ok ? 'ops-muted' : 'attn', note + ' · ' + H.ago(h.ts_ms)));
-          r.appendChild(left); r.appendChild(right);
-          host.appendChild(r);
+          var err = ok ? null : String(h.translated || h.raw_error || '').replace(/^failed to execute message; message index: \d+: /, '');
+          table.appendChild(window.StructsCards.tx.row({
+            id: h.id, type: String(h.action || '').replace(/^.*Msg/, '') || '?', signer: h.player_id || h.context || null,
+            state: ok ? 'ok' : h.outcome === 'skipped' ? 'skipped' : 'failed', hash: h.tx_hash || null, ago: H.ago(h.ts_ms), error: err, attempts: h.attempts,
+          }, { doors: h.tx_hash ? [{ icon: 'icon-copy', title: 'Copy the hash', onClick: function () { if (navigator.clipboard) navigator.clipboard.writeText(String(h.tx_hash)).catch(function () {}); } }] : [] }));
         });
+        host.appendChild(table);
       }).catch(function (e) { fail(host, 'tx', e); });
     },
   });
@@ -369,19 +359,19 @@
           return true;
         });
         if (!rows.length) { host.appendChild(H.stateBlock('info', 'No raids to show.')); return; }
+        var table = H.resultTable();
         rows.slice(0, 25).forEach(function (r) {
-          host.appendChild(H.resultRow({
-            icon: r.live ? 'icon-raid' : 'icon-combat-log',
-            title: 'planet ' + r.planet_id,
-            subtitle: (r.attacker || 'unknown fleet owner') + ' → ' + (r.defender || 'unknown planet owner') + (r.fleet_id ? ' · fleet ' + r.fleet_id : ''),
-            chips: [
-              H.statTile('status', human(r.status), null, r.live ? 'live' : 'muted'),
-              H.statTile('seized', H.fmtOre(r.seized_ore || 0), 'sui-icon-alpha-ore'),
-              H.statTile('updated', H.ago(r.updated_ms), null, 'muted'),
-            ],
+          table.appendChild(window.StructsCards.raid.row({
+            planetId: r.planet_id, live: !!r.live, status: human(r.status), since: H.ago(r.updated_ms), stale: !!r.stale,
+            ore: H.fmtOre(r.seized_ore || 0), oreLabel: 'Ore seized',
+            attacker: r.attacker ? { id: r.attacker } : null, defender: r.defender ? { id: r.defender } : null,
+          }, {
             onClick: function () { add('planet', { id: r.planet_id }); },
+            onEmblem: function () { add('map', { id: r.planet_id }); },
+            doors: [{ icon: 'icon-combat-log', title: 'Battle log', onClick: function () { add('log', { id: r.planet_id }); } }],
           }));
         });
+        host.appendChild(table);
       }).catch(function (e) { fail(host, 'raids', e); });
     },
   });
@@ -400,13 +390,22 @@
       return invoke('mcp_war_bundle').then(function (d) {
         host.innerHTML = '';
         var resp = d.response || {}, raid = d.raid || {}, sb = d.shot_budget || {};
-        host.appendChild(H.row('Response', (resp.enabled ? 'ON' : 'off') + ' · ' + (resp.autonomy || '?') + (resp.dry_run ? ' · DRY RUN' : ''), resp.enabled ? 'icon-counter' : 'icon-blocked'));
-        host.appendChild(H.row('Raiding', (raid.enabled ? 'ON' : 'off') + ' · ' + (raid.autonomy || '?') + ' · ' + (raid.posture || '?') + (raid.dry_run ? ' · DRY RUN' : ''), raid.enabled ? 'icon-raid' : 'icon-blocked'));
-        host.appendChild(H.row('Shot budget', H.fmtInt(sb.used || 0) + ' of ' + H.fmtInt(sb.cap || 0) + ' this window', 'icon-dmg'));
-        host.appendChild(doorRow([
-          { label: resp.enabled ? 'Response off' : 'Response on', primary: !resp.enabled, onClick: function () { loopToggle('response', resp, ctx); } },
-          { label: raid.enabled ? 'Raiding off' : 'Raiding on', primary: !raid.enabled, onClick: function () { loopToggle('raid', raid, ctx); } },
-        ]));
+        // The two loops as loop cards (structs-cards.js): the game's own
+        // switch is the control, the badge the state, the hold reason a mark.
+        var grid = H.el('div', 'pc-grid');
+        grid.appendChild(window.StructsCards.loop.card({
+          key: 'response', name: 'Auto response', on: !!resp.enabled, cadence: 'event', icon: 'icon-counter', dryRun: !!resp.dry_run,
+          figures: [{ value: String(resp.autonomy || '?'), icon: 'sui-icon-md icon-computer', title: 'Autonomy' },
+                    { value: H.fmtInt(sb.used || 0) + ' / ' + H.fmtInt(sb.cap || 0), icon: 'sui-icon-md icon-dmg', title: 'Shots this window' }],
+          holding: resp.enabled && resp.blocked_reason ? String(resp.blocked_reason) : null,
+        }, { onToggle: function () { loopToggle('response', resp, ctx); } }));
+        grid.appendChild(window.StructsCards.loop.card({
+          key: 'raid', name: 'Auto raid', on: !!raid.enabled, cadence: raid.scan_interval_secs ? raid.scan_interval_secs + 's' : null, icon: 'icon-raid', dryRun: !!raid.dry_run,
+          figures: [{ value: String(raid.autonomy || '?'), icon: 'sui-icon-md icon-computer', title: 'Autonomy' },
+                    { value: String(raid.posture || '?'), icon: 'sui-icon-md icon-range', title: 'Posture' }],
+          holding: raid.enabled && raid.blocked_reason ? String(raid.blocked_reason) : null,
+        }, { onToggle: function () { loopToggle('raid', raid, ctx); } }));
+        host.appendChild(grid);
       }).catch(function (e) { fail(host, 'war', e); });
     },
   });
@@ -499,13 +498,16 @@
         var inc = d.incidents || [];
         if (!inc.length) { host.appendChild(H.stateBlock('info', 'No incidents recorded.')); return; }
         var table = H.resultTable();
+        var clock = function (ms) { var d = new Date(Number(ms) || 0); return isNaN(d.getTime()) ? '?' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); };
         inc.slice(0, 20).forEach(function (i) {
-          table.appendChild(H.resultRow({
-            icon: i.shots_fired > 0 ? 'icon-counter' : 'icon-incoming',
-            title: (i.defender_player || '?') + ' @ ' + i.planet_id + (i.attacker_player ? '  ← ' + i.attacker_player : ''),
-            subtitle: (i.mode || '') + ' · ' + (i.fire_target ? 'fired at ' + i.fire_target + ' (' + i.target_kind + ')' : (i.note || '')),
-            chips: [H.resource((i.shots_fired || 0) + '/' + (i.shots_planned || 0), 'icon-dmg'), H.resource(Math.round((i.projected_damage || 0) * 10) / 10, 'icon-ballistic-weapon'), H.resource(H.ago(i.at_ms), null)],
+          table.appendChild(window.StructsCards.incident.row({
+            at: clock(i.at_ms), planetId: i.planet_id, mode: i.mode || 'incident', fired: i.shots_fired || 0, planned: i.shots_planned || 0,
+            attacker: i.attacker_player ? { id: i.attacker_player } : null,
+            damage: Math.round((i.projected_damage || 0) * 10) / 10, fireTarget: i.fire_target || null, note: i.note || null,
+            advised: !(i.shots_fired > 0) && /advis/i.test(String(i.mode || '') + ' ' + String(i.note || '')),
+          }, {
             onClick: function () { add('planet', { id: i.planet_id }); },
+            doors: [{ icon: 'icon-combat-log', title: 'Battle log', onClick: function () { add('log', { id: i.planet_id }); } }],
           }));
         });
         host.appendChild(table);
@@ -525,12 +527,15 @@
         cap(host, (who.name || who.player_id || 'primary') + (who.player_id ? ' · ' + who.player_id : ''));
         var assets = (d && d.assets) || [];
         if (!assets.length) { host.appendChild(H.stateBlock('info', 'No balances read yet.')); return; }
+        var table = H.resultTable();
         assets.forEach(function (a) {
-          var name = a.display_name || a.denom;
-          var qty = a.denom === 'ualpha' ? H.fmtAlpha(a.amount_p != null ? a.amount_p : a.amount) : (a.denom === 'ore' ? H.fmtOre(a.amount) : H.fmtNum(a.amount) + ' ' + (a.base_name || ''));
-          host.appendChild(H.row(name + (a.guild_tag ? ' [' + a.guild_tag + ']' : ''), qty + (a.sendable === false ? ' · not sendable' : ''), a.denom === 'ore' ? 'sui-icon-alpha-ore' : 'sui-icon-alpha-matter'));
+          var kind = a.denom === 'ualpha' ? 'alpha' : a.denom === 'ore' ? 'ore' : (/^uguild\./.test(String(a.denom)) ? 'guild' : 'other');
+          var qty = kind === 'alpha' ? H.fmtAlpha(a.amount_p != null ? a.amount_p : a.amount) : (kind === 'ore' ? H.fmtOre(a.amount) : H.fmtNum(a.amount));
+          table.appendChild(window.StructsCards.asset.row({
+            denom: a.denom, name: a.display_name || a.denom, tag: a.guild_tag || null, kind: kind, amount: qty, sendable: a.sendable !== false,
+          }, { doors: a.sendable === false ? [] : [{ icon: 'icon-send-alpha', title: 'Pay', onClick: function () { add('pay', {}); } }] }));
         });
-        host.appendChild(doorRow([{ label: 'Pay', primary: true, onClick: function () { add('pay', {}); } }]));
+        host.appendChild(table);
       }).catch(function (e) { fail(host, 'inventory', e); });
     },
   });

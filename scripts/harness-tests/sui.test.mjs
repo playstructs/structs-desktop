@@ -55,6 +55,14 @@ const BUDGET = {
   'chat-complete.js':   [0, 0],
   'chat-reactions.js':  [0, 0],
   'chat-refs.js':       [0, 0],
+  // The Terminal card catalogue: tokens and SUI classes only; its stylesheet
+  // draws the meter, the sparkline and the tape grid in px like playercard.css.
+  'structs-cards.js':   [0, 0],
+  // 20 px: emblem art sizes (64/40/22), the 10-chunk bar (6×12), the meter
+  // bar (8, 1px ticks), the 96×24 sparkline, the peek's max width, the row's
+  // identity floor (140/120) and the 2px state stripes — measured, like
+  // playercard.css, not tokens SUI has.
+  'structs-cards.css':  [0, 20],
   'chat-work.js':       [0, 0],
   'chat-channels.js':   [0, 0],
   'chat-search.js':     [0, 0],

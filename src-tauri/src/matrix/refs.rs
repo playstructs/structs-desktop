@@ -244,9 +244,16 @@ fn planet_card(id: &str, v: &Value) -> Value {
             row("Shield", format!("{}", shield as i64)),
             row("Ore", format_ore(num(grid.get("ore")))),
             row("Structs", format!("{}/{}", filled, total)),
-            row("Status", if status.is_empty() { "—".to_string() } else { status }),
+            row("Status", if status.is_empty() { "—".to_string() } else { status.clone() }),
         ],
         "actions": [action("watch_planet", "Watch", "icon-planet")],
+        // The card's own readings, printed: the shared planet card draws these.
+        "owner": owner_ref(&owner),
+        "shield": shield as i64,
+        "ore_text": format_ore(num(grid.get("ore"))),
+        "structs_text": format!("{} / {}", filled, total),
+        "raided": status == "raided" || status == "underRaid",
+        "planet_id": id,
         "planet_id": id,
     })
 }
@@ -312,15 +319,21 @@ fn struct_card(id: &str, v: &Value) -> Value {
             None
         },
         "rows": [
-            row("Work", work),
+            row("Work", work.clone()),
             row("Health", format!("{}", health as i64)),
-            row("Ambit", if ambit.is_empty() { "—".to_string() } else { ambit }),
+            row("Ambit", if ambit.is_empty() { "—".to_string() } else { ambit.clone() }),
             row("Location", text(st.get("locationId"))),
         ],
         // A struct is somewhere; watching that somewhere is the useful verb.
         "actions": [action("watch_planet", "Watch", "icon-planet")],
         "owner": text(st.get("owner")),
+        "owner_ref": owner_ref(&text(st.get("owner"))),
         "planet_id": text(st.get("locationId")),
+        "type_name": type_name,
+        "ambit": ambit,
+        "health": health as i64,
+        "built": built, "online": online, "destroyed": destroyed,
+        "work_text": work,
     })
 }
 
@@ -349,11 +362,16 @@ fn fleet_card(id: &str, v: &Value) -> Value {
         "title": format!("Fleet {}", id),
         "subtitle": format!("Of {}", player_label(&text(f.get("owner")))),
         "rows": [
-            row("Status", if status.is_empty() { "—".to_string() } else { status }),
+            row("Status", if status.is_empty() { "—".to_string() } else { status.clone() }),
             row("Location", text(f.get("locationId"))),
             row("Structs", format!("{}/{}", filled, total)),
         ],
         "actions": [action("watch_fleet", "Watch", "icon-fleet-tile")],
+        "owner": owner_ref(&text(f.get("owner"))),
+        "away": status == "away",
+        "location": text(f.get("locationId")),
+        "structs_text": format!("{} / {}", filled, total),
+        "fleet_id": id,
         "fleet_id": id,
     })
 }
@@ -369,6 +387,11 @@ fn substation_card(id: &str, v: &Value) -> Value {
             row("Load", format_power(num(grid.get("load")))),
             row("Connections", format!("{}", num(grid.get("connectionCount")) as i64)),
         ],
+        "capacity_mw": num(grid.get("connectionCapacity")),
+        "load_mw": num(grid.get("load")),
+        "capacity_text": format_power(num(grid.get("connectionCapacity"))),
+        "load_text": format_power(num(grid.get("load"))),
+        "connections": num(grid.get("connectionCount")) as i64,
     })
 }
 
