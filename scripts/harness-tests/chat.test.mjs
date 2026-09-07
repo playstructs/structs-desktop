@@ -749,23 +749,32 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
 
 {
   console.log('\n— embedded in a Terminal card');
-  const { w, d } = await open('?embed=1');
-  check('embed=1 marks the document, and the stylesheet hides the nav bar for it',
-    d.documentElement.hasAttribute('data-embed')
-      && /html\[data-embed\]:not\(\[data-embed-tabs\]\) #menu-page-nav\s*\{\s*display:\s*none/.test(readFileSync(repo + '/frontend/chat.html', 'utf8')));
-  check('one room open: no tab strip', !d.documentElement.hasAttribute('data-embed-tabs'));
-  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
-  await w.Chat.openRoom('!alpha:matrix.beta.playstructs.com');
-  await tick();
-  check('two rooms open: the strip comes back as tabs', d.documentElement.hasAttribute('data-embed-tabs'));
-  // The frame's doors reach the page by message; only our origin, only the
-  // two pages the doors name.
-  w.postMessage({ structs: 'chat', go: 'channels' }, '*');
-  await until(() => w.Chat._state.view === 'channels');
-  check('a Channels message from the frame navigates', w.Chat._state.view === 'channels');
-  w.postMessage({ structs: 'chat', go: 'room' }, '*');
-  await tick();
-  check('…but a page the doors do not name is ignored', w.Chat._state.view === 'channels');
+  const { w, d } = await open('?embed=1&card=chat-1');
+  check('embed marks the document and keeps this bar as the card\'s header',
+    d.documentElement.hasAttribute('data-embed') && w.getComputedStyle(d.getElementById('menu-page-nav')).display !== 'none');
+  check('…with a pop-out door that only embedding shows',
+    w.getComputedStyle(d.getElementById('chat-nav-popout')).display !== 'none'
+      && /#chat-nav-popout\s*\{\s*display:\s*none/.test(readFileSync(repo + '/frontend/chat.html', 'utf8')));
+  const heard = [];
+  w.addEventListener('message', (ev) => { if (ev.data && ev.data.structs === 'card') heard.push(ev.data); });
+  d.getElementById('chat-nav-popout').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  d.getElementById('menu-page-nav-close').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await until(() => heard.length === 2);
+  check('pop-out and close ask the Terminal by message, naming the card', heard.map((m) => m.card + ':' + m.act).join(',') === 'chat-1:popout,chat-1:remove', JSON.stringify(heard));
+  check('…and close no longer closes the window', d.getElementById('menu-page-nav-close').title === 'Remove this card' && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'close_chat_window'));
+  check('embedded, the page is flat: no panel edge or fill of its own', /html\[data-embed\] #menu-page-panel > \.sui-panel-edge-left \{ display: none/.test(readFileSync(repo + '/frontend/chat.html', 'utf8').replace(/\s+/g, ' ')));
+}
+
+{
+  console.log('\n— an unreachable app is an error, not \"no server\"');
+  const { w, d } = await open('?embed=1&card=chat-1');
+  // Nothing known yet (a fresh card), then the only ask fails.
+  w.Chat._state.networks = [];
+  w.__TAURI__.core.invoke = (cmd) => Promise.reject('no tauri bridge for ' + cmd);
+  await w.Chat._refreshStatus().catch(() => {});
+  w.Chat.go('connection');
+  await until(() => /Comms unreachable/.test(d.body.textContent));
+  check('a failed status ask names itself on the connection page', /Comms unreachable/.test(d.body.textContent) && /no tauri bridge for matrix_status/.test(d.body.textContent) && !/No comms server/.test(d.body.textContent), d.body.textContent.slice(0, 200));
 }
 
 {

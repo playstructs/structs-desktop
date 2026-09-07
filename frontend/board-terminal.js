@@ -246,6 +246,62 @@
     }).catch(function (e) { Board.stamp && Board.stamp('order not saved: ' + e); return false; });
   }
   Terminal.moveWorkspace = moveWorkspace;
+  // Drop a workspace before or after another one (or last, with no target).
+  function dropWorkspace(name, targetName, after) {
+    var list = state.workspaces.filter(function (n) { return n !== name; });
+    if (state.workspaces.indexOf(name) < 0) return Promise.resolve(false);
+    var at = targetName ? list.indexOf(targetName) : -1;
+    if (targetName && at < 0) return Promise.resolve(false);
+    if (!targetName) list.push(name); else list.splice(after ? at + 1 : at, 0, name);
+    if (list.join(',') === state.workspaces.join(',')) return Promise.resolve(false);
+    state.workspaces = list;
+    renderAll();
+    return invoke('terminal_workspace_order', { names: state.workspaces.slice() }).then(function (w) {
+      if (w && Array.isArray(w.names) && w.names.length) state.workspaces = w.names;
+      return true;
+    }).catch(function (e) { Board.stamp && Board.stamp('order not saved: ' + e); return false; });
+  }
+  Terminal.dropWorkspace = dropWorkspace;
+  // Drag a workspace tab along the strip — the same pointer-event drag the
+  // cards use, so any synthetic mouse (and the tests) can drive it.
+  function wireWorkspaceDrag(nav) {
+    var tabs = Array.prototype.slice.call(nav.querySelectorAll('.sui-screen-nav-item'));
+    var names = state.workspaces;
+    tabs.forEach(function (tab, i) {
+      var name = names[i];
+      if (name == null) return; // the '+' door
+      tab.setAttribute('data-ws', name);
+      tab.title = 'Drag to move';
+      tab.addEventListener('pointerdown', function (ev) {
+        if (ev.button !== 0) return;
+        var sx = ev.clientX, live = false, target = null, after = false;
+        var onMove = function (e) {
+          if (!live) { if (Math.abs(e.clientX - sx) < 4) return; live = true; tab.classList.add('tm-dragging'); }
+          e.preventDefault();
+          var hit = document.elementFromPoint ? document.elementFromPoint(e.clientX, e.clientY) : null;
+          var over = hit && hit.closest ? hit.closest('[data-ws]') : null;
+          tabs.forEach(function (t) { t.classList.remove('tm-drop-before', 'tm-drop-after'); });
+          if (over && over !== tab) {
+            var r = over.getBoundingClientRect();
+            after = r.width > 0 ? (e.clientX - r.left) > r.width / 2 : true;
+            target = over.getAttribute('data-ws');
+            over.classList.add(after ? 'tm-drop-after' : 'tm-drop-before');
+          } else { target = null; }
+        };
+        var onUp = function () {
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+          window.removeEventListener('pointercancel', onUp);
+          tabs.forEach(function (t) { t.classList.remove('tm-drop-before', 'tm-drop-after', 'tm-dragging'); });
+          if (!live) return;
+          if (target) dropWorkspace(name, target, after);
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+      });
+    });
+  }
   function renameRow(strip) {
     var old = strip.querySelector('#tm-ws-rename');
     if (old) { old.parentNode.removeChild(old); return; }
@@ -289,8 +345,8 @@
   function markCadence(node, card) {
     var paused = card.cadence != null && Number(card.cadence) === 0;
     node.classList.toggle('tm-paused', paused);
-    var rd = node.querySelector('.tm-refresh');
-    if (rd) rd.title = paused ? 'Paused · refresh now' : 'Refresh';
+    var t = node.querySelector('.tm-title');
+    if (t) t.title = paused ? 'Paused' : '';
   }
 
   function door(iconName, title, onClick) {
@@ -307,10 +363,12 @@
   // header — the title as the active nav tab, the doors where the window's
   // icons go — and a screen whose page body holds the card.
   var FRAME_CLS = 'sui-panel sui-theme-player tm-card';
-  function frameClass(w, extra) { return FRAME_CLS + ' tm-w' + w + (extra || ''); }
+  // A frameless type (a whole page as a card) keeps that mark through every
+  // redraw, resize and width change — these all rewrite the class list.
+  function frameClass(w, extra, def) { return FRAME_CLS + ' tm-w' + w + (extra || '') + (def && def.frameless ? ' tm-frameless' : ''); }
   function frame(card) {
     var def = TYPES[card.type];
-    var node = H.el('div', frameClass(card.w || 1));
+    var node = H.el('div', frameClass(card.w || 1, '', def));
     node.id = 'tm-' + card.id;
     node.setAttribute('data-card', card.id);
     node.setAttribute('data-type', card.type);
@@ -330,20 +388,13 @@
     var doors = H.el('span', 'tm-doors');
     var own = def && def.doors ? def.doors(card, { get body() { var m = state.mounted[card.id]; return m ? m.body : null; } }) : [];
     (own || []).forEach(function (d) { var a = door(d.icon, d.title, d.onClick); a.classList.add('tm-door-own'); doors.appendChild(a); });
-    var refreshDoor = door('icon-in-progress', 'Refresh', function () { refresh(card.id, true); });
-    refreshDoor.classList.add('tm-refresh');
-    if (def && def.cadenceMs === 0 && (own || []).length) refreshDoor.classList.add('tm-door-quiet');
-    doors.appendChild(refreshDoor);
+    // No refresh door: cards refresh on their cadence. No up/down: the
+    // header drags, and dropping on another card or the floor places it.
     markCadence(node, card);
     if (!state.solo) {
       // Every card configures: its name, its refresh cadence and its width,
       // plus whatever params the type declares.
       doors.appendChild(door('icon-menu', 'Configure', function () { toggleConfig(card.id); }));
-      // The keyboard's way to move; the header itself drags. Quiet until the
-      // pointer is over the card, so a page of cards is not a page of arrows.
-      var up = door('icon-chevron-up', 'Move up', function () { move(card.id, -1); }); up.classList.add('tm-door-quiet');
-      var down = door('icon-chevron-down', 'Move down', function () { move(card.id, 1); }); down.classList.add('tm-door-quiet');
-      doors.appendChild(up); doors.appendChild(down);
       doors.appendChild(door('icon-link-out', 'Pop out', function () { popOut(card.id); }));
       doors.appendChild(door('icon-close', 'Remove', function () { remove(card.id); }));
       // Drag the header to move the card; drop on another card to land
@@ -450,7 +501,7 @@
     var c = findCard(id), m = state.mounted[id];
     if (!c || !m) return;
     w = Math.max(1, Math.min(3, w || 1));
-    m.node.className = frameClass(w, preview ? ' tm-resizing' : '');
+    m.node.className = frameClass(w, preview ? ' tm-resizing' : '', m.def);
     if (!preview && w !== c.w) { c.w = w; save(); }
     fitRows(m);
   }
@@ -504,6 +555,7 @@
     var m = state.mounted[id];
     if (!m) return;
     if (m.def && m.def.unmount) { try { m.def.unmount(m.body, m.params); } catch (e) { /* a card must not take the page down */ } }
+    if (m.def && m.def.frameless) dropFrameSubs(m.body);
     if (m.ro) { try { m.ro.disconnect(); } catch (e) { /* fine */ } }
     if (m.node.parentNode) m.node.parentNode.removeChild(m.node);
     delete state.mounted[id];
@@ -533,7 +585,7 @@
     if (!c) return;
     c.w = Math.max(1, Math.min(3, Number(w) || 1));
     var m = state.mounted[id];
-    if (m) m.node.className = frameClass(c.w);
+    if (m) m.node.className = frameClass(c.w, '', m.def);
     save();
   }
 
@@ -678,7 +730,7 @@
       // stale card would wear a new title.
       if (m && (m.def !== TYPES[c.type] || JSON.stringify(m.params || {}) !== JSON.stringify(c.params || {}))) { unmountCard(c.id); m = null; }
       if (!m) { mount(c, grid); m = state.mounted[c.id]; }
-      m.node.className = frameClass(state.solo ? 3 : (c.w || 1));
+      m.node.className = frameClass(state.solo ? 3 : (c.w || 1), '', m.def);
       markCadence(m.node, c);
       if (c.title) m.title.textContent = c.title;
       if (grid.children[i] !== m.node) grid.insertBefore(m.node, grid.children[i] || null);
@@ -714,25 +766,39 @@
       switchWorkspace(k);
     });
     nav.id = 'tm-ws-nav';
-    strip.appendChild(nav);
+    wireWorkspaceDrag(nav); // before the items may move into the board nav
+    // In a Terminal window the board's own nav bar is the header: the
+    // workspace tabs take the area tabs' slot and the doors sit beside the
+    // refresh. The strip below then only ever holds the share / rename / new
+    // rows. In the main window the strip is the Terminal area's sub-nav.
+    var boardNav = Board.solo === 'terminal' ? document.querySelector('.sui-screen-nav:has(> #board-tabs)') : null;
+    if (boardNav) {
+      var oldItems = boardNav.querySelector('#tm-ws-items'), oldDoors = boardNav.querySelector('#tm-ws-doors');
+      if (oldItems) oldItems.parentNode.removeChild(oldItems);
+      if (oldDoors) oldDoors.parentNode.removeChild(oldDoors);
+      var list = nav.querySelector('.sui-screen-nav-items');
+      list.id = 'tm-ws-items';
+      var tabs = boardNav.querySelector('#board-tabs');
+      boardNav.insertBefore(list, tabs ? tabs.nextSibling : boardNav.firstChild);
+    } else {
+      strip.appendChild(nav);
+    }
     var wsDoors = H.el('span', 'tm-doors');
+    wsDoors.id = 'tm-ws-doors';
     wsDoors.appendChild(door('icon-link-out', 'Open this workspace in its own window', function () {
       invoke('open_terminal_workspace', { name: state.ws }).catch(function (e) { Board.stamp && Board.stamp('needs the app: ' + e); });
     }));
     wsDoors.appendChild(door('icon-send-alpha', 'Share this workspace', function () { shareRow(strip); }));
     wsDoors.appendChild(door('icon-edit', 'Rename this workspace', function () { renameRow(strip); }));
     if (state.workspaces.length > 1) {
-      var idx = state.workspaces.indexOf(state.ws);
-      var left = door('icon-caret-left', 'Move this workspace left', function () { moveWorkspace(state.ws, -1); });
-      var right = door('icon-caret-right', 'Move this workspace right', function () { moveWorkspace(state.ws, 1); });
-      if (idx <= 0) left.classList.add('tm-door-off');
-      if (idx < 0 || idx >= state.workspaces.length - 1) right.classList.add('tm-door-off');
-      wsDoors.appendChild(left); wsDoors.appendChild(right);
-    }
-    if (state.workspaces.length > 1) {
       wsDoors.appendChild(door('icon-close', 'Delete this workspace', function () { confirmDeleteWorkspace(state.ws); }));
     }
-    strip.appendChild(wsDoors);
+    if (boardNav) {
+      var aside = boardNav.querySelector('.board-navaside');
+      if (aside) aside.insertBefore(wsDoors, aside.firstChild); else boardNav.appendChild(wsDoors);
+    } else {
+      strip.appendChild(wsDoors);
+    }
     top.appendChild(strip);
 
     // The command line and the add-a-card control, one row, symmetric.
@@ -1702,17 +1768,74 @@
   // Whole windows, framed: the spectator map, the Comms window, the Pay window.
   // `embed=1`: the page drops its own nav bar (the card frame is the header)
   // and takes navigation from the frame's doors, by message.
-  function framed(url, title) {
+  function framed(url, title, cardId) {
     var f = document.createElement('iframe');
     f.className = 'tm-frame';
     f.title = title;
-    f.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'embed=1';
+    f.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'embed=1&card=' + encodeURIComponent(cardId || '');
     return f;
   }
-  function tellFrame(host, msg) {
-    var f = host && host.querySelector('iframe.tm-frame');
-    if (f && f.contentWindow) f.contentWindow.postMessage(msg, location.origin === 'null' ? '*' : location.origin);
+  // The embedded page's own bar carries pop-out and close; it asks the card
+  // by message, naming the card it was given. Same origin only.
+  //
+  // The same channel is the page's Tauri bridge (frontend/bridge.js): an
+  // iframe has no bridge of its own, so it asks this window to invoke and to
+  // listen for it. Only frames this page embeds are answered.
+  function frameOf(source) {
+    var frames = document.querySelectorAll('#tm-grid iframe.tm-frame');
+    for (var i = 0; i < frames.length; i++) if (frames[i].contentWindow === source) return frames[i];
+    return null;
   }
+  var frameSubs = typeof WeakMap === 'function' ? new WeakMap() : null;
+  function sendTo(source, msg) {
+    var mine = String(location.origin || '');
+    try { source.postMessage(msg, mine === 'null' || !mine ? '*' : mine); } catch (e) { /* the frame is gone */ }
+  }
+  Terminal.answerFrame = function (ev) {
+    var mine = String(location.origin || '');
+    var same = ev.origin === mine || (mine === 'null' && (ev.origin === 'null' || ev.origin === ''));
+    if (!same) return false;
+    var m = ev.data;
+    if (!m || m.structs !== 'bridge') return false;
+    var source = ev.source;
+    if (!source || (source !== window && !frameOf(source))) return false;
+    if (m.kind === 'invoke') {
+      Promise.resolve().then(function () { return invoke(m.cmd, m.args || {}); }).then(function (value) {
+        sendTo(source, { structs: 'bridge', kind: 'result', id: m.id, ok: true, value: value === undefined ? null : value });
+      }, function (e) {
+        sendTo(source, { structs: 'bridge', kind: 'result', id: m.id, ok: false, error: String(e && e.message || e) });
+      });
+      return true;
+    }
+    if (m.kind === 'listen' && window.StructsEvents) {
+      var subs = frameSubs && frameSubs.get(source);
+      if (!subs) { subs = { names: {}, unlisten: [] }; if (frameSubs) frameSubs.set(source, subs); }
+      if (subs.names[m.name]) return true;
+      subs.names[m.name] = true;
+      var p = window.StructsEvents.listen(m.name, function (e) { sendTo(source, { structs: 'bridge', kind: 'event', name: m.name, payload: e && e.payload }); });
+      if (p && typeof p.then === 'function') p.then(function (un) { if (typeof un === 'function') subs.unlisten.push(un); });
+      return true;
+    }
+    return false;
+  };
+  function dropFrameSubs(body) {
+    if (!frameSubs || !body) return;
+    var f = body.querySelector && body.querySelector('iframe.tm-frame');
+    var subs = f && f.contentWindow && frameSubs.get(f.contentWindow);
+    if (!subs) return;
+    subs.unlisten.forEach(function (un) { try { un(); } catch (e) { /* fine */ } });
+    frameSubs.delete(f.contentWindow);
+  }
+  window.addEventListener('message', function (ev) {
+    if (Terminal.answerFrame(ev)) return;
+    var mine = String(location.origin || '');
+    var same = ev.origin === mine || (mine === 'null' && (ev.origin === 'null' || ev.origin === ''));
+    if (!same) return;
+    var m = ev.data;
+    if (!m || m.structs !== 'card' || !m.card || !state.mounted[m.card]) return;
+    if (m.act === 'popout') popOut(m.card);
+    else if (m.act === 'remove') remove(m.card);
+  });
   // A planet as a card, not a window: who holds it, what it is worth, what is
   // happening to it, and every slot by ambit — the spectator snapshot the raid
   // view draws from, laid out to be read in a column. The doors open the
@@ -1815,21 +1938,15 @@
       host.appendChild(framed('raidview.html?' + kind + '=' + encodeURIComponent(p.id), 'Map of ' + kind + ' ' + p.id));
     },
   });
+  // Whole pages as cards keep their OWN bar as the header (frameless): the
+  // frame draws none, and the page's bar carries pop-out and close.
   Terminal.register('chat', {
-    label: 'Comms window', defaultWidth: 2, describe: function () { return 'Comms'; }, cadenceMs: 0,
-    // The Comms nav (channels, connection) as doors on the frame, where the
-    // page's own bar used to repeat the card's header.
-    doors: function (card, m) {
-      return [
-        { icon: 'icon-phone', title: 'Channels', onClick: function () { tellFrame(m.body, { structs: 'chat', go: 'channels' }); } },
-        { icon: 'icon-menu', title: 'Connection', onClick: function () { tellFrame(m.body, { structs: 'chat', go: 'connection' }); } },
-      ];
-    },
-    render: function (host) { host.innerHTML = ''; host.appendChild(framed('chat.html', 'Comms')); },
+    label: 'Comms window', defaultWidth: 2, describe: function () { return 'Comms'; }, cadenceMs: 0, frameless: true,
+    render: function (host, p, ctx) { host.innerHTML = ''; host.appendChild(framed('chat.html', 'Comms', ctx.id)); },
   });
   Terminal.register('pay', {
-    label: 'Pay', describe: function () { return 'Pay'; }, cadenceMs: 0,
-    render: function (host) { host.innerHTML = ''; host.appendChild(framed('transfer.html', 'Pay')); },
+    label: 'Pay', describe: function () { return 'Pay'; }, cadenceMs: 0, frameless: true,
+    render: function (host, p, ctx) { host.innerHTML = ''; host.appendChild(framed('transfer.html', 'Pay', ctx.id)); },
   });
 
   // Comms about one object: the raid view's own rail, which IS the object's

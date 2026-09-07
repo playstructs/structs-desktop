@@ -91,6 +91,12 @@
         return page;
       }
 
+      if (S.statusError && !S.networks.length) {
+        scroll.appendChild(noticeBlock('Comms unreachable', S.statusError, true));
+        page.appendChild(scroll);
+        return page;
+      }
+
       if (!S.networks.length) {
         scroll.appendChild(noticeBlock(
           'No comms server',

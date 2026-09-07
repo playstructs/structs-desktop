@@ -156,6 +156,15 @@
   // than one room to switch between.
   S.embed = /[?&]embed=1(&|$)/.test(String(location.search || ''));
   if (S.embed) document.documentElement.setAttribute('data-embed', '');
+  S.embedCard = (function () { var m = /[?&]card=([A-Za-z0-9_-]{1,40})(&|$)/.exec(String(location.search || '')); return m ? m[1] : null; })();
+  // Ask the Terminal that embeds us to act on our card. Same origin only.
+  function tellCard(act) {
+    if (!S.embed || !S.embedCard || !window.parent) return;
+    var origin = String(location.origin || '');
+    window.parent.postMessage({ structs: 'card', card: S.embedCard, act: act }, origin === 'null' || !origin ? '*' : origin);
+  }
+  Chat.tellCard = tellCard;
+  Chat._refreshStatus = function () { return refreshStatus(); };
 
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
   // Same idiom as board.js, kept local so this window loads no board code.
@@ -747,12 +756,16 @@
     return invoke('matrix_status', { asPlayer: AS_PLAYER })
       .then(function (st) {
         S.started = true;
+        S.statusError = null;
         applyStatus(st);
         return st;
       })
       .catch(function (e) {
-        // Even a failed ask is an answer: we asked, and now we can say so.
+        // Even a failed ask is an answer: we asked, and now we can say so —
+        // and say WHAT failed: an unreachable app is not "no server".
         S.started = true;
+        S.statusError = String(e && e.message || e);
+        render();
         throw e;
       });
   }
@@ -1105,7 +1118,11 @@
   // ── Boot ──────────────────────────────────────────────────────────────────
   function boot() {
     var close = byId('menu-page-nav-close');
-    if (close) {
+    if (close && S.embed) {
+      // Inside a Terminal card, close removes the card — the window stays.
+      close.title = 'Remove this card';
+      close.addEventListener('click', function () { stopTyping(); tellCard('remove'); });
+    } else if (close) {
       close.addEventListener('click', function () {
         stopTyping();
         // Rust closes it, for the same reason Rust opened it. The JS window
@@ -1143,21 +1160,10 @@
     if (comms) comms.addEventListener('click', function () { go('channels'); });
     var settings = byId('chat-nav-settings');
     if (settings) settings.addEventListener('click', function () { go('connection'); });
-    // Embedded in a Terminal card (`?embed=1`): the card frame is the header
-    // and its doors navigate here by message. Only our own origin is heard,
-    // and only the two pages the doors name.
-    if (S.embed) {
-      window.addEventListener('message', function (ev) {
-        // Same origin only. A file:// page (the harness) has the opaque origin
-        // 'null', which a same-window message reports as 'null' or ''.
-        var mine = String(location.origin || '');
-        var same = ev.origin === mine || (mine === 'null' && (ev.origin === 'null' || ev.origin === ''));
-        if (!same) return;
-        var m = ev.data;
-        if (!m || m.structs !== 'chat') return;
-        if (m.go === 'channels' || m.go === 'connection') go(m.go);
-      });
-    }
+    // Embedded in a Terminal card (`?embed=1&card=<id>`): this bar is the
+    // card's header. Pop-out asks the Terminal to open the card as a window.
+    var popout = byId('chat-nav-popout');
+    if (popout) popout.addEventListener('click', function () { tellCard('popout'); });
 
     listen('matrix::timeline', function (e) { onTimeline(e && e.payload); });
     listen('matrix::typing', function (e) { onTyping(e && e.payload); });

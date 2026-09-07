@@ -99,11 +99,16 @@
       text-decoration: none; color: var(--accent-primary);
     }
     #chat-nav-actions a.sui-mod-active { border-bottom: 2px solid var(--accent-primary-active); }
-    /* Embedded in a Terminal card: the frame is the header. The bar returns
-       only as a tab strip when two or more rooms are open; the page icons and
-       the close are the frame's doors then. */
-    html[data-embed]:not([data-embed-tabs]) #menu-page-nav { display: none; }
-    html[data-embed] #chat-nav-actions, html[data-embed] #menu-page-nav-close { display: none; }
+    /* Embedded in a Terminal card this bar IS the card's header: pop-out
+       appears beside the page icons and close removes the card. */
+    #chat-nav-popout { display: none; }
+    html[data-embed] #chat-nav-popout { display: flex; }
+    /* Inside a card the CARD is the panel: no second frame, no edge, no fill. */
+    html[data-embed] #menu-page-panel > .sui-panel-top-fill-background,
+    html[data-embed] #menu-page-panel > .sui-panel-bottom-fill-background,
+    html[data-embed] #menu-page-panel > .sui-panel-edge-left { display: none; }
+    html[data-embed] #menu-page-panel-chunk { border-width: 0; padding-bottom: 0; }
+    html[data-embed] body, html[data-embed] #menu-page-layout { margin: 0; padding: 0; background: transparent; }
     #chat-nav-actions a:hover { color: var(--accent-primary-active); }
 
     /* A page fills the body content box and scrolls in its middle band only,
@@ -735,6 +740,9 @@
             <a id="chat-nav-settings" href="javascript:void(0)" title="Connection">
               <i class="sui-icon-sm icon-menu"></i>
             </a>
+            <a id="chat-nav-popout" href="javascript:void(0)" title="Open in a window">
+              <i class="sui-icon-sm icon-link-out"></i>
+            </a>
             <a id="menu-page-nav-close" class="sui-screen-nav-close" href="javascript:void(0)" title="Close">
               <i class="sui-icon-sm icon-close"></i>
             </a>
@@ -762,6 +770,7 @@
 </div>
 
 <!-- Portrait composer first: chat.js aliases it at module load. -->
+<script src="bridge.js"></script>
 <script src="events.js"></script>
 <script src="chatrow.js"></script>
 <script src="pfp.js"></script>

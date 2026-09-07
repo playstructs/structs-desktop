@@ -14,8 +14,11 @@
  * from a chat message and a message must not be able to name a destination.
  */
 (function () {
-  // `?embed=1` — inside a Terminal card, whose frame is the header.
-  if (/[?&]embed=1(&|$)/.test(String(location.search || ''))) document.documentElement.setAttribute('data-embed', '');
+  // `?embed=1&card=<id>` — inside a Terminal card; this page's own bar is the
+  // card's header, and its close removes the card rather than the window.
+  var EMBED = /[?&]embed=1(&|$)/.test(String(location.search || ''));
+  var EMBED_CARD = (function () { var m = /[?&]card=([A-Za-z0-9_-]{1,40})(&|$)/.exec(String(location.search || '')); return m ? m[1] : null; })();
+  if (EMBED) document.documentElement.setAttribute('data-embed', '');
   'use strict';
 
   var T = window.__TAURI__;
@@ -502,7 +505,15 @@
   // has one job, so leaving it is leaving it.
   ['tx-cancel', 'tx-close'].forEach(function (id) {
     var n = document.getElementById(id);
-    if (n) n.addEventListener('click', function () { T.window.getCurrentWindow().close(); });
+    if (!n) return;
+    if (EMBED && EMBED_CARD && window.parent) {
+      n.addEventListener('click', function () {
+        var origin = String(location.origin || '');
+        window.parent.postMessage({ structs: 'card', card: EMBED_CARD, act: 'remove' }, origin === 'null' || !origin ? '*' : origin);
+      });
+    } else {
+      n.addEventListener('click', function () { T.window.getCurrentWindow().close(); });
+    }
   });
 
   // A second Pay while this window is already open re-addresses it rather than

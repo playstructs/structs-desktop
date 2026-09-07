@@ -77,6 +77,7 @@ const BUDGET = {
   'chat-tabs.js':       [0, 0],
   'chat-rent.js':       [0, 0],
   'events.js':          [0, 0],
+  'bridge.js':          [0, 0],
   'raidview.html':      [3, 45],
   // Four ambit background colours, copied from main.css and commented as
   // such. Only `space` (#222034) has a token — it is `--surface-default` —

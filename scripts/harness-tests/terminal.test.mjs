@@ -40,8 +40,8 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('widths come from the layout', cards[1].classList.contains('tm-w2') && cards[0].classList.contains('tm-w1'));
   check('the toolbar offers every registered type', d.querySelectorAll('.tm-toolbar select option').length >= 12);
   check('every card is the game\'s own panel: edges, chunk, a nav screen for the header with the title as the active tab and the doors beside it, a page-body screen for the body', cards.every((c) => c.classList.contains('sui-panel') && c.classList.contains('sui-theme-player') && c.querySelector(':scope > .sui-panel-edge-left') && c.querySelector(':scope > .sui-panel-edge-right') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-screen-nav .sui-screen-nav-item.sui-mod-active.tm-title') && c.querySelector('.sui-screen-nav .tm-doors') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-page-body-screen.tm-body')));
-  const wsItems = [...d.querySelectorAll('#tm-ws-nav .sui-screen-nav-item')].map((a) => a.textContent);
-  check('the workspace strip lists every workspace and a door to a new one', wsItems.join(',') === 'main,war-room,+' && d.querySelector('#tm-ws-nav .sui-mod-active').textContent === 'main', wsItems.join(','));
+  const wsItems = [...d.querySelectorAll('#tm-ws-items .sui-screen-nav-item')].map((a) => a.textContent);
+  check('the workspace strip lists every workspace and a door to a new one', wsItems.join(',') === 'main,war-room,+' && d.querySelector('#tm-ws-items .sui-mod-active').textContent === 'main', wsItems.join(','));
 
   await until(() => d.querySelector('#tm-people-1 .pc-person'));
   check('liveness card: the Game Stats people card, inside the Terminal', d.querySelectorAll('#tm-people-1 .pc-person').length === 12);
@@ -62,7 +62,9 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // Doors.
   const set = () => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_layout_set');
-  d.querySelector('#tm-people-1 [title="Move down"]').click();
+  // No move doors: the header drags (tested below); the keyboard API remains.
+  check('a card has no refresh or move doors', d.querySelectorAll('#tm-grid [title="Refresh"], #tm-grid [title="Move up"], #tm-grid [title="Move down"]').length === 0);
+  w.Board.Terminal.move('people-1', 1);
   check('move down reorders', d.querySelectorAll('#tm-grid .tm-card')[1].getAttribute('data-card') === 'people-1');
   d.querySelector('#tm-stats-1 [title="Remove"]').click();
   check('remove takes the card off the page', d.getElementById('tm-stats-1') === null && w.Board.Terminal.state.layout.cards.length === 5);
@@ -99,7 +101,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await w.Board.Terminal.flushSave();
   const savedPow = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_layout_set').pop().args.layout.cards.find((c) => c.id === 'pow-1');
   check('…and both are saved on the card', savedPow && savedPow.title === 'GPU corner' && savedPow.cadence === 0, JSON.stringify(savedPow));
-  check('paused: the frame says so and the tick will not refresh it', d.getElementById('tm-pow-1').classList.contains('tm-paused') && w.Board.Terminal.cadenceOf('pow-1') === 0 && /Paused/.test(d.querySelector('#tm-pow-1 .tm-refresh').title));
+  check('paused: the frame says so and the tick will not refresh it', d.getElementById('tm-pow-1').classList.contains('tm-paused') && w.Board.Terminal.cadenceOf('pow-1') === 0 && d.querySelector('#tm-pow-1 .tm-title').title === 'Paused');
   check('…both persisted on the card in the layout', (() => { const c = w.Board.Terminal.state.layout.cards.find((x) => x.id === 'pow-1'); return c.title === 'GPU corner' && c.cadence === 0; })());
   check('auto restores the type\'s own cadence and title', (w.Board.Terminal.setCadence('pow-1', ''), w.Board.Terminal.setTitle('pow-1', ''), w.Board.Terminal.cadenceOf('pow-1') > 0 && d.querySelector('#tm-pow-1 .tm-title').textContent === 'Proof queue' && !d.getElementById('tm-pow-1').classList.contains('tm-paused')));
 
@@ -237,7 +239,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('release lands it after that card, and saves', order().split(',').indexOf(ids[1]) === order().split(',').indexOf(ids[3]) + 1 && !w.Board.Terminal.state.drag && !d.querySelector('.tm-drop-after, .tm-dragging'));
     delete d.elementFromPoint;
   }
-  check('every card carries a resize grip and its move doors are quiet', d.querySelectorAll('#tm-grid .tm-card .tm-resize').length === d.querySelectorAll('#tm-grid .tm-card').length && d.querySelectorAll('.tm-door-quiet').length >= 2);
+  check('every card carries a resize grip', d.querySelectorAll('#tm-grid .tm-card .tm-resize').length === d.querySelectorAll('#tm-grid .tm-card').length);
   w.Board.Terminal.resizeTo(first, 3, false);
   check('a resize commits the width to the layout', d.querySelector('#tm-' + first).classList.contains('tm-w3') && w.Board.Terminal.state.layout.cards.find((c) => c.id === first).w === 3);
   w.Board.Terminal.resizeTo(first, 9, false);
@@ -292,10 +294,40 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   run('CHAT');
   await until(() => d.querySelector('#tm-grid [data-type="chat"] iframe.tm-frame'));
   const chatCard = d.querySelector('#tm-grid [data-type="chat"]');
-  check('the Comms card embeds chat.html with embed=1, so the page hides its own nav bar', /chat\.html\?embed=1$/.test(chatCard.querySelector('iframe.tm-frame').getAttribute('src')));
-  check('…and carries Channels and Connection as doors on the frame', [...chatCard.querySelectorAll('.tm-door-own')].map((a) => a.title).join(',') === 'Channels,Connection');
-  check('a Terminal window hides the board\'s own nav bar so the workspace strip is the only header', /html\[data-solo="terminal"\] \.sui-screen-nav:has\(> #board-tabs\)\s*\{\s*display:\s*none/.test(read('frontend/board.html')));
-  w.Board.Terminal.remove(chatCard.getAttribute('data-card'));
+  const chatId = chatCard.getAttribute('data-card');
+  check('the Comms card is frameless — the page\'s own bar is its header — and the page learns its card id', chatCard.classList.contains('tm-frameless') && chatCard.querySelector('iframe.tm-frame').getAttribute('src') === 'chat.html?embed=1&card=' + chatId && /#tm-grid \.tm-card\.tm-frameless \.tm-head[^{]*\{\s*display:\s*none/.test(read('frontend/board.html')));
+  // The page has no bridge of its own: it asks this window to invoke and to
+  // listen for it (bridge.js), and only frames this page embeds are answered.
+  {
+    const replies = [];
+    const fakeSource = { postMessage: (m) => replies.push(m) };
+    const stranger = { postMessage: (m) => replies.push(m) };
+    const frame = chatCard.querySelector('iframe.tm-frame');
+    Object.defineProperty(frame, 'contentWindow', { value: fakeSource, configurable: true });
+    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 7, cmd: 'terminal_workspaces', args: {} } });
+    await until(() => replies.length === 1);
+    check('an embedded page\'s invoke is run by this window and answered by message', replies[0].kind === 'result' && replies[0].id === 7 && replies[0].ok === true && Array.isArray(replies[0].value.names));
+    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 8, cmd: 'no_such_command', args: {} } });
+    await until(() => replies.length === 2);
+    check('…a failing invoke answers with the error', replies[1].ok === false && /no fixture/.test(replies[1].error));
+    const took = w.Board.Terminal.answerFrame({ origin: '', source: stranger, data: { structs: 'bridge', kind: 'invoke', id: 9, cmd: 'terminal_workspaces', args: {} } });
+    check('…a frame this page does not embed is not answered', took === false && replies.length === 2);
+    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'listen', name: 'matrix::typing' } });
+    w.__HARNESS_EMIT__('matrix::typing', { room: '!x' });
+    await until(() => replies.some((m) => m.kind === 'event'));
+    check('…a listen subscribes here and forwards the event to the page', replies.some((m) => m.kind === 'event' && m.name === 'matrix::typing' && m.payload.room === '!x'));
+  }
+  // The page's bar asks for pop-out and close by message; only our origin.
+  w.dispatchEvent(new w.MessageEvent('message', { data: { structs: 'card', card: chatId, act: 'popout' }, origin: '' }));
+  check('…its pop-out asks Rust for a window on this card', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'open_terminal_card' && c.args.cardId === chatId));
+  w.dispatchEvent(new w.MessageEvent('message', { data: { structs: 'card', card: chatId, act: 'remove' }, origin: 'https://evil.example' }));
+  check('…a message from another origin is ignored', d.querySelector('#tm-grid [data-card="' + chatId + '"]') !== null);
+  w.dispatchEvent(new w.MessageEvent('message', { data: { structs: 'card', card: chatId, act: 'remove' }, origin: '' }));
+  check('…and its close removes the card', d.querySelector('#tm-grid [data-card="' + chatId + '"]') === null);
+  // A Terminal window has one header: the board's nav bar, with the
+  // workspace tabs and their doors mounted into it.
+  const boardNav = d.querySelector('.sui-screen-nav:has(> #board-tabs)');
+  check('in a Terminal window the workspace tabs sit in the board\'s nav bar, doors beside the refresh, and no strip of their own', boardNav.querySelector('#tm-ws-items .sui-mod-active') !== null && boardNav.querySelector('.board-navaside #tm-ws-doors [title="Rename this workspace"]') !== null && d.querySelector('.tm-workspaces #tm-ws-nav') === null && d.getElementById('board-refresh') === null);
   run('TAPE');
   check('TAPE is a live stream with a filter, economy by default', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'tape') && w.Board.Terminal.types().find((t) => t.type === 'tape').params[0].options.map((o) => o.value).join(',') === 'economy,combat,all');
   run('SETTINGS');
@@ -322,7 +354,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await tick(20);
   check('PRESET makes the role\'s workspace and goes there', w.Board.Terminal.state.ws === 'trader' && w.Board.Terminal.state.layout.cards.some((c) => c.type === 'market') && w.Board.Terminal.state.layout.cards.some((c) => c.type === 'book'));
   check('every preset names only registered card types and unique ids', Object.keys(w.Board.Terminal.PRESETS).every((k) => { const l = w.Board.Terminal.presetLayout(k); const ids = l.cards.map((c) => c.id); return l.cards.every((c) => w.Board.Terminal.known(c.type)) && new Set(ids).size === ids.length; }));
-  [...d.querySelectorAll('#tm-ws-nav .sui-screen-nav-item')].find((a) => a.textContent === '+').click();
+  [...d.querySelectorAll('#tm-ws-items .sui-screen-nav-item')].find((a) => a.textContent === '+').click();
   check('the new-workspace row offers the presets', !!d.querySelector('#tm-ws-preset') && d.querySelectorAll('#tm-ws-preset option').length === Object.keys(w.Board.Terminal.PRESETS).length + 1);
   run('SHARE');
   check('SHARE opens the share row with the code and a door to Comms', d.querySelector('#tm-ws-share input')?.value === w.Board.Terminal.exportWorkspace() && [...d.querySelectorAll('#tm-ws-share a')].some((a) => a.textContent === 'Send to Comms'));
@@ -349,7 +381,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     // deleted workspace moves to the active one rather than saving it back.
     w.__HARNESS_EMIT__('terminal-workspaces', { active: 'main', names: ['main', 'war-room', 'ops-2'] });
     await tick();
-    check('a workspace list announced by another window is taken up by the strip', w.Board.Terminal.state.workspaces.join(',') === 'main,war-room,ops-2' && [...d.querySelectorAll('#tm-ws-nav .sui-screen-nav-item')].some((n) => n.textContent === 'ops-2'));
+    check('a workspace list announced by another window is taken up by the strip', w.Board.Terminal.state.workspaces.join(',') === 'main,war-room,ops-2' && [...d.querySelectorAll('#tm-ws-items .sui-screen-nav-item')].some((n) => n.textContent === 'ops-2'));
     const wsBefore = w.Board.Terminal.state.ws;
     w.__HARNESS_EMIT__('terminal-workspaces', { active: 'war-room', names: ['war-room'] });
     await until(() => w.Board.Terminal.state.ws === 'war-room');
@@ -363,12 +395,12 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('an unknown word is refused in place, not swallowed', cmd.classList.contains('is-err') && cmd.value === 'NOPE');
 
   // Workspaces.
-  [...d.querySelectorAll('#tm-ws-nav .sui-screen-nav-item')].find((a) => a.textContent === 'war-room').click();
+  [...d.querySelectorAll('#tm-ws-items .sui-screen-nav-item')].find((a) => a.textContent === 'war-room').click();
   await until(() => w.Board.Terminal.state.ws === 'war-room');
   check('picking a workspace switches the page and activates it', w.Board.Terminal.state.ws === 'war-room' && (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_workspace_activate' && c.args.name === 'war-room'));
   // Delete asks first; the strip's delete door never acts on one click.
   const delCallsBefore = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_workspace_delete').length;
-  d.querySelector('.tm-workspaces [title="Delete this workspace"]').click();
+  d.querySelector('#tm-ws-doors [title="Delete this workspace"]').click();
   await until(() => d.querySelector('.ops-modal-overlay'));
   check('delete asks first, naming the workspace', d.querySelector('.ops-modal-overlay') !== null && /war-room/.test(d.querySelector('.ops-modal-overlay').textContent) && (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_workspace_delete').length === delCallsBefore);
   d.querySelector('.ops-modal-overlay .sui-message-system-modal-cta-btn-wrapper a').click();
@@ -376,7 +408,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   // Rename: the door opens a name box; Enter renames through Rust, closes the
   // old windows first, and the strip follows the new name.
   await w.Board.Terminal.switchWorkspace('main');
-  d.querySelector('.tm-workspaces [title="Rename this workspace"]').click();
+  d.querySelector('#tm-ws-doors [title="Rename this workspace"]').click();
   const renameBox = d.getElementById('tm-ws-rename-name');
   check('rename opens a box holding the current name', renameBox !== null && renameBox.value === 'main');
   renameBox.value = 'ops';
@@ -385,24 +417,35 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const renameCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_workspace_rename');
   const calls = (w.__HARNESS_CALLS__ || []);
   check('Enter renames through Rust, old windows closed first', renameCall && renameCall.args.from === 'main' && renameCall.args.to === 'ops' && calls.findIndex((c) => c.cmd === 'terminal_workspace_windows_close' && c.args.name === 'main') < calls.indexOf(renameCall));
-  check('…and the strip and the page follow the new name', w.Board.Terminal.state.ws === 'ops' && d.querySelector('#tm-ws-nav .sui-mod-active').textContent === 'ops' && [...d.querySelectorAll('#tm-ws-nav a, #tm-ws-nav button')].every((n) => n.textContent !== 'main'));
+  check('…and the strip and the page follow the new name', w.Board.Terminal.state.ws === 'ops' && d.querySelector('#tm-ws-items .sui-mod-active').textContent === 'ops' && [...d.querySelectorAll('#tm-ws-items a, #tm-ws-items button')].every((n) => n.textContent !== 'main'));
   check('a taken name is refused without touching Rust', (w.Board.Terminal.renameWorkspace('ops', 'war-room'), (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_workspace_rename').length === 1));
   await w.Board.Terminal.renameWorkspace('ops', 'main');
   await w.Board.Terminal.switchWorkspace('war-room');
   // Order: the strip is arranged by the player, through Rust, and the doors
   // know the ends — war-room is last, so right is off and left is live.
-  check('the current workspace can be nudged along the strip; the door at the end is off', d.querySelector('.tm-workspaces [title="Move this workspace right"]').classList.contains('tm-door-off') && !d.querySelector('.tm-workspaces [title="Move this workspace left"]').classList.contains('tm-door-off'));
-  d.querySelector('.tm-workspaces [title="Move this workspace left"]').click();
+  // Order: drag a tab along the strip — the same pointer drag the cards use.
+  check('there are no nudge doors; the tabs drag', d.querySelectorAll('#tm-ws-doors [title^="Move this workspace"]').length === 0 && d.querySelector('#tm-ws-items [data-ws="war-room"]').title === 'Drag to move');
+  {
+    const src = d.querySelector('#tm-ws-items [data-ws="war-room"]'), dst = d.querySelector('#tm-ws-items [data-ws]');
+    d.elementFromPoint = (x) => (x < 100 ? dst : null);
+    dst.getBoundingClientRect = () => ({ left: 0, width: 80, top: 0, height: 30, right: 80, bottom: 30 });
+    const ev = (type, x, y, el) => (el || w).dispatchEvent(new w.MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 }));
+    ev('pointerdown', 300, 10, src);
+    ev('pointermove', 20, 10);
+    check('while dragging, the tab under the pointer shows the drop side', dst.classList.contains('tm-drop-before'));
+    ev('pointerup', 20, 10);
+    delete d.elementFromPoint;
+  }
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_workspace_order'));
   const orderCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_workspace_order');
   // (The rename fixture answers a fixed list, so only war-room's move is pinned, not its neighbour's name.)
-  check('a nudge sends the whole order to Rust and redraws the strip in it', orderCall.args.names[0] === 'war-room' && orderCall.args.names.length === w.Board.Terminal.state.workspaces.length && d.querySelector('#tm-ws-nav .sui-screen-nav-item').textContent === 'war-room', orderCall.args.names.join(','));
-  await w.Board.Terminal.moveWorkspace('war-room', 1);
+  check('a nudge sends the whole order to Rust and redraws the strip in it', orderCall.args.names[0] === 'war-room' && orderCall.args.names.length === w.Board.Terminal.state.workspaces.length && d.querySelector('#tm-ws-items .sui-screen-nav-item').textContent === 'war-room', orderCall.args.names.join(','));
+  await w.Board.Terminal.dropWorkspace('war-room', null, true);
   check('…loading that workspace\'s own layout', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_layout_get' && c.args && c.args.workspace === 'war-room'));
-  d.querySelector('.tm-workspaces [title="Open this workspace in its own window"]').click();
+  d.querySelector('#tm-ws-doors [title="Open this workspace in its own window"]').click();
   await tick(10);
   check('a workspace can be a window of its own', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'open_terminal_workspace' && c.args.name === 'war-room'));
-  [...d.querySelectorAll('#tm-ws-nav .sui-screen-nav-item')].find((a) => a.textContent === '+').click();
+  [...d.querySelectorAll('#tm-ws-items .sui-screen-nav-item')].find((a) => a.textContent === '+').click();
   const nameBox = d.getElementById('tm-ws-new');
   check('+ asks for a name', nameBox !== null);
   nameBox.value = 'ore desk'; nameBox.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
@@ -417,7 +460,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => d.querySelectorAll('#tm-grid .tm-card').length >= 1);
   check('a pop-out shows exactly its card', d.querySelectorAll('#tm-grid .tm-card').length === 1 && d.querySelector('#tm-grid .tm-card').getAttribute('data-card') === 'market-1');
   check('…full width, with no toolbar and no layout doors', d.querySelector('.tm-toolbar') === null && d.querySelector('#tm-market-1').classList.contains('tm-w3') && d.querySelector('#tm-market-1 [title="Remove"]') === null);
-  check('…but it can still refresh', d.querySelector('#tm-market-1 [title="Refresh"]') !== null);
+  check('…and no refresh door either: it refreshes on its cadence', d.querySelector('#tm-market-1 [title="Refresh"]') === null && w.Board.Terminal.cadenceOf('market-1') > 0);
 }
 
 // ── No layout yet: the default page ────────────────────────────────────────

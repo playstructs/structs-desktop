@@ -895,9 +895,16 @@
     /* Game Stats is a long dashboard, not a pinned log: the window scrolls. */
     html[data-solo="gamestats"] .ops-scroll { overflow-y: auto; }
     html[data-solo="terminal"] .ops-scroll { overflow-y: auto; }
-    /* A Terminal window's only header is the workspace strip: the board's nav
-       bar (area tabs hidden, refresh door left) was a second, empty header. */
-    html[data-solo="terminal"] .sui-screen-nav:has(> #board-tabs) { display: none; }
+    /* A Terminal window has ONE header: the board's nav bar, with the
+       workspace tabs and their doors mounted into it (chrome() in
+       board-terminal.js) where the area tabs are in the main window. */
+    html[data-solo="terminal"] .sui-screen-nav:has(> #tm-ws-items) { justify-content: space-between; }
+    #tm-ws-items { display: flex; min-width: 0; overflow-x: auto; }
+    #tm-ws-doors { display: inline-flex; align-items: center; gap: var(--spacing-xs); }
+    /* A card that embeds a whole page (Comms, Pay) keeps that page's own bar
+       as its header; the frame draws none and only the resize grip remains. */
+    #tm-grid .tm-card.tm-frameless .tm-head, .tm-card.tm-frameless .tm-head { display: none; }
+    #board-layout .tm-frameless .tm-body { padding: 0; }
     /* ── The Terminal (board-terminal.js) ──────────────────────────────── */
     /* One grid of the game's data cards: three equal columns, one gutter,
        every card the same frame — header with the doors, body with the
@@ -959,8 +966,6 @@
     /* a.sui-nav-btn:link out-specifies a bare class, so the door's rest state
        needs the grid id in front of it. */
     /* a.tm-door:link below is (1,2,1); the rest state needs to out-rank it. */
-    #tm-grid .tm-doors a.tm-door.tm-door-quiet { display: none; }
-    #tm-grid .tm-card:hover .tm-doors a.tm-door.tm-door-quiet, #tm-grid .tm-card:focus-within .tm-doors a.tm-door.tm-door-quiet { display: inline-flex; }
     .tm-share { display: inline-flex; align-items: center; gap: var(--spacing-sm); flex: 1 1 auto; min-width: 0; }
     .tm-share input { flex: 1 1 auto; min-width: 0; }
     /* The battle log, as the raid view styles it. */
@@ -991,13 +996,16 @@
     .tm-head { justify-content: space-between; gap: var(--spacing-md); width: 100%; box-sizing: border-box; }
     .tm-toolbar .sui-screen-btn { justify-self: start; }
     .tm-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-    .tm-paused .tm-refresh { opacity: .35; }
-    .tm-paused:hover .tm-refresh { opacity: 1; }
+    .tm-paused .tm-title { opacity: .6; }
+    #tm-ws-items .sui-screen-nav-item.tm-dragging { opacity: .5; }
+    #tm-ws-items .sui-screen-nav-item.tm-drop-before { box-shadow: inset 2px 0 0 var(--accent-primary); }
+    #tm-ws-items .sui-screen-nav-item.tm-drop-after { box-shadow: inset -2px 0 0 var(--accent-primary); }
+    #tm-ws-nav .sui-screen-nav-item.tm-drop-before { box-shadow: inset 2px 0 0 var(--accent-primary); }
+    #tm-ws-nav .sui-screen-nav-item.tm-drop-after { box-shadow: inset -2px 0 0 var(--accent-primary); }
     .tm-doors { display: inline-flex; align-items: stretch; align-self: stretch; gap: 0; flex: none; }
     /* Doors as the Comms window draws its nav actions (#chat-nav-actions a). */
     #tm-grid a.tm-door, #tm-grid a.tm-door:link, #tm-grid a.tm-door:visited { display: inline-flex; align-items: center; padding: var(--spacing-sm) var(--spacing-sm); text-decoration: none; color: var(--accent-primary); }
     #tm-grid a.tm-door:hover { color: var(--accent-primary-active); }
-    .tm-door-off { opacity: .3; pointer-events: none; }
     .tm-config { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md); background: var(--surface-default); }
     /* `display: flex` beats the UA's [hidden] rule, so without this the
      * configure strip never closed once opened — Apply left it on the card. */
@@ -1128,9 +1136,8 @@
                    stop reading it. -->
               <a id="board-comms" class="ops-refresh-btn hidden" href="javascript:void(0)"
                  title="Open Comms"><i class="icon-phone"></i><span id="board-comms-count"></span></a>
+              <!-- No refresh door: pages and cards refresh on their own cadence. -->
               <span id="board-updated" class="sui-text-hint"></span>
-              <a id="board-refresh" class="ops-refresh-btn" href="javascript:void(0)"
-                 title="Refresh this page now"><i class="icon-refresh-12"></i></a>
             </div>
           </div>
         </div>
