@@ -295,6 +295,12 @@
        input in a screen frame — which is what made the rail read as a
        different product. Only the fit is set here: the panel is narrow, and
        the portrait well and button are fixed while the message grows. */
+    /* The composer's panel ships inside a `fit-content` wrapper, and
+       `main.css` centres text, so the wrapper shrank to its content and sat in
+       the middle of the row — `width: 100%` on the panel only ever measured
+       against that wrapper. The wrapper is what has to span, not the panel. */
+    #rv-chat-entry { text-align: left; }
+    #rv-chat-entry .sui-panel-wrapper-fit-content { display: block; width: 100%; }
     #rv-chat-entry .sui-panel { width: 100%; }
     #rv-chat-entry .sui-panel-chunk.sui-mod-grow { min-width: 0; }
     /* The portrait is SUI's own size.
@@ -664,7 +670,13 @@
        and alone at the head of the bar it read as a stray digit. The FILTERED
        form ("12/200") stays — it is the only thing that says rows are hidden. */
     html[data-only="log"] #rv-log-count:not(.rv-log-count-filtered) { display: none; }
-    html[data-only="comms"] #rv-chat { display: flex; width: 100%; }
+    /* Beside a map, Comms is a fixed-width RAIL — the map wants the horizontal
+       room and a conversation wants the vertical. In a card of its own there
+       is no map, and the rail stayed pinned to its 340px cap with the rest of
+       a wide window empty beside it. `width: 100%` could not undo that: in a
+       flex row the BASIS is the used size, so `flex: 0 0 340px` wins over any
+       width. The basis has to go, not be overridden. */
+    html[data-only="comms"] #rv-chat { display: flex; flex: 1 1 auto; width: 100%; border-left: 0; }
     html[data-only="comms"] #rv-left { display: none; }
     html[data-embed] #rv-left { height: 100%; }
 </style>

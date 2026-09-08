@@ -72,7 +72,7 @@
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'tape', 'feed']],
     ['Explore', ['player', 'guild', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
-    ['Armada', ['armada', 'ops', 'pow', 'tasks', 'solve', 'queue', 'results']],
+    ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results']],
     ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'pay']],
     ['War', ['scout', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['Comms', ['chat', 'comms', 'members']],
@@ -1197,12 +1197,17 @@
     // The ambit they neither reach nor occupy — the one computed answer that
     // decides a fight. `RECON` because that is what people call it.
     SCOUT: ['scout', 'id'], RECON: ['scout', 'id'], REACH: ['scout', 'id'],
+    // Staging: a raid needs the fleet AT the planet, and the fleet you stage
+    // is usually a worker's, not the primary's.
+    STAGE: ['fleet', 'id'], MOVE: ['fleet', 'id'],
     // What the chain destroys first if the grid gives: the cascade order.
     BROWNOUT: ['brownout'], CASCADE: ['brownout'], RISK: ['brownout'],
     // The game's own verbs, on the struct in front of you.
     OPS: ['ops', 'id'], ACT: ['ops', 'id'], DO: ['ops', 'id'],
     // A guild's PEOPLE, not its statistics.
     MEMBERS: ['members', 'id'], ROSTER_OF: ['members', 'id'], WHO: ['members', 'id'],
+    // Placement: what can stand here, and in which free slot.
+    BUILD: ['build', 'id'], DEPLOY: ['build', 'id'],
   };
   Terminal.WORDS = WORDS;
 
@@ -1295,9 +1300,17 @@
         { id: parts[0] });
     }
     if (head === '?') return card('help', {});
-    // FLEET is the game's word: with an id it is that fleet, on the map. Bare,
-    // it is what people have always typed for the roster.
-    if (head === 'FLEET') return card(ID_RE.test(rest) ? 'map' : 'armada', rest ? { id: rest } : {});
+    /* FLEET is the game's word and it means three things, decided by what
+     * follows it — the same rule the rest of the grammar runs on. Bare, it is
+     * the roster, which is what people have always typed. Given a FLEET id it
+     * is that fleet on the map. Given a PLAYER id it is that player's fleet:
+     * where it stands and where it can go. It used to send a player id to the
+     * map, which drew the wrong object for the id it was handed. */
+    if (head === 'FLEET') {
+      if (!rest) return card('armada', {});
+      if (kindOf(rest) === 1) return card('fleet', { id: rest });
+      return card(ID_RE.test(rest) ? 'map' : 'armada', { id: rest });
+    }
     if (head === 'PRESET' || head === 'PRESETS') return { kind: 'preset', name: String(rest || '').toLowerCase() };
     if (head === 'SHARE') return { kind: 'share' };
     // The bar's RESET button went with the bar; this is the same verb.
@@ -2845,7 +2858,7 @@
   // Whole pages as cards keep their OWN bar as the header (frameless): the
   // frame draws none, and the page's bar carries pop-out and close.
   Terminal.register('chat', {
-    label: 'Comms window', defaultWidth: 2, cadenceMs: 0, frameless: true,
+    label: 'Comms window', defaultWidth: 2, cadenceMs: 0,
     describe: function (p) { return p.list === 'direct' ? 'Direct messages' : p.list === 'rooms' ? 'Channels' : 'Comms'; },
     // Rooms and people are two questions; a card that answers one of them is
     // a card you can leave open beside the other.
@@ -2858,7 +2871,7 @@
     },
   });
   Terminal.register('pay', {
-    label: 'Pay', describe: function () { return 'Pay'; }, cadenceMs: 0, frameless: true,
+    label: 'Pay', describe: function () { return 'Pay'; }, cadenceMs: 0,
     render: function (host, p, ctx) { host.innerHTML = ''; host.appendChild(framed('transfer.html', 'Pay', ctx.id)); },
   });
 

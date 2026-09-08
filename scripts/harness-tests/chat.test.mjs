@@ -771,9 +771,25 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const { w, d } = await open('?embed=1&card=chat-1');
   check('embed marks the document and keeps this bar as the card\'s header',
     d.documentElement.hasAttribute('data-embed') && w.getComputedStyle(d.getElementById('menu-page-nav')).display !== 'none');
-  check('…with a pop-out door that only embedding shows',
-    w.getComputedStyle(d.getElementById('chat-nav-popout')).display !== 'none'
-      && /#chat-nav-popout\s*\{\s*display:\s*none/.test(readFileSync(repo + '/frontend/chat.html', 'utf8')));
+  /* The CARD's header owns pop-out and close now — it wears the same frame
+   * and the same three tools as every other card — so this page's own copies
+   * of them are hidden when embedded rather than shown twice. The message
+   * path they use stays, and still works. */
+  /* A card is not a window. `main.css` scales the game's menu-page layout by
+   * an INTEGER factor at window sizes — scale(2) from 1152px wide OR 1024px
+   * tall, scale(4) from 2304px — and this page reuses those ids on purpose,
+   * to inherit the game's chrome. It inherited the scaler with them, so a
+   * Comms card in a wide window painted at twice the size of every card
+   * beside it while its CSS still honestly reported 8px. Measured in a real
+   * browser at 1300px: transform matrix(2,…), room row 124px tall; with the
+   * reset, transform none and 62px. jsdom evaluates no media queries, so the
+   * rule itself is what is pinned here. */
+  check('…and does not scale itself: the host decided the size, and every neighbouring card draws at 1x',
+    /html\[data-embed\] #menu-page-layout \{[^}]*transform: none/.test(readFileSync(repo + '/frontend/embed.css', 'utf8')),
+    'embed.css must reset #menu-page-layout');
+  check('…with its own pop-out and close hidden, because the card header carries them',
+    /html\[data-embed\] #chat-nav-popout/.test(readFileSync(repo + '/frontend/embed.css', 'utf8'))
+      && /#menu-page-nav-close \{ display: none; \}/.test(readFileSync(repo + '/frontend/embed.css', 'utf8')));
   const heard = [];
   w.addEventListener('message', (ev) => { if (ev.data && ev.data.structs === 'card') heard.push(ev.data); });
   d.getElementById('chat-nav-popout').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));

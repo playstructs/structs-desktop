@@ -228,6 +228,20 @@ const OWNER = { id: '1-248', name: 'Phoniffer', tag: 'SN.C', pfp: '{"head":4,"ne
   const bare = C.tape.row({ time: '14:03', kind: 'block', subject: 'height', ids: [], parts: [] });
   check('a frame with no figures draws no second band', text(bare.querySelector('.sc-tape-body')) === '');
   check('the newest line wears the accent stripe', line.classList.contains('is-new'));
+
+  /* jsdom evaluates neither container queries nor descendant cascade, so the
+   * one-line-when-wide rule is pinned as text: a card wide enough puts the
+   * figures on the header line instead of leaving the width beside the
+   * timestamp empty, and it asks the CARD's width, not the viewport's. */
+  {
+    const css = read('frontend/structs-cards.css');
+    const q = css.match(/@container tape \(min-width: [^)]+\) \{[\s\S]*?\n\}/);
+    check('the tape measures its own card, not the window', /\.tm-tape \{[^}]*container-type: inline-size/.test(css) && /container-name: tape/.test(css));
+    check('…and a wide card puts the figures on the header line, unwrapped, in a column that starts at the same x every line',
+      q !== null && /\.sc-tape-body \{[^}]*grid-row: 1/.test(q[0]) && /\.sc-tape-body \{[^}]*flex-wrap: nowrap/.test(q[0])
+      && /\.sc-tape \{ grid-template-columns: auto 46ch minmax\(0, 1fr\) auto/.test(q[0])
+      && /\.sc-tape-blk \{ grid-column: 4/.test(q[0]), q && q[0]);
+  }
   const ws = C.workspace.card({ name: 'trader', cards: ['market', 'book', 'banks'], open: true, windows: 1, changed: '2m' });
   check('a workspace card lists its cards as badges and says OPEN', ws.querySelectorAll('.sc-ws-cards .sui-badge').length === 3 && [...ws.querySelectorAll('.sui-badge')].some((b) => text(b) === 'OPEN'), ws.textContent);
 }

@@ -1124,6 +1124,81 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   check('Escape cancels a pending action', !S.pending);
 }
 
+/* ── Comms is a rail beside the map and a PAGE on its own ──────────────────
+ *
+ * jsdom computes no flex, so this is pinned as text. Two separate mistakes,
+ * both of which look like "the window is too wide for the content":
+ *
+ *   `flex: 0 0 clamp(240px, 26vw, 340px)` is right for a rail sharing a row
+ *   with the map. As `only=comms` it IS the row, and stayed pinned at its
+ *   340px cap. `width: 100%` cannot undo that — in a flex row the BASIS is
+ *   the used size — so the basis has to go, not be overridden.
+ *
+ *   The composer ships in a `fit-content` wrapper, and `main.css` centres
+ *   text, so the wrapper shrank to its content and sat in the middle. The
+ *   panel's own `width: 100%` measured against that wrapper, not the row.
+ */
+{
+  const html = readFileSync(resolve(repo, 'frontend/raidview.html'), 'utf8');
+  const solo = html.match(/html\[data-only="comms"\] #rv-chat \{[^}]*\}/);
+  check('a Comms card that is the whole document gives up the rail\'s fixed width',
+    solo !== null && /flex: 1 1 auto/.test(solo[0]) && !/flex: 0 0/.test(solo[0]), solo && solo[0]);
+  check('…and the composer spans the row rather than shrinking to its content in the middle of it',
+    /#rv-chat-entry \.sui-panel-wrapper-fit-content \{[^}]*width: 100%/.test(html)
+    && /#rv-chat-entry \{ text-align: left/.test(html));
+  check('…while the rail beside the map keeps the fixed width the map needs',
+    /#rv-chat \{[\s\S]*?flex: 0 0 clamp\(240px, 26vw, 340px\)/.test(html));
+}
+
+/* ── Which layer a detail belongs on is the GAME's decision ─────────────────
+ *
+ * `StructStillBuilder` hands a struct's weapon art to `topDetailLayer1` for
+ * some hulls and to `bottomDetailLayer1` for others — z-index 300 and 100,
+ * either side of the hull at 200. The filename does not decide it: every
+ * aircraft's `*-bottom-weapon.png` goes BELOW, and reading five of them off
+ * the name painted the missiles across the fuselage.
+ *
+ * So this does not hardcode the answer. It reads the game's own builder,
+ * hull by hull, and fails if either side moves.
+ */
+{
+  const builder = readFileSync(resolve(repo, 'structs-webapp/src/js/builders/StructStillBuilder.js'), 'utf8');
+  const artSet = readFileSync(resolve(repo, 'structs-webapp/src/js/builders/StructTypeArtSetBuilder.js'), 'utf8');
+  const ours = readFileSync(resolve(repo, 'frontend/raidview.js'), 'utf8');
+
+  // The game: for each hull, which constructor slot each weapon lands in.
+  //   args[2] topDetailLayer1  args[3] topDetailLayer2  args[6] bottomDetailLayer1
+  const wantLayer = new Map();                       // "<dir>/<suffix>" → 'top' | 'bottom'
+  for (const m of builder.matchAll(/build([A-Za-z]+)\(structType\)\s*\{[\s\S]*?new StructStillRenderer\(([\s\S]*?)\);/g)) {
+    const args = m[2].split(',').map((a) => a.trim());
+    if (args.length < 7) continue;
+    const slotOf = (weapon) => (args[2].includes(weapon) || args[3].includes(weapon)) ? 'top'
+      : args[6].includes(weapon) ? 'bottom' : null;
+    // …and which FILE each weapon is, from the art-set builder.
+    const body = artSet.match(new RegExp('build' + m[1] + '\\(structType\\)\\s*\\{([\\s\\S]*?)\\n  \\}'));
+    if (!body) continue;
+    for (const f of body[1].matchAll(/art\[STRUCT_WEAPON_SYSTEM\.(\w+)\][^;]*?\/([\w-]+)\/\2-([\w-]+)\.png/g)) {
+      const layer = slotOf(f[1]);
+      if (layer) wantLayer.set(f[2] + '/' + f[3], layer);
+    }
+  }
+  check('the game names a layer for every weapon we draw', wantLayer.size >= 10, String(wantLayer.size));
+
+  // Ours: the ART table, entry by entry.
+  const wrong = [];
+  for (const [key, layer] of wantLayer) {
+    const [dir, suffix] = key.split('/');
+    const row = ours.match(new RegExp("\\{ dir: '" + dir + "'[^}]*\\}"));
+    if (!row) { wrong.push(dir + ': no ART entry'); continue; }
+    const inTop = new RegExp("top: \\[[^\\]]*'" + suffix + "'").test(row[0]);
+    const inBottom = new RegExp("bottom: \\[[^\\]]*'" + suffix + "'").test(row[0]);
+    const have = inTop ? 'top' : inBottom ? 'bottom' : 'missing';
+    if (have !== layer) wrong.push(`${dir}-${suffix}: game says ${layer}, we draw it ${have}`);
+  }
+  check('…and every one is on the layer the game puts it on — the filename does not decide it',
+    wrong.length === 0, wrong.join(' · '));
+}
+
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');
 w.close();
 process.exit(failures ? 1 : 0);

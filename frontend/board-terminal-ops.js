@@ -55,9 +55,17 @@
       Object.keys(inputs).forEach(function (k) { v[k] = readControl(inputs[k]); });
       return v;
     }
-    function paintFields() {
+    /* `seed` is what the fields held BEFORE the rebuild.
+     *
+     * A field function that depends on another field — the free SLOTS of the
+     * chosen ambit, say — was asked for its shape after `inputs` had already
+     * been cleared, so it read an empty form and offered the first ambit's
+     * slots whichever ambit you picked. */
+    function paintFields(seed) {
       var fields = H.el('div', 'tm-ticket-fields');
-      (typeof spec.fields === 'function' ? spec.fields(values()) : spec.fields).forEach(function (f) {
+      // A ticket with nothing to fill in is a real shape — "Return home" has
+      // one answer — so no `fields` means no fields, not a crash.
+      (typeof spec.fields === 'function' ? spec.fields(seed || values()) : (spec.fields || [])).forEach(function (f) {
         var ctl;
         if (f.kind === 'choice') ctl = H.selectBox(String(f.value == null ? (f.options[0] || {}).value : f.value), f.options, function () { changed(true); });
         else {
@@ -77,7 +85,7 @@
       else box.appendChild(fields);
     }
     function changed(rebuild) {
-      if (rebuild && typeof spec.fields === 'function') { var keep = values(); inputs = {}; paintFields(); restore(keep); }
+      if (rebuild && typeof spec.fields === 'function') { var keep = values(); inputs = {}; paintFields(keep); restore(keep); }
       if (timer) clearTimeout(timer);
       timer = setTimeout(runPreview, 250);
     }
@@ -503,6 +511,98 @@
     },
   });
 
+  /* ── BUILD: the last verb with no way in ─────────────────────────────────
+   *
+   * `build` takes a struct type, an ambit and a SLOT — and a slot number is
+   * not something a person knows. Offered as a bare number it is a guess the
+   * chain refuses, which is why the placement verbs were the last two the
+   * Terminal could not reach. `terminal_build_slots` subtracts the occupied
+   * slots from the planet's own per-ambit count, so what is offered is what
+   * is free.
+   *
+   * The type list is the chain's (`mcp_struct_type_catalog`), filtered to
+   * what can stand on a planet, and each carries its build charge — the cost
+   * you are about to spend, named before you spend it.
+   */
+  var AMBIT_ORDER = ['space', 'air', 'land', 'water'];
+  T.register('build', {
+    label: 'Build a struct', defaultWidth: 1,
+    describe: function (p) { return 'Build on ' + (p.id || '?'); },
+    params: [{ key: 'id', label: 'Planet', kind: 'id', kinds: [2], placeholder: '2-15361' }],
+    cadenceMs: 60000,
+    render: function (host, p, ctx) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet id.')); return; }
+      return Promise.all([
+        invoke('terminal_build_slots', { planet: p.id }),
+        invoke('terminal_struct_types').catch(function () { return []; }),
+      ]).then(function (res) {
+        var d = res[0] || {}, types = res[1] || [];
+        host.innerHTML = '';
+        var ambits = d.ambits || {};
+        var freeAll = AMBIT_ORDER.reduce(function (n, a) { return n + (((ambits[a] || {}).free || []).length); }, 0);
+        host.appendChild(tiles([
+          ['planet', String(d.planet_id || p.id)],
+          [['free slots', 'across every ambit'], H.fmtInt(freeAll), null, freeAll ? 'ok' : 'bad'],
+          ['owner', String(d.owner || '—')],
+        ]));
+        // Which ambits have room, read across in the same order every time.
+        var row = H.el('div', 'tm-ambits');
+        row.appendChild(H.el('span', 'fstat-l', 'free'));
+        AMBIT_ORDER.forEach(function (a) {
+          var f = ((ambits[a] || {}).free || []).length, n = (ambits[a] || {}).slots || 0;
+          var chip = H.el('span', 'tm-ambit' + (f ? ' is-on sc-ok' : ''));
+          chip.textContent = a + ' ' + f + '/' + n;
+          chip.title = f ? f + ' of ' + n + ' slots open' : 'full';
+          row.appendChild(chip);
+        });
+        host.appendChild(row);
+        if (!freeAll) { host.appendChild(H.stateBlock('info', 'Every slot on ' + (d.planet_id || p.id) + ' is taken.')); return; }
+        var planetary = types.filter(function (t) { return String(t.category || '').toLowerCase() === 'planet'; });
+        if (!planetary.length) planetary = types;
+        var slot = H.el('div', 'tm-ticket-slot');
+        host.appendChild(doorRow([{ label: 'Build', primary: true, onClick: function () {
+          slot.innerHTML = '';
+          slot.appendChild(ticket({
+            cta: 'Build',
+            // The slot choices FOLLOW the ambit: a slot number means nothing
+            // without one, and offering a full ambit's numbers is offering a
+            // refusal.
+            fields: function (v) {
+              var a = v.ambit || AMBIT_ORDER.filter(function (x) { return ((ambits[x] || {}).free || []).length; })[0];
+              var free = (ambits[a] || {}).free || [];
+              return [
+                { key: 'struct_type', label: 'Type', kind: 'choice', value: v.struct_type,
+                  options: planetary.map(function (t) { return { value: t.name, label: t.name + (t.build_charge ? ' · ' + t.build_charge + ' charge' : '') }; }) },
+                { key: 'ambit', label: 'Ambit', kind: 'choice', value: a,
+                  options: AMBIT_ORDER.filter(function (x) { return ((ambits[x] || {}).free || []).length; })
+                    .map(function (x) { return { value: x, label: x }; }) },
+                { key: 'slot', label: 'Slot', kind: 'choice', value: v.slot,
+                  options: free.map(function (i) { return { value: String(i), label: 'slot ' + i }; }) },
+              ];
+            },
+            confirm: function (v) {
+              var t = planetary.filter(function (x) { return x.name === v.struct_type; })[0];
+              return { title: 'Build a ' + (v.struct_type || '?') + '?', cta: 'Build', rows: [
+                ['Planet', String(d.planet_id || p.id)],
+                ['Where', (v.ambit || '?') + ' · slot ' + (v.slot == null ? '?' : v.slot)],
+                ['Charge', t && t.build_charge ? String(t.build_charge) : '—'],
+                ['Signing as', String(d.owner || 'primary')],
+              ] };
+            },
+            submit: function (v) {
+              if (!v.struct_type) return Promise.reject('choose a type');
+              return invoke('mcp_struct_act', { player: d.owner || 'primary', action: 'build',
+                args: { struct_type: v.struct_type, ambit: v.ambit, slot: Number(v.slot) || 0 } })
+                .then(function (msg) { Board.stamp && Board.stamp(String(msg).split('\n')[0]); });
+            },
+            done: function () { T.refresh(ctx.id, true); },
+          }));
+        } }]));
+        host.appendChild(slot);
+      }).catch(function (e) { fail(host, 'build', e); });
+    },
+  });
+
   /* ── OPS: the verbs, on the struct in front of you ───────────────────────
    *
    * `mcp_action` exposes fourteen of the game's verbs — explore, mine, refine,
@@ -533,6 +633,19 @@
    * are NOT struct actions in that sense — they start a proof — so those keep
    * the `mcp_action` path.
    */
+  /* Only the ambits this hull may enter AND that have a slot open. An ambit
+   * it cannot occupy is not a choice, and neither is a full one. */
+  function DEPLOY_OPEN(d) {
+    var ambits = (d || {}).ambits || {};
+    return AMBIT_ORDER.filter(function (a) {
+      var x = ambits[a] || {};
+      return x.allowed !== false && (x.free || []).length;
+    }).map(function (a) {
+      var x = ambits[a] || {};
+      return { value: a, label: a + ' · ' + x.free.length + '/' + x.slots + ' open' + (x.here ? ' · here now' : '') };
+    });
+  }
+
   function structVerbs(ref) {
     if (!ref || ref.destroyed) return [];
     var name = String(ref.type_name || '');
@@ -557,6 +670,34 @@
       needs: 'protected_id',
     });
     out.push({ verb: 'defense_clear', label: 'Stop defending', args: function () { return { struct_id: ref.id }; } });
+    /* Reposition — `deploy` is `struct_move`, the verb behind the reach
+     * doctrine: you win by standing in an ambit the enemy neither reaches nor
+     * occupies. The destination is not free-text. `prepare` reads which ambits
+     * this hull may enter and which slots are open where it stands, so the
+     * form offers legal moves only. */
+    out.push({
+      verb: 'deploy', label: 'Reposition',
+      prepare: function () { return invoke('terminal_deploy_slots', { id: ref.id }); },
+      fields: function (v, d) {
+        var open = DEPLOY_OPEN(d);
+        var a = v.ambit || (open[0] || {}).value;
+        var free = ((((d || {}).ambits || {})[a]) || {}).free || [];
+        return [
+          { key: 'ambit', label: 'Ambit', kind: 'choice', value: a, options: open },
+          { key: 'slot', label: 'Slot', kind: 'choice', value: v.slot,
+            options: free.map(function (i) { return { value: String(i), label: 'slot ' + i }; }) },
+        ];
+      },
+      rows: function (v, d) {
+        return [
+          ['From', (d && d.ambit ? d.ambit + ' · slot ' + d.slot : '—')],
+          ['To', (v.ambit || '?') + ' · slot ' + (v.slot == null ? '?' : v.slot)],
+          ['Charge', d && d.move_charge != null ? String(d.move_charge) : '—'],
+        ];
+      },
+      args: function (v) { return { struct_id: ref.id, ambit: v.ambit, slot: Number(v.slot) || 0 }; },
+      needs: 'ambit',
+    });
     out.push({
       verb: 'attack', label: 'Attack', danger: true,
       fields: [
@@ -592,15 +733,19 @@
       }
       var slot = H.el('div', 'tm-ticket-slot');
       host.appendChild(doorRow(verbs.map(function (v) {
-        return { label: v.label, primary: !v.danger, onClick: function () {
+        /* Some verbs need a read before they can even draw their form —
+         * Reposition cannot offer an ambit until it knows which ones this hull
+         * may enter and which slots are open. The door does that read, so a
+         * form is never a free-text guess at something the chain will refuse. */
+        var draw = function (d) {
           slot.innerHTML = '';
           slot.appendChild(ticket({
             cta: v.label, danger: v.danger,
-            fields: v.fields || [],
+            fields: typeof v.fields === 'function' ? function (vals) { return v.fields(vals, d); } : (v.fields || []),
             confirm: function (vals) {
               if (v.needs && !vals[v.needs]) return null;
               return { title: v.label + '?', cta: v.label, rows: [['Struct', ref.id + ' · ' + (ref.type_name || '?')], ['Signing as', ref.owner || 'primary']]
-                .concat(Object.keys(vals).map(function (k) { return [k.replace(/_/g, ' '), String(vals[k] || '—')]; })) };
+                .concat(v.rows ? v.rows(vals, d) : Object.keys(vals).map(function (k) { return [k.replace(/_/g, ' '), String(vals[k] || '—')]; })) };
             },
             submit: function (vals) {
               if (v.needs && !vals[v.needs]) return Promise.reject(v.needs.replace(/_/g, ' ') + ' required');
@@ -614,6 +759,15 @@
             },
             done: function () { T.refresh(ctx.id, true); },
           }));
+        };
+        return { label: v.label, primary: !v.danger, onClick: function () {
+          if (!v.prepare) { draw(null); return; }
+          slot.innerHTML = '';
+          slot.appendChild(H.stateBlock('info', 'Reading where it can go…'));
+          v.prepare().then(draw).catch(function (e) {
+            slot.innerHTML = '';
+            slot.appendChild(H.stateBlock('error', String((e && e.message) || e)));
+          });
         } };
       })));
       host.appendChild(slot);
@@ -817,7 +971,7 @@
   // ── Power (mcp_energy / mcp_infusions / mcp_allocations) ─────────────────
   T.register('grid', {
     label: 'Guild power', describe: function () { return 'Guild power'; }, cadenceMs: 30000,
-    render: function (host) {
+    render: function (host, p, ctx) {
       return invoke('mcp_energy').then(function (d) {
         host.innerHTML = '';
         var g = (d && d.guild) || {};
@@ -830,10 +984,36 @@
         host.appendChild(H.row('Per connection', H.fmtWatts(g.sub_connection_capacity_mw || 0) + ' → ' + H.fmtWatts(g.share_if_one_more_mw || 0) + ' with one more'));
         host.appendChild(H.row('Reactor fuel', H.fmtWatts(g.reactor_fuel_mw || 0) + ' · ' + Math.round((g.reactor_commission || 0) * 100) + '% commission'));
         host.appendChild(H.row('Headroom', '~' + H.fmtInt(g.supportable_more || 0) + ' more players', (g.supportable_more || 0) > 0 ? 'icon-success' : 'icon-alert'));
+        /* Which reactor the guild draws from is a GUILD-ADMIN change and the
+         * one lever on this card that is not a read. It is not undoable by
+         * looking at it, so it names the reactor and the guild before it goes. */
+        var slot = H.el('div', 'tm-ticket-slot');
         host.appendChild(doorRow([
           { label: 'Allocations', onClick: function () { add('allocations', {}); } },
           { label: 'Reactor fuel', onClick: function () { add('fuel', {}); } },
+          { label: 'Primary reactor', onClick: function () {
+            slot.innerHTML = '';
+            slot.appendChild(ticket({
+              cta: 'Set primary reactor', danger: true,
+              fields: [{ key: 'reactor_id', label: 'Reactor', placeholder: '3-…' }],
+              confirm: function (v) {
+                if (!v.reactor_id) return null;
+                return { title: 'Set the guild\'s primary reactor?', cta: 'Set', rows: [
+                  ['Reactor', String(v.reactor_id)],
+                  ['Guild', String(g.guild_id || d.guild_id || '—')],
+                  ['Effect', 'every member draws from it'],
+                ] };
+              },
+              submit: function (v) {
+                if (!v.reactor_id) return Promise.reject('reactor required');
+                return invoke('mcp_action', { action: 'update_primary_reactor', args: { reactor_id: v.reactor_id } })
+                  .then(function (msg) { Board.stamp && Board.stamp(String(msg).split('\n')[0]); });
+              },
+              done: function () { T.refresh(ctx.id, true); },
+            }));
+          } },
         ]));
+        host.appendChild(slot);
       }).catch(function (e) { fail(host, 'energy', e); });
     },
   });
@@ -1548,6 +1728,79 @@
     },
   });
 
+  /* ── FLEET: staging, for anyone on the roster ────────────────────────────
+   *
+   * A raid needs the fleet AT the planet, so `move_fleet` is the verb between
+   * reading a target and taking it — and it was primary-only, because
+   * `action_move_fleet` reads the fleet id out of GAME_STATE. The fleet you
+   * want to stage is usually a worker's.
+   *
+   * `terminal_fleet_where` is a snapshot read (free), and it reads the FLEET's
+   * own location rather than the player's planet, which follows the fleet on
+   * arrival and so can never tell you that you are away.
+   *
+   * The home guard lives in the policy engine and is applied server-side for
+   * the primary: leaving home arms our own raid clock and exposes the Command
+   * Ship. The card does not restate it — a blocked move comes back saying so.
+   */
+  T.register('fleet', {
+    label: 'Move a fleet', defaultWidth: 1,
+    describe: function (p) { return 'Fleet · ' + (p.id || 'primary'); },
+    params: [{ key: 'id', label: 'Player', kind: 'id', kinds: [1], placeholder: '1-194' }],
+    cadenceMs: 30000,
+    render: function (host, p, ctx) {
+      return invoke('terminal_fleet_where', { player: p.id || 'primary' }).then(function (d) {
+        host.innerHTML = '';
+        d = d || {};
+        host.appendChild(tiles([
+          ['fleet', String(d.fleet_id || '—')],
+          ['standing at', String(d.at || '—'), null, d.away ? 'bad' : 'ok'],
+          ['home', String(d.home || '—')],
+        ]));
+        if (d.away) host.appendChild(H.alertLine('Away from home — the raid clock is running and the Command Ship is exposed', 'icon-alert'));
+        var slot = H.el('div', 'tm-ticket-slot');
+        var doors = [{ label: 'Move', primary: true, onClick: function () {
+          slot.innerHTML = '';
+          slot.appendChild(ticket({
+            cta: 'Move',
+            fields: [{ key: 'destination', label: 'Destination', placeholder: '2-…' }],
+            confirm: function (v) {
+              if (!v.destination) return null;
+              return { title: 'Move the fleet?', cta: 'Move', rows: [
+                ['Fleet', String(d.fleet_id || '—')],
+                ['From', String(d.at || '—')],
+                ['To', String(v.destination)],
+                ['Signing as', String(d.player || 'primary')],
+              ] };
+            },
+            submit: function (v) {
+              if (!v.destination) return Promise.reject('destination required');
+              return invoke('terminal_fleet_move', { player: d.player || 'primary', destination: v.destination })
+                .then(function (msg) { Board.stamp && Board.stamp(String(msg).split('\n')[0]); });
+            },
+            done: function () { T.refresh(ctx.id, true); },
+          }));
+        } }];
+        // Retreat is always allowed — the guard never blocks the way back.
+        if (d.away && d.home) doors.push({ label: 'Return home', onClick: function () {
+          slot.innerHTML = '';
+          slot.appendChild(ticket({
+            cta: 'Return home',
+            confirm: function () {
+              return { title: 'Bring the fleet home?', cta: 'Return', rows: [['Fleet', String(d.fleet_id || '—')], ['To', String(d.home)]] };
+            },
+            submit: function () {
+              return invoke('terminal_fleet_move', { player: d.player || 'primary', destination: d.home })
+                .then(function (msg) { Board.stamp && Board.stamp(String(msg).split('\n')[0]); });
+            },
+            done: function () { T.refresh(ctx.id, true); },
+          }));
+        } });
+        host.appendChild(doorRow(doors));
+        host.appendChild(slot);
+      }).catch(function (e) { fail(host, 'fleet', e); });
+    },
+  });
   T.register('health', {
     label: 'System health', describe: function () { return 'System health'; }, cadenceMs: 15000,
     render: function (host) {
@@ -1565,7 +1818,33 @@
         if (h && (h.loops_overdue || h.loops_wedged)) {
           host.appendChild(H.alertLine(H.fmtInt(h.loops_overdue || 0) + ' loops overdue · ' + H.fmtInt(h.loops_wedged || 0) + ' wedged', 'icon-alert'));
         }
-        host.appendChild(doorRow([{ label: 'What the watchdog did', onClick: function () { add('feed', {}); } }]));
+        /* `resync` is the verb for the state this card is FOR: a stream that
+         * has stopped, a bridge that has gone quiet. Soft re-syncs game state
+         * and reconnects the event stream; hard reloads the page, which drops
+         * anything unsaved, so it is the one behind the ticket. */
+        var slot = H.el('div', 'tm-ticket-slot');
+        host.appendChild(doorRow([
+          { label: 'What the watchdog did', onClick: function () { add('feed', {}); } },
+          { label: 'Re-sync', onClick: function () {
+            slot.innerHTML = '';
+            slot.appendChild(ticket({
+              cta: 'Re-sync',
+              fields: [{ key: 'hard', label: 'Depth', kind: 'choice',
+                options: [{ value: 'soft', label: 'soft · re-sync state and reconnect' }, { value: 'hard', label: 'hard · reload the page' }] }],
+              confirm: function (v) {
+                return { title: 'Re-sync?', cta: 'Re-sync', rows: [
+                  ['Depth', v.hard === 'hard' ? 'hard' : 'soft'],
+                  ['Effect', v.hard === 'hard' ? 'reloads the page' : 're-syncs game state and reconnects the stream'],
+                ] };
+              },
+              submit: function (v) {
+                return invoke('mcp_action', { action: 'resync', args: { hard: v.hard === 'hard' } })
+                  .then(function (msg) { Board.stamp && Board.stamp(String(msg).split('\n')[0]); });
+              },
+            }));
+          } },
+        ]));
+        host.appendChild(slot);
       }).catch(function (e) { fail(host, 'health', e); });
     },
   });

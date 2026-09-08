@@ -81,25 +81,38 @@
   // follow from the type name — hence an explicit table rather than a rule.
   // ══════════════════════════════════════════════════════════════════════════
 
+  /* Which layer each detail belongs on is the GAME's decision, not the
+   * filename's — `StructStillBuilder` passes a struct's weapon art to
+   * `topDetailLayer1` for some hulls and to `bottomDetailLayer1` for others,
+   * and the two are z-index 300 and 100 either side of the hull at 200.
+   *
+   * Every aircraft's underslung weapon (`*-bottom-weapon.png`) goes BELOW:
+   * Frigate, High Altitude Interceptor, Pursuit Fighter, Stealth Bomber, and
+   * the Starfighter's smart weapon — whose ballistic one goes above. Reading
+   * those five off the filename put the missiles over the fuselage, which is
+   * what a Pursuit Fighter with a missile painted across its nose looked
+   * like. Cross-checked against `StructStillBuilder`'s argument order, hull
+   * by hull.
+   */
   var ART = {
     battleship:                 { dir: 'battleship' },
     command_ship:               { dir: 'cmd-ship', top: ['top-weapon'] },
     cruiser:                    { dir: 'cruiser', top: ['top-weapon-ballistic', 'top-weapon-smart'], bottom: ['bottom-ripples'] },
     destroyer:                  { dir: 'destroyer', top: ['top-weapon'], bottom: ['bottom-ripples'] },
     ore_extractor:              { dir: 'extractor', top: ['top-drill'] },
-    frigate:                    { dir: 'frigate', top: ['bottom-weapon'] },
+    frigate:                    { dir: 'frigate', bottom: ['bottom-weapon'] },
     field_generator:            { dir: 'generator', top: ['top-tube'] },
-    high_altitude_interceptor:  { dir: 'interceptor', top: ['bottom-weapon'] },
+    high_altitude_interceptor:  { dir: 'interceptor', bottom: ['bottom-weapon'] },
     jamming_satellite:          { dir: 'jamming-sat', top: ['top-weapon'] },
     mobile_artillery:           { dir: 'mobile-artillery', top: ['top-weapon'] },
     orbital_shield_generator:   { dir: 'orb-shield', top: ['top-weapon'] },
     ore_bunker:                 { dir: 'ore-bunker', top: ['top-weapon'] },
     planetary_defense_cannon:   { dir: 'pdc', top: ['top-weapon'] },
-    pursuit_fighter:            { dir: 'pursuit-fighter', top: ['bottom-weapon'] },
+    pursuit_fighter:            { dir: 'pursuit-fighter', bottom: ['bottom-weapon'] },
     ore_refinery:               { dir: 'refinery', top: ['top-bays'] },
-    starfighter:                { dir: 'starfighter', top: ['bottom-weapon-smart', 'top-weapon-ballistic'] },
+    starfighter:                { dir: 'starfighter', top: ['top-weapon-ballistic'], bottom: ['bottom-weapon-smart'] },
     sam_launcher:               { dir: 'sam-launcher', top: ['top-weapon'] },
-    stealth_bomber:             { dir: 'stealth-bomber', top: ['bottom-weapon'] },
+    stealth_bomber:             { dir: 'stealth-bomber', bottom: ['bottom-weapon'] },
     submersible:                { dir: 'submersible', top: ['top-weapon'], bottom: ['bottom-ripples'], hidden: true },
     tank:                       { dir: 'tank', top: ['top-weapon'] },
   };

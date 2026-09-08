@@ -130,6 +130,25 @@
 .sc-tape-kv .pc-id { color: var(--text-hint); }
 li > .sc-tape { list-style: none; }
 .tm-tape > li { list-style: none; padding: 0; }
+
+/* …but a wide card does not need two bands. Full screen, the second band left
+ * the whole width beside the timestamp empty and wrapped figures that had room
+ * to sit on the header line. The tape asks its own card how wide it is —
+ * viewport width is the wrong question when the card can be half a column or a
+ * popped-out window — and above ~1000px the figures join the line they belong
+ * to and the row is one line again. */
+.tm-tape { container-type: inline-size; container-name: tape; }
+@container tape (min-width: 62rem) {
+  /* A FIXED head column, not an auto one: sized to the widest real header
+   * (a shortened kind, a subject word and two ids), it is what makes the
+   * figures start at the same x every line — a tape you can run your eye down
+   * instead of five ragged indents. */
+  .sc-tape { grid-template-columns: auto 46ch minmax(0, 1fr) auto; }
+  .sc-tape-t { grid-column: 1; grid-row: 1; }
+  .sc-tape-head { grid-column: 2; grid-row: 1; }
+  .sc-tape-body { grid-column: 3; grid-row: 1; flex-wrap: nowrap; }
+  .sc-tape-blk { grid-column: 4; grid-row: 1; }
+}
 .sc-tape.is-new { box-shadow: inset 2px 0 0 var(--accent-primary); }
 
 /* ── the peek: a chip opened in place ─────────────────────────────────── */

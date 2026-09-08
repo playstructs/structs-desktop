@@ -701,6 +701,64 @@ cat > "$FIX" <<'EOF'
       { metric: 'ore', unit: 'ore', object_types: ['planet', 'player', 'struct', 'fleet'] },
       { metric: 'load', unit: 'power', object_types: ['substation', 'player', 'guild', 'struct'] },
     ],
+    /* Where a struct can go. The planet has a fixed count per ambit and some
+     * are occupied, so the free ones are a subtraction — land is full here,
+     * which is the case that must never be offered. */
+    terminal_build_slots: function (args) {
+      return {
+        planet_id: String((args && args.planet) || '2-15361'), owner: '1-194',
+        ambits: {
+          space: { slots: 2, free: [1] },
+          air: { slots: 2, free: [0, 1] },
+          land: { slots: 4, free: [] },
+          water: { slots: 4, free: [2, 3] },
+        },
+      };
+    },
+    /* Where a struct that already exists may GO. The Ore Extractor is a land
+     * hull, so three of the four ambits are not choices at all — and land is
+     * where it already stands, with slot 1 open beside it. This is the case
+     * that must never offer water: the chain would refuse it and the card
+     * would have no way to say why. */
+    /* Where a fleet actually STANDS. The primary is away from home here,
+     * which is the state the card exists to make visible — the raid clock is
+     * running and the Command Ship is exposed. A worker's home we do not
+     * know, so `away` is false rather than a guess. */
+    terminal_fleet_where: function (args) {
+      var who = String((args && args.player) || 'primary');
+      if (who === 'primary' || who === '1-194') {
+        return { player: '1-194', is_primary: true, fleet_id: '9-194', at: '2-15361', home: '2-223', away: true };
+      }
+      return { player: who, is_primary: false, fleet_id: '9-287', at: '2-287', home: '2-287', away: false };
+    },
+    terminal_fleet_move: 'Fleet 9-194 moving to planet 2-223',
+    terminal_deploy_slots: function (args) {
+      var id = String((args && args.id) || '5-4559');
+      if (id === '5-88') {
+        // A Tank: land and water, aboard a fleet — four slots an ambit.
+        return { struct_id: id, type_name: 'Tank', owner: '1-194', location_id: '9-77',
+          location_kind: 'fleet', ambit: 'land', slot: 0, move_charge: 8,
+          ambits: {
+            water: { allowed: true, slots: 4, free: [0, 1, 2, 3], here: false },
+            land: { allowed: true, slots: 4, free: [1, 2, 3], here: true },
+            air: { allowed: false, slots: 4, free: [0, 1, 2, 3], here: false },
+            space: { allowed: false, slots: 4, free: [0, 1, 2, 3], here: false },
+          } };
+      }
+      return { struct_id: id, type_name: 'Ore Extractor', owner: '1-194', location_id: '2-15361',
+        location_kind: 'planet', ambit: 'land', slot: 2, move_charge: 4,
+        ambits: {
+          water: { allowed: false, slots: 4, free: [2, 3], here: false },
+          land: { allowed: true, slots: 4, free: [1], here: true },
+          air: { allowed: false, slots: 2, free: [0, 1], here: false },
+          space: { allowed: false, slots: 2, free: [1], here: false },
+        } };
+    },
+    terminal_struct_types: [
+      { id: 11, name: 'Planetary Defense Cannon', category: 'planet', build_charge: 3 },
+      { id: 5, name: 'Ore Extractor', category: 'planet', build_charge: 2 },
+      { id: 10, name: 'Tank', category: 'fleet', build_charge: 2 },
+    ],
     /* A guild's PEOPLE. `last_action_block` is a BLOCK, and absent means we
      * have never seen that player act — which is not the same as acting at
      * block zero, and must not sort as if it were. */

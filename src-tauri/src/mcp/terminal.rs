@@ -1248,6 +1248,352 @@ pub fn terminal_series_metrics() -> Value {
     )
 }
 
+/// The struct types the chain knows, for a build picker: what it is called,
+/// where it can stand, and the charge it costs to start one.
+///
+/// A pure read of the synced catalog. Its own command because the placement
+/// card needs it and nothing else in this window offers it.
+#[tauri::command]
+pub fn terminal_struct_types() -> Value {
+    let gs = crate::game_state::GAME_STATE.read().unwrap_or_else(|e| e.into_inner());
+    let mut rows: Vec<Value> = gs
+        .struct_types
+        .values()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "name": t.name,
+                "category": t.category,
+                "build_charge": t.build_charge,
+                "max_health": t.max_health,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+    Value::Array(rows)
+}
+
+/* ── Where a struct can actually go ─────────────────────────────────────────
+ *
+ * `build` takes an ambit and a SLOT, and a slot number is not something a
+ * person knows: the planet has a fixed count per ambit and some of them are
+ * occupied. Offered as a bare number field it is a guess that the chain
+ * refuses, which is why the placement verbs were the last two with no UI.
+ *
+ * The spectator snapshot already carries both halves — `slots` is the count
+ * per ambit off the Planet body, and every planetary struct reports the ambit
+ * and slot it sits in — so the free ones are a subtraction, not a new read.
+ */
+#[tauri::command]
+pub async fn terminal_build_slots(planet: String) -> Result<Value, String> {
+    let t = crate::mcp::raid_view::parse_target(Some(planet.as_str()), None)?;
+    let state = crate::mcp::spectator::pull_state(&t).await;
+    let snap = state.get("snapshot").cloned().unwrap_or(Value::Null);
+    if snap.is_null() {
+        return Err(format!("{planet}: nothing to read"));
+    }
+    let structs = snap.get("structs").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let mut out = serde_json::Map::new();
+    for ambit in ["space", "air", "land", "water"] {
+        let count = snap
+            .get("slots")
+            .and_then(|s| s.get(ambit))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        // A DESTROYED struct frees its slot; a struct still building does not.
+        let taken: Vec<u64> = structs
+            .iter()
+            .filter(|s| s.get("category").and_then(|c| c.as_str()) == Some("planet"))
+            .filter(|s| s.get("ambit").and_then(|a| a.as_str()) == Some(ambit))
+            .filter(|s| !s.get("destroyed").and_then(|d| d.as_bool()).unwrap_or(false))
+            .filter_map(|s| s.get("slot").and_then(|v| v.as_u64()))
+            .collect();
+        let free: Vec<u64> = (0..count).filter(|i| !taken.contains(i)).collect();
+        out.insert(ambit.to_string(), json!({ "slots": count, "free": free }));
+    }
+    Ok(json!({
+        "planet_id": snap.get("planet_id").cloned().unwrap_or(Value::Null),
+        "owner": snap.get("owner").cloned().unwrap_or(Value::Null),
+        "ambits": out,
+    }))
+}
+
+/* ── Where a struct that already EXISTS can go ──────────────────────────────
+ *
+ * `deploy` is not "build somewhere", it is `struct_move`: pick a different
+ * ambit and slot for a hull that is already on the board. It is the verb
+ * behind the reach-asymmetry doctrine — you win by standing where the enemy
+ * neither reaches nor occupies — and it is the one an expert reaches for after
+ * reading `scout`, so guessing at a slot number is exactly the wrong ending.
+ *
+ * Three things make a destination legal, and all three are already local:
+ *
+ *   1. The TYPE may occupy that ambit. `possibleAmbit` is a bitmask
+ *      (water 2, land 4, air 8, space 16) and a Command Ship's is all four
+ *      while an extractor's is one. An ambit the hull cannot enter is not
+ *      offered at all rather than offered and refused by the chain.
+ *   2. The slot is free. Planetary and fleet slots are SEPARATE spaces — the
+ *      same struct id space, but "land slot 0" means two different places —
+ *      so the occupancy scan is filtered by `location_id`, which is the fleet
+ *      for a fleet struct and the planet for a planetary one.
+ *   3. The slot count. A planet publishes its own per-ambit count; a fleet has
+ *      four, which is what the map's two columns by two rows per ambit are.
+ *
+ * The struct's OWN slot is not counted as taken: it vacates as it moves, so
+ * "same slot, different ambit" is a legal move and used to be an unexplainable
+ * refusal. `here` marks where it stands now.
+ *
+ * Reads nothing over the network. The perception snapshot is the source of
+ * truth for every struct's location, ambit and slot, so this is a subtraction.
+ */
+const FLEET_SLOTS_PER_AMBIT: u64 = 4;
+
+/// The per-ambit answer: legal for this hull, how many slots, which are free,
+/// and which one it stands in. Split out from the command so the arithmetic is
+/// testable without a snapshot or a catalogue behind it.
+fn deploy_ambits(
+    kind: &str,
+    mask: u64,
+    planet: Option<&Value>,
+    taken: &[(String, u64)],
+    here_ambit: &str,
+) -> Value {
+    let mut out = serde_json::Map::new();
+    for (bit, ambit) in [(2u64, "water"), (4, "land"), (8, "air"), (16, "space")] {
+        let count = if kind == "fleet" {
+            FLEET_SLOTS_PER_AMBIT
+        } else {
+            planet
+                .and_then(|p| {
+                    p.get(format!("{ambit}Slots").as_str())
+                        .or_else(|| p.get(format!("{ambit}_slots").as_str()))
+                        .cloned()
+                })
+                .map(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0))
+                .unwrap_or(0)
+        };
+        let free: Vec<u64> = (0..count)
+            .filter(|i| !taken.iter().any(|(a, s)| a == ambit && s == i))
+            .collect();
+        out.insert(
+            ambit.to_string(),
+            json!({
+                // A mask we could not read is not "no ambit is legal" — with no
+                // catalogue every ambit stays on offer and the chain decides.
+                "allowed": mask == 0 || mask & bit != 0,
+                "slots": count,
+                "free": free,
+                "here": here_ambit == ambit,
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
+#[tauri::command]
+pub fn terminal_deploy_slots(window: tauri::WebviewWindow, id: String) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_board(&window)?;
+    let sid = id.trim().to_string();
+    if !sid.starts_with("5-") {
+        return Err(format!("'{sid}' is not a struct id (expected 5-<number>)"));
+    }
+    let found = crate::mcp::perception::with_snapshot(|snap| {
+        let row = snap.struct_row(&sid)?;
+        let (loc, here_ambit, here_slot, type_id, owner) = (
+            row.location_id.clone(),
+            row.operating_ambit.clone(),
+            row.slot,
+            row.type_id.clone(),
+            row.owner.clone(),
+        );
+        // Everything else standing in the same slot-space.
+        let mut taken: Vec<(String, u64)> = vec![];
+        for (other_id, r) in snap.structs.iter() {
+            if other_id == &sid || r.location_id != loc {
+                continue;
+            }
+            if snap
+                .struct_entity(other_id)
+                .and_then(|e| e.get("structAttributes")?.get("isDestroyed")?.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            taken.push((r.operating_ambit.clone(), r.slot));
+        }
+        let planet = snap.planet_row(&loc).cloned();
+        Some((loc, here_ambit, here_slot, type_id, owner, taken, planet))
+    })
+    .flatten();
+    let Some((loc, here_ambit, here_slot, type_id, owner, taken, planet)) = found else {
+        return Err(format!("{sid}: not in the snapshot"));
+    };
+
+    let kind = if loc.starts_with("9-") { "fleet" } else { "planet" };
+    let (mask, move_charge, type_name) = {
+        let gs = crate::game_state::GAME_STATE.read().unwrap_or_else(|e| e.into_inner());
+        match gs.struct_types.get(&type_id) {
+            Some(t) => (t.possible_ambit.unwrap_or(0), t.move_charge, t.name.clone()),
+            None => (0, None, String::new()),
+        }
+    };
+
+    let out = deploy_ambits(kind, mask, planet.as_ref(), &taken, &here_ambit);
+
+    Ok(json!({
+        "struct_id": sid,
+        "type_id": type_id,
+        "type_name": type_name,
+        "owner": owner,
+        "location_id": loc,
+        "location_kind": kind,
+        "ambit": here_ambit,
+        "slot": here_slot,
+        "move_charge": move_charge,
+        "ambits": out,
+    }))
+}
+
+/// Where a player's fleet actually stands, and whether that is home.
+///
+/// Read from the snapshot, so it costs nothing. The FLEET's `locationId` is
+/// the honest answer to "where is it": the player row's `planetId` follows the
+/// fleet on arrival, so it agrees with the destination the moment we get there
+/// and cannot tell you that you are away.
+#[tauri::command]
+pub fn terminal_fleet_where(window: tauri::WebviewWindow, player: String) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_board(&window)?;
+    let primary = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone());
+    let who = if player.trim() == "primary" {
+        primary.clone().unwrap_or_default()
+    } else {
+        player.trim().to_string()
+    };
+    let is_primary = primary.as_deref() == Some(who.as_str());
+    let home = if is_primary {
+        crate::game_state::GAME_STATE.read().ok().and_then(|g| g.planet_id.clone()).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let found = crate::mcp::perception::with_snapshot(|snap| {
+        let row = snap.player_row(&who)?;
+        let fleet_id = row.get("fleetId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let at = snap
+            .fleet_row(&fleet_id)
+            .and_then(|f| f.get("locationId").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let planet = row.get("planetId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        Some((fleet_id, at, planet))
+    })
+    .flatten();
+    let Some((fleet_id, at, planet)) = found else {
+        return Err(format!("{who}: not in the snapshot"));
+    };
+    let home = if home.is_empty() { planet.clone() } else { home };
+    Ok(json!({
+        "player": who,
+        "is_primary": is_primary,
+        "fleet_id": fleet_id,
+        "at": at,
+        "home": home,
+        // Only meaningful for the primary, whose home we actually know.
+        "away": is_primary && !at.is_empty() && !home.is_empty() && at != home,
+    }))
+}
+
+/* ── Moving a fleet, for anyone on the roster ───────────────────────────────
+ *
+ * `move_fleet` was primary-only: `action_move_fleet` reads `fleet_id` out of
+ * GAME_STATE, which is the primary's fleet and nobody else's. On a roster this
+ * size that is the same mistake the struct verbs made before they learned to
+ * sign as the owner — the fleet you want to stage is usually a worker's.
+ *
+ * The vplayer path already builds `MsgFleetMove` from an explicit `fleet_id`,
+ * so this resolves the fleet from the snapshot and signs as that player. The
+ * primary is not a special case for signing — `players::execute` takes
+ * "primary" — but it IS one for the home guard: leaving home arms our own raid
+ * clock and exposes the Command Ship, and `primary_home_guard` exists to stop
+ * exactly that. The guard reads the PRIMARY's ore and headroom out of
+ * GAME_STATE, so it is meaningless for a worker and mandatory for us. Calling
+ * the policy's own function rather than restating it keeps the Terminal from
+ * becoming the hole in it. Moving BACK home is always allowed.
+ */
+#[tauri::command]
+pub async fn terminal_fleet_move(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    registry: tauri::State<'_, std::sync::Arc<crate::hasher::types::TaskRegistry>>,
+    player: String,
+    destination: String,
+) -> Result<String, String> {
+    crate::mcp::tools::board_pages::require_board(&window)?;
+    let player = player.trim().to_string();
+    let destination = destination.trim().to_string();
+    if player.is_empty() {
+        return Err("fleet move: player required".into());
+    }
+    if !destination.starts_with("2-") {
+        return Err(format!("'{destination}' is not a planet id (expected 2-<number>)"));
+    }
+
+    let primary = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone());
+    let is_primary = player == "primary" || primary.as_deref() == Some(player.as_str());
+    let who = if is_primary { primary.clone().unwrap_or_default() } else { player.clone() };
+
+    let fleet_id = crate::mcp::perception::with_snapshot(|snap| {
+        Some(snap.player_row(&who)?.get("fleetId")?.as_str()?.to_string())
+    })
+    .flatten()
+    .unwrap_or_default();
+    if fleet_id.is_empty() {
+        return Err(format!("{who}: no fleet in the snapshot — an unexplored player has none"));
+    }
+
+    // Home is GAME_STATE's planet, the same field `action_move_fleet` guards
+    // against — NOT the snapshot's `planetId`, which follows the fleet on
+    // arrival and would call every destination "home" the moment we got there.
+    let home = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.planet_id.clone()).unwrap_or_default();
+    if is_primary && destination != home {
+        if let Some(reason) = crate::mcp::policy::home_guard_block_reason() {
+            crate::mcp::board_feed::push(
+                &app,
+                crate::mcp::board_feed::Severity::Notice,
+                "home_guard",
+                format!("blocked fleet move to {destination} — {reason}"),
+            );
+            return Err(format!("BLOCKED — {reason}"));
+        }
+    }
+
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let out = crate::mcp::tools::players::execute(
+        &app,
+        &client,
+        &registry,
+        crate::mcp::tools::players::PlayerParams {
+            command: "act".into(),
+            player: Some(if is_primary { "primary".into() } else { player }),
+            action: Some("fleet_move".into()),
+            args: json!({ "fleet_id": fleet_id, "destination_id": destination }),
+            name: None,
+            index: None,
+            role: None,
+            guild_id: None,
+        },
+    )
+    .await;
+    let text = out
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.starts_with("Error:") || text.starts_with("Blocked:") || text.starts_with("No virtual player") {
+        return Err(text);
+    }
+    Ok(text)
+}
+
 /* ── The one verb a fresh virtual player needs ──────────────────────────────
  *
  * A newly created virtual player is an empty guild membership: no planet, no
@@ -1475,6 +1821,82 @@ pub async fn terminal_scout(target: String) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+
+    /* ── deploy: only ambits the hull may enter, only slots that are free ──
+     *
+     * Every case here is a refusal the chain would otherwise hand back with no
+     * explanation, so each is pinned against what the hull and the location
+     * actually allow rather than against a remembered number. */
+
+    #[test]
+    fn a_hull_is_offered_only_the_ambits_its_type_may_occupy() {
+        // Extractor: land only (4). Command Ship: all four (30).
+        let planet = json!({ "spaceSlots": "4", "airSlots": "4", "landSlots": "4", "waterSlots": "4" });
+        let land_only = deploy_ambits("planet", 4, Some(&planet), &[], "land");
+        assert_eq!(land_only["land"]["allowed"], json!(true));
+        for a in ["water", "air", "space"] {
+            assert_eq!(land_only[a]["allowed"], json!(false), "{a} is not open to a land hull");
+        }
+        let anywhere = deploy_ambits("planet", 30, Some(&planet), &[], "land");
+        for a in ["water", "land", "air", "space"] {
+            assert_eq!(anywhere[a]["allowed"], json!(true), "a Command Ship may stand in {a}");
+        }
+    }
+
+    #[test]
+    fn an_unsynced_catalogue_offers_every_ambit_rather_than_none() {
+        // Mask 0 means "we could not read it", not "nothing is legal" — the
+        // chain decides, and a card that offers nothing is worse than one that
+        // offers a move the chain may refuse.
+        let planet = json!({ "landSlots": 4 });
+        let out = deploy_ambits("planet", 0, Some(&planet), &[], "land");
+        assert_eq!(out["land"]["allowed"], json!(true));
+        assert_eq!(out["space"]["allowed"], json!(true));
+    }
+
+    #[test]
+    fn an_occupied_slot_is_not_free_and_the_movers_own_slot_still_is() {
+        // The caller excludes the moving struct from `taken`: it vacates as it
+        // moves, so "same slot, different ambit" is legal.
+        let planet = json!({ "landSlots": 4, "waterSlots": 4, "airSlots": 0, "spaceSlots": 0 });
+        let taken = vec![("land".to_string(), 0u64), ("land".to_string(), 2), ("water".to_string(), 1)];
+        let out = deploy_ambits("planet", 30, Some(&planet), &taken, "land");
+        assert_eq!(out["land"]["free"], json!([1, 3]));
+        assert_eq!(out["water"]["free"], json!([0, 2, 3]));
+        assert_eq!(out["land"]["here"], json!(true));
+        assert_eq!(out["water"]["here"], json!(false));
+    }
+
+    #[test]
+    fn an_ambit_with_no_slots_offers_nothing_even_when_the_hull_may_enter_it() {
+        let planet = json!({ "landSlots": 4, "waterSlots": 0 });
+        let out = deploy_ambits("planet", 30, Some(&planet), &[], "land");
+        assert_eq!(out["water"]["slots"], json!(0));
+        assert_eq!(out["water"]["free"], json!([]));
+    }
+
+    #[test]
+    fn a_fleet_has_four_slots_an_ambit_whatever_the_planet_says() {
+        // Planetary and fleet slots are separate spaces; a fleet struct's
+        // capacity is the map's two columns by two rows, not the planet's.
+        let planet = json!({ "landSlots": 1, "waterSlots": 1, "airSlots": 1, "spaceSlots": 1 });
+        let out = deploy_ambits("fleet", 30, Some(&planet), &[], "space");
+        for a in ["water", "land", "air", "space"] {
+            assert_eq!(out[a]["slots"], json!(4), "{a}");
+        }
+    }
+
+    #[test]
+    fn planet_slot_counts_read_as_strings_or_numbers_and_in_either_spelling() {
+        // Guild API and LCD numerics arrive as strings as often as numbers, and
+        // the snapshot normalises snake to camel — accept what actually shows up.
+        let strings = deploy_ambits("planet", 30, Some(&json!({ "landSlots": "3" })), &[], "land");
+        assert_eq!(strings["land"]["slots"], json!(3));
+        let snake = deploy_ambits("planet", 30, Some(&json!({ "land_slots": 3 })), &[], "land");
+        assert_eq!(snake["land"]["slots"], json!(3));
+        let missing = deploy_ambits("planet", 30, None, &[], "land");
+        assert_eq!(missing["land"]["slots"], json!(0));
+    }
     use super::*;
 
     /* ── The quote board's one price ─────────────────────────────────────

@@ -150,6 +150,46 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     w.Board.Terminal.remove(id);   // the layout below is the default one
   }
 
+  /* ── BUILD: the last verb with no way in ────────────────────────────────
+   *
+   * `build` takes an ambit and a SLOT, and a slot number is not something a
+   * person knows: offered as a bare number it is a guess the chain refuses.
+   * What is offered has to be what is FREE.
+   */
+  {
+    const T = w.Board.Terminal;
+    T.execute('BUILD 2-15361');
+    await until(() => d.querySelector('#tm-grid [data-type="build"] .tm-ambits'));
+    const b = [...d.querySelectorAll('#tm-grid [data-type="build"]')].slice(-1)[0];
+    const chips = [...b.querySelectorAll('.tm-ambit')].map((n) => n.textContent);
+    check('the card counts free slots per ambit, in the same order every time',
+      chips.join(' ') === 'space 1/2 air 2/2 land 0/4 water 2/4', chips.join(' '));
+    check('…and a full ambit is not lit', [...b.querySelectorAll('.tm-ambit')].find((n) => /land/.test(n.textContent)).classList.contains('is-on') === false);
+    b.querySelector('.tm-doors-row a').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await tick(30);
+    const sel = (label) => [...b.querySelectorAll('.tm-ticket label')].find((l) => new RegExp(label, 'i').test(l.textContent))?.querySelector('select');
+    check('…the ambit choices are only the ones with room — a full ambit is a refusal, not an option',
+      [...sel('Ambit').options].map((o) => o.value).join(' ') === 'space air water', [...sel('Ambit').options].map((o) => o.value).join(' '));
+    check('…and the slot choices are the free ones of the chosen ambit, not 0..n',
+      [...sel('Slot').options].map((o) => o.value).join(' ') === '1', [...sel('Slot').options].map((o) => o.value).join(' '));
+    check('…the type list is the chain\'s, filtered to what can stand on a planet, with the charge it costs',
+      [...sel('Type').options].map((o) => o.value).join(' ') === 'Planetary Defense Cannon Ore Extractor'
+        && /charge/.test(sel('Type').textContent), [...sel('Type').options].map((o) => o.value).join(' '));
+    /* Changing the ambit re-asks which slots are free — the numbers of one
+     * ambit mean nothing in another. */
+    sel('Ambit').value = 'water';
+    sel('Ambit').dispatchEvent(new w.Event('change', { bubbles: true }));
+    await tick(30);
+    /* This also pins a bug in the SHARED ticket helper: it cleared `inputs`
+     * before asking the field function for its shape, so a field that depends
+     * on another read an empty form — every ambit offered the first ambit's
+     * slots. Fuel and Allocations use function fields too. */
+    check('…and changing the ambit re-offers that ambit\'s free slots', [...sel('Slot').options].map((o) => o.value).join(' ') === '2 3',
+      [...sel('Slot').options].map((o) => o.value).join(' '));
+    check('…because the rebuilt fields are seeded with what the form held', /paintFields\(keep\)/.test(read('frontend/board-terminal-ops.js')));
+    T.remove(b.getAttribute('data-card'));
+  }
+
   /* ── Finishing a virtual player ─────────────────────────────────────────
    *
    * A newly created virtual player is an empty guild membership: no planet,
@@ -262,7 +302,80 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('an online struct is offered the verb that stops it', tl.includes('Take offline') && !tl.includes('Bring online'), tl.join(' | '));
     check('…and a Tank is offered no mine or refine cycle, because it can do neither',
       !tl.some((x) => /cycle/.test(x)), tl.join(' | '));
+
+    /* ── Reposition ────────────────────────────────────────────────────────
+     *
+     * `deploy` is `struct_move`, the verb behind the reach doctrine: you win
+     * by standing where the enemy neither reaches nor occupies. A destination
+     * is legal only if the HULL may enter that ambit and a slot there is open,
+     * and neither is something a person knows — offered as free text it is a
+     * guess the chain refuses with no explanation. So the form is built from a
+     * read, and offers nothing that would be refused. */
+    check('a built struct can be repositioned', tl.includes('Reposition'), tl.join(' | '));
+    tank.querySelectorAll('.tm-doors-row a').forEach((a) => { if (a.textContent === 'Reposition') a.dispatchEvent(new w.MouseEvent('click', { bubbles: true })); });
+    await until(() => tank.querySelector('.tm-ticket select'));
+    const ambitSel = tank.querySelector('.tm-ticket select');
+    const opts = [...ambitSel.options].map((o) => o.value);
+    check('…and the ambits it is offered are the ones its hull may ENTER — an air-blind Tank is never offered the sky',
+      opts.includes('water') && opts.includes('land') && !opts.includes('air') && !opts.includes('space'), opts.join(','));
+    check('…each saying how much room is there, and which one it stands in now',
+      /land · 3\/4 open · here now/.test([...ambitSel.options].map((o) => o.textContent).join(' | ')),
+      [...ambitSel.options].map((o) => o.textContent).join(' | '));
+    const slotSel = tank.querySelectorAll('.tm-ticket select')[1];
+    check('…and the slots offered are the FREE ones in that ambit, never the occupied one',
+      [...slotSel.options].map((o) => o.value).join(',') === '1,2,3',
+      [...slotSel.options].map((o) => o.value).join(','));
+    /* Its own slot is not counted as taken on the way out, so "same slot,
+     * different ambit" is a move — it vacates as it goes. */
+    ambitSel.value = 'water'; ambitSel.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await tick(20);
+    check('…moving ambit re-reads the slots for the ambit chosen, including the number it occupies today',
+      [...tank.querySelectorAll('.tm-ticket select')[1].options].map((o) => o.value).join(',') === '0,1,2,3',
+      [...tank.querySelectorAll('.tm-ticket select')[1].options].map((o) => o.value).join(','));
+    const moves = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_struct_act' && c.args && c.args.action === 'deploy').length;
+    check('…and nothing is signed until the ticket is confirmed', moves === 0);
     T.remove(tank.getAttribute('data-card'));
+  }
+
+  /* ── Staging a fleet ──────────────────────────────────────────────────
+   *
+   * A raid needs the fleet AT the planet, so `move_fleet` is the verb between
+   * reading a target and taking it — and it was primary-only, because
+   * `action_move_fleet` reads the fleet id out of GAME_STATE. On this roster
+   * the fleet you stage is usually a worker's.
+   *
+   * Where it stands is read from the FLEET's own location. The player row's
+   * planet follows the fleet on arrival, so asking it would agree with the
+   * destination the moment we got there and could never say "away".
+   */
+  {
+    const T = w.Board.Terminal;
+    T.execute('FLEET 1-194');
+    await until(() => d.querySelector('#tm-grid [data-type="fleet"] .tm-doors-row'));
+    const card = [...d.querySelectorAll('#tm-grid [data-type="fleet"]')].slice(-1)[0];
+    check('a fleet card says where the fleet stands and where home is', /9-194/.test(card.textContent) && /2-15361/.test(card.textContent) && /2-223/.test(card.textContent), card.textContent);
+    check('…and being away from home is called out, because it arms our own raid clock',
+      /Away from home/.test(card.textContent) && card.querySelector('.tm-alert, .sc-attn, [class*="alert"]') !== null, card.textContent);
+    const doors = [...card.querySelectorAll('.tm-doors-row a')].map((a) => a.textContent);
+    check('…and a fleet that is away is offered the way back, which the home guard never blocks',
+      doors.includes('Move') && doors.includes('Return home'), doors.join(' | '));
+    const before = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_fleet_move').length;
+    card.querySelectorAll('.tm-doors-row a').forEach((a) => { if (a.textContent === 'Return home') a.dispatchEvent(new w.MouseEvent('click', { bubbles: true })); });
+    await tick(20);
+    check('…and even the retreat goes through a ticket rather than a single click',
+      card.querySelector('.tm-ticket') !== null
+        && (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_fleet_move').length === before);
+    T.remove(card.getAttribute('data-card'));
+
+    /* Signing as the PLAYER, not always the primary — the whole point. */
+    const opsSrc = read('frontend/board-terminal-ops.js');
+    check('…and the move is signed as the player whose fleet it is',
+      /terminal_fleet_move', \{ player: d\.player \|\| 'primary'/.test(opsSrc));
+    /* The guard is the policy engine's, applied server-side. The card must not
+     * restate it — a second copy is a copy that drifts. */
+    const rs = read('src-tauri/src/mcp/terminal.rs');
+    check('…while the home guard stays in the policy engine, called not copied',
+      /home_guard_block_reason\(\)/.test(rs) && !/max_stored_ore/.test(opsSrc));
   }
 
   /* ── Where we stand with someone ────────────────────────────────────────
@@ -560,7 +673,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
      * only when the CARD's own `kinds` accepts it. */
     const words = (l) => T.suggestFor(l).map((s) => s.words);
     check('typing an id offers every question you can ask OF it, named by the card it opens',
-      words('2-29604 ').join(' ') === 'COMMS MAP PLANET INSPECT WATCH LOG HIST SCOUT'
+      words('2-29604 ').join(' ') === 'COMMS MAP PLANET INSPECT WATCH LOG HIST SCOUT BUILD'
         && T.suggestFor('2-29604 ')[0].what === 'Comms about an object', words('2-29604 ').join(' '));
     check('…a player is asked different questions than a planet',
       words('1-61 ').includes('WALLET') && words('1-61 ').includes('BOOK')
@@ -880,7 +993,22 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => d.querySelector('#tm-grid [data-type="chat"] iframe.tm-frame'));
   const chatCard = d.querySelector('#tm-grid [data-type="chat"]');
   const chatId = chatCard.getAttribute('data-card');
-  check('the Comms card is frameless — the page\'s own bar is its header — and the page learns its card id', chatCard.classList.contains('tm-frameless') && chatCard.querySelector('iframe.tm-frame').getAttribute('src') === 'chat.html?embed=1&card=' + chatId && /#tm-grid \.tm-card\.tm-frameless \.tm-head-screen[^{]*\{\s*display:\s*none/.test(read('frontend/board.html')));
+  /* Framed like every other card. `frameless` once gave the embedded page's
+   * own bar the header job — which cost the card the frame every other card
+   * wears AND the three panel tools, leaving it a black box beside them. The
+   * card draws its header; the page gives up whatever that header now says
+   * twice (Pay's whole bar, Comms' pop-out and close). */
+  check('the Comms card wears the same frame and header as every other card, and the page learns its card id',
+    !chatCard.classList.contains('tm-frameless')
+      && chatCard.querySelector('iframe.tm-frame').getAttribute('src') === 'chat.html?embed=1&card=' + chatId
+      && chatCard.querySelector('.tm-head-screen .tm-title') !== null);
+  check('…including the three panel tools and its age',
+    ['Configure', 'Pop out', 'Remove'].every((t) => chatCard.querySelector('.tm-head [title="' + t + '"]') !== null)
+      && chatCard.querySelector('.tm-age') !== null,
+    [...chatCard.querySelectorAll('.tm-head .tm-door')].map((a) => a.title).join(' | '));
+  check('…and the embedded page drops what the header now says twice',
+    /html\[data-embed\] #tx-bar \{ display: none; \}/.test(read('frontend/embed.css'))
+      && /#chat-nav-popout,\s*\n?html\[data-embed\] #menu-page-nav-close \{ display: none; \}/.test(read('frontend/embed.css')));
   /* The SCREEN, not just the bar inside it: hiding `.tm-head` alone left its
    * `.sui-screen` wrapper standing — an empty 8px box with a 4px border all
    * round — and the embedded page's own header opened one row too low. */

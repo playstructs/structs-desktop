@@ -111,6 +111,11 @@ fn main() {
             mcp::terminal::terminal_scout,
             mcp::terminal::terminal_guild_members,
             mcp::terminal::terminal_player_explore,
+            mcp::terminal::terminal_build_slots,
+            mcp::terminal::terminal_deploy_slots,
+            mcp::terminal::terminal_fleet_move,
+            mcp::terminal::terminal_fleet_where,
+            mcp::terminal::terminal_struct_types,
             mcp::game_stats::open_game_stats_window,
             // Comms (federated Matrix chat). Reachable only from the Debug
             // panel for now — see src/matrix/mod.rs.

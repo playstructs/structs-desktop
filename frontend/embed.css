@@ -61,3 +61,42 @@ html[data-embed] .embed-frame > .sui-panel-chunk > .sui-screen {
 html[data-embed] .sui-page-header-resources {
   display: none;
 }
+
+
+/* ── The card's header is the card's ──────────────────────────────────────
+ *
+ * These pages were once shown WITHOUT a card header — their own bar did that
+ * job. It cost them the frame every other card wears and, worse, the three
+ * panel tools: configure, pop out, close. So the card draws its header again,
+ * and the page gives up whatever the header now says twice.
+ *
+ * Pay's bar is a title and a close, both of which the card header provides —
+ * so the whole bar goes. Comms' bar is not a title: it carries the networks
+ * you can reach and the DM/channel switch, which is content. It stays, minus
+ * the two doors the card header now owns.
+ */
+html[data-embed] #tx-bar { display: none; }
+html[data-embed] #chat-nav-popout,
+html[data-embed] #menu-page-nav-close { display: none; }
+
+
+/* ── A card is not a window ───────────────────────────────────────────────
+ *
+ * `main.css` scales the game's menu-page layout by an INTEGER factor at
+ * window sizes — `scale(2)` from 1152px wide (or 1024px TALL), `scale(4)`
+ * from 2304px — and sizes it in 50vw/50vh to match. That is right for a
+ * window: the game is pixel art and doubles cleanly rather than blurring.
+ *
+ * It is wrong for a card. chat.html reuses the game's menu-page ids on
+ * purpose, to inherit the same chrome, and inherits the scaler with them — so
+ * a Comms card in a wide window painted at twice the size of every card
+ * beside it, while its CSS still honestly reported 8px. The host has already
+ * decided how big this is; inside a card the page draws at 1x.
+ */
+html[data-embed] #menu-page-layout {
+  transform: none;
+  transform-origin: top left;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+}
