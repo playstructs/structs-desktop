@@ -52,6 +52,17 @@ const iso = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, 
   chips[2].click();
   assert.equal(body.querySelectorAll('.rv-log-row').length, 4);
   assert.equal(w.document.getElementById('rv-log-count').textContent, '4');
+  /* In a card of its own the log's title is hidden, so a PLAIN total led the
+   * bar as a stray digit the chips already add up to. The class marks the
+   * filtered form — the only one that says rows are hidden — and card CSS
+   * keeps that one alone. */
+  assert.equal(w.document.getElementById('rv-log-count').classList.contains('rv-log-count-filtered'), false,
+    'an unfiltered total is not marked');
+  [...w.document.querySelectorAll('.rv-log-chip')][2].click();
+  assert.equal(w.document.getElementById('rv-log-count').textContent, '2/4');
+  assert.equal(w.document.getElementById('rv-log-count').classList.contains('rv-log-count-filtered'), true,
+    'a filtered count is marked, and survives in the card');
+  [...w.document.querySelectorAll('.rv-log-chip')][2].click();   // back to all-on for what follows
   chips.forEach(() => {}); [...w.document.querySelectorAll('.rv-log-chip')].forEach((c) => c.click());
   assert.ok(/rows hidden/.test(body.textContent), 'everything filtered says so');
   lg.logState.rows = []; lg.renderLog();

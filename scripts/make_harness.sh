@@ -848,7 +848,14 @@ cat > "$RFIX" <<'EOF'
   };
   var F = {
     mcp_raid_state: { snapshot: SNAP },
-    mcp_raid_log: { rows: [] },
+    /* Real rows. This was `{ rows: [] }`, so the raid harness could never see
+     * the log RENDER — which is how the `only=log` card shipped collapsed,
+     * capped at 45% height and wearing the map's own controls. */
+    mcp_raid_log: { planet_id: '2-15361', rows: [
+      { time: '14:46', date: '2026-09-06', category: 'raid_struct_attack', kind: 'combat', detail: 'Tank 5-88 hit Mining Rig 5-12 for 2', block: 4200700 },
+      { time: '14:44', date: '2026-09-06', category: 'fleet_move', kind: 'movement', detail: 'Fleet 9-61 arrived', block: 4200690 },
+      { time: '19:28', date: '2026-09-05', category: 'struct_defense_set', kind: 'defense', detail: 'Tank 5-88 now defends Mining Rig 5-12', block: 4199000 },
+    ] },
     matrix_share: { ok: true },
     /* Who the rail speaks AS. There was no fixture for this, so `loadMyPfp`
      * rejected in every harness run and the composer's well drew the

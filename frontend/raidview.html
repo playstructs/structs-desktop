@@ -642,8 +642,23 @@
        fixed element ids, which is why they could not be duplicated in one. */
     html[data-only] #rv-stage { display: none; }
     html[data-only] #rv-left { height: 100%; }
-    html[data-only="log"] #rv-log { display: flex; flex: 1 1 auto; min-height: 0; }
+    /* `max-height: 45%` keeps the log from eating the board it sits under. In
+       a card of its own there is no board, and the cap left the log filling
+       half the card with the page's own black under it. */
+    html[data-only="log"] #rv-log { display: flex; flex: 1 1 auto; min-height: 0; max-height: none; }
     html[data-only="log"] #rv-log.rv-collapsed { flex: 1 1 auto; }
+    /* In a card of its own the log keeps only the controls that are ABOUT the
+       log. Its title is the card's header already; `show`/`hide` folds away a
+       panel that is the whole card; and `fit all` zooms a board this document
+       is not even rendering (`#rv-stage` is hidden here). The count and the
+       category chips stay — those filter the rows. */
+    html[data-only="log"] #rv-log-head > i.icon-list,
+    html[data-only="log"] #rv-log-title,
+    html[data-only="log"] #rv-log-head .rv-log-toggle { display: none; }
+    /* The plain total goes with the title: the chips already add up to it,
+       and alone at the head of the bar it read as a stray digit. The FILTERED
+       form ("12/200") stays — it is the only thing that says rows are hidden. */
+    html[data-only="log"] #rv-log-count:not(.rv-log-count-filtered) { display: none; }
     html[data-only="comms"] #rv-chat { display: flex; width: 100%; }
     html[data-only="comms"] #rv-left { display: none; }
     html[data-embed] #rv-left { height: 100%; }
@@ -788,7 +803,7 @@
   <div id="rv-log" class="rv-collapsed">
     <div id="rv-log-head" class="sui-text-label">
       <i class="icon-list"></i>
-      <span>Battle log</span>
+      <span id="rv-log-title">Battle log</span>
       <span id="rv-log-count" class="rv-log-count"></span>
       <span id="rv-log-filters" class="rv-log-filters"></span>
       <span class="rv-spacer"></span>

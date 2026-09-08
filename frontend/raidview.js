@@ -2156,6 +2156,17 @@
         setFitMode(fitMode() === 'full' ? 'zoom' : 'full');
       });
     }
+    /* A log that IS the card is never collapsed. The panel ships collapsed
+     * because on the map it sits under the board and starts out of the way —
+     * but here there is no board, and the control that would open it is
+     * hidden (see `data-only="log"` in raidview.html), so the card rendered
+     * as an empty black box with a `show` link that had no business existing. */
+    if (document.documentElement.getAttribute('data-only') === 'log') {
+      logState.open = true;
+      var panel = document.getElementById('rv-log');
+      if (panel) panel.classList.remove('rv-collapsed');
+      refreshLog();
+    }
     var toggle = document.getElementById('rv-log-toggle');
     if (!toggle) return;
     toggle.addEventListener('click', function () {

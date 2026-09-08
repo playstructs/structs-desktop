@@ -202,9 +202,15 @@
       // The count reports what is ON SCREEN over what was fetched — "12/200"
       // makes the filter's effect obvious without reading the chips.
       if (count) {
-        count.textContent = shown.length === logState.rows.length
-          ? String(logState.rows.length)
-          : shown.length + '/' + logState.rows.length;
+        var filtered = shown.length !== logState.rows.length;
+        count.textContent = filtered
+          ? shown.length + '/' + logState.rows.length
+          : String(logState.rows.length);
+        /* In a card of its own the log's title is hidden, and a bare total
+         * then LED the bar as a stray digit the chips already add up to.
+         * "12/200" is different — that is the filter's effect, which nothing
+         * else states — so the class keeps that one and only that one. */
+        count.classList.toggle('rv-log-count-filtered', filtered);
       }
       if (!shown.length) {
         body.appendChild(el('div', 'rv-log-empty sui-text-tiny',

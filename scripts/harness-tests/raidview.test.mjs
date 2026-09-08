@@ -1005,6 +1005,47 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     ['defensiveManeuver', 'signalJamming', 'lowOrbitBallisticInterceptorNetwork'].every((k) => RV.EVADE_ART[k]));
 }
 
+
+/* ── The log as a card of its own (`?only=log`) ─────────────────────────────
+ *
+ * The Terminal's Battle log card is this page with the map hidden. It arrived
+ * wearing the map's furniture: its own "Battle log" title under a card header
+ * that already said Battle log, a `show`/`hide` that folds away the whole
+ * card, and `fit all`, which zooms a board this document is not rendering.
+ * It also shipped COLLAPSED and capped at 45% height, so the card was a black
+ * box with a link to open it — and that link is one of the ones now hidden.
+ */
+{
+  const file = resolve(repo, 'frontend', '_harness_raid.html');
+  const d2 = await JSDOM.fromFile(file, {
+    url: pathToFileURL(file).href + '?planet=2-15361&embed=1&only=log&card=log-1',
+    runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
+    beforeParse(window) {
+      window.HTMLCanvasElement.prototype.getContext = () => ({
+        fillStyle: null, fillRect() {}, drawImage() {}, getImageData: () => ({ data: [] }),
+        clearRect() {}, canvas: { width: 0, height: 0 },
+      });
+    },
+  });
+  const w2 = d2.window, doc = w2.document;
+  await until(() => doc.querySelectorAll('#rv-log-body .rv-log-row').length > 0);
+  check('the log card marks itself, and opens: a panel that IS the card is never collapsed',
+    doc.documentElement.getAttribute('data-only') === 'log'
+      && !doc.getElementById('rv-log').classList.contains('rv-collapsed')
+      && doc.querySelectorAll('#rv-log-body .rv-log-row').length > 0);
+  const gone = (el) => el !== null && hidesElement(el);
+  check('…and drops the map\'s furniture: its own title, show/hide, and the board zoom',
+    gone(doc.getElementById('rv-log-title'))
+      && gone(doc.querySelector('#rv-log-head > i.icon-list'))
+      && [...doc.querySelectorAll('#rv-log-head .rv-log-toggle')].length === 2
+      && [...doc.querySelectorAll('#rv-log-head .rv-log-toggle')].every(gone));
+  check('…keeping what is about the LOG: the category chips',
+    doc.querySelectorAll('#rv-log-filters .rv-log-chip').length >= 2
+      && !hidesElement(doc.getElementById('rv-log-filters')));
+  check('…and the 45% cap that kept the log off the board is lifted, so it fills the card',
+    /html\[data-only="log"\] #rv-log \{[^}]*max-height: none/.test(readFileSync(resolve(repo, 'frontend', 'raidview.html'), 'utf8')));
+}
+
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');
 w.close();
 process.exit(failures ? 1 : 0);
