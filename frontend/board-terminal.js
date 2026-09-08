@@ -898,7 +898,8 @@
     var groups = Terminal.groups();
     var first = groups[0] && groups[0].options[0] ? groups[0].options[0].value : '';
     var pick = H.selectBox(first, groups, function () { syncParamField(); });
-    row.appendChild(H.field('Add a card', pick));
+    pick.setAttribute('aria-label', 'Add a card');
+    row.appendChild(H.field('', pick));
     var paramHost = H.el('span', 'tm-toolbar-param');
     row.appendChild(paramHost);
     var paramCtl = null, paramKey = null;
@@ -1506,6 +1507,11 @@
     var ids = [], words = [];
     toks.forEach(function (t) {
       if (/^\d{1,2}-\d{1,9}$/.test(t)) { if (ids.indexOf(t) < 0) ids.push(t); }
+      // Every inventory subject ENDS in a 44-character bech32 address, which
+      // is not a word: as the head of the line it filled the header and left
+      // nothing for the ids beside it. Shortened here, whole on hover — the
+      // same trade the Pay window makes with a recipient's address.
+      else if (/^structs1[0-9a-z]{20,}$/.test(t)) { var sh = t.slice(0, 12) + '…' + t.slice(-6); if (ids.indexOf(sh) < 0) ids.push(sh); }
       else words.push(t);
     });
     return { word: words.length ? words[words.length - 1] : '', ids: ids };
@@ -1539,9 +1545,27 @@
           var shown = {};
           var mark = function (v) { if (v == null || v === '') return; shown[String(v).trim().toLowerCase()] = 1; };
           mark(subj.word); subj.ids.forEach(mark); mark(kind); mark(g.category);
+          /* A chip that only PART-repeats the header still repeats it. The
+           * grass algorithm resolves ids to names, so `player_id` came back as
+           * "1-462 (Colin-Lewis)" — half of which is the id already standing
+           * in the header. Take the id out and the new fact, the name, is what
+           * is left; take out everything and the chip was never news. Whole
+           * tokens, never a substring: 1-462 must not match 1-4620. */
+          var undup = function (text) {
+            var out = String(text);
+            subj.ids.forEach(function (id) {
+              out = out.replace(new RegExp('(^|[^0-9A-Za-z_-])' + id.replace(/-/g, '\\-') + '(?![0-9-])', 'g'), '$1');
+            });
+            out = out.replace(/\s{2,}/g, ' ').trim();
+            var wrapped = /^\((.*)\)$/.exec(out);
+            return (wrapped ? wrapped[1] : out).trim();
+          };
           /* And a change goes first, so the one line of figures a narrow card
            * can show is the line that says something happened. */
-          var chips = (g.chips || []).filter(function (c) { return !shown[String(c.text).trim().toLowerCase()]; }).sort(function (a, b) {
+          var chips = (g.chips || []).filter(function (c) { return !shown[String(c.text).trim().toLowerCase()]; })
+            .map(function (c) { return { label: c.label, text: undup(c.text), title: c.title }; })
+            .filter(function (c) { return c.text !== ''; })
+            .sort(function (a, b) {
             var ca = /→/.test(a.text) ? 0 : 1, cb = /→/.test(b.text) ? 0 : 1;
             return ca - cb;
           });

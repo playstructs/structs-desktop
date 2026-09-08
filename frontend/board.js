@@ -645,8 +645,13 @@
   // from document.body, so this works on content rendered at any time. Each
   // trigger needs its own id and a positioned parent, which the <span> provides.
   var fieldSeq = 0;
+  // An empty `label` draws NO caption: a control whose own choices name it
+  // (the card picker reads "Commands", "Watch a player") does not need a word
+  // above it saying so. The caller gives the control an `aria-label` instead,
+  // so it is still named for anyone not looking at it.
   function field(label, controlNode, hint) {
     var wrap = el('label', 'sui-input-text cfg-field');
+    if (!label && !hint) { wrap.appendChild(controlNode); return wrap; }
     var cap = el('span');
     cap.appendChild(document.createTextNode(label));
     if (hint) {

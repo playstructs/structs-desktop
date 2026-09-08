@@ -142,10 +142,18 @@
       return invoke('mcp_work').then(function (d) {
         host.innerHTML = '';
         var c = d.counts || {}, hc = d.hash_config || {};
+        /* `done` was a tile that read 0 forever: a completed task reaps
+         * itself, so the count it showed was of tasks caught mid-reap.
+         * `running` is nearly as quiet — a GPU solve is tens of
+         * milliseconds, so a poll almost never lands on one. What actually
+         * says the engine is working is how much it has SOLVED, which the
+         * same payload already carries. Live 2026-09-07: 0 running, 0 done,
+         * 1,657 waiting, and 161 solves in the hour. */
+        var solved = (Array.isArray(d.pow_stats) ? d.pow_stats : []).reduce(function (n, e) { return n + (e.solves || 0); }, 0);
         host.appendChild(tiles([
           ['running', H.fmtInt(c.running || 0), null, c.running ? 'live' : 'muted'],
           ['waiting', H.fmtInt(c.waiting || 0), null, (c.waiting || 0) > (hc.max_concurrent || 0) * 4 ? 'bad' : null],
-          ['done', H.fmtInt(c.completed || 0), null, 'muted'],
+          [['solved', '24h'], H.fmtInt(solved), null, solved ? 'ok' : 'bad'],
         ]));
         // Engine, difficulty and concurrency are three short facts, not three
         // sentences: as label/value rows they wrapped in a one-wide card.

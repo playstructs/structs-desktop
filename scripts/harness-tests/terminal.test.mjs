@@ -51,6 +51,12 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…an open offer can be rented, a guild-market one cannot', d.querySelectorAll('#tm-market-1 .tm-offer')[0].querySelector('[title="Rent capacity"]') !== null && d.querySelectorAll('#tm-market-1 .tm-offer')[1].querySelector('[title="Rent capacity"]') === null);
   await until(() => d.querySelector('#tm-pow-1 .fstat'));
   check('proof queue card: six tiles, not three tiles over three wrapping label rows, and no constant 64 anywhere', d.querySelectorAll('#tm-pow-1 .fstat').length === 6 && /GPU/.test(d.querySelector('#tm-pow-1').textContent) && /auto-tuned/.test(d.querySelector('#tm-pow-1').textContent) && !/64/.test(d.querySelector('#tm-pow-1').textContent), d.querySelector('#tm-pow-1').textContent);
+  /* A tile that reads 0 forever is not a reading. `done` counted completed
+   * tasks, which reap themselves, so it was always 0 — live 2026-09-07 the
+   * card said 0 running / 0 done / 1,657 waiting while the GPU was solving
+   * 161 an hour. What is working is what it has SOLVED, from the pow stats
+   * already in the same payload. */
+  check('…and the third tile is what the engine has SOLVED, not a `done` count that reaps itself to zero', /solved/.test(d.querySelector('#tm-pow-1').textContent) && /310/.test(d.querySelector('#tm-pow-1').textContent) && !/done/i.test(d.querySelector('#tm-pow-1').textContent), d.querySelector('#tm-pow-1').textContent);
   await until(() => d.querySelector('#tm-tasks-1 .pc-row'));
   check('tasks card: a row per UNFINISHED proof, the running one first with its progress bar and its difficulty (the constant 64 dropped)', d.querySelectorAll('#tm-tasks-1 .pc-row').length === 2 && /5-12:mine/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent) && d.querySelector('#tm-tasks-1 .pc-row .sui-action-bar-progress-bar') !== null && /12difficulty/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent) && !/64/.test(d.querySelector('#tm-tasks-1 .pc-row').textContent), d.querySelector('#tm-tasks-1 .pc-row') && d.querySelector('#tm-tasks-1 .pc-row').textContent);
   check('…finished proofs are set aside, and the caption says how many', /1 finished hidden/.test(d.querySelector('#tm-tasks-1 .tm-cap').textContent), d.querySelector('#tm-tasks-1 .tm-cap').textContent);
@@ -68,6 +74,11 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('the card menu is grouped by the board\'s areas, not one flat list', groups.length >= 6 && groups.every((g) => g.group && g.options.length) && d.querySelectorAll('.tm-bar optgroup').length === groups.length);
     check('…every registered card is filed in exactly one named group', groups.every((g) => g.group !== 'More') && all.every((t) => filed.filter((f) => f === t).length === 1) && filed.length === all.length, all.filter((t) => !filed.includes(t)).join(','));
     check('…and the menu still offers every card it did as a flat list', [...d.querySelectorAll('.tm-bar select option')].length === all.length);
+    // The picker's own choices name it ("Commands", "Watch a player"), so the
+    // caption over it was a word saying what the control already said. Gone
+    // from the bar, kept for anyone not looking at it.
+    const picker = d.querySelector('.tm-bar select');
+    check('…the picker carries no caption, only a name for a reader that cannot see it', picker.getAttribute('aria-label') === 'Add a card' && !/Add a card/.test(d.querySelector('.tm-bar').textContent) && picker.closest('label').querySelector('span') === null);
   }
   await until(() => d.querySelector('#tm-player-1 .pc-card'));
   {
@@ -687,6 +698,20 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…and a tape line opens what it is about', (() => { const before = w.Board.Terminal.state.layout.cards.length; d.querySelector('#tm-grid [data-type="tape"] .sc-tape').click(); return w.Board.Terminal.state.layout.cards.length === before + 1; })());
   check('a tape event reads as a header (time, short kind, what it is about) over the ONE figure that changed — the four chips restating the header are dropped', tapeLine.classList.contains('is-new') && /planet/.test(tapeLine.querySelector('.sc-tape-subj').textContent) && /2-29577/.test(tapeLine.querySelector('.sc-tape-subj').textContent) && /11g → 12g/.test(tapeLine.textContent) && /#2,507,904/.test(tapeLine.querySelector('.sc-tape-blk').textContent) && tapeLine.querySelectorAll('.sc-tape-kv').length === 1 && !/object_type/.test(tapeLine.textContent) && !/block_height/.test(tapeLine.textContent), tapeLine.textContent);
   check('…with the whole event on hover', /object_id 2-29577/.test(tapeLine.querySelector('.sc-tape-body').title));
+  /* Half a repeat is still a repeat. The grass algorithm resolves ids to
+   * names, so a `player_id` chip comes back as "1-422 (Marklifer)" — and the
+   * id half is already standing in the header. Live 2026-09-07. */
+  w.__HARNESS_EMIT__('grass-event', { category: 'ore', subject: 'structs.grid.planet.2-28908.1-462', timestamp: Date.now(), detail: { player_id: '1-462 (Colin-Lewis)', value: 5, value_old: 4, block_height: 2518613 } });
+  await until(() => /Colin-Lewis/.test(d.querySelector('#tm-grid [data-type="tape"]').textContent));
+  const named = [...d.querySelectorAll('#tm-grid [data-type="tape"] .sc-tape')].find((n) => /Colin-Lewis/.test(n.textContent));
+  check('a chip that half-repeats the header keeps only the new half — the name, not the id again', /Colin-Lewis/.test(named.textContent) && named.querySelectorAll('.sc-tape-kv').length === 2 && !/1-462 \(/.test(named.querySelector('.sc-tape-body').textContent) && /1-462/.test(named.querySelector('.sc-tape-subj').textContent), named.textContent);
+  /* Every inventory subject ends in a 44-character bech32 address. As the
+   * head word it filled the whole header band and left nothing for the ids
+   * beside it — live 2026-09-07, on every SENT / MINTED / REFINED frame. */
+  w.__HARNESS_EMIT__('grass-event', { category: 'transfer', subject: 'structs.inventory.ualpha.0-1.structs1rwfvu2k78ajl5nljj8hfl79zmm0l96xyqw0tc9', timestamp: Date.now(), detail: { amount: '1', denom: 'ualpha', block_height: 2518623 } });
+  await until(() => /structs1rwfv…/.test(d.querySelector('#tm-grid [data-type="tape"]').textContent));
+  const addr = [...d.querySelectorAll('#tm-grid [data-type="tape"] .sc-tape')].find((n) => /structs1rwfv…/.test(n.textContent));
+  check('an address in the subject is shortened, and rides with the ids so it is never the half that ellipses', /structs1rwfv…qw0tc9/.test(addr.querySelector('.sc-tape-ids').textContent) && /ualpha/.test(addr.querySelector('.sc-tape-word').textContent) && /structs1rwfvu2k78ajl5nljj8hfl79zmm0l96xyqw0tc9/.test(addr.querySelector('.sc-tape-subj').title), addr.textContent);
 }
 
 console.log(failures ? failures + ' failing check(s)' : 'all checks passed');

@@ -169,9 +169,14 @@
     var lastVal = null;
     for (var i = series[0].values.length - 1; i >= 0; i--) { if (finite(series[0].values[i])) { lastVal = series[0].values[i]; break; } }
     var lastEl = H.el('div', 'gs-axis gs-axis-last ops-val', lastVal == null ? '' : fmt(lastVal));
-    // Where the line ENDS, not the top corner: a "0" floating at the top of
-    // a chart whose line sits on the floor reads as the wrong number.
-    if (lastVal != null) lastEl.style.top = yOf(lastVal).toFixed(0) + 'px';
+    /* Where the line ENDS, not the top corner: a "0" floating at the top of
+     * a chart whose line sits on the floor reads as the wrong number. Kept
+     * off the floor and the ceiling though — the label is centred on its own
+     * position, so a series ending at its minimum put half of it into the
+     * time-tick row and it read as one word with the last tick. */
+    if (lastVal != null) {
+      lastEl.style.top = Math.max(7, Math.min(h - 8, yOf(lastVal))).toFixed(0) + 'px';
+    }
     gutterR.appendChild(lastEl);
     box.appendChild(plot);
 

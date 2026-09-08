@@ -786,11 +786,25 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('embedded, the page is flat: no panel edge, fill or inset of its own', (() => {
     const css = readFileSync(repo + '/frontend/embed.css', 'utf8').replace(/\s+/g, ' ');
     const html = readFileSync(repo + '/frontend/chat.html', 'utf8');
-    return /html\[data-embed\] \.sui-panel-edge-left,/.test(css)
-      && /html\[data-embed\] \.sui-panel-chunk \{[^}]*background: transparent/.test(css)
-      && /html\[data-embed\] \.sui-panel-chunk > \.sui-screen \{ border-width: 0/.test(css)
+    return /html\[data-embed\] \.embed-frame > \.sui-panel-edge-left,/.test(css)
+      && /html\[data-embed\] \.embed-frame > \.sui-panel-chunk \{[^}]*background: transparent/.test(css)
+      && /html\[data-embed\] \.embed-frame > \.sui-panel-chunk > \.sui-screen \{ border-width: 0/.test(css)
       && html.includes('href="embed.css"');
   })());
+  /* And ONLY the page's own frame. A panel is not only a window — the game
+   * builds its floating HUD out of the same parts, and raidview.html has no
+   * page frame at all, only two action bars. Written against `.sui-panel` at
+   * large these rules stripped those bars' edges and flattened their chunks,
+   * so an embedded map showed a loose portrait and battery beside a detached
+   * ability panel; chat's own composer chunks went the same way. */
+  check('…and nothing else: the rules never leave the element the page marks as its frame', (() => {
+    const css = readFileSync(repo + '/frontend/embed.css', 'utf8');
+    const frameRules = css.split('\n').filter((l) => /html\[data-embed\].*\.sui-panel/.test(l));
+    return frameRules.length > 0 && frameRules.every((l) => l.includes('.embed-frame >'))
+      && d.getElementById('menu-page-panel').classList.contains('embed-frame')
+      && !readFileSync(repo + '/frontend/raidview.html', 'utf8').includes('embed-frame');
+  })());
+  check('…so a composer chunk inside the content keeps the frame it draws', d.querySelector('#chat-composer .sui-panel-chunk') === null || !d.querySelector('#chat-composer .sui-panel-chunk').closest('.embed-frame > .sui-panel-chunk'));
 }
 
 {

@@ -12,6 +12,20 @@
  * `frontend/css/` is regenerated on release so it cannot live there.
  *
  * Set `?embed=1`; each page stamps `data-embed` on its root from that.
+ *
+ * ── Only the page's OWN frame ─────────────────────────────────────────────
+ *
+ * A panel is not only a window: the game builds its floating HUD out of the
+ * same parts. Written against `.sui-panel` at large, these rules reached
+ * every panel in the document — and raidview.html has NO page frame, only two
+ * action bars, so an embedded map lost its action bar's edges and its chunks'
+ * padding and background, leaving the portrait and the battery loose on the
+ * map beside a detached ability panel. Chat's composer chunks were flattened
+ * the same way.
+ *
+ * So the page marks its own frame with `embed-frame` and these rules never
+ * leave it. A page with no frame (raidview) marks nothing and keeps every
+ * panel it draws.
  */
 html[data-embed],
 html[data-embed] body {
@@ -22,13 +36,13 @@ html[data-embed] body {
 }
 
 /* The frame: the card is already it. */
-html[data-embed] .sui-panel-top-fill-background,
-html[data-embed] .sui-panel-bottom-fill-background,
-html[data-embed] .sui-panel-edge-left,
-html[data-embed] .sui-panel-edge-right {
+html[data-embed] .embed-frame > .sui-panel-top-fill-background,
+html[data-embed] .embed-frame > .sui-panel-bottom-fill-background,
+html[data-embed] .embed-frame > .sui-panel-edge-left,
+html[data-embed] .embed-frame > .sui-panel-edge-right {
   display: none;
 }
-html[data-embed] .sui-panel-chunk {
+html[data-embed] .embed-frame > .sui-panel-chunk {
   padding: 0;
   border-width: 0;
   background: transparent;
@@ -37,7 +51,7 @@ html[data-embed] .sui-panel-chunk {
 /* The 4px inset that floats a screen inside the frame. With no frame there is
  * nothing to float inside, and it read as the second border. Direct children
  * only: a screen nested in the CONTENT is content, and keeps its own inset. */
-html[data-embed] .sui-panel-chunk > .sui-screen {
+html[data-embed] .embed-frame > .sui-panel-chunk > .sui-screen {
   border-width: 0;
 }
 
