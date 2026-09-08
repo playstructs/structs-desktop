@@ -496,7 +496,11 @@ pub(crate) fn provider_card(id: &str, v: &Value) -> Value {
         "title": format!("Provider {}", id),
         "subtitle": format!("From {}", player_label(&text(p.get("owner")))),
         "rows": [
-            row("Rate", format!("{} {} / W / block", rate_amount as i64, denom_label(&rate_denom))),
+            // MILLIWATTS. The chain charges `duration × capacity × rate` with
+            // capacity in mW, so this row said the price of a kilowatt when it
+            // meant the price of a watt — off by a thousand, on the one number
+            // anybody trades on.
+            row("Rate", format!("{} {} / mW / block", rate_amount as i64, denom_label(&rate_denom))),
             row("Capacity", format!("{} – {}",
                 format_power(num(p.get("capacityMinimum"))),
                 format_power(num(p.get("capacityMaximum"))))),

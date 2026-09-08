@@ -1388,8 +1388,11 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const card = msg.querySelector('.chat-ref');
   check('a provider gets a card', !!card, text(msg));
   check('…as the shared provider card', !!card.querySelector('.xp-card.sui-planet-card'));
-  check('…priced in the provider\'s own denom',
-    /1 ack \/ W \/ blk/i.test(text(card.querySelector('.xp-rate'))), text(card));
+  // Per MILLIWATT: the chain charges `duration × capacity × rate` with
+  // capacity in mW, so "per W" was a thousandfold error on the one number
+  // anybody trades on.
+  check('…priced in the provider\'s own denom, per milliwatt per block',
+    /1 ack \/ mW \/ blk/i.test(text(card.querySelector('.xp-rate'))), text(card));
   check('…with the policy as the badge', text(card.querySelector('.sui-badge')) === 'OPEN');
   check('…the agreement length as time, blocks on hover',
     text(card.querySelector('.xp-range[title^="Agreement"]')) === '9m – 61d'

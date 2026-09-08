@@ -11,7 +11,12 @@
 // Cards are registered, not hard-wired: `Board.Terminal.register(type, spec)`:
 //   label        what the palette calls it
 //   describe(p)  the title on the card, from its params
-//   params       [{ key, label, kind: 'id' | 'choice' | 'text', options?, placeholder? }]
+//   params       [{ key, label, kind: 'id' | 'choice' | 'text', options?, placeholder?,
+//                    kinds? }]  — an `id` param MUST declare `kinds`: the object
+//                    kinds it accepts as chain-id prefixes ([1] = player, [2, 9]
+//                    = planet or fleet), or `null` for any object. That is what
+//                    lets the command line answer "what can I ask of 2-29604?"
+//                    without guessing, and a test fails an id param without it.
 //   render(host, p, ctx) → Promise|void     draw into `host`
 //   cadenceMs    re-render this often while on screen (0 = never)
 //   single       at most one per window (a card that owns fixed DOM ids)
@@ -69,7 +74,7 @@
     ['Explore', ['player', 'guild', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
     ['Armada', ['armada', 'pow', 'tasks', 'solve', 'queue', 'results']],
     ['Industry', ['grid', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'pay']],
-    ['War', ['posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
+    ['War', ['scout', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['Comms', ['chat', 'comms']],
     ['System', ['health']],
   ];
@@ -425,6 +430,14 @@
     var title = H.el('span', 'sui-screen-nav-item sui-mod-header sui-mod-active tm-title', titleOf(card));
     titles.appendChild(title);
     head.appendChild(titles);
+    /* How old is what you are looking at?
+     *
+     * Every card here refreshes on a cadence, and until now nothing said when
+     * it last did. A number with no age is a number you cannot act on: a board
+     * that lost its connection five minutes ago looks exactly like one that
+     * updated a second ago. This is the whole reason to trust the screen. */
+    var age = H.el('span', 'tm-age fstat-l');
+    head.appendChild(age);
     headScreen.appendChild(head);
     var doors = H.el('span', 'tm-doors');
     var own = def && def.doors ? def.doors(card, { get body() { var m = state.mounted[card.id]; return m ? m.body : null; } }) : [];
@@ -535,7 +548,7 @@
     var body = H.el('div', 'sui-page-body-screen tm-body');
     bodyScreen.appendChild(body);
     chunk.appendChild(bodyScreen);
-    return { node: node, body: body, config: config, title: title };
+    return { node: node, body: body, config: config, title: title, age: age };
   }
 
   // ── Moving and sizing by hand ──────────────────────────────────────────
@@ -748,6 +761,90 @@
   }
 
   // ── Rendering ───────────────────────────────────────────────────────────
+  /* ── The chain's own clock ───────────────────────────────────────────────
+   *
+   * Every card here dates itself against when WE last read (`paintAge`). That
+   * is only half the question: a card can honestly say "now" while the thing
+   * it read from has not heard from the chain in ten minutes. Structs is
+   * block-paced — raids resolve in minutes, agreements expire at a height,
+   * proofs decay with anchor age — so the height, and whether it is still
+   * moving, is the one reading that says whether ANY of this is real.
+   *
+   * The source is the chain's own heartbeat: the GRASS `block` frame, which
+   * carries `{height}` and arrives every few seconds. No poll of our own —
+   * and if it stops arriving, that silence IS the signal.
+   */
+  var CLOCK_QUIET_MS = 45000;
+  var clockState = { height: null, atMs: 0, listening: false, el: null };
+  function mountClock(host) {
+    if (!host) return;
+    var old = document.getElementById('tm-clock');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    var el = H.el('span', 'tm-clock fstat-l');
+    el.id = 'tm-clock';
+    host.insertBefore(el, host.firstChild);
+    clockState.el = el;
+    if (!clockState.listening && window.StructsEvents) {
+      clockState.listening = true;
+      window.StructsEvents.listen('grass-event', function (e) {
+        var ev = e && e.payload;
+        if (!ev || String(ev.category) !== 'block') return;
+        var d = ev.detail;
+        if (typeof d === 'string') { try { d = JSON.parse(d); } catch (x) { d = null; } }
+        var h = d && Number(d.height);
+        if (!isFinite(h) || !h) return;
+        clockState.height = h;
+        clockState.atMs = Date.now();
+        paintClock();
+      });
+    }
+    paintClock();
+  }
+  function paintClock() {
+    var el = clockState.el;
+    if (!el || !el.parentNode) return;
+    if (!clockState.height) {
+      el.textContent = 'no block';
+      el.title = 'No block has arrived since this window opened — every reading below is as old as its own card says, and possibly older';
+      el.className = 'tm-clock fstat-l tm-clock-quiet';
+      return;
+    }
+    var since = Date.now() - clockState.atMs;
+    var quiet = since > CLOCK_QUIET_MS;
+    el.textContent = H.fmtInt(clockState.height);
+    el.className = 'tm-clock fstat-l' + (quiet ? ' tm-clock-quiet' : '');
+    el.title = quiet
+      ? 'Block ' + H.fmtInt(clockState.height) + ' — nothing since ' + window.StructsUnits.fmtDuration(Math.round(since / 1000)) + ' ago. The chain feed is quiet, so nothing on this page is being kept up to date.'
+      : 'Block ' + H.fmtInt(clockState.height) + ', ' + window.StructsUnits.fmtDuration(Math.round(since / 1000), { empty: 'just now' }) + ' ago';
+  }
+  Terminal.paintClock = paintClock;
+  Terminal.clockState = clockState;
+
+  /* The age of what is on screen, and whether it is still arriving.
+   *
+   * `fresh` while the last good read is within its own cadence, `late` past
+   * it, `stale` once a refresh has actually failed — and stale keeps showing
+   * the AGE OF THE GOOD DATA, not the age of the failure, because that is the
+   * question ("how old is this number?"). A card that refreshes by hand only
+   * still ages; it just never becomes late.
+   */
+  function paintAge(id) {
+    var m = state.mounted[id];
+    if (!m || !m.age) return;
+    if (!m.lastOk) { m.age.textContent = ''; m.node.classList.remove('tm-stale', 'tm-late'); return; }
+    var secs = Math.max(0, Math.round((Date.now() - m.lastOk) / 1000));
+    m.age.textContent = secs < 5 ? 'now' : window.StructsUnits.fmtDuration(secs, { empty: '' });
+    var c = findCard(id);
+    var every = c ? cadenceOf(c) : ((m.def && m.def.cadenceMs) || 0);
+    var late = !!every && Date.now() - m.lastOk > every * 2;
+    m.node.classList.toggle('tm-stale', !!m.lastErr);
+    m.node.classList.toggle('tm-late', late && !m.lastErr);
+    m.age.title = m.lastErr
+      ? 'Last good read ' + m.age.textContent + ' ago — the refresh since then failed: ' + m.lastErr
+      : 'Read ' + m.age.textContent + ' ago';
+  }
+  Terminal.paintAge = paintAge;
+
   function refresh(id, force) {
     var m = state.mounted[id];
     if (!m || !m.def) return Promise.resolve();
@@ -769,10 +866,22 @@
         // card's frame — a box in a box around one surface.
         first.classList.add('tm-unwrapped');
       }
+      m.lastOk = Date.now();
+      m.lastErr = null;
     }).catch(function (e) {
-      m.body.innerHTML = '';
-      m.body.appendChild(H.stateBlock('error', String(e && e.message || e)));
-    }).then(function () { m.busy = false; });
+      /* A failed refresh must not ERASE the last good answer.
+       *
+       * Wiping the card and printing the error threw away the only data the
+       * operator had — a stale reading you can see and date beats a blank you
+       * cannot. So the content stays and the card goes visibly stale, with
+       * what went wrong on hover. A card that has never rendered has nothing
+       * to keep, and there the error IS the content. */
+      m.lastErr = String((e && e.message) || e);
+      if (!m.rendered) {
+        m.body.innerHTML = '';
+        m.body.appendChild(H.stateBlock('error', m.lastErr));
+      }
+    }).then(function () { m.busy = false; paintAge(id); });
   }
   Terminal.refresh = refresh;
 
@@ -781,7 +890,7 @@
     var f = frame(card);
     if (!def) f.body.appendChild(H.stateBlock('error', 'Unknown card type: ' + card.type));
     grid.appendChild(f.node);
-    state.mounted[card.id] = { node: f.node, body: f.body, config: f.config, title: f.title, def: def, params: card.params || {}, lastRun: 0, rendered: false };
+    state.mounted[card.id] = { node: f.node, body: f.body, config: f.config, title: f.title, age: f.age, def: def, params: card.params || {}, lastRun: 0, lastOk: 0, lastErr: null, rendered: false };
     watchSize(state.mounted[card.id]);
     if (def) refresh(card.id, true);
   }
@@ -872,6 +981,7 @@
     } else {
       strip.appendChild(wsDoors);
     }
+    mountClock(boardNav ? boardNav.querySelector('.board-navaside') : strip);
     top.appendChild(strip);
     // The command line and the card picker belong to the header, not to a
     // slab floating over the cards. They ride a `sui-screen-nav` of their own,
@@ -882,18 +992,14 @@
 
     // The command line and the add-a-card control, one row, symmetric.
     var row = bar;
-    var cmd = H.textBox('', 'HELP · MKT · GT 0-1 · 1-194 · 2-15361 · PEOPLE', function () {});
+    var cmd = H.textBox('', '2-29604 · 1-61 WALLET · MKT · HELP', function () {});
     cmd.id = 'tm-cmd';
-    cmd.addEventListener('keydown', function (e) {
-      if (e.key !== 'Enter') return;
-      e.preventDefault();
-      var r = Terminal.execute(cmd.value);
-      if (r) cmd.value = ''; else cmd.classList.add('is-err');
-    });
-    cmd.addEventListener('input', function () { cmd.classList.remove('is-err'); });
+    cmd.setAttribute('autocomplete', 'off');
+    cmd.setAttribute('spellcheck', 'false');
     var cmdField = H.field('Command', cmd);
     cmdField.classList.add('tm-cmd-field');
     row.appendChild(cmdField);
+    wireCommandLine(cmd, cmdField);
 
     var groups = Terminal.groups();
     var first = groups[0] && groups[0].options[0] ? groups[0].options[0].value : '';
@@ -1076,39 +1182,282 @@
     HELP: ['help'], COMMANDS: ['help'],
     FEED: ['feed'], EVENTS: ['feed'], NEXT: ['next'], MOVES: ['next'],
     DMS: ['chat', 'direct'], DM: ['chat', 'direct'], CHANNELS: ['chat', 'rooms'],
+    // The guild's stat store, asked of one object: ore on a planet, load on a
+    // substation, health on a struct. `HIST` is the word; `GP` is there
+    // because that is what the muscle memory of a terminal reaches for.
+    HIST: ['series', 'id'], HISTORY: ['series', 'id'], GP: ['series', 'id'], CHART: ['series', 'id'],
+    // The ambit they neither reach nor occupy — the one computed answer that
+    // decides a fight. `RECON` because that is what people call it.
+    SCOUT: ['scout', 'id'], RECON: ['scout', 'id'], REACH: ['scout', 'id'],
   };
   Terminal.WORDS = WORDS;
-  Terminal.execute = function (line) {
+
+  /* ── The grammar ─────────────────────────────────────────────────────────
+   *
+   * Two orders, because people think in two orders.
+   *
+   *   WORD [subject]     PLAYER 1-61     — you know the function
+   *   subject WORD       1-61 PLAYER     — you know the subject
+   *
+   * The second is the one an expert falls into: you are looking at 2-29604,
+   * and you want the map, then the log, then its ore history. Typing the id
+   * once and then asking of it is how a terminal is meant to feel; typing
+   * PLANET, then LOG, then HIST and re-typing the id three times is not.
+   *
+   * A function only offers itself for a subject it can actually take, and
+   * that comes from the card's own `kinds` rather than a second list here:
+   * `2-29604 WALLET` is not a command, and the completion menu never shows
+   * it.
+   */
+  var OBJECT_KINDS = {
+    0: 'guild', 1: 'player', 2: 'planet', 3: 'reactor', 4: 'substation',
+    5: 'struct', 6: 'allocation', 7: 'infusion', 8: 'address', 9: 'fleet',
+    10: 'provider', 11: 'agreement',
+  };
+  var ID_RE = /^(\d{1,2})-(\d{1,9})$/;
+  function kindOf(id) { var m = ID_RE.exec(String(id || '')); return m ? Number(m[1]) : null; }
+  Terminal.kindOf = kindOf;
+  Terminal.OBJECT_KINDS = OBJECT_KINDS;
+
+  /* The `id` param a word's card takes, if it takes one. `optid` and `ids`
+   * count: WALLET and WATCH both name objects. */
+  function idParamOf(type) {
+    var def = TYPES[type];
+    if (!def || !def.params) return null;
+    for (var i = 0; i < def.params.length; i++) if (def.params[i].kind === 'id') return def.params[i];
+    return null;
+  }
+  /* Every word that can be asked of this object, in the order the card menu
+   * files them, so the same vocabulary answers in both places. */
+  Terminal.functionsFor = function (id) {
+    var kind = kindOf(id);
+    if (kind === null) return [];
+    var seen = {}, out = [];
+    Object.keys(WORDS).forEach(function (word) {
+      var w = WORDS[word], type = w[0], arg = w[1];
+      if (arg !== 'id' && arg !== 'optid' && arg !== 'ids') return;
+      var p = idParamOf(type);
+      // `kinds: null` is "any object"; a missing param is a word whose card
+      // takes the id another way (the map's planet-or-fleet).
+      if (p && p.kinds && p.kinds.indexOf(kind) < 0) return;
+      var def = TYPES[type];
+      if (!def || def.hidden) return;
+      if (seen[type]) return;
+      seen[type] = 1;
+      out.push({ word: word, type: type, label: def.label, arg: arg });
+    });
+    return out;
+  };
+
+  /* Parse a line into a PLAN — what it would open — without opening it.
+   *
+   * The command line needs to know whether Enter will do something before it
+   * decides between running what was typed and taking the highlighted
+   * completion, and there is no way to try `execute` and take it back. One
+   * parser answers both questions, so what the menu promises and what Enter
+   * does cannot drift.
+   *
+   * A plan is `{ kind: 'card', type, params }` for the ordinary case, or
+   * `{ kind: <verb> }` for the few lines that act on the workspace itself.
+   * `null` means "not a command".
+   */
+  Terminal.parse = function (line) {
     var parts = String(line || '').trim().split(/\s+/).filter(Boolean);
-    if (!parts.length) return false;
+    if (!parts.length) return null;
+    /* Subject first: `2-29604 LOG`, `1-61 WALLET`. Rewritten into the
+     * word-first form rather than handled twice, so one dispatch decides what
+     * every word does. A trailing subject that is ALSO an id (`1-61 SHEET`)
+     * needs no special case — the word is still parts[1]. */
+    if (ID_RE.test(parts[0]) && parts.length > 1 && WORDS[parts[1].toUpperCase()]) {
+      parts = [parts[1]].concat(parts[0], parts.slice(2));
+    }
     var head = parts[0].toUpperCase();
     var rest = parts.slice(1).join(' ');
-    var idm = /^(\d{1,2})-(\d{1,9})$/.exec(parts[0]);
+    var card = function (type, params) { return { kind: 'card', type: type, params: params || {} }; };
+    var idm = ID_RE.exec(parts[0]);
     if (idm && parts.length === 1) {
-      var kind = Number(idm[1]);
-      if (kind === 1) return !!add('player', { id: parts[0] });
-      if (kind === 0) return !!add('guild', { id: parts[0] });
-      if (kind === 2) return !!add('planet', { id: parts[0] });
-      if (kind === 9) return !!add('map', { id: parts[0] });
-      return !!add('inspector', { id: parts[0] });
+      var k = Number(idm[1]);
+      return card(k === 1 ? 'player' : k === 0 ? 'guild' : k === 2 ? 'planet' : k === 9 ? 'map' : 'inspector',
+        { id: parts[0] });
     }
-    if (head === '?') return !!add('help', {});
+    if (head === '?') return card('help', {});
     // FLEET is the game's word: with an id it is that fleet, on the map. Bare,
     // it is what people have always typed for the roster.
-    if (head === 'FLEET') return !!add(/^\d{1,2}-\d{1,9}$/.test(rest) ? 'map' : 'armada', rest ? { id: rest } : {});
-    if (head === 'PRESET' || head === 'PRESETS') { applyPreset(String(rest || '').toLowerCase()); return true; }
-    if (head === 'SHARE') { var strip = document.querySelector('.tm-workspaces'); if (strip) shareRow(strip); return true; }
-    if (head === 'IMPORT') { if (!rest) return false; Terminal.importWorkspace(rest); return true; }
+    if (head === 'FLEET') return card(ID_RE.test(rest) ? 'map' : 'armada', rest ? { id: rest } : {});
+    if (head === 'PRESET' || head === 'PRESETS') return { kind: 'preset', name: String(rest || '').toLowerCase() };
+    if (head === 'SHARE') return { kind: 'share' };
+    if (head === 'IMPORT') return rest ? { kind: 'import', text: rest } : null;
     var w = WORDS[head];
-    if (!w) return false;
+    if (!w) return null;
     var type = w[0], arg = w[1];
-    if (!arg) return !!add(type, {});
-    if (arg === 'id' || arg === 'ids' || arg === 'rules') { if (!rest) return false; var p = {}; p[arg] = rest; return !!add(type, p); }
-    if (arg === 'optid') return !!add(type, rest ? { id: rest } : {});
-    if (arg === 'direct' || arg === 'rooms') return !!add(type, { list: arg });
-    if (arg === 'section') return !!add(type, { section: (rest || 'universe').toLowerCase() });
-    return !!add(type, { page: arg });
+    if (!arg) return card(type, {});
+    if (arg === 'id' || arg === 'ids' || arg === 'rules') {
+      if (!rest) return null;
+      var pp = {}; pp[arg] = rest; return card(type, pp);
+    }
+    if (arg === 'optid') return card(type, rest ? { id: rest } : {});
+    if (arg === 'direct' || arg === 'rooms') return card(type, { list: arg });
+    if (arg === 'section') return card(type, { section: (rest || 'universe').toLowerCase() });
+    return card(type, { page: arg });
   };
+  /* Would Enter do anything? The menu asks before it decides whether to take
+   * the completion or run the line as typed. */
+  Terminal.canRun = function (line) { return Terminal.parse(line) !== null; };
+
+  Terminal.execute = function (line) {
+    var plan = Terminal.parse(line);
+    if (!plan) return false;
+    if (plan.kind === 'card') return !!add(plan.type, plan.params);
+    if (plan.kind === 'preset') { applyPreset(plan.name); return true; }
+    if (plan.kind === 'share') { var strip = document.querySelector('.tm-workspaces'); if (strip) shareRow(strip); return true; }
+    if (plan.kind === 'import') { Terminal.importWorkspace(plan.text); return true; }
+    return false;
+  };
+
+  /* ── The command line ────────────────────────────────────────────────────
+   *
+   * A terminal is only as fast as the distance between a thought and the
+   * screen. Three things close that distance, and none of them existed:
+   *
+   *   completion  type `2-29604` and see every question you can ask OF it —
+   *               the map, the log, its ore history — named and one key away.
+   *               Typing a word shows the words that start that way.
+   *   recall      Up walks back through what you ran. An expert re-runs.
+   *   the answer  each row says which CARD it opens, so the vocabulary teaches
+   *               itself instead of living in a reference nobody opens.
+   *
+   * Suggestions never invent: a function appears for a subject only when the
+   * card's own `kinds` accepts it (`Terminal.functionsFor`).
+   */
+  var HISTORY_MAX = 50;
+  var cmdHistory = [];
+  function suggestFor(line) {
+    var raw = String(line || '');
+    var parts = raw.trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return [];
+    var trailingSpace = /\s$/.test(raw);
+    // Subject first: `2-29604` → everything askable of a planet; `2-29604 L`
+    // narrows it. This is the case the whole feature exists for.
+    if (ID_RE.test(parts[0]) && (parts.length === 1 || parts.length === 2)) {
+      var typed = parts.length === 2 ? parts[1].toUpperCase() : (trailingSpace ? '' : null);
+      if (typed === null && parts.length === 1) typed = '';
+      var fns = Terminal.functionsFor(parts[0]).filter(function (f) { return f.word.indexOf(typed) === 0; });
+      return fns.map(function (f) {
+        return { line: parts[0] + ' ' + f.word, words: f.word, what: f.label, sub: parts[0], run: true };
+      });
+    }
+    // A word being typed. Every word that starts this way, one row per CARD so
+    // the aliases (MKT / MARKET) do not fill the list with the same answer.
+    var head = parts[0].toUpperCase();
+    if (parts.length > 1 || trailingSpace) return [];
+    var seen = {}, out = [];
+    Object.keys(WORDS).forEach(function (word) {
+      if (word.indexOf(head) !== 0) return;
+      var w = WORDS[word], def = TYPES[w[0]];
+      if (!def || def.hidden) return;
+      var key = w.join(':');
+      if (seen[key]) { seen[key].words += ' · ' + word; return; }
+      var arg = w[1] && ARG_LABEL[w[1]] ? ARG_LABEL[w[1]] : '';
+      seen[key] = { line: word + (arg ? ' ' : ''), words: word, what: def.label, arg: arg, run: !arg };
+      out.push(seen[key]);
+    });
+    out.sort(function (a, b) { return a.words < b.words ? -1 : a.words > b.words ? 1 : 0; });
+    return out;
+  }
+  Terminal.suggestFor = suggestFor;
+
+  function wireCommandLine(cmd, field) {
+    var menu = H.el('div', 'tm-suggest');
+    menu.hidden = true;
+    field.appendChild(menu);
+    var items = [], cursor = -1, histAt = -1, draft = '', picked = false;
+
+    function paint() {
+      menu.innerHTML = '';
+      if (!items.length) { menu.hidden = true; return; }
+      items.forEach(function (it, i) {
+        var r = H.el('a', 'tm-suggest-row' + (i === cursor ? ' is-on' : ''));
+        r.href = 'javascript:void(0)';
+        var left = H.el('span', 'tm-help-words');
+        if (it.sub) left.appendChild(H.el('span', 'ops-muted', it.sub));
+        left.appendChild(H.el('b', null, it.words));
+        if (it.arg) { left.appendChild(document.createTextNode(' ')); left.appendChild(H.el('span', 'ops-muted', it.arg)); }
+        r.appendChild(left);
+        r.appendChild(H.el('span', 'ops-val', it.what));
+        // mousedown, not click: the input blurs on click and the menu is gone
+        // before the click lands.
+        r.addEventListener('mousedown', function (ev) { ev.preventDefault(); accept(i); });
+        menu.appendChild(r);
+      });
+      menu.hidden = false;
+    }
+    function refresh() {
+      items = suggestFor(cmd.value);
+      cursor = items.length ? 0 : -1;
+      picked = false;
+      paint();
+    }
+    function close() { items = []; cursor = -1; menu.hidden = true; }
+    function run(line) {
+      var ok = Terminal.execute(line);
+      if (ok) {
+        cmd.value = '';
+        if (cmdHistory[0] !== line) cmdHistory.unshift(line);
+        if (cmdHistory.length > HISTORY_MAX) cmdHistory.length = HISTORY_MAX;
+        histAt = -1;
+        close();
+      } else {
+        cmd.classList.add('is-err');
+      }
+      return ok;
+    }
+    function accept(i) {
+      var it = items[i];
+      if (!it) return;
+      if (it.run) { run(it.line); return; }
+      // A word that still needs an argument: put it in the box with the caret
+      // after it rather than running something incomplete.
+      cmd.value = it.line;
+      cmd.focus();
+      refresh();
+    }
+    cmd.addEventListener('input', function () { cmd.classList.remove('is-err'); histAt = -1; refresh(); });
+    cmd.addEventListener('focus', refresh);
+    cmd.addEventListener('blur', function () { setTimeout(close, 120); });
+    cmd.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { close(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        var down = e.key === 'ArrowDown';
+        if (items.length) {
+          e.preventDefault();
+          cursor = (cursor + (down ? 1 : -1) + items.length) % items.length;
+          picked = true;
+          paint();
+          return;
+        }
+        // No menu: the arrows are history. Up from an unrun line keeps that
+        // line as the draft, so walking back and forth never eats it.
+        if (!cmdHistory.length) return;
+        e.preventDefault();
+        if (histAt === -1 && !down) draft = cmd.value;
+        histAt = Math.min(cmdHistory.length - 1, Math.max(-1, histAt + (down ? -1 : 1)));
+        cmd.value = histAt === -1 ? draft : cmdHistory[histAt];
+        return;
+      }
+      if (e.key === 'Tab' && items.length) { e.preventDefault(); accept(cursor < 0 ? 0 : cursor); return; }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      /* Enter does what you TYPED, unless you deliberately picked a row.
+       *
+       * `MKT` opens the market even though MARGINS and MARKET sit under it,
+       * and `2-29604` opens the planet even though the menu is offering seven
+       * other things to ask of it. The completion wins in exactly two cases:
+       * you arrowed to it, or what you typed is not a command at all — which
+       * is when Enter would otherwise do nothing. */
+      if ((picked || !Terminal.canRun(cmd.value)) && items.length && cursor >= 0) { accept(cursor); return; }
+      run(cmd.value);
+    });
+  }
 
   // ── HELP: every word the command line understands, as a card ───────────
   // The reference is the words themselves: each row is a word, what it
@@ -1161,6 +1510,10 @@
         }));
       });
       list.appendChild(helpLine('1-…  ·  0-…  ·  2-…  ·  9-…', 'Player · Guild · Planet · Map by id', '', function () { fillCommand(''); }));
+      /* The order an expert falls into, which the list above cannot show
+       * because it is a list of WORDS. Type the subject and the box offers
+       * every question you can ask of it. */
+      list.appendChild(helpLine('<id> <word>', 'Any word above, asked of that object — 2-29604 LOG', '', function () { fillCommand('2-29604 '); }));
       list.appendChild(helpLine('PRESET', Object.keys(PRESETS).join(' · '), '<name>', function () { fillCommand('PRESET '); }));
       list.appendChild(helpLine('SHARE', 'Share this workspace', '', function () { Terminal.execute('SHARE'); }));
       list.appendChild(helpLine('IMPORT', 'Import a shared workspace', '<code>', function () { fillCommand('IMPORT '); }));
@@ -1173,9 +1526,12 @@
   setInterval(function () {
     if (document.visibilityState === 'hidden' || Board.current !== 'terminal') return;
     var now = Date.now();
+    paintClock();
     Object.keys(state.mounted).forEach(function (id) {
       var m = state.mounted[id];
-      if (!m.def || m.busy) return;
+      if (!m.def) return;
+      paintAge(id);
+      if (m.busy) return;
       var c = findCard(id);
       var every = c ? cadenceOf(c) : (m.def.cadenceMs || 0);
       if (!every) return;
@@ -1265,9 +1621,22 @@
           var open = (c.provider || {}).open === true || String(c.policy || '') === 'openMarket';
           return p.policy === 'open' ? open : !open;
         });
+        /* The board's own summary, the way a quote screen opens: what the
+         * cheapest capacity in the galaxy costs, what the middle of the market
+         * costs, and how much of it you can actually buy. None of this was
+         * answerable before — offers are quoted in different guilds' tokens,
+         * so "cheapest" had no meaning until they were all restated. */
+        var fmtQ = function (v) { return v == null ? '—' : H.fmtAlpha(v * 1e6); };
+        var strip = H.el('div', 'hstrip tm-tiles');
+        strip.appendChild(H.statTile(['best', 'alpha / kW / day'], fmtQ(m && m.best_alpha_per_kw_day), null,
+          (m && m.best_alpha_per_kw_day) != null ? 'ok' : 'muted'));
+        strip.appendChild(H.statTile(['median', 'alpha / kW / day'], fmtQ(m && m.median_alpha_per_kw_day)));
+        strip.appendChild(H.statTile(['open', 'capacity for sale'], m && m.open_capacity_mw ? H.fmtWatts(m.open_capacity_mw) : '—'));
+        host.appendChild(strip);
         var head = H.el('div', 'tm-cap');
         head.appendChild(H.el('span', 'fstat-l', list.length + ' offer' + (list.length === 1 ? '' : 's')
           + (list.length !== all.length ? ' of ' + all.length : '')
+          + (m && m.unpriced ? ' · ' + m.unpriced + ' unpriced' : '')
           + (m && m.height ? ' · block ' + H.fmtInt(m.height) : '')));
         host.appendChild(head);
         if (!list.length) { host.appendChild(H.stateBlock('info', 'No providers on the chain.')); return; }
@@ -1289,6 +1658,14 @@
       substation: card.substation_id || null,
       policy: card.policy || (p.open ? 'openMarket' : null),
       rate: p.rate_amount != null ? { value: H.fmtInt(p.rate_amount), denomLabel: isAlpha ? null : (p.denom_label || p.rate_denom || null), denomIcon: isAlpha ? 'sui-icon-alpha-matter' : null } : null,
+      /* The lead reading, because it is the only one that compares. Rust
+       * restates every offer in alpha per kilowatt per day off the guild
+       * banks' collateral ratios; an offer it could not price says so on
+       * hover rather than being quoted at par. */
+      comparable: p.alpha_per_kw_day != null
+        ? { value: H.fmtAlpha(p.alpha_per_kw_day * 1e6), unit: '/ kW / day',
+            title: 'Comparable price, from ' + (p.fx_source || 'the chain') + ' — every offer in one unit' }
+        : null,
       capacity: p.capacity_min != null ? { min: p.capacity_min_text || H.fmtInt(p.capacity_min) + 'W', max: p.capacity_max_text || H.fmtInt(p.capacity_max) + 'W' } : null,
       duration: p.duration_min != null ? { min: p.duration_min_text || H.fmtInt(p.duration_min), max: p.duration_max_text || H.fmtInt(p.duration_max), blocks: H.fmtInt(p.duration_min) + ' – ' + H.fmtInt(p.duration_max) + ' blocks' } : null,
       owner: card.owner && card.owner.id ? { id: card.owner.id, name: card.owner.name, tag: card.owner.tag, pfp: card.owner.pfp_attrs } : null,
@@ -1308,7 +1685,7 @@
   };
   Terminal.register('player', {
     label: 'Watch a player', describe: function (p) { return 'Player ' + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Player id', kind: 'id', placeholder: '1-194' }],
+    params: [{ key: 'id', label: 'Player id', kind: 'id', kinds: [1], placeholder: '1-194' }],
     cadenceMs: 60000,
     /* `mcp_player_profile`, not `mcp_player_detail`.
      *
@@ -1391,7 +1768,7 @@
 
   Terminal.register('guild', {
     label: 'Watch a guild', describe: function (p) { return 'Guild ' + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Guild id', kind: 'id', placeholder: '0-1' }],
+    params: [{ key: 'id', label: 'Guild id', kind: 'id', kinds: [0], placeholder: '0-1' }],
     cadenceMs: 60000, usesRefs: true,
     // The chain's own record first (`matrix_refs`, the same read Comms uses):
     // a guild absent from the leaderboard used to render nothing at all.
@@ -1432,7 +1809,7 @@
   Terminal.register('inspector', {
     label: 'Inspect an object', usesRefs: true,
     describe: function (p) { return 'Inspect ' + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Object id', kind: 'id', placeholder: '5-4559 · 4-4 · 10-1' }],
+    params: [{ key: 'id', label: 'Object id', kind: 'id', kinds: null, placeholder: '5-4559 · 4-4 · 10-1' }],
     cadenceMs: 120000,
     render: function (host, p) {
       host.innerHTML = '';
@@ -1526,7 +1903,18 @@
         host.innerHTML = '';
         var ul = H.el('ul', 'ops-feed sui-text-ticker tm-tape');
         var rows = tape.rows.filter(function (ev) { return want.test(String(ev.category || '')); }).slice(0, 40);
-        if (!rows.length) ul.appendChild(H.el('li', 'ops-muted', 'no economic frames yet'));
+        /* A stream with nothing on it and a stream that is DEAD looked the
+         * same, and the line said "economic" whichever stream you picked. The
+         * chain is quiet in one category for long stretches — live
+         * 2026-09-07 the tape read "no economic frames yet" while 177 frames
+         * an hour were arriving as block / struct_status / structsLoad — so
+         * say which stream is empty, and how much is coming in elsewhere. */
+        if (!rows.length) {
+          var stream = p.filter || 'economy';
+          ul.appendChild(H.el('li', 'ops-muted', tape.rows.length
+            ? 'nothing on the ' + stream + ' stream · ' + H.fmtInt(tape.rows.length) + ' other frames'
+            : 'no frames yet'));
+        }
         var clock = function (ts) { var d = new Date(Number(ts) || 0); return isNaN(d.getTime()) || !ts ? '' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); };
         var tone = function (cat) { var c = String(cat || ''); return /raid|combat|attack|destroy/i.test(c) ? 'destructive' : /defen|shield|alert/i.test(c) ? 'warning' : 'default'; };
         // The board's grass algorithm (Board._grass.parts) folds the detail
@@ -1726,7 +2114,7 @@
   Terminal.register('book', {
     label: 'Energy book', defaultWidth: 2,
     describe: function (p) { return 'Book · ' + (p.id || 'primary'); },
-    params: [{ key: 'id', label: 'Player id', kind: 'id', placeholder: '1-194' }],
+    params: [{ key: 'id', label: 'Player id', kind: 'id', kinds: [1], placeholder: '1-194' }],
     cadenceMs: 60000,
     render: function (host, p) {
       var who = p.id || (Board.primaryId ? Board.primaryId() : '');
@@ -1766,17 +2154,72 @@
   //   market.best_rate < 2 · halt.min_margin < 10 · raids.live > 0 ·
   //   people.live_1h < 20 · ore.top < 1000 · book.first_expiry < 680
   var READINGS = {
-    'market.best_rate': function () { return invoke('terminal_market').then(function (m) { var r = ((m && m.providers) || []).map(function (p) { return p.provider && p.provider.rate_denom === 'ualpha' ? Number(p.provider.rate_amount) : NaN; }).filter(isFinite); return r.length ? Math.min.apply(null, r) : null; }); },
+    /* The cheapest capacity in the galaxy, in the one unit every offer shares
+     * (alpha per kW per day). This used to ignore every offer priced in a
+     * guild token — so an alarm on "the market got cheap" could not see the
+     * cheap offer if the seller quoted it in their own currency. */
+    'market.best_rate': function () { return invoke('terminal_market').then(function (m) { var v = m && m.best_alpha_per_kw_day; return v == null ? null : Number(v); }); },
     'halt.min_margin': function () { return invoke('mcp_energy').then(function (e) { var m = ((e && e.players) || []).map(function (p) { return Number(p.margin_pct); }).filter(isFinite); return m.length ? Math.min.apply(null, m) : null; }); },
     'raids.live': function () { return Board._gamestats.ensureBoot().then(function () { var t = Board._gamestats.state.snap && Board._gamestats.state.snap.totals; return t ? Number(t.raids_active) : null; }); },
     'people.live_1h': function () { return Board._gamestats.ensureBoot().then(function () { var t = Board._gamestats.state.snap && Board._gamestats.state.snap.totals; return t ? Number(t.live_1h) : null; }); },
     'ore.top': function () { return invoke('mcp_game_stats_snapshot').then(function (r) { var p = r && r.players_top && r.players_top.ore && r.players_top.ore[0]; return p ? Number(p.value) : null; }); },
     'book.first_expiry': function () { return invoke('terminal_agreements', { player: Board.primaryId ? Board.primaryId() : '' }).then(function (b) { return b && b.first_expiry_block != null && b.height ? b.first_expiry_block - b.height : null; }); },
   };
+  /* ── Watching one THING, not just the galaxy ─────────────────────────────
+   *
+   * The six readings above are galaxy-wide, and an expert's alarms are not:
+   * "that planet's shield is down", "that worker is out of charge", "the ore
+   * I am mining is nearly gone". A subject reading takes a chain id, the same
+   * way the command line does — `shield.2-29604 = 0`, `charge.1-271 < 3` —
+   * and refuses an id of the wrong kind rather than silently reading nothing.
+   *
+   * Every source here is one the board already polls and caches, so watching
+   * forty things costs the same two reads as watching one.
+   */
+  function rosterField(id, field) {
+    return invoke('mcp_roster').then(function (r) {
+      var row = ((r && r.rows) || []).filter(function (x) { return String(x.player_id) === id; })[0];
+      var v = row ? Number(row[field]) : NaN;
+      return isFinite(v) ? v : null;
+    });
+  }
+  function planetField(id, field) {
+    return invoke('terminal_ore_radar', { limit: 200 }).then(function (r) {
+      var row = ((r && r.planets) || []).filter(function (x) { return String(x.planet_id) === id; })[0];
+      var v = row ? Number(row[field]) : NaN;
+      return isFinite(v) ? v : null;
+    });
+  }
+  var SUBJECT_READINGS = {
+    // metric: [accepted id kinds, resolver]
+    charge: [[1], function (id) { return rosterField(id, 'charge'); }],
+    alpha: [[1], function (id) { return rosterField(id, 'alpha_ualpha'); }],
+    ore: [[1, 2], function (id) {
+      return kindOf(id) === 1 ? rosterField(id, 'ore') : planetField(id, 'ore');
+    }],
+    shield: [[2], function (id) { return planetField(id, 'shield'); }],
+  };
+  Terminal.SUBJECT_READINGS = SUBJECT_READINGS;
+  /* The resolver for a metric, whether it names the galaxy or one object.
+   * `null` for anything else — an alert whose reading cannot be taken says
+   * INVALID rather than sitting quiet forever, which is the failure mode that
+   * makes people stop trusting alarms. */
+  function readingFor(metric) {
+    if (READINGS[metric]) return READINGS[metric];
+    var dot = String(metric || '').lastIndexOf('.');
+    if (dot < 0) return null;
+    var head = metric.slice(0, dot), id = metric.slice(dot + 1);
+    var sub = SUBJECT_READINGS[head];
+    if (!sub || sub[0].indexOf(kindOf(id)) < 0) return null;
+    return function () { return sub[1](id); };
+  }
+  Terminal.readingFor = readingFor;
+
   var OPS = { '<': function (a, b) { return a < b; }, '>': function (a, b) { return a > b; }, '<=': function (a, b) { return a <= b; }, '>=': function (a, b) { return a >= b; }, '=': function (a, b) { return a === b; } };
   function parseRules(text) {
     return String(text || '').split(/[;\n]+/).map(function (s) { return s.trim(); }).filter(Boolean).map(function (s) {
-      var m = /^([a-z_.0-9]+)\s*(<=|>=|<|>|=)\s*(-?[\d.]+)$/i.exec(s);
+      // `-` too: a subject reading names a chain id (`shield.2-29604`).
+      var m = /^([a-z_.0-9-]+)\s*(<=|>=|<|>|=)\s*(-?[\d.]+)$/i.exec(s);
       return m ? { metric: m[1].toLowerCase(), op: m[2], value: Number(m[3]), text: s } : { text: s, bad: true };
     });
   }
@@ -1792,14 +2235,20 @@
     render: function (host, p, ctx) {
       var rules = parseRules(p.rules);
       host.innerHTML = '';
-      if (!rules.length) { host.appendChild(H.stateBlock('info', 'Configure this card with rules: ' + Object.keys(READINGS).join(' · '))); return; }
+      if (!rules.length) {
+        host.appendChild(H.stateBlock('info', 'Configure this card with rules: '
+          + Object.keys(READINGS).join(' · ') + ' · '
+          + Object.keys(SUBJECT_READINGS).map(function (k) { return k + '.<id>'; }).join(' · ')));
+        return;
+      }
       var fired = H.el('div', 'tm-fired');
       host.appendChild(fired);
       var table = H.resultTable();
       host.appendChild(table);
       return Promise.all(rules.map(function (r) {
-        if (r.bad || !READINGS[r.metric]) return { rule: r, state: 'bad' };
-        return READINGS[r.metric]().then(function (v) {
+        var read = r.bad ? null : readingFor(r.metric);
+        if (!read) return { rule: r, state: 'bad' };
+        return read().then(function (v) {
           var fired = v != null && OPS[r.op](v, r.value);
           return { rule: r, value: v, state: v == null ? 'unknown' : (fired ? 'fired' : 'quiet') };
         }).catch(function () { return { rule: r, state: 'unknown' }; });
@@ -1874,7 +2323,7 @@
   // and thirty days of supply walked back from today.
   Terminal.register('gt', {
     label: 'Guild token', defaultWidth: 2, describe: function (p) { return 'Guild token · ' + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Guild id', kind: 'id', placeholder: '0-1' }],
+    params: [{ key: 'id', label: 'Guild id', kind: 'id', kinds: [0], placeholder: '0-1' }],
     cadenceMs: 60000,
     render: function (host, p) {
       host.innerHTML = '';
@@ -2008,7 +2457,7 @@
   }
   Terminal.register('sheet', {
     label: 'Tearsheet', defaultWidth: 2, describe: function (p) { return 'Tearsheet · ' + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Player or guild id', kind: 'id', placeholder: '1-194 or 0-1' }],
+    params: [{ key: 'id', label: 'Player or guild id', kind: 'id', kinds: [0, 1], placeholder: '1-194 or 0-1' }],
     cadenceMs: 120000,
     render: function (host, p) {
       host.innerHTML = '';
@@ -2065,7 +2514,7 @@
   Terminal.register('log', {
     label: 'Battle log', defaultWidth: 2, cadenceMs: 0,
     describe: function (p) { return 'Battle log · ' + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Planet id', kind: 'id', placeholder: '2-15361' }],
+    params: [{ key: 'id', label: 'Planet id', kind: 'id', kinds: [2], placeholder: '2-15361' }],
     doors: function (card) {
       var id = (card.params || {}).id;
       return id ? [{ icon: 'icon-planet', title: 'Open the planet', onClick: function () { add('planet', { id: id }); } }] : [];
@@ -2209,7 +2658,7 @@
   Terminal.register('planet', {
     label: 'Planet view', defaultWidth: 2, cadenceMs: 0,
     describe: function (p) { return 'Planet ' + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Planet id', kind: 'id', placeholder: '2-15361' }],
+    params: [{ key: 'id', label: 'Planet id', kind: 'id', kinds: [2], placeholder: '2-15361' }],
     doors: function (card) {
       var id = (card.params || {}).id;
       if (!id) return [];
@@ -2229,7 +2678,7 @@
   Terminal.register('map', {
     label: 'Map viewer', defaultWidth: 2,
     describe: function (p) { return 'Map · ' + (String(p.id || '').indexOf('9-') === 0 ? 'fleet ' : 'planet ') + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Planet or fleet id', kind: 'id', placeholder: '2-15361' }],
+    params: [{ key: 'id', label: 'Planet or fleet id', kind: 'id', kinds: [2, 9], placeholder: '2-15361' }],
     cadenceMs: 0,
     render: function (host, p, ctx) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet (2-…) or fleet (9-…) id.')); return; }
@@ -2262,7 +2711,7 @@
   Terminal.register('comms', {
     label: 'Comms about an object', cadenceMs: 0,
     describe: function (p) { return 'Comms · ' + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Planet or fleet id', kind: 'id', placeholder: '2-15361' }],
+    params: [{ key: 'id', label: 'Planet or fleet id', kind: 'id', kinds: [2, 9], placeholder: '2-15361' }],
     doors: function (card) {
       var id = (card.params || {}).id;
       return id ? [{ icon: 'icon-planet', title: 'Open the object', onClick: function () { add(String(id).indexOf('9-') === 0 ? 'map' : 'planet', { id: id }); } }] : [];

@@ -49,6 +49,27 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const offers = [...d.querySelectorAll('#tm-market-1 .sui-planet-card')];
   check('market card: one provider card per offer, from terminal_market', offers.length === 2);
   check('…an open offer can be rented, a guild-market one cannot', d.querySelectorAll('#tm-market-1 .tm-offer')[0].querySelector('[title="Rent capacity"]') !== null && d.querySelectorAll('#tm-market-1 .tm-offer')[1].querySelector('[title="Rent capacity"]') === null);
+  /* ── The market as a QUOTE BOARD ────────────────────────────────────────
+   *
+   * Offers are quoted in whatever the seller likes — alpha, or any guild's own
+   * token — so "1 alpha" beside "3 ohm" is not a comparison and the board had
+   * no ordering at all: alpha-priced offers led and the rest kept their chain
+   * order behind them. Restated off the guild banks' collateral ratios, the
+   * cheapest capacity in the galaxy is the top row whoever is selling it.
+   */
+  {
+    const mkt = d.querySelector('#tm-market-1');
+    const tiles = [...mkt.querySelectorAll('.fstat')].map((t) => t.textContent.replace(/\s+/g, ' ').trim());
+    check('the board opens with the market: best, median, and how much is actually for sale',
+      tiles.length === 3 && /16\.36Kg/.test(tiles[0]) && /best/i.test(tiles[0])
+        && /49\.09Kg/.test(tiles[1]) && /1\.05MW/.test(tiles[2]), tiles.join(' | '));
+    const cmp = [...mkt.querySelectorAll('.xp-compare')].map((n) => n.textContent.replace(/\s+/g, ' ').trim());
+    check('…and every offer leads with that one comparable unit, cheapest first',
+      cmp.join(' , ') === '16.36Kg / kW / day , 49.09Kg / kW / day', cmp.join(' , '));
+    check('…while the seller\'s own quote stays beside it, per MILLIWATT — the unit the chain charges in',
+      /1 \/ mW \/ blk/.test(offers[0].textContent.replace(/\s+/g, ' ')) && /3 ohm \/ mW \/ blk/i.test(offers[1].textContent.replace(/\s+/g, ' ')),
+      offers[1].textContent.replace(/\s+/g, ' '));
+  }
   await until(() => d.querySelector('#tm-pow-1 .fstat'));
   check('proof queue card: six tiles, not three tiles over three wrapping label rows, and no constant 64 anywhere', d.querySelectorAll('#tm-pow-1 .fstat').length === 6 && /GPU/.test(d.querySelector('#tm-pow-1').textContent) && /auto-tuned/.test(d.querySelector('#tm-pow-1').textContent) && !/64/.test(d.querySelector('#tm-pow-1').textContent), d.querySelector('#tm-pow-1').textContent);
   /* A tile that reads 0 forever is not a reading. `done` counted completed
@@ -115,6 +136,106 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const dpath = node.querySelector('.gs-chart svg path').getAttribute('d');
     check('…with the slots before the first sample left out of the line, not drawn as zero', dpath.split('M').length === 2 && !/NaN/.test(dpath));
     w.Board.Terminal.remove(id);   // the layout below is the default one
+  }
+
+  /* ── SCOUT: the ambit they neither reach nor occupy ─────────────────────
+   *
+   * Every fleet weapon in the game does 2 damage, so hulls differ by REACH,
+   * not firepower — and a counter fires when the defender's weapon reaches
+   * your ambit OR the defender is standing in it. The card's job is to say
+   * which ambit is neither, because nobody can union nine hulls' reach in
+   * their head while a raid's four-minute window runs.
+   */
+  {
+    w.Board.Terminal.execute('SCOUT 2-15361');
+    await until(() => d.querySelector('#tm-grid [data-type="scout"] .tm-ambits'));
+    const sc = d.querySelector('#tm-grid [data-type="scout"]');
+    const rowOf = (label) => [...sc.querySelectorAll('.tm-ambits')].find((r) => r.firstChild.textContent === label);
+    const on = (label) => [...rowOf(label).querySelectorAll('.tm-ambit.is-on')].map((n) => n.textContent).join(' ');
+    check('scout leads with the FREE ambits — the answer, before the working', on('free') === 'air'
+      && sc.querySelector('.tm-ambits').firstChild.textContent === 'free', on('free'));
+    check('…and shows both ways an ambit is covered, separately',
+      on('they reach') === 'land water' && on('they stand in') === 'space land', on('they reach') + ' | ' + on('they stand in'));
+    /* Space is the case the whole correction exists for: nothing they own can
+     * shoot into space, and space is still not free, because their Command
+     * Ship is parked there and counters same-ambit for 2. */
+    check('…so an ambit they cannot REACH but do OCCUPY is not offered as free',
+      on('they reach').includes('space') === false && on('they stand in').includes('space') && !on('free').includes('space'));
+    check('…names the command ship, whose loss strands the fleet', /Command Ship 5-9/.test(sc.textContent) && /space/.test(sc.textContent));
+    check('…counts who would counter from each ambit', /counters from/.test(sc.textContent) && /air 0/.test(sc.textContent) && /land 2/.test(sc.textContent));
+    const hull = sc.querySelector('.pc-row[data-kind="struct"]');
+    check('…and every hull says what it can shoot at, since that is all that differs',
+      /reaches land/.test(hull.textContent) && /COMMAND/.test(sc.textContent), hull.textContent);
+    w.Board.Terminal.remove(sc.getAttribute('data-card'));
+    /* And it is reachable from where the question arises: the board that
+     * SCORES a target says nothing about which ambit you can shoot from, and
+     * mid-raid the four minutes it takes to work out by hand are the window. */
+    check('…and both the target board and a live raid carry a door to it',
+      /Scout .* where can we shoot from\?/.test(read('frontend/board-terminal-ops.js'))
+        && (read('frontend/board-terminal-ops.js').match(/add\('scout', \{ id:/g) || []).length === 2);
+  }
+
+  /* ── The chain's own clock ──────────────────────────────────────────────
+   *
+   * Card ages say when WE last read. That is only half the question: a card
+   * can honestly read "now" over a feed that has not heard from the chain in
+   * ten minutes. Structs is block-paced, so whether the height is still moving
+   * is the reading that says whether ANY of this is real — and the honest
+   * default before a block arrives is the alarming one, not a blank.
+   */
+  {
+    const clock = d.getElementById('tm-clock');
+    check('the header carries the chain clock, alarming until a block actually arrives',
+      clock !== null && /no block/i.test(clock.textContent) && clock.className.includes('tm-clock-quiet'), clock && clock.textContent);
+    w.__HARNESS_EMIT__('grass-event', { category: 'block', subject: 'consensus', timestamp: Date.now(), detail: { height: 2520256, updated_at: 'now' } });
+    await tick(30);
+    check('…and a block frame sets it, from the chain\'s own heartbeat rather than a poll of ours',
+      clock.textContent === '2,520,256' && !clock.className.includes('tm-clock-quiet') && /Block 2,520,256/.test(clock.title), clock.textContent);
+    // Silence is the signal: nothing for long enough and the clock says so.
+    w.Board.Terminal.clockState.atMs = Date.now() - 120000;
+    w.Board.Terminal.paintClock();
+    check('…and silence turns it, naming what that means for everything below',
+      clock.className.includes('tm-clock-quiet') && /nothing since/i.test(clock.title) && /kept up to date/.test(clock.title), clock.title);
+    w.Board.Terminal.clockState.atMs = Date.now();
+    w.Board.Terminal.paintClock();
+  }
+
+  /* ── How old is what you are looking at? ────────────────────────────────
+   *
+   * A number with no age is a number you cannot act on: a card that lost its
+   * connection five minutes ago looked exactly like one that updated a second
+   * ago. And a failed refresh used to ERASE the card — throwing away the only
+   * data the operator had. A stale reading you can see and date beats a blank
+   * you cannot.
+   */
+  {
+    const card = d.getElementById('tm-market-1');
+    check('every card says how old its content is', card.querySelector('.tm-age') !== null && /now|s$/.test(card.querySelector('.tm-age').textContent), card.querySelector('.tm-age')?.textContent);
+    const body = card.querySelector('.tm-body').textContent;
+    w.__HARNESS_REJECT__['terminal_market'] = 'guild API unreachable';
+    await w.Board.Terminal.refresh('market-1', true);
+    await tick(50);
+    check('a failed refresh KEEPS the last good answer and marks the card stale',
+      card.querySelector('.tm-body').textContent === body && card.classList.contains('tm-stale'));
+    check('…dating the GOOD data, with what went wrong on hover',
+      /unreachable/.test(card.querySelector('.tm-age').title) && /Last good read/.test(card.querySelector('.tm-age').title),
+      card.querySelector('.tm-age').title);
+    check('…and the stale mark dims the content rather than hiding it',
+      /\.tm-card\.tm-stale \.tm-body \{[^}]*opacity/.test(read('frontend/board.html')));
+    delete w.__HARNESS_REJECT__['terminal_market'];
+    await w.Board.Terminal.refresh('market-1', true);
+    await tick(50);
+    check('…and a good read clears it', !card.classList.contains('tm-stale') && !/failed/.test(card.querySelector('.tm-age').title));
+    /* A card that has never rendered has nothing to keep — there the error IS
+     * the content, which is the behaviour that already existed. */
+    w.__HARNESS_REJECT__['mcp_work'] = 'no engine';
+    w.Board.Terminal.add('solve', {});
+    const solveId = w.Board.Terminal.state.layout.cards.slice(-1)[0].id;
+    await until(() => d.querySelector('#tm-' + solveId + ' .sui-message-inline-alert, #tm-' + solveId + ' .ops-muted'));
+    check('a card that never rendered shows the error itself — there is nothing to preserve',
+      /no engine/.test(d.querySelector('#tm-' + solveId).textContent), d.querySelector('#tm-' + solveId).textContent.slice(0, 80));
+    delete w.__HARNESS_REJECT__['mcp_work'];
+    w.Board.Terminal.remove(solveId);
   }
 
   // Doors.
@@ -205,6 +326,86 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   w.Board.Terminal.remove(help.getAttribute('data-card'));
   w.Board.Terminal.remove(d.querySelectorAll('#tm-grid [data-type="people"]')[1].getAttribute('data-card'));
   run('1-248');
+  /* ── The grammar ────────────────────────────────────────────────────────
+   *
+   * A terminal is only as fast as the distance between a thought and the
+   * screen. Two orders, because people think in two orders — and the second,
+   * subject first, is the one an expert falls into: you are looking at
+   * 2-29604 and you want the map, then the log, then its ore history.
+   */
+  {
+    const T = w.Board.Terminal;
+    const plan = (l) => T.parse(l);
+    check('subject first: `2-29604 LOG` is the same command as `LOG 2-29604`',
+      JSON.stringify(plan('2-29604 LOG')) === JSON.stringify(plan('LOG 2-29604'))
+        && plan('2-29604 LOG').type === 'log' && plan('2-29604 LOG').params.id === '2-29604');
+    check('…and the subject-first form works for every word that takes an id',
+      plan('1-61 WALLET').type === 'wallet' && plan('1-61 WALLET').params.id === '1-61'
+        && plan('0-1 GT').type === 'gt' && plan('2-29604 HIST').type === 'series');
+    check('a bare id still opens the card that IS that object',
+      plan('2-29604').type === 'planet' && plan('1-61').type === 'player'
+        && plan('0-1').type === 'guild' && plan('9-61').type === 'map' && plan('5-1').type === 'inspector');
+    /* `parse` exists so the command line can know what Enter will do without
+     * doing it — otherwise the menu has to guess, and what it promises drifts
+     * from what happens. */
+    check('parsing is pure: asking what a line would do opens nothing',
+      (() => { const before = w.Board.Terminal.state.layout.cards.length;
+               ['MKT', '2-29604 LOG', 'nonsense', ''].forEach(plan);
+               return w.Board.Terminal.state.layout.cards.length === before; })());
+    check('…and `canRun` agrees with it, so Enter and the menu cannot disagree',
+      T.canRun('MKT') && T.canRun('2-29604 HIST') && !T.canRun('PLAYER') && !T.canRun('nope') && !T.canRun(''));
+
+    /* The completion menu never invents: a function is offered for a subject
+     * only when the CARD's own `kinds` accepts it. */
+    const words = (l) => T.suggestFor(l).map((s) => s.words);
+    check('typing an id offers every question you can ask OF it, named by the card it opens',
+      words('2-29604 ').join(' ') === 'COMMS MAP PLANET INSPECT WATCH LOG HIST SCOUT'
+        && T.suggestFor('2-29604 ')[0].what === 'Comms about an object', words('2-29604 ').join(' '));
+    check('…a player is asked different questions than a planet',
+      words('1-61 ').includes('WALLET') && words('1-61 ').includes('BOOK')
+        && !words('1-61 ').includes('LOG') && !words('2-29604 ').includes('WALLET'));
+    check('…and a partial word narrows them', words('2-29604 L').join(' ') === 'LOG');
+    check('a word being typed offers the words that start that way, one row per card',
+      words('MA').join(' ') === 'MAP MARGINS MARKET');
+    check('…and aliases for one card share a row rather than repeating it',
+      (() => { const r = T.suggestFor('MK')[0]; return r && /MKT/.test(r.words) && T.suggestFor('MK').length === 1; })());
+    check('every id param declares the object kinds it accepts, or the menu would be guessing',
+      T.types().every((t) => (t.params || []).every((p) => p.kind !== 'id' || 'kinds' in p)),
+      T.types().filter((t) => (t.params || []).some((p) => p.kind === 'id' && !('kinds' in p))).map((t) => t.type).join(','));
+
+    /* The menu in the DOM: keyboard-first, and the row Enter takes is the one
+     * that is highlighted. */
+    const cmd = d.getElementById('tm-cmd');
+    const menu = d.querySelector('.tm-suggest');
+    check('the command line has a completion menu anchored to it', menu !== null && cmd.closest('.tm-cmd-field').contains(menu));
+    cmd.dispatchEvent(new w.Event('focus'));
+    cmd.value = '1-61 ';
+    cmd.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('…which fills as you type, first row highlighted', !menu.hidden && menu.children.length === T.functionsFor('1-61').length && menu.children[0].classList.contains('is-on'), String(menu.children.length));
+    const down = () => cmd.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    down(); down();
+    check('…arrows walk it', menu.children[2].classList.contains('is-on') && !menu.children[0].classList.contains('is-on'));
+    const before = w.Board.Terminal.state.layout.cards.length;
+    cmd.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    const added = w.Board.Terminal.state.layout.cards.slice(-1)[0];
+    check('…and Enter opens the highlighted row, for that subject', w.Board.Terminal.state.layout.cards.length === before + 1 && added.type === 'inspector' && added.params.id === '1-61' && cmd.value === '' && menu.hidden, added.type + ' ' + added.params.id);
+    w.Board.Terminal.remove(added.id);
+    /* A line that already runs runs AS TYPED: MKT opens the market even
+     * though MARGINS and MARKET are both listed under it. */
+    cmd.value = 'MKT';
+    cmd.dispatchEvent(new w.Event('input', { bubbles: true }));
+    const before2 = w.Board.Terminal.state.layout.cards.length;
+    cmd.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    const added2 = w.Board.Terminal.state.layout.cards.slice(-1)[0];
+    check('a complete command runs as typed, never as the highlighted completion', w.Board.Terminal.state.layout.cards.length === before2 + 1 && added2.type === 'market', added2.type);
+    // History: Up walks back through what was run.
+    cmd.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+    check('Up recalls the last command an expert ran', cmd.value === 'MKT', cmd.value);
+    cmd.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+    check('…and the one before it', cmd.value === '1-61 INSPECT', cmd.value);
+    cmd.value = '';
+    w.Board.Terminal.remove(added2.id);
+  }
   check('a bare player id opens that player', d.querySelector('#tm-grid [data-card="player-2"]')?.getAttribute('data-type') === 'player' && w.Board.Terminal.state.layout.cards.find((c) => c.id === 'player-2').params.id === '1-248');
   run('GUILD 0-2');
   check('GUILD opens a guild', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'guild' && c.params.id === '0-2'));
@@ -249,11 +450,41 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const book = d.querySelector('#tm-grid [data-type="book"]');
   check('BOOK shows what was bought and sold and when the first runs out', /1-170/.test(book.textContent) && /1-482/.test(book.textContent) && /BOUGHT/.test(book.textContent) && /SOLD/.test(book.textContent) && /First expiry/i.test(book.textContent) && (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_agreements' && c.args.player === '1-194'), book.textContent.slice(0, 200));
   check('…each agreement is a catalogue row with a countdown over its term', book.querySelectorAll('.pc-row[data-kind="agreement"] .sc-count').length === book.querySelectorAll('.pc-row').length && book.querySelectorAll('.pc-row').length > 0);
-  run('ALERTS market.best_rate < 2; halt.min_margin > 50; nonsense');
+  /* `market.best_rate` is now the COMPARABLE price — alpha per kW per day,
+   * across every denomination — so the threshold is in that unit. It used to
+   * read the raw rate of alpha-priced offers only, which means an alarm on
+   * "the market got cheap" could not see a cheap offer quoted in a guild's own
+   * token. */
+  run('ALERTS market.best_rate < 20000; halt.min_margin > 50; nonsense');
   await until(() => d.querySelectorAll('#tm-grid [data-type="alerts"] .tm-alert').length === 3);
   const alerts = [...d.querySelectorAll('#tm-grid [data-type="alerts"] .tm-alert')].map((r) => r.className.replace(/.*tm-alert-/, ''));
   check('ALERTS judges each rule against a live reading: fired, quiet, and a bad rule named as such', alerts.join(',') === 'fired,quiet,bad', alerts.join(','));
   check('a rule parses to metric, op and value', JSON.stringify(w.Board.Terminal.parseRules('raids.live >= 1')[0]) === JSON.stringify({ metric: 'raids.live', op: '>=', value: 1, text: 'raids.live >= 1' }));
+
+  /* ── Watching one THING ─────────────────────────────────────────────────
+   *
+   * The galaxy readings are not an expert's alarms. "That planet's shield is
+   * down", "that worker is out of charge" — a subject reading takes a chain id
+   * the same way the command line does, and refuses an id of the wrong kind
+   * rather than sitting quiet forever, which is the failure that makes people
+   * stop trusting alarms.
+   */
+  {
+    const T = w.Board.Terminal;
+    check('a subject rule parses, dashes and all', JSON.stringify(T.parseRules('shield.2-15361 = 0')[0]) === JSON.stringify({ metric: 'shield.2-15361', op: '=', value: 0, text: 'shield.2-15361 = 0' }));
+    check('…and resolves to a reading of that one object', typeof T.readingFor('shield.2-15361') === 'function' && typeof T.readingFor('charge.1-271') === 'function');
+    check('…while an id of the WRONG KIND is refused, not read as nothing',
+      T.readingFor('shield.1-271') === null && T.readingFor('charge.2-15361') === null && T.readingFor('shield.nope') === null && T.readingFor('bogus.2-15361') === null);
+    const shield = await T.readingFor('shield.2-15361')();
+    const charge = await T.readingFor('charge.1-271')();
+    check('…reading the real number off a source the board already polls', shield === 0 && charge === 5, shield + ' / ' + charge);
+    run('ALERTS shield.2-15361 = 0; charge.1-271 > 9');
+    await until(() => d.querySelectorAll('#tm-grid [data-type="alerts"]:last-of-type .tm-alert').length === 2);
+    const subj = [...d.querySelectorAll('#tm-grid [data-type="alerts"]')].slice(-1)[0];
+    check('…and an alert on one object fires on that object', [...subj.querySelectorAll('.tm-alert')].map((r) => r.className.replace(/.*tm-alert-/, '')).join(',') === 'fired,quiet',
+      [...subj.querySelectorAll('.tm-alert')].map((r) => r.className.replace(/.*tm-alert-/, '')).join(','));
+    T.remove(subj.getAttribute('data-card'));
+  }
   run('BANKS');
   await until(() => d.querySelector('#tm-grid [data-type="banks"] .pc-row, #tm-grid [data-type="banks"] .gc-row'));
   const banks = d.querySelector('#tm-grid [data-type="banks"]');
@@ -491,16 +722,16 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   // addressed to this card, with the neighbouring surfaces as doors.
   run('PLANET 2-15361');
   await until(() => d.querySelector('#tm-grid [data-type="planet"] iframe.tm-frame-map'));
-  const planetCard = d.querySelector('#tm-grid [data-type="planet"]');
+  const planetCard = [...d.querySelectorAll('#tm-grid [data-type="planet"]')].slice(-1)[0];
   const planetId = planetCard.getAttribute('data-card');
   const src = planetCard.querySelector('iframe.tm-frame-map').getAttribute('src');
   check('the planet card embeds the map for that planet, labelled for this card', /^raidview\.html\?planet=2-15361&label=board%3A/.test(src) && src.includes('embed=1') && src.includes('card=' + planetId), src);
-  const watch = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_raid_view_watch');
+  const watch = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_raid_view_watch' && c.args && c.args.planetId === '2-15361').slice(-1)[0];
   check('…and asks Rust to push that planet\'s feed to this card', watch && watch.args.planetId === '2-15361' && watch.args.label === 'board:' + planetId);
   check('…with the log, Comms and the full window as doors', [...planetCard.querySelectorAll('.tm-door-own')].map((a) => a.title).join(',') === 'Battle log,Comms about this planet,Watch in its own window');
   w.Board.Terminal.remove(planetId);
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_raid_view_unwatch'));
-  const unwatch = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_raid_view_unwatch');
+  const unwatch = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_raid_view_unwatch' && c.args && c.args.planetId === '2-15361').slice(-1)[0];
   check('removing the card stops the feed', unwatch.args.label === 'board:' + planetId && unwatch.args.planetId === '2-15361');
   // The two cards the audit said were missing entirely.
   run('FEED');
@@ -712,6 +943,20 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => /structs1rwfv…/.test(d.querySelector('#tm-grid [data-type="tape"]').textContent));
   const addr = [...d.querySelectorAll('#tm-grid [data-type="tape"] .sc-tape')].find((n) => /structs1rwfv…/.test(n.textContent));
   check('an address in the subject is shortened, and rides with the ids so it is never the half that ellipses', /structs1rwfv…qw0tc9/.test(addr.querySelector('.sc-tape-ids').textContent) && /ualpha/.test(addr.querySelector('.sc-tape-word').textContent) && /structs1rwfvu2k78ajl5nljj8hfl79zmm0l96xyqw0tc9/.test(addr.querySelector('.sc-tape-subj').title), addr.textContent);
+  /* A quiet stream and a DEAD stream looked the same. Live 2026-09-07 the
+   * card read "no economic frames yet" while 177 frames an hour were landing
+   * as block / struct_status / structsLoad — none of which the economy filter
+   * matches. And the line said "economic" whichever stream was chosen. */
+  {
+    const before = w.Board.Terminal.state.layout.cards.length;
+    w.Board.Terminal.add('tape', { filter: 'combat' }, 1);
+    const quiet = w.Board.Terminal.state.layout.cards.slice(-1)[0].id;
+    await until(() => d.querySelector('#tm-' + quiet + ' .ops-feed'));
+    const line = d.querySelector('#tm-' + quiet + ' .ops-muted');
+    check('an empty stream names ITSELF and says what is arriving elsewhere', /nothing on the combat stream/.test(line.textContent) && /other frames/.test(line.textContent), line.textContent);
+    w.Board.Terminal.remove(quiet);
+    check('…and the card came off again', w.Board.Terminal.state.layout.cards.length === before);
+  }
 }
 
 console.log(failures ? failures + ' failing check(s)' : 'all checks passed');

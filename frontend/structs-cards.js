@@ -484,11 +484,11 @@
    *              left:{text, frac, title}, providerChip:Node, counterparty:{...} } */
   var agreement = {
     rateNode: function (r) {
-      var s = el('span', 'pc-res sc-wide'); s.title = 'Price per W per block';
+      var s = el('span', 'pc-res sc-wide'); s.title = 'Price per milliwatt per block — the chain\'s own unit';
       s.appendChild(T(str(r.value) + ' '));
       if (r.denomIcon) s.appendChild(icon(r.denomIcon));
       else if (r.denomLabel) { s.appendChild(el('span', 'xp-unit', str(r.denomLabel))); s.appendChild(T(' ')); }
-      s.appendChild(el('span', 'xp-unit', '/ W / blk'));
+      s.appendChild(el('span', 'xp-unit', '/ mW / blk'));
       return s;
     },
     describe: function (a) {

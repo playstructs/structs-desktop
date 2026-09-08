@@ -134,7 +134,9 @@ const OWNER = { id: '1-248', name: 'Phoniffer', tag: 'SN.C', pfp: '{"head":4,"ne
   console.log('\n— agreement, token, reactor');
   const a = C.agreement.card({ id: '11-3', side: 'bought', capacity: '10KW', rate: { value: '1', denomLabel: 'ack' }, left: { text: '3d 2h', frac: 0.6, title: '50,000 blocks left' }, counterparty: OWNER, providerChip: C.substation.chip({ id: '4-4', load: 1, capacity: 2 }) });
   check('BOUGHT badge, the countdown with the term as its bar and blocks in the title', text(a.querySelector('.sui-badge')) === 'BOUGHT' && a.querySelector('.sc-count') !== null && /3d 2h/.test(text(a.querySelector('.sc-count'))) && a.querySelector('.sc-count').title === '50,000 blocks left');
-  check('the price reads per W per block on its own wide line', /1 ack \/ W \/ blk/.test(text(a.querySelector('.sc-wide'))));
+  // MILLIWATTS: the chain charges `duration × capacity × rate` with capacity
+  // in mW, so a rate is per milliwatt. "per W" was a thousandfold error.
+  check('the price reads per mW per block on its own wide line', /1 ack \/ mW \/ blk/.test(text(a.querySelector('.sc-wide'))), text(a.querySelector('.sc-wide')));
   check('the provider is a chip on the card', a.querySelector('.sc-chips .sc-chip[data-kind="substation"]') !== null);
   const ending = C.agreement.row({ id: '11-4', side: 'sold', capacity: '1KW', ending: true });
   check('SOLD is solid; an ending agreement is amber', text(ending.querySelector('.sui-badge')) === 'SOLD' && ending.classList.contains('sc-warn'));

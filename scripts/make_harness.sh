@@ -490,15 +490,26 @@ cat > "$FIX" <<'EOF'
     matrix_refs: { refs: [] },
     terminal_windows: { open: true, cards: [] },
     open_terminal_card: null,
-    terminal_market: { at_ms: 0, height: 4200719, providers: [
+    /* The quote board. Two offers in DIFFERENT denominations — one in alpha,
+     * one in a guild token — because that is the whole problem the board
+     * solves: "1 alpha" beside "3 ohm" is not a comparison until both are
+     * restated off the guild bank's collateral ratio, which is what
+     * `alpha_per_kw_day` is. */
+    terminal_market: { at_ms: 0, height: 4200719,
+      best_alpha_per_kw_day: 16364, median_alpha_per_kw_day: 49091,
+      priced: 2, unpriced: 0, open_capacity_mw: 1050000000,
+      providers: [
       { id: '10-1', kind: 'provider', policy: 'openMarket', substation_id: '4-4',
         owner: { id: '1-170', name: 'TRACINGVIOLET', tag: 'SNC', pfp_attrs: '{"head":3,"neck":2,"body":4,"arms":5,"background":1}' },
         provider: { rate_amount: 1, rate_denom: 'ualpha', denom_label: 'alpha', capacity_min: 1000, capacity_max: 1000000000,
-          capacity_min_text: '1KW', capacity_max_text: '1GW', duration_min: 100, duration_max: 1000000, duration_min_text: '9m', duration_max_text: '61d', open: true } },
+          capacity_min_text: '1KW', capacity_max_text: '1GW', duration_min: 100, duration_max: 1000000, duration_min_text: '9m', duration_max_text: '61d', open: true,
+          rate_ualpha_per_mw_block: 1, alpha_per_kw_day: 16364, fx_source: 'alpha' } },
       { id: '10-2', kind: 'provider', policy: 'guildMarket', substation_id: '4-9',
         owner: { id: '1-61', name: 'JPEG', tag: 'OH', pfp_attrs: null },
         provider: { rate_amount: 3, rate_denom: 'uguild.0-2', denom_label: 'ohm', capacity_min: 500, capacity_max: 50000,
-          capacity_min_text: '500W', capacity_max_text: '50KW', duration_min: 50, duration_max: 5000, duration_min_text: '4m', duration_max_text: '7h', open: false } },
+          capacity_min_text: '500W', capacity_max_text: '50KW', duration_min: 50, duration_max: 5000, duration_min_text: '4m', duration_max_text: '7h', open: false,
+          // 3 ohm × 1.0 alpha-per-ohm from guild 0-2's bank.
+          rate_ualpha_per_mw_block: 3, alpha_per_kw_day: 49091, fx_source: 'guild bank' } },
     ] },
     // Nothing parked. The board claims a Comms hand-off on every boot, so the
     // quiet answer is the normal one and must not reject into the console.
@@ -674,6 +685,29 @@ cat > "$FIX" <<'EOF'
       { metric: 'ore', unit: 'ore', object_types: ['planet', 'player', 'struct', 'fleet'] },
       { metric: 'load', unit: 'power', object_types: ['substation', 'player', 'guild', 'struct'] },
     ],
+    /* SCOUT: the doctrine's answer, as `terminal_scout` computes it. Their
+     * fleet reaches water and land and STANDS in land and space — so air is
+     * the only ambit that is neither, and space is covered by hulls parked
+     * there even though nothing they own can shoot into it. That distinction
+     * is the whole point of the card. */
+    terminal_scout: function (args) {
+      return {
+        target: String((args && args.target) || '2-15361'), planet_id: '2-15361',
+        owner: '1-9', owner_name: 'Harness', shield: 0, stored_ore: 12,
+        defender: {
+          side: 'defender', count: 3,
+          reaches: ['land', 'water'], occupies: ['land', 'space'], free: ['air'],
+          exposure: { space: 1, air: 0, land: 2, water: 2 },
+          command: { id: '5-9', type: 'Command Ship', ambit: 'space', health: 6, max_health: 6, is_command: true, reaches: [] },
+          hulls: [
+            { id: '5-1', type: 'Tank', ambit: 'land', health: 2, max_health: 3, online: true, is_command: false, reaches: ['land'], counter: 1, counter_same: 1 },
+            { id: '5-2', type: 'Battleship', ambit: 'land', health: 3, max_health: 3, online: true, is_command: false, reaches: ['water', 'land'], counter: 1, counter_same: 1 },
+            { id: '5-9', type: 'Command Ship', ambit: 'space', health: 6, max_health: 6, online: true, is_command: true, reaches: [], counter: 0, counter_same: 2 },
+          ],
+        },
+        attacker: { side: 'attacker', count: 0, reaches: [], occupies: [], free: ['space', 'air', 'land', 'water'], exposure: { space: 0, air: 0, land: 0, water: 0 }, command: null, hulls: [] },
+      };
+    },
     /* The ROSTER's record of the same player, exactly as Rust answers it: for
      * anybody outside our virtual roster the name is the literal string
      * "primary" and there is no alpha, no ore and no portrait. That is why the

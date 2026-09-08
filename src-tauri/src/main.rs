@@ -108,6 +108,7 @@ fn main() {
             mcp::terminal::terminal_guild_bank_redeem,
             mcp::terminal::terminal_series,
             mcp::terminal::terminal_series_metrics,
+            mcp::terminal::terminal_scout,
             mcp::game_stats::open_game_stats_window,
             // Comms (federated Matrix chat). Reachable only from the Debug
             // panel for now — see src/matrix/mod.rs.

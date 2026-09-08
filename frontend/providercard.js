@@ -14,7 +14,10 @@
  *   substation  '4-4'                                 where the capacity comes from
  *   policy      'openMarket' | 'guildMarket' | 'closedMarket'   drawn as the badge
  *   rate        { value: '1', denomLabel: 'ack', denomIcon: null }
- *                                                     price per W per block; the
+ *   comparable  { value: '16.4K', unit: 'alpha / kW / day', title }  the same
+ *               price in the one unit every offer shares; absent when the
+ *               offer could not be priced
+ *                                                     price per mW per block; the
  *                                                     alpha glyph when it is alpha,
  *                                                     the token's own name otherwise
  *   capacity    { min: '1KW', max: '1GW' }
@@ -53,17 +56,24 @@
     return box;
   }
 
-  // "1 ack / W / blk" — the alpha glyph stands in for the word when it is alpha.
+  /* "1 ack / mW / blk" — the alpha glyph stands in for the word when it is
+   * alpha, and the unit is MILLIWATTS.
+   *
+   * The chain charges `duration × capacity × rate` with capacity in mW
+   * (agreement_cache.go GetCollateral, msg_server_agreement_open.go), so a
+   * rate is per milliwatt. This card said "/ W / blk" — a thousandfold error
+   * on the one number anybody trades on. `comparable` is the same price
+   * restated in a unit a person can hold in their head. */
   function rateReading(p) {
     var P = parts();
     var r = p.rate || {};
     var s = P.el('span', 'pc-res xp-rate');
-    s.title = 'Price per W per block';
-    // Text nodes between the pieces so the copied text reads "1 ack / W / blk".
+    s.title = 'Price per milliwatt per block — the chain\'s own unit';
+    // Text nodes between the pieces so the copied text reads "1 ack / mW / blk".
     s.appendChild(document.createTextNode(str(r.value) + ' '));
     if (r.denomIcon) s.appendChild(P.icon(r.denomIcon));
     else if (r.denomLabel) { s.appendChild(unit(str(r.denomLabel))); s.appendChild(document.createTextNode(' ')); }
-    s.appendChild(unit('/ W / blk'));
+    s.appendChild(unit('/ mW / blk'));
     return s;
   }
 
@@ -79,9 +89,28 @@
     return s;
   }
 
+  /* The same price, in a unit a person can hold in their head — and the one
+   * unit every offer shares. Sellers quote in whatever they like (`ualpha`, or
+   * any guild's own token), so "1 ack" beside "3 ohm" is not a comparison
+   * until both are restated. Rust does the restating, off the guild banks'
+   * collateral ratios; this only draws it, and draws nothing when an offer
+   * could not be priced rather than quoting an unknown token at par. */
+  function comparableReading(p) {
+    var P = parts();
+    var c = p.comparable;
+    if (!c || c.value == null) return null;
+    var s = P.el('span', 'pc-res xp-compare');
+    s.title = c.title || 'The same rate in one unit, so offers can be compared';
+    s.appendChild(document.createTextNode(str(c.value) + ' '));
+    s.appendChild(unit(str(c.unit || '')));
+    return s;
+  }
+
   function readings(p) {
     var P = parts();
     var box = P.el('div', 'pc-reads');
+    var cmp = comparableReading(p);
+    if (cmp) box.appendChild(cmp);
     if (p.rate) box.appendChild(rateReading(p));
     var cap = rangeReading(p.capacity, 'sui-icon-energy', 'Capacity on offer');
     if (cap) box.appendChild(cap);
@@ -159,7 +188,7 @@
     var r = p.rate || {};
     var nm = P.el('span', 'pc-name');
     nm.appendChild(P.el('span', 'pc-nm',
-      str(r.value) + (r.denomLabel ? ' ' + str(r.denomLabel) : '') + ' / W / blk'));
+      str(r.value) + (r.denomLabel ? ' ' + str(r.denomLabel) : '') + ' / mW / blk'));
     node.appendChild(nm);
     node.appendChild(document.createTextNode(' '));
     node.appendChild(P.el('span', 'pc-id', '#' + str(p.id)));

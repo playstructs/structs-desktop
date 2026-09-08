@@ -555,6 +555,52 @@ pub fn reopen_if_persisted(app: &tauri::AppHandle) {
 
 // ── The energy market ───────────────────────────────────────────────────────
 
+/// Blocks in a day, from the measured block time the hasher already uses.
+pub const BLOCKS_PER_DAY: f64 = 86_400_000.0 / crate::hasher::difficulty::ESTIMATED_BLOCK_TIME_MS;
+
+/// One offer's price, restated so it can be compared with any other.
+///
+/// Returns `(ualpha per mW per block, alpha per kW per day)`, or `None` when
+/// the denom has no price we can read — never a guess. An unpriced offer sorts
+/// last and says so; quoting an unknown token at par would put a fictional
+/// bargain at the top of the board.
+///
+/// The two 1e6 factors — milliwatts per kilowatt, and ualpha per alpha —
+/// cancel, which is why the day rate is a single multiply by the block count.
+pub fn comparable_price(
+    rate_amount: f64,
+    denom: &str,
+    fx: &std::collections::HashMap<String, f64>,
+) -> Option<(f64, f64)> {
+    let ualpha = if denom == "ualpha" { Some(rate_amount) } else { fx.get(denom).map(|r| rate_amount * r) }?;
+    Some((ualpha, ualpha * BLOCKS_PER_DAY))
+}
+
+/// What one base unit of each denom is worth in `ualpha`.
+///
+/// `ualpha` is 1 by definition. A guild token is worth its bank's collateral
+/// ratio — the same figure the Guild banks card prints as "alpha per token" —
+/// which is what makes offers priced in different guilds' tokens comparable at
+/// all. A guild whose bank cannot be read is simply absent: an offer in its
+/// token then has no price, and says so, rather than being quoted at par.
+async fn denom_fx() -> std::collections::HashMap<String, f64> {
+    let mut out = std::collections::HashMap::new();
+    out.insert("ualpha".to_string(), 1.0);
+    if let Ok(v) = terminal_guild_banks().await {
+        for b in v.get("banks").and_then(|b| b.as_array()).cloned().unwrap_or_default() {
+            let denom = b.get("denom").and_then(|d| d.as_str()).unwrap_or("");
+            let ratio = b.get("ratio").and_then(|r| r.as_f64());
+            if let (false, Some(r)) = (denom.is_empty(), ratio) {
+                if r > 0.0 {
+                    out.insert(denom.to_string(), r);
+                }
+            }
+        }
+    }
+    out
+}
+
+
 /// Every provider on the chain as the provider card draws it, cached for a
 /// minute. Read from the LCD's provider store in pages, through the same
 /// `provider_card` Comms uses for a provider it names, so the market board
@@ -599,22 +645,65 @@ pub async fn terminal_market() -> Result<Value, String> {
             break;
         }
     }
-    // Cheapest first, as a quote board reads: only alpha-priced offers are
-    // comparable without a bank ratio, so those lead and the rest keep their
-    // chain order behind them.
-    providers.sort_by(|a, b| {
-        let rate = |v: &Value| {
-            let p = v.get("provider");
-            let alpha = p.and_then(|p| p.get("rate_denom")).and_then(|d| d.as_str()) == Some("ualpha");
-            let amt = p.and_then(|p| p.get("rate_amount")).and_then(|a| a.as_f64()).unwrap_or(f64::MAX);
-            (if alpha { 0 } else { 1 }, amt)
+    /* ── One price, so the board can be read down ─────────────────────────
+     *
+     * Offers are quoted in whatever the seller likes: `ualpha`, or any guild's
+     * own token. "1 ack" beside "3 ohm" is not a comparison, and until now the
+     * board gave up on it — alpha-priced offers led and everything else kept
+     * its chain order behind them, which is not an ordering at all.
+     *
+     * A guild token has a price: its bank's collateral ratio, ualpha per token,
+     * which `terminal_guild_banks` already reads. That is the FX rate, so every
+     * offer can be restated in one unit and the cheapest capacity in the galaxy
+     * is the top row whoever is selling it.
+     *
+     * The unit is ALPHA PER KILOWATT PER DAY. The chain charges
+     * `duration × capacity × rate` (agreement_cache.go, msg_server_agreement_
+     * open.go) with capacity in MILLIWATTS — so the raw rate is per mW per
+     * block, and a rate of 1 ualpha/mW/block is 1e6 mW/kW × blocks-per-day ÷
+     * 1e6 ualpha/alpha = one day of a kilowatt for `blocks_per_day` alpha. The
+     * two factors of 1e6 cancel, which is why this reads as a single multiply.
+     */
+    let fx = denom_fx().await;
+    for p in providers.iter_mut() {
+        let (amount, denom) = {
+            let pr = p.get("provider");
+            (
+                pr.and_then(|x| x.get("rate_amount")).and_then(|a| a.as_f64()).unwrap_or(0.0),
+                pr.and_then(|x| x.get("rate_denom")).and_then(|d| d.as_str()).unwrap_or("").to_string(),
+            )
         };
-        rate(a).partial_cmp(&rate(b)).unwrap_or(std::cmp::Ordering::Equal)
+        let q = comparable_price(amount, &denom, &fx);
+        if let Some(pr) = p.get_mut("provider").and_then(|x| x.as_object_mut()) {
+            pr.insert("rate_ualpha_per_mw_block".into(), json!(q.map(|x| x.0)));
+            pr.insert("alpha_per_kw_day".into(), json!(q.map(|x| x.1)));
+            pr.insert("fx_source".into(), json!(if denom == "ualpha" { "alpha" } else if q.is_some() { "guild bank" } else { "unpriced" }));
+        }
+    }
+    let priced = |v: &Value| v.get("provider").and_then(|p| p.get("alpha_per_kw_day")).and_then(|x| x.as_f64());
+    providers.sort_by(|a, b| match (priced(a), priced(b)) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     });
+    // The board's own summary: what it costs to buy, and how much there is.
+    let mut prices: Vec<f64> = providers.iter().filter_map(priced).collect();
+    prices.sort_by(f64::total_cmp);
+    let open_capacity: f64 = providers
+        .iter()
+        .filter(|p| p.get("provider").and_then(|x| x.get("open")).and_then(|o| o.as_bool()).unwrap_or(false))
+        .filter_map(|p| p.get("provider").and_then(|x| x.get("capacity_max")).and_then(|c| c.as_f64()))
+        .sum();
     let out = json!({
         "at_ms": now,
         "height": crate::mcp::perception::with_snapshot(|s| s.height).unwrap_or(0),
         "providers": providers,
+        "best_alpha_per_kw_day": prices.first(),
+        "median_alpha_per_kw_day": if prices.is_empty() { None } else { Some(prices[prices.len() / 2]) },
+        "priced": prices.len(),
+        "unpriced": providers.len() - prices.len(),
+        "open_capacity_mw": open_capacity,
     });
     *lock(&CACHE) = (now, out.clone());
     Ok(out)
@@ -1154,9 +1243,157 @@ pub fn terminal_series_metrics() -> Value {
     )
 }
 
+/* ── SCOUT: the ambit they neither reach nor occupy ─────────────────────────
+ *
+ * The one computed answer that decides fights, and nothing in this app showed
+ * it to a person. From the doctrine, measured rather than reasoned:
+ *
+ *   * every fleet weapon does 2 damage — hulls differ by REACH, control,
+ *     counter values and charge, not by firepower;
+ *   * a counter fires when the defender's weapon reaches the ATTACKER's ambit
+ *     (cross-ambit) or when the defender is STANDING in it (same-ambit);
+ *   * so an ambit they neither reach nor occupy is a free shot, and against
+ *     beezhan on 2026-08-18 that was the whole battle: 12-1, their Command
+ *     Ship decapitated, our Command Ship untouched at 6/6.
+ *
+ * A human cannot union nine hulls' weapon reach in their head while a raid's
+ * four-minute window runs. This is that union, per side.
+ */
+fn ambit_names(mask: u64) -> Vec<String> {
+    crate::mcp::combat::AMBIT_BITS
+        .iter()
+        .filter(|b| mask & **b != 0)
+        .map(|b| crate::mcp::tools::format::decode_ambits(*b))
+        .collect()
+}
+
+/// One side's fighting shape, as an attacker needs to read it.
+fn scout_side(structs: &[Value], types: &Value, side: &str) -> Value {
+    let live: Vec<&Value> = structs
+        .iter()
+        .filter(|s| s.get("side").and_then(|x| x.as_str()) == Some(side))
+        .filter(|s| !s.get("destroyed").and_then(|x| x.as_bool()).unwrap_or(false))
+        .collect();
+    let mut threats: Vec<crate::mcp::combat::DefenderThreat> = Vec::new();
+    let mut occupied = 0u64;
+    let mut hulls: Vec<Value> = Vec::new();
+    let mut command: Value = Value::Null;
+    for s in &live {
+        let ambit = s.get("ambit").and_then(|x| x.as_str()).unwrap_or("");
+        let bit = crate::mcp::tools::format::ambit_bit(ambit);
+        occupied |= bit;
+        let tid = s.get("type_id").map(|x| match x {
+            Value::String(v) => v.clone(),
+            other => other.to_string(),
+        }).unwrap_or_default();
+        let t = types.get(&tid);
+        let num = |k: &str| t.and_then(|x| x.get(k)).and_then(|x| x.as_u64()).unwrap_or(0);
+        let mask = num("primary_weapon_ambits") | num("secondary_weapon_ambits");
+        let counter = num("counter_attack");
+        let counter_same = num("counter_attack_same_ambit");
+        threats.push(crate::mcp::combat::DefenderThreat { mask, ambit_bit: bit, counter, counter_same });
+        let hull = json!({
+            "id": s.get("id").cloned().unwrap_or(Value::Null),
+            "type": s.get("type_name").cloned().unwrap_or(Value::Null),
+            "ambit": ambit,
+            "health": s.get("health").cloned().unwrap_or(Value::Null),
+            "max_health": s.get("max_health").cloned().unwrap_or(Value::Null),
+            "online": s.get("online").and_then(|x| x.as_bool()).unwrap_or(true),
+            "is_command": s.get("is_command").and_then(|x| x.as_bool()).unwrap_or(false),
+            "reaches": ambit_names(mask),
+            "counter": counter, "counter_same": counter_same,
+        });
+        if hull["is_command"] == true { command = hull.clone(); }
+        hulls.push(hull);
+    }
+    let reach = threats.iter().fold(0u64, |acc, t| acc | if t.counter > 0 { t.mask } else { 0 });
+    let free = crate::mcp::combat::counter_free_ambits(&threats);
+    let exposure: Value = crate::mcp::combat::AMBIT_BITS
+        .iter()
+        .map(|b| {
+            (
+                crate::mcp::tools::format::decode_ambits(*b),
+                json!(crate::mcp::combat::counter_exposure(&threats, *b)),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>()
+        .into();
+    json!({
+        "side": side,
+        "hulls": hulls,
+        "count": live.len(),
+        "reaches": ambit_names(reach),
+        "occupies": ambit_names(occupied),
+        // The answer. `counter_free_ambits` already subtracts both — the
+        // ambits they reach AND the ambits they stand in.
+        "free": ambit_names(free),
+        "exposure": exposure,
+        "command": command,
+    })
+}
+
+/// Scout a planet or fleet: both sides' hulls, and the ambits each of them
+/// neither reaches nor occupies.
+#[tauri::command]
+pub async fn terminal_scout(target: String) -> Result<Value, String> {
+    let t = crate::mcp::raid_view::parse_target(
+        if target.starts_with('2') { Some(target.as_str()) } else { None },
+        if target.starts_with('9') { Some(target.as_str()) } else { None },
+    )?;
+    let state = crate::mcp::spectator::pull_state(&t).await;
+    let snap = state.get("snapshot").cloned().unwrap_or(Value::Null);
+    if snap.is_null() {
+        return Err(state.get("reason").and_then(|r| r.as_str()).unwrap_or("nothing to scout there").to_string());
+    }
+    let structs = snap.get("structs").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let types = snap.get("struct_types").cloned().unwrap_or(json!({}));
+    Ok(json!({
+        "target": target,
+        "planet_id": snap.get("planet_id").cloned().unwrap_or(Value::Null),
+        "owner": snap.get("owner").cloned().unwrap_or(Value::Null),
+        "owner_name": snap.get("owner_name").cloned().unwrap_or(Value::Null),
+        "shield": snap.get("planetary_shield").cloned().unwrap_or(Value::Null),
+        "stored_ore": snap.get("stored_ore").cloned().unwrap_or(Value::Null),
+        "defender": scout_side(&structs, &types, "defender"),
+        "attacker": scout_side(&structs, &types, "attacker"),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ── The quote board's one price ─────────────────────────────────────
+     *
+     * Sellers quote in whatever they like — `ualpha`, or any guild's own
+     * token — so "1 ack" beside "3 ohm" is not a comparison. This is the
+     * restatement that makes the board readable down the page, and getting it
+     * wrong misprices real money, so the arithmetic is pinned here rather than
+     * trusted to a comment.
+     */
+    #[test]
+    fn every_offer_restates_into_one_unit_or_admits_it_cannot() {
+        let mut fx = std::collections::HashMap::new();
+        fx.insert("ualpha".to_string(), 1.0);
+        fx.insert("uguild.0-2".to_string(), 2.5);   // 2.5 ualpha per ohm
+
+        let (alpha_rate, alpha_day) = comparable_price(1.0, "ualpha", &fx).unwrap();
+        assert_eq!(alpha_rate, 1.0, "alpha is the unit, so it passes through");
+        // 86,400,000 ms / 5,280 ms = 16,363.6 blocks a day. The chain charges
+        // duration × capacity × rate with capacity in mW, so a rate of 1 buys a
+        // kilowatt-day for that many alpha.
+        assert!((alpha_day - 16_363.63).abs() < 0.1, "got {alpha_day}");
+
+        let (token_rate, token_day) = comparable_price(3.0, "uguild.0-2", &fx).unwrap();
+        assert_eq!(token_rate, 7.5, "3 ohm at 2.5 ualpha each is 7.5 ualpha");
+        assert!((token_day - alpha_day * 7.5).abs() < 0.1, "and 7.5x the alpha offer");
+
+        assert!(
+            comparable_price(1.0, "uguild.9-9", &fx).is_none(),
+            "a token whose bank we cannot read has NO price — quoting it at par would \
+             put a fiction at the top of the board"
+        );
+    }
 
     /* The stat store's samples are change-triggered, so the resampler is the
      * one place a quiet object can be turned into a lie: a zero where nothing

@@ -275,21 +275,29 @@ pub fn simulate(
 /// (`CanCounterTargetAmbit`), independently of the defended struct's ambit —
 /// so this is purely "which ambits nobody covers". Attacking from one of these
 /// is, per the docs, "the single biggest combat lever".
-pub fn counter_free_ambits(defender_weapon_masks: &[u64]) -> u64 {
-    let covered = defender_weapon_masks.iter().fold(0u64, |acc, m| acc | m);
-    AMBIT_BITS.iter().fold(0u64, |acc, b| acc | b) & !covered
+///
+/// TWO ways an ambit is covered, and this took only weapon REACH until
+/// 2026-09-08 — which is optimistic in exactly the way that costs hulls. Live
+/// against beezhan (1-471) on 2026-08-18: our space Battleship hit their land
+/// Command Ship and took 1 counter, though not one of its nine defenders had a
+/// weapon reaching space. The counter came from their space-STANDING
+/// Battleships: a defender in the ATTACKER'S OWN ambit counters regardless of
+/// what its weapon reaches. So the rule is "an ambit they neither REACH nor
+/// OCCUPY".
+pub fn counter_free_ambits(threats: &[DefenderThreat]) -> u64 {
+    AMBIT_BITS
+        .iter()
+        .filter(|b| !threats.iter().any(|t| t.covers(**b)))
+        .fold(0u64, |acc, b| acc | b)
 }
 
 /// How exposed an attacker sitting in `attacker_ambit_bit` is: the number of
-/// defenders whose weapons reach that ambit. 0 means a free shot.
-pub fn counter_exposure(defender_weapon_masks: &[u64], attacker_ambit_bit: u64) -> usize {
+/// defenders that would counter them there. 0 means a free shot.
+pub fn counter_exposure(threats: &[DefenderThreat], attacker_ambit_bit: u64) -> usize {
     if attacker_ambit_bit == 0 {
-        return defender_weapon_masks.len();
+        return threats.len();
     }
-    defender_weapon_masks
-        .iter()
-        .filter(|m| **m & attacker_ambit_bit != 0)
-        .count()
+    threats.iter().filter(|t| t.covers(attacker_ambit_bit)).count()
 }
 
 /// One registered defender (or the target itself) as a counter threat.
@@ -305,6 +313,19 @@ pub struct DefenderThreat {
     /// Same-ambit counter damage (Destroyer is the only hull where this
     /// EXCEEDS the base — advancedCounterAttack 1 → 2).
     pub counter_same: u64,
+}
+
+impl DefenderThreat {
+    /// Would this defender counter an attacker standing in `ambit_bit`?
+    ///
+    /// Two ways, and only the first was modelled until 2026-09-08: its WEAPON
+    /// reaches that ambit (cross-ambit), or it is STANDING in that ambit
+    /// itself (same-ambit counters are not weapon-reach-gated — the Command
+    /// Ship reaches nothing real and still counters same-ambit for 2).
+    pub fn covers(&self, ambit_bit: u64) -> bool {
+        (self.mask & ambit_bit != 0 && self.counter > 0)
+            || (self.ambit_bit == ambit_bit && self.counter_same > 0)
+    }
 }
 
 /// Total counter damage an attacker in `attacker_ambit_bit` eats per landed
@@ -615,21 +636,63 @@ mod tests {
         assert!((both.evade_chance(WeaponControl::Unknown) - 0.6667).abs() < 0.01);
     }
 
+    /// A defender that reaches an ambit with its weapon.
+    fn reacher(mask: u64) -> DefenderThreat {
+        DefenderThreat { mask, ambit_bit: 0, counter: 1, counter_same: 1 }
+    }
+
     #[test]
     fn counter_free_ambits_are_the_uncovered_ones() {
         // One land-only defender (mask 4) and one water/land (mask 6).
-        let free = counter_free_ambits(&[4, 6]);
+        let free = counter_free_ambits(&[reacher(4), reacher(6)]);
         assert_eq!(free & 4, 0, "land is covered");
         assert_eq!(free & 2, 0, "water is covered");
         assert_eq!(free & 8, 8, "air is free");
         assert_eq!(free & 16, 16, "space is free");
-        assert_eq!(counter_exposure(&[4, 6], 4), 2);
-        assert_eq!(counter_exposure(&[4, 6], 16), 0);
+        assert_eq!(counter_exposure(&[reacher(4), reacher(6)], 4), 2);
+        assert_eq!(counter_exposure(&[reacher(4), reacher(6)], 16), 0);
     }
 
     #[test]
     fn no_defenders_means_every_ambit_is_free() {
         assert_eq!(counter_free_ambits(&[]), 2 | 4 | 8 | 16);
+    }
+
+    /* ── An ambit they neither REACH nor OCCUPY ───────────────────────────
+     *
+     * Measured against beezhan (1-471) on 2026-08-18. Their whole fleet's
+     * weapon reach was water|land|air — nothing reached SPACE — so stripping
+     * their land blockers from space was completely free. But attacking their
+     * Command Ship from space still took 1 counter, because three of their
+     * Battleships were STANDING in space: a same-ambit counter is not
+     * weapon-reach-gated. Modelling reach alone called space free and was
+     * wrong by exactly that hull.
+     */
+    #[test]
+    fn a_defender_standing_in_an_ambit_covers_it_even_reaching_nothing_there() {
+        // Their fleet: reach water|land, but three hulls parked in space.
+        let land_reacher = DefenderThreat { mask: 2 | 4, ambit_bit: 4, counter: 1, counter_same: 1 };
+        let space_stander = DefenderThreat { mask: 2 | 4, ambit_bit: 16, counter: 1, counter_same: 1 };
+
+        let reach_only = counter_free_ambits(&[land_reacher]);
+        assert_eq!(reach_only & 16, 16, "with nobody in space, space really is free");
+
+        let real = counter_free_ambits(&[land_reacher, space_stander]);
+        assert_eq!(real & 16, 0, "a hull STANDING in space covers space");
+        assert_eq!(real & 8, 8, "air is still free — nobody reaches it or stands in it");
+        assert_eq!(counter_exposure(&[land_reacher, space_stander], 16), 1, "exactly the one that was standing there");
+
+        // The Command Ship is the proof the two mechanisms are separate: its
+        // weapon mask reaches no real ambit, and it is still the hardest
+        // same-ambit counter in the game.
+        let cmd = DefenderThreat { mask: 32, ambit_bit: 4, counter: 0, counter_same: 2 };
+        assert_eq!(counter_free_ambits(&[cmd]) & 4, 0, "land, where it stands, is covered");
+        assert_eq!(counter_free_ambits(&[cmd]) & 16, 16, "space, which it cannot touch, is not");
+
+        // And a defender with no counter value at all covers nothing, however
+        // far its weapon reaches (Mobile Artillery, unarmed planetary hulls).
+        let toothless = DefenderThreat { mask: 2 | 4 | 8 | 16, ambit_bit: 4, counter: 0, counter_same: 0 };
+        assert_eq!(counter_free_ambits(&[toothless]), 2 | 4 | 8 | 16);
     }
 
     /// Live planet 2-855 carries one interceptor at 1/3 — so a guided volley at

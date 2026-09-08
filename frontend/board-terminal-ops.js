@@ -280,7 +280,7 @@
   T.register('queue', {
     label: 'Signing queue',
     describe: function (p) { return 'Signing queue' + (p.signer ? ' · ' + p.signer : ''); },
-    params: [{ key: 'signer', label: 'Signer', kind: 'id', placeholder: 'any player' }],
+    params: [{ key: 'signer', label: 'Signer', kind: 'id', kinds: [1], placeholder: 'any player' }],
     cadenceMs: 2500,
     render: function (host, p, ctx) {
       return invoke('mcp_tx_snapshot').then(function (d) {
@@ -327,7 +327,7 @@
       // retry door: the queue has no retry op, and a history row keeps the
       // message type and the error but not the arguments, so there is nothing
       // to replay — you redo the action from the card that owns it.)
-      { key: 'signer', label: 'Signer', kind: 'id', placeholder: 'any player' },
+      { key: 'signer', label: 'Signer', kind: 'id', kinds: [1], placeholder: 'any player' },
     ],
     cadenceMs: 10000,
     render: function (host, p) {
@@ -391,7 +391,7 @@
     label: 'History chart',
     describe: function (p) { return (p.metric || 'ore') + (p.id ? ' · ' + p.id : ''); },
     params: [
-      { key: 'id', label: 'Object', kind: 'id', placeholder: '2-29604' },
+      { key: 'id', label: 'Object', kind: 'id', kinds: null, placeholder: '2-29604' },
       { key: 'metric', label: 'Metric', kind: 'choice', options: [
         { value: 'ore', label: 'ore' }, { value: 'fuel', label: 'fuel' },
         { value: 'capacity', label: 'capacity' }, { value: 'load', label: 'load' },
@@ -445,6 +445,99 @@
           xLabel: function (i) { return clock(at(i)); },
         }));
       }).catch(function (e) { fail(host, metric + ' history', e); });
+    },
+  });
+
+  /* ── SCOUT: the ambit they neither reach nor occupy ──────────────────────
+   *
+   * The one computed answer that decides fights. Every fleet weapon in the
+   * game does 2 damage, so hulls differ by REACH, not firepower — and a
+   * counter only fires when the defender's weapon reaches your ambit or the
+   * defender is standing in it. Attack from an ambit that is neither and the
+   * shot is free.
+   *
+   * Nobody can union nine hulls' weapon reach in their head while a raid's
+   * four-minute window runs. Rust does it (`terminal_scout`, off the same
+   * doctrine the strike planner uses); this reads it out.
+   */
+  var AMBIT_ICON = { space: 'icon-ambit-space', air: 'icon-ambit-air', land: 'icon-ambit-land', water: 'icon-ambit-water' };
+  var AMBITS = ['space', 'air', 'land', 'water'];
+  function ambitRow(label, list, tone, title) {
+    var r = H.el('div', 'tm-ambits');
+    var cap = H.el('span', 'fstat-l', label);
+    r.appendChild(cap);
+    AMBITS.forEach(function (a) {
+      var on = (list || []).indexOf(a) >= 0;
+      var chip = H.el('span', 'tm-ambit' + (on ? ' is-on ' + (tone || '') : ''));
+      chip.textContent = a;
+      chip.title = title || '';
+      r.appendChild(chip);
+    });
+    return r;
+  }
+  function scoutSide(host, label, side, exposure) {
+    if (!side || !side.count) return;
+    var head = H.el('div', 'tm-cap');
+    head.appendChild(H.el('span', 'fstat-l', label + ' · ' + side.count + ' live hull' + (side.count === 1 ? '' : 's')));
+    host.appendChild(head);
+    /* The free ambits FIRST — it is the answer, and everything under it is
+     * the working. Nothing free is itself the finding: there is no safe
+     * angle on this fleet. */
+    host.appendChild(ambitRow('free', side.free, 'sc-ok', 'They neither reach nor stand in this ambit — a shot from here takes no counter'));
+    if (!(side.free || []).length) host.appendChild(H.alertLine('No free ambit — every angle takes a counter.', 'icon-alert'));
+    host.appendChild(ambitRow('they reach', side.reaches, 'sc-bad-text', 'Their weapons cover this ambit'));
+    host.appendChild(ambitRow('they stand in', side.occupies, 'sc-bad-text', 'A hull standing here counters regardless of what its weapon reaches'));
+    if (side.command && side.command.id) {
+      // Killing it strands the fleet: no Command Ship, no raid, no movement.
+      host.appendChild(H.row('Command ship', String(side.command.type || '?') + ' ' + side.command.id
+        + ' · ' + String(side.command.ambit || '?')
+        + (side.command.health != null ? ' · ' + side.command.health + '/' + side.command.max_health + ' HP' : ''), 'icon-alert'));
+    }
+    var table = H.resultTable();
+    (side.hulls || []).forEach(function (h) {
+      table.appendChild(window.StructsCards.struct.row({
+        id: h.id, type: h.type, ambit: h.ambit, health: h.health, maxHealth: h.max_health,
+        online: h.online, built: true, destroyed: false,
+        // What this hull can shoot at, which is the only thing that decides
+        // whether it can punish you — every fleet weapon does the same damage.
+        attn: (h.is_command ? 'COMMAND · ' : '') + ((h.reaches || []).length ? 'reaches ' + h.reaches.join(' ') : 'reaches nothing'),
+      }, { onClick: function () { add('inspector', { id: h.id }); } }));
+    });
+    host.appendChild(table);
+    if (exposure) {
+      var ex = H.el('div', 'tm-ambits');
+      ex.appendChild(H.el('span', 'fstat-l', 'counters from'));
+      AMBITS.forEach(function (a) {
+        var n = Number(exposure[a] || 0);
+        var chip = H.el('span', 'tm-ambit' + (n ? ' is-on sc-bad-text' : ' is-on sc-ok'));
+        chip.textContent = a + ' ' + n;
+        chip.title = n ? n + ' of their hulls would counter a shot fired from ' + a : 'A shot from ' + a + ' takes no counter';
+        ex.appendChild(chip);
+      });
+      host.appendChild(ex);
+    }
+  }
+  T.register('scout', {
+    label: 'Scout a target', defaultWidth: 2,
+    describe: function (p) { return 'Scout ' + (p.id || '?'); },
+    params: [{ key: 'id', label: 'Planet or fleet', kind: 'id', kinds: [2, 9], placeholder: '2-15361' }],
+    cadenceMs: 30000,
+    render: function (host, p) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet or fleet id.')); return; }
+      return invoke('terminal_scout', { target: p.id }).then(function (d) {
+        host.innerHTML = '';
+        host.appendChild(tiles([
+          ['shield', d.shield == null ? '—' : H.fmtInt(d.shield), null, Number(d.shield) ? null : 'ok'],
+          ['ore', d.stored_ore == null ? '—' : H.fmtOre(d.stored_ore)],
+          [['defenders', 'live hulls'], H.fmtInt((d.defender && d.defender.count) || 0)],
+          [['raiders', 'live hulls'], H.fmtInt((d.attacker && d.attacker.count) || 0), null, (d.attacker && d.attacker.count) ? 'bad' : 'muted'],
+        ]));
+        scoutSide(host, 'Holding ' + (d.planet_id || p.id), d.defender, d.defender && d.defender.exposure);
+        scoutSide(host, 'Raiding it', d.attacker, d.attacker && d.attacker.exposure);
+        if (!(d.defender && d.defender.count) && !(d.attacker && d.attacker.count)) {
+          host.appendChild(H.stateBlock('info', 'Nothing live on ' + (d.planet_id || p.id) + '.'));
+        }
+      }).catch(function (e) { fail(host, 'scout', e); });
     },
   });
 
@@ -767,6 +860,9 @@
                 invoke('mcp_raid_view_open', { planetId: r.planet_id }).catch(function (e) { Board.stamp && Board.stamp('raid view: ' + e); });
               } },
               { icon: 'icon-combat-log', title: 'Battle log', onClick: function () { add('log', { id: r.planet_id }); } },
+              // Mid-raid, the question is where to shoot from — and the four
+              // minutes it takes to answer by hand are the whole window.
+              { icon: 'icon-range', title: 'Scout both sides — where can we shoot from?', onClick: function () { add('scout', { id: r.planet_id }); } },
             ],
           }));
         });
@@ -889,6 +985,11 @@
                     .catch(function (e) { Board.stamp && Board.stamp('raid: ' + e); });
                 });
               } } : null,
+              /* Scout BEFORE you raid. The board scores a target on ore,
+               * shield and defender count; none of that says which ambit you
+               * can shoot from, which is what decides whether the raid costs
+               * you hulls. One door between the two. */
+              { icon: 'icon-range', title: 'Scout ' + t.planet_id + ' — where can we shoot from?', onClick: function () { add('scout', { id: t.planet_id }); } },
               { icon: 'icon-planet', title: 'Open planet ' + t.planet_id, onClick: function () { add('planet', { id: t.planet_id }); } },
               { icon: 'icon-attention', title: 'Add ' + t.player_id + ' to the grudge list', onClick: function () { warSet({ action: 'add', kind: 'grudge', id: t.player_id, label: t.name, guild_id: t.guild_id, weight: 1.5 }, ctx); } },
               { icon: 'icon-blocked', title: 'Never attack ' + t.player_id, destructive: true, onClick: function () { warSet({ action: 'add', kind: 'protected', id: t.player_id }, ctx); } },
@@ -999,7 +1100,7 @@
   // ── Wallet (mcp_inventory) ───────────────────────────────────────────────
   T.register('wallet', {
     label: 'Wallet', describe: function (p) { return 'Wallet · ' + (p.id || 'primary'); },
-    params: [{ key: 'id', label: 'Player', kind: 'id', placeholder: 'primary' }],
+    params: [{ key: 'id', label: 'Player', kind: 'id', kinds: [1], placeholder: 'primary' }],
     cadenceMs: 30000,
     render: function (host, p, ctx) {
       return invoke('mcp_inventory', { player: p.id || 'primary' }).then(function (d) {

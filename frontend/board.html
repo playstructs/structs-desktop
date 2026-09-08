@@ -964,6 +964,71 @@
     .tm-toolbar-param:empty, .tm-bar .tm-toolbar-param:empty { display: none; }
     #tm-cmd.is-err { border-color: var(--text-enemy-primary); }
     .tm-help { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 0 var(--spacing-lg); }
+    /* ── Ambits, as four cells you read across ────────────────────────────
+       The answer to "where can I shoot them from" is a comparison between
+       four ambits, so it is drawn as four cells in a fixed order every time —
+       space, air, land, water — and the ones that are ON are the finding. */
+    .tm-ambits { display: flex; align-items: center; gap: var(--spacing-sm); padding: var(--spacing-xs) 0; flex-wrap: wrap; }
+    .tm-ambits > .fstat-l { flex: 0 0 13ch; }
+    .tm-ambit {
+      flex: none; padding: 0 var(--spacing-sm); border: 1px solid transparent;
+      color: var(--text-hint); text-transform: uppercase; opacity: .4;
+    }
+    .tm-ambit.is-on {
+      border-color: var(--border); color: var(--text-body);
+      background: var(--surface-default); opacity: 1;
+    }
+
+    /* ── The chain's own clock ────────────────────────────────────────────
+       Card ages say when WE last read. This says whether the CHAIN is still
+       moving — a card can honestly read "now" over a feed that died ten
+       minutes ago. Quiet is the alarming state, so it is the coloured one. */
+    .tm-clock { color: var(--text-hint); font-variant-numeric: tabular-nums; white-space: nowrap; padding-right: var(--spacing-md); }
+    .tm-clock.tm-clock-quiet { color: var(--accent-destructive); }
+
+    /* ── How old is what you are looking at? ──────────────────────────────
+       A number with no age is a number you cannot act on: a card that lost
+       its connection five minutes ago looked exactly like one that updated a
+       second ago. `late` is past twice its own cadence; `stale` is a refresh
+       that actually FAILED, and there the content stays — a stale reading you
+       can see and date beats a blank you cannot. */
+    .tm-age { flex: none; margin-left: auto; padding: 0 var(--spacing-md); color: var(--text-hint); white-space: nowrap; }
+    .tm-card.tm-late .tm-age { color: var(--text-warning); }
+    .tm-card.tm-stale .tm-age { color: var(--accent-destructive); }
+    /* The body, not the frame: the frame's border is the game's art. Dimming
+       the content is what says "this is the last good answer, not a live one"
+       without hiding the answer. */
+    .tm-card.tm-stale .tm-body { opacity: .55; }
+
+    /* ── The command line's completion menu ───────────────────────────────
+       Anchored to the field, over the cards. The rows are the HELP card's
+       rows — one vocabulary, drawn one way, whether you are reading the
+       reference or typing into the box. */
+    .tm-cmd-field { position: relative; }
+    /* SUI's nav bar scrolls sideways so a long tab strip can be reached. Ours
+       WRAPS instead (`.tm-bar` above), so it needs no scroll of its own — and
+       the scroll was clipping the completion menu, which hangs below the bar.
+       282px of suggestions were in the DOM, unhidden, and invisible. */
+    #board-layout .sui-screen-nav.tm-bar { overflow: visible; }
+    .tm-suggest {
+      position: absolute; top: 100%; left: 0; right: 0; z-index: 60;
+      max-height: 40vh; overflow-y: auto;
+      background: var(--surface-default);
+      border: 1px solid var(--accent-primary);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, .45);
+    }
+    .tm-suggest-row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md);
+      text-decoration: none; color: var(--text-body); white-space: nowrap;
+    }
+    /* flex, not a text node with a trailing space: HTML collapses that space
+       and the subject ran into the word — "2-29604COMMS". */
+    .tm-suggest-row .tm-help-words { display: flex; gap: var(--spacing-sm); min-width: 0; overflow: hidden; }
+    .tm-suggest-row .ops-val { flex: none; color: var(--text-hint); }
+    /* The highlighted row is the one Enter takes. */
+    .tm-suggest-row.is-on { background: var(--surface-player-highlight); }
+    .tm-suggest-row:hover { background: var(--surface-player-highlight); }
     .tm-help-row { display: flex; justify-content: space-between; gap: var(--spacing-md); text-decoration: none; color: var(--text-body); }
     .tm-help-row:hover { background: var(--surface-player-highlight); }
     .tm-help-words b { color: var(--text-player-primary); font-weight: normal; }

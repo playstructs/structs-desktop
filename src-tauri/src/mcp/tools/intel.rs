@@ -770,7 +770,15 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
         Some(tid) => defender_threats(client, tid).await,
         None => vec![],
     };
-    let defender_masks: Vec<u64> = threats.iter().map(|t| t.mask).collect();
+    /* The THREATS, not just their weapon masks.
+     *
+     * A defender standing in the attacker's own ambit counters regardless of
+     * what its weapon reaches, so passing masks alone made "free ambit" mean
+     * "nobody's weapon reaches here" — optimistic in the way that costs hulls.
+     * Measured live 2026-08-18: a space shot at a land Command Ship took 1
+     * counter from their space-STANDING Battleships, though not one of its
+     * nine defenders had a weapon reaching space. `DefenderThreat::covers`
+     * now decides, and it knows both ways. */
     // The planet's interceptor network only bites guided ordnance aimed at a
     // struct sitting on that planet. Its rate is chain-exposed (e.g. 1/3 per
     // interceptor), so this is real data, not a guess.
@@ -948,7 +956,7 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
                     (sec, "secondary", r)
                 }
             };
-            let exposure = counter_exposure(&defender_masks, *att_ambit);
+            let exposure = counter_exposure(&threats, *att_ambit);
             // Struct-level attackCounterable overrides everything (Mobile
             // Artillery grinds defended targets with ZERO attrition) — a
             // counter-immune weapon pays no counter risk however many
@@ -989,7 +997,7 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
         tgt_ambit_bit,
         tgt_hp,
         reduction,
-        counter_free: crate::mcp::combat::counter_free_ambits(&defender_masks),
+        counter_free: crate::mcp::combat::counter_free_ambits(&threats),
         rows,
     })
 }

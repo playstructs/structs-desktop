@@ -55,7 +55,7 @@ const OFFER = {
   check('the emblem is the transfers glyph', !!card.querySelector('.gc-emblem .icon-transfers'));
 
   // Readings: price with its unit, two ranges with the game's glyphs.
-  check('the price reads "1 ack / W / blk"', /^1 ack \/ W \/ blk$/i.test(text(card.querySelector('.xp-rate'))),
+  check('the price reads "1 ack / mW / blk" — MILLIWATTS, the unit the chain charges in', /^1 ack \/ mW \/ blk$/i.test(text(card.querySelector('.xp-rate'))),
     text(card.querySelector('.xp-rate')));
   const ranges = card.querySelectorAll('.xp-range');
   check('capacity is a range with the energy glyph',
@@ -63,6 +63,19 @@ const OFFER = {
   check('duration is a range in time, blocks on hover',
     text(ranges[1]) === '9m – 61d' && /100 – 1M blocks/.test(ranges[1].title), ranges[1].title);
   check('no reading is captioned', !/RATE|CAPACITY|DURATION|MARKET/i.test(text(card)), text(card));
+
+  /* The comparable price LEADS, because it is the only reading that compares.
+   * Sellers quote in whatever they like, so "1 ack" beside "3 ohm" is not a
+   * comparison until both are restated in one unit. */
+  const priced = XP.card(Object.assign({}, OFFER, {
+    comparable: { value: '16.36Kg', unit: '/ kW / day', title: 'Comparable price, from guild bank' },
+  }));
+  const cmp = priced.querySelector('.xp-compare');
+  check('a priced offer leads with the comparable rate, before its own denomination',
+    text(cmp) === '16.36Kg / kW / day' && /guild bank/.test(cmp.title)
+      && priced.querySelector('.pc-reads').firstChild === cmp, text(cmp));
+  check('…and an offer that could NOT be priced shows nothing rather than quoting an unknown token at par',
+    card.querySelector('.xp-compare') === null);
 
   // The owner is a small player line.
   const own = card.querySelector('.xp-owner');
@@ -107,11 +120,11 @@ const OFFER = {
   const chip = XP.chip(OFFER, { onClick: () => { opened++; } });
   check('a clickable chip is a link', chip.tagName === 'A' && chip.classList.contains('gc-chip'));
   check('one line: glyph, price, id, policy',
-    !!chip.querySelector('.gc-emblem.gc-xs .icon-transfers') && text(chip) === '1 ack / W / blk #10-1 OPEN', text(chip));
+    !!chip.querySelector('.gc-emblem.gc-xs .icon-transfers') && text(chip) === '1 ack / mW / blk #10-1 OPEN', text(chip));
   chip.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   check('clicking it opens', opened === 1);
   const inert = XP.chip({ id: '10-9', rate: { value: '3', denomLabel: 'snack' } });
-  check('an inert chip is not a link', inert.tagName === 'SPAN' && text(inert) === '3 snack / W / blk #10-9', text(inert));
+  check('an inert chip is not a link', inert.tagName === 'SPAN' && text(inert) === '3 snack / mW / blk #10-9', text(inert));
 }
 
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
