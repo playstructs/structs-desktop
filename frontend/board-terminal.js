@@ -434,6 +434,75 @@
   function frameClass(w, extra, def, h) {
     return FRAME_CLS + ' tm-w' + w + ' tm-h-' + (h || 'tall') + (extra || '') + (def && def.frameless ? ' tm-frameless' : '');
   }
+  /* ── Reaching the part of the board you cannot see ──────────────────────
+   *
+   * A board taller than the window could not be rearranged past one screen:
+   * you picked a card up at the bottom, ran out of pixels, and there was
+   * nowhere left to drag to. Every mature sortable solves this the same way
+   * and ours did not — SortableJS's scroll plugin, react-beautiful-dnd's
+   * "fluid scroller", dnd-kit's auto-scroll activator are all one idea: a band
+   * along each edge of the scroller which, while the pointer is inside it,
+   * scrolls on every frame.
+   *
+   * The speed is squared over the band rather than linear, which is the part
+   * worth stealing. A linear ramp reads as one speed — you either creep the
+   * whole way or you overshoot — while a squared one is gentle where you are
+   * still choosing and fast where you have clearly asked to travel.
+   */
+  var SCROLL_EDGE = 72;  // px of each edge that scrolls
+  var SCROLL_MAX = 24;   // px per frame hard against the edge
+  function scrollerOf(node) {
+    for (var n = node; n && n.nodeType === 1 && n !== document.body; n = n.parentNode) {
+      var cs = getComputedStyle(n);
+      if (/(auto|scroll)/.test(cs.overflowY) && n.scrollHeight > n.clientHeight + 1) return n;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+  /* Scrolls toward `y` every frame while it sits in an edge band, and calls
+   * `step` whenever it actually moved: the board slid under a pointer that
+   * never moved, so what it is over now is a different landing spot. */
+  function autoScroller(node) {
+    var box = scrollerOf(node), raf = 0, at = null, step = null;
+    var page = box === document.scrollingElement || box === document.documentElement;
+    function speed(d) { var t = 1 - Math.max(0, d) / SCROLL_EDGE; return Math.max(1, Math.round(SCROLL_MAX * t * t)); }
+    function frame() {
+      raf = 0;
+      if (at == null) return;
+      var r = page ? { top: 0, bottom: window.innerHeight } : box.getBoundingClientRect();
+      var dy = 0;
+      if (at - r.top < SCROLL_EDGE) dy = -speed(at - r.top);
+      else if (r.bottom - at < SCROLL_EDGE) dy = speed(r.bottom - at);
+      if (dy) {
+        var was = box.scrollTop;
+        box.scrollTop += dy;
+        if (box.scrollTop !== was && step) step();
+      }
+      raf = requestAnimationFrame(frame);
+    }
+    return {
+      to: function (y, onStep) {
+        at = y; step = onStep;
+        if (!raf && typeof requestAnimationFrame === 'function') raf = requestAnimationFrame(frame);
+      },
+      stop: function () { if (raf) cancelAnimationFrame(raf); raf = 0; at = null; step = null; },
+    };
+  }
+  /* Before or after the card you are over, in READING order.
+   *
+   * The old rule was the horizontal midpoint alone, which is right for two
+   * cards side by side and wrong for a full-width or a grown one: dragging to
+   * the bottom edge of a tall card meaning "below this" landed above it
+   * whenever the pointer happened to be on its left half. So the vertical
+   * decides once the card is tall enough for "below" to mean anything, and
+   * the horizontal decides otherwise. */
+  var ROW_SLOP = 48;
+  function landsAfter(r, x, y) {
+    var cy = r.top + r.height / 2;
+    if (y > cy + ROW_SLOP) return true;
+    if (y < cy - ROW_SLOP) return false;
+    return r.width > 0 ? x > r.left + r.width / 2 : true;
+  }
+
   function frame(card) {
     var def = TYPES[card.type];
     var node = H.el('div', frameClass(card.w || 1, '', def, heightOf(card)));
@@ -474,14 +543,33 @@
       doors.appendChild(door('icon-link-out', 'Pop out', function () { popOut(card.id); }));
       doors.appendChild(door('icon-close', 'Remove', function () { remove(card.id); }));
       // Drag the header to move the card; drop on another card to land
-      // before or after it (left or right half), or on the grid floor to go
-      // last. Pointer events, not HTML5 drag-and-drop: they behave the same in
-      // WebKit and Chromium, need no ghost image, and can be driven by any
-      // synthetic mouse — which is also how the tests reach them.
-      head.title = 'Drag to move';
+      // before or after it, or on the grid floor to go last. Pointer events,
+      // not HTML5 drag-and-drop: they behave the same in WebKit and Chromium,
+      // need no ghost image, and can be driven by any synthetic mouse — which
+      // is also how the tests reach them.
+      head.title = 'Drag to move · alt+← → to step, alt+home/end to send';
+      head.tabIndex = 0;
       head.addEventListener('pointerdown', function (ev) {
         if (ev.button !== 0 || (ev.target.closest && ev.target.closest('.tm-door'))) return;
-        var sx = ev.clientX, sy = ev.clientY, live = false, target = null, after = false, ghost = null;
+        var sx = ev.clientX, sy = ev.clientY, live = false, target = null, after = false;
+        var ghost = null, chip = null, scroll = null, at = { x: sx, y: sy };
+        /* Where would it land from where the pointer is now? Split out of the
+         * move handler because the autoscroller has to ask the same question
+         * with the pointer standing still — the board moved, not the hand. */
+        var place = function () {
+          var hit = document.elementFromPoint ? document.elementFromPoint(at.x, at.y) : null;
+          var over = hit && hit.closest ? hit.closest('.tm-card') : null;
+          if (over && over !== node) {
+            after = landsAfter(over.getBoundingClientRect(), at.x, at.y);
+            target = over.getAttribute('data-card');
+            if (ghost) over.parentNode.insertBefore(ghost, after ? over.nextSibling : over);
+          } else {
+            target = null;
+            var grid0 = document.getElementById('tm-grid');
+            // Over the floor: it lands last, and the silhouette says so.
+            if (ghost && grid0 && hit && (hit === grid0 || grid0.contains(hit))) grid0.appendChild(ghost);
+          }
+        };
         var onMove = function (e) {
           if (!live) {
             if (Math.abs(e.clientX - sx) < 4 && Math.abs(e.clientY - sy) < 4) return;
@@ -496,6 +584,19 @@
             node.parentNode.insertBefore(ghost, node);
             node.classList.add('tm-dragging');
             node.hidden = true;
+            /* Once the board scrolls, the card you are carrying is usually off
+             * screen and the silhouette is the only thing left saying what is
+             * in your hand — and on a long board it is somewhere else again.
+             * The name rides the cursor so the answer is always under it. */
+            chip = H.el('div', 'tm-drag-chip sui-text-label', titleOf(card));
+            document.body.appendChild(chip);
+            scroll = autoScroller(node);
+            /* An iframe eats pointer events: the Comms and Pay cards are whole
+             * documents, and dragging across one stopped the drag dead — no
+             * more moves, and `elementFromPoint` answering the frame instead of
+             * the card under it. Capture routes every move back here whatever
+             * it crosses; the CSS shield keeps the hit test honest. */
+            if (head.setPointerCapture) { try { head.setPointerCapture(ev.pointerId); } catch (err) { /* not captureable */ } }
             // A press that becomes a drag has usually already begun selecting
             // the header's text; without this the selection drags along.
             document.body.classList.add('tm-dragging-cards');
@@ -503,29 +604,27 @@
             if (sel && sel.removeAllRanges) sel.removeAllRanges();
           }
           e.preventDefault();
-          var hit = document.elementFromPoint ? document.elementFromPoint(e.clientX, e.clientY) : null;
-          var over = hit && hit.closest ? hit.closest('.tm-card') : null;
-          if (over && over !== node) {
-            var r = over.getBoundingClientRect();
-            after = r.width > 0 ? (e.clientX - r.left) > r.width / 2 : true;
-            target = over.getAttribute('data-card');
-            if (ghost) over.parentNode.insertBefore(ghost, after ? over.nextSibling : over);
-          } else {
-            target = null;
-            var grid0 = document.getElementById('tm-grid');
-            // Over the floor: it lands last, and the silhouette says so.
-            if (ghost && grid0 && hit && (hit === grid0 || grid0.contains(hit))) grid0.appendChild(ghost);
-          }
+          at = { x: e.clientX, y: e.clientY };
+          if (chip) { chip.style.left = at.x + 'px'; chip.style.top = at.y + 'px'; }
+          place();
+          if (scroll) scroll.to(at.y, place);
         };
         var finish = function () {
           window.removeEventListener('pointermove', onMove);
           window.removeEventListener('pointerup', onUp);
           window.removeEventListener('pointercancel', onUp);
+          if (scroll) scroll.stop();
+          scroll = null;
+          if (head.releasePointerCapture && head.hasPointerCapture && head.hasPointerCapture(ev.pointerId)) {
+            try { head.releasePointerCapture(ev.pointerId); } catch (err) { /* already gone */ }
+          }
           document.body.classList.remove('tm-dragging-cards');
           node.hidden = false;
           node.classList.remove('tm-dragging');
           if (ghost && ghost.parentNode) ghost.parentNode.removeChild(ghost);
+          if (chip && chip.parentNode) chip.parentNode.removeChild(chip);
           ghost = null;
+          chip = null;
         };
         var onUp = function (e) {
           var wasLive = live;
@@ -538,9 +637,44 @@
           else if (onFloor) dropOn(card.id, null, true);
           else { state.drag = null; clearDrop(); }
         };
+        /* Escape puts it back. A drag you cannot abandon has to be finished
+         * somewhere, and "somewhere" on a board you have scrolled away from is
+         * a guess — so the way out is the one every drag surface offers. */
+        var onKey = function (e) {
+          if (e.key !== 'Escape' || !live) return;
+          e.preventDefault();
+          window.removeEventListener('keydown', onKey);
+          target = null;
+          finish();
+          state.drag = null;
+          clearDrop();
+        };
         window.addEventListener('pointermove', onMove);
         window.addEventListener('pointerup', onUp);
         window.addEventListener('pointercancel', onUp);
+        window.addEventListener('keydown', onKey);
+        var stopKey = function () { window.removeEventListener('keydown', onKey); };
+        window.addEventListener('pointerup', stopKey, { once: true });
+        window.addEventListener('pointercancel', stopKey, { once: true });
+      });
+      /* Dragging is not the only way to move a card, and on a long board it is
+       * the worst one: to send a card from the bottom to the top you have to
+       * hold a button down through the whole journey. Alt+arrows step it past
+       * a neighbour, alt+home/end send it the whole way, and the card that
+       * moved keeps focus and scrolls itself into view so you can see it land
+       * and press again. */
+      head.addEventListener('keydown', function (e) {
+        if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        var cards = state.layout.cards;
+        var i = cards.map(function (c) { return c.id; }).indexOf(card.id);
+        if (i < 0) return;
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { if (i === 0) return; move(card.id, -1); }
+        else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { if (i >= cards.length - 1) return; move(card.id, 1); }
+        else if (e.key === 'Home') { if (i === 0) return; dropOn(card.id, cards[0].id, false); }
+        else if (e.key === 'End') { if (i >= cards.length - 1) return; dropOn(card.id, null, true); }
+        else return;
+        e.preventDefault();
+        focusHead(card.id);
       });
       // The header carries a title and doors, both of which the browser will
       // happily drag as content of their own.
@@ -592,6 +726,17 @@
     renderGrid();
   }
   Terminal.dropOn = dropOn;
+  /* Both moves re-render the grid, which throws away the node you pressed the
+   * key on. Focus has to be put back on the card that moved, not left on the
+   * body — otherwise the second press goes nowhere and a keyboard move is a
+   * one-shot. `block: 'nearest'` because the card is usually already visible
+   * and yanking the board to centre it loses your place. */
+  function focusHead(id) {
+    var n = document.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-head');
+    if (!n) return;
+    if (n.focus) n.focus();
+    if (n.scrollIntoView) n.scrollIntoView({ block: 'nearest' });
+  }
   function columnWidth(grid) {
     var cols = getComputedStyle(grid).gridTemplateColumns.split(' ').map(parseFloat).filter(isFinite);
     if (!cols.length) return 0;

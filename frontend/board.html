@@ -1100,8 +1100,29 @@
       user-select: none;
     }
     .tm-card.tm-resizing { outline: 1px solid var(--accent-primary); }
-    .tm-head { cursor: grab; user-select: none; -webkit-user-select: none; }
+    /* `touch-action: none` or a trackpad/touch drag scrolls the board instead
+       of lifting the card — the browser claims the gesture before the first
+       pointermove arrives, and there is no taking it back. */
+    .tm-head { cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none; }
     .tm-card.tm-dragging .tm-head { cursor: grabbing; }
+    /* The header is a drag handle, so it is also a keyboard one: alt+arrows
+       step the card, alt+home/end send it. Focusable means it needs to SHOW
+       that it is focused. */
+    .tm-head:focus-visible { outline: var(--spacing-xs) solid var(--accent-primary-active); outline-offset: calc(-1 * var(--spacing-xs)); }
+    /* Comms, Pay and the viewer are whole documents in iframes, and an iframe
+       consumes the pointer: a drag across one stopped receiving moves and
+       `elementFromPoint` answered the frame rather than the card holding it.
+       Pointer capture fixes the first half; this fixes the hit test. */
+    body.tm-dragging-cards iframe { pointer-events: none; }
+    /* The name of the card in your hand, riding the cursor. Once the board
+       autoscrolls, the card itself is usually off screen. */
+    .tm-drag-chip {
+      position: fixed; z-index: 70; pointer-events: none;
+      transform: translate(var(--spacing-lg), var(--spacing-lg));
+      padding: var(--spacing-xs) var(--spacing-sm);
+      background: var(--accent-primary); color: var(--surface-default);
+      white-space: nowrap;
+    }
     /* The grip straddles the column gap so the target is a full --spacing-md
        wide on either side of the card's edge, not a 4px sliver inside it. */
     .tm-resize { position: absolute; top: 0; bottom: 0; right: calc(-1 * var(--spacing-sm)); width: var(--spacing-md); cursor: col-resize; touch-action: none; }

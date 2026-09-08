@@ -860,6 +860,118 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('…and the card is back in the flow, selection allowed again', src.hidden === false && !d.body.classList.contains('tm-dragging-cards'));
     delete d.elementFromPoint;
   }
+  /* ── Reaching the part of the board you cannot see ────────────────────────
+   *
+   * The drag above never leaves one screen. A board four screens tall could
+   * not be rearranged past the first: you picked a card up, ran out of pixels,
+   * and had nowhere left to drag to. jsdom lays nothing out and never paints,
+   * so the scroller is stubbed and the frames are stepped by hand — which also
+   * makes the speed curve assertable rather than a thing you feel.
+   */
+  {
+    const ids = order().split(',');
+    const src = d.querySelector('#tm-' + ids[1]);
+    const head = src.querySelector('.tm-head');
+    const sc = d.querySelector('.ops-scroll');
+    sc.style.overflowY = 'auto';
+    Object.defineProperty(sc, 'scrollHeight', { value: 4000, configurable: true });
+    Object.defineProperty(sc, 'clientHeight', { value: 500, configurable: true });
+    sc.getBoundingClientRect = () => ({ left: 0, top: 100, right: 800, bottom: 600, width: 800, height: 500 });
+    sc.scrollTop = 2000;
+    d.elementFromPoint = () => null;
+    const frames = [];
+    const realRaf = w.requestAnimationFrame;
+    w.requestAnimationFrame = (fn) => frames.push(fn);
+    w.cancelAnimationFrame = () => { frames.length = 0; };
+    const step = (n) => { for (let i = 0; i < n; i++) frames.splice(0).forEach((f) => f()); };
+    const ev = (type, x, y, el) => (el || w).dispatchEvent(new w.MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 }));
+
+    ev('pointerdown', 300, 300, head);
+    ev('pointermove', 340, 340);
+    check('the card you are carrying says its name under the cursor — once the board scrolls it is the only thing that does',
+      d.querySelector('.tm-drag-chip') !== null
+      && d.querySelector('.tm-drag-chip').textContent === w.Board.Terminal.titleOf(w.Board.Terminal.state.layout.cards.find((c) => c.id === ids[1])),
+      d.querySelector('.tm-drag-chip') && d.querySelector('.tm-drag-chip').textContent);
+
+    ev('pointermove', 300, 110);   // 10px inside the top band
+    const top0 = sc.scrollTop;
+    step(4);
+    const up = top0 - sc.scrollTop;
+    check('holding the pointer at the top edge scrolls the board up under it, with the pointer standing still', up > 0, String(up));
+
+    ev('pointermove', 300, 590);   // 10px inside the bottom band
+    const bot0 = sc.scrollTop;
+    step(4);
+    check('…and at the bottom edge, down', sc.scrollTop - bot0 > 0, String(sc.scrollTop - bot0));
+
+    /* Squared, not linear: the far side of the band is a nudge and the edge
+     * is a sprint. A linear ramp reads as one speed — you creep the whole way
+     * or you overshoot. */
+    ev('pointermove', 300, 165);   // 65px in: nearly out of the band
+    const slow0 = sc.scrollTop; step(1); const slow = slow0 - sc.scrollTop;
+    ev('pointermove', 300, 101);   // hard against it
+    const fast0 = sc.scrollTop; step(1); const fast = fast0 - sc.scrollTop;
+    check('…and the speed grows with how far into the band you are, squared rather than linearly',
+      fast > slow * 4, fast + ' vs ' + slow);
+
+    ev('pointermove', 300, 350);   // out of both bands
+    const still0 = sc.scrollTop; step(3);
+    check('…and the middle of the board does not scroll at all', sc.scrollTop === still0);
+
+    /* A drag you cannot abandon has to be finished somewhere, and on a board
+     * you have scrolled away from that is a guess. */
+    const wasOrder = order();
+    d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    check('escape puts the card back and leaves the order alone',
+      order() === wasOrder && !w.Board.Terminal.state.drag
+      && !d.querySelector('.tm-ghost, .tm-drag-chip') && src.hidden === false
+      && !d.body.classList.contains('tm-dragging-cards'));
+    check('…and the autoscroller stops with it', (step(3), sc.scrollTop === still0));
+
+    w.requestAnimationFrame = realRaf;
+    delete d.elementFromPoint;
+    delete sc.getBoundingClientRect;
+  }
+
+  /* ── Moving without holding a button down ────────────────────────────────
+   *
+   * Dragging is the worst way to send a card the length of a long board: you
+   * hold a button through the whole journey, and one slip drops it somewhere
+   * you did not mean. The header is a drag handle, so it is a keyboard one.
+   */
+  {
+    const ids = order().split(',');
+    const id = ids[2];
+    const key = (k, alt) => d.querySelector('#tm-' + id + ' .tm-head')
+      .dispatchEvent(new w.KeyboardEvent('keydown', { key: k, altKey: alt !== false, bubbles: true }));
+    key('ArrowLeft');
+    check('alt+← steps a card back past its neighbour', order().split(',')[1] === id, order());
+    key('ArrowRight');
+    check('alt+→ steps it forward again', order().split(',')[2] === id, order());
+    key('Home');
+    check('alt+home sends it the whole way to the front', order().split(',')[0] === id, order());
+    key('End');
+    check('alt+end sends it to the back', order().split(',').pop() === id, order());
+    const settled = order();
+    key('End');
+    check('…and the ends are walls, not wraps', order() === settled);
+    key('ArrowLeft', false);
+    check('a bare arrow is left alone — it belongs to whatever the header is inside', order() === settled);
+    check('the header takes focus so a keyboard can reach it at all',
+      d.querySelector('#tm-' + id + ' .tm-head').tabIndex === 0
+      && /\.tm-head:focus-visible/.test(read('frontend/board.html')));
+  }
+
+  /* Two things a synthetic pointer cannot show, pinned as text: an iframe
+   * consumes real pointer events (Comms, Pay and the viewer are whole
+   * documents), and a touch drag on an unguarded handle scrolls the board
+   * instead of lifting the card. */
+  check('an iframe card cannot swallow a drag crossing it',
+    /body\.tm-dragging-cards iframe \{[^}]*pointer-events: none/.test(read('frontend/board.html'))
+    && /setPointerCapture/.test(read('frontend/board-terminal.js')));
+  check('…and a touch drag lifts the card rather than scrolling the board',
+    /\.tm-head \{[^}]*touch-action: none/.test(read('frontend/board.html')));
+
   check('every card carries a resize grip', d.querySelectorAll('#tm-grid .tm-card .tm-resize').length === d.querySelectorAll('#tm-grid .tm-card').length);
   w.Board.Terminal.resizeTo(first, 3, false);
   check('a resize commits the width to the layout', d.querySelector('#tm-' + first).classList.contains('tm-w3') && w.Board.Terminal.state.layout.cards.find((c) => c.id === first).w === 3);
