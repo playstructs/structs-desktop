@@ -46,7 +46,26 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
    * second way in. */
   check('the command bar is GONE until asked for — no permanent slab over the cards',
     d.getElementById('tm-palette') !== null && d.getElementById('tm-palette').hidden
-      && d.querySelector('.tm-chrome > .sui-screen > .sui-screen-nav.tm-bar') !== null);
+      && d.querySelector('.tm-chrome .sui-screen-nav.tm-bar') === null);
+  /* Being temporary is what lets it stop being a bar. A strip wedged into the
+   * chrome had to stay narrow; a Spotlight over the whole board does not — so
+   * it is a scrim on the BODY with one panel floating on it, and the scrim is
+   * the game's own (`.sui-message-system-model-overlay`, what the game dims
+   * the board with for its system modals) rather than a second one invented
+   * here. */
+  {
+    const pal = d.getElementById('tm-palette');
+    check('…and when it comes it is a Spotlight over the whole board, not a strip in the chrome',
+      pal.parentNode === d.body
+      && pal.classList.contains('sui-message-system-model-overlay')
+      && pal.querySelector('.tm-palette-box.sui-panel .sui-screen-nav.tm-bar #tm-cmd') !== null,
+      pal.className);
+    check('…sitting high in it, because the matches grow downward',
+      /#tm-palette \{[^}]*justify-content: flex-start/.test(read('frontend/board.html'))
+      && /#tm-palette \{[^}]*padding: 16vh/.test(read('frontend/board.html')));
+    check('…and the line you type is at reading size, which a bar could never afford',
+      d.getElementById('tm-cmd').classList.contains('sui-text-paragraph'));
+  }
   check('…and a mouse has a door to it, because a hidden feature with no affordance is one nobody finds',
     d.querySelector('#tm-ws-doors .tm-door[title^="Command palette"]') !== null);
   check('every card is the game\'s own panel: edges, chunk, a nav screen for the header with the title as the active tab and the doors beside it, a page-body screen for the body', cards.every((c) => c.classList.contains('sui-panel') && c.classList.contains('sui-theme-player') && c.querySelector(':scope > .sui-panel-edge-left') && c.querySelector(':scope > .sui-panel-edge-right') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-screen-nav .sui-screen-nav-item.sui-mod-active.tm-title') && c.querySelector('.sui-screen-nav .tm-doors') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-page-body-screen.tm-body')));
@@ -596,6 +615,17 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
    * something incomplete, which is the picker's old refusal in the shape the
    * palette can express. */
   const cmdBox = d.getElementById('tm-cmd');
+  /* Clicking off it is the way out you reach for when the pointer is already
+   * in your hand. The scrim ITSELF only: a press that lands on the panel is
+   * not a press on the board behind it. */
+  {
+    const pal = d.getElementById('tm-palette');
+    w.Board.Terminal.openPalette();
+    pal.querySelector('.tm-palette-box').dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true }));
+    check('a press inside the palette does not dismiss it', !pal.hidden);
+    pal.dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true }));
+    check('…a press on the scrim around it does', pal.hidden);
+  }
   w.Board.Terminal.openPalette();
   cmdBox.value = 'GUILD';
   cmdBox.dispatchEvent(new w.Event('input', { bubbles: true }));
@@ -691,7 +721,24 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
      * that is highlighted. */
     const cmd = d.getElementById('tm-cmd');
     const menu = d.querySelector('.tm-suggest');
-    check('the command line has a completion menu anchored to it', menu !== null && cmd.closest('.tm-cmd-field').contains(menu));
+    /* The matches are CONTENT of the palette, inside the same frame under the
+     * line, not a dropdown hanging off its edge — which is the whole reason
+     * the box is a panel and not a bar. */
+    check('the matches sit inside the palette\'s own frame, under the line you are typing',
+      menu !== null && menu.closest('.tm-palette-results') !== null
+      && menu.closest('.tm-palette-box') === cmd.closest('.tm-palette-box'));
+    /* Flowing inside the frame means the frame has to go when there is nothing
+     * in it: an empty `sui-screen` is still a screen, and it read as a stray
+     * bar under the line. */
+    const results = menu.closest('.tm-palette-results');
+    cmd.value = 'zzzznotacommand';
+    cmd.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('…and with no matches the frame under the line goes with them', menu.hidden && results.hidden);
+    cmd.value = '';
+    cmd.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('…while an empty line is the card menu, so the palette is a superset of the picker it replaced',
+      !menu.hidden && !results.hidden && menu.querySelectorAll('.tm-suggest-row').length > 5,
+      String(menu.querySelectorAll('.tm-suggest-row').length));
     cmd.dispatchEvent(new w.Event('focus'));
     cmd.value = '1-61 ';
     cmd.dispatchEvent(new w.Event('input', { bubbles: true }));
@@ -1090,6 +1137,75 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     await until(() => d.querySelector('#tm-' + dm.id + ' iframe'));
     check('…and the page is asked for that list', /list=direct/.test(d.querySelector('#tm-' + dm.id + ' iframe').getAttribute('src')));
     w.Board.Terminal.remove(dm.id);
+  }
+
+  /* ── Pay is a CARD now, not a window in a card ────────────────────────────
+   *
+   * `transfer.html` in an iframe was the cause of every frame, header and
+   * scaling bug that panel had: a whole document carrying its own `.sui-panel`,
+   * its own nav bar and the game's menu-page scaler inside a frame that
+   * already drew all three. The window still exists — Comms opens it, and
+   * there it IS a window — but the card draws itself.
+   */
+  {
+    const pay = w.Board.Terminal.add('pay', { to: '1-61' });
+    const node = d.querySelector('#tm-' + pay.id);
+    await until(() => node.querySelector('.pay-parties .pc-person'));
+    check('Pay draws itself — no page embedded in the card',
+      node.querySelector('iframe') === null && node.querySelector('.pay-parties') !== null);
+
+    /* A payment names two PEOPLE. Seeing the recipient's face and id is what
+     * catches a mis-send before it is signed; an address never does. */
+    const sides = node.querySelectorAll('.pay-party');
+    check('…and it names BOTH parties, as people', sides.length === 2
+      && /Marklifer/.test(sides[0].textContent) && /1-194/.test(sides[0].textContent)
+      && /JPEG/.test(sides[1].textContent) && /1-61/.test(sides[1].textContent)
+      && sides[0].querySelector('.pc-pfp') !== null && sides[1].querySelector('.pc-pfp') !== null,
+      [...sides].map((s) => s.textContent).join(' | '));
+    check('…the recipient shown with the address the payment would actually go to',
+      /structs1qqqq/.test(sides[1].querySelector('.pay-addr').textContent));
+    /* `fstat-l` upper-cases. An address that cannot be pasted back is not an
+     * address the player can check. */
+    check('…in the lowercase it is really written in',
+      !/STRUCTS1/.test(sides[1].querySelector('.pay-addr').textContent));
+
+    /* `amount` is the FLOORED display figure, `amount_p` the precise base one:
+     * 40230000000 µg is 40.23 Kg, and reading the wrong field would have shown
+     * a balance a millionth of the truth. */
+    const amount = node.querySelector('.amount-input');
+    const facts = () => node.querySelector('.pay-facts').textContent;
+    check('the balance is the PRECISE holding, not the floored display figure', /40\.23Kg/.test(facts()), facts());
+    check('…and the asset picker offers only what the SERVER says may leave a wallet — ore is not a bank asset',
+      !/[Oo]re/.test(node.querySelector('.pay-amount-host').textContent),
+      node.querySelector('.pay-amount-host').textContent);
+
+    amount.value = '5';
+    amount.dispatchEvent(new w.Event('input', { bubbles: true }));
+    // Wait for the PREVIEW, not just the local arithmetic: "after" is worked
+    // out here, the route is the server's answer, and only the second means
+    // the round trip landed.
+    await until(() => /primary signing queue/.test(facts()));
+    check('an amount previews what it costs you and which queue signs it',
+      /35\.23Kg/.test(facts()) && /primary signing queue/.test(facts()), facts());
+    const cta = () => node.querySelector('.pay-actions a');
+    check('…and the button says what it will do, not "submit"', / Send 5Kg/.test(cta().textContent), cta().textContent);
+    check('…and is live, because the preview says the chain would take it', !cta().classList.contains('pay-off'));
+
+    /* The card's whole job is to refuse what the chain would refuse. */
+    amount.value = '999';
+    amount.dispatchEvent(new w.Event('input', { bubbles: true }));
+    await until(() => /short by/.test(node.querySelector('.pay-note').textContent));
+    check('spending more than you hold is refused HERE, with the chain\'s own reason',
+      cta().classList.contains('pay-off') && /short by/.test(node.querySelector('.pay-note').textContent),
+      node.querySelector('.pay-note').textContent);
+
+    /* Paying someone else gives up only the thing that must be re-decided. */
+    sides[1].querySelector('.pay-clear').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await until(() => node.querySelector('.pay-party input'));
+    check('changing the recipient hands back the search, and refuses to send meanwhile',
+      node.querySelector('.pay-party input') !== null && cta().classList.contains('pay-off'));
+
+    w.Board.Terminal.remove(pay.id);
   }
   check('an incident row names the attacker as a person and the shots as its badge', /1-1957/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && /2-287/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="incidents"] .pc-row .sui-badge') !== null);
   check('a raid row stacks attacker vs defender and keeps the live one\'s status word', /Marklifer/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && /JPEG/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="raids"] .pc-row.sc-bad') !== null);

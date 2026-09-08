@@ -848,6 +848,23 @@ cat > "$FIX" <<'EOF'
     terminal_player_explore: '[vplayer 5] explored — planet 2-31001, fleet 9-1201',
     mcp_struct_act: 'queued',
     matrix_resolve_payable: { to: 'structs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq', playerId: '1-61', name: 'JPEG' },
+    /* Pay's preview, answering against the ARGS rather than a canned reply:
+     * the card's whole job is to refuse a payment the chain would refuse, so a
+     * fixture that always says ok could never show that. Over balance is the
+     * one refusal the client can reach on its own. */
+    mcp_transfer_preview: function (a) {
+      var bal = 40230000000;
+      var over = Number(a.amount) > bal;
+      return {
+        ok: !over,
+        problems: over ? ['balance is 40230 ualpha, short by ' + (Number(a.amount) - bal)] : [],
+        from: { player_id: '1-194', name: 'Marklifer', address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne' },
+        to: a.to, recipient: 'JPEG', recipient_id: '1-61',
+        denom: a.denom, amount: a.amount, balance: bal,
+        route: 'primary signing queue',
+      };
+    },
+    mcp_transfer_execute: { ok: true },
     mcp_infusion_preview: INFUSION_PREVIEW,
     mcp_infusion_infuse: { ok: true, tx: 'HARNESSTX' },
     mcp_infusion_defuse: { ok: true, tx: 'HARNESSTX' },

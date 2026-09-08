@@ -1848,4 +1848,267 @@
       }).catch(function (e) { fail(host, 'health', e); });
     },
   });
+
+  /* ── Pay ──────────────────────────────────────────────────────────────────
+   *
+   * Was `transfer.html` in an iframe, and every problem it had was that one
+   * problem: a whole DOCUMENT pretending to be a card. It carried its own
+   * `.sui-panel`, its own nav bar, its own close button and the game's
+   * menu-page scaler, so the card drew a frame around a frame, the header sat
+   * a screen's border too low, the type came out at 2× past 1152px, and the
+   * panel tools the card owns had nowhere to live. Patching each of those in
+   * `embed.css` was treating symptoms of the embed itself.
+   *
+   * So: a card, drawn here, from the same parts every other card uses.
+   *
+   * The shape keeps the one genuinely good idea the old window had — a
+   * payment names two PEOPLE, and seeing the recipient's face and id is what
+   * catches a mis-send before it is signed, which an address never does. The
+   * amount is the only number you are deciding, so it is the only number
+   * drawn large; balance, what you would be left with, and which queue signs
+   * it are facts beside it.
+   *
+   * `transfer.html` stays: Comms still opens it as its own window, which is a
+   * window, and there it is right.
+   */
+  T.register('pay', {
+    label: 'Pay', cadenceMs: 0,
+    describe: function (p) { return 'Pay' + (p && p.to ? ' · ' + p.to : ''); },
+    params: [{ key: 'to', label: 'Pay whom', kind: 'id', kinds: [1], placeholder: '1-61' }],
+    render: function (host, p, ctx) {
+      var S = { me: null, assets: [], denom: null, base: 0, unit: null, to: null, preview: null, timer: null, busy: false };
+      host.innerHTML = '';
+      var parties = H.el('div', 'pay-parties');
+      var amountHost = H.el('div', 'pay-amount-host');
+      var facts = H.el('div', 'pay-facts');
+      var note = H.el('div', 'pay-note');
+      var actions = H.el('div', 'pay-actions');
+      [parties, amountHost, facts, note, actions].forEach(function (n) { host.appendChild(n); });
+
+      function asset() {
+        for (var i = 0; i < S.assets.length; i++) if (S.assets[i].denom === S.denom) return S.assets[i];
+        return null;
+      }
+      /* Alpha rides the shared ladder so a figure copied off any other card
+       * pastes back in. A guild token has only the two rungs its guild named. */
+      function rungs(a) {
+        if (!a || a.denom === 'ualpha') return null;
+        var out = [], exp = Number(a.exponent) || 0;
+        if (exp > 0 && a.display_name) out.push({ label: a.display_name, mul: Math.pow(10, exp) });
+        out.push({ label: a.base_name || a.denom, mul: 1 });
+        return out;
+      }
+      function assetName(a) { return a ? (a.denom === 'ualpha' ? 'alpha' : (a.display_name || a.denom)) : ''; }
+      /* `amount` is the FLOORED display figure; `amount_p` is the precise base
+       * one. Spending the first would send whole Alpha when the player holds
+       * 40230.7, and MAX off it leaves the remainder stranded. */
+      function baseOf(a) { return Number(a && a.amount_p != null ? a.amount_p : (a && a.amount) || 0) || 0; }
+
+      // ── The two parties ──────────────────────────────────────────────────
+      function person(role, o, extra, onClear) {
+        var box = H.el('div', 'pay-party sui-screen');
+        box.appendChild(H.el('div', 'fstat-l', role));
+        var line = PC() && PC().parts.personLine
+          ? PC().parts.personLine({ id: o.id, name: o.name, tag: o.tag, pfp: o.pfp }, {})
+          : H.el('div', null, String(o.name || o.id || ''));
+        if (line) box.appendChild(line);
+        /* One tiny footer carrying both. An address is lowercase bech32 —
+         * `fstat-l` upper-cases, which made structs1zpta…dk4q6s read as
+         * something you could not paste back — and the link takes its size by
+         * INHERITANCE, because SUI's `a:link` out-specifies any type class
+         * put on the anchor itself. */
+        var foot = H.el('div', 'pay-foot sui-text-tiny');
+        if (extra) foot.appendChild(H.el('span', 'pay-addr', extra));
+        if (onClear) {
+          var a = H.el('a', 'pay-clear', 'change');
+          a.href = 'javascript:void(0)';
+          a.addEventListener('click', onClear);
+          foot.appendChild(a);
+        }
+        if (foot.childNodes.length) box.appendChild(foot);
+        return box;
+      }
+      /* No recipient yet: the slot IS the search. A payment screen with an
+       * empty "to" box and no way to find anyone was the old window's other
+       * dead end. */
+      function search() {
+        var box = H.el('div', 'pay-party sui-screen');
+        box.appendChild(H.el('div', 'fstat-l', 'TO'));
+        var input = H.textBox('', 'name or 1-61', function () {});
+        input.setAttribute('autocomplete', 'off');
+        box.appendChild(H.field('', input));
+        var hits = H.el('div', 'pay-hits');
+        box.appendChild(hits);
+        var timer = null;
+        function run() {
+          var q = String(input.value || '').trim();
+          hits.innerHTML = '';
+          if (q.length < 2) return;
+          invoke('mcp_player_search', { query: q }).then(function (res) {
+            hits.innerHTML = '';
+            ((res && (res.results || res.players)) || res || []).slice(0, 5).forEach(function (r) {
+              var row = PC() && PC().parts.personLine
+                ? PC().parts.personLine({ id: r.player_id, name: r.name || r.username, tag: r.guild_tag, pfp: r.pfp || r.pfp_attrs },
+                    { cls: 'pay-hit', onClick: function () { choose(r.player_id, r.name || r.username, r.pfp || r.pfp_attrs, r.guild_tag); } })
+                : null;
+              if (row) hits.appendChild(row);
+            });
+            if (!hits.childNodes.length) hits.appendChild(H.el('div', 'fstat-l', 'no one by that name'));
+          }).catch(function (e) { hits.innerHTML = ''; hits.appendChild(H.el('div', 'fstat-l', String(e))); });
+        }
+        input.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(run, 250); });
+        // A bare id needs no search: it is already the answer.
+        input.addEventListener('keydown', function (e) {
+          if (e.key !== 'Enter') return;
+          var v = String(input.value || '').trim();
+          if (/^1-\d+$/.test(v)) { e.preventDefault(); choose(v, null, null, null); }
+        });
+        return box;
+      }
+      function choose(playerId, name, pfp, tag) {
+        S.to = { id: playerId, name: name, pfp: pfp, tag: tag, address: null };
+        paint();
+        invoke('matrix_resolve_payable', { playerId: playerId }).then(function (intent) {
+          if (!intent || !intent.to) return;
+          S.to = { id: intent.playerId || playerId, name: intent.name || name, pfp: pfp, tag: tag, address: intent.to };
+          paint(); schedule();
+        }).catch(function (e) { S.preview = null; setNote('error', String(e)); });
+      }
+
+      function setNote(kind, text) {
+        note.innerHTML = '';
+        if (text) note.appendChild(H.stateBlock(kind, text));
+      }
+
+      // ── Preview ──────────────────────────────────────────────────────────
+      function schedule() {
+        if (S.timer) clearTimeout(S.timer);
+        S.timer = setTimeout(preview, 250);
+      }
+      function preview() {
+        if (!S.to || !S.to.address || !S.denom || !S.base) { S.preview = null; paintFacts(); return; }
+        invoke('mcp_transfer_preview', { from: 'primary', to: S.to.address, denom: S.denom, amount: S.base })
+          .then(function (pv) {
+            S.preview = pv;
+            setNote(pv && pv.ok ? '' : 'error', pv && pv.problems && pv.problems.length ? pv.problems.join(' · ') : '');
+            paintFacts();
+          })
+          .catch(function (e) { S.preview = null; setNote('error', String(e)); paintFacts(); });
+      }
+
+      function send() {
+        if (S.busy || !S.preview || !S.preview.ok) return;
+        S.busy = true; paintActions();
+        invoke('mcp_transfer_execute', { from: 'primary', to: S.to.address, denom: S.denom, amount: S.base })
+          .then(function () {
+            S.busy = false; S.base = 0; S.preview = null;
+            setNote('ok', 'sent to ' + (S.to.name || S.to.id));
+            return load();
+          })
+          .catch(function (e) { S.busy = false; setNote('error', String(e)); paintActions(); });
+      }
+
+      // ── Paint ────────────────────────────────────────────────────────────
+      function paintFacts() {
+        facts.innerHTML = '';
+        var a = asset();
+        if (!a) return;
+        var bal = baseOf(a);
+        var f = function (label, value) {
+          /* Supporting facts, not the decision: the amount is the one figure
+           * at reading size, and "primary signing queue" at 16px shouted over
+           * it. */
+          var w = H.el('span', 'pay-fact');
+          w.appendChild(H.el('span', 'fstat-l', label));
+          w.appendChild(H.el('b', 'sui-text-tiny', value));
+          facts.appendChild(w);
+        };
+        f('balance', H.fmtAmountIn(a, bal));
+        if (S.base) f('after', H.fmtAmountIn(a, Math.max(0, bal - S.base)));
+        if (S.preview && S.preview.route) f('route', S.preview.route);
+        paintActions();
+      }
+      function paintActions() {
+        actions.innerHTML = '';
+        var ready = !!(S.preview && S.preview.ok) && !S.busy;
+        var a = H.el('a', 'sui-screen-btn ' + (ready ? 'sui-mod-primary' : 'sui-mod-secondary'));
+        a.href = 'javascript:void(0)';
+        a.appendChild(H.el('i', 'icon-send-alpha'));
+        a.appendChild(H.el('span', null, S.busy ? ' Sending…'
+          : ' Send' + (S.base && asset() ? ' ' + H.fmtAmountIn(asset(), S.base) : '')));
+        if (!ready) a.classList.add('pay-off');
+        else a.addEventListener('click', send);
+        actions.appendChild(a);
+      }
+      function paintAmount() {
+        amountHost.innerHTML = '';
+        var a = asset();
+        if (!a) return;
+        var opts = {
+          kind: 'alpha', rungs: rungs(a), base: S.base, max: baseOf(a),
+          onChange: function (base, unit) { S.base = base; S.unit = unit; paintFacts(); schedule(); },
+        };
+        // WHICH asset first, then how much of it — and only when there is a
+        // choice: a player holding nothing but Alpha is not asked to pick it.
+        if (S.assets.length > 1) {
+          var sel = H.selectBox(S.denom, S.assets.map(function (x) {
+            return { value: x.denom, label: assetName(x) + ' · ' + H.fmtAmountIn(x, baseOf(x)) };
+          }), function (d) { S.denom = d; S.unit = null; S.base = 0; paintAmount(); paintFacts(); schedule(); });
+          amountHost.appendChild(H.field('Asset', sel));
+        }
+        if (S.unit) opts.unit = S.unit;
+        var af = H.amountField('Amount', opts);
+        var input = af.querySelector('.amount-input');
+        if (input) input.classList.add('sui-text-paragraph');
+        amountHost.appendChild(af);
+      }
+      function paint() {
+        parties.innerHTML = '';
+        parties.appendChild(person('FROM', S.me || { id: 'primary' }, S.me && S.me.address ? shortAddr(S.me.address) : null));
+        var ar = H.el('div', 'pay-arrow');
+        ar.appendChild(H.el('i', 'sui-icon-sm icon-arrow-right'));
+        parties.appendChild(ar);
+        parties.appendChild(S.to
+          ? person('TO', S.to, S.to.address ? shortAddr(S.to.address) : 'resolving…',
+              function () { S.to = null; S.preview = null; setNote('', ''); paint(); paintFacts(); })
+          : search());
+        paintAmount();
+        paintFacts();
+      }
+      function shortAddr(a) {
+        var s = String(a || '');
+        return s.length > 20 ? s.slice(0, 12) + '…' + s.slice(-6) : s;
+      }
+
+      function load() {
+        return invoke('mcp_inventory', { player: 'primary' }).then(function (d) {
+          /* `mcp_inventory` names the player `player_id`, the player card wants
+           * `id`. Left unmapped the FROM side drew nothing at all — a payment
+           * screen naming one of its two parties. */
+          var me = d && d.player;
+          if (me) S.me = { id: me.player_id || me.id, name: me.name, pfp: me.pfp || me.pfp_attrs, tag: me.guild_tag, address: me.address };
+          /* Whatever the SERVER says may leave a wallet, not a list kept here:
+           * ore is not a bank asset at all and staking states are not
+           * balances, and the two must never disagree. */
+          S.assets = ((d && d.assets) || []).filter(function (x) { return x.sendable && baseOf(x) > 0; });
+          S.assets.sort(function (x, y) {
+            if (x.denom === 'ualpha') return -1;
+            if (y.denom === 'ualpha') return 1;
+            return String(x.display_name || x.denom).localeCompare(y.display_name || y.denom);
+          });
+          if (!asset()) { S.denom = S.assets.length ? S.assets[0].denom : null; S.unit = null; }
+          paint();
+        });
+      }
+
+      return load().then(function () {
+        if (p && p.to) choose(String(p.to), null, null, null);
+        // Handed a recipient by Comms: the same claim the window made.
+        else invoke('matrix_take_pending_transfer').then(function (intent) {
+          if (intent && intent.playerId) choose(intent.playerId, intent.name, intent.pfp_attrs, null);
+        }).catch(function () {});
+      });
+    },
+  });
+
 })();

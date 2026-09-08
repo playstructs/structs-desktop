@@ -328,11 +328,37 @@
   }
   // The units an operator may type a quantity IN, largest first — the option
   // list behind every amount field on this board.
-  function unitOptions(kind) {
-    return SCALES[kind].map(function (s) { return { value: s[2], label: s[2], div: s[1] }; });
+  /* A guild's own token is not on the shared ladder.
+   *
+   * Alpha, power and ore each have a fixed ladder every screen agrees on, and
+   * `kind` names it. A guild token has whatever exponent and display name its
+   * guild chose — two rungs, both read off the chain — so a caller that knows
+   * them passes them as `rungs` ([{label, mul}]) and everything below works
+   * the same. Without it there was no way to spell "3 Orbital Hydro" and the
+   * player was left counting millionths. */
+  function ladder(kind, rungs) {
+    if (rungs && rungs.length) return rungs.map(function (r) { return [0, r.mul, r.label]; });
+    return SCALES[kind];
   }
-  function unitDivisor(kind, unit) {
-    var l = SCALES[kind];
+  /* An amount in an ASSET's own units.
+   *
+   * Alpha is on the shared ladder, so "12.4 Kg" reads the same here as on
+   * every other card. A guild token has only what its guild named it: whole
+   * display units when they divide cleanly, base units when they do not,
+   * because a two-rung token has nowhere else to go. */
+  function fmtAmountIn(asset, base) {
+    var n = Number(base) || 0;
+    if (!asset || asset.denom === 'ualpha') return window.StructsUnits.fmtAlpha(n);
+    var exp = Number(asset.exponent) || 0;
+    var mul = exp > 0 ? Math.pow(10, exp) : 1;
+    if (mul > 1 && asset.display_name && n >= mul) return window.StructsUnits.trim2(n / mul) + ' ' + asset.display_name;
+    return n + ' ' + (asset.base_name || asset.denom || '');
+  }
+  function unitOptions(kind, rungs) {
+    return ladder(kind, rungs).map(function (s) { return { value: s[2], label: s[2], div: s[1] }; });
+  }
+  function unitDivisor(kind, unit, rungs) {
+    var l = ladder(kind, rungs);
     for (var i = 0; i < l.length; i++) if (l[i][2] === unit) return l[i][1];
     return 1;
   }
@@ -684,8 +710,9 @@
   function amountField(label, opts) {
     opts = opts || {};
     var kind = opts.kind || 'alpha';
-    var unit = opts.unit || stepFor(opts.base || opts.max || 0, SCALES[kind])[2];
-    var div = unitDivisor(kind, unit);
+    var rungs = opts.rungs || null;
+    var unit = opts.unit || (rungs && rungs.length ? rungs[0].label : stepFor(opts.base || opts.max || 0, SCALES[kind])[2]);
+    var div = unitDivisor(kind, unit, rungs);
     var shown = opts.base ? Number(opts.base) / div : '';
 
     var row = el('div', 'amount-field');
@@ -702,13 +729,13 @@
     }
     input.addEventListener('input', emit);
 
-    var sel = selectBox(unit, unitOptions(kind), function (u) {
+    var sel = selectBox(unit, unitOptions(kind, rungs), function (u) {
       // Keep the QUANTITY, restate it in the new unit — switching from g to mg
       // should show the same amount, not silently multiply it by a thousand.
       var n = Number(String(input.value).replace(/[, ]/g, ''));
       var baseNow = isNaN(n) ? 0 : n * div;
       unit = u;
-      div = unitDivisor(kind, unit);
+      div = unitDivisor(kind, unit, rungs);
       input.value = baseNow ? String(trim2(baseNow / div)) : '';
       emit();
     });
@@ -1043,7 +1070,7 @@
     sortControl: sortControl, sortBy: sortBy, drawer: drawer, detailModal: drawer,
     pfpPortrait: pfpPortrait,
     checkbox: checkbox, stepper: stepper, selectBox: selectBox, textBox: textBox,
-    navStrip: navStrip, field: field, amountField: amountField,
+    navStrip: navStrip, field: field, amountField: amountField, fmtAmountIn: fmtAmountIn,
     scaleSet: scaleSet, unitOptions: unitOptions, unitDivisor: unitDivisor,
     duration: duration, stateBlock: stateBlock, renderInto: renderInto, busy: busy,
     listView: listView, pagination: pagination, pageSlots: pageSlots,

@@ -1112,6 +1112,11 @@
     var host = document.getElementById('terminal-body');
     if (!host) return;
     host.innerHTML = '';
+    /* The palette lives on the BODY, not in this subtree, so wiping the host
+     * does not take it with it. `chrome()` builds a fresh one; this is what
+     * stops the old one outliving it and owning the id. */
+    var stale = document.getElementById('tm-palette');
+    if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
     if (!state.solo) host.appendChild(chrome());
     var grid = H.el('div', 'tm-grid' + (state.solo ? ' tm-solo' : ''));
     grid.id = 'tm-grid';
@@ -1182,23 +1187,58 @@
      * is one keystroke away. Opened empty it lists every card, grouped the way
      * the board names its areas, so it is a strict superset of the picker it
      * replaces: you can type what you want or read what there is.
+     *
+     * Being temporary is what lets it stop being a bar. It is a Spotlight:
+     * a scrim over the whole board with one panel floating on it, which is
+     * the right shape for something that owns the screen for two seconds and
+     * then goes away. A strip wedged into the chrome had to stay narrow and
+     * out of the way; this does not, so the box is wide, the type is the
+     * READING size rather than the label size, and the matches sit inside the
+     * frame under the line you are typing instead of hanging off it.
+     *
+     * It sits high rather than dead centre, as Spotlight and Quicksilver and
+     * Raycast all do: the matches grow downward, and a box centred on an empty
+     * list walks up the screen as the list fills.
      */
+    var overlay = H.el('div', 'sui-message-system-model-overlay tm-palette-scrim');
+    overlay.id = 'tm-palette';
+    overlay.hidden = true;
+    var box = H.el('div', 'tm-palette-box sui-panel sui-theme-player');
+    box.appendChild(H.el('div', 'sui-panel-top-fill-background'));
+    box.appendChild(H.el('div', 'sui-panel-bottom-fill-background'));
+    box.appendChild(H.el('div', 'sui-panel-edge-left'));
+    var pchunk = H.el('div', 'sui-panel-chunk sui-mod-grow sui-mod-shrink');
+    box.appendChild(pchunk);
+    box.appendChild(H.el('div', 'sui-panel-edge-right'));
+    overlay.appendChild(box);
+
     var barScreen = H.el('div', 'sui-screen sui-screen-full-width tm-bar-screen');
-    barScreen.id = 'tm-palette';
-    barScreen.hidden = true;
     var bar = H.el('div', 'sui-screen-nav tm-bar');
     barScreen.appendChild(bar);
+    pchunk.appendChild(barScreen);
 
     var cmd = H.textBox('', 'a card, or an object — 2-29604 · 1-61 WALLET · MKT', function () {});
     cmd.id = 'tm-cmd';
+    cmd.classList.add('sui-text-paragraph');
     cmd.setAttribute('autocomplete', 'off');
     cmd.setAttribute('spellcheck', 'false');
     var cmdField = H.field('', cmd);
     cmdField.classList.add('tm-cmd-field');
     cmd.setAttribute('aria-label', 'Command');
     bar.appendChild(cmdField);
-    wireCommandLine(cmd, cmdField);
-    top.appendChild(barScreen);
+    // The matches are a screen of their own inside the same frame, so the
+    // panel grows around them instead of a menu hanging below its edge.
+    var results = H.el('div', 'sui-screen sui-screen-full-width tm-palette-results');
+    results.hidden = true;
+    pchunk.appendChild(results);
+    wireCommandLine(cmd, cmdField, results);
+    /* Clicking off it is the other way out, the one you reach for when the
+     * pointer is already in your hand. Only the scrim itself: a click that
+     * started inside the panel is not a click on the board behind it. */
+    overlay.addEventListener('mousedown', function (ev) {
+      if (ev.target === overlay) { ev.preventDefault(); Terminal.closePalette(); }
+    });
+    document.body.appendChild(overlay);
     return top;
   }
 
@@ -1606,15 +1646,19 @@
     });
   }
 
-  function wireCommandLine(cmd, field) {
+  function wireCommandLine(cmd, field, host) {
     var menu = H.el('div', 'tm-suggest');
     menu.hidden = true;
-    field.appendChild(menu);
+    (host || field).appendChild(menu);
+    /* With a host of its own the matches FLOW inside the palette's frame, so
+     * the frame has to disappear when there are none — an empty screen is
+     * still a screen, and it read as a stray bar under the line. */
+    var show = function (on) { menu.hidden = !on; if (host) host.hidden = !on; };
     var items = [], cursor = -1, histAt = -1, draft = '', picked = false;
 
     function paint() {
       menu.innerHTML = '';
-      if (!items.length) { menu.hidden = true; return; }
+      if (!items.length) { show(false); return; }
       var group = null;
       items.forEach(function (it, i) {
         if (it.group && it.group !== group) {
@@ -1634,7 +1678,7 @@
         r.addEventListener('mousedown', function (ev) { ev.preventDefault(); accept(i); });
         menu.appendChild(r);
       });
-      menu.hidden = false;
+      show(true);
     }
     function refresh() {
       items = suggestFor(cmd.value);
@@ -1642,7 +1686,7 @@
       picked = false;
       paint();
     }
-    function close() { items = []; cursor = -1; menu.hidden = true; }
+    function close() { items = []; cursor = -1; show(false); }
     function run(line) {
       var ok = Terminal.execute(line);
       if (ok) {
@@ -3015,10 +3059,10 @@
       host.appendChild(framed('chat.html' + (p.list ? '?list=' + encodeURIComponent(p.list) : ''), 'Comms', ctx.id));
     },
   });
-  Terminal.register('pay', {
-    label: 'Pay', describe: function () { return 'Pay'; }, cadenceMs: 0,
-    render: function (host, p, ctx) { host.innerHTML = ''; host.appendChild(framed('transfer.html', 'Pay', ctx.id)); },
-  });
+  /* `pay` is a NATIVE card, registered in board-terminal-ops.js beside the
+   * other things that sign. It was an embedded `transfer.html`; that window
+   * still exists and Comms still opens it, but a window inside a card was the
+   * cause of every frame, header and scaling bug that panel had. */
 
   // Comms about one object: the raid view's own rail, which IS the object's
   // room. It owns fixed DOM ids, so one per window.
