@@ -1222,12 +1222,107 @@ pub async fn enriched_snapshot(
     planet_id: &str,
 ) -> Snapshot {
     let mut snap = snapshot_planet(client, planet_id).await;
+    let (status, fleet) = raid_state_for(client, planet_id).await;
+    snap.raid_status = status;
+    snap.raiding_fleet = fleet;
+    snap
+}
+
+// ── Raid state: GRASS-maintained, guild-seeded ──────────────────────────────
+//
+// The raid status and raiding fleet used to be a Guild API read on EVERY
+// 20-second snapshot, per watched planet — the single most expensive thing a
+// quiet watch did. The stream already carries `raid_status` (status +
+// fleet) and `block_raid_start` (the clock, 0 when the raid ends) for every
+// planet, so one read seeds a planet's state and the frames keep it current.
+// While GRASS is not authoritative the seed is refreshed each snapshot, which
+// is the old behaviour exactly.
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RaidState {
+    status: Option<String>,
+    fleet: Option<String>,
+    /// True once a guild read has answered for this planet (an answer of
+    /// "no raid" is still an answer).
+    seeded: bool,
+}
+
+static RAID_STATE: LazyLock<Mutex<HashMap<String, RaidState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Statuses after which the raid is over and the raider gone.
+const TERMINAL_RAID: &[&str] = &["raidSuccessful", "attackerRetreated", "attackerDefeated", "raidVoided", "raidCancelled"];
+
+/// Fold one stream frame into the cache. Returns true when the planet's raid
+/// state changed, so the caller can force a snapshot for its windows.
+pub fn note_raid_frame(planet_id: &str, category: &str, detail: &Value) -> bool {
+    let mut m = RAID_STATE.lock().unwrap();
+    let e = m.entry(planet_id.to_string()).or_default();
+    let before = e.clone();
+    match category {
+        "raid_status" => {
+            let status = str_of(detail.get("status")).or_else(|| str_of(detail.get("raid_status")));
+            let fleet = str_of(detail.get("fleet_id")).or_else(|| str_of(detail.get("raiding_fleet")));
+            if let Some(st) = status {
+                if TERMINAL_RAID.contains(&st.as_str()) {
+                    e.status = None;
+                    e.fleet = None;
+                } else {
+                    e.status = Some(st);
+                    if fleet.is_some() {
+                        e.fleet = fleet;
+                    }
+                }
+                e.seeded = true;
+            }
+        }
+        "block_raid_start" => {
+            let start = detail
+                .get("block_start_raid")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+            if start == Some(0) {
+                e.status = None;
+                e.fleet = None;
+                e.seeded = true;
+            }
+        }
+        _ => {}
+    }
+    *e != before
+}
+
+/// What the cache holds for a planet, if anything has been learned yet.
+pub fn raid_state_cached(planet_id: &str) -> Option<(Option<String>, Option<String>)> {
+    RAID_STATE
+        .lock()
+        .unwrap()
+        .get(planet_id)
+        .filter(|e| e.seeded)
+        .map(|e| (e.status.clone(), e.fleet.clone()))
+}
+
+async fn raid_state_for(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    planet_id: &str,
+) -> (Option<String>, Option<String>) {
+    if crate::mcp::grass_native::authoritative() {
+        if let Some(cached) = raid_state_cached(planet_id) {
+            return cached;
+        }
+    }
+    // First sight of this planet (or the stream is not to be trusted): one
+    // guild read seeds the cache.
+    let mut out = (None, None);
     if let Ok(raid) = client.guild.planet_raid_active_by_planet(planet_id).await {
         let r = raid.as_array().and_then(|a| a.first()).unwrap_or(&raid);
-        snap.raid_status = str_of(r.get("status"));
-        snap.raiding_fleet = str_of(r.get("fleet_id"));
+        out = (str_of(r.get("status")), str_of(r.get("fleet_id")));
     }
-    snap
+    let mut m = RAID_STATE.lock().unwrap();
+    m.insert(
+        planet_id.to_string(),
+        RaidState { status: out.0.clone(), fleet: out.1.clone(), seeded: true },
+    );
+    out
 }
 
 /// Current re-target generation for a watched location; 0 when nothing
@@ -1273,7 +1368,22 @@ pub async fn pull_state(target: &Target) -> Value {
         });
     };
     let snap = enriched_snapshot(&client, &pid).await;
-    json!({ "generation": generation_for(target), "snapshot": snap })
+    json!({ "generation": generation_for(target), "snapshot": snap, "catalog": type_catalog() })
+}
+
+/// Every struct type the chain knows — id, name, planet-or-fleet category,
+/// build charge — for the map's deploy picker. It rides on the pull (once
+/// per window) rather than on every snapshot; the game state already holds
+/// the catalogue, so this is a read of memory, not a command of its own.
+pub fn type_catalog() -> Value {
+    let gs = crate::game_state::GAME_STATE.read().unwrap_or_else(|e| e.into_inner());
+    let mut rows: Vec<Value> = gs
+        .struct_types
+        .values()
+        .map(|t| json!({ "id": t.id, "name": t.name, "category": t.category, "build_charge": t.build_charge }))
+        .collect();
+    rows.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+    Value::Array(rows)
 }
 
 /// Resolve one placement into a drawable struct.
@@ -1465,15 +1575,21 @@ fn windows_for_planet(planet_id: &str) -> Vec<String> {
 /// often enough to catch arrivals, departures and new builds.
 const SNAPSHOT_INTERVAL_MS: u64 = 20_000;
 
-/// How often `planet_activity` is checked for new shots. Combat resolves in
-/// bursts; the response window in this game is measured in minutes, so a few
-/// seconds of lag on the animation is imperceptible next to the fight itself.
+/// How often the loop wakes. Shots and log rows now arrive from the stream
+/// (`note_event`), so the tick only decides whether a snapshot or a fallback
+/// poll is due; it does no network work of its own.
 const SHOT_POLL_MS: u64 = 4_000;
-/// Shot-poll cadence while the planet is QUIET (no raider present, no live
-/// raid status, no shots landing). A spectator window left open on a peaceful
-/// planet was 15 requests/minute against the shared Guild API for nothing;
-/// combat re-heats the poll the moment a snapshot or shot says so.
+/// Tick while the planet is QUIET (no raider present, no live raid status,
+/// no shots landing).
 const SHOT_POLL_QUIET_MS: u64 = 20_000;
+/// The activity page is polled ONLY as a fallback: when the stream is not
+/// authoritative (disconnected, or silent past its window), or as a slow
+/// reconcile in case a frame was lost — once a minute in combat, every five
+/// minutes on a quiet planet. A quiet watch on a healthy stream therefore
+/// costs the Guild API nothing between snapshots, and the snapshot itself is
+/// local reads.
+const RECONCILE_HOT_MS: f64 = 60_000.0;
+const RECONCILE_QUIET_MS: f64 = 300_000.0;
 
 /// How much combat history a freshly-attached window is allowed to animate.
 ///
@@ -1498,6 +1614,7 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
     tauri::async_runtime::spawn(async move {
         let client = crate::mcp::cosmos_client::CosmosClient::new();
         let mut last_snapshot = 0f64;
+        let mut last_poll = 0f64;
         // Start hot: a freshly-opened window should feel live immediately;
         // the first snapshot then decides whether the planet is actually quiet.
         let mut raid_hot = true;
@@ -1587,8 +1704,15 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                 }
             }
 
-            // Shots: the choreography source. Only rows newer than the cursor.
-            if let Ok(page) = client.guild.planet_activity_by_planet(&pid, 1).await {
+            // Shots and log rows come from the stream; the page is read only
+            // when the stream cannot be trusted, or on the slow reconcile.
+            let reconcile_ms = if raid_hot { RECONCILE_HOT_MS } else { RECONCILE_QUIET_MS };
+            let poll_due = !crate::mcp::grass_native::authoritative()
+                || now - last_poll >= reconcile_ms;
+            if !poll_due {
+                // fall through to the sleep below
+            } else if let Ok(page) = client.guild.planet_activity_by_planet(&pid, 1).await {
+                last_poll = now;
                 let cursor = WATCHES
                     .lock()
                     .unwrap()
@@ -1742,6 +1866,24 @@ pub fn collect_shots(rows: &[Value], cursor: f64) -> (Vec<Value>, f64) {
 
 // ── GRASS fan-out ───────────────────────────────────────────────────────────
 
+/// A stream frame in the shape of a `planet_activity` row, so `collect_shots`
+/// and `collect_log_rows` read it exactly as they read the guild's page:
+/// `time` as the RFC 3339 text the page carries, `detail` as the object the
+/// page carries as a JSON string (both collectors accept either).
+pub fn row_from_event(event: &crate::mcp::event_buffer::GameEvent) -> Value {
+    let time = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(event.timestamp as i64)
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_default();
+    let block = event.detail.get("block_height").cloned().unwrap_or(Value::Null);
+    json!({
+        "time": time,
+        "category": event.category,
+        "subject": event.subject,
+        "detail": event.detail,
+        "block_height": block,
+    })
+}
+
 /// Categories a spectator cares about. Everything else on the stream — and it
 /// carries every planet in the galaxy — is dropped before it costs anything.
 const WATCHED_CATEGORIES: &[&str] = &[
@@ -1760,14 +1902,70 @@ const WATCHED_CATEGORIES: &[&str] = &[
 /// `structs.>`, so every planet's events arrive here regardless of who is
 /// watching — this only decides where they go.
 pub fn note_event(app: &tauri::AppHandle, event: &crate::mcp::event_buffer::GameEvent) {
-    if !WATCHED_CATEGORIES.contains(&event.category.as_str()) {
-        return;
-    }
     let Some(planet_id) = planet_of(event) else {
         return;
     };
+    // The raid-state cache is kept for EVERY planet, watched or not, so a
+    // window opened later starts from the stream's knowledge rather than a
+    // guild read. A change on a watched planet forces its snapshot.
+    let raid_changed = note_raid_frame(&planet_id, &event.category, &event.detail);
     let windows = windows_for_planet(&planet_id);
     if windows.is_empty() {
+        return;
+    }
+    if raid_changed {
+        let mut w = WATCHES.lock().unwrap();
+        for e in w.values_mut() {
+            if e.planet_id.as_deref() == Some(planet_id.as_str()) {
+                e.force_snapshot = true;
+            }
+        }
+    }
+    // Shots and battle-log rows: the frame IS the activity row the poll used
+    // to fetch, so the same collectors turn it into the same payloads, and
+    // the same cursors keep a later fallback poll from replaying it.
+    let row = row_from_event(event);
+    let keys: Vec<String> = {
+        let w = WATCHES.lock().unwrap();
+        w.iter()
+            .filter(|(_, e)| e.planet_id.as_deref() == Some(planet_id.as_str()) && !e.windows.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    for key in keys {
+        let (labels, generation, shot_cursor, log_cursor) = {
+            let w = WATCHES.lock().unwrap();
+            match w.get(&key) {
+                Some(e) => (e.windows.clone(), e.generation, e.shot_cursor, e.log_cursor),
+                None => continue,
+            }
+        };
+        let (shots, high) = collect_shots(std::slice::from_ref(&row), shot_cursor);
+        if !shots.is_empty() {
+            if let Ok(mut w) = WATCHES.lock() {
+                if let Some(e) = w.get_mut(&key) {
+                    e.shot_cursor = high;
+                }
+            }
+            let payload = json!({ "generation": generation, "attacks": shots });
+            for label in &labels {
+                emit(app, label, "raid-attacks", payload.clone());
+            }
+        }
+        let (rows, log_high) = crate::mcp::raid_view::collect_log_rows(std::slice::from_ref(&row), log_cursor);
+        if !rows.is_empty() {
+            if let Ok(mut w) = WATCHES.lock() {
+                if let Some(e) = w.get_mut(&key) {
+                    e.log_cursor = log_high;
+                }
+            }
+            let payload = json!({ "generation": generation, "rows": rows });
+            for label in &labels {
+                emit(app, label, "raid-log", payload.clone());
+            }
+        }
+    }
+    if !WATCHED_CATEGORIES.contains(&event.category.as_str()) {
         return;
     }
     // Fleet movement changes WHO IS ON THE BOARD — deltas alone can't add or
@@ -1828,6 +2026,52 @@ pub fn debug_state() -> Value {
             "log_cursor": v.log_cursor,
         })).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use crate::mcp::event_buffer::GameEvent;
+
+    fn ev(category: &str, detail: Value, ts: f64) -> GameEvent {
+        GameEvent { category: category.into(), subject: "structs.planet.2-1".into(), detail, timestamp: ts }
+    }
+
+    #[test]
+    fn a_stream_attack_frame_is_the_row_the_poll_fetched() {
+        let e = ev("struct_attack", json!({
+            "attackerStructId": "5-88", "attackerStructType": "10", "weaponSystem": "primaryWeapon",
+            "eventAttackShotDetail": [{ "targetStructId": "5-12", "damage": 2 }], "planet_id": "2-1",
+        }), 1_788_875_000_000.0);
+        let row = row_from_event(&e);
+        assert!(row["time"].as_str().unwrap().starts_with("2026-"), "{}", row["time"]);
+        let (shots, high) = collect_shots(std::slice::from_ref(&row), 1_788_874_000_000.0);
+        assert_eq!(shots.len(), 1);
+        assert_eq!(shots[0]["attacker_id"], json!("5-88"));
+        assert_eq!(high, 1_788_875_000_000.0);
+        let (again, _) = collect_shots(std::slice::from_ref(&row), high);
+        assert!(again.is_empty(), "the cursor stops a fallback poll replaying it");
+        let (rows, _) = crate::mcp::raid_view::collect_log_rows(std::slice::from_ref(&row), 0.0);
+        assert_eq!(rows.len(), 1, "the same frame is a battle-log row");
+    }
+
+    #[test]
+    fn raid_state_follows_the_stream_and_ends_with_the_clock() {
+        let pid = "2-stream-test";
+        RAID_STATE.lock().unwrap().remove(pid);
+        assert!(raid_state_cached(pid).is_none(), "unseeded until a frame or a read says so");
+        assert!(note_raid_frame(pid, "raid_status", &json!({ "status": "initiated", "fleet_id": "9-61" })));
+        assert_eq!(raid_state_cached(pid), Some((Some("initiated".into()), Some("9-61".into()))));
+        assert!(!note_raid_frame(pid, "raid_status", &json!({ "status": "initiated" })), "no change, no snapshot forced");
+        assert!(note_raid_frame(pid, "raid_status", &json!({ "status": "shieldsVulnerable" })));
+        assert_eq!(raid_state_cached(pid).unwrap().1, Some("9-61".into()), "the fleet is kept when a later frame omits it");
+        assert!(note_raid_frame(pid, "block_raid_start", &json!({ "block_start_raid": 0, "block_start_raid_old": 2488550 })));
+        assert_eq!(raid_state_cached(pid), Some((None, None)), "clock at 0 = the raid is over");
+        assert!(note_raid_frame(pid, "raid_status", &json!({ "status": "ongoing", "fleet_id": "9-7" })));
+        assert!(note_raid_frame(pid, "raid_status", &json!({ "status": "raidSuccessful", "fleet_id": "9-7" })));
+        assert_eq!(raid_state_cached(pid), Some((None, None)), "a terminal status clears it");
+        RAID_STATE.lock().unwrap().remove(pid);
+    }
 }
 
 #[cfg(test)]

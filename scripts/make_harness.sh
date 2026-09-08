@@ -487,7 +487,22 @@ cat > "$FIX" <<'EOF'
     terminal_agreements: { player: '1-194', height: 4200719, supply_w: 115000, obligation_w: 500000, spend_per_block: 115, income_per_block: 1500, first_expiry_block: 4200819,
       bought: [{ id: '11-3', provider_id: '10-1', allocation_id: '6-9', owner: '1-194', counterparty: '1-170', capacity: 115000, rate_amount: 1, denom_label: 'alpha', start_block: 4100000, end_block: 4200819, blocks_remaining: 100, active: true, per_block: 115 }],
       sold: [{ id: '11-8', provider_id: '10-4', allocation_id: '6-12', owner: '1-482', counterparty: '1-482', capacity: 500000, rate_amount: 3, denom_label: 'ohm', start_block: 4150000, end_block: 4300000, blocks_remaining: 99281, active: true, per_block: 1500 }] },
-    matrix_refs: { refs: [] },
+    /* Reference records, as `matrix_refs` really answers: a struct carries the
+     * state that decides which VERBS it can take (built / online / destroyed)
+     * as well as the rows a card prints. */
+    matrix_refs: { refs: [
+      { id: '5-4559', kind: 'struct', icon: 'icon-cmd-post', title: 'Ore Extractor',
+        subtitle: '5-4559 · Marklifer', type_name: 'Ore Extractor', ambit: 'land',
+        planet_id: '2-15361', owner: '1-194', health: 3,
+        built: true, online: false, destroyed: false, work_text: 'Offline',
+        rows: [{ label: 'Work', value: 'Offline' }, { label: 'Health', value: '3' }],
+        actions: [] },
+      { id: '5-88', kind: 'struct', icon: 'icon-cmd-post', title: 'Tank',
+        subtitle: '5-88 · Marklifer', type_name: 'Tank', ambit: 'land',
+        planet_id: '2-15361', owner: '1-194', health: 3,
+        built: true, online: true, destroyed: false, work_text: 'Idle',
+        rows: [{ label: 'Work', value: 'Idle' }], actions: [] },
+    ] },
     terminal_windows: { open: true, cards: [] },
     open_terminal_card: null,
     /* The quote board. Two offers in DIFFERENT denominations — one in alpha,
@@ -621,6 +636,7 @@ cat > "$FIX" <<'EOF'
         row(3, 'BRENDA-COX', 'bait', '1-273', 8, 0, 77, 1, 360, 60),
         row(4, 'WORKER 17', 'productive', '1-287', 3, 2100000000, 12, 210, 45, 180, { fetched_at_ms: now - 3 * 3600 * 1000 }),
         row(5, 'HAULER-4', 'raider', '1-402', 8, 0, 0, null, null, null),
+        row(6, 'FRESH-6', 'productive', '1-999', 8, 0, 0, null, null, null, { planet_id: null, fleet_id: null }),
       ] };
     },
     // Explore: what a name search answers with (normalised in Rust).
@@ -685,6 +701,19 @@ cat > "$FIX" <<'EOF'
       { metric: 'ore', unit: 'ore', object_types: ['planet', 'player', 'struct', 'fleet'] },
       { metric: 'load', unit: 'power', object_types: ['substation', 'player', 'guild', 'struct'] },
     ],
+    /* A guild's PEOPLE. `last_action_block` is a BLOCK, and absent means we
+     * have never seen that player act — which is not the same as acting at
+     * block zero, and must not sort as if it were. */
+    terminal_guild_members: function (args) {
+      return {
+        guild_id: String((args && args.guildId) || '0-1'), height: 4200719, count: 3, dated: 2,
+        members: [
+          { player_id: '1-61', name: 'JPEG', tag: 'OH', pfp: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}', last_action_block: 4200700, quiet_blocks: 19 },
+          { player_id: '1-248', name: 'PHONIFFER', tag: 'OH', pfp: null, last_action_block: 4100000, quiet_blocks: 100719 },
+          { player_id: '1-999', name: null, tag: 'OH', pfp: null, last_action_block: null, quiet_blocks: null },
+        ],
+      };
+    },
     /* SCOUT: the doctrine's answer, as `terminal_scout` computes it. Their
      * fleet reaches water and land and STANDS in land and space — so air is
      * the only ambit that is neither, and space is covered by hulls parked
@@ -693,7 +722,7 @@ cat > "$FIX" <<'EOF'
     terminal_scout: function (args) {
       return {
         target: String((args && args.target) || '2-15361'), planet_id: '2-15361',
-        owner: '1-9', owner_name: 'Harness', shield: 0, stored_ore: 12,
+        owner: '1-1957', owner_name: 'beezhan', shield: 0, stored_ore: 12,
         defender: {
           side: 'defender', count: 3,
           reaches: ['land', 'water'], occupies: ['land', 'space'], free: ['air'],
@@ -758,6 +787,8 @@ cat > "$FIX" <<'EOF'
     stop_hash_task: null,
     mcp_action: 'queued: raid on 2-15361',
     mcp_players: 'created 1-999 at HD index 42',
+    terminal_player_explore: '[vplayer 5] explored — planet 2-31001, fleet 9-1201',
+    mcp_struct_act: 'queued',
     matrix_resolve_payable: { to: 'structs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq', playerId: '1-61', name: 'JPEG' },
     mcp_infusion_preview: INFUSION_PREVIEW,
     mcp_infusion_infuse: { ok: true, tx: 'HARNESSTX' },
@@ -869,19 +900,63 @@ cat > "$RFIX" <<'EOF'
       owner: '1-9', ambit: 'land', slot: 0, health: 6, max_health: 6, destroyed: false,
       online: true, built: true, hidden: false, defending: false, defended: false,
       protects: null, is_command: true, side: 'defender' },
+    // The raider's command ship: the enemy side, owned by someone this
+    // install does NOT control, so it is a target and never a live bar.
+    { id: '5-20', type_id: '1', type_name: 'Command Ship', type_slug: 'command_ship', category: 'fleet',
+      owner: '1-194', ambit: 'space', slot: 0, health: 6, max_health: 6, destroyed: false,
+      online: true, built: true, hidden: false, defending: false, defended: false,
+      protects: null, is_command: true, side: 'attacker' },
   ];
+  // The type records the action bar draws from — the fields
+  // `parse_struct_type` fills, for the three types on the board.
+  function stype(o) {
+    return Object.assign({
+      class_abbreviation: '', class_name: '', default_cosmetic_model_number: '', category: 'planet',
+      primary_weapon: 'noPrimaryWeapon', primary_weapon_control: 'unguided', secondary_weapon: 'noSecondaryWeapon', secondary_weapon_control: 'unguided',
+      passive_weaponry: 'noPassiveWeaponry', unit_defenses: 'noUnitDefenses', ore_reserve_defenses: 'noOreReserveDefenses', planetary_defenses: 'noPlanetaryDefenses',
+      planetary_mining: 'noPlanetaryMining', planetary_refinery: 'noPlanetaryRefinery', power_generation: 'noPowerGeneration',
+      stealth_systems: false, movable: false, build_charge: 8, build_draw: 0, generating_rate: 0, planetary_shield_contribution: 0,
+      counter_attack: 0, counter_attack_same_ambit: 0, possible_ambit: 0, primary_weapon_ambits: 0, secondary_weapon_ambits: 0,
+      primary_weapon_damage: 2, primary_weapon_shots: 1, primary_weapon_charge: 1, primary_weapon_armour_piercing: false,
+      secondary_weapon_damage: 0, secondary_weapon_shots: 0, secondary_weapon_charge: 0, secondary_weapon_armour_piercing: false,
+      move_charge: 1, defend_change_charge: 1, stealth_activate_charge: 1, activate_charge: 1,
+      primary_weapon_label: 'Ballistic Weapon', primary_weapon_description: '', secondary_weapon_label: '', secondary_weapon_description: '',
+      passive_weaponry_label: '', passive_weaponry_description: '', unit_defenses_label: '', unit_defenses_description: '',
+      ore_reserve_defenses_label: '', ore_reserve_defenses_description: '', planetary_defenses_label: '', planetary_defenses_description: '',
+      drive_label: 'Move', drive_description: '',
+    }, o);
+  }
+  var STRUCT_TYPES = {
+    '10': stype({ class_abbreviation: 'TNK', class_name: 'Tank', primary_weapon: 'unguidedWeaponry', unit_defenses: 'armour' }),
+    '11': stype({ class_abbreviation: 'PDC', class_name: 'Planetary Defense Cannon', planetary_defenses: 'defensiveCannon' }),
+    '12': stype({ class_abbreviation: 'SAM', class_name: 'SAM Launcher', primary_weapon: 'guidedWeaponry', primary_weapon_control: 'guided' }),
+    '13': stype({ class_abbreviation: 'SUB', class_name: 'Submersible', category: 'fleet', primary_weapon: 'unguidedWeaponry', stealth_systems: true, movable: true }),
+    '1': stype({ class_abbreviation: 'CMD', class_name: 'Command Ship', category: 'fleet', primary_weapon: 'unguidedWeaponry', movable: true }),
+  };
   var SNAP = {
     // The viewer's own charge — drives the composer's battery, and is not
     // either combatant's. 4 lands on level 4 of [0,1,2,3,5,8].
     viewer_charge: 4,
     planet_id: '2-1', owner: '1-9', planetary_shield: 120, block_start_raid: 0,
     raid_status: null, raiding_fleet: null,
+    // The raider (not ours) and both combatants' charge — what the live
+    // action bar gates on.
+    raider_id: '1-194', raider_name: 'Marklifer', owner_charge: 5, raider_charge: 3,
     fleets: [], slots: { space: 2, air: 2, land: 4, water: 4 },
-    structs: STRUCTS, struct_types: {},
+    structs: STRUCTS, struct_types: STRUCT_TYPES,
     stored_ore: 12, owner_name: 'Harness', fetched_at_ms: 1700000000000,
   };
   var F = {
-    mcp_raid_state: { snapshot: SNAP },
+    // The state pull carries the type catalogue the deploy picker lists.
+    mcp_raid_state: { snapshot: SNAP, catalog: [
+      { id: 10, name: 'Tank', category: 'planet', build_charge: 8 },
+      { id: 1, name: 'Command Ship', category: 'fleet', build_charge: 8 },
+      { id: 13, name: 'Submersible', category: 'fleet', build_charge: 8 },
+    ] },
+    // Who this install can sign for is the roster: the planet owner (1-9)
+    // is ours, so the defender's action bars come alive; the raider is not.
+    mcp_roster: { refreshed_at_ms: 1700000000000, rows: [{ player_id: '1-9', name: 'Harness', role: 'primary' }] },
+    mcp_struct_act: 'sent',
     /* Real rows. This was `{ rows: [] }`, so the raid harness could never see
      * the log RENDER — which is how the `only=log` card shipped collapsed,
      * capped at 45% height and wearing the map's own controls. */

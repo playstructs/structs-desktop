@@ -38,7 +38,17 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('the saved layout is drawn, in its order — a saved whole-page card migrated into the cards that carry its data', cards.map((c) => c.getAttribute('data-card')).join(',') === 'people-1,market-1,pow-1,tasks-1,player-1,stats-1', cards.map((c) => c.getAttribute('data-card')).join(','));
   check('no card is titled after a window', [...d.querySelectorAll('#tm-grid .tm-title')].every((t) => !/Team Ops|Game Stats/.test(t.textContent)));
   check('widths come from the layout', cards[1].classList.contains('tm-w2') && cards[0].classList.contains('tm-w1'));
-  check('the command bar offers every registered type, and rides SUI\'s own nav bar rather than a slab of its own', d.querySelectorAll('.tm-bar select option').length >= 12 && d.querySelector('.tm-chrome > .sui-screen > .sui-screen-nav.tm-bar') !== null);
+  /* ── The palette replaced the bar ───────────────────────────────────────
+   *
+   * A bar that is always there is a bar the cards are always paying for, and
+   * everything it did is one keystroke away. Opened empty the palette IS the
+   * card menu — so it is a strict superset of the picker it replaced, not a
+   * second way in. */
+  check('the command bar is GONE until asked for — no permanent slab over the cards',
+    d.getElementById('tm-palette') !== null && d.getElementById('tm-palette').hidden
+      && d.querySelector('.tm-chrome > .sui-screen > .sui-screen-nav.tm-bar') !== null);
+  check('…and a mouse has a door to it, because a hidden feature with no affordance is one nobody finds',
+    d.querySelector('#tm-ws-doors .tm-door[title^="Command palette"]') !== null);
   check('every card is the game\'s own panel: edges, chunk, a nav screen for the header with the title as the active tab and the doors beside it, a page-body screen for the body', cards.every((c) => c.classList.contains('sui-panel') && c.classList.contains('sui-theme-player') && c.querySelector(':scope > .sui-panel-edge-left') && c.querySelector(':scope > .sui-panel-edge-right') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-screen-nav .sui-screen-nav-item.sui-mod-active.tm-title') && c.querySelector('.sui-screen-nav .tm-doors') && c.querySelector(':scope > .sui-panel-chunk > .sui-screen > .sui-page-body-screen.tm-body')));
   const wsItems = [...d.querySelectorAll('#tm-ws-items .sui-screen-nav-item')].map((a) => a.textContent);
   check('the workspace strip lists every workspace and a door to a new one', wsItems.join(',') === 'main,war-room,+' && d.querySelector('#tm-ws-items .sui-mod-active').textContent === 'main', wsItems.join(','));
@@ -83,7 +93,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…finished proofs are set aside, and the caption says how many', /1 finished hidden/.test(d.querySelector('#tm-tasks-1 .tm-cap').textContent), d.querySelector('#tm-tasks-1 .tm-cap').textContent);
   check('…and an unfinished proof can be cancelled', d.querySelector('#tm-tasks-1 .pc-row .pc-act[title="Cancel this proof"]') !== null);
   check('…the running proof wears the struct it is for as its emblem', d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img') !== null && /img\/structs\/extractor\//.test(d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img').getAttribute('src') || ''), d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img') && d.querySelector('#tm-tasks-1 .pc-row .gc-emblem img').getAttribute('src'));
-  check('the Team Ops pages themselves are not offered as cards (only the settings forms)', ![...d.querySelectorAll('.tm-bar select option')].some((o) => /Team Ops/.test(o.textContent)) && !w.Board.Terminal.types().some((t) => t.type === 'page'));
+  check('the Team Ops pages themselves are not offered as cards (only the settings forms)', !w.Board.Terminal.suggestFor('').some((o) => /Team Ops/.test(o.what)) && !w.Board.Terminal.types().some((t) => t.type === 'page'));
   /* Forty-two cards in one flat scroll is an inventory, not a menu. They are
    * filed under the board's OWN area names, so the vocabulary the tabs teach
    * is the vocabulary that finds a card — and nothing may fall through: a
@@ -92,14 +102,16 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const groups = w.Board.Terminal.groups();
     const filed = groups.flatMap((g) => g.options.map((o) => o.value));
     const all = w.Board.Terminal.types().map((t) => t.type);
-    check('the card menu is grouped by the board\'s areas, not one flat list', groups.length >= 6 && groups.every((g) => g.group && g.options.length) && d.querySelectorAll('.tm-bar optgroup').length === groups.length);
+    const empty = w.Board.Terminal.suggestFor('');
+    check('the card menu is grouped by the board\'s areas, not one flat list', groups.length >= 6 && groups.every((g) => g.group && g.options.length)
+      && new Set(empty.map((o) => o.group)).size === groups.length);
     check('…every registered card is filed in exactly one named group', groups.every((g) => g.group !== 'More') && all.every((t) => filed.filter((f) => f === t).length === 1) && filed.length === all.length, all.filter((t) => !filed.includes(t)).join(','));
-    check('…and the menu still offers every card it did as a flat list', [...d.querySelectorAll('.tm-bar select option')].length === all.length);
-    // The picker's own choices name it ("Commands", "Watch a player"), so the
-    // caption over it was a word saying what the control already said. Gone
-    // from the bar, kept for anyone not looking at it.
-    const picker = d.querySelector('.tm-bar select');
-    check('…the picker carries no caption, only a name for a reader that cannot see it', picker.getAttribute('aria-label') === 'Add a card' && !/Add a card/.test(d.querySelector('.tm-bar').textContent) && picker.closest('label').querySelector('span') === null);
+    /* Opened EMPTY, the palette is the card menu: every card, grouped, each
+     * row naming the word that opens it. That is what lets the picker go — a
+     * strict superset, not a second way in. */
+    check('…and an empty palette still offers every card the picker did, each named by the word that opens it',
+      empty.length === all.length && empty.every((o) => o.words && o.what), empty.length + ' of ' + all.length);
+    check('…in the same groups, in the same order', empty.map((o) => o.group).filter((g, i, a) => g !== a[i - 1]).join(' ') === groups.map((g) => g.group).join(' '));
   }
   await until(() => d.querySelector('#tm-player-1 .pc-card'));
   {
@@ -138,6 +150,149 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     w.Board.Terminal.remove(id);   // the layout below is the default one
   }
 
+  /* ── Finishing a virtual player ─────────────────────────────────────────
+   *
+   * A newly created virtual player is an empty guild membership: no planet,
+   * no fleet, no command ship. `explore` gives it all three, and until it runs
+   * every other verb refuses. The Armada card could CREATE one and had no way
+   * to finish it.
+   */
+  {
+    const T = w.Board.Terminal;
+    T.execute('ARMADA');
+    await until(() => d.querySelector('#tm-grid [data-type="armada"] .pc-row'));
+    const arm = [...d.querySelectorAll('#tm-grid [data-type="armada"]')].slice(-1)[0];
+    const fresh = [...arm.querySelectorAll('.pc-row')].find((r) => /FRESH-6/.test(r.textContent));
+    check('a player that has never explored says so, rather than reading as a stale row',
+      fresh !== undefined && /never explored/.test(fresh.textContent), fresh && fresh.textContent);
+    check('…and carries the one door that finishes it', fresh.querySelector('.pc-act[title^="Explore"]') !== null);
+    const started = [...arm.querySelectorAll('.pc-row')].find((r) => /MARKLIFER/.test(r.textContent));
+    check('…which a player who already has a planet is not offered', started.querySelector('.pc-act[title^="Explore"]') === null);
+    /* Its own command: `explore` is not a struct action, so `mcp_struct_act`
+     * refuses it, and `mcp_players` is closed to list/create/state on purpose
+     * — widening either would hand a window far more than this one verb. */
+    const src = read('frontend/board-terminal-ops.js');
+    check('…through a command that does exactly one thing', /invoke\('terminal_player_explore', \{ player: r\.player_id \}\)/.test(src));
+    T.remove(arm.getAttribute('data-card'));
+  }
+
+  /* ── A guild's people ───────────────────────────────────────────────────
+   *
+   * The guild card answers "how big is it", which is a statistic, not a
+   * community. Who is still playing, who has gone quiet, who can be reached —
+   * and a member we have never seen act must say so rather than sorting as if
+   * they were merely the quietest.
+   */
+  {
+    const T = w.Board.Terminal;
+    T.execute('MEMBERS 0-1');
+    await until(() => d.querySelector('#tm-grid [data-type="members"] .pc-row'));
+    const mem = [...d.querySelectorAll('#tm-grid [data-type="members"]')].slice(-1)[0];
+    const rows = [...mem.querySelectorAll('.pc-row')];
+    check('the roster leads with the people still playing', /JPEG/.test(rows[0].textContent) && /quiet/.test(rows[0].textContent), rows[0].textContent);
+    check('…and a member we have never seen act says exactly that, rather than reading as the quietest',
+      /never seen acting/.test(rows[2].textContent) && !/quiet/.test(rows[2].textContent), rows[2].textContent);
+    check('…the tiles separate "acted today" from "never seen"', /acted/.test(mem.textContent) && /never seen/.test(mem.textContent));
+    /* Our standing travels with the person, wherever we draw them. */
+    check('…and a member our own team marked off-limits says so here too',
+      /OFF-LIMITS/.test(rows[1].textContent), rows[1].textContent);
+    /* But NOT "their guild is allied" on every row of that guild's own member
+     * list — that is a property of the card's subject, not of the person, and
+     * it drowns out the two standings that are about the individual. */
+    check('…while a guild-wide standing is left off a list whose subject IS that guild',
+      !/ALLY/.test(mem.textContent), mem.textContent.slice(0, 160));
+    const ls = await T.standingLists();
+    check('…though it still reads elsewhere, where the guild is not the subject',
+      T.standingOf(ls, '1-999', '0-1').badge.text === 'ALLY'
+        && T.standingOf(ls, '1-999', '0-1', { personOnly: true }) === null);
+    check('…every row carries the doors that reach them', rows[0].querySelectorAll('.pc-act').length >= 2);
+    T.remove(mem.getAttribute('data-card'));
+  }
+
+  /* ── OPS: the game's verbs, on the struct in front of you ───────────────
+   *
+   * `mcp_action` exposes fourteen verbs and exactly two had reached a card —
+   * raid, from the target board, and refine, from the wallet. The Terminal
+   * could see a rig sitting offline and offer no way to turn it on.
+   *
+   * The verbs offered depend on what the struct IS and what state it is in,
+   * so the card shows what would actually go through rather than a menu of
+   * refusals.
+   */
+  {
+    const T = w.Board.Terminal;
+    T.execute('OPS 5-4559');            // an Ore Extractor, built, OFFLINE
+    await until(() => d.querySelector('#tm-grid [data-type="ops"] .tm-doors-row'));
+    const ops = [...d.querySelectorAll('#tm-grid [data-type="ops"]')].slice(-1)[0];
+    const labels = () => [...ops.querySelectorAll('.tm-doors-row a')].map((a) => a.textContent);
+    check('an offline rig is offered the verb that starts it, not the one that stops it',
+      labels().includes('Bring online') && !labels().includes('Take offline'), labels().join(' | '));
+    check('…and a mine cycle is not offered while it is offline — the cycle begins when it comes online',
+      !labels().includes('Start a mine cycle'), labels().join(' | '));
+    check('…while the verbs that always apply to a built struct are there', labels().includes('Attack') && labels().includes('Defend another struct'));
+    /* Every verb goes through the ticket, so nothing is signed by a single
+     * click — the ticket is what carries the confirm. */
+    const before = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_action').length;
+    ops.querySelectorAll('.tm-doors-row a')[0].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await tick(20);
+    check('…choosing a verb opens a ticket rather than signing on the spot',
+      ops.querySelector('.tm-ticket') !== null
+        && (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_action').length === before);
+    /* A verb that needs a target names the field it needs, so a half-command
+     * cannot be sent. */
+    ops.querySelectorAll('.tm-doors-row a').forEach((a) => { if (a.textContent === 'Attack') a.dispatchEvent(new w.MouseEvent('click', { bubbles: true })); });
+    await tick(20);
+    check('…and a verb that needs a target asks for one', [...ops.querySelectorAll('.tm-ticket label')].some((l) => /Target/i.test(l.textContent)),
+      [...ops.querySelectorAll('.tm-ticket label')].map((l) => l.textContent).join(' | '));
+    /* Struct verbs go through `mcp_struct_act`, which takes the acting PLAYER
+     * — a rig owned by a worker is switched on by that worker, not by the
+     * primary — and carries verbs `mcp_action` does not expose at all.
+     * `mine`/`refine` start a proof rather than acting on the struct, so they
+     * keep the other path. */
+    const opsSrc = read('frontend/board-terminal-ops.js');
+    check('…struct verbs sign AS the struct\'s owner, through the map\'s own allowlist',
+      /invoke\('mcp_struct_act', \{ player: ref\.owner \|\| 'primary'/.test(opsSrc));
+    check('…and reach verbs mcp_action never exposed', /defense_clear/.test(opsSrc) && /build_cancel/.test(opsSrc));
+    T.remove(ops.getAttribute('data-card'));
+
+    T.execute('OPS 5-88');              // a Tank, built, ONLINE
+    await until(() => [...d.querySelectorAll('#tm-grid [data-type="ops"]')].length > 0);
+    const tank = [...d.querySelectorAll('#tm-grid [data-type="ops"]')].slice(-1)[0];
+    const tl = [...tank.querySelectorAll('.tm-doors-row a')].map((a) => a.textContent);
+    check('an online struct is offered the verb that stops it', tl.includes('Take offline') && !tl.includes('Bring online'), tl.join(' | '));
+    check('…and a Tank is offered no mine or refine cycle, because it can do neither',
+      !tl.some((x) => /cycle/.test(x)), tl.join(' | '));
+    T.remove(tank.getAttribute('data-card'));
+  }
+
+  /* ── Where we stand with someone ────────────────────────────────────────
+   *
+   * The team keeps four lists — grudges, allied guilds, priority guilds, and
+   * players who are off-limits — and they were visible only on the WAR cards
+   * that own them. The automation obeys them; a person about to act should
+   * see what the automation sees.
+   */
+  {
+    const T = w.Board.Terminal;
+    const lists = await T.standingLists();
+    check('off-limits outranks everything — it is the one that stops an action',
+      T.standingOf(lists, '1-248', '0-1').badge.text === 'OFF-LIMITS');
+    check('…a grudge names what it cost us, not just that we hold one',
+      T.standingOf(lists, '1-1957', '0-5').badge.text === 'GRUDGE'
+        && /3 attacks/.test(T.standingOf(lists, '1-1957', '0-5').note), T.standingOf(lists, '1-1957', '0-5').note);
+    check('…an allied guild is read off the guild, not the player', T.standingOf(lists, '1-999', '0-1').badge.text === 'ALLY');
+    check('…a priority guild is its own standing', T.standingOf(lists, '1-999', '0-5').badge.text === 'PRIORITY');
+    check('…and somebody we have no view of draws nothing at all', T.standingOf(lists, '1-999', '0-9') === null);
+    /* On the dossier it outranks the role they play for us: a card about
+     * someone our own team marked never-attack should say so. */
+    T.execute('PLAYER 1-248');
+    await until(() => [...d.querySelectorAll('#tm-grid [data-type="player"]')].some((n) => /OFF-LIMITS/.test(n.textContent)));
+    const dossier = [...d.querySelectorAll('#tm-grid [data-type="player"]')].slice(-1)[0];
+    check('the player card leads with our standing, and says why',
+      /OFF-LIMITS/.test(dossier.textContent) && /never-attack/.test(dossier.textContent), dossier.textContent.slice(0, 120));
+    T.remove(dossier.getAttribute('data-card'));
+  }
+
   /* ── SCOUT: the ambit they neither reach nor occupy ─────────────────────
    *
    * Every fleet weapon in the game does 2 damage, so hulls differ by REACH,
@@ -164,6 +319,12 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('…names the command ship, whose loss strands the fleet', /Command Ship 5-9/.test(sc.textContent) && /space/.test(sc.textContent));
     check('…counts who would counter from each ambit', /counters from/.test(sc.textContent) && /air 0/.test(sc.textContent) && /land 2/.test(sc.textContent));
     const hull = sc.querySelector('.pc-row[data-kind="struct"]');
+    /* Who holds it, and where we stand, BEFORE the hulls: "off-limits" is a
+     * thing you find out before you look at their fleet, not after. */
+    check('scout names the holder and our standing with them, above the fleet',
+      /beezhan/.test(sc.textContent) && /GRUDGE/.test(sc.textContent)
+        && /3 attacks/.test(sc.textContent)
+        && sc.textContent.indexOf('GRUDGE') < sc.textContent.indexOf('reaches'), sc.textContent.slice(0, 140));
     check('…and every hull says what it can shoot at, since that is all that differs',
       /reaches land/.test(hull.textContent) && /COMMAND/.test(sc.textContent), hull.textContent);
     w.Board.Terminal.remove(sc.getAttribute('data-card'));
@@ -173,6 +334,39 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('…and both the target board and a live raid carry a door to it',
       /Scout .* where can we shoot from\?/.test(read('frontend/board-terminal-ops.js'))
         && (read('frontend/board-terminal-ops.js').match(/add\('scout', \{ id:/g) || []).length === 2);
+  }
+
+  /* ── How much room a card may take ──────────────────────────────────────
+   *
+   * A CAP, not a floor: a card with less to say still takes only what it
+   * needs, and `grow` lifts the cap. `tall` is what every card did before
+   * this existed, so a saved layout that never chose changes nothing.
+   */
+  {
+    const T = w.Board.Terminal;
+    const card = d.getElementById('tm-pow-1');
+    check('a card that never chose is `tall` — the height every card already had',
+      T.heightOf('pow-1') === 'tall' && card.classList.contains('tm-h-tall')
+        && !T.state.layout.cards.find((c) => c.id === 'pow-1').h);
+    T.setHeight('pow-1', 'short');
+    check('choosing one moves the class, and the class is what the CSS caps on',
+      card.classList.contains('tm-h-short') && !card.classList.contains('tm-h-tall')
+        && T.state.layout.cards.find((c) => c.id === 'pow-1').h === 'short');
+    check('…and every choice has a rule, including the one that lifts the cap',
+      ['short', 'medium', 'tall'].every((h) => new RegExp('\\.tm-h-' + h + ' \\.tm-body \\{[^}]*max-height:\\s*\\d+vh').test(read('frontend/board.html')))
+        && /\.tm-h-grow \.tm-body \{[^}]*max-height:\s*none/.test(read('frontend/board.html')));
+    check('…an embedded page has no content to measure, so the choice sizes the FRAME too',
+      /\.tm-h-short \.tm-frame \{[^}]*height:\s*\d+vh/.test(read('frontend/board.html')));
+    T.setHeight('pow-1', 'nonsense');
+    check('an unknown height falls back to the default rather than sticking',
+      T.heightOf('pow-1') === 'tall' && card.classList.contains('tm-h-tall'));
+    // Width and height are separate axes and must not overwrite each other.
+    T.setHeight('pow-1', 'grow');
+    T.resizeTo('pow-1', 2);
+    check('resizing keeps the height, and vice versa',
+      card.classList.contains('tm-w2') && card.classList.contains('tm-h-grow'));
+    T.setHeight('pow-1', '');
+    T.resizeTo('pow-1', 1);
   }
 
   /* ── The chain's own clock ──────────────────────────────────────────────
@@ -255,19 +449,20 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const cfg = d.querySelector('#tm-player-1 .tm-config');
   check('configure opens the params strip', cfg && !cfg.hidden && cfg.querySelector('input'));
   cfg.querySelector('input').value = '1-248';
-  cfg.querySelectorAll('select')[cfg.querySelectorAll('select').length - 1].value = '2';
+  cfg.querySelector('.tm-config-width').value = '2';
   cfg.querySelector('a.sui-mod-primary').click();
   await until(() => /PHONIFFER/.test(d.querySelector('#tm-player-1')?.textContent || ''));
   check('…and the card re-renders on the new player', /PHONIFFER/.test(d.querySelector('#tm-player-1').textContent) && d.getElementById('tm-player-1').classList.contains('tm-w2'));
   check('the title follows the params', d.querySelector('#tm-player-1 .tm-title').textContent === 'Player 1-248');
 
-  // Every card configures — its name, its refresh cadence and its width —
+  // Every card configures — its name, its refresh cadence, its width and how
+  // much room it may take —
   // not only the ones with params. A player's name for a card outlives the
   // type's own title; a paused card refreshes by hand only.
   check('a card with no params still has a Configure door', d.querySelector('#tm-pow-1 [title="Configure"]') !== null);
   d.querySelector('#tm-pow-1 [title="Configure"]').click();
   const cfg2 = d.querySelector('#tm-pow-1 .tm-config');
-  check('…opening name, refresh and width', cfg2.querySelector('.tm-config-name') !== null && cfg2.querySelector('.tm-config-cadence') !== null && cfg2.querySelectorAll('select').length === 2);
+  check('…opening name, refresh, width and height', cfg2.querySelector('.tm-config-name') !== null && cfg2.querySelector('.tm-config-cadence') !== null && cfg2.querySelector('.tm-config-width') !== null && cfg2.querySelector('.tm-config-height') !== null);
   cfg2.querySelector('.tm-config-name').value = 'GPU corner';
   cfg2.querySelector('.tm-config-cadence').value = '0';
   cfg2.querySelector('a.sui-mod-primary').click();
@@ -283,17 +478,23 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…both persisted on the card in the layout', (() => { const c = w.Board.Terminal.state.layout.cards.find((x) => x.id === 'pow-1'); return c.title === 'GPU corner' && c.cadence === 0; })());
   check('auto restores the type\'s own cadence and title', (w.Board.Terminal.setCadence('pow-1', ''), w.Board.Terminal.setTitle('pow-1', ''), w.Board.Terminal.cadenceOf('pow-1') > 0 && d.querySelector('#tm-pow-1 .tm-title').textContent === 'Proof queue' && !d.getElementById('tm-pow-1').classList.contains('tm-paused')));
 
-  // Add from the toolbar.
-  const pick = d.querySelector('.tm-bar select');
-  pick.value = 'guild'; pick.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await tick(10);
-  const idBox = d.querySelector('.tm-toolbar-param input');
-  check('a type that needs an id asks for it', idBox !== null);
-  d.getElementById('tm-add').click();
-  check('…and refuses to add without one', d.querySelectorAll('#tm-grid .tm-card').length === 5);
-  idBox.value = '0-1';
-  d.getElementById('tm-add').click();
-  check('adding places the card last with a fresh id', d.querySelectorAll('#tm-grid .tm-card').length === 6 && d.querySelectorAll('#tm-grid .tm-card')[5].getAttribute('data-card') === 'guild-1');
+  /* Add from the PALETTE, which replaced the picker. A card that needs an id
+   * cannot be added without one — the row fills the line instead of running
+   * something incomplete, which is the picker's old refusal in the shape the
+   * palette can express. */
+  const cmdBox = d.getElementById('tm-cmd');
+  w.Board.Terminal.openPalette();
+  cmdBox.value = 'GUILD';
+  cmdBox.dispatchEvent(new w.Event('input', { bubbles: true }));
+  const before5 = d.querySelectorAll('#tm-grid .tm-card').length;
+  cmdBox.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  check('a type that needs an id is not added without one — the line is filled instead',
+    d.querySelectorAll('#tm-grid .tm-card').length === before5 && cmdBox.value === 'GUILD ', JSON.stringify(cmdBox.value));
+  cmdBox.value = 'GUILD 0-1';
+  cmdBox.dispatchEvent(new w.Event('input', { bubbles: true }));
+  cmdBox.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  check('adding places the card last with a fresh id', d.querySelectorAll('#tm-grid .tm-card').length === before5 + 1 && [...d.querySelectorAll('#tm-grid .tm-card')].slice(-1)[0].getAttribute('data-card') === 'guild-1');
+  check('…and running something puts the palette away', d.getElementById('tm-palette').hidden);
   await tick(400);
   const saved = set();
   check('every change is saved through Rust, debounced', saved.length >= 1 && saved[saved.length - 1].args.layout.cards.some((c) => c.id === 'guild-1'));
@@ -427,7 +628,10 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   run('5-4559');
   check('any other id opens the inspector, which asks Comms\' reference cards', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'inspector')?.params.id === '5-4559');
   await tick(80);
-  check('…through matrix_refs', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_refs' && (c.args.ids || []).includes('5-4559')));
+  await until(() => /Ore Extractor/.test(d.querySelector('#tm-grid [data-type="inspector"]')?.textContent || ''));
+  check('…drawing Comms\' reference record for it, from the shared cache when it is already known',
+    /Ore Extractor/.test(d.querySelector('#tm-grid [data-type="inspector"]').textContent)
+      && (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_refs'));
   run('STATS ORE');
   check('STATS opens a section', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'stats' && c.params.section === 'ore') !== undefined);
   run('HALT');
@@ -676,7 +880,17 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => d.querySelector('#tm-grid [data-type="chat"] iframe.tm-frame'));
   const chatCard = d.querySelector('#tm-grid [data-type="chat"]');
   const chatId = chatCard.getAttribute('data-card');
-  check('the Comms card is frameless — the page\'s own bar is its header — and the page learns its card id', chatCard.classList.contains('tm-frameless') && chatCard.querySelector('iframe.tm-frame').getAttribute('src') === 'chat.html?embed=1&card=' + chatId && /#tm-grid \.tm-card\.tm-frameless \.tm-head[^{]*\{\s*display:\s*none/.test(read('frontend/board.html')));
+  check('the Comms card is frameless — the page\'s own bar is its header — and the page learns its card id', chatCard.classList.contains('tm-frameless') && chatCard.querySelector('iframe.tm-frame').getAttribute('src') === 'chat.html?embed=1&card=' + chatId && /#tm-grid \.tm-card\.tm-frameless \.tm-head-screen[^{]*\{\s*display:\s*none/.test(read('frontend/board.html')));
+  /* The SCREEN, not just the bar inside it: hiding `.tm-head` alone left its
+   * `.sui-screen` wrapper standing — an empty 8px box with a 4px border all
+   * round — and the embedded page's own header opened one row too low. */
+  /* jsdom does not cascade descendant selectors, so this asserts the rule
+   * names an element that really is in the card — hiding `.tm-head` alone
+   * left this `.sui-screen` wrapper standing (an empty 8px box with a 4px
+   * border all round) and the page's own header opened one row too low. */
+  check('…and the rule names the header SCREEN, which is the element actually in the card',
+    chatCard.querySelector('.tm-head-screen') !== null
+      && chatCard.querySelector('.tm-head-screen').classList.contains('sui-screen'));
   // The page has no bridge of its own: it asks this window to invoke and to
   // listen for it (bridge.js), and only frames this page embeds are answered.
   {

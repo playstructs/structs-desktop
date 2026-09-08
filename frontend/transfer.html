@@ -142,7 +142,12 @@
         <div class="height-100 sui-page-body-screen">
           <div id="tx-body">
 
-            <div class="tx-sub sui-text-tiny" id="tx-who">…</div>
+            <!-- Filled only when Comms hands this window a recipient
+                 (`applyIntent`). It shipped holding a literal "…", so opening
+                 Pay yourself — the ordinary way — left an ellipsis sitting
+                 under the header saying nothing. Empty is the same state
+                 `clearRecipient` puts it back to. -->
+            <div class="tx-sub sui-text-tiny" id="tx-who"></div>
 
             <!-- Who is paying whom, as PEOPLE. The game draws a player as a
                  portrait with a name and an id; a payment screen that showed

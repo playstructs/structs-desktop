@@ -70,8 +70,10 @@ pub async fn mcp_players(
 ) -> Result<String, String> {
     crate::mcp::tools::board_pages::require_board(&window)?;
     // Reads and creation only. Acting AS a virtual player goes through
-    // `mcp_action`, which has its own guards; widening this one would hand a
-    // window every verb for every player on the roster as a side effect.
+    // commands that each carry their own allowlist — `mcp_struct_act` (struct
+    // verbs the map offers) and `terminal_player_explore` (exactly one verb).
+    // Widening THIS one would hand a window every verb for every player on the
+    // roster as a side effect, which is the thing those two avoid.
     if command != "list" && command != "create" && command != "state" {
         return Err(format!("{command}: this window can list, inspect and create, nothing else"));
     }
@@ -98,6 +100,78 @@ pub async fn mcp_players(
         .collect::<Vec<_>>()
         .join("\n");
     if text.starts_with("Error:") || text.starts_with("BLOCKED:") {
+        return Err(text);
+    }
+    Ok(text)
+}
+
+/// One struct action signed AS the player who owns the struct — the map's
+/// action bar (activate, deactivate, attack, defend, defense_clear, deploy,
+/// stealth_activate, stealth_deactivate, build, build_cancel) from any
+/// board-family or raid window. `player` is a player id, a vplayer index or
+/// "primary"; the act path refuses anyone this install does not hold a key
+/// for. Its own command, on purpose: `mcp_action` is the primary acting
+/// through the game window, and `mcp_players` is closed to list/create/state
+/// so a window never gets every verb for every player as a side effect. This
+/// door carries exactly the verbs the map offers. Who this install controls
+/// is the roster (`mcp_roster`); the build picker's catalogue rides on the
+/// raid state pull — neither needed a command of its own.
+#[tauri::command]
+pub async fn mcp_struct_act(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    registry: tauri::State<'_, Arc<TaskRegistry>>,
+    player: String,
+    action: String,
+    args: Option<Value>,
+) -> Result<String, String> {
+    let label = window.label();
+    if !crate::mcp::web_board::is_board_window(label) && !label.starts_with("raid-") {
+        return Err(format!("command restricted to board and raid windows (called from '{label}')"));
+    }
+    struct_act_impl(&app, &registry, player, action, args.unwrap_or(Value::Null)).await
+}
+
+pub async fn struct_act_impl(
+    app: &tauri::AppHandle,
+    registry: &Arc<TaskRegistry>,
+    player: String,
+    action: String,
+    args: Value,
+) -> Result<String, String> {
+    const ALLOWED: &[&str] = &[
+        "activate", "deactivate", "attack", "defend", "defense_clear", "deploy",
+        "stealth_activate", "stealth_deactivate", "build", "build_cancel",
+    ];
+    if !ALLOWED.contains(&action.as_str()) {
+        return Err(format!("'{action}' is not a struct action the map offers"));
+    }
+    // "primary" and the primary's own id both mean HD index 0.
+    let primary = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone());
+    let key = if primary.as_deref() == Some(player.as_str()) { "primary".to_string() } else { player };
+    let client = CosmosClient::new();
+    let out = execute(
+        app,
+        &client,
+        registry,
+        PlayerParams {
+            command: "act".into(),
+            player: Some(key),
+            action: Some(action),
+            args,
+            name: None,
+            index: None,
+            role: None,
+            guild_id: None,
+        },
+    )
+    .await;
+    let text = out
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.starts_with("Error:") || text.starts_with("Blocked:") || text.starts_with("No virtual player") {
         return Err(text);
     }
     Ok(text)

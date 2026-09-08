@@ -109,6 +109,8 @@ fn main() {
             mcp::terminal::terminal_series,
             mcp::terminal::terminal_series_metrics,
             mcp::terminal::terminal_scout,
+            mcp::terminal::terminal_guild_members,
+            mcp::terminal::terminal_player_explore,
             mcp::game_stats::open_game_stats_window,
             // Comms (federated Matrix chat). Reachable only from the Debug
             // panel for now — see src/matrix/mod.rs.
@@ -189,6 +191,7 @@ fn main() {
             mcp::raid_view::mcp_raids,
             mcp::raid_view::mcp_raid_view_open,
             mcp::tools::action::mcp_action,
+            mcp::tools::players::mcp_struct_act,
             mcp::tools::players::mcp_players,
             mcp::raid_view::mcp_raid_view_watch,
             mcp::raid_view::mcp_raid_view_unwatch,

@@ -72,10 +72,10 @@
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'tape', 'feed']],
     ['Explore', ['player', 'guild', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
-    ['Armada', ['armada', 'pow', 'tasks', 'solve', 'queue', 'results']],
-    ['Industry', ['grid', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'pay']],
+    ['Armada', ['armada', 'ops', 'pow', 'tasks', 'solve', 'queue', 'results']],
+    ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'pay']],
     ['War', ['scout', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
-    ['Comms', ['chat', 'comms']],
+    ['Comms', ['chat', 'comms', 'members']],
     ['System', ['health']],
   ];
   function cardGroups() {
@@ -411,10 +411,32 @@
   var FRAME_CLS = 'sui-panel sui-theme-player tm-card';
   // A frameless type (a whole page as a card) keeps that mark through every
   // redraw, resize and width change — these all rewrite the class list.
-  function frameClass(w, extra, def) { return FRAME_CLS + ' tm-w' + w + (extra || '') + (def && def.frameless ? ' tm-frameless' : ''); }
+  /* ── How much room a card may take ───────────────────────────────────────
+   *
+   * A CAP, not a floor: a card with less to say still takes only what it
+   * needs, and `grow` lifts the cap so the card is as tall as its content.
+   * `tall` is what every card did before this existed, so it is the default
+   * and no saved layout changes shape.
+   */
+  var HEIGHTS = [
+    { value: '', label: 'Tall' },
+    { value: 'short', label: 'Short' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'grow', label: 'Grower' },
+  ];
+  function heightOf(card) {
+    var h = card && card.h;
+    if (h) return h;
+    var def = card && TYPES[card.type];
+    return (def && def.defaultHeight) || 'tall';
+  }
+  Terminal.heightOf = function (id) { var c = findCard(id); return c ? heightOf(c) : 'tall'; };
+  function frameClass(w, extra, def, h) {
+    return FRAME_CLS + ' tm-w' + w + ' tm-h-' + (h || 'tall') + (extra || '') + (def && def.frameless ? ' tm-frameless' : '');
+  }
   function frame(card) {
     var def = TYPES[card.type];
-    var node = H.el('div', frameClass(card.w || 1, '', def));
+    var node = H.el('div', frameClass(card.w || 1, '', def, heightOf(card)));
     node.id = 'tm-' + card.id;
     node.setAttribute('data-card', card.id);
     node.setAttribute('data-type', card.type);
@@ -581,7 +603,7 @@
     var c = findCard(id), m = state.mounted[id];
     if (!c || !m) return;
     w = Math.max(1, Math.min(3, w || 1));
-    m.node.className = frameClass(w, preview ? ' tm-resizing' : '', m.def);
+    m.node.className = frameClass(w, preview ? ' tm-resizing' : '', m.def, Terminal.heightOf(id));
     if (!preview && w !== c.w) { c.w = w; save(); }
     fitRows(m);
   }
@@ -660,12 +682,26 @@
   }
   Terminal.move = move;
 
+  function setHeight(id, h) {
+    var c = findCard(id);
+    if (!c) return;
+    var ok = HEIGHTS.some(function (o) { return o.value === h; });
+    if (!ok || !h) delete c.h; else c.h = h;
+    var m = state.mounted[id];
+    if (m) {
+      m.node.className = frameClass(state.solo ? 3 : (c.w || 1), '', m.def, heightOf(c));
+      fitRows(m);
+    }
+    save();
+  }
+  Terminal.setHeight = setHeight;
+
   function setWidth(id, w) {
     var c = findCard(id);
     if (!c) return;
     c.w = Math.max(1, Math.min(3, Number(w) || 1));
     var m = state.mounted[id];
-    if (m) m.node.className = frameClass(c.w, '', m.def);
+    if (m) m.node.className = frameClass(c.w, '', m.def, heightOf(c));
     save();
   }
 
@@ -744,13 +780,18 @@
     cadence.classList.add('tm-config-cadence');
     m.config.appendChild(H.field('Refresh', cadence));
     var width = H.selectBox(String(c.w || 1), [{ value: '1', label: 'Narrow' }, { value: '2', label: 'Wide' }, { value: '3', label: 'Full' }], function () {});
+    width.classList.add('tm-config-width');
     m.config.appendChild(H.field('Width', width));
+    var height = H.selectBox(c.h || '', HEIGHTS, function () {});
+    height.classList.add('tm-config-height');
+    m.config.appendChild(H.field('Height', height));
     var apply = H.el('a', 'sui-screen-btn sui-mod-primary', 'Apply');
     apply.href = 'javascript:void(0)';
     apply.addEventListener('click', function () {
       var params = {};
       Object.keys(inputs).forEach(function (k) { params[k] = readControl(inputs[k]); });
       setWidth(id, readControl(width));
+      setHeight(id, readControl(height));
       setTitle(id, readControl(name));
       setCadence(id, readControl(cadence));
       setParams(id, params);
@@ -912,7 +953,7 @@
       // stale card would wear a new title.
       if (m && (m.def !== TYPES[c.type] || JSON.stringify(m.params || {}) !== JSON.stringify(c.params || {}))) { unmountCard(c.id); m = null; }
       if (!m) { mount(c, grid); m = state.mounted[c.id]; }
-      m.node.className = frameClass(state.solo ? 3 : (c.w || 1), '', m.def);
+      m.node.className = frameClass(state.solo ? 3 : (c.w || 1), '', m.def, heightOf(c));
       markCadence(m.node, c);
       if (c.title) m.title.textContent = c.title;
       if (grid.children[i] !== m.node) grid.insertBefore(m.node, grid.children[i] || null);
@@ -982,69 +1023,36 @@
       strip.appendChild(wsDoors);
     }
     mountClock(boardNav ? boardNav.querySelector('.board-navaside') : strip);
+    // A hidden feature with no affordance is a feature nobody finds. This is
+    // the control, not a note about one: clicking it opens the palette.
+    wsDoors.insertBefore(door('icon-cmd-post', 'Command palette (⌘K)', function () { Terminal.togglePalette(); }), wsDoors.firstChild);
     top.appendChild(strip);
     // The command line and the card picker belong to the header, not to a
     // slab floating over the cards. They ride a `sui-screen-nav` of their own,
     // the same bar the workspace tabs sit in, so the two read as one stack.
+    /* ── The command palette ─────────────────────────────────────────────
+     *
+     * Hidden until you ask for it (⌘K / Ctrl-K), because a bar that is always
+     * there is a bar the cards are always paying for — and everything it did
+     * is one keystroke away. Opened empty it lists every card, grouped the way
+     * the board names its areas, so it is a strict superset of the picker it
+     * replaces: you can type what you want or read what there is.
+     */
     var barScreen = H.el('div', 'sui-screen sui-screen-full-width tm-bar-screen');
+    barScreen.id = 'tm-palette';
+    barScreen.hidden = true;
     var bar = H.el('div', 'sui-screen-nav tm-bar');
     barScreen.appendChild(bar);
 
-    // The command line and the add-a-card control, one row, symmetric.
-    var row = bar;
-    var cmd = H.textBox('', '2-29604 · 1-61 WALLET · MKT · HELP', function () {});
+    var cmd = H.textBox('', 'a card, or an object — 2-29604 · 1-61 WALLET · MKT', function () {});
     cmd.id = 'tm-cmd';
     cmd.setAttribute('autocomplete', 'off');
     cmd.setAttribute('spellcheck', 'false');
-    var cmdField = H.field('Command', cmd);
+    var cmdField = H.field('', cmd);
     cmdField.classList.add('tm-cmd-field');
-    row.appendChild(cmdField);
+    cmd.setAttribute('aria-label', 'Command');
+    bar.appendChild(cmdField);
     wireCommandLine(cmd, cmdField);
-
-    var groups = Terminal.groups();
-    var first = groups[0] && groups[0].options[0] ? groups[0].options[0].value : '';
-    var pick = H.selectBox(first, groups, function () { syncParamField(); });
-    pick.setAttribute('aria-label', 'Add a card');
-    row.appendChild(H.field('', pick));
-    var paramHost = H.el('span', 'tm-toolbar-param');
-    row.appendChild(paramHost);
-    var paramCtl = null, paramKey = null;
-    function syncParamField() {
-      paramHost.innerHTML = '';
-      paramCtl = null; paramKey = null;
-      var def = TYPES[readControl(pick)];
-      if (!def || !def.params || !def.params.length) return;
-      var p = def.params[0];
-      paramKey = p.key;
-      paramCtl = control(p, null);
-      paramHost.appendChild(H.field(p.label, paramCtl));
-    }
-    syncParamField();
-    var addBtn = H.el('a', 'sui-screen-btn sui-mod-primary', 'Add');
-    addBtn.href = 'javascript:void(0)';
-    addBtn.id = 'tm-add';
-    addBtn.addEventListener('click', function () {
-      var params = {};
-      if (paramKey) params[paramKey] = readControl(paramCtl);
-      var def = TYPES[readControl(pick)];
-      if (def && def.params && def.params.length && def.params[0].kind === 'id' && !params[paramKey]) {
-        Board.stamp && Board.stamp('name the ' + def.params[0].label.toLowerCase() + ' first');
-        return;
-      }
-      add(readControl(pick), params);
-    });
-    row.appendChild(addBtn);
-    var reset = H.el('a', 'sui-screen-btn sui-mod-secondary', 'Reset');
-    reset.href = 'javascript:void(0)';
-    reset.id = 'tm-reset';
-    reset.title = 'Back to the default page';
-    reset.addEventListener('click', function () {
-      Object.keys(state.mounted).forEach(function (id) { unmountCard(id); });
-      state.layout = defaultLayout();
-      save();
-      renderGrid();
-    });
-    row.appendChild(reset);
     top.appendChild(barScreen);
     return top;
   }
@@ -1189,6 +1197,12 @@
     // The ambit they neither reach nor occupy — the one computed answer that
     // decides a fight. `RECON` because that is what people call it.
     SCOUT: ['scout', 'id'], RECON: ['scout', 'id'], REACH: ['scout', 'id'],
+    // What the chain destroys first if the grid gives: the cascade order.
+    BROWNOUT: ['brownout'], CASCADE: ['brownout'], RISK: ['brownout'],
+    // The game's own verbs, on the struct in front of you.
+    OPS: ['ops', 'id'], ACT: ['ops', 'id'], DO: ['ops', 'id'],
+    // A guild's PEOPLE, not its statistics.
+    MEMBERS: ['members', 'id'], ROSTER_OF: ['members', 'id'], WHO: ['members', 'id'],
   };
   Terminal.WORDS = WORDS;
 
@@ -1286,6 +1300,8 @@
     if (head === 'FLEET') return card(ID_RE.test(rest) ? 'map' : 'armada', rest ? { id: rest } : {});
     if (head === 'PRESET' || head === 'PRESETS') return { kind: 'preset', name: String(rest || '').toLowerCase() };
     if (head === 'SHARE') return { kind: 'share' };
+    // The bar's RESET button went with the bar; this is the same verb.
+    if (head === 'RESET') return { kind: 'reset' };
     if (head === 'IMPORT') return rest ? { kind: 'import', text: rest } : null;
     var w = WORDS[head];
     if (!w) return null;
@@ -1311,6 +1327,13 @@
     if (plan.kind === 'preset') { applyPreset(plan.name); return true; }
     if (plan.kind === 'share') { var strip = document.querySelector('.tm-workspaces'); if (strip) shareRow(strip); return true; }
     if (plan.kind === 'import') { Terminal.importWorkspace(plan.text); return true; }
+    if (plan.kind === 'reset') {
+      Object.keys(state.mounted).forEach(function (id) { unmountCard(id); });
+      state.layout = defaultLayout();
+      save();
+      renderGrid();
+      return true;
+    }
     return false;
   };
 
@@ -1329,12 +1352,37 @@
    * Suggestions never invent: a function appears for a subject only when the
    * card's own `kinds` accepts it (`Terminal.functionsFor`).
    */
+  /* The word that opens a card type: the first one WORDS names it by, so the
+   * palette teaches the vocabulary the command line already understands
+   * rather than inventing a second one. */
+  function wordFor(type) {
+    var keys = Object.keys(WORDS);
+    for (var i = 0; i < keys.length; i++) if (WORDS[keys[i]][0] === type) return keys[i];
+    return null;
+  }
+  Terminal.wordFor = wordFor;
+
   var HISTORY_MAX = 50;
   var cmdHistory = [];
   function suggestFor(line) {
     var raw = String(line || '');
     var parts = raw.trim().split(/\s+/).filter(Boolean);
-    if (!parts.length) return [];
+    /* Opened empty, the palette IS the card menu — every card, in the groups
+     * the board names its areas by. That is what makes it a replacement for
+     * the picker rather than a second way in: you can type what you want, or
+     * read what there is. */
+    if (!parts.length) {
+      var out = [];
+      Terminal.groups().forEach(function (g) {
+        g.options.forEach(function (o) {
+          var word = wordFor(o.value);
+          if (!word) return;
+          var arg = WORDS[word] && WORDS[word][1] ? ARG_LABEL[WORDS[word][1]] || '' : '';
+          out.push({ line: word + (arg ? ' ' : ''), words: word, what: o.label, arg: arg, group: g.group, run: !arg });
+        });
+      });
+      return out;
+    }
     var trailingSpace = /\s$/.test(raw);
     // Subject first: `2-29604` → everything askable of a planet; `2-29604 L`
     // narrows it. This is the case the whole feature exists for.
@@ -1366,6 +1414,40 @@
   }
   Terminal.suggestFor = suggestFor;
 
+  /* ⌘K / Ctrl-K. One keystroke, from anywhere on the page — the palette is
+   * the whole reason the bar can be gone. Escape puts it away; so does
+   * running something. */
+  function palette() { return document.getElementById('tm-palette'); }
+  Terminal.openPalette = function () {
+    var p = palette();
+    if (!p) return false;
+    p.hidden = false;
+    var cmd = document.getElementById('tm-cmd');
+    if (cmd) { cmd.focus(); cmd.select(); cmd.dispatchEvent(new Event('input', { bubbles: true })); }
+    return true;
+  };
+  Terminal.closePalette = function () {
+    var p = palette();
+    if (!p) return;
+    p.hidden = true;
+    var cmd = document.getElementById('tm-cmd');
+    if (cmd) { cmd.value = ''; cmd.classList.remove('is-err'); }
+  };
+  Terminal.togglePalette = function () {
+    var p = palette();
+    if (p && !p.hidden) { Terminal.closePalette(); return; }
+    Terminal.openPalette();
+  };
+  if (!Terminal._paletteKeys) {
+    Terminal._paletteKeys = true;
+    document.addEventListener('keydown', function (e) {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && String(e.key).toLowerCase() === 'k') {
+        e.preventDefault();
+        Terminal.togglePalette();
+      }
+    });
+  }
+
   function wireCommandLine(cmd, field) {
     var menu = H.el('div', 'tm-suggest');
     menu.hidden = true;
@@ -1375,7 +1457,12 @@
     function paint() {
       menu.innerHTML = '';
       if (!items.length) { menu.hidden = true; return; }
+      var group = null;
       items.forEach(function (it, i) {
+        if (it.group && it.group !== group) {
+          group = it.group;
+          menu.appendChild(H.el('div', 'tm-suggest-group fstat-l', group));
+        }
         var r = H.el('a', 'tm-suggest-row' + (i === cursor ? ' is-on' : ''));
         r.href = 'javascript:void(0)';
         var left = H.el('span', 'tm-help-words');
@@ -1406,6 +1493,7 @@
         if (cmdHistory.length > HISTORY_MAX) cmdHistory.length = HISTORY_MAX;
         histAt = -1;
         close();
+        Terminal.closePalette();
       } else {
         cmd.classList.add('is-err');
       }
@@ -1425,7 +1513,7 @@
     cmd.addEventListener('focus', refresh);
     cmd.addEventListener('blur', function () { setTimeout(close, 120); });
     cmd.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') { close(); return; }
+      if (e.key === 'Escape') { close(); Terminal.closePalette(); return; }
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         var down = e.key === 'ArrowDown';
         if (items.length) {
@@ -1514,8 +1602,13 @@
        * because it is a list of WORDS. Type the subject and the box offers
        * every question you can ask of it. */
       list.appendChild(helpLine('<id> <word>', 'Any word above, asked of that object — 2-29604 LOG', '', function () { fillCommand('2-29604 '); }));
+      // The command line has no permanent bar any more, so the key that
+      // summons it is part of the vocabulary.
+      list.appendChild(helpLine('⌘K  ·  Ctrl-K', 'Open the command palette', '', function () { Terminal.openPalette(); }));
       list.appendChild(helpLine('PRESET', Object.keys(PRESETS).join(' · '), '<name>', function () { fillCommand('PRESET '); }));
       list.appendChild(helpLine('SHARE', 'Share this workspace', '', function () { Terminal.execute('SHARE'); }));
+      // The bar's RESET button went with the bar; this is the same verb.
+      list.appendChild(helpLine('RESET', 'Back to the default page', '', function () { Terminal.execute('RESET'); }));
       list.appendChild(helpLine('IMPORT', 'Import a shared workspace', '<code>', function () { fillCommand('IMPORT '); }));
       host.appendChild(list);
       return Promise.resolve();
@@ -1541,6 +1634,8 @@
 
   // ── Shared: the Comms reference cards, for the inspector and the watchlist
   var refs = null;
+  // Shared with the ops cards, which act on the same reference records.
+  Terminal.ensureRefs = function () { return ensureRefs(); };
   function ensureRefs() {
     if (refs || !window.ChatRefs) return refs;
     refs = window.ChatRefs({
@@ -1673,6 +1768,61 @@
     return box;
   }
 
+  /* ── Where we stand with someone ─────────────────────────────────────────
+   *
+   * The team keeps four lists — grudges, allied guilds, priority guilds, and
+   * players who are off-limits — and until now they were visible only on the
+   * WAR cards that own them. Everywhere else a player was a name and a
+   * portrait, so you could open a dossier on someone your own team has marked
+   * NEVER ATTACK and read nothing about it.
+   *
+   * That is the half of the social layer that costs something when it is
+   * missing: the automation obeys these lists, and a person clicking Raid
+   * should see what the automation sees.
+   */
+  var standing = { at: 0, p: null };
+  function standingLists() {
+    var now = Date.now();
+    if (!standing.p || now - standing.at > 30000) {
+      standing.at = now;
+      standing.p = invoke('mcp_war_bundle')
+        .then(function (d) { return (d && d.lists) || {}; })
+        .catch(function () { return {}; });
+    }
+    return standing.p;
+  }
+  /* `{ badge, note }` — or null when we have no view of them, which is the
+   * ordinary case and must not draw anything. */
+  function standingOf(lists, playerId, guildId, opts) {
+    if (!lists || !playerId) return null;
+    /* `personOnly` for a view whose SUBJECT is the guild: "their guild is
+     * allied" on every row of that guild's own member list is a property of
+     * the card, not of the person, and it drowns out the two standings that
+     * are about the individual. */
+    var personOnly = !!(opts && opts.personOnly);
+    var has = function (arr, v) { return Array.isArray(arr) && v && arr.indexOf(v) >= 0; };
+    // Off-limits outranks everything: it is the one that stops an action.
+    if (has(lists.protected_players, playerId)) {
+      return { badge: { text: 'OFF-LIMITS', mod: 'warning' }, note: 'on our never-attack list' };
+    }
+    var g = (lists.grudges || []).filter(function (x) { return x.player_id === playerId; })[0];
+    if (g && !g.expired && !g.muted) {
+      var bits = [];
+      if (g.attacks) bits.push(g.attacks + ' attack' + (g.attacks === 1 ? '' : 's'));
+      if (g.structs_lost) bits.push(g.structs_lost + ' struct' + (g.structs_lost === 1 ? '' : 's') + ' lost');
+      if (g.ore_lost) bits.push(H.fmtOre(g.ore_lost) + ' ore lost');
+      return { badge: { text: 'GRUDGE', mod: 'destructive' }, note: bits.join(' · ') || 'on our grudge list' };
+    }
+    if (!personOnly && has(lists.allies, guildId)) return { badge: { text: 'ALLY', mod: 'solid' }, note: 'their guild is allied' };
+    if (!personOnly && has(lists.priority_guilds && lists.priority_guilds.map(function (x) { return x.guild_id || x; }), guildId)) {
+      return { badge: { text: 'PRIORITY', mod: 'warning' }, note: 'their guild is a priority target' };
+    }
+    if (g && g.muted) return { badge: { text: 'GRUDGE MUTED', mod: 'default' }, note: 'muted' };
+    return null;
+  }
+  Terminal.standingOf = standingOf;
+  Terminal.standingLists = standingLists;
+
   // The player entity's own shape, the way Explore reads it (board-pages.js).
   var entP = function (ent) { return (ent && ent.Player) || {}; };
   var entS = function (ent, k) { var v = entP(ent)[k]; return v == null || v === '' ? null : String(v); };
@@ -1703,6 +1853,7 @@
         soft('mcp_player_profile', { player: p.id }),
         soft('mcp_player_detail', { player: p.id }),
         soft('mcp_player_search', { query: p.id }),
+        standingLists(),
       ]).then(function (res) {
         var d = res[0] || {}, det = res[1] || {};
         var hit = ((res[2] && res[2].results) || []).filter(function (x) { return x.player_id === p.id; })[0] || null;
@@ -1724,6 +1875,7 @@
         if (cap || load) reads.push({ value: H.fmtWatts(load) + ' / ' + H.fmtWatts(cap), icon: 'sui-icon-energy', title: 'Energy used of available' });
         if (det.struct_count != null) reads.push({ value: H.fmtInt(det.struct_count), icon: 'sui-icon-deployed-structs', title: 'Structs built' });
         var gid = entS(ent, 'guildId') || (hit && hit.guild_id) || null;
+        var stand = standingOf(res[3], id, gid);
         var g = d.guild || null;
         var planetId = entS(ent, 'planetId') || (hit && hit.planet_id) || null;
         var fleetId = entS(ent, 'fleetId') || (hit && hit.fleet_id) || null;
@@ -1731,7 +1883,11 @@
           id: id, name: name, pfp: attrs,
           presence: Board.presenceDot && Board.presenceDot(id),
           guild: g ? ((g.tag ? '[' + g.tag + '] ' : '') + (g.name || gid || '')).trim() : gid,
-          badge: det.role && det.role !== 'primary' ? { text: String(det.role).toUpperCase(), mod: 'default' } : null,
+          /* Where we STAND with them outranks what role they play for us: a
+           * dossier on someone our own team has marked never-attack should
+           * say so on the card, not three cards away on the WAR page. */
+          badge: (stand && stand.badge) || (det.role && det.role !== 'primary' ? { text: String(det.role).toUpperCase(), mod: 'default' } : null),
+          marks: stand ? [{ icon: 'sui-icon sui-icon-md icon-defend', value: stand.note, title: 'Our standing with them — ' + stand.note }] : null,
           readings: reads,
         }, { actions: (Board.watchActions ? Board.watchActions({ player_id: id, planet_id: planetId, fleet_id: fleetId }) : [])
           .concat(Board.reachActions ? Board.reachActions({ player_id: id, player_name: name }) : []) });

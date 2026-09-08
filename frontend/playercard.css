@@ -96,7 +96,12 @@
   font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: 1;
   text-transform: none; letter-spacing: 0;
 }
-.pc-mark { white-space: nowrap; }
+/* A mark is a phrase, not a token: "on our never-attack list" ran straight
+ * under the doors beside it, because nothing here could shrink and the doors
+ * do not. Marks give first and ellipse; doors keep their hit areas. */
+.pc-mark { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-card .pc-foot .pc-marks { flex: 1 1 auto; min-width: 0; }
+.pc-card .pc-foot .pc-actions { flex: none; }
 .pc-mark i { color: var(--text-hint); }
 
 /* ── actions: icon doors, 32px hit areas, the game's md glyphs ────────── */

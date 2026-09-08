@@ -39,6 +39,11 @@ pub struct Card {
     pub params: Value,
     #[serde(default = "one")]
     pub w: u8,
+    /// How much room the card may take: `short` | `medium` | `tall` | `grow`.
+    /// None means the type's own default. A cap, not a floor — a card with
+    /// less to say still takes only what it needs; `grow` lifts the cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h: Option<String>,
     /// A name the player gave the card; None means the type's own title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -1243,6 +1248,115 @@ pub fn terminal_series_metrics() -> Value {
     )
 }
 
+/* ── The one verb a fresh virtual player needs ──────────────────────────────
+ *
+ * A newly created virtual player is an empty guild membership: no planet, no
+ * fleet, no command ship. `explore` is what gives it all three, and until it
+ * runs every other verb refuses. The Armada card could CREATE one and had no
+ * way to finish it.
+ *
+ * Deliberately its own command rather than a widening of either neighbour:
+ * `mcp_struct_act`'s allowlist is struct actions and explore is not one, and
+ * `mcp_players` is closed to list/create/state on purpose — "widening this one
+ * would hand a window every verb for every player on the roster as a side
+ * effect". This hands it exactly one.
+ */
+#[tauri::command]
+pub async fn terminal_player_explore(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    registry: tauri::State<'_, std::sync::Arc<crate::hasher::types::TaskRegistry>>,
+    player: String,
+) -> Result<String, String> {
+    crate::mcp::tools::board_pages::require_board(&window)?;
+    if player.trim().is_empty() {
+        return Err("explore: player required".into());
+    }
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let out = crate::mcp::tools::players::execute(
+        &app,
+        &client,
+        &registry,
+        crate::mcp::tools::players::PlayerParams {
+            command: "act".into(),
+            player: Some(player),
+            action: Some("explore".into()),
+            args: json!({}),
+            name: None,
+            index: None,
+            role: None,
+            guild_id: None,
+        },
+    )
+    .await;
+    let text = out
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.starts_with("Error:") || text.starts_with("Blocked:") || text.starts_with("No virtual player") {
+        return Err(text);
+    }
+    Ok(text)
+}
+
+/* ── A guild's people ───────────────────────────────────────────────────────
+ *
+ * The guild card answers "how big is it" — member count, power, planets. That
+ * is a statistic, not a community. The questions a guild actually turns on are
+ * about PEOPLE: who is in it, who is still playing, who has gone quiet, who
+ * can be reached.
+ *
+ * The roster is the guild's own (`/api/guild/{id}/roster`), and liveness comes
+ * from the perception snapshot's `lastAction` — the block each player last
+ * acted on — so a quiet member is a fact rather than an impression. Comms
+ * presence is the window's to add; it knows who is signed in.
+ */
+#[tauri::command]
+pub async fn terminal_guild_members(guild_id: String) -> Result<Value, String> {
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let roster = client.guild.guild_roster(&guild_id).await?;
+    let rows = roster
+        .as_array()
+        .cloned()
+        .or_else(|| roster.get("players").and_then(|v| v.as_array()).cloned())
+        .unwrap_or_default();
+    let height = crate::mcp::perception::with_snapshot(|s| s.height).unwrap_or(0);
+    let members: Vec<Value> = rows
+        .iter()
+        .filter_map(|r| {
+            let id = r.get("id").and_then(|v| v.as_str())?.to_string();
+            // `lastAction` is a BLOCK, and absent means we have never seen this
+            // player act — which is not the same as "acted at block zero".
+            let last = crate::mcp::perception::with_snapshot(|s| s.grid_attr(&id, "lastAction"))
+                .flatten()
+                .filter(|b| *b > 0);
+            Some(json!({
+                "player_id": id,
+                "name": r.get("username").cloned().unwrap_or(Value::Null),
+                "tag": r.get("tag").cloned().unwrap_or(Value::Null),
+                "pfp": r.get("pfp_client_render_attributes").cloned().unwrap_or(Value::Null),
+                "last_action_block": last,
+                "quiet_blocks": last.map(|b| height.saturating_sub(b)),
+            }))
+        })
+        .collect();
+    // Quietest last: the people still playing lead, which is the order you
+    // read a roster in.
+    let mut members = members;
+    members.sort_by_key(|m| m.get("quiet_blocks").and_then(|v| v.as_u64()).unwrap_or(u64::MAX));
+    let seen = members.iter().filter(|m| m["quiet_blocks"].is_u64()).count();
+    Ok(json!({
+        "guild_id": guild_id,
+        "height": height,
+        "members": members,
+        "count": rows.len(),
+        // How much of the roster we have ever seen act — a roster we cannot
+        // date is a roster whose "quiet" column means nothing.
+        "dated": seen,
+    }))
+}
+
 /* ── SCOUT: the ambit they neither reach nor occupy ─────────────────────────
  *
  * The one computed answer that decides fights, and nothing in this app showed
@@ -1546,7 +1660,7 @@ mod tests {
             let mut st = lock(&STORE);
             st.workspaces.remove(&from);
             st.workspaces.remove(&to);
-            st.workspaces.insert(from.clone(), Layout { version: 2, cards: vec![Card { id: "x".into(), kind: "people".into(), params: json!({}), w: 1, title: None, cadence: None }] });
+            st.workspaces.insert(from.clone(), Layout { version: 2, cards: vec![Card { id: "x".into(), kind: "people".into(), params: json!({}), w: 1, h: None, title: None, cadence: None }] });
             st.active = from.clone();
         }
         {
@@ -1585,7 +1699,7 @@ mod tests {
     #[test]
     fn a_stale_save_is_refused_and_a_newer_one_wins() {
         let ws = "conflict-test".to_string();
-        let mk = |v: u64, id: &str| Layout { version: v, cards: vec![Card { id: id.into(), kind: "people".into(), params: json!({}), w: 1, title: None, cadence: None }] };
+        let mk = |v: u64, id: &str| Layout { version: v, cards: vec![Card { id: id.into(), kind: "people".into(), params: json!({}), w: 1, h: None, title: None, cadence: None }] };
         {
             let mut st = lock(&STORE);
             st.workspaces.remove(&ws);
@@ -1611,7 +1725,16 @@ mod tests {
         assert_eq!(l.cards[1].w, 3);
         assert_eq!(l.cards[1].params["page"], "work");
         assert_eq!(l.version, 0);
+        // Height is the type's business until the player says otherwise, and
+        // an absent choice must not be written back as one.
+        assert_eq!(l.cards[0].h, None);
+        assert!(!serde_json::to_string(&l).unwrap().contains("\"h\""));
         let back: Layout = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(back, l);
+
+        let sized: Layout = serde_json::from_str(r#"{"cards":[{"id":"a","type":"people","h":"grow"}]}"#).unwrap();
+        assert_eq!(sized.cards[0].h.as_deref(), Some("grow"), "and a choice survives the round trip");
+        let back2: Layout = serde_json::from_str(&serde_json::to_string(&sized).unwrap()).unwrap();
+        assert_eq!(back2, sized);
     }
 }

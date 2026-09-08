@@ -8,7 +8,7 @@
 import { JSDOM } from 'jsdom';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const harness = resolve(repo, 'frontend', '_harness_transfer.html');
@@ -52,6 +52,16 @@ const pick = async (id, value) => {
 // A payment is between two PEOPLE. This screen used to print the word
 // "primary" on both lines, naming neither of them and giving no way to notice
 // you were about to pay the wrong one.
+{
+  /* Opening Pay yourself is the ordinary way in, and there is no handed-off
+   * recipient then. `#tx-who` shipped holding a literal "…", so an ellipsis
+   * sat under the header saying nothing until Comms filled it — which for
+   * most sessions is never. */
+  const html = readFileSync(resolve(repo, 'frontend/transfer.html'), 'utf8');
+  const m = /<div class="tx-sub sui-text-tiny" id="tx-who">([^<]*)<\/div>/.exec(html);
+  check('the hand-off line starts EMPTY, not holding a placeholder it may never replace', m !== null && m[1].trim() === '', m && JSON.stringify(m[1]));
+}
+
 {
   console.log('\n— who is paying whom');
   const cards = [...d.querySelectorAll('#tx-parties .sui-result-row')];

@@ -880,8 +880,14 @@
     /* The window IS the log, so it owns the height: the toolbar stays pinned
        and the list scrolls inside it. Just dropping the list's max-height let
        it grow to its full 16,000px content and the filter controls scrolled
-       away with the rows. */
-    html[data-solo] .ops-scroll { height: 100vh; max-height: 100vh; overflow: hidden;
+       away with the rows.
+
+       100% of its SCREEN, not 100vh. The panel is the window, and it already
+       spends height on a nav bar above this box and a fill band below it — so
+       a viewport-tall box under a 46px nav ran 66px past the bottom of the
+       window and painted over the panel's own bottom edge. Its parent screen
+       is already sized correctly by the flex column; take that. */
+    html[data-solo] .ops-scroll { height: 100%; max-height: 100%; overflow: hidden;
                                   padding: var(--spacing-md) var(--spacing-lg); }
     /* Stream-only: display:flex would override the router's `hidden` toggle,
        so it must never apply to a DIFFERENT solo view's window — that is how
@@ -922,7 +928,13 @@
 
     /* A card that embeds a whole page (Comms, Pay) keeps that page's own bar
        as its header; the frame draws none and only the resize grip remains. */
-    #tm-grid .tm-card.tm-frameless .tm-head, .tm-card.tm-frameless .tm-head { display: none; }
+    /* The SCREEN, not just the bar inside it. Hiding `.tm-head` alone left its
+       `.sui-screen` wrapper standing — an empty 8px box with a 4px border on
+       every side — so a frameless card opened with a gap above the embedded
+       page's own header, which is what "the header is just below where the
+       header should be" looks like. A frameless card's doors and title come
+       from the page, so the whole screen goes. */
+    #tm-grid .tm-card.tm-frameless .tm-head-screen, .tm-card.tm-frameless .tm-head-screen { display: none; }
     #board-layout .tm-frameless .tm-body { padding: 0; }
     /* ── The Terminal (board-terminal.js) ──────────────────────────────── */
     /* One grid of the game's data cards: three equal columns, one gutter,
@@ -999,6 +1011,19 @@
        the content is what says "this is the last good answer, not a live one"
        without hiding the answer. */
     .tm-card.tm-stale .tm-body { opacity: .55; }
+
+    /* ── The command palette ──────────────────────────────────────────────
+       Hidden until ⌘K, so the cards get the space a permanent bar was taking.
+       Opened, it is one field over the whole width — the menu under it is
+       what you are actually reading. */
+    #tm-palette { flex: none; }
+    #tm-palette[hidden] { display: none; }
+    #tm-palette .tm-cmd-field { flex: 1 1 auto; }
+    .tm-suggest-group {
+      padding: var(--spacing-sm) var(--spacing-md) var(--spacing-xs);
+      color: var(--text-hint); text-transform: uppercase;
+    }
+    .tm-suggest-group:first-child { padding-top: var(--spacing-xs); }
 
     /* ── The command line's completion menu ───────────────────────────────
        Anchored to the field, over the cards. The rows are the HELP card's
@@ -1143,6 +1168,19 @@
        this one only when it must, and caps the card at 70vh. */
     .tm-body-screen { line-height: 0; }
     #board-layout .tm-body { width: 100%; padding: var(--spacing-md); max-height: 70vh; overflow-y: auto; text-align: left; line-height: normal; }
+    /* ── How much room a card may take ────────────────────────────────────
+       A CAP, not a floor: a card with less to say still takes only what it
+       needs, and `grow` lifts the cap so the card is as tall as its content.
+       `tall` is the 70vh every card had before this existed, so no saved
+       layout changes shape. An embedded page has no content to measure — its
+       height IS the card's — so the same choice sizes the frame directly. */
+    #board-layout .tm-card.tm-h-short .tm-body { max-height: 22vh; }
+    #board-layout .tm-card.tm-h-medium .tm-body { max-height: 40vh; }
+    #board-layout .tm-card.tm-h-tall .tm-body { max-height: 70vh; }
+    #board-layout .tm-card.tm-h-grow .tm-body { max-height: none; overflow-y: visible; }
+    #board-layout .tm-card.tm-h-short .tm-frame { height: 22vh; }
+    #board-layout .tm-card.tm-h-medium .tm-frame { height: 40vh; }
+    #board-layout .tm-card.tm-h-tall .tm-frame { height: 70vh; }
     .tm-body > .sui-data-card { margin: 0; }
     .tm-body .page { display: block; max-height: 70vh; overflow-y: auto; }
     .tm-cap { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: var(--spacing-sm); }

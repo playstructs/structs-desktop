@@ -598,6 +598,14 @@ async fn board_invoke(
             }
         }
         "mcp_vplayer_list" => ok_json(board::mcp_vplayer_list()),
+        // The map's action bars over the web: the token is the operator, and
+        // the act path signs only for players this install holds keys for.
+        "mcp_struct_act" => match (s("player"), s("action")) {
+            (Some(p), Some(a)) => from_result(
+                crate::mcp::tools::players::struct_act_impl(&st.app, &st.registry, p, a, body.get("args").cloned().unwrap_or(Value::Null)).await,
+            ),
+            _ => err_json("player + action required".into()),
+        },
         // The Terminal (board.html?view=terminal) over the web. Layouts and
         // workspaces are the operator's own state, so the token (= operator)
         // may read AND write them; the store is the same terminal.json the

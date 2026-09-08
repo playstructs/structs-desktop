@@ -1046,6 +1046,84 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     /html\[data-only="log"\] #rv-log \{[^}]*max-height: none/.test(readFileSync(resolve(repo, 'frontend', 'raidview.html'), 'utf8')));
 }
 
+// ── The action bar acts for players this install controls ─────────────────
+{
+  const d = w.document;
+  const calls = () => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_struct_act');
+  await until(() => S.controlled && S.controlled['1-9']);
+  check('the view learns who this install can sign for', S.controlled['1-9'] === true && !S.controlled['1-194']);
+  RV.cancelPending();
+  const sel = (id) => { if (S.selectedId !== id) RV.selectStruct(id); };
+  sel('5-1'); // our Tank, online, owner 1-9 (charge 5)
+  const chunk = d.getElementById('rv-def-chunk');
+  const fire = chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"]');
+  check('an owned, online, charged struct gets a LIVE weapon button in the game\'s default style', !!fire && fire.classList.contains('sui-mod-default') && !fire.classList.contains('sui-mod-disabled'));
+  check('…and its power switch is a control, not a picture', !!chunk.querySelector('a.rv-switch[data-action="deactivate"]'));
+  fire.click();
+  check('pressing a weapon arms target selection: the header becomes the prompt and the button goes active-offense', S.pending && S.pending.action === 'attack' && /Select Target/.test(chunk.querySelector('.sui-screen-info').textContent) && !!chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"].sui-mod-active-offense'));
+  const enemy = d.querySelector('[id$="slot-5-20"]');
+  check('the enemy command ship is marked as a target, our own structs are not', d.querySelectorAll('.rv-can-target').length === 1 && enemy && enemy.classList.contains('rv-can-target'));
+  RV._anchors()[RV.anchorKeyFor(S.structsById['5-20'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await until(() => calls().length >= 1);
+  const shot = calls()[0].args;
+  check('clicking the target fires the attack AS the owner, with the game\'s own message arguments', shot.player === '1-9' && shot.action === 'attack' && shot.args.attacker_id === '5-1' && shot.args.target_id === '5-20' && shot.args.weapon === 'primary');
+  check('…and target selection ends', !S.pending && d.querySelectorAll('.rv-can-target').length === 0);
+  sel('5-1');
+  chunk.querySelector('a.rv-switch').click();
+  await until(() => calls().length >= 2);
+  check('the switch deactivates an online struct', calls()[1].args.action === 'deactivate' && calls()[1].args.args.struct_id === '5-1' && calls()[1].args.player === '1-9');
+  sel('5-5'); // our Submersible: stealth, movable, fleet
+  const stealth = chunk.querySelector('a.sui-panel-btn[data-action="stealth"]');
+  stealth.click();
+  await until(() => calls().length >= 3);
+  check('stealth acts at once (no target to choose)', calls()[2].args.action === 'stealth_activate' && calls()[2].args.args.struct_id === '5-5');
+  const move = chunk.querySelector('a.sui-panel-btn[data-action="move"]');
+  move.click();
+  const tiles = RV._tileAnchors();
+  const freeFleetTiles = Object.keys(tiles).filter((k) => tiles[k].classList.contains('rv-can-target'));
+  check('Move marks the empty tiles on our own side and nothing on the enemy\'s', freeFleetTiles.length > 0 && freeFleetTiles.every((k) => k.startsWith('fleet|defender|') || k.startsWith('plan|')) && !freeFleetTiles.some((k) => k.startsWith('fleet|attacker|')));
+  tiles[freeFleetTiles[0]].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await until(() => calls().length >= 4);
+  const mv = calls()[3].args;
+  check('clicking a marked tile deploys there', mv.action === 'deploy' && mv.args.struct_id === '5-5' && typeof mv.args.ambit === 'string' && typeof mv.args.slot === 'number');
+  sel('5-5');
+  chunk.querySelector('a.sui-panel-btn[data-action="defend"]').click();
+  check('Defend waits for a friendly struct', S.pending && S.pending.kind === 'friendly' && !!S.structsById['5-3'] && d.querySelectorAll('.rv-can-target').length >= 3);
+  RV._anchors()[RV.anchorKeyFor(S.structsById['5-3'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await until(() => calls().length >= 5);
+  check('…and choosing one sets the defense', calls()[4].args.action === 'defend' && calls()[4].args.args.defender_id === '5-5' && calls()[4].args.args.protected_id === '5-3');
+  // A fleet struct already standing guard offers to stand down instead.
+  S.structsById['5-5'].defending = true;
+  RV.selectStruct('5-5'); RV.selectStruct('5-5');
+  const clear = chunk.querySelector('a.sui-panel-btn[data-action="defend"]');
+  check('a defender that already stands guard offers Clear Defense instead', !!clear && /Clear Defense/.test(clear.title));
+  clear.click();
+  await until(() => calls().length >= 6);
+  check('…and pressing it clears the defense at once', calls()[5].args.action === 'defense_clear' && calls()[5].args.args.defender_id === '5-5');
+  S.structsById['5-5'].defending = false;
+  sel('5-20'); // the raider's ship: not ours
+  const atk = d.getElementById('rv-atk-chunk');
+  check('a struct we do not control keeps the inert bar: every button disabled, no switch', atk.querySelectorAll('a.sui-panel-btn').length > 0 && [...atk.querySelectorAll('a.sui-panel-btn')].every((a) => a.classList.contains('sui-mod-disabled')) && !atk.querySelector('a.rv-switch'));
+  // Building on an empty slot of our side.
+  const airTile = RV._tileAnchors()['plan|air|0'];
+  airTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await until(() => chunk.querySelector('.rv-build select option[value="Tank"]'));
+  const build = chunk.querySelector('.rv-build');
+  check('an empty slot on our side offers the game\'s deploy: a picker of planet types (no fleet types) and a Build door', !!build && [...build.querySelectorAll('option')].map((o) => o.value).join(',') === ',Tank');
+  build.querySelector('select').value = 'Tank';
+  build.querySelector('a.sui-screen-btn').click();
+  await until(() => calls().length >= 7);
+  const bd = calls()[6].args;
+  check('Build signs as the planet owner for that ambit and slot', bd.player === '1-9' && bd.action === 'build' && bd.args.struct_type === 'Tank' && bd.args.ambit === 'air' && bd.args.slot === 0);
+  const enemyTile = RV._tileAnchors()['fleet|attacker|land|0'];
+  enemyTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('an empty slot on the raider\'s side offers nothing — we do not control the raider', !atk.querySelector('.rv-build'));
+  sel('5-1');
+  chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"]').click();
+  d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('Escape cancels a pending action', !S.pending);
+}
+
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');
 w.close();
 process.exit(failures ? 1 : 0);

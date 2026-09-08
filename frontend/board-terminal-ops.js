@@ -448,6 +448,266 @@
     },
   });
 
+  /* ── A guild's people ────────────────────────────────────────────────────
+   *
+   * The guild card answers "how big is it". That is a statistic, not a
+   * community. The questions a guild turns on are about PEOPLE: who is in it,
+   * who is still playing, who has gone quiet, who can be reached — and every
+   * row here carries the two doors that reach them, plus where we stand.
+   *
+   * Liveness is the block each player last acted on, so "quiet" is a fact
+   * rather than an impression. A member we have never seen act says so
+   * instead of being sorted as if they were the quietest.
+   */
+  T.register('members', {
+    label: 'Guild members', defaultWidth: 2,
+    describe: function (p) { return 'Members · ' + (p.id || '?'); },
+    params: [{ key: 'id', label: 'Guild', kind: 'id', kinds: [0], placeholder: '0-1' }],
+    cadenceMs: 120000,
+    render: function (host, p) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a guild id.')); return; }
+      return Promise.all([invoke('terminal_guild_members', { guildId: p.id }), T.standingLists()]).then(function (res) {
+        var d = res[0] || {}, lists = res[1];
+        host.innerHTML = '';
+        var all = d.members || [];
+        // 5.28s a block: a day is ~16,364 blocks.
+        var DAY = 16364;
+        var live = all.filter(function (m) { return m.quiet_blocks != null && m.quiet_blocks < DAY; });
+        var never = all.filter(function (m) { return m.quiet_blocks == null; });
+        host.appendChild(tiles([
+          ['members', H.fmtInt(d.count || all.length)],
+          [['acted', 'in the last day'], H.fmtInt(live.length), null, live.length ? 'ok' : 'muted'],
+          [['never seen', 'acting'], H.fmtInt(never.length), null, never.length ? 'muted' : 'ok'],
+        ]));
+        if (!all.length) { host.appendChild(H.stateBlock('info', 'No roster published for ' + p.id + '.')); return; }
+        if (all.length > 30) cap(host, 'showing 30 of ' + all.length + ' · quietest last');
+        var table = H.resultTable();
+        all.slice(0, 30).forEach(function (m) {
+          // The guild is this card's subject, so only standings about the
+          // PERSON belong on their row.
+          var stand = T.standingOf(lists, m.player_id, p.id, { personOnly: true });
+          table.appendChild(window.StructsPlayerCard.row({
+            id: m.player_id, name: m.name || m.player_id, pfp: m.pfp,
+            presence: Board.presenceDot && Board.presenceDot(m.player_id),
+            badge: stand ? stand.badge : null,
+            sub: m.quiet_blocks == null ? 'never seen acting'
+              : 'quiet ' + window.StructsUnits.fmtDuration(Math.round(m.quiet_blocks * 5.28)),
+            attn: stand ? stand.note : null,
+          }, {
+            onClick: function () { add('player', { id: m.player_id }); },
+            actions: Board.reachActions ? Board.reachActions({ player_id: m.player_id, player_name: m.name }) : [],
+          }));
+        });
+        host.appendChild(table);
+      }).catch(function (e) { fail(host, 'members', e); });
+    },
+  });
+
+  /* ── OPS: the verbs, on the struct in front of you ───────────────────────
+   *
+   * `mcp_action` exposes fourteen of the game's verbs — explore, mine, refine,
+   * build, activate, deactivate, attack, defend, move_fleet, transfer, deploy,
+   * raid, update_primary_reactor, resync — and exactly two of them had reached
+   * a card: raid (from the target board) and refine (from the wallet). The
+   * Terminal could see a struct sitting offline, and the only way to turn it
+   * on was somewhere else.
+   *
+   * The verbs a struct can take depend on what it IS and what state it is in,
+   * and the chain already tells us both (`matrix_refs`: built / online /
+   * destroyed / type_name). So this offers only what would actually go
+   * through, rather than a menu of refusals — and every one goes through the
+   * ticket, so nothing is signed without a confirm that names it.
+   *
+   * A mine or refine cycle begins when the rig comes ONLINE (the ore clock is
+   * the planet's, since v0.21.0), so `activate` is the economy's start button
+   * and the explicit cycle verbs are for restarting one that has stopped.
+   */
+  /* Which verbs, and through WHICH command.
+   *
+   * Struct verbs go through `mcp_struct_act`, not `mcp_action`. Two reasons,
+   * both of which matter on a roster of virtual players: it takes the acting
+   * PLAYER (so a rig owned by a worker is switched on by that worker, not by
+   * the primary), and it carries an allowlist of struct verbs the map offers
+   * — including `defense_clear`, `stealth_*` and `build_cancel`, which
+   * `mcp_action` does not expose at all. `mine` and `refine` are the two that
+   * are NOT struct actions in that sense — they start a proof — so those keep
+   * the `mcp_action` path.
+   */
+  function structVerbs(ref) {
+    if (!ref || ref.destroyed) return [];
+    var name = String(ref.type_name || '');
+    var mines = /Extractor|Mining/i.test(name);
+    var refines = /Refinery|Refine/i.test(name);
+    var out = [];
+    if (!ref.built) {
+      // The build proof is the hasher's; what a person can do to an unbuilt
+      // struct is call it off.
+      out.push({ verb: 'build_cancel', label: 'Cancel the build', danger: true, args: function () { return { struct_id: ref.id }; } });
+      return out;
+    }
+    if (ref.online) out.push({ verb: 'deactivate', label: 'Take offline', danger: true, args: function () { return { struct_id: ref.id }; } });
+    else out.push({ verb: 'activate', label: 'Bring online', args: function () { return { struct_id: ref.id }; } });
+    // A cycle begins when the rig comes online; these restart one that stopped.
+    if (mines && ref.online) out.push({ verb: 'mine', via: 'action', label: 'Start a mine cycle', args: function () { return { struct_id: ref.id }; } });
+    if (refines && ref.online) out.push({ verb: 'refine', via: 'action', label: 'Start a refine cycle', args: function () { return { struct_id: ref.id }; } });
+    out.push({
+      verb: 'defend', label: 'Defend another struct',
+      fields: [{ key: 'protected_id', label: 'Protect', placeholder: '5-…' }],
+      args: function (v) { return { defender_id: ref.id, protected_id: v.protected_id }; },
+      needs: 'protected_id',
+    });
+    out.push({ verb: 'defense_clear', label: 'Stop defending', args: function () { return { struct_id: ref.id }; } });
+    out.push({
+      verb: 'attack', label: 'Attack', danger: true,
+      fields: [
+        { key: 'target_id', label: 'Target', placeholder: '5-…' },
+        { key: 'weapon', label: 'Weapon', kind: 'choice', options: [{ value: 'primary', label: 'primary' }, { value: 'secondary', label: 'secondary' }] },
+      ],
+      args: function (v) { return { attacker_id: ref.id, target_id: v.target_id, weapon: v.weapon || 'primary' }; },
+      needs: 'target_id',
+    });
+    return out;
+  }
+  T.register('ops', {
+    label: 'Act on a struct', defaultWidth: 1,
+    describe: function (p) { return 'Act on ' + (p.id || '?'); },
+    params: [{ key: 'id', label: 'Struct', kind: 'id', kinds: [5], placeholder: '5-4559' }],
+    cadenceMs: 30000, usesRefs: true,
+    render: function (host, p, ctx) {
+      host.innerHTML = '';
+      if (!p.id) { host.appendChild(H.stateBlock('info', 'Configure this card with a struct id.')); return; }
+      var R = T.ensureRefs && T.ensureRefs();
+      if (!R) { host.appendChild(H.stateBlock('error', 'Reference cards not loaded.')); return; }
+      var ref = R.cards[p.id];
+      if (!ref) { R.wantRefs([p.id]); host.appendChild(H.stateBlock('info', 'Looking up ' + p.id + '…')); return; }
+      host.appendChild(window.StructsCards.struct.row({
+        id: ref.id, type: ref.type_name, ambit: ref.ambit, location: ref.planet_id,
+        health: ref.health, maxHealth: ref.health, online: ref.online, built: ref.built,
+        destroyed: ref.destroyed, attn: ref.work_text || null,
+      }, { onClick: function () { add('inspector', { id: ref.id }); } }));
+      var verbs = structVerbs(ref);
+      if (!verbs.length) {
+        host.appendChild(H.stateBlock('info', ref.destroyed ? 'Destroyed — nothing to do.' : 'Not built yet — the build proof finishes it.'));
+        return;
+      }
+      var slot = H.el('div', 'tm-ticket-slot');
+      host.appendChild(doorRow(verbs.map(function (v) {
+        return { label: v.label, primary: !v.danger, onClick: function () {
+          slot.innerHTML = '';
+          slot.appendChild(ticket({
+            cta: v.label, danger: v.danger,
+            fields: v.fields || [],
+            confirm: function (vals) {
+              if (v.needs && !vals[v.needs]) return null;
+              return { title: v.label + '?', cta: v.label, rows: [['Struct', ref.id + ' · ' + (ref.type_name || '?')], ['Signing as', ref.owner || 'primary']]
+                .concat(Object.keys(vals).map(function (k) { return [k.replace(/_/g, ' '), String(vals[k] || '—')]; })) };
+            },
+            submit: function (vals) {
+              if (v.needs && !vals[v.needs]) return Promise.reject(v.needs.replace(/_/g, ' ') + ' required');
+              /* AS the struct's owner. Signing a worker's rig as the primary
+               * is a permission error at best and the wrong account at
+               * worst — the owner is on the reference record, so use it. */
+              var call = v.via === 'action'
+                ? invoke('mcp_action', { action: v.verb, args: v.args(vals) })
+                : invoke('mcp_struct_act', { player: ref.owner || 'primary', action: v.verb, args: v.args(vals) });
+              return call.then(function (msg) { Board.stamp && Board.stamp(String(msg).split('\n')[0]); });
+            },
+            done: function () { T.refresh(ctx.id, true); },
+          }));
+        } };
+      })));
+      host.appendChild(slot);
+    },
+  });
+
+  /* ── GRID RISK: what the chain destroys, and in what order ───────────────
+   *
+   * Two mechanics decide whether an infrastructure position holds, and no
+   * card showed either.
+   *
+   * **GridCascade.** `grid_context.go:111` — if an object's load exceeds its
+   * capacity, the keeper DESTROYS its outgoing allocations, in creation
+   * order, until load fits again. Not throttles: destroys. So the question an
+   * operator actually has is "if I lose capacity, what goes, and in what
+   * order" — and the answer is a list the chain has already decided.
+   *
+   * **Dilution.** `connectionCapacity = (capacity − load) / connectionCount`
+   * is recomputed on every connect, so each new player on a substation
+   * SHRINKS everyone else's share. A player whose own margin looks fine can
+   * be one connection away from a brownout they did not cause.
+   *
+   * Both are arithmetic on data `mcp_allocations` already returns.
+   */
+  var allocSeq = function (id) { var m = /-(\d+)$/.exec(String(id || '')); return m ? Number(m[1]) : Infinity; };
+  var ORDINAL = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th'];
+  T.register('brownout', {
+    label: 'Grid risk', defaultWidth: 2,
+    describe: function () { return 'Grid risk'; },
+    cadenceMs: 30000,
+    render: function (host, p, ctx) {
+      return invoke('mcp_allocations').then(function (d) {
+        host.innerHTML = '';
+        if (d && d._err) { host.appendChild(H.stateBlock('error', 'allocations unavailable: ' + d._err)); return; }
+        var b = (d && d.budget) || {};
+        var mine = ((d && d.allocations) || []).slice().sort(function (x, y) { return allocSeq(x.id) - allocSeq(y.id); });
+        var routed = mine.reduce(function (n, a) { return n + (Number(a.power_mw) || 0); }, 0);
+        var head = Number(b.allocatable_mw) || 0;
+        host.appendChild(tiles([
+          ['capacity', H.fmtWatts(b.capacity_mw || 0), 'sui-icon-energy'],
+          [['routed out', 'load'], H.fmtWatts(routed), null, routed > (b.capacity_mw || 0) ? 'bad' : null],
+          [['headroom', 'before a cascade'], H.fmtWatts(head), null, head <= 0 ? 'bad' : head < routed * 0.1 ? 'warn' : 'ok'],
+          [['structs', b.online === false ? 'OFFLINE' : 'online'], H.fmtWatts(b.structs_load_mw || 0), null, b.online === false ? 'bad' : 'muted'],
+        ]));
+        /* The order the chain would destroy them in, with what each one sheds.
+         * Reading down, an operator sees exactly how much capacity they can
+         * lose before a given allocation goes. */
+        if (mine.length) {
+          var shed = 0;
+          var table = H.resultTable();
+          mine.forEach(function (a, i) {
+            var power = Number(a.power_mw) || 0;
+            shed += power;
+            table.appendChild(window.StructsCards.row({
+              kind: 'allocation',
+              emblem: window.StructsCards.emblem.glyph(a.locked ? 'icon-key' : 'sui-icon-energy', 'sm', i === 0 ? 'enemy' : 'secondary'),
+              title: (a.type || 'allocation') + ' → ' + (a.destination_id || '?'), id: a.id,
+              sub: a.source_object_id ? 'from ' + a.source_object_id : null,
+              attn: (ORDINAL[i] || (i + 1) + 'th') + ' to go',
+              readings: [
+                { value: H.fmtWatts(power), icon: 'sui-icon-energy', title: 'Power this allocation carries' },
+                { value: H.fmtWatts(shed), icon: 'sui-icon-md icon-alert', title: 'Capacity you can lose before this one goes: everything above it, and it' },
+              ],
+            }, { onClick: function () { add('allocations', {}); } }));
+          });
+          host.appendChild(table);
+        } else {
+          host.appendChild(H.stateBlock('info', 'Nothing routed out — no allocation of ours can cascade.'));
+        }
+        /* And the other half: every substation's share, and what one more
+         * connection does to it. */
+        var subs = ((d && d.substations) || []).filter(function (x) { return (Number(x.connection_count) || 0) > 0; });
+        subs.sort(function (x, y) { return (Number(x.connection_capacity_mw) || 0) - (Number(y.connection_capacity_mw) || 0); });
+        if (subs.length) {
+          cap(host, 'substations · thinnest share first');
+          var st = H.resultTable();
+          subs.slice(0, 12).forEach(function (x) {
+            var free = Math.max(0, (Number(x.capacity_mw) || 0) - (Number(x.load_mw) || 0));
+            var count = Number(x.connection_count) || 0;
+            var now = Number(x.connection_capacity_mw) || (count ? free / count : 0);
+            var next = free / (count + 1);
+            st.appendChild(window.StructsCards.substation.row({
+              id: x.id, guild: x.name || null, load: Number(x.load_mw) || 0, capacity: Number(x.capacity_mw) || 0,
+              connections: count, perConnection: H.fmtWatts(now),
+              fmt: H.fmtWatts,
+              attn: now > 0 ? '−' + H.fmtWatts(now - next) + ' with one more' : 'nothing left to share',
+            }, { onClick: function () { add('inspector', { id: x.id }); } }));
+          });
+          host.appendChild(st);
+        }
+      }).catch(function (e) { fail(host, 'grid risk', e); });
+    },
+  });
+
   /* ── SCOUT: the ambit they neither reach nor occupy ──────────────────────
    *
    * The one computed answer that decides fights. Every fleet weapon in the
@@ -524,8 +784,21 @@
     cadenceMs: 30000,
     render: function (host, p) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet or fleet id.')); return; }
-      return invoke('terminal_scout', { target: p.id }).then(function (d) {
+      return Promise.all([invoke('terminal_scout', { target: p.id }), T.standingLists()]).then(function (res) {
+        var d = res[0];
         host.innerHTML = '';
+        /* Who holds this, and where we stand with them — BEFORE the hulls.
+         * The automation obeys these lists; a person about to raid should see
+         * what the automation sees, and "off-limits" is a thing you find out
+         * before you look at their fleet, not after. */
+        var stand = T.standingOf(res[1], d.owner, null);
+        if (d.owner) {
+          host.appendChild(window.StructsPlayerCard.row({
+            id: d.owner, name: d.owner_name || d.owner, sub: 'holds ' + (d.planet_id || p.id),
+            badge: stand ? stand.badge : null, attn: stand ? stand.note : null,
+            err: !!(stand && stand.badge && stand.badge.text === 'OFF-LIMITS'),
+          }, { actions: Board.reachActions ? Board.reachActions({ player_id: d.owner, player_name: d.owner_name }) : [] }));
+        }
         host.appendChild(tiles([
           ['shield', d.shield == null ? '—' : H.fmtInt(d.shield), null, Number(d.shield) ? null : 'ok'],
           ['ore', d.stored_ore == null ? '—' : H.fmtOre(d.stored_ore)],
@@ -809,15 +1082,31 @@
         var table = H.resultTable();
         rows.slice(0, 30).forEach(function (r) {
           var stale = r.err || (Date.now() - (r.fetched_at_ms || 0) > 2 * 3600 * 1000);
+          /* A player with no planet has never explored, and until it does it
+           * is an empty guild membership: no planet, no fleet, no command
+           * ship, and every other verb refuses. Creating one from this card
+           * left exactly that state with nothing here to finish it. */
+          var unstarted = !r.planet_id;
           table.appendChild(PC().row({
             id: r.player_id, name: r.name || r.player_id, pfp: r.pfp_attrs, sub: r.role || null, err: !!r.err,
-            attn: r.err ? 'read failed' : (stale ? 'read ' + H.ago(r.fetched_at_ms) + ' ago' : null),
+            attn: r.err ? 'read failed' : unstarted ? 'never explored' : (stale ? 'read ' + H.ago(r.fetched_at_ms) + ' ago' : null),
             readings: [
               { value: H.fmtAlpha(r.alpha_ualpha || 0), icon: 'sui-icon-alpha-matter', title: 'Alpha' },
               { value: H.fmtOre(r.ore || 0), icon: 'sui-icon-alpha-ore', title: 'Ore' },
               { value: r.charge == null ? '—' : String(r.charge) + '/8', icon: 'sui-icon-value', title: 'Charge' },
             ],
-          }, { actions: (Board.watchActions ? Board.watchActions(r) : []).concat([{ icon: 'icon-member', title: 'Watch this player', onClick: function () { add('player', { id: r.player_id }); } }]) }));
+          }, { actions: (Board.watchActions ? Board.watchActions(r) : []).concat([
+            { icon: 'icon-member', title: 'Watch this player', onClick: function () { add('player', { id: r.player_id }); } },
+          ]).concat(unstarted ? [{ icon: 'icon-beacon', title: 'Explore — give ' + (r.name || r.player_id) + ' a planet and a fleet', onClick: function () {
+            var body = H.el('div');
+            body.appendChild(H.fact ? H.fact('Player', r.player_id) : H.row('Player', r.player_id));
+            body.appendChild(H.fact ? H.fact('Gets', 'a planet, a fleet and a command ship') : H.row('Gets', 'a planet, a fleet and a command ship'));
+            H.confirmModal('Explore for ' + (r.name || r.player_id) + '?', body, 'Explore', function () {
+              invoke('terminal_player_explore', { player: r.player_id })
+                .then(function (msg) { Board.stamp && Board.stamp(String(msg).split('\n')[0]); T.refresh(ctx.id, true); })
+                .catch(function (e) { Board.stamp && Board.stamp('explore: ' + e); });
+            });
+          } }] : []) }));
         });
         host.appendChild(table);
       }).catch(function (e) { fail(host, 'roster', e); });
