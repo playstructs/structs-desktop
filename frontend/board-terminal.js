@@ -73,7 +73,7 @@
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'tape', 'feed']],
     ['Explore', ['player', 'guild', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
     ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results']],
-    ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'pay']],
+    ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
     ['War', ['scout', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['Comms', ['chat', 'comms', 'members']],
     ['System', ['health']],
@@ -151,6 +151,8 @@
       // The roster card was called `fleet` until the word was needed for the
       // game's own fleets; a layout saved then still opens.
       if (c.type === 'fleet') c.type = 'armada';
+      // `pay` was renamed `deliver`; a layout saved under the old name still opens.
+      if (c.type === 'pay') c.type = 'deliver';
       var into = c.type === 'page' ? PAGE_TO_CARDS[String((c.params || {}).page || 'work')] : null;
       if (!into) { out.push(c); return; }
       into.forEach(function (n) { out.push({ id: fresh(n[0]), type: n[0], params: n[1], w: n[2] }); });
@@ -1359,7 +1361,7 @@
   // `2-15361`, `COMMS 2-15361`, `WORK`, `STATS ORE`, `PEOPLE`, `PAY`, `CHAT`.
   var WORDS = {
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['tape'], FLOW: ['tape'],
-    PAY: ['pay'], CHAT: ['chat'], COMMS: ['comms', 'id'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
+    DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], CHAT: ['chat'], COMMS: ['comms', 'id'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
     BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
     PLAYER: ['player', 'id'], MAP: ['map', 'id'], PLANET: ['planet', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
     PRESET: ['preset'], PRESETS: ['preset'],
@@ -3059,7 +3061,7 @@
       host.appendChild(framed('chat.html' + (p.list ? '?list=' + encodeURIComponent(p.list) : ''), 'Comms', ctx.id));
     },
   });
-  /* `pay` is a NATIVE card, registered in board-terminal-ops.js beside the
+  /* `deliver` is a NATIVE card, registered in board-terminal-ops.js beside the
    * other things that sign. It was an embedded `transfer.html`; that window
    * still exists and Comms still opens it, but a window inside a card was the
    * cause of every frame, header and scaling bug that panel had. */

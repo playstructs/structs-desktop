@@ -606,7 +606,9 @@ cat > "$FIX" <<'EOF'
       expeditions: [],
     },
     mcp_inventory: {
-      player: { player_id: '1-194', name: 'Marklifer', address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne' },
+      // `resolve_player` answers with the ROLE label until the game window has
+      // reported a callsign, and the Pay card drew a person called "primary".
+      player: { player_id: '1-194', name: 'primary', address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne' },
       assets: [
         { denom: 'ualpha', amount: 40230, amount_p: 40230000000, sendable: true, display_name: 'Alpha', base_name: 'ualpha', exponent: 6 },
         { denom: 'uguild.0-1', amount: 12, amount_p: 12000000, sendable: true, display_name: 'Hydro', base_name: 'uhydro', exponent: 6, guild_id: '0-1', guild_tag: 'OH' },

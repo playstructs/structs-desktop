@@ -1139,7 +1139,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     w.Board.Terminal.remove(dm.id);
   }
 
-  /* ── Pay is a CARD now, not a window in a card ────────────────────────────
+  /* ── Deliver is a CARD now, not a window in a card ────────────────────────────
    *
    * `transfer.html` in an iframe was the cause of every frame, header and
    * scaling bug that panel had: a whole document carrying its own `.sui-panel`,
@@ -1148,36 +1148,65 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
    * there it IS a window — but the card draws itself.
    */
   {
-    const pay = w.Board.Terminal.add('pay', { to: '1-61' });
+    const pay = w.Board.Terminal.add('deliver', { to: '1-61' });
     const node = d.querySelector('#tm-' + pay.id);
-    await until(() => node.querySelector('.pay-parties .pc-person'));
-    check('Pay draws itself — no page embedded in the card',
-      node.querySelector('iframe') === null && node.querySelector('.pay-parties') !== null);
+    await until(() => node.querySelector('.deliver-parties .pc-person'));
+    check('Deliver draws itself — no page embedded in the card',
+      node.querySelector('iframe') === null && node.querySelector('.deliver-parties') !== null);
 
     /* A payment names two PEOPLE. Seeing the recipient's face and id is what
      * catches a mis-send before it is signed; an address never does. */
-    const sides = node.querySelectorAll('.pay-party');
+    const sides = node.querySelectorAll('.deliver-party');
     check('…and it names BOTH parties, as people', sides.length === 2
-      && /Marklifer/.test(sides[0].textContent) && /1-194/.test(sides[0].textContent)
+      && /1-194/.test(sides[0].textContent)
       && /JPEG/.test(sides[1].textContent) && /1-61/.test(sides[1].textContent)
       && sides[0].querySelector('.pc-pfp') !== null && sides[1].querySelector('.pc-pfp') !== null,
       [...sides].map((s) => s.textContent).join(' | '));
+    /* `resolve_player` answers with the ROLE label until the game window has
+     * reported a callsign, so the payer was drawn as a person called
+     * "primary". An unnamed player is shown by id. */
+    check('…and the payer is never a person called "primary"',
+      !/primary/i.test(sides[0].textContent), sides[0].textContent);
     check('…the recipient shown with the address the payment would actually go to',
-      /structs1qqqq/.test(sides[1].querySelector('.pay-addr').textContent));
+      /structs1qqqq/.test(sides[1].querySelector('.deliver-addr').textContent));
     /* `fstat-l` upper-cases. An address that cannot be pasted back is not an
      * address the player can check. */
     check('…in the lowercase it is really written in',
-      !/STRUCTS1/.test(sides[1].querySelector('.pay-addr').textContent));
+      !/STRUCTS1/.test(sides[1].querySelector('.deliver-addr').textContent));
 
     /* `amount` is the FLOORED display figure, `amount_p` the precise base one:
      * 40230000000 µg is 40.23 Kg, and reading the wrong field would have shown
      * a balance a millionth of the truth. */
     const amount = node.querySelector('.amount-input');
-    const facts = () => node.querySelector('.pay-facts').textContent;
+    const facts = () => node.querySelector('.deliver-facts').textContent;
     check('the balance is the PRECISE holding, not the floored display figure', /40\.23Kg/.test(facts()), facts());
-    check('…and the asset picker offers only what the SERVER says may leave a wallet — ore is not a bank asset',
-      !/[Oo]re/.test(node.querySelector('.pay-amount-host').textContent),
-      node.querySelector('.pay-amount-host').textContent);
+    /* The picker is always there, even holding one thing: the list IS the
+     * answer to "what can I send", and a control that only appears once you
+     * happen to hold a second token is one nobody knows exists. */
+    const picker = () => node.querySelector('.deliver-amount-host select');
+    const denoms = () => [...picker().options].map((o) => o.textContent);
+    check('the asset picker is always drawn, with Alpha first and the guild token beside it',
+      picker() !== null && /alpha/i.test(denoms()[0]) && denoms().some((t) => /Hydro/.test(t)),
+      denoms().join(' | '));
+    check('…offering only what the SERVER says may leave a wallet — ore is not a bank asset',
+      !denoms().some((t) => /ore/i.test(t)), denoms().join(' | '));
+    check('…and each option says how much of it you hold', /40\.23Kg/.test(denoms()[0]), denoms()[0]);
+
+    /* A guild token is not on Alpha's ladder: it has whatever exponent and
+     * display name its guild chose, read off the chain. Without them there
+     * was no way to spell "3 Hydro" and the player counted millionths. */
+    picker().value = 'uguild.0-1';
+    picker().dispatchEvent(new w.Event('change', { bubbles: true }));
+    await until(() => /Hydro/.test(node.querySelector('.deliver-facts').textContent));
+    check('switching asset re-denominates the balance in that token\'s OWN units',
+      /12 Hydro/.test(node.querySelector('.deliver-facts').textContent),
+      node.querySelector('.deliver-facts').textContent);
+    check('…and the unit picker offers that guild\'s rungs, not Alpha\'s',
+      [...node.querySelectorAll('.amount-unit option')].map((o) => o.value).join(',') === 'Hydro,uhydro',
+      [...node.querySelectorAll('.amount-unit option')].map((o) => o.value).join(','));
+    picker().value = 'ualpha';
+    picker().dispatchEvent(new w.Event('change', { bubbles: true }));
+    await until(() => /40\.23Kg/.test(node.querySelector('.deliver-facts').textContent));
 
     amount.value = '5';
     amount.dispatchEvent(new w.Event('input', { bubbles: true }));
@@ -1187,29 +1216,64 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     await until(() => /primary signing queue/.test(facts()));
     check('an amount previews what it costs you and which queue signs it',
       /35\.23Kg/.test(facts()) && /primary signing queue/.test(facts()), facts());
-    const cta = () => node.querySelector('.pay-actions a');
+    const cta = () => node.querySelector('.deliver-actions a');
     check('…and the button says what it will do, not "submit"', / Send 5Kg/.test(cta().textContent), cta().textContent);
-    check('…and is live, because the preview says the chain would take it', !cta().classList.contains('pay-off'));
+    check('…and is live, because the preview says the chain would take it', !cta().classList.contains('deliver-off'));
 
     /* The card's whole job is to refuse what the chain would refuse. */
     amount.value = '999';
     amount.dispatchEvent(new w.Event('input', { bubbles: true }));
-    await until(() => /short by/.test(node.querySelector('.pay-note').textContent));
+    await until(() => /short by/.test(node.querySelector('.deliver-note').textContent));
     check('spending more than you hold is refused HERE, with the chain\'s own reason',
-      cta().classList.contains('pay-off') && /short by/.test(node.querySelector('.pay-note').textContent),
-      node.querySelector('.pay-note').textContent);
+      cta().classList.contains('deliver-off') && /short by/.test(node.querySelector('.deliver-note').textContent),
+      node.querySelector('.deliver-note').textContent);
 
     /* Paying someone else gives up only the thing that must be re-decided. */
-    sides[1].querySelector('.pay-clear').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-    await until(() => node.querySelector('.pay-party input'));
+    sides[1].querySelector('.deliver-clear').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await until(() => node.querySelector('.deliver-party input'));
     check('changing the recipient hands back the search, and refuses to send meanwhile',
-      node.querySelector('.pay-party input') !== null && cta().classList.contains('pay-off'));
+      node.querySelector('.deliver-party input') !== null && cta().classList.contains('deliver-off'));
+
+    /* Half an id is not a name, and the guild API's name search says so with a
+     * 400. That reached the card verbatim — a URL, a JSON body and "this value
+     * is not valid", upper-cased over six lines where the answer goes. */
+    {
+      const box = node.querySelector('.deliver-party input');
+      const hits = () => node.querySelector('.deliver-hits').textContent;
+      const type = async (v) => {
+        box.value = v;
+        box.dispatchEvent(new w.Event('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 320));
+      };
+      const before = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_player_search').length;
+      await type('1-');
+      const asked = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_player_search').length;
+      check('half an id is not asked of the name search at all', asked === before, String(asked - before));
+      await type('1-61');
+      check('…and a whole one is offered, not searched for', /1-61/.test(hits()), hits());
+      await type('JPE');
+      await until(() => /JPEG/.test(hits()));
+      check('…while a name is still a search', /JPEG/.test(hits()), hits());
+      check('…and the raw failure never reaches the card',
+        !/http|json|\{|\}/i.test(hits()) && /search unavailable|\bno one\b|JPEG|1-61/.test(hits()), hits());
+    }
+
+    /* The card was called `pay` and is called `deliver`. A layout saved under
+     * the old name still opens, the way `fleet` still opens as `armada`. */
+    check('a workspace saved when the card was called `pay` still opens',
+      w.Board.Terminal.migrate({ cards: [{ id: 'pay-9', type: 'pay', params: {}, w: 1 }] })
+        .cards[0].type === 'deliver');
+    check('…and PAY still runs it from the palette, alongside DELIVER and SEND',
+      ['DELIVER 1-61', 'PAY 1-61', 'SEND 1-61'].every((line) => {
+        const plan = w.Board.Terminal.parse(line);
+        return plan && plan.type === 'deliver';
+      }));
 
     w.Board.Terminal.remove(pay.id);
   }
   check('an incident row names the attacker as a person and the shots as its badge', /1-1957/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && /2-287/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="incidents"] .pc-row .sui-badge') !== null);
   check('a raid row stacks attacker vs defender and keeps the live one\'s status word', /Marklifer/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && /JPEG/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="raids"] .pc-row.sc-bad') !== null);
-  check('a wallet row is an asset row: ore marked not sendable and without a Pay door', [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => /not sendable/.test(r.textContent) && !r.querySelector('.pc-act[title="Pay"]')) && [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => r.querySelector('.pc-act[title="Pay"]')));
+  check('a wallet row is an asset row: ore marked not sendable and without a Deliver door', [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => /not sendable/.test(r.textContent) && !r.querySelector('.pc-act[title="Deliver"]')) && [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => r.querySelector('.pc-act[title="Deliver"]')));
   // The sweep prices itself before it moves anything.
   const sweepBtn = [...d.querySelectorAll('#tm-grid [data-type="armada"] a')].find((a) => a.textContent === 'Sweep Alpha');
   sweepBtn.click();

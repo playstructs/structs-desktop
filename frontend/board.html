@@ -1123,41 +1123,41 @@
        catches a mis-send before it is signed; an address never does. The two
        parties sit side by side with the direction between them, and the
        amount — the only number being decided — is the only one drawn large. */
-    .pay-parties { display: flex; align-items: stretch; gap: var(--spacing-sm); }
-    .pay-party {
+    .deliver-parties { display: flex; align-items: stretch; gap: var(--spacing-sm); }
+    .deliver-party {
       flex: 1 1 0; min-width: 0;
       display: flex; flex-direction: column; gap: var(--spacing-xs);
       padding: var(--spacing-sm); text-align: left;
     }
-    .pay-party .pc-person { min-width: 0; }
+    .deliver-party .pc-person { min-width: 0; }
     /* The amount is a compound control (number + unit + MAX) and there is
        never room for it beside its caption in one column, so this one field
        stacks where the rest of the board's fields sit in a row. */
-    #board-layout .pay-amount-host label.sui-input-text.cfg-field {
+    #board-layout .deliver-amount-host label.sui-input-text.cfg-field {
       flex-direction: column; align-items: stretch; gap: var(--spacing-xs);
     }
-    #board-layout .pay-amount-host label.sui-input-text.cfg-field > span:first-child { flex: none; }
-    .pay-arrow { flex: none; display: flex; align-items: center; color: var(--accent-primary); }
-    .pay-addr, .pay-clear { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .pay-foot { display: flex; gap: var(--spacing-md); align-items: baseline; min-width: 0; }
+    #board-layout .deliver-amount-host label.sui-input-text.cfg-field > span:first-child { flex: none; }
+    .deliver-arrow { flex: none; display: flex; align-items: center; color: var(--accent-primary); }
+    .deliver-addr, .deliver-clear { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .deliver-foot { display: flex; gap: var(--spacing-md); align-items: baseline; min-width: 0; }
     /* SUI's `a:link` out-specifies any type class on the anchor, so the link
        takes the footer's size by inheriting it rather than restating it. */
-    #board-layout .pay-clear { font-size: inherit; line-height: inherit; color: var(--text-hint); flex: none; }
-    .pay-addr { color: var(--text-hint); text-transform: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-    .pay-hits { display: flex; flex-direction: column; gap: var(--spacing-xs); max-height: 14vh; overflow-y: auto; }
-    .pay-hit { padding: var(--spacing-xs); }
-    .pay-hit:hover { background: var(--surface-player-highlight); }
+    #board-layout .deliver-clear { font-size: inherit; line-height: inherit; color: var(--text-hint); flex: none; }
+    .deliver-addr { color: var(--text-hint); text-transform: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .deliver-hits { display: flex; flex-direction: column; gap: var(--spacing-xs); max-height: 14vh; overflow-y: auto; }
+    .deliver-hit { padding: var(--spacing-xs); }
+    .deliver-hit:hover { background: var(--surface-player-highlight); }
     /* The amount is the decision, so it is the one figure at reading size —
        SUI's own `sui-text-paragraph`, put on the input by the card. */
-    #board-layout .pay-amount-host .amount-input { text-align: right; }
-    .pay-facts { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-lg); align-items: baseline; }
-    .pay-fact { display: flex; gap: var(--spacing-sm); align-items: baseline; min-width: 0; }
-    .pay-fact b { font-weight: normal; }
-    .pay-actions { display: flex; justify-content: flex-end; }
+    #board-layout .deliver-amount-host .amount-input { text-align: right; }
+    .deliver-facts { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-lg); align-items: baseline; }
+    .deliver-fact { display: flex; gap: var(--spacing-sm); align-items: baseline; min-width: 0; }
+    .deliver-fact b { font-weight: normal; }
+    .deliver-actions { display: flex; justify-content: flex-end; }
     /* Not `disabled`: it is a link, and a preview that has not answered yet is
        not the same as a payment that is refused. */
-    .pay-off { opacity: .5; pointer-events: none; }
-    .pay-note:empty { display: none; }
+    .deliver-off { opacity: .5; pointer-events: none; }
+    .deliver-note:empty { display: none; }
     .tm-card.tm-dragging { opacity: .5; }
     .tm-card.tm-drop-before { box-shadow: inset var(--spacing-xs) 0 0 var(--accent-primary); }
     .tm-card.tm-drop-after { box-shadow: inset calc(-1 * var(--spacing-xs)) 0 0 var(--accent-primary); }

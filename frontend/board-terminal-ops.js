@@ -1593,7 +1593,7 @@
                     .catch(function (e) { Board.stamp && Board.stamp('refine: ' + e); });
                 });
               } }]
-            : (a.sendable === false ? [] : [{ icon: 'icon-send-alpha', title: 'Pay', onClick: function () { add('pay', {}); } }]) }));
+            : (a.sendable === false ? [] : [{ icon: 'icon-send-alpha', title: 'Deliver', onClick: function () { add('deliver', {}); } }]) }));
         });
         host.appendChild(table);
       }).catch(function (e) { fail(host, 'inventory', e); });
@@ -1849,7 +1849,7 @@
     },
   });
 
-  /* ── Pay ──────────────────────────────────────────────────────────────────
+  /* ── Deliver ──────────────────────────────────────────────────────────────
    *
    * Was `transfer.html` in an iframe, and every problem it had was that one
    * problem: a whole DOCUMENT pretending to be a card. It carried its own
@@ -1871,18 +1871,18 @@
    * `transfer.html` stays: Comms still opens it as its own window, which is a
    * window, and there it is right.
    */
-  T.register('pay', {
-    label: 'Pay', cadenceMs: 0,
-    describe: function (p) { return 'Pay' + (p && p.to ? ' · ' + p.to : ''); },
+  T.register('deliver', {
+    label: 'Deliver', cadenceMs: 0,
+    describe: function (p) { return 'Deliver' + (p && p.to ? ' · ' + p.to : ''); },
     params: [{ key: 'to', label: 'Pay whom', kind: 'id', kinds: [1], placeholder: '1-61' }],
     render: function (host, p, ctx) {
       var S = { me: null, assets: [], denom: null, base: 0, unit: null, to: null, preview: null, timer: null, busy: false };
       host.innerHTML = '';
-      var parties = H.el('div', 'pay-parties');
-      var amountHost = H.el('div', 'pay-amount-host');
-      var facts = H.el('div', 'pay-facts');
-      var note = H.el('div', 'pay-note');
-      var actions = H.el('div', 'pay-actions');
+      var parties = H.el('div', 'deliver-parties');
+      var amountHost = H.el('div', 'deliver-amount-host');
+      var facts = H.el('div', 'deliver-facts');
+      var note = H.el('div', 'deliver-note');
+      var actions = H.el('div', 'deliver-actions');
       [parties, amountHost, facts, note, actions].forEach(function (n) { host.appendChild(n); });
 
       function asset() {
@@ -1906,7 +1906,7 @@
 
       // ── The two parties ──────────────────────────────────────────────────
       function person(role, o, extra, onClear) {
-        var box = H.el('div', 'pay-party sui-screen');
+        var box = H.el('div', 'deliver-party sui-screen');
         box.appendChild(H.el('div', 'fstat-l', role));
         var line = PC() && PC().parts.personLine
           ? PC().parts.personLine({ id: o.id, name: o.name, tag: o.tag, pfp: o.pfp }, {})
@@ -1917,10 +1917,10 @@
          * something you could not paste back — and the link takes its size by
          * INHERITANCE, because SUI's `a:link` out-specifies any type class
          * put on the anchor itself. */
-        var foot = H.el('div', 'pay-foot sui-text-tiny');
-        if (extra) foot.appendChild(H.el('span', 'pay-addr', extra));
+        var foot = H.el('div', 'deliver-foot sui-text-tiny');
+        if (extra) foot.appendChild(H.el('span', 'deliver-addr', extra));
         if (onClear) {
-          var a = H.el('a', 'pay-clear', 'change');
+          var a = H.el('a', 'deliver-clear', 'change');
           a.href = 'javascript:void(0)';
           a.addEventListener('click', onClear);
           foot.appendChild(a);
@@ -1932,36 +1932,50 @@
        * empty "to" box and no way to find anyone was the old window's other
        * dead end. */
       function search() {
-        var box = H.el('div', 'pay-party sui-screen');
+        var box = H.el('div', 'deliver-party sui-screen');
         box.appendChild(H.el('div', 'fstat-l', 'TO'));
         var input = H.textBox('', 'name or 1-61', function () {});
         input.setAttribute('autocomplete', 'off');
         box.appendChild(H.field('', input));
-        var hits = H.el('div', 'pay-hits');
+        var hits = H.el('div', 'deliver-hits');
         box.appendChild(hits);
         var timer = null;
+        /* An id is not a name, and half an id is neither.
+         *
+         * Every keystroke went to the guild API's name search, so typing
+         * `1-61` sent `1-` — which that API rejects — and the card printed its
+         * 400 verbatim: a URL, a JSON body and the words "this value is not
+         * valid", upper-cased across six lines, in place of the answer. A
+         * player id is resolved here, and a PARTIAL one is not a question
+         * worth asking anyone. */
+        function idish(q) { return /^\d+-/.test(q); }
+        function whole(q) { return /^\d+-\d+$/.test(q); }
+        function say(text) { hits.innerHTML = ''; if (text) hits.appendChild(H.el('div', 'fstat-l', text)); }
         function run() {
           var q = String(input.value || '').trim();
-          hits.innerHTML = '';
-          if (q.length < 2) return;
+          if (whole(q)) { say('press enter for ' + q); return; }
+          if (idish(q) || q.length < 2) { say(''); return; }
           invoke('mcp_player_search', { query: q }).then(function (res) {
+            if (String(input.value || '').trim() !== q) return;   // a later keystroke owns the box
             hits.innerHTML = '';
             ((res && (res.results || res.players)) || res || []).slice(0, 5).forEach(function (r) {
               var row = PC() && PC().parts.personLine
                 ? PC().parts.personLine({ id: r.player_id, name: r.name || r.username, tag: r.guild_tag, pfp: r.pfp || r.pfp_attrs },
-                    { cls: 'pay-hit', onClick: function () { choose(r.player_id, r.name || r.username, r.pfp || r.pfp_attrs, r.guild_tag); } })
+                    { cls: 'deliver-hit', onClick: function () { choose(r.player_id, r.name || r.username, r.pfp || r.pfp_attrs, r.guild_tag); } })
                 : null;
               if (row) hits.appendChild(row);
             });
-            if (!hits.childNodes.length) hits.appendChild(H.el('div', 'fstat-l', 'no one by that name'));
-          }).catch(function (e) { hits.innerHTML = ''; hits.appendChild(H.el('div', 'fstat-l', String(e))); });
+            if (!hits.childNodes.length) say('no one by that name');
+          // Never the raw failure: it is a wall of URL and JSON where the
+          // answer goes, and there is nothing in it the player can act on.
+          }).catch(function () { say('search unavailable'); });
         }
         input.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(run, 250); });
-        // A bare id needs no search: it is already the answer.
+        // A whole id needs no search: it is already the answer.
         input.addEventListener('keydown', function (e) {
           if (e.key !== 'Enter') return;
           var v = String(input.value || '').trim();
-          if (/^1-\d+$/.test(v)) { e.preventDefault(); choose(v, null, null, null); }
+          if (whole(v)) { e.preventDefault(); choose(v, null, null, null); }
         });
         return box;
       }
@@ -1972,7 +1986,11 @@
           if (!intent || !intent.to) return;
           S.to = { id: intent.playerId || playerId, name: intent.name || name, pfp: pfp, tag: tag, address: intent.to };
           paint(); schedule();
-        }).catch(function (e) { S.preview = null; setNote('error', String(e)); });
+        }).catch(function () {
+          S.preview = null;
+          setNote('error', 'no payable address for ' + playerId);
+          paintActions();
+        });
       }
 
       function setNote(kind, text) {
@@ -2018,7 +2036,7 @@
           /* Supporting facts, not the decision: the amount is the one figure
            * at reading size, and "primary signing queue" at 16px shouted over
            * it. */
-          var w = H.el('span', 'pay-fact');
+          var w = H.el('span', 'deliver-fact');
           w.appendChild(H.el('span', 'fstat-l', label));
           w.appendChild(H.el('b', 'sui-text-tiny', value));
           facts.appendChild(w);
@@ -2036,26 +2054,27 @@
         a.appendChild(H.el('i', 'icon-send-alpha'));
         a.appendChild(H.el('span', null, S.busy ? ' Sending…'
           : ' Send' + (S.base && asset() ? ' ' + H.fmtAmountIn(asset(), S.base) : '')));
-        if (!ready) a.classList.add('pay-off');
+        if (!ready) a.classList.add('deliver-off');
         else a.addEventListener('click', send);
         actions.appendChild(a);
       }
       function paintAmount() {
         amountHost.innerHTML = '';
         var a = asset();
-        if (!a) return;
+        // Nothing sendable is a STATE, not an empty card with a dead button.
+        if (!a) { amountHost.appendChild(H.stateBlock('info', 'nothing sendable in this wallet')); return; }
         var opts = {
           kind: 'alpha', rungs: rungs(a), base: S.base, max: baseOf(a),
           onChange: function (base, unit) { S.base = base; S.unit = unit; paintFacts(); schedule(); },
         };
-        // WHICH asset first, then how much of it — and only when there is a
-        // choice: a player holding nothing but Alpha is not asked to pick it.
-        if (S.assets.length > 1) {
-          var sel = H.selectBox(S.denom, S.assets.map(function (x) {
-            return { value: x.denom, label: assetName(x) + ' · ' + H.fmtAmountIn(x, baseOf(x)) };
-          }), function (d) { S.denom = d; S.unit = null; S.base = 0; paintAmount(); paintFacts(); schedule(); });
-          amountHost.appendChild(H.field('Asset', sel));
-        }
+        /* WHICH asset first, then how much of it. Always shown, even holding
+         * nothing but Alpha: the list IS the answer to "what can I send", and
+         * a control that appears only once you happen to hold a second token
+         * is one nobody knows exists. Alpha sorts first and is the default. */
+        var sel = H.selectBox(S.denom, S.assets.map(function (x) {
+          return { value: x.denom, label: assetName(x) + ' · ' + H.fmtAmountIn(x, baseOf(x)) };
+        }), function (dn) { S.denom = dn; S.unit = null; S.base = 0; paintAmount(); paintFacts(); schedule(); });
+        amountHost.appendChild(H.field('Asset', sel));
         if (S.unit) opts.unit = S.unit;
         var af = H.amountField('Amount', opts);
         var input = af.querySelector('.amount-input');
@@ -2065,7 +2084,7 @@
       function paint() {
         parties.innerHTML = '';
         parties.appendChild(person('FROM', S.me || { id: 'primary' }, S.me && S.me.address ? shortAddr(S.me.address) : null));
-        var ar = H.el('div', 'pay-arrow');
+        var ar = H.el('div', 'deliver-arrow');
         ar.appendChild(H.el('i', 'sui-icon-sm icon-arrow-right'));
         parties.appendChild(ar);
         parties.appendChild(S.to
@@ -2086,7 +2105,15 @@
            * `id`. Left unmapped the FROM side drew nothing at all — a payment
            * screen naming one of its two parties. */
           var me = d && d.player;
-          if (me) S.me = { id: me.player_id || me.id, name: me.name, pfp: me.pfp || me.pfp_attrs, tag: me.guild_tag, address: me.address };
+          if (me) {
+            /* "primary" is the ROLE this account plays, not what it is called.
+             * Until the game window has reported a callsign the server still
+             * answers with the label, and drawing it as the payer's name put a
+             * person called "primary" on one side of the payment. An unnamed
+             * player is shown by id, which `personLine` already does. */
+            var nm = me.name && String(me.name) !== 'primary' ? me.name : null;
+            S.me = { id: me.player_id || me.id, name: nm, pfp: me.pfp || me.pfp_attrs, tag: me.guild_tag, address: me.address };
+          }
           /* Whatever the SERVER says may leave a wallet, not a list kept here:
            * ore is not a bank asset at all and staking states are not
            * balances, and the two must never disagree. */

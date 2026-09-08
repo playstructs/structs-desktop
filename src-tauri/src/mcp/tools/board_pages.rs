@@ -444,14 +444,24 @@ fn resolve_player(player: &str) -> Result<(String, Option<u32>, String, String),
             ));
         }
     }
-    let (pid, addr) = crate::game_state::GAME_STATE
+    let (pid, addr, pname) = crate::game_state::GAME_STATE
         .read()
-        .map(|g| (g.player_id.clone().unwrap_or_default(), g.wallet_address.clone().unwrap_or_default()))
+        .map(|g| {
+            (
+                g.player_id.clone().unwrap_or_default(),
+                g.wallet_address.clone().unwrap_or_default(),
+                g.player_name.clone().unwrap_or_default(),
+            )
+        })
         .unwrap_or_default();
     if addr.is_empty() {
         return Err("no wallet address known yet — is the game window signed in?".into());
     }
-    Ok((pid, None, "primary".to_string(), addr))
+    // "primary" is a ROLE, not a callsign. Returned as the name it reached the
+    // UI as one, and the Pay card drew the payer as a person called "primary"
+    // — the account has a name, and every other card shows it.
+    let name = if pname.trim().is_empty() { "primary".to_string() } else { pname };
+    Ok((pid, None, name, addr))
 }
 
 /// Balances for one player (default: the primary), plus the denom registry the
