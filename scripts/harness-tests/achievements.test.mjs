@@ -77,9 +77,12 @@ const NO_COMBAT = {
   for (const m of rs.matchAll(new RegExp(`=>\\s*"${KEYISH}"`, 'g'))) emitted.add(m[1]);
   for (const m of rs.matchAll(new RegExp(`\\.entry\\("${KEYISH}"\\)`, 'g'))) emitted.add(m[1]);
   for (const m of rs.matchAll(new RegExp(`\\("[a-z]+",\\s*"${KEYISH}"\\)`, 'g'))) emitted.add(m[1]);
-  // Counted, never published as its own tile — the walk's own measure of
-  // raids launched, which replaces the profile endpoint's when it lands.
+  /* Counted, never published as tiles of their own: the walk's own measure of
+   * raids launched (which replaces the profile endpoint's when it lands), and
+   * the ledger's count of won raids (which stands in for the activity feed's
+   * until that route exists). Both feed a tile that already has a name. */
   emitted.delete('raids_initiated');
+  emitted.delete('raids_won_ledger');
 
   const known = new Set(Object.keys(A.BY_KEY));
   const orphans = [...emitted].filter((k) => !known.has(k));

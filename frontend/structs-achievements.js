@@ -87,7 +87,6 @@
       { key: 'raids_launched', name: 'Raids launched', short: 'Launched', icon: 'icon-raid' },
       { key: 'raids_won', name: 'Raids won', short: 'Won', icon: 'sui-icon-attacker' },
       { key: 'ore_seized', name: 'Ore seized in raids', short: 'Seized', icon: 'sui-icon-alpha-ore', fmt: 'ore', ladder: 'ore' },
-      { key: 'raids_landed', name: 'Raids that made contact', short: 'Contact', icon: 'icon-detected' },
       { key: 'raids_repelled', name: 'Raids repelled', short: 'Repelled', icon: 'sui-icon-defended' },
       { key: 'ore_forfeited', name: 'Ore lost to raiders', short: 'Forfeited', icon: 'icon-outgoing', fmt: 'ore', ladder: 'ore' },
       { key: 'feat_breach_kill', name: 'Killed a raider mid-breach', short: 'Breach kill', icon: 'icon-planetary-shield', ladder: 'feat' },

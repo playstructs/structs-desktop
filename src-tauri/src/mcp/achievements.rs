@@ -221,12 +221,8 @@ pub fn is_missing_route(err: &str) -> bool {
 /// are shooting, when `targetPlayerId` is us we are being shot. A self-raid
 /// hits both branches, which is correct — a vplayer shooting another vplayer
 /// really did fire and really was hit.
-pub fn fold_attack(rec: &mut Record, me: &str, d: &Value) {
+pub fn fold_attack(rec: &mut Record, me: &str, d: &Value, on_my_planet: bool) {
     let attacker_is_me = text(d.get("attackerPlayerId")).as_deref() == Some(me);
-    let target_is_me = text(d.get("targetPlayerId")).as_deref() == Some(me);
-    if !attacker_is_me && !target_is_me {
-        return;
-    }
 
     let a_type = text(d.get("attackerStructType")).unwrap_or_default();
     let a_ambit = text(d.get("attackerStructOperatingAmbit")).unwrap_or_default();
@@ -246,6 +242,17 @@ pub fn fold_attack(rec: &mut Record, me: &str, d: &Value) {
     }
 
     for shot in &shots {
+        /* WHOSE struct this shot hit is a property of the SHOT, not of the
+         * volley: `targetPlayerId` lives in `eventAttackShotDetail`, and one
+         * volley can spray several defenders. Read flat — as the published
+         * schema describes it — it is always absent, `target_is_me` is always
+         * false, and the entire defensive half of the record silently scores
+         * zero. Verified against the indexer: the top level carries only
+         * `attacker*` fields, and every `target*` key is per shot. */
+        let target_is_me = text(shot.get("targetPlayerId")).as_deref() == Some(me);
+        if !attacker_is_me && !target_is_me {
+            continue;
+        }
         // What actually landed. Never `damage` on its own.
         let landed = (num(shot.get("damageDealt")) - num(shot.get("damageReduction"))).max(0.0);
         let reduced = num(shot.get("damageReduction"));
@@ -318,9 +325,8 @@ pub fn fold_attack(rec: &mut Record, me: &str, d: &Value) {
             }
             // A counter is MY defender hitting back: it belongs to me even
             // though the row is an attack ON me.
-            for c in d
-                .get("eventAttackShotDetail")
-                .and_then(|_| shot.get("eventAttackDefenderCounterDetail"))
+            for c in shot
+                .get("eventAttackDefenderCounterDetail")
                 .and_then(|x| x.as_array())
                 .into_iter()
                 .flatten()
@@ -344,9 +350,11 @@ pub fn fold_attack(rec: &mut Record, me: &str, d: &Value) {
         }
     }
 
-    // Planetary defence cannons belong to whoever owns the planet, so they
-    // score for the defender, not for the shooter.
-    if target_is_me {
+    /* Planetary defence cannons belong to whoever owns the PLANET, and the row
+     * names no planet owner at all — only `planet_activity.planet_id`. So the
+     * caller, which knows our planets, decides; reading it off the shots would
+     * credit a cannon to whoever happened to be shot at. */
+    if on_my_planet {
         let pdc = num(d.get("planetaryDefenseCannonDamage"));
         if pdc > 0.0 {
             rec.bump("damage_dealt", pdc);
@@ -431,27 +439,35 @@ impl Feats {
             }
             "struct_attack" => {
                 let attacker = text(d.get("attackerPlayerId")).unwrap_or_default();
-                let target = text(d.get("targetPlayerId")).unwrap_or_default();
                 let shots = d
                     .get("eventAttackShotDetail")
                     .and_then(|s| s.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let killed = shots.iter().filter(|s| truthy(s.get("targetDestroyed"))).count();
-                if killed == 0 {
+                // Only `attacker*` is flat; who each shot HIT is per shot.
+                let killed: Vec<String> = shots
+                    .iter()
+                    .filter(|s| truthy(s.get("targetDestroyed")))
+                    .map(|s| text(s.get("targetPlayerId")).unwrap_or_default())
+                    .collect();
+                if killed.is_empty() {
                     return;
                 }
-                if target == me && !attacker.is_empty() {
+                if killed.iter().any(|t| t == me) && !attacker.is_empty() && attacker != me {
                     self.beaten_by.insert(attacker);
                     return;
                 }
                 if attacker != me {
                     return;
                 }
-                // Payback is scored once per opponent, the first time we
-                // answer them — otherwise a long feud counts as ten feats.
-                if !target.is_empty() && self.beaten_by.remove(&target) {
-                    rec.bump("feat_payback", 1.0);
+                /* Payback is scored once per opponent, the first time we answer
+                 * them — otherwise a long feud counts as ten feats. One volley
+                 * can kill structs belonging to several players, so every
+                 * victim in it is checked. */
+                for t in killed.iter().filter(|t| !t.is_empty()) {
+                    if self.beaten_by.remove(t) {
+                        rec.bump("feat_payback", 1.0);
+                    }
                 }
                 let cmd = shots
                     .iter()
@@ -518,18 +534,28 @@ async fn ledger_totals(client: &GuildApiClient, id: &str) -> Result<HashMap<&'st
             .unwrap_or(0.0);
         let key = match (action.as_str(), denom.as_str()) {
             ("refined", "ualpha") => "alpha_refined",
-            ("infused", _) => "alpha_infused",
+            /* `ualpha`, not any denom. An infusion writes BOTH legs of one
+             * double entry — `ualpha` debit out of the wallet and
+             * `ualpha.infused` credit into the stake, same block, same amount
+             * — so a denom-agnostic match counted 1-61's single 4g infusion
+             * as 8g. The `ualpha` leg is the alpha that left, which is what
+             * "Infuse [#] Alpha" asks for. `refined` is the same shape (ore
+             * debit, ualpha credit) and was already pinned to one leg. */
+            ("infused", "ualpha") => "alpha_infused",
             ("mined", "ore") => "ore_mined",
             ("seized", "ore") => "ore_seized",
             ("forfeited", "ore") => "ore_forfeited",
             _ => continue,
         };
         *out.entry(key).or_insert(0.0) += amt;
-        // A raid that reached the planet and took nothing still writes a
-        // seized row — roughly 40% of them are 0 grams — so the COUNT of
-        // seized rows is "raids that made contact", not "raids that paid".
+        /* Every won raid writes one `seized` row, whether or not it carried
+         * anything away — roughly 40% are 0 grams. So the COUNT of seized rows
+         * is the number of raids won, from the ledger, and it agrees exactly
+         * with the activity feed's own count (1-61: 76 either way). It is kept
+         * as a fallback rather than a tile of its own: it is the only way to
+         * answer "raids won" until the per-player activity route exists. */
         if key == "ore_seized" {
-            *out.entry("raids_landed").or_insert(0.0) += 1.0;
+            *out.entry("raids_won_ledger").or_insert(0.0) += 1.0;
         }
     }
     if !complete {
@@ -579,7 +605,7 @@ async fn activity_totals(
             .or_else(|| text(row.get("planet_id")))
             .unwrap_or_default();
         match category.as_str() {
-            "struct_attack" => fold_attack(rec, id, &d),
+            "struct_attack" => fold_attack(rec, id, &d, mine.planets.iter().any(|p| *p == planet)),
             "struct_status" => fold_status(rec, &d),
             "raid_status" => {
                 let fleet = text(d.get("fleet_id")).unwrap_or_default();
@@ -738,6 +764,9 @@ async fn build(id: &str) -> Result<Value, String> {
             // Ledger figures are base units and beat the profile's floored
             // display sums wherever both exist.
             for (k, v) in t {
+                if *k == "raids_won_ledger" {
+                    continue;   // a fallback, applied below only if it is needed
+                }
                 rec.set(k, *v);
             }
         }
@@ -758,6 +787,18 @@ async fn build(id: &str) -> Result<Value, String> {
             "none"
         }
     };
+
+    /* Without the activity route there is still one combat figure the ledger
+     * can answer, because a won raid always writes a `seized` row. Applied
+     * only here, AFTER the walk: the walk counts the same raids itself, and
+     * setting it earlier would have the two sources add up to double. */
+    if combat != "full" {
+        if let Ok(t) = &ledger {
+            if let Some(n) = t.get("raids_won_ledger") {
+                rec.set("raids_won", *n);
+            }
+        }
+    }
 
     let height = crate::mcp::perception::with_snapshot(|s| s.height).unwrap_or(0);
     Ok(json!({
@@ -824,23 +865,33 @@ fn hulls_json(rec: &Record) -> Value {
 mod tests {
     use super::*;
 
-    /// One volley: a Destroyer firing a guided weapon, three shots — one that
-    /// lands through armour, one blocked by a defender, one that kills.
+    /* One volley: a Destroyer firing a guided weapon, three shots — one that
+     * lands through armour, one blocked by a defender, one that kills.
+     *
+     * THE SHAPE IS THE POINT. Only `attacker*` fields are flat; every
+     * `target*` field, `targetPlayerId` INCLUDED, is per shot. The published
+     * schema describes `targetPlayerId` as top-level and it is not — a fixture
+     * that believed the doc let the whole defensive half of this module score
+     * zero while these tests stayed green. Verified against the indexer:
+     * `struct_attack` details carry `attackerPlayerId` and no other player id
+     * at the top level. */
     fn volley() -> Value {
         json!({
             "attackerPlayerId": "1-194",
-            "targetPlayerId": "1-248",
             "attackerStructType": "Destroyer",
             "attackerStructOperatingAmbit": "space",
             "weaponControl": "guided",
             "eventAttackShotDetail": [
-                { "damageDealt": "2", "damageReduction": "1", "damageReductionCause": "ablativeArmour",
+                { "targetPlayerId": "1-248",
+                  "damageDealt": "2", "damageReduction": "1", "damageReductionCause": "ablativeArmour",
                   "armourPiercing": true, "targetStructType": "Tank", "targetStructOperatingAmbit": "land",
                   "targetStructLocationType": "planet", "targetDestroyed": false },
-                { "damageDealt": "2", "damageReduction": "0", "blocked": true, "blockedByStructId": "5-9",
+                { "targetPlayerId": "1-248",
+                  "damageDealt": "2", "damageReduction": "0", "blocked": true, "blockedByStructId": "5-9",
                   "targetStructType": "Cruiser", "targetStructOperatingAmbit": "space",
                   "targetStructLocationType": "fleet", "targetDestroyed": false },
-                { "damageDealt": "2", "damageReduction": "0", "targetStructType": "Command Ship",
+                { "targetPlayerId": "1-248",
+                  "damageDealt": "2", "damageReduction": "0", "targetStructType": "Command Ship",
                   "targetStructOperatingAmbit": "space", "targetStructLocationType": "fleet",
                   "targetDestroyed": "true" }
             ]
@@ -850,7 +901,7 @@ mod tests {
     #[test]
     fn damage_is_the_roll_minus_the_armour_never_the_accumulator() {
         let mut r = Record::default();
-        fold_attack(&mut r, "1-194", &volley());
+        fold_attack(&mut r, "1-194", &volley(), false);
         // 2−1, then 2−0, then 2−0.
         assert_eq!(r.counters["damage_dealt"], 5.0);
         assert_eq!(r.counters["smart_damage"], 5.0);
@@ -861,7 +912,7 @@ mod tests {
     #[test]
     fn a_kill_scores_for_the_shooters_hull_and_against_the_targets() {
         let mut r = Record::default();
-        fold_attack(&mut r, "1-194", &volley());
+        fold_attack(&mut r, "1-194", &volley(), false);
         assert_eq!(r.counters["kills"], 1.0);
         assert_eq!(r.counters["cmd_kills"], 1.0);
         assert_eq!(r.counters["fleet_kills"], 1.0);
@@ -874,20 +925,20 @@ mod tests {
     #[test]
     fn armour_piercing_scores_only_when_it_actually_met_armour() {
         let mut r = Record::default();
-        fold_attack(&mut r, "1-194", &volley());
+        fold_attack(&mut r, "1-194", &volley(), false);
         assert_eq!(r.counters["armour_piercer"], 1.0, "one shot was AP AND reduced");
 
         let mut clean = volley();
         clean["eventAttackShotDetail"][0]["damageReduction"] = json!("0");
         let mut r2 = Record::default();
-        fold_attack(&mut r2, "1-194", &clean);
+        fold_attack(&mut r2, "1-194", &clean, false);
         assert!(!r2.counters.contains_key("armour_piercer"), "AP against no armour is not the feat");
     }
 
     #[test]
     fn the_defender_reads_the_same_row_from_the_other_side() {
         let mut r = Record::default();
-        fold_attack(&mut r, "1-248", &volley());
+        fold_attack(&mut r, "1-248", &volley(), false);
         assert_eq!(r.counters["damage_taken"], 5.0);
         assert_eq!(r.counters["damage_absorbed"], 1.0, "the armour ate one");
         assert_eq!(r.counters["damage_blocked"], 2.0, "a defender took the whole round");
@@ -900,21 +951,89 @@ mod tests {
     fn an_evaded_shot_is_filed_by_its_cause() {
         let mut d = volley();
         d["eventAttackShotDetail"] = json!([
-            { "damageDealt": "2", "evaded": true, "evadedCause": "signalJamming", "targetStructType": "Tank" },
-            { "damageDealt": "3", "evaded": true, "evadedCause": "stealthMode", "targetStructType": "Tank" },
-            { "damageDealt": "1", "evaded": true, "targetStructType": "Tank" }
+            { "targetPlayerId": "1-248", "damageDealt": "2", "evaded": true, "evadedCause": "signalJamming", "targetStructType": "Tank" },
+            { "targetPlayerId": "1-248", "damageDealt": "3", "evaded": true, "evadedCause": "stealthMode", "targetStructType": "Tank" },
+            { "targetPlayerId": "1-248", "damageDealt": "1", "evaded": true, "targetStructType": "Tank" }
         ]);
         let mut r = Record::default();
-        fold_attack(&mut r, "1-248", &d);
+        fold_attack(&mut r, "1-248", &d, false);
         assert_eq!(r.counters["evaded_jam"], 2.0);
         assert_eq!(r.counters["evaded_stealth"], 3.0);
         assert_eq!(r.counters["evaded_other"], 1.0);
     }
 
+    /* ── The shape, pinned ─────────────────────────────────────────────────
+     *
+     * `targetPlayerId` on the VOLLEY is what the published schema describes
+     * and what the indexer never writes. Believing it cost the whole defensive
+     * half of this module — damage taken, blocked, absorbed, evaded, structs
+     * lost, counters — every one of them silently zero, with these tests
+     * green, because the fixture believed it too. */
+    #[test]
+    fn the_victim_is_named_on_the_shot_and_a_volley_level_name_is_ignored() {
+        let mut wrong = volley();
+        // The doc's shape: the victim only at the top, nothing on the shots.
+        wrong["targetPlayerId"] = json!("1-248");
+        for shot in wrong["eventAttackShotDetail"].as_array_mut().unwrap() {
+            shot.as_object_mut().unwrap().remove("targetPlayerId");
+        }
+        let mut r = Record::default();
+        fold_attack(&mut r, "1-248", &wrong, false);
+        assert!(r.counters.is_empty(), "a name the indexer never writes must not score: {:?}", r.counters);
+
+        // And the real shape does.
+        let mut r2 = Record::default();
+        fold_attack(&mut r2, "1-248", &volley(), false);
+        assert_eq!(r2.counters["damage_taken"], 5.0);
+    }
+
+    #[test]
+    fn one_volley_can_hit_several_players_and_only_our_shots_are_ours() {
+        let mut d = volley();
+        // The middle shot belongs to somebody else's struct.
+        d["eventAttackShotDetail"][1]["targetPlayerId"] = json!("1-999");
+        let mut r = Record::default();
+        fold_attack(&mut r, "1-248", &d, false);
+        assert_eq!(r.counters["damage_taken"], 3.0, "2−1 and 2−0, not the blocked shot aimed at 1-999");
+        assert!(!r.counters.contains_key("damage_blocked"), "another player's defender is not ours");
+    }
+
+    #[test]
+    fn a_planetary_cannon_scores_for_whoever_owns_the_planet() {
+        let mut d = volley();
+        d["planetaryDefenseCannonDamage"] = json!("4");
+        d["planetaryDefenseCannonDamageDestroyedAttacker"] = json!(true);
+        // Not our planet: the row names no owner, so it is not ours to claim.
+        let mut away = Record::default();
+        fold_attack(&mut away, "1-248", &d, false);
+        assert!(!away.counters.contains_key("defender_kills"));
+        // Ours.
+        let mut home = Record::default();
+        fold_attack(&mut home, "1-248", &d, true);
+        assert_eq!(home.counters["defender_kills"], 1.0);
+        assert_eq!(home.counters["kills"], 1.0);
+    }
+
+    #[test]
+    fn an_infusion_is_counted_once_though_the_ledger_writes_both_legs() {
+        // Live shape (player 1-61, block 1506519): one 4g infusion, two rows.
+        let legs = [("infused", "ualpha", 4_000_000.0), ("infused", "ualpha.infused", 4_000_000.0)];
+        let mut total = 0.0;
+        for (action, denom, amt) in legs {
+            let key = match (action, denom) {
+                ("refined", "ualpha") => Some("alpha_refined"),
+                ("infused", "ualpha") => Some("alpha_infused"),
+                _ => None,
+            };
+            if key == Some("alpha_infused") { total += amt; }
+        }
+        assert_eq!(total, 4_000_000.0, "the staked leg must not be added to the spent one");
+    }
+
     #[test]
     fn a_row_about_two_other_players_is_not_ours() {
         let mut r = Record::default();
-        fold_attack(&mut r, "1-999", &volley());
+        fold_attack(&mut r, "1-999", &volley(), false);
         assert!(r.counters.is_empty());
         assert!(r.hulls.is_empty());
     }
@@ -969,10 +1088,12 @@ mod tests {
     fn raid(status: &str, fleet: &str) -> Value {
         json!({ "status": status, "fleet_id": fleet, "planet_id": "2-100" })
     }
+    // Again: the victim is named on the SHOT, never on the volley.
     fn kill(attacker: &str, target: &str, ty: &str) -> Value {
         json!({
-            "attackerPlayerId": attacker, "targetPlayerId": target,
-            "eventAttackShotDetail": [{ "targetStructType": ty, "targetDestroyed": true, "damageDealt": "2" }]
+            "attackerPlayerId": attacker,
+            "eventAttackShotDetail": [{ "targetPlayerId": target, "targetStructType": ty,
+                                        "targetDestroyed": true, "damageDealt": "2" }]
         })
     }
 
