@@ -75,6 +75,8 @@ fn main() {
             mcp::native_signer::native_signer_forget,
             mcp::event_buffer::push_game_event,
             mcp::event_buffer::mcp_grass_recent,
+            mcp::event_buffer::mcp_grass_pulse,
+            mcp::event_buffer::mcp_grass_history,
             mcp::txq_bridge::txq_response,
             mcp::tools::board::mcp_board_html,
             mcp::tools::board::mcp_board_refresh,

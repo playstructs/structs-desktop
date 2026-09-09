@@ -109,7 +109,13 @@ const BUDGET = {
   // board.html +1 (2026-09-08): the Pay card's container breakpoint — the width
   // at which its two parties stop stacking. A breakpoint is not spacing and has
   // no token, same case as board-gamestats.js's column minmax.
-  'board.html':         [2, 108],
+  // board.html +2 (2026-09-09): the command reference's column width (260px,
+  // a breakpoint, not spacing) and its section-heading hairline.
+  // board.html +5 (2026-09-09): the rebuilt FEED card — the pulse band's 56px
+  // height (a chart plot area, which SUI has no token for, the way the Game
+  // Stats meters have none) and four 1px hairlines: the band's inter-bar gap,
+  // the lane box, the lane header rule, and the picked hour's outline.
+  'board.html':         [2, 115],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not

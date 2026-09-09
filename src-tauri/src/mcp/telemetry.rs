@@ -1037,6 +1037,239 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
     Ok(json!(out))
 }
 
+
+// ── The durable GRASS log, read back ────────────────────────────────────────
+//
+// The in-memory ring (`event_buffer`) is 2000 frames. Measured over the seven
+// days this table retains, the stream runs at a median 3,566 frames an HOUR —
+// about one a second — so the ring is roughly thirty minutes and a 40-row card
+// is forty SECONDS. Every question worth asking of the feed ("was there a raid
+// on Tuesday", "when did we lose 2,285 structs") is outside it. These two
+// readers are the only way anything can see past the ring.
+
+/// The FEED card's pulse band: one bucket per hour.
+///
+/// Returns, newest last: `{ hour_ms, total, top, destroyed, combat }`. The
+/// rollup exists because the alternative is shipping ~600k rows to draw 48
+/// bars. Grouped by (hour, category) in SQL and folded here, so the dominant
+/// category costs no extra pass.
+pub fn grass_pulse(hours: usize) -> Result<Vec<Value>, String> {
+    const HOUR_MS: f64 = 3_600_000.0;
+    let conn = open_read()?;
+    let hours = hours.clamp(1, 24 * 8);
+    let since = now_millis() - HOUR_MS * hours as f64;
+    let mut stmt = conn
+        .prepare(
+            // 35 is the destroyed bit. `struct_status` is three different
+            // events wearing one name — 0→1 build start, 1→7 online, 7→35
+            // destroyed — and only the third is news, so it is counted apart
+            // from the category it arrives under.
+            "SELECT CAST(ts_ms / 3600000 AS INTEGER) AS hr,
+                    category,
+                    COUNT(*) AS n,
+                    SUM(CASE WHEN category = 'struct_status'
+                              AND json_extract(detail, '$.status') = 35
+                             THEN 1 ELSE 0 END) AS destroyed
+             FROM grass_events
+             WHERE ts_ms >= ?1
+             GROUP BY hr, category",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([since], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut tuples = Vec::new();
+    for row in rows {
+        tuples.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(fold_pulse(tuples))
+}
+
+/// `(hour, category, count, destroyed)` tuples → one bucket per hour.
+///
+/// Split out from the query so the folding rules are testable: `block` never
+/// claims the dominant-category label (it wins nearly every hour and says
+/// nothing), and combat is counted from a named list rather than a pattern.
+fn fold_pulse(rows: Vec<(i64, String, i64, i64)>) -> Vec<Value> {
+    const HOUR_MS: f64 = 3_600_000.0;
+    // hour → (total, destroyed, combat, best category, its count)
+    let mut buckets: std::collections::BTreeMap<i64, (i64, i64, i64, String, i64)> =
+        std::collections::BTreeMap::new();
+    for (hr, cat, n, destroyed) in rows {
+        let e = buckets.entry(hr).or_insert((0, 0, 0, String::new(), 0));
+        e.0 += n;
+        e.1 += destroyed;
+        if is_combat_category(&cat) {
+            e.2 += n;
+        }
+        if cat != "block" && n > e.4 {
+            e.3 = cat;
+            e.4 = n;
+        }
+    }
+    buckets
+        .into_iter()
+        .map(|(hr, (total, destroyed, combat, top, _))| {
+            json!({
+                "hour_ms": hr as f64 * HOUR_MS,
+                "total": total,
+                "top": if top.is_empty() { Value::Null } else { json!(top) },
+                "destroyed": destroyed,
+                "combat": combat,
+            })
+        })
+        .collect()
+}
+
+/// Combat is 0.017% of the stream — 104 `struct_attack` frames in a week
+/// against 92,301 `block`. Naming the categories rather than pattern-matching
+/// them keeps that ratio honest: `shield_change` and `struct_defense_add` look
+/// martial and are overwhelmingly peacetime housekeeping.
+pub fn is_combat_category(cat: &str) -> bool {
+    matches!(
+        cat,
+        "struct_attack" | "raid_status" | "block_raid_start" | "seized" | "forfeited"
+    )
+}
+
+/// Durable frames in a time window, newest last — the shape `event_buffer`
+/// hands out, so the same row renderer draws both.
+///
+/// `categories` empty means every category. `limit` is capped hard: this is a
+/// card back-fill, not an export.
+pub fn grass_history(
+    since_ms: f64,
+    until_ms: Option<f64>,
+    categories: &[String],
+    limit: usize,
+) -> Result<Vec<Value>, String> {
+    let conn = open_read()?;
+    let mut sql = String::from(
+        "SELECT ts_ms, category, subject, detail FROM grass_events WHERE ts_ms >= ?",
+    );
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(since_ms)];
+    if let Some(until) = until_ms {
+        sql.push_str(" AND ts_ms < ?");
+        params.push(Box::new(until));
+    }
+    if !categories.is_empty() {
+        sql.push_str(&format!(
+            " AND category IN ({})",
+            categories.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+        ));
+        for c in categories {
+            params.push(Box::new(c.clone()));
+        }
+    }
+    // Newest first out of SQL so the LIMIT keeps the RECENT end of the window,
+    // then reversed for the caller.
+    sql.push_str(" ORDER BY id DESC LIMIT ?");
+    params.push(Box::new(limit.clamp(1, 2000) as i64));
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |r| {
+                let detail: Option<String> = r.get(3)?;
+                Ok(json!({
+                    "timestamp": r.get::<_, f64>(0)?,
+                    "category": r.get::<_, String>(1)?,
+                    "subject": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    "detail": detail
+                        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                        .unwrap_or(Value::Null),
+                }))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    let mut out = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    out.reverse();
+    Ok(out)
+}
+
+#[cfg(test)]
+mod grass_pulse_tests {
+    use super::*;
+
+    fn rows() -> Vec<(i64, String, i64, i64)> {
+        vec![
+            // One hour dominated by `block` — 92,301 of the week's frames are
+            // block heartbeats, so if `block` could win the label every hour
+            // would read "block" and the band would say nothing.
+            (100, "block".into(), 600, 0),
+            (100, "struct_status".into(), 300, 250),
+            (100, "ore".into(), 100, 0),
+            // A quiet hour that contains the only combat of the day.
+            (101, "block".into(), 400, 0),
+            (101, "struct_attack".into(), 6, 0),
+            (101, "raid_status".into(), 2, 0),
+        ]
+    }
+
+    #[test]
+    fn block_never_claims_the_label() {
+        let out = fold_pulse(rows());
+        assert_eq!(out[0]["top"], "struct_status");
+        assert_eq!(out[1]["top"], "struct_attack");
+    }
+
+    #[test]
+    fn totals_and_destroyed_are_summed_across_categories() {
+        let out = fold_pulse(rows());
+        assert_eq!(out[0]["total"], 1000);
+        // 7→35 is a quarter of `struct_status`, and it is the only part of
+        // that category that is news.
+        assert_eq!(out[0]["destroyed"], 250);
+        assert_eq!(out[0]["combat"], 0);
+    }
+
+    #[test]
+    fn combat_survives_a_thousand_to_one_ratio() {
+        // The whole point of the band: 8 combat frames in a 408-frame hour
+        // must be visible as combat, not rounded away by volume.
+        let out = fold_pulse(rows());
+        assert_eq!(out[1]["combat"], 8);
+        assert_eq!(out[1]["total"], 408);
+    }
+
+    #[test]
+    fn hours_come_back_oldest_first_and_carry_a_timestamp() {
+        let out = fold_pulse(rows());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["hour_ms"], 100.0 * 3_600_000.0);
+        assert!(out[0]["hour_ms"].as_f64() < out[1]["hour_ms"].as_f64());
+    }
+
+    #[test]
+    fn martial_looking_housekeeping_is_not_combat() {
+        // shield_change is 29,341 frames a week and struct_defense_add 14,652;
+        // both are overwhelmingly peacetime. A regex on /defen|shield/ (which
+        // is what the old tape used) makes every hour look like a war.
+        assert!(!is_combat_category("shield_change"));
+        assert!(!is_combat_category("struct_defense_add"));
+        assert!(!is_combat_category("struct_health"));
+        assert!(is_combat_category("struct_attack"));
+        assert!(is_combat_category("raid_status"));
+        assert!(is_combat_category("seized"));
+    }
+
+    #[test]
+    fn an_hour_of_nothing_but_block_has_no_label() {
+        let out = fold_pulse(vec![(7, "block".into(), 12, 0)]);
+        assert_eq!(out[0]["top"], Value::Null);
+        assert_eq!(out[0]["total"], 12);
+    }
+}
+
 #[cfg(test)]
 mod context_rollup_tests {
     use rusqlite::Connection;

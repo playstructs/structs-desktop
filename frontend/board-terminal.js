@@ -70,7 +70,7 @@
    * A type missing from here still appears (under "More"), and the harness
    * fails on it: a new card that nobody filed is a card nobody will find. */
   var CARD_GROUPS = [
-    ['Command', ['help', 'next', 'alerts', 'watchlist', 'tape', 'feed']],
+    ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
     ['Explore', ['player', 'record', 'guild', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
     ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results']],
     ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
@@ -103,7 +103,7 @@
     return { version: 0, cards: [
       { id: 'people-1', type: 'people', params: {}, w: 1 },
       { id: 'market-1', type: 'market', params: {}, w: 2 },
-      { id: 'tape-1', type: 'tape', params: {}, w: 1 },
+      { id: 'feed-1', type: 'feed', params: { span: '24' }, w: 2 },
       { id: 'stats-1', type: 'stats', params: { section: 'universe' }, w: 2 },
       { id: 'pow-1', type: 'pow', params: {}, w: 1 },
       { id: 'queue-1', type: 'queue', params: {}, w: 1 },
@@ -140,7 +140,7 @@
     energy: [['grid', {}, 1], ['halt', {}, 2]], 'energy:production': [['fuel', {}, 1]], 'energy:distribution': [['grid', {}, 1], ['allocations', {}, 1]],
     armada: [['armada', {}, 2]], raids: [['raids', {}, 1]], inventory: [['wallet', {}, 1]], diagnostics: [['health', {}, 1]],
     war: [['posture', {}, 1], ['targets', {}, 2]], 'war:doctrine': [['posture', {}, 1]], 'war:targets': [['targets', {}, 2]],
-    'war:lists': [['grudges', {}, 1], ['vetoes', {}, 1]], 'war:incidents': [['incidents', {}, 2]], grass: [['tape', { filter: 'all' }, 1]],
+    'war:lists': [['grudges', {}, 1], ['vetoes', {}, 1]], 'war:incidents': [['incidents', {}, 2]], grass: [['feed', { span: '24' }, 2]],
     ops: [['health', {}, 1], ['pow', {}, 1]], explore: [['people', {}, 1]],
   };
   function migrate(l) {
@@ -1337,11 +1337,11 @@
   // Starting layouts for the people this page is for. Each is an ordinary
   // workspace once made, and exports as a `terminal:` code like any other.
   var PRESETS = {
-    trader:    { label: 'Energy trader',   cards: [['market', {}, 2], ['book', { id: 'primary' }, 1], ['banks', {}, 2], ['grid', {}, 1], ['halt', {}, 2], ['alerts', {}, 1], ['tape', { filter: 'economy' }, 1], ['wallet', {}, 1]] },
+    trader:    { label: 'Energy trader',   cards: [['market', {}, 2], ['book', { id: 'primary' }, 1], ['banks', {}, 2], ['grid', {}, 1], ['halt', {}, 2], ['alerts', {}, 1], ['feed', { span: '24', lane: 'economy' }, 2], ['wallet', {}, 1]] },
     admin:     { label: 'Guild admin',     cards: [['people', {}, 1], ['banks', {}, 2], ['stats', { section: 'guilds' }, 2], ['grid', {}, 1], ['armada', {}, 2], ['chat', {}, 1]] },
-    botter:    { label: 'Botter',          cards: [['health', {}, 1], ['queue', {}, 1], ['results', {}, 1], ['pow', {}, 1], ['armada', {}, 2], ['tape', { filter: 'all' }, 1], ['page', { page: 'config:profiles' }, 2]] },
+    botter:    { label: 'Botter',          cards: [['health', {}, 1], ['queue', {}, 1], ['results', {}, 1], ['pow', {}, 1], ['armada', {}, 2], ['feed', { span: '24' }, 2], ['page', { page: 'config:profiles' }, 2]] },
     hasher:    { label: 'Hasher',          cards: [['pow', {}, 1], ['solve', {}, 1], ['stats', { section: 'engine' }, 1], ['tasks', {}, 2], ['fuel', {}, 1], ['queue', {}, 1]] },
-    raider:    { label: 'Raider',          cards: [['posture', {}, 1], ['targets', {}, 2], ['raids', { scope: 'live' }, 1], ['ore', {}, 2], ['grudges', {}, 1], ['incidents', {}, 2], ['tape', { filter: 'combat' }, 1]] },
+    raider:    { label: 'Raider',          cards: [['posture', {}, 1], ['targets', {}, 2], ['raids', { scope: 'live' }, 1], ['ore', {}, 2], ['grudges', {}, 1], ['incidents', {}, 2], ['feed', { span: '48', lane: 'war' }, 2]] },
   };
   Terminal.PRESETS = PRESETS;
   function presetLayout(key) {
@@ -1390,7 +1390,7 @@
   // inspector); a word opens a page or a board. `MKT`, `GT 0-1`, `1-194`,
   // `2-15361`, `COMMS 2-15361`, `WORK`, `STATS ORE`, `PEOPLE`, `PAY`, `CHAT`.
   var WORDS = {
-    MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['tape'], FLOW: ['tape'],
+    MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['feed'], FLOW: ['feed'],
     DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], CHAT: ['chat'], COMMS: ['comms', 'id'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
     BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
     PLAYER: ['player', 'id'], MAP: ['map', 'id'], PLANET: ['planet', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
@@ -1402,7 +1402,7 @@
     ARMADA: ['armada'], ROSTER: ['armada'], SQUAD: ['armada'], RAIDS: ['raids'], POSTURE: ['posture'], WAR: ['posture'], TARGETS: ['targets'],
     GRUDGES: ['grudges'], VETOES: ['vetoes'], INCIDENTS: ['incidents'], WALLET: ['wallet', 'optid'], HEALTH: ['health'],
     SETTINGS: ['page', 'config'],
-    STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], STREAM: ['tape'],
+    STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], STREAM: ['feed'],
     INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
     // What a player has DONE (the tiles) and what their hulls have done (the
     // table). `AWARDS` and `HULLS` because that is what each is called out loud.
@@ -1467,6 +1467,26 @@
     for (var i = 0; i < def.params.length; i++) if (def.params[i].kind === 'id') return def.params[i];
     return null;
   }
+  /* A word whose argument is a FIXED SET — `STATS <section>` — and the set,
+   * read off the card's own `kind: 'choice'` param. The options were already
+   * declared there for the configure strip; nothing but the palette was
+   * asking, so `<section>` was a prompt with no way to learn the answers.
+   *
+   * Matched on the param KEY, so only an argument that really is that param
+   * completes: `CHAT direct` names a literal, not a param, and is left alone. */
+  function choiceOptionsFor(word) {
+    var w = WORDS[word];
+    if (!w || !w[1]) return null;
+    var def = TYPES[w[0]];
+    if (!def || !def.params) return null;
+    for (var i = 0; i < def.params.length; i++) {
+      var p = def.params[i];
+      if (p.kind === 'choice' && p.key === w[1] && p.options && p.options.length) return p.options;
+    }
+    return null;
+  }
+  Terminal.choiceOptionsFor = choiceOptionsFor;
+
   /* Will this card take this id? `kinds: null` is "any object", and a card
    * with no id param takes none. */
   function acceptsId(type, id) {
@@ -1654,9 +1674,22 @@
         return { line: parts[0] + ' ' + f.word, words: f.word, what: f.label, sub: parts[0], run: true };
       });
     }
+    var head = parts[0].toUpperCase();
+    /* `STATS ` — the word is complete and its argument is a fixed set, so the
+     * set is what comes next. Before the early return below, which used to
+     * leave the box silent at exactly the moment there was something to say. */
+    if (WORDS[head] && (parts.length === 2 || trailingSpace)) {
+      var opts = choiceOptionsFor(head);
+      if (opts) {
+        var typedOpt = parts.length === 2 ? parts[1].toLowerCase() : '';
+        return opts.filter(function (o) { return String(o.value).toLowerCase().indexOf(typedOpt) === 0; })
+          .map(function (o) {
+            return { line: head + ' ' + o.value, words: head + ' ' + o.value, what: o.label, run: true };
+          });
+      }
+    }
     // A word being typed. Every word that starts this way, one row per CARD so
     // the aliases (MKT / MARKET) do not fill the list with the same answer.
-    var head = parts[0].toUpperCase();
     if (parts.length > 1 || trailingSpace) return [];
     var seen = {}, out = [];
     Object.keys(WORDS).forEach(function (word) {
@@ -2013,16 +2046,6 @@
   // opens its card; one that needs an argument lands in the command box with
   // the caret after it. The bare-id forms and the workspace verbs are rows too.
   var ARG_LABEL = { id: '<id>', ids: '<id id …>', rules: '<rule …>', section: '<section>', optid: '[id]' };
-  function helpRows() {
-    var byTarget = {};
-    Object.keys(WORDS).forEach(function (word) {
-      var w = WORDS[word], key = w.join(':');
-      (byTarget[key] = byTarget[key] || { type: w[0], arg: w[1] || '', words: [] }).words.push(word);
-    });
-    var rows = Object.keys(byTarget).map(function (k) { return byTarget[k]; });
-    rows.sort(function (a, b) { var la = TYPES[a.type] ? TYPES[a.type].label : a.type, lb = TYPES[b.type] ? TYPES[b.type].label : b.type; return la < lb ? -1 : la > lb ? 1 : 0; });
-    return rows;
-  }
   function helpLine(words, what, arg, onClick) {
     var r = H.el('a', 'sui-data-card-row tm-help-row');
     r.href = 'javascript:void(0)';
@@ -2041,35 +2064,86 @@
     box.classList.remove('is-err');
     box.focus();
   }
+  /* Every word that opens a card, filed under the SAME areas the palette
+   * files them under. Sorted-by-label was a flat list of sixty-two rows in
+   * which nothing could be found; the areas are the vocabulary the tabs
+   * already teach, so the reference and the palette agree. */
+  function helpWordsByType() {
+    var by = {};
+    Object.keys(WORDS).forEach(function (word) {
+      var w = WORDS[word];
+      (by[w[0]] = by[w[0]] || { arg: w[1] || '', words: [] }).words.push(word);
+    });
+    return by;
+  }
+
   Terminal.register('help', {
-    label: 'Commands', single: true, defaultWidth: 2, describe: function () { return 'Commands'; },
+    label: 'Commands', single: true, defaultWidth: 2, defaultHeight: 'grow',
+    describe: function () { return 'Commands'; },
     render: function (host) {
       host.innerHTML = '';
       var list = H.el('div', 'tm-help');
-      helpRows().forEach(function (row) {
-        var def = TYPES[row.type];
-        var what = def ? def.label : row.type;
-        if (row.type === 'page') what = 'Settings';
-        if (row.type === 'stats') what = 'Galaxy statistics';
-        var arg = row.arg && row.arg !== 'config' ? ARG_LABEL[row.arg] || row.arg : '';
-        var first = row.words[0];
-        list.appendChild(helpLine(row.words.join(' · '), what, arg, function () {
-          if (arg) fillCommand(first + ' '); else Terminal.execute(first);
-        }));
+      var by = helpWordsByType();
+
+      var section = function (name) {
+        var h = H.el('div', 'tm-help-h fstat-l', name);
+        list.appendChild(h);
+      };
+      var line = function (words, what, arg, onClick) {
+        list.appendChild(helpLine(words, what, arg, onClick));
+      };
+
+      /* ── The cards, by area ──────────────────────────────────────────── */
+      Terminal.groups().forEach(function (g) {
+        var rows = g.options.filter(function (o) { return by[o.value]; });
+        if (!rows.length) return;
+        section(g.group);
+        rows.forEach(function (o) {
+          var e = by[o.value];
+          var arg = e.arg && e.arg !== 'config' ? ARG_LABEL[e.arg] || e.arg : '';
+          var first = e.words[0];
+          /* A fixed set is worth naming: `<section>` is a prompt, `universe ·
+           * trends · …` is the answer. */
+          var opts = choiceOptionsFor(first);
+          if (opts) arg = opts.map(function (x) { return x.value; }).join(' · ');
+          line(e.words.join(' · '), o.label, arg, function () {
+            if (arg) fillCommand(first + ' '); else Terminal.execute(first);
+          });
+        });
       });
-      list.appendChild(helpLine('1-…  ·  0-…  ·  2-…  ·  9-…', 'Player · Guild · Planet · Map by id', '', function () { fillCommand(''); }));
-      /* The order an expert falls into, which the list above cannot show
-       * because it is a list of WORDS. Type the subject and the box offers
-       * every question you can ask of it. */
-      list.appendChild(helpLine('<id> <word>', 'Any word above, asked of that object — 2-29604 LOG', '', function () { fillCommand('2-29604 '); }));
-      // The command line has no permanent bar any more, so the key that
-      // summons it is part of the vocabulary.
-      list.appendChild(helpLine('⌘K  ·  Ctrl-K', 'Open the command palette', '', function () { Terminal.openPalette(); }));
-      list.appendChild(helpLine('PRESET', Object.keys(PRESETS).join(' · '), '<name>', function () { fillCommand('PRESET '); }));
-      list.appendChild(helpLine('SHARE', 'Share this workspace', '', function () { Terminal.execute('SHARE'); }));
+
+      /* ── Subjects ──────────────────────────────────────────────────────
+       * The half of the grammar a list of WORDS cannot show, and the half an
+       * expert actually uses. The forgiving forms are new and nothing else
+       * announces them: a name or a player id now stands in for whatever id
+       * the card wants. */
+      section('Subjects');
+      line('1-…  ·  0-…  ·  2-…  ·  9-…', 'Player · Guild · Planet · Fleet, by id', '',
+        function () { fillCommand('1-61'); });
+      line('<id> <word>', 'Any word above, asked of that object', '',
+        function () { fillCommand('2-29604 '); });
+      line('<name>', 'A callsign finds the player, their planet and their fleet', '',
+        function () { fillCommand('jpeg'); });
+      line('<word> <name>', 'And resolves to the id that word wants — PLANET jpeg', '',
+        function () { fillCommand('PLANET jpeg'); });
+      line('<word> 1-…', 'A player id does the same — PLANET 1-61 opens their planet', '',
+        function () { fillCommand('PLANET 1-61'); });
+      line('⌘K  ·  Ctrl-K', 'Open this command line from anywhere', '',
+        function () { Terminal.openPalette(); });
+
+      /* ── The workspace verbs, which open no card ─────────────────────── */
+      section('Workspace');
+      /* The words whose target is not a CARD, so the loop above never sees
+       * them: the settings page is a page, and PRESET is a verb. Listed by
+       * hand here, and the harness checks every word in the vocabulary
+       * reaches this reference — which is how their absence was caught. */
+      line('SETTINGS · CONFIG', 'Settings', '', function () { Terminal.execute('SETTINGS'); });
+      line('PRESET · PRESETS', Object.keys(PRESETS).join(' · '), '<name>', function () { fillCommand('PRESET '); });
+      line('SHARE', 'Share this workspace as a code', '', function () { Terminal.execute('SHARE'); });
+      line('IMPORT', 'Open a workspace someone shared', '<code>', function () { fillCommand('IMPORT '); });
       // The bar's RESET button went with the bar; this is the same verb.
-      list.appendChild(helpLine('RESET', 'Back to the default page', '', function () { Terminal.execute('RESET'); }));
-      list.appendChild(helpLine('IMPORT', 'Import a shared workspace', '<code>', function () { fillCommand('IMPORT '); }));
+      line('RESET', 'Back to the default page', '', function () { Terminal.execute('RESET'); });
+
       host.appendChild(list);
       return Promise.resolve();
     },
@@ -2568,13 +2642,66 @@
     },
   });
 
-  // The flow tape: the live stream's economic frames, as the stream draws them.
-  var STREAMS = {
-    economy: /transfer|sent|received|settled|mint|burn|refine|seized|infus|agreement|provider|allocation|ore/i,
-    combat: /raid|attack|struct_health|destroy|defen|shield|fleet/i,
-    all: /./,
-  };
-  var tape = { rows: [], listening: false };
+  // ══════════════════════════════════════════════════════════════════════════
+  // THE FEED — a pulse band over lanes.
+  //
+  // Rebuilt 2026-09-09 from the app's own durable log: 610,919 GRASS frames
+  // across seven days. Three numbers out of that reading decided the shape,
+  // and the old tape contradicted all three.
+  //
+  //   ~1 frame per SECOND at the median (3,566/hour; 8,886 at peak). A 40-row
+  //   list is forty seconds of chain. Any question worth asking of the feed is
+  //   outside it, so the card carries a PULSE band — one bar an hour over up to
+  //   a week — and the list answers only "what is in the hour I clicked".
+  //
+  //   Combat is 0.017% — 104 `struct_attack` in a week against 92,301 `block`.
+  //   At 5,000:1 combat cannot survive in a single ordered list at any height,
+  //   so the rows are dealt into fixed LANES. The war lane keeps its space on a
+  //   quiet day; economy volume can never take it.
+  //
+  //   `struct_status` is three events wearing one name: 0→1 build start
+  //   (29,815), 1→7 online (31,111), 7→35 DESTROYED (25,913). A quarter of the
+  //   second-largest category is structs dying and the old tape drew all three
+  //   the same. (Of those 25,913 deaths only 74 had an attack within five
+  //   seconds — the rest are brownout cascades, which is why a destruction is
+  //   not filed under war.)
+  //
+  // It also folds in the ops feed, which was a separate card showing a
+  // different thing in the same shape with nothing saying which was which.
+  // One card, two sources, each row labelled.
+
+  var STATUS_DESTROYED = 35;
+
+  // Lanes, in the order they are drawn. `cats` is matched against the real
+  // category names the server hands back — never a regex, because
+  // `shield_change` (29,341/week) and `struct_defense_add` (14,652) look
+  // martial and are peacetime housekeeping. Anything unmatched lands in
+  // `chain`, so a category nobody wrote a rule for is quiet, not lost.
+  var LANES = [
+    { key: 'war', label: 'War', icon: 'icon-raid', hot: true,
+      cats: ['struct_attack', 'raid_status', 'block_raid_start', 'seized', 'forfeited'] },
+    { key: 'structs', label: 'Structs', icon: 'icon-deploy',
+      cats: ['struct_status', 'struct_health', 'struct_block_build_start',
+             'struct_defense_add', 'struct_defense_remove', 'struct_block_ore_mine_start',
+             'struct_block_ore_refine_start'] },
+    { key: 'grid', label: 'Grid', icon: 'icon-unpowered',
+      cats: ['structsLoad', 'shield_change', 'connectionCapacity', 'connectionCount',
+             'load', 'capacity', 'power', 'nonce', 'proofs'] },
+    { key: 'economy', label: 'Economy', icon: 'icon-refine',
+      cats: ['ore', 'mined', 'refined', 'minted', 'sent', 'received', 'infused',
+             'burned', 'transfer', 'allocation', 'agreement', 'provider'] },
+    { key: 'ops', label: 'Our loops', icon: 'icon-computer', ours: true, cats: [] },
+    { key: 'chain', label: 'Chain', icon: 'icon-signal-jam', quiet: true, cats: [] },
+  ];
+  var LANE_OF = {};
+  LANES.forEach(function (L) { L.cats.forEach(function (c) { LANE_OF[c] = L.key; }); });
+  var laneOf = function (cat) { return LANE_OF[String(cat || '')] || 'chain'; };
+
+  var SPANS = [
+    { value: '6', label: '6 hours' }, { value: '24', label: '24 hours' },
+    { value: '48', label: '2 days' }, { value: '168', label: '7 days' },
+  ];
+
   /* A grass category is a chain event name, not a word: `struct_block_ore_
    * mine_status` filled the whole line as a badge and left no room for what
    * the frame said. Drop the tokens every event shares and keep the two that
@@ -2603,109 +2730,328 @@
     });
     return { word: words.length ? words[words.length - 1] : '', ids: ids };
   };
-  Terminal.register('tape', {
-    label: 'Live tape', describe: function (p) { return 'Live tape · ' + (p.filter || 'economy'); },
-    params: [{ key: 'filter', label: 'Stream', kind: 'choice', options: [{ value: 'economy', label: 'economy' }, { value: 'combat', label: 'combat' }, { value: 'all', label: 'everything' }] }],
-    cadenceMs: 15000,
+
+  /* `struct_status` carries the transition, and the transition is the whole
+   * story. Everything downstream — the label, the tone, whether the row is a
+   * loss — reads this rather than the raw number. */
+  var statusAct = function (ev) {
+    var d = (ev && ev.detail) || {};
+    var now = Number(d.status), was = Number(d.status_old);
+    if (now === STATUS_DESTROYED) return { word: 'destroyed', tone: 'destructive' };
+    if (now === 7) return { word: 'online', tone: 'default' };
+    if (was === 0 && now === 1) return { word: 'building', tone: 'default' };
+    return null;
+  };
+
+  var CAT_TONE = {
+    struct_attack: 'destructive', raid_status: 'destructive', block_raid_start: 'destructive',
+    seized: 'destructive', forfeited: 'destructive',
+    struct_defense_add: 'warning', struct_defense_remove: 'warning', shield_change: 'warning',
+  };
+  var toneOf = function (ev) {
+    var st = ev.category === 'struct_status' ? statusAct(ev) : null;
+    if (st) return st.tone;
+    return CAT_TONE[String(ev.category || '')] || 'default';
+  };
+
+  /* One frame → one row, the way the Grass page draws it: old→new pairs,
+   * precision twins hidden, ids resolved to names, the block lifted out. */
+  function tapeRow(ev, opts) {
+    var g = Board._grass && Board._grass.parts ? Board._grass.parts(ev)
+      : { time: '', category: ev.category, subject: String(ev.subject || ''), block: null, chips: [] };
+    var subj = tapeSubject(g.subject);
+    var st = ev.category === 'struct_status' ? statusAct(ev) : null;
+    var kind = st ? st.word : tapeKind(g.category);
+    /* A chip that restates the header is not news. An ore frame carries
+     * object_id, object_type, player_id and attribute_type — four chips
+     * that between them say "planet 2-29577, player 1-422, ore", which
+     * is exactly what the line above them already says. Dropping them
+     * leaves the one thing that changed. */
+    var shown = {};
+    var mark = function (v) { if (v == null || v === '') return; shown[String(v).trim().toLowerCase()] = 1; };
+    mark(subj.word); subj.ids.forEach(mark); mark(kind); mark(g.category);
+    /* A chip that only PART-repeats the header still repeats it. The
+     * grass algorithm resolves ids to names, so `player_id` came back as
+     * "1-462 (Colin-Lewis)" — half of which is the id already standing
+     * in the header. Take the id out and the new fact, the name, is what
+     * is left; take out everything and the chip was never news. Whole
+     * tokens, never a substring: 1-462 must not match 1-4620. */
+    var undup = function (text) {
+      var out = String(text);
+      subj.ids.forEach(function (id) {
+        out = out.replace(new RegExp('(^|[^0-9A-Za-z_-])' + id.replace(/-/g, '\\-') + '(?![0-9-])', 'g'), '$1');
+      });
+      out = out.replace(/\s{2,}/g, ' ').trim();
+      var wrapped = /^\((.*)\)$/.exec(out);
+      return (wrapped ? wrapped[1] : out).trim();
+    };
+    /* And a change goes first, so the one line of figures a narrow card
+     * can show is the line that says something happened. */
+    var chips = (g.chips || []).filter(function (c) { return !shown[String(c.text).trim().toLowerCase()]; })
+      .map(function (c) { return { label: c.label, text: undup(c.text), title: c.title }; })
+      .filter(function (c) { return c.text !== ''; })
+      .sort(function (a, b) { return (/→/.test(a.text) ? 0 : 1) - (/→/.test(b.text) ? 0 : 1); });
+    var parts = chips.map(function (c) {
+      var s = H.el('span', 'fig sc-tape-kv'); s.appendChild(H.el('span', 'pc-id', c.label + ' ')); s.appendChild(document.createTextNode(c.text));
+      if (c.title) s.title = c.title;
+      return s;
+    });
+    if (opts && opts.repeats > 1) parts.unshift(H.el('span', 'fig tm-feed-rep', '×' + H.fmtInt(opts.repeats)));
+    // The first id the frame names is what the line is ABOUT; a tape
+    // you cannot follow is a tape you only watch.
+    var idm = /(?:^|[^0-9A-Za-z_-])(\d{1,2}-\d{1,9})(?![0-9-])/.exec(g.subject + ' ' + (g.chips || []).map(function (c) { return c.text; }).join(' '));
+    var subject = subj.ids[0] || (idm ? idm[1] : null);
+    return window.StructsCards.tape.row({
+      time: g.time, kind: kind, kindTitle: String(g.category || ''), tone: toneOf(ev),
+      subject: subj.word, ids: subj.ids, parts: parts,
+      block: g.block != null ? H.fmtInt(g.block) : null, fresh: !!(opts && opts.fresh),
+      title: g.subject + ((g.chips || []).length ? ' · ' + g.chips.map(function (c) { return c.label + ' ' + c.text; }).join(' · ') : ''),
+    }, subject ? { onClick: function () {
+      var k = Number(String(subject).split('-')[0]);
+      add(k === 1 ? 'player' : k === 0 ? 'guild' : k === 2 ? 'planet' : 'inspector', { id: subject });
+    } } : {});
+  }
+
+  /* Repeats collapse to one row with ×N. Without this a single chatty loop
+   * owns the card: the screenshot that started this rebuild was five identical
+   * `AUTO_BUILD 0 build completion(s) started, 1 build(s) initiated` rows out
+   * of forty slots. Keyed on the shape of the line, not its numbers, which is
+   * the same rule Team Ops has always used. */
+  function collapse(rows, keyOf) {
+    var out = [], last = null;
+    rows.forEach(function (r) {
+      var k = keyOf(r);
+      if (last && last.key === k) { last.repeats++; return; }
+      last = { key: k, row: r, repeats: 1 };
+      out.push(last);
+    });
+    return out;
+  }
+  var grassKey = function (ev) {
+    return String(ev.category || '') + '|' + String(ev.subject || '').replace(/\d+/g, 'N');
+  };
+  var opsKey = function (e) {
+    return String(e.source || '') + '|' + String(e.message || '').replace(/\d+/g, 'N');
+  };
+
+  // ── The shared stream state ───────────────────────────────────────────────
+  // One ring for the chain, one for our loops, both filled once per window and
+  // tailed live. `scope` is the hour the player picked on the pulse, or null
+  // for live.
+  var feed = {
+    grass: [], ops: [], lookupsWired: false, listening: false,
+    fresh: null, scope: null, history: null, pulse: null, draws: [],
+  };
+  var GRASS_RING = 600;
+  /* Every card that is currently on the page redraws on a live frame. A card
+   * that has been removed leaves its draw behind, writing into a host no
+   * longer in the document — so the list is pruned on the way through rather
+   * than leaking one closure per mount. */
+  var redraw = function () {
+    feed.draws = feed.draws.filter(function (fn) { return fn.host && fn.host.isConnected; });
+    feed.draws.forEach(function (fn) { try { fn(); } catch (e) {} });
+  };
+  var mergeLookups = function (l) { if (l && Board._grass && Board._grass.mergeLookups) Board._grass.mergeLookups(l); };
+
+  function wireStream() {
+    if (feed.listening || !window.StructsEvents) return;
+    feed.listening = true;
+    window.StructsEvents.listen('grass-event', function (e) {
+      var ev = e && e.payload;
+      if (!ev || !ev.category) return;
+      feed.fresh = ev;
+      feed.grass.unshift(ev);
+      if (feed.grass.length > GRASS_RING) feed.grass.length = GRASS_RING;
+      if (!feed.scope) redraw();
+    });
+    // Ids resolve lazily; rows already drawn upgrade in place on the next pass.
+    window.StructsEvents.listen('grass-lookups', function (e) { mergeLookups(e && e.payload); redraw(); });
+    window.StructsEvents.listen('board-feed', function (e) {
+      var entry = e && e.payload;
+      if (!entry) return;
+      feed.ops.unshift(entry);
+      if (feed.ops.length > 300) feed.ops.length = 300;
+      if (!feed.scope) redraw();
+    });
+  }
+
+  /* The back-fill that never ran. `mcp_grass_recent` returns an OBJECT —
+   * { events, categories, lookups } — and this read `Array.isArray(recent)`,
+   * which is false for every reply the command has ever sent. The 2,000-frame
+   * ring in Rust was unreachable: the tape started empty on every mount and
+   * filled only from live frames, which is why it always looked thinner than
+   * the Grass page reading the identical command correctly. */
+  function backfill() {
+    return Promise.all([
+      invoke('mcp_grass_recent', { limit: GRASS_RING }).then(function (d) {
+        var evs = (d && d.events) || [];
+        mergeLookups(d && d.lookups);
+        if (evs.length) feed.grass = evs.slice().reverse();
+      }).catch(function () {}),
+      invoke('mcp_board_feed').then(function (entries) {
+        // Rust hands them oldest first; newest belongs on top.
+        feed.ops = (entries || []).slice().reverse();
+      }).catch(function () {}),
+    ]);
+  }
+
+  // ── The pulse band ────────────────────────────────────────────────────────
+  function pulseBand(host, hours, onPick) {
+    var band = H.el('div', 'tm-pulse');
+    var buckets = (feed.pulse && feed.pulse.buckets) || [];
+    if (!buckets.length) {
+      band.appendChild(H.el('div', 'ops-muted', 'no history yet'));
+      host.appendChild(band);
+      return;
+    }
+    var max = buckets.reduce(function (m, b) { return Math.max(m, Number(b.total) || 0); }, 1);
+    var bars = H.el('div', 'tm-pulse-band');
+    buckets.forEach(function (b, i) {
+      var live = i === buckets.length - 1;
+      var combat = Number(b.combat) > 0;
+      var col = H.el('div', 'tm-pulse-hr' + (combat ? ' is-combat' : '')
+        + (feed.scope === b.hour_ms ? ' is-on' : '') + (live && !feed.scope ? ' is-live' : ''));
+      var fill = H.el('div', 'tm-pulse-fill');
+      fill.style.height = Math.max(3, Math.round(100 * (Number(b.total) || 0) / max)) + '%';
+      col.appendChild(fill);
+      var when = new Date(Number(b.hour_ms) || 0);
+      col.title = when.toLocaleString() + ' · ' + H.fmtInt(b.total) + ' frames'
+        + (b.top ? ' · mostly ' + b.top : '')
+        + (Number(b.destroyed) ? ' · ' + H.fmtInt(b.destroyed) + ' destroyed' : '')
+        + (combat ? ' · ' + H.fmtInt(b.combat) + ' combat' : '');
+      col.addEventListener('click', function () { onPick(live && feed.scope !== b.hour_ms ? null : b); });
+      bars.appendChild(col);
+    });
+    band.appendChild(bars);
+    var axis = H.el('div', 'tm-pulse-axis');
+    var first = new Date(Number(buckets[0].hour_ms) || 0);
+    axis.appendChild(H.el('span', 'fstat-l', first.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric' })));
+    var mid = buckets.map(function (b) { return Number(b.total) || 0; }).sort(function (a, b) { return a - b; })[Math.floor(buckets.length / 2)];
+    axis.appendChild(H.el('span', 'fstat-l', 'median ' + H.fmtInt(mid) + '/h · ' + hours + 'h'));
+    axis.appendChild(H.el('span', 'fstat-l', feed.scope ? 'scoped' : 'live'));
+    band.appendChild(axis);
+    host.appendChild(band);
+  }
+
+  // ── The card ──────────────────────────────────────────────────────────────
+  var LANE_OPTS = [{ value: 'all', label: 'every lane' }].concat(LANES.map(function (L) {
+    return { value: L.key, label: L.label.toLowerCase() };
+  }));
+  Terminal.register('feed', {
+    label: 'Feed', defaultWidth: 2, single: true, defaultHeight: 'grow',
+    describe: function (p) {
+      return 'Feed · ' + ((SPANS.filter(function (s) { return s.value === String(p.span || '24'); })[0] || SPANS[1]).label)
+        + (p.lane && p.lane !== 'all' ? ' · ' + p.lane : '');
+    },
+    params: [
+      { key: 'span', label: 'Span', kind: 'choice', options: SPANS },
+      { key: 'lane', label: 'Lane', kind: 'choice', options: LANE_OPTS },
+    ],
+    cadenceMs: 60000,
     render: function (host, p) {
-      var want = STREAMS[p.filter] || STREAMS.economy;
+      var hours = Math.max(1, Number(p.span) || 24);
+      var only = p.lane && p.lane !== 'all' ? p.lane : null;
+
       var draw = function () {
+        if (!host.isConnected) return;
         host.innerHTML = '';
-        var ul = H.el('ul', 'ops-feed sui-text-ticker tm-tape');
-        var rows = tape.rows.filter(function (ev) { return want.test(String(ev.category || '')); }).slice(0, 40);
-        /* A stream with nothing on it and a stream that is DEAD looked the
-         * same, and the line said "economic" whichever stream you picked. The
-         * chain is quiet in one category for long stretches — live
-         * 2026-09-07 the tape read "no economic frames yet" while 177 frames
-         * an hour were arriving as block / struct_status / structsLoad — so
-         * say which stream is empty, and how much is coming in elsewhere. */
-        if (!rows.length) {
-          var stream = p.filter || 'economy';
-          ul.appendChild(H.el('li', 'ops-muted', tape.rows.length
-            ? 'nothing on the ' + stream + ' stream · ' + H.fmtInt(tape.rows.length) + ' other frames'
-            : 'no frames yet'));
+        pulseBand(host, hours, function (b) {
+          feed.scope = b ? Number(b.hour_ms) : null;
+          feed.history = null;
+          if (!feed.scope) { redraw(); return; }
+          invoke('mcp_grass_history', {
+            since_ms: feed.scope, until_ms: feed.scope + 3600000, limit: 500,
+          }).then(function (d) {
+            mergeLookups(d && d.lookups);
+            feed.history = ((d && d.events) || []).slice().reverse();
+          }).catch(function () { feed.history = []; }).then(redraw);
+          redraw();
+        });
+
+        var scoped = feed.scope != null;
+        var grass = scoped ? feed.history : feed.grass;
+        var wrap = H.el('div', 'tm-lanes');
+        if (scoped && grass == null) {
+          wrap.appendChild(H.el('div', 'ops-muted', 'reading that hour…'));
+          host.appendChild(wrap);
+          return;
         }
-        var clock = function (ts) { var d = new Date(Number(ts) || 0); return isNaN(d.getTime()) || !ts ? '' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); };
-        var tone = function (cat) { var c = String(cat || ''); return /raid|combat|attack|destroy/i.test(c) ? 'destructive' : /defen|shield|alert/i.test(c) ? 'warning' : 'default'; };
-        // The board's grass algorithm (Board._grass.parts) folds the detail
-        // keys the same way the Grass tab does: old→new pairs, precision twins
-        // hidden, ids resolved to names, the block lifted out.
-        rows.forEach(function (ev) {
-          var li = H.el('li');
-          var g = Board._grass && Board._grass.parts ? Board._grass.parts(ev) : { time: clock(ev.timestamp), category: ev.category, subject: String(ev.subject || ''), block: null, chips: [] };
-          var subj = tapeSubject(g.subject);
-          var kind = tapeKind(g.category);
-          /* A chip that restates the header is not news. An ore frame carries
-           * object_id, object_type, player_id and attribute_type — four chips
-           * that between them say "planet 2-29577, player 1-422, ore", which
-           * is exactly what the line above them already says. Dropping them
-           * leaves the one thing that changed. */
-          var shown = {};
-          var mark = function (v) { if (v == null || v === '') return; shown[String(v).trim().toLowerCase()] = 1; };
-          mark(subj.word); subj.ids.forEach(mark); mark(kind); mark(g.category);
-          /* A chip that only PART-repeats the header still repeats it. The
-           * grass algorithm resolves ids to names, so `player_id` came back as
-           * "1-462 (Colin-Lewis)" — half of which is the id already standing
-           * in the header. Take the id out and the new fact, the name, is what
-           * is left; take out everything and the chip was never news. Whole
-           * tokens, never a substring: 1-462 must not match 1-4620. */
-          var undup = function (text) {
-            var out = String(text);
-            subj.ids.forEach(function (id) {
-              out = out.replace(new RegExp('(^|[^0-9A-Za-z_-])' + id.replace(/-/g, '\\-') + '(?![0-9-])', 'g'), '$1');
+        // Our loops have no durable copy — the ring is all there is — so a
+        // scoped view says so rather than showing the live entries under an
+        // hour they did not happen in.
+        LANES.forEach(function (L) {
+          if (only && L.key !== only) return;
+          var rows, keyOf;
+          if (L.ours) {
+            rows = scoped ? [] : feed.ops;
+            keyOf = opsKey;
+          } else {
+            rows = (grass || []).filter(function (ev) { return laneOf(ev.category) === L.key; });
+            keyOf = grassKey;
+          }
+          var groups = collapse(rows, keyOf).slice(0, 60);
+          var lane = H.el('div', 'tm-lane'
+            + (groups.length && L.hot ? ' is-hot' : '')
+            + (groups.length ? '' : ' is-quiet'));
+          var hd = H.el('div', 'tm-lane-hd');
+          hd.appendChild(H.el('i', 'sui-icon sui-icon-sm ' + L.icon));
+          hd.appendChild(H.el('span', 'fstat-l', L.label));
+          hd.appendChild(H.el('span', 'tm-lane-n fstat-l',
+            groups.length ? H.fmtInt(rows.length) : (L.ours && scoped ? 'live only' : 'quiet')));
+          lane.appendChild(hd);
+          if (!groups.length) {
+            lane.appendChild(H.el('div', 'tm-lane-empty ops-muted',
+              L.ours && scoped ? 'our loops keep no history' : 'nothing in this window'));
+          } else {
+            var ul = H.el('ul', 'ops-feed sui-text-ticker tm-lane-rows');
+            groups.forEach(function (g) {
+              var li = H.el('li');
+              li.appendChild(L.ours ? opsRow(g.row, g.repeats)
+                : tapeRow(g.row, { repeats: g.repeats, fresh: g.row === feed.fresh }));
+              ul.appendChild(li);
             });
-            out = out.replace(/\s{2,}/g, ' ').trim();
-            var wrapped = /^\((.*)\)$/.exec(out);
-            return (wrapped ? wrapped[1] : out).trim();
-          };
-          /* And a change goes first, so the one line of figures a narrow card
-           * can show is the line that says something happened. */
-          var chips = (g.chips || []).filter(function (c) { return !shown[String(c.text).trim().toLowerCase()]; })
-            .map(function (c) { return { label: c.label, text: undup(c.text), title: c.title }; })
-            .filter(function (c) { return c.text !== ''; })
-            .sort(function (a, b) {
-            var ca = /→/.test(a.text) ? 0 : 1, cb = /→/.test(b.text) ? 0 : 1;
-            return ca - cb;
-          });
-          var parts = chips.map(function (c) {
-            var s = H.el('span', 'fig sc-tape-kv'); s.appendChild(H.el('span', 'pc-id', c.label + ' ')); s.appendChild(document.createTextNode(c.text));
-            if (c.title) s.title = c.title;
-            return s;
-          });
-          // The first id the frame names is what the line is ABOUT; a tape
-          // you cannot follow is a tape you only watch.
-          var idm = /(?:^|[^0-9A-Za-z_-])(\d{1,2}-\d{1,9})(?![0-9-])/.exec(g.subject + ' ' + (g.chips || []).map(function (c) { return c.text; }).join(' '));
-          var subject = subj.ids[0] || (idm ? idm[1] : null);
-          li.appendChild(window.StructsCards.tape.row({
-            time: g.time, kind: kind, kindTitle: String(g.category || ''), tone: tone(g.category),
-            subject: subj.word, ids: subj.ids, parts: parts,
-            block: g.block != null ? H.fmtInt(g.block) : null, fresh: ev === tape.fresh,
-            title: g.subject + ((g.chips || []).length ? ' · ' + g.chips.map(function (c) { return c.label + ' ' + c.text; }).join(' · ') : ''),
-          }, subject ? { onClick: function () {
-            var kind = Number(String(subject).split('-')[0]);
-            add(kind === 1 ? 'player' : kind === 0 ? 'guild' : kind === 2 ? 'planet' : 'inspector', { id: subject });
-          } } : {}));
-          ul.appendChild(li);
+            lane.appendChild(ul);
+          }
+          wrap.appendChild(lane);
         });
-        host.appendChild(ul);
+        host.appendChild(wrap);
       };
-      if (!tape.listening && window.StructsEvents) {
-        tape.listening = true;
-        window.StructsEvents.listen('grass-event', function (e) {
-          var ev = e && e.payload;
-          if (!ev) return;
-          tape.fresh = ev;
-          tape.rows.unshift(ev);
-          if (tape.rows.length > 200) tape.rows.length = 200;
-          if (state.mounted['tape-1'] || Object.keys(state.mounted).some(function (id) { return state.mounted[id].def && state.mounted[id].def.type === 'tape'; })) draw();
-        });
-      }
-      return invoke('mcp_grass_recent').then(function (recent) {
-        if (Array.isArray(recent) && recent.length && !tape.rows.length) tape.rows = recent.slice().reverse();
-      }).catch(function () {}).then(draw);
+
+      wireStream();
+      draw.host = host;
+      feed.draws = feed.draws.filter(function (fn) { return fn.host && fn.host !== host && fn.host.isConnected; });
+      feed.draws.push(draw);
+      var loads = [invoke('mcp_grass_pulse', { hours: hours }).then(function (d) { feed.pulse = d; }).catch(function () {})];
+      if (!feed.grass.length && !feed.ops.length) loads.push(backfill());
+      return Promise.all(loads).then(draw);
     },
   });
 
+  /* Our loops' own rows. The severity map here used to declare
+   * `{ error, warn, warning, important }` while Rust only ever emits
+   * `info | notice | important` — three of the four keys were unreachable,
+   * nothing was ever drawn destructive, and `notice` was indistinguishable
+   * from `info`. One bit of severity where the card thought it had three. */
+  var OPS_TONE = { important: 'destructive', notice: 'warning', info: 'default' };
+  function opsRow(e, repeats) {
+    var d = new Date(Number(e.ts_ms) || 0);
+    var time = isNaN(d.getTime()) ? '' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
+    var parts = [String(e.message || '')];
+    if (repeats > 1) parts.unshift(H.el('span', 'fig tm-feed-rep', '×' + H.fmtInt(repeats)));
+    return window.StructsCards.tape.row({
+      time: time, kind: String(e.source || 'app'),
+      tone: OPS_TONE[String(e.severity || '')] || 'default',
+      parts: parts, title: String(e.message || ''),
+    });
+  }
+
+  // The old card names still open layouts saved before the rebuild.
+  Terminal.register('tape', {
+    label: 'Live tape', hidden: true, defaultWidth: 2, defaultHeight: 'grow',
+    describe: function () { return 'Feed'; },
+    params: [],
+    render: function (host, p) { return TYPES.feed.render(host, p || {}); },
+  });
   // A page, or a page's VIEW (`energy:production`), the way the board's own
   // sub-nav reaches them. Ordered by who reaches for them: hashers and
   // botters first, then energy, then war.

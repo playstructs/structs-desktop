@@ -1402,7 +1402,39 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
 
     /* The card was called `pay` and is called `deliver`. A layout saved under
      * the old name still opens, the way `fleet` still opens as `armada`. */
-    /* ── A card window keeps the game's frame ──────────────────────────────
+    /* ── A fixed-set argument completes itself ─────────────────────────────
+   *
+   * `STATS <section>` was a prompt with no way to learn the answers: the seven
+   * sections were declared on the card for the configure strip and nothing
+   * else read them. */
+  {
+    const T = w.Board.Terminal;
+    const opts = T.choiceOptionsFor('STATS');
+    check('the options come off the card itself, not a second list',
+      opts && opts.length === 7 && opts[0].value === 'universe', JSON.stringify(opts && opts.map((o) => o.value)));
+    const rows = T.suggestFor('STATS ');
+    check('a completed word with a fixed set offers the set',
+      rows.length === opts.length && rows.every((r) => r.run === true)
+      && rows[0].line === 'STATS universe', JSON.stringify(rows.map((r) => r.line)));
+    check('…each named, so the value and what it opens are both on the row',
+      rows[0].words === 'STATS universe' && rows[0].what === 'Universe');
+    check('…and a partial narrows it', T.suggestFor('STATS r').map((r) => r.line).join(',') === 'STATS raids');
+    /* Only an argument that really IS that param. `CHAT direct` names a
+     * literal, and `WATCH` takes ids, not a set. */
+    check('a word whose argument is not a choice param is left alone',
+      T.choiceOptionsFor('DMS') === null && T.choiceOptionsFor('WATCH') === null
+      && T.choiceOptionsFor('MKT') === null);
+    // The reference may or may not still be on the page by now; open one.
+    const hc = w.Board.Terminal.add('help', {});
+    await until(() => d.querySelector('#tm-' + hc.id + ' .tm-help-row'));
+    const helpText = [...d.querySelectorAll('#tm-' + hc.id + ' .tm-help-row')].map((r) => r.textContent).join(' ');
+    check('…and the reference names the set where it used to say <section>',
+      /universe · trends/.test(helpText) && !/&lt;section&gt;|<section>/.test(helpText),
+      helpText.slice(0, 160));
+    w.Board.Terminal.remove(hc.id);
+  }
+
+  /* ── A card window keeps the game's frame ──────────────────────────────
    *
    * `html[data-card]` hides the BOARD's panel art, because in a card window
    * the OS window is the outer frame. Written unscoped, those selectors also
@@ -1641,15 +1673,73 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_raid_view_unwatch'));
   const unwatch = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_raid_view_unwatch' && c.args && c.args.planetId === '2-15361').slice(-1)[0];
   check('removing the card stops the feed', unwatch.args.label === 'board:' + planetId && unwatch.args.planetId === '2-15361');
-  // The two cards the audit said were missing entirely.
+  /* ── FEED: the pulse band over lanes ───────────────────────────────────
+   *
+   * Rebuilt 2026-09-09 against the app's own 7-day log. The three readings
+   * that decided the shape are what these checks defend: ~1 frame a SECOND
+   * (so a list is forty seconds and the band is the navigation), combat at
+   * 0.017% (so lanes, not one ordered list), and `struct_status` being three
+   * events under one name (so a destruction reads as a destruction). */
   run('FEED');
-  await until(() => d.querySelector('#tm-grid [data-type="feed"] .sc-tape'));
+  await until(() => d.querySelector('#tm-grid [data-type="feed"] .tm-pulse-band'));
   {
     const feed = d.querySelector('#tm-grid [data-type="feed"]');
-    check('FEED shows what the loops and the watchdog did, newest first', d.querySelectorAll('#tm-grid [data-type="feed"] .sc-tape').length === 2 && /watchdog/.test(feed.querySelector('.sc-tape').textContent) && /wedged/.test(feed.querySelector('.sc-tape').textContent), feed.querySelector('.sc-tape').textContent);
-    w.__HARNESS_EMIT__('board-feed', { ts_ms: Date.now(), severity: 'error', source: 'tx', message: 'signing bridge down' });
+    const bars = [...feed.querySelectorAll('.tm-pulse-hr')];
+    check('FEED leads with a pulse band — one bar an hour, because 40 rows is 40 seconds of this chain', bars.length === 48);
+    check('…the hour with combat in it is the only one drawn as combat', bars.filter((b) => b.classList.contains('is-combat')).length === 1);
+    // Every live frame redraws the card, so a lane node captured once is
+    // stale by the next assertion — always re-query.
+    const lanes = () => [...feed.querySelectorAll('.tm-lane')];
+    const lane = (name) => lanes().find((l) => new RegExp(name).test(l.querySelector('.tm-lane-hd').textContent));
+    check('…and the rows are dealt into fixed lanes, war first', lanes().length === 6 && /War/.test(lanes()[0].querySelector('.tm-lane-hd').textContent));
+    const ops = lane('Our loops');
+    check('our loops are a LANE of this card now, not a second card wearing the same shape', ops !== undefined && /watchdog/.test(ops.textContent) && /wedged/.test(ops.textContent), ops && ops.textContent);
+    /* One chatty loop owning forty slots is what the ops feed really looked
+     * like: the screenshot that started the rebuild was five identical
+     * auto_build lines. Repeats collapse by the SHAPE of the line. */
+    check('…with repeats collapsed to one row and a count', /×2/.test(ops.textContent) && ops.querySelectorAll('.sc-tape').length === 3, ops.textContent);
+    /* Rust emits info | notice | important and nothing else. The old map
+     * declared error/warn/warning/important — three unreachable keys, so
+     * nothing was ever drawn destructive and `notice` read as `info`. */
+    const alarm = [...ops.querySelectorAll('.sc-tape')].find((n) => /wedged/.test(n.textContent));
+    check('…and `important` is the one severity Rust really sends, drawn as an alarm', /sc-bad|destructive/.test(alarm.className + alarm.innerHTML), alarm.className);
+    w.__HARNESS_EMIT__('board-feed', { ts_ms: Date.now(), severity: 'important', source: 'tx', message: 'signing bridge down' });
     await until(() => /signing bridge down/.test(feed.textContent));
-    check('…and a live entry lands on top', /signing bridge down/.test(feed.querySelector('.sc-tape').textContent) && feed.querySelector('.sc-tape').classList.contains('is-new'));
+    check('…a live entry lands on top of its lane', /signing bridge down/.test(lane('Our loops').querySelector('.sc-tape').textContent));
+    /* A destruction is 7→35 on `struct_status`, and a quarter of that
+     * category is deaths. Drawn as `struct status` it was indistinguishable
+     * from a build start — which is 29,815 frames a week of nothing. */
+    w.__HARNESS_EMIT__('grass-event', { category: 'struct_status', subject: 'structs.planet.2-21740.1-2616', timestamp: Date.now(), detail: { struct_id: '5-174740', status: 35, status_old: 7, block_height: 2532949 } });
+    await until(() => /destroyed/i.test(feed.textContent));
+    const dead = [...feed.querySelectorAll('.sc-tape')].find((n) => /destroyed/i.test(n.textContent));
+    check('a struct_status 7→35 reads as DESTROYED, not as a status number', /destroyed/i.test(dead.textContent), dead.textContent);
+    check('…and it files under structs, not war — only 74 of 25,913 deaths in the log had an attack near them', lane('Structs').contains(dead) && !lane('War').contains(dead));
+    /* 104 struct_attack frames in a week against 92,301 blocks. A regex on
+     * /defen|shield/ — which is what the old tape used — calls every hour a
+     * war; shield_change alone is 29,341 frames of housekeeping. */
+    w.__HARNESS_EMIT__('grass-event', { category: 'shield_change', subject: 'structs.planet.2-30564.1-3279', timestamp: Date.now(), detail: { planetary_shield: 100, planetary_shield_old: 75, block_height: 2535261 } });
+    w.__HARNESS_EMIT__('grass-event', { category: 'struct_attack', subject: 'structs.planet.2-21740.1-61', timestamp: Date.now(), detail: { attackerStructType: 'Mobile Artillery', planet_id: '2-21740', block_height: 2532949 } });
+    await until(() => /attack/i.test(lane('War').textContent));
+    check('shield changes are housekeeping, not war — only a real attack reaches the war lane', /attack/i.test(lane('War').textContent) && !/shield/i.test(lane('War').textContent) && /shield/i.test(lane('Grid').textContent), lane('War').textContent);
+    check('…and a lane with something in it says so at the border', lane('War').classList.contains('is-hot'));
+    /* Clicking an hour asks the DURABLE table for it. The in-memory ring is
+     * about thirty minutes; every question worth asking is outside it. */
+    bars[10].click();
+    await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_grass_history'));
+    const hist = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_grass_history').slice(-1)[0];
+    check('clicking an hour reads that hour out of the 7-day table, not the ring', hist.args.until_ms - hist.args.since_ms === 3600000);
+    await until(() => /Mobile Artillery|artillery/i.test(feed.textContent));
+    check('…and our loops say plainly that they keep no history rather than showing live rows under someone else\'s hour', /live only|no history/.test(lane('Our loops').textContent));
+    /* A removed card used to leave its draw behind, writing into a host no
+     * longer in the document — one leaked closure per mount, every one of them
+     * running on every live frame. */
+    {
+      const id = w.Board.Terminal.state.layout.cards.find((c) => c.type === 'feed').id;
+      const before = w.Board.Terminal.state.layout.cards.length;
+      w.Board.Terminal.remove(id);
+      w.__HARNESS_EMIT__('grass-event', { category: 'ore', subject: 'structs.grid.planet.2-1.1-1', timestamp: Date.now(), detail: { value: 2, value_old: 1 } });
+      check('a removed feed stops drawing instead of writing into a detached host', d.querySelector('#tm-grid [data-type="feed"]') === null && w.Board.Terminal.state.layout.cards.length === before - 1);
+    }
   }
   run('NEXT');
   await until(() => d.querySelector('#tm-grid [data-type="next"] .pc-row, #tm-grid [data-type="next"] .sui-message-inline-alert'));
@@ -1667,8 +1757,12 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     rows[0].querySelector('.pc-act[title^="Open "]').click();
     check('…as a real card, not a description of one', d.querySelectorAll('#tm-grid .tm-card').length === before + 1);
   }
-  run('TAPE');
-  check('TAPE is a live stream with a filter, economy by default', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'tape') && w.Board.Terminal.types().find((t) => t.type === 'tape').params[0].options.map((o) => o.value).join(',') === 'economy,combat,all');
+  /* TAPE / FLOW / STREAM were a second card showing the chain in the same
+   * shape as the ops feed, with nothing on either saying which was which.
+   * They are the same card now, and the old type still opens a saved layout. */
+  check('TAPE, FLOW and STREAM all reach the one feed', ['TAPE', 'FLOW', 'STREAM'].every((word) => w.Board.Terminal.parse(word).type === 'feed'));
+  check('…and the retired type is still known, so a layout saved before the rebuild still loads', w.Board.Terminal.known('tape') && !w.Board.Terminal.types().some((t) => t.type === 'tape'));
+  check('…FEED is configured by span and lane, which is what the band and the lanes are', w.Board.Terminal.types().find((t) => t.type === 'feed').params.map((p) => p.key).join(',') === 'span,lane');
   run('SETTINGS');
   check('SETTINGS is the one page still reached as a page, plainly titled', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'page' && c.params.page === 'config') && !/Team Ops/.test(d.querySelector('#tm-grid [data-type="page"] .tm-title').textContent));
   // The battle log and Comms are the raid view's own rails, embedded: two of
@@ -1835,44 +1929,62 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await w.Board.Terminal.enter();
   await until(() => d.querySelectorAll('#tm-grid .tm-card').length >= 7);
   check('with nothing saved, the default page has seven cards', d.querySelectorAll('#tm-grid .tm-card').length === 7);
-  await until(() => d.querySelector('#tm-grid [data-type="tape"] ul.tm-tape'));
+  await until(() => d.querySelector('#tm-grid [data-type="feed"] .tm-lane-rows'));
   check('a card kept by id from the last layout is re-rendered for its new params', /UNIVERSE/.test(d.querySelector('#tm-stats-1')?.textContent || ''));
-  check('…including the flow tape, drawn as the stream draws its rows', d.querySelector('#tm-grid [data-type="tape"] ul.tm-tape') !== null);
+  check('…including the feed, drawn as the stream draws its rows', d.querySelector('#tm-grid [data-type="feed"] .tm-lane-rows') !== null);
+  const feedCard = d.querySelector('#tm-grid [data-type="feed"]');
+  /* The back-fill that never ran. `mcp_grass_recent` answers with an OBJECT —
+   * { events, categories, lookups } — and the card guarded on
+   * `Array.isArray(recent)`, false for every reply the command has ever sent.
+   * The 2,000-frame ring in Rust was unreachable: the card started empty on
+   * every mount and filled only from live frames. */
+  {
+    const call = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_grass_recent').slice(-1)[0];
+    check('the feed back-fills from the Rust ring — reading d.events, not treating the reply as an array', call !== undefined && call.args.limit >= 500);
+    check('…and asks for the hourly rollup rather than 600k rows to draw a band', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_grass_pulse'));
+  }
   // A live frame arrives: ONE tape line (structs-cards.js), folded by the
   // board's own grass algorithm (old→new, block lifted out), newest striped.
   w.__HARNESS_EMIT__('grass-event', { category: 'ore', subject: 'structs.grid.planet.2-29577.1-422', timestamp: Date.now(), detail: { object_id: '2-29577', object_type: 'planet', player_id: '1-422', attribute_type: 'ore', value: 12, value_old: 11, block_height: 2507904 } });
-  await until(() => d.querySelector('#tm-grid [data-type="tape"] .sc-tape'));
-  const tapeLine = d.querySelector('#tm-grid [data-type="tape"] .sc-tape');
-  check('…and a tape line opens what it is about', (() => { const before = w.Board.Terminal.state.layout.cards.length; d.querySelector('#tm-grid [data-type="tape"] .sc-tape').click(); return w.Board.Terminal.state.layout.cards.length === before + 1; })());
-  check('a tape event reads as a header (time, short kind, what it is about) over the ONE figure that changed — the four chips restating the header are dropped', tapeLine.classList.contains('is-new') && /planet/.test(tapeLine.querySelector('.sc-tape-subj').textContent) && /2-29577/.test(tapeLine.querySelector('.sc-tape-subj').textContent) && /11g → 12g/.test(tapeLine.textContent) && /#2,507,904/.test(tapeLine.querySelector('.sc-tape-blk').textContent) && tapeLine.querySelectorAll('.sc-tape-kv').length === 1 && !/object_type/.test(tapeLine.textContent) && !/block_height/.test(tapeLine.textContent), tapeLine.textContent);
+  await until(() => d.querySelector('#tm-grid [data-type="feed"] .sc-tape'));
+  const tapeLine = d.querySelector('#tm-grid [data-type="feed"] .sc-tape');
+  check('…and a feed line opens what it is about', (() => { const before = w.Board.Terminal.state.layout.cards.length; d.querySelector('#tm-grid [data-type="feed"] .sc-tape').click(); return w.Board.Terminal.state.layout.cards.length === before + 1; })());
+  check('a feed event reads as a header (time, short kind, what it is about) over the ONE figure that changed — the four chips restating the header are dropped', tapeLine.classList.contains('is-new') && /planet/.test(tapeLine.querySelector('.sc-tape-subj').textContent) && /2-29577/.test(tapeLine.querySelector('.sc-tape-subj').textContent) && /11g → 12g/.test(tapeLine.textContent) && /#2,507,904/.test(tapeLine.querySelector('.sc-tape-blk').textContent) && tapeLine.querySelectorAll('.sc-tape-kv').length === 1 && !/object_type/.test(tapeLine.textContent) && !/block_height/.test(tapeLine.textContent), tapeLine.textContent);
   check('…with the whole event on hover', /object_id 2-29577/.test(tapeLine.querySelector('.sc-tape-body').title));
   /* Half a repeat is still a repeat. The grass algorithm resolves ids to
    * names, so a `player_id` chip comes back as "1-422 (Marklifer)" — and the
    * id half is already standing in the header. Live 2026-09-07. */
   w.__HARNESS_EMIT__('grass-event', { category: 'ore', subject: 'structs.grid.planet.2-28908.1-462', timestamp: Date.now(), detail: { player_id: '1-462 (Colin-Lewis)', value: 5, value_old: 4, block_height: 2518613 } });
-  await until(() => /Colin-Lewis/.test(d.querySelector('#tm-grid [data-type="tape"]').textContent));
-  const named = [...d.querySelectorAll('#tm-grid [data-type="tape"] .sc-tape')].find((n) => /Colin-Lewis/.test(n.textContent));
+  await until(() => /Colin-Lewis/.test(d.querySelector('#tm-grid [data-type="feed"]').textContent));
+  const named = [...d.querySelectorAll('#tm-grid [data-type="feed"] .sc-tape')].find((n) => /Colin-Lewis/.test(n.textContent));
   check('a chip that half-repeats the header keeps only the new half — the name, not the id again', /Colin-Lewis/.test(named.textContent) && named.querySelectorAll('.sc-tape-kv').length === 2 && !/1-462 \(/.test(named.querySelector('.sc-tape-body').textContent) && /1-462/.test(named.querySelector('.sc-tape-subj').textContent), named.textContent);
   /* Every inventory subject ends in a 44-character bech32 address. As the
    * head word it filled the whole header band and left nothing for the ids
    * beside it — live 2026-09-07, on every SENT / MINTED / REFINED frame. */
   w.__HARNESS_EMIT__('grass-event', { category: 'transfer', subject: 'structs.inventory.ualpha.0-1.structs1rwfvu2k78ajl5nljj8hfl79zmm0l96xyqw0tc9', timestamp: Date.now(), detail: { amount: '1', denom: 'ualpha', block_height: 2518623 } });
-  await until(() => /structs1rwfv…/.test(d.querySelector('#tm-grid [data-type="tape"]').textContent));
-  const addr = [...d.querySelectorAll('#tm-grid [data-type="tape"] .sc-tape')].find((n) => /structs1rwfv…/.test(n.textContent));
+  await until(() => /structs1rwfv…/.test(d.querySelector('#tm-grid [data-type="feed"]').textContent));
+  const addr = [...d.querySelectorAll('#tm-grid [data-type="feed"] .sc-tape')].find((n) => /structs1rwfv…/.test(n.textContent));
   check('an address in the subject is shortened, and rides with the ids so it is never the half that ellipses', /structs1rwfv…qw0tc9/.test(addr.querySelector('.sc-tape-ids').textContent) && /ualpha/.test(addr.querySelector('.sc-tape-word').textContent) && /structs1rwfvu2k78ajl5nljj8hfl79zmm0l96xyqw0tc9/.test(addr.querySelector('.sc-tape-subj').title), addr.textContent);
-  /* A quiet stream and a DEAD stream looked the same. Live 2026-09-07 the
-   * card read "no economic frames yet" while 177 frames an hour were landing
-   * as block / struct_status / structsLoad — none of which the economy filter
-   * matches. And the line said "economic" whichever stream was chosen. */
+  /* A quiet lane and a DEAD card looked the same on the old tape: live
+   * 2026-09-07 it read "no economic frames yet" while 177 frames an hour were
+   * landing as block / struct_status / structsLoad, none of which the economy
+   * filter matched. A lane now says it is quiet and keeps its place. */
   {
-    const before = w.Board.Terminal.state.layout.cards.length;
-    w.Board.Terminal.add('tape', { filter: 'combat' }, 1);
-    const quiet = w.Board.Terminal.state.layout.cards.slice(-1)[0].id;
-    await until(() => d.querySelector('#tm-' + quiet + ' .ops-feed'));
-    const line = d.querySelector('#tm-' + quiet + ' .ops-muted');
-    check('an empty stream names ITSELF and says what is arriving elsewhere', /nothing on the combat stream/.test(line.textContent) && /other frames/.test(line.textContent), line.textContent);
-    w.Board.Terminal.remove(quiet);
-    check('…and the card came off again', w.Board.Terminal.state.layout.cards.length === before);
+    const quiet = [...feedCard.querySelectorAll('.tm-lane')].find((l) => l.classList.contains('is-quiet'));
+    check('a lane with nothing in it says so and keeps its place, rather than the card claiming the stream is empty', quiet !== undefined && /quiet/.test(quiet.querySelector('.tm-lane-n').textContent) && /nothing in this window/.test(quiet.textContent), quiet && quiet.textContent);
+  }
+  /* A category nobody wrote a rule for is quiet, not lost — `block` is 15.1%
+   * of the stream and belongs nowhere else. */
+  w.__HARNESS_EMIT__('grass-event', { category: 'lastAction', subject: 'structs.player.1-61', timestamp: Date.now(), detail: { value: 2535300, value_old: 2535299 } });
+  await until(() => /last action|lastaction/i.test(feedCard.textContent));
+  check('an unclassified category lands in the chain lane rather than vanishing', /last action|lastaction/i.test([...feedCard.querySelectorAll('.tm-lane')].find((l) => /Chain/.test(l.querySelector('.tm-lane-hd').textContent)).textContent));
+  /* Nothing here takes its height from a constant. The old tape was
+   * `max-height: 420px`, so a popped-out window taller than that got a list
+   * that stopped and a band of empty card underneath — the dead space in the
+   * screenshot that started the rebuild. */
+  {
+    const css = read('frontend/board.html');
+    check('a grown feed takes its height from the card, never a constant', /#board-layout \.tm-h-grow \.tm-lane-rows \{ max-height: none/.test(css));
   }
 }
 

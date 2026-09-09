@@ -1001,7 +1001,17 @@
     .tm-toolbar .sui-screen-btn { transform: translateY(var(--spacing-xs)); }
     .tm-toolbar-param:empty, .tm-bar .tm-toolbar-param:empty { display: none; }
     #tm-cmd.is-err { border-color: var(--text-enemy-primary); }
-    .tm-help { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 0 var(--spacing-lg); }
+    /* COLUMNS, not a grid. A grid couples row heights ACROSS columns, so one
+       row whose words wrapped to two lines stretched every cell beside it —
+       which is what made the reference read as a ragged scatter with holes in
+       it. Column flow lets each column pack independently; a row and its
+       heading only have to stay whole. */
+    .tm-help { columns: 260px; column-gap: var(--spacing-xxl); }
+    .tm-help-row { break-inside: avoid; }
+    .tm-help-h { break-after: avoid; break-inside: avoid;
+      margin-top: var(--spacing-lg); padding-bottom: var(--spacing-xs);
+      border-bottom: 1px solid var(--border-subtle); }
+    .tm-help-h:first-child { margin-top: 0; }
     /* ── Ambits, as four cells you read across ────────────────────────────
        The answer to "where can I shoot them from" is a comparison between
        four ambits, so it is drawn as four cells in a fixed order every time —
@@ -1120,8 +1130,22 @@
     /* The highlighted row is the one Enter takes. */
     .tm-suggest-row.is-on { background: var(--surface-player-highlight); }
     .tm-suggest-row:hover { background: var(--surface-player-highlight); }
-    .tm-help-row { display: flex; justify-content: space-between; gap: var(--spacing-md); text-decoration: none; color: var(--text-body); }
+    /* The word, then what it opens UNDER it — always, not only when the two
+       would not fit. `space-between` in a 260px column made the label land
+       wherever the words happened to end and drop to a second line only
+       sometimes, so a column of rows had no shared left edge to scan and no
+       shared shape. Two lines every time is taller and readable. */
+    .tm-help-row { display: flex; flex-direction: column; align-items: flex-start;
+      gap: 0; padding: var(--spacing-xs) 0; text-decoration: none; color: var(--text-body);
+      /* SUI's `.sui-data-card-row` is built for ONE horizontal line: it sets
+         `flex-wrap: wrap` with `align-content: center`, and in a column
+         direction those two turn the children into wrapped LINES centred on
+         the cross axis — which put both lines 111px in from the row's own
+         left edge. Turned off here, where the row runs the other way.
+         `text-align` alone does nothing about it. */
+      flex-wrap: nowrap; align-content: flex-start; text-align: left; }
     .tm-help-row:hover { background: var(--surface-player-highlight); }
+    .tm-help-row .ops-val { color: var(--text-hint); text-align: left; }
     .tm-help-words b { color: var(--text-player-primary); font-weight: normal; }
     /* Dense packing: rows are one small unit, every card spans what it
        measures (board-terminal.js fitRows), and the flow is dense so a short
@@ -1374,6 +1398,48 @@
     /* A rail (battle log, Comms) is a column, not a scene. */
     .tm-frame-rail, .tm-w1 .tm-frame-rail { height: min(460px, 76vh); }
     .tm-tape { max-height: 420px; overflow-y: auto; margin: 0; }
+
+    /* ── The FEED card (board-terminal.js) ─────────────────────────────────
+       A pulse band over lanes. Nothing here takes its height from a constant:
+       the old tape was `max-height: 420px`, so a popped-out window taller than
+       that got a list that stopped and a band of empty card under it. */
+    .tm-pulse { display: flex; flex-direction: column; gap: var(--spacing-xs);
+      margin-bottom: var(--spacing-md); }
+    .tm-pulse-band { display: flex; align-items: stretch; gap: 1px; height: 56px; }
+    /* align-items: flex-end here would collapse every column to its content
+       height, which is zero, and the percentage fills would resolve against
+       nothing. Stretch the column; the fill sits at its bottom. */
+    .tm-pulse-hr { flex: 1 1 0; min-width: var(--spacing-xs); background: var(--surface-default);
+      display: flex; align-items: flex-end; cursor: pointer; }
+    .tm-pulse-fill { width: 100%; background: var(--accent-secondary); }
+    /* 104 combat frames in a week against 92,301 blocks: the only way an hour
+       with a raid in it is visible at all is if it is a different colour. */
+    .tm-pulse-hr.is-combat .tm-pulse-fill { background: var(--accent-destructive); }
+    .tm-pulse-hr.is-live .tm-pulse-fill { background: var(--accent-primary); }
+    .tm-pulse-hr.is-on { outline: 1px solid var(--text-player-primary); }
+    .tm-pulse-hr:hover .tm-pulse-fill { background: var(--text-player-primary); }
+    .tm-pulse-axis { display: flex; justify-content: space-between; gap: var(--spacing-sm); }
+
+    .tm-lanes { display: flex; flex-direction: column; gap: var(--spacing-sm);
+      flex: 1 1 auto; min-height: 0; }
+    .tm-lane { border: 1px solid var(--border-subtle); background: var(--surface-default);
+      display: flex; flex-direction: column; min-height: 0; }
+    .tm-lane-hd { display: flex; align-items: center; gap: var(--spacing-sm);
+      padding: var(--spacing-xs) var(--spacing-md);
+      border-bottom: 1px solid var(--border-subtle); }
+    .tm-lane-hd .tm-lane-n { margin-left: auto; }
+    /* A hot lane says so at the border, so combat is legible without reading. */
+    .tm-lane.is-hot { border-color: var(--accent-destructive); }
+    .tm-lane.is-hot .tm-lane-hd { color: var(--accent-destructive); }
+    /* A quiet lane keeps its place — that reserved space IS the design — but
+       it does not take room it has nothing to put in. */
+    .tm-lane.is-quiet { opacity: .55; }
+    .tm-lane-empty { padding: var(--spacing-xs) var(--spacing-md); }
+    /* `.ops-feed` has never carried a rule — the Grass page styles its list
+       by id — so a <ul> that is not #grass-list draws browser bullets. */
+    .tm-lane-rows { list-style: none; margin: 0; padding: 0; overflow-y: auto; max-height: 30vh; }
+    #board-layout .tm-h-grow .tm-lane-rows { max-height: none; }
+    .tm-feed-rep { color: var(--text-hint); }
     .tm-comms-body { max-height: 360px; overflow-y: auto; }
     .chat-rent-quote.chat-rent-short { color: var(--text-warning); }
     /* ── Game Stats charts (board-gamestats.js) ─────────────────────────── */

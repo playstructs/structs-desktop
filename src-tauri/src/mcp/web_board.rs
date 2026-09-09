@@ -589,6 +589,25 @@ async fn board_invoke(
             body.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize),
             s("category"),
         )),
+        "mcp_grass_pulse" => from_result(
+            crate::mcp::event_buffer::mcp_grass_pulse(
+                body.get("hours").and_then(|v| v.as_u64()).map(|v| v as usize),
+            )
+            .await,
+        ),
+        "mcp_grass_history" => from_result(
+            crate::mcp::event_buffer::mcp_grass_history(
+                body.get("since_ms").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                body.get("until_ms").and_then(|v| v.as_f64()),
+                body.get("categories").and_then(|v| {
+                    v.as_array().map(|a| {
+                        a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+                    })
+                }),
+                body.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize),
+            )
+            .await,
+        ),
         "mcp_mass_action" => {
             match serde_json::from_value::<mass_action::MassActionRequest>(
                 body.get("request").cloned().unwrap_or(Value::Null),

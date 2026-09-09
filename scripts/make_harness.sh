@@ -617,7 +617,41 @@ cat > "$FIX" <<'EOF'
         { denom: 'ore', amount: 3, sendable: false, display_name: 'Ore', base_name: 'g', exponent: 0 },
       ],
     },
-    mcp_grass_recent: [],
+    /* The REAL shape: an object, never an array. This fixture said `[]` for
+     * as long as it has existed, which is exactly the shape the card's
+     * `Array.isArray(recent)` back-fill guard expected — so a bug that made
+     * the ring unreachable in production passed here every time. */
+    mcp_grass_recent: { events: [], categories: [], lookups: {} },
+    // 48 hourly buckets. The middle one is the hour that lost 2,285 structs
+    // (09-04 17:00 in the real log) and one late hour carries the week's only
+    // combat, so both of the band's colours are exercised.
+    get mcp_grass_pulse() {
+      var hour = 3600000, base = Math.floor(Date.now() / hour) * hour;
+      var out = [];
+      for (var i = 47; i >= 0; i--) {
+        var h = base - i * hour;
+        var spike = i === 24, war = i === 3;
+        out.push({
+          hour_ms: h,
+          total: spike ? 8886 : war ? 1290 : 1200 + ((i * 137) % 2400),
+          top: spike ? 'struct_status' : war ? 'struct_attack' : 'ore',
+          destroyed: spike ? 2285 : 0,
+          combat: war ? 52 : 0,
+        });
+      }
+      return { hours: 48, buckets: out };
+    },
+    mcp_grass_history: function (a) {
+      var t = Number(a && a.since_ms) || Date.now();
+      return { lookups: {}, events: [
+        { category: 'struct_attack', subject: 'structs.planet.2-21740.1-61', timestamp: t + 1000,
+          detail: { attackerStructType: 'Mobile Artillery', attackerPlayerId: '1-61', planet_id: '2-21740', block_height: 2532949 } },
+        { category: 'struct_status', subject: 'structs.planet.2-21740.1-2616', timestamp: t + 2000,
+          detail: { struct_id: '5-174740', status: 35, status_old: 7, block_height: 2532949 } },
+        { category: 'ore', subject: 'structs.grid.planet.2-29577.1-422', timestamp: t + 3000,
+          detail: { value: 12, value_old: 11, block_height: 2532950 } },
+      ] };
+    },
     // The Armada roster, in the shape `mcp_roster` really answers with (the
     // fields armadaRow reads). Six players covering every role, one with a
     // stale read, so the shared player card is exercised end to end.
@@ -853,9 +887,16 @@ cat > "$FIX" <<'EOF'
     mcp_allocation_preview: { ok: true, refusal: null, delta_mw: -117999995000, projected_headroom_mw: 21201276295 },
     mcp_allocation_set_power: { ok: true },
     mcp_allocation_create: { ok: true },
+    /* Rust emits `info | notice | important` and NOTHING else
+     * (mcp/board_feed.rs::Severity). This fixture said `warn`, which the card's
+     * severity map also declared — so a map whose only reachable key was
+     * `important` looked correct here. Two identical auto_build lines because
+     * one chatty loop owning forty slots is what the feed really looks like. */
     mcp_board_feed: [
+      { ts_ms: Date.now() - 90000, severity: 'info', source: 'auto_build', message: '0 build completion(s) started, 1 build(s) initiated' },
+      { ts_ms: Date.now() - 80000, severity: 'info', source: 'auto_build', message: '0 build completion(s) started, 2 build(s) initiated' },
       { ts_ms: Date.now() - 60000, severity: 'info', source: 'auto_harvest', message: 'started 3 mine cycles' },
-      { ts_ms: Date.now() - 30000, severity: 'warn', source: 'watchdog', message: 'auto_raid wedged — scan reset' },
+      { ts_ms: Date.now() - 30000, severity: 'important', source: 'watchdog', message: 'auto_raid wedged — scan reset' },
     ],
     stop_hash_task: null,
     mcp_action: 'queued: raid on 2-15361',

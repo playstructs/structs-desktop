@@ -42,7 +42,6 @@
   //         cta, danger, preview(values)->Promise|null, facts(preview)->[[label,value,tone]],
   //         confirm(values,preview)->{title,rows,cta}, submit(values)->Promise, done() }
   var readControl = function (n) { return T.readControl(n); };
-  var feed = { rows: [], listening: false, fresh: null, draw: null };
   function ticket(spec) {
     var box = H.el('div', 'tm-ticket');
     var inputs = {}, timer = null, last = null;
@@ -1680,53 +1679,10 @@
     },
   });
 
-  // ── The ops feed (mcp_board_feed + `board-feed`) ─────────────────────────
-  // Every loop event, policy decision and threat the app records. Team Ops
-  // has shown this since it was built; the Terminal never did, so a player
-  // whose workspace IS the Terminal never saw what the automation was doing.
-  var SEVERITY = { error: 'destructive', warn: 'warning', warning: 'warning', important: 'warning' };
-  T.register('feed', {
-    label: 'Ops feed', defaultWidth: 2, single: true,
-    describe: function (p) { return 'Ops feed' + (p.source ? ' · ' + p.source : ''); },
-    params: [{ key: 'source', label: 'Source', kind: 'text', placeholder: 'any (auto_raid, watchdog, policy…)' }],
-    cadenceMs: 0,
-    render: function (host, p) {
-      var draw = function () {
-        host.innerHTML = '';
-        var rows = feed.rows.filter(function (e) { return !p.source || String(e.source || '').indexOf(p.source) >= 0; });
-        cap(host, rows.length + ' entr' + (rows.length === 1 ? 'y' : 'ies') + (rows.length > 40 ? ' · showing 40' : ''));
-        if (!rows.length) { host.appendChild(H.stateBlock('info', 'Nothing recorded yet.')); return; }
-        var ul = H.el('ul', 'ops-feed sui-text-ticker tm-tape');
-        var clock = function (ts) { var d = new Date(Number(ts) || 0); return isNaN(d.getTime()) ? '' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2); };
-        rows.slice(0, 40).forEach(function (e, i) {
-          var li = H.el('li');
-          li.appendChild(window.StructsCards.tape.row({
-            time: clock(e.ts_ms), kind: String(e.source || 'app'), tone: SEVERITY[String(e.severity || '')] || 'default',
-            parts: [String(e.message || '')], fresh: i === 0 && e === feed.fresh, title: String(e.message || ''),
-          }));
-          ul.appendChild(li);
-        });
-        host.appendChild(ul);
-      };
-      if (!feed.listening && window.StructsEvents) {
-        feed.listening = true;
-        window.StructsEvents.listen('board-feed', function (e) {
-          var entry = e && e.payload;
-          if (!entry) return;
-          feed.fresh = entry;
-          feed.rows.unshift(entry);
-          if (feed.rows.length > 300) feed.rows.length = 300;
-          if (feed.draw) feed.draw();
-        });
-      }
-      feed.draw = draw;
-      if (feed.rows.length) { draw(); return Promise.resolve(); }
-      return invoke('mcp_board_feed').then(function (entries) {
-        // Rust hands them oldest first; newest belongs on top.
-        feed.rows = (entries || []).slice().reverse();
-      }).catch(function () {}).then(draw);
-    },
-  });
+  // The ops feed used to be a card here — `mcp_board_feed` rows in the same
+  // shape as the chain tape, with nothing on either card saying which was
+  // which. It is now the "Our loops" lane of the rebuilt FEED card
+  // (board-terminal.js): one feed, two sources, each row labelled.
 
   /* ── FLEET: staging, for anyone on the roster ────────────────────────────
    *

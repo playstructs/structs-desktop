@@ -3676,8 +3676,15 @@
     return Promise.resolve();
   }
 
-  // The Terminal's flow tape draws the same rows.
-  Board._grass = { row: grassRow, parts: grassParts };
+  // The Terminal's feed draws the same rows.
+  //
+  // `mergeLookups` is exported because grassParts resolves ids to names out of
+  // grassState.lookups, and that map is only filled by THIS page's back-fill.
+  // The Terminal is a separate window that may never open the Grass page, so
+  // its feed rendered bare ids — `1-462` where the page said
+  // `1-462 (Colin-Lewis)` — for as long as it has existed. It now feeds its own
+  // back-fill and its own `grass-lookups` frames in here.
+  Board._grass = { row: grassRow, parts: grassParts, mergeLookups: grassMergeLookups };
 
   Board.registerPage('grass', {
     onBoot: function () {

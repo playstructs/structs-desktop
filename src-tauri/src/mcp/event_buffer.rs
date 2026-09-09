@@ -247,6 +247,41 @@ pub fn mcp_grass_recent(limit: Option<usize>, category: Option<String>) -> serde
     })
 }
 
+/// The FEED card's pulse band. One bucket per hour over `hours` (default 48),
+/// read from the durable 7-day table rather than the ring — the ring is about
+/// thirty minutes.
+#[tauri::command]
+pub async fn mcp_grass_pulse(hours: Option<usize>) -> Result<serde_json::Value, String> {
+    let hours = hours.unwrap_or(48);
+    let buckets = tokio::task::spawn_blocking(move || crate::mcp::telemetry::grass_pulse(hours))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(serde_json::json!({ "hours": hours, "buckets": buckets }))
+}
+
+/// Durable frames in a window — what the FEED card loads when the player
+/// clicks an hour on the pulse. Oldest→newest, same row shape as
+/// `mcp_grass_recent`, with the name lookups the tape needs to render ids.
+#[tauri::command]
+pub async fn mcp_grass_history(
+    since_ms: f64,
+    until_ms: Option<f64>,
+    categories: Option<Vec<String>>,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let cats = categories.unwrap_or_default();
+    let limit = limit.unwrap_or(500);
+    let events = tokio::task::spawn_blocking(move || {
+        crate::mcp::telemetry::grass_history(since_ms, until_ms, &cats, limit)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(serde_json::json!({
+        "events": events,
+        "lookups": crate::mcp::enrich::lookups_json(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
