@@ -174,11 +174,25 @@
   var ART = 'img/structs/';
   /* Nine struct types draw from a directory that is not their slugified name.
    * board-pages.js owns the same map; the test suite pins the two together. */
+  /* Keyed on the catalogue's OWN names (`/api/struct/type` → `type`, the same
+   * strings `struct_attack` uses), not on names guessed from the art folders.
+   * The guessed version had four keys that match nothing — "refinery",
+   * "signal jammer", "orbital shield", "surface-to-air missile launcher" — and
+   * was missing the five hulls whose folder is not their slug, so High Altitude
+   * Interceptor and Orbital Shield Generator drew the unknown glyph.
+   *
+   * Only the names that DIFFER from their slug are listed; the other seventeen
+   * slugify correctly. Continental Power Plant and World Engine have no art at
+   * all, and keep the unknown glyph honestly. */
   var ART_DIRS = {
-    'command ship': 'cmd-ship', 'ore extractor': 'extractor', 'refinery': 'refinery',
-    'planetary defense cannon': 'pdc', 'surface-to-air missile launcher': 'sam-launcher',
-    'signal jammer': 'jamming-sat', 'orbital shield': 'orb-shield', 'ore bunker': 'ore-bunker',
-    'mobile artillery': 'mobile-artillery',
+    'command ship': 'cmd-ship',
+    'high altitude interceptor': 'interceptor',
+    'ore extractor': 'extractor',
+    'ore refinery': 'refinery',
+    'orbital shield generator': 'orb-shield',
+    'jamming satellite': 'jamming-sat',
+    'planetary defense cannon': 'pdc',
+    'field generator': 'generator',
   };
   function artSlug(name) {
     var k = String(name || '').toLowerCase().trim();

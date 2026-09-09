@@ -8,7 +8,7 @@
 import { JSDOM } from 'jsdom';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const read = (p) => readFileSync(resolve(repo, p), 'utf8');
@@ -193,8 +193,30 @@ const NO_COMBAT = {
   const first = mx.querySelector('tbody tr');
   check('the hull leads with its own art and name', first.querySelector('.ac-mx-id img') !== null
     && /Destroyer/.test(text(first.querySelector('.ac-nm'))));
+  /* Every one of the catalogue's names, from `/api/struct/type`. The map used
+   * to be keyed on names guessed from the art folders — four keys matched
+   * nothing and five hulls fell through to the unknown glyph, which is what
+   * "High Altitude Interceptor" and "Orbital Shield Generator" drew. */
+  const CATALOGUE = [
+    'Command Ship', 'Battleship', 'Starfighter', 'Frigate', 'Pursuit Fighter',
+    'Stealth Bomber', 'High Altitude Interceptor', 'Mobile Artillery', 'Tank',
+    'SAM Launcher', 'Cruiser', 'Destroyer', 'Submersible', 'Ore Extractor',
+    'Ore Refinery', 'Orbital Shield Generator', 'Jamming Satellite', 'Ore Bunker',
+    'Planetary Defense Cannon', 'Field Generator',
+    // These two have no art of their own and keep the unknown glyph honestly.
+    'Continental Power Plant', 'World Engine',
+  ];
+  const dirs = new Set(readdirSync(resolve(repo, 'frontend/img/structs')));
+  const NO_ART = new Set(['Continental Power Plant', 'World Engine']);
+  const missing = CATALOGUE.filter((n) => !NO_ART.has(n) && !dirs.has(A.artSlug(n)));
+  check('every hull the catalogue names resolves to art that ships',
+    missing.length === 0, missing.map((n) => n + ' \u2192 ' + A.artSlug(n)).join(', '));
+  check('…and the two with no art are not pretended into one',
+    [...NO_ART].every((n) => !dirs.has(A.artSlug(n))));
   check('the art directory is the game’s, not a slugified guess',
-    A.artSlug('Command Ship') === 'cmd-ship' && A.artSlug('Ore Extractor') === 'extractor'
+    A.artSlug('Command Ship') === 'cmd-ship'
+    && A.artSlug('High Altitude Interceptor') === 'interceptor'
+    && A.artSlug('Orbital Shield Generator') === 'orb-shield'
     && A.artSlug('Starfighter') === 'starfighter');
   const cells = [...first.querySelectorAll('td.ac-num')].map(text);
   check('numbers are the numbers', cells.join(',') === '41,188,1,240,6,22', cells.join(','));

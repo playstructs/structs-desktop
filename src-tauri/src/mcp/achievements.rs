@@ -52,14 +52,29 @@ use crate::mcp::types::numeric_f64;
 /// totals — a minute of staleness is invisible.
 const TTL: Duration = Duration::from_secs(180);
 
-/// Page size for the walks. The Guild API clamps `?limit=` server-side
-/// (`PaginationLimits::MAX` is 10000), and a short page is what ends a walk.
-const PAGE: usize = 5000;
+/// Page size for the walks — the Guild API's own maximum
+/// (`PaginationLimits::MAX`). A page shorter than the first is what ends a walk.
+const PAGE: usize = 10_000;
 
-/// Hard cap on pages, so one very old player cannot turn a card refresh into
-/// a minutes-long scan. A truncated walk is reported as such rather than
-/// passed off as a total.
+/// Hard cap on activity pages. The per-player feed is small (the busiest player
+/// measured is ~6k rows), so this is a runaway guard, not a working limit.
 const MAX_PAGES: u32 = 8;
+
+/// Hard cap on LEDGER pages, which is a different order of problem.
+///
+/// The ledger is not per-player-sized: it is one row per movement, and the
+/// account every other account sweeps Alpha INTO accumulates all of them. The
+/// primary measured **119,982 rows** against 1-61's 289 — 400× — so the 40,000
+/// this used to allow truncated it, and a truncated walk is discarded rather
+/// than published (a partial sum presented as a lifetime total is a wrong
+/// number, not an incomplete one). The visible symptom was both ledger-only
+/// tiles reading "—" on the busiest account in the game.
+///
+/// 32 pages of 10,000 covers that with room; past it the counters stay
+/// honestly unknown. The real fix is server-side sums — see
+/// `proposals/guild-api-planet-activity-by-player.md` — because walking 120,000
+/// rows to add up five numbers is the wrong shape however high this goes.
+const MAX_LEDGER_PAGES: u32 = 32;
 
 // ── the shape a card reads ──────────────────────────────────────────────────
 
@@ -372,13 +387,80 @@ pub fn fold_attack(rec: &mut Record, me: &str, d: &Value, on_my_planet: bool) {
 /// ONLINE 4, STORED 8, HIDDEN 16, DESTROYED 32, LOCKED 64. A build shows as
 /// BUILT going 0 → 1; `struct_block_build_start` counts INITIATIONS, which is
 /// a different and more flattering number.
-pub fn fold_status(rec: &mut Record, d: &Value) {
+pub fn fold_status(rec: &mut Record, d: &Value) -> Option<String> {
     const BUILT: u64 = 2;
     let now = num(d.get("status")) as u64;
     let was = num(d.get("status_old")) as u64;
     if now & BUILT != 0 && was & BUILT == 0 {
         rec.bump("structs_built", 1.0);
+        /* WHICH hull was built is not in this row — `struct_status` detail is
+         * `{status, status_old, struct_id}` and carries no type — so the id is
+         * handed back for the caller to resolve in one batch. That is why the
+         * tally's BUILT column read "—" for every hull while its total said
+         * 433: the counter had a source and the column did not. */
+        return text(d.get("struct_id"));
     }
+    None
+}
+
+/// Name the hull behind each build, in batches.
+///
+/// `/api/objects?ids=` answers with the struct's `type` (the catalogue's
+/// integer id), 200 ids per call, so a career of builds costs a couple of
+/// requests rather than one per struct. The catalogue itself is static — the
+/// live rows were last touched in August — so it is fetched once per process.
+///
+/// Silent on failure: a hull column that cannot be named is left absent, which
+/// the card already draws as "—". Better a blank column than a wrong one.
+async fn name_built_hulls(client: &GuildApiClient, rec: &mut Record, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let Some(types) = struct_type_names(client).await else { return };
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let unique: Vec<&str> = ids.iter().map(|s| s.as_str()).filter(|s| seen.insert(s)).collect();
+    for chunk in unique.chunks(crate::mcp::guild_api::OBJECTS_BATCH_MAX) {
+        let Ok((rows, _)) = client.objects_by_ids(chunk).await else { continue };
+        for r in &rows {
+            let ty = r
+                .get("object")
+                .and_then(|o| o.get("type"))
+                .and_then(|t| numeric_f64(Some(t)))
+                .map(|n| n as u64);
+            if let Some(name) = ty.and_then(|t| types.get(&t)).cloned() {
+                add(&mut rec.hull(&name).built, 1.0);
+            }
+        }
+    }
+}
+
+/// The struct-type catalogue as `id -> name`, fetched once.
+///
+/// The names are the SAME strings `struct_attack` uses for
+/// `attackerStructType` / `targetStructType` (verified against the indexer), so
+/// a build lands on the row its kills and losses are already on rather than
+/// creating a second row for the same hull.
+static TYPE_NAMES: LazyLock<Mutex<Option<HashMap<u64, String>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+async fn struct_type_names(client: &GuildApiClient) -> Option<HashMap<u64, String>> {
+    if let Ok(g) = TYPE_NAMES.lock() {
+        if let Some(m) = g.as_ref() {
+            return Some(m.clone());
+        }
+    }
+    let rows = client.struct_type_catalog().await.ok()?;
+    let mut map = HashMap::new();
+    for r in rows.as_array()? {
+        let id = numeric_f64(r.get("id"))? as u64;
+        if let Some(name) = text(r.get("type")) {
+            map.insert(id, name);
+        }
+    }
+    if let Ok(mut g) = TYPE_NAMES.lock() {
+        *g = Some(map.clone());
+    }
+    Some(map)
 }
 
 /// The one-off achievements — the ones that are not a count of anything but a
@@ -523,7 +605,7 @@ pub fn fold_raid(rec: &mut Record, d: &Value, fleet_is_mine: bool, planet_is_min
 /// `amount` is a floored display string.
 async fn ledger_totals(client: &GuildApiClient, id: &str) -> Result<HashMap<&'static str, f64>, String> {
     let (rows, _, complete) = client
-        .walk_list(&format!("/api/ledger/list/player/{id}"), PAGE, MAX_PAGES)
+        .walk_list(&format!("/api/ledger/list/player/{id}"), PAGE, MAX_LEDGER_PAGES)
         .await?;
     let mut out: HashMap<&'static str, f64> = HashMap::new();
     for r in &rows {
@@ -559,7 +641,13 @@ async fn ledger_totals(client: &GuildApiClient, id: &str) -> Result<HashMap<&'st
         }
     }
     if !complete {
-        return Err(format!("ledger truncated at {} rows", rows.len()));
+        /* Everything or nothing: these are lifetime totals, and a sum over the
+         * first N pages is a smaller number wearing the same label. Reported so
+         * it lands in `unavailable` rather than vanishing. */
+        return Err(format!(
+            "ledger truncated at {} rows — totals would be short",
+            rows.len()
+        ));
     }
     Ok(out)
 }
@@ -595,6 +683,7 @@ async fn activity_totals(
     });
 
     let mut feats = Feats::default();
+    let mut built_ids: Vec<String> = Vec::new();
     for key in FEAT_KEYS {
         rec.mark(key);
     }
@@ -606,7 +695,11 @@ async fn activity_totals(
             .unwrap_or_default();
         match category.as_str() {
             "struct_attack" => fold_attack(rec, id, &d, mine.planets.iter().any(|p| *p == planet)),
-            "struct_status" => fold_status(rec, &d),
+            "struct_status" => {
+                if let Some(sid) = fold_status(rec, &d) {
+                    built_ids.push(sid);
+                }
+            }
             "raid_status" => {
                 let fleet = text(d.get("fleet_id")).unwrap_or_default();
                 fold_raid(
@@ -624,6 +717,8 @@ async fn activity_totals(
     // "Deal [#] DMG from [Ambit]-Based Structs" is a counter like any other,
     // so it is published as one rather than making the rack reach into the
     // matrix's ambit map for four of its tiles.
+    name_built_hulls(client, rec, &built_ids).await;
+
     for (ambit, key) in AMBIT_DAMAGE_KEYS {
         let v = rec.ambit_damage.get(*ambit).copied().unwrap_or(0.0);
         rec.set(key, v);
@@ -1041,9 +1136,36 @@ mod tests {
     #[test]
     fn build_counts_the_bit_flipping_on_not_the_status_being_set() {
         let mut r = Record::default();
-        fold_status(&mut r, &json!({ "status": "6", "status_old": "4" })); // BUILT on
-        fold_status(&mut r, &json!({ "status": "7", "status_old": "6" })); // already built
+        // The live shape: MATERIALIZED first (1), then BUILT|ONLINE (7).
+        let a = fold_status(&mut r, &json!({ "status": 1, "status_old": 0 }));
+        let b = fold_status(&mut r, &json!({ "status": 7, "status_old": 1 }));
+        let c = fold_status(&mut r, &json!({ "status": 7, "status_old": 7 }));
         assert_eq!(r.counters["structs_built"], 1.0);
+        assert!(a.is_none() && c.is_none(), "only the crossing is a build");
+        assert_eq!(b.as_deref(), None, "no struct_id on this row, nothing to name");
+
+        // With an id, the build hands it back so its hull can be named — the
+        // row itself carries no type, which is why the column was empty.
+        let mut r2 = Record::default();
+        let id = fold_status(&mut r2, &json!({ "status": 7, "status_old": 1, "struct_id": "5-9" }));
+        assert_eq!(id.as_deref(), Some("5-9"));
+        assert!(!json!({ "status": 7, "status_old": 1, "struct_id": "5-9" })
+            .as_object().unwrap().contains_key("type"),
+            "if the row ever gains a type, resolve it here instead of a second request");
+    }
+
+    /// The ledger is not per-player-sized: the account every other account
+    /// sweeps INTO accumulates every movement. Measured 2026-09-09 — the
+    /// primary 119,982 rows against 1-61's 289. The old 8-page cap truncated
+    /// it, the truncation discarded the section, and both ledger-only tiles
+    /// went blank on the busiest account in the game.
+    #[test]
+    fn the_ledger_cap_covers_the_account_everything_sweeps_into() {
+        assert!(
+            (PAGE as u64) * (MAX_LEDGER_PAGES as u64) >= 320_000,
+            "120k rows measured on the primary; leave room for it to grow"
+        );
+        assert!(MAX_LEDGER_PAGES > MAX_PAGES, "the activity feed is small; the ledger is not");
     }
 
     #[test]
