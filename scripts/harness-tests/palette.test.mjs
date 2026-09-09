@@ -108,11 +108,22 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   // the game, inside a try/catch. Stub it so the log is about the test.
   w.focus = () => {};
   const calls = [];
-  const TAURI = { core: { invoke: (cmd, args) => { calls.push({ cmd, args }); return Promise.resolve({ ok: 1 }); } } };
-  w.eval('(function(){ var TAURI = arguments[0];\n' + block + '\n})')(TAURI);
+  /* Eval'd with NOTHING in scope but the window, exactly as structs-config.js
+   * runs it. Handing the block a `TAURI` parameter is what let a
+   * `ReferenceError: Can't find variable: TAURI` ship: there is no file-wide
+   * binding in that file — every block declares its own from `window.__TAURI__`
+   * — and a harness that supplies one tests a file that does not exist. */
+  w.__TAURI__ = { core: { invoke: (cmd, args) => { calls.push({ cmd, args }); return Promise.resolve({ ok: 1 }); } } };
+  w.eval('(function(){\n' + block + '\n})()');
 
   const host = () => d.getElementById('structs-palette-host');
   check('nothing is built until it is asked for', host() === null);
+  // Comments stripped: the block's own prose explains why it declares one.
+  const code = block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  check('the block declares its own bridge — this file has no file-wide TAURI',
+    /var TAURI = window\.__TAURI__;/.test(code)
+    && code.indexOf('TAURI') === code.indexOf('var TAURI = window.__TAURI__;') + 'var '.length,
+    JSON.stringify(code.slice(Math.max(0, code.indexOf('TAURI') - 40), code.indexOf('TAURI') + 40)));
 
   const key = (init) => w.dispatchEvent(new w.KeyboardEvent('keydown', Object.assign({ bubbles: true, cancelable: true }, init)));
   key({ key: 'k', metaKey: true });

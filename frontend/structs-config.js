@@ -3609,6 +3609,12 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
    * wipe anything injected in there.
    */
   (function () {
+    // Each block in this file binds its own, the way the agent-UI and updater
+    // blocks do — there is no file-wide `TAURI`, and reaching for one is a
+    // ReferenceError at the first keypress, not at load.
+    var TAURI = window.__TAURI__;
+    if (!TAURI || !TAURI.core) return;
+
     var HOST_ID = 'structs-palette-host';
     var SRC = 'board.html?view=palette';
     /* The pick becomes a card AND a window. `log_ui_events` rides along
