@@ -1402,6 +1402,126 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
 
     /* The card was called `pay` and is called `deliver`. A layout saved under
      * the old name still opens, the way `fleet` still opens as `armada`. */
+    /* ── A card window keeps the game's frame ──────────────────────────────
+   *
+   * `html[data-card]` hides the BOARD's panel art, because in a card window
+   * the OS window is the outer frame. Written unscoped, those selectors also
+   * hit the CARD's panel — `frame()` builds every card from the same five
+   * parts — so a popped-out card lost its borders and the window stopped
+   * looking like Structs. The same shape of mistake as stripping every
+   * `.sui-panel` in embed.css and taking the floating HUD with it.
+   *
+   * Asserted against the SOURCE: jsdom does not cascade these reliably, and
+   * what matters is that the selector names the outer panel. */
+  {
+    const css = read('frontend/board.html');
+    const rules = css.split('\n').filter((l) => /html\[data-card\]/.test(l) && /sui-panel/.test(l));
+    check('every card-window panel rule names the BOARD panel, not any panel',
+      rules.length > 0 && rules.every((l) => /#board-layout > \.sui-panel >/.test(l)),
+      rules.filter((l) => !/#board-layout > \.sui-panel >/.test(l)).join(' | ').slice(0, 200));
+    /* A card builds its own panel from these five, which is where its frame
+     * comes from — if that ever stops being true this test is measuring
+     * nothing. */
+    const bt = read('frontend/board-terminal.js');
+    const at = bt.indexOf('function frame(card');
+    const frameFn = bt.slice(at, at + 900);
+    check('…and the card really does build one of its own to protect',
+      ['sui-panel-top-fill-background', 'sui-panel-bottom-fill-background',
+       'sui-panel-edge-left', 'sui-panel-edge-right', 'sui-panel-chunk']
+        .every((c) => frameFn.includes(c)));
+  }
+
+  /* ── Forgiving subjects: a name or the wrong-kind id both resolve ───────
+   *
+   * Looking AT a planet used to mean looking UP its id first. The id anyone
+   * actually has is the player's, or their callsign, and one
+   * `mcp_player_search` row carries the player, their planet and their fleet.
+   *
+   * The rules are pure (`searchSubject` / `searchRows`) so what the palette
+   * offers is decided here rather than by whatever the network returned. */
+  {
+    const T = w.Board.Terminal;
+    const HIT = [{ player_id: '1-61', username: 'JPEG', guild_id: '0-1', planet_id: '2-9462', fleet_id: '9-61' }];
+
+    // What gets asked, and — more importantly — what does not.
+    check('a whole id is looked up, because that is how a player becomes their planet',
+      T.searchSubject('PLANET 1-61') === '1-61' && T.searchSubject('1-61') === '1-61');
+    check('…so is a name', T.searchSubject('PLANET jpeg') === 'jpeg' && T.searchSubject('jpeg') === 'jpeg');
+    /* The guild API answers `1-` with a 400, which the Pay window learned by
+     * printing one at the player. */
+    check('…and half an id is never asked of anyone',
+      T.searchSubject('PLANET 1-') === null && T.searchSubject('1-') === null);
+    check('…nor is a single letter, or a word still being typed',
+      T.searchSubject('P') === null && T.searchSubject('PLANET') === null && T.searchSubject('') === null);
+
+    // WORD + subject → the id the CARD wants.
+    const rows = T.searchRows('PLANET 1-61', HIT);
+    check('a player id resolves to the planet the card asked for',
+      rows.length === 1 && rows[0].line === 'PLANET 2-9462' && rows[0].run === true,
+      JSON.stringify(rows));
+    check('…labelled with who it belongs to, not just the id',
+      /JPEG/.test(rows[0].what) && /planet/.test(rows[0].what), rows[0].what);
+    check('…and a name resolves the same way',
+      T.searchRows('PLANET jpeg', HIT)[0].line === 'PLANET 2-9462');
+    check('…while MAP, which wants a fleet, gets the fleet',
+      T.searchRows('MAP jpeg', HIT).some((r) => r.line === 'MAP 9-61'),
+      JSON.stringify(T.searchRows('MAP jpeg', HIT)));
+    check('…and a card that takes ANY object is left alone — there is nothing to resolve',
+      T.searchRows('INSPECT jpeg', HIT).length === 0);
+    check('…and an id that is already the right kind offers nothing to change',
+      T.searchRows('PLANET 2-9462', HIT).length === 0);
+
+    /* A bare subject hands back the OBJECTS, not a card: putting the id in the
+     * box is what makes the subject-first completion list everything askable
+     * of it. */
+    const bare = T.searchRows('jpeg', HIT);
+    check('a bare name offers the player and the objects they own',
+      bare.map((r) => r.words).join(',') === '1-61,2-9462,9-61', JSON.stringify(bare.map((r) => r.words)));
+    check('…as subjects to complete, not as cards to open', bare.every((r) => r.run === false && /\s$/.test(r.line)));
+    check('…and a bare player id skips itself and offers what it owns',
+      T.searchRows('1-61', HIT).map((r) => r.words).join(',') === '2-9462,9-61');
+    check('the block is bounded — a busy name cannot bury the grammar',
+      T.searchRows('a', new Array(20).fill(HIT[0])).length <= 6);
+
+    /* Enter must not run the wrong object. `PLANET 1-61` used to PARSE, which
+     * meant Enter ran it and drew a player id as a planet — and because it
+     * parsed, the menu's own rule handed it the line rather than the resolved
+     * completion sitting right there. */
+    check('a wrong-kind id is not a command at all', T.canRun('PLANET 1-61') === false);
+    check('…so the resolved row is what Enter takes', T.canRun('PLANET 2-9462') === true);
+    check('…and a card that takes any object still accepts anything',
+      T.canRun('INSPECT 1-61') === true && T.canRun('INSPECT 2-9462') === true);
+    check('…and nothing else about the grammar moved',
+      T.canRun('MKT') === true && T.canRun('1-61') === true && T.canRun('PLAYER 1-61') === true);
+  }
+
+  /* ── A door in a popped-out card window ──────────────────────────────
+     *
+     * A card window IS one card: `renderGrid` filters to the solo id, so a
+     * door that called `add()` mounted its card NOWHERE and read as dead —
+     * while `save()` still wrote it into the workspace, leaving a stray card
+     * in the Terminal on every click. Doors now open another window, which is
+     * the only place a second card can go from there. */
+    {
+      const before = (w.__HARNESS_CALLS__ || []).length;
+      const cardsBefore = w.Board.Terminal.state.layout.cards.length;
+      w.Board.Terminal.state.solo = 'deliver-9';       // pretend this is a card window
+      const ret = w.Board.Terminal.add('sheet', { id: '1-61' });
+      const calls = (w.__HARNESS_CALLS__ || []).slice(before);
+      w.Board.Terminal.state.solo = null;
+
+      check('a door in a card window opens ANOTHER window, not a card nobody can see',
+        calls.some((c) => c.cmd === 'open_terminal_card_new' && c.args.kind === 'sheet' && c.args.params.id === '1-61'),
+        JSON.stringify(calls.map((c) => c.cmd)));
+      check('…and leaves no stray card behind in the workspace',
+        w.Board.Terminal.state.layout.cards.length === cardsBefore
+        && !calls.some((c) => c.cmd === 'terminal_layout_set'),
+        w.Board.Terminal.state.layout.cards.length + ' vs ' + cardsBefore);
+      /* Sixty-eight call sites go through `add`, and `Terminal.execute` is the
+       * only one that reads the result — as a boolean. */
+      check('…and still answers truthy, so every door and the command line agree', ret === true);
+    }
+
     check('a workspace saved when the card was called `pay` still opens',
       w.Board.Terminal.migrate({ cards: [{ id: 'pay-9', type: 'pay', params: {}, w: 1 }] })
         .cards[0].type === 'deliver');
@@ -1683,7 +1803,16 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const w = dom.window, d = w.document;
   await until(() => d.querySelectorAll('#tm-grid .tm-card').length >= 1);
   check('a pop-out shows exactly its card', d.querySelectorAll('#tm-grid .tm-card').length === 1 && d.querySelector('#tm-grid .tm-card').getAttribute('data-card') === 'market-1');
-  check('…full width, with no command bar and no layout doors', d.querySelector('.tm-bar') === null && d.querySelector('#tm-market-1').classList.contains('tm-w3') && d.querySelector('#tm-market-1 [title="Remove"]') === null);
+  /* No toolbar in the window's own chrome. `.tm-bar` alone is too blunt now:
+   * the palette carries one INSIDE its hidden scrim, and a card window answers
+   * ⌘K like every other surface. So this asks the question it meant — is there
+   * a bar on the page — and pins the palette's state separately. */
+  check('…full width, with no command bar and no layout doors',
+    d.querySelector('#terminal-body .tm-bar') === null
+    && d.querySelector('#tm-market-1').classList.contains('tm-w3')
+    && d.querySelector('#tm-market-1 [title="Remove"]') === null);
+  check('…but ⌘K still reaches it, closed until asked for',
+    d.getElementById('tm-palette') !== null && d.getElementById('tm-palette').hidden === true);
   check('…and no refresh door either: it refreshes on its cadence', d.querySelector('#tm-market-1 [title="Refresh"]') === null && w.Board.Terminal.cadenceOf('market-1') > 0);
   /* The window IS the card: it draws the game's frame itself, so the board's
    * panel (two fill bands, two edges) and its nav bar — empty in a card

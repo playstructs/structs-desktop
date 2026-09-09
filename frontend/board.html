@@ -937,13 +937,19 @@
        has no workspace tabs — only wrapped a second container around it, with
        the bottom fill lying across the card's own bottom border. Same trade
        as embed.css: keep the content, give up the frame. */
+    /* DIRECT children of the BOARD's panel, every one of them. Written
+       unscoped, these matched the CARD's panel too — `frame()` gives every
+       card the same five parts (two fill bands, two edges, the chunk) — so a
+       card window lost the frame this rule exists to preserve, and the game's
+       own panel art with it. Same mistake, same shape, as stripping every
+       `.sui-panel` in embed.css and taking the floating HUD out with it. */
     html[data-card] #board-layout > .sui-panel > .sui-panel-chunk > .sui-screen:has(> .sui-screen-nav),
-    html[data-card] .sui-panel-top-fill-background,
-    html[data-card] .sui-panel-bottom-fill-background,
-    html[data-card] .sui-panel-edge-left,
-    html[data-card] .sui-panel-edge-right { display: none; }
-    html[data-card] .sui-panel-chunk { padding: 0; border-width: 0; background: transparent; }
-    html[data-card] .sui-panel-chunk > .sui-screen { border-width: 0; }
+    html[data-card] #board-layout > .sui-panel > .sui-panel-top-fill-background,
+    html[data-card] #board-layout > .sui-panel > .sui-panel-bottom-fill-background,
+    html[data-card] #board-layout > .sui-panel > .sui-panel-edge-left,
+    html[data-card] #board-layout > .sui-panel > .sui-panel-edge-right { display: none; }
+    html[data-card] #board-layout > .sui-panel > .sui-panel-chunk { padding: 0; border-width: 0; background: transparent; }
+    html[data-card] #board-layout > .sui-panel > .sui-panel-chunk > .sui-screen { border-width: 0; }
     html[data-card] .ops-scroll { padding: 0; }
 
     /* A card that embeds a whole page (Comms, Pay) keeps that page's own bar

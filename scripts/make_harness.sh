@@ -644,11 +644,22 @@ cat > "$FIX" <<'EOF'
       ] };
     },
     // Explore: what a name search answers with (normalised in Rust).
-    mcp_player_search: { results: [
-      { player_id: '1-61', username: 'JPEG', guild_id: '0-1', pfp: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}' },
-      { player_id: '1-248', username: 'PHONIFFER', guild_id: '0-1', pfp: '{"head":40,"neck":3,"body":30,"arms":20,"background":2}' },
-      { player_id: '1-1957', username: null, guild_id: '0-5', pfp: null },
-    ] },
+    /* A FUNCTION of the query, and carrying `planet_id` / `fleet_id` the way
+     * the real `hit()` does (board_pages.rs) — that is what lets the command
+     * line resolve a name or a player id into the planet a card wants. */
+    mcp_player_search: function (a) {
+      var all = [
+        { player_id: '1-61', username: 'JPEG', guild_id: '0-1', planet_id: '2-9462', fleet_id: '9-61', pfp: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}' },
+        { player_id: '1-248', username: 'PHONIFFER', guild_id: '0-1', planet_id: '2-223', fleet_id: '9-248', pfp: '{"head":40,"neck":3,"body":30,"arms":20,"background":2}' },
+        { player_id: '1-1957', username: null, guild_id: '0-5', planet_id: null, fleet_id: null, pfp: null },
+      ];
+      var q = String((a && a.query) || '').trim().toLowerCase();
+      if (!q) return { results: all };
+      return { results: all.filter(function (h) {
+        return String(h.player_id).toLowerCase().indexOf(q) >= 0
+          || String(h.username || '').toLowerCase().indexOf(q) >= 0;
+      }) };
+    },
     /* Explore -> Player: the shape `mcp_player_profile` really answers with
      * (board_pages.rs). Identity is nested under `Player`, the readings under
      * `gridAttributes` and `playerInventory`, the guild is a separate read,

@@ -788,6 +788,19 @@
   function add(type, params, w) {
     var def = TYPES[type];
     if (!def) return null;
+    /* ── A popped-out card IS its window ───────────────────────────────────
+     *
+     * There is no grid beside it to put a second card in: `renderGrid` filters
+     * to the solo card, so an added card mounted NOWHERE and the door looked
+     * dead. Worse, `save()` still wrote it into the workspace — so every click
+     * of Tearsheet or Guild token in a card window left another stray card in
+     * the Terminal for the player to find later.
+     *
+     * The only place a second card can go from here is another window, which
+     * is exactly what the palette over the game already does. Every door in
+     * the app goes through this one function, so all of them get it at once
+     * rather than being audited one at a time. */
+    if (state.solo) return Terminal.openInWindow(type, params);
     if (def.single && state.layout.cards.some(function (c) { return c.type === type; })) {
       Board.stamp && Board.stamp('one ' + def.label + ' card per window');
       return null;
@@ -1120,6 +1133,10 @@
     var stale = document.getElementById('tm-palette');
     if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
     if (!state.solo) host.appendChild(chrome());
+    // `chrome()` builds the palette on its way past; a solo window has no
+    // chrome, so it builds it directly. It hangs off document.body and needs
+    // nothing else on the page — `?view=palette` is the proof.
+    else buildPalette();
     var grid = H.el('div', 'tm-grid' + (state.solo ? ' tm-solo' : ''));
     grid.id = 'tm-grid';
     grid.addEventListener('dragover', function (ev) { if (state.drag && ev.target === grid) ev.preventDefault(); });
@@ -1450,6 +1467,17 @@
     for (var i = 0; i < def.params.length; i++) if (def.params[i].kind === 'id') return def.params[i];
     return null;
   }
+  /* Will this card take this id? `kinds: null` is "any object", and a card
+   * with no id param takes none. */
+  function acceptsId(type, id) {
+    var p = idParamOf(type);
+    if (!p) return true;
+    if (!p.kinds) return true;
+    var k = kindOf(id);
+    return k !== null && p.kinds.indexOf(k) >= 0;
+  }
+  Terminal.acceptsId = acceptsId;
+
   /* Every word that can be asked of this object, in the order the card menu
    * files them, so the same vocabulary answers in both places. */
   Terminal.functionsFor = function (id) {
@@ -1526,6 +1554,12 @@
     if (!arg) return card(type, {});
     if (arg === 'id' || arg === 'ids' || arg === 'rules') {
       if (!rest) return null;
+      /* An id of the wrong KIND is not a command. `PLANET 1-61` used to parse
+       * and hand a player id to the planet card, which then drew the wrong
+       * object — and because it parsed, Enter ran it instead of taking the
+       * resolved completion sitting right there. Refusing it makes `canRun`
+       * false, which is exactly the case the menu already knows to win. */
+      if (arg === 'id' && !acceptsId(type, rest)) return null;
       var pp = {}; pp[arg] = rest; return card(type, pp);
     }
     if (arg === 'optid') return card(type, rest ? { id: rest } : {});
@@ -1640,6 +1674,104 @@
   }
   Terminal.suggestFor = suggestFor;
 
+  /* ── Forgiving subjects: the palette as a search bar ──────────────────────
+   *
+   * `PLANET 2-9462` was the only spelling the grammar knew, so looking AT a
+   * planet meant looking UP its id first. A player id or a callsign is what
+   * anyone actually has to hand, and `mcp_player_search` already answers all
+   * three at once — one row carries the player, their planet and their fleet —
+   * so the id you have can stand in for the id the card wants.
+   *
+   * Deliberately OUTSIDE `suggestFor`, which stays pure and instant: these
+   * rows arrive from a round trip and are appended when they land, so
+   * completion never waits on the network.
+   */
+  var KIND_FIELD = { 0: 'guild_id', 1: 'player_id', 2: 'planet_id', 9: 'fleet_id' };
+  var KIND_NOUN = { 0: 'guild', 1: 'player', 2: 'planet', 9: 'fleet' };
+
+  function hitLabel(h) {
+    var name = h && (h.username || h.name);
+    var tag = h && h.guild_tag ? '[' + h.guild_tag + '] ' : '';
+    return name ? tag + String(name) : String((h && h.player_id) || '');
+  }
+
+  /* Half an id is nobody's question — the guild API answers `1-` with a 400,
+   * which the Pay window learned by printing one at the player. A WHOLE id is
+   * a fine thing to look up: it is how a player id resolves to their planet. */
+  function searchable(text) {
+    var t = String(text || '').trim();
+    if (ID_RE.test(t)) return true;
+    if (/^\d+-/.test(t)) return false;
+    return t.length >= 2;
+  }
+
+  /* What this line wants looked up, or null when nothing should be asked. */
+  Terminal.searchSubject = function (line) {
+    var raw = String(line || '');
+    var parts = raw.trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return null;
+    var head = parts[0].toUpperCase();
+    if (WORDS[head] && parts.length > 1) {
+      var subject = parts.slice(1).join(' ');
+      return searchable(subject) ? subject : null;
+    }
+    // A bare subject, once it is no longer just a word being typed.
+    if (parts.length === 1 && !/\s$/.test(raw) && !WORDS[head]) {
+      return searchable(parts[0]) ? parts[0] : null;
+    }
+    return null;
+  };
+
+  /* The rows a search answers with. Pure — the hits go in, the menu comes out
+   * — so what it offers is decided by rules rather than by whatever the
+   * network happened to return. */
+  Terminal.searchRows = function (line, hits) {
+    var raw = String(line || '');
+    var parts = raw.trim().split(/\s+/).filter(Boolean);
+    if (!parts.length || !hits || !hits.length) return [];
+    var head = parts[0].toUpperCase();
+    var rows = [];
+    var push = function (row) { if (rows.length < SEARCH_MAX) rows.push(row); };
+
+    // `WORD subject` — resolve the subject to the kind the CARD wants.
+    if (WORDS[head] && parts.length > 1) {
+      var typed = parts.slice(1).join(' ');
+      var p = idParamOf(WORDS[head][0]);
+      // A card that takes any object needs no resolving, and one that takes no
+      // id has nothing to resolve into.
+      if (!p || !p.kinds) return [];
+      hits.forEach(function (h) {
+        p.kinds.forEach(function (k) {
+          var id = h[KIND_FIELD[k]];
+          if (!id || id === typed) return;
+          push({ line: head + ' ' + id, words: head, sub: id, run: true,
+                 what: hitLabel(h) + ' · ' + KIND_NOUN[k], group: 'Found' });
+        });
+      });
+      return rows;
+    }
+
+    /* A bare subject — a name, or an id whose owner has OTHER objects. The row
+     * puts the id in the box rather than opening anything: the subject-first
+     * completion then lists everything askable of it, which is the same two
+     * keystrokes as knowing the id in the first place. */
+    if (parts.length === 1) {
+      var was = parts[0];
+      hits.forEach(function (h) {
+        [1, 2, 9].forEach(function (k) {
+          var id = h[KIND_FIELD[k]];
+          if (!id || id === was) return;
+          push({ line: id + ' ', words: id, run: false,
+                 what: hitLabel(h) + ' · ' + KIND_NOUN[k], group: 'Found' });
+        });
+      });
+      return rows;
+    }
+    return [];
+  };
+  var SEARCH_MAX = 6;
+
+
   /* ⌘K / Ctrl-K. One keystroke, from anywhere on the page — the palette is
    * the whole reason the bar can be gone. Escape puts it away; so does
    * running something. */
@@ -1746,6 +1878,9 @@
      * still a screen, and it read as a stray bar under the line. */
     var show = function (on) { menu.hidden = !on; if (host) host.hidden = !on; };
     var items = [], cursor = -1, histAt = -1, draft = '', picked = false;
+    /* The search half. One cache keyed by query, so walking back over a name
+     * you already typed is instant and a held key does not fan out. */
+    var searchTimer = null, searchCache = {}, searchSeq = 0;
 
     function paint() {
       menu.innerHTML = '';
@@ -1772,10 +1907,42 @@
       show(true);
     }
     function refresh() {
-      items = suggestFor(cmd.value);
+      var line = cmd.value;
+      items = suggestFor(line).concat(searchFor(line));
       cursor = items.length ? 0 : -1;
       picked = false;
       paint();
+      askSearch(line);
+    }
+
+    /* Rows already in hand for this line. Nothing waits on them: they are the
+     * empty list until the answer lands, and `askSearch` repaints when it does. */
+    function searchFor(line) {
+      var q = Terminal.searchSubject(line);
+      var hits = q == null ? null : searchCache[q];
+      return hits ? Terminal.searchRows(line, hits) : [];
+    }
+
+    function askSearch(line) {
+      var q = Terminal.searchSubject(line);
+      if (q == null || searchCache[q]) return;
+      if (searchTimer) clearTimeout(searchTimer);
+      var mine = ++searchSeq;
+      searchTimer = setTimeout(function () {
+        invoke('mcp_player_search', { query: q }).then(function (res) {
+          var hits = (res && (res.results || res.players)) || res || [];
+          searchCache[q] = Array.isArray(hits) ? hits : [];
+          // A later keystroke owns the box; do not repaint under it.
+          if (mine !== searchSeq || Terminal.searchSubject(cmd.value) !== q) return;
+          items = suggestFor(cmd.value).concat(searchFor(cmd.value));
+          if (cursor < 0 && items.length) cursor = 0;
+          paint();
+        }).catch(function () {
+          // A search that cannot be made is simply no extra rows — never an
+          // error page where the completions go.
+          searchCache[q] = [];
+        });
+      }, 220);
     }
     function close() { items = []; cursor = -1; show(false); }
     function run(line) {
