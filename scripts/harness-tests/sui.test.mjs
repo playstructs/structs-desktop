@@ -106,7 +106,10 @@ const BUDGET = {
   // board.html +2 (2026-09-06): the resize preview outline and the battle log's row rule, both 1px hairlines.
   // board.html +1 (2026-09-06): the Terminal grid's 1px row unit (packing precision; the gap itself is a token).
   // board.html +4 (2026-09-06): the planet card — its ambit-row hairline, the slot tile's 64px basis and 128px cap (2× and 4× the 32px art).
-  'board.html':         [2, 107],
+  // board.html +1 (2026-09-08): the Pay card's container breakpoint — the width
+  // at which its two parties stop stacking. A breakpoint is not spacing and has
+  // no token, same case as board-gamestats.js's column minmax.
+  'board.html':         [2, 108],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not

@@ -71,8 +71,20 @@ function fakeParent(w, answer) {
   const html = readFileSync(resolve(repo, 'frontend/chat.html'), 'utf8');
   const html2 = readFileSync(resolve(repo, 'frontend/transfer.html'), 'utf8');
   const html3 = readFileSync(resolve(repo, 'frontend/raidview.html'), 'utf8');
+  // board.html joined the list when `?view=palette` made it embeddable — the
+  // game window frames it for ⌘K.
+  const html4 = readFileSync(resolve(repo, 'frontend/board.html'), 'utf8');
   const first = (s) => s.indexOf('bridge.js') > 0 && s.indexOf('bridge.js') < s.indexOf('events.js');
-  check('every page that can be embedded loads bridge.js before events.js', first(html) && first(html2) && first(html3));
+  check('every page that can be embedded loads bridge.js before events.js', first(html) && first(html2) && first(html3) && first(html4));
+  /* And before board-shim.js specifically. The shim fakes `__TAURI__` over
+   * HTTP/SSE for the WEB board, and it decides which it is by the absence of
+   * `__TAURI__` — which is also what an iframe of the native app looks like.
+   * Framed, board.html would have opened an EventSource against the game
+   * window's origin instead of asking its parent. */
+  // The SCRIPT TAGS, not any mention: the comment above them names the shim.
+  const tagAt = (s, f) => s.indexOf('<script src="' + f + '"');
+  check('…and board.html loads it before the web shim, which would otherwise mistake a frame for a browser tab',
+    tagAt(html4, 'bridge.js') > 0 && tagAt(html4, 'bridge.js') < tagAt(html4, 'board-shim.js'));
 }
 await tick();
 console.log('');

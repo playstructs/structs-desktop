@@ -88,6 +88,7 @@ fn main() {
             mcp::board_feed::open_board_window,
             mcp::terminal::open_terminal_window,
             mcp::terminal::open_terminal_card,
+            mcp::terminal::open_terminal_card_new,
             mcp::terminal::terminal_windows,
             mcp::terminal::terminal_workspaces,
             mcp::terminal::terminal_workspace_activate,

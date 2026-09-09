@@ -131,6 +131,15 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('…and an empty palette still offers every card the picker did, each named by the word that opens it',
       empty.length === all.length && empty.every((o) => o.words && o.what), empty.length + ' of ' + all.length);
     check('…in the same groups, in the same order', empty.map((o) => o.group).filter((g, i, a) => g !== a[i - 1]).join(' ') === groups.map((g) => g.group).join(' '));
+    /* Named explicitly, not left to the "everything is filed" rule above: the
+     * two achievement cards are the newest, and "is it in the palette yet?"
+     * is the first question a build raises about them. */
+    // `words` is the single word the row is opened by, a string — not a list.
+    const at = (t) => empty.find((o) => String(o.words || '').toUpperCase() === t);
+    check('the service record is in the palette, under Explore, as RECORD',
+      at('RECORD') && at('RECORD').group === 'Explore', JSON.stringify(at('RECORD') || null));
+    check('…and the hull tally under War, as TALLY',
+      at('TALLY') && at('TALLY').group === 'War', JSON.stringify(at('TALLY') || null));
   }
   await until(() => d.querySelector('#tm-player-1 .pc-card'));
   {
@@ -1218,6 +1227,14 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
       /35\.23Kg/.test(facts()) && /primary signing queue/.test(facts()), facts());
     const cta = () => node.querySelector('.deliver-actions a');
     check('…and the button says what it will do, not "submit"', / Send 5Kg/.test(cta().textContent), cta().textContent);
+    /* …and says it in a face that HAS the units. `sui-screen-btn` is
+     * ExtremeHazard, all-caps with no lowercase, so a 1μg send read "SEND 1MG"
+     * — a thousandfold misreading on the control that states what is about to
+     * be signed. The quantity is drawn in DirectiveZero instead. */
+    check('…with the quantity in the face that can spell μg, mg and Kg apart',
+      cta().querySelector('.deliver-qty') !== null
+      && cta().querySelector('.deliver-qty').textContent === '5Kg',
+      cta().innerHTML);
     check('…and is live, because the preview says the chain would take it', !cta().classList.contains('deliver-off'));
 
     /* The card's whole job is to refuse what the chain would refuse. */
@@ -1257,6 +1274,131 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
       check('…and the raw failure never reaches the card',
         !/http|json|\{|\}/i.test(hits()) && /search unavailable|\bno one\b|JPEG|1-61/.test(hits()), hits());
     }
+
+    /* ── The payer is a pick too ────────────────────────────────────────────
+     *
+     * It was hardcoded to the primary, so an account holding the Alpha could
+     * not be the one to spend it — and the only way to change it would have
+     * been a card setting, which puts a signing identity behind a config
+     * strip and makes it stick across sessions. It is the same picker the
+     * recipient uses, in the card, defaulting to the primary.
+     *
+     * The candidate SET is what differs: the roster, not the galaxy, because a
+     * payer is an account we hold a key to. */
+    {
+      const fromSide = () => node.querySelectorAll('.deliver-party')[0];
+      // The block above left the recipient in its search box; put one back, so
+      // what is being tested here is the PAYER and not a half-filled form.
+      {
+        const to = node.querySelectorAll('.deliver-party')[1].querySelector('input');
+        to.value = '1-61';
+        to.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await until(() => node.querySelectorAll('.deliver-party')[1].querySelector('.deliver-addr'));
+      }
+      check('the payer opens as the primary, with a way to change it',
+        /1-194/.test(fromSide().textContent) && fromSide().querySelector('.deliver-clear') !== null);
+
+      fromSide().querySelector('.deliver-clear').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+      await until(() => fromSide().querySelector('input'));
+      check('changing the payer hands back a search, in the FROM slot',
+        /FROM/.test(fromSide().querySelector('.fstat-l').textContent)
+        && fromSide().querySelector('input') !== null);
+      /* Eight hundred callsigns is not a list you type your way into blind,
+       * and "who can afford this" is the question a payer picker is asked. */
+      await until(() => fromSide().querySelectorAll('.deliver-hit').length);
+      check('…which opens already showing the roster rather than an empty box',
+        fromSide().querySelectorAll('.deliver-hit').length > 0
+        && /1-194/.test(fromSide().textContent), fromSide().textContent);
+
+      const box = fromSide().querySelector('input');
+      const before = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_player_search').length;
+      box.value = 'miner';
+      box.dispatchEvent(new w.Event('input', { bubbles: true }));
+      await until(() => fromSide().querySelectorAll('.deliver-hit').length === 1);
+      check('…filters the cached roster rather than asking a server per keystroke',
+        (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_player_search').length === before
+        && /1-272/.test(fromSide().textContent), fromSide().textContent);
+
+      fromSide().querySelectorAll('.deliver-hit')[0].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+      await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_inventory' && c.args && c.args.player === '1-272'));
+      check('picking a payer re-reads THAT account\'s wallet, not the primary\'s',
+        (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_inventory' && c.args.player === '1-272'));
+      /* A different account holds different assets, so the denom, the typed
+       * amount and the preview are all answers to a question no longer asked. */
+      check('…and clears the amount rather than carrying it to a new balance',
+        !node.querySelector('.amount-input').value, node.querySelector('.amount-input').value);
+      /* Nothing is previewed on the switch alone — there is no amount to
+       * price yet. Type one and it goes out as THEM. */
+      check('…and previews nothing until there is an amount again',
+        !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_transfer_preview' && c.args && c.args.from === '1-272'));
+      const amt = node.querySelector('.amount-input');
+      amt.value = '2';
+      amt.dispatchEvent(new w.Event('input', { bubbles: true }));
+      await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_transfer_preview' && c.args && c.args.from === '1-272'));
+      check('…and the payment is then priced AS them, not as the primary',
+        (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_transfer_preview' && c.args.from === '1-272')
+        && !(w.__HARNESS_CALLS__ || []).slice(-3).some((c) => c.cmd === 'mcp_transfer_preview' && c.args.from === 'primary'));
+      check('the payer is never a card setting — a signing identity does not belong in a config strip',
+        !(w.Board.Terminal.types().find((t) => t.type === 'deliver').params || [])
+          .some((p) => /from|payer/i.test(p.key)));
+    }
+
+    /* ── The Terminal may sign a transfer; an embedded page may not ─────────
+     *
+     * Deliver is a Terminal card, and the Terminal's windows are labelled
+     * `terminal` / `terminal-<workspace>-<card>` — never `board`. The gate is
+     * an exact-match allowlist, so the card drew a whole payment and was then
+     * refused by its own app at the signature: "command restricted to 'board'
+     * or 'transfer' (called from 'terminal')".
+     *
+     * Naming the Terminal there is only safe with the other half in place. A
+     * card can embed a page, an iframe shares its HOST window's label, and the
+     * frame bridge used to forward any command at all — so the Comms window,
+     * which renders text written by federated strangers, could have asked the
+     * Terminal to sign for it. */
+    {
+      const rs = read('src-tauri/src/mcp/tools/board_pages.rs');
+      check('the transfer gate names the Terminal, since that is where Deliver lives',
+        /require_window\(&window, &\["board", "transfer", "terminal"\]\)/.test(rs));
+      check('…and "terminal" in an allowlist is the CLASS — the popped-out card labels are minted per card',
+        /allowed\.contains\(&"terminal"\)\s*&&\s*crate::mcp::terminal::is_terminal_label\(label\)/.test(rs));
+      /* Widening `require_board` itself would have handed the Terminal every
+       * mass action, every config write and every roster command as a side
+       * effect. It earns one capability. */
+      check('…and it did NOT widen the board gate to get there',
+        /pub\(crate\) fn require_board[^}]*require_window\(window, &\["board"\]\)/s.test(rs));
+
+      const may = w.Board.Terminal.frameMayInvoke;
+      check('an embedded page cannot borrow the signature it just unlocked',
+        !may('mcp_transfer_execute') && !may('mcp_action') && !may('mcp_mass_action')
+        && !may('mcp_config_set') && !may('terminal_guild_bank_mint'));
+      check('…while everything Comms and the raid map really call still goes through',
+        ['matrix_send', 'matrix_timeline', 'mcp_raid_state', 'mcp_struct_act', 'mcp_roster',
+         'mcp_inventory', 'log_ui_events', 'close_chat_window'].every(may));
+
+      /* The allowlist is MEASURED, not remembered: re-derive it from the pages
+       * themselves so a page that grows a call fails here rather than in the
+       * window, silently, on a control nobody clicks in a test. */
+      const framed = ['chat.html', 'raidview.html'].flatMap((page) => {
+        const html = read('frontend/' + page);
+        return [...html.matchAll(/src="([a-z0-9_.-]+\.js)"/g)].map((m) => m[1]);
+      });
+      const called = new Set();
+      [...new Set(framed)].forEach((f) => {
+        for (const m of read('frontend/' + f).matchAll(/invoke\(\s*'([a-zA-Z_0-9]+)'/g)) called.add(m[1]);
+      });
+      const refused = [...called].filter((c) => !may(c));
+      check('…and every command those pages actually invoke is on the list',
+        refused.length === 0, refused.join(', '));
+      check('…which is a real restriction, not a list of everything', called.size < 60 && !may('terminal_layout_set'),
+        String(called.size));
+    }
+
+    /* The direction between the two parties is drawn with an icon the font
+     * actually has: `icon-arrow-right` is not one, so it rendered nothing. */
+    check('the arrow between the parties is a real glyph',
+      node.querySelector('.deliver-arrow i').className.split(/\s+/).includes('icon-arrow'),
+      node.querySelector('.deliver-arrow i').className);
 
     /* The card was called `pay` and is called `deliver`. A layout saved under
      * the old name still opens, the way `fleet` still opens as `armada`. */
@@ -1319,14 +1461,26 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const stranger = { postMessage: (m) => replies.push(m) };
     const frame = chatCard.querySelector('iframe.tm-frame');
     Object.defineProperty(frame, 'contentWindow', { value: fakeSource, configurable: true });
-    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 7, cmd: 'terminal_workspaces', args: {} } });
+    // `mcp_roster`, not `terminal_workspaces`: the proxy now answers only what
+    // the embedded pages really call, and rearranging the operator's own
+    // workspaces is not something Comms has any business asking for.
+    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 7, cmd: 'mcp_roster', args: {} } });
     await until(() => replies.length === 1);
-    check('an embedded page\'s invoke is run by this window and answered by message', replies[0].kind === 'result' && replies[0].id === 7 && replies[0].ok === true && Array.isArray(replies[0].value.names));
-    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 8, cmd: 'no_such_command', args: {} } });
+    check('an embedded page\'s invoke is run by this window and answered by message', replies[0].kind === 'result' && replies[0].id === 7 && replies[0].ok === true && Array.isArray(replies[0].value.rows));
+    // On the list, so it reaches the bridge — and fails there, as it should.
+    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 8, cmd: 'matrix_no_such_command', args: {} } });
     await until(() => replies.length === 2);
     check('…a failing invoke answers with the error', replies[1].ok === false && /no fixture/.test(replies[1].error));
-    const took = w.Board.Terminal.answerFrame({ origin: '', source: stranger, data: { structs: 'bridge', kind: 'invoke', id: 9, cmd: 'terminal_workspaces', args: {} } });
-    check('…a frame this page does not embed is not answered', took === false && replies.length === 2);
+    /* OFF the list: refused here, and never handed to the bridge at all. The
+     * refusal is an answer, not silence — a page waiting forever on a promise
+     * is a worse bug than a page told no. */
+    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 10, cmd: 'mcp_transfer_execute', args: {} } });
+    await until(() => replies.length === 3);
+    check('…and a command off the list is refused by the PROXY, with a reason',
+      replies[2].ok === false && /not available to an embedded page/.test(replies[2].error)
+      && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_transfer_execute'), replies[2].error);
+    const took = w.Board.Terminal.answerFrame({ origin: '', source: stranger, data: { structs: 'bridge', kind: 'invoke', id: 9, cmd: 'mcp_roster', args: {} } });
+    check('…a frame this page does not embed is not answered', took === false && replies.length === 3);
     w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'listen', name: 'matrix::typing' } });
     w.__HARNESS_EMIT__('matrix::typing', { room: '!x' });
     await until(() => replies.some((m) => m.kind === 'event'));

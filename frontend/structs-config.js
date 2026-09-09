@@ -3577,6 +3577,135 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     }
   })();
 
+  /* ── [structs-universe] ⌘K over the game ──────────────────────────────────
+   *
+   * The Terminal's command palette, on the game window. One keystroke from
+   * standing on a planet to a card about it — the whole point of the palette
+   * is that the distance between a thought and the screen is one key, and
+   * until now that only held if you were already looking at the Terminal.
+   *
+   * ## Why an iframe and not a palette drawn here
+   *
+   * The palette is not a menu; it is a grammar. It knows every registered card,
+   * which object kinds each one accepts, how to complete `2-29604` into the
+   * questions you can ask OF a planet, and the history you have typed. All of
+   * that lives in board-terminal.js beside the cards it describes, and a second
+   * copy in this file would be a second vocabulary that drifts from the first
+   * the day a card is added — the exact failure the catalogue exists to avoid.
+   *
+   * So this hosts `board.html?view=palette`: the real palette, in a frame with
+   * its own document, so the panel art, the fonts and the `#board-layout`-
+   * scoped rules all come along unchanged.
+   *
+   * ## What it may do
+   *
+   * An iframe shares its host window's LABEL, so anything the game window may
+   * invoke, this frame could ask it to. It is answered for exactly one command
+   * — the one that turns a pick into a window — and nothing else. Cheap to
+   * hold to, because the palette view boots without asking for anything.
+   *
+   * The host hangs off <body>, not off `#menu-page-body-content`: the webapp's
+   * own grass listeners `goto()` the menu on the slightest provocation and
+   * wipe anything injected in there.
+   */
+  (function () {
+    var HOST_ID = 'structs-palette-host';
+    var SRC = 'board.html?view=palette';
+    /* The pick becomes a card AND a window. `log_ui_events` rides along
+     * because ui-telemetry.js runs on any board page and flushes on a timer —
+     * the same benign logger the Terminal's own frame allowlist carries.
+     * Nothing else is reachable from this frame; see the note above. */
+    var FRAME_CMDS = { open_terminal_card_new: 1, log_ui_events: 1 };
+
+    var host = null, frame = null, open = false;
+
+    function ensure() {
+      if (host) return host;
+      host = document.createElement('div');
+      host.id = HOST_ID;
+      /* Inline, not a stylesheet: four declarations that must not depend on
+       * the game's cascade, on a node that exists only while it is open.
+       * `2147483647` is the same ceiling the debug bar uses — the palette is
+       * modal and nothing the game draws may sit over it. */
+      host.setAttribute('style', [
+        'position:fixed', 'inset:0', 'z-index:2147483647', 'display:none',
+      ].join(';'));
+      frame = document.createElement('iframe');
+      frame.src = SRC;
+      frame.title = 'Command palette';
+      frame.setAttribute('style', 'width:100%;height:100%;border:0 none;background:transparent');
+      frame.setAttribute('allowtransparency', 'true');
+      host.appendChild(frame);
+      document.body.appendChild(host);
+      return host;
+    }
+
+    function post(msg) {
+      if (!frame || !frame.contentWindow) return;
+      var mine = String(location.origin || '');
+      frame.contentWindow.postMessage(msg, mine === 'null' || !mine ? '*' : mine);
+    }
+
+    function show() {
+      ensure().style.display = 'block';
+      open = true;
+      // The frame may still be loading on the very first press; it asks for
+      // this itself when it is ready, so both orders work.
+      post({ structs: 'palette', act: 'open' });
+      try { frame.contentWindow.focus(); } catch (e) { /* not loaded yet */ }
+    }
+    function hide() {
+      if (!host) return;
+      host.style.display = 'none';
+      open = false;
+      post({ structs: 'palette', act: 'close' });
+      // Give the keyboard back to the game, or the next keystroke goes
+      // nowhere: the frame still holds focus after it is hidden.
+      try { window.focus(); if (document.activeElement === frame) frame.blur(); } catch (e) {}
+    }
+    function toggle() { if (open) hide(); else show(); }
+
+    /* Capture phase. The webapp binds its own keys on document and window, and
+     * a palette that only opens when the game happens not to want ⌘K is a
+     * palette you cannot rely on. */
+    window.addEventListener('keydown', function (e) {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (String(e.key).toLowerCase() !== 'k') return;
+      e.preventDefault();
+      e.stopPropagation();
+      toggle();
+    }, true);
+
+    window.addEventListener('message', function (ev) {
+      var mine = String(location.origin || '');
+      var same = ev.origin === mine || (mine === 'null' && (ev.origin === 'null' || ev.origin === ''));
+      if (!same || !frame || ev.source !== frame.contentWindow) return;
+      var m = ev.data;
+      if (!m) return;
+
+      // The frame telling us it is up, or that it is done.
+      if (m.structs === 'palette') {
+        if (m.act === 'ready' && open) { post({ structs: 'palette', act: 'open' }); try { frame.contentWindow.focus(); } catch (e2) {} }
+        if (m.act === 'close' || m.act === 'ran') hide();
+        return;
+      }
+
+      // The bridge (frontend/bridge.js): the frame has no `__TAURI__` of its
+      // own and asks us to invoke for it.
+      if (m.structs !== 'bridge' || m.kind !== 'invoke') return;
+      var reply = function (ok, payload) {
+        post({ structs: 'bridge', kind: 'result', id: m.id, ok: ok, value: ok ? payload : null, error: ok ? null : String(payload) });
+      };
+      if (FRAME_CMDS[String(m.cmd)] !== 1) {
+        reply(false, String(m.cmd) + ' is not available to the palette');
+        return;
+      }
+      TAURI.core.invoke(String(m.cmd), m.args || {}).then(function (v) {
+        reply(true, v === undefined ? null : v);
+      }, function (err) { reply(false, (err && err.message) || err); });
+    });
+  })();
+
 } else if (!window.__STRUCTS_CONFIG__) {
   console.info('No guild config injected (running outside Tauri)');
 }

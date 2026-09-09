@@ -525,6 +525,89 @@ pub fn open_terminal_card(app: tauri::AppHandle, workspace: Option<String>, card
     Ok(())
 }
 
+/// Create ONE card and open it in its own window.
+///
+/// The Terminal's own palette adds a card to the page it is standing on. The
+/// GAME window's palette has no page to stand on — there may be no Terminal
+/// open at all — so what it asks for is the card and a window to put it in.
+///
+/// The card is appended to a real workspace rather than conjured for the
+/// window alone, so it behaves like every other popped-out card: it is in the
+/// layout, an open Terminal sees it appear, and it comes back at the next
+/// launch. A palette pick is a card you made, not a dialog that evaporates.
+///
+/// `params` is the card type's own business and is stored verbatim, exactly as
+/// `terminal_layout_set` stores it — Rust does not know the card types.
+#[tauri::command]
+pub fn open_terminal_card_new(
+    app: tauri::AppHandle,
+    kind: String,
+    params: Option<Value>,
+    workspace: Option<String>,
+) -> Result<Value, String> {
+    let kind = kind.trim().to_string();
+    if kind.is_empty() {
+        return Err("no card type given".into());
+    }
+    // The type becomes part of the card id, so it has to survive `sane_card_id`
+    // before it is used to build one.
+    if sane_card_id(&kind).is_none() {
+        return Err(format!("card type {kind:?} is not a plain name"));
+    }
+    let (ws_name, id, version) = append_card(workspace, &kind, params.unwrap_or_else(|| json!({})))?;
+    // An open Terminal is showing this workspace; tell it, or it saves the card
+    // back out of existence on its next write.
+    let _ = crate::mcp::events::emit(
+        &app,
+        crate::mcp::events::AppEvent::Board {
+            name: "terminal-layout",
+            payload: json!({ "workspace": ws_name, "version": version }),
+        },
+    );
+    open_terminal_card(app, Some(ws_name.clone()), id.clone(), None)?;
+    Ok(json!({ "workspace": ws_name, "card_id": id, "type": kind }))
+}
+
+/// Append one card to a workspace, minting a free id for it.
+///
+/// Split out from the command so the part with the rules in it — id minting,
+/// workspace resolution, the version bump — is testable without an AppHandle
+/// or a window. Returns `(workspace, card id, new version)`.
+///
+/// The STORE lock is released before the caller builds a window:
+/// `open_terminal_card` reads the STORE itself to title the window, and
+/// holding it across that call would deadlock on a slow build.
+fn append_card(workspace: Option<String>, kind: &str, params: Value) -> Result<(String, String, u64), String> {
+    let mut st = lock(&STORE);
+    let name = match workspace {
+        Some(n) => sane_card_id(&n).ok_or_else(|| format!("workspace {n:?} is not a plain name"))?,
+        None => st.active.clone(),
+    };
+    let layout = st.workspaces.entry(name.clone()).or_insert_with(|| Layout { cards: vec![], version: 0 });
+    // `<kind>-N`, the same shape the page mints, and free in this workspace.
+    let mut n = 1;
+    let id = loop {
+        let candidate = format!("{kind}-{n}");
+        if !layout.cards.iter().any(|c| c.id == candidate) {
+            break candidate;
+        }
+        n += 1;
+    };
+    layout.cards.push(Card {
+        id: id.clone(),
+        kind: kind.to_string(),
+        params,
+        w: 1,
+        h: None,
+        title: None,
+        cadence: None,
+    });
+    layout.version += 1;
+    let version = layout.version;
+    save_store(&st);
+    Ok((name, id, version))
+}
+
 /// Which terminal windows are open right now.
 #[tauri::command]
 pub fn terminal_windows(app: tauri::AppHandle) -> Value {
@@ -2137,6 +2220,52 @@ mod tests {
         layout_set_impl(Some(ws.clone()), Layout { version: 0, cards: vec![] }).ok();
         let mut st = lock(&STORE);
         st.workspaces.remove(&ws);
+    }
+
+    /* ── A palette pick from the game window ──────────────────────────────
+     *
+     * The game window has no Terminal page to add a card to, so it asks for
+     * the card and a window at once. What has rules in it — which workspace,
+     * which id, the version bump — is `append_card`, and that is what is
+     * tested; the window build is Tauri's. */
+    #[test]
+    fn a_palette_pick_appends_a_card_with_a_free_id() {
+        let ws = "palette-test".to_string();
+        {
+            let mut st = lock(&STORE);
+            st.workspaces.remove(&ws);
+        }
+        let (w1, id1, v1) = append_card(Some(ws.clone()), "record", json!({ "id": "1-194" })).unwrap();
+        assert_eq!(w1, ws);
+        assert_eq!(id1, "record-1", "the id is <type>-N, the shape the page mints");
+        assert_eq!(v1, 1, "the version moves, so an open Terminal knows to re-read");
+
+        // A second pick of the same card does not collide with the first.
+        let (_, id2, v2) = append_card(Some(ws.clone()), "record", json!({ "id": "1-61" })).unwrap();
+        assert_eq!(id2, "record-2");
+        assert_eq!(v2, 2);
+
+        {
+            let st = lock(&STORE);
+            let cards = &st.workspaces[&ws].cards;
+            assert_eq!(cards.len(), 2);
+            // Params are the card type's own business and are stored verbatim
+            // — Rust does not know what a `record` is.
+            assert_eq!(cards[0].params["id"], json!("1-194"));
+            assert_eq!(cards[1].params["id"], json!("1-61"));
+            assert_eq!(cards[0].w, 1);
+        }
+
+        // A workspace that does not exist yet is created rather than refused:
+        // the palette is reachable before the Terminal has ever been opened.
+        let (w3, id3, v3) = append_card(Some("palette-test-fresh".into()), "tally", json!({})).unwrap();
+        assert_eq!((w3.as_str(), id3.as_str(), v3), ("palette-test-fresh", "tally-1", 1));
+
+        assert!(append_card(Some("../etc".into()), "record", json!({})).is_err(), "a workspace name is a plain name");
+
+        let mut st = lock(&STORE);
+        st.workspaces.remove(&ws);
+        st.workspaces.remove("palette-test-fresh");
     }
 
     #[test]

@@ -872,6 +872,25 @@
     .cfg-note { font-size: 8px; line-height: 1.45; text-align: left;
       margin-top: var(--spacing-md); max-width: 62ch; }
 
+    /* ── Palette mode (board.html?view=palette) ─────────────────────────────
+       This page, framed over the GAME window, carrying only the command
+       palette. Nothing of the board is drawn and nothing of it is painted:
+       the frame has to be a scrim over the game, so the page itself is
+       transparent all the way down. `background: none` as well as the colour
+       — sui.css paints `body` with a repeating page-background IMAGE, and a
+       transparent colour under an opaque tile is still an opaque tile. */
+    html[data-view="palette"],
+    html[data-view="palette"] body {
+      background: none transparent;
+      height: 100%;
+      overflow: hidden;
+    }
+    html[data-view="palette"] #board-layout,
+    html[data-view="palette"] #agent-ui { display: none; }
+    /* The scrim is the whole frame here, not a layer over a page — it has no
+       board behind it to dim, only the game. */
+    html[data-view="palette"] #tm-palette { position: fixed; inset: 0; }
+
     /* ── Pop-out mode (board.html?view=stream) ──────────────────────────────
        Same page, one section, no chrome: the window IS the stream. */
     html[data-solo] #board-tabs,
@@ -1120,25 +1139,59 @@
     .tm-head .sui-screen-nav-items { min-width: 0; flex: 1 1 auto; justify-content: flex-start; }
     .tm-title { display: block; }
     /* ── Pay ───────────────────────────────────────────────────────────────
-       A payment names two PEOPLE. Seeing the recipient's face and id is what
-       catches a mis-send before it is signed; an address never does. The two
-       parties sit side by side with the direction between them, and the
-       amount — the only number being decided — is the only one drawn large. */
-    .deliver-parties { display: flex; align-items: stretch; gap: var(--spacing-sm); }
+       A payment names two PEOPLE. Seeing each face and id is what catches a
+       mis-send before it is signed; an address never does. Both parties are
+       pickers — the payer searches the roster, the recipient the galaxy — and
+       the amount, the only number being decided, is the only one drawn large.
+
+       The card asks its OWN width, not the viewport's: it can be one of three
+       columns or a popped-out window, and a viewport query answers for neither.
+       Narrow is the default and the two parties stack; at ~360px of card they
+       go side by side and the captions rejoin their controls. */
+    .deliver { container-type: inline-size; container-name: deliver;
+      display: flex; flex-direction: column; gap: var(--spacing-md); text-align: left; }
+    .deliver-parties { display: flex; flex-direction: column; gap: var(--spacing-sm); }
     .deliver-party {
       flex: 1 1 0; min-width: 0;
       display: flex; flex-direction: column; gap: var(--spacing-xs);
       padding: var(--spacing-sm); text-align: left;
     }
     .deliver-party .pc-person { min-width: 0; }
-    /* The amount is a compound control (number + unit + MAX) and there is
-       never room for it beside its caption in one column, so this one field
-       stacks where the rest of the board's fields sit in a row. */
+    /* The amount is a compound control (number + unit + MAX), so when the card
+       is narrow its caption drops above it rather than fighting it for a line. */
     #board-layout .deliver-amount-host label.sui-input-text.cfg-field {
       flex-direction: column; align-items: stretch; gap: var(--spacing-xs);
     }
     #board-layout .deliver-amount-host label.sui-input-text.cfg-field > span:first-child { flex: none; }
-    .deliver-arrow { flex: none; display: flex; align-items: center; color: var(--accent-primary); }
+    /* The number is a QUANTITY, not a paragraph. `flex: 1 1 auto` let it grow
+       to whatever was left of the row, which drew a 250px underline with a
+       single digit parked at the far end and a caption stranded a line above
+       it — the field read as broken rather than empty. Cap it and pull the
+       whole control to the right wall, where its unit and MAX already sit. */
+    #board-layout .deliver-amount-host .amount-field { justify-content: flex-end; }
+    #board-layout .deliver-amount-host .amount-field .amount-input { flex: 0 1 8em; }
+    /* Stacked parties get a downward arrow; side-by-side ones get the
+       rightward one it is drawn as. */
+    .deliver-arrow { flex: none; display: flex; align-items: center; align-self: center;
+      color: var(--accent-primary); transform: rotate(90deg); }
+    @container deliver (min-width: 360px) {
+      .deliver-parties { flex-direction: row; align-items: stretch; }
+      .deliver-arrow { transform: none; }
+      #board-layout .deliver-amount-host label.sui-input-text.cfg-field {
+        flex-direction: row; align-items: center; gap: var(--spacing-md) var(--spacing-xl);
+      }
+      #board-layout .deliver-amount-host label.sui-input-text.cfg-field > span:first-child { flex: 1 1 auto; }
+    }
+    /* Balance and Send are one thought, so they are one line: what you hold on
+       the left, the control that spends it on the right. */
+    .deliver-bar { display: flex; align-items: center; flex-wrap: wrap;
+      gap: var(--spacing-md) var(--spacing-lg); }
+    /* A quantity inside a button. `sui-screen-btn` is ExtremeHazard, which is
+       all-caps and has no lowercase at all, so "1μg" came out as "1MG" — a
+       thousandfold misreading on the control that states what will be signed.
+       `text-transform: none` alone is a red herring; the FONT is the cause. */
+    #board-layout .deliver-qty { font-family: 'DirectiveZero', sans-serif;
+      text-transform: none; font-variant-numeric: tabular-nums; }
     .deliver-addr, .deliver-clear { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .deliver-foot { display: flex; gap: var(--spacing-md); align-items: baseline; min-width: 0; }
     /* SUI's `a:link` out-specifies any type class on the anchor, so the link
@@ -1151,10 +1204,11 @@
     /* The amount is the decision, so it is the one figure at reading size —
        SUI's own `sui-text-paragraph`, put on the input by the card. */
     #board-layout .deliver-amount-host .amount-input { text-align: right; }
-    .deliver-facts { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-lg); align-items: baseline; }
+    .deliver-facts { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-lg);
+      align-items: baseline; flex: 1 1 auto; min-width: 0; }
     .deliver-fact { display: flex; gap: var(--spacing-sm); align-items: baseline; min-width: 0; }
     .deliver-fact b { font-weight: normal; }
-    .deliver-actions { display: flex; justify-content: flex-end; }
+    .deliver-actions { display: flex; justify-content: flex-end; flex: none; margin-left: auto; }
     /* Not `disabled`: it is a link, and a preview that has not answered yet is
        not the same as a payment that is refused. */
     .deliver-off { opacity: .5; pointer-events: none; }
@@ -1593,6 +1647,15 @@
   <script src="providercard.js"></script>
   <script src="structs-cards.js"></script>
   <script src="structs-achievements.js"></script>
+  <!-- FIRST, and before board-shim.js. Tauri injects `__TAURI__` into a
+       window's TOP frame only, so this page framed over the game
+       (`?view=palette`) has none — and board-shim.js, seeing that, would
+       conclude it was the WEB board and open an HTTP/SSE connection to the
+       game window's origin. bridge.js gives an embedded page a bridge that
+       asks its parent instead, and the shim then finds `__TAURI__` and stands
+       down. In the native Team Ops window and in a real browser tab both files
+       no-op, exactly as before. -->
+  <script src="bridge.js"></script>
   <script src="board-shim.js"></script>
   <script src="events.js"></script>
   <script src="ui-telemetry.js"></script>

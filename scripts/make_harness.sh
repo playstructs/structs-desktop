@@ -505,6 +505,8 @@ cat > "$FIX" <<'EOF'
     ] },
     terminal_windows: { open: true, cards: [] },
     open_terminal_card: null,
+    // The game window's palette asks for a card AND a window in one call.
+    open_terminal_card_new: { workspace: 'main', card_id: 'new-1' },
     /* The quote board. Two offers in DIFFERENT denominations — one in alpha,
      * one in a guild token — because that is the whole problem the board
      * solves: "1 alpha" beside "3 ohm" is not a comparison until both are

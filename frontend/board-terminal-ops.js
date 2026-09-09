@@ -1876,14 +1876,28 @@
     describe: function (p) { return 'Deliver' + (p && p.to ? ' · ' + p.to : ''); },
     params: [{ key: 'to', label: 'Pay whom', kind: 'id', kinds: [1], placeholder: '1-61' }],
     render: function (host, p, ctx) {
-      var S = { me: null, assets: [], denom: null, base: 0, unit: null, to: null, preview: null, timer: null, busy: false };
+      var S = { from: null, picking: false, assets: [], denom: null, base: 0, unit: null,
+                to: null, preview: null, timer: null, busy: false };
       host.innerHTML = '';
+      /* One element owns the card's width so both halves of the layout can ask
+       * about it — the parties stack and the amount's caption drops under its
+       * control at a one-wide card, and both go back on one line at two. The
+       * CARD's width, not the viewport's: this can be one of three columns or
+       * a popped-out window, and the viewport says nothing about either. */
+      var root = H.el('div', 'deliver');
       var parties = H.el('div', 'deliver-parties');
       var amountHost = H.el('div', 'deliver-amount-host');
       var facts = H.el('div', 'deliver-facts');
       var note = H.el('div', 'deliver-note');
       var actions = H.el('div', 'deliver-actions');
-      [parties, amountHost, facts, note, actions].forEach(function (n) { host.appendChild(n); });
+      /* Balance and Send are one line, not two. They are the same thought —
+       * what you have, and the button that spends it — and stacking them put
+       * a band of empty card between a figure and the control it governs. */
+      var bar = H.el('div', 'deliver-bar');
+      bar.appendChild(facts);
+      bar.appendChild(actions);
+      [parties, amountHost, note, bar].forEach(function (n) { root.appendChild(n); });
+      host.appendChild(root);
 
       function asset() {
         for (var i = 0; i < S.assets.length; i++) if (S.assets[i].denom === S.denom) return S.assets[i];
@@ -1928,13 +1942,27 @@
         if (foot.childNodes.length) box.appendChild(foot);
         return box;
       }
-      /* No recipient yet: the slot IS the search. A payment screen with an
-       * empty "to" box and no way to find anyone was the old window's other
-       * dead end. */
-      function search() {
+      /* ── One picker, both sides ────────────────────────────────────────────
+       *
+       * The slot IS the search: an empty party box with no way to find anyone
+       * was the old window's dead end, and it was only ever fixed for the
+       * recipient — the payer was hardcoded to the primary, so an account that
+       * holds the Alpha could not be the one to spend it.
+       *
+       * What differs between the two sides is the CANDIDATE SET, not the
+       * interaction:
+       *
+       *   TO   — the whole galaxy (`mcp_player_search`). Anyone can be paid.
+       *   FROM — the roster only (`mcp_roster`). A payer is an account we hold
+       *          a key to; offering the galaxy here would list payers nobody
+       *          at this desk can sign as, and every pick would fail at the
+       *          signer instead of at the picker.
+       *
+       * So `find` is the only thing the two calls disagree about. */
+      function picker(role, opts) {
         var box = H.el('div', 'deliver-party sui-screen');
-        box.appendChild(H.el('div', 'fstat-l', 'TO'));
-        var input = H.textBox('', 'name or 1-61', function () {});
+        box.appendChild(H.el('div', 'fstat-l', role));
+        var input = H.textBox('', opts.placeholder, function () {});
         input.setAttribute('autocomplete', 'off');
         box.appendChild(H.field('', input));
         var hits = H.el('div', 'deliver-hits');
@@ -1951,34 +1979,98 @@
         function idish(q) { return /^\d+-/.test(q); }
         function whole(q) { return /^\d+-\d+$/.test(q); }
         function say(text) { hits.innerHTML = ''; if (text) hits.appendChild(H.el('div', 'fstat-l', text)); }
+        function draw(list, empty) {
+          hits.innerHTML = '';
+          list.slice(0, 5).forEach(function (r) {
+            var row = PC() && PC().parts.personLine
+              ? PC().parts.personLine({ id: r.id, name: r.name, tag: r.tag, pfp: r.pfp },
+                  { cls: 'deliver-hit', onClick: function () { opts.pick(r); } })
+              : null;
+            if (row) hits.appendChild(row);
+          });
+          if (!hits.childNodes.length) say(empty);
+        }
         function run() {
           var q = String(input.value || '').trim();
-          if (whole(q)) { say('press enter for ' + q); return; }
-          if (idish(q) || q.length < 2) { say(''); return; }
-          invoke('mcp_player_search', { query: q }).then(function (res) {
+          if (opts.enterResolves && whole(q)) { say('press enter for ' + q); return; }
+          if (opts.enterResolves && (idish(q) || q.length < 2)) { say(''); return; }
+          opts.find(q).then(function (list) {
             if (String(input.value || '').trim() !== q) return;   // a later keystroke owns the box
-            hits.innerHTML = '';
-            ((res && (res.results || res.players)) || res || []).slice(0, 5).forEach(function (r) {
-              var row = PC() && PC().parts.personLine
-                ? PC().parts.personLine({ id: r.player_id, name: r.name || r.username, tag: r.guild_tag, pfp: r.pfp || r.pfp_attrs },
-                    { cls: 'deliver-hit', onClick: function () { choose(r.player_id, r.name || r.username, r.pfp || r.pfp_attrs, r.guild_tag); } })
-                : null;
-              if (row) hits.appendChild(row);
-            });
-            if (!hits.childNodes.length) say('no one by that name');
+            draw(list, q ? opts.empty : '');
           // Never the raw failure: it is a wall of URL and JSON where the
           // answer goes, and there is nothing in it the player can act on.
           }).catch(function () { say('search unavailable'); });
         }
         input.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(run, 250); });
-        // A whole id needs no search: it is already the answer.
-        input.addEventListener('keydown', function (e) {
-          if (e.key !== 'Enter') return;
-          var v = String(input.value || '').trim();
-          if (whole(v)) { e.preventDefault(); choose(v, null, null, null); }
-        });
+        /* A whole id needs no search: it is already the answer. Only the
+         * recipient side takes one — a payer typed as a bare id we do not hold
+         * a key to is a pick that can only fail later. */
+        if (opts.enterResolves) {
+          input.addEventListener('keydown', function (e) {
+            if (e.key !== 'Enter') return;
+            var v = String(input.value || '').trim();
+            if (whole(v)) { e.preventDefault(); opts.pick({ id: v }); }
+          });
+        }
+        /* The roster opens showing its richest accounts rather than an empty
+         * box: "who can afford this" is the actual question a payer picker is
+         * asked, and a list of eight hundred callsigns nobody can recall is
+         * not a list you type your way into blind. */
+        if (opts.openWith) opts.openWith().then(function (l) { draw(l, ''); }).catch(function () {});
         return box;
       }
+
+      /* An id is not a name, and half an id is neither.
+       *
+       * Every keystroke used to go to the guild API's name search, so typing
+       * `1-61` sent `1-` — which that API rejects — and the card printed its
+       * 400 verbatim: a URL, a JSON body and the words "this value is not
+       * valid", upper-cased across six lines, in place of the answer. A player
+       * id is resolved by Enter, and a PARTIAL one is not a question worth
+       * asking anyone. */
+      function findGalaxy(q) {
+        return invoke('mcp_player_search', { query: q }).then(function (res) {
+          return ((res && (res.results || res.players)) || res || []).map(function (r) {
+            return { id: r.player_id, name: r.name || r.username, tag: r.guild_tag, pfp: r.pfp || r.pfp_attrs };
+          });
+        });
+      }
+      /* The roster is already cached and already whole, so it is filtered HERE
+       * rather than asked of a server — an eight-hundred-row list is a
+       * substring match, not a round trip per keystroke. */
+      function rosterRows(q, byWealth) {
+        return invoke('mcp_roster', { refreshIfOlderMs: 120000 }).then(function (snap) {
+          var rows = (snap && snap.rows) || [];
+          var needle = String(q || '').trim().toLowerCase();
+          if (needle) {
+            rows = rows.filter(function (r) {
+              return String(r.player_id || '').toLowerCase().indexOf(needle) >= 0
+                || String(r.name || '').toLowerCase().indexOf(needle) >= 0;
+            });
+          }
+          if (byWealth) rows = rows.slice().sort(function (a, b) { return (b.alpha_ualpha || 0) - (a.alpha_ualpha || 0); });
+          return rows.map(function (r) {
+            return {
+              // `who` is what the signer is asked for: the primary is a ROLE,
+              // and a vplayer is its player id. `resolve_player` reads both.
+              who: r.role === 'primary' ? 'primary' : r.player_id,
+              id: r.player_id, name: r.name, pfp: r.pfp_attrs, tag: null,
+            };
+          });
+        });
+      }
+      /* Switching payer invalidates everything downstream: a different account
+       * holds different assets, so the chosen denom, the typed amount and the
+       * preview are all answers to a question that is no longer being asked. */
+      function choosePayer(row) {
+        S.picking = false;
+        S.from = { who: row.who, id: row.id, name: row.name, pfp: row.pfp, tag: row.tag, address: null };
+        S.denom = null; S.base = 0; S.unit = null; S.preview = null;
+        setNote('', '');
+        paint();
+        load().then(function () { schedule(); });
+      }
+
       function choose(playerId, name, pfp, tag) {
         S.to = { id: playerId, name: name, pfp: pfp, tag: tag, address: null };
         paint();
@@ -2005,7 +2097,7 @@
       }
       function preview() {
         if (!S.to || !S.to.address || !S.denom || !S.base) { S.preview = null; paintFacts(); return; }
-        invoke('mcp_transfer_preview', { from: 'primary', to: S.to.address, denom: S.denom, amount: S.base })
+        invoke('mcp_transfer_preview', { from: (S.from && S.from.who) || 'primary', to: S.to.address, denom: S.denom, amount: S.base })
           .then(function (pv) {
             S.preview = pv;
             setNote(pv && pv.ok ? '' : 'error', pv && pv.problems && pv.problems.length ? pv.problems.join(' · ') : '');
@@ -2017,7 +2109,7 @@
       function send() {
         if (S.busy || !S.preview || !S.preview.ok) return;
         S.busy = true; paintActions();
-        invoke('mcp_transfer_execute', { from: 'primary', to: S.to.address, denom: S.denom, amount: S.base })
+        invoke('mcp_transfer_execute', { from: (S.from && S.from.who) || 'primary', to: S.to.address, denom: S.denom, amount: S.base })
           .then(function () {
             S.busy = false; S.base = 0; S.preview = null;
             setNote('ok', 'sent to ' + (S.to.name || S.to.id));
@@ -2052,8 +2144,16 @@
         var a = H.el('a', 'sui-screen-btn ' + (ready ? 'sui-mod-primary' : 'sui-mod-secondary'));
         a.href = 'javascript:void(0)';
         a.appendChild(H.el('i', 'icon-send-alpha'));
-        a.appendChild(H.el('span', null, S.busy ? ' Sending…'
-          : ' Send' + (S.base && asset() ? ' ' + H.fmtAmountIn(asset(), S.base) : '')));
+        a.appendChild(H.el('span', null, S.busy ? ' Sending…' : ' Send'));
+        /* The QUANTITY escapes the button's face. `sui-screen-btn` is set in
+         * ExtremeHazard, which has no lowercase — so a send of 1μg read
+         * "SEND 1MG" on the one control whose whole job is to state, exactly,
+         * what is about to be signed. Unit strings are case-bearing (μg, mg,
+         * Kg, Tg are four different amounts) and belong in DirectiveZero. */
+        if (!S.busy && S.base && asset()) {
+          a.appendChild(document.createTextNode(' '));
+          a.appendChild(H.el('span', 'deliver-qty', H.fmtAmountIn(asset(), S.base)));
+        }
         if (!ready) a.classList.add('deliver-off');
         else a.addEventListener('click', send);
         actions.appendChild(a);
@@ -2083,14 +2183,33 @@
       }
       function paint() {
         parties.innerHTML = '';
-        parties.appendChild(person('FROM', S.me || { id: 'primary' }, S.me && S.me.address ? shortAddr(S.me.address) : null));
+        parties.appendChild(S.picking
+          ? picker('FROM', {
+              placeholder: 'callsign or 1-61',
+              empty: 'nobody on the roster by that name',
+              find: function (q) { return rosterRows(q, false); },
+              openWith: function () { return rosterRows('', true); },
+              pick: choosePayer,
+            })
+          : person('FROM', S.from || { id: 'primary' },
+              S.from && S.from.address ? shortAddr(S.from.address) : null,
+              function () { S.picking = true; paint(); }));
+        /* `icon-arrow`, not `icon-arrow-right`: the latter is not in the icon
+         * font, so this drew an empty box between the two parties and the
+         * direction of the payment was carried by the labels alone. */
         var ar = H.el('div', 'deliver-arrow');
-        ar.appendChild(H.el('i', 'sui-icon-sm icon-arrow-right'));
+        ar.appendChild(H.el('i', 'sui-icon sui-icon-sm icon-arrow'));
         parties.appendChild(ar);
         parties.appendChild(S.to
           ? person('TO', S.to, S.to.address ? shortAddr(S.to.address) : 'resolving…',
               function () { S.to = null; S.preview = null; setNote('', ''); paint(); paintFacts(); })
-          : search());
+          : picker('TO', {
+              placeholder: 'name or 1-61',
+              empty: 'no one by that name',
+              enterResolves: true,
+              find: findGalaxy,
+              pick: function (r) { choose(r.id, r.name, r.pfp, r.tag); },
+            }));
         paintAmount();
         paintFacts();
       }
@@ -2100,10 +2219,14 @@
       }
 
       function load() {
-        return invoke('mcp_inventory', { player: 'primary' }).then(function (d) {
+        // Whoever is paying — the primary until somebody picks otherwise.
+        var who = (S.from && S.from.who) || 'primary';
+        return invoke('mcp_inventory', { player: who }).then(function (d) {
           /* `mcp_inventory` names the player `player_id`, the player card wants
            * `id`. Left unmapped the FROM side drew nothing at all — a payment
-           * screen naming one of its two parties. */
+           * screen naming one of its two parties. The address comes from here
+           * too, which is why a freshly picked payer is re-loaded rather than
+           * trusted from the roster row: the roster carries no address. */
           var me = d && d.player;
           if (me) {
             /* "primary" is the ROLE this account plays, not what it is called.
@@ -2112,7 +2235,8 @@
              * person called "primary" on one side of the payment. An unnamed
              * player is shown by id, which `personLine` already does. */
             var nm = me.name && String(me.name) !== 'primary' ? me.name : null;
-            S.me = { id: me.player_id || me.id, name: nm, pfp: me.pfp || me.pfp_attrs, tag: me.guild_tag, address: me.address };
+            S.from = { who: who, id: me.player_id || me.id, name: nm,
+                       pfp: me.pfp || me.pfp_attrs, tag: me.guild_tag, address: me.address };
           }
           /* Whatever the SERVER says may leave a wallet, not a list kept here:
            * ore is not a bank asset at all and staking states are not

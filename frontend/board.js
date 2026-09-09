@@ -151,6 +151,11 @@
     return (m && SOLO_VIEWS[m[1]]) ? m[1] : null;
   }
   Board.solo = soloView();
+  /* `?view=palette` is a MODE, not a section: the page carries only the
+   * Terminal's command palette, for the game window to host in a frame. Kept
+   * out of SOLO_VIEWS deliberately — those name a section to route to, and a
+   * palette routes nowhere. See the early exit in `init`. */
+  Board.paletteOnly = /[?&]view=palette\b/.test(location.search || '');
 
   function findArea(key) {
     for (var i = 0; i < AREAS.length; i++) if (AREAS[i].key === key) return AREAS[i];
@@ -1716,6 +1721,28 @@
   }
   function init(T) {
     Board.T = T;
+    /* ── Palette only ──────────────────────────────────────────────────────
+     *
+     * `board.html?view=palette` is this page carrying ONE thing: the Terminal's
+     * command palette, so the game window can host it in a frame. It is not a
+     * `SOLO_VIEWS` entry, because those name a SECTION to route to and skip
+     * almost nothing — a palette that dragged in the Ops snapshot, the feed,
+     * the Comms poll and the grass tail would make ⌘K over the game cost more
+     * than the card it opens.
+     *
+     * Everything below this line is boot: four invokes, a 15-second poll and
+     * the grass listeners, none of which a palette has any use for. Card
+     * REGISTRATION is already done — board-terminal.js and its ops file fill
+     * the whole registry at script-eval with no I/O — and `parse`,
+     * `suggestFor`, `groups` and `functionsFor` are pure functions over it. So
+     * the palette needs the page's helpers and nothing the page fetches.
+     */
+    if (Board.paletteOnly) {
+      document.documentElement.setAttribute('data-view', 'palette');
+      var Term = Board.Terminal;
+      if (Term && Term.paletteOnly) Term.paletteOnly();
+      return;
+    }
     if (Board.solo) document.documentElement.setAttribute('data-solo', Board.solo);
     setupOps();
     setupFeed();

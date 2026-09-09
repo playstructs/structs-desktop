@@ -34,11 +34,28 @@ pub(crate) fn require_board(window: &tauri::WebviewWindow) -> Result<(), String>
 /// The rule this encodes is not "not chat". It is that a window which renders
 /// text written by federated strangers is never on one of these lists, and
 /// membership is stated at the command it protects.
+///
+/// One label in an allowlist is a CLASS rather than a name: `"terminal"`
+/// matches the Terminal window and every card it pops out
+/// (`terminal-<workspace>-<card>`). Those labels are minted per card, so they
+/// cannot be listed — and without this a Deliver card popped into its own
+/// window could draw the whole payment and then be refused by its own app at
+/// the signature, which is what happened.
+///
+/// The Terminal embeds pages (Comms, the raid map) in iframes, and an iframe
+/// shares its host window's label — so anything the Terminal may invoke, an
+/// embedded page could ask it to invoke on its behalf. `Terminal.answerFrame`
+/// answers only a measured allowlist of commands for exactly this reason; the
+/// two halves have to stay in step, and `terminal.test.mjs` checks that they do.
 pub(crate) fn require_window(
     window: &tauri::WebviewWindow,
     allowed: &[&str],
 ) -> Result<(), String> {
-    if allowed.contains(&window.label()) {
+    let label = window.label();
+    if allowed.contains(&label) {
+        return Ok(());
+    }
+    if allowed.contains(&"terminal") && crate::mcp::terminal::is_terminal_label(label) {
         return Ok(());
     }
     Err(format!(
@@ -737,11 +754,15 @@ pub async fn mcp_transfer_execute(
     denom: String,
     amount: f64,
 ) -> Result<Value, String> {
-    // The focused Pay window is a SINGLE-PURPOSE surface: one recipient, one
-    // amount, one button. That makes it a narrower place to sign from than the
-    // six-area console, not a wider one — but it is named explicitly here, and
-    // it gets nothing else that `require_board` protects.
-    require_window(&window, &["board", "transfer"])?;
+    /* Three surfaces, each named here and each getting nothing else that
+     * `require_board` protects.
+     *
+     * The focused Pay window is SINGLE-PURPOSE: one recipient, one amount, one
+     * button — a narrower place to sign from than the six-area console, not a
+     * wider one. The Terminal is where Deliver actually lives now (the window
+     * itself and every card popped out of it), and it drew the whole payment
+     * and then refused it at the signature until it was named here. */
+    require_window(&window, &["board", "transfer", "terminal"])?;
     mcp_transfer_execute_impl(app, from, to, denom, amount).await
 }
 

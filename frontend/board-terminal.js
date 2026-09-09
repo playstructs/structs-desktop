@@ -1182,6 +1182,19 @@
     // The command line and the card picker belong to the header, not to a
     // slab floating over the cards. They ride a `sui-screen-nav` of their own,
     // the same bar the workspace tabs sit in, so the two read as one stack.
+    buildPalette();
+    return top;
+  }
+
+  /* The palette, built on its own so it does not depend on the rest of the
+   * Terminal being up. `chrome()` calls it as part of drawing the page, and
+   * `Terminal.paletteOnly()` calls it with nothing else at all — which is what
+   * lets `board.html?view=palette` be a frame the game window hosts.
+   *
+   * It appends to `document.body`, NOT into the page subtree: it is a scrim
+   * over everything, and `renderAll()` wipes the subtree on every repaint. */
+  function buildPalette() {
+    if (document.getElementById('tm-palette')) return document.getElementById('tm-palette');
     /* ── The command palette ─────────────────────────────────────────────
      *
      * Hidden until you ask for it (⌘K / Ctrl-K), because a bar that is always
@@ -1241,7 +1254,7 @@
       if (ev.target === overlay) { ev.preventDefault(); Terminal.closePalette(); }
     });
     document.body.appendChild(overlay);
-    return top;
+    return overlay;
   }
 
   /* A workspace as text anyone can paste: `terminal:` + the layout, base64.
@@ -1527,6 +1540,15 @@
   Terminal.execute = function (line) {
     var plan = Terminal.parse(line);
     if (!plan) return false;
+    /* Framed over the game there is no layout and no grid, so a card opens as
+     * a window instead of being added here. The other verbs all MUTATE a
+     * workspace this page never loaded — a preset would overwrite the layout
+     * with `state.layout` still null — so they are refused rather than half
+     * done. Nothing is lost: they are what the Terminal itself is for. */
+    if (state.paletteOnly) {
+      if (plan.kind !== 'card') return false;
+      return Terminal.openInWindow(plan.type, plan.params);
+    }
     if (plan.kind === 'card') return !!add(plan.type, plan.params);
     if (plan.kind === 'preset') { applyPreset(plan.name); return true; }
     if (plan.kind === 'share') { var strip = document.querySelector('.tm-workspaces'); if (strip) shareRow(strip); return true; }
@@ -1636,11 +1658,74 @@
     p.hidden = true;
     var cmd = document.getElementById('tm-cmd');
     if (cmd) { cmd.value = ''; cmd.classList.remove('is-err'); }
+    // Escape and a click on the scrim are both this. Framed over the game, the
+    // frame itself has to go too, or an invisible overlay keeps the pointer.
+    tellHost('close');
   };
   Terminal.togglePalette = function () {
     var p = palette();
     if (p && !p.hidden) { Terminal.closePalette(); return; }
     Terminal.openPalette();
+  };
+
+  /* ── The palette, alone, for the game window to host ─────────────────────
+   *
+   * `board.html?view=palette` in an iframe over the game (structs-config.js).
+   * The palette is a GRAMMAR, not a menu — it knows every registered card,
+   * which object kinds each accepts, and how to complete `2-29604` into the
+   * questions you can ask of a planet. A second copy of that beside the game
+   * would drift from this one the day a card is added, so the real thing is
+   * framed instead.
+   *
+   * Nothing else on the page runs: `board.js` returns from `init` before its
+   * four boot invokes, the 15-second Comms poll and the grass listeners, and
+   * `enter()` is never called — so the layout is never loaded and there is no
+   * grid. That is the whole reason a pick opens a WINDOW rather than adding a
+   * card here: there is no page for it to land on.
+   */
+  Terminal.paletteOnly = function () {
+    state.paletteOnly = true;
+    buildPalette();
+    Terminal.openPalette();
+    // Both orders work: the host may have said "open" before this frame
+    // existed, and it says it again when we announce ourselves.
+    tellHost('ready');
+    window.addEventListener('message', function (ev) {
+      var mine = String(location.origin || '');
+      var same = ev.origin === mine || (mine === 'null' && (ev.origin === 'null' || ev.origin === ''));
+      if (!same) return;
+      var m = ev.data;
+      if (!m || m.structs !== 'palette') return;
+      if (m.act === 'open') Terminal.openPalette();
+      if (m.act === 'close') { var p = palette(); if (p) p.hidden = true; }
+    });
+  };
+
+  /* The host is the window this page is framed in. Silent when there isn't
+   * one — the palette works exactly the same inside the Terminal. */
+  function tellHost(act) {
+    if (!state.paletteOnly) return;
+    var p = window.parent;
+    if (!p || p === window) return;
+    var mine = String(location.origin || '');
+    try { p.postMessage({ structs: 'palette', act: act }, mine === 'null' || !mine ? '*' : mine); } catch (e) { /* nothing to tell */ }
+  }
+
+  /* A pick with no page to land on becomes a card AND a window, made by Rust
+   * in one call: the card is appended to a real workspace, so it is in the
+   * layout, an open Terminal sees it appear, and it comes back at the next
+   * launch — a palette pick is a card you made, not a dialog that evaporates. */
+  Terminal.openInWindow = function (type, params) {
+    invoke('open_terminal_card_new', { kind: type, params: params || {} })
+      .then(function () { tellHost('ran'); })
+      .catch(function (e) {
+        var cmd = document.getElementById('tm-cmd');
+        if (cmd) cmd.classList.add('is-err');
+        Board.stamp && Board.stamp('palette: ' + e);
+      });
+    // Answered optimistically: the line has been accepted and the box should
+    // clear, whatever the window build then does.
+    return true;
   };
   if (!Terminal._paletteKeys) {
     Terminal._paletteKeys = true;
@@ -3055,6 +3140,40 @@
     var mine = String(location.origin || '');
     try { source.postMessage(msg, mine === 'null' || !mine ? '*' : mine); } catch (e) { /* the frame is gone */ }
   }
+  /* ── What an embedded page may ask the Terminal to run ────────────────────
+   *
+   * A card can embed a page (Comms, the raid map), and an iframe shares its
+   * HOST window's label — so a command gated to the Terminal is a command an
+   * embedded page can ask the Terminal to run for it. That proxy used to
+   * forward anything, which was survivable only because the Terminal could
+   * invoke nothing gated; the moment it could sign a transfer, the Comms
+   * window — which renders text written by federated strangers — could ask it
+   * to.
+   *
+   * So the proxy carries an allowlist, and the allowlist is MEASURED: it is
+   * every command `chat.html` and `raidview.html` and the modules they load
+   * actually call, and nothing else. `terminal.test.mjs` re-derives it from
+   * those files, so a page that grows a new call fails the suite rather than
+   * failing in the window — and a command the pages do NOT call can never be
+   * borrowed through them.
+   *
+   * `matrix_` is a prefix because Comms owns that whole surface (46 of the 55
+   * calls); the rest are named one at a time. */
+  var FRAME_CMD_PREFIXES = ['matrix_'];
+  var FRAME_CMDS = {
+    close_chat_window: 1, events_listening: 1, log_ui_events: 1,
+    mcp_inventory: 1, mcp_roster: 1,
+    mcp_raid_log: 1, mcp_raid_state: 1, mcp_raid_view_open: 1, mcp_struct_act: 1,
+  };
+  Terminal.frameMayInvoke = function (cmd) {
+    var name = String(cmd || '');
+    if (FRAME_CMDS[name] === 1) return true;
+    for (var i = 0; i < FRAME_CMD_PREFIXES.length; i++) {
+      if (name.indexOf(FRAME_CMD_PREFIXES[i]) === 0) return true;
+    }
+    return false;
+  };
+
   Terminal.answerFrame = function (ev) {
     var mine = String(location.origin || '');
     var same = ev.origin === mine || (mine === 'null' && (ev.origin === 'null' || ev.origin === ''));
@@ -3064,6 +3183,11 @@
     var source = ev.source;
     if (!source || (source !== window && !frameOf(source))) return false;
     if (m.kind === 'invoke') {
+      if (!Terminal.frameMayInvoke(m.cmd)) {
+        sendTo(source, { structs: 'bridge', kind: 'result', id: m.id, ok: false,
+          error: String(m.cmd) + ' is not available to an embedded page' });
+        return true;
+      }
       Promise.resolve().then(function () { return invoke(m.cmd, m.args || {}); }).then(function (value) {
         sendTo(source, { structs: 'bridge', kind: 'result', id: m.id, ok: true, value: value === undefined ? null : value });
       }, function (e) {
