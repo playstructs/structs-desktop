@@ -103,6 +103,7 @@ fn main() {
             mcp::terminal::terminal_agreements,
             mcp::terminal::terminal_guild_bank_mint,
             mcp::terminal::terminal_tearsheet,
+            mcp::achievements::terminal_achievements,
             mcp::terminal::terminal_guild_banks,
             mcp::terminal::terminal_guild_bank_history,
             mcp::terminal::terminal_guild_bank_redeem,

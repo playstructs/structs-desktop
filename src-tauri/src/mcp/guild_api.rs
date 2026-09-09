@@ -312,6 +312,67 @@ impl GuildApiClient {
         .await
     }
 
+    /* Every activity row that names this player, on either side of it.
+     *
+     * `structs.planet_activity` has no `player_id` column — attribution lives
+     * inside the JSON `detail` (`attackerPlayerId` / `targetPlayerId`, and for
+     * a raid only a `fleet_id` you have to resolve) — and until this route
+     * shipped the API offered only `/all`, `/planet/{id}` and `/category/{c}`.
+     * That made every per-player combat figure a full-table walk, which is why
+     * the achievement cards treat its absence as UNKNOWN rather than zero.
+     *
+     * The walk is written out rather than handed to `walk_list` because the
+     * optional `?category=` has to survive the `/page/{n}` segment, and
+     * `walk_list` builds that segment by string append.
+     *
+     * Returns (rows, height, completed) — `completed: false` means the walk
+     * hit `max_pages` and the rows are a truncated tail, never a total. */
+    pub async fn planet_activity_by_player(
+        &self,
+        player_id: &str,
+        category: Option<&str>,
+        limit: usize,
+        max_pages: u32,
+    ) -> Result<(Vec<Value>, Option<u64>, bool), String> {
+        // `list_page_with_meta` appends `?limit=`/`&limit=` itself — adding a
+        // second one here silently halved the page size on the first walk.
+        let query = match category {
+            Some(c) if !c.is_empty() => format!("?category={c}"),
+            _ => String::new(),
+        };
+        let mut rows = Vec::new();
+        let mut height: Option<u64> = None;
+        let mut page_size: Option<usize> = None;
+        let mut page = 1u32;
+        loop {
+            let (items, h, _) = self
+                .list_page_with_meta(
+                    &format!("/api/planet-activity/player/{player_id}/page/{page}{query}"),
+                    limit,
+                )
+                .await
+                .map_err(|e| {
+                    // The page number is noise in the common case (the route
+                    // is not there at all); keep the raw error so
+                    // `achievements::is_missing_route` can still read the 404.
+                    if page == 1 { e } else { format!("page {page}: {e}") }
+                })?;
+            if let Some(h) = h {
+                height = Some(height.map_or(h, |x| x.max(h)));
+            }
+            let n = items.len();
+            rows.extend(items);
+            let first = *page_size.get_or_insert(n);
+            if !page_walk_continues(first, n) {
+                return Ok((rows, height, true));
+            }
+            if page >= max_pages {
+                return Ok((rows, height, false));
+            }
+            page += 1;
+        }
+    }
+
     // -- planet-raid --
     //
     // `planet_raid` holds only the LATEST raid per planet, as a `PlanetRaid`:

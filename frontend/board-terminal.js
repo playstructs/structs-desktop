@@ -71,10 +71,10 @@
    * fails on it: a new card that nobody filed is a card nobody will find. */
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'tape', 'feed']],
-    ['Explore', ['player', 'guild', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
+    ['Explore', ['player', 'record', 'guild', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
     ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results']],
     ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
-    ['War', ['scout', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
+    ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['Comms', ['chat', 'comms', 'members']],
     ['System', ['health']],
   ];
@@ -1374,6 +1374,10 @@
     SETTINGS: ['page', 'config'],
     STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], STREAM: ['tape'],
     INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
+    // What a player has DONE (the tiles) and what their hulls have done (the
+    // table). `AWARDS` and `HULLS` because that is what each is called out loud.
+    RECORD: ['record', 'id'], AWARDS: ['record', 'id'], ACHIEVEMENTS: ['record', 'id'],
+    TALLY: ['tally', 'id'], HULLS: ['tally', 'id'], KILLS: ['tally', 'id'],
     HELP: ['help'], COMMANDS: ['help'],
     FEED: ['feed'], EVENTS: ['feed'], NEXT: ['next'], MOVES: ['next'],
     DMS: ['chat', 'direct'], DM: ['chat', 'direct'], CHANNELS: ['chat', 'rooms'],
@@ -2122,6 +2126,100 @@
           { label: 'Wallet', onClick: function () { add('wallet', { id: id }); } },
           { label: 'Tearsheet', onClick: function () { add('sheet', { id: id }); } },
         ]));
+      });
+    },
+  });
+
+  /* ── The service record ──────────────────────────────────────────────────
+   *
+   * What a player has DONE, as tiles. Both this and `tally` read one command,
+   * `terminal_achievements`, which caches per player for three minutes — so
+   * two of these cards on the same page cost one walk, not two.
+   *
+   * The catalogue, the tier ladder and both renderers live in
+   * `structs-achievements.js`; this is only the wiring. That is deliberate:
+   * the ladder is the part that will be tuned once the thing is live, and it
+   * should be tunable without opening a 3,000-line file.
+   *
+   * The card takes an id, so it works on ANYONE. That makes it a scouting
+   * instrument as much as a trophy case, which is also why `tally` is filed
+   * under War rather than beside this one. */
+  Terminal.register('record', {
+    /* Two wide by default, not one. A 96px tile track fits only TWO columns in
+     * a ~290px card body, which makes 37 tiles nineteen rows tall; at two
+     * columns' width it is six across and reads as a rack. A player who wants
+     * it narrow sets a family instead, which is what that param is for. */
+    label: 'Service record', defaultWidth: 2, defaultHeight: 'grow',
+    describe: function (p) { return 'Record ' + (p.id || '?'); },
+    params: [
+      { key: 'id', label: 'Player id', kind: 'id', kinds: [1], placeholder: '1-194' },
+      { key: 'family', label: 'Section', kind: 'choice', options: [
+        { value: '', label: 'everything' },
+        { value: 'raid', label: 'raiding' },
+        { value: 'war', label: 'destruction' },
+        { value: 'gun', label: 'gunnery' },
+        { value: 'def', label: 'defense' },
+        { value: 'econ', label: 'industry' },
+        { value: 'build', label: 'construction' },
+      ] },
+    ],
+    cadenceMs: 120000,
+    doors: function (card) {
+      var id = (card.params || {}).id;
+      if (!id) return [];
+      return [
+        { icon: 'icon-combat-log', title: 'Hull tally', onClick: function () { add('tally', { id: id }); } },
+        { icon: 'icon-member', title: 'The player', onClick: function () { add('player', { id: id }); } },
+      ];
+    },
+    render: function (host, p) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a player id.')); return; }
+      var A = window.StructsAchievements;
+      if (!A) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', 'the achievement catalogue did not load')); return; }
+      return invoke('terminal_achievements', { player: p.id }).then(function (d) {
+        host.innerHTML = '';
+        host.appendChild(A.rack(d, { onlyFamily: p.family || null }));
+      });
+    },
+  });
+
+  /* ── The hull tally ──────────────────────────────────────────────────────
+   *
+   * "Destroy [#] [Struct]" over 22 hull types × three verbs is 66 rows in a
+   * list and one table here. It is also a real intel read: what an opponent
+   * actually flies, what it has killed, and in which ambit — which given how
+   * much of the roster has no viable shot into water is a fight-deciding
+   * question, not decoration.
+   *
+   * Five columns will not fit a one-wide card, so a narrow card is configured
+   * down to one rather than scrolling four off its own edge. */
+  Terminal.register('tally', {
+    label: 'Hull tally', defaultWidth: 2, defaultHeight: 'grow',
+    describe: function (p) { return 'Tally ' + (p.id || '?'); },
+    params: [
+      { key: 'id', label: 'Player id', kind: 'id', kinds: [1], placeholder: '1-194' },
+      { key: 'columns', label: 'Columns', kind: 'choice', options: [
+        { value: '', label: 'all five' },
+        { value: 'kills', label: 'kills only' },
+        { value: 'destroyed', label: 'destroyed only' },
+        { value: 'damage', label: 'damage only' },
+        { value: 'built,lost', label: 'built and lost' },
+      ] },
+    ],
+    cadenceMs: 120000,
+    doors: function (card) {
+      var id = (card.params || {}).id;
+      if (!id) return [];
+      return [{ icon: 'icon-success', title: 'Service record', onClick: function () { add('record', { id: id }); } }];
+    },
+    render: function (host, p) {
+      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a player id.')); return; }
+      var A = window.StructsAchievements;
+      if (!A) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', 'the achievement catalogue did not load')); return; }
+      var cols = p.columns ? String(p.columns).split(',') : null;
+      return invoke('terminal_achievements', { player: p.id }).then(function (d) {
+        host.innerHTML = '';
+        host.appendChild(A.matrix(d, { columns: cols }));
       });
     },
   });

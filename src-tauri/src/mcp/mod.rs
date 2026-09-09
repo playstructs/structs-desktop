@@ -1,3 +1,4 @@
+pub mod achievements;
 pub mod callsign;
 pub mod chain_codec;
 pub mod combat;

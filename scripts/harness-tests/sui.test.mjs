@@ -64,6 +64,12 @@ const BUDGET = {
   // playercard.css, not tokens SUI has. The tape body's one-line clip (16px
   // line height and max height) is two more.
   'structs-cards.css':  [0, 22],
+  // The two achievement cards. The JS is textContent and SUI classes only;
+  // the stylesheet's pixels are the same kind playercard.css and
+  // structs-cards.css already carry — the emblem frame, the 6px tier pip and
+  // the 96px tile track, all sized to pixel art rather than to a type scale.
+  'structs-achievements.js':  [0, 0],
+  'structs-achievements.css': [0, 25],
   'chat-work.js':       [0, 0],
   'chat-channels.js':   [0, 0],
   'chat-search.js':     [0, 0],

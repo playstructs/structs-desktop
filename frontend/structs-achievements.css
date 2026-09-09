@@ -1,0 +1,116 @@
+/* The achievement cards: the ribbon rack and the hull tally.
+ *
+ * Tokens only, never a `var(--x, #fallback)` — a fallback lets a token name
+ * that does not exist render as a colour somebody invented, and the window
+ * then looks almost right, which is worse than looking broken.
+ *
+ * Hand-authored, top level in frontend/ (frontend/css/ is regenerated on
+ * release and anything written there dies at the next build).
+ */
+
+/* ── shared ──────────────────────────────────────────────────────────────── */
+
+/* An emblem is a framed 32px cell so a glyph and a piece of struct art sit on
+ * the same baseline; the art is pixel art scaled UP, which is the only case
+ * `pixelated` is for. */
+.ac-em {
+  display: flex; align-items: center; justify-content: center; flex: none;
+  width: 32px; height: 32px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-default);
+}
+.ac-em img { image-rendering: pixelated; width: 28px; height: 28px; }
+.ac-em i { color: var(--accent-secondary); }
+.ac-em.ac-done { border-color: var(--accent-primary); }
+.ac-em.ac-locked { opacity: .4; }
+
+.ac-nm { min-width: 0; color: var(--text-body); }
+
+/* Stat tiles. `.fstat` in board.js is the same idea, but it lives in
+ * board.html's own <style> and these cards also render inside a popped-out
+ * window, so the shape is restated here rather than reached for. */
+.ac-strip { display: flex; flex-wrap: wrap; gap: var(--spacing-xl); padding: var(--spacing-md) 0; text-align: left; }
+.ac-stat { display: flex; flex-direction: column; gap: var(--spacing-xs); min-width: 56px; text-align: left; }
+.ac-stat-v {
+  display: flex; align-items: center; gap: var(--spacing-sm);
+  font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.ac-stat-l { color: var(--text-hint); }
+.ac-stat.ac-live .ac-stat-v { color: var(--text-player-primary); }
+.ac-stat.ac-muted .ac-stat-v { color: var(--text-hint); }
+
+/* A family header: glyph, name, and how many of its rows are on the board. */
+.ac-sec-h {
+  display: flex; align-items: center; gap: var(--spacing-md);
+  padding: var(--spacing-xs) 0; margin-top: var(--spacing-lg);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-hint);
+}
+.ac-sec-h .ac-sec-n { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+/* State, not an explainer: what the card cannot see. */
+.ac-gap {
+  display: flex; align-items: center; gap: var(--spacing-md);
+  padding: var(--spacing-md) 0; color: var(--text-warning); text-align: left;
+}
+
+/* ── B · the ribbon rack ─────────────────────────────────────────────────── */
+
+/* 96px, not 78: at 78 the 8px all-caps label broke mid-word — "REPELLE / D",
+ * "EXTRACT / ED" — which reads as two different words in a face with no
+ * lowercase. The tile widens; the label never hyphenates. */
+.ac-rack { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: var(--spacing-md); }
+.ac-rib {
+  display: flex; flex-direction: column; align-items: center; gap: var(--spacing-sm);
+  padding: var(--spacing-md) var(--spacing-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-default);
+  text-align: center; cursor: pointer;
+}
+.ac-rib:hover { border-color: var(--accent-primary); }
+.ac-rib:focus-visible { outline: 2px solid var(--accent-primary-active); outline-offset: 1px; }
+.ac-rib .ac-em { width: 44px; height: 44px; }
+.ac-rib .ac-em img { width: 40px; height: 40px; }
+.ac-rib-v { font-variant-numeric: tabular-nums; }
+.ac-rib-n { color: var(--text-hint); line-height: 12px; overflow-wrap: normal; }
+
+/* Earned-forward: a maxed tile wears the accent edge, an unstarted one dims,
+ * and one we have no record for dims further and loses its number entirely. */
+.ac-rib.is-max { box-shadow: inset 0 2px 0 var(--accent-primary); }
+.ac-rib.is-locked { opacity: .45; }
+.ac-rib.is-locked .ac-rib-v { color: var(--text-hint); }
+.ac-rib.is-unknown { opacity: .3; }
+.ac-rib.is-unknown .ac-rib-v { color: var(--text-hint); }
+.ac-rib.is-open { border-color: var(--accent-primary); }
+
+.ac-rib-pips { display: flex; gap: 2px; }
+.ac-pip { width: 6px; height: 6px; background: var(--surface-panel); border: 1px solid var(--border-subtle); }
+.ac-pip.on { background: var(--accent-primary); border-color: var(--accent-primary); }
+
+/* The cheatsheet opens in place, spanning the rack so it never squeezes the
+ * tiles into a narrower column while it is open. */
+.ac-sheet { grid-column: 1 / -1; }
+.ac-sheet .sui-cheatsheet { min-width: 0; width: 100%; }
+
+/* ── C · the hull tally ──────────────────────────────────────────────────── */
+
+.ac-mx { width: 100%; border-collapse: collapse; text-align: left; }
+.ac-mx th {
+  padding: var(--spacing-xs) var(--spacing-md);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-hint); white-space: nowrap;
+}
+.ac-mx td { padding: var(--spacing-xs) var(--spacing-md); border-bottom: 1px solid var(--border-subtle); }
+.ac-mx th.ac-num, .ac-mx td.ac-num { text-align: right; font-variant-numeric: tabular-nums; }
+.ac-mx tbody tr:hover { background: var(--surface-player-highlight); }
+.ac-mx td.ac-zero { color: var(--text-hint); }
+.ac-mx td.ac-hot { color: var(--text-player-primary); }
+.ac-mx-id { display: flex; align-items: center; gap: var(--spacing-md); min-width: 0; }
+.ac-mx-id img { image-rendering: pixelated; width: 24px; height: 24px; flex: none; }
+.ac-mx-id .sui-badge { flex: none; }
+
+/* A one-wide card is ~300px, and five numeric columns will not fit there. The
+ * card asks for a single column instead of scrolling four off the edge, so
+ * this only has to keep the table from forcing the page wider than the frame. */
+.ac-mx-wrap { min-width: 0; overflow-x: auto; text-align: left; }
