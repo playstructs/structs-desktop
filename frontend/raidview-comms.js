@@ -312,9 +312,26 @@
        * full timeline. A rail beside a live raid is for reading and saying one
        * thing.
        */
+      /* The "new messages" rule, the rail's one piece of reading state.
+       *
+       * The rail repaints whole on every message, so what arrived while you
+       * were watching the map was indistinguishable from what was there when
+       * you opened it. The line you had read up to is remembered from the
+       * last paint that happened while this window was the one you were in;
+       * everything after it is new. */
+      var ids = chatState.rows.map(function (h) { return (h.message || {}).event_id; });
+      var seenAt = chatState.seenLast ? ids.indexOf(chatState.seenLast) : -1;
+      var newFrom = seenAt >= 0 && seenAt < ids.length - 1 ? ids[seenAt + 1] : null;
+      if (document.hasFocus() || !chatState.seenLast) chatState.seenLast = ids[ids.length - 1] || chatState.seenLast;
       var prev = null;
       chatState.rows.forEach(function (h) {
         var m = h.message || {};
+        if (newFrom && m.event_id === newFrom) {
+          var rule = el('div', 'chat-new');
+          rule.setAttribute('role', 'separator');
+          rule.appendChild(el('span', null, 'new messages'));
+          body.appendChild(rule);
+        }
         var node = R.render(m, prev, {});
         // Which room a line came from only tells you something when the lines
         // come from DIFFERENT rooms. In the object's own room every row would
@@ -331,9 +348,9 @@
          * a reply's quote line and drew reactions as unstyled spans — both of
          * which chatrow.js knows how to draw, and now does for all three
          * windows. Read-only: the rail carries no reply or react controls. */
-        /* Ids are chips here too — the same chip the Terminal draws. In this
+        /* Ids are links here too — the same link the Terminal draws. In this
          * window a planet or a fleet opens as a raid view; a player or a guild
-         * has nowhere to open from a rail, and stays a chip that is not a door. */
+         * has nowhere to open from a rail, and the link does nothing. */
         var b = R.body(m, { fill: function (n, text) {
           n.appendChild(R.idChips(text, function (id) {
             var k = Number(String(id).split('-')[0]);

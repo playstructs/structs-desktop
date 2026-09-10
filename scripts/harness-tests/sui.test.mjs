@@ -136,7 +136,7 @@ const BUDGET = {
   // strip — the one Comms signal that reaches you with no Comms card open.
   // board.html −1 (2026-09-09): the id chip's hairline moved to chat-rows.css
   // with the chip itself — one implementation for every window.
-  'board.html':         [2, 127],
+  'board.html':         [2, 125],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not

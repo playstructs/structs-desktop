@@ -201,6 +201,19 @@ async function load(qs) {
   const secs = [...card.querySelectorAll('.cm-sec')].map((s) => s.textContent.replace(/[\u25b8\s\d]+$/, '').trim());
   check('the list groups by what is WAITING, with what you pinned held stable above it',
     secs.join(' ') === 'Invited Pinned Unread Everything else', secs.join(' '));
+  /* The guild's own pinned channels are pinned for EVERYONE — joined or not.
+   * Filtering out every unjoined room filtered out exactly those, and the
+   * question "where did the three pinned channels go" had no answer. */
+  w.__HARNESS_EMIT__('matrix::rooms', { guild_id: '0-5', rooms: C.S.rooms.concat([
+    { room_id: '!rules:h', name: 'Rules', canonical_alias: '#rules:h', section: 'local', joined: false,
+      home_rank: 1, members: 900, unread: 0, mention: false, icon: 'icon-beacon' },
+  ]) });
+  await until(() => [...card.querySelectorAll('.cm-room')].some((r) => /Rules/.test(r.textContent)));
+  const rules = [...card.querySelectorAll('.cm-room')].find((r) => /Rules/.test(r.textContent));
+  check('a pinned channel you have not joined is still in Pinned, with a Join in the row',
+    C.sectionOf(C.roomById('!rules:h')) === 'pinned' && rules.querySelector('.cm-room-act') !== null
+    && /Join/.test(rules.querySelector('.cm-room-act').textContent) && !/Decline/.test(rules.textContent));
+  check('…and a plain unjoined room is not', !/Alpha Base/.test(card.textContent));
   /* The quiet ones are most of the list and none of the answer — collapsed to
    * a count, never hidden, because a room you cannot find is a room you have
    * left without deciding to. */
@@ -388,9 +401,13 @@ async function load(qs) {
   await until(() => first.querySelector('[data-event="$refs"] .cm-id'));
   const line = first.querySelector('[data-event="$refs"]');
   const chips = [...line.querySelectorAll('.cm-id')].map((c) => c.textContent.trim());
-  check('every id in a line is a chip, in the line, and the line still reads as a sentence',
+  check('every id in a line is a LINK, in the line, and the line still reads as a sentence',
     chips.join(',') === '2-15361,9-2136'
     && /shield on .* is down and .* is two jumps out/.test(line.textContent), chips.join(','));
+  // A link and nothing more — no icon, no chip dressing.
+  check('…a plain link: no icon, no decoration of its own',
+    [...line.querySelectorAll('.cm-id')].every((c) => c.tagName === 'A' && c.children.length === 0)
+    && !/\.cm-id\s*\{/.test(read('frontend/chat-rows.css')));
   /* A chip opens a WINDOW, not a card pushed onto the board behind the
    * conversation you are in the middle of. */
   line.querySelector('.cm-id').click();
@@ -538,29 +555,47 @@ async function load(qs) {
   check('the directory offers only what you are NOT already in',
     /Help/.test(dir.textContent) && !/Trade/.test(dir.textContent), dir.textContent.replace(/\s+/g, ' ').slice(0, 120));
 
-  /* Comms is DECENTRALISED — every guild runs its own homeserver — but the
-   * community meets in channels published by one of them. `/publicRooms` with
-   * no `server` answers only for the server you asked, so a player opened the
-   * directory, saw their own guild's rooms, and had no way to discover where
-   * anybody actually talks: they had to be told an alias. Federation already
-   * carried the join. Only DISCOVERY stopped at the guild boundary. */
+  /* Comms is DECENTRALISED — every guild runs its own homeserver — and the
+   * number of guilds is unbounded. One TAB per guild was a menu that grew
+   * without limit and made a new player pick a server before they knew what a
+   * server was. There is ONE list now: every guild's directory, fanned out and
+   * merged, ranked so the hub's rooms and the big rooms are on top, with the
+   * guild named on each row. No other Matrix client can do this; we know the
+   * whole set of homeservers from chain. */
   {
-    /* The board's own sub-nav, labelled by guild NAME. It was a row of badges
-     * reading `OH · yours  SN.C  KC` — a sentence, not a menu. */
-    // The strip in the BODY (`.subnav`), not the card's own title tab.
-    const servers = [...dir.querySelectorAll('.subnav .sui-screen-nav-item')].map((a) => a.textContent);
-    check('the directory names every guild that publishes a homeserver, by name, as a menu',
-      servers.length === 2 && servers.some((t) => /SN Corp/.test(t)) && servers.some((t) => /Orbital Hydro/.test(t))
-      && dir.querySelector('.subnav .sui-screen-nav-item.sui-mod-active') !== null,
-      servers.join(' | '));
-    const other = [...dir.querySelectorAll('.subnav .sui-screen-nav-item')].find((a) => /Orbital Hydro/.test(a.textContent));
-    other.click();
-    await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_browse' && c.args.server));
-    const asked = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'matrix_browse').slice(-1)[0];
-    check('…and picking one browses THAT server\'s directory', asked.args.server === 'oh.energy');
-    await until(() => /Hydro General/.test(d.querySelector('#tm-' + cid).textContent));
-    check('…which is a different set of rooms, reachable without being told an alias',
-      /Hydro General/.test(d.querySelector('#tm-' + cid).textContent));
+    const browses = () => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'matrix_browse');
+    check('no server strip — a guild is not a tab', dir.querySelector('.subnav') === null);
+    check('every guild that publishes a homeserver was asked, in one go',
+      browses().some((c) => c.args.server === 'oh.energy') && browses().some((c) => !c.args.server));
+    const rows = [...dir.querySelectorAll('.cm-room')];
+    check('…and their rooms stand in one list, each saying which guild',
+      rows.some((r) => /Hydro General/.test(r.textContent) && /Orbital Hydro/.test(r.querySelector('.cm-room-where').textContent))
+      && rows.some((r) => /Help/.test(r.textContent) && /SN Corp/.test(r.querySelector('.cm-room-where').textContent)),
+      rows.map((r) => r.textContent.replace(/\s+/g, ' ')).join(' | '));
+    check('the biggest room is on top — "where does everyone talk" answers itself',
+      /Hydro General/.test(rows[0].textContent));
+    check('…and the caption says how many guilds answered', /2 of 2 guilds/.test(dir.textContent), dir.textContent.replace(/\s+/g, ' ').slice(0, 80));
+    /* Search is IN the card, where a person looks for it — and it is the same
+     * `q` ⌘K's `CHANNELS <text>` sets, so the two cannot disagree. */
+    const box = dir.querySelector('.cm-find-input');
+    check('a search box stands at the top of the directory', box !== null);
+    /* A guild is a SUBJECT. `CHANNELS OH` is that guild's directory, whole. */
+    const n0 = browses().length;
+    box.value = 'OH';
+    box.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await until(() => browses().length > n0);
+    await until(() => /OH|Orbital Hydro/.test(d.querySelector('#tm-' + cid + ' .tm-title').textContent));
+    check('naming a guild scopes the directory to that guild\'s server, and says so',
+      browses().slice(n0).every((c) => c.args.server === 'oh.energy')
+      && /Orbital Hydro only/.test(d.querySelector('#tm-' + cid).textContent), d.querySelector('#tm-' + cid).textContent.replace(/\s+/g, ' ').slice(0, 100));
+    /* Anything else is a SEARCH, on every guild at once. */
+    const n1 = browses().length;
+    T.setParams(cid, { q: 'trade' });
+    await until(() => browses().length >= n1 + 2);
+    check('any other word searches every guild\'s directory for it',
+      browses().slice(n1).every((c) => c.args.query === 'trade') && browses().slice(n1).length === 2);
+    T.setParams(cid, { q: '' });
+    await until(() => [...d.querySelectorAll('#tm-' + cid + ' .cm-room')].some((r) => /Hydro General/.test(r.textContent)));
   }
 
   /* Joining from the directory. `matrix_join` answers `{ ok: true }` and the
@@ -572,7 +607,7 @@ async function load(qs) {
     const before = T.state.layout.cards.length;
     // The directory is on the OTHER guild's server by now — so this is a
     // federated join, which is the case that matters.
-    [...dir.querySelectorAll('.cm-room')].find((r) => /Hydro General/.test(r.textContent)).click();
+    [...d.querySelectorAll('#tm-' + cid + ' .cm-room')].find((r) => /Hydro General/.test(r.textContent)).click();
     await until(() => T.state.layout.cards.length === before + 1);
     const rc = T.state.layout.cards.slice(-1)[0];
     await until(() => d.querySelector('#tm-' + rc.id + ' .sui-message-inline-alert, #tm-' + rc.id + ' .cm-timeline'));
@@ -632,7 +667,19 @@ async function load(qs) {
   check('…and every hit names the room it was said in, which is the answer',
     /SN.Corporation/.test(card.textContent) && /down to 25/.test(card.textContent));
   card.querySelector('.cm-hit-room').click();
-  check('…and opens it', T.state.layout.cards.some((c) => c.type === 'room' && c.params.id === '!snc:h'));
+  check('…and opens it AT the message, not at the newest line',
+    T.state.layout.cards.some((c) => c.type === 'room' && c.params.id === '!snc:h' && c.params.at === '$h1'));
+  /* An empty FIND is a search box, not a note telling you to find one. */
+  T.add('find', {}, 1);
+  const fid = T.state.layout.cards.slice(-1)[0].id;
+  await until(() => d.querySelector('#tm-' + fid + ' .cm-find-input'));
+  check('an empty FIND card is a search box', d.querySelector('#tm-' + fid + ' .cm-find-input') !== null);
+  /* A room opened at a message selects it. */
+  T.add('room', { id: '!snc:h', at: '$m1' }, 1);
+  const aid = T.state.layout.cards.slice(-1)[0].id;
+  await until(() => d.querySelector('#tm-' + aid + ' [data-event="$m1"].is-sel'));
+  check('…and a room opened at a message has that message selected, with the bar up',
+    d.querySelector('#tm-' + aid + ' .cm-bar') !== null);
   w.close();
 }
 
@@ -748,6 +795,9 @@ async function load(qs) {
     && C.title({ name: '', canonical_alias: '#trade:h' }) === '#trade'
     && C.title({ name: 'Trade', canonical_alias: '#trade:h' }) === 'Trade');
   const card = d.querySelector('#tm-' + cid);
+  check('a row\'s subtitle is a topic or an alias — never `#trade:h`',
+    [...card.querySelectorAll('.cm-room-sub')].some((n) => n.textContent === '#trade')
+    && ![...card.querySelectorAll('.cm-room-sub')].some((n) => /:h$/.test(n.textContent)));
   check('a private conversation looks private in the list',
     [...card.querySelectorAll('.cm-room.is-direct')].some((r) => /DM/.test(r.querySelector('.cm-room-where').textContent)));
 
@@ -829,7 +879,16 @@ async function load(qs) {
   check('WHO says how many are here and puts them first',
     /1 here · 3 members/.test(who.textContent) && who.textContent.indexOf('JPEG') < who.textContent.indexOf('Beezhan'), who.textContent.replace(/\s+/g, ' ').slice(0, 80));
 
-  /* 11. ⌘K: read all as one row; a level per row. */
+  /* 11. ⌘K: a GUILD is a subject of CHANNELS — typed, not known. */
+  const gl = T.commsRows('CHANNELS ');
+  check('`CHANNELS ` lists every guild that publishes a homeserver, by name',
+    gl.filter((r) => r.group === 'Guilds').length === 2
+    && gl.some((r) => r.line === 'CHANNELS OH' && r.sub === 'Orbital Hydro')
+    && gl.some((r) => r.line === 'CHANNELS SNC' && /your guild/.test(r.what)), JSON.stringify(gl.map((r) => r.line)));
+  check('…and narrows as you type', T.commsRows('CHANNELS hyd').length === 1 && T.commsRows('CHANNELS hyd')[0].sub === 'Orbital Hydro'
+    && T.commsRows('CHANNELS trade').filter((r) => r.group === 'Guilds').length === 0);
+
+  /* 12. ⌘K: read all as one row; a level per row. */
   const rows = T.commsRows('');
   const all = rows.find((r) => r.acts && r.acts.some((a) => a.label === 'read all'));
   check('an empty ⌘K offers to read everything in one act', all !== undefined && all.group === 'Unread');

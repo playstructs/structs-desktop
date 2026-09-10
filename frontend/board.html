@@ -1533,7 +1533,6 @@
       color: var(--text-hint); border-left: 2px solid var(--accent-secondary);
       padding-left: var(--spacing-md); }
     .cm-replying .cm-x { margin-left: auto; }
-    .cm-msg-act { color: var(--text-hint); }
 
     /* SELECT-THEN-ACT. The row carries no controls; you select a message and
        ONE bar appears at the foot of the card. Per-row hover icons were three
@@ -1541,9 +1540,11 @@
     .cm-timeline .chat-msg.is-sel { background: var(--surface-player-highlight);
       box-shadow: inset 2px 0 0 var(--accent-primary); }
     .cm-timeline:focus { outline: none; }
+    /* DOCKED: the bar and the composer run edge to edge along the card's
+       bottom, over the body's padding, rather than floating inside it. */
     .cm-bar { display: flex; flex-wrap: wrap; gap: var(--spacing-md);
-      padding: var(--spacing-xs) var(--spacing-md); margin-bottom: var(--spacing-xs);
-      border-top: 1px solid var(--border-subtle); }
+      padding: var(--spacing-xs) var(--spacing-md); margin: 0 calc(-1 * var(--spacing-md));
+      border-top: 1px solid var(--border-subtle); background: var(--surface-default); }
     .cm-verb { display: inline-flex; align-items: baseline; gap: var(--spacing-xs);
       color: var(--text-body); }
     .cm-verb:hover { color: var(--text-player-primary); }
@@ -1614,17 +1615,18 @@
     .cm-me { display: flex; align-items: baseline; gap: var(--spacing-md); }
     .cm-me .cm-signout { margin-left: auto; color: var(--text-hint); white-space: nowrap; }
     .cm-me .cm-signout:hover { color: var(--accent-destructive); }
-    /* Ids a message named, beyond the one that expanded. Chips, not cards:
-       a message naming four objects would otherwise bury itself under four. */
-    /* Which homeserver's directory you are looking at. Comms is decentralised
-       and the community meets on ONE guild's server; a directory with no way
-       to name another one cannot show a new player where anybody is. */
-    .cm-servers { display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
-      margin-bottom: var(--spacing-sm); }
-    .cm-server.is-here { border-color: var(--accent-primary); color: var(--text-player-primary); }
     /* Who you are about to name. A menu, not Tab-cycling: in a room of four
        hundred you have to SEE which of three Nets you meant. */
-    .cm-compose { position: relative; }
+    .cm-compose { position: relative; margin: var(--spacing-xs) calc(-1 * var(--spacing-md)) calc(-1 * var(--spacing-md)); }
+    .cm-compose .sui-panel-wrapper-fit-content, .cm-compose .sui-panel { width: 100%; }
+    .cm-compose .sui-panel-chunk.sui-mod-grow { min-width: 0; }
+    .cm-compose .sui-panel-chunk { justify-content: center; }
+    .cm-find { margin-bottom: var(--spacing-sm); }
+    .cm-find-input { width: 100%; box-sizing: border-box; background: var(--surface-default);
+      color: var(--text-body); border: thin solid var(--border-subtle); padding: var(--spacing-xs) var(--spacing-sm);
+      font-family: 'DirectiveZero', sans-serif; font-size: inherit; }
+    .cm-find-input:focus { outline: none; border-color: var(--accent-primary); }
+    .cm-fold { display: block; color: var(--accent-secondary); padding: var(--spacing-xs) 0; }
     .cm-at { position: absolute; bottom: 100%; left: 0; right: 0; z-index: 6;
       border: 1px solid var(--border-subtle); background: var(--surface-panel);
       max-height: 40vh; overflow-y: auto; margin-bottom: var(--spacing-xs); }
@@ -1643,7 +1645,8 @@
     #board-layout .cm-older, #board-layout .cm-signout, #board-layout .cm-hit-room,
     #board-layout .cm-room-moved, #board-layout .cm-head-pins, #board-layout .cm-retry,
     #board-layout .cm-verb, #board-layout .cm-x, #board-layout .cm-readall,
-    #board-layout .cm-pins-more, #board-layout .cm-door-label { font-size: 8px; }
+    #board-layout .cm-pins-more, #board-layout .cm-door-label, #board-layout .cm-fold,
+    #board-layout .cm-room-act { font-size: 8px; }
 
     /* A one-wide card is 306px. An invite row there is a name, a Join and a
        Decline competing for it, and the NAME is the part that loses — which
@@ -1653,12 +1656,9 @@
        depending only on where it was dropped. */
     #board-layout .tm-card[data-type="comms"] .tm-body,
     #board-layout .tm-card[data-type="channels"] .tm-body { container-type: inline-size; }
-    @container (max-width: 340px) {
-      .cm-room { flex-wrap: wrap; }
-      .cm-room-right { width: 100%; justify-content: flex-end; }
-    }
-    .cm-msg-act:hover { color: var(--text-player-primary); }
-    .tm-comms-body { max-height: 360px; overflow-y: auto; }
+    .cm-room-act { color: var(--accent-primary); white-space: nowrap; }
+    .cm-room-act.cm-mod-no { color: var(--text-hint); }
+    .cm-room-act:hover { color: var(--accent-primary-active); }
     .chat-rent-quote.chat-rent-short { color: var(--text-warning); }
     /* ── Game Stats charts (board-gamestats.js) ─────────────────────────── */
     /* The hero figure: the one number the page leads with. DirectiveZero at

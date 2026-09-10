@@ -104,13 +104,14 @@
     if (r.encrypted) title.appendChild(H.el('span', 'sui-badge sui-mod-warning', 'ENCRYPTED'));
     if (r.muted) title.appendChild(icon('icon-disabled', 'sui-icon-sm'));
     mid.appendChild(title);
-    var sub = String(r.topic || r.canonical_alias || '');
+    var sub = String(r.topic || (r.canonical_alias ? String(r.canonical_alias).split(':')[0] : ''));
     if (r.invited) sub = 'invited' + (r.invited_by ? ' by ' + r.invited_by : '');
     if (sub) mid.appendChild(H.el('div', 'cm-room-sub fstat-l', sub));
     /* WHERE it is. Invisible before, and in a federated community it is the
      * difference between your guild's #general and the one everybody uses. */
     var place = C.placeOf(r);
-    if (place === 'hub' || place === 'galaxy') {
+    if (opts.where) title.appendChild(H.el('span', 'cm-room-where fstat-l', opts.where));
+    else if (place === 'hub' || place === 'galaxy') {
       title.appendChild(H.el('span', 'cm-room-where fstat-l',
         place === 'hub' ? 'HUB' : C.serverName(C.serverOf(r.room_id))));
     }
@@ -138,7 +139,7 @@
     /* Pinning is what makes the top of the list STABLE — you look for #trade
      * by position, and a list that re-sorts under you every time somebody
      * speaks is a list you cannot learn. */
-    if (!r.invited && opts.pin !== false) {
+    if (r.joined && opts.pin !== false) {
       var pin = H.el('a', 'cm-room-pin' + (C.isPinned(r.room_id) ? ' is-on' : ''));
       pin.href = 'javascript:void(0)';
       pin.title = C.isPinned(r.room_id) ? 'Unpin' : 'Pin to the top';
@@ -146,8 +147,13 @@
       pin.addEventListener('click', function (e) { e.stopPropagation(); C.togglePin(r.room_id); });
       right.appendChild(pin);
     }
-    if (r.invited) {
-      var yes = H.el('a', 'sui-screen-btn sui-mod-primary', 'Join');
+    /* A room you are NOT in — an invite, or a pinned channel you have not
+     * joined yet — offers the join in the row. Opening it does the same. */
+    if (!r.joined) {
+      /* Compact — a caption-sized link, not the HUD's full button. Two
+       * buttons on a 306px row left the NAME as the part that lost, and the
+       * fix was to wrap the row, which made every invite two lines tall. */
+      var yes = H.el('a', 'cm-room-act fstat-l', 'Join');
       yes.href = 'javascript:void(0)';
       yes.addEventListener('click', function (e) {
         e.stopPropagation();
@@ -156,13 +162,15 @@
           .catch(function (err) { Board.stamp && Board.stamp('join: ' + err); });
       });
       right.appendChild(yes);
-      var no = H.el('a', 'sui-screen-btn sui-mod-secondary', 'Decline');
-      no.href = 'javascript:void(0)';
-      no.addEventListener('click', function (e) {
-        e.stopPropagation();
-        invoke('matrix_leave', { guildId: C.S.key, roomId: r.room_id }).then(function () { return C.rooms(true); });
-      });
-      right.appendChild(no);
+      if (r.invited) {
+        var no = H.el('a', 'cm-room-act cm-mod-no fstat-l', 'Decline');
+        no.href = 'javascript:void(0)';
+        no.addEventListener('click', function (e) {
+          e.stopPropagation();
+          invoke('matrix_leave', { guildId: C.S.key, roomId: r.room_id }).then(function () { return C.rooms(true); });
+        });
+        right.appendChild(no);
+      }
     } else if (r.mention) {
       /* Being NAMED is not the same as traffic. A count of 40 hides the one
        * message that was actually for you, so the mention takes the badge and
@@ -294,7 +302,7 @@
     { value: 'direct', label: 'people' },
     { value: 'hub', label: 'the hub' },
     { value: 'guild', label: 'your guild' },
-    { value: 'galaxy', label: 'galaxy' },
+    { value: 'galaxy', label: 'other guilds' },
     { value: 'unread', label: 'unread only' },
   ];
   T.register('comms', {
@@ -385,7 +393,7 @@
           g.rooms.forEach(function (r) {
             state.rows.push(r.room_id);
             host.appendChild(roomRow(r, { cursor: state.cursor === r.room_id,
-              onOpen: function () { add('room', { id: r.room_id }); } }));
+              onOpen: function () { add('room', { id: r.joined ? r.room_id : (r.canonical_alias || r.room_id) }); } }));
           });
         });
       };
@@ -420,8 +428,9 @@
   //
   // The card that makes the rebuild worth doing. Two of them side by side is
   // two conversations; the embedded window could only ever be one.
-  /* The game inside the conversation — INLINE. The chip itself is the shared
-   * row's (`StructsChatRow.idChips`); what opening one does is this host's:
+  /* The game inside the conversation — INLINE, as plain links. The link
+   * itself is the shared row's (`StructsChatRow.idChips`); what opening one
+   * does is this host's:
    * a card WINDOW, not a card pushed onto the board behind the conversation
    * you are in the middle of. */
   var KIND_CARD = { 0: 'guild', 1: 'player', 2: 'planet', 9: 'map' };
@@ -612,6 +621,16 @@
             C.markRead(room.room_id);
             C.members(room.room_id);
             if ((room.pinned || []).length) C.pinned(room.room_id).then(draw);
+            /* Opened AT a message (a search hit, a reply's pointer): that line
+             * is selected and in view, not the newest one. One page back is
+             * read if it is not in hand; older than that, the newest line is
+             * an honest answer. */
+            if (p.at) {
+              var has = function () { return (C.S.timelines[room.room_id] || []).some(function (m) { return m.event_id === p.at; }); };
+              var land = function () { state.sel = p.at; state.atBottom = false; draw();
+                var box = host.querySelector('[data-event="' + p.at + '"]'); if (box && box.scrollIntoView) box.scrollIntoView({ block: 'center' }); };
+              if (has()) land(); else C.older(room.room_id).then(function () { if (has()) land(); });
+            }
             /* Who they are TO YOU — ally, grudge, protected. Folded in after
              * the first paint so a conversation never waits on a standing. */
             if (room.player_id) {
@@ -736,7 +755,7 @@
     var src = m.mxc ? C.media(m.mxc, rid) : null;
     var b = window.StructsChatRow.body(m, {
       mediaUrl: src ? function () { return src; } : null,
-      // Ids become chips IN the sentence, and a chip opens a window.
+      // Ids become links IN the sentence, and a link opens a window.
       fill: function (n, text) { n.appendChild(idChips(text)); },
       onJump: function (eid) {
         var at = scroller.querySelector('[data-event="' + eid + '"]');
@@ -1032,82 +1051,82 @@
   T.register('channels', {
     label: 'Channel directory', defaultWidth: 1, single: true, defaultHeight: 'grow',
     describe: function (p) {
-      /* The NAME of the guild whose directory this is. It said
-       * `Channels · matrix.beta.playstructs.com` — a hostname is a routing
-       * detail, not a thing anybody calls that place. */
-      var known = (C.S.servers || []).filter(function (sv) { return sv.server === p.server; })[0];
-      var where = p.server ? (known ? (known.name || known.tag) : p.server) : '';
-      return 'Channels' + (where ? ' · ' + where : '') + (p.q ? ' · ' + p.q : '');
+      var sv = p.q && C.serverFor(p.q);
+      return 'Channels' + (sv ? ' · ' + (sv.name || sv.tag) : p.q ? ' · ' + p.q : '');
     },
+    /* ONE box. `CHANNELS trade` searches every guild's directory for "trade";
+     * `CHANNELS OH` (or `0-1`, or `Orbital Hydro`) is that one guild's whole
+     * directory. A guild is a subject, the way a room is — not a tab. */
     params: [
-      { key: 'q', label: 'Search', kind: 'text', placeholder: 'trade, war, help…' },
-      { key: 'server', label: 'Homeserver', kind: 'text', placeholder: 'yours' },
+      { key: 'q', label: 'Find, or a guild', kind: 'text', placeholder: 'trade · war · OH · 0-1' },
     ],
     cadenceMs: 120000,
     render: function (host, p, ctx) {
       var ctxId = ctx.id;
-      var draw = function (list, servers) {
+      var state = { all: false };
+      var SHOWN = 12;
+      var draw = function (out) {
         if (!host.isConnected) return;
         host.innerHTML = '';
 
-        /* WHICH homeserver's directory this is.
-         *
-         * Comms is decentralised — every guild runs its own — but the
-         * community meets in channels published by ONE of them. A directory
-         * that only ever answers for your own guild's server showed a new
-         * player their own guild's rooms and left the place everybody actually
-         * talks undiscoverable: you had to be told an alias. Federation
-         * already carried the join; only discovery stopped at the boundary.
-         *
-         * The list comes from the guild configs the app discovers on chain, so
-         * a guild that stands up a homeserver appears here without anything
-         * being typed anywhere. */
-        /* WHICH homeserver's directory this is.
-         *
-         * This was a row of badges reading `OH · yours  SN.C  KC`, which is a
-         * SENTENCE, not a menu — no affordance, no separation, and a "· yours"
-         * glued onto a name so the whole line scanned as prose. It is the
-         * board's own sub-nav now (`H.navStrip`, the same component the areas
-         * and the config pages use), so it reads as a menu because it IS the
-         * menu, and it is labelled by guild NAME rather than by a hostname
-         * nobody has ever typed.
-         *
-         * Yours first. It needs no marker: your own guild's name is a name you
-         * already know, and the strip says which one you are looking at by
-         * being a strip. */
-        if ((servers || []).length > 1) {
-          var items = servers.slice().sort(function (a, b) { return (b.mine ? 1 : 0) - (a.mine ? 1 : 0); })
-            .map(function (sv) {
-              return { key: sv.mine ? '' : sv.server, label: sv.name || sv.tag || sv.server };
-            });
-          host.appendChild(H.navStrip(items, p.server || '', function (key) {
-            T.setParams(ctxId, { q: p.q || '', server: key });
-          }));
-        }
+        /* SEARCH, where a person looks for it: at the top of the directory.
+         * The box is the card's own param, so ⌘K and the box agree. */
+        var find = H.el('div', 'cm-find');
+        var input = H.el('input', 'cm-find-input');
+        input.type = 'search';
+        input.placeholder = 'find a channel, or name a guild';
+        input.value = p.q || '';
+        input.setAttribute('aria-label', 'find a channel, or name a guild');
+        input.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); T.setParams(ctxId, { q: input.value.trim() }); }
+          if (e.key === 'Escape' && input.value) { e.preventDefault(); e.stopPropagation(); input.value = ''; T.setParams(ctxId, { q: '' }); }
+        });
+        find.appendChild(input);
+        host.appendChild(find);
 
         var joined = {};
         C.S.rooms.forEach(function (r) { if (r.joined) joined[r.room_id] = 1; });
-        var rows = (list || []).filter(function (r) { return !joined[r.room_id]; });
-        cap(host, rows.length ? H.fmtInt(rows.length) + ' to join · ' + H.fmtInt(Object.keys(joined).length) + ' already in'
-          : 'nothing here you are not already in');
-        rows.forEach(function (r) {
+        var rows = (out.rooms || []).filter(function (r) { return !joined[r.room_id]; });
+        var guilds = {};
+        rows.forEach(function (r) { guilds[r.server] = 1; });
+        /* The directory is a SUPERSET of the room list — everything public,
+         * joined or not — and it is drawn against what you already have, so
+         * it offers only what you are not in. A directory drawn before the
+         * room list landed offers you every room you are standing in. */
+        var said = [];
+        said.push(rows.length ? H.fmtInt(rows.length) + ' to join' : 'nothing you are not already in');
+        if (out.guilds > 1) said.push(H.fmtInt(Object.keys(guilds).length) + ' of ' + H.fmtInt(out.guilds) + ' guilds');
+        else if (p.q && C.serverFor(p.q)) said.push((C.serverFor(p.q).name || C.serverFor(p.q).tag) + ' only');
+        if (out.failed) said.push(H.fmtInt(out.failed) + ' did not answer');
+        cap(host, said.join(' · '));
+
+        /* Ranked, then FOLDED. The hub's rooms and the big ones are the answer
+         * to "where does everyone talk"; the twenty-third guild's two rooms
+         * are still here, one click down, rather than a tab nobody opens. */
+        var show = rows, more = 0;
+        if (!state.all && !p.q && rows.length > SHOWN) { show = rows.slice(0, SHOWN); more = rows.length - SHOWN; }
+        show.forEach(function (r) {
           host.appendChild(roomRow(r, {
             pin: false,   // you cannot pin a room you are not in
+            where: out.guilds > 1 ? r.guild : null,
             onOpen: function () { add('room', { id: r.canonical_alias || r.room_id }); },
           }));
         });
+        if (more) {
+          var rest = {};
+          rows.slice(SHOWN).forEach(function (r) { rest[r.server] = 1; });
+          var fold = H.el('a', 'cm-fold fstat-l', '▸ ' + H.fmtInt(more) + ' more across ' + H.fmtInt(Object.keys(rest).length) + ' guild' + (Object.keys(rest).length === 1 ? '' : 's'));
+          fold.href = 'javascript:void(0)';
+          fold.addEventListener('click', function () { state.all = true; draw(out); });
+          host.appendChild(fold);
+        }
       };
       return gate(host, function () {
-        /* The joined list FIRST. "What else is there" is defined against what
-         * you already have, and a directory drawn before sync landed offers
-         * you every room you are standing in. */
         return C.rooms().then(function () {
-          return Promise.all([
-            invoke('matrix_browse', { guildId: C.S.key, query: p.q || null, server: p.server || null }),
-            C.servers(),
-          ]);
+          var sv = p.q && C.serverFor(p.q);
+          return C.directory(sv ? { scope: sv.server } : { query: p.q || null });
         })
-          .then(function (r) { draw((r[0] && (r[0].rooms || r[0].chunk)) || [], r[1]); })
+          .then(draw)
           .catch(function (e) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', String(e))); });
       });
     },
@@ -1129,8 +1148,25 @@
       { key: 'room', label: 'In room', kind: 'text', placeholder: 'everywhere' },
     ],
     cadenceMs: 0,
-    render: function (host, p) {
-      if (!p.q) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Type what was said.')); return; }
+    render: function (host, p, ctx) {
+      var ctxId = ctx.id;
+      /* The box, IN the card. "Type what was said" told you to go and find
+       * the card's parameter drawer; a search card with no search box is
+       * how a search card that exists goes unused. */
+      var findBox = function () {
+        var find = H.el('div', 'cm-find');
+        var input = H.el('input', 'cm-find-input');
+        input.type = 'search';
+        input.placeholder = 'what was said — shield, 2-15361, ore…';
+        input.value = p.q || '';
+        input.setAttribute('aria-label', 'find something that was said');
+        input.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); T.setParams(ctxId, { q: input.value.trim(), room: p.room || '' }); }
+        });
+        find.appendChild(input);
+        return find;
+      };
+      if (!p.q) { host.innerHTML = ''; host.appendChild(findBox()); return; }
       return gate(host, function () {
         var run = function (roomId) {
           return invoke('matrix_search', { guildId: C.S.key, query: p.q, roomId: roomId || null });
@@ -1139,6 +1175,7 @@
         return go.then(function (d) {
           var hits = (d && d.hits) || [];
           host.innerHTML = '';
+          host.appendChild(findBox());
           cap(host, hits.length ? H.fmtInt(hits.length) + ' found' + (p.room ? ' in ' + p.room : ' across every room you are in')
             : 'nothing said that, anywhere you can read');
           var prev = null;
@@ -1149,60 +1186,17 @@
              * spans every room — a hit with no room is a quote from nowhere. */
             var where = H.el('a', 'cm-hit-room fstat-l', h.room_name || h.room_id || '');
             where.href = 'javascript:void(0)';
-            where.addEventListener('click', function () { add('room', { id: h.room_id }); });
+            /* AT the message, not merely in the room: a hit is a place in a
+             * conversation, and opening the room at its newest line left you
+             * scrolling for what you had just found. */
+            var open = function () { add('room', { id: h.room_id, at: m.event_id }); };
+            where.addEventListener('click', open);
             wrap.appendChild(where);
             var node = window.StructsChatRow.render(m, prev, {});
-            var b = window.StructsChatRow.body(m, {});
+            var b = window.StructsChatRow.body(m, { fill: function (n, text) { n.appendChild(idChips(text)); } });
             if (b) node.appendChild(b);
-            wrap.appendChild(node);
-            host.appendChild(wrap);
-          });
-        }).catch(function (e) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', String(e))); });
-      });
-    },
-  });
-
-  // ══════════════════════════════════════════════════════════════════════
-  // FIND — something that was said
-  // ══════════════════════════════════════════════════════════════════════
-  //
-  // The HOMESERVER does the searching. A client that filters its own cache can
-  // only find what it has already fetched, which for a busy channel is the
-  // last few minutes — and "where did somebody post that trade" is never
-  // about the last few minutes.
-  T.register('find', {
-    label: 'Search Comms', defaultWidth: 1, defaultHeight: 'grow',
-    describe: function (p) { return p.q ? 'Find · ' + p.q : 'Find in Comms'; },
-    params: [
-      { key: 'q', label: 'Words', kind: 'text', placeholder: 'shield, 2-15361, ore…' },
-      { key: 'room', label: 'In room', kind: 'text', placeholder: 'everywhere' },
-    ],
-    cadenceMs: 0,
-    render: function (host, p) {
-      if (!p.q) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Type what was said.')); return; }
-      return gate(host, function () {
-        var run = function (roomId) {
-          return invoke('matrix_search', { guildId: C.S.key, query: p.q, roomId: roomId || null });
-        };
-        var go = p.room ? C.resolve(p.room).then(function (r) { return run(r.room_id); }) : run(null);
-        return go.then(function (d) {
-          var hits = (d && d.hits) || [];
-          host.innerHTML = '';
-          cap(host, hits.length ? H.fmtInt(hits.length) + ' found' + (p.room ? ' in ' + p.room : ' across every room you are in')
-            : 'nothing said that, anywhere you can read');
-          var prev = null;
-          hits.forEach(function (h) {
-            var m = h.message || h;
-            var wrap = H.el('div', 'cm-hit');
-            /* Which ROOM it was said in is the whole answer when the search
-             * spans every room — a hit with no room is a quote from nowhere. */
-            var where = H.el('a', 'cm-hit-room fstat-l', h.room_name || h.room_id || '');
-            where.href = 'javascript:void(0)';
-            where.addEventListener('click', function () { add('room', { id: h.room_id }); });
-            wrap.appendChild(where);
-            var node = window.StructsChatRow.render(m, prev, {});
-            var b = window.StructsChatRow.body(m, {});
-            if (b) node.appendChild(b);
+            node.classList.add('is-clickable');
+            node.addEventListener('click', open);
             wrap.appendChild(node);
             host.appendChild(wrap);
           });

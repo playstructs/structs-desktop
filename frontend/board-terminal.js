@@ -1962,6 +1962,7 @@
    * whatever sync happened to have landed.
    */
   var COMMS_WORDS = { ROOM: 1, DM: 1, MSG: 1, MESSAGE: 1, TALK: 1, CHAT: 1, WHO: 1, INROOM: 1 };
+  var DIR_WORDS = { CHANNELS: 1, BROWSE: 1, DIRECTORY: 1 };
   var COMMS_MAX = 4;
   Terminal.commsRows = function (line, rooms) {
     var list = rooms || (window.BoardComms && window.BoardComms.S.rooms) || [];
@@ -2029,6 +2030,22 @@
                     what: H.fmtInt(due.length) + ' rooms waiting',
                     acts: [{ label: 'read all', run: function () { C.markAllRead(); } }] });
       }
+      return rows;
+    }
+
+    /* `CHANNELS <guild>` — the guilds that publish a homeserver, as rows, so
+     * "which guild's channels can I look at" is answered by typing the word
+     * and not by knowing a tag. Bare `CHANNELS ` lists them all. */
+    if (DIR_WORDS[head] && C && C.S.servers && C.S.servers.length) {
+      var gq = parts.slice(1).join(' ').toLowerCase();
+      C.S.servers.filter(function (sv) {
+        if (!gq) return true;
+        return [sv.name, sv.tag, sv.guild_id, sv.server].some(function (v) { return String(v || '').toLowerCase().indexOf(gq) >= 0; });
+      }).slice(0, 6).forEach(function (sv) {
+        rows.push({ line: 'CHANNELS ' + (sv.tag || sv.guild_id), words: 'CHANNELS', sub: sv.name || sv.tag || sv.server,
+                    lead: true, run: true, group: 'Guilds', what: sv.mine ? 'your guild\'s channels' : 'that guild\'s channels' });
+      });
+      if (gq && !rows.length) return rows;   // a search term, not a guild: the word row already offers it
       return rows;
     }
 

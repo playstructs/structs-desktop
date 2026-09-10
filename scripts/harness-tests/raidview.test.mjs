@@ -689,6 +689,21 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   check('...and the per-row room label stops repeating it',
     [...d.querySelectorAll('.rv-chat-room')].every((e) => e.textContent === ''));
 
+  /* The "new messages" rule. The rail repaints whole on every message, so
+   * what arrived while you were watching the map was indistinguishable from
+   * what was there when you opened it. */
+  const row = (id, body) => ({ room_id: '!planet-2-1:h', room_name: 'Planet 2-1',
+    message: { event_id: id, sender_name: 'JPEG', body, kind: 'text', ts: 1 } });
+  chat.seenLast = null;
+  chat.rows = [row('$r1', 'shield 40'), row('$r2', 'shield 30')];
+  RV._renderChat();
+  check('the first paint draws no rule — nothing is new yet', d.querySelector('#rv-chat-body .chat-new') === null);
+  chat.rows = chat.rows.concat([row('$r3', 'shield 20')]);
+  RV._renderChat();
+  const rule = d.querySelector('#rv-chat-body .chat-new');
+  check('a message that arrived since you last looked sits under a "new messages" rule',
+    rule !== null && rule.nextElementSibling && /shield 20/.test(rule.nextElementSibling.textContent));
+
   // The empty state must not call a fleet a planet. This window opens on both.
   chat.rows = [];
   RV._renderChat();

@@ -349,28 +349,27 @@
   }
 
 
-  /* Ids in a message, as CHIPS, in the sentence.
+  /* Ids in a message, as LINKS, in the sentence.
    *
    * Moved here from the Terminal (2026-09-09) for the reason the row and the
    * body were: three surfaces draw a message, and only one of them turned
-   * `2-15361` into something you could open. The chip is the same everywhere;
+   * `2-15361` into something you could open. The link is the same everywhere;
    * what OPENING one does belongs to the host, through `onOpen(id)` — the
    * Terminal opens a card window, the raid rail opens a raid view, and a host
-   * that can do neither gets a chip that is still a chip, just not a door.
+   * that can do neither gets the id as text, which is not a door.
    */
   var ID_IN_TEXT = /(\d{1,2}-\d{1,9})/g;
-  var KIND_ICON = { 0: 'icon-guild', 1: 'icon-member', 2: 'icon-planet', 9: 'icon-fleet-tile' };
+  /* A LINK, and nothing more. The chip — icon, border, badge — was decoration
+   * on top of the one thing that matters, which is that the id can be
+   * opened. It dresses like every other link in the game. */
   function idChip(id, onOpen) {
-    var chip = el(onOpen ? 'a' : 'span', 'cm-id');
-    if (onOpen) chip.href = 'javascript:void(0)';
-    var ic = el('i', 'sui-icon sui-icon-sm ' + (KIND_ICON[Number(String(id).split('-')[0])] || 'icon-unknown'));
-    chip.appendChild(ic);
-    chip.appendChild(el('span', null, id));
+    var link = el(onOpen ? 'a' : 'span', 'cm-id', id);
     if (onOpen) {
-      chip.title = 'Open ' + id;
-      chip.addEventListener('click', function (e) { e.stopPropagation(); onOpen(id); });
+      link.href = 'javascript:void(0)';
+      link.title = 'Open ' + id;
+      link.addEventListener('click', function (e) { e.stopPropagation(); onOpen(id); });
     }
-    return chip;
+    return link;
   }
   function idChips(text, onOpen) {
     var frag = document.createDocumentFragment();

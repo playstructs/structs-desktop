@@ -275,16 +275,13 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* ── Ids as chips, in the sentence ──────────────────────────────────────────
- *
- * With the row, because `StructsChatRow.idChips` draws them for every window
- * that draws a message. Expanding an id into the game's full card under the
- * message turned a channel where every third line names a planet into a
- * column of cards with conversation wedged between them. Inline, the text
- * reads as text and every id is still a door. */
-.cm-id { display: inline-flex; align-items: baseline; gap: var(--spacing-xs);
-  padding: 0 var(--spacing-xs); border: 1px solid var(--border-subtle);
-  background: var(--surface-default); color: var(--text-player-primary);
-  white-space: nowrap; }
-a.cm-id:hover { border-color: var(--accent-primary); background: var(--surface-player-highlight); }
-.cm-id .sui-icon { align-self: center; }
+/* Ids in a sentence are plain links (`StructsChatRow.idChips`) — no chip,
+ * no icon, no border. The game's own link rule dresses them. */
+
+/* ── The "new messages" rule ────────────────────────────────────────────
+ * Drawn by any window that knows where you left off (the raid rail; the
+ * Terminal's ROOM card draws its own, `.cm-new`, the same shape). */
+.chat-new { display: flex; align-items: center; gap: var(--spacing-md);
+  color: var(--accent-destructive); margin: var(--spacing-xs) 0;
+  font-family: 'ExtremeHazard', sans-serif; font-size: 8px; text-transform: uppercase; }
+.chat-new::before, .chat-new::after { content: ''; flex: 1 1 auto; border-top: thin solid var(--accent-destructive); }

@@ -396,7 +396,11 @@
         /* An invite is the most waiting thing there is, so it survives the
          * unread filter — but not a filter that ASKED for one place. */
         if (g.key === 'invited') return !opts.only || opts.only === 'all';
-        if (!r.joined) return false;
+        /* The guild's own pinned channels are pinned for EVERYONE, joined or
+         * not — that is what pinning them was for. Dropping every unjoined
+         * room dropped those three, and a new player's list opened on
+         * nothing. They stay, with a Join in the row. */
+        if (!r.joined && !(g.key === 'pinned' && r.home_rank != null)) return false;
         if (opts.only && opts.only !== 'all' && placeOf(r) !== opts.only) return false;
         if (opts.unreadOnly && !r.unread && !r.mention) return false;
         if (opts.query && !matches(r, opts.query)) return false;
@@ -573,6 +577,65 @@
       announce('rooms');   // rows can now say a guild's NAME where they said a hostname
       return serversCache;
     }).catch(function () { return []; });
+  }
+  /* A guild, by anything a player would type for it — `0-1`, `OH`, `Orbital
+   * Hydro`, `oh.energy` — to the homeserver it publishes. */
+  function serverFor(subject) {
+    var want = String(subject || '').trim().toLowerCase();
+    if (!want) return null;
+    return (serversCache || []).filter(function (x) {
+      return [x.guild_id, x.tag, x.name, x.server].some(function (v) { return String(v || '').toLowerCase() === want; });
+    })[0] || null;
+  }
+  /* THE directory: every guild's published rooms, in one list.
+   *
+   * A Matrix client cannot do this — there is no federated directory, so
+   * Element makes you pick a server first, and this card had one TAB per
+   * guild, which is a menu that grows without bound. But we know the whole set
+   * of homeservers from chain, which no other client does; fan-out is what
+   * that knowledge buys. Ranked by size with the hub on top, so "where does
+   * everyone talk" answers itself, and a two-room guild sinks below the fold
+   * instead of getting a tab. `scope` narrows to one guild's server; `query`
+   * is the same search on every one of them. Cached briefly — a directory
+   * changes far more slowly than a timeline. */
+  var DIR_TTL = 120000;
+  var dirCache = {};
+  function directory(opts) {
+    opts = opts || {};
+    if (!S.key) return Promise.resolve({ rooms: [], guilds: 0, failed: 0 });
+    var key = (opts.scope || '*') + '|' + (opts.query || '');
+    var hit = dirCache[key];
+    if (hit && Date.now() - hit.at < DIR_TTL) return Promise.resolve(hit.out);
+    return servers().then(function (list) {
+      var home = mine(), hub = hubServer();
+      var targets = list.length ? list : [{ server: home, name: home, mine: true }];
+      if (opts.scope) targets = targets.filter(function (sv) { return sv.server === opts.scope; });
+      if (!targets.length) return Promise.reject('no guild called “' + opts.scope + '” publishes a homeserver');
+      var failed = 0;
+      return Promise.all(targets.map(function (sv) {
+        var remote = sv.mine ? null : sv.server;   // omitted, the server is this session's own
+        return invoke('matrix_browse', { guildId: S.key, query: opts.query || null, server: remote })
+          .then(function (d) {
+            return ((d && (d.rooms || d.chunk)) || []).map(function (r) {
+              return Object.assign({}, r, { server: sv.server, guild: sv.name || sv.tag || sv.server, guild_id: sv.guild_id });
+            });
+          })
+          .catch(function () { failed++; return []; });
+      })).then(function (lists) {
+        var seen = {}, rooms = [];
+        lists.forEach(function (l) { l.forEach(function (r) { if (!seen[r.room_id]) { seen[r.room_id] = 1; rooms.push(r); } }); });
+        var weight = function (r) {
+          // Pinned-for-everyone first, then the hub's rooms, then by SIZE — not
+          // by whose server it is. "Where does everyone talk" is a question
+          // about people, and your own guild's two-member room is not the answer.
+          return (Number(r.members) || 0) + (r.server === hub ? 1e6 : 0) + (r.home_rank != null ? 2e6 : 0);
+        };
+        rooms.sort(function (a, b) { return weight(b) - weight(a) || String(a.name || '').localeCompare(String(b.name || '')); });
+        var out = { rooms: rooms, guilds: targets.length, failed: failed };
+        dirCache[key] = { at: Date.now(), out: out };
+        return out;
+      });
+    });
   }
   /* ONE name per server. The list said `HUB`, the directory said `Orbital
    * Hydro`, the room said `oh.energy`, the help said `#general:oh.energy` —
@@ -946,6 +1009,7 @@
     placeOf: placeOf, hubServer: hubServer, serverOf: serverOf,
     pins: pins, isPinned: isPinned, togglePin: togglePin,
     levelOf: levelOf, setLevel: setLevel, calls: calls, serverName: serverName, title: title,
+    serverFor: serverFor, directory: directory,
     markAllRead: markAllRead, media: media,
     subjectKind: subjectKind, resolve: resolve, people: people, playerIdFor: playerIdFor,
     servers: servers,
