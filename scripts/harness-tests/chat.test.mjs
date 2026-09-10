@@ -1085,6 +1085,31 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('a request arriving before the guild is known still opens',
     w.Chat._state.roomId === '!dm-jpeg:matrix.beta.playstructs.com',
     String(w.Chat._state.roomId));
+
+  /* The race the Message door actually runs: its `show_room` lands while
+   * this window is still BOOTING — before the first status answer, before
+   * any room is listed. Acted on at once, `refreshRooms` had no network to
+   * ask, `openRoom` ran against an empty list (a tab named by a raw room
+   * id), and the boot chain painted the Channels page over the room a
+   * moment later. The request is HELD until the boot finishes, then opened
+   * by the boot itself. */
+  const st = w.Chat._state;
+  st.booted = false; st.guildId = null; st.rooms = []; st.roomId = null; st.view = 'channels'; st.tabs = [];
+  w.__HARNESS_EMIT__('matrix::show_room', {
+    guild_id: '0-5', room_id: '!dm-jpeg:matrix.beta.playstructs.com',
+  });
+  await tick();
+  await tick();
+  check('a request during boot is held — no room opens against an empty list',
+    st.roomId === null && st.view === 'channels' && st.requested && st.requested.room_id === '!dm-jpeg:matrix.beta.playstructs.com'
+    && st.tabs.length === 0, JSON.stringify({ roomId: st.roomId, view: st.view, tabs: st.tabs }));
+  st.guildId = '0-5';
+  w.Chat.booted();
+  await tick();
+  await tick();
+  check('…and opens the moment the boot finishes, with the rooms in hand',
+    st.roomId === '!dm-jpeg:matrix.beta.playstructs.com' && st.view === 'room' && st.rooms.length > 0 && st.requested === null,
+    JSON.stringify({ roomId: st.roomId, view: st.view, rooms: st.rooms.length }));
 }
 
 // ── Pictures ────────────────────────────────────────────────────────────────

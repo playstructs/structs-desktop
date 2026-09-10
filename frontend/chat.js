@@ -890,8 +890,27 @@
      * ignore one.
      */
     if (target.guild_id && S.guildId && target.guild_id !== S.guildId) return;
+    /* A request that arrives while the window is still BOOTING is held, not
+     * acted on. The Message door opens this window and resolves the DM in
+     * the same breath, so its `show_room` routinely lands before the first
+     * status answer: `refreshRooms` then had no network to ask, `openRoom`
+     * ran with an empty list (a tab named by a raw room id), and the boot
+     * chain — still in flight — painted the Channels page over the room a
+     * moment later. That was "the Message button opens a channel". Held
+     * here, it is opened by the boot itself once the rooms are in hand. */
+    if (!S.booted) { S.requested = target; return; }
     refreshRooms().then(function () { openRoom(target.room_id); });
   }
+  /* The end of a boot or a sign-in: rooms are in hand, so whatever was asked
+   * for while we were not ready is opened now, and later requests act at
+   * once. */
+  function booted() {
+    S.booted = true;
+    var t = S.requested;
+    S.requested = null;
+    if (t) showRequestedRoom(t);
+  }
+  Chat.booted = booted;
 
   // The player's own objects, for completing an id. Asked once: your planet
   // does not change while you are typing.
@@ -966,7 +985,7 @@
           render();
           loadMyIds();
           loadPresence();
-          return refreshRooms().then(claimPendingRoom).then(claimPendingDraft);
+          return refreshRooms().then(claimPendingRoom).then(claimPendingDraft).then(booted);
         }
         render();
       })
@@ -1199,7 +1218,7 @@
           render();
           loadMyIds();
           loadPresence();
-          return refreshRooms().then(claimPendingRoom).then(claimPendingDraft);
+          return refreshRooms().then(claimPendingRoom).then(claimPendingDraft).then(booted);
         }
         S.loading = false;
         if (!net) {
