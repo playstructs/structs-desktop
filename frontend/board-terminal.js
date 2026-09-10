@@ -71,7 +71,7 @@
    * fails on it: a new card that nobody filed is a card nobody will find. */
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
-    ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
+    ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats']],
     ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results']],
     ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
@@ -164,6 +164,13 @@
        * `feed` cards — four pulse bands, four rollup queries, and one shared
        * scope for them all to fight over. The old `filter` maps onto the lane
        * it was reaching for; `all` had no lane and wants none. */
+      /* The one-series history card became the chart: a saved `series`
+       * card is a one-series chart of the same object and window. */
+      if (c.type === 'series') {
+        var sp = c.params || {};
+        c.type = 'chart';
+        c.params = { series: JSON.stringify(sp.id ? [{ source: 'stat', metric: sp.metric || 'ore', subject: sp.id }] : []), window: sp.window };
+      }
       if (c.type === 'tape') {
         var lane = { combat: 'war', economy: 'economy' }[String((c.params || {}).filter || '')];
         c.type = 'feed';
@@ -1398,14 +1405,40 @@
     try { raw = m ? decodeURIComponent(escape(atob(m[1]))) : t; } catch (e) { return null; }
     var payload;
     try { payload = JSON.parse(raw); } catch (e) { return null; }
+    /* A chart code: one chart, not a workspace. Saved under its name (or
+     * "shared") and opened; the word travels only if nobody here owns it. */
+    if (payload && payload.chart && payload.chart.params && typeof payload.chart.params === 'object') {
+      var ch = payload.chart;
+      var name = String(ch.name || 'shared').replace(/[^A-Za-z0-9 _-]/g, '').trim().slice(0, 40) || 'shared';
+      var params = {};
+      ['series', 'window', 'mode', 'scale', 'index'].forEach(function (k) { if (ch.params[k] != null) params[k] = String(ch.params[k]); });
+      return { chart: { name: name, word: String(ch.word || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 12), params: params } };
+    }
     if (!payload || !Array.isArray(payload.cards)) return null;
-    var cards = payload.cards.filter(function (c) { return c && typeof c.type === 'string' && TYPES[c.type]; }).map(function (c, i) {
+    var cards = payload.cards.map(function (c) {
+      // A code cut before the history card became the chart still opens.
+      if (c && c.type === 'series') {
+        var sp = c.params || {};
+        return { id: c.id, w: c.w, type: 'chart', params: { series: JSON.stringify(sp.id ? [{ source: 'stat', metric: sp.metric || 'ore', subject: sp.id }] : []), window: sp.window } };
+      }
+      return c;
+    }).filter(function (c) { return c && typeof c.type === 'string' && TYPES[c.type]; }).map(function (c, i) {
       return { id: String(c.id || (c.type + '-' + (i + 1))).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || (c.type + '-' + (i + 1)), type: c.type, params: c.params && typeof c.params === 'object' ? c.params : {}, w: Math.max(1, Math.min(3, Number(c.w) || 1)) };
     });
     return { name: String(payload.name || 'shared').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'shared', cards: cards };
   };
   Terminal.importWorkspace = function (text) {
     var parsed = Terminal.parseShared(text);
+    if (parsed && parsed.chart) {
+      var ch = parsed.chart;
+      return invoke('terminal_chart_save', { name: ch.name, params: Object.assign({}, ch.params, { name: ch.name }), word: ch.word || null })
+        .catch(function () { return invoke('terminal_chart_save', { name: ch.name, params: Object.assign({}, ch.params, { name: ch.name }), word: null }); })
+        .then(function (r) {
+          Terminal.charts = (r && r.charts) || Terminal.charts;
+          add('chart', Object.assign({}, ch.params, { name: (r && r.name) || ch.name }), 2);
+          return true;
+        }).catch(function () { return false; });
+    }
     if (!parsed || !parsed.cards.length) return Promise.resolve(false);
     var name = parsed.name, n = 2;
     while (state.workspaces.indexOf(name) >= 0) name = parsed.name + '-' + n++;
@@ -1532,7 +1565,7 @@
     // The guild's stat store, asked of one object: ore on a planet, load on a
     // substation, health on a struct. `HIST` is the word; `GP` is there
     // because that is what the muscle memory of a terminal reaches for.
-    HIST: ['series', 'id'], HISTORY: ['series', 'id'], GP: ['series', 'id'], CHART: ['series', 'id'],
+    HIST: ['chart', 'optid'], HISTORY: ['chart', 'optid'], GP: ['chart', 'optid'], CHART: ['chart', 'optid'],
     // The ambit they neither reach nor occupy — the one computed answer that
     // decides a fight. `RECON` because that is what people call it.
     SCOUT: ['scout', 'id'], RECON: ['scout', 'id'], REACH: ['scout', 'id'],
@@ -1709,9 +1742,13 @@
     // The bar's RESET button went with the bar; this is the same verb.
     if (head === 'RESET') return { kind: 'reset' };
     if (head === 'IMPORT') return rest ? { kind: 'import', text: rest } : null;
+    /* A saved chart's own word opens it — `OHM` — and `CHART <name>` too. */
+    var saved = Terminal.savedChart(head);
+    if (saved && parts.length === 1) return card('chart', Object.assign({}, saved.params, { name: saved.name }));
     var w = WORDS[head];
     if (!w) return null;
     var type = w[0], arg = w[1];
+    if (type === 'chart') return card('chart', Terminal.chartParamsFor(rest));
     if (!arg) return card(type, {});
     if (arg === 'id' || arg === 'ids' || arg === 'rules') {
       if (!rest) return null;
@@ -1743,6 +1780,41 @@
   /* Would Enter do anything? The menu asks before it decides whether to take
    * the completion or run the line as typed. */
   Terminal.canRun = function (line) { return Terminal.parse(line) !== null; };
+
+  /* ── Saved charts ────────────────────────────────────────────────────────
+   * Kept in Rust (`terminal_charts`); cached here for the grammar. Loaded
+   * when the Terminal enters and when the palette opens — never at the
+   * palette page's boot, which asks the app for nothing. */
+  Terminal.charts = null;
+  Terminal.loadCharts = function () {
+    return invoke('terminal_charts').then(function (list) { Terminal.charts = Array.isArray(list) ? list : []; return Terminal.charts; })
+      .catch(function () { Terminal.charts = Terminal.charts || []; return Terminal.charts; });
+  };
+  Terminal.savedChart = function (wordOrName) {
+    var key = String(wordOrName || '').trim();
+    if (!key) return null;
+    var list = Terminal.charts || [];
+    return list.filter(function (c) { return c.word && c.word === key.toUpperCase(); })[0]
+      || list.filter(function (c) { return String(c.name || '').toLowerCase() === key.toLowerCase(); })[0]
+      || null;
+  };
+  /* What `CHART <thing>` means: nothing → an empty chart; a saved name → that
+   * chart; an object id → its first recorded metric; a source word (`market`,
+   * `chain`) → that source's headline series. */
+  Terminal.chartParamsFor = function (rest) {
+    var r = String(rest || '').trim();
+    if (!r) return {};
+    var saved = Terminal.savedChart(r);
+    if (saved) return Object.assign({}, saved.params, { name: saved.name });
+    if (ID_RE.test(r)) {
+      var s = Terminal.defaultChartSeries ? Terminal.defaultChartSeries(r) : null;
+      return s ? { series: JSON.stringify([s]) } : { series: '[]' };
+    }
+    var head = r.toLowerCase().split(/\s+/)[0];
+    var HEADLINE = { market: { source: 'market', metric: 'best' }, chain: { source: 'chain', metric: 'chain_tx' }, galaxy: { source: 'galaxy', metric: 'load', subject: 'substation' } };
+    if (HEADLINE[head]) return { series: JSON.stringify([HEADLINE[head]]) };
+    return { series: '[]', name: r };
+  };
 
   /* The one door to Comms from any card: raise the window at a subject —
    * a planet, a fleet, a player, an alias — with an optional draft. Every
@@ -1837,6 +1909,10 @@
       out.push({ line: 'DM ', words: 'DM', what: 'Message a player', arg: '<player>', group: 'Comms', run: false });
       out.push({ line: 'ROOM ', words: 'ROOM', what: 'A conversation, by subject', arg: '<id · #alias>', group: 'Comms', run: false });
       out.push({ line: 'SAY ', words: 'SAY', what: 'Draft a line in Comms', arg: '<text>', group: 'Comms', run: false });
+      // The charts a player has saved, by name, each under the word it answers to.
+      (Terminal.charts || []).forEach(function (c) {
+        out.push({ line: 'CHART ' + c.name, words: c.word || 'CHART', what: c.name, sub: c.word ? 'CHART ' + c.name : '', group: 'Charts', run: true });
+      });
       Terminal.groups().forEach(function (g) {
         g.options.forEach(function (o) {
           var word = wordFor(o.value);
@@ -2144,6 +2220,12 @@
     }
     function refresh() {
       var line = cmd.value;
+      /* Saved charts are asked for on the first keystroke, never at boot:
+       * the palette over the game boots asking the app for nothing. */
+      if (Terminal.charts === null && String(line).trim()) {
+        Terminal.charts = [];
+        Terminal.loadCharts().then(function (list) { if (list.length && cmd.value === line) refresh(); });
+      }
       /* On an EMPTY line what is waiting leads, because that is the question
        * an empty ⌘K is asking. With something typed the words lead, because
        * then you already know what you want. */
@@ -3513,6 +3595,8 @@
    * makes people stop trusting alarms. */
   function readingFor(metric) {
     if (READINGS[metric]) return READINGS[metric];
+    // `series.<source>.<metric>[.<subject>]`: any series a chart can draw.
+    if (Terminal.chartReading) { var cr = Terminal.chartReading(metric); if (cr) return cr; }
     var dot = String(metric || '').lastIndexOf('.');
     if (dot < 0) return null;
     var head = metric.slice(0, dot), id = metric.slice(dot + 1);
@@ -3531,6 +3615,16 @@
     });
   }
   Terminal.parseRules = parseRules;
+  /* A reading on the row: a series reading in its unit's own ladder; any
+   * other with the noise cut — a rate is 2.07, never 2.0701697876146734. */
+  function fmtReading(metric, v) {
+    var f = Terminal.chartValueFmt && Terminal.chartValueFmt(metric);
+    if (f) return f(v);
+    var n = Number(v);
+    if (!isFinite(n)) return String(v);
+    return Number.isInteger(n) ? n : Number(n.toFixed(Math.abs(n) >= 100 ? 0 : Math.abs(n) >= 10 ? 1 : 2));
+  }
+  Terminal.fmtReading = fmtReading;
   var alertsFired = {};
   // Muted rules, by their text, until a wall-clock ms. A mute is a judgement
   // about right now, so it is deliberately not saved with the layout.
@@ -3568,7 +3662,8 @@
           var muted = until > Date.now();
           if (muted) res.state = 'quiet';
           var row = window.StructsCards.alert.row({
-            text: res.rule.text, state: res.state, value: res.value != null ? res.value : null, valueIcon: VALUE_ICON[res.rule.metric] || null,
+            text: res.rule.text, state: res.state, value: res.value != null ? fmtReading(res.rule.metric, res.value) : null,
+            valueIcon: VALUE_ICON[res.rule.metric] || (Terminal.chartValueIcon && Terminal.chartValueIcon(res.rule.metric)) || null,
             firedAgo: muted ? 'muted ' + window.StructsUnits.fmtDuration(Math.round((until - Date.now()) / 1000)) : (res.state === 'fired' && alertsFired[res.rule.text] ? H.ago(alertsFired[res.rule.text]) : null),
           }, {
             doors: [
@@ -4069,6 +4164,7 @@
     // A one-card window is the card and nothing else: board.html strips its
     // own panel frame and its (empty) nav bar off this attribute.
     if (state.solo) document.documentElement.setAttribute('data-card', '1');
+    Terminal.loadCharts();
     return loadWorkspaces().then(function () {
       state.ws = param('ws') || state.active || 'main';
       if (state.workspaces.indexOf(state.ws) < 0) state.workspaces.push(state.ws);

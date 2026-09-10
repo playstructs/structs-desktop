@@ -93,6 +93,11 @@
       return box;
     }
     if (nums.length < 2) return collecting();
+    /* Reference lines (`refs`: {value, stroke, label}) — an alert threshold,
+     * a rate you would pay — are part of the band: a line the plot cannot
+     * show is a threshold the reader cannot judge the distance to. */
+    var refs = (spec.refs || []).filter(function (r) { return r && finite(r.value) && (!spec.log || r.value > 0); });
+    refs.forEach(function (r) { nums.push(r.value); });
     var min = Math.min.apply(null, nums), max = Math.max.apply(null, nums);
     if (spec.zero && min > 0) min = 0;
     /* A count series gets a floor on its CEILING too (`least`): one raid in
@@ -104,8 +109,23 @@
     if (max === min) max = min + 1;
     var span = max - min;
 
-    // Legend for ≥ 2 series: identity never rides on colour alone.
-    if (series.length > 1) {
+    /* A log scale draws log10 of every positive value and labels the axis
+     * with the real numbers; zero and below cannot be drawn on it and break
+     * the line like a gap. */
+    var log = !!spec.log;
+    var tx = log ? function (v) { return v > 0 ? Math.log10(v) : NaN; } : function (v) { return v; };
+    if (log) {
+      nums = nums.map(tx).filter(finite);
+      if (nums.length < 2) return collecting();
+      min = Math.min.apply(null, nums); max = Math.max.apply(null, nums);
+      if (max === min) max = min + 1;
+      span = max - min;
+    }
+    var untx = log ? function (y) { return Math.pow(10, y); } : function (y) { return y; };
+    // Legend for ≥ 2 series: identity never rides on colour alone. A caller
+    // that draws its own legend (the chart card's, with last values and a
+    // remove control) says so.
+    if (series.length > 1 && !spec.noLegend) {
       var legend = H.el('div', 'gs-legend');
       series.forEach(function (sr) {
         var item = H.el('span', 'gs-legend-item');
@@ -134,26 +154,65 @@
     svg.appendChild(svgEl('line', { x1: 0, x2: w, y1: h - 1, y2: h - 1, stroke: 'var(--border-subtle)', 'stroke-width': 0.5 }));
     svg.appendChild(svgEl('line', { x1: 0, x2: w, y1: 1, y2: 1, stroke: 'var(--border-subtle)', 'stroke-width': 0.5, 'stroke-opacity': 0.5 }));
     var step = n > 1 ? w / (n - 1) : w;
-    function yOf(v) { return h - 3 - ((v - min) / span) * (h - 6); }
+    function yOf(v) { return h - 3 - ((tx(v) - min) / span) * (h - 6); }
     var drewAny = false;
-    series.forEach(function (sr) {
+    var mode = spec.mode || 'line';
+    if (mode === 'bars') {
+      /* Bars: one per slot, anchored to the floor, a two-unit gap between
+       * neighbours. With more than one series they interleave in the slot;
+       * beyond two the picture is noise, so a third series and on are lines. */
+      var barSeries = series.slice(0, 2), gapW = 2, slotW = step;
+      barSeries.forEach(function (sr, si) {
+        var bw = Math.max(1, (slotW - gapW) / barSeries.length);
+        sr.values.forEach(function (v, i) {
+          if (!finite(v) || !finite(tx(v))) return;
+          var y = yOf(v), x0 = i * step - slotW / 2 + gapW / 2 + si * bw;
+          svg.appendChild(svgEl('rect', { x: x0.toFixed(1), y: y.toFixed(1), width: bw.toFixed(1), height: Math.max(0, h - 1 - y).toFixed(1), fill: sr.stroke || 'var(--text-player-primary)', 'fill-opacity': 0.85 }));
+          drewAny = true;
+        });
+      });
+    }
+    // Lines for everything a bar did not take; the legend, the last-value
+    // label and the tooltip still read every series.
+    var lineSeries = mode === 'bars' ? series.slice(2) : series;
+    lineSeries.forEach(function (sr) {
       /* Gaps BREAK the line; they are not drawn through and not drawn as
        * zero. A gap means "no sample": a zero invents a crash, a bridge
        * invents readings nobody took. It also keeps NaN out of `d` — one
        * non-finite value invalidates the whole path silently. */
       var d = '', pen = 'M', drew = false;
       sr.values.forEach(function (v, i) {
-        if (!finite(v)) { pen = 'M'; return; }
+        if (!finite(v) || !finite(tx(v))) { pen = 'M'; return; }
         d += pen + (i * step).toFixed(1) + ' ' + yOf(v).toFixed(1);
         if (pen === 'L') drew = true;
         pen = 'L';
       });
       if (!drew) return;
       drewAny = true;
+      if (mode === 'area') {
+        // The fill under the line, run by run: each M…L run closes to the
+        // floor and back, so a gap stays a gap in the fill too.
+        var runs = d.split('M').filter(Boolean);
+        runs.forEach(function (run) {
+          var pts = run.split('L').filter(Boolean);
+          if (pts.length < 2) return;
+          var first = pts[0].trim().split(' ')[0], last = pts[pts.length - 1].trim().split(' ')[0];
+          svg.appendChild(svgEl('path', { d: 'M' + pts.join('L') + 'L' + last + ' ' + (h - 1) + 'L' + first + ' ' + (h - 1) + 'Z', fill: sr.stroke || 'var(--text-player-primary)', 'fill-opacity': 0.18, stroke: 'none' }));
+        });
+      }
       svg.appendChild(svgEl('path', { d: d, fill: 'none', stroke: sr.stroke || 'var(--text-player-primary)',
         'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke' }));
     });
     if (!drewAny) { box.innerHTML = ''; return collecting(); }
+    // Reference lines: dashed, recessive, in the colour of the series they
+    // belong to, drawn over the data so a threshold stays visible.
+    refs.forEach(function (r) {
+      var y = yOf(r.value).toFixed(1);
+      var line = svgEl('line', { x1: 0, x2: w, y1: y, y2: y, stroke: r.stroke || 'var(--text-hint)', 'stroke-width': 1, 'stroke-dasharray': '6 4', 'stroke-opacity': 0.8, 'vector-effect': 'non-scaling-stroke' });
+      line.setAttribute('class', 'gs-ref');
+      if (r.label) { var t = svgEl('title', {}); t.textContent = r.label; line.appendChild(t); }
+      svg.appendChild(line);
+    });
     // The crosshair, hidden until the pointer is over the plot.
     var cross = svgEl('line', { x1: 0, x2: 0, y1: 0, y2: h, stroke: 'var(--text-hint)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' });
     cross.setAttribute('class', 'gs-cross');
@@ -163,8 +222,8 @@
 
     // Axis figures live in the gutters beside the plot, in HTML, so the
     // pixel face stays crisp and never sits on top of the line.
-    gutterL.appendChild(H.el('div', 'gs-axis gs-axis-top fstat-l', fmt(max)));
-    gutterL.appendChild(H.el('div', 'gs-axis gs-axis-bot fstat-l', fmt(min)));
+    gutterL.appendChild(H.el('div', 'gs-axis gs-axis-top fstat-l', fmt(untx(max))));
+    gutterL.appendChild(H.el('div', 'gs-axis gs-axis-bot fstat-l', fmt(untx(min))));
     // The last reading of the first series, at the right edge.
     var lastVal = null;
     for (var i = series[0].values.length - 1; i >= 0; i--) { if (finite(series[0].values[i])) { lastVal = series[0].values[i]; break; } }
@@ -174,7 +233,7 @@
      * off the floor and the ceiling though — the label is centred on its own
      * position, so a series ending at its minimum put half of it into the
      * time-tick row and it read as one word with the last tick. */
-    if (lastVal != null) {
+    if (lastVal != null && finite(tx(lastVal))) {
       lastEl.style.top = Math.max(7, Math.min(h - 8, yOf(lastVal))).toFixed(0) + 'px';
     }
     gutterR.appendChild(lastEl);

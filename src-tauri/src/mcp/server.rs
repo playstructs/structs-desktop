@@ -32,6 +32,8 @@ impl McpServer {
 
         // Web dashboard state (opt-in; routes 404 until enabled).
         crate::mcp::web_board::init_from_config();
+        // The energy market's history: one reading every five minutes, whether or not a card is open.
+        crate::mcp::charts::spawn_market_sampler();
         let web_state = crate::mcp::web_board::WebState {
             app: app_handle.clone(),
             registry: task_registry.clone(),

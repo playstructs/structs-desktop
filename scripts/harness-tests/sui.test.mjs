@@ -144,6 +144,7 @@ const BUDGET = {
   'board-gamestats.js': [0, 1],
   'board-terminal.js':  [0, 0],
   // Comms: the model is pure data and the cards build with tokens only.
+  'board-terminal-chart.js': [0, 0],
   'board-terminal-ops.js': [0, 0],
   'board-shim.js':      [0, 0],
   // The debug-tab patch INJECTED INTO THE GAME'S OWN WINDOW, so it renders

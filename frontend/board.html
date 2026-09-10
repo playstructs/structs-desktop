@@ -1476,6 +1476,29 @@
     #board-layout .tm-h-grow .tm-lane-rows { max-height: none; }
     .tm-feed-rep { color: var(--text-hint); }
 
+    /* ── The chart card (board-terminal-chart.js) ─────────────────────────
+       Panes stack; the legend carries every series with its last value and
+       its ×; the editor and the save/share/alert strips are SUI fields in a
+       row. Tokens only. */
+    #board-layout .ch-legend { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-lg); margin-bottom: var(--spacing-sm); text-align: left; }
+    #board-layout .ch-legend-item { display: inline-flex; align-items: center; gap: var(--spacing-xs); }
+    #board-layout .ch-legend-item.is-err { opacity: .6; }
+    #board-layout .ch-legend-item .ch-x { color: var(--text-hint); text-decoration: none; padding: 0 var(--spacing-xs); }
+    #board-layout .ch-legend-item .ch-x:hover { color: var(--text-enemy-primary); }
+    #board-layout .ch-pane { margin-bottom: var(--spacing-md); }
+    #board-layout .ch-windows { margin: 0 0 var(--spacing-sm); }
+    #board-layout .ch-windows .sui-screen-nav { padding: 0; }
+    #board-layout .ch-delta { color: var(--text-hint); }
+    #board-layout .ch-refs { margin-left: var(--spacing-sm); }
+    #board-layout .ch-editor, #board-layout .ch-strip { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--spacing-sm) var(--spacing-md); padding-top: var(--spacing-sm); border-top: thin solid var(--border-subtle); margin-top: var(--spacing-sm); text-align: left; }
+    /* Caption above control, as the Explore search does: side by side, a
+       caption and a select in a row of five overlap. */
+    #board-layout .ch-editor label.sui-input-text.cfg-field, #board-layout .ch-strip label.sui-input-text.cfg-field {
+      min-width: 0; flex: 1 1 8em; flex-direction: column; align-items: stretch; gap: var(--spacing-xs); padding: 0;
+    }
+    #board-layout .ch-editor label.sui-input-text.cfg-field > span:first-child, #board-layout .ch-strip label.sui-input-text.cfg-field > span:first-child { flex: none; }
+    #board-layout .ch-editor input, #board-layout .ch-editor select, #board-layout .ch-strip input, #board-layout .ch-strip select { min-width: 0; width: 100%; }
+    #board-layout .ch-strip .sui-screen-btn.is-err { border-color: var(--text-enemy-primary); }
     /* ── Game Stats charts (board-gamestats.js) ─────────────────────────── */
     /* The hero figure: the one number the page leads with. DirectiveZero at
        32px is an exact 2× of the tile face, so the pixel art stays crisp. */
@@ -1775,6 +1798,7 @@
   <script src="raidview-log.js"></script>
   <script src="board-terminal.js"></script>
   <script src="board-terminal-ops.js"></script>
+  <script src="board-terminal-chart.js"></script>
   <!-- Comms: the model first, then the cards over it. Both AFTER
        board-terminal.js, which is where Board.Terminal is created. -->
 </body>

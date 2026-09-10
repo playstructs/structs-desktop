@@ -827,6 +827,8 @@ pub async fn terminal_market() -> Result<Value, String> {
         "unpriced": providers.len() - prices.len(),
         "open_capacity_mw": open_capacity,
     });
+    // The chart's market history is this reading, sampled at most every five minutes.
+    crate::mcp::charts::note_market(&out);
     *lock(&CACHE) = (now, out.clone());
     Ok(out)
 }
@@ -977,7 +979,7 @@ struct BankRing {
 }
 static BANKS: LazyLock<Mutex<BankRing>> = LazyLock::new(|| Mutex::new(crate::mcp::config_store::load_config(BANK_FILE)));
 
-fn parse_num(v: Option<&Value>) -> Option<f64> {
+pub(crate) fn parse_num(v: Option<&Value>) -> Option<f64> {
     v.and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse::<f64>().ok())))
 }
 
@@ -1254,7 +1256,7 @@ pub const STAT_METRICS: &[(&str, &str, &[&str])] = &[
 /// The object type an id names, by its prefix — the same table the guild API
 /// keys `object_key` on (ObjectTypes::PREFIXES). Longest prefix first: 10 and
 /// 11 must be matched before 1.
-fn object_type_of(id: &str) -> Option<&'static str> {
+pub(crate) fn object_type_of(id: &str) -> Option<&'static str> {
     const PREFIXES: &[(&str, &str)] = &[
         ("10-", "provider"), ("11-", "agreement"), ("0-", "guild"), ("1-", "player"),
         ("2-", "planet"), ("3-", "reactor"), ("4-", "substation"), ("5-", "struct"),
@@ -1265,7 +1267,7 @@ fn object_type_of(id: &str) -> Option<&'static str> {
 
 /// The bucket a window needs: none while the raw window allows it, then the
 /// coarsest that keeps the whole window inside the server's cap.
-fn stat_bucket_for(window_s: u64) -> (Option<&'static str>, u64) {
+pub(crate) fn stat_bucket_for(window_s: u64) -> (Option<&'static str>, u64) {
     use crate::mcp::guild_api::GuildApiClient;
     if window_s <= GuildApiClient::STAT_MAX_RAW_SECONDS {
         (None, window_s)
@@ -1278,7 +1280,7 @@ fn stat_bucket_for(window_s: u64) -> (Option<&'static str>, u64) {
 
 /// Carry each sample forward into evenly spaced slots. `None` until the first
 /// sample: a reading nobody took is not a zero.
-fn locf(samples: &[(f64, f64)], start_ms: f64, step_ms: f64, points: usize) -> Vec<Option<f64>> {
+pub(crate) fn locf(samples: &[(f64, f64)], start_ms: f64, step_ms: f64, points: usize) -> Vec<Option<f64>> {
     let mut out = vec![None; points];
     let mut i = 0usize;
     let mut held: Option<f64> = None;

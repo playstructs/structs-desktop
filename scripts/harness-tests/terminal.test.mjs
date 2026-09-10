@@ -179,12 +179,12 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
    * `terminal_series` — and the nulls before the first sample must break the
    * line, never land on the floor as zeros. */
   {
-    w.Board.Terminal.add('series', { id: '2-29604', metric: 'ore', window: '86400' }, 2);
+    w.Board.Terminal.add('chart', { series: JSON.stringify([{ source: 'stat', metric: 'ore', subject: '2-29604' }]), window: '86400' }, 2);
     const id = w.Board.Terminal.state.layout.cards.slice(-1)[0].id;
     await until(() => d.querySelector('#tm-' + id + ' .gs-chart svg path'));
     const node = d.querySelector('#tm-' + id);
-    const call = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_series').slice(-1)[0];
-    check('history card: asks the stat store for that object, metric and window', call && call.args.object === '2-29604' && call.args.metric === 'ore' && call.args.windowS === 86400);
+    const call = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_chart_series').slice(-1)[0];
+    check('history card: asks for that object, metric and window on one grid', call && call.args.series[0].subject === '2-29604' && call.args.series[0].metric === 'ore' && call.args.windowS === 86400);
     check('…and draws it with the Game Stats chart, in the metric\'s own unit', node.querySelector('.gs-chart svg path') !== null && /Kg|g\b/.test(node.querySelector('.gs-axis-top').textContent), node.querySelector('.gs-axis-top')?.textContent);
     const dpath = node.querySelector('.gs-chart svg path').getAttribute('d');
     check('…with the slots before the first sample left out of the line, not drawn as zero', dpath.split('M').length === 2 && !/NaN/.test(dpath));
@@ -707,7 +707,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
         && plan('2-29604 LOG').type === 'log' && plan('2-29604 LOG').params.id === '2-29604');
     check('…and the subject-first form works for every word that takes an id',
       plan('1-61 WALLET').type === 'wallet' && plan('1-61 WALLET').params.id === '1-61'
-        && plan('0-1 GT').type === 'gt' && plan('2-29604 HIST').type === 'series');
+        && plan('0-1 GT').type === 'gt' && plan('2-29604 HIST').type === 'chart');
     check('a bare id still opens the card that IS that object',
       plan('2-29604').type === 'planet' && plan('1-61').type === 'player'
         && plan('0-1').type === 'guild' && plan('9-61').type === 'map' && plan('5-1').type === 'inspector');

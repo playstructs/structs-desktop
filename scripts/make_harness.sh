@@ -864,6 +864,47 @@ cat > "$FIX" <<'EOF'
       { metric: 'ore', unit: 'ore', object_types: ['planet', 'player', 'struct', 'fleet'] },
       { metric: 'load', unit: 'power', object_types: ['substation', 'player', 'guild', 'struct'] },
     ],
+    /* The chart card's world. The catalogue names every source and what it
+     * takes; the series call answers EVERY requested series on one grid,
+     * each in its own unit, null before its first sample — the card never
+     * aligns or invents. A saved chart round-trips through save/list. */
+    terminal_chart_catalog: {
+      sources: [
+        { source: 'stat', label: 'an object', subject: 'id', metrics: [
+          { metric: 'ore', unit: 'ore', object_types: ['planet', 'player', 'struct', 'fleet'] },
+          { metric: 'load', unit: 'power', object_types: ['substation', 'player', 'guild', 'struct'] } ] },
+        { source: 'galaxy', label: 'every object of a type', subject: 'object_type', metrics: [
+          { metric: 'load', unit: 'power', object_types: ['substation', 'player', 'guild', 'struct'] } ] },
+        { source: 'bank', label: 'a guild token', subject: 'guild', metrics: [{ metric: 'ratio', unit: 'ratio', label: 'alpha per token' }] },
+        { source: 'market', label: 'the energy market', subject: null, metrics: [{ metric: 'best', unit: 'rate', label: 'best rate' }, { metric: 'offers', unit: 'count', label: 'offers' }] },
+        { source: 'provider', label: 'one provider', subject: 'provider', metrics: [{ metric: 'rate', unit: 'rate', label: 'rate' }], known: ['10-4'] },
+        { source: 'chain', label: 'the last hour, by block', subject: null, metrics: [{ metric: 'chain_tx', unit: 'count', label: 'tx per block' }] },
+      ],
+      windows: [21600, 86400, 604800, 2592000], market_samples: 12,
+    },
+    terminal_chart_series: function (args) {
+      var points = Number((args && args.points) || 120), windowS = Number((args && args.windowS) || 86400);
+      var end = Date.now(), start = end - windowS * 1000, step = (windowS * 1000) / points;
+      var UNIT = { stat: { ore: 'ore', load: 'power' }, galaxy: { load: 'power' }, bank: { ratio: 'ratio' }, market: { best: 'rate', offers: 'count' }, provider: { rate: 'rate' }, chain: { chain_tx: 'count' } };
+      var list = ((args && args.series) || []).map(function (sr, k) {
+        var unit = (UNIT[sr.source] || {})[sr.metric];
+        if (!unit) return { source: sr.source, metric: sr.metric, subject: sr.subject || null, error: 'unknown ' + sr.source + ' metric ' + sr.metric, values: [] };
+        var base = unit === 'rate' ? 2 : unit === 'ratio' ? 1.2 : unit === 'count' ? 3 : 4000;
+        var vals = [];
+        var lead = Math.min(12, Math.floor(points / 10));   // null before the first sample, scaled to the grid
+        for (var i = 0; i < points; i++) vals.push(i < lead ? null : base + (unit === 'rate' || unit === 'ratio' ? 0.1 * Math.sin(i / 9 + k) : Math.round(base * 0.2 * Math.sin(i / 11 + k)) + i));
+        return { source: sr.source, metric: sr.metric, subject: sr.subject || null, unit: unit,
+          label: sr.metric.replace(/_/g, ' ') + (sr.subject ? ' · ' + sr.subject : ''),
+          samples: 46, first_ms: start + 12 * step, last: vals[points - 1], values: vals };
+      });
+      return { start_ms: start, end_ms: end, step_ms: step, points: points, window_s: windowS, series: list };
+    },
+    terminal_charts: [],
+    terminal_chart_save: function (a) {
+      var word = a && a.word ? String(a.word).toUpperCase() : null;
+      return { ok: true, name: a.name, word: word, charts: [{ name: a.name, word: word, params: a.params, saved_ms: Date.now() }] };
+    },
+    terminal_chart_delete: { ok: true, charts: [] },
     /* Where a struct can go. The planet has a fixed count per ambit and some
      * are occupied, so the free ones are a subtraction — land is full here,
      * which is the case that must never be offered. */

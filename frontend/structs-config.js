@@ -3632,6 +3632,8 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
        * palette frame reads nothing from any room and posts nothing itself:
        * a keystroke in a launcher must never put words in front of people. */
       matrix_open: 1,
+      // Saved charts, so a chart's own ⌘K word works over the game too.
+      terminal_charts: 1,
     };
 
     var host = null, frame = null, open = false;

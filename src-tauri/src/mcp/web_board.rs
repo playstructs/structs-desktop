@@ -862,6 +862,28 @@ async fn board_invoke(
         // host's window shows next. Leaving these out served the page with a
         // default layout and "unknown command" on every card that reads
         // through Rust — which looked like the cards were broken, not absent.
+        // Charts: the catalogue, many series on one grid, and the saved charts.
+        "terminal_chart_catalog" => ok_json(crate::mcp::charts::terminal_chart_catalog()),
+        "terminal_chart_series" => match serde_json::from_value::<Vec<crate::mcp::charts::SeriesReq>>(body.get("series").cloned().unwrap_or(Value::Null)) {
+            Ok(list) => from_result(
+                crate::mcp::charts::terminal_chart_series(
+                    list,
+                    body.get("windowS").or_else(|| body.get("window_s")).and_then(|v| v.as_u64()).unwrap_or(86400),
+                    body.get("points").and_then(|v| v.as_u64()).map(|v| v as u32),
+                )
+                .await,
+            ),
+            Err(e) => err_json(format!("bad series list: {e}")),
+        },
+        "terminal_charts" => ok_json(crate::mcp::charts::terminal_charts()),
+        "terminal_chart_save" => match s("name") {
+            Some(n) => from_result(crate::mcp::charts::terminal_chart_save(n, body.get("params").cloned().unwrap_or(Value::Null), s("word"))),
+            None => err_json("name required".into()),
+        },
+        "terminal_chart_delete" => match s("name") {
+            Some(n) => from_result(crate::mcp::charts::terminal_chart_delete(n)),
+            None => err_json("name required".into()),
+        },
         "terminal_layout_get" => ok_json(crate::mcp::terminal::terminal_layout_get(s("workspace"))),
         "terminal_layout_set" => match body.get("layout").cloned() {
             Some(l) => match serde_json::from_value(l) {

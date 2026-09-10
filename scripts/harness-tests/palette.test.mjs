@@ -176,7 +176,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
    * palette's own code calls (search, prose search, SAY, the rows' acts, the
    * server names); it must match the allowlist exactly, so a command added to
    * one side without the other fails here rather than in the window. */
-  const PALETTE_CALLS = ['open_terminal_card_new', 'log_ui_events', 'mcp_player_search', 'matrix_open'];
+  const PALETTE_CALLS = ['open_terminal_card_new', 'log_ui_events', 'mcp_player_search', 'matrix_open', 'terminal_charts'];
   const cfgSrc = readFileSync(resolve(repo, 'frontend/structs-config.js'), 'utf8');
   const listed = (cfgSrc.match(/var FRAME_CMDS = \{([\s\S]*?)\};/) || ['', ''])[1].match(/\b[a-z_]+(?=: 1)/g) || [];
   check('the palette frame may invoke exactly what the palette page calls',
