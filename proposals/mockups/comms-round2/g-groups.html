@@ -1,0 +1,80 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/css/normalize.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/css/structicons.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/css/sui/sui.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/css/main.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/chat-rows.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/playercard.css">
+<link rel="stylesheet" href="board-inline.rebased.css">
+<style>
+  body { background: var(--page-background); margin: 0; text-align: left; }
+  #board-layout { display: flex; gap: var(--spacing-md); padding: var(--spacing-md); align-items: flex-start; }
+  #board-layout .tm-card { flex: 0 0 auto; }
+  #board-layout .tm-card .tm-body { max-height: none; }
+  .mk-portrait { position: relative; width: 32px; height: 32px; flex: 0 0 32px; overflow: hidden; }
+  .mk-portrait img { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .mk-row { display: flex; gap: var(--spacing-sm); align-items: center; }
+  .mk-stat { display: flex; gap: var(--spacing-lg); align-items: baseline; padding: var(--spacing-sm) 0; border-bottom: thin solid var(--border-subtle); }
+  .mk-stat b { font-size: inherit; }
+  .mk-caption { padding: var(--spacing-xs) 0; color: var(--text-hint); }
+  .mk-tag { color: var(--text-hint); min-width: 3.5em; display: inline-block; }
+  .mk-tag.is-war { color: var(--text-enemy-primary); }
+  .mk-tag.is-said { color: var(--text-player-primary); }
+  .mk-line { display: flex; gap: var(--spacing-sm); padding: 2px 0; align-items: baseline; }
+  .mk-line .t { color: var(--text-hint); flex: 0 0 3em; }
+  .mk-line .s { flex: 0 0 8em; }
+  .mk-line a { color: var(--text-player-primary); }
+  .mk-stage { position: relative; height: 300px; background: var(--surface-default); border: thin solid var(--border-subtle); overflow: hidden; }
+  .mk-ambit { position: absolute; left: 0; right: 0; height: 25%; border-bottom: thin dashed var(--border-subtle); }
+  .mk-ambit span { position: absolute; left: var(--spacing-sm); top: var(--spacing-xs); color: var(--text-hint); }
+  .mk-struct { position: absolute; width: 64px; }
+  .mk-bubble { position: absolute; max-width: 260px; }
+  .mk-eyes { position: absolute; display: flex; gap: 2px; align-items: center; }
+  .mk-eyes .mk-portrait { width: 20px; height: 20px; flex-basis: 20px; }
+  .mk-prompt { display: flex; gap: var(--spacing-sm); align-items: center; padding: var(--spacing-sm); background: var(--surface-default); border: thin solid var(--border-strong); }
+  .mk-prompt .caret { color: var(--accent-primary); }
+  .mk-prompt input { flex: 1; background: transparent; border: 0; color: var(--text-body); font: inherit; outline: 0; }
+  .mk-menu { border: thin solid var(--border-subtle); background: var(--surface-panel); }
+  .mk-menu div { padding: var(--spacing-xs) var(--spacing-sm); }
+  .mk-menu div.is-on { background: var(--accent-primary); color: var(--page-background); }
+</style><style>
+  .lc-members { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); padding: var(--spacing-xs) 0 var(--spacing-sm); }
+  .lc-member { display: flex; align-items: center; gap: 4px; }
+  .lc-member .dot { width: 6px; height: 6px; background: var(--accent-primary); flex: 0 0 6px; }
+  .lc-member.is-away .dot { background: var(--text-hint); }
+  .lc-member.is-enemy span.n { color: var(--text-enemy-primary); }
+  .lc-member.is-ally span.n { color: var(--text-player-primary); }
+  .lc-orders { display: flex; gap: var(--spacing-sm); align-items: center; padding: var(--spacing-xs) var(--spacing-sm); border-left: 2px solid var(--accent-primary); background: var(--surface-default); margin: var(--spacing-xs) 0; }
+  .lc-bc { display: flex; gap: var(--spacing-sm); align-items: center; padding: 3px var(--spacing-xs); background: var(--surface-default); margin: 2px 0; }
+  .lc-bc .k { min-width: 4.5em; color: var(--text-player-primary); }
+  .lc-bc.is-enemy .k { color: var(--text-enemy-primary); }
+  .lc-bc .seen { margin-left: auto; color: var(--text-hint); white-space: nowrap; }
+  .lc-keys { display: flex; gap: var(--spacing-xs); flex-wrap: wrap; padding: var(--spacing-sm) 0 0; }
+  .lc-keys a { display: inline-flex; align-items: center; gap: 4px; }
+  .lc-keys kbd { color: var(--text-hint); font: inherit; }
+  .lc-lines { display: flex; flex-direction: column; }
+  .in-row { display: flex; gap: var(--spacing-sm); align-items: flex-start; padding: 3px 0; border-bottom: thin solid var(--border-subtle); }
+  .in-row .t { flex: 0 0 3em; color: var(--text-hint); }
+  .in-row .w { flex: 0 0 5.5em; color: var(--text-hint); }
+  .in-row.is-alert .w { color: var(--text-enemy-primary); }
+  .in-row.is-order .w { color: var(--accent-primary); }
+  .in-row .g { color: var(--text-hint); }
+  .in-row .seen { margin-left: auto; color: var(--text-hint); white-space: nowrap; }
+  .in-row a { color: var(--text-player-primary); }
+  .sp-tree div { padding: 2px 0; display: flex; gap: var(--spacing-sm); align-items: center; }
+  .sp-tree .d1 { padding-left: var(--spacing-lg); }
+  .sp-tree .d2 { padding-left: var(--spacing-xxl); }
+  .sp-tree .n { margin-left: auto; color: var(--text-hint); }
+  .gp-deal { display: flex; gap: var(--spacing-md); align-items: center; padding: var(--spacing-sm); border: thin solid var(--border-strong); background: var(--surface-default); margin: var(--spacing-sm) 0; }
+  .gp-deal .who { display: flex; gap: 4px; align-items: center; }
+</style></head><body><div id="board-layout"><div class="sui-panel sui-theme-player tm-card tm-w3 tm-h-grow " style="width:420px">
+<div class="sui-panel-top-fill-background"></div><div class="sui-panel-bottom-fill-background"></div><div class="sui-panel-edge-left"></div>
+<div class="sui-panel-chunk sui-mod-grow sui-mod-shrink tm-chunk">
+<div class="sui-screen sui-screen-full-width tm-head-screen"><div class="sui-screen-nav tm-head"><div class="sui-screen-nav-items"><span class="sui-screen-nav-item sui-mod-header sui-mod-active tm-title">Channels</span></div><span class="tm-age fstat-l">now</span><span class="tm-doors"><a class="tm-door tm-door-own" href="javascript:void(0)" title="New group"><i class="icon-add sui-icon-sm"></i></a><a class="tm-door tm-door-own" href="javascript:void(0)" title="Find a room"><i class="icon-detected sui-icon-sm"></i></a></span></div></div>
+<div class="sui-screen sui-screen-full-width sui-screen-shrink tm-body-screen"><div class="sui-page-body-screen tm-body"><div class="sp-tree"><div><i class="icon-guild sui-icon-md"></i><b>Orbital Hydro</b><span class="n fstat-l">your guild</span></div><div class="d1"><i class="icon-beacon sui-icon-sm"></i>Intel<span class="n fstat-l">3 alerts</span></div><div class="d1"><i class="icon-member sui-icon-sm"></i>Hub<span class="n fstat-l">5 here</span></div><div class="d1"><i class="icon-info sui-icon-sm"></i>Help<span class="n fstat-l">quiet</span></div><div class="d1"><i class="icon-planet sui-icon-sm"></i>Planet 2-21411<span class="n fstat-l">raid live · 5 here</span></div><div class="d1"><i class="icon-fleet-tile sui-icon-sm"></i>Fleet 9-172<span class="n fstat-l">2 here</span></div><div class="d1 fstat-l" style="color:var(--text-hint)">▸ 14 more objects</div><div><i class="icon-guild sui-icon-md"></i><b>OH × Imperial One</b><span class="n fstat-l">alliance · 2 servers</span></div><div class="d1"><i class="icon-beacon sui-icon-sm"></i>Shared intel<span class="n fstat-l">1 alert</span></div><div class="d1"><i class="icon-cmd-post sui-icon-sm"></i>Leaders<span class="n fstat-l">restricted</span></div><div><i class="icon-member sui-icon-md"></i><b>Groups</b><span class="n fstat-l">yours</span></div><div class="d1"><i class="icon-transfers sui-icon-sm"></i>Ore deal<span class="n fstat-l">beezhan, Reactin · 1 new</span></div><div class="d1"><i class="icon-member sui-icon-sm"></i>beezhan<span class="n fstat-l">direct</span></div><div class="d1 fstat-l" style="color:var(--text-hint)">▸ 5 more people</div><div><i class="icon-guild-directory sui-icon-md"></i><b>Other guilds</b><span class="n fstat-l">3 answered</span></div></div></div></div>
+</div><div class="sui-panel-edge-right"></div></div><div class="sui-panel sui-theme-player tm-card tm-w3 tm-h-grow " style="width:560px">
+<div class="sui-panel-top-fill-background"></div><div class="sui-panel-bottom-fill-background"></div><div class="sui-panel-edge-left"></div>
+<div class="sui-panel-chunk sui-mod-grow sui-mod-shrink tm-chunk">
+<div class="sui-screen sui-screen-full-width tm-head-screen"><div class="sui-screen-nav tm-head"><div class="sui-screen-nav-items"><span class="sui-screen-nav-item sui-mod-header sui-mod-active tm-title">Ore deal</span></div><span class="tm-age fstat-l">now</span><span class="tm-doors"><a class="tm-door tm-door-own" href="javascript:void(0)" title="Add someone"><i class="icon-add sui-icon-sm"></i></a><a class="tm-door tm-door-own" href="javascript:void(0)" title="Leave"><i class="icon-close sui-icon-sm"></i></a></span></div></div>
+<div class="sui-screen sui-screen-full-width sui-screen-shrink tm-body-screen"><div class="sui-page-body-screen tm-body"><div class="lc-members"><span class="lc-member is-ally"><span class="mk-portrait"><img src="http://127.0.0.1:8421/board/img/pfp/background/pfp_background_6.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/arms/pfp_arms_26.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/body/pfp_body_9.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/neck/pfp_neck_9.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/head/pfp_head_49.png" alt=""></span><span class="dot"></span><span class="n">[OH] Marklifer</span></span><span class="lc-member is-ally"><span class="mk-portrait"><img src="http://127.0.0.1:8421/board/img/pfp/background/pfp_background_1.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/arms/pfp_arms_7.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/body/pfp_body_13.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/neck/pfp_neck_5.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/head/pfp_head_50.png" alt=""></span><span class="dot"></span><span class="n">[OH] Reactin</span></span><span class="lc-member is-away"><span class="mk-portrait"><img src="http://127.0.0.1:8421/board/img/pfp/background/pfp_background_2.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/arms/pfp_arms_12.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/body/pfp_body_10.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/neck/pfp_neck_6.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/head/pfp_head_3.png" alt=""></span><span class="dot"></span><span class="n">[SN] beezhan</span></span></div><div class="tm-cap fstat-l mk-caption">private · you started it · only these three can read</div><div class="chat-msg"><div class="chat-msg-head"><div class="chat-msg-sender"><span class="chat-msg-tag">[SN]</span><span>beezhan</span></div><div class="chat-msg-meta"><div class="chat-msg-time">13:38</div></div></div><div class="chat-msg-body">are you selling ore</div></div><div class="chat-msg is-self"><div class="chat-msg-head"><div class="chat-msg-sender chat-mod-self"><span class="chat-msg-tag">[OH]</span><span>Marklifer</span></div><div class="chat-msg-meta"><div class="chat-msg-time">13:50</div></div></div><div class="chat-msg-body">not this week. Reactin might, adding him</div></div><div class="chat-event"><span class="chat-event-who">Marklifer</span><span class="chat-event-what">invited Reactin</span><span class="chat-event-time">13:50</span></div><div class="chat-msg"><div class="chat-msg-head"><div class="chat-msg-sender"><span class="chat-msg-tag">[OH]</span><span>Reactin</span></div><div class="chat-msg-meta"><div class="chat-msg-time">13:52</div></div></div><div class="chat-msg-body">4g for 10Kg, delivered to 2-30383</div></div><div class="gp-deal"><i class="icon-transfers sui-icon-md"></i><div><div><b>10Kg alpha</b> from beezhan → <b>4g ore</b> from Reactin</div><div class="fstat-l" style="color:var(--text-hint)">both sign · settles on chain · Reactin has signed</div></div><a class="sui-screen-btn sui-mod-primary" href="javascript:void(0)" style="margin-left:auto">Sign</a></div><div class="cm-compose"><div class="chat-composer-panel mk-row" style="padding:var(--spacing-sm)"><span class="mk-portrait"><img src="http://127.0.0.1:8421/board/img/pfp/background/pfp_background_6.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/arms/pfp_arms_26.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/body/pfp_body_9.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/neck/pfp_neck_9.png" alt=""><img src="http://127.0.0.1:8421/board/img/pfp/head/pfp_head_49.png" alt=""></span><label class="sui-input-text" style="flex:1;min-width:0"><input type="text" placeholder="Message the group"></label><a class="sui-screen-btn sui-mod-primary" href="javascript:void(0)"><i class="icon-send-alpha sui-icon-md"></i></a></div></div></div></div>
+</div><div class="sui-panel-edge-right"></div></div></div></body></html>

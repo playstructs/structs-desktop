@@ -552,7 +552,7 @@ cat > "$FIX" <<'EOF'
     // than from reading Rust, and the response check caught it.
     matrix_message_player: { room_id: '!dm-harness:h', player_id: '1-61' },
     matrix_share: { ok: true },
-    /* Comms, as the native cards read it (board-comms.js).
+    /* Comms, as the window and the Terminal words read it.
      *
      * `matrix_status` answers with a session KEY — the guild id for the
      * primary, `guild#player` for anyone else on the roster — and every later

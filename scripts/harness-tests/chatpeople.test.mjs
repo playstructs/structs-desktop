@@ -96,4 +96,33 @@ function boot(fixtures = {}) {
   assert.ok(!calls.some((c) => c[0] === 'showError'));
 }
 
+// 6. A group: pick people from the same list, name it, create it — one room,
+//    every picked player invited, opened when the server answers.
+{
+  const { pp, S, calls, w } = boot({ matrix_group: { room_id: '!grp:x', invited: 2 }, matrix_people: { people: [] } });
+  S.view = 'people';
+  const a = pp.personRow({ player_id: '1-61', username: 'JPEG', tag: 'OH' });
+  const b = pp.personRow({ player_id: '1-248', username: 'Phoniffer', tag: 'OH' });
+  const addOf = (row) => [...row.querySelectorAll('button')].find((x) => /^Add/.test(x.textContent));
+  assert.ok(addOf(a) && addOf(a).textContent === 'Add', 'a person row offers Add beside Message');
+  addOf(a).click(); addOf(b).click();
+  assert.deepEqual(JSON.parse(JSON.stringify(S.groupPick)), ['1-61', '1-248'], 'each Add picks that player');
+  assert.equal(addOf(pp.personRow({ player_id: '1-61', username: 'JPEG' })).textContent, 'Added', 'a picked player reads Added');
+  addOf(pp.personRow({ player_id: '1-61', username: 'JPEG' })).click();
+  assert.deepEqual(JSON.parse(JSON.stringify(S.groupPick)), ['1-248'], 'Added un-picks');
+  addOf(pp.personRow({ player_id: '1-61', username: 'JPEG' })).click();
+  S.people = [{ player_id: '1-61', username: 'JPEG' }];
+  const page = pp.renderPeople();
+  const strip = page.querySelector('.chat-topic');
+  assert.ok(strip && /Group with 1-248, 1-61/.test(strip.textContent), 'the page shows who is picked, with a name box and Create');
+  strip.querySelector('#chat-group-name').value = 'Ore deal';
+  strip.querySelector('#chat-group-name').dispatchEvent(new w.Event('input'));
+  [...strip.querySelectorAll('button')].find((x) => /Create group/.test(x.textContent)).click();
+  await tick(5);
+  const made = calls.find((c) => c[0] === 'matrix_group');
+  assert.equal(JSON.stringify(made && made[1]), JSON.stringify({ guildId: '0-1', playerIds: ['1-248', '1-61'], name: 'Ore deal' }), 'one call, the picked ids, the name');
+  assert.ok(calls.some((c) => c[0] === 'openRoom' && c[1] === '!grp:x'), 'the new room is opened');
+  assert.deepEqual(JSON.parse(JSON.stringify(S.groupPick)), [], 'the pick is spent');
+}
+
 console.log('chat-people: all checks passed');

@@ -58,7 +58,9 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
    * so the grammar is whole even though the page fetched nothing. */
   const T = w.Board.Terminal;
   check('the grammar is whole: every card, its groups and its completions',
-    T.types().length > 20 && T.groups().length >= 6 && T.suggestFor('').length === T.types().length,
+    T.types().length > 20 && T.groups().length >= 6
+    && T.suggestFor('').filter((o) => o.group !== 'Comms').length === T.types().length
+    && T.suggestFor('').filter((o) => o.group === 'Comms').length === 4,
     T.types().length + ' types, ' + T.suggestFor('').length + ' rows');
   check('…including subject-first completion, which is what the palette is FOR',
     T.functionsFor('2-29604').some((f) => f.word === 'PLANET'));
@@ -166,6 +168,25 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     [2, 3, 4].every((n) => byId(n) && byId(n).ok === false && /not available to the palette/.test(byId(n).error))
     && !calls.some((c) => /transfer|mcp_action|layout_set/.test(c.cmd)),
     JSON.stringify([2, 3, 4].map((n) => byId(n) && byId(n).error)));
+
+  /* Everything the palette PAGE actually invokes, over the game. `PLANET jpeg`
+   * was fixed in the Terminal window and still did nothing over the map,
+   * because the search it needs was not on this list — and the palette
+   * swallows a refusal, so nothing said why. The list below is what the
+   * palette's own code calls (search, prose search, SAY, the rows' acts, the
+   * server names); it must match the allowlist exactly, so a command added to
+   * one side without the other fails here rather than in the window. */
+  const PALETTE_CALLS = ['open_terminal_card_new', 'log_ui_events', 'mcp_player_search', 'matrix_open'];
+  const cfgSrc = readFileSync(resolve(repo, 'frontend/structs-config.js'), 'utf8');
+  const listed = (cfgSrc.match(/var FRAME_CMDS = \{([\s\S]*?)\};/) || ['', ''])[1].match(/\b[a-z_]+(?=: 1)/g) || [];
+  check('the palette frame may invoke exactly what the palette page calls',
+    listed.slice().sort().join(',') === PALETTE_CALLS.slice().sort().join(','), listed.sort().join(','));
+  PALETTE_CALLS.forEach((cmd, i) => ask(100 + i, cmd));
+  await tick(30);
+  check('…and each of them is answered, not refused — `PLANET jpeg` included',
+    PALETTE_CALLS.every((cmd, i) => byId(100 + i) && byId(100 + i).ok === true)
+    && calls.some((c) => c.cmd === 'mcp_player_search'),
+    JSON.stringify(PALETTE_CALLS.map((cmd, i) => cmd + ':' + (byId(100 + i) ? byId(100 + i).ok : '?'))));
 
   /* A message whose source is not our frame is not our frame's. */
   const stranger = { postMessage: () => {} };

@@ -1,0 +1,75 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/css/normalize.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/css/structicons.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/css/sui/sui.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/css/main.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/chat-rows.css">
+<link rel="stylesheet" href="http://127.0.0.1:8421/board/playercard.css">
+<link rel="stylesheet" href="board-inline.rebased.css">
+<style>
+  body { background: var(--page-background); margin: 0; text-align: left; }
+  #board-layout { display: flex; gap: var(--spacing-md); padding: var(--spacing-md); align-items: flex-start; }
+  #board-layout .tm-card { flex: 0 0 auto; }
+  #board-layout .tm-card .tm-body { max-height: none; }
+  .mk-portrait { position: relative; width: 32px; height: 32px; flex: 0 0 32px; overflow: hidden; }
+  .mk-portrait img { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .mk-row { display: flex; gap: var(--spacing-sm); align-items: center; }
+  .mk-stat { display: flex; gap: var(--spacing-lg); align-items: baseline; padding: var(--spacing-sm) 0; border-bottom: thin solid var(--border-subtle); }
+  .mk-stat b { font-size: inherit; }
+  .mk-caption { padding: var(--spacing-xs) 0; color: var(--text-hint); }
+  .mk-tag { color: var(--text-hint); min-width: 3.5em; display: inline-block; }
+  .mk-tag.is-war { color: var(--text-enemy-primary); }
+  .mk-tag.is-said { color: var(--text-player-primary); }
+  .mk-line { display: flex; gap: var(--spacing-sm); padding: 2px 0; align-items: baseline; }
+  .mk-line .t { color: var(--text-hint); flex: 0 0 3em; }
+  .mk-line .s { flex: 0 0 8em; }
+  .mk-line a { color: var(--text-player-primary); }
+  .mk-stage { position: relative; height: 300px; background: var(--surface-default); border: thin solid var(--border-subtle); overflow: hidden; }
+  .mk-ambit { position: absolute; left: 0; right: 0; height: 25%; border-bottom: thin dashed var(--border-subtle); }
+  .mk-ambit span { position: absolute; left: var(--spacing-sm); top: var(--spacing-xs); color: var(--text-hint); }
+  .mk-struct { position: absolute; width: 64px; }
+  .mk-bubble { position: absolute; max-width: 260px; }
+  .mk-eyes { position: absolute; display: flex; gap: 2px; align-items: center; }
+  .mk-eyes .mk-portrait { width: 20px; height: 20px; flex-basis: 20px; }
+  .mk-prompt { display: flex; gap: var(--spacing-sm); align-items: center; padding: var(--spacing-sm); background: var(--surface-default); border: thin solid var(--border-strong); }
+  .mk-prompt .caret { color: var(--accent-primary); }
+  .mk-prompt input { flex: 1; background: transparent; border: 0; color: var(--text-body); font: inherit; outline: 0; }
+  .mk-menu { border: thin solid var(--border-subtle); background: var(--surface-panel); }
+  .mk-menu div { padding: var(--spacing-xs) var(--spacing-sm); }
+  .mk-menu div.is-on { background: var(--accent-primary); color: var(--page-background); }
+</style><style>
+  .lc-members { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); padding: var(--spacing-xs) 0 var(--spacing-sm); }
+  .lc-member { display: flex; align-items: center; gap: 4px; }
+  .lc-member .dot { width: 6px; height: 6px; background: var(--accent-primary); flex: 0 0 6px; }
+  .lc-member.is-away .dot { background: var(--text-hint); }
+  .lc-member.is-enemy span.n { color: var(--text-enemy-primary); }
+  .lc-member.is-ally span.n { color: var(--text-player-primary); }
+  .lc-orders { display: flex; gap: var(--spacing-sm); align-items: center; padding: var(--spacing-xs) var(--spacing-sm); border-left: 2px solid var(--accent-primary); background: var(--surface-default); margin: var(--spacing-xs) 0; }
+  .lc-bc { display: flex; gap: var(--spacing-sm); align-items: center; padding: 3px var(--spacing-xs); background: var(--surface-default); margin: 2px 0; }
+  .lc-bc .k { min-width: 4.5em; color: var(--text-player-primary); }
+  .lc-bc.is-enemy .k { color: var(--text-enemy-primary); }
+  .lc-bc .seen { margin-left: auto; color: var(--text-hint); white-space: nowrap; }
+  .lc-keys { display: flex; gap: var(--spacing-xs); flex-wrap: wrap; padding: var(--spacing-sm) 0 0; }
+  .lc-keys a { display: inline-flex; align-items: center; gap: 4px; }
+  .lc-keys kbd { color: var(--text-hint); font: inherit; }
+  .lc-lines { display: flex; flex-direction: column; }
+  .in-row { display: flex; gap: var(--spacing-sm); align-items: flex-start; padding: 3px 0; border-bottom: thin solid var(--border-subtle); }
+  .in-row .t { flex: 0 0 3em; color: var(--text-hint); }
+  .in-row .w { flex: 0 0 5.5em; color: var(--text-hint); }
+  .in-row.is-alert .w { color: var(--text-enemy-primary); }
+  .in-row.is-order .w { color: var(--accent-primary); }
+  .in-row .g { color: var(--text-hint); }
+  .in-row .seen { margin-left: auto; color: var(--text-hint); white-space: nowrap; }
+  .in-row a { color: var(--text-player-primary); }
+  .sp-tree div { padding: 2px 0; display: flex; gap: var(--spacing-sm); align-items: center; }
+  .sp-tree .d1 { padding-left: var(--spacing-lg); }
+  .sp-tree .d2 { padding-left: var(--spacing-xxl); }
+  .sp-tree .n { margin-left: auto; color: var(--text-hint); }
+  .gp-deal { display: flex; gap: var(--spacing-md); align-items: center; padding: var(--spacing-sm); border: thin solid var(--border-strong); background: var(--surface-default); margin: var(--spacing-sm) 0; }
+  .gp-deal .who { display: flex; gap: 4px; align-items: center; }
+</style></head><body><div id="board-layout"><div class="sui-panel sui-theme-player tm-card tm-w3 tm-h-grow " style="width:760px">
+<div class="sui-panel-top-fill-background"></div><div class="sui-panel-bottom-fill-background"></div><div class="sui-panel-edge-left"></div>
+<div class="sui-panel-chunk sui-mod-grow sui-mod-shrink tm-chunk">
+<div class="sui-screen sui-screen-full-width tm-head-screen"><div class="sui-screen-nav tm-head"><div class="sui-screen-nav-items"><span class="sui-screen-nav-item sui-mod-header sui-mod-active tm-title">Intel</span></div><span class="tm-age fstat-l">now</span><span class="tm-doors"><a class="tm-door tm-door-own" href="javascript:void(0)" title="Post a sighting"><i class="icon-beacon sui-icon-sm"></i></a><a class="tm-door tm-door-own" href="javascript:void(0)" title="Mark all seen"><i class="icon-okay sui-icon-sm"></i></a></span></div></div>
+<div class="sui-screen sui-screen-full-width sui-screen-shrink tm-body-screen"><div class="sui-page-body-screen tm-body"><label class="sui-input-text" style="display:block;min-width:0"><input type="text" placeholder="find anything said or seen"></label><div class="sui-screen-nav" style="margin:var(--spacing-sm) 0"><div class="sui-screen-nav-items"><span class="sui-screen-nav-item sui-mod-active">all</span><span class="sui-screen-nav-item">alerts · 3</span><span class="sui-screen-nav-item">mine</span><span class="sui-screen-nav-item">orders</span></div></div><div class="lc-orders"><i class="icon-cmd-post sui-icon-md"></i><span><b>Water hulls to 2-21411 and 2-15361 until Friday.</b> <span class="fstat-l" style="color:var(--text-hint)">— Reactin · standing orders · seen by 11 of 14</span></span></div><div class="in-row "><span class="t fstat-l">13:47</span><span class="w fstat-l">CLEAR</span><span><a>2-21411</a> attacker defeated — Marklifer</span><span class=seen>seen 6</span></div><div class="in-row is-alert"><span class="t fstat-l">13:45</span><span class="w fstat-l">SIGHTING</span><span>[SN] worker12 · cruiser, water, at <a>2-21411</a> (yours)</span><span class=seen>seen 5</span></div><div class="in-row is-alert"><span class="t fstat-l">13:44</span><span class="w fstat-l">COVER</span><span><a>2-21411</a> · water — Reactin</span><span class=seen>ack 2</span></div><div class="in-row "><span class="t fstat-l">13:44</span><span class="w fstat-l">SAID</span><span>Marklifer at <a>2-21411</a>: moving 9-194 in. two blocks.</span></div><div class="in-row is-alert"><span class="t fstat-l">13:41</span><span class="w fstat-l">SIGHTING</span><span>[SN] worker12 · fleet 9-2034 arrived at <a>2-21411</a> (yours)</span></div><div class="in-row is-alert"><span class="t fstat-l">13:38</span><span class="w fstat-l">SAID</span><span>beezhan → you: are you selling ore</span></div><div class="in-row "><span class="t fstat-l">13:30</span><span class="w fstat-l">SIGHTING</span><span>[KC] raider7 · 2 destroyers at <a>2-30383</a> <span class=g>· Imperial One</span></span></div><div class="in-row is-order"><span class="t fstat-l">13:22</span><span class="w fstat-l">ORDER</span><span>Imperial One: their war fleet is staging at 2-30380 <span class=g>· Imperial One</span></span><span class=seen>seen 4</span></div><div class="in-row "><span class="t fstat-l">13:12</span><span class="w fstat-l">CLEAR</span><span><a>2-15361</a> attacker defeated — auto_response</span></div><div class="chat-new" role="separator"><span class="fstat-l">seen up to here</span></div><div class="in-row "><span class="t fstat-l">12:58</span><span class="w fstat-l">SAID</span><span>chatrbocks in Orbital Hydro: anyone selling a cruiser hull</span></div><div class="tm-cap fstat-l mk-caption">Orbital Hydro · shared with Imperial One and Lucky Star · 3 servers</div></div></div>
+</div><div class="sui-panel-edge-right"></div></div></div></body></html>

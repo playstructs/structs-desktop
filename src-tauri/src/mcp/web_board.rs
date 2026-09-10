@@ -778,6 +778,27 @@ async fn board_invoke(
             ),
             None => err_json("objectId required".into()),
         },
+        /* The Terminal's ⌘K words point at the Comms WINDOW now. Over the
+         * web there is no window to raise, but the pending room and draft are
+         * still set, so a Comms tab open beside the board shows the room. */
+        "matrix_open" => from_result(
+            crate::matrix::matrix_open(st.app.clone(), s("subject"), s("draft")).await,
+        ),
+        "matrix_group" => match s("guildId") {
+            Some(g) => from_result(
+                crate::matrix::matrix_group(
+                    st.app.clone(),
+                    g,
+                    body.get("playerIds")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_default(),
+                    s("name"),
+                )
+                .await,
+            ),
+            None => err_json("guildId required".into()),
+        },
         "matrix_object_room_create" => match s("objectId") {
             Some(o) => from_result(crate::matrix::matrix_object_room_create(s("guildId"), o).await),
             None => err_json("objectId required".into()),

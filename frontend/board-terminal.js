@@ -75,7 +75,6 @@
     ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results']],
     ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
-    ['Comms', ['comms', 'room', 'channels', 'find', 'who']],
     ['System', ['health']],
   ];
   function cardGroups() {
@@ -143,6 +142,7 @@
     'war:lists': [['grudges', {}, 1], ['vetoes', {}, 1]], 'war:incidents': [['incidents', {}, 2]], grass: [['feed', { span: '24' }, 2]],
     ops: [['health', {}, 1], ['pow', {}, 1]], explore: [['people', {}, 1]],
   };
+  var DROPPED = { chat: 1, comms: 1, room: 1, channels: 1, find: 1, who: 1 };
   function migrate(l) {
     var out = [], seen = {};
     l.cards.forEach(function (c) { seen[c.id] = true; });
@@ -153,22 +153,10 @@
       if (c.type === 'fleet') c.type = 'armada';
       // `pay` was renamed `deliver`; a layout saved under the old name still opens.
       if (c.type === 'pay') c.type = 'deliver';
-      /* Comms stopped being a WINDOW inside a card. A layout saved when it
-       * was one names types that no longer exist:
-       *   `chat`             the whole Comms window   → the room list
-       *   `chat {list:direct}`  its people page       → the room list, people
-       *   `comms {id}`       an object's rail          → that object's room
-       * The object rail is the interesting one: `comms` used to mean "the
-       * conversation about 2-15361", which is exactly a ROOM whose subject is
-       * an object id — so it migrates to the card that now says that. */
-      if (c.type === 'chat') {
-        var show = { direct: 'direct', rooms: 'local' }[String((c.params || {}).list || '')];
-        c.type = 'comms';
-        c.params = show ? { show: show } : {};
-      } else if (c.type === 'comms' && (c.params || {}).id) {
-        c.type = 'room';
-        c.params = { id: c.params.id };
-      }
+      /* Comms is a WINDOW again, not a card — five card types (and the
+       * older framed `chat`) came and went. A layout that still names one
+       * simply loses it; the words that opened them now raise the window. */
+      if (DROPPED[c.type]) return;
       /* The live tape and the ops feed became one card. A layout saved before
        * that rebuild is rewritten rather than kept working by an alias: an
        * alias is a SECOND type, so it walks straight past `single`, and a real
@@ -1460,7 +1448,7 @@
   // workspace once made, and exports as a `terminal:` code like any other.
   var PRESETS = {
     trader:    { label: 'Energy trader',   cards: [['market', {}, 2], ['book', { id: 'primary' }, 1], ['banks', {}, 2], ['grid', {}, 1], ['halt', {}, 2], ['alerts', {}, 1], ['feed', { span: '24', lane: 'economy' }, 2], ['wallet', {}, 1]] },
-    admin:     { label: 'Guild admin',     cards: [['people', {}, 1], ['banks', {}, 2], ['stats', { section: 'guilds' }, 2], ['grid', {}, 1], ['armada', {}, 2], ['comms', {}, 1]] },
+    admin:     { label: 'Guild admin',     cards: [['people', {}, 1], ['banks', {}, 2], ['stats', { section: 'guilds' }, 2], ['grid', {}, 1], ['armada', {}, 2]] },
     botter:    { label: 'Botter',          cards: [['health', {}, 1], ['queue', {}, 1], ['results', {}, 1], ['pow', {}, 1], ['armada', {}, 2], ['feed', { span: '24' }, 2], ['page', { page: 'config:profiles' }, 2]] },
     hasher:    { label: 'Hasher',          cards: [['pow', {}, 1], ['solve', {}, 1], ['stats', { section: 'engine' }, 1], ['tasks', {}, 2], ['fuel', {}, 1], ['queue', {}, 1]] },
     raider:    { label: 'Raider',          cards: [['posture', {}, 1], ['targets', {}, 2], ['raids', { scope: 'live' }, 1], ['ore', {}, 2], ['grudges', {}, 1], ['incidents', {}, 2], ['feed', { span: '48', lane: 'war' }, 2]] },
@@ -1511,6 +1499,15 @@
   // implies (a player, a guild, a planet or fleet's map, anything else the
   // inspector); a word opens a page or a board. `MKT`, `GT 0-1`, `1-194`,
   // `2-15361`, `COMMS 2-15361`, `WORK`, `STATS ORE`, `PEOPLE`, `PAY`, `CHAT`.
+  /* Comms is a WINDOW. Every one of these raises it through one command,
+   * `matrix_open`, at the subject typed after the word — a player id or
+   * name, a planet or fleet id, `#alias`, `!room` — or at nothing. They are
+   * not cards and never were meant to be; a conversation lives in the
+   * window that was built for it. `SAY` is the same door with a draft. */
+  var COMMS_WORDS = {
+    COMMS: 1, INBOX: 1, DMS: 1, UNREAD: 1, CHANNELS: 1, BROWSE: 1, DIRECTORY: 1,
+    ROOM: 1, DM: 1, MSG: 1, MESSAGE: 1, TALK: 1, CHAT: 1, WHO: 1, INROOM: 1, FIND: 1, SEARCH: 1,
+  };
   var WORDS = {
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['feed'], FLOW: ['feed'],
     DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
@@ -1532,15 +1529,6 @@
     TALLY: ['tally', 'id'], HULLS: ['tally', 'id'], KILLS: ['tally', 'id'],
     HELP: ['help'], COMMANDS: ['help'], SAY: ['say', 'text'],
     FEED: ['feed'], EVENTS: ['feed'], NEXT: ['next'], MOVES: ['next'],
-    /* Comms, as subjects. A room is reached the way a planet is: `ROOM 1-61`,
-     * `ROOM JPEG`, `ROOM #trade`, `ROOM 2-15361` all name one conversation,
-     * and `resolve()` (board-comms.js) is what makes them the same request. */
-    COMMS: ['comms'], INBOX: ['comms'], DMS: ['comms', 'show=direct'], UNREAD: ['comms', 'show=unread'],
-    ROOM: ['room', 'optid'], DM: ['room', 'optid'], MSG: ['room', 'optid'],
-    MESSAGE: ['room', 'optid'], TALK: ['room', 'optid'], CHAT: ['room', 'optid'],
-    CHANNELS: ['channels'], BROWSE: ['channels'], DIRECTORY: ['channels'],
-    WHO: ['who', 'optid'], INROOM: ['who', 'optid'],
-    FIND: ['find', 'text'], SEARCH: ['find', 'text'],
     // The guild's stat store, asked of one object: ore on a planet, load on a
     // substation, health on a struct. `HIST` is the word; `GP` is there
     // because that is what the muscle memory of a terminal reaches for.
@@ -1647,6 +1635,12 @@
       seen[type] = 1;
       out.push({ word: word, type: type, label: def.label, arg: arg });
     });
+    /* The window's words, for the subjects that have a conversation: a
+     * player's is a DM, a planet's or a fleet's is its room. They open no
+     * card, so the loop above cannot find them; typed subject-first they are
+     * the launcher's whole reason to exist — `1-61 DM`, `2-29604 ROOM`. */
+    if (kind === 1) out.push({ word: 'DM', type: 'comms', label: 'Comms', arg: 'optid' });
+    if (kind === 2 || kind === 9) out.push({ word: 'ROOM', type: 'comms', label: 'Comms', arg: 'optid' });
     return out;
   };
 
@@ -1669,7 +1663,8 @@
      * word-first form rather than handled twice, so one dispatch decides what
      * every word does. A trailing subject that is ALSO an id (`1-61 SHEET`)
      * needs no special case — the word is still parts[1]. */
-    if (ID_RE.test(parts[0]) && parts.length > 1 && WORDS[parts[1].toUpperCase()]) {
+    if (ID_RE.test(parts[0]) && parts.length > 1
+        && (WORDS[parts[1].toUpperCase()] || COMMS_WORDS[parts[1].toUpperCase()] || parts[1].toUpperCase() === 'SAY')) {
       parts = [parts[1]].concat(parts[0], parts.slice(2));
     }
     var head = parts[0].toUpperCase();
@@ -1699,12 +1694,16 @@
      * thing that makes this a game's chat rather than a chat in a game. */
     if (head === 'SAY') {
       if (!rest) return null;
-      /* Only `#alias` or `!room` names a target. A leading OBJECT id is the
-       * subject of the sentence — `SAY 2-15361 is breached` is about the
-       * planet, not addressed to it. */
-      var m = /^([#!][^\s]+)\s+([\s\S]+)$/.exec(rest);
+      /* `SAY 2-15361 shield is down` drafts "shield is down" in the planet's
+       * own room; `SAY 1-61 …` in that player's DM; `SAY #war-room …` in that
+       * room. A planet's room is where a line about the planet belongs, and
+       * the window that opens shows which room it landed in before anything
+       * is sent. With no subject, the draft goes to the room the window has
+       * open, or waits for one. */
+      var m = /^([#!][^\s]+|\d+-\d+)\s+([\s\S]+)$/.exec(rest);
       return m ? { kind: 'say', subject: m[1], text: m[2] } : { kind: 'say', text: rest };
     }
+    if (COMMS_WORDS[head]) return { kind: 'comms', subject: rest || null };
     if (head === 'PRESET' || head === 'PRESETS') return { kind: 'preset', name: String(rest || '').toLowerCase() };
     if (head === 'SHARE') return { kind: 'share' };
     // The bar's RESET button went with the bar; this is the same verb.
@@ -1745,6 +1744,14 @@
    * the completion or run the line as typed. */
   Terminal.canRun = function (line) { return Terminal.parse(line) !== null; };
 
+  /* The one door to Comms from any card: raise the window at a subject —
+   * a planet, a fleet, a player, an alias — with an optional draft. Every
+   * icon-phone on the board goes through here, so a card cannot reach for a
+   * Comms card that no longer exists. */
+  Terminal.comms = function (subject, draft) {
+    return invoke('matrix_open', { subject: subject || null, draft: draft || null })
+      .catch(function (e) { Board.stamp && Board.stamp('comms: ' + e); });
+  };
   Terminal.execute = function (line) {
     var plan = Terminal.parse(line);
     if (!plan) return false;
@@ -1753,16 +1760,17 @@
      * workspace this page never loaded — a preset would overwrite the layout
      * with `state.layout` still null — so they are refused rather than half
      * done. Nothing is lost: they are what the Terminal itself is for. */
-    if (plan.kind === 'say') {
-      var C = window.BoardComms;
-      if (!C) return false;
-      // Over the game the model has not been asked anything yet; ask first.
-      C.status().then(function () { return C.say(plan.text, plan.subject); })
-        .then(function (msg) { Board.stamp && Board.stamp(msg); tellHost('ran'); })
+    if (plan.kind === 'say' || plan.kind === 'comms') {
+      /* The Comms window, raised at the subject — with the line as a DRAFT
+       * for SAY. Never a post: the player reads the room and presses send.
+       * Works the same over the game (the palette frame) and in the
+       * Terminal, because neither has a chat of its own. */
+      invoke('matrix_open', { subject: plan.subject || null, draft: plan.kind === 'say' ? plan.text : null })
+        .then(function () { tellHost('ran'); })
         .catch(function (e) {
           var cmd = document.getElementById('tm-cmd');
           if (cmd) cmd.classList.add('is-err');
-          Board.stamp && Board.stamp('say: ' + e);
+          Board.stamp && Board.stamp('comms: ' + e);
         });
       return true;
     }
@@ -1828,6 +1836,13 @@
           out.push({ line: word + (arg ? ' ' : ''), words: word, what: o.label, arg: arg, group: g.group, run: !arg });
         });
       });
+      /* The window's words, as a group of their own: they open no card, so
+       * the card menu would never list them, and a launcher that cannot
+       * reach Comms is a launcher people stop opening. */
+      out.push({ line: 'COMMS', words: 'COMMS', what: 'Open Comms', arg: '', group: 'Comms', run: true });
+      out.push({ line: 'DM ', words: 'DM', what: 'Message a player', arg: '<player>', group: 'Comms', run: false });
+      out.push({ line: 'ROOM ', words: 'ROOM', what: 'A conversation, by subject', arg: '<id · #alias>', group: 'Comms', run: false });
+      out.push({ line: 'SAY ', words: 'SAY', what: 'Draft a line in Comms', arg: '<text>', group: 'Comms', run: false });
       return out;
     }
     var trailingSpace = /\s$/.test(raw);
@@ -1971,134 +1986,6 @@
   };
   var SEARCH_MAX = 6;
 
-  /* ── Comms in the palette ───────────────────────────────────────────────
-   *
-   * The rooms you are already in are the one set of subjects the Terminal can
-   * offer without asking anything: they are in hand, kept current by sync. So
-   * ⌘K answers three questions about them that the embedded Comms window made
-   * you navigate for.
-   *
-   *   An EMPTY box lists what is waiting. "Find the chats already on the go"
-   *   was the complaint, and the answer is that they are the first thing ⌘K
-   *   shows when you have nothing else in mind. Mentions before counts —
-   *   being named is not the same as traffic.
-   *
-   *   `#tr` completes to the channels whose alias starts that way, without a
-   *   round trip.
-   *
-   *   `ROOM <anything>` matches name, alias, topic and the player a DM is
-   *   with, so "the one with Beezhan in it" is reachable by typing Beezhan.
-   *
-   * Pure, given the room list — the tests drive it with a fixture rather than
-   * a homeserver, and what it offers is decided by rules rather than by
-   * whatever sync happened to have landed.
-   */
-  var COMMS_WORDS = { ROOM: 1, DM: 1, MSG: 1, MESSAGE: 1, TALK: 1, CHAT: 1, WHO: 1, INROOM: 1 };
-  var DIR_WORDS = { CHANNELS: 1, BROWSE: 1, DIRECTORY: 1 };
-  var COMMS_MAX = 4;
-  Terminal.commsRows = function (line, rooms) {
-    var list = rooms || (window.BoardComms && window.BoardComms.S.rooms) || [];
-    if (!list.length) return [];
-    var raw = String(line || '');
-    var parts = raw.trim().split(/\s+/).filter(Boolean);
-    var head = (parts[0] || '').toUpperCase();
-    var rows = [];
-    var name = function (r) { return r.canonical_alias || r.room_id; };
-    var what = function (r) {
-      var bits = [];
-      if (r.mention) bits.push('named you');
-      else if (r.unread) bits.push(H.fmtInt(r.unread) + ' unread');
-      if (r.player_id) bits.push(r.player_id);
-      else if (r.topic) bits.push(String(r.topic).slice(0, 40));
-      return bits.join(' · ') || 'room';
-    };
-    var push = function (r, group) {
-      if (rows.length >= COMMS_MAX) return;
-      /* The ROOM is the subject; the word is a detail. `SN.Corporation ROOM ·
-       * named you` read the word on every line as if it mattered. And a
-       * waiting row can be DEALT WITH, not only opened: dismissing one is as
-       * common as opening one when the question is "what is on the go". */
-      var acts = [];
-      if (r.unread || r.mention) acts.push({ label: 'read', run: function () {
-        var C = window.BoardComms; C.timeline(r.room_id).then(function () { C.markRead(r.room_id); });
-      } });
-      if (!r.player_id) {
-        var quiet = window.BoardComms.levelOf && window.BoardComms.levelOf(r.room_id) === 'mentions';
-        acts.push({ label: quiet ? 'all messages' : 'mentions only', run: function () {
-          window.BoardComms.setLevel(r.room_id, quiet ? 'all' : 'mentions');
-        } });
-      }
-      acts.push({ label: r.muted ? 'unmute' : 'mute', run: function () {
-        invoke('matrix_mute', { guildId: window.BoardComms.S.key, roomId: r.room_id, muted: !r.muted })
-          .then(function () { return window.BoardComms.rooms(true); });
-      } });
-      rows.push({ line: 'ROOM ' + name(r), words: 'ROOM', sub: r.name || name(r), lead: true, run: true,
-                  what: what(r), group: group, acts: acts });
-    };
-
-    var C = window.BoardComms;
-    var last = C && C.lastRoom && C.lastRoom();
-    var lastName = last ? ((C.roomById(last) || {}).name || last) : null;
-    /* SAY, as a row you can see. `suggestFor` lists only words that open a
-     * card, and SAY opens nothing — it is the one verb here that acts. An
-     * empty box shows where it would go; a typed SAY shows what it will do. */
-    if (head === 'SAY' && parts.length > 1) {
-      var plan = Terminal.parse(raw);
-      var to = plan && plan.subject ? plan.subject : (lastName || 'no room read yet');
-      return [{ line: raw, words: 'SAY', sub: to, lead: true, run: true,
-                what: plan && plan.subject ? 'say it there' : 'say it in the room you last read', group: 'Say' }];
-    }
-    // Nothing typed: what is waiting, worst first — and where SAY would go.
-    if (!parts.length) {
-      if (lastName) rows.push({ line: 'SAY ', words: 'SAY', sub: lastName, lead: true, run: false,
-                                what: 'say something there', group: 'Say' });
-      var due = list.filter(function (r) { return C && C.calls ? C.calls(r) : (r.joined && !r.muted && (r.unread || r.mention)); })
-        .sort(function (a, b) { return (b.mention ? 1 : 0) - (a.mention ? 1 : 0) || (b.unread || 0) - (a.unread || 0); });
-      due.forEach(function (r) { push(r, 'Unread'); });
-      /* And all of it at once. Forty rooms after three months away were forty
-       * opens; this is one row with one act. */
-      if (due.length > 1 && C && C.markAllRead) {
-        rows.push({ line: 'COMMS', words: 'COMMS', sub: 'everything', lead: true, run: true, group: 'Unread',
-                    what: H.fmtInt(due.length) + ' rooms waiting',
-                    acts: [{ label: 'read all', run: function () { C.markAllRead(); } }] });
-      }
-      return rows;
-    }
-
-    /* `CHANNELS <guild>` — the guilds that publish a homeserver, as rows, so
-     * "which guild's channels can I look at" is answered by typing the word
-     * and not by knowing a tag. Bare `CHANNELS ` lists them all. */
-    if (DIR_WORDS[head] && C && C.S.servers && C.S.servers.length) {
-      var gq = parts.slice(1).join(' ').toLowerCase();
-      C.S.servers.filter(function (sv) {
-        if (!gq) return true;
-        return [sv.name, sv.tag, sv.guild_id, sv.server].some(function (v) { return String(v || '').toLowerCase().indexOf(gq) >= 0; });
-      }).slice(0, 6).forEach(function (sv) {
-        rows.push({ line: 'CHANNELS ' + (sv.tag || sv.guild_id), words: 'CHANNELS', sub: sv.name || sv.tag || sv.server,
-                    lead: true, run: true, group: 'Guilds', what: sv.mine ? 'your guild\'s channels' : 'that guild\'s channels' });
-      });
-      if (gq && !rows.length) return rows;   // a search term, not a guild: the word row already offers it
-      return rows;
-    }
-
-    // `ROOM <subject>` — the rooms in hand that the subject names.
-    if (COMMS_WORDS[head] && parts.length > 1) {
-      var q = parts.slice(1).join(' ');
-      list.filter(function (r) {
-        return r.joined && window.BoardComms && window.BoardComms.matches(r, q) && name(r) !== q;
-      }).forEach(function (r) { push(r, 'Rooms'); });
-      return rows;
-    }
-
-    // A bare `#alias` being typed.
-    if (parts.length === 1 && raw.charAt(0) === '#' && !/\s$/.test(raw)) {
-      var t = parts[0].toLowerCase();
-      list.filter(function (r) {
-        return r.joined && String(r.canonical_alias || '').toLowerCase().indexOf(t) === 0;
-      }).forEach(function (r) { push(r, 'Rooms'); });
-    }
-    return rows;
-  };
 
 
   /* ⌘K / Ctrl-K. One keystroke, from anywhere on the page — the palette is
@@ -2258,10 +2145,7 @@
       /* On an EMPTY line what is waiting leads, because that is the question
        * an empty ⌘K is asking. With something typed the words lead, because
        * then you already know what you want. */
-      var comms = Terminal.commsRows(line);
-      items = String(line || '').trim()
-        ? suggestFor(line).concat(comms, searchFor(line), Terminal.saidRows(line))
-        : comms.concat(suggestFor(line));
+      items = suggestFor(line).concat(searchFor(line));
       cursor = items.length ? 0 : -1;
       picked = false;
       paint();
@@ -2276,43 +2160,7 @@
       return hits ? Terminal.searchRows(line, hits) : [];
     }
 
-    /* Prose in the box searches MESSAGES. Typing three words into a launcher
-     * and getting nothing is how a search card that exists goes unused; the
-     * homeserver already answers the query and the top three hits are what
-     * you wanted. Only prose — two or more words with no command at the head. */
-    var saidSeq = 0, saidCache = {};
-    Terminal.saidRows = function (line) {
-      var raw = String(line || '').trim();
-      var parts = raw.split(/\s+/).filter(Boolean);
-      if (parts.length < 2 || WORDS[parts[0].toUpperCase()] || ID_RE.test(parts[0])) return [];
-      var hits = saidCache[raw];
-      if (!hits) return [];
-      return hits.slice(0, 3).map(function (h) {
-        var m = h.message || h;
-        return { line: 'ROOM ' + h.room_id, words: 'ROOM', sub: String(m.body || '').slice(0, 48), lead: true,
-                 run: true, what: (h.room_name || h.room_id) + ' · ' + (m.sender_name || ''), group: 'Said' };
-      });
-    };
-    function askSaid(line) {
-      var raw = String(line || '').trim();
-      var parts = raw.split(/\s+/).filter(Boolean);
-      if (parts.length < 2 || WORDS[parts[0].toUpperCase()] || ID_RE.test(parts[0]) || saidCache[raw]) return;
-      var C = window.BoardComms;
-      if (!C || !C.S.connected || !C.S.key) return;
-      var mine = ++saidSeq;
-      setTimeout(function () {
-        if (mine !== saidSeq || cmd.value.trim() !== raw) return;
-        invoke('matrix_search', { guildId: C.S.key, query: raw }).then(function (d) {
-          saidCache[raw] = (d && d.hits) || [];
-          if (cmd.value.trim() !== raw) return;
-          items = suggestFor(cmd.value).concat(Terminal.commsRows(cmd.value), searchFor(cmd.value), Terminal.saidRows(cmd.value));
-          if (cursor < 0 && items.length) cursor = 0;
-          paint();
-        }).catch(function () { saidCache[raw] = []; });
-      }, 300);
-    }
     function askSearch(line) {
-      askSaid(line);
       var q = Terminal.searchSubject(line);
       if (q == null || searchCache[q]) return;
       if (searchTimer) clearTimeout(searchTimer);
@@ -2323,7 +2171,7 @@
           searchCache[q] = Array.isArray(hits) ? hits : [];
           // A later keystroke owns the box; do not repaint under it.
           if (mine !== searchSeq || Terminal.searchSubject(cmd.value) !== q) return;
-          items = suggestFor(cmd.value).concat(Terminal.commsRows(cmd.value), searchFor(cmd.value));
+          items = suggestFor(cmd.value).concat(searchFor(cmd.value));
 
           if (cursor < 0 && items.length) cursor = 0;
           paint();
@@ -2488,6 +2336,16 @@
       line('⌘K  ·  Ctrl-K', 'Open this command line from anywhere', '',
         function () { Terminal.openPalette(); });
 
+      /* ── Comms: words that open the WINDOW, at a subject ─────────────── */
+      section('Comms');
+      line('COMMS · INBOX · DMS · UNREAD', 'Open Comms', '', function () { Terminal.execute('COMMS'); });
+      line('DM · MSG · MESSAGE · TALK · CHAT', 'A player\'s conversation, by id or name', '<player>', function () { fillCommand('DM '); });
+      line('ROOM', 'A conversation, by subject — 2-15361 · 1-61 · #trade', '<id · #alias>', function () { fillCommand('ROOM '); });
+      line('WHO · INROOM', 'Who is in a conversation', '<id · #alias>', function () { fillCommand('WHO '); });
+      line('CHANNELS · BROWSE · DIRECTORY', 'Every guild\'s channels', '', function () { Terminal.execute('CHANNELS'); });
+      line('FIND · SEARCH', 'Search everything said', '<text>', function () { fillCommand('FIND '); });
+      line('SAY', 'Draft a line — SAY 2-15361 <text> in that room, SAY <text> where you are', '<text>', function () { fillCommand('SAY '); });
+
       /* ── The workspace verbs, which open no card ─────────────────────── */
       section('Workspace');
       /* The words whose target is not a CARD, so the loop above never sees
@@ -2496,7 +2354,6 @@
        * reaches this reference — which is how their absence was caught. */
       line('SETTINGS · CONFIG', 'Settings', '', function () { Terminal.execute('SETTINGS'); });
       line('PRESET · PRESETS', Object.keys(PRESETS).join(' · '), '<name>', function () { fillCommand('PRESET '); });
-      line('SAY', 'Say it in the room you last read · SAY #room <text> names one', '<text>', function () { fillCommand('SAY '); });
       line('SHARE', 'Share this workspace as a code', '', function () { Terminal.execute('SHARE'); });
       line('IMPORT', 'Open a workspace someone shared', '<code>', function () { fillCommand('IMPORT '); });
       // The bar's RESET button went with the bar; this is the same verb.
@@ -4058,7 +3915,7 @@
    *
    * It used to carry `matrix_` as a PREFIX, because Comms was framed here and
    * reached 46 of the 55 commands on the list. Comms is native now
-   * (board-terminal-comms.js) and nothing frames `chat.html`, so the prefix
+   * (the Comms window is its own window) and nothing frames `chat.html`, so the prefix
    * went with it: the raid view's rail calls five Matrix commands and those
    * five are named. That closes `matrix_open_transfer`, `matrix_share`,
    * `matrix_agreement_open` and every `matrix_work_*` to an embedded page —
@@ -4159,7 +4016,7 @@
       if (!id) return [];
       return [
         { icon: 'icon-combat-log', title: 'Battle log', onClick: function () { add('log', { id: id }); } },
-        { icon: 'icon-phone', title: 'Comms about this planet', onClick: function () { add('room', { id: id }); } },
+        { icon: 'icon-phone', title: 'Comms about this planet', onClick: function () { Terminal.comms(id); } },
         { icon: 'icon-raid', title: 'Watch in its own window', onClick: function () { invoke('mcp_raid_view_open', { planetId: id }).catch(function (e) { Board.stamp && Board.stamp('raid view: ' + e); }); } },
       ];
     },
@@ -4190,7 +4047,7 @@
    * could not name a room because rooms were not subjects.
    *
    * It is four native cards now — COMMS, ROOM, CHANNELS, WHO — over one model
-   * (board-comms.js), in board-terminal-comms.js. `chat.html` still exists and
+   * — was five cards; now `chat.html` is the one Comms surface and
    * is still a good window; nothing in the Terminal frames it.
    */
 

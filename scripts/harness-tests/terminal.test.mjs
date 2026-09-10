@@ -122,15 +122,20 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const filed = groups.flatMap((g) => g.options.map((o) => o.value));
     const all = w.Board.Terminal.types().map((t) => t.type);
     const empty = w.Board.Terminal.suggestFor('');
+    /* The Comms WORDS are rows of their own group at the end: they open the
+     * Comms window, not a card, so the card menu could never list them. */
+    const commsRows = empty.filter((o) => o.group === 'Comms');
     check('the card menu is grouped by the board\'s areas, not one flat list', groups.length >= 6 && groups.every((g) => g.group && g.options.length)
-      && new Set(empty.map((o) => o.group)).size === groups.length);
+      && new Set(empty.map((o) => o.group)).size === groups.length + 1);
     check('…every registered card is filed in exactly one named group', groups.every((g) => g.group !== 'More') && all.every((t) => filed.filter((f) => f === t).length === 1) && filed.length === all.length, all.filter((t) => !filed.includes(t)).join(','));
     /* Opened EMPTY, the palette is the card menu: every card, grouped, each
      * row naming the word that opens it. That is what lets the picker go — a
      * strict superset, not a second way in. */
     check('…and an empty palette still offers every card the picker did, each named by the word that opens it',
-      empty.length === all.length && empty.every((o) => o.words && o.what), empty.length + ' of ' + all.length);
-    check('…in the same groups, in the same order', empty.map((o) => o.group).filter((g, i, a) => g !== a[i - 1]).join(' ') === groups.map((g) => g.group).join(' '));
+      empty.length === all.length + commsRows.length && empty.every((o) => o.words && o.what), empty.length + ' of ' + all.length);
+    check('…in the same groups, in the same order — then the Comms words, which open the window',
+      empty.map((o) => o.group).filter((g, i, a) => g !== a[i - 1]).join(' ') === groups.map((g) => g.group).concat('Comms').join(' ')
+      && commsRows.map((o) => o.words).join(' ') === 'COMMS DM ROOM SAY');
     /* Named explicitly, not left to the "everything is filed" rule above: the
      * two achievement cards are the newest, and "is it in the palette yet?"
      * is the first question a build raises about them. */
@@ -712,14 +717,18 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
      * only when the CARD's own `kinds` accepts it. */
     const words = (l) => T.suggestFor(l).map((s) => s.words);
     check('typing an id offers every question you can ask OF it, named by the card it opens',
-      words('2-29604 ').join(' ') === 'MAP PLANET INSPECT WATCH LOG ROOM WHO HIST SCOUT BUILD',
+      words('2-29604 ').join(' ') === 'MAP PLANET INSPECT WATCH LOG HIST SCOUT BUILD ROOM',
       words('2-29604 ').join(' '));
-    /* A planet has a CONVERSATION, and it is reached by the same word that
-     * reaches a person's. That is the whole point of making a room a subject:
-     * `ROOM 2-29604`, `ROOM 1-61` and `ROOM #trade` are one request. */
-    check('…including the object\'s own room, under the same word a player\'s DM uses',
-      words('2-29604 ').includes('ROOM') && words('1-61 ').includes('ROOM')
-      && T.parse('ROOM 2-29604').type === 'room' && T.parse('ROOM 1-61').type === 'room');
+    /* A conversation is not a card. `ROOM 2-29604`, `DM 1-61`, `ROOM #trade`
+     * and `COMMS` all open the Comms WINDOW — at that subject when there is
+     * one — through one command, so the Terminal never grows a chat of its
+     * own again. SAY hands the window a draft, never a post. */
+    check('the Comms words open the window at their subject, and never a card',
+      T.parse('ROOM 2-29604').kind === 'comms' && T.parse('ROOM 2-29604').subject === '2-29604'
+      && T.parse('DM 1-61').kind === 'comms' && T.parse('COMMS').kind === 'comms' && T.parse('COMMS').subject === null
+      && T.parse('SAY 2-15361 shield is down').kind === 'say' && !T.parse('DMS').type
+      && words('1-61 ').includes('DM') && T.parse('1-61 DM').kind === 'comms' && T.parse('1-61 DM').subject === '1-61'
+      && T.parse('2-29604 SAY on my way').subject === '2-29604' && T.parse('2-29604 SAY on my way').text === 'on my way');
     check('…a player is asked different questions than a planet',
       words('1-61 ').includes('WALLET') && words('1-61 ').includes('BOOK')
         && !words('1-61 ').includes('LOG') && !words('2-29604 ').includes('WALLET'));
@@ -1165,20 +1174,19 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const made = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_players');
     check('…through the roster\'s own create, which picks the HD index and joins the guild', made.args.command === 'create' && made.args.name === 'Test Pilot');
   }
-  /* Comms is four native cards, not a window in an iframe. Each answers ONE
-   * question, which is what lets a board hold two conversations, the room list
-   * and the directory at once — the thing a single embedded window could not
-   * do however it was configured. */
+  /* Comms is a WINDOW, not a card. Every Comms word raises it through
+   * `matrix_open`; the Terminal adds nothing to the board for any of them. */
   {
     const before = w.Board.Terminal.state.layout.cards.length;
-    run('DMS');
-    const dm = w.Board.Terminal.state.layout.cards[w.Board.Terminal.state.layout.cards.length - 1];
-    check('DMS opens the room list scoped to people — a card, not a framed page',
-      w.Board.Terminal.state.layout.cards.length === before + 1 && dm.type === 'comms' && dm.params.show === 'direct');
-    await until(() => d.querySelector('#tm-' + dm.id + ' .tm-body'));
-    check('…and nothing about Comms is an iframe any more',
-      d.querySelector('#tm-' + dm.id + ' iframe') === null);
-    w.Board.Terminal.remove(dm.id);
+    const calls = () => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'matrix_open');
+    const n = calls().length;
+    run('DMS'); run('DM 1-61'); run('SAY 2-15361 shield is down');
+    const mine = calls().slice(n);
+    check('DMS, DM and SAY all reach the Comms window, and add no card',
+      w.Board.Terminal.state.layout.cards.length === before && mine.length === 3
+      && mine[0].args.subject == null && mine[1].args.subject === '1-61'
+      && mine[2].args.subject === '2-15361' && mine[2].args.draft === 'shield is down',
+      JSON.stringify(mine.map((c) => c.args)));
   }
 
   /* ── Deliver is a CARD now, not a window in a card ────────────────────────────

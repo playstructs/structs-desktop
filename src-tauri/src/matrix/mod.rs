@@ -1754,6 +1754,141 @@ pub async fn matrix_message_player(
     Ok(json!({ "room_id": room_id, "player_id": player_id }))
 }
 
+/// Open the Comms window AT something — a room id, an alias, an object id, a
+/// player id or a player's name — with an optional draft. One command behind
+/// every ⌘K word that names a conversation: the Terminal has no chat of its
+/// own any more; it points at the window that does.
+///
+/// A draft is a draft. `SAY 2-15361 shield is down` lands in the composer of
+/// that room with the text ready, and the player presses send — one keystroke
+/// from a launcher must never put words in front of other people.
+#[tauri::command]
+pub async fn matrix_open(
+    app: tauri::AppHandle,
+    subject: Option<String>,
+    draft: Option<String>,
+) -> Result<Value, String> {
+    open_chat_window(app.clone())?;
+    let subject = subject.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let draft = draft.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+    let mut room_id: Option<String> = None;
+    if let Some(s) = subject.as_deref() {
+        let guild_id = selected_guild().ok_or("no guild you belong to runs a comms server")?;
+        let session = store::get(&guild_id).ok_or("Comms is still signing in — try again in a moment")?;
+        let id = resolve_subject(&guild_id, &session, s).await?;
+        set_pending_room(&guild_id, &id);
+        let _ = crate::mcp::events::emit_matrix(
+            &app,
+            "matrix::show_room",
+            json!({ "guild_id": guild_id, "room_id": id }),
+        );
+        room_id = Some(id);
+    }
+    if let Some(d) = draft.as_deref() {
+        set_pending_draft(d);
+        let _ = crate::mcp::events::emit_matrix(&app, "matrix::compose", json!({ "text": d }));
+    }
+    Ok(json!({ "ok": true, "room_id": room_id, "draft": draft }))
+}
+
+/// What a typed subject names, as a room the window can show. Chain ids by
+/// their type: a player is a DM, a planet or fleet is its object room; a bare
+/// word is a player's name from the directory; `#alias` and `!room` are
+/// themselves.
+async fn resolve_subject(guild_id: &str, session: &store::Session, s: &str) -> Result<String, String> {
+    if s.starts_with('!') {
+        return Ok(s.to_string());
+    }
+    if s.starts_with('#') {
+        return client::room_id_for_alias(session, s)
+            .await
+            .ok_or_else(|| format!("no room called {s}"));
+    }
+    let kind = s.split_once('-').and_then(|(k, rest)| {
+        if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() { k.parse::<u32>().ok() } else { None }
+    });
+    match kind {
+        Some(1) => {
+            let their_id = directory::matrix_id_resolving(s).await?;
+            let room_id = client::open_dm(guild_id, session, &their_id).await?;
+            client::note_dm_player(guild_id, &room_id, s);
+            Ok(room_id)
+        }
+        Some(2) | Some(9) => {
+            let v = matrix_object_room(Some(guild_id.to_string()), s.to_string()).await?;
+            v.get("room_id")
+                .and_then(|r| r.as_str())
+                .map(String::from)
+                .ok_or_else(|| format!("no room for {s} yet — say something in it from the window"))
+        }
+        Some(_) => Err(format!("{s} is not a player, a planet or a fleet")),
+        None => {
+            let pid = player_id_by_name(s).ok_or_else(|| format!("no player called \u{201c}{s}\u{201d}"))?;
+            let their_id = directory::matrix_id_resolving(&pid).await?;
+            let room_id = client::open_dm(guild_id, session, &their_id).await?;
+            client::note_dm_player(guild_id, &room_id, &pid);
+            Ok(room_id)
+        }
+    }
+}
+
+/// The one player a name means: exact, then the one name that starts with
+/// it, then the one that contains it. Case-insensitive; on-chain names only.
+fn player_id_by_name(name: &str) -> Option<String> {
+    let want = name.trim().to_lowercase();
+    if want.is_empty() {
+        return None;
+    }
+    let all = directory::all();
+    let pick = |test: &dyn Fn(&str) -> bool| -> Option<String> {
+        let hits: Vec<&(String, directory::Ident)> =
+            all.iter().filter(|(_, i)| test(&i.username.to_lowercase())).collect();
+        if hits.len() == 1 { Some(hits[0].0.clone()) } else { None }
+    };
+    pick(&|n| n == want)
+        .or_else(|| pick(&|n| n.starts_with(&want)))
+        .or_else(|| pick(&|n| n.contains(&want)))
+}
+
+/// A private room with any set of players, on any homeserver. The thing a
+/// treaty, a trade or a raid plan needs and a DM cannot hold.
+#[tauri::command]
+pub async fn matrix_group(
+    app: tauri::AppHandle,
+    guild_id: String,
+    player_ids: Vec<String>,
+    name: Option<String>,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    directory::ensure_fresh().await;
+    let me = directory::player_id_of(&session.user_id);
+    let mut invites: Vec<String> = Vec::new();
+    for p in player_ids {
+        let p = p.trim().trim_start_matches('#');
+        if p.is_empty() || me.as_deref() == Some(p) {
+            continue;
+        }
+        invites.push(directory::matrix_id_resolving(p).await?);
+    }
+    if invites.is_empty() {
+        return Err("who is in the group?".into());
+    }
+    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    let room_id = client::create_group(&session, &invites, name.as_deref()).await?;
+    let _ = crate::mcp::events::emit_matrix(
+        &app,
+        "matrix::rooms",
+        json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
+    );
+    set_pending_room(&guild_id, &room_id);
+    let _ = crate::mcp::events::emit_matrix(
+        &app,
+        "matrix::show_room",
+        json!({ "guild_id": guild_id, "room_id": room_id }),
+    );
+    Ok(json!({ "room_id": room_id, "invited": invites.len() }))
+}
+
 /// Bring something from the game into a conversation.
 ///
 /// The game is full of moments worth saying something about — a raid on your

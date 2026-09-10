@@ -3566,6 +3566,32 @@ pub async fn open_dm(
     Ok(room_id)
 }
 
+/// A private, invite-only room for a set of people. `private_chat` (not the
+/// trusted variant): a group's members should not all hold power over each
+/// other the way the two ends of a DM do.
+pub async fn create_group(
+    session: &Session,
+    invites: &[String],
+    name: Option<&str>,
+) -> Result<String, String> {
+    let url = format!("{}/createRoom", base(session));
+    let mut payload = json!({
+        "preset": "private_chat",
+        "invite": invites,
+    });
+    if let Some(n) = name {
+        payload["name"] = json!(n);
+    }
+    let v = authed(session, move |c, s| {
+        c.post(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await?;
+    v.get("room_id")
+        .and_then(|r| r.as_str())
+        .map(String::from)
+        .ok_or_else(|| "the homeserver created no room".to_string())
+}
+
 /// Remember that this room is the conversation with this PLAYER.
 ///
 /// Called by `matrix_message_player`, which is handed a player id and would

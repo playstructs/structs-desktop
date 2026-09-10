@@ -171,6 +171,8 @@ fn main() {
             matrix::matrix_message_player,
             matrix::matrix_take_pending_room,
             matrix::matrix_share,
+            matrix::matrix_open,
+            matrix::matrix_group,
             matrix::matrix_take_pending_draft,
             matrix::matrix_open_as,
             matrix::matrix_object_room,

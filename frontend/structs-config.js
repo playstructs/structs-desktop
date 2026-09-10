@@ -3623,12 +3623,15 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
      * Nothing else is reachable from this frame; see the note above. */
     var FRAME_CMDS = {
       open_terminal_card_new: 1, log_ui_events: 1,
-      /* `SAY <text>` from ⌘K over the map: the one Comms verb that is worth
-       * more from the game than from the Terminal. The palette frame is OUR
-       * page, not a rail rendering strangers' text, and these three are the
-       * whole of what it needs — status to know the session key, rooms to
-       * name a target, send to say it. Nothing that moves value. */
-      matrix_status: 1, matrix_rooms: 1, matrix_send: 1,
+      /* `PLANET jpeg`, `PLAYER jpeg`, `RECORD jpeg`: the palette is a search
+       * bar, and the search is `mcp_player_search` — a name to an id, an id to
+       * the planet and fleet it owns. Read-only. */
+      mcp_player_search: 1,
+      /* Every Comms word — `SAY`, `DM`, `ROOM`, `COMMS` — raises the Comms
+       * WINDOW through one command, at a subject and with a draft. The
+       * palette frame reads nothing from any room and posts nothing itself:
+       * a keystroke in a launcher must never put words in front of people. */
+      matrix_open: 1,
     };
 
     var host = null, frame = null, open = false;

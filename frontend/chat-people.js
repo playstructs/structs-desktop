@@ -230,6 +230,13 @@
       var right = el('div', 'sui-result-row-right-section');
       var btn = el('button', 'sui-screen-btn sui-mod-secondary', 'Message');
       right.appendChild(btn);
+      /* A group is picked one person at a time from the same list. The
+       * button reads what it will do — Add, or Added — because a checkbox on
+       * a row that also opens a DM is two meanings on one click. */
+      var picked = groupPick().indexOf(p.player_id) >= 0;
+      var add = el('button', 'sui-screen-btn ' + (picked ? 'sui-mod-primary' : 'sui-mod-secondary'), picked ? 'Added' : 'Add');
+      add.addEventListener('click', function (ev) { ev.stopPropagation(); togglePick(p.player_id); render(); });
+      right.appendChild(add);
       row.appendChild(right);
 
       var open = function () { startDm(p.player_id); };
@@ -237,6 +244,48 @@
       btn.addEventListener('click', function (ev) { ev.stopPropagation(); open(); });
       return row;
     }
+
+    // ── Groups ────────────────────────────────────────────────────────────
+    // Any set of players, on any homeserver, in one private room — the thing
+    // a treaty, a trade or a raid plan needs and a DM cannot hold.
+    function groupPick() { return S.groupPick || (S.groupPick = []); }
+    function togglePick(playerId) {
+      var list = groupPick(), i = list.indexOf(playerId);
+      if (i >= 0) list.splice(i, 1); else list.push(playerId);
+    }
+    function groupStrip() {
+      var list = groupPick();
+      if (!list.length) return null;
+      var strip = el('div', 'chat-topic');
+      strip.appendChild(el('span', null, 'Group with ' + list.join(', ') + ' '));
+      var label = el('label', 'sui-input-text');
+      label.setAttribute('for', 'chat-group-name');
+      var name = el('input');
+      name.type = 'text'; name.id = 'chat-group-name'; name.name = 'chat-group-name';
+      name.placeholder = 'Name it (optional)'; name.autocomplete = 'off';
+      name.value = S.groupName || '';
+      name.addEventListener('input', function () { S.groupName = name.value; });
+      label.appendChild(name);
+      strip.appendChild(label);
+      var make = el('button', 'sui-screen-btn sui-mod-primary', 'Create group');
+      make.addEventListener('click', function () { createGroup(); });
+      strip.appendChild(make);
+      var clear = el('button', 'sui-screen-btn sui-mod-secondary', 'Clear');
+      clear.addEventListener('click', function () { S.groupPick = []; S.groupName = ''; render(); });
+      strip.appendChild(clear);
+      return strip;
+    }
+    function createGroup() {
+      var ids = groupPick().slice();
+      if (!ids.length) return Promise.resolve();
+      return invoke('matrix_group', { guildId: S.guildId, playerIds: ids, name: (S.groupName || '').trim() || null })
+        .then(function (res) {
+          S.groupPick = []; S.groupName = '';
+          return refreshRooms().then(function () { if (res && res.room_id) return openRoom(res.room_id); });
+        })
+        .catch(function (e) { showError(String(e)); });
+    }
+    Chat.createGroup = createGroup;
 
     function renderPeople() {
       var page = el('div', 'chat-page');
@@ -256,6 +305,8 @@
       label.appendChild(input);
       search.appendChild(label);
       page.appendChild(search);
+      var strip = groupStrip();
+      if (strip) page.appendChild(strip);
 
       var scroll = el('div', 'chat-scroll');
       if (S.peopleLoading) {
