@@ -952,6 +952,42 @@
     html[data-card] #board-layout > .sui-panel > .sui-panel-chunk > .sui-screen { border-width: 0; }
     html[data-card] .ops-scroll { padding: 0; }
 
+    /* ── The frame IS the window ────────────────────────────────────────
+       A card window sized its frame to its CONTENT, which is wrong in both
+       directions: a short card (STATS) drew its bottom border a third of the
+       way down and left bare page under it, and a long one (FEED, RECORD) ran
+       its rows straight off the bottom with the border nowhere in sight,
+       because the scroll lived on `.ops-scroll` — the whole card, border and
+       all, scrolled away. The window owns the height, the panel spans it, and
+       the BODY is the only thing that scrolls.
+
+       Every link in the chain has to pass the height down: the page, its body,
+       the one-column grid, and the card. A single `min-height: 0` missing
+       anywhere and a flex child refuses to shrink below its content, which is
+       the same overflow again one level in. */
+    html[data-card] .ops-scroll { overflow: hidden; }
+    html[data-card] #page-terminal { height: 100%; min-height: 0; }
+    html[data-card] #terminal-body { flex: 1 1 auto; min-height: 0; }
+    /* The grid gives the card a ROW to fill. `height: 100%` on the card
+       instead resolves against an auto-sized track, which is circular — it
+       collapsed the whole panel to its 25px header. */
+    html[data-card] #tm-grid.tm-solo { height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+    html[data-card] #board-layout .tm-card { align-self: stretch; max-height: 100%; min-height: 0; }
+    /* The header and the config drawer keep their size; the body takes the
+       rest. Without `flex: none` a tall body squeezes the header instead. */
+    /* `.sui-panel-chunk` is a flex ITEM of the panel, so its automatic minimum
+       size is its content — which is what pushed a 411px card to 5,500px and
+       overflowed the window while every ancestor measured correctly. */
+    html[data-card] .tm-card > .tm-chunk { min-height: 0; }
+    html[data-card] .tm-card > .tm-chunk > .tm-head-screen,
+    html[data-card] .tm-card > .tm-chunk > .tm-config { flex: none; }
+    html[data-card] .tm-card > .tm-chunk > .tm-body-screen { flex: 1 1 auto; min-height: 0; }
+    /* Beats every height class (short/medium/tall/grow): in a window of its
+       own a card has exactly one height, the window's. */
+    html[data-card] #board-layout .tm-card .tm-body {
+      height: 100%; max-height: 100%; overflow-y: auto;
+    }
+
     /* A card that embeds a whole page (Comms, Pay) keeps that page's own bar
        as its header; the frame draws none and only the resize grip remains. */
     /* The SCREEN, not just the bar inside it. Hiding `.tm-head` alone left its
@@ -1440,6 +1476,97 @@
     .tm-lane-rows { list-style: none; margin: 0; padding: 0; overflow-y: auto; max-height: 30vh; }
     #board-layout .tm-h-grow .tm-lane-rows { max-height: none; }
     .tm-feed-rep { color: var(--text-hint); }
+
+    /* ── Comms (board-terminal-comms.js) ───────────────────────────────────
+       Four cards over one model. Nothing here takes a fixed height: a room
+       list, a timeline and a directory all want the card's height, and the
+       window that these replace was one 420px box for all three. */
+    .cm-signin { display: flex; flex-direction: column; gap: var(--spacing-md);
+      align-items: flex-start; text-align: left; }
+    .cm-ladder { display: flex; flex-direction: column; gap: var(--spacing-xs); width: 100%; }
+    .cm-step { display: flex; align-items: flex-start; gap: var(--spacing-md); }
+    .cm-step-text { min-width: 0; }
+    .cm-step.cm-mod-failed { color: var(--accent-destructive); }
+    .cm-step.cm-mod-done { color: var(--text-hint); }
+    .cm-step.cm-mod-active { color: var(--text-player-primary); }
+
+    /* One section of the room list. Invites, pinned, people, guild, galaxy —
+       always in that order, because invites are the only rows anyone is
+       waiting on an answer to. */
+    .cm-sec { display: flex; align-items: center; gap: var(--spacing-sm);
+      padding: var(--spacing-md) 0 var(--spacing-xs); border-bottom: 1px solid var(--border-subtle);
+      color: var(--text-hint); }
+    .cm-sec .cm-sec-n { margin-left: auto; }
+
+    .cm-room { display: flex; align-items: center; gap: var(--spacing-md);
+      padding: var(--spacing-xs) var(--spacing-sm); border-bottom: 1px solid var(--border-subtle);
+      text-align: left; }
+    .cm-room.is-clickable { cursor: pointer; }
+    .cm-room.is-clickable:hover { background: var(--surface-player-highlight); }
+    .cm-room-face { flex: none; display: flex; align-items: center; }
+    .cm-room-mid { min-width: 0; flex: 1 1 auto; }
+    .cm-room-title { display: flex; align-items: baseline; gap: var(--spacing-sm); min-width: 0; }
+    .cm-room-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cm-room-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--text-hint); }
+    .cm-room-moved { display: block; color: var(--text-warning); }
+    .cm-room-right { flex: none; display: flex; align-items: center; gap: var(--spacing-sm); }
+    /* Unread is a count; being NAMED is a badge beside it. A count of 40 hides
+       the one message that was actually for you. */
+    .cm-room-n { font-variant-numeric: tabular-nums; color: var(--text-player-primary); }
+    .cm-room-n.is-muted { color: var(--text-hint); }
+    .cm-room.is-unread .cm-room-name { color: var(--text-player-primary); }
+    .cm-room.is-muted { opacity: .6; }
+    .cm-room.is-mention { box-shadow: inset 2px 0 0 var(--accent-destructive); }
+    .cm-room.is-active { background: var(--surface-player-highlight); }
+
+    /* The conversation. The timeline takes the room the composer leaves — the
+       composer is fixed, the messages give ground, never the other way. */
+    .cm-timeline { flex: 1 1 auto; min-height: 0; overflow-y: auto;
+      display: flex; flex-direction: column; gap: var(--spacing-xs);
+      margin-bottom: var(--spacing-md); }
+    #board-layout .tm-card[data-type="room"] .tm-body { display: flex; flex-direction: column; }
+    .cm-older { color: var(--text-hint); align-self: center; }
+    .cm-older:hover { color: var(--text-player-primary); }
+    .cm-typing { color: var(--text-hint); }
+    .cm-replying { display: flex; align-items: baseline; gap: var(--spacing-sm);
+      color: var(--text-hint); border-left: 2px solid var(--accent-secondary);
+      padding-left: var(--spacing-md); }
+    .cm-replying .cm-x { margin-left: auto; }
+    .cm-msg-act { color: var(--text-hint); }
+    /* A search hit is a message plus the room it was said in — without the
+       room it is a quote from nowhere. */
+    .cm-me { display: flex; align-items: baseline; gap: var(--spacing-md); }
+    .cm-me .cm-signout { margin-left: auto; color: var(--text-hint); white-space: nowrap; }
+    .cm-me .cm-signout:hover { color: var(--accent-destructive); }
+    /* Ids a message named, beyond the one that expanded. Chips, not cards:
+       a message naming four objects would otherwise bury itself under four. */
+    .cm-refs { display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
+      margin-top: var(--spacing-xs); }
+    .cm-hit { border-bottom: 1px solid var(--border-subtle); padding-bottom: var(--spacing-xs);
+      margin-bottom: var(--spacing-xs); }
+    .cm-hit-room { display: block; color: var(--accent-secondary); }
+    /* Three small LINKS that all carry a caption class and were all 16px.
+       The base rule is written `a, a:link, a:visited`, and `a:link` is
+       (0,1,1) — it outranks any single class, so `.fstat-l` on an <a>
+       silently does nothing in this window. Said once here, with the id in
+       front to win, rather than repeated on each of them. */
+    #board-layout .cm-older, #board-layout .cm-signout, #board-layout .cm-hit-room,
+    #board-layout .cm-room-moved { font-size: 8px; }
+
+    /* A one-wide card is 306px. An invite row there is a name, a Join and a
+       Decline competing for it, and the NAME is the part that loses — which
+       is the one thing on the row you need to decide. So under 340px the
+       answer moves under the question. Container query, not a media query:
+       the card's width is what matters, and the same card is 306, 640 or 960
+       depending only on where it was dropped. */
+    #board-layout .tm-card[data-type="comms"] .tm-body,
+    #board-layout .tm-card[data-type="channels"] .tm-body { container-type: inline-size; }
+    @container (max-width: 340px) {
+      .cm-room { flex-wrap: wrap; }
+      .cm-room-right { width: 100%; justify-content: flex-end; }
+    }
+    .cm-msg-act:hover { color: var(--text-player-primary); }
     .tm-comms-body { max-height: 360px; overflow-y: auto; }
     .chat-rent-quote.chat-rent-short { color: var(--text-warning); }
     /* ── Game Stats charts (board-gamestats.js) ─────────────────────────── */
@@ -1741,5 +1868,9 @@
   <script src="raidview-log.js"></script>
   <script src="board-terminal.js"></script>
   <script src="board-terminal-ops.js"></script>
+  <!-- Comms: the model first, then the cards over it. Both AFTER
+       board-terminal.js, which is where Board.Terminal is created. -->
+  <script src="board-comms.js"></script>
+  <script src="board-terminal-comms.js"></script>
 </body>
 </html>

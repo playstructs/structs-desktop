@@ -326,10 +326,13 @@
         }
         body.appendChild(node);
         if ((m.kind || 'text') !== 'event') prev = m;
-        // The BODY is a separate node under the head, as the timeline draws it.
-        if ((m.kind || 'text') !== 'event' && (m.kind || 'text') !== 'emote') {
-          node.appendChild(el('div', 'chat-msg-body', m.body || ''));
-        }
+        /* The BODY, from the shared row rather than hand-built here. This was
+         * a bare `chat-msg-body` div, which is why the rail showed nothing for
+         * a reply's quote line and drew reactions as unstyled spans — both of
+         * which chatrow.js knows how to draw, and now does for all three
+         * windows. Read-only: the rail carries no reply or react controls. */
+        var b = R.body(m, {});
+        if (b) node.appendChild(b);
       });
     }
 

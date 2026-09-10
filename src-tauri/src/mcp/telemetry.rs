@@ -1047,6 +1047,16 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
 // on Tuesday", "when did we lose 2,285 structs") is outside it. These two
 // readers are the only way anything can see past the ring.
 
+/// Memo for `grass_pulse`, keyed by window. Measured on the live 620k-row
+/// table: 24 h costs 67 ms, 48 h 136 ms, and the 7-day window **682 ms** —
+/// a full scan, since a week IS the retention. The card asks on mount and
+/// again on every cadence tick, and only the newest bucket can have moved in
+/// between, so a short TTL turns all but the first tick into nothing. Held
+/// well under the card's own 60 s cadence so the live bar still breathes.
+const PULSE_TTL_MS: f64 = 30_000.0;
+static PULSE_MEMO: std::sync::LazyLock<std::sync::Mutex<HashMap<usize, (f64, Vec<Value>)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
 /// The FEED card's pulse band: one bucket per hour.
 ///
 /// Returns, newest last: `{ hour_ms, total, top, destroyed, combat }`. The
@@ -1055,9 +1065,17 @@ pub fn pow_stats(window_ms: f64) -> Result<Value, String> {
 /// category costs no extra pass.
 pub fn grass_pulse(hours: usize) -> Result<Vec<Value>, String> {
     const HOUR_MS: f64 = 3_600_000.0;
-    let conn = open_read()?;
     let hours = hours.clamp(1, 24 * 8);
-    let since = now_millis() - HOUR_MS * hours as f64;
+    let now = now_millis();
+    if let Ok(memo) = PULSE_MEMO.lock() {
+        if let Some((at, cached)) = memo.get(&hours) {
+            if now - at < PULSE_TTL_MS {
+                return Ok(cached.clone());
+            }
+        }
+    }
+    let conn = open_read()?;
+    let since = now - HOUR_MS * hours as f64;
     let mut stmt = conn
         .prepare(
             // 35 is the destroyed bit. `struct_status` is three different
@@ -1090,7 +1108,11 @@ pub fn grass_pulse(hours: usize) -> Result<Vec<Value>, String> {
     for row in rows {
         tuples.push(row.map_err(|e| e.to_string())?);
     }
-    Ok(fold_pulse(tuples))
+    let out = fold_pulse(tuples);
+    if let Ok(mut memo) = PULSE_MEMO.lock() {
+        memo.insert(hours, (now, out.clone()));
+    }
+    Ok(out)
 }
 
 /// `(hour, category, count, destroyed)` tuples → one bucket per hour.

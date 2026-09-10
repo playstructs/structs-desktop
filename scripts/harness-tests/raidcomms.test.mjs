@@ -18,6 +18,15 @@ function boot(target, fixtures = {}) {
   w.StructsChatRow = {
     notice: (t, d) => el('div', 'notice', t + ' ' + d),
     render: (m) => { const n = el('div', 'row'); n.appendChild(el('div', 'chat-msg-meta', m.sender_name || '')); return n; },
+    /* The BODY is the shared row's too now. The rail used to hand-build a bare
+     * `chat-msg-body` div, which is why a reply's quote line never appeared in
+     * it and reactions drew as unstyled spans. Faithful to the real one: null
+     * for the kinds `render` already drew whole. */
+    body: (m) => {
+      const k = m.kind || 'text';
+      if (k === 'gap' || k === 'event' || k === 'emote') return null;
+      return el('div', 'chat-msg-body', m.body || '');
+    },
     composer: (o) => { const node = el('div', 'composer'); const input = el('input'); input.id = o.inputId; const send = el('a', 'send'); const portrait = el('div', 'portrait'); portrait.appendChild(el('div', 'sui-screen-portrait-image')); node.appendChild(input); node.appendChild(send); node.appendChild(portrait); return { node, input, send, portrait, battery: el('div', 'battery') }; },
   };
   w.eval(src);

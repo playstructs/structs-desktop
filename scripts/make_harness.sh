@@ -552,6 +552,82 @@ cat > "$FIX" <<'EOF'
     // than from reading Rust, and the response check caught it.
     matrix_message_player: { room_id: '!dm-harness:h', player_id: '1-61' },
     matrix_share: { ok: true },
+    /* Comms, as the native cards read it (board-comms.js).
+     *
+     * `matrix_status` answers with a session KEY — the guild id for the
+     * primary, `guild#player` for anyone else on the roster — and every later
+     * call echoes it back as `guildId`. A fixture that answered a bare guild
+     * id would let a card that guesses the key pass. */
+    get matrix_status() {
+      return window.__HARNESS_MATRIX_OUT__ ? {
+        networks: [{ guild_id: '0-5', guild_name: 'SN Corp', homeserver: 'h', logged_in: false }],
+        selected: '0-5', as_player: null, profile: null, resources: null, error: null,
+      } : {
+        networks: [{ guild_id: '0-5', guild_name: 'SN Corp', homeserver: 'h', logged_in: true,
+                     user_id: '@1-194:h' }],
+        selected: '0-5', as_player: null,
+        profile: { display_name: 'Marklifer', pfp_attrs: null, avatar_published: true },
+        resources: null, error: null,
+      };
+    },
+    matrix_connect: { ok: true, steps: [] },
+    /* One room of every kind the list has to tell apart: an INVITE nobody has
+     * answered, a mention, plain unread, a muted room still counted, a DM with
+     * a face, a room that has been UPGRADED and is still joinable, and an
+     * ENCRYPTED one this client cannot read a word of. The discussed room is
+     * SECOND so a composer that simply takes the first fails. */
+    matrix_rooms: { guild_id: '0-5', rooms: [
+      { room_id: '!general:h', name: 'General', canonical_alias: '#general:h', section: 'local',
+        joined: true, members: 40, unread: 0, mention: false, icon: 'icon-guild' },
+      { room_id: '!snc:h', name: 'SN.Corporation', canonical_alias: '#snc:h', section: 'local',
+        joined: true, members: 12, unread: 3, mention: true, icon: 'icon-guild',
+        topic: 'guild business' },
+      { room_id: '!trade:h', name: 'Trade', canonical_alias: '#trade:h', section: 'galaxy',
+        joined: true, members: 300, unread: 9, mention: false, icon: 'icon-transfers' },
+      { room_id: '!noise:h', name: 'Noise', canonical_alias: '#noise:h', section: 'galaxy',
+        joined: true, members: 800, unread: 400, mention: false, muted: true, icon: 'icon-transfers' },
+      { room_id: '!dm-jpeg:h', name: 'JPEG', section: 'direct', joined: true, members: 2,
+        unread: 1, mention: false, icon: 'icon-member', player_id: '1-61' },
+      { room_id: '!old:h', name: 'War Room', section: 'local', joined: true, members: 4,
+        unread: 0, mention: false, icon: 'icon-guild', replaced_by: '!new:h' },
+      { room_id: '!secret:h', name: 'Secret', section: 'galaxy', joined: true, members: 3,
+        unread: 0, mention: false, icon: 'icon-guild', encrypted: true },
+      { room_id: '!invite:h', name: 'Ore Cartel', section: 'galaxy', joined: false,
+        invited: true, invited_by: 'Beezhan', members: 6, unread: 0, mention: false,
+        icon: 'icon-guild' },
+      { room_id: '!home:h', name: 'Announcements', section: 'local', joined: true,
+        home_rank: 0, members: 900, unread: 0, mention: false, icon: 'icon-beacon' },
+    ] },
+    matrix_browse: { rooms: [
+      { room_id: '!trade:h', name: 'Trade', canonical_alias: '#trade:h', members: 300, joined: true },
+      { room_id: '!help:h', name: 'Help', canonical_alias: '#help:h', members: 88, joined: false,
+        topic: 'ask anything' },
+    ] },
+    matrix_people: { people: [
+      { player_id: '1-61', name: 'JPEG' },
+      { player_id: '1-104', name: 'BEEZHAN' },
+    ] },
+    matrix_dm: { room_id: '!dm-jpeg:h', name: 'JPEG' },
+    matrix_members: { members: [
+      { user_id: '@1-61:h', player_id: '1-61', name: 'JPEG' },
+      { user_id: '@1-194:h', player_id: '1-194', name: 'Marklifer' },
+    ] },
+    matrix_join: { ok: true, room_id: '!help:h' },
+    matrix_leave: { ok: true },
+    matrix_mute: { ok: true },
+    matrix_mark_read: { ok: true },
+    matrix_typing: { ok: true },
+    matrix_react: { ok: true },
+    matrix_redact: { ok: true },
+    matrix_backfill: { messages: [] },
+    /* The HOMESERVER searches, not the client: a hit carries the room it was
+     * said in, which is the whole answer when the search spans every room. */
+    matrix_search: { query: 'shield', hits: [
+      { room_id: '!snc:h', room_name: 'SN.Corporation',
+        message: { event_id: '$h1', sender: '@1-61:h', sender_name: 'JPEG', kind: 'text',
+                   ts: 1, body: 'shield on 2-1 is down to 25' } },
+    ] },
+    matrix_send: { ok: true, event_id: '$sent' },
     mcp_board_html: '<div class="sui-data-card-row">harness ops snapshot</div>',
     mcp_board_feed: [],
     mcp_health: { ok: true },

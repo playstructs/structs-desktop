@@ -55,7 +55,12 @@ const D = w.document;
 const q = (s) => D.querySelectorAll(s);
 const text = (n) => (n.textContent || '').replace(/\s+/g, ' ').trim();
 
-await until(() => w.Board && w.Board.pages && w.Board.pages.config);
+/* `Board.T` — which every page's render reaches through for its invoke — is
+ * assigned inside init(), a setTimeout after DOMContentLoaded, while
+ * `Board.pages.config` exists at script-eval time. Entering between the two
+ * throws `Cannot read properties of null (reading 'core')`. Wait for the thing
+ * the render actually needs. */
+await until(() => w.Board && w.Board.T && w.Board.pages && w.Board.pages.config);
 w.Board.pages.config.onEnter({}, 'notifications');
 await until(() => q('#config-body .sui-result-row').length);
 

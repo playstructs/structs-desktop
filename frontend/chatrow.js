@@ -241,6 +241,100 @@
              battery: battery };
   }
 
+  /* Everything UNDER the head: what this answers, what was said, and who
+   * reacted to it.
+   *
+   * `render()` deliberately stops at the head, because the three windows that
+   * draw a message disagree about what goes beneath it — and so all three grew
+   * their own `chat-msg-body`. The raid rail's was one line; the Terminal's
+   * would have been a fourth. The parts they AGREE on live here now, and what
+   * a window adds arrives through hooks:
+   *
+   *   fill(node, text)   how this window renders text (linkified, ref-aware).
+   *                      Default: textContent — never innerHTML, because every
+   *                      body here is somebody else's text.
+   *   onJump(eventId)    make the reply quote a pointer you can follow.
+   *   onReact(key)       make the reactions clickable.
+   *   mediaUrl(mxc)      resolve an image; without it the filename stands in.
+   *
+   * Returns null for the kinds `render()` already drew whole (gap, event,
+   * emote) so a caller can append unconditionally.
+   */
+  function body(m, opts) {
+    opts = opts || {};
+    var kind = kindOf(m);
+    if (kind === 'gap' || kind === 'event' || kind === 'emote') return null;
+    var frag = document.createDocumentFragment();
+
+    /* What this answers: one line, a POINTER back rather than a copy. The full
+     * text is already up there in the room, and Matrix's compatibility
+     * fallback quote is the sender's words rearranged by their client. */
+    if (m.reply_to) {
+      var q = el('a', 'chat-reply-quote');
+      q.href = 'javascript:void(0)';
+      q.appendChild(el('span', 'chat-reply-who', m.reply_sender || 'a message'));
+      q.appendChild(el('span', 'chat-reply-text', m.reply_excerpt || '…'));
+      if (opts.onJump) {
+        q.title = 'Go to the message this answers';
+        q.addEventListener('click', function () { opts.onJump(m.reply_to); });
+      }
+      frag.appendChild(q);
+    }
+    /* A thread is a grouping none of these windows draw. Saying so is honest;
+     * showing the attached quote would put words in the sender's mouth. */
+    else if (m.thread_root) {
+      frag.appendChild(el('div', 'chat-reply-quote chat-mod-thread', 'In a thread'));
+    }
+
+    /* A picture is shown, not described — in the box `chat-rows.css` already
+     * defines, so the three windows frame it identically. An `mxc://` needs an
+     * authenticated fetch to become a URL, so a window that has not wired one
+     * says the filename rather than drawing a broken image. */
+    if (kind === 'image' && m.mxc) {
+      var box = el('div', 'chat-image');
+      if (opts.mediaUrl) {
+        var img = el('img', 'chat-image-img');
+        img.alt = m.body || 'image';
+        img.title = m.body || '';
+        img.src = opts.mediaUrl(m.mxc);
+        box.appendChild(img);
+      } else {
+        box.appendChild(el('div', 'chat-image-loading', m.body || 'image'));
+      }
+      frag.appendChild(box);
+    } else {
+      var b = el('div', 'chat-msg-body'
+        + (kind === 'notice' ? ' chat-mod-notice' : kind === 'unknown' ? ' chat-mod-unknown' : ''));
+      if (opts.fill) opts.fill(b, m.body || '');
+      else b.textContent = m.body || '';
+      frag.appendChild(b);
+    }
+
+    var rx = reactions(m, opts.onReact);
+    if (rx) frag.appendChild(rx);
+    return frag;
+  }
+
+  /* Who reacted, and with what. `mine` is why the row is a control and not a
+   * readout: clicking the key you already sent takes it back. */
+  function reactions(m, onReact) {
+    var list = (m && m.reactions) || [];
+    if (!list.length) return null;
+    var row = el('div', 'chat-reactions');
+    list.forEach(function (r) {
+      // `sui-badge chat-reaction` — the same chip the Comms window builds, so
+      // one stylesheet dresses all three windows.
+      var chip = el(onReact ? 'a' : 'span', 'sui-badge chat-reaction' + (r.mine ? ' chat-mod-mine' : ''));
+      if (onReact) { chip.href = 'javascript:void(0)'; chip.addEventListener('click', function () { onReact(r.key, r.mine); }); }
+      chip.appendChild(el('span', 'chat-reaction-key', r.key));
+      chip.appendChild(el('span', 'chat-reaction-count', String(r.count)));
+      // "Who agreed to the plan" is the whole point in a guild room.
+      if (r.who && r.who.length) chip.title = r.who.join(', ');
+      row.appendChild(chip);
+    });
+    return row;
+  }
+
   /* What a timeline shows instead of messages.
    *
    * A title and a sentence, not a bare line of hint text. This is the state a
@@ -256,6 +350,8 @@
 
   root.StructsChatRow = {
     notice: notice,
+    body: body,
+    reactions: reactions,
     composer: composer,
     render: render,
     continues: continues,

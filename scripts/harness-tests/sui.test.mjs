@@ -47,7 +47,9 @@ const BUDGET = {
   // sizes — 8, 12 and 16 — and Team Ops invented a continuous one between
   // them (8, 9, 10, 11, 12, 13). Remapping is a visible change to a console
   // people use, so it wants doing deliberately rather than in a sweep.
-  'chat.html':          [0, 65],
+  // chat.html −11 (2026-09-09): reactions and replies moved to chat-rows.css,
+  // where the raid rail and the Terminal's ROOM card can see them too.
+  'chat.html':          [0, 54],
   'chat.js':            [0, 0],
   // The sections extracted from chat.js (2026-09-05) and the shared
   // listener helper: built with textContent and tokens, no pixels of their own.
@@ -115,13 +117,26 @@ const BUDGET = {
   // height (a chart plot area, which SUI has no token for, the way the Game
   // Stats meters have none) and four 1px hairlines: the band's inter-bar gap,
   // the lane box, the lane header rule, and the picked hour's outline.
-  'board.html':         [2, 115],
+  // board.html +3 (2026-09-09): native Comms — three 1px/2px hairlines (the
+  // section rule, the room-row rule, the mention and reply-quote stripes).
+  // board.html +1 (2026-09-09): the room row's container breakpoint — the
+  // width at which an invite's Join/Decline stop competing with its name.
+  // A breakpoint is not spacing and has no token, same as the Pay card's.
+  // board.html +1 (2026-09-09): ONE 8px for Comms' four small links. The base
+  // link rule is `a, a:link, a:visited`, and `a:link` is (0,1,1) — it outranks
+  // `.fstat-l`, so an <a> carrying a caption class in this window renders at
+  // 16px until something with an id in front says otherwise.
+  // board.html +1 (2026-09-09): a search hit's rule.
+  'board.html':         [2, 121],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not
   // spacing and has no token.
   'board-gamestats.js': [0, 1],
   'board-terminal.js':  [0, 0],
+  // Comms: the model is pure data and the cards build with tokens only.
+  'board-comms.js':     [0, 0],
+  'board-terminal-comms.js': [0, 0],
   'board-terminal-ops.js': [0, 0],
   'board-shim.js':      [0, 0],
   // The debug-tab patch INJECTED INTO THE GAME'S OWN WINDOW, so it renders
@@ -141,7 +156,8 @@ const BUDGET = {
   // and are audited the same way. The px here are the portrait's native 72px
   // art, 32px icon doors, a 6px presence dot and 1px hairlines.
   'playercard.css':     [0, 23],
-  'chat-rows.css':      [0, 19],
+  // +10 (2026-09-09): the reaction and reply rules that arrived from chat.html.
+  'chat-rows.css':      [0, 29],
   // The guild emblem (72px / 24px) and its 1px frame.
   'guildcard.css':      [0, 10],
   // The owner line's 24px portrait and the unit/owner type sizes.

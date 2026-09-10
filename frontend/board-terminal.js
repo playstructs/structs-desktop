@@ -71,11 +71,11 @@
    * fails on it: a new card that nobody filed is a card nobody will find. */
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
-    ['Explore', ['player', 'record', 'guild', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
+    ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'series', 'people', 'stats']],
     ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results']],
     ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
-    ['Comms', ['chat', 'comms', 'members']],
+    ['Comms', ['comms', 'room', 'channels', 'find', 'who']],
     ['System', ['health']],
   ];
   function cardGroups() {
@@ -153,11 +153,51 @@
       if (c.type === 'fleet') c.type = 'armada';
       // `pay` was renamed `deliver`; a layout saved under the old name still opens.
       if (c.type === 'pay') c.type = 'deliver';
+      /* Comms stopped being a WINDOW inside a card. A layout saved when it
+       * was one names types that no longer exist:
+       *   `chat`             the whole Comms window   → the room list
+       *   `chat {list:direct}`  its people page       → the room list, people
+       *   `comms {id}`       an object's rail          → that object's room
+       * The object rail is the interesting one: `comms` used to mean "the
+       * conversation about 2-15361", which is exactly a ROOM whose subject is
+       * an object id — so it migrates to the card that now says that. */
+      if (c.type === 'chat') {
+        var show = { direct: 'direct', rooms: 'local' }[String((c.params || {}).list || '')];
+        c.type = 'comms';
+        c.params = show ? { show: show } : {};
+      } else if (c.type === 'comms' && (c.params || {}).id) {
+        c.type = 'room';
+        c.params = { id: c.params.id };
+      }
+      /* The live tape and the ops feed became one card. A layout saved before
+       * that rebuild is rewritten rather than kept working by an alias: an
+       * alias is a SECOND type, so it walks straight past `single`, and a real
+       * board came out of the rebuild carrying a `tape` plus three leftover
+       * `feed` cards — four pulse bands, four rollup queries, and one shared
+       * scope for them all to fight over. The old `filter` maps onto the lane
+       * it was reaching for; `all` had no lane and wants none. */
+      if (c.type === 'tape') {
+        var lane = { combat: 'war', economy: 'economy' }[String((c.params || {}).filter || '')];
+        c.type = 'feed';
+        c.params = lane ? { lane: lane } : {};
+      }
       var into = c.type === 'page' ? PAGE_TO_CARDS[String((c.params || {}).page || 'work')] : null;
       if (!into) { out.push(c); return; }
       into.forEach(function (n) { out.push({ id: fresh(n[0]), type: n[0], params: n[1], w: n[2] }); });
     });
-    l.cards = out;
+    /* A `single` type means one per window, and `add()` enforces it — but a
+     * layout can carry more from before the flag existed, from an import, or
+     * from a rename like the one above. The FIRST keeps its place and its
+     * params; the rest go, because two of a card that owns fixed state (the
+     * feed's scope, the help card's ids) is two of them fighting. */
+    var kept = {};
+    l.cards = out.filter(function (c) {
+      var def = TYPES[c.type];
+      if (!def || !def.single) return true;
+      if (kept[c.type]) return false;
+      kept[c.type] = true;
+      return true;
+    });
     return l;
   }
   Terminal.migrate = migrate;
@@ -766,6 +806,15 @@
   var ROW_GAP = 8;
   function fitRows(m) {
     if (!m || !m.node || !m.node.isConnected) return;
+    /* A window holding ONE card has nothing to pack, and the span is what
+       stopped it filling that window: a measured `grid-row-end: span 4429`
+       over 1px rows made the card exactly as tall as its content, so a short
+       card drew its bottom border a third of the way down and a long one ran
+       off the bottom. Solo, the card takes the grid's single row. */
+    if (state.solo) {
+      if (m.span != null) { m.span = null; m.node.style.gridRowEnd = ''; }
+      return;
+    }
     var h = m.node.getBoundingClientRect().height;
     if (!h) return;
     var span = Math.max(1, Math.ceil(h) + ROW_GAP);
@@ -888,6 +937,19 @@
     save();
   }
   Terminal.setTitle = setTitle;
+  /* The title a card learns AFTER it has drawn — not the one a player typed.
+   *
+   * `describe()` runs once, from the params, before anything has been fetched:
+   * a ROOM card knows `!snc:h` and not "SN.Corporation" until the room list
+   * lands. `setTitle` is the wrong tool for that — it persists, so a name the
+   * card discovered would become a name the player had chosen and would then
+   * never update again. This only repaints. */
+  Terminal.retitle = function (id, text) {
+    var m = state.mounted[id];
+    var c = findCard(id);
+    if (!m || !m.title || !text || (c && c.title)) return;
+    m.title.textContent = text;
+  };
   function setCadence(id, secs) {
     var c = findCard(id);
     if (!c) return;
@@ -1338,7 +1400,7 @@
   // workspace once made, and exports as a `terminal:` code like any other.
   var PRESETS = {
     trader:    { label: 'Energy trader',   cards: [['market', {}, 2], ['book', { id: 'primary' }, 1], ['banks', {}, 2], ['grid', {}, 1], ['halt', {}, 2], ['alerts', {}, 1], ['feed', { span: '24', lane: 'economy' }, 2], ['wallet', {}, 1]] },
-    admin:     { label: 'Guild admin',     cards: [['people', {}, 1], ['banks', {}, 2], ['stats', { section: 'guilds' }, 2], ['grid', {}, 1], ['armada', {}, 2], ['chat', {}, 1]] },
+    admin:     { label: 'Guild admin',     cards: [['people', {}, 1], ['banks', {}, 2], ['stats', { section: 'guilds' }, 2], ['grid', {}, 1], ['armada', {}, 2], ['comms', {}, 1]] },
     botter:    { label: 'Botter',          cards: [['health', {}, 1], ['queue', {}, 1], ['results', {}, 1], ['pow', {}, 1], ['armada', {}, 2], ['feed', { span: '24' }, 2], ['page', { page: 'config:profiles' }, 2]] },
     hasher:    { label: 'Hasher',          cards: [['pow', {}, 1], ['solve', {}, 1], ['stats', { section: 'engine' }, 1], ['tasks', {}, 2], ['fuel', {}, 1], ['queue', {}, 1]] },
     raider:    { label: 'Raider',          cards: [['posture', {}, 1], ['targets', {}, 2], ['raids', { scope: 'live' }, 1], ['ore', {}, 2], ['grudges', {}, 1], ['incidents', {}, 2], ['feed', { span: '48', lane: 'war' }, 2]] },
@@ -1391,7 +1453,7 @@
   // `2-15361`, `COMMS 2-15361`, `WORK`, `STATS ORE`, `PEOPLE`, `PAY`, `CHAT`.
   var WORDS = {
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['feed'], FLOW: ['feed'],
-    DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], CHAT: ['chat'], COMMS: ['comms', 'id'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
+    DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
     BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
     PLAYER: ['player', 'id'], MAP: ['map', 'id'], PLANET: ['planet', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
     PRESET: ['preset'], PRESETS: ['preset'],
@@ -1410,7 +1472,15 @@
     TALLY: ['tally', 'id'], HULLS: ['tally', 'id'], KILLS: ['tally', 'id'],
     HELP: ['help'], COMMANDS: ['help'],
     FEED: ['feed'], EVENTS: ['feed'], NEXT: ['next'], MOVES: ['next'],
-    DMS: ['chat', 'direct'], DM: ['chat', 'direct'], CHANNELS: ['chat', 'rooms'],
+    /* Comms, as subjects. A room is reached the way a planet is: `ROOM 1-61`,
+     * `ROOM JPEG`, `ROOM #trade`, `ROOM 2-15361` all name one conversation,
+     * and `resolve()` (board-comms.js) is what makes them the same request. */
+    COMMS: ['comms'], INBOX: ['comms'], DMS: ['comms', 'show=direct'], UNREAD: ['comms', 'show=unread'],
+    ROOM: ['room', 'optid'], DM: ['room', 'optid'], MSG: ['room', 'optid'],
+    MESSAGE: ['room', 'optid'], TALK: ['room', 'optid'], CHAT: ['room', 'optid'],
+    CHANNELS: ['channels'], BROWSE: ['channels'], DIRECTORY: ['channels'],
+    WHO: ['who', 'optid'], INROOM: ['who', 'optid'],
+    FIND: ['find', 'text'], SEARCH: ['find', 'text'],
     // The guild's stat store, asked of one object: ore on a planet, load on a
     // substation, health on a struct. `HIST` is the word; `GP` is there
     // because that is what the muscle memory of a terminal reaches for.
@@ -1426,7 +1496,7 @@
     // The game's own verbs, on the struct in front of you.
     OPS: ['ops', 'id'], ACT: ['ops', 'id'], DO: ['ops', 'id'],
     // A guild's PEOPLE, not its statistics.
-    MEMBERS: ['members', 'id'], ROSTER_OF: ['members', 'id'], WHO: ['members', 'id'],
+    MEMBERS: ['members', 'id'], ROSTER_OF: ['members', 'id'],
     // Placement: what can stand here, and in which free slot.
     BUILD: ['build', 'id'], DEPLOY: ['build', 'id'],
   };
@@ -1583,7 +1653,19 @@
       var pp = {}; pp[arg] = rest; return card(type, pp);
     }
     if (arg === 'optid') return card(type, rest ? { id: rest } : {});
-    if (arg === 'direct' || arg === 'rooms') return card(type, { list: arg });
+    /* `text` — everything after the word is one free-text argument. `FIND
+     * shield is down` is three words and one question; splitting it on spaces
+     * the way an id argument is split would search for "shield". */
+    if (arg === 'text') return rest ? card(type, { q: rest }) : null;
+    /* `key=value` — a word that IS a configured card. `DMS` is the room list
+     * with `show: direct`; it used to be two hard-coded literals for the one
+     * card that needed them, which is how a rename of that card's params broke
+     * a word rather than a test. */
+    if (arg.indexOf('=') > 0) {
+      var kv = arg.split('='), params = {};
+      params[kv[0]] = kv.slice(1).join('=');
+      return card(type, params);
+    }
     if (arg === 'section') return card(type, { section: (rest || 'universe').toLowerCase() });
     return card(type, { page: arg });
   };
@@ -1804,17 +1886,99 @@
   };
   var SEARCH_MAX = 6;
 
+  /* ── Comms in the palette ───────────────────────────────────────────────
+   *
+   * The rooms you are already in are the one set of subjects the Terminal can
+   * offer without asking anything: they are in hand, kept current by sync. So
+   * ⌘K answers three questions about them that the embedded Comms window made
+   * you navigate for.
+   *
+   *   An EMPTY box lists what is waiting. "Find the chats already on the go"
+   *   was the complaint, and the answer is that they are the first thing ⌘K
+   *   shows when you have nothing else in mind. Mentions before counts —
+   *   being named is not the same as traffic.
+   *
+   *   `#tr` completes to the channels whose alias starts that way, without a
+   *   round trip.
+   *
+   *   `ROOM <anything>` matches name, alias, topic and the player a DM is
+   *   with, so "the one with Beezhan in it" is reachable by typing Beezhan.
+   *
+   * Pure, given the room list — the tests drive it with a fixture rather than
+   * a homeserver, and what it offers is decided by rules rather than by
+   * whatever sync happened to have landed.
+   */
+  var COMMS_WORDS = { ROOM: 1, DM: 1, MSG: 1, MESSAGE: 1, TALK: 1, CHAT: 1, WHO: 1, INROOM: 1 };
+  var COMMS_MAX = 4;
+  Terminal.commsRows = function (line, rooms) {
+    var list = rooms || (window.BoardComms && window.BoardComms.S.rooms) || [];
+    if (!list.length) return [];
+    var raw = String(line || '');
+    var parts = raw.trim().split(/\s+/).filter(Boolean);
+    var head = (parts[0] || '').toUpperCase();
+    var rows = [];
+    var name = function (r) { return r.canonical_alias || r.room_id; };
+    var what = function (r) {
+      var bits = [];
+      if (r.mention) bits.push('named you');
+      else if (r.unread) bits.push(H.fmtInt(r.unread) + ' unread');
+      if (r.player_id) bits.push(r.player_id);
+      else if (r.topic) bits.push(String(r.topic).slice(0, 40));
+      return bits.join(' · ') || 'room';
+    };
+    var push = function (r, group) {
+      if (rows.length >= COMMS_MAX) return;
+      rows.push({ line: 'ROOM ' + name(r), words: 'ROOM', sub: r.name || name(r), run: true,
+                  what: what(r), group: group });
+    };
+
+    // Nothing typed: what is waiting, worst first.
+    if (!parts.length) {
+      list.filter(function (r) { return r.joined && !r.muted && (r.unread || r.mention); })
+        .sort(function (a, b) { return (b.mention ? 1 : 0) - (a.mention ? 1 : 0) || (b.unread || 0) - (a.unread || 0); })
+        .forEach(function (r) { push(r, 'Waiting'); });
+      return rows;
+    }
+
+    // `ROOM <subject>` — the rooms in hand that the subject names.
+    if (COMMS_WORDS[head] && parts.length > 1) {
+      var q = parts.slice(1).join(' ');
+      list.filter(function (r) {
+        return r.joined && window.BoardComms && window.BoardComms.matches(r, q) && name(r) !== q;
+      }).forEach(function (r) { push(r, 'Rooms'); });
+      return rows;
+    }
+
+    // A bare `#alias` being typed.
+    if (parts.length === 1 && raw.charAt(0) === '#' && !/\s$/.test(raw)) {
+      var t = parts[0].toLowerCase();
+      list.filter(function (r) {
+        return r.joined && String(r.canonical_alias || '').toLowerCase().indexOf(t) === 0;
+      }).forEach(function (r) { push(r, 'Rooms'); });
+    }
+    return rows;
+  };
+
 
   /* ⌘K / Ctrl-K. One keystroke, from anywhere on the page — the palette is
    * the whole reason the bar can be gone. Escape puts it away; so does
    * running something. */
   function palette() { return document.getElementById('tm-palette'); }
-  Terminal.openPalette = function () {
+  /* `prefix` opens it part-typed — "message a player" is `ROOM ` with the
+   * cursor after it, which is one gesture rather than a picker nobody can
+   * reach from the keyboard. */
+  Terminal.openPalette = function (prefix) {
     var p = palette();
     if (!p) return false;
     p.hidden = false;
     var cmd = document.getElementById('tm-cmd');
-    if (cmd) { cmd.focus(); cmd.select(); cmd.dispatchEvent(new Event('input', { bubbles: true })); }
+    if (cmd) {
+      if (prefix != null) { cmd.value = String(prefix); }
+      cmd.focus();
+      if (prefix == null) cmd.select();
+      else cmd.setSelectionRange(cmd.value.length, cmd.value.length);
+      cmd.dispatchEvent(new Event('input', { bubbles: true }));
+    }
     return true;
   };
   Terminal.closePalette = function () {
@@ -1941,7 +2105,13 @@
     }
     function refresh() {
       var line = cmd.value;
-      items = suggestFor(line).concat(searchFor(line));
+      /* On an EMPTY line what is waiting leads, because that is the question
+       * an empty ⌘K is asking. With something typed the words lead, because
+       * then you already know what you want. */
+      var comms = Terminal.commsRows(line);
+      items = String(line || '').trim()
+        ? suggestFor(line).concat(comms, searchFor(line))
+        : comms.concat(suggestFor(line));
       cursor = items.length ? 0 : -1;
       picked = false;
       paint();
@@ -1967,7 +2137,8 @@
           searchCache[q] = Array.isArray(hits) ? hits : [];
           // A later keystroke owns the box; do not repaint under it.
           if (mine !== searchSeq || Terminal.searchSubject(cmd.value) !== q) return;
-          items = suggestFor(cmd.value).concat(searchFor(cmd.value));
+          items = suggestFor(cmd.value).concat(Terminal.commsRows(cmd.value), searchFor(cmd.value));
+
           if (cursor < 0 && items.length) cursor = 0;
           paint();
         }).catch(function () {
@@ -2731,6 +2902,26 @@
     return { word: words.length ? words[words.length - 1] : '', ids: ids };
   };
 
+  /* `struct_block_build_start` is the SECOND category that covers two opposite
+   * events under one name, and this one had the card saying the opposite of
+   * what happened. Measured over the durable log:
+   *
+   *   block > 0  →  the struct entered BUILDING   (2,473 of a 3,000 sample
+   *                 reached status 1 within five seconds)
+   *   block = 0  →  the struct was DESTROYED      (15,137 of 15,305 had a
+   *                 7 → 35 within five seconds — 98.9%)
+   *
+   * A third of every "BUILD START" row the card drew was a build proof-window
+   * being CLEARED because the struct died, which is why the live board showed
+   * `BUILD START ×8` sitting beside `DESTROYED ×8` for one player in one
+   * second. The death is already a row of its own — it is one of the ~9 frames
+   * a single death emits — so the duplicate is dropped rather than relabelled.
+   * That is the same act-fold that turns six frames of a refine into one line. */
+  var isBuildCleared = function (ev) {
+    return ev && ev.category === 'struct_block_build_start'
+      && Number((ev.detail || {}).block) === 0;
+  };
+
   /* `struct_status` carries the transition, and the transition is the whole
    * story. Everything downstream — the label, the tone, whether the row is a
    * loss — reads this rather than the raw number. */
@@ -2785,9 +2976,19 @@
       var wrapped = /^\((.*)\)$/.exec(out);
       return (wrapped ? wrapped[1] : out).trim();
     };
-    /* And a change goes first, so the one line of figures a narrow card
-     * can show is the line that says something happened. */
+    /* The header now SAYS the transition, so the chip that carries it repeats
+     * half of itself: `status mat·built·online → mat·built·DESTROYED` beside a
+     * DESTROYED badge. The half that is still news is where it came FROM —
+     * whether the thing that died was finished and online or still going up. */
     var chips = (g.chips || []).filter(function (c) { return !shown[String(c.text).trim().toLowerCase()]; })
+      .map(function (c) {
+        if (st && c.label === 'status') {
+          var was = String(c.text).split('→')[0].trim();
+          return was ? { label: 'was', text: was, title: c.title } : null;
+        }
+        return c;
+      })
+      .filter(Boolean)
       .map(function (c) { return { label: c.label, text: undup(c.text), title: c.title }; })
       .filter(function (c) { return c.text !== ''; })
       .sort(function (a, b) { return (/→/.test(a.text) ? 0 : 1) - (/→/.test(b.text) ? 0 : 1); });
@@ -2986,7 +3187,9 @@
             rows = scoped ? [] : feed.ops;
             keyOf = opsKey;
           } else {
-            rows = (grass || []).filter(function (ev) { return laneOf(ev.category) === L.key; });
+            rows = (grass || []).filter(function (ev) {
+              return laneOf(ev.category) === L.key && !isBuildCleared(ev);
+            });
             keyOf = grassKey;
           }
           var groups = collapse(rows, keyOf).slice(0, 60);
@@ -3045,13 +3248,10 @@
     });
   }
 
-  // The old card names still open layouts saved before the rebuild.
-  Terminal.register('tape', {
-    label: 'Live tape', hidden: true, defaultWidth: 2, defaultHeight: 'grow',
-    describe: function () { return 'Feed'; },
-    params: [],
-    render: function (host, p) { return TYPES.feed.render(host, p || {}); },
-  });
+  /* No `tape` alias type. A layout saved before the rebuild is REWRITTEN on
+   * load (migrate), because an alias is a second type and `single` is checked
+   * per type — which is how a real board ended up carrying a tape and three
+   * feeds at once. `TAPE`, `FLOW` and `STREAM` reach this card as words. */
   // A page, or a page's VIEW (`energy:production`), the way the board's own
   // sub-nav reaches them. Ordered by who reaches for them: hashers and
   // botters first, then energy, then war.
@@ -3664,19 +3864,29 @@
    * to.
    *
    * So the proxy carries an allowlist, and the allowlist is MEASURED: it is
-   * every command `chat.html` and `raidview.html` and the modules they load
-   * actually call, and nothing else. `terminal.test.mjs` re-derives it from
-   * those files, so a page that grows a new call fails the suite rather than
-   * failing in the window — and a command the pages do NOT call can never be
-   * borrowed through them.
+   * every command the pages the Terminal actually frames really call, and
+   * nothing else. `terminal.test.mjs` re-derives it from those files, so a
+   * page that grows a new call fails the suite rather than failing in the
+   * window — and a command the pages do NOT call can never be borrowed.
    *
-   * `matrix_` is a prefix because Comms owns that whole surface (46 of the 55
-   * calls); the rest are named one at a time. */
-  var FRAME_CMD_PREFIXES = ['matrix_'];
+   * It used to carry `matrix_` as a PREFIX, because Comms was framed here and
+   * reached 46 of the 55 commands on the list. Comms is native now
+   * (board-terminal-comms.js) and nothing frames `chat.html`, so the prefix
+   * went with it: the raid view's rail calls five Matrix commands and those
+   * five are named. That closes `matrix_open_transfer`, `matrix_share`,
+   * `matrix_agreement_open` and every `matrix_work_*` to an embedded page —
+   * all of them reachable, until now, from a rail that renders text written
+   * by federated strangers.
+   */
+  var FRAME_CMD_PREFIXES = [];
   var FRAME_CMDS = {
-    close_chat_window: 1, events_listening: 1, log_ui_events: 1,
+    events_listening: 1,
+    // The raid view's Comms rail: an object's room, its recent chatter, and
+    // saying something in it. Nothing that moves value.
+    matrix_object_chatter: 1, matrix_object_room: 1, matrix_object_room_create: 1,
+    matrix_send: 1, matrix_timeline: 1,
     mcp_inventory: 1, mcp_roster: 1,
-    mcp_raid_log: 1, mcp_raid_state: 1, mcp_raid_view_open: 1, mcp_struct_act: 1,
+    mcp_raid_log: 1, mcp_raid_state: 1, mcp_struct_act: 1,
   };
   Terminal.frameMayInvoke = function (cmd) {
     var name = String(cmd || '');
@@ -3759,7 +3969,7 @@
       if (!id) return [];
       return [
         { icon: 'icon-combat-log', title: 'Battle log', onClick: function () { add('log', { id: id }); } },
-        { icon: 'icon-phone', title: 'Comms about this planet', onClick: function () { add('comms', { id: id }); } },
+        { icon: 'icon-phone', title: 'Comms about this planet', onClick: function () { add('room', { id: id }); } },
         { icon: 'icon-raid', title: 'Watch in its own window', onClick: function () { invoke('mcp_raid_view_open', { planetId: id }).catch(function (e) { Board.stamp && Board.stamp('raid view: ' + e); }); } },
       ];
     },
@@ -3781,42 +3991,23 @@
     },
     unmount: mapUnmount,
   });
-  // Whole pages as cards keep their OWN bar as the header (frameless): the
-  // frame draws none, and the page's bar carries pop-out and close.
-  Terminal.register('chat', {
-    label: 'Comms window', defaultWidth: 2, cadenceMs: 0,
-    describe: function (p) { return p.list === 'direct' ? 'Direct messages' : p.list === 'rooms' ? 'Channels' : 'Comms'; },
-    // Rooms and people are two questions; a card that answers one of them is
-    // a card you can leave open beside the other.
-    params: [{ key: 'list', label: 'Show', kind: 'choice', options: [
-      { value: '', label: 'rooms and people' }, { value: 'rooms', label: 'channels only' }, { value: 'direct', label: 'direct messages only' },
-    ] }],
-    render: function (host, p, ctx) {
-      host.innerHTML = '';
-      host.appendChild(framed('chat.html' + (p.list ? '?list=' + encodeURIComponent(p.list) : ''), 'Comms', ctx.id));
-    },
-  });
+  /* Comms is no longer a WINDOW inside a card.
+   *
+   * `chat` embedded the whole of `chat.html` in an iframe: its own navigation,
+   * its own back button, its own idea of which room you were looking at, and
+   * its own scroll, all fighting the board for the same gestures. Two
+   * conversations meant two copies of the entire window, and the command line
+   * could not name a room because rooms were not subjects.
+   *
+   * It is four native cards now — COMMS, ROOM, CHANNELS, WHO — over one model
+   * (board-comms.js), in board-terminal-comms.js. `chat.html` still exists and
+   * is still a good window; nothing in the Terminal frames it.
+   */
+
   /* `deliver` is a NATIVE card, registered in board-terminal-ops.js beside the
    * other things that sign. It was an embedded `transfer.html`; that window
    * still exists and Comms still opens it, but a window inside a card was the
    * cause of every frame, header and scaling bug that panel had. */
-
-  // Comms about one object: the raid view's own rail, which IS the object's
-  // room. It owns fixed DOM ids, so one per window.
-  Terminal.register('comms', {
-    label: 'Comms about an object', cadenceMs: 0,
-    describe: function (p) { return 'Comms · ' + (p.id || '?'); },
-    params: [{ key: 'id', label: 'Planet or fleet id', kind: 'id', kinds: [2, 9], placeholder: '2-15361' }],
-    doors: function (card) {
-      var id = (card.params || {}).id;
-      return id ? [{ icon: 'icon-planet', title: 'Open the object', onClick: function () { add(String(id).indexOf('9-') === 0 ? 'map' : 'planet', { id: id }); } }] : [];
-    },
-    render: function (host, p, ctx) {
-      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a planet or fleet id.')); return; }
-      return mapFrame(host, ctx, p.id, 'comms');
-    },
-    unmount: mapUnmount,
-  });
 
   // ── Boot ────────────────────────────────────────────────────────────────
   function enter() {

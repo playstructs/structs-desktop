@@ -712,8 +712,14 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
      * only when the CARD's own `kinds` accepts it. */
     const words = (l) => T.suggestFor(l).map((s) => s.words);
     check('typing an id offers every question you can ask OF it, named by the card it opens',
-      words('2-29604 ').join(' ') === 'COMMS MAP PLANET INSPECT WATCH LOG HIST SCOUT BUILD'
-        && T.suggestFor('2-29604 ')[0].what === 'Comms about an object', words('2-29604 ').join(' '));
+      words('2-29604 ').join(' ') === 'MAP PLANET INSPECT WATCH LOG ROOM WHO HIST SCOUT BUILD',
+      words('2-29604 ').join(' '));
+    /* A planet has a CONVERSATION, and it is reached by the same word that
+     * reaches a person's. That is the whole point of making a room a subject:
+     * `ROOM 2-29604`, `ROOM 1-61` and `ROOM #trade` are one request. */
+    check('…including the object\'s own room, under the same word a player\'s DM uses',
+      words('2-29604 ').includes('ROOM') && words('1-61 ').includes('ROOM')
+      && T.parse('ROOM 2-29604').type === 'room' && T.parse('ROOM 1-61').type === 'room');
     check('…a player is asked different questions than a planet',
       words('1-61 ').includes('WALLET') && words('1-61 ').includes('BOOK')
         && !words('1-61 ').includes('LOG') && !words('2-29604 ').includes('WALLET'));
@@ -794,6 +800,28 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   run('FLEET 9-12');
   check('FLEET with an id opens that fleet on the map, not the roster', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'map' && c.params.id === '9-12'));
   check('…and a layout saved when the roster was called `fleet` still opens', w.Board.Terminal.migrate({ cards: [{ id: 'fleet-9', type: 'fleet', params: {}, w: 2 }] }).cards[0].type === 'armada');
+  /* The live tape and the ops feed became one card. An ALIAS type would have
+   * kept old layouts working and walked straight past `single` — which is
+   * exactly what a real board did after the rebuild: a `tape` plus three
+   * leftover `feed` cards, four pulse bands, four rollup queries, and one
+   * shared scope for them all to fight over. Rewrite, don't alias. */
+  {
+    const migrated = w.Board.Terminal.migrate({ cards: [
+      { id: 'tape-1', type: 'tape', params: { filter: 'economy' }, w: 2 },
+      { id: 'feed-1', type: 'feed', params: {}, w: 2 },
+      { id: 'feed-2', type: 'feed', params: {}, w: 1 },
+      { id: 'feed-3', type: 'feed', params: {}, w: 1 },
+      { id: 'market-1', type: 'market', params: {}, w: 2 },
+    ] }).cards;
+    check('a layout saved when the feed was a TAPE opens as the feed, on the lane its filter was reaching for',
+      migrated[0].type === 'feed' && migrated[0].params.lane === 'economy' && migrated[0].id === 'tape-1');
+    check('…and four feeds collapse to the one this card is allowed, the first keeping its place',
+      migrated.filter((c) => c.type === 'feed').length === 1 && migrated.length === 2 && migrated[1].type === 'market');
+    check('…while `all` had no lane and asks for none',
+      w.Board.Terminal.migrate({ cards: [{ id: 'tape-1', type: 'tape', params: { filter: 'all' }, w: 1 }] }).cards[0].params.lane === undefined);
+    check('…and a card that is not single-per-window is never collapsed',
+      w.Board.Terminal.migrate({ cards: [{ id: 'player-1', type: 'player', params: { id: '1-61' }, w: 1 }, { id: 'player-2', type: 'player', params: { id: '1-194' }, w: 1 }] }).cards.length === 2);
+  }
   run('5-4559');
   check('any other id opens the inspector, which asks Comms\' reference cards', w.Board.Terminal.state.layout.cards.find((c) => c.type === 'inspector')?.params.id === '5-4559');
   await tick(80);
@@ -1137,14 +1165,19 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const made = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_players');
     check('…through the roster\'s own create, which picks the HD index and joins the guild', made.args.command === 'create' && made.args.name === 'Test Pilot');
   }
-  // Comms splits into rooms and people, each its own card.
+  /* Comms is four native cards, not a window in an iframe. Each answers ONE
+   * question, which is what lets a board hold two conversations, the room list
+   * and the directory at once — the thing a single embedded window could not
+   * do however it was configured. */
   {
     const before = w.Board.Terminal.state.layout.cards.length;
     run('DMS');
     const dm = w.Board.Terminal.state.layout.cards[w.Board.Terminal.state.layout.cards.length - 1];
-    check('DMS opens a Comms card showing only direct messages', w.Board.Terminal.state.layout.cards.length === before + 1 && dm.type === 'chat' && dm.params.list === 'direct');
-    await until(() => d.querySelector('#tm-' + dm.id + ' iframe'));
-    check('…and the page is asked for that list', /list=direct/.test(d.querySelector('#tm-' + dm.id + ' iframe').getAttribute('src')));
+    check('DMS opens the room list scoped to people — a card, not a framed page',
+      w.Board.Terminal.state.layout.cards.length === before + 1 && dm.type === 'comms' && dm.params.show === 'direct');
+    await until(() => d.querySelector('#tm-' + dm.id + ' .tm-body'));
+    check('…and nothing about Comms is an iframe any more',
+      d.querySelector('#tm-' + dm.id + ' iframe') === null);
     w.Board.Terminal.remove(dm.id);
   }
 
@@ -1372,14 +1405,22 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
       check('an embedded page cannot borrow the signature it just unlocked',
         !may('mcp_transfer_execute') && !may('mcp_action') && !may('mcp_mass_action')
         && !may('mcp_config_set') && !may('terminal_guild_bank_mint'));
-      check('…while everything Comms and the raid map really call still goes through',
+      check('…while everything the raid map really calls still goes through',
         ['matrix_send', 'matrix_timeline', 'mcp_raid_state', 'mcp_struct_act', 'mcp_roster',
-         'mcp_inventory', 'log_ui_events', 'close_chat_window'].every(may));
+         'mcp_inventory', 'matrix_object_room'].every(may));
+      /* The prefix went with the window. `matrix_` was on the list because
+       * Comms was FRAMED here and reached 46 of the 55 commands; Comms is
+       * native now and nothing frames chat.html, so a rail that renders text
+       * written by federated strangers can no longer reach the money verbs
+       * that happen to share the prefix. */
+      check('…and the matrix_ PREFIX is gone with the window that needed it',
+        !may('matrix_open_transfer') && !may('matrix_share') && !may('matrix_agreement_open')
+        && !may('matrix_work_accept') && !may('matrix_leave') && !may('matrix_redact'));
 
       /* The allowlist is MEASURED, not remembered: re-derive it from the pages
        * themselves so a page that grows a call fails here rather than in the
        * window, silently, on a control nobody clicks in a test. */
-      const framed = ['chat.html', 'raidview.html'].flatMap((page) => {
+      const framed = ['raidview.html'].flatMap((page) => {
         const html = read('frontend/' + page);
         return [...html.matchAll(/src="([a-z0-9_.-]+\.js)"/g)].map((m) => m[1]);
       });
@@ -1390,7 +1431,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
       const refused = [...called].filter((c) => !may(c));
       check('…and every command those pages actually invoke is on the list',
         refused.length === 0, refused.join(', '));
-      check('…which is a real restriction, not a list of everything', called.size < 60 && !may('terminal_layout_set'),
+      check('…which is a real restriction, not a list of everything', called.size < 20 && !may('terminal_layout_set'),
         String(called.size));
     }
 
@@ -1573,31 +1614,29 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   sweepBtn.click();
   await until(() => /Confirm sweep/.test(sweepBtn.textContent));
   check('the Armada card\'s sweep is a dry run first, and says what a second click will do', /Confirm sweep of 1/.test(sweepBtn.textContent) && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_mass_action' && c.args.request.mode === 'execute'));
-  // Embedded pages: one header. The Comms card's frame carries the Comms nav
-  // as doors and the page is asked to drop its own bar (`?embed=1`).
-  run('CHAT');
-  await until(() => d.querySelector('#tm-grid [data-type="chat"] iframe.tm-frame'));
-  const chatCard = d.querySelector('#tm-grid [data-type="chat"]');
+  /* Embedded pages: one header.
+   *
+   * This used to be driven through the Comms card, which framed the whole of
+   * `chat.html`. Comms is native now and NOTHING frames chat.html, so the
+   * vehicle is the raid view's battle log — the page the Terminal really does
+   * embed, and therefore the page whose proxy rules actually matter. */
+  run('LOG 2-15361');
+  await until(() => d.querySelector('#tm-grid [data-type="log"] iframe.tm-frame'));
+  const chatCard = d.querySelector('#tm-grid [data-type="log"]');
   const chatId = chatCard.getAttribute('data-card');
   /* Framed like every other card. `frameless` once gave the embedded page's
    * own bar the header job — which cost the card the frame every other card
-   * wears AND the three panel tools, leaving it a black box beside them. The
-   * card draws its header; the page gives up whatever that header now says
-   * twice (Pay's whole bar, Comms' pop-out and close). */
-  check('the Comms card wears the same frame and header as every other card, and the page learns its card id',
+   * wears AND the three panel tools, leaving it a black box beside them. */
+  check('an embedded page wears the same frame and header as every other card, and learns its card id',
     !chatCard.classList.contains('tm-frameless')
-      && chatCard.querySelector('iframe.tm-frame').getAttribute('src') === 'chat.html?embed=1&card=' + chatId
+      && /raidview\.html\?planet=2-15361/.test(chatCard.querySelector('iframe.tm-frame').getAttribute('src'))
       && chatCard.querySelector('.tm-head-screen .tm-title') !== null);
   check('…including the three panel tools and its age',
     ['Configure', 'Pop out', 'Remove'].every((t) => chatCard.querySelector('.tm-head [title="' + t + '"]') !== null)
       && chatCard.querySelector('.tm-age') !== null,
     [...chatCard.querySelectorAll('.tm-head .tm-door')].map((a) => a.title).join(' | '));
   check('…and the embedded page drops what the header now says twice',
-    /html\[data-embed\] #tx-bar \{ display: none; \}/.test(read('frontend/embed.css'))
-      && /#chat-nav-popout,\s*\n?html\[data-embed\] #menu-page-nav-close \{ display: none; \}/.test(read('frontend/embed.css')));
-  /* The SCREEN, not just the bar inside it: hiding `.tm-head` alone left its
-   * `.sui-screen` wrapper standing — an empty 8px box with a 4px border all
-   * round — and the embedded page's own header opened one row too low. */
+    /html\[data-embed\] #tx-bar \{ display: none; \}/.test(read('frontend/embed.css')));
   /* jsdom does not cascade descendant selectors, so this asserts the rule
    * names an element that really is in the card — hiding `.tm-head` alone
    * left this `.sui-screen` wrapper standing (an empty 8px box with a 4px
@@ -1613,14 +1652,14 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const stranger = { postMessage: (m) => replies.push(m) };
     const frame = chatCard.querySelector('iframe.tm-frame');
     Object.defineProperty(frame, 'contentWindow', { value: fakeSource, configurable: true });
-    // `mcp_roster`, not `terminal_workspaces`: the proxy now answers only what
-    // the embedded pages really call, and rearranging the operator's own
-    // workspaces is not something Comms has any business asking for.
+    // `mcp_roster`, not `terminal_workspaces`: the proxy answers only what the
+    // embedded pages really call, and rearranging the operator's own
+    // workspaces is not something a raid rail has any business asking for.
     w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 7, cmd: 'mcp_roster', args: {} } });
     await until(() => replies.length === 1);
     check('an embedded page\'s invoke is run by this window and answered by message', replies[0].kind === 'result' && replies[0].id === 7 && replies[0].ok === true && Array.isArray(replies[0].value.rows));
     // On the list, so it reaches the bridge — and fails there, as it should.
-    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 8, cmd: 'matrix_no_such_command', args: {} } });
+    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 8, cmd: 'matrix_object_chatter', args: {} } });
     await until(() => replies.length === 2);
     check('…a failing invoke answers with the error', replies[1].ok === false && /no fixture/.test(replies[1].error));
     /* OFF the list: refused here, and never handed to the bridge at all. The
@@ -1631,8 +1670,14 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('…and a command off the list is refused by the PROXY, with a reason',
       replies[2].ok === false && /not available to an embedded page/.test(replies[2].error)
       && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_transfer_execute'), replies[2].error);
+    /* And the narrowing that came with the rebuild: `matrix_` was a PREFIX on
+     * this list because Comms was framed here. It is not any more. */
+    w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'invoke', id: 11, cmd: 'matrix_open_transfer', args: {} } });
+    await until(() => replies.length === 4);
+    check('…including every matrix_ command the raid rail does not call',
+      replies[3].ok === false && /not available to an embedded page/.test(replies[3].error));
     const took = w.Board.Terminal.answerFrame({ origin: '', source: stranger, data: { structs: 'bridge', kind: 'invoke', id: 9, cmd: 'mcp_roster', args: {} } });
-    check('…a frame this page does not embed is not answered', took === false && replies.length === 3);
+    check('…a frame this page does not embed is not answered', took === false && replies.length === 4);
     w.Board.Terminal.answerFrame({ origin: '', source: fakeSource, data: { structs: 'bridge', kind: 'listen', name: 'matrix::typing' } });
     w.__HARNESS_EMIT__('matrix::typing', { room: '!x' });
     await until(() => replies.some((m) => m.kind === 'event'));
@@ -1714,6 +1759,16 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const dead = [...feed.querySelectorAll('.sc-tape')].find((n) => /destroyed/i.test(n.textContent));
     check('a struct_status 7→35 reads as DESTROYED, not as a status number', /destroyed/i.test(dead.textContent), dead.textContent);
     check('…and it files under structs, not war — only 74 of 25,913 deaths in the log had an attack near them', lane('Structs').contains(dead) && !lane('War').contains(dead));
+    check('…and the chip that carried the transition keeps only the half the badge does NOT say', /was/.test(dead.textContent) && !/→/.test(dead.textContent) && /built.online/i.test(dead.textContent), dead.textContent);
+    /* `struct_block_build_start` is the SECOND category covering two opposite
+     * events under one name, and this one had the card saying the OPPOSITE of
+     * what happened: `block: 0` is a build proof-window cleared because the
+     * struct DIED (15,137 of 15,305 had a 7→35 within five seconds), and the
+     * card drew it as BUILD START. A third of every build row. */
+    w.__HARNESS_EMIT__('grass-event', { category: 'struct_block_build_start', subject: 'structs.planet.2-28038.1-1978', timestamp: Date.now(), detail: { block: 0, block_height: 2536863, struct_id: '5-237356' } });
+    w.__HARNESS_EMIT__('grass-event', { category: 'struct_block_build_start', subject: 'structs.planet.2-30626.1-1407', timestamp: Date.now(), detail: { block: 2536883, block_height: 2536883, struct_id: '5-260550' } });
+    await until(() => /5-260550/.test(lane('Structs').textContent));
+    check('a build-start frame whose block is 0 is a DEATH, already reported, and is not drawn as a build', !/5-237356/.test(lane('Structs').textContent) && /5-260550/.test(lane('Structs').textContent), lane('Structs').textContent);
     /* 104 struct_attack frames in a week against 92,301 blocks. A regex on
      * /defen|shield/ — which is what the old tape used — calls every hour a
      * war; shield_change alone is 29,341 frames of housekeeping. */
@@ -1761,7 +1816,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
    * shape as the ops feed, with nothing on either saying which was which.
    * They are the same card now, and the old type still opens a saved layout. */
   check('TAPE, FLOW and STREAM all reach the one feed', ['TAPE', 'FLOW', 'STREAM'].every((word) => w.Board.Terminal.parse(word).type === 'feed'));
-  check('…and the retired type is still known, so a layout saved before the rebuild still loads', w.Board.Terminal.known('tape') && !w.Board.Terminal.types().some((t) => t.type === 'tape'));
+  check('…and the retired type is gone from the registry, because the layout is rewritten instead of aliased', !w.Board.Terminal.known('tape'));
   check('…FEED is configured by span and lane, which is what the band and the lanes are', w.Board.Terminal.types().find((t) => t.type === 'feed').params.map((p) => p.key).join(',') === 'span,lane');
   run('SETTINGS');
   check('SETTINGS is the one page still reached as a page, plainly titled', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'page' && c.params.page === 'config') && !/Team Ops/.test(d.querySelector('#tm-grid [data-type="page"] .tm-title').textContent));
@@ -1908,6 +1963,23 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…but ⌘K still reaches it, closed until asked for',
     d.getElementById('tm-palette') !== null && d.getElementById('tm-palette').hidden === true);
   check('…and no refresh door either: it refreshes on its cadence', d.querySelector('#tm-market-1 [title="Refresh"]') === null && w.Board.Terminal.cadenceOf('market-1') > 0);
+  /* The frame IS the window. A card window used to size its panel to its
+   * CONTENT, wrong in both directions: a short card drew its bottom border a
+   * third of the way down with bare page under it, and a long one ran its rows
+   * off the bottom with the border nowhere in sight — the scroll was on
+   * `.ops-scroll`, so the whole card, border and all, scrolled away. */
+  {
+    const m = w.Board.Terminal.state.mounted['market-1'];
+    check('a card window does not pack its one card into measured 1px rows', m.node.style.gridRowEnd === '' && m.span == null);
+    const css = read('frontend/board.html');
+    check('…the panel spans the window, and the BODY is what scrolls', /html\[data-card\] \.ops-scroll \{ overflow: hidden/.test(css)
+      && /html\[data-card\] #board-layout \.tm-card \.tm-body \{[^}]*overflow-y: auto/.test(css));
+    /* `.sui-panel-chunk` is a flex ITEM, so its automatic minimum size is its
+     * content: with every ancestor measuring correctly the chunk alone pushed
+     * a 411px card to 5,500px and straight out of the window. */
+    check('…and every link in the chain may shrink below its content', /html\[data-card\] \.tm-card > \.tm-chunk \{ min-height: 0/.test(css)
+      && /html\[data-card\] #tm-grid\.tm-solo \{[^}]*grid-template-rows: minmax\(0, 1fr\)/.test(css));
+  }
   /* The window IS the card: it draws the game's frame itself, so the board's
    * panel (two fill bands, two edges) and its nav bar — empty in a card
    * window — must not wrap a second container around it, with the bottom fill
