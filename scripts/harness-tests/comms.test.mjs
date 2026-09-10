@@ -131,6 +131,72 @@ async function load(qs) {
    * Both fail silently — a handler that reads a key nobody sent gets undefined
    * and carries on, so the indicator simply never appears and nothing anywhere
    * says why. Derived from the emit sites the same way the calls are. */
+  /* THE REPLY. What a command hands back is a shape too, and a card that
+   * reads `d.pinned` from a command that answers `{room_id, messages}` gets
+   * undefined and draws nothing — the same silent failure as a bad call, one
+   * hop later. Derived from every `Ok(json!({…}))` in the command's body;
+   * a command that answers an opaque value (`Ok(out)`) is not judged. A line
+   * that reads a fallback chain (`d.pinned || d.messages`) passes when ANY
+   * key on it is real. */
+  const replies = {};
+  for (const m of rust.matchAll(/pub (?:async )?fn (matrix_\w+)\([\s\S]*?\n\}/g)) {
+    const name = m[1];
+    const body = m[0];
+    const keys = new Set();
+    let shaped = false;
+    for (const j of body.matchAll(/Ok\(json!\(\{([\s\S]*?)\}\)\)/g)) {
+      shaped = true;
+      for (const k of j[1].matchAll(/"(\w+)"\s*:/g)) keys.add(k[1]);
+    }
+    if (/Ok\((?!json!)\w+\)/.test(body)) shaped = false; // an opaque answer somewhere: skip
+    if (shaped) replies[name] = keys;
+  }
+  /* Reads a card makes ON PURPOSE of a key today's answer lacks, each with
+   * its reason. A new one is a decision, not a fallback. */
+  const hopeful = {
+    // join answers {ok} and the room arrives on the NEXT sync; the read is
+    // for a homeserver that names the room at once, and afterJoin builds
+    // the provisional room without it.
+    matrix_join: new Set(['room_id', 'roomId']),
+  };
+  const badReads = [];
+  for (const f of ['frontend/board-comms.js', 'frontend/board-terminal-comms.js']) {
+    const src = read(f);
+    // Only a `.then` chained straight onto the invoke is judged: one hop
+    // later the value may be somebody else's promise.
+    for (const m of src.matchAll(/invoke\('(matrix_\w+)',\s*\{[^}]*\}\)\s*\.then\(function \((\w+)\)\s*\{/g)) {
+      const cmd = m[1], v = m[2];
+      if (!replies[cmd]) continue;
+      // The callback body: up to the first line that closes it at its own depth.
+      const tail = src.slice(m.index + m[0].length);
+      let depth = 1, i = 0;
+      for (; i < tail.length && depth > 0; i++) { if (tail[i] === '{') depth++; else if (tail[i] === '}') depth--; }
+      const cb = tail.slice(0, i);
+      for (const line of cb.split('\n')) {
+        const reads = [...line.matchAll(new RegExp('\\b' + v + '\\.(\\w+)', 'g'))].map((r) => r[1]);
+        if (!reads.length) continue;
+        if (reads.every((k) => hopeful[cmd] && hopeful[cmd].has(k))) continue;
+        if (!reads.some((k) => replies[cmd].has(k))) badReads.push(cmd + ' answers no ' + reads.join('/') + ' (' + f.split('/').pop() + ')');
+      }
+    }
+  }
+  check('every key a card reads from a reply is one the command answers',
+    badReads.length === 0, [...new Set(badReads)].join(' · '));
+  check('…judged on real shapes', Object.keys(replies).length >= 8, Object.keys(replies).length + ' shaped');
+
+  /* The web board. The same cards are served at /board over HTTP, where an
+   * invoke is a POST the Rust router has to have an arm for. Six commands
+   * the cards grew (edit, pin, pinned, media, object chatter/room create)
+   * had no arm, so over the web they answered `unknown command` and the card
+   * quietly drew nothing. Connect, disconnect and share are absent on purpose
+   * — the arm's own comment says why — and are the only exceptions. */
+  const web = read('src-tauri/src/mcp/web_board.rs');
+  const routed = new Set([...web.matchAll(/"(matrix_\w+)"\s*=>/g)].map((m) => m[1]));
+  const deliberate = new Set(['matrix_connect', 'matrix_disconnect', 'matrix_share']);
+  const unrouted = [...new Set(js.map((c) => c.cmd))].filter((c) => !routed.has(c) && !deliberate.has(c));
+  check('every command the cards call has a web-board arm (or is excluded on purpose)',
+    unrouted.length === 0, unrouted.join(','));
+
   const emits = {};
   const opaque = new Set();
   for (const f of ['src-tauri/src/matrix/mod.rs', 'src-tauri/src/matrix/client.rs']) {

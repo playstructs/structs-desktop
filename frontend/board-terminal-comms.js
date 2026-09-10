@@ -323,8 +323,15 @@
       return doors;
     },
     render: function (host, p) {
-      var only = p.show === 'unread' ? 'all' : (p.show || 'all');
-      var unreadOnly = p.show === 'unread';
+      /* A persisted layout can carry a filter word this build no longer has
+       * (`local` → `guild`, `galaxy` → other guilds …). An unknown word must
+       * mean everything, not an empty list captioned with the old word — the
+       * card is restored on every launch and nobody re-picks a filter to fix
+       * a room list they never emptied. */
+      var known = SHOW.some(function (x) { return x.value === p.show; });
+      var show = known ? p.show : 'all';
+      var only = show === 'unread' ? 'all' : show;
+      var unreadOnly = show === 'unread';
       var state = { open: {}, cursor: null, rows: [] };
 
       var draw = function () {
@@ -547,12 +554,6 @@
           });
         }
         host.appendChild(scroller);
-        /* A repaint must never move you. It rebuilt the list and so landed at
-         * the top unless you happened to be at the bottom — a reaction landing
-         * on somebody else's message yanked the card you were reading. Where
-         * you were is restored; only a live tail follows the newest line. */
-        if (state.atBottom !== false) scroller.scrollTop = scroller.scrollHeight;
-        else if (state.scrollTop != null) scroller.scrollTop = state.scrollTop;
         scroller.addEventListener('scroll', function () {
           state.scrollTop = scroller.scrollTop;
           state.atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
@@ -575,6 +576,23 @@
         if (state.sel) actionBar(host, rid, state, scroller, draw);
 
         composer(host, rid, r, state, draw);
+        /* A repaint must never move you. It rebuilt the list and so landed at
+         * the top unless you happened to be at the bottom — a reaction landing
+         * on somebody else's message yanked the card you were reading. Where
+         * you were is restored; only a live tail follows the newest line.
+         *
+         * LAST, after the composer and the bar: restored before them, the list
+         * was measured at the card's full height, nothing overflowed, the
+         * scroll clamped to 0 — and then the composer took its share and the
+         * newest line, your own just-sent one included, sat below the fold. */
+        var settle = function () {
+          if (!scroller.isConnected) return;
+          if (state.atBottom !== false) scroller.scrollTop = scroller.scrollHeight;
+          else if (state.scrollTop != null) scroller.scrollTop = state.scrollTop;
+        };
+        settle();
+        // Fonts and avatars land a frame later and grow the rows under you.
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(settle);
       };
 
       C.watch(host, function (what) {
@@ -611,6 +629,11 @@
         return C.resolve(p.id).then(function (room) {
           state.room = room;
           T.retitle(ctx.id, C.title(room));
+          // Typed as a name; kept as the room. The doors need the id too.
+          if (room.room_id && p.id !== room.room_id && String(room.room_id).charAt(0) === '!') {
+            p = Object.assign({}, p, { id: room.room_id });
+            T.learnParams(ctx.id, p);
+          } else T.redoors(ctx.id);
           /* A read marker names the EVENT you have read up to, so the timeline
            * has to be in hand first — and the unread ANCHOR has to be taken
            * before we mark, because marking is what destroys the answer. */
@@ -1213,10 +1236,15 @@
     describe: function (p) { var r = p.id && C.roomById(p.id); return 'Who · ' + (r ? r.name : (p.id || '?')); },
     params: [{ key: 'id', label: 'Room', kind: 'id', kinds: [1, 2, 9], placeholder: '#trade · 1-61' }],
     cadenceMs: 60000,
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Name a room.')); return; }
       return gate(host, function () {
         return C.resolve(p.id).then(function (room) {
+          T.retitle(ctx.id, 'Who · ' + C.title(room));
+          if (room.room_id && p.id !== room.room_id && String(room.room_id).charAt(0) === '!') {
+            p = Object.assign({}, p, { id: room.room_id });
+            T.learnParams(ctx.id, p);
+          }
           return invoke('matrix_members', { guildId: C.S.key, roomId: room.room_id }).then(function (d) {
             var list = ((d && (d.members || d.people)) || (Array.isArray(d) ? d : [])).slice();
             /* PRESENT first. "Who is around" is the question this card is

@@ -117,6 +117,19 @@ pub fn emit_board<S: serde::Serialize>(app: &tauri::AppHandle, event: &str, payl
     }
 }
 
+/// Hand an event that Tauri is ALSO delivering itself (an `Audience::All`
+/// `app.emit`) to the web page's stream only. `emit_board` would re-emit it
+/// to the native board windows, which already have it; this is the half
+/// that `app.emit` cannot do — a browser is not a Tauri window.
+///
+/// Without it every `matrix::*` event stopped at the native windows, and the
+/// Comms cards over the web were a snapshot: a reaction, an edit, a reply
+/// landed on the server and the card never redrew.
+pub fn relay<S: serde::Serialize>(event: &str, payload: S) {
+    let value = serde_json::to_value(&payload).unwrap_or(Value::Null);
+    let _ = BOARD_BUS.send((event.to_string(), value));
+}
+
 // ── Router ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]

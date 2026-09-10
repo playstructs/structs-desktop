@@ -1216,6 +1216,15 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         Some(_) => quoted_from_fallback(&raw_body),
         None => (None, None),
     };
+    // The quote names its author by Matrix id (`<@1-42:h>`); a row names
+    // PEOPLE, so the id becomes the same name the sender line would get —
+    // the on-chain one when the directory has it, the player id otherwise.
+    // A search hit and a reloaded timeline used to print the raw id here.
+    let reply_sender = reply_sender.map(|who| {
+        let pid = directory::player_id_of(&who);
+        let ident = pid.as_deref().and_then(directory::get);
+        sender_display(&who, ident.as_ref(), gs)
+    });
 
     let (kind, body): (&'static str, String) = if redacted {
         ("notice", "message removed".to_string())
@@ -5373,7 +5382,7 @@ mod tests {
         let m = render_event(&real, &gs, "!r:h", "@me:h").unwrap();
         assert_eq!(m.thread_root.as_deref(), Some("$root"));
         assert_eq!(m.reply_to.as_deref(), Some("$asked"), "a chosen reply survives");
-        assert_eq!(m.reply_sender.as_deref(), Some("@1-42:h"));
+        assert_eq!(m.reply_sender.as_deref(), Some("1-42"), "the quote names a player, never a raw Matrix id");
 
         // And a plain reply, in no thread at all, is unchanged.
         let plain = json!({

@@ -951,6 +951,38 @@
     if (!m || !m.title || !text || (c && c.title)) return;
     m.title.textContent = text;
   };
+  /* The doors a card learns AFTER it has drawn. `def.doors(card)` runs once,
+   * when the header is built — for a ROOM card that is before the room list
+   * has landed, so `roomById` answered null and the header had no Who, no
+   * Mute, no Leave; popped out (where the header is built exactly once) it
+   * never got them. Rebuilt from the same function, in the same place. */
+  function redoors(id) {
+    var m = state.mounted[id];
+    var c = findCard(id);
+    if (!m || !c) return;
+    var def = TYPES[c.type];
+    var span = m.node.querySelector('.tm-doors');
+    if (!span) return;
+    Array.prototype.slice.call(span.querySelectorAll('.tm-door-own')).forEach(function (a) { span.removeChild(a); });
+    var own = def && def.doors ? def.doors(c, { get body() { return m.body; } }) : [];
+    var first = span.firstChild;
+    (own || []).forEach(function (d) { var a = door(d.icon, d.title, d.onClick); a.classList.add('tm-door-own'); span.insertBefore(a, first); });
+  }
+  Terminal.redoors = redoors;
+  /* Params a card learns after it has drawn — the room id behind the name
+   * that was typed. Unlike `setParams` this does NOT redraw (the card is the
+   * one telling us, mid-draw); it persists, so the next launch resolves the
+   * id rather than a name that may since have changed, and the doors are
+   * rebuilt from what is now known. */
+  Terminal.learnParams = function (id, params) {
+    var c = findCard(id);
+    if (!c) return;
+    c.params = params;
+    var m = state.mounted[id];
+    if (m) m.params = params;
+    save();
+    redoors(id);
+  };
   function setCadence(id, secs) {
     var c = findCard(id);
     if (!c) return;

@@ -248,6 +248,17 @@
     return roomsInFlight;
   }
 
+  /* The one room a bare word names, or null. Only rooms that are not a DM:
+   * a person's name is the player's, and `playerIdFor` owns that. */
+  function roomByName(name) {
+    var want = String(name || '').trim().toLowerCase();
+    if (!want) return null;
+    var list = S.rooms.filter(function (r) { return r.section !== 'direct' && r.name; });
+    var by = function (test) { var hits = list.filter(function (r) { return test(String(r.name).toLowerCase()); }); return hits.length === 1 ? hits[0] : (hits.length > 1 ? hits.filter(function (r) { return r.joined; })[0] || hits[0] : null); };
+    return by(function (n) { return n === want; })
+      || by(function (n) { return n.indexOf(want) === 0; })
+      || by(function (n) { return n.indexOf(want) >= 0; });
+  }
   function roomById(id) {
     var want = String(id || '');
     return S.rooms.filter(function (r) {
@@ -508,6 +519,16 @@
           if (!id) return Promise.reject('no room for ' + s + ' yet — say something to start it');
           return afterJoin(id)(d);
         });
+    }
+    /* A room by its NAME, before a player by theirs. `ROOM Orbital Hydro`
+     * is the room called that, the way `ROOM #orbital-hydro` is; it used to
+     * answer "no player called Orbital Hydro", because a bare word was only
+     * ever a person. The rooms in hand are asked first — exact, then the
+     * one name that starts with it, then the one name that contains it — and
+     * a word that names no room falls through to the people, as before. */
+    if (kind === 'name') {
+      var room = roomByName(s);
+      if (room) return Promise.resolve(room);
     }
     // A player, by id or by name. `matrix_dm` is idempotent — an existing DM
     // comes back rather than a second room beside it.

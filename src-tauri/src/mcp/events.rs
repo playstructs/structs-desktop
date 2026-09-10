@@ -166,7 +166,12 @@ pub fn emit(app: &AppHandle, event: AppEvent) -> Result<(), String> {
             }
             app.emit_to(label.as_str(), &name, payload)
         }
-        Audience::All => app.emit(&name, payload),
+        Audience::All => {
+            // The web board is not a Tauri window: give its stream the copy
+            // `app.emit` cannot deliver.
+            crate::mcp::web_board::relay(&name, &payload);
+            app.emit(&name, payload)
+        }
     };
     record(&name);
     res.map_err(|e| format!("emit {name}: {e}"))
