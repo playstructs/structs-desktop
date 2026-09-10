@@ -108,7 +108,10 @@
       return invoke('matrix_people', { guildId: S.guildId, query: tok }).then(function (res) {
         var people = (res && res.people) || [];
         var exact = people.filter(function (p) { return String(p.username || '').toLowerCase() === tok.toLowerCase(); })[0];
-        return (exact || (people.length === 1 ? people[0] : null) || {}).player_id || null;
+        var hit = exact || (people.length === 1 ? people[0] : null);
+        // The name is known now; the group's own name is built from these.
+        if (hit && hit.player_id && hit.username) { S.groupNames = S.groupNames || {}; S.groupNames[hit.player_id] = hit.username; }
+        return (hit || {}).player_id || null;
       }).catch(function () { return null; });
     }
 

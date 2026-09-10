@@ -121,6 +121,13 @@ function boot(fixtures = {}) {
   await tick(5);
   const made = calls.find((c) => c[0] === 'matrix_group');
   assert.equal(JSON.stringify(made && made[1]), JSON.stringify({ guildId: '0-1', playerIds: ['1-248', '1-61'], name: 'Ore deal' }), 'one call, the picked ids, the name');
+  // Left unnamed, a group is named by its people rather than left untitled.
+  addOf(pp.personRow({ player_id: '1-61', username: 'JPEG' })).click();
+  addOf(pp.personRow({ player_id: '1-248', username: 'Phoniffer' })).click();
+  S.groupName = '';
+  await pp.createGroup();
+  const unnamed = calls.filter((c) => c[0] === 'matrix_group').pop();
+  assert.equal(unnamed[1].name, 'JPEG, Phoniffer', 'a blank name becomes the members\' names');
   assert.ok(calls.some((c) => c[0] === 'openRoom' && c[1] === '!grp:x'), 'the new room is opened');
   assert.deepEqual(JSON.parse(JSON.stringify(S.groupPick)), [], 'the pick is spent');
 }

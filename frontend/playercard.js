@@ -27,6 +27,8 @@
  *
  * `opts`:
  *   actions     [{ icon: 'icon-planet', title: 'Watch planet', onClick(ev) }]  icon doors
+ *   objects     [node, …]   chips for what is theirs (guild, planet, fleet), a row inside the frame
+ *   record      [{ label: 'raids', value: '183', title? }]  what they have done, as tiles inside the frame
  *   onClick     the card body was clicked (never fires for a portrait or action click)
  *   onPortrait  the portrait was clicked; overrides selection
  *   selectable  the portrait toggles selection (accent frame)
@@ -295,6 +297,27 @@
       if (mk) foot.appendChild(mk);
       if (acts.childNodes.length) foot.appendChild(acts);
       body.appendChild(foot);
+    }
+    /* What is THEIRS and what they have DONE, inside the same frame. These
+     * used to be three loose strips under the card — chips, tiles, buttons —
+     * and read as three unrelated things about the same person. */
+    var objs = (opts.objects || []).filter(Boolean);
+    if (objs.length) {
+      var line = el('div', 'pc-objects');
+      objs.forEach(function (o) { line.appendChild(o); });
+      body.appendChild(line);
+    }
+    var rec = (opts.record || []).filter(Boolean);
+    if (rec.length) {
+      var rack = el('div', 'pc-record');
+      rec.forEach(function (r) {
+        var t = el('div', 'pc-rec');
+        if (r.title) t.title = r.title;
+        t.appendChild(el('div', 'pc-rec-v', r.value == null ? '\u2014' : str(r.value)));
+        t.appendChild(el('div', 'pc-rec-l', str(r.label)));
+        rack.appendChild(t);
+      });
+      body.appendChild(rack);
     }
     node.appendChild(body);
     wireClick(node, opts);

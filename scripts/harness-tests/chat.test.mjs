@@ -1112,6 +1112,24 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     JSON.stringify({ roomId: st.roomId, view: st.view, rooms: st.rooms.length }));
 }
 
+// ── Tabs for rooms we no longer have ────────────────────────────────────────
+// A tab can outlive its room: the DM map once handed the window a room we had
+// left, and its raw id sat in the strip for the rest of the session. Once the
+// room list is in hand, a tab the list cannot name is dropped — except the
+// room on screen, which a just-made group or a fresh join legitimately is
+// until the next sync lists it.
+{
+  console.log('\n— tabs for rooms we no longer have');
+  const { w } = await open();
+  const st = w.Chat._state;
+  const listed = st.rooms[0] && st.rooms[0].room_id;
+  st.roomId = '!fresh:h';
+  st.tabs = ['!left:h', listed, '!fresh:h'];
+  await w.Chat.refreshRooms();
+  check('a tab the room list cannot name is dropped, the listed and the open ones stay',
+    JSON.stringify(st.tabs) === JSON.stringify([listed, '!fresh:h']), JSON.stringify(st.tabs));
+}
+
 // ── Pictures ────────────────────────────────────────────────────────────────
 // Live rooms carry images. The client used to print the filename and nothing
 // else, which is the least useful possible rendering of a picture.

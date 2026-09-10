@@ -190,5 +190,21 @@ const PFP = '{"head":12,"neck":2,"body":7,"arms":3,"background":3}';
   check('no doors renders an empty action cell', bare.querySelector('.pc-actions').childNodes.length === 0);
 }
 
+// ── Objects and record, inside the frame ─────────────────────────────────────
+{
+  console.log('\n— objects and record');
+  const chip = dom.window.document.createElement('a'); chip.className = 'sc-chip'; chip.textContent = 'PLANET #2-21740';
+  const full = PC.card({ id: '1-61', name: 'JPEG', pfp: PFP },
+    { actions: [{ icon: 'icon-transfers', title: 'Send Alpha' }], objects: [chip, null],
+      record: [{ label: 'planets', value: '11' }, { label: 'stolen', value: null }] });
+  const body = full.querySelector('.sui-planet-card-body');
+  check('the objects row is inside the frame, after the doors', body.querySelector('.pc-foot + .pc-objects .sc-chip') !== null);
+  check('the record is a row of tiles inside the frame', body.querySelectorAll('.pc-record .pc-rec').length === 2);
+  check('a tile is a value stood on its label', text(body.querySelector('.pc-rec .pc-rec-v')) === '11' && text(body.querySelector('.pc-rec .pc-rec-l')) === 'planets');
+  check('an absent number is a dash, never a zero', text(body.querySelectorAll('.pc-rec-v')[1]) === '\u2014');
+  const plain = PC.card({ id: '1-62', pfp: PFP });
+  check('no objects, no record: no rows', !plain.querySelector('.pc-objects') && !plain.querySelector('.pc-record'));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

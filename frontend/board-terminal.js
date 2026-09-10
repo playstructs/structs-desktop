@@ -2586,6 +2586,10 @@
     label: 'Watch a player', describe: function (p) { return 'Player ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Player id', kind: 'id', kinds: [1], placeholder: '1-194' }],
     cadenceMs: 60000,
+    doors: function (card) {
+      var id = (card.params || {}).id;
+      return id ? [{ icon: 'icon-combat-log', title: 'Tearsheet', onClick: function () { add('sheet', { id: id }); } }] : [];
+    },
     /* `mcp_player_profile`, not `mcp_player_detail`.
      *
      * Detail answers a different question — it is the ROSTER's record, and for
@@ -2628,6 +2632,33 @@
         var g = d.guild || null;
         var planetId = entS(ent, 'planetId') || (hit && hit.planet_id) || null;
         var fleetId = entS(ent, 'fleetId') || (hit && hit.fleet_id) || null;
+        /* The chips open the SAME window the watch doors used to — the full
+         * map viewer — so the two icon doors that duplicated them are gone.
+         * Over the web, where no window can open, the card is what there is. */
+        var watch = function (opts, fallback) {
+          if (Board.canSpectate && Board.canSpectate() && Board.openSpectatorWindow) {
+            Board.openSpectatorWindow(opts).catch(fallback);
+          } else fallback();
+        };
+        var chips = [];
+        if (gid) chips.push(window.StructsGuildCard.chip({ id: gid, name: g && g.name, tag: g && g.tag }, { onClick: function () { add('guild', { id: gid }); } }));
+        if (planetId) chips.push(window.StructsCards.planet.chip({ id: planetId }, { onClick: function () { watch({ planet_id: planetId }, function () { add('planet', { id: planetId }); }); } }));
+        if (fleetId) chips.push(window.StructsCards.fleet.chip({ id: fleetId }, { onClick: function () { watch({ fleet_id: fleetId }, function () { add('map', { id: fleetId }); }); } }));
+        // The guild's record of what this player has DONE. `null` is not zero:
+        // a guild that does not publish one of these leaves a dash.
+        var stat = function (v, key) { var n = v == null ? null : (key ? v[key] : v); if (n == null) return null; var f = Number(n); return isFinite(f) ? f : null; };
+        var mined = stat(d.ore_stats, 'mined'), seized = stat(d.ore_stats, 'seized');
+        var planets = stat(d.planets_completed, 'count'), raids = stat(d.raids_launched, 'count');
+        var record = (mined != null || seized != null || planets != null || raids != null) ? [
+          { label: 'planets', value: planets == null ? null : H.fmtInt(planets) },
+          { label: 'raids', value: raids == null ? null : H.fmtInt(raids) },
+          { label: 'mined', value: mined == null ? null : H.fmtOre(mined) },
+          { label: 'stolen', value: seized == null ? null : H.fmtOre(seized) },
+        ] : [];
+        /* Three doors, one row: send them Alpha, message them, share them.
+         * Everything about this player is INSIDE the frame now; the buttons
+         * that used to sit under it are the header's doors. */
+        var send = { icon: 'icon-transfers', title: 'Send Alpha to ' + name, onClick: function () { add('deliver', { to: id }); } };
         var card = window.StructsPlayerCard.card({
           id: id, name: name, pfp: attrs,
           presence: Board.presenceDot && Board.presenceDot(id),
@@ -2638,35 +2669,9 @@
           badge: (stand && stand.badge) || (det.role && det.role !== 'primary' ? { text: String(det.role).toUpperCase(), mod: 'default' } : null),
           marks: stand ? [{ icon: 'sui-icon sui-icon-md icon-defend', value: stand.note, title: 'Our standing with them — ' + stand.note }] : null,
           readings: reads,
-        }, { actions: (Board.watchActions ? Board.watchActions({ player_id: id, planet_id: planetId, fleet_id: fleetId }) : [])
-          .concat(Board.reachActions ? Board.reachActions({ player_id: id, player_name: name }) : []) });
+        }, { actions: [send].concat(Board.reachActions ? Board.reachActions({ player_id: id, player_name: name }) : []),
+             objects: chips, record: record });
         host.appendChild(card);
-        var chips = [];
-        if (gid) chips.push(window.StructsGuildCard.chip({ id: gid, name: g && g.name, tag: g && g.tag }, { onClick: function () { add('guild', { id: gid }); } }));
-        if (planetId) chips.push(window.StructsCards.planet.chip({ id: planetId }, { onClick: function () { add('planet', { id: planetId }); } }));
-        if (fleetId) chips.push(window.StructsCards.fleet.chip({ id: fleetId }, { onClick: function () { add('map', { id: fleetId }); } }));
-        if (chips.length) {
-          var line = H.el('div', 'sc-chips tm-player-chips');
-          chips.forEach(function (c) { line.appendChild(c); });
-          host.appendChild(line);
-        }
-        // The guild's record of what this player has DONE. `null` is not zero:
-        // a guild that does not publish one of these leaves a dash.
-        var stat = function (v, key) { var n = v == null ? null : (key ? v[key] : v); if (n == null) return null; var f = Number(n); return isFinite(f) ? f : null; };
-        var mined = stat(d.ore_stats, 'mined'), seized = stat(d.ore_stats, 'seized');
-        var planets = stat(d.planets_completed, 'count'), raids = stat(d.raids_launched, 'count');
-        if (mined != null || seized != null || planets != null || raids != null) {
-          var strip = H.el('div', 'hstrip tm-tiles');
-          strip.appendChild(H.statTile('planets', planets == null ? '—' : H.fmtInt(planets)));
-          strip.appendChild(H.statTile('raids', raids == null ? '—' : H.fmtInt(raids)));
-          strip.appendChild(H.statTile('mined', mined == null ? '—' : H.fmtOre(mined)));
-          strip.appendChild(H.statTile('stolen', seized == null ? '—' : H.fmtOre(seized)));
-          host.appendChild(strip);
-        }
-        host.appendChild(doorRow([
-          { label: 'Wallet', onClick: function () { add('wallet', { id: id }); } },
-          { label: 'Tearsheet', onClick: function () { add('sheet', { id: id }); } },
-        ]));
       });
     },
   });

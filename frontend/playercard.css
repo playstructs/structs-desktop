@@ -76,14 +76,14 @@
    Quantities are set in DirectiveZero: ExtremeHazard has no lowercase, and
    "40.23Kg" / "0μg" are case-bearing units. */
 .pc-reads { display: flex; align-items: center; gap: var(--spacing-xl); }
-.pc-res {
+.pc-res, .pc-rec-v {
   display: inline-flex; align-items: center; gap: var(--spacing-sm);
   white-space: nowrap; font-variant-numeric: tabular-nums;
   font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: 1;
   text-transform: none; letter-spacing: 0;
   color: var(--text-body);
 }
-.pc-res .pc-res-hint {
+.pc-res .pc-res-hint, .pc-rec-l {
   font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: 16px;
   text-transform: uppercase; color: var(--text-hint);
 }
@@ -160,6 +160,14 @@ a.pc-person.pc-mod-clickable:hover .pc-nm { color: var(--text-player-primary); }
   gap: var(--spacing-md); width: 100%; min-height: 32px;
 }
 .pc-card .pc-foot .pc-actions { margin-left: auto; }
+/* ── objects and record: the frame's last two lines ─────────────────── */
+.pc-card .pc-objects {
+  display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
+  width: 100%; padding-top: var(--spacing-md); border-top: thin solid var(--border-subtle);
+}
+.pc-card .pc-record { display: flex; gap: var(--spacing-lg); width: 100%; }
+/* A record tile is a reading stood on its label: the same two faces. */
+.pc-rec { flex: 1 1 0; min-width: 0; }
 
 /* ═══ .pc-row — one aligned line ═════════════════════════════════════════ */
 .pc-row {

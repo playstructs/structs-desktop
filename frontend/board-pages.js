@@ -464,6 +464,9 @@
     return acts;
   }
   Board.watchActions = watchActions;
+  // The chips on a player card open the same window the watch doors do.
+  Board.canSpectate = canSpectate;
+  Board.openSpectatorWindow = openSpectatorWindow;
 
   function armadaActions(r) {
     var acts = watchActions(r);

@@ -796,6 +796,16 @@
       if (r.room_id === S.roomId) { r.unread = 0; r.mention = false; }
       return r;
     });
+    /* A tab for a room the list does not have is a tab for a room we have
+     * left (or were shown by mistake) — it can only ever show a raw id and
+     * a timeline that ends in "left". Pruned once the list is in hand; the
+     * room on screen stays, because a room just made or just joined is
+     * listed by the NEXT sync, not this one. */
+    if (S.rooms.length && S.tabs && S.tabs.length) {
+      S.tabs = S.tabs.filter(function (id) {
+        return id === S.roomId || S.rooms.some(function (r) { return r.room_id === id; });
+      });
+    }
   }
 
   function refreshRooms() {

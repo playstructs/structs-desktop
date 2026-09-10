@@ -158,10 +158,18 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('…the guild is named and tagged, not left as an id', /\[OH\]/.test(pc.textContent) && /Orbital Hydro/.test(pc.textContent));
     check('…the portrait is the player\'s own on-chain one', pc.querySelector('.pc-pfp img') !== null, pc.querySelector('.pc-pfp')?.innerHTML.slice(0, 120));
     check('…alpha, ore, energy and the struct count are all readings', pc.querySelectorAll('.pc-res').length >= 4 && /13/.test(pc.textContent));
-    const strip = d.querySelector('#tm-player-1 .tm-tiles');
-    check('…and the guild\'s record of what they have done rides under it', strip !== null && /planets/.test(strip.textContent) && /raids/.test(strip.textContent) && /mined/.test(strip.textContent));
-    const chips = d.querySelectorAll('#tm-player-1 .tm-player-chips .sc-chip, #tm-player-1 .tm-player-chips .gc-chip');
-    check('…with their guild, planet and fleet as chips that open cards of their own', chips.length === 3);
+    /* One frame. What is theirs (guild, planet, fleet) and what they have
+     * done (the record) live INSIDE the card; the doors are send · message ·
+     * share, and Tearsheet is the card header's own door. Nothing rides
+     * under the frame any more — three loose strips was the mess. */
+    const rec = pc.querySelector('.pc-record');
+    check('…and the guild\'s record of what they have done is a row inside the frame', rec !== null && /planets/i.test(rec.textContent) && /raids/i.test(rec.textContent) && /mined/i.test(rec.textContent));
+    const chips = pc.querySelectorAll('.pc-objects .sc-chip, .pc-objects .gc-chip');
+    check('…with their guild, planet and fleet as chips inside the frame', chips.length === 3);
+    const doors = [...pc.querySelectorAll('.pc-act')].map((a) => a.title);
+    check('…three doors: send Alpha, message, share — the map is what the chips open', doors.length === 3 && /^Send Alpha/.test(doors[0]) && /^Message/.test(doors[1]) && /^Share/.test(doors[2]), doors.join(' | '));
+    check('…Tearsheet is the header\'s door, and nothing sits under the frame',
+      d.querySelector('#tm-player-1 .tm-door[title="Tearsheet"]') !== null && d.querySelector('#tm-player-1 .tm-doors-row') === null && d.querySelector('#tm-player-1 .tm-tiles') === null);
   }
   await until(() => d.querySelector('#tm-stats-1 .fstat'));
   check('stats card: one Game Stats section', /RAID PRESSURE/i.test(d.querySelector('#tm-stats-1')?.textContent || ''));

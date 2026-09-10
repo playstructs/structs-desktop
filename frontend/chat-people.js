@@ -283,7 +283,11 @@
     function createGroup() {
       var ids = groupPick().slice();
       if (!ids.length) return Promise.resolve();
-      return invoke('matrix_group', { guildId: S.guildId, playerIds: ids, name: (S.groupName || '').trim() || null })
+      /* A group always gets a name. Left blank it is named by its people —
+       * "JPEG, Phoniffer" — because a room without one is shown by whatever
+       * the server can guess, and for a fresh group that is nothing. */
+      var name = (S.groupName || '').trim() || ids.map(pickName).join(', ');
+      return invoke('matrix_group', { guildId: S.guildId, playerIds: ids, name: name })
         .then(function (res) {
           S.groupPick = []; S.groupName = '';
           return refreshRooms().then(function () { if (res && res.room_id) return openRoom(res.room_id); });
