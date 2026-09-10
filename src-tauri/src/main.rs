@@ -131,6 +131,7 @@ fn main() {
             matrix::matrix_disconnect,
             matrix::matrix_rooms,
             matrix::matrix_browse,
+            matrix::matrix_servers,
             matrix::matrix_timeline,
             matrix::matrix_backfill,
             matrix::matrix_open_url,

@@ -323,6 +323,14 @@
         host.innerHTML = '';
 
         var r = C.roomById(rid) || state.room;
+        /* A room the joined list does not have. It is real — the server named
+         * it — but we know its id and nothing else, so the card says which
+         * state it is in rather than drawing an empty conversation that looks
+         * settled. */
+        if (r.unknown) {
+          host.appendChild(H.stateBlock('info',
+            'Joined ' + r.room_id + ', but it has not come back in a sync yet.'));
+        }
         if (r.encrypted) {
           host.appendChild(H.stateBlock('error',
             'This room is end-to-end encrypted and this client has no crypto — nothing sent here can be read.'));
@@ -416,6 +424,7 @@
           made.input.value = '';
           state.replyTo = null;
           state.atBottom = true;
+          if (state.stopTyping) state.stopTyping();
           C.send(rid, text, reply).catch(function (e) { Board.stamp && Board.stamp('send: ' + e); });
         };
         made.input.addEventListener('keydown', function (e) {
@@ -428,11 +437,24 @@
             state.replyTo = null; draw();
           }
         });
-        var typingAt = 0;
+        /* Typing is a claim with an END. This told the server `true` every four
+         * seconds and `false` never — so every keystroke left you "typing" in
+         * everyone else's client until their timeout expired, including after
+         * you gave up and closed the box. Say it once, and stop saying it. */
+        var typingAt = 0, typingOff = null;
+        var stopTyping = function () {
+          if (typingOff) { clearTimeout(typingOff); typingOff = null; }
+          if (typingAt) { typingAt = 0; C.typing(rid, false); }
+        };
         made.input.addEventListener('input', function () {
+          if (!String(made.input.value || '').trim()) { stopTyping(); return; }
           var now = Date.now();
           if (now - typingAt > 4000) { typingAt = now; C.typing(rid, true); }
+          if (typingOff) clearTimeout(typingOff);
+          typingOff = setTimeout(stopTyping, 5000);
         });
+        made.input.addEventListener('blur', stopTyping);
+        state.stopTyping = stopTyping;
         made.send.addEventListener('click', submit);
         host.appendChild(made.node);
         if (state.focus) { made.input.focus(); state.focus = false; }
@@ -440,6 +462,11 @@
 
       C.watch(host, function (what) {
         if (!state.room) return;
+        /* A message arriving in the room you are LOOKING AT is a message you
+         * have read. This marked read once, on mount, so the badge on a room
+         * you were staring at climbed all evening and only cleared if you
+         * reopened the card. The receipt is what the server counts against. */
+        if (what === 'timeline:' + state.room.room_id) C.markRead(state.room.room_id);
         if (what === 'timeline:' + state.room.room_id || what === 'typing:' + state.room.room_id
           || what === 'rooms' || what === 'status') draw();
       });
@@ -497,13 +524,48 @@
   // is why joining a channel meant scrolling past the ones you were in.
   T.register('channels', {
     label: 'Channel directory', defaultWidth: 1, single: true, defaultHeight: 'grow',
-    describe: function (p) { return 'Channels' + (p.q ? ' · ' + p.q : ''); },
-    params: [{ key: 'q', label: 'Search', kind: 'text', placeholder: 'trade, war, help…' }],
+    describe: function (p) {
+      return 'Channels' + (p.server ? ' · ' + p.server : '') + (p.q ? ' · ' + p.q : '');
+    },
+    params: [
+      { key: 'q', label: 'Search', kind: 'text', placeholder: 'trade, war, help…' },
+      { key: 'server', label: 'Homeserver', kind: 'text', placeholder: 'yours' },
+    ],
     cadenceMs: 120000,
-    render: function (host, p) {
-      var draw = function (list) {
+    render: function (host, p, ctx) {
+      var ctxId = ctx.id;
+      var draw = function (list, servers) {
         if (!host.isConnected) return;
         host.innerHTML = '';
+
+        /* WHICH homeserver's directory this is.
+         *
+         * Comms is decentralised — every guild runs its own — but the
+         * community meets in channels published by ONE of them. A directory
+         * that only ever answers for your own guild's server showed a new
+         * player their own guild's rooms and left the place everybody actually
+         * talks undiscoverable: you had to be told an alias. Federation
+         * already carried the join; only discovery stopped at the boundary.
+         *
+         * The list comes from the guild configs the app discovers on chain, so
+         * a guild that stands up a homeserver appears here without anything
+         * being typed anywhere. */
+        if ((servers || []).length > 1) {
+          var strip = H.el('div', 'cm-servers');
+          servers.forEach(function (sv) {
+            var here = p.server ? sv.server === p.server : sv.mine;
+            var a = H.el('a', 'sui-badge cm-server' + (here ? ' is-here' : ''),
+              (sv.tag || sv.name || sv.server) + (sv.mine ? ' · yours' : ''));
+            a.href = 'javascript:void(0)';
+            a.title = sv.server;
+            a.addEventListener('click', function () {
+              T.setParams(ctxId, { q: p.q || '', server: sv.mine ? '' : sv.server });
+            });
+            strip.appendChild(a);
+          });
+          host.appendChild(strip);
+        }
+
         var joined = {};
         C.S.rooms.forEach(function (r) { if (r.joined) joined[r.room_id] = 1; });
         var rows = (list || []).filter(function (r) { return !joined[r.room_id]; });
@@ -520,9 +582,12 @@
          * you already have, and a directory drawn before sync landed offers
          * you every room you are standing in. */
         return C.rooms().then(function () {
-          return invoke('matrix_browse', { guildId: C.S.key, query: p.q || null });
+          return Promise.all([
+            invoke('matrix_browse', { guildId: C.S.key, query: p.q || null, server: p.server || null }),
+            C.servers(),
+          ]);
         })
-          .then(function (d) { draw((d && (d.rooms || d.chunk)) || (Array.isArray(d) ? d : [])); })
+          .then(function (r) { draw((r[0] && (r[0].rooms || r[0].chunk)) || [], r[1]); })
           .catch(function (e) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', String(e))); });
       });
     },

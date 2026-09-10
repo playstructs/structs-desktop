@@ -598,11 +598,31 @@ cat > "$FIX" <<'EOF'
       { room_id: '!home:h', name: 'Announcements', section: 'local', joined: true,
         home_rank: 0, members: 900, unread: 0, mention: false, icon: 'icon-beacon' },
     ] },
-    matrix_browse: { rooms: [
-      { room_id: '!trade:h', name: 'Trade', canonical_alias: '#trade:h', members: 300, joined: true },
-      { room_id: '!help:h', name: 'Help', canonical_alias: '#help:h', members: 88, joined: false,
-        topic: 'ask anything' },
+    /* Two guilds, two homeservers. Comms is decentralised and the community
+     * meets on ONE of them, so a directory that only ever answers for your own
+     * cannot show a new player where anybody is. */
+    matrix_servers: { servers: [
+      { guild_id: '0-5', name: 'SN Corp', tag: 'SNC', server: 'h', mine: true },
+      { guild_id: '0-1', name: 'Orbital Hydro', tag: 'OH', server: 'oh.energy', mine: false },
     ] },
+    matrix_browse: function (a) {
+      // The remote directory is a DIFFERENT set of rooms, which is the whole
+      // point — a fixture answering the same list for both would let a card
+      // that ignores `server` pass.
+      if (a && a.server === 'oh.energy') {
+        return { server: 'oh.energy', rooms: [
+          { room_id: '!hydro:oh.energy', name: 'Hydro General',
+            canonical_alias: '#general:oh.energy', members: 400, joined: false,
+            topic: 'the other guild' },
+        ] };
+      }
+      return { server: null, rooms: [
+        { room_id: '!trade:h', name: 'Trade', canonical_alias: '#trade:h', members: 300, joined: true },
+        { room_id: '!help:h', name: 'Help', canonical_alias: '#help:h', members: 88, joined: false,
+          topic: 'ask anything' },
+      ] };
+    },
+
     matrix_people: { people: [
       { player_id: '1-61', name: 'JPEG' },
       { player_id: '1-104', name: 'BEEZHAN' },

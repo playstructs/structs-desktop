@@ -2939,12 +2939,31 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
 /// hundreds of rooms only ever hands us the first hundred, so searching
 /// locally would search the wrong set. Federated servers can be searched too
 /// once the `server` argument is wired; for now this is the guild's own.
+/// The published room directory — of THIS homeserver, or of another one.
+///
+/// `server` is the whole reason this takes a parameter. Comms is decentralised:
+/// every guild runs its own homeserver, and a player's session lives on their
+/// OWN guild's. But the community meets in one place — channels published by
+/// another guild entirely — and `/publicRooms` with no `server` answers only
+/// for the server you asked. So a player in one guild opened the directory,
+/// saw their own guild's rooms, and had no way to discover the rooms everybody
+/// actually talks in: they had to be TOLD an alias.
+///
+/// Federation already carries the join. It was only the DISCOVERY that stopped
+/// at the guild boundary.
 pub async fn browse(
     guild_id: &str,
     session: &Session,
     query: Option<&str>,
+    server: Option<&str>,
 ) -> Result<Vec<Room>, String> {
     let url = format!("{}/publicRooms", base(session));
+    // The spec puts it in the query string even for the POST form. `.query()`
+    // is reqwest's own encoder — no new dependency for one parameter.
+    let remote = server
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let term = query.unwrap_or("").trim().to_string();
     let mut body = json!({ "limit": 60 });
     if !term.is_empty() {
@@ -2953,7 +2972,11 @@ pub async fn browse(
     // POST, not GET: the search term goes in a filter object, which the GET
     // form has no way to carry.
     let v = authed(session, move |c, s| {
-        c.post(&url).bearer_auth(&s.access_token).json(&body)
+        let mut req = c.post(&url).bearer_auth(&s.access_token).json(&body);
+        if let Some(r) = remote.as_deref() {
+            req = req.query(&[("server", r)]);
+        }
+        req
     })
     .await?;
 

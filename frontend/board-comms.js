@@ -249,7 +249,11 @@
     SECTIONS.forEach(function (sec) {
       var rows = S.rooms.filter(function (r) {
         if (sectionOf(r) !== sec.key) return false;
-        if (sec.key === 'invited') return true;
+        /* An invite is the most waiting thing in the list, so it survives the
+         * unread filter — but not a filter that ASKED for one section. "Show
+         * me people" answered with a channel invite is answering a different
+         * question. */
+        if (sec.key === 'invited') return !opts.only || opts.only === 'all';
         if (!r.joined) return false;
         if (opts.only && opts.only !== 'all' && sec.key !== opts.only) return false;
         if (opts.unreadOnly && !r.unread && !r.mention) return false;
@@ -369,9 +373,20 @@
     return function (d) {
       var told = d && (d.room_id || d.roomId);
       return refreshRooms(true).then(function () {
-        return (String(asked).charAt(0) === '!' && roomById(asked))
-          || roomById(told) || roomById(asked)
-          || { room_id: told || asked, name: (d && d.name) || asked, joined: true };
+        var found = (String(asked).charAt(0) === '!' && roomById(asked))
+          || roomById(told) || roomById(asked);
+        if (found) return found;
+        /* Not in the list after a refresh. That is either a room the server
+         * has only just made (an object room, one sync behind) or a join that
+         * did not produce one we can see — and the two are told apart by
+         * whether the server named a room at all.
+         *
+         * It used to fabricate `{ room_id: told || asked, name: asked }` for
+         * both, which meant `ROOM #nope-not-real` opened an empty room called
+         * "#nope-not-real" that had never existed. A room we cannot see is not
+         * an empty room; naming it after what was TYPED is inventing one. */
+        if (!told) return Promise.reject('no room for “' + asked + '” — nothing joined');
+        return { room_id: told, name: told, joined: true, unknown: true };
       });
     };
   }
@@ -389,6 +404,18 @@
         return list;
       }).catch(function () { return S.people || []; });
   }
+  /* Every homeserver a player could browse: their own, and every other guild's
+   * that publishes one. Read once per session — a guild standing up a
+   * homeserver is not a thing that happens while you are looking at a card. */
+  var serversCache = null;
+  function servers() {
+    if (serversCache) return Promise.resolve(serversCache);
+    return invoke('matrix_servers', {}).then(function (d) {
+      serversCache = (d && d.servers) || [];
+      return serversCache;
+    }).catch(function () { return []; });
+  }
+
   function playerIdFor(name) {
     var want = String(name || '').toLowerCase();
     var pick = function (list) {
@@ -460,6 +487,7 @@
     rooms: refreshRooms, roomById: roomById, sections: sections, SECTIONS: SECTIONS,
     sectionOf: sectionOf, matches: matches, waiting: waiting,
     subjectKind: subjectKind, resolve: resolve, people: people, playerIdFor: playerIdFor,
+    servers: servers,
     timeline: timeline, older: older, send: send, markRead: markRead, typing: typing,
   };
 })();

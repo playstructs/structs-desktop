@@ -1541,6 +1541,12 @@
     .cm-me .cm-signout:hover { color: var(--accent-destructive); }
     /* Ids a message named, beyond the one that expanded. Chips, not cards:
        a message naming four objects would otherwise bury itself under four. */
+    /* Which homeserver's directory you are looking at. Comms is decentralised
+       and the community meets on ONE guild's server; a directory with no way
+       to name another one cannot show a new player where anybody is. */
+    .cm-servers { display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
+      margin-bottom: var(--spacing-sm); }
+    .cm-server.is-here { border-color: var(--accent-primary); color: var(--text-player-primary); }
     .cm-refs { display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
       margin-top: var(--spacing-xs); }
     .cm-hit { border-bottom: 1px solid var(--border-subtle); padding-bottom: var(--spacing-xs);

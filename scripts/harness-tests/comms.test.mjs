@@ -135,6 +135,14 @@ async function load(qs) {
     card.querySelector('.cm-me .cm-signout') !== null
     && card.querySelector('.cm-me .cm-signout').textContent === 'sign out');
 
+  /* An invite is the most waiting thing in the list, so it survives the
+   * unread filter — but not a filter that ASKED for one section. "Show me
+   * people" answered with a channel invite answers a different question. */
+  check('an invite outlives the unread filter, because it IS waiting',
+    C.sections({ only: 'all', unreadOnly: true }).some((g) => g.section.key === 'invited'));
+  check('…but "show me people" is not answered with a channel invite',
+    C.sections({ only: 'direct' }).map((g) => g.section.key).join(',') === 'direct');
+
   /* The unread badge is the SERVER's, kept against the read receipts this app
    * sends — so it survives the window closing, survives a restart, and agrees
    * with the same account open in Element on a phone. */
@@ -169,6 +177,18 @@ async function load(qs) {
   const dm = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'matrix_dm');
   check('a player id opens their direct message, without a handle to exchange first',
     dm !== undefined && dm.args.playerId === '1-61');
+
+  /* A room the joined list does not have after a refresh. It used to fabricate
+   * `{room_id: told || asked, name: asked}` for BOTH cases — so
+   * `ROOM #nope-not-real` opened an empty conversation called
+   * "#nope-not-real" that had never existed. A room we cannot see is not an
+   * empty room, and naming it after what was TYPED is inventing one. */
+  {
+    const made = await w.BoardComms.resolve('#no-such-channel').catch((e) => ({ error: String(e) }));
+    check('a room the server names but sync has not returned says so, under the id the SERVER gave',
+      made.unknown === true && made.room_id === '!help:h' && made.name === '!help:h',
+      JSON.stringify(made));
+  }
   check('…and looking at a room is reading it', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_mark_read'));
 
   const first = d.querySelector('#tm-' + ids[0]);
@@ -256,6 +276,27 @@ async function load(qs) {
    * every channel you were already in. */
   check('the directory offers only what you are NOT already in',
     /Help/.test(dir.textContent) && !/Trade/.test(dir.textContent), dir.textContent.replace(/\s+/g, ' ').slice(0, 120));
+
+  /* Comms is DECENTRALISED — every guild runs its own homeserver — but the
+   * community meets in channels published by one of them. `/publicRooms` with
+   * no `server` answers only for the server you asked, so a player opened the
+   * directory, saw their own guild's rooms, and had no way to discover where
+   * anybody actually talks: they had to be told an alias. Federation already
+   * carried the join. Only DISCOVERY stopped at the guild boundary. */
+  {
+    const servers = [...dir.querySelectorAll('.cm-server')].map((a) => a.textContent);
+    check('the directory names every guild that publishes a homeserver, not just yours',
+      servers.length === 2 && servers.some((t) => /yours/.test(t)) && servers.some((t) => /OH/.test(t)),
+      servers.join(' | '));
+    const other = [...dir.querySelectorAll('.cm-server')].find((a) => /OH/.test(a.textContent));
+    other.click();
+    await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_browse' && c.args.server));
+    const asked = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'matrix_browse').slice(-1)[0];
+    check('…and picking one browses THAT server\'s directory', asked.args.server === 'oh.energy');
+    await until(() => /Hydro General/.test(d.querySelector('#tm-' + cid).textContent));
+    check('…which is a different set of rooms, reachable without being told an alias',
+      /Hydro General/.test(d.querySelector('#tm-' + cid).textContent));
+  }
 
   T.add('who', { id: '!snc:h' }, 1);
   const wid = T.state.layout.cards.slice(-1)[0].id;

@@ -301,14 +301,60 @@ pub async fn matrix_rooms(guild_id: String) -> Result<Value, String> {
 /// The homeserver's channel directory — everything public, not just what you
 /// are already in. The channel list answers "where am I"; this answers "what
 /// else is there", and conflating the two makes both worse.
+/// The published room directory.
+///
+/// `server` browses ANOTHER homeserver's directory. Comms is decentralised —
+/// every guild runs its own — but the community meets in channels published by
+/// one of them, and a directory that only ever answers for your own guild's
+/// server cannot show a new player where anyone is. Federation already carried
+/// the join; only discovery stopped at the guild boundary.
+///
+/// Omitted, it is this session's own server, which is what "what else is on
+/// mine" means.
 #[tauri::command]
 pub async fn matrix_browse(
     guild_id: String,
     query: Option<String>,
+    server: Option<String>,
 ) -> Result<Value, String> {
     let session = session_for(&guild_id)?;
-    let rooms = client::browse(&guild_id, &session, query.as_deref()).await?;
-    Ok(json!({ "guild_id": guild_id, "rooms": rooms }))
+    let rooms = client::browse(&guild_id, &session, query.as_deref(), server.as_deref()).await?;
+    Ok(json!({ "guild_id": guild_id, "rooms": rooms, "server": server }))
+}
+
+/// Every homeserver a player could browse: their own, and every other guild's
+/// that publishes one. The list comes from the guild configs the app already
+/// discovers on chain, so a guild that stands up a homeserver appears here
+/// without anything being typed anywhere.
+#[tauri::command]
+pub async fn matrix_servers() -> Result<Value, String> {
+    let mine = own_guild_id();
+    let list: Vec<Value> = crate::guild_config::get_guild_configs()
+        .into_iter()
+        .filter_map(|c| {
+            let url = c.matrix_url.clone().filter(|m| !m.is_empty())?;
+            // The SERVER NAME, not the base URL: `/publicRooms?server=` takes
+            // the name a room id is suffixed with, not somewhere to connect to.
+            let host = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if host.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "guild_id": c.guild_id,
+                "name": c.name,
+                "tag": c.guild_tag,
+                "server": host,
+                "mine": Some(&c.guild_id) == mine.as_ref(),
+            }))
+        })
+        .collect();
+    Ok(json!({ "servers": list }))
 }
 
 #[tauri::command]

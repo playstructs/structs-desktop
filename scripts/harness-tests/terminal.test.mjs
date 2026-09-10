@@ -1952,6 +1952,42 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const w = dom.window, d = w.document;
   await until(() => d.querySelectorAll('#tm-grid .tm-card').length >= 1);
   check('a pop-out shows exactly its card', d.querySelectorAll('#tm-grid .tm-card').length === 1 && d.querySelector('#tm-grid .tm-card').getAttribute('data-card') === 'market-1');
+  /* A window is pinned to a card ID, and a migration can retire the id under
+   * it — `chat` → `comms`, or a duplicate of a one-per-window card collapsing.
+   * A window open on the second of three feeds came back as "This card is no
+   * longer on the workspace": dead, permanently, with no way to say what it
+   * was for. It was a window on THE FEED, and the feed is still there. */
+  {
+    const L = w.Board.Terminal.state.layout;
+    const before = L.cards.slice();
+    L.cards = [{ id: 'feed-1', type: 'feed', params: {}, w: 2 }];
+    w.Board.Terminal.state.solo = 'feed-3';
+    w.Board.Terminal.reloadLayout && null;   // no reload: renderGrid is the unit
+    d.getElementById('tm-grid').innerHTML = '';
+    w.Board.Terminal.state.mounted && Object.keys(w.Board.Terminal.state.mounted).forEach((k) => delete w.Board.Terminal.state.mounted[k]);
+    w.Board.Terminal.dropOn('feed-1', null, false);   // any op that redraws the grid
+    await until(() => d.querySelector('#tm-grid .tm-card'));
+    check('…and a window whose exact card was retired follows the survivor rather than dying',
+      d.querySelectorAll('#tm-grid .tm-card').length === 1
+      && d.querySelector('#tm-grid .tm-card').getAttribute('data-type') === 'feed');
+    /* Only for a card that is one-per-window. Two `player` cards are two
+     * different players, and following one to the other would silently change
+     * what the window is watching. */
+    L.cards = [{ id: 'player-1', type: 'player', params: { id: '1-61' }, w: 1 }];
+    w.Board.Terminal.state.solo = 'player-9';
+    Object.keys(w.Board.Terminal.state.mounted).forEach((k) => delete w.Board.Terminal.state.mounted[k]);
+    d.getElementById('tm-grid').innerHTML = '';
+    w.Board.Terminal.dropOn('player-1', null, false);
+    check('…but a card that is not one-per-window is never substituted: another player is another player',
+      d.querySelector('#tm-grid .tm-card') === null
+      && /no longer on the workspace/.test(d.getElementById('tm-grid').textContent));
+    w.Board.Terminal.state.solo = 'market-1';
+    L.cards = before;
+    Object.keys(w.Board.Terminal.state.mounted).forEach((k) => delete w.Board.Terminal.state.mounted[k]);
+    d.getElementById('tm-grid').innerHTML = '';
+    w.Board.Terminal.dropOn('market-1', null, false);
+    await until(() => d.querySelector('#tm-grid .tm-card'));
+  }
   /* No toolbar in the window's own chrome. `.tm-bar` alone is too blunt now:
    * the palette carries one INSIDE its hidden scrim, and a card window answers
    * ⌘K like every other surface. So this asks the question it meant — is there

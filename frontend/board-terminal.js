@@ -936,6 +936,7 @@
     if (m) m.title.textContent = titleOf(c);
     save();
   }
+  Terminal.setParams = setParams;
   Terminal.setTitle = setTitle;
   /* The title a card learns AFTER it has drawn — not the one a player typed.
    *
@@ -1158,10 +1159,33 @@
     if (def) refresh(card.id, true);
   }
 
+  /* The one card a pop-out window is for — and its SUCCESSOR when that exact
+   * card is gone.
+   *
+   * A window is pinned to a card ID, and a migration can retire the id under
+   * it: the Comms rebuild renamed `chat` → `comms`, and both rebuilds collapse
+   * duplicates of a card that is one-per-window. A window open on the second
+   * of three feeds then came back as "This card is no longer on the
+   * workspace" — a dead window, permanently, with no way to say what it was
+   * for. It was a window on THE FEED, and the feed is still there.
+   *
+   * So: the exact id first, then the survivor of the same TYPE — which the id
+   * carries, because `newId` mints `type + '-' + n`. Only for a type that is
+   * one-per-window; two `player` cards are two different players and following
+   * one to the other would silently change what the window is watching. */
+  function soloCards() {
+    var exact = state.layout.cards.filter(function (c) { return c.id === state.solo; });
+    if (exact.length) return exact;
+    var type = String(state.solo || '').replace(/-\d+$/, '');
+    var def = TYPES[type];
+    if (!def || !def.single) return [];
+    return state.layout.cards.filter(function (c) { return c.type === type; }).slice(0, 1);
+  }
+
   function renderGrid() {
     var grid = document.getElementById('tm-grid');
     if (!grid) return;
-    var want = state.solo ? state.layout.cards.filter(function (c) { return c.id === state.solo; }) : state.layout.cards;
+    var want = state.solo ? soloCards() : state.layout.cards;
     // The reconcile keeps mounted cards in place; an empty-workspace note from
     // an earlier pass is not a card and would otherwise sit beside the first
     // card added after it.
