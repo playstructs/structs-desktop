@@ -9,7 +9,19 @@ use std::path::PathBuf;
 
 /// Absolute path of a config file `<config_dir>/structs-app/<filename>`.
 pub fn config_path(filename: &str) -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("structs-app").join(filename))
+    #[cfg(not(test))]
+    {
+        dirs::config_dir().map(|d| d.join("structs-app").join(filename))
+    }
+    #[cfg(test)]
+    {
+        // Profile tests exercise real save/rename operations after replacing
+        // the in-memory store. Never read or overwrite the user's settings.
+        static ROOT: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+            std::env::temp_dir().join(format!("structs-app-tests-{}", uuid::Uuid::new_v4()))
+        });
+        Some(ROOT.join(filename))
+    }
 }
 
 /// Load a config from disk, falling back to `Default` on any error (missing
@@ -55,5 +67,22 @@ pub fn save_config<T: Serialize>(filename: &str, cfg: &T) {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(p, json);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configuration_round_trips_outside_the_user_directory() {
+        let path = config_path("profile-isolation-check.json").unwrap();
+        let real = dirs::config_dir().unwrap().join("structs-app");
+        assert!(!path.starts_with(real));
+        assert!(path.starts_with(std::env::temp_dir()));
+        let expected = vec!["saved test profile".to_string()];
+        save_config("profile-isolation-check.json", &expected);
+        assert_eq!(load_config::<Vec<String>>("profile-isolation-check.json"), expected);
+        std::fs::remove_file(path).unwrap();
     }
 }

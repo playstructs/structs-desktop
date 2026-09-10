@@ -639,6 +639,13 @@ cat > "$FIX" <<'EOF'
     matrix_typing: { ok: true },
     matrix_react: { ok: true },
     matrix_redact: { ok: true },
+    /* A timeline with SERVER event ids (`$…`). A read marker names the event
+     * you have read up to, and Rust refuses anything that is not a server id —
+     * a fixture of local echoes would let a card that marks nothing pass. */
+    matrix_timeline: { room: { room_id: '!snc:h', name: 'SN.Corporation' }, messages: [
+      { event_id: '$m1', sender: '@1-61:h', sender_name: 'JPEG', kind: 'text', ts: 1,
+        body: 'shield on 2-15361 is down to 25' },
+    ] },
     matrix_backfill: { messages: [] },
     /* The HOMESERVER searches, not the client: a hit carries the room it was
      * said in, which is the whole answer when the search spans every room. */
@@ -1052,12 +1059,47 @@ cat > "$FIX" <<'EOF'
   // The one that matters here: Comms not signed in, which is the state every
   // player is in before they connect.
   window.__HARNESS_REJECT__ = {};
+  /* Arguments a command CANNOT do without.
+   *
+   * The fixture used to answer any shape, which is how a Comms client that
+   * called `matrix_mark_read` with no `event_id`, `matrix_send` with a string
+   * where Rust wants a struct, and `matrix_react` with no `on` tested green
+   * while none of it worked. Rust rejects a missing required argument with a
+   * deserialisation error; so does this now.
+   *
+   * Only the ones a caller cannot omit — everything `Option<_>` in Rust stays
+   * optional here. `scripts/harness-tests/comms.test.mjs` derives the full
+   * list from the source; this is the runtime half, so a card that gets it
+   * wrong fails where it is USED and not only where it is audited. */
+  var REQUIRED = {
+    matrix_rooms: ['guildId'], matrix_browse: ['guildId'], matrix_people: ['guildId'],
+    matrix_members: ['guildId', 'roomId'], matrix_timeline: ['guildId', 'roomId'],
+    matrix_backfill: ['guildId', 'roomId'], matrix_search: ['guildId', 'query'],
+    matrix_send: ['guildId', 'roomId', 'body'],
+    matrix_mark_read: ['guildId', 'roomId', 'eventId'],
+    matrix_react: ['guildId', 'roomId', 'eventId', 'key', 'on'],
+    matrix_redact: ['guildId', 'roomId', 'eventId'],
+    matrix_edit: ['guildId', 'roomId', 'eventId', 'body'],
+    matrix_pin: ['guildId', 'roomId', 'eventId', 'pin'],
+    matrix_pinned: ['guildId', 'roomId'],
+    matrix_typing: ['guildId', 'roomId', 'typing'],
+    matrix_mute: ['guildId', 'roomId', 'muted'],
+    matrix_join: ['guildId', 'roomId'], matrix_leave: ['guildId', 'roomId'],
+    matrix_dm: ['guildId', 'playerId'], matrix_object_room: ['objectId'],
+    matrix_media: ['guildId', 'mxc'],
+  };
   window.__TAURI__ = {
     core: {
       invoke: function (cmd, args) {
         calls.push({ cmd: cmd, args: args });
         if (window.__HARNESS_REJECT__[cmd]) {
           return Promise.reject(window.__HARNESS_REJECT__[cmd]);
+        }
+        var need = (REQUIRED[cmd] || []).filter(function (k) {
+          return !args || args[k] === undefined || args[k] === null;
+        });
+        if (need.length) {
+          return Promise.reject('harness: ' + cmd + ' needs ' + need.join(', '));
         }
         // A fixture may be a FUNCTION of the arguments. Some commands answer
         // about the thing they were asked for (a player profile), and one

@@ -1534,6 +1534,61 @@
       padding-left: var(--spacing-md); }
     .cm-replying .cm-x { margin-left: auto; }
     .cm-msg-act { color: var(--text-hint); }
+
+    /* SELECT-THEN-ACT. The row carries no controls; you select a message and
+       ONE bar appears at the foot of the card. Per-row hover icons were three
+       glyphs on every line of a 306px card, and hover does not exist on touch. */
+    .cm-timeline .chat-msg.is-sel { background: var(--surface-player-highlight);
+      box-shadow: inset 2px 0 0 var(--accent-primary); }
+    .cm-timeline:focus { outline: none; }
+    .cm-bar { display: flex; flex-wrap: wrap; gap: var(--spacing-md);
+      padding: var(--spacing-xs) var(--spacing-md); margin-bottom: var(--spacing-xs);
+      border-top: 1px solid var(--border-subtle); }
+    .cm-verb { display: inline-flex; align-items: baseline; gap: var(--spacing-xs);
+      color: var(--text-body); }
+    .cm-verb:hover { color: var(--text-player-primary); }
+    .cm-verb-done { margin-left: auto; color: var(--text-hint); }
+    /* Every button wears its KEY — which is how the keyboard layer is taught
+       without a page of documentation nobody reads. */
+    .cm-verb-key { border: 1px solid var(--border-subtle); padding: 0 var(--spacing-xs);
+      color: var(--text-hint); }
+
+    /* The "new messages" rule. THE most important reading affordance in any
+       chat client, and there was no way at all to tell what had arrived. */
+    .cm-new { display: flex; align-items: center; gap: var(--spacing-md);
+      color: var(--accent-destructive); margin: var(--spacing-xs) 0; }
+    .cm-new::before, .cm-new::after { content: ''; flex: 1 1 auto;
+      border-top: 1px solid var(--accent-destructive); }
+
+    /* What this place IS — and WHICH SERVER it is on, which in a federated
+       community is the difference between your #general and the hub's. */
+    .cm-head { display: flex; align-items: baseline; gap: var(--spacing-md); }
+    .cm-head .cm-head-pins { margin-left: auto; color: var(--accent-secondary); }
+    .cm-topic { color: var(--text-hint); margin-bottom: var(--spacing-xs); }
+    .cm-pins { border: 1px solid var(--border-subtle); background: var(--surface-default);
+      padding: var(--spacing-xs) var(--spacing-md); margin-bottom: var(--spacing-xs); }
+    .cm-pin { display: flex; gap: var(--spacing-md); align-items: baseline; }
+    .cm-pin-body { min-width: 0; }
+
+    /* A send that FAILED used to be nothing at all — the text left the box and
+       never arrived anywhere. */
+    .cm-failed { display: flex; gap: var(--spacing-md); align-items: baseline;
+      color: var(--accent-destructive); }
+    .cm-failed .cm-retry { margin-left: auto; }
+    .cm-timeline .chat-msg-pending { opacity: .55; }
+    .cm-replying.cm-mod-edit { border-left-color: var(--text-warning); }
+
+    /* A DM opens with WHO you are talking to — standing, guild, presence.
+       Talking to somebody in a war game without seeing whether they are an
+       ally is a gap the generic client has and we should not. */
+    .cm-person { margin-bottom: var(--spacing-xs); }
+    /* WHERE a room is. Invisible before, and in a federated community it is
+       the difference between your guild's #general and the one everyone uses. */
+    .cm-room-where { color: var(--accent-secondary); flex: none; }
+    .cm-room-pin { color: var(--border-subtle); }
+    .cm-room-pin.is-on, .cm-room-pin:hover { color: var(--accent-primary); }
+    .cm-sec.is-foldable { cursor: pointer; }
+    .cm-sec.is-foldable:hover { color: var(--text-player-primary); }
     /* A search hit is a message plus the room it was said in — without the
        room it is a quote from nowhere. */
     .cm-me { display: flex; align-items: baseline; gap: var(--spacing-md); }
@@ -1547,8 +1602,30 @@
     .cm-servers { display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
       margin-bottom: var(--spacing-sm); }
     .cm-server.is-here { border-color: var(--accent-primary); color: var(--text-player-primary); }
-    .cm-refs { display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
-      margin-top: var(--spacing-xs); }
+    /* An id stays where it was WRITTEN — in the sentence — as a chip.
+       Expanding the first one into the game's full card turned a channel where
+       every third line names a planet into a column of cards with conversation
+       wedged between them: the thing you were reading was the smallest element
+       on screen. Inline, the text reads as text and every id is still a door,
+       and the door opens a WINDOW rather than pushing a card onto the board
+       behind the conversation you are in the middle of. */
+    .cm-id { display: inline-flex; align-items: baseline; gap: var(--spacing-xs);
+      padding: 0 var(--spacing-xs); border: 1px solid var(--border-subtle);
+      background: var(--surface-default); color: var(--text-player-primary);
+      white-space: nowrap; }
+    .cm-id:hover { border-color: var(--accent-primary); background: var(--surface-player-highlight); }
+    .cm-id .sui-icon { align-self: center; }
+
+    /* Who you are about to name. A menu, not Tab-cycling: in a room of four
+       hundred you have to SEE which of three Nets you meant. */
+    .cm-compose { position: relative; }
+    .cm-at { position: absolute; bottom: 100%; left: 0; right: 0; z-index: 6;
+      border: 1px solid var(--border-subtle); background: var(--surface-panel);
+      max-height: 40vh; overflow-y: auto; margin-bottom: var(--spacing-xs); }
+    .cm-at-row { display: flex; align-items: baseline; gap: var(--spacing-md);
+      padding: var(--spacing-xs) var(--spacing-md); }
+    .cm-at-row.is-on, .cm-at-row:hover { background: var(--surface-player-highlight); }
+    .cm-at-row .cm-at-id { margin-left: auto; }
     .cm-hit { border-bottom: 1px solid var(--border-subtle); padding-bottom: var(--spacing-xs);
       margin-bottom: var(--spacing-xs); }
     .cm-hit-room { display: block; color: var(--accent-secondary); }
@@ -1558,7 +1635,8 @@
        silently does nothing in this window. Said once here, with the id in
        front to win, rather than repeated on each of them. */
     #board-layout .cm-older, #board-layout .cm-signout, #board-layout .cm-hit-room,
-    #board-layout .cm-room-moved { font-size: 8px; }
+    #board-layout .cm-room-moved, #board-layout .cm-head-pins, #board-layout .cm-retry,
+    #board-layout .cm-verb, #board-layout .cm-x { font-size: 8px; }
 
     /* A one-wide card is 306px. An invite row there is a name, a Join and a
        Decline competing for it, and the NAME is the part that loses — which

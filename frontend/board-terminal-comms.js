@@ -102,6 +102,13 @@
     var sub = String(r.topic || r.canonical_alias || '');
     if (r.invited) sub = 'invited' + (r.invited_by ? ' by ' + r.invited_by : '');
     if (sub) mid.appendChild(H.el('div', 'cm-room-sub fstat-l', sub));
+    /* WHERE it is. Invisible before, and in a federated community it is the
+     * difference between your guild's #general and the one everybody uses. */
+    var place = C.placeOf(r);
+    if (place === 'hub' || place === 'galaxy') {
+      title.appendChild(H.el('span', 'cm-room-where fstat-l',
+        place === 'hub' ? 'HUB' : C.serverOf(r.room_id)));
+    }
     /* A room that has been UPGRADED is still joinable and still in the list,
      * so without following the pointer a player goes on talking into a room
      * everybody else has left. */
@@ -114,6 +121,17 @@
     row.appendChild(mid);
 
     var right = H.el('div', 'cm-room-right');
+    /* Pinning is what makes the top of the list STABLE — you look for #trade
+     * by position, and a list that re-sorts under you every time somebody
+     * speaks is a list you cannot learn. */
+    if (!r.invited && opts.pin !== false) {
+      var pin = H.el('a', 'cm-room-pin' + (C.isPinned(r.room_id) ? ' is-on' : ''));
+      pin.href = 'javascript:void(0)';
+      pin.title = C.isPinned(r.room_id) ? 'Unpin' : 'Pin to the top';
+      pin.appendChild(icon('icon-beacon'));
+      pin.addEventListener('click', function (e) { e.stopPropagation(); C.togglePin(r.room_id); });
+      right.appendChild(pin);
+    }
     if (r.invited) {
       var yes = H.el('a', 'sui-screen-btn sui-mod-primary', 'Join');
       yes.href = 'javascript:void(0)';
@@ -152,10 +170,13 @@
   // ══════════════════════════════════════════════════════════════════════
   // COMMS — where am I, and what is waiting
   // ══════════════════════════════════════════════════════════════════════
+  /* WHERE a room is, which is a different axis from what is waiting in it.
+   * "hub" is derived — the server this community's centre of gravity is on. */
   var SHOW = [
     { value: 'all', label: 'everything' },
     { value: 'direct', label: 'people' },
-    { value: 'local', label: 'guild' },
+    { value: 'hub', label: 'the hub' },
+    { value: 'guild', label: 'your guild' },
     { value: 'galaxy', label: 'galaxy' },
     { value: 'unread', label: 'unread only' },
   ];
@@ -179,6 +200,7 @@
     render: function (host, p) {
       var only = p.show === 'unread' ? 'all' : (p.show || 'all');
       var unreadOnly = p.show === 'unread';
+      var state = { open: {} };
 
       var draw = function () {
         if (!host.isConnected) return;
@@ -215,11 +237,24 @@
           return;
         }
         groups.forEach(function (g) {
-          var head = H.el('div', 'cm-sec');
+          /* The quiet ones collapse to a count. They are most of the list and
+           * none of the answer — but they are never hidden, because a room you
+           * cannot find is a room you have left without deciding to. */
+          var shut = g.section.collapsed && !state.open[g.section.key];
+          var head = H.el('div', 'cm-sec' + (g.section.collapsed ? ' is-foldable' : ''));
           head.appendChild(icon(g.section.icon));
           head.appendChild(H.el('span', 'fstat-l', g.section.label));
-          head.appendChild(H.el('span', 'cm-sec-n fstat-l', H.fmtInt(g.rooms.length)));
+          head.appendChild(H.el('span', 'cm-sec-n fstat-l',
+            shut ? '▸ ' + H.fmtInt(g.rooms.length) : H.fmtInt(g.rooms.length)));
+          if (g.section.collapsed) {
+            head.classList.add('is-clickable');
+            head.addEventListener('click', function () {
+              state.open[g.section.key] = !state.open[g.section.key];
+              draw();
+            });
+          }
           host.appendChild(head);
+          if (shut) return;
           g.rooms.forEach(function (r) {
             host.appendChild(roomRow(r, { onOpen: function () { add('room', { id: r.room_id }); } }));
           });
@@ -237,60 +272,67 @@
   //
   // The card that makes the rebuild worth doing. Two of them side by side is
   // two conversations; the embedded window could only ever be one.
-  /* The game inside the conversation.
+  /* The game inside the conversation — INLINE.
    *
-   * "shield on 2-15361 is down" names an object, and the object is the point
-   * of the sentence. `ChatRefs` already turns an id into the game's own
-   * planet / player / guild / provider card — the same card the Explore board
-   * draws — and the Terminal already wires it (`Terminal.ensureRefs`). So a
-   * message that names something shows it, and every id in the line is a chip
-   * that opens it.
+   * This first expanded the first id a message named into the game's own full
+   * card, underneath it. That is the right thing on a board and the wrong
+   * thing in a chat: a channel where every third line names a planet became a
+   * column of cards with conversation wedged between them, and the thing you
+   * were reading was the smallest element on screen.
    *
-   * Only the FIRST reference expands on its own: a message naming four objects
-   * would otherwise bury itself under four cards, and the point of a summary
-   * is to be an aside. */
-  var ID_IN_TEXT = /(?:^|[^0-9A-Za-z_-])(\d{1,2}-\d{1,9})(?![0-9-])/g;
-  function idsIn(text) {
-    var out = [], seen = {}, m;
+   * So the id stays where it was written — in the sentence — as a chip. The
+   * text reads as text, and every id in it is still a door. Clicking opens the
+   * object in its OWN WINDOW rather than pushing a card onto the board behind
+   * the conversation you are in the middle of.
+   */
+  var ID_IN_TEXT = /(\d{1,2}-\d{1,9})/g;
+  var KIND_CARD = { 0: 'guild', 1: 'player', 2: 'planet', 9: 'map' };
+  var KIND_ICON = { 0: 'icon-guild', 1: 'icon-member', 2: 'icon-planet', 9: 'icon-fleet-tile' };
+  function cardFor(id) { return KIND_CARD[Number(String(id).split('-')[0])] || 'inspector'; }
+
+  /* Split a body on the ids in it and hand back text and chips. Pure and
+   * exported so the test can drive it without a room: what counts as an id
+   * here decides what is clickable in every message anyone ever sends. */
+  function idChips(text, onOpen) {
+    var frag = document.createDocumentFragment();
+    var src = String(text || '');
+    var at = 0, m;
     ID_IN_TEXT.lastIndex = 0;
-    while ((m = ID_IN_TEXT.exec(String(text || '')))) {
-      if (!seen[m[1]]) { seen[m[1]] = 1; out.push(m[1]); }
+    while ((m = ID_IN_TEXT.exec(src))) {
+      /* A boundary on BOTH sides. Without it `5-260550` matches inside a
+       * longer run of digits and `2026-09-09` reads as a fleet — the same
+       * prefix trap as everywhere else in this codebase, in a sentence. */
+      var before = m.index ? src.charAt(m.index - 1) : '';
+      var after = src.charAt(m.index + m[0].length);
+      if (/[0-9A-Za-z_-]/.test(before) || /[0-9-]/.test(after)) continue;
+      if (m.index > at) frag.appendChild(document.createTextNode(src.slice(at, m.index)));
+      frag.appendChild(idChip(m[1], onOpen));
+      at = m.index + m[0].length;
     }
-    return out;
+    if (at < src.length) frag.appendChild(document.createTextNode(src.slice(at)));
+    return frag;
   }
-  function refsUnder(node, m) {
-    var ids = idsIn(m.body);
-    if (!ids.length) return;
-    var R = T.ensureRefs();
-    if (!R) return;
-    R.wantRefs(ids);
-    var first = R.cards[ids[0]];
-    if (first) node.appendChild(R.refCard(first));
-    var rest = ids.slice(first ? 1 : 0);
-    if (!rest.length) return;
-    var strip = H.el('div', 'cm-refs');
-    rest.forEach(function (id) {
-      var chip = H.el('a', 'sui-badge cm-ref', id);
-      chip.href = 'javascript:void(0)';
-      chip.title = 'Open ' + id;
-      chip.addEventListener('click', function () {
-        var k = Number(String(id).split('-')[0]);
-        add(k === 1 ? 'player' : k === 0 ? 'guild' : k === 2 ? 'planet' : k === 9 ? 'map' : 'inspector', { id: id });
-      });
-      strip.appendChild(chip);
+  T.idChips = idChips;
+
+  function idChip(id, onOpen) {
+    var chip = H.el('a', 'cm-id');
+    chip.href = 'javascript:void(0)';
+    chip.appendChild(icon(KIND_ICON[Number(String(id).split('-')[0])] || 'icon-unknown', 'sui-icon-sm'));
+    chip.appendChild(H.el('span', null, id));
+    chip.title = 'Open ' + id + ' in its own window';
+    chip.addEventListener('click', function (e) {
+      e.stopPropagation();
+      (onOpen || function (x) { T.openInWindow(cardFor(x), { id: x }); })(id);
     });
-    node.appendChild(strip);
+    return chip;
   }
 
   T.register('room', {
-    label: 'Conversation', defaultWidth: 1, defaultHeight: 'grow', cadenceMs: 0, usesRefs: true,
+    label: 'Conversation', defaultWidth: 1, defaultHeight: 'grow', cadenceMs: 0,
     describe: function (p) {
       var r = p.id && C.roomById(p.id);
       return r ? r.name : ('Room · ' + (p.id || '?'));
     },
-    /* `kinds: [1, 2, 9]` so the palette resolves a player, planet or fleet id
-     * into this card the same way it does for the planet viewer — and `text`
-     * because a room id, an alias and a username are none of those. */
     /* `kind: 'id'` with `kinds: [1, 2, 9]` is what makes a player, a planet or
      * a fleet OFFER this card in the subject-first menu and in ⌘K's search
      * results. The word itself parses as `optid`, so the box also takes the
@@ -305,7 +347,12 @@
         doors.push({ icon: 'icon-member', title: 'Who is in here', onClick: function () { add('who', { id: r.room_id }); } });
         doors.push({ icon: r.muted ? 'icon-okay' : 'icon-disabled', title: r.muted ? 'Unmute' : 'Mute',
           onClick: function () { invoke('matrix_mute', { guildId: C.S.key, roomId: r.room_id, muted: !r.muted }).then(function () { return C.rooms(true); }); } });
-        if (r.player_id) doors.push({ icon: 'icon-planet', title: 'Open ' + r.player_id, onClick: function () { add('player', { id: r.player_id }); } });
+        /* You could join and mute; you could not LEAVE. A room you joined by
+         * accident was permanent from the Terminal. */
+        doors.push({ icon: 'icon-close', title: 'Leave ' + (r.name || 'this room'), onClick: function () {
+          if (!window.confirm('Leave ' + (r.name || r.room_id) + '?')) return;
+          C.leave(r.room_id);
+        } });
       }
       return doors;
     },
@@ -315,25 +362,24 @@
         host.appendChild(H.stateBlock('info', 'Name a room, a player or an object — #trade, 1-61, JPEG, 2-15361.'));
         return;
       }
-      var state = { room: null, replyTo: null };
+      var state = { room: null, replyTo: null, sel: null, editing: null, showPins: false, atBottom: true };
 
       var draw = function () {
         if (!host.isConnected || !state.room) return;
         var rid = state.room.room_id;
+        var r = C.roomById(rid) || state.room;
         host.innerHTML = '';
 
-        var r = C.roomById(rid) || state.room;
-        /* A room the joined list does not have. It is real — the server named
-         * it — but we know its id and nothing else, so the card says which
-         * state it is in rather than drawing an empty conversation that looks
-         * settled. */
-        if (r.unknown) {
-          host.appendChild(H.stateBlock('info',
-            'Joined ' + r.room_id + ', but it has not come back in a sync yet.'));
-        }
+        if (r.player_id) personHeader(host, r, state.standings);
+        else header(host, r, state, draw);
+
         if (r.encrypted) {
           host.appendChild(H.stateBlock('error',
             'This room is end-to-end encrypted and this client has no crypto — nothing sent here can be read.'));
+        }
+        if (r.unknown) {
+          host.appendChild(H.stateBlock('info',
+            'Joined ' + r.room_id + ', but it has not come back in a sync yet.'));
         }
         if (r.replaced_by) {
           var moved = H.stateBlock('info', 'This room has been upgraded; the conversation continues elsewhere.');
@@ -343,8 +389,10 @@
           moved.appendChild(go);
           host.appendChild(moved);
         }
+        if (state.showPins) pinStrip(host, rid);
 
         var scroller = H.el('div', 'cm-timeline');
+        scroller.tabIndex = 0;
         var msgs = C.S.timelines[rid] || [];
         if (!msgs.length) {
           scroller.appendChild(H.el('div', 'ops-muted', 'Nothing said here yet.'));
@@ -359,128 +407,73 @@
             C.older(rid).then(function (n) { if (!n) back.textContent = 'that is the beginning'; });
           });
           scroller.appendChild(back);
-          var prev = null;
+
+          var divideAfter = C.unreadFrom(rid);
+          var prev = null, ruled = false;
           msgs.forEach(function (m) {
-            /* Head and body from the SHARED row (chatrow.js). The body used to
-             * be each window's own `chat-msg-body` — three of them, drifting —
-             * so it lives there now and this card only says what it wants
-             * DONE with a message. */
-            var node = window.StructsChatRow.render(m, prev, {
-              onSender: m.player_id ? function () { add('player', { id: m.player_id }); } : null,
-              controls: function (m2, meta) { controls(rid, m2, meta, state); },
-            });
-            var b = window.StructsChatRow.body(m, {
-              onJump: function (eid) {
-                var at = scroller.querySelector('[data-event="' + eid + '"]');
-                if (at) at.scrollIntoView({ block: 'center' });
-              },
-              onReact: function (key, mine) {
-                invoke(mine ? 'matrix_redact' : 'matrix_react',
-                  mine ? { guildId: C.S.key, roomId: rid, eventId: m.event_id }
-                       : { guildId: C.S.key, roomId: rid, eventId: m.event_id, key: key })
-                  .catch(function (e) { Board.stamp && Board.stamp('react: ' + e); });
-              },
-            });
-            if (b) node.appendChild(b);
-            refsUnder(node, m);
-            scroller.appendChild(node);
+            scroller.appendChild(messageRow(rid, m, prev, state, scroller, draw));
             prev = m;
+            /* The "new messages" rule. THE most important reading affordance
+             * in any chat client, and it was missing entirely: there was no
+             * way to tell what had arrived since you last looked. */
+            if (!ruled && divideAfter && m.event_id === divideAfter) {
+              ruled = true;
+              var rule = H.el('div', 'cm-new');
+              rule.appendChild(H.el('span', 'fstat-l', 'new messages'));
+              scroller.appendChild(rule);
+            }
           });
         }
         host.appendChild(scroller);
-        // A live room scrolls itself; a room you are reading back does not
-        // get yanked to the bottom under your eyes.
         if (state.atBottom !== false) scroller.scrollTop = scroller.scrollHeight;
         scroller.addEventListener('scroll', function () {
           state.atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
         });
+        // ↑/↓ walk the messages; the action bar follows the selection.
+        scroller.addEventListener('keydown', function (e) { walkKeys(e, rid, state, scroller, draw); });
 
-        var who = (C.S.typing[rid] || []).length;
-        if (who) host.appendChild(H.el('div', 'cm-typing fstat-l', who === 1 ? 'someone is typing…' : who + ' people are typing…'));
-
-        if (state.replyTo) {
-          var q = H.el('div', 'cm-replying fstat-l');
-          q.appendChild(H.el('span', null, 'replying to ' + (state.replyTo.sender_name || '') + ': '
-            + String(state.replyTo.body || '').slice(0, 60)));
-          var x = H.el('a', 'cm-x', '×');
-          x.href = 'javascript:void(0)';
-          x.addEventListener('click', function () { state.replyTo = null; draw(); });
-          q.appendChild(x);
-          host.appendChild(q);
+        var who = (C.S.typing[rid] || []);
+        if (who.length) {
+          host.appendChild(H.el('div', 'cm-typing fstat-l',
+            who.length === 1 ? who[0] + ' is typing…' : who.slice(0, 3).join(', ') + ' are typing…'));
         }
 
-        /* The SHARED composer (chatrow.js) — the same panel the Comms window
-         * and the raid rail draw, third consumer. It hands back its parts and
-         * the host wires them; that is why the rail can have a charge battery
-         * and this cannot, without either growing a copy of the other. */
-        var made = window.StructsChatRow.composer({
-          pfpAttrs: C.S.profile && C.S.profile.pfp_attrs,
-          placeholder: 'Message ' + (r.name || ''),
-        });
-        var submit = function () {
-          var text = made.input.value;
-          if (!String(text || '').trim()) return;
-          var reply = state.replyTo ? state.replyTo.event_id : null;
-          made.input.value = '';
-          state.replyTo = null;
-          state.atBottom = true;
-          if (state.stopTyping) state.stopTyping();
-          C.send(rid, text, reply).catch(function (e) { Board.stamp && Board.stamp('send: ' + e); });
-        };
-        made.input.addEventListener('keydown', function (e) {
-          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); return; }
-          /* Escape drops the reply FIRST, and only then belongs to anything
-           * outside — the usual innermost-thing-first rule. Without the stop,
-           * one Escape both cleared the reply and closed the palette. */
-          if (e.key === 'Escape' && state.replyTo) {
-            e.preventDefault(); e.stopPropagation();
-            state.replyTo = null; draw();
-          }
-        });
-        /* Typing is a claim with an END. This told the server `true` every four
-         * seconds and `false` never — so every keystroke left you "typing" in
-         * everyone else's client until their timeout expired, including after
-         * you gave up and closed the box. Say it once, and stop saying it. */
-        var typingAt = 0, typingOff = null;
-        var stopTyping = function () {
-          if (typingOff) { clearTimeout(typingOff); typingOff = null; }
-          if (typingAt) { typingAt = 0; C.typing(rid, false); }
-        };
-        made.input.addEventListener('input', function () {
-          if (!String(made.input.value || '').trim()) { stopTyping(); return; }
-          var now = Date.now();
-          if (now - typingAt > 4000) { typingAt = now; C.typing(rid, true); }
-          if (typingOff) clearTimeout(typingOff);
-          typingOff = setTimeout(stopTyping, 5000);
-        });
-        made.input.addEventListener('blur', stopTyping);
-        state.stopTyping = stopTyping;
-        made.send.addEventListener('click', submit);
-        host.appendChild(made.node);
-        if (state.focus) { made.input.focus(); state.focus = false; }
+        // One action bar for the selected message, naming its own keys.
+        if (state.sel) actionBar(host, rid, state, scroller, draw);
+
+        composer(host, rid, r, state, draw);
       };
 
       C.watch(host, function (what) {
         if (!state.room) return;
+        var rid = state.room.room_id;
         /* A message arriving in the room you are LOOKING AT is a message you
          * have read. This marked read once, on mount, so the badge on a room
-         * you were staring at climbed all evening and only cleared if you
-         * reopened the card. The receipt is what the server counts against. */
-        if (what === 'timeline:' + state.room.room_id) C.markRead(state.room.room_id);
-        if (what === 'timeline:' + state.room.room_id || what === 'typing:' + state.room.room_id
-          || what === 'rooms' || what === 'status') draw();
+         * you were staring at climbed all evening. */
+        if (what === 'timeline:' + rid) C.markRead(rid);
+        if (what === 'timeline:' + rid || what === 'typing:' + rid
+          || what === 'pinned:' + rid || what === 'rooms' || what === 'status') draw();
       });
 
       return gate(host, function () {
         return C.resolve(p.id).then(function (room) {
           state.room = room;
-          /* The header said `!snc:h` because that is all the card knew when
-           * `describe()` ran. It knows the room's name now. */
           T.retitle(ctx.id, room.name || room.canonical_alias || room.room_id);
-          // Looking at a room IS reading it — the unread badge is the
-          // server's, kept against the receipts this app sends.
-          C.markRead(room.room_id);
-          return C.timeline(room.room_id).then(draw);
+          /* A read marker names the EVENT you have read up to, so the timeline
+           * has to be in hand first — and the unread ANCHOR has to be taken
+           * before we mark, because marking is what destroys the answer. */
+          return C.timeline(room.room_id).then(function () {
+            C.anchorUnread(room.room_id);
+            C.markRead(room.room_id);
+            C.members(room.room_id);
+            if ((room.pinned || []).length) C.pinned(room.room_id);
+            /* Who they are TO YOU — ally, grudge, protected. Folded in after
+             * the first paint so a conversation never waits on a standing. */
+            if (room.player_id) {
+              T.standingLists().then(function (lists) { state.standings = lists; draw(); }).catch(function () {});
+            }
+            draw();
+          });
         }).catch(function (e) {
           host.innerHTML = '';
           host.appendChild(H.stateBlock('error', String(e)));
@@ -489,39 +482,370 @@
     },
   });
 
-  /* What a message row can do here: react, reply, and — for your own — edit
-   * and delete. The raid rail renders the same row with none of this, which
-   * is why the controls arrive as a callback rather than living in the row. */
-  function controls(rid, m, meta, state) {
-    var act = function (glyph, title, fn) {
-      var a = H.el('a', 'cm-msg-act');
-      a.href = 'javascript:void(0)';
-      a.title = title;
-      a.appendChild(icon(glyph));
-      a.addEventListener('click', fn);
-      meta.appendChild(a);
-      return a;
-    };
-    act('icon-tip', 'React', function () {
-      invoke('matrix_react', { guildId: C.S.key, roomId: rid, eventId: m.event_id, key: '👍' })
-        .catch(function (e) { Board.stamp && Board.stamp('react: ' + e); });
+  /* A DM opens with WHO you are talking to.
+   *
+   * Talking to somebody in a war game without being able to see whether they
+   * are an ally is a gap the generic client has and we should not: their
+   * standing, their guild, their planet and their fleet are the context of
+   * every word in the conversation. `StructsPlayerCard` and `standingOf` are
+   * the same ones the player and scout cards draw, so a person looks like a
+   * person everywhere. */
+  function personHeader(host, r, standings) {
+    if (!r.player_id || !window.StructsPlayerCard) return;
+    var stand = standings ? T.standingOf(standings, r.player_id, null) : null;
+    var card = window.StructsPlayerCard.row({
+      id: r.player_id, name: r.name || r.player_id, pfp: r.pfp_attrs,
+      presence: Board.presenceDot ? Board.presenceDot(r.player_id) : null,
+      badge: stand ? stand.badge : null,
+    }, {
+      actions: [{ icon: 'icon-planet', title: 'Open ' + r.player_id,
+                  onClick: function () { T.openInWindow('player', { id: r.player_id }); } }],
     });
-    act('icon-incoming', 'Reply', function () { state.replyTo = m; C.announce('timeline:' + rid); });
-    if (m['self']) {
-      act('icon-close', 'Delete', function () {
-        invoke('matrix_redact', { guildId: C.S.key, roomId: rid, eventId: m.event_id })
-          .catch(function (e) { Board.stamp && Board.stamp('delete: ' + e); });
+    var box = H.el('div', 'cm-person');
+    box.appendChild(card);
+    host.appendChild(box);
+  }
+
+  /* What this place IS — topic, size, alias, and WHICH SERVER it lives on.
+   * None of it was shown. In a federated community where the channel you are
+   * reading may be published by another guild entirely, the server is not a
+   * detail: it is the difference between your guild's #general and the hub's. */
+  function header(host, r, state, draw) {
+    var strip = H.el('div', 'cm-head');
+    var bits = [];
+    if (r.members) bits.push(H.fmtInt(r.members) + ' members');
+    if (r.canonical_alias) bits.push(r.canonical_alias);
+    else if (r.room_id) bits.push(serverOf(r.room_id));
+    var line = H.el('div', 'cm-head-line fstat-l', bits.join(' · '));
+    strip.appendChild(line);
+    if ((r.pinned || []).length) {
+      var pins = H.el('a', 'cm-head-pins fstat-l', H.fmtInt(r.pinned.length) + ' pinned');
+      pins.href = 'javascript:void(0)';
+      pins.addEventListener('click', function () {
+        state.showPins = !state.showPins;
+        if (state.showPins) C.pinned(r.room_id);
+        draw();
       });
+      strip.appendChild(pins);
     }
+    host.appendChild(strip);
+    if (r.topic) host.appendChild(H.el('div', 'cm-topic fstat-l', r.topic));
+  }
+  function serverOf(roomId) { var at = String(roomId).lastIndexOf(':'); return at > 0 ? String(roomId).slice(at + 1) : ''; }
+
+  /* The room's noticeboard. In a community channel this is where the rules,
+   * the schedule and the current operation live — and it was unreachable. */
+  function pinStrip(host, rid) {
+    var box = H.el('div', 'cm-pins');
+    var list = C.S.pinned[rid];
+    if (!list) { box.appendChild(H.el('div', 'ops-muted', 'reading the pins…')); host.appendChild(box); return; }
+    if (!list.length) { box.appendChild(H.el('div', 'ops-muted', 'nothing pinned')); host.appendChild(box); return; }
+    list.forEach(function (m) {
+      var row = H.el('div', 'cm-pin');
+      row.appendChild(H.el('span', 'cm-pin-who fstat-l', m.sender_name || m.sender || ''));
+      var body = H.el('span', 'cm-pin-body');
+      body.appendChild(idChips(m.body));
+      row.appendChild(body);
+      box.appendChild(row);
+    });
+    host.appendChild(box);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // A message, and what you can do to it
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // SELECT-THEN-ACT. The row carries no controls at all; you select a message
+  // and one action bar appears at the foot of the card.
+  //
+  // Per-row hover icons were three glyphs on every line of a 306px card, and
+  // hover does not exist on touch. One bar at any width, naming its own keys,
+  // also teaches the keyboard layer without a tutorial — which is what the
+  // Terminal is for.
+  function messageRow(rid, m, prev, state, scroller, draw) {
+    var node = window.StructsChatRow.render(m, prev, {
+      onSender: m.player_id ? function () { T.openInWindow('player', { id: m.player_id }); } : null,
+    });
+    var b = window.StructsChatRow.body(m, {
+      // Ids become chips IN the sentence, and a chip opens a window.
+      fill: function (n, text) { n.appendChild(idChips(text)); },
+      onJump: function (eid) {
+        var at = scroller.querySelector('[data-event="' + eid + '"]');
+        if (at) at.scrollIntoView({ block: 'center' });
+      },
+      /* Taking back a reaction is `on: false`, NOT a redaction — redacting the
+       * MESSAGE id would have deleted the message. */
+      onReact: function (key, mine) {
+        invoke('matrix_react', { guildId: C.S.key, roomId: rid, eventId: m.event_id, key: key, on: !mine })
+          .catch(function (e) { Board.stamp && Board.stamp('react: ' + e); });
+      },
+    });
+    if (b) node.appendChild(b);
+
+    /* A send that failed is a message you can SEE and retry. It used to be
+     * nothing at all: the text left the box and never arrived anywhere. */
+    if (m.failed) {
+      var bad = H.el('div', 'cm-failed fstat-l');
+      bad.appendChild(H.el('span', null, 'not sent — ' + String(m.failed).slice(0, 60)));
+      var again = H.el('a', 'cm-retry', 'retry');
+      again.href = 'javascript:void(0)';
+      again.addEventListener('click', function (e) { e.stopPropagation(); C.retry(rid, m); });
+      bad.appendChild(again);
+      node.appendChild(bad);
+    }
+
+    if (state.sel === m.event_id) node.classList.add('is-sel');
+    node.addEventListener('click', function () {
+      state.sel = state.sel === m.event_id ? null : m.event_id;
+      state.editing = null;
+      draw();
+      var box = scroller.querySelector('.is-sel');
+      if (box) box.scrollIntoView({ block: 'nearest' });
+    });
+    return node;
+  }
+
+  var selectable = function (rid) {
+    return (C.S.timelines[rid] || []).filter(function (m) { return (m.kind || 'text') !== 'event'; });
+  };
+  function walkKeys(e, rid, state, scroller, draw) {
+    var list = selectable(rid);
+    if (!list.length) return;
+    var at = list.findIndex(function (m) { return m.event_id === state.sel; });
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (at < 0) at = e.key === 'ArrowUp' ? list.length - 1 : 0;
+      else at = Math.max(0, Math.min(list.length - 1, at + (e.key === 'ArrowUp' ? -1 : 1)));
+      state.sel = list[at].event_id;
+      draw();
+      var box = scroller.querySelector('.is-sel');
+      if (box) box.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    if (at < 0) return;
+    var m = list[at];
+    var did = act(e.key, rid, m, state, draw);
+    if (did) { e.preventDefault(); e.stopPropagation(); }
+  }
+
+  /* One verb, from a key or from the bar — so the two can never disagree
+   * about what `d` means. Answers false for a key it does not own. */
+  function act(key, rid, m, state, draw) {
+    var mine = !!m['self'];
+    if (key === 'Escape') { state.sel = null; state.editing = null; draw(); return true; }
+    if (key === 'r') { state.replyTo = m; state.sel = null; draw(); return true; }
+    if (key === 'e' && mine) { state.editing = m; draw(); return true; }
+    if (key === 'd' && mine) {
+      invoke('matrix_redact', { guildId: C.S.key, roomId: rid, eventId: m.event_id })
+        .catch(function (err) { Board.stamp && Board.stamp('delete: ' + err); });
+      state.sel = null; draw(); return true;
+    }
+    if (key === '+') {
+      invoke('matrix_react', { guildId: C.S.key, roomId: rid, eventId: m.event_id, key: '👍', on: true })
+        .catch(function (err) { Board.stamp && Board.stamp('react: ' + err); });
+      return true;
+    }
+    if (key === 'p') {
+      var on = !(C.roomById(rid) || {}).pinned || (C.roomById(rid).pinned || []).indexOf(m.event_id) < 0;
+      C.pin(rid, m.event_id, on).catch(function (err) { Board.stamp && Board.stamp('pin: ' + err); });
+      return true;
+    }
+    return false;
+  }
+
+  /* The bar. It shows only what is LEGAL for this message — offering `edit` on
+   * somebody else's line and then refusing it is worse than not offering it —
+   * and every button wears its key, which is how the keyboard layer is taught
+   * without a page of documentation nobody reads. */
+  var VERBS = [
+    { key: 'r', label: 'reply' },
+    { key: 'e', label: 'edit', mine: true },
+    { key: 'd', label: 'delete', mine: true },
+    { key: '+', label: 'react' },
+    { key: 'p', label: 'pin' },
+  ];
+  function actionBar(host, rid, state, scroller, draw) {
+    var m = (C.S.timelines[rid] || []).filter(function (x) { return x.event_id === state.sel; })[0];
+    if (!m) { state.sel = null; return; }
+    var bar = H.el('div', 'cm-bar');
+    VERBS.forEach(function (v) {
+      if (v.mine && !m['self']) return;
+      var a = H.el('a', 'cm-verb');
+      a.href = 'javascript:void(0)';
+      a.appendChild(H.el('span', 'cm-verb-key', v.key));
+      a.appendChild(H.el('span', null, v.label));
+      a.addEventListener('click', function () { act(v.key, rid, m, state, draw); });
+      bar.appendChild(a);
+    });
+    var esc = H.el('a', 'cm-verb cm-verb-done');
+    esc.href = 'javascript:void(0)';
+    esc.appendChild(H.el('span', 'cm-verb-key', 'esc'));
+    esc.appendChild(H.el('span', null, 'done'));
+    esc.addEventListener('click', function () { act('Escape', rid, m, state, draw); });
+    bar.appendChild(esc);
+    host.appendChild(bar);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // The composer
+  // ══════════════════════════════════════════════════════════════════════
+  function composer(host, rid, r, state, draw) {
+    if (state.replyTo) {
+      var q = H.el('div', 'cm-replying fstat-l');
+      q.appendChild(H.el('span', null, 'replying to ' + (state.replyTo.sender_name || '') + ': '
+        + String(state.replyTo.body || '').slice(0, 60)));
+      var x = H.el('a', 'cm-x', '×');
+      x.href = 'javascript:void(0)';
+      x.addEventListener('click', function () { state.replyTo = null; draw(); });
+      q.appendChild(x);
+      host.appendChild(q);
+    }
+    if (state.editing) {
+      var ed = H.el('div', 'cm-replying cm-mod-edit fstat-l');
+      ed.appendChild(H.el('span', null, 'editing your message'));
+      var ex = H.el('a', 'cm-x', '×');
+      ex.href = 'javascript:void(0)';
+      ex.addEventListener('click', function () { state.editing = null; draw(); });
+      ed.appendChild(ex);
+      host.appendChild(ed);
+    }
+
+    /* The SHARED composer (chatrow.js) — the same panel the Comms window and
+     * the raid rail draw, third consumer. It hands back its parts and the host
+     * wires them; that is why the rail can have a charge battery and this
+     * cannot, without either growing a copy of the other. */
+    var made = window.StructsChatRow.composer({
+      pfpAttrs: C.S.profile && C.S.profile.pfp_attrs,
+      placeholder: state.editing ? 'Edit your message' : 'Message ' + (r.name || ''),
+    });
+    // What you typed and did not send. Switching cards used to lose it.
+    made.input.value = state.editing ? String(state.editing.body || '') : C.draft(rid);
+
+    var stopTyping, closeAt;
+
+    var submit = function () {
+      var text = made.input.value;
+      if (!String(text || '').trim()) return;
+      made.input.value = '';
+      C.draft(rid, '');
+      closeAt();
+      if (stopTyping) stopTyping();
+      if (state.editing) {
+        var was = state.editing;
+        state.editing = null;
+        C.edit(rid, was.event_id, text).catch(function (e) { Board.stamp && Board.stamp('edit: ' + e); });
+        draw();
+        return;
+      }
+      var reply = state.replyTo;
+      state.replyTo = null;
+      state.atBottom = true;
+      /* The unread rule stops meaning anything the moment YOU say something —
+       * everything above it is now read by definition. */
+      C.clearUnread(rid);
+      C.send(rid, text, reply, C.mentionsIn(rid, text)).catch(function () {});
+    };
+
+    /* `@` completion.
+     *
+     * A mention is not a nicety here: `m.mentions` is what sets the server's
+     * highlight count, which is the "YOU" badge in the room list. Without a way
+     * to name somebody, every message to you is indistinguishable from traffic.
+     *
+     * A menu rather than Tab-cycling: in a room of four hundred you have to SEE
+     * which of three Nets you meant. */
+    var menu = H.el('div', 'cm-at');
+    menu.hidden = true;
+    var atFrom = -1;
+    closeAt = function () { menu.hidden = true; menu.innerHTML = ''; atFrom = -1; };
+    var partial = function () {
+      var m = /@([A-Za-z0-9_.-]*)$/.exec(made.input.value.slice(0, made.input.selectionStart));
+      return m ? m[1] : null;
+    };
+    var takeAt = function (who) {
+      if (!who || atFrom < 0) return;
+      var v = made.input.value;
+      made.input.value = v.slice(0, atFrom) + '@' + who.name + ' ' + v.slice(made.input.selectionStart);
+      closeAt();
+      made.input.focus();
+    };
+    var offerAt = function () {
+      var t = partial();
+      if (t === null) { closeAt(); return; }
+      atFrom = made.input.selectionStart - t.length - 1;
+      var who = C.mentionOptions(rid, t);
+      menu.innerHTML = '';
+      if (!who.length) { menu.hidden = true; return; }
+      who.forEach(function (person, i) {
+        var row = H.el('a', 'cm-at-row' + (i === 0 ? ' is-on' : ''));
+        row.href = 'javascript:void(0)';
+        row.appendChild(H.el('span', 'cm-at-name', person.name || person.user_id));
+        if (person.player_id) row.appendChild(H.el('span', 'cm-at-id fstat-l', person.player_id));
+        row.addEventListener('mousedown', function (e) { e.preventDefault(); takeAt(person); });
+        menu.appendChild(row);
+      });
+      menu.hidden = false;
+    };
+    var atKeys = function (e) {
+      if (menu.hidden) return false;
+      var rows = [].slice.call(menu.children);
+      var at = rows.findIndex(function (n) { return n.classList.contains('is-on'); });
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (rows[at]) rows[at].classList.remove('is-on');
+        at = ((at < 0 ? 0 : at) + (e.key === 'ArrowDown' ? 1 : rows.length - 1)) % rows.length;
+        rows[at].classList.add('is-on');
+        return true;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        takeAt(C.mentionOptions(rid, partial() || '')[at < 0 ? 0 : at]);
+        return true;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeAt(); return true; }
+      return false;
+    };
+
+    /* Typing is a claim with an END. This told the server `true` every four
+     * seconds and `false` never, so every keystroke left you "typing" in
+     * everyone else's client until their timeout — including after you gave up
+     * and closed the box. Say it once, and stop saying it. */
+    var typingAt = 0, typingOff = null;
+    stopTyping = function () {
+      if (typingOff) { clearTimeout(typingOff); typingOff = null; }
+      if (typingAt) { typingAt = 0; C.typing(rid, false); }
+    };
+
+    made.input.addEventListener('input', function () {
+      offerAt();
+      C.draft(rid, made.input.value);
+      if (!String(made.input.value || '').trim()) { stopTyping(); return; }
+      var now = Date.now();
+      if (now - typingAt > 4000) { typingAt = now; C.typing(rid, true); }
+      if (typingOff) clearTimeout(typingOff);
+      typingOff = setTimeout(stopTyping, 5000);
+    });
+    made.input.addEventListener('keydown', function (e) {
+      if (atKeys(e)) return;
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); return; }
+      /* Escape drops the innermost thing first — the mention menu, then the
+       * edit, then the reply — and only then belongs to anything outside. */
+      if (e.key === 'Escape' && state.editing) { e.preventDefault(); e.stopPropagation(); state.editing = null; draw(); return; }
+      if (e.key === 'Escape' && state.replyTo) { e.preventDefault(); e.stopPropagation(); state.replyTo = null; draw(); }
+    });
+    made.input.addEventListener('blur', function () { stopTyping(); setTimeout(closeAt, 120); });
+    made.send.addEventListener('click', submit);
+
+    var box = H.el('div', 'cm-compose');
+    box.appendChild(menu);
+    box.appendChild(made.node);
+    host.appendChild(box);
+    if (state.editing) made.input.focus();
   }
 
   // ══════════════════════════════════════════════════════════════════════
   // CHANNELS — what else is there
   // ══════════════════════════════════════════════════════════════════════
-  //
-  // Separate from the room list on purpose. "Where am I" and "what else is
-  // there" are two questions, and the window that answered both in one list
-  // is why joining a channel meant scrolling past the ones you were in.
   T.register('channels', {
     label: 'Channel directory', defaultWidth: 1, single: true, defaultHeight: 'grow',
     describe: function (p) {
@@ -589,6 +913,55 @@
         })
           .then(function (r) { draw((r[0] && (r[0].rooms || r[0].chunk)) || [], r[1]); })
           .catch(function (e) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', String(e))); });
+      });
+    },
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // FIND — something that was said
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // The HOMESERVER does the searching. A client that filters its own cache can
+  // only find what it has already fetched, which for a busy channel is the
+  // last few minutes — and "where did somebody post that trade" is never
+  // about the last few minutes.
+  T.register('find', {
+    label: 'Search Comms', defaultWidth: 1, defaultHeight: 'grow',
+    describe: function (p) { return p.q ? 'Find · ' + p.q : 'Find in Comms'; },
+    params: [
+      { key: 'q', label: 'Words', kind: 'text', placeholder: 'shield, 2-15361, ore…' },
+      { key: 'room', label: 'In room', kind: 'text', placeholder: 'everywhere' },
+    ],
+    cadenceMs: 0,
+    render: function (host, p) {
+      if (!p.q) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Type what was said.')); return; }
+      return gate(host, function () {
+        var run = function (roomId) {
+          return invoke('matrix_search', { guildId: C.S.key, query: p.q, roomId: roomId || null });
+        };
+        var go = p.room ? C.resolve(p.room).then(function (r) { return run(r.room_id); }) : run(null);
+        return go.then(function (d) {
+          var hits = (d && d.hits) || [];
+          host.innerHTML = '';
+          cap(host, hits.length ? H.fmtInt(hits.length) + ' found' + (p.room ? ' in ' + p.room : ' across every room you are in')
+            : 'nothing said that, anywhere you can read');
+          var prev = null;
+          hits.forEach(function (h) {
+            var m = h.message || h;
+            var wrap = H.el('div', 'cm-hit');
+            /* Which ROOM it was said in is the whole answer when the search
+             * spans every room — a hit with no room is a quote from nowhere. */
+            var where = H.el('a', 'cm-hit-room fstat-l', h.room_name || h.room_id || '');
+            where.href = 'javascript:void(0)';
+            where.addEventListener('click', function () { add('room', { id: h.room_id }); });
+            wrap.appendChild(where);
+            var node = window.StructsChatRow.render(m, prev, {});
+            var b = window.StructsChatRow.body(m, {});
+            if (b) node.appendChild(b);
+            wrap.appendChild(node);
+            host.appendChild(wrap);
+          });
+        }).catch(function (e) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', String(e))); });
       });
     },
   });

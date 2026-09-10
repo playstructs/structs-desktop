@@ -585,6 +585,147 @@ async fn board_invoke(
             ),
             _ => err_json("op + id required".into()),
         },
+        /* ── Comms ────────────────────────────────────────────────────────
+         *
+         * The web board had NO matrix arm at all, so every Comms card over
+         * the browser answered `unknown command 'matrix_status'` and the whole
+         * surface was dead there. It was survivable while Comms was an iframe
+         * that the web board never framed; it is not now that Comms IS the
+         * Terminal's cards.
+         *
+         * READS and the ordinary conversational writes. Deliberately absent:
+         * `matrix_connect` / `matrix_disconnect` (signing in is an interactive
+         * OIDC hop that belongs in the app), `matrix_open_transfer` and
+         * `matrix_share` (they open native windows nobody is looking at), and
+         * every `matrix_work_*` (an offer is a commitment). */
+        "matrix_status" => from_result(crate::matrix::matrix_status(s("as_player")).await),
+        "matrix_rooms" => match s("guildId").or_else(|| s("guild_id")) {
+            Some(g) => from_result(crate::matrix::matrix_rooms(g).await),
+            None => err_json("guildId required".into()),
+        },
+        "matrix_servers" => from_result(crate::matrix::matrix_servers().await),
+        "matrix_browse" => match s("guildId").or_else(|| s("guild_id")) {
+            Some(g) => from_result(
+                crate::matrix::matrix_browse(g, s("query"), s("server")).await,
+            ),
+            None => err_json("guildId required".into()),
+        },
+        "matrix_people" => match s("guildId").or_else(|| s("guild_id")) {
+            Some(g) => from_result(crate::matrix::matrix_people(g, s("query")).await),
+            None => err_json("guildId required".into()),
+        },
+        "matrix_members" => match (s("guildId"), s("roomId")) {
+            (Some(g), Some(r)) => from_result(crate::matrix::matrix_members(g, r).await),
+            _ => err_json("guildId + roomId required".into()),
+        },
+        "matrix_timeline" => match (s("guildId"), s("roomId")) {
+            (Some(g), Some(r)) => from_result(
+                crate::matrix::matrix_timeline(
+                    g,
+                    r,
+                    body.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32),
+                )
+                .await,
+            ),
+            _ => err_json("guildId + roomId required".into()),
+        },
+        "matrix_backfill" => match (s("guildId"), s("roomId")) {
+            (Some(g), Some(r)) => from_result(
+                crate::matrix::matrix_backfill(
+                    g,
+                    r,
+                    body.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32),
+                )
+                .await,
+            ),
+            _ => err_json("guildId + roomId required".into()),
+        },
+        "matrix_search" => match (s("guildId"), s("query")) {
+            (Some(g), Some(q)) => from_result(crate::matrix::matrix_search(g, q, s("roomId")).await),
+            _ => err_json("guildId + query required".into()),
+        },
+        "matrix_unread" => from_result(crate::matrix::matrix_unread()),
+        "matrix_refs" => from_result(
+            crate::matrix::matrix_refs(
+                body.get("ids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+            )
+            .await,
+        ),
+        // The token IS the operator, the same way it is for a transfer.
+        /* `reply_to` is a STRUCT and `mentions` is what makes being named
+         * exact — both are deserialised from the body rather than guessed at,
+         * which is the mistake that broke every reply in the cards. */
+        "matrix_send" => match (s("guildId"), s("roomId"), s("body")) {
+            (Some(g), Some(r), Some(b)) => from_result(
+                crate::matrix::matrix_send(
+                    g,
+                    r,
+                    b,
+                    s("msgtype"),
+                    body.get("mentions").and_then(|v| v.as_array()).cloned(),
+                    body.get("replyTo")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok()),
+                )
+                .await,
+            ),
+            _ => err_json("guildId + roomId + body required".into()),
+        },
+        "matrix_dm" => match (s("guildId"), s("playerId")) {
+            (Some(g), Some(p)) => from_result(crate::matrix::matrix_dm(st.app.clone(), g, p).await),
+            _ => err_json("guildId + playerId required".into()),
+        },
+        "matrix_join" => match (s("guildId"), s("roomId")) {
+            (Some(g), Some(r)) => from_result(crate::matrix::matrix_join(st.app.clone(), g, r).await),
+            _ => err_json("guildId + roomId required".into()),
+        },
+        "matrix_leave" => match (s("guildId"), s("roomId")) {
+            (Some(g), Some(r)) => from_result(crate::matrix::matrix_leave(st.app.clone(), g, r).await),
+            _ => err_json("guildId + roomId required".into()),
+        },
+        "matrix_mark_read" => match (s("guildId"), s("roomId"), s("eventId")) {
+            (Some(g), Some(r), Some(e)) => from_result(crate::matrix::matrix_mark_read(g, r, e).await),
+            _ => err_json("guildId + roomId + eventId required".into()),
+        },
+        "matrix_typing" => match (s("guildId"), s("roomId")) {
+            (Some(g), Some(r)) => from_result(
+                crate::matrix::matrix_typing(
+                    g, r, body.get("typing").and_then(|v| v.as_bool()).unwrap_or(false),
+                )
+                .await,
+            ),
+            _ => err_json("guildId + roomId required".into()),
+        },
+        "matrix_mute" => match (s("guildId"), s("roomId")) {
+            (Some(g), Some(r)) => from_result(
+                crate::matrix::matrix_mute(
+                    st.app.clone(), g, r,
+                    body.get("muted").and_then(|v| v.as_bool()).unwrap_or(false),
+                )
+                .await,
+            ),
+            _ => err_json("guildId + roomId required".into()),
+        },
+        "matrix_react" => match (s("guildId"), s("roomId"), s("eventId"), s("key")) {
+            (Some(g), Some(r), Some(e), Some(k)) => from_result(
+                crate::matrix::matrix_react(
+                    g, r, e, k, body.get("on").and_then(|v| v.as_bool()).unwrap_or(true),
+                )
+                .await,
+            ),
+            _ => err_json("guildId + roomId + eventId + key required".into()),
+        },
+        "matrix_redact" => match (s("guildId"), s("roomId"), s("eventId")) {
+            (Some(g), Some(r), Some(e)) => from_result(crate::matrix::matrix_redact(g, r, e).await),
+            _ => err_json("guildId + roomId + eventId required".into()),
+        },
+        "matrix_object_room" => from_result(
+            crate::matrix::matrix_object_room(s("guildId"), s("objectId").unwrap_or_default()).await,
+        ),
+
         "mcp_grass_recent" => ok_json(crate::mcp::event_buffer::mcp_grass_recent(
             body.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize),
             s("category"),

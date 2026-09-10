@@ -52,6 +52,11 @@
     typing: {},            // room_id → [user_id]
     presence: {},          // user_id → {state, last_active_ago, currently_active}
     people: null,          // the directory, for the DM picker
+    readAt: {},            // room_id → the event id we last told the server about
+    members: {},           // room_id → [member], for @-mentions and completion
+    drafts: {},            // room_id → what you typed and did not send
+    pinned: {},            // room_id → the room's pinned events
+    lastRead: {},          // room_id → the event id the unread divider sits under
     listening: false,
     subs: [],              // repaint callbacks, pruned by liveness
   };
@@ -101,7 +106,8 @@
       if (!p || !p.room_id) return;
       var t = S.timelines[p.room_id];
       if (!t) return;   // not a room any card has open; the next open re-reads
-      var msgs = p.messages || (p.message ? [p.message] : []);
+      var msgs = p.messages || [];
+      settleEchoes(p.room_id, msgs);
       msgs.forEach(function (m) {
         var at = t.findIndex(function (x) { return x.event_id === m.event_id; });
         if (at >= 0) t[at] = m; else t.push(m);
@@ -120,21 +126,28 @@
     });
     on('matrix::reactions', function (p) { patch(p, function (m) { m.reactions = p.reactions || []; }); });
 
+    /* Rust sends `names` — the display names already resolved, because the
+     * window has no business turning `@1-61:h` into "JPEG" a second time. This
+     * read `user_ids`, which nothing ever sent, so the typing line never once
+     * appeared. */
     on('matrix::typing', function (p) {
       if (!p || !p.room_id) return;
-      S.typing[p.room_id] = p.user_ids || p.users || [];
+      S.typing[p.room_id] = p.names || [];
       announce('typing:' + p.room_id);
     });
+    /* And presence arrives as the WHOLE map, keyed by player id, not one
+     * person at a time. Reading `p.user_id` off it got undefined and returned
+     * early every single time, so no presence dot has ever lit. */
     on('matrix::presence', function (p) {
-      if (!p || !p.user_id) return;
-      S.presence[p.user_id] = p;
+      if (!p || !p.presence) return;
+      S.presence = p.presence;
       announce('presence');
     });
     on('matrix::seen', function () { announce('seen'); });
     on('matrix::show_room', function (p) {
       // Something outside the board asked for a room — a notification, the
       // game window, an MCP tool. Cards decide whether to take it.
-      if (p && (p.room_id || p.roomId)) announce('show:' + (p.room_id || p.roomId));
+      if (p && p.room_id) announce('show:' + p.room_id);
     });
   }
   function patch(p, fn) {
@@ -229,41 +242,131 @@
    * Invites first because they are the only rows that expire — somebody is
    * waiting on an answer. Then whatever the server pinned above the sections
    * (`home_rank`), then people, then your guild, then the wider galaxy. */
-  var SECTIONS = [
+  /* ── How the list is organised ────────────────────────────────────────
+   *
+   * PINNED · WAITING · QUIET, not one section per Matrix concept.
+   *
+   * The five fixed sections mirrored the model and answered the wrong
+   * question. Two things were wrong with them:
+   *
+   *   The Guild/Galaxy split is by YOUR homeserver. Comms is decentralised —
+   *   every guild runs one — but a community has a centre of gravity, and when
+   *   that centre is another guild's server every channel anybody actually
+   *   talks in filed under "Galaxy" beside genuinely random rooms.
+   *
+   *   Sections that are usually empty cost a 306px column every day for
+   *   something that happens monthly.
+   *
+   * So: what you PINNED, in a stable order, because you look for it by
+   * position. Then everything with something waiting, worst first. Then the
+   * quiet ones, collapsed to a count.
+   */
+  /* Pins live in this window, remembered across sessions where they can be.
+   *
+   * `localStorage` THROWS on a `file:` origin and in a private window, so the
+   * in-memory copy is the truth and storage is only where it is written down.
+   * A read that throws used to mean pinning silently did nothing at all. */
+  var PIN_KEY = 'structs.comms.pins';
+  var pinned_ = null;
+  function pins() {
+    if (pinned_) return pinned_;
+    try { pinned_ = JSON.parse(localStorage.getItem(PIN_KEY) || '[]'); } catch (e) { pinned_ = []; }
+    if (!Array.isArray(pinned_)) pinned_ = [];
+    return pinned_;
+  }
+  function isPinned(roomId) { return pins().indexOf(roomId) >= 0; }
+  function togglePin(roomId) {
+    var list = pins();
+    var at = list.indexOf(roomId);
+    if (at >= 0) list.splice(at, 1); else list.push(roomId);
+    try { localStorage.setItem(PIN_KEY, JSON.stringify(list)); } catch (e) { /* memory only */ }
+    announce('rooms');
+    return at < 0;
+  }
+
+  /* Which server this community's centre of gravity is on.
+   *
+   * DERIVED, never configured: the server the largest share of your joined
+   * channels live on, when that is not your own. A guild that becomes the
+   * place everybody meets becomes the Hub without anyone typing anything, and
+   * a community that moves takes the label with it.
+   */
+  function serverOf(roomId) {
+    var at = String(roomId || '').lastIndexOf(':');
+    return at > 0 ? String(roomId).slice(at + 1) : '';
+  }
+  function mine() {
+    var net = S.networks.filter(function (n) { return n.guild_id === S.key; })[0] || S.networks[0];
+    return net ? serverOf((S.profile && S.profile.user_id) || '') || String(net.homeserver || '')
+      .replace(/^https?:\/\//, '').split('/')[0] : '';
+  }
+  function hubServer() {
+    var home = mine(), count = {};
+    S.rooms.forEach(function (r) {
+      if (!r.joined || r.section === 'direct') return;
+      var sv = serverOf(r.room_id);
+      if (!sv || sv === home) return;
+      count[sv] = (count[sv] || 0) + 1;
+    });
+    var best = null;
+    Object.keys(count).forEach(function (sv) { if (!best || count[sv] > count[best]) best = sv; });
+    // One stray federated room is not a community hub.
+    return best && count[best] >= 2 ? best : null;
+  }
+  /* "Hub" · "Guild" · "Galaxy" — what a room's server MEANS, rather than
+   * whether it happens to be yours. */
+  function placeOf(r) {
+    if (r.section === 'direct') return 'direct';
+    var sv = serverOf(r.room_id), home = mine(), hub = hubServer();
+    if (hub && sv === hub) return 'hub';
+    if (sv && home && sv === home) return 'guild';
+    return 'galaxy';
+  }
+
+  var GROUPS = [
     { key: 'invited', label: 'Invited', icon: 'icon-incoming' },
     { key: 'pinned', label: 'Pinned', icon: 'icon-beacon' },
-    { key: 'direct', label: 'People', icon: 'icon-member' },
-    { key: 'local', label: 'Guild', icon: 'icon-guild' },
-    { key: 'galaxy', label: 'Galaxy', icon: 'icon-planet' },
+    { key: 'waiting', label: 'Waiting', icon: 'icon-alert' },
+    { key: 'quiet', label: 'Quiet', icon: 'icon-okay', collapsed: true },
   ];
   function sectionOf(r) {
     if (r.invited) return 'invited';
-    if (r.home_rank != null) return 'pinned';
-    return r.section || 'galaxy';
+    if (isPinned(r.room_id) || r.home_rank != null) return 'pinned';
+    if (!r.muted && (r.unread || r.mention)) return 'waiting';
+    return 'quiet';
   }
-  /* The room list a card draws: joined rooms only, grouped, each group in the
-   * order the server gave (already joined-first, then section, then name). */
+  /* The room list a card draws. `only` still narrows to one PLACE (people,
+   * hub, guild, galaxy) — that is a different axis from the grouping, and
+   * both are useful. */
   function sections(opts) {
     opts = opts || {};
     var out = [];
-    SECTIONS.forEach(function (sec) {
+    GROUPS.forEach(function (g) {
       var rows = S.rooms.filter(function (r) {
-        if (sectionOf(r) !== sec.key) return false;
-        /* An invite is the most waiting thing in the list, so it survives the
-         * unread filter — but not a filter that ASKED for one section. "Show
-         * me people" answered with a channel invite is answering a different
-         * question. */
-        if (sec.key === 'invited') return !opts.only || opts.only === 'all';
+        if (sectionOf(r) !== g.key) return false;
+        /* An invite is the most waiting thing there is, so it survives the
+         * unread filter — but not a filter that ASKED for one place. */
+        if (g.key === 'invited') return !opts.only || opts.only === 'all';
         if (!r.joined) return false;
-        if (opts.only && opts.only !== 'all' && sec.key !== opts.only) return false;
+        if (opts.only && opts.only !== 'all' && placeOf(r) !== opts.only) return false;
         if (opts.unreadOnly && !r.unread && !r.mention) return false;
         if (opts.query && !matches(r, opts.query)) return false;
         return true;
       });
-      if (rows.length) out.push({ section: sec, rooms: rows });
+      if (g.key === 'waiting') {
+        // Worst first: named you, then loudest, then most recent.
+        rows.sort(function (a, b) {
+          return (b.mention ? 1 : 0) - (a.mention ? 1 : 0) || (b.unread || 0) - (a.unread || 0);
+        });
+      }
+      if (rows.length) out.push({ section: g, rooms: rows });
     });
     return out;
   }
+
+  /* Does this room answer to that word? Name, alias, topic, and the player a
+   * DM is with — so "the one with Beezhan in it" is reachable by typing
+   * Beezhan, which is how people actually remember a conversation. */
   function matches(r, q) {
     var t = String(q || '').toLowerCase().replace(/^#/, '');
     if (!t) return true;
@@ -430,6 +533,66 @@
     return people(name).then(pick);
   }
 
+  /* Who is in a room, so a name can become a mention.
+   *
+   * `m.mentions` is what makes being NAMED exact on the receiving side — and
+   * it is what sets the server's highlight count, which is the "YOU" badge in
+   * the room list. Without it a message saying someone's name is just traffic
+   * to them, and the one row in Comms that should interrupt never does.
+   *
+   * Cached per room: membership changes far more slowly than a keystroke. */
+  function members(roomId) {
+    if (!S.key || !roomId) return Promise.resolve([]);
+    if (S.members[roomId]) return Promise.resolve(S.members[roomId]);
+    return invoke('matrix_members', { guildId: S.key, roomId: roomId }).then(function (d) {
+      var list = (d && (d.members || d.people)) || (Array.isArray(d) ? d : []);
+      S.members[roomId] = list;
+      return list;
+    }).catch(function () { return []; });
+  }
+
+  /* `@Name` runs in a body that resolve to real people in THIS room. Longest
+   * name first, so `@T.Xue` is not matched as `@T`, and a boundary after the
+   * name so `@Net` does not match inside `@Netlag` — the same id-prefix trap
+   * that has bitten this codebase before, in a different alphabet. */
+  function mentionsIn(roomId, body) {
+    var list = S.members[roomId] || [];
+    var lower = String(body || '').toLowerCase();
+    if (lower.indexOf('@') < 0 || !list.length) return [];
+    var out = [];
+    list.slice().sort(function (a, b) {
+      return String(b.name || '').length - String(a.name || '').length;
+    }).forEach(function (p) {
+      var key = String(p.name || '').toLowerCase();
+      if (!key) return;
+      var at = lower.indexOf('@' + key);
+      if (at < 0) return;
+      var after = lower.charAt(at + key.length + 1);
+      if (after && /[a-z0-9_.-]/.test(after)) return;
+      var uid = p.user_id || p.userId;
+      if (uid && !out.some(function (m) { return m.user_id === uid; })) {
+        out.push({ user_id: uid, name: p.name, player_id: p.player_id || p.playerId });
+      }
+    });
+    return out;
+  }
+
+  /* The names a half-typed `@…` could mean, for the composer's completion.
+   * Prefix first, then anywhere — typing three letters of somebody's name
+   * should reach them whether or not you started at the beginning. */
+  function mentionOptions(roomId, partial) {
+    var list = S.members[roomId] || [];
+    var t = String(partial || '').toLowerCase();
+    var starts = [], has = [];
+    list.forEach(function (p) {
+      var n = String(p.name || '').toLowerCase();
+      if (!n) return;
+      if (n.indexOf(t) === 0) starts.push(p);
+      else if (t && n.indexOf(t) > 0) has.push(p);
+    });
+    return starts.concat(has).slice(0, 8);
+  }
+
   // ── A conversation ──────────────────────────────────────────────────────
   function timeline(roomId, opts) {
     opts = opts || {};
@@ -466,15 +629,166 @@
         return add.length;
       }).catch(function () { return 0; });
   }
-  function send(roomId, body, replyTo) {
-    if (!S.key || !roomId || !String(body || '').trim()) return Promise.resolve(null);
-    return invoke('matrix_send', {
-      guildId: S.key, roomId: roomId, body: String(body), replyTo: replyTo || null,
+  /* `replyTo` is a MESSAGE, not an event id.
+   *
+   * Rust takes `Option<ReplyTarget> { event_id, sender, body }` and builds the
+   * rich-reply fallback from all three — the quote line every other Matrix
+   * client shows above a reply. Handing it a bare string was a shape it cannot
+   * deserialise, so the whole send failed: replying did nothing at all.
+   *
+   * `mentions` is `m.mentions`, which is how being named is EXACT rather than
+   * a word-boundary guess on the receiving side — and how the server's
+   * highlight count (the "YOU" badge in the room list) gets set at all. */
+  /* ── Local echo, drafts, pins ─────────────────────────────────────────
+   *
+   * A message you sent appears the instant you send it, dimmed, and then
+   * confirms or fails. Waiting for the round trip made the composer feel
+   * broken on a slow homeserver, and a send that FAILED simply vanished —
+   * there was no message, no error, nothing to retry.
+   *
+   * The echo carries a local id (`~1`), which is not a server id (`$…`) — the
+   * read-marker code already refuses anything not starting `$`, so an echo can
+   * never be mistaken for something the server knows about. */
+  var echoSeq = 0;
+  function echo(roomId, body, replyTo) {
+    var id = '~' + (++echoSeq);
+    var m = {
+      event_id: id, sender: S.profile && S.profile.user_id || 'me',
+      sender_name: (S.profile && S.profile.display_name) || 'you',
+      body: String(body), kind: 'text', ts: Date.now(), pending: true,
+    };
+    m['self'] = true;
+    if (replyTo) {
+      m.reply_to = replyTo.event_id;
+      m.reply_sender = replyTo.sender_name || replyTo.sender;
+      m.reply_excerpt = String(replyTo.body || '').slice(0, 80);
+    }
+    (S.timelines[roomId] = S.timelines[roomId] || []).push(m);
+    announce('timeline:' + roomId);
+    return m;
+  }
+  /* Sync brings the real message back with a server id, so the echo has to go
+   * — matched on body and sender, because a local id has no relationship to
+   * the server's. Kept simple deliberately: the worst case is one duplicate
+   * line for a few seconds, and the alternative (a correlation id round trip)
+   * is a protocol we do not control. */
+  function settleEchoes(roomId, arrived) {
+    var t = S.timelines[roomId];
+    if (!t) return;
+    arrived.forEach(function (real) {
+      if (!real['self'] && !(S.profile && real.sender === S.profile.user_id)) return;
+      var at = t.findIndex(function (m) {
+        return m.pending && m.body === real.body;
+      });
+      if (at >= 0) t.splice(at, 1);
     });
   }
+
+  /* What you typed and did not send, per room. Switching cards lost it. */
+  function draft(roomId, text) {
+    if (text === undefined) return S.drafts[roomId] || '';
+    if (String(text || '').trim()) S.drafts[roomId] = text;
+    else delete S.drafts[roomId];
+    return text;
+  }
+
+  /* The room's pinned events — its noticeboard. `Room.pinned` carries the ids
+   * and nothing else; the events themselves are fetched on demand. */
+  function pinned(roomId) {
+    if (!S.key || !roomId) return Promise.resolve([]);
+    if (S.pinned[roomId]) return Promise.resolve(S.pinned[roomId]);
+    return invoke('matrix_pinned', { guildId: S.key, roomId: roomId }).then(function (d) {
+      var list = (d && (d.pinned || d.messages)) || (Array.isArray(d) ? d : []);
+      S.pinned[roomId] = list;
+      announce('pinned:' + roomId);
+      return list;
+    }).catch(function () { return []; });
+  }
+  function pin(roomId, eventId, on) {
+    if (!S.key || !roomId) return Promise.resolve();
+    return invoke('matrix_pin', { guildId: S.key, roomId: roomId, eventId: eventId, pin: !!on })
+      .then(function () { delete S.pinned[roomId]; return pinned(roomId); });
+  }
+  function edit(roomId, eventId, body) {
+    if (!S.key || !roomId) return Promise.resolve();
+    return invoke('matrix_edit', { guildId: S.key, roomId: roomId, eventId: eventId, body: String(body) });
+  }
+  function leave(roomId) {
+    if (!S.key || !roomId) return Promise.resolve();
+    return invoke('matrix_leave', { guildId: S.key, roomId: roomId })
+      .then(function () { return refreshRooms(true); });
+  }
+
+  function send(roomId, body, replyTo, mentions) {
+    if (!S.key || !roomId || !String(body || '').trim()) return Promise.resolve(null);
+    var args = { guildId: S.key, roomId: roomId, body: String(body) };
+    if (replyTo && replyTo.event_id) {
+      args.replyTo = {
+        eventId: replyTo.event_id,
+        sender: replyTo.sender || replyTo.sender_name || '',
+        body: String(replyTo.body || ''),
+      };
+    }
+    if (mentions && mentions.length) args.mentions = mentions;
+    var mine = echo(roomId, body, replyTo);
+    return invoke('matrix_send', args).then(function (r) {
+      mine.pending = false;
+      announce('timeline:' + roomId);
+      return r;
+    }, function (e) {
+      /* A send that failed is a message you can SEE and retry. It used to be
+       * nothing at all — the text left the box and never arrived anywhere. */
+      mine.pending = false;
+      mine.failed = String(e);
+      mine.retry = { body: body, replyTo: replyTo, mentions: mentions };
+      announce('timeline:' + roomId);
+      throw e;
+    });
+  }
+  function retry(roomId, m) {
+    var t = S.timelines[roomId] || [];
+    var at = t.indexOf(m);
+    if (at >= 0) t.splice(at, 1);
+    var r = m.retry || {};
+    return send(roomId, r.body, r.replyTo, r.mentions);
+  }
+  /* A read marker names the EVENT you have read up to.
+   *
+   * `matrix_mark_read(guild_id, room_id, event_id)` — the event id is not
+   * optional, and calling it without one failed every single time. That is why
+   * unread counts never cleared: the badge is the server's, kept against the
+   * receipts this app sends, and this app had never successfully sent one.
+   *
+   * A local echo has no server event id (Rust refuses anything not starting
+   * `$`), so the newest REAL event is what we mark. */
+  /* Where the "new messages" rule goes.
+   *
+   * Captured ONCE, when a room is opened, from the count the server was
+   * carrying — because the moment we mark read that count becomes zero and the
+   * answer is gone. Nothing else in the model can reconstruct it afterwards. */
+  function anchorUnread(roomId) {
+    if (S.lastRead[roomId] !== undefined) return;
+    var r = roomById(roomId);
+    var n = r ? Number(r.unread) || 0 : 0;
+    var t = S.timelines[roomId] || [];
+    // The message just BEFORE the unread run — the rule sits under it.
+    S.lastRead[roomId] = (n > 0 && t.length > n) ? t[t.length - n - 1].event_id : null;
+  }
+  function unreadFrom(roomId) { return S.lastRead[roomId] || null; }
+  function clearUnread(roomId) { S.lastRead[roomId] = null; announce('timeline:' + roomId); }
+
   function markRead(roomId) {
     if (!S.key || !roomId) return Promise.resolve();
-    return invoke('matrix_mark_read', { guildId: S.key, roomId: roomId }).catch(function () {});
+    var t = S.timelines[roomId] || [];
+    var last = null;
+    for (var i = t.length - 1; i >= 0; i--) {
+      if (String(t[i].event_id || '').charAt(0) === '$') { last = t[i].event_id; break; }
+    }
+    if (!last) return Promise.resolve();
+    if (S.readAt[roomId] === last) return Promise.resolve();   // already told them
+    S.readAt[roomId] = last;
+    return invoke('matrix_mark_read', { guildId: S.key, roomId: roomId, eventId: last })
+      .catch(function () { S.readAt[roomId] = null; });
   }
   function typing(roomId, on) {
     if (!S.key || !roomId) return Promise.resolve();
@@ -484,10 +798,15 @@
   window.BoardComms = {
     S: S, watch: watch, announce: announce,
     status: status, connect: connect, disconnect: disconnect,
-    rooms: refreshRooms, roomById: roomById, sections: sections, SECTIONS: SECTIONS,
-    sectionOf: sectionOf, matches: matches, waiting: waiting,
+    rooms: refreshRooms, roomById: roomById, sections: sections,
+    sectionOf: sectionOf, matches: matches, waiting: waiting, GROUPS: GROUPS,
+    placeOf: placeOf, hubServer: hubServer, serverOf: serverOf,
+    pins: pins, isPinned: isPinned, togglePin: togglePin,
     subjectKind: subjectKind, resolve: resolve, people: people, playerIdFor: playerIdFor,
     servers: servers,
     timeline: timeline, older: older, send: send, markRead: markRead, typing: typing,
+    members: members, mentionsIn: mentionsIn, mentionOptions: mentionOptions,
+    draft: draft, pinned: pinned, pin: pin, edit: edit, leave: leave, retry: retry,
+    anchorUnread: anchorUnread, unreadFrom: unreadFrom, clearUnread: clearUnread,
   };
 })();

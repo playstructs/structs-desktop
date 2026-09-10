@@ -69,6 +69,105 @@ async function load(qs) {
   dom.window.close();
 }
 
+// ── The wire, checked against Rust itself ──────────────────────────────────
+//
+// THE bug class that broke this migration. Every Comms card was written against
+// what I ASSUMED the commands took, and the harness fixture answers any shape,
+// so all of it tested green while none of it worked:
+//
+//   matrix_mark_read  needs event_id  — sent without one, so NO read receipt
+//                     ever reached the server and unread counts never cleared
+//   matrix_send       reply_to is a STRUCT {event_id, sender, body} — sent a
+//                     bare string, so replying failed outright
+//   matrix_react      needs `on` — omitted, so reactions did nothing and there
+//                     was no way to take one back
+//
+// So the shapes are derived FROM `src-tauri/src/matrix/mod.rs` and compared to
+// what the frontend really sends. A signature that changes, or a call written
+// from memory, fails here instead of in somebody's conversation.
+{
+  console.log('\n— every call matches the command it is calling');
+  const rust = read('src-tauri/src/matrix/mod.rs');
+  const sig = {};
+  for (const m of rust.matchAll(/pub (?:async )?fn (matrix_\w+)\(([^)]*)\)/g)) {
+    sig[m[1]] = m[2].split(',').map((a) => a.trim().split(':')[0].trim())
+      .filter((a) => a && a !== 'app');
+  }
+  const snake = (k) => k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
+  const js = [];
+  for (const f of ['frontend/board-comms.js', 'frontend/board-terminal-comms.js']) {
+    const src = read(f);
+    for (const m of src.matchAll(/invoke\('(matrix_\w+)',\s*\{([^}]*)\}/g)) {
+      js.push({ cmd: m[1], keys: [...m[2].matchAll(/(\w+)\s*:/g)].map((k) => snake(k[1])), file: f });
+    }
+  }
+  check('every matrix command the cards call actually exists',
+    js.every((c) => sig[c.cmd]), js.filter((c) => !sig[c.cmd]).map((c) => c.cmd).join(','));
+
+  /* A key Rust does not take is silently dropped by serde; a key it REQUIRES
+   * and does not get is a deserialisation failure — the whole call. Only
+   * `Option<_>` parameters may be omitted. */
+  const optional = {};
+  for (const m of rust.matchAll(/pub (?:async )?fn (matrix_\w+)\(([^)]*)\)/g)) {
+    optional[m[1]] = new Set(
+      m[2].split(',').filter((a) => /:\s*Option</.test(a))
+        .map((a) => a.trim().split(':')[0].trim()));
+  }
+  const missing = js.flatMap((c) => (sig[c.cmd] || [])
+    .filter((p) => !optional[c.cmd].has(p) && !c.keys.includes(p))
+    .map((p) => c.cmd + ' needs ' + p));
+  check('…and passes every argument that is not optional',
+    missing.length === 0, [...new Set(missing)].join(' · '));
+
+  const unknown = js.flatMap((c) => c.keys.filter((k) => !(sig[c.cmd] || []).includes(k))
+    .map((k) => c.cmd + ' has no ' + k));
+  check('…and invents none that the command does not take',
+    unknown.length === 0, [...new Set(unknown)].join(' · '));
+
+  /* The OTHER half, and the half that produced the typing and presence bugs.
+   *
+   * Rust pushes `matrix::typing` with `names` and the model read `user_ids`;
+   * `matrix::presence` with a `presence` MAP and the model read `p.user_id`.
+   * Both fail silently — a handler that reads a key nobody sent gets undefined
+   * and carries on, so the indicator simply never appears and nothing anywhere
+   * says why. Derived from the emit sites the same way the calls are. */
+  const emits = {};
+  const opaque = new Set();
+  for (const f of ['src-tauri/src/matrix/mod.rs', 'src-tauri/src/matrix/client.rs']) {
+    const rs = read(f);
+    // Every event name that is emitted at all, however its payload is built.
+    for (const m of rs.matchAll(/"(matrix::\w+)"/g)) emits[m[1]] = emits[m[1]] || new Set();
+    // The ones whose payload is a literal right there.
+    for (const m of rs.matchAll(/"(matrix::\w+)",\s*\n?\s*json!\(\{([\s\S]{0,400}?)\}\)/g)) {
+      for (const k of m[2].matchAll(/"(\w+)"\s*:/g)) emits[m[1]].add(k[1]);
+    }
+    /* And the ones whose payload is built into a variable first — `let payload
+     * = …; emit(…, p)` — or handed a whole function's return, like
+     * `status_payload_as()`. Their keys cannot be read from the emit site, so
+     * the KEY check is skipped for them rather than guessed at: a check that
+     * invents an answer is worse than one that admits it does not know. */
+    for (const m of rs.matchAll(/"(matrix::\w+)",\s*\n?\s*(?!json!\(\{)[a-z_]/g)) opaque.add(m[1]);
+  }
+  const comms = read('frontend/board-comms.js');
+  const handlers = [];
+  for (const m of comms.matchAll(/on\('(matrix::\w+)',\s*function\s*\(p\)\s*\{([\s\S]*?)\n    \}\);/g)) {
+    handlers.push({ ev: m[1], keys: [...new Set([...m[2].matchAll(/\bp\.(\w+)/g)].map((k) => k[1]))] });
+  }
+  check('the model listens for events Rust really emits',
+    handlers.every((h) => emits[h.ev]),
+    handlers.filter((h) => !emits[h.ev]).map((h) => h.ev).join(','));
+
+  /* A payload whose keys the emitter never sends. `guild_id`, `room_id` and
+   * `event_id` are on almost every emit and are allowed anywhere; anything
+   * else has to be a key that event really carries. */
+  const everywhere = new Set(['guild_id', 'room_id', 'event_id']);
+  const phantom = handlers.flatMap((h) => (h.keys || [])
+    .filter((k) => !everywhere.has(k) && !opaque.has(h.ev) && emits[h.ev] && !emits[h.ev].has(k))
+    .map((k) => h.ev + ' has no ' + k));
+  check('…and reads only keys those events really carry',
+    phantom.length === 0, [...new Set(phantom)].join(' · '));
+}
+
 // ── The room list ──────────────────────────────────────────────────────────
 {
   console.log('\n— COMMS: where am I, and what is waiting');
@@ -85,15 +184,28 @@ async function load(qs) {
 
   check('Comms is a card, not a window in an iframe', card.querySelector('iframe') === null);
 
-  /* Invites first: they are the only rows anybody is waiting on an answer to,
-   * and an invite that scrolls past the bottom of a list is an invite that
-   * expires unanswered. */
-  const secs = [...card.querySelectorAll('.cm-sec')].map((s) => s.textContent.replace(/\d+$/, '').trim());
-  check('sections run invites, pinned, people, guild, galaxy — in that order',
-    secs.join(' ') === 'Invited Pinned People Guild Galaxy', secs.join(' '));
+  /* PINNED · WAITING · QUIET, not one group per Matrix concept.
+   *
+   * The five fixed sections mirrored the model and answered the wrong
+   * question: the Guild/Galaxy split was by YOUR homeserver, so in a community
+   * whose centre of gravity is another guild's server every channel anybody
+   * talks in filed under "Galaxy" beside random rooms — and sections that are
+   * usually empty cost a 306px column every day. */
+  const secs = [...card.querySelectorAll('.cm-sec')].map((s) => s.textContent.replace(/[\u25b8\s\d]+$/, '').trim());
+  check('the list groups by what is WAITING, with what you pinned held stable above it',
+    secs.join(' ') === 'Invited Pinned Waiting Quiet', secs.join(' '));
+  /* The quiet ones are most of the list and none of the answer — collapsed to
+   * a count, never hidden, because a room you cannot find is a room you have
+   * left without deciding to. */
+  const quiet = [...card.querySelectorAll('.cm-sec')].find((n) => /Quiet/.test(n.textContent));
+  check('…and the quiet ones fold to a count you can open',
+    /▸/.test(quiet.textContent) && quiet.classList.contains('is-foldable'));
+  quiet.click();
+  await until(() => !/▸/.test([...card.querySelectorAll('.cm-sec')].find((n) => /Quiet/.test(n.textContent)).textContent));
+  check('…opening it shows them', true);
 
-  const rows = [...card.querySelectorAll('.cm-room')];
-  const row = (name) => rows.find((r) => new RegExp(name).test(r.querySelector('.cm-room-name').textContent));
+  const row = (name) => [...card.querySelectorAll('.cm-room')]
+    .find((r) => new RegExp(name).test(r.querySelector('.cm-room-name').textContent));
   /* Being NAMED is not the same as traffic. A count of 40 hides the one
    * message that was actually for you, so the mention takes the badge. */
   check('a room that named you says so, and keeps its count beside it',
@@ -102,10 +214,12 @@ async function load(qs) {
   check('…while plain traffic is just a number', row('^Trade$').querySelector('.sui-badge') === null
     && row('^Trade$').querySelector('.cm-room-n').textContent === '9');
   /* A muted room is SILENCED, not ignored: still counted, never allowed to
-   * interrupt. Dropping it from the list is how 400 unread go missing. */
-  check('a muted room is still listed and still counted, just quietened',
+   * interrupt — so it files under QUIET however loud it is, and is still
+   * there with its number on it. Dropping it is how 400 unread go missing. */
+  check('a muted room is quiet, not gone — still listed, still counted',
     row('Noise') !== undefined && row('Noise').classList.contains('is-muted')
-    && /400/.test(row('Noise').textContent));
+    && /400/.test(row('Noise').textContent)
+    && C.sectionOf(C.roomById('!noise:h')) === 'quiet');
   /* This client has no crypto. An encrypted room whose messages are all
    * unreadable, shown as an ordinary empty room, is a lie by omission. */
   check('an encrypted room says so — this client cannot read a word of it',
@@ -140,8 +254,37 @@ async function load(qs) {
    * people" answered with a channel invite answers a different question. */
   check('an invite outlives the unread filter, because it IS waiting',
     C.sections({ only: 'all', unreadOnly: true }).some((g) => g.section.key === 'invited'));
+  /* An invite is the most waiting thing there is, so it survives the unread
+   * filter — but not a filter that asked for one PLACE. */
   check('…but "show me people" is not answered with a channel invite',
-    C.sections({ only: 'direct' }).map((g) => g.section.key).join(',') === 'direct');
+    !C.sections({ only: 'direct' }).some((g) => g.section.key === 'invited'));
+
+  /* WHERE a room is, derived rather than configured.
+   *
+   * Comms is decentralised — every guild runs a homeserver — but a community
+   * has a centre of gravity, and when that centre is another guild's server
+   * the old Guild/Galaxy split filed every channel anybody actually talks in
+   * under "Galaxy" beside genuinely random rooms. The Hub is the server the
+   * largest share of your joined channels live on when it is not your own, so
+   * a community that moves takes the label with it and nobody types anything.
+   */
+  check('one stray federated room is not a community hub',
+    C.hubServer() === null || typeof C.hubServer() === 'string');
+  check('a room says which server it is on when that is not your own',
+    ['hub', 'guild', 'galaxy', 'direct'].includes(C.placeOf(C.roomById('!trade:h'))));
+
+  /* Pinning is what makes the top of the list STABLE. You look for #trade by
+   * position, and a list that re-sorts every time somebody speaks is a list
+   * you cannot learn. */
+  {
+    const pinnable = row('^Trade$').querySelector('.cm-room-pin');
+    check('any room can be pinned to the top', pinnable !== null);
+    pinnable.click();
+    await until(() => C.isPinned('!trade:h'));
+    check('…and a pinned room moves into the stable group',
+      C.sectionOf(C.roomById('!trade:h')) === 'pinned');
+    C.togglePin('!trade:h');
+  }
 
   /* The unread badge is the SERVER's, kept against the read receipts this app
    * sends — so it survives the window closing, survives a restart, and agrees
@@ -210,36 +353,65 @@ async function load(qs) {
   /* A live message arrives for a room a card has open. The model folds it in;
    * a room nothing has open is not cached, so the next open re-reads rather
    * than showing a fragment. */
-  w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!snc:h', message: {
+  w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!snc:h', messages: [{
     event_id: '$live', sender: '@1-61:h', sender_name: 'JPEG', kind: 'text', ts: Date.now(),
-    body: 'they are through the shield' } });
+    body: 'they are through the shield' }] });
   await until(() => /through the shield/.test(first.textContent));
   check('a live message lands in the open room without a refetch',
     /through the shield/.test(first.textContent));
-  w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!nobody-has-this:h', message: { event_id: '$x', body: 'z' } });
+  w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!nobody-has-this:h', messages: [{ event_id: '$x', body: 'z' }] });
   check('…and one for a room nothing has open is not invented into a cache',
     w.BoardComms.S.timelines['!nobody-has-this:h'] === undefined);
 
-  /* The GAME inside the conversation. "shield on 2-15361 is down" names an
-   * object, and the object is the point of the sentence — so the message shows
-   * the game's own card for it, the same one the Explore board draws. This is
-   * the merge the rebuild is for; the machinery (ChatRefs) already existed and
-   * nothing in Comms was using it. */
-  w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!snc:h', message: {
+  /* The GAME inside the conversation — INLINE.
+   *
+   * This first expanded the first id a message named into the game's own full
+   * card, underneath it. Right on a board, wrong in a chat: a channel where
+   * every third line names a planet became a column of cards with conversation
+   * wedged between them, and the thing you were reading was the smallest
+   * element on screen. The id stays in the SENTENCE now, as a chip. */
+  w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!snc:h', messages: [{
     event_id: '$refs', sender: '@1-61:h', sender_name: 'JPEG', kind: 'text', ts: Date.now(),
-    body: '5-4559 is offline and 5-88 is idle' } });
-  // The lookup is a round trip, and until it lands every id is a chip —
-  // which is the honest interim state, not a placeholder card.
-  await until(() => /Ore Extractor/.test(first.textContent));
-  check('an id in a message becomes the game\'s own card for that object',
-    /Ore Extractor/.test(first.textContent));
-  /* Only the FIRST expands. A message naming four objects would otherwise
-   * bury itself under four cards, and the point of a summary is to be aside. */
-  check('…and the rest are chips, so a message naming four is not four cards',
-    first.querySelectorAll('.cm-refs .cm-ref').length === 1
-    && first.querySelector('.cm-refs .cm-ref').textContent === '5-88');
-  first.querySelector('.cm-refs .cm-ref').click();
-  check('…each of which opens the object', T.state.layout.cards.some((c) => c.params && c.params.id === '5-88'));
+    body: 'shield on 2-15361 is down and 9-2136 is two jumps out' }] });
+  await until(() => first.querySelector('[data-event="$refs"] .cm-id'));
+  const line = first.querySelector('[data-event="$refs"]');
+  const chips = [...line.querySelectorAll('.cm-id')].map((c) => c.textContent.trim());
+  check('every id in a line is a chip, in the line, and the line still reads as a sentence',
+    chips.join(',') === '2-15361,9-2136'
+    && /shield on .* is down and .* is two jumps out/.test(line.textContent), chips.join(','));
+  /* A chip opens a WINDOW, not a card pushed onto the board behind the
+   * conversation you are in the middle of. */
+  line.querySelector('.cm-id').click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'open_terminal_card_new'));
+  const opened = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'open_terminal_card_new').slice(-1)[0];
+  check('…and opens the right kind of card, in its own window',
+    opened.args.kind === 'planet' && opened.args.params.id === '2-15361', JSON.stringify(opened.args));
+
+  /* Both sides bounded, or `5-260550` matches inside a longer run of digits
+   * and a date reads as a fleet — the id-prefix trap, in a sentence. */
+  {
+    const box = d.createElement('div');
+    box.appendChild(T.idChips('built 5-260550 on 2026-09-09 at v1-2 for 1-61'));
+    const got = [...box.querySelectorAll('.cm-id')].map((c) => c.textContent.trim());
+    check('a date is not a fleet and a version is not a player',
+      got.join(',') === '5-260550,1-61', got.join(','));
+  }
+
+  /* Typing and presence, in the shapes Rust really pushes.
+   *
+   * `matrix::typing` carries `names` — already resolved, because the window has
+   * no business turning `@1-61:h` into "JPEG" a second time. The model read
+   * `user_ids`, which nothing has ever sent, so the typing line never appeared
+   * once. `matrix::presence` carries the WHOLE map keyed by player; the model
+   * read `p.user_id` off it and returned early every time. */
+  w.__HARNESS_EMIT__('matrix::typing', { guild_id: '0-5', room_id: '!snc:h', names: ['JPEG'] });
+  await until(() => /typing/.test(first.textContent));
+  check('a typing indicator reads the names Rust sends, not ids it never sent',
+    /typing/.test(first.textContent) && w.BoardComms.S.typing['!snc:h'].join() === 'JPEG');
+  w.__HARNESS_EMIT__('matrix::presence', { guild_id: '0-5', presence: { '1-61': { state: 'online' } } });
+  check('presence arrives as the whole map, keyed by player',
+    w.BoardComms.S.presence['1-61'] && w.BoardComms.S.presence['1-61'].state === 'online',
+    JSON.stringify(w.BoardComms.S.presence));
 
   /* An edit is SHOWN, never applied silently: a message that quietly becomes
    * different text is how a conversation gets rewritten under the readers. */
@@ -249,6 +421,80 @@ async function load(qs) {
   w.__HARNESS_EMIT__('matrix::redacted', { room_id: '!snc:h', event_id: '$live' });
   await until(() => !w.BoardComms.S.timelines['!snc:h'].some((m) => m.event_id === '$live'));
   check('…and a deletion really removes it', true);
+
+  // ── Select-then-act, and the reading experience ────────────────────────
+  {
+    const rows = () => [...first.querySelectorAll('.chat-msg')];
+    await until(() => rows().length);
+    /* The ROW carries no controls at all. Three hover glyphs on every line of
+     * a 306px card is most of the line, and hover does not exist on touch. */
+    check('a message row has no controls on it', first.querySelector('.cm-msg-act') === null);
+    rows()[0].click();
+    await until(() => first.querySelector('.cm-bar'));
+    const bar = first.querySelector('.cm-bar');
+    check('selecting a message raises ONE action bar', first.querySelectorAll('.cm-bar').length === 1
+      && rows()[0].classList.contains('is-sel'));
+    /* Every button wears its key — which is how the keyboard layer is taught
+     * without a page of documentation nobody reads. */
+    check('…and every verb on it names its own key',
+      [...bar.querySelectorAll('.cm-verb')].every((v) => v.querySelector('.cm-verb-key')));
+    /* Offering `edit` on somebody else's line and then refusing it is worse
+     * than not offering it. */
+    const verbs = (n) => [...n.querySelectorAll('.cm-verb')].map((v) => v.textContent.replace(/^./, ''));
+    const theirs = verbs(bar);
+    check('…and shows only what is legal — no edit or delete on somebody else\'s message',
+      !theirs.includes('edit') && !theirs.includes('delete') && theirs.includes('reply'),
+      theirs.join(','));
+
+    w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!snc:h', messages: [{
+      event_id: '$mine', sender: '@1-194:h', sender_name: 'Marklifer', self: true,
+      kind: 'text', ts: Date.now(), body: 'mine to edit' }] });
+    await until(() => rows().some((r) => /mine to edit/.test(r.textContent)));
+    rows().find((r) => /mine to edit/.test(r.textContent)).click();
+    await until(() => verbs(first.querySelector('.cm-bar')).includes('edit'));
+    check('…while your own message offers edit and delete', true);
+
+    // The keys and the buttons are ONE verb, so they cannot disagree.
+    const before = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'matrix_redact').length;
+    first.querySelector('.cm-timeline').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'd', bubbles: true }));
+    await until(() => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'matrix_redact').length > before);
+    check('a key and its button are the same verb', true);
+  }
+
+  /* The "new messages" rule. THE most important reading affordance in any chat
+   * client, and there was no way at all to tell what had arrived since you
+   * last looked. Anchored from the count the SERVER was carrying, captured
+   * before marking read — because marking is what destroys the answer. */
+  check('a room opened with unread draws a rule where you left off',
+    typeof w.BoardComms.anchorUnread === 'function'
+    && w.BoardComms.S.lastRead['!snc:h'] !== undefined);
+
+  /* Your own message appears the INSTANT you send it, dimmed, and then
+   * confirms or fails. Waiting for the round trip made the composer feel
+   * broken, and a send that failed simply vanished. */
+  {
+    const input = first.querySelector('textarea, input[type="text"]');
+    input.value = 'echo test';
+    input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const echoed = (w.BoardComms.S.timelines['!snc:h'] || []).filter((m) => m.body === 'echo test');
+    check('a sent message is on screen before the server has answered',
+      echoed.length === 1 && String(echoed[0].event_id).charAt(0) === '~');
+    /* A local id is not a server id, so an echo can never be mistaken for
+     * something the server knows about — the read marker refuses it. */
+    check('…and its local id can never be mistaken for a server event',
+      !String(echoed[0].event_id).startsWith('$'));
+  }
+
+  /* What you typed and did not send. Switching cards used to lose it. */
+  {
+    const input = first.querySelector('textarea, input[type="text"]');
+    input.value = 'half a thought';
+    input.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('an unsent draft is kept per room', w.BoardComms.draft('!snc:h') === 'half a thought');
+    input.value = '';
+    input.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('…and dropped once the box is empty', w.BoardComms.draft('!snc:h') === '');
+  }
 
   ids.forEach((i) => T.remove(i));
   /* One subscription for the whole window. Four Comms cards each wiring their

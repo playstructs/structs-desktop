@@ -104,7 +104,7 @@ pub static REGISTRY: std::sync::LazyLock<RwLock<VirtualPlayerStore>> =
 
 impl VirtualPlayerStore {
     fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("structs-app").join(FILENAME))
+        crate::mcp::config_store::config_path(FILENAME)
     }
 
     pub fn load() -> Self {

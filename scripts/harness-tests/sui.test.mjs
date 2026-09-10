@@ -127,7 +127,12 @@ const BUDGET = {
   // `.fstat-l`, so an <a> carrying a caption class in this window renders at
   // 16px until something with an id in front says otherwise.
   // board.html +1 (2026-09-09): a search hit's rule.
-  'board.html':         [2, 121],
+  // board.html +2 (2026-09-09): the inline id chip's hairline and the mention
+  // menu's — an id now reads in the sentence instead of expanding to a card.
+  // board.html +4 (2026-09-09): Comms' reading pass — the action bar's rule
+  // and its key outlines, the "new messages" divider, and the pinned strip.
+  // All hairlines; the card has no fixed dimension anywhere.
+  'board.html':         [2, 127],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not
