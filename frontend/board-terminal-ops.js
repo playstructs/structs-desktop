@@ -1829,7 +1829,7 @@
    */
   T.register('deliver', {
     label: 'Deliver', cadenceMs: 0,
-    describe: function (p) { return 'Deliver' + (p && p.to ? ' · ' + p.to : ''); },
+    describe: function (p) { return 'Deliver' + (p && p.to ? ' · ' + (p.name || p.to) : ''); },
     params: [{ key: 'to', label: 'Pay whom', kind: 'id', kinds: [1], placeholder: '1-61' }],
     render: function (host, p, ctx) {
       var S = { from: null, picking: false, assets: [], denom: null, base: 0, unit: null,
@@ -2032,7 +2032,11 @@
         paint();
         invoke('matrix_resolve_payable', { playerId: playerId }).then(function (intent) {
           if (!intent || !intent.to) return;
-          S.to = { id: intent.playerId || playerId, name: intent.name || name, pfp: pfp, tag: tag, address: intent.to };
+          /* The resolver's `name` is the address book's, and falls back to
+           * the id — which must not beat a real name the caller already had
+           * ("TO 1-61 #1-61" on a card that knew JPEG). */
+          var known = intent.name && intent.name !== (intent.playerId || playerId) ? intent.name : null;
+          S.to = { id: intent.playerId || playerId, name: name || known, pfp: pfp, tag: tag, address: intent.to };
           paint(); schedule();
         }).catch(function () {
           S.preview = null;
@@ -2209,7 +2213,7 @@
       }
 
       return load().then(function () {
-        if (p && p.to) choose(String(p.to), null, null, null);
+        if (p && p.to) choose(String(p.to), p.name ? String(p.name) : null, null, null);
         // Handed a recipient by Comms: the same claim the window made.
         else invoke('matrix_take_pending_transfer').then(function (intent) {
           if (intent && intent.playerId) choose(intent.playerId, intent.name, intent.pfp_attrs, null);

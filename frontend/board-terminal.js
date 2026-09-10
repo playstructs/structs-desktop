@@ -1828,6 +1828,15 @@
      * read what there is. */
     if (!parts.length) {
       var out = [];
+      /* The window's words FIRST, as a group of their own: they open no
+       * card, so the card menu would never list them — and listed last,
+       * under fifty card rows, they sat below the fold and read as missing.
+       * A launcher that cannot reach Comms is a launcher people stop
+       * opening. */
+      out.push({ line: 'COMMS', words: 'COMMS', what: 'Open Comms', arg: '', group: 'Comms', run: true });
+      out.push({ line: 'DM ', words: 'DM', what: 'Message a player', arg: '<player>', group: 'Comms', run: false });
+      out.push({ line: 'ROOM ', words: 'ROOM', what: 'A conversation, by subject', arg: '<id · #alias>', group: 'Comms', run: false });
+      out.push({ line: 'SAY ', words: 'SAY', what: 'Draft a line in Comms', arg: '<text>', group: 'Comms', run: false });
       Terminal.groups().forEach(function (g) {
         g.options.forEach(function (o) {
           var word = wordFor(o.value);
@@ -1836,13 +1845,6 @@
           out.push({ line: word + (arg ? ' ' : ''), words: word, what: o.label, arg: arg, group: g.group, run: !arg });
         });
       });
-      /* The window's words, as a group of their own: they open no card, so
-       * the card menu would never list them, and a launcher that cannot
-       * reach Comms is a launcher people stop opening. */
-      out.push({ line: 'COMMS', words: 'COMMS', what: 'Open Comms', arg: '', group: 'Comms', run: true });
-      out.push({ line: 'DM ', words: 'DM', what: 'Message a player', arg: '<player>', group: 'Comms', run: false });
-      out.push({ line: 'ROOM ', words: 'ROOM', what: 'A conversation, by subject', arg: '<id · #alias>', group: 'Comms', run: false });
-      out.push({ line: 'SAY ', words: 'SAY', what: 'Draft a line in Comms', arg: '<text>', group: 'Comms', run: false });
       return out;
     }
     var trailingSpace = /\s$/.test(raw);
@@ -2658,7 +2660,7 @@
         /* Three doors, one row: send them Alpha, message them, share them.
          * Everything about this player is INSIDE the frame now; the buttons
          * that used to sit under it are the header's doors. */
-        var send = { icon: 'icon-transfers', title: 'Send Alpha to ' + name, onClick: function () { add('deliver', { to: id }); } };
+        var send = { icon: 'icon-transfers', title: 'Send Alpha to ' + name, onClick: function () { add('deliver', { to: id, name: name }); } };
         var card = window.StructsPlayerCard.card({
           id: id, name: name, pfp: attrs,
           presence: Board.presenceDot && Board.presenceDot(id),

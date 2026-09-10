@@ -133,8 +133,8 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
      * strict superset, not a second way in. */
     check('…and an empty palette still offers every card the picker did, each named by the word that opens it',
       empty.length === all.length + commsRows.length && empty.every((o) => o.words && o.what), empty.length + ' of ' + all.length);
-    check('…in the same groups, in the same order — then the Comms words, which open the window',
-      empty.map((o) => o.group).filter((g, i, a) => g !== a[i - 1]).join(' ') === groups.map((g) => g.group).concat('Comms').join(' ')
+    check('…Comms first (its words open the window, and last they sat below the fold), then the groups in order',
+      empty.map((o) => o.group).filter((g, i, a) => g !== a[i - 1]).join(' ') === ['Comms'].concat(groups.map((g) => g.group)).join(' ')
       && commsRows.map((o) => o.words).join(' ') === 'COMMS DM ROOM SAY');
     /* Named explicitly, not left to the "everything is filed" rule above: the
      * two achievement cards are the newest, and "is it in the palette yet?"
