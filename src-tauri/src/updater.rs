@@ -282,9 +282,24 @@ fn mark_staged(version: &str) {
     let _ = std::fs::write(path, version);
 }
 
+/// Version hold: the startup auto-stager is skipped when the environment
+/// variable `STRUCTS_NO_AUTO_UPDATE` is set to anything but `0`/`false`, or
+/// when `auto_update_enabled` is false in the MCP config. Only the background
+/// stager is held — the in-app "Download" button remains a deliberate act.
+pub fn auto_update_disabled() -> bool {
+    let env_hold = std::env::var("STRUCTS_NO_AUTO_UPDATE")
+        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no"))
+        .unwrap_or(false);
+    env_hold || !crate::mcp::config::McpConfig::load().auto_update_enabled
+}
+
 /// Spawn the startup update check. Runs once, shortly after launch, off the main
 /// thread. Safe to call unconditionally — it no-ops when already up to date.
 pub fn check_and_stage_on_startup(app: tauri::AppHandle) {
+    if auto_update_disabled() {
+        eprintln!("[Structs Update] auto-update held (STRUCTS_NO_AUTO_UPDATE / auto_update_enabled=false) — staying on v{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         // Let the app settle (window, IPC, notification permission, initial PoW)
         // before competing for network/CPU.

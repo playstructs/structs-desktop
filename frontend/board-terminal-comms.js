@@ -82,8 +82,12 @@
    * standing. What differs is what the row can DO, which arrives in `opts`. */
   function roomRow(r, opts) {
     opts = opts || {};
+    /* A room that has a card on the board is marked as such, so the list is a
+     * map of your board and not only a list — the two never pointed at each
+     * other, and "which of these do I already have open" had no answer. */
+    var active = opts.active != null ? opts.active : C.isOpen(r.room_id);
     var row = H.el('div', 'cm-room' + (r.mention ? ' is-mention' : '') + (r.unread ? ' is-unread' : '')
-      + (r.muted ? ' is-muted' : '') + (opts.active ? ' is-active' : ''));
+      + (r.muted ? ' is-muted' : '') + (active ? ' is-active' : ''));
 
     var face = H.el('div', 'cm-room-face');
     if (r.player_id && H.pfpPortrait) face.appendChild(H.pfpPortrait(r.pfp_attrs));
@@ -166,6 +170,66 @@
     }
     return row;
   }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // The Terminal as a whole: being named, and being sent somewhere
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // Two signals that arrive whether or not any Comms card is open, watched
+  // from a host that never leaves the document.
+  //
+  //   `matrix::unread`  reached the GAME window's door badge and nothing else.
+  //                     The Terminal — the surface this was built for — had no
+  //                     idea you had been named. The count now sits on the
+  //                     workspace strip, and a mention stamps the status line.
+  //
+  //   `matrix::show_room`  an MCP tool, a notification, the game window
+  //                     asking for a room. It was announced and nobody
+  //                     handled it: the agent saying "look at #war-room" did
+  //                     nothing. A card for that room is flashed; otherwise
+  //                     one is added.
+  function badge() {
+    var strip = document.getElementById('tm-ws-items') || document.querySelector('#tm-ws-nav .sui-screen-nav-items');
+    if (!strip) return;
+    var old = strip.querySelector('.cm-badge');
+    if (old) old.parentNode.removeChild(old);
+    var b = C.S.badge || {};
+    if (!b.count && !b.mention) return;
+    var n = H.el('span', 'cm-badge' + (b.mention ? ' is-mention' : ''), b.mention ? 'YOU' : H.fmtInt(b.count));
+    n.title = (b.mention ? 'somebody named you' : H.fmtInt(b.count) + ' unread') + ' — ⌘K to see';
+    n.addEventListener('click', function () { T.openPalette(); });
+    strip.appendChild(n);
+  }
+  C.watch(document.body, function (what) {
+    if (what === 'unread') {
+      badge();
+      if (C.S.badge && C.S.badge.mention) Board.stamp && Board.stamp('Comms: somebody named you');
+      return;
+    }
+    if (what === 'rooms' || what === 'status') { badge(); return; }
+    if (what.indexOf('show:') === 0) {
+      var rid = what.slice(5);
+      var hit = null;
+      Object.keys(T.state.mounted).forEach(function (id) {
+        var m = T.state.mounted[id];
+        if (m.def && m.def.type === 'room' && m.body && C.S.open[rid] === m.body) hit = m;
+      });
+      if (hit) {
+        // The mark FIRST: a scroll that throws (no scrollIntoView in a test
+        // DOM) must not take the flash with it.
+        hit.node.classList.add('is-flash');
+        setTimeout(function () { hit.node.classList.remove('is-flash'); }, 1600);
+        if (hit.node.scrollIntoView) hit.node.scrollIntoView({ block: 'center' });
+      } else {
+        add('room', { id: rid });
+      }
+    }
+  });
+  /* NOT `C.status()` here. This file runs at script-eval time, before
+   * `Board.T` exists; an invoke then throws, and a throw at the top of this
+   * IIFE aborts it — every card below went unregistered and `COMMS` opened
+   * nothing. The watcher above paints the badge on the first `status` that
+   * lands, which is the earliest anything true can be known anyway. */
 
   // ══════════════════════════════════════════════════════════════════════
   // COMMS — where am I, and what is waiting
@@ -261,7 +325,7 @@
         });
       };
 
-      C.watch(host, function (what) { if (what === 'rooms' || what === 'status' || what === 'seen') draw(); });
+      C.watch(host, function (what) { if (what === 'rooms' || what === 'status' || what === 'seen' || what === 'open') draw(); });
       return gate(host, function () { return C.rooms().then(draw); });
     },
   });
@@ -272,60 +336,16 @@
   //
   // The card that makes the rebuild worth doing. Two of them side by side is
   // two conversations; the embedded window could only ever be one.
-  /* The game inside the conversation — INLINE.
-   *
-   * This first expanded the first id a message named into the game's own full
-   * card, underneath it. That is the right thing on a board and the wrong
-   * thing in a chat: a channel where every third line names a planet became a
-   * column of cards with conversation wedged between them, and the thing you
-   * were reading was the smallest element on screen.
-   *
-   * So the id stays where it was written — in the sentence — as a chip. The
-   * text reads as text, and every id in it is still a door. Clicking opens the
-   * object in its OWN WINDOW rather than pushing a card onto the board behind
-   * the conversation you are in the middle of.
-   */
-  var ID_IN_TEXT = /(\d{1,2}-\d{1,9})/g;
+  /* The game inside the conversation — INLINE. The chip itself is the shared
+   * row's (`StructsChatRow.idChips`); what opening one does is this host's:
+   * a card WINDOW, not a card pushed onto the board behind the conversation
+   * you are in the middle of. */
   var KIND_CARD = { 0: 'guild', 1: 'player', 2: 'planet', 9: 'map' };
-  var KIND_ICON = { 0: 'icon-guild', 1: 'icon-member', 2: 'icon-planet', 9: 'icon-fleet-tile' };
   function cardFor(id) { return KIND_CARD[Number(String(id).split('-')[0])] || 'inspector'; }
-
-  /* Split a body on the ids in it and hand back text and chips. Pure and
-   * exported so the test can drive it without a room: what counts as an id
-   * here decides what is clickable in every message anyone ever sends. */
   function idChips(text, onOpen) {
-    var frag = document.createDocumentFragment();
-    var src = String(text || '');
-    var at = 0, m;
-    ID_IN_TEXT.lastIndex = 0;
-    while ((m = ID_IN_TEXT.exec(src))) {
-      /* A boundary on BOTH sides. Without it `5-260550` matches inside a
-       * longer run of digits and `2026-09-09` reads as a fleet — the same
-       * prefix trap as everywhere else in this codebase, in a sentence. */
-      var before = m.index ? src.charAt(m.index - 1) : '';
-      var after = src.charAt(m.index + m[0].length);
-      if (/[0-9A-Za-z_-]/.test(before) || /[0-9-]/.test(after)) continue;
-      if (m.index > at) frag.appendChild(document.createTextNode(src.slice(at, m.index)));
-      frag.appendChild(idChip(m[1], onOpen));
-      at = m.index + m[0].length;
-    }
-    if (at < src.length) frag.appendChild(document.createTextNode(src.slice(at)));
-    return frag;
+    return window.StructsChatRow.idChips(text, onOpen || function (id) { T.openInWindow(cardFor(id), { id: id }); });
   }
   T.idChips = idChips;
-
-  function idChip(id, onOpen) {
-    var chip = H.el('a', 'cm-id');
-    chip.href = 'javascript:void(0)';
-    chip.appendChild(icon(KIND_ICON[Number(String(id).split('-')[0])] || 'icon-unknown', 'sui-icon-sm'));
-    chip.appendChild(H.el('span', null, id));
-    chip.title = 'Open ' + id + ' in its own window';
-    chip.addEventListener('click', function (e) {
-      e.stopPropagation();
-      (onOpen || function (x) { T.openInWindow(cardFor(x), { id: x }); })(id);
-    });
-    return chip;
-  }
 
   T.register('room', {
     label: 'Conversation', defaultWidth: 1, defaultHeight: 'grow', cadenceMs: 0,
@@ -425,9 +445,20 @@
           });
         }
         host.appendChild(scroller);
+        /* A repaint must never move you. It rebuilt the list and so landed at
+         * the top unless you happened to be at the bottom — a reaction landing
+         * on somebody else's message yanked the card you were reading. Where
+         * you were is restored; only a live tail follows the newest line. */
         if (state.atBottom !== false) scroller.scrollTop = scroller.scrollHeight;
+        else if (state.scrollTop != null) scroller.scrollTop = state.scrollTop;
         scroller.addEventListener('scroll', function () {
+          state.scrollTop = scroller.scrollTop;
           state.atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+          /* The "new messages" rule stays until you have SCROLLED PAST it.
+           * Clearing it on the read receipt cleared it the moment the card
+           * painted, which is before you had read anything. */
+          var rule = scroller.querySelector('.cm-new');
+          if (rule && rule.offsetTop < scroller.scrollTop) C.clearUnread(rid);
         });
         // ↑/↓ walk the messages; the action bar follows the selection.
         scroller.addEventListener('keydown', function (e) { walkKeys(e, rid, state, scroller, draw); });
@@ -463,6 +494,8 @@
            * has to be in hand first — and the unread ANCHOR has to be taken
            * before we mark, because marking is what destroys the answer. */
           return C.timeline(room.room_id).then(function () {
+            C.openRoom(room.room_id, host);
+            state.rid = room.room_id;
             C.anchorUnread(room.room_id);
             C.markRead(room.room_id);
             C.members(room.room_id);
@@ -566,6 +599,11 @@
     var node = window.StructsChatRow.render(m, prev, {
       onSender: m.player_id ? function () { T.openInWindow('player', { id: m.player_id }); } : null,
     });
+    // "edited" with no way to see the old text is half an answer.
+    if (m.edited && m.was) {
+      var mark = node.querySelector('.chat-msg-edited');
+      if (mark) mark.title = 'was: ' + String(m.was).slice(0, 200);
+    }
     var b = window.StructsChatRow.body(m, {
       // Ids become chips IN the sentence, and a chip opens a window.
       fill: function (n, text) { n.appendChild(idChips(text)); },
@@ -849,7 +887,12 @@
   T.register('channels', {
     label: 'Channel directory', defaultWidth: 1, single: true, defaultHeight: 'grow',
     describe: function (p) {
-      return 'Channels' + (p.server ? ' · ' + p.server : '') + (p.q ? ' · ' + p.q : '');
+      /* The NAME of the guild whose directory this is. It said
+       * `Channels · matrix.beta.playstructs.com` — a hostname is a routing
+       * detail, not a thing anybody calls that place. */
+      var known = (C.S.servers || []).filter(function (sv) { return sv.server === p.server; })[0];
+      var where = p.server ? (known ? (known.name || known.tag) : p.server) : '';
+      return 'Channels' + (where ? ' · ' + where : '') + (p.q ? ' · ' + p.q : '');
     },
     params: [
       { key: 'q', label: 'Search', kind: 'text', placeholder: 'trade, war, help…' },
@@ -874,20 +917,27 @@
          * The list comes from the guild configs the app discovers on chain, so
          * a guild that stands up a homeserver appears here without anything
          * being typed anywhere. */
+        /* WHICH homeserver's directory this is.
+         *
+         * This was a row of badges reading `OH · yours  SN.C  KC`, which is a
+         * SENTENCE, not a menu — no affordance, no separation, and a "· yours"
+         * glued onto a name so the whole line scanned as prose. It is the
+         * board's own sub-nav now (`H.navStrip`, the same component the areas
+         * and the config pages use), so it reads as a menu because it IS the
+         * menu, and it is labelled by guild NAME rather than by a hostname
+         * nobody has ever typed.
+         *
+         * Yours first. It needs no marker: your own guild's name is a name you
+         * already know, and the strip says which one you are looking at by
+         * being a strip. */
         if ((servers || []).length > 1) {
-          var strip = H.el('div', 'cm-servers');
-          servers.forEach(function (sv) {
-            var here = p.server ? sv.server === p.server : sv.mine;
-            var a = H.el('a', 'sui-badge cm-server' + (here ? ' is-here' : ''),
-              (sv.tag || sv.name || sv.server) + (sv.mine ? ' · yours' : ''));
-            a.href = 'javascript:void(0)';
-            a.title = sv.server;
-            a.addEventListener('click', function () {
-              T.setParams(ctxId, { q: p.q || '', server: sv.mine ? '' : sv.server });
+          var items = servers.slice().sort(function (a, b) { return (b.mine ? 1 : 0) - (a.mine ? 1 : 0); })
+            .map(function (sv) {
+              return { key: sv.mine ? '' : sv.server, label: sv.name || sv.tag || sv.server };
             });
-            strip.appendChild(a);
-          });
-          host.appendChild(strip);
+          host.appendChild(H.navStrip(items, p.server || '', function (key) {
+            T.setParams(ctxId, { q: p.q || '', server: key });
+          }));
         }
 
         var joined = {};
@@ -897,6 +947,7 @@
           : 'nothing here you are not already in');
         rows.forEach(function (r) {
           host.appendChild(roomRow(r, {
+            pin: false,   // you cannot pin a room you are not in
             onOpen: function () { add('room', { id: r.canonical_alias || r.room_id }); },
           }));
         });

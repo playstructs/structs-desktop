@@ -554,7 +554,21 @@ pub fn open_terminal_card_new(
     if sane_card_id(&kind).is_none() {
         return Err(format!("card type {kind:?} is not a plain name"));
     }
-    let (ws_name, id, version) = append_card(workspace, &kind, params.unwrap_or_else(|| json!({})))?;
+    let params = params.unwrap_or_else(|| json!({}));
+    /* FOCUS-OR-OPEN.
+     *
+     * Every pick minted a fresh card and built a fresh window, so clicking
+     * `2-15361` in three messages over one conversation left you owning three
+     * planet windows. A chip is a door to a THING, and a thing already on
+     * screen wants focusing, not duplicating. So: the same kind about the same
+     * id, already in this workspace, is the card we open — and
+     * `open_terminal_card` already raises the window when one exists. */
+    if let Some(existing) = same_card(workspace.as_deref(), &kind, &params) {
+        let (ws_name, id) = existing;
+        open_terminal_card(app, Some(ws_name.clone()), id.clone(), None)?;
+        return Ok(json!({ "workspace": ws_name, "card_id": id, "type": kind, "focused": true }));
+    }
+    let (ws_name, id, version) = append_card(workspace, &kind, params)?;
     // An open Terminal is showing this workspace; tell it, or it saves the card
     // back out of existence on its next write.
     let _ = crate::mcp::events::emit(
@@ -566,6 +580,26 @@ pub fn open_terminal_card_new(
     );
     open_terminal_card(app, Some(ws_name.clone()), id.clone(), None)?;
     Ok(json!({ "workspace": ws_name, "card_id": id, "type": kind }))
+}
+
+/// A card of this kind about this id, if the workspace already holds one.
+///
+/// "About this id" is `params.id` — the one parameter every object card and
+/// every Comms card keys on. A card with NO id (a room list, the feed) is a
+/// singleton by kind alone. Pure, so it is testable without a window.
+fn same_card(workspace: Option<&str>, kind: &str, params: &Value) -> Option<(String, String)> {
+    let st = lock(&STORE);
+    let name = match workspace {
+        Some(n) => sane_card_id(n)?,
+        None => st.active.clone(),
+    };
+    let layout = st.workspaces.get(&name)?;
+    let want = params.get("id").and_then(|v| v.as_str());
+    layout
+        .cards
+        .iter()
+        .find(|c| c.kind == kind && c.params.get("id").and_then(|v| v.as_str()) == want)
+        .map(|c| (name.clone(), c.id.clone()))
 }
 
 /// Append one card to a workspace, minting a free id for it.
@@ -1902,6 +1936,47 @@ pub async fn terminal_scout(target: String) -> Result<Value, String> {
     }))
 }
 
+#[cfg(test)]
+mod same_card_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Through serde, the way a card really arrives — so the test needs no
+    /// opinion about which of Card's fields are optional.
+    fn seed(cards: Vec<(&str, &str, Value)>) {
+        let mut st = lock(&STORE);
+        st.active = "main".into();
+        st.workspaces.insert("main".into(), Layout {
+            version: 0,
+            cards: cards.into_iter().map(|(id, kind, params)| {
+                serde_json::from_value(json!({ "id": id, "type": kind, "params": params })).expect("a card")
+            }).collect(),
+        });
+    }
+
+    /// Clicking `2-15361` in three messages left you owning three planet
+    /// windows. The same kind about the same id is the card already there.
+    #[test]
+    fn the_same_object_focuses_the_card_that_already_shows_it() {
+        seed(vec![("planet-1", "planet", json!({ "id": "2-15361" }))]);
+        assert_eq!(same_card(None, "planet", &json!({ "id": "2-15361" })), Some(("main".into(), "planet-1".into())));
+    }
+
+    #[test]
+    fn a_different_id_is_a_different_card() {
+        seed(vec![("planet-1", "planet", json!({ "id": "2-15361" }))]);
+        assert_eq!(same_card(None, "planet", &json!({ "id": "2-99" })), None);
+        assert_eq!(same_card(None, "room", &json!({ "id": "2-15361" })), None);
+    }
+
+    /// A card with no id — the room list, the feed — is one per workspace by
+    /// kind alone.
+    #[test]
+    fn a_card_without_an_id_is_a_singleton_by_kind() {
+        seed(vec![("comms-1", "comms", json!({}))]);
+        assert_eq!(same_card(None, "comms", &json!({})), Some(("main".into(), "comms-1".into())));
+    }
+}
 #[cfg(test)]
 mod tests {
 

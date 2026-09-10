@@ -239,7 +239,7 @@ pub async fn mcp_player_search(query: String) -> Result<Value, String> {
      * window has one record to read.
      */
     let found = client.guild.player_search(q, None).await?;
-    let rows: Vec<Value> = found
+    let mut rows: Vec<Value> = found
         .as_array()
         .cloned()
         .unwrap_or_default()
@@ -257,7 +257,93 @@ pub async fn mcp_player_search(query: String) -> Result<Value, String> {
             ))
         })
         .collect();
+    /* The name search is the PAY-RECIPIENT picker (`/player/transfer/search`)
+     * and carries an id, a name and a portrait — it has no reason to know a
+     * planet or a fleet, and it does not. So `planet jpeg` in the palette
+     * found JPEG and then had nothing to resolve the planet TO, silently.
+     *
+     * The id branch above already asks the chain, which knows all three. Do
+     * the same for a name's hits, only where the DTO left a hole, and only for
+     * as many as the palette will show — six reads, not a page of them. */
+    const ENRICH: usize = 6;
+    for row in rows.iter_mut().take(ENRICH) {
+        if !needs_objects(row) {
+            continue;
+        }
+        let id = row.get("player_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if id.is_empty() {
+            continue;
+        }
+        if let Ok(entity) = client.query_entity("player", &id).await {
+            fill_objects_from_entity(row, &entity);
+        }
+    }
     Ok(json!({ "results": rows }))
+}
+
+/// Does this hit still lack the objects a lookup needs to offer its doors?
+fn needs_objects(row: &Value) -> bool {
+    ["planet_id", "fleet_id", "guild_id"]
+        .iter()
+        .any(|k| row.get(k).and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()))
+}
+
+/// Fill a search hit's planet / fleet / guild from the chain's player entity.
+///
+/// The entity keys are camelCase under a nested `Player` (`planetId`), the
+/// hit's are snake_case at the top (`planet_id`) — the exact kind of rename
+/// that reads as "worked, then didn't". Only holes are filled: a value the
+/// DTO did supply is never overwritten by the chain's.
+fn fill_objects_from_entity(row: &mut Value, entity: &Value) {
+    let p = entity.get("Player").unwrap_or(entity);
+    for (theirs, ours) in [("planetId", "planet_id"), ("fleetId", "fleet_id"), ("guildId", "guild_id")] {
+        let have = row.get(ours).and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty());
+        if have {
+            continue;
+        }
+        if let Some(v) = p.get(theirs).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            row[ours] = json!(v);
+        }
+    }
+}
+
+#[cfg(test)]
+mod player_search_tests {
+    use super::*;
+
+    /// `planet jpeg` found JPEG and then had nothing to resolve the planet
+    /// to. The pay-recipient DTO has no planet; the chain entity does, under
+    /// a different key and a nested object.
+    #[test]
+    fn a_name_hit_learns_its_objects_from_the_chain() {
+        let mut row = json!({ "player_id": "1-61", "username": "JPEG", "planet_id": null, "fleet_id": null, "guild_id": null });
+        assert!(needs_objects(&row));
+        let entity = json!({ "Player": { "id": "1-61", "planetId": "2-9462", "fleetId": "9-61", "guildId": "0-1", "name": "JPEG" } });
+        fill_objects_from_entity(&mut row, &entity);
+        assert_eq!(row["planet_id"], "2-9462");
+        assert_eq!(row["fleet_id"], "9-61");
+        assert_eq!(row["guild_id"], "0-1");
+        assert!(!needs_objects(&row));
+    }
+
+    /// A value the DTO DID supply is the DTO's; the chain only fills holes.
+    #[test]
+    fn what_the_search_already_knew_is_kept() {
+        let mut row = json!({ "player_id": "1-61", "planet_id": "2-1", "fleet_id": null, "guild_id": null });
+        fill_objects_from_entity(&mut row, &json!({ "Player": { "planetId": "2-9462", "fleetId": "9-61" } }));
+        assert_eq!(row["planet_id"], "2-1");
+        assert_eq!(row["fleet_id"], "9-61");
+    }
+
+    /// An entity that answers with empty strings fills nothing — an empty
+    /// planet id is a hole, not a planet.
+    #[test]
+    fn an_empty_answer_is_not_an_answer() {
+        let mut row = json!({ "player_id": "1-61", "planet_id": null, "fleet_id": null, "guild_id": null });
+        fill_objects_from_entity(&mut row, &json!({ "Player": { "planetId": "", "fleetId": "" } }));
+        assert!(row["planet_id"].is_null());
+        assert!(needs_objects(&row));
+    }
 }
 
 // ── ENERGY ───────────────────────────────────────────────────────────────────

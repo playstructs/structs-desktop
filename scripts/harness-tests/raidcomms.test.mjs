@@ -22,6 +22,7 @@ function boot(target, fixtures = {}) {
      * `chat-msg-body` div, which is why a reply's quote line never appeared in
      * it and reactions drew as unstyled spans. Faithful to the real one: null
      * for the kinds `render` already drew whole. */
+    idChips: (t) => { const f = el('span'); f.textContent = t; return f; },
     body: (m) => {
       const k = m.kind || 'text';
       if (k === 'gap' || k === 'event' || k === 'emote') return null;

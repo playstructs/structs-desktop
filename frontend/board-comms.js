@@ -57,6 +57,9 @@
     drafts: {},            // room_id → what you typed and did not send
     pinned: {},            // room_id → the room's pinned events
     lastRead: {},          // room_id → the event id the unread divider sits under
+    badge: { count: 0, mention: false },   // what the server says is waiting, for surfaces outside Comms
+    lastRoom: null,        // the room you last looked at — where SAY goes
+    open: {},              // room_id → the host of the card showing it
     listening: false,
     subs: [],              // repaint callbacks, pruned by liveness
   };
@@ -116,7 +119,19 @@
       announce('timeline:' + p.room_id);
     });
 
-    on('matrix::edited', function (p) { patch(p, function (m) { m.body = p.body; m.edited = true; }); });
+    /* An edit is SHOWN, and it says WHAT changed. A message that quietly
+     * becomes different text is how a conversation gets rewritten under the
+     * people reading it — and "edited" with no way to see the old text is only
+     * half an answer. */
+    on('matrix::edited', function (p) { patch(p, function (m) { m.was = m.body; m.body = p.body; m.edited = true; }); });
+    /* The one signal about Comms that surfaces OUTSIDE Comms. It reached the
+     * game window's door badge and nothing else — the Terminal, the surface
+     * this was all built for, had no idea you had been named. */
+    on('matrix::unread', function (p) {
+      if (!p) return;
+      S.badge = { count: Number(p.count) || 0, mention: !!p.mention };
+      announce('unread');
+    });
     on('matrix::redacted', function (p) {
       if (!p || !p.room_id) return;
       var t = S.timelines[p.room_id];
@@ -639,6 +654,45 @@
    * `mentions` is `m.mentions`, which is how being named is EXACT rather than
    * a word-boundary guess on the receiving side — and how the server's
    * highlight count (the "YOU" badge in the room list) gets set at all. */
+  /* ── Which rooms are on screen ────────────────────────────────────────
+   *
+   * So the room list can mark the rooms that have a card, and so `SAY` knows
+   * where to go. A host that has left the document is pruned on read rather
+   * than on some unmount hook nobody calls. */
+  function openRoom(roomId, host) {
+    if (!roomId) return;
+    S.open[roomId] = host;
+    S.lastRoom = roomId;
+    announce('open');
+  }
+  function isOpen(roomId) {
+    var h = S.open[roomId];
+    if (h && !h.isConnected) { delete S.open[roomId]; return false; }
+    return !!h;
+  }
+  function lastRoom() {
+    if (S.lastRoom && isOpen(S.lastRoom)) return S.lastRoom;
+    return S.lastRoom;   // a room you closed is still the one you last read
+  }
+
+  /* SAY <text> — send to the room you last looked at, from anywhere.
+   *
+   * Mid-raid: ⌘K, `SAY 2-15361 is breached`, back to the map — without
+   * opening, focusing or leaving anything. `SAY #war-room <text>` names the
+   * room instead. Answers with a sentence for the palette to show. */
+  function say(text, subject) {
+    var body = String(text || '').trim();
+    if (!body) return Promise.reject('nothing to say');
+    var target = subject ? resolve(subject) : (lastRoom()
+      ? Promise.resolve(roomById(lastRoom()) || { room_id: lastRoom(), name: lastRoom() })
+      : Promise.reject('no room open yet — name one: SAY #room …'));
+    return target.then(function (room) {
+      return send(room.room_id, body, null, mentionsIn(room.room_id, body)).then(function () {
+        return 'said in ' + (room.name || room.room_id);
+      });
+    });
+  }
+
   /* ── Local echo, drafts, pins ─────────────────────────────────────────
    *
    * A message you sent appears the instant you send it, dimmed, and then
@@ -808,5 +862,6 @@
     members: members, mentionsIn: mentionsIn, mentionOptions: mentionOptions,
     draft: draft, pinned: pinned, pin: pin, edit: edit, leave: leave, retry: retry,
     anchorUnread: anchorUnread, unreadFrom: unreadFrom, clearUnread: clearUnread,
+    openRoom: openRoom, isOpen: isOpen, lastRoom: lastRoom, say: say,
   };
 })();

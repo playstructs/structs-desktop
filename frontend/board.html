@@ -1589,6 +1589,16 @@
     .cm-room-pin.is-on, .cm-room-pin:hover { color: var(--accent-primary); }
     .cm-sec.is-foldable { cursor: pointer; }
     .cm-sec.is-foldable:hover { color: var(--text-player-primary); }
+    /* Being named, on the workspace strip — the one Comms signal that has to
+       reach you when no Comms card is on screen. */
+    .cm-badge { margin-left: var(--spacing-sm); padding: 0 var(--spacing-xs);
+      border: 1px solid var(--accent-secondary); color: var(--accent-secondary); cursor: pointer; }
+    .cm-badge.is-mention { border-color: var(--accent-destructive); color: var(--accent-destructive); }
+    /* "Look at #war-room": the card that already shows it says so. */
+    #board-layout .tm-card.is-flash { box-shadow: 0 0 0 2px var(--accent-primary); }
+    /* A palette result you can deal with without opening it. */
+    .tm-suggest-act { margin-left: var(--spacing-md); color: var(--text-hint); }
+    .tm-suggest-act:hover { color: var(--text-player-primary); }
     /* A search hit is a message plus the room it was said in — without the
        room it is a quote from nowhere. */
     .cm-me { display: flex; align-items: baseline; gap: var(--spacing-md); }
@@ -1602,20 +1612,6 @@
     .cm-servers { display: flex; flex-wrap: wrap; gap: var(--spacing-sm);
       margin-bottom: var(--spacing-sm); }
     .cm-server.is-here { border-color: var(--accent-primary); color: var(--text-player-primary); }
-    /* An id stays where it was WRITTEN — in the sentence — as a chip.
-       Expanding the first one into the game's full card turned a channel where
-       every third line names a planet into a column of cards with conversation
-       wedged between them: the thing you were reading was the smallest element
-       on screen. Inline, the text reads as text and every id is still a door,
-       and the door opens a WINDOW rather than pushing a card onto the board
-       behind the conversation you are in the middle of. */
-    .cm-id { display: inline-flex; align-items: baseline; gap: var(--spacing-xs);
-      padding: 0 var(--spacing-xs); border: 1px solid var(--border-subtle);
-      background: var(--surface-default); color: var(--text-player-primary);
-      white-space: nowrap; }
-    .cm-id:hover { border-color: var(--accent-primary); background: var(--surface-player-highlight); }
-    .cm-id .sui-icon { align-self: center; }
-
     /* Who you are about to name. A menu, not Tab-cycling: in a room of four
        hundred you have to SEE which of three Nets you meant. */
     .cm-compose { position: relative; }

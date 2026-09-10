@@ -348,8 +348,53 @@
     return box;
   }
 
+
+  /* Ids in a message, as CHIPS, in the sentence.
+   *
+   * Moved here from the Terminal (2026-09-09) for the reason the row and the
+   * body were: three surfaces draw a message, and only one of them turned
+   * `2-15361` into something you could open. The chip is the same everywhere;
+   * what OPENING one does belongs to the host, through `onOpen(id)` — the
+   * Terminal opens a card window, the raid rail opens a raid view, and a host
+   * that can do neither gets a chip that is still a chip, just not a door.
+   */
+  var ID_IN_TEXT = /(\d{1,2}-\d{1,9})/g;
+  var KIND_ICON = { 0: 'icon-guild', 1: 'icon-member', 2: 'icon-planet', 9: 'icon-fleet-tile' };
+  function idChip(id, onOpen) {
+    var chip = el(onOpen ? 'a' : 'span', 'cm-id');
+    if (onOpen) chip.href = 'javascript:void(0)';
+    var ic = el('i', 'sui-icon sui-icon-sm ' + (KIND_ICON[Number(String(id).split('-')[0])] || 'icon-unknown'));
+    chip.appendChild(ic);
+    chip.appendChild(el('span', null, id));
+    if (onOpen) {
+      chip.title = 'Open ' + id;
+      chip.addEventListener('click', function (e) { e.stopPropagation(); onOpen(id); });
+    }
+    return chip;
+  }
+  function idChips(text, onOpen) {
+    var frag = document.createDocumentFragment();
+    var src = String(text || '');
+    var at = 0, m;
+    ID_IN_TEXT.lastIndex = 0;
+    while ((m = ID_IN_TEXT.exec(src))) {
+      /* A boundary on BOTH sides. Without it `5-260550` matches inside a
+       * longer run of digits and `2026-09-09` reads as a fleet — the same
+       * id-prefix trap as everywhere else in this codebase, in a sentence. */
+      var before = m.index ? src.charAt(m.index - 1) : '';
+      var after = src.charAt(m.index + m[0].length);
+      if (/[0-9A-Za-z_-]/.test(before) || /[0-9-]/.test(after)) continue;
+      if (m.index > at) frag.appendChild(document.createTextNode(src.slice(at, m.index)));
+      frag.appendChild(idChip(m[1], onOpen));
+      at = m.index + m[0].length;
+    }
+    if (at < src.length) frag.appendChild(document.createTextNode(src.slice(at)));
+    return frag;
+  }
+
   root.StructsChatRow = {
     notice: notice,
+    idChips: idChips,
     body: body,
     reactions: reactions,
     composer: composer,

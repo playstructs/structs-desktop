@@ -3621,7 +3621,15 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
      * because ui-telemetry.js runs on any board page and flushes on a timer —
      * the same benign logger the Terminal's own frame allowlist carries.
      * Nothing else is reachable from this frame; see the note above. */
-    var FRAME_CMDS = { open_terminal_card_new: 1, log_ui_events: 1 };
+    var FRAME_CMDS = {
+      open_terminal_card_new: 1, log_ui_events: 1,
+      /* `SAY <text>` from ⌘K over the map: the one Comms verb that is worth
+       * more from the game than from the Terminal. The palette frame is OUR
+       * page, not a rail rendering strangers' text, and these three are the
+       * whole of what it needs — status to know the session key, rooms to
+       * name a target, send to say it. Nothing that moves value. */
+      matrix_status: 1, matrix_rooms: 1, matrix_send: 1,
+    };
 
     var host = null, frame = null, open = false;
 

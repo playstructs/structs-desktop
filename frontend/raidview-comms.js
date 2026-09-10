@@ -331,7 +331,17 @@
          * a reply's quote line and drew reactions as unstyled spans — both of
          * which chatrow.js knows how to draw, and now does for all three
          * windows. Read-only: the rail carries no reply or react controls. */
-        var b = R.body(m, {});
+        /* Ids are chips here too — the same chip the Terminal draws. In this
+         * window a planet or a fleet opens as a raid view; a player or a guild
+         * has nowhere to open from a rail, and stays a chip that is not a door. */
+        var b = R.body(m, { fill: function (n, text) {
+          n.appendChild(R.idChips(text, function (id) {
+            var k = Number(String(id).split('-')[0]);
+            if (k !== 2 && k !== 9) return;
+            window.__TAURI__.core.invoke('mcp_raid_view_open', k === 2 ? { planetId: id } : { fleetId: id })
+              .catch(function () { /* a rail that cannot open one says nothing */ });
+          }));
+        } });
         if (b) node.appendChild(b);
       });
     }

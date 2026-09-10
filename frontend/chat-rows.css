@@ -274,3 +274,17 @@
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* ── Ids as chips, in the sentence ──────────────────────────────────────────
+ *
+ * With the row, because `StructsChatRow.idChips` draws them for every window
+ * that draws a message. Expanding an id into the game's full card under the
+ * message turned a channel where every third line names a planet into a
+ * column of cards with conversation wedged between them. Inline, the text
+ * reads as text and every id is still a door. */
+.cm-id { display: inline-flex; align-items: baseline; gap: var(--spacing-xs);
+  padding: 0 var(--spacing-xs); border: 1px solid var(--border-subtle);
+  background: var(--surface-default); color: var(--text-player-primary);
+  white-space: nowrap; }
+a.cm-id:hover { border-color: var(--accent-primary); background: var(--surface-player-highlight); }
+.cm-id .sui-icon { align-self: center; }

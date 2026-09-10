@@ -24,6 +24,12 @@ pub struct McpConfig {
     /// and that difference is the player's to choose.
     #[serde(default)]
     pub comms_status_enabled: bool,
+    /// Startup auto-stager for app updates. `false` (or the environment
+    /// variable `STRUCTS_NO_AUTO_UPDATE=1`) holds the running build: nothing
+    /// is downloaded or staged behind the player's back, so a restart comes
+    /// back on the same version. The manual "Download" button still works.
+    #[serde(default = "default_auto_update_enabled")]
+    pub auto_update_enabled: bool,
     /// How virtual-player signs are carried out and returned: `"sync"`
     /// (default) signs in the webview and waits for block inclusion — p50
     /// 6.1 s per sign; `"async"` signs in the webview and returns after the
@@ -68,6 +74,10 @@ fn default_verify_source() -> String {
     "guild".to_string()
 }
 
+fn default_auto_update_enabled() -> bool {
+    true
+}
+
 impl Default for McpConfig {
     fn default() -> Self {
         Self {
@@ -78,6 +88,7 @@ impl Default for McpConfig {
             // Off. Nothing about what you are doing leaves this machine until
             // the player asks for it.
             comms_status_enabled: false,
+            auto_update_enabled: default_auto_update_enabled(),
             sign_mode: default_sign_mode(),
             tx_gate_cap: None,
             verify_source: default_verify_source(),

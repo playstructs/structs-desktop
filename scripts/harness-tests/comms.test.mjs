@@ -148,10 +148,17 @@ async function load(qs) {
      * invents an answer is worse than one that admits it does not know. */
     for (const m of rs.matchAll(/"(matrix::\w+)",\s*\n?\s*(?!json!\(\{)[a-z_]/g)) opaque.add(m[1]);
   }
+  /* Handlers by BRACE-MATCHING, not by regex. A non-greedy match to the block
+   * close ran a one-line handler on into the next one and blamed its keys on
+   * the wrong event — `matrix::edited has no count`, when `count` was read by
+   * the `matrix::unread` handler beneath it. */
   const comms = read('frontend/board-comms.js');
   const handlers = [];
-  for (const m of comms.matchAll(/on\('(matrix::\w+)',\s*function\s*\(p\)\s*\{([\s\S]*?)\n    \}\);/g)) {
-    handlers.push({ ev: m[1], keys: [...new Set([...m[2].matchAll(/\bp\.(\w+)/g)].map((k) => k[1]))] });
+  for (const m of comms.matchAll(/on\('(matrix::\w+)',\s*function\s*\(p\)\s*\{/g)) {
+    let i = m.index + m[0].length, depth = 1;
+    while (i < comms.length && depth) { if (comms[i] === '{') depth++; else if (comms[i] === '}') depth--; i++; }
+    const body = comms.slice(m.index + m[0].length, i - 1);
+    handlers.push({ ev: m[1], keys: [...new Set([...body.matchAll(/\bp\.(\w+)/g)].map((k) => k[1]))] });
   }
   check('the model listens for events Rust really emits',
     handlers.every((h) => emits[h.ev]),
@@ -499,8 +506,11 @@ async function load(qs) {
   ids.forEach((i) => T.remove(i));
   /* One subscription for the whole window. Four Comms cards each wiring their
    * own listeners is how one glance sends four read receipts. */
+  /* One subscriber is meant to outlive every card: the Terminal-wide watcher
+   * on document.body that paints the mention badge and answers show_room. So
+   * "no card is drawn into" means no subscriber whose host is a CARD. */
   check('every card shares ONE live subscription, and a removed card stops being drawn into',
-    w.BoardComms.S.subs.filter((f) => f.host && f.host.isConnected).length === 0);
+    w.BoardComms.S.subs.filter((f) => f.host && f.host !== d.body && f.host.isConnected).length === 0);
   w.close();
 }
 
@@ -530,11 +540,15 @@ async function load(qs) {
    * anybody actually talks: they had to be told an alias. Federation already
    * carried the join. Only DISCOVERY stopped at the guild boundary. */
   {
-    const servers = [...dir.querySelectorAll('.cm-server')].map((a) => a.textContent);
-    check('the directory names every guild that publishes a homeserver, not just yours',
-      servers.length === 2 && servers.some((t) => /yours/.test(t)) && servers.some((t) => /OH/.test(t)),
+    /* The board's own sub-nav, labelled by guild NAME. It was a row of badges
+     * reading `OH · yours  SN.C  KC` — a sentence, not a menu. */
+    // The strip in the BODY (`.subnav`), not the card's own title tab.
+    const servers = [...dir.querySelectorAll('.subnav .sui-screen-nav-item')].map((a) => a.textContent);
+    check('the directory names every guild that publishes a homeserver, by name, as a menu',
+      servers.length === 2 && servers.some((t) => /SN Corp/.test(t)) && servers.some((t) => /Orbital Hydro/.test(t))
+      && dir.querySelector('.subnav .sui-screen-nav-item.sui-mod-active') !== null,
       servers.join(' | '));
-    const other = [...dir.querySelectorAll('.cm-server')].find((a) => /OH/.test(a.textContent));
+    const other = [...dir.querySelectorAll('.subnav .sui-screen-nav-item')].find((a) => /Orbital Hydro/.test(a.textContent));
     other.click();
     await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_browse' && c.args.server));
     const asked = (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'matrix_browse').slice(-1)[0];
@@ -644,6 +658,86 @@ async function load(qs) {
   check('…and DMS and UNREAD are the room list, configured — not three more cards',
     T.parse('DMS').type === 'comms' && T.parse('DMS').params.show === 'direct'
     && T.parse('UNREAD').params.show === 'unread');
+  w.close();
+}
+
+// ── The connective tissue: knowing where you are while three windows move ──
+{
+  console.log('\n— the surfaces know about each other');
+  const dom = await load('?view=terminal');
+  const w = dom.window, d = w.document;
+  const T = w.Board.Terminal, C = w.BoardComms;
+  await T.enter();
+  T.state.layout.cards.slice().forEach((c) => T.remove(c.id));
+
+  /* SAY is the one verb that is not a card. Mid-raid: ⌘K, say it, back to the
+   * map — without opening, focusing or leaving anything. */
+  check('SAY parses as an action, to the last room or to a named one',
+    T.parse('SAY 2-15361 is breached').kind === 'say' && T.parse('SAY 2-15361 is breached').subject === undefined
+    && T.parse('SAY #trade ore for capacity').subject === '#trade'
+    && T.parse('SAY #trade ore for capacity').text === 'ore for capacity'
+    && T.parse('SAY') === null);
+  T.add('room', { id: '!snc:h' }, 1);
+  await until(() => C.lastRoom() === '!snc:h');
+  check('…and a room you looked at is where a bare SAY goes', C.lastRoom() === '!snc:h');
+  const sends = () => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'matrix_send');
+  const n0 = sends().length;
+  T.execute('SAY shields up');
+  await until(() => sends().length > n0);
+  check('…so SAY sends there without a card being opened', sends().slice(-1)[0].args.roomId === '!snc:h'
+    && sends().slice(-1)[0].args.body === 'shields up');
+
+  /* The room list is a map of the board: a room with a card says so. */
+  T.add('comms', {}, 1);
+  const cid = T.state.layout.cards.slice(-1)[0].id;
+  await until(() => d.querySelector('#tm-' + cid + ' .cm-room.is-active'));
+  check('a room that has a card on the board is marked in the list',
+    /SN.Corporation/.test(d.querySelector('#tm-' + cid + ' .cm-room.is-active').textContent));
+
+  /* Being named reaches the Terminal. `matrix::unread` went to the game
+   * window's door and nowhere else — the surface this was built for had no
+   * idea. */
+  w.__HARNESS_EMIT__('matrix::unread', { count: 4, mention: true });
+  await until(() => d.querySelector('.cm-badge'));
+  check('a mention puts a badge on the workspace strip', d.querySelector('.cm-badge.is-mention') !== null
+    && d.querySelector('.cm-badge').textContent === 'YOU');
+  w.__HARNESS_EMIT__('matrix::unread', { count: 0, mention: false });
+  await until(() => !d.querySelector('.cm-badge'));
+  check('…and it goes when there is nothing waiting', true);
+
+  /* "Look at #war-room" from the agent used to do nothing at all. */
+  const rooms = () => d.querySelectorAll('#tm-grid [data-type="room"]').length;
+  const r0 = rooms();
+  w.__HARNESS_EMIT__('matrix::show_room', { guild_id: '0-5', room_id: '!snc:h' });
+  await until(() => d.querySelector('#tm-grid .tm-card.is-flash'));
+  check('show_room for a room with a card flashes that card rather than adding another',
+    rooms() === r0 && d.querySelector('.tm-card.is-flash [data-type], .tm-card.is-flash') !== null);
+  w.__HARNESS_EMIT__('matrix::show_room', { guild_id: '0-5', room_id: '!trade:h' });
+  await until(() => rooms() === r0 + 1);
+  check('…and for a room with no card, adds one', T.state.layout.cards.some((c) => c.type === 'room' && c.params.id === '!trade:h'));
+
+  /* An edit says what it WAS. */
+  w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!snc:h', messages: [{ event_id: '$e1', sender: '@1-61:h', sender_name: 'JPEG', kind: 'text', ts: Date.now(), body: 'attack at dawn' }] });
+  await until(() => (C.S.timelines['!snc:h'] || []).some((m) => m.event_id === '$e1'));
+  w.__HARNESS_EMIT__('matrix::edited', { guild_id: '0-5', room_id: '!snc:h', event_id: '$e1', body: 'attack at dusk' });
+  await until(() => C.S.timelines['!snc:h'].find((m) => m.event_id === '$e1').edited);
+  const first = d.querySelector('#tm-grid [data-type="room"]');
+  await until(() => first.querySelector('[data-event="$e1"] .chat-msg-edited'));
+  check('an edited message keeps what it used to say, one hover away',
+    /was: attack at dawn/.test(first.querySelector('[data-event="$e1"] .chat-msg-edited').title));
+
+  /* Palette rows: the room leads, the word follows, and a waiting row can be
+   * dealt with without opening it. */
+  const rows = T.commsRows('', C.S.rooms);
+  const row = rows.find((r) => r.group === 'Waiting');
+  check('a waiting row leads with the ROOM and carries verbs', row.lead === true && row.acts.some((a) => a.label === 'read')
+    && row.acts.some((a) => /mute/.test(a.label)));
+  /* And SAY is a row you can SEE — `suggestFor` lists only words that open a
+   * card, and SAY opens nothing. An empty box says where it would go. */
+  check('an empty box shows where SAY would go', rows[0].group === 'Say' && /SN.Corporation/.test(rows[0].sub));
+  check('prose in the box is a message search, a word is not',
+    T.saidRows('shield is down').length === 0 /* nothing cached yet */ && T.parse('shield is down') === null
+    && typeof T.saidRows === 'function');
   w.close();
 }
 

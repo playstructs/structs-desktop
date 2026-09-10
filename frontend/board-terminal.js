@@ -1494,7 +1494,7 @@
     // table). `AWARDS` and `HULLS` because that is what each is called out loud.
     RECORD: ['record', 'id'], AWARDS: ['record', 'id'], ACHIEVEMENTS: ['record', 'id'],
     TALLY: ['tally', 'id'], HULLS: ['tally', 'id'], KILLS: ['tally', 'id'],
-    HELP: ['help'], COMMANDS: ['help'],
+    HELP: ['help'], COMMANDS: ['help'], SAY: ['say', 'text'],
     FEED: ['feed'], EVENTS: ['feed'], NEXT: ['next'], MOVES: ['next'],
     /* Comms, as subjects. A room is reached the way a planet is: `ROOM 1-61`,
      * `ROOM JPEG`, `ROOM #trade`, `ROOM 2-15361` all name one conversation,
@@ -1657,6 +1657,18 @@
       if (kindOf(rest) === 1) return card('fleet', { id: rest });
       return card(ID_RE.test(rest) ? 'map' : 'armada', { id: rest });
     }
+    /* SAY is the one verb here that is not a card. `SAY 2-15361 is breached`
+     * goes to the room you last looked at; `SAY #war-room …` names one. Mid-
+     * raid, from ⌘K over the map, without opening or leaving anything — the
+     * thing that makes this a game's chat rather than a chat in a game. */
+    if (head === 'SAY') {
+      if (!rest) return null;
+      /* Only `#alias` or `!room` names a target. A leading OBJECT id is the
+       * subject of the sentence — `SAY 2-15361 is breached` is about the
+       * planet, not addressed to it. */
+      var m = /^([#!][^\s]+)\s+([\s\S]+)$/.exec(rest);
+      return m ? { kind: 'say', subject: m[1], text: m[2] } : { kind: 'say', text: rest };
+    }
     if (head === 'PRESET' || head === 'PRESETS') return { kind: 'preset', name: String(rest || '').toLowerCase() };
     if (head === 'SHARE') return { kind: 'share' };
     // The bar's RESET button went with the bar; this is the same verb.
@@ -1705,6 +1717,19 @@
      * workspace this page never loaded — a preset would overwrite the layout
      * with `state.layout` still null — so they are refused rather than half
      * done. Nothing is lost: they are what the Terminal itself is for. */
+    if (plan.kind === 'say') {
+      var C = window.BoardComms;
+      if (!C) return false;
+      // Over the game the model has not been asked anything yet; ask first.
+      C.status().then(function () { return C.say(plan.text, plan.subject); })
+        .then(function (msg) { Board.stamp && Board.stamp(msg); tellHost('ran'); })
+        .catch(function (e) {
+          var cmd = document.getElementById('tm-cmd');
+          if (cmd) cmd.classList.add('is-err');
+          Board.stamp && Board.stamp('say: ' + e);
+        });
+      return true;
+    }
     if (state.paletteOnly) {
       if (plan.kind !== 'card') return false;
       return Terminal.openInWindow(plan.type, plan.params);
@@ -1952,12 +1977,38 @@
     };
     var push = function (r, group) {
       if (rows.length >= COMMS_MAX) return;
-      rows.push({ line: 'ROOM ' + name(r), words: 'ROOM', sub: r.name || name(r), run: true,
-                  what: what(r), group: group });
+      /* The ROOM is the subject; the word is a detail. `SN.Corporation ROOM ·
+       * named you` read the word on every line as if it mattered. And a
+       * waiting row can be DEALT WITH, not only opened: dismissing one is as
+       * common as opening one when the question is "what is on the go". */
+      var acts = [];
+      if (r.unread || r.mention) acts.push({ label: 'read', run: function () {
+        var C = window.BoardComms; C.timeline(r.room_id).then(function () { C.markRead(r.room_id); });
+      } });
+      acts.push({ label: r.muted ? 'unmute' : 'mute', run: function () {
+        invoke('matrix_mute', { guildId: window.BoardComms.S.key, roomId: r.room_id, muted: !r.muted })
+          .then(function () { return window.BoardComms.rooms(true); });
+      } });
+      rows.push({ line: 'ROOM ' + name(r), words: 'ROOM', sub: r.name || name(r), lead: true, run: true,
+                  what: what(r), group: group, acts: acts });
     };
 
-    // Nothing typed: what is waiting, worst first.
+    var C = window.BoardComms;
+    var last = C && C.lastRoom && C.lastRoom();
+    var lastName = last ? ((C.roomById(last) || {}).name || last) : null;
+    /* SAY, as a row you can see. `suggestFor` lists only words that open a
+     * card, and SAY opens nothing — it is the one verb here that acts. An
+     * empty box shows where it would go; a typed SAY shows what it will do. */
+    if (head === 'SAY' && parts.length > 1) {
+      var plan = Terminal.parse(raw);
+      var to = plan && plan.subject ? plan.subject : (lastName || 'no room read yet');
+      return [{ line: raw, words: 'SAY', sub: to, lead: true, run: true,
+                what: plan && plan.subject ? 'say it there' : 'say it in the room you last read', group: 'Say' }];
+    }
+    // Nothing typed: what is waiting, worst first — and where SAY would go.
     if (!parts.length) {
+      if (lastName) rows.push({ line: 'SAY ', words: 'SAY', sub: lastName, lead: true, run: false,
+                                what: 'say something there', group: 'Say' });
       list.filter(function (r) { return r.joined && !r.muted && (r.unread || r.mention); })
         .sort(function (a, b) { return (b.mention ? 1 : 0) - (a.mention ? 1 : 0) || (b.unread || 0) - (a.unread || 0); })
         .forEach(function (r) { push(r, 'Waiting'); });
@@ -2115,11 +2166,20 @@
         var r = H.el('a', 'tm-suggest-row' + (i === cursor ? ' is-on' : ''));
         r.href = 'javascript:void(0)';
         var left = H.el('span', 'tm-help-words');
-        if (it.sub) left.appendChild(H.el('span', 'ops-muted', it.sub));
-        left.appendChild(H.el('b', null, it.words));
+        // `lead`: the subject is the answer, the word is how it is reached.
+        if (it.sub) left.appendChild(it.lead ? H.el('b', null, it.sub) : H.el('span', 'ops-muted', it.sub));
+        left.appendChild(it.lead ? H.el('span', 'ops-muted', ' ' + it.words) : H.el('b', null, it.words));
         if (it.arg) { left.appendChild(document.createTextNode(' ')); left.appendChild(H.el('span', 'ops-muted', it.arg)); }
         r.appendChild(left);
-        r.appendChild(H.el('span', 'ops-val', it.what));
+        var right = H.el('span', 'ops-val');
+        right.appendChild(document.createTextNode(it.what || ''));
+        (it.acts || []).forEach(function (a) {
+          var v = H.el('a', 'tm-suggest-act', a.label);
+          v.href = 'javascript:void(0)';
+          v.addEventListener('mousedown', function (ev) { ev.preventDefault(); ev.stopPropagation(); a.run(); });
+          right.appendChild(v);
+        });
+        r.appendChild(right);
         // mousedown, not click: the input blurs on click and the menu is gone
         // before the click lands.
         r.addEventListener('mousedown', function (ev) { ev.preventDefault(); accept(i); });
@@ -2134,7 +2194,7 @@
        * then you already know what you want. */
       var comms = Terminal.commsRows(line);
       items = String(line || '').trim()
-        ? suggestFor(line).concat(comms, searchFor(line))
+        ? suggestFor(line).concat(comms, searchFor(line), Terminal.saidRows(line))
         : comms.concat(suggestFor(line));
       cursor = items.length ? 0 : -1;
       picked = false;
@@ -2150,7 +2210,43 @@
       return hits ? Terminal.searchRows(line, hits) : [];
     }
 
+    /* Prose in the box searches MESSAGES. Typing three words into a launcher
+     * and getting nothing is how a search card that exists goes unused; the
+     * homeserver already answers the query and the top three hits are what
+     * you wanted. Only prose — two or more words with no command at the head. */
+    var saidSeq = 0, saidCache = {};
+    Terminal.saidRows = function (line) {
+      var raw = String(line || '').trim();
+      var parts = raw.split(/\s+/).filter(Boolean);
+      if (parts.length < 2 || WORDS[parts[0].toUpperCase()] || ID_RE.test(parts[0])) return [];
+      var hits = saidCache[raw];
+      if (!hits) return [];
+      return hits.slice(0, 3).map(function (h) {
+        var m = h.message || h;
+        return { line: 'ROOM ' + h.room_id, words: 'ROOM', sub: String(m.body || '').slice(0, 48), lead: true,
+                 run: true, what: (h.room_name || h.room_id) + ' · ' + (m.sender_name || ''), group: 'Said' };
+      });
+    };
+    function askSaid(line) {
+      var raw = String(line || '').trim();
+      var parts = raw.split(/\s+/).filter(Boolean);
+      if (parts.length < 2 || WORDS[parts[0].toUpperCase()] || ID_RE.test(parts[0]) || saidCache[raw]) return;
+      var C = window.BoardComms;
+      if (!C || !C.S.connected || !C.S.key) return;
+      var mine = ++saidSeq;
+      setTimeout(function () {
+        if (mine !== saidSeq || cmd.value.trim() !== raw) return;
+        invoke('matrix_search', { guildId: C.S.key, query: raw }).then(function (d) {
+          saidCache[raw] = (d && d.hits) || [];
+          if (cmd.value.trim() !== raw) return;
+          items = suggestFor(cmd.value).concat(Terminal.commsRows(cmd.value), searchFor(cmd.value), Terminal.saidRows(cmd.value));
+          if (cursor < 0 && items.length) cursor = 0;
+          paint();
+        }).catch(function () { saidCache[raw] = []; });
+      }, 300);
+    }
     function askSearch(line) {
+      askSaid(line);
       var q = Terminal.searchSubject(line);
       if (q == null || searchCache[q]) return;
       if (searchTimer) clearTimeout(searchTimer);
@@ -2334,6 +2430,7 @@
        * reaches this reference — which is how their absence was caught. */
       line('SETTINGS · CONFIG', 'Settings', '', function () { Terminal.execute('SETTINGS'); });
       line('PRESET · PRESETS', Object.keys(PRESETS).join(' · '), '<name>', function () { fillCommand('PRESET '); });
+      line('SAY', 'Say it in the room you last read · SAY #room <text> names one', '<text>', function () { fillCommand('SAY '); });
       line('SHARE', 'Share this workspace as a code', '', function () { Terminal.execute('SHARE'); });
       line('IMPORT', 'Open a workspace someone shared', '<code>', function () { fillCommand('IMPORT '); });
       // The bar's RESET button went with the bar; this is the same verb.
@@ -3911,6 +4008,9 @@
     matrix_send: 1, matrix_timeline: 1,
     mcp_inventory: 1, mcp_roster: 1,
     mcp_raid_log: 1, mcp_raid_state: 1, mcp_struct_act: 1,
+    // A chip in the rail opening a planet or fleet as a raid view — the
+    // spectator window, which is ungated. Read-only, and nothing it shows moves value.
+    mcp_raid_view_open: 1,
   };
   Terminal.frameMayInvoke = function (cmd) {
     var name = String(cmd || '');

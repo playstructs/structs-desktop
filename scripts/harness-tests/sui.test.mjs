@@ -132,6 +132,10 @@ const BUDGET = {
   // board.html +4 (2026-09-09): Comms' reading pass — the action bar's rule
   // and its key outlines, the "new messages" divider, and the pinned strip.
   // All hairlines; the card has no fixed dimension anywhere.
+  // board.html +1 (2026-09-09): the mention badge's hairline on the workspace
+  // strip — the one Comms signal that reaches you with no Comms card open.
+  // board.html −1 (2026-09-09): the id chip's hairline moved to chat-rows.css
+  // with the chip itself — one implementation for every window.
   'board.html':         [2, 127],
   'board.js':           [0, 0],
   'board-pages.js':     [3, 11],
@@ -162,7 +166,8 @@ const BUDGET = {
   // art, 32px icon doors, a 6px presence dot and 1px hairlines.
   'playercard.css':     [0, 23],
   // +10 (2026-09-09): the reaction and reply rules that arrived from chat.html.
-  'chat-rows.css':      [0, 29],
+  // +1 (2026-09-09): the id chip's hairline, arrived from board.html.
+  'chat-rows.css':      [0, 30],
   // The guild emblem (72px / 24px) and its 1px frame.
   'guildcard.css':      [0, 10],
   // The owner line's 24px portrait and the unit/owner type sizes.
