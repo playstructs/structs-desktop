@@ -104,15 +104,20 @@
     /* A player id stands as it is; a name is asked of the directory and
      * must match exactly, or be the only player it finds. Null otherwise. */
     function resolvePlayer(tok) {
-      if (/^\d+-\d+$/.test(tok)) return Promise.resolve(tok);
+      var isId = /^\d+-\d+$/.test(tok);
       return invoke('matrix_people', { guildId: S.guildId, query: tok }).then(function (res) {
         var people = (res && res.people) || [];
-        var exact = people.filter(function (p) { return String(p.username || '').toLowerCase() === tok.toLowerCase(); })[0];
-        var hit = exact || (people.length === 1 ? people[0] : null);
-        // The name is known now; the group's own name is built from these.
-        if (hit && hit.player_id && hit.username) { S.groupNames = S.groupNames || {}; S.groupNames[hit.player_id] = hit.username; }
-        return (hit || {}).player_id || null;
-      }).catch(function () { return null; });
+        var hit = isId
+          ? people.filter(function (p) { return p.player_id === tok; })[0]
+          : people.filter(function (p) { return String(p.username || '').toLowerCase() === tok.toLowerCase(); })[0]
+            || (people.length === 1 ? people[0] : null);
+        /* The name is kept beside the id so the group is named after PEOPLE
+         * — "Beverly-Mwangi, miner-2" — not after "1-271, 1-272". An id the
+         * directory has not met still stands as itself. */
+        var id = (hit && hit.player_id) || (isId ? tok : null);
+        if (id && hit && hit.username) { S.groupNames = S.groupNames || {}; S.groupNames[id] = hit.username; }
+        return id;
+      }).catch(function () { return isId ? tok : null; });
     }
 
     function runCommand(line) {

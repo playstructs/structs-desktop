@@ -20,7 +20,8 @@ const FRONTEND = ['frontend/chat.js', 'frontend/chat-refs.js', 'frontend/chat-co
   'frontend/chat-commands.js', 'frontend/chat-work.js', 'frontend/chat-channels.js', 'frontend/chat-search.js',
   'frontend/chat-people.js', 'frontend/chat-connection.js', 'frontend/chat-pins.js', 'frontend/chat-presence.js',
   'frontend/chat-message.js', 'frontend/chat-scroll.js', 'frontend/chat-room.js', 'frontend/chat-tabs.js',
-  'frontend/chat-rent.js', 'frontend/raidview-comms.js', 'frontend/board.js', 'frontend/board-terminal.js'];
+  'frontend/chat-rent.js', 'frontend/raidview-comms.js', 'frontend/board.js', 'frontend/board-terminal.js',
+  'frontend/board-terminal-ops.js', 'frontend/board-pages.js'];
 
 let failures = 0;
 function check(what, ok, detail) {
@@ -150,11 +151,12 @@ function check(what, ok, detail) {
    * — the arm's own comment says why — and are the only exceptions. */
   const web = read('src-tauri/src/mcp/web_board.rs');
   const routed = new Set([...web.matchAll(/"(matrix_\w+)"\s*=>/g)].map((m) => m[1]));
-  const deliberate = new Set(['matrix_connect', 'matrix_disconnect', 'matrix_share']);
+  // …and `matrix_open_as`, which opens a native window as another identity.
+  const deliberate = new Set(['matrix_connect', 'matrix_disconnect', 'matrix_share', 'matrix_open_as']);
   /* Only the pages the web board SERVES: the board, the Terminal and the raid
    * view's rail. The Comms window is a native window and is never framed
    * over HTTP, so its work-offer, agreement and presence calls need no arm. */
-  const WEB_SERVED = ['frontend/board.js', 'frontend/board-terminal.js', 'frontend/raidview-comms.js'];
+  const WEB_SERVED = ['frontend/board.js', 'frontend/board-terminal.js', 'frontend/board-terminal-ops.js', 'frontend/board-pages.js', 'frontend/raidview-comms.js'];
   const unrouted = [...new Set(js.filter((c) => WEB_SERVED.includes(c.file)).map((c) => c.cmd))]
     .filter((c) => !routed.has(c) && !deliberate.has(c));
   check('every command the cards call has a web-board arm (or is excluded on purpose)',

@@ -608,9 +608,9 @@ async fn board_invoke(
          *
          * READS and the ordinary conversational writes. Deliberately absent:
          * `matrix_connect` / `matrix_disconnect` (signing in is an interactive
-         * OIDC hop that belongs in the app), `matrix_open_transfer` and
-         * `matrix_share` (they open native windows nobody is looking at), and
-         * every `matrix_work_*` (an offer is a commitment). */
+         * OIDC hop that belongs in the app), `matrix_open_transfer`,
+         * `matrix_share` and `matrix_open_as` (they open native windows nobody
+         * is looking at), and every `matrix_work_*` (an offer is a commitment). */
         "matrix_status" => from_result(crate::matrix::matrix_status(s("as_player")).await),
         "matrix_rooms" => match s("guildId").or_else(|| s("guild_id")) {
             Some(g) => from_result(crate::matrix::matrix_rooms(g).await),
@@ -799,6 +799,17 @@ async fn board_invoke(
             ),
             None => err_json("guildId required".into()),
         },
+        /* The Deliver card's two reads: who a player id pays out to (the
+         * chain's payable address, a lookup), and the transfer intent another
+         * window may have left for it (consumed on read). Over the web the
+         * card sat on "no payable address" because neither had an arm. */
+        // Who is online, for the presence dots on every player row.
+        "matrix_presence" => from_result(crate::matrix::matrix_presence(s("guildId").or_else(|| s("guild_id")))),
+        "matrix_resolve_payable" => match s("playerId").or_else(|| s("player_id")) {
+            Some(p) => from_result(crate::matrix::matrix_resolve_payable(p).await),
+            None => err_json("playerId required".into()),
+        },
+        "matrix_take_pending_transfer" => from_result(crate::matrix::matrix_take_pending_transfer()),
         "matrix_object_room_create" => match s("objectId") {
             Some(o) => from_result(crate::matrix::matrix_object_room_create(s("guildId"), o).await),
             None => err_json("objectId required".into()),

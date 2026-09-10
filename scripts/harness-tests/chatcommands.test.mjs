@@ -117,15 +117,17 @@ console.log('chatcommands: ok');
 // /group: ids stand, names are looked up, an unknown name is named back, and a
 // resolved set becomes the pick the New Message page's Create would use.
 {
-  const { c, S, calls } = boot({ matrix_people: (a) => ({ people: a.query === 'phoniffer' ? [{ player_id: '1-248', username: 'Phoniffer' }] : [] }) });
+  const { c, S, calls } = boot({ matrix_people: (a) => ({ people: a.query === 'phoniffer' ? [{ player_id: '1-248', username: 'Phoniffer' }]
+    : a.query === '1-61' ? [{ player_id: '1-61', username: 'JPEG' }, { player_id: '1-610', username: 'Other' }] : [] }) });
   c.runCommand('group 1-61 phoniffer nobody');
   await new Promise((r) => setTimeout(r, 30));
   const last = notices(S).pop() || '';
   assert.ok(/No player called nobody/.test(last), 'an unknown name is named back: ' + JSON.stringify(notices(S)));
-  assert.ok(calls.filter((x) => x[0] === 'matrix_people').length === 2, 'ids are not looked up, names are');
+  assert.ok(calls.filter((x) => x[0] === 'matrix_people').length === 3, 'every token is asked of the directory — an id for its name, a name for its id');
   c.runCommand('group 1-61 phoniffer');
   await new Promise((r) => setTimeout(r, 30));
   assert.deepEqual(JSON.parse(JSON.stringify(S.groupPick)), ['1-61', '1-248'], 'the resolved ids become the pick');
+  assert.deepEqual(JSON.parse(JSON.stringify(S.groupNames)), { '1-61': 'JPEG', '1-248': 'Phoniffer' }, 'and the names ride along, so the group is named after people');
 }
 
 console.log('chat-commands: /group checks passed');

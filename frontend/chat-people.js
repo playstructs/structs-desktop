@@ -386,7 +386,7 @@
     return {
       renderMembers: renderMembers, memberRow: memberRow, loadMembers: loadMembers,
       browseOrder: browseOrder, renderBrowse: renderBrowse, loadBrowse: loadBrowse,
-      personRow: personRow, renderPeople: renderPeople, loadPeople: loadPeople, startDm: startDm,
+      personRow: personRow, renderPeople: renderPeople, loadPeople: loadPeople, startDm: startDm, createGroup: createGroup,
     };
   };
 })();
