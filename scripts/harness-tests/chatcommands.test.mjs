@@ -17,7 +17,7 @@ function boot(fixtures) {
   const refCards = {};
   const c = w.ChatCommands({
     byId: (id) => w.document.getElementById(id),
-    invoke: (cmd, args) => { calls.push([cmd, args]); const f = fixtures[cmd]; return f instanceof Error ? Promise.reject(f) : Promise.resolve(f); },
+    invoke: (cmd, args) => { calls.push([cmd, args]); const f = fixtures[cmd]; return f instanceof Error ? Promise.reject(f) : Promise.resolve(typeof f === 'function' ? f(args) : f); },
     excerpt: (t) => String(t || '').slice(0, 20),
     go: (v) => seen.go.push(v),
     openSearch: () => {},
@@ -73,6 +73,7 @@ const notices = (S) => S.messages.filter((m) => m.local).map((m) => m.body);
   c.runCommand('me waves'); assert.equal(calls[0][1].msgtype, 'm.emote');
   c.runCommand('msg @1-61 hi there'); assert.deepEqual(JSON.parse(JSON.stringify(seen.dm[0])), ['1-61', 'hi there']);
   c.runCommand('msg'); assert.ok(notices(S).pop().includes('/msg needs'));
+  c.runCommand('group 1-61'); assert.ok(notices(S).pop().includes('/group needs two'));
   c.runCommand('join #ops'); await tick();
   assert.deepEqual(JSON.parse(JSON.stringify(calls.find(([x]) => x === 'matrix_join')[1])), { guildId: '0-1', roomId: '#ops' });
   c.runCommand('leave'); await tick();
@@ -111,3 +112,20 @@ const notices = (S) => S.messages.filter((m) => m.local).map((m) => m.body);
 }
 
 console.log('chatcommands: ok');
+
+
+// /group: ids stand, names are looked up, an unknown name is named back, and a
+// resolved set becomes the pick the New Message page's Create would use.
+{
+  const { c, S, calls } = boot({ matrix_people: (a) => ({ people: a.query === 'phoniffer' ? [{ player_id: '1-248', username: 'Phoniffer' }] : [] }) });
+  c.runCommand('group 1-61 phoniffer nobody');
+  await new Promise((r) => setTimeout(r, 30));
+  const last = notices(S).pop() || '';
+  assert.ok(/No player called nobody/.test(last), 'an unknown name is named back: ' + JSON.stringify(notices(S)));
+  assert.ok(calls.filter((x) => x[0] === 'matrix_people').length === 2, 'ids are not looked up, names are');
+  c.runCommand('group 1-61 phoniffer');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(JSON.parse(JSON.stringify(S.groupPick)), ['1-61', '1-248'], 'the resolved ids become the pick');
+}
+
+console.log('chat-commands: /group checks passed');

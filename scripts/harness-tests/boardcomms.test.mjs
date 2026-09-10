@@ -87,7 +87,7 @@ w.Board.paintComms({ count: 1, mention: false });
 btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 await new Promise((r) => setTimeout(r, 50));
 check('clicking it opens Comms',
-  w.__HARNESS_CALLS__.some((c) => c.cmd === 'open_chat_window'));
+  w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_open' && c.args.subject == null && c.args.draft == null));
 
 // ── Telling the guild ──────────────────────────────────────────────────────
 // The console can hear Comms; this is the other direction. Everything the app
@@ -108,9 +108,9 @@ console.log('\n— sharing a feed line');
 
   share.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 50));
-  const shared = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_share').pop();
+  const shared = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_open').pop();
   check('it hands Comms a draft rather than posting',
-    !!shared && shared.args.text === 'raid on 2-15361 lost 3 structs',
+    !!shared && shared.args.draft === 'raid on 2-15361 lost 3 structs' && shared.args.subject == null,
     JSON.stringify(shared && shared.args));
   check('…and the row remembers it was told', share.classList.contains('feed-shared'));
 
@@ -125,9 +125,9 @@ console.log('\n— sharing a feed line');
     folded.textContent);
   folded.querySelector('.feed-share').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 50));
-  const latest = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_share').pop();
+  const latest = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_open').pop();
   check('…and sharing it tells the NEWEST numbers, not the first',
-    !!latest && latest.args.text === 'raid on 2-15361 lost 9 structs',
+    !!latest && latest.args.draft === 'raid on 2-15361 lost 9 structs',
     JSON.stringify(latest && latest.args));
 
   // The internal source tag is for the console, not for people.

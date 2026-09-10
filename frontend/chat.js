@@ -710,6 +710,11 @@
       stopTyping();
       S.roomId = null; S.room = null; S.messages = [];
     }
+    /* Entering the directory paints it BEFORE the request below is made,
+     * and an empty list that has not been asked for read as "the directory
+     * is empty" for the first moment of every visit. Loading is the truth
+     * until the answer lands. */
+    if (view === 'people' && !S.people.length) S.peopleLoading = true;
     render();
     if (view === 'channels') refreshRooms();
     if (view === 'people') loadPeople();

@@ -1435,7 +1435,7 @@
     var send = H.el('a', 'sui-screen-btn sui-mod-primary', 'Send to Comms');
     send.href = 'javascript:void(0)';
     send.addEventListener('click', function () {
-      invoke('matrix_share', { text: 'Terminal workspace "' + state.ws + '" — paste into the Terminal command line: IMPORT ' + code.value })
+      invoke('matrix_open', { subject: null, draft: 'Terminal workspace "' + state.ws + '" — paste into the Terminal command line: IMPORT ' + code.value })
         .then(function () { send.textContent = 'Sent'; }).catch(function (e) { Board.stamp && Board.stamp('needs Comms: ' + e); });
     });
     row.appendChild(send);

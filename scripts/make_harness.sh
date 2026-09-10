@@ -552,6 +552,7 @@ cat > "$FIX" <<'EOF'
     // than from reading Rust, and the response check caught it.
     matrix_message_player: { room_id: '!dm-harness:h', player_id: '1-61' },
     matrix_share: { ok: true },
+    matrix_open: { ok: true, room_id: null, draft: null },
     /* Comms, as the window and the Terminal words read it.
      *
      * `matrix_status` answers with a session KEY — the guild id for the
@@ -1245,6 +1246,7 @@ cat > "$RFIX" <<'EOF'
       { time: '19:28', date: '2026-09-05', category: 'struct_defense_set', kind: 'defense', detail: 'Tank 5-88 now defends Mining Rig 5-12', block: 4199000 },
     ] },
     matrix_share: { ok: true },
+    matrix_open: { ok: true, room_id: null, draft: null },
     /* Who the rail speaks AS. There was no fixture for this, so `loadMyPfp`
      * rejected in every harness run and the composer's well drew the
      * placeholder forever — which is precisely the bug the rail shipped with,

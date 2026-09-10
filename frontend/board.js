@@ -1357,7 +1357,7 @@
     var btn = document.getElementById('board-comms');
     if (!btn) return;
     btn.addEventListener('click', function () {
-      Board.T.core.invoke('open_chat_window').catch(function () {});
+      Board.T.core.invoke('matrix_open', { subject: null, draft: null }).catch(function () {});
     });
     var tick = function () {
       Board.T.core.invoke('matrix_unread')
@@ -1571,7 +1571,7 @@
       var msg = li && li.querySelector('.feed-msg');
       var text = msg ? msg.textContent : '';
       if (!text) return;
-      Board.T.core.invoke('matrix_share', { text: text })
+      Board.T.core.invoke('matrix_open', { subject: null, draft: text })
         .then(function () { a.classList.add('feed-shared'); })
         .catch(function (err) { a.title = String(err).slice(0, 120); });
     });

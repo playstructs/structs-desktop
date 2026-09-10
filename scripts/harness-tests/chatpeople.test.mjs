@@ -114,7 +114,7 @@ function boot(fixtures = {}) {
   S.people = [{ player_id: '1-61', username: 'JPEG' }];
   const page = pp.renderPeople();
   const strip = page.querySelector('.chat-topic');
-  assert.ok(strip && /Group with 1-248, 1-61/.test(strip.textContent), 'the page shows who is picked, with a name box and Create');
+  assert.ok(strip && /Group with Phoniffer, JPEG/.test(strip.textContent), 'the page shows who is picked BY NAME, with a name box and Create');
   strip.querySelector('#chat-group-name').value = 'Ore deal';
   strip.querySelector('#chat-group-name').dispatchEvent(new w.Event('input'));
   [...strip.querySelectorAll('button')].find((x) => /Create group/.test(x.textContent)).click();

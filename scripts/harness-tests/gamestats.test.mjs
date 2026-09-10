@@ -284,7 +284,7 @@ async function until(fn, ms = 5000) {
 
   // Every matrix call refuses, the way it does when nothing is signed in.
   w.__HARNESS_REJECT__ = w.__HARNESS_REJECT__ || {};
-  w.__HARNESS_REJECT__.matrix_message_player =
+  w.__HARNESS_REJECT__.matrix_open =
     'Comms is not connected — open Comms to sign in';
 
   // The direct-message door (the watch doors come first when the row has a

@@ -235,7 +235,7 @@
        * a row that also opens a DM is two meanings on one click. */
       var picked = groupPick().indexOf(p.player_id) >= 0;
       var add = el('button', 'sui-screen-btn ' + (picked ? 'sui-mod-primary' : 'sui-mod-secondary'), picked ? 'Added' : 'Add');
-      add.addEventListener('click', function (ev) { ev.stopPropagation(); togglePick(p.player_id); render(); });
+      add.addEventListener('click', function (ev) { ev.stopPropagation(); togglePick(p.player_id, p.username); render(); });
       right.appendChild(add);
       row.appendChild(right);
 
@@ -249,15 +249,20 @@
     // Any set of players, on any homeserver, in one private room — the thing
     // a treaty, a trade or a raid plan needs and a DM cannot hold.
     function groupPick() { return S.groupPick || (S.groupPick = []); }
-    function togglePick(playerId) {
+    function togglePick(playerId, name) {
       var list = groupPick(), i = list.indexOf(playerId);
       if (i >= 0) list.splice(i, 1); else list.push(playerId);
+      // The strip names people, not ids: the name is known at the moment of
+      // the click and may be gone from the list by the time the strip draws.
+      S.groupNames = S.groupNames || {};
+      if (name) S.groupNames[playerId] = name;
     }
+    function pickName(id) { return (S.groupNames && S.groupNames[id]) || id; }
     function groupStrip() {
       var list = groupPick();
       if (!list.length) return null;
       var strip = el('div', 'chat-topic');
-      strip.appendChild(el('span', null, 'Group with ' + list.join(', ') + ' '));
+      strip.appendChild(el('span', null, 'Group with ' + list.map(pickName).join(', ') + ' '));
       var label = el('label', 'sui-input-text');
       label.setAttribute('for', 'chat-group-name');
       var name = el('input');

@@ -118,7 +118,12 @@
           // simply says nothing rather than pretending to be a channel.
           : isDm
             ? []
-            : [fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')];
+            /* A count the server has not given reads as 0 — and "0 Players"
+             * under a room with people in it is a false fact. Absence is not
+             * zero: no count, no line. */
+            : Number(r.members) > 0
+              ? [fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')]
+              : [];
         if (browsing) {
           // The ADDRESS — the one thing about a room that cannot be taken.
           // Anyone may publish a public room under any name, so two rows here

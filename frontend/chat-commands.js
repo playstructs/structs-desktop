@@ -55,6 +55,7 @@
     var COMMANDS = [
       { name: 'me', args: '<action>', help: 'Send an action: * you wave' },
       { name: 'msg', args: '<player> [message]', help: 'Open a direct message' },
+      { name: 'group', args: '<player> <player> …', help: 'Start a group with these players' },
       { name: 'join', args: '<room>', help: 'Join a room by name or alias' },
       { name: 'leave', args: '', help: 'Leave the room you are in' },
       { name: 'topic', args: '', help: 'Show what this room is about' },
@@ -100,6 +101,17 @@
     }
     Chat.say = say;
 
+    /* A player id stands as it is; a name is asked of the directory and
+     * must match exactly, or be the only player it finds. Null otherwise. */
+    function resolvePlayer(tok) {
+      if (/^\d+-\d+$/.test(tok)) return Promise.resolve(tok);
+      return invoke('matrix_people', { guildId: S.guildId, query: tok }).then(function (res) {
+        var people = (res && res.people) || [];
+        var exact = people.filter(function (p) { return String(p.username || '').toLowerCase() === tok.toLowerCase(); })[0];
+        return (exact || (people.length === 1 ? people[0] : null) || {}).player_id || null;
+      }).catch(function () { return null; });
+    }
+
     function runCommand(line) {
       var sp = line.indexOf(' ');
       var name = (sp === -1 ? line : line.slice(0, sp)).toLowerCase();
@@ -127,6 +139,23 @@
           var who = m[1].replace(/^[@#]/, '');
           var body = m[2];
           startDm(who, body || null);
+          return;
+        }
+
+        case 'group': {
+          /* `/group 1-61 phoniffer beezhan` — ids as they are, names looked
+           * up in the directory. One private room, everyone invited, opened
+           * when the server answers; the same door the New Message page's
+           * Add buttons use, so the two cannot drift. */
+          var toks = rest.split(/\s+/).map(function (t) { return t.replace(/^[@#]/, ''); }).filter(Boolean);
+          if (toks.length < 2) { say('/group needs two or more players.', true); return; }
+          Promise.all(toks.map(resolvePlayer)).then(function (ids) {
+            var missing = toks.filter(function (t, i) { return !ids[i]; });
+            if (missing.length) { say('No player called ' + missing.join(', ') + '.', true); return; }
+            S.groupPick = ids;
+            S.groupName = '';
+            if (typeof Chat.createGroup === 'function') return Chat.createGroup();
+          }).catch(function (e) { say(String(e), true); });
           return;
         }
 

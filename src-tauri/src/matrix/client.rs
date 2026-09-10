@@ -1273,6 +1273,16 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         // the story wrong in the one case people care about.
         let subject = ev.get("state_key").and_then(|k| k.as_str()).unwrap_or("");
         let by_someone_else = !subject.is_empty() && subject != sender;
+        // The row names the SENDER, so a line about somebody else has to
+        // name them in the text: "Marklifer invited Beverly", not "Marklifer
+        // was invited" twice over for a two-person group. Same lookup the
+        // sender line uses — the on-chain name when the directory has it,
+        // the player id otherwise.
+        let target = || {
+            let pid = directory::player_id_of(subject);
+            let ident = pid.as_deref().and_then(directory::get);
+            sender_display(subject, ident.as_ref(), gs)
+        };
 
         match (was, membership) {
             ("join", "join") => {
@@ -1297,10 +1307,13 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
             // moderator, so the "somebody else did this" test below would
             // otherwise call lifting a ban a removal — the opposite of what
             // happened.
+            ("ban", "leave") if by_someone_else => ("event", format!("unbanned {}", target())),
             ("ban", "leave") => ("event", "was unbanned".to_string()),
-            (_, "leave") if by_someone_else => ("event", "was removed".to_string()),
+            (_, "leave") if by_someone_else => ("event", format!("removed {}", target())),
             (_, "leave") => ("event", "left".to_string()),
+            (_, "ban") if by_someone_else => ("event", format!("banned {}", target())),
             (_, "ban") => ("event", "was banned".to_string()),
+            (_, "invite") if by_someone_else => ("event", format!("invited {}", target())),
             (_, "invite") => ("event", "was invited".to_string()),
             _ => return None,
         }
@@ -3518,19 +3531,33 @@ pub async fn send_full(
 /// Reuses an existing DM when there is one: Matrix will happily create a
 /// second room with the same two people, which then splits the conversation
 /// in half with no way to tell which half is current.
+/// The DM with this person that we are still IN, if any. Pure, so the rule
+/// is testable without a homeserver: a mapping to a room we have left is
+/// stepped over, never reused.
+fn existing_dm(gs: &GuildState, their_id: &str) -> Option<String> {
+    gs.dm_with
+        .iter()
+        .filter(|(room, peer)| {
+            peer.as_str() == their_id && gs.rooms.get(room.as_str()).map(|r| r.joined) == Some(true)
+        })
+        .map(|(room, _)| room.clone())
+        .next()
+}
+
 pub async fn open_dm(
     guild_id: &str,
     session: &Session,
     their_id: &str,
 ) -> Result<String, String> {
+    /* A DM we are still IN. `m.direct` remembers every room that was ever a
+     * conversation with this person, including ones we have since left — and
+     * a left room is one the window cannot show: it opened it by raw id, on
+     * a timeline that ended with "left", and the DM the player wanted never
+     * appeared. Only a joined room counts as the existing conversation; a
+     * stale mapping is stepped over and a fresh room is made. */
     if let Some(existing) = {
         let map = STATE.read().unwrap();
-        map.get(guild_id).and_then(|gs| {
-            gs.dm_with
-                .iter()
-                .find(|(_, peer)| peer.as_str() == their_id)
-                .map(|(room, _)| room.clone())
-        })
+        map.get(guild_id).and_then(|gs| existing_dm(gs, their_id))
     } {
         return Ok(existing);
     }
@@ -4541,6 +4568,24 @@ pub async fn profile(session: &Session) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_left_dm_is_never_reused() {
+        let room = |id: &str, joined: bool| Room {
+            room_id: id.into(), name: String::new(), canonical_alias: None, topic: None, members: 1,
+            joined, invited: false, invited_by: None, replaced_by: None, encrypted: false, muted: false,
+            pinned: Vec::new(), unread: 0, mention: false, section: "direct", home_rank: None,
+            icon: "icon-member", pfp_attrs: None, player_id: None,
+        };
+        let mut gs = GuildState::default();
+        gs.rooms.insert("!left:h".into(), room("!left:h", false));
+        gs.rooms.insert("!live:h".into(), room("!live:h", true));
+        gs.dm_with.insert("!left:h".into(), "@1-61:h".into());
+        assert_eq!(existing_dm(&gs, "@1-61:h"), None, "a room we left is not the conversation");
+        gs.dm_with.insert("!live:h".into(), "@1-61:h".into());
+        assert_eq!(existing_dm(&gs, "@1-61:h").as_deref(), Some("!live:h"));
+        assert_eq!(existing_dm(&gs, "@1-99:h"), None, "no mapping, no room");
+    }
+
     use super::*;
 
     fn session() -> Session {

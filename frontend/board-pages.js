@@ -323,11 +323,11 @@
     var who = r.player_name || r.name || r.player_id;
     return [
       { icon: 'icon-phone', title: 'Message ' + who, onClick: function (ev, a) {
-        Board.T.core.invoke('matrix_message_player', { playerId: r.player_id })
+        Board.T.core.invoke('matrix_open', { subject: r.player_id, draft: null })
           .catch(function (err) { reachFailed(a, 'message', r, err); });
       } },
       { icon: 'icon-outgoing', title: 'Share ' + who + ' in Comms', onClick: function (ev, a) {
-        Board.T.core.invoke('matrix_share', { text: r.player_id })
+        Board.T.core.invoke('matrix_open', { subject: null, draft: r.player_id })
           .catch(function (err) { reachFailed(a, 'share', r, err); });
       } },
     ];
@@ -343,7 +343,7 @@
     var who = g.name || gid;
     return [
       { icon: 'icon-outgoing', title: 'Share ' + who + ' in Comms', onClick: function (ev, a) {
-        Board.T.core.invoke('matrix_share', { text: String(gid) })
+        Board.T.core.invoke('matrix_open', { subject: null, draft: String(gid) })
           .catch(function (err) { reachFailed(a, 'share', { name: who, player_id: gid }, err); });
       } },
     ];
@@ -387,7 +387,7 @@
       // The row itself opens the detail drawer; this must not also do that
       // behind the Comms window.
       e.stopPropagation();
-      Board.T.core.invoke('matrix_message_player', { playerId: r.player_id })
+      Board.T.core.invoke('matrix_open', { subject: r.player_id, draft: null })
         .catch(function (err) { reachFailed(a, 'message', r, err); });
     });
     return a;
@@ -404,7 +404,7 @@
     a.appendChild(H.el('i', 'sui-icon-md icon-outgoing'));
     a.addEventListener('click', function (e) {
       e.stopPropagation();
-      Board.T.core.invoke('matrix_share', { text: r.player_id })
+      Board.T.core.invoke('matrix_open', { subject: null, draft: r.player_id })
         .catch(function (err) { reachFailed(a, 'share', r, err); });
     });
     return a;

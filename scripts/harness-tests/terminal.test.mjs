@@ -1861,7 +1861,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('SHARE opens the share row with the code and a door to Comms', d.querySelector('#tm-ws-share input')?.value === w.Board.Terminal.exportWorkspace() && [...d.querySelectorAll('#tm-ws-share a')].some((a) => a.textContent === 'Send to Comms'));
   [...d.querySelectorAll('#tm-ws-share a')].find((a) => a.textContent === 'Send to Comms').click();
   await tick(10);
-  check('…which shares it as a message', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_share' && /IMPORT terminal:/.test(c.args.text)));
+  check('…which hands Comms the code as a draft', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_open' && /IMPORT terminal:/.test(c.args.draft)));
 
   // Two windows, one workspace: a save adopts the version Rust answers, an
   // announced newer version from elsewhere reloads the page's copy.
