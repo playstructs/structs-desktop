@@ -725,6 +725,50 @@ async fn board_invoke(
         "matrix_object_room" => from_result(
             crate::matrix::matrix_object_room(s("guildId"), s("objectId").unwrap_or_default()).await,
         ),
+        /* The Terminal cards grew edit / pin / media / object-room reads after
+         * the arm above was written; a card that works in the app and answers
+         * `unknown command` over the web is the same dead surface as before. */
+        "matrix_edit" => match (s("guildId"), s("roomId"), s("eventId"), s("body")) {
+            (Some(g), Some(r), Some(e), Some(b)) => from_result(
+                crate::matrix::matrix_edit(g, r, e, b, s("msgtype")).await,
+            ),
+            _ => err_json("guildId + roomId + eventId + body required".into()),
+        },
+        "matrix_pinned" => match (s("guildId"), s("roomId")) {
+            (Some(g), Some(r)) => from_result(crate::matrix::matrix_pinned(g, r).await),
+            _ => err_json("guildId + roomId required".into()),
+        },
+        "matrix_pin" => match (s("guildId"), s("roomId"), s("eventId")) {
+            (Some(g), Some(r), Some(e)) => from_result(
+                crate::matrix::matrix_pin(
+                    g, r, e, body.get("pin").and_then(|v| v.as_bool()).unwrap_or(true),
+                )
+                .await,
+            ),
+            _ => err_json("guildId + roomId + eventId required".into()),
+        },
+        "matrix_media" => match (s("guildId"), s("mxc")) {
+            (Some(g), Some(m)) => from_result(
+                crate::matrix::matrix_media(
+                    g, m, body.get("size").and_then(|v| v.as_u64()).map(|v| v as u32),
+                )
+                .await,
+            ),
+            _ => err_json("guildId + mxc required".into()),
+        },
+        "matrix_object_chatter" => match s("objectId") {
+            Some(o) => from_result(
+                crate::matrix::matrix_object_chatter(
+                    s("guildId"), o, body.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32),
+                )
+                .await,
+            ),
+            None => err_json("objectId required".into()),
+        },
+        "matrix_object_room_create" => match s("objectId") {
+            Some(o) => from_result(crate::matrix::matrix_object_room_create(s("guildId"), o).await),
+            None => err_json("objectId required".into()),
+        },
 
         "mcp_grass_recent" => ok_json(crate::mcp::event_buffer::mcp_grass_recent(
             body.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize),
