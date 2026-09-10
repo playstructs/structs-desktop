@@ -1594,6 +1594,16 @@
     .cm-badge { margin-left: var(--spacing-sm); padding: 0 var(--spacing-xs);
       border: 1px solid var(--accent-secondary); color: var(--accent-secondary); cursor: pointer; }
     .cm-badge.is-mention { border-color: var(--accent-destructive); color: var(--accent-destructive); }
+    /* The door into Comms on the Terminal's header: icon, word, count. */
+    .cm-door { display: inline-flex; align-items: center; gap: var(--spacing-xs); }
+    .cm-door .cm-badge { margin-left: 0; }
+    .cm-me .cm-readall { margin-left: auto; color: var(--accent-secondary); white-space: nowrap; }
+    .cm-me .cm-readall + .cm-signout { margin-left: 0; }
+    .cm-room.is-cursor { outline: thin solid var(--accent-primary); }
+    .cm-room-where.cm-mod-dm { color: var(--text-hint); }
+    .cm-was { color: var(--text-hint); }
+    .cm-was .cm-was-l { color: var(--text-warning); }
+    .cm-pins-more { color: var(--accent-secondary); }
     /* "Look at #war-room": the card that already shows it says so. */
     #board-layout .tm-card.is-flash { box-shadow: 0 0 0 2px var(--accent-primary); }
     /* A palette result you can deal with without opening it. */
@@ -1632,7 +1642,8 @@
        front to win, rather than repeated on each of them. */
     #board-layout .cm-older, #board-layout .cm-signout, #board-layout .cm-hit-room,
     #board-layout .cm-room-moved, #board-layout .cm-head-pins, #board-layout .cm-retry,
-    #board-layout .cm-verb, #board-layout .cm-x { font-size: 8px; }
+    #board-layout .cm-verb, #board-layout .cm-x, #board-layout .cm-readall,
+    #board-layout .cm-pins-more, #board-layout .cm-door-label { font-size: 8px; }
 
     /* A one-wide card is 306px. An invite row there is a name, a Join and a
        Decline competing for it, and the NAME is the part that loses — which

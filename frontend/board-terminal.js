@@ -1281,6 +1281,10 @@
     // A hidden feature with no affordance is a feature nobody finds. This is
     // the control, not a note about one: clicking it opens the palette.
     wsDoors.insertBefore(door('icon-cmd-post', 'Command palette (⌘K)', function () { Terminal.togglePalette(); }), wsDoors.firstChild);
+    /* Doors other files own — Comms puts its own on the header. The header
+     * is rebuilt on every workspace switch, so they are asked each time
+     * rather than painted once and lost. */
+    (Terminal.onChrome || []).forEach(function (fn) { try { fn(wsDoors, strip); } catch (e) { /* one door must not take the header down */ } });
     top.appendChild(strip);
     // The command line and the card picker belong to the header, not to a
     // slab floating over the cards. They ride a `sui-screen-nav` of their own,
@@ -1985,6 +1989,12 @@
       if (r.unread || r.mention) acts.push({ label: 'read', run: function () {
         var C = window.BoardComms; C.timeline(r.room_id).then(function () { C.markRead(r.room_id); });
       } });
+      if (!r.player_id) {
+        var quiet = window.BoardComms.levelOf && window.BoardComms.levelOf(r.room_id) === 'mentions';
+        acts.push({ label: quiet ? 'all messages' : 'mentions only', run: function () {
+          window.BoardComms.setLevel(r.room_id, quiet ? 'all' : 'mentions');
+        } });
+      }
       acts.push({ label: r.muted ? 'unmute' : 'mute', run: function () {
         invoke('matrix_mute', { guildId: window.BoardComms.S.key, roomId: r.room_id, muted: !r.muted })
           .then(function () { return window.BoardComms.rooms(true); });
@@ -2009,9 +2019,16 @@
     if (!parts.length) {
       if (lastName) rows.push({ line: 'SAY ', words: 'SAY', sub: lastName, lead: true, run: false,
                                 what: 'say something there', group: 'Say' });
-      list.filter(function (r) { return r.joined && !r.muted && (r.unread || r.mention); })
-        .sort(function (a, b) { return (b.mention ? 1 : 0) - (a.mention ? 1 : 0) || (b.unread || 0) - (a.unread || 0); })
-        .forEach(function (r) { push(r, 'Waiting'); });
+      var due = list.filter(function (r) { return C && C.calls ? C.calls(r) : (r.joined && !r.muted && (r.unread || r.mention)); })
+        .sort(function (a, b) { return (b.mention ? 1 : 0) - (a.mention ? 1 : 0) || (b.unread || 0) - (a.unread || 0); });
+      due.forEach(function (r) { push(r, 'Unread'); });
+      /* And all of it at once. Forty rooms after three months away were forty
+       * opens; this is one row with one act. */
+      if (due.length > 1 && C && C.markAllRead) {
+        rows.push({ line: 'COMMS', words: 'COMMS', sub: 'everything', lead: true, run: true, group: 'Unread',
+                    what: H.fmtInt(due.length) + ' rooms waiting',
+                    acts: [{ label: 'read all', run: function () { C.markAllRead(); } }] });
+      }
       return rows;
     }
 

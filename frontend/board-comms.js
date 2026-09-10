@@ -225,6 +225,9 @@
   var roomsInFlight = null;
   function refreshRooms(force) {
     if (!S.connected || !S.key) return Promise.resolve(S.rooms);
+    // Server NAMES ride with the first room list, so a row can say a guild's
+    // name where it would otherwise say a hostname.
+    if (!serversCache) servers();
     if (!force && Date.now() - S.roomsAt < ROOMS_TTL) return Promise.resolve(S.rooms);
     if (roomsInFlight) return roomsInFlight;
     roomsInFlight = invoke('matrix_rooms', { guildId: S.key }).then(function (d) {
@@ -299,6 +302,35 @@
     return at < 0;
   }
 
+  /* How loud a room may be: 'all' (the default) or 'mentions'.
+   *
+   * Mute is the server's and silences everything; this is the setting
+   * between — "tell me when I am NAMED, never for traffic" — which is the one
+   * every busy channel in a player's life is set to. Local, like the pins:
+   * it changes what counts as waiting, not what the server sends. */
+  var LEVEL_KEY = 'structs.comms.levels';
+  var levels_ = null;
+  function levels() {
+    if (levels_) return levels_;
+    try { levels_ = JSON.parse(localStorage.getItem(LEVEL_KEY) || '{}'); } catch (e) { levels_ = {}; }
+    if (!levels_ || typeof levels_ !== 'object') levels_ = {};
+    return levels_;
+  }
+  function levelOf(roomId) { return levels()[roomId] === 'mentions' ? 'mentions' : 'all'; }
+  function setLevel(roomId, level) {
+    var all = levels();
+    if (level === 'mentions') all[roomId] = 'mentions'; else delete all[roomId];
+    try { localStorage.setItem(LEVEL_KEY, JSON.stringify(all)); } catch (e) { /* memory only */ }
+    announce('rooms');
+    return levelOf(roomId);
+  }
+  /* Is anything in this room WAITING for you, by its own rules? */
+  function calls(r) {
+    if (!r || r.muted || !r.joined) return false;
+    if (r.mention) return true;
+    return !!r.unread && levelOf(r.room_id) !== 'mentions';
+  }
+
   /* Which server this community's centre of gravity is on.
    *
    * DERIVED, never configured: the server the largest share of your joined
@@ -341,13 +373,15 @@
   var GROUPS = [
     { key: 'invited', label: 'Invited', icon: 'icon-incoming' },
     { key: 'pinned', label: 'Pinned', icon: 'icon-beacon' },
-    { key: 'waiting', label: 'Waiting', icon: 'icon-alert' },
-    { key: 'quiet', label: 'Quiet', icon: 'icon-okay', collapsed: true },
+    /* Named by what they HOLD. "Waiting" and "Quiet" were moods, and a
+     * player reading in a second language spent a day working out the rule. */
+    { key: 'waiting', label: 'Unread', icon: 'icon-alert' },
+    { key: 'quiet', label: 'Everything else', icon: 'icon-okay', collapsed: true },
   ];
   function sectionOf(r) {
     if (r.invited) return 'invited';
     if (isPinned(r.room_id) || r.home_rank != null) return 'pinned';
-    if (!r.muted && (r.unread || r.mention)) return 'waiting';
+    if (calls(r)) return 'waiting';
     return 'quiet';
   }
   /* The room list a card draws. `only` still narrows to one PLACE (people,
@@ -396,7 +430,7 @@
     var unread = 0, mention = 0, invites = 0;
     S.rooms.forEach(function (r) {
       if (r.invited) { invites++; return; }
-      if (!r.joined || r.muted) return;
+      if (!calls(r)) return;
       unread += Number(r.unread) || 0;
       if (r.mention) mention++;
     });
@@ -487,24 +521,29 @@
    * and for a room id is the same id again — but a stub, a redirect or an
    * upgraded alias can differ, and a card that took the reply's word for it
    * opened a different conversation than the one it was told to. */
+  /* After a join that the server ACCEPTED.
+   *
+   * `matrix_join` answers `{ ok: true }` and nothing else — it does not name
+   * the room — and `client::join` is only the HTTP join: the room reaches the
+   * list on the next SYNC, not on the refresh right after. So a successful
+   * join legitimately comes back with nothing in the list yet.
+   *
+   * This used to demand a `room_id` from the reply and, finding none, reject
+   * with "nothing joined" — turning every successful join from the directory
+   * into an error, one keystroke after the server said yes. The reply shape
+   * was assumed, not read; the same mistake as mark_read and send.
+   *
+   * A join we cannot see YET is a room in a known state — `unknown: true` —
+   * that the card draws as such and upgrades when the sync lands. A join the
+   * server REFUSED never reaches here: `matrix_join` rejects, and that
+   * rejection is the error. */
   function afterJoin(asked) {
     return function (d) {
       var told = d && (d.room_id || d.roomId);
       return refreshRooms(true).then(function () {
-        var found = (String(asked).charAt(0) === '!' && roomById(asked))
-          || roomById(told) || roomById(asked);
-        if (found) return found;
-        /* Not in the list after a refresh. That is either a room the server
-         * has only just made (an object room, one sync behind) or a join that
-         * did not produce one we can see — and the two are told apart by
-         * whether the server named a room at all.
-         *
-         * It used to fabricate `{ room_id: told || asked, name: asked }` for
-         * both, which meant `ROOM #nope-not-real` opened an empty room called
-         * "#nope-not-real" that had never existed. A room we cannot see is not
-         * an empty room; naming it after what was TYPED is inventing one. */
-        if (!told) return Promise.reject('no room for “' + asked + '” — nothing joined');
-        return { room_id: told, name: told, joined: true, unknown: true };
+        return (String(asked).charAt(0) === '!' && roomById(asked))
+          || roomById(told) || roomById(asked)
+          || { room_id: told || asked, name: asked, joined: true, unknown: true };
       });
     };
   }
@@ -530,8 +569,30 @@
     if (serversCache) return Promise.resolve(serversCache);
     return invoke('matrix_servers', {}).then(function (d) {
       serversCache = (d && d.servers) || [];
+      S.servers = serversCache;
+      announce('rooms');   // rows can now say a guild's NAME where they said a hostname
       return serversCache;
     }).catch(function () { return []; });
+  }
+  /* ONE name per server. The list said `HUB`, the directory said `Orbital
+   * Hydro`, the room said `oh.energy`, the help said `#general:oh.energy` —
+   * four names for one place. A hostname is a routing detail; this answers
+   * with what the guild calls itself, and only falls back to the host. */
+  function serverName(server) {
+    var sv = String(server || '');
+    var hit = (serversCache || []).filter(function (x) { return x.server === sv; })[0];
+    return hit ? (hit.name || hit.tag || sv) : sv;
+  }
+  /* What to CALL a room. Never `#sncorp:matrix.beta.playstructs.com` — that
+   * is an address, and to somebody's grandmother it is an email that went
+   * wrong. A room the sync has not named yet is called by its alias's local
+   * part, and the server is said separately, by name. */
+  function title(r) {
+    if (!r) return '';
+    var n = String(r.name || '');
+    if (n && n.charAt(0) !== '#' && n.charAt(0) !== '!') return n;
+    var a = String(r.canonical_alias || n || r.room_id || '');
+    return a.charAt(0) === '#' ? a.split(':')[0] : (n || a);
   }
 
   function playerIdFor(name) {
@@ -844,6 +905,34 @@
     return invoke('matrix_mark_read', { guildId: S.key, roomId: roomId, eventId: last })
       .catch(function () { S.readAt[roomId] = null; });
   }
+  /* Everything, read. Back after three months, forty rooms carried a number
+   * and the only way to clear them was to open each one. A read receipt
+   * names an event, so each room's timeline is read first — bounded by the
+   * rooms that actually have something waiting. */
+  function markAllRead() {
+    var todo = S.rooms.filter(function (r) { return r.joined && !r.invited && (r.unread || r.mention); });
+    return Promise.all(todo.map(function (r) {
+      return timeline(r.room_id).then(function () { return markRead(r.room_id); })
+        .then(function () { S.lastRead[r.room_id] = null; });
+    })).then(function () { return refreshRooms(true); }).then(function () { return todo.length; });
+  }
+
+  /* A picture, resolved. `mxc://` needs an authenticated fetch to become a
+   * URL; the row is drawn with the filename standing in and redrawn when the
+   * bytes land. Bounded the way Rust's own cache is. */
+  var mediaCache = {};
+  function media(mxc, roomId) {
+    if (!mxc || !S.key) return null;
+    var hit = mediaCache[mxc];
+    if (hit !== undefined) return hit || null;
+    mediaCache[mxc] = '';
+    invoke('matrix_media', { guildId: S.key, mxc: mxc, size: 320 }).then(function (d) {
+      mediaCache[mxc] = (d && d.data_url) || '';
+      if (roomId) announce('timeline:' + roomId);
+    }).catch(function () { mediaCache[mxc] = ''; });
+    return null;
+  }
+
   function typing(roomId, on) {
     if (!S.key || !roomId) return Promise.resolve();
     return invoke('matrix_typing', { guildId: S.key, roomId: roomId, typing: !!on }).catch(function () {});
@@ -856,6 +945,8 @@
     sectionOf: sectionOf, matches: matches, waiting: waiting, GROUPS: GROUPS,
     placeOf: placeOf, hubServer: hubServer, serverOf: serverOf,
     pins: pins, isPinned: isPinned, togglePin: togglePin,
+    levelOf: levelOf, setLevel: setLevel, calls: calls, serverName: serverName, title: title,
+    markAllRead: markAllRead, media: media,
     subjectKind: subjectKind, resolve: resolve, people: people, playerIdFor: playerIdFor,
     servers: servers,
     timeline: timeline, older: older, send: send, markRead: markRead, typing: typing,

@@ -87,7 +87,8 @@
      * other, and "which of these do I already have open" had no answer. */
     var active = opts.active != null ? opts.active : C.isOpen(r.room_id);
     var row = H.el('div', 'cm-room' + (r.mention ? ' is-mention' : '') + (r.unread ? ' is-unread' : '')
-      + (r.muted ? ' is-muted' : '') + (active ? ' is-active' : ''));
+      + (r.muted ? ' is-muted' : '') + (active ? ' is-active' : '') + (r.player_id ? ' is-direct' : '')
+      + (opts.cursor ? ' is-cursor' : ''));
 
     var face = H.el('div', 'cm-room-face');
     if (r.player_id && H.pfpPortrait) face.appendChild(H.pfpPortrait(r.pfp_attrs));
@@ -96,7 +97,7 @@
 
     var mid = H.el('div', 'cm-room-mid');
     var title = H.el('div', 'cm-room-title');
-    title.appendChild(H.el('span', 'cm-room-name', r.name || r.canonical_alias || r.room_id));
+    title.appendChild(H.el('span', 'cm-room-name', C.title(r)));
     /* Encryption is stated once, at the top, rather than line by line: this
      * client has no crypto, so an encrypted room is one whose messages we
      * cannot read at all. Silently showing an empty room would be worse. */
@@ -111,7 +112,16 @@
     var place = C.placeOf(r);
     if (place === 'hub' || place === 'galaxy') {
       title.appendChild(H.el('span', 'cm-room-where fstat-l',
-        place === 'hub' ? 'HUB' : C.serverOf(r.room_id)));
+        place === 'hub' ? 'HUB' : C.serverName(C.serverOf(r.room_id))));
+    }
+    /* A private conversation LOOKS private in the list. On a stream, a DM
+     * row that reads like any channel row is somebody's name on screen
+     * before you have decided whether it should be. */
+    if (r.player_id) title.appendChild(H.el('span', 'cm-room-where cm-mod-dm fstat-l', 'DM'));
+    if (C.levelOf(r.room_id) === 'mentions') {
+      var lv = icon('icon-member', 'sui-icon-sm');
+      lv.title = 'mentions only';
+      title.appendChild(lv);
     }
     /* A room that has been UPGRADED is still joinable and still in the list,
      * so without following the pointer a player goes on talking into a room
@@ -166,6 +176,8 @@
 
     if (opts.onOpen) {
       row.classList.add('is-clickable');
+      row.setAttribute('role', 'button');
+      row.setAttribute('aria-label', C.title(r) + (r.mention ? ', named you' : r.unread ? ', ' + H.fmtInt(r.unread) + ' unread' : ''));
       row.addEventListener('click', function () { opts.onOpen(r); });
     }
     return row;
@@ -188,22 +200,63 @@
   //                     handled it: the agent saying "look at #war-room" did
   //                     nothing. A card for that room is flashed; otherwise
   //                     one is added.
+  /* A DOOR into Comms, always on the Terminal's header — and it wears the
+   * count. Five of sixteen players could not find chat at all: the only way
+   * in was a key chord and a word nobody had told them, and the badge only
+   * appeared once somebody had already mentioned them. A button that says
+   * COMMS is the first-run hint; it needs no tutorial because it is the
+   * control. It focuses the Comms card when there is one, adds one when
+   * there is not, and opens a window when this window is a single card. */
   function badge() {
+    var doors = document.getElementById('tm-ws-doors');
     var strip = document.getElementById('tm-ws-items') || document.querySelector('#tm-ws-nav .sui-screen-nav-items');
-    if (!strip) return;
-    var old = strip.querySelector('.cm-badge');
-    if (old) old.parentNode.removeChild(old);
+    var home = doors || strip;
+    if (!home) return;
+    [].slice.call(document.querySelectorAll('.cm-door')).forEach(function (n) { n.parentNode.removeChild(n); });
     var b = C.S.badge || {};
-    if (!b.count && !b.mention) return;
-    var n = H.el('span', 'cm-badge' + (b.mention ? ' is-mention' : ''), b.mention ? 'YOU' : H.fmtInt(b.count));
-    n.title = (b.mention ? 'somebody named you' : H.fmtInt(b.count) + ' unread') + ' — ⌘K to see';
-    n.addEventListener('click', function () { T.openPalette(); });
-    strip.appendChild(n);
+    var a = H.el('a', 'tm-door cm-door');
+    a.href = 'javascript:void(0)';
+    a.title = 'Comms — ' + (b.mention ? 'somebody named you' : b.count ? H.fmtInt(b.count) + ' unread' : 'nothing waiting');
+    a.setAttribute('aria-label', a.title);
+    a.appendChild(icon('icon-phone'));
+    a.appendChild(H.el('span', 'cm-door-label fstat-l', 'Comms'));
+    if (b.count || b.mention) {
+      a.appendChild(H.el('span', 'cm-badge' + (b.mention ? ' is-mention' : ''), b.mention ? 'YOU' : H.fmtInt(b.count)));
+    }
+    a.addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      var hit = null;
+      Object.keys(T.state.mounted).forEach(function (id) {
+        var m = T.state.mounted[id];
+        if (m.def && m.def.type === 'comms') hit = m;
+      });
+      if (hit) {
+        hit.node.classList.add('is-flash');
+        setTimeout(function () { hit.node.classList.remove('is-flash'); }, 1600);
+        if (hit.node.scrollIntoView) hit.node.scrollIntoView({ block: 'center' });
+      } else {
+        add('comms', {});
+      }
+    });
+    if (doors) doors.insertBefore(a, doors.firstChild); else home.appendChild(a);
+  }
+  /* The header is rebuilt on every workspace switch; the door goes back on
+   * with it. And the window's own title carries the count, which is the one
+   * place a person looks when the Terminal is behind something else. */
+  (T.onChrome = T.onChrome || []).push(function () { badge(); });
+  var baseTitle = null;
+  function titleCount() {
+    var b = C.S.badge || {};
+    if (baseTitle === null) baseTitle = String(document.title || '').replace(/^(\(\d+\)|•) /, '');
+    var now = String(document.title || '').replace(/^(\(\d+\)|•) /, '');
+    if (now !== baseTitle) baseTitle = now;   // something else renamed the window; keep its name
+    document.title = (b.mention ? '• ' : b.count ? '(' + H.fmtInt(b.count) + ') ' : '') + baseTitle;
   }
   C.watch(document.body, function (what) {
     if (what === 'unread') {
       badge();
-      if (C.S.badge && C.S.badge.mention) Board.stamp && Board.stamp('Comms: somebody named you');
+      titleCount();
+      if (C.S.badge && C.S.badge.mention) Board.stamp && Board.stamp('Comms: somebody mentioned you');
       return;
     }
     if (what === 'rooms' || what === 'status') { badge(); return; }
@@ -264,13 +317,14 @@
     render: function (host, p) {
       var only = p.show === 'unread' ? 'all' : (p.show || 'all');
       var unreadOnly = p.show === 'unread';
-      var state = { open: {} };
+      var state = { open: {}, cursor: null, rows: [] };
 
       var draw = function () {
         if (!host.isConnected) return;
         var S = C.S;
         if (!S.connected) { host.innerHTML = ''; host.appendChild(signIn()); return; }
         host.innerHTML = '';
+        state.rows = [];
 
         /* State, said once, at the top: WHO you are speaking as, on which
          * homeserver, and what is waiting — all three of which used to mean
@@ -287,6 +341,15 @@
             : w.mention ? H.fmtInt(w.mention) + ' room' + (w.mention === 1 ? '' : 's') + ' named you'
             : w.unread ? H.fmtInt(w.unread) + ' unread'
             : 'nothing waiting')));
+        if (w.unread || w.mention) {
+          var all = H.el('a', 'cm-readall fstat-l', 'mark all read');
+          all.href = 'javascript:void(0)';
+          all.addEventListener('click', function () {
+            all.textContent = 'reading…';
+            C.markAllRead().then(function (n) { Board.stamp && Board.stamp('Comms: ' + n + ' room' + (n === 1 ? '' : 's') + ' marked read'); });
+          });
+          strip.appendChild(all);
+        }
         var out = H.el('a', 'cm-signout fstat-l', 'sign out');
         out.href = 'javascript:void(0)';
         out.addEventListener('click', function () { C.disconnect(); });
@@ -320,10 +383,31 @@
           host.appendChild(head);
           if (shut) return;
           g.rooms.forEach(function (r) {
-            host.appendChild(roomRow(r, { onOpen: function () { add('room', { id: r.room_id }); } }));
+            state.rows.push(r.room_id);
+            host.appendChild(roomRow(r, { cursor: state.cursor === r.room_id,
+              onOpen: function () { add('room', { id: r.room_id }); } }));
           });
         });
       };
+      /* ↑/↓ walk the rooms and Enter opens one — the conversation had keys and
+       * the list of conversations was mouse-only. */
+      host.tabIndex = 0;
+      host.addEventListener('keydown', function (e) {
+        if (!state.rows.length) return;
+        var at = state.rows.indexOf(state.cursor);
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+          e.preventDefault();
+          at = at < 0 ? (e.key === 'ArrowUp' ? state.rows.length - 1 : 0)
+            : Math.max(0, Math.min(state.rows.length - 1, at + (e.key === 'ArrowUp' ? -1 : 1)));
+          state.cursor = state.rows[at];
+          draw();
+          var on = host.querySelector('.is-cursor');
+          if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest' });
+          return;
+        }
+        if (e.key === 'Enter' && at >= 0) { e.preventDefault(); add('room', { id: state.cursor }); }
+        if (e.key === 'Escape' && at >= 0) { e.preventDefault(); state.cursor = null; draw(); }
+      });
 
       C.watch(host, function (what) { if (what === 'rooms' || what === 'status' || what === 'seen' || what === 'open') draw(); });
       return gate(host, function () { return C.rooms().then(draw); });
@@ -351,7 +435,7 @@
     label: 'Conversation', defaultWidth: 1, defaultHeight: 'grow', cadenceMs: 0,
     describe: function (p) {
       var r = p.id && C.roomById(p.id);
-      return r ? r.name : ('Room · ' + (p.id || '?'));
+      return r ? C.title(r) : ('Room · ' + (p.id || '?'));
     },
     /* `kind: 'id'` with `kinds: [1, 2, 9]` is what makes a player, a planet or
      * a fleet OFFER this card in the subject-first menu and in ⌘K's search
@@ -365,6 +449,10 @@
       var doors = [];
       if (r) {
         doors.push({ icon: 'icon-member', title: 'Who is in here', onClick: function () { add('who', { id: r.room_id }); } });
+        /* Three levels, not two: everything · mentions only · muted. */
+        var quiet = C.levelOf(r.room_id) === 'mentions';
+        doors.push({ icon: quiet ? 'icon-alert' : 'icon-member', title: quiet ? 'Count every message' : 'Mentions only',
+          onClick: function () { C.setLevel(r.room_id, quiet ? 'all' : 'mentions'); } });
         doors.push({ icon: r.muted ? 'icon-okay' : 'icon-disabled', title: r.muted ? 'Unmute' : 'Mute',
           onClick: function () { invoke('matrix_mute', { guildId: C.S.key, roomId: r.room_id, muted: !r.muted }).then(function () { return C.rooms(true); }); } });
         /* You could join and mute; you could not LEAVE. A room you joined by
@@ -382,7 +470,11 @@
         host.appendChild(H.stateBlock('info', 'Name a room, a player or an object — #trade, 1-61, JPEG, 2-15361.'));
         return;
       }
-      var state = { room: null, replyTo: null, sel: null, editing: null, showPins: false, atBottom: true };
+      /* Pins are SHOWN. They are the room's noticeboard — the rules, the
+       * schedule, the current operation — and behind a `2 pinned` link they
+       * were the first thing a returning player needed and the last thing
+       * they found. */
+      var state = { room: null, replyTo: null, sel: null, editing: null, showPins: true, allPins: false, atBottom: true };
 
       var draw = function () {
         if (!host.isConnected || !state.room) return;
@@ -398,8 +490,7 @@
             'This room is end-to-end encrypted and this client has no crypto — nothing sent here can be read.'));
         }
         if (r.unknown) {
-          host.appendChild(H.stateBlock('info',
-            'Joined ' + r.room_id + ', but it has not come back in a sync yet.'));
+          host.appendChild(H.stateBlock('info', 'Joined — waiting for the room to arrive.'));
         }
         if (r.replaced_by) {
           var moved = H.stateBlock('info', 'This room has been upgraded; the conversation continues elsewhere.');
@@ -409,7 +500,7 @@
           moved.appendChild(go);
           host.appendChild(moved);
         }
-        if (state.showPins) pinStrip(host, rid);
+        if (state.showPins && (r.pinned || []).length) pinStrip(host, rid, state, draw);
 
         var scroller = H.el('div', 'cm-timeline');
         scroller.tabIndex = 0;
@@ -439,6 +530,8 @@
             if (!ruled && divideAfter && m.event_id === divideAfter) {
               ruled = true;
               var rule = H.el('div', 'cm-new');
+              rule.setAttribute('role', 'separator');
+              rule.setAttribute('aria-label', 'new messages');
               rule.appendChild(H.el('span', 'fstat-l', 'new messages'));
               scroller.appendChild(rule);
             }
@@ -477,6 +570,25 @@
 
       C.watch(host, function (what) {
         if (!state.room) return;
+        /* A room joined one sync ago. The list now has the real thing —
+         * matched by alias, which is what a directory join was asked for — so
+         * take it, and read the conversation the provisional room could not. */
+        if (what === 'rooms' && state.room.unknown) {
+          var real = C.roomById(state.room.room_id);
+          if (real && !real.unknown && String(real.room_id).charAt(0) === '!') {
+            state.room = real;
+            state.rid = real.room_id;
+            T.retitle(ctx.id, C.title(real));
+            C.timeline(real.room_id, { force: true }).then(function () {
+              C.openRoom(real.room_id, host);
+              C.anchorUnread(real.room_id);
+              C.markRead(real.room_id);
+              C.members(real.room_id);
+              draw();
+            });
+            return;
+          }
+        }
         var rid = state.room.room_id;
         /* A message arriving in the room you are LOOKING AT is a message you
          * have read. This marked read once, on mount, so the badge on a room
@@ -489,7 +601,7 @@
       return gate(host, function () {
         return C.resolve(p.id).then(function (room) {
           state.room = room;
-          T.retitle(ctx.id, room.name || room.canonical_alias || room.room_id);
+          T.retitle(ctx.id, C.title(room));
           /* A read marker names the EVENT you have read up to, so the timeline
            * has to be in hand first — and the unread ANCHOR has to be taken
            * before we mark, because marking is what destroys the answer. */
@@ -499,7 +611,7 @@
             C.anchorUnread(room.room_id);
             C.markRead(room.room_id);
             C.members(room.room_id);
-            if ((room.pinned || []).length) C.pinned(room.room_id);
+            if ((room.pinned || []).length) C.pinned(room.room_id).then(draw);
             /* Who they are TO YOU — ally, grudge, protected. Folded in after
              * the first paint so a conversation never waits on a standing. */
             if (room.player_id) {
@@ -547,16 +659,21 @@
     var strip = H.el('div', 'cm-head');
     var bits = [];
     if (r.members) bits.push(H.fmtInt(r.members) + ' members');
-    if (r.canonical_alias) bits.push(r.canonical_alias);
-    else if (r.room_id) bits.push(serverOf(r.room_id));
+    /* `#trade · Orbital Hydro`, not `#trade:oh.energy`: the alias's local
+     * part and the guild's NAME, which is the one name that place has
+     * everywhere else in Comms. */
+    if (r.canonical_alias) bits.push(String(r.canonical_alias).split(':')[0]);
+    var where = C.serverName(serverOf(r.canonical_alias || r.room_id));
+    if (where) bits.push(where);
     var line = H.el('div', 'cm-head-line fstat-l', bits.join(' · '));
     strip.appendChild(line);
     if ((r.pinned || []).length) {
-      var pins = H.el('a', 'cm-head-pins fstat-l', H.fmtInt(r.pinned.length) + ' pinned');
+      var pins = H.el('a', 'cm-head-pins fstat-l',
+        state.showPins ? 'hide pins' : H.fmtInt(r.pinned.length) + ' pinned');
       pins.href = 'javascript:void(0)';
       pins.addEventListener('click', function () {
         state.showPins = !state.showPins;
-        if (state.showPins) C.pinned(r.room_id);
+        if (state.showPins) C.pinned(r.room_id).then(draw);
         draw();
       });
       strip.appendChild(pins);
@@ -568,12 +685,19 @@
 
   /* The room's noticeboard. In a community channel this is where the rules,
    * the schedule and the current operation live — and it was unreachable. */
-  function pinStrip(host, rid) {
+  var PINS_SHOWN = 3;
+  function pinStrip(host, rid, state, draw) {
     var box = H.el('div', 'cm-pins');
+    box.setAttribute('aria-label', 'pinned messages');
     var list = C.S.pinned[rid];
     if (!list) { box.appendChild(H.el('div', 'ops-muted', 'reading the pins…')); host.appendChild(box); return; }
     if (!list.length) { box.appendChild(H.el('div', 'ops-muted', 'nothing pinned')); host.appendChild(box); return; }
-    list.forEach(function (m) {
+    // Newest last is how the room states them; newest FIRST is how a
+    // noticeboard reads. A war room's pins are its orders — the latest on top.
+    var show = list.slice().reverse();
+    var more = !state.allPins && show.length > PINS_SHOWN ? show.length - PINS_SHOWN : 0;
+    if (more) show = show.slice(0, PINS_SHOWN);
+    show.forEach(function (m) {
       var row = H.el('div', 'cm-pin');
       row.appendChild(H.el('span', 'cm-pin-who fstat-l', m.sender_name || m.sender || ''));
       var body = H.el('span', 'cm-pin-body');
@@ -581,6 +705,12 @@
       row.appendChild(body);
       box.appendChild(row);
     });
+    if (more) {
+      var rest = H.el('a', 'cm-pins-more fstat-l', '▸ ' + H.fmtInt(more) + ' more pinned');
+      rest.href = 'javascript:void(0)';
+      rest.addEventListener('click', function () { state.allPins = true; draw(); });
+      box.appendChild(rest);
+    }
     host.appendChild(box);
   }
 
@@ -599,12 +729,13 @@
     var node = window.StructsChatRow.render(m, prev, {
       onSender: m.player_id ? function () { T.openInWindow('player', { id: m.player_id }); } : null,
     });
-    // "edited" with no way to see the old text is half an answer.
-    if (m.edited && m.was) {
-      var mark = node.querySelector('.chat-msg-edited');
-      if (mark) mark.title = 'was: ' + String(m.was).slice(0, 200);
-    }
+    if (m['self']) node.classList.add('is-self');
+    node.setAttribute('aria-selected', state.sel === m.event_id ? 'true' : 'false');
+    /* A picture is drawn once its bytes are here; the filename stands in
+     * until then, and the row is redrawn when they land. */
+    var src = m.mxc ? C.media(m.mxc, rid) : null;
     var b = window.StructsChatRow.body(m, {
+      mediaUrl: src ? function () { return src; } : null,
       // Ids become chips IN the sentence, and a chip opens a window.
       fill: function (n, text) { n.appendChild(idChips(text)); },
       onJump: function (eid) {
@@ -619,6 +750,15 @@
       },
     });
     if (b) node.appendChild(b);
+    /* An edit says what it changed, IN the row. A tooltip is a fact only a
+     * mouse can reach; a record that changed without a visible trace is
+     * worthless to the one player who keeps a notebook. */
+    if (m.edited && m.was) {
+      var was = H.el('div', 'cm-was fstat-l');
+      was.appendChild(H.el('span', 'cm-was-l', 'before: '));
+      was.appendChild(H.el('span', null, String(m.was).slice(0, 200)));
+      node.appendChild(was);
+    }
 
     /* A send that failed is a message you can SEE and retry. It used to be
      * nothing at all: the text left the box and never arrived anywhere. */
@@ -706,10 +846,14 @@
     var m = (C.S.timelines[rid] || []).filter(function (x) { return x.event_id === state.sel; })[0];
     if (!m) { state.sel = null; return; }
     var bar = H.el('div', 'cm-bar');
+    bar.setAttribute('role', 'toolbar');
+    bar.setAttribute('aria-label', 'message actions');
     VERBS.forEach(function (v) {
       if (v.mine && !m['self']) return;
       var a = H.el('a', 'cm-verb');
       a.href = 'javascript:void(0)';
+      // A screen reader read the bar as one run — "r reply e edit d delete".
+      a.setAttribute('aria-label', v.label + ', key ' + v.key);
       a.appendChild(H.el('span', 'cm-verb-key', v.key));
       a.appendChild(H.el('span', null, v.label));
       a.addEventListener('click', function () { act(v.key, rid, m, state, draw); });
@@ -717,6 +861,7 @@
     });
     var esc = H.el('a', 'cm-verb cm-verb-done');
     esc.href = 'javascript:void(0)';
+    esc.setAttribute('aria-label', 'deselect, key escape');
     esc.appendChild(H.el('span', 'cm-verb-key', 'esc'));
     esc.appendChild(H.el('span', null, 'done'));
     esc.addEventListener('click', function () { act('Escape', rid, m, state, draw); });
@@ -1079,9 +1224,15 @@
       return gate(host, function () {
         return C.resolve(p.id).then(function (room) {
           return invoke('matrix_members', { guildId: C.S.key, roomId: room.room_id }).then(function (d) {
-            var list = (d && (d.members || d.people)) || (Array.isArray(d) ? d : []);
+            var list = ((d && (d.members || d.people)) || (Array.isArray(d) ? d : [])).slice();
+            /* PRESENT first. "Who is around" is the question this card is
+             * opened with before an op; an alphabet of four hundred with
+             * dots in it does not answer it. */
+            var here = function (m) { var p = m.presence || {}; return p.currently_active || p.state === 'online' ? 1 : 0; };
+            list.sort(function (a, b) { return here(b) - here(a) || String(a.name || '').localeCompare(String(b.name || '')); });
+            var n = list.filter(here).length;
             host.innerHTML = '';
-            cap(host, H.fmtInt(list.length) + ' member' + (list.length === 1 ? '' : 's'));
+            cap(host, (n ? H.fmtInt(n) + ' here · ' : '') + H.fmtInt(list.length) + ' member' + (list.length === 1 ? '' : 's'));
             var table = H.resultTable();
             list.forEach(function (m) {
               var pid = m.player_id || m.playerId;

@@ -200,15 +200,15 @@ async function load(qs) {
    * usually empty cost a 306px column every day. */
   const secs = [...card.querySelectorAll('.cm-sec')].map((s) => s.textContent.replace(/[\u25b8\s\d]+$/, '').trim());
   check('the list groups by what is WAITING, with what you pinned held stable above it',
-    secs.join(' ') === 'Invited Pinned Waiting Quiet', secs.join(' '));
+    secs.join(' ') === 'Invited Pinned Unread Everything else', secs.join(' '));
   /* The quiet ones are most of the list and none of the answer — collapsed to
    * a count, never hidden, because a room you cannot find is a room you have
    * left without deciding to. */
-  const quiet = [...card.querySelectorAll('.cm-sec')].find((n) => /Quiet/.test(n.textContent));
+  const quiet = [...card.querySelectorAll('.cm-sec')].find((n) => /Everything else/.test(n.textContent));
   check('…and the quiet ones fold to a count you can open',
     /▸/.test(quiet.textContent) && quiet.classList.contains('is-foldable'));
   quiet.click();
-  await until(() => !/▸/.test([...card.querySelectorAll('.cm-sec')].find((n) => /Quiet/.test(n.textContent)).textContent));
+  await until(() => !/▸/.test([...card.querySelectorAll('.cm-sec')].find((n) => /Everything else/.test(n.textContent)).textContent));
   check('…opening it shows them', true);
 
   const row = (name) => [...card.querySelectorAll('.cm-room')]
@@ -334,9 +334,14 @@ async function load(qs) {
    * "#nope-not-real" that had never existed. A room we cannot see is not an
    * empty room, and naming it after what was TYPED is inventing one. */
   {
+    /* `matrix_join` names no room — it answers `{ ok: true }` — so a join
+     * that sync has not returned yet is keyed by the alias we ASKED for,
+     * marked unknown. That key is what lets the card find the real room when
+     * the sync lands, because the list matches on canonical alias. What it
+     * must never do is invent a DIFFERENT room than the one asked for. */
     const made = await w.BoardComms.resolve('#no-such-channel').catch((e) => ({ error: String(e) }));
-    check('a room the server names but sync has not returned says so, under the id the SERVER gave',
-      made.unknown === true && made.room_id === '!help:h' && made.name === '!help:h',
+    check('a join sync has not returned yet is a room in a known state, keyed by what was asked for',
+      made.unknown === true && made.room_id === '#no-such-channel' && !made.error,
       JSON.stringify(made));
   }
   check('…and looking at a room is reading it', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_mark_read'));
@@ -558,12 +563,43 @@ async function load(qs) {
       /Hydro General/.test(d.querySelector('#tm-' + cid).textContent));
   }
 
+  /* Joining from the directory. `matrix_join` answers `{ ok: true }` and the
+   * room reaches the list on the NEXT sync — so the card must show a room in
+   * the "joined, not in sync yet" state, not an error, and then become the
+   * real room when `matrix::rooms` lands. This turned every directory join
+   * into "nothing joined" for as long as the fixture pretended otherwise. */
+  {
+    const before = T.state.layout.cards.length;
+    // The directory is on the OTHER guild's server by now — so this is a
+    // federated join, which is the case that matters.
+    [...dir.querySelectorAll('.cm-room')].find((r) => /Hydro General/.test(r.textContent)).click();
+    await until(() => T.state.layout.cards.length === before + 1);
+    const rc = T.state.layout.cards.slice(-1)[0];
+    await until(() => d.querySelector('#tm-' + rc.id + ' .sui-message-inline-alert, #tm-' + rc.id + ' .cm-timeline'));
+    const card = d.querySelector('#tm-' + rc.id);
+    check('a join the server accepted is not an error, even before sync has the room',
+      /waiting for the room to arrive/.test(card.textContent) && !/nothing joined/.test(card.textContent)
+      // …and it is CALLED by its alias's local part, never the raw address.
+      && !/#general:oh\.energy/.test(card.textContent) && /Orbital Hydro/.test(card.textContent),
+      card.textContent.replace(/\s+/g, ' ').slice(0, 120));
+    // The sync lands: the room list now carries the room, by the alias we asked for.
+    w.__HARNESS_EMIT__('matrix::rooms', { guild_id: '0-5', rooms: w.BoardComms.S.rooms.concat([
+      { room_id: '!hydro:oh.energy', name: 'Hydro General', canonical_alias: '#general:oh.energy',
+        section: 'galaxy', joined: true, members: 400, unread: 0, mention: false, icon: 'icon-guild' },
+    ]) });
+    await until(() => !/not come back in a sync yet/.test(d.querySelector('#tm-' + rc.id).textContent));
+    check('…and becomes the real room when the sync lands — across servers',
+      /Hydro General/.test(d.querySelector('#tm-' + rc.id + ' .tm-title').textContent)
+      && (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'matrix_timeline' && c.args.roomId === '!hydro:oh.energy'));
+    T.remove(rc.id);
+  }
+
   T.add('who', { id: '!snc:h' }, 1);
   const wid = T.state.layout.cards.slice(-1)[0].id;
   await until(() => d.querySelector('#tm-' + wid + ' .pc-row'));
   const who = d.querySelector('#tm-' + wid);
   check('WHO draws room members as PEOPLE, with the same face the roster shows',
-    who.querySelectorAll('.pc-row').length === 2 && /JPEG/.test(who.textContent));
+    who.querySelectorAll('.pc-row').length === 3 && /JPEG/.test(who.textContent));
   check('…each of whom can be messaged from where they stand',
     who.querySelector('.pc-row .pc-act[title^="Message"]') !== null);
   w.close();
@@ -616,7 +652,7 @@ async function load(qs) {
    * ⌘K shows when you have nothing else in mind, worst first. */
   const idle = T.commsRows('', rooms);
   check('an empty command line leads with what is waiting, the room that named you first',
-    idle.length && idle[0].sub === 'SN.Corporation' && idle[0].group === 'Waiting'
+    idle.length && idle[0].sub === 'SN.Corporation' && idle[0].group === 'Unread'
     && idle.every((r) => r.run === true), idle.map((r) => r.sub).join(','));
   check('…and a muted room never takes one of those places',
     !idle.some((r) => r.sub === 'Noise'));
@@ -659,6 +695,149 @@ async function load(qs) {
     T.parse('DMS').type === 'comms' && T.parse('DMS').params.show === 'direct'
     && T.parse('UNREAD').params.show === 'unread');
   w.close();
+}
+
+// ── What sixteen players asked for ─────────────────────────────────────────
+//
+// proposals/comms-player-review.md: the same interface reviewed by a grandma,
+// a raider mid-siege, a screen-reader user, a returning player… What they
+// converged on is tested here, by the thing they asked for.
+{
+  console.log('\n— what sixteen players asked for');
+  const dom = await load('?view=terminal');
+  const w = dom.window, d = w.document;
+  const T = w.Board.Terminal, C = w.BoardComms;
+  await T.enter();
+  T.state.layout.cards.slice().forEach((c) => T.remove(c.id));
+  await C.status(); await C.rooms();
+  const calls = (cmd) => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === cmd);
+
+  /* 1. A DOOR. Five of sixteen could not find chat: the only way in was a key
+   * chord and a word, and the badge appeared only once you had been named. */
+  await until(() => d.querySelector('.cm-door'));
+  check('a Comms door stands on the Terminal header before anything is waiting',
+    d.querySelector('#tm-ws-doors .cm-door') !== null && /Comms/.test(d.querySelector('.cm-door').textContent)
+    && d.querySelector('.cm-door .cm-badge') === null);
+  d.querySelector('.cm-door').click();
+  await until(() => T.state.layout.cards.some((c) => c.type === 'comms'));
+  check('…and opens the Comms card', T.state.layout.cards.filter((c) => c.type === 'comms').length === 1);
+  const cid = T.state.layout.cards.find((c) => c.type === 'comms').id;
+  await until(() => d.querySelector('#tm-' + cid + ' .cm-room'));
+  d.querySelector('.cm-door').click();
+  check('…and a second click focuses the one there is rather than complaining',
+    T.state.layout.cards.filter((c) => c.type === 'comms').length === 1
+    && d.querySelector('#tm-' + cid).classList.contains('is-flash'));
+
+  /* 2. The count reaches you where you are looking — the door, and the
+   * window's own title behind whatever else is open. */
+  const title0 = d.title;
+  w.__HARNESS_EMIT__('matrix::unread', { count: 7, mention: false });
+  await until(() => d.querySelector('.cm-door .cm-badge'));
+  check('the door wears the count', d.querySelector('.cm-door .cm-badge').textContent === '7');
+  check('…and so does the window title', d.title === '(7) ' + title0, d.title);
+  w.__HARNESS_EMIT__('matrix::unread', { count: 0, mention: false });
+  await until(() => !d.querySelector('.cm-door .cm-badge'));
+  check('…and both let go when nothing is waiting', d.title === title0);
+
+  /* 3. Words that say what they hold, and one name per server. */
+  check('sections are named by their contents', C.GROUPS.map((g) => g.label).join('|') === 'Invited|Pinned|Unread|Everything else');
+  await until(() => C.S.servers && C.S.servers.length);
+  check('a server is called by its guild\'s name, everywhere', C.serverName('oh.energy') === 'Orbital Hydro' && C.serverName('nowhere') === 'nowhere');
+  check('a room is never called by its raw address',
+    C.title({ name: '#sncorp:matrix.beta.playstructs.com' }) === '#sncorp'
+    && C.title({ name: '', canonical_alias: '#trade:h' }) === '#trade'
+    && C.title({ name: 'Trade', canonical_alias: '#trade:h' }) === 'Trade');
+  const card = d.querySelector('#tm-' + cid);
+  check('a private conversation looks private in the list',
+    [...card.querySelectorAll('.cm-room.is-direct')].some((r) => /DM/.test(r.querySelector('.cm-room-where').textContent)));
+
+  /* 4. A level between everything and nothing: mentions only. */
+  check('a busy channel can be set to mentions only', C.setLevel('!trade:h', 'mentions') === 'mentions'
+    && C.sectionOf(C.roomById('!trade:h')) === 'quiet' && C.calls(C.roomById('!trade:h')) === false);
+  check('…so its traffic stops counting, while a mention still does',
+    C.waiting().unread === 4 && C.calls(C.roomById('!snc:h')) === true);
+  C.setLevel('!trade:h', 'all');
+  check('…and it comes back', C.sectionOf(C.roomById('!trade:h')) === 'waiting' && C.waiting().unread === 13);
+
+  /* 5. Everything read, in one act — not one open per room. */
+  const reads0 = calls('matrix_mark_read').length;
+  await until(() => card.querySelector('.cm-readall'));
+  card.querySelector('.cm-readall').click();
+  await until(() => calls('matrix_mark_read').length >= reads0 + 4);
+  const marked = calls('matrix_mark_read').slice(reads0).map((c) => c.args.roomId).sort();
+  // ALL means all — the muted room's 400 go too. And the receipt names an event.
+  check('mark all read sends a receipt for every room carrying a count, the muted one included',
+    marked.join(' ') === '!dm-jpeg:h !noise:h !snc:h !trade:h'
+    && calls('matrix_mark_read').slice(reads0).every((c) => c.args.eventId === '$m1'), marked.join(' '));
+
+  /* 6. The list has keys, like the conversation does. */
+  // The rows' parent is the card body the keys live on (the card HEAD is focusable too).
+  const body = card.querySelector('.cm-room').parentNode;
+  check('the room list is focusable', body.tabIndex === 0);
+  body.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  await until(() => card.querySelector('.cm-room.is-cursor'));
+  const first = card.querySelector('.cm-room.is-cursor');
+  body.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  await until(() => card.querySelector('.cm-room.is-cursor') !== first);
+  const rooms0 = T.state.layout.cards.filter((c) => c.type === 'room').length;
+  body.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await until(() => T.state.layout.cards.filter((c) => c.type === 'room').length === rooms0 + 1);
+  check('↑/↓ walk the room list and Enter opens the one under the cursor', true);
+  T.state.layout.cards.filter((c) => c.type === 'room').forEach((c) => T.remove(c.id));
+
+  /* 7. Pins are SHOWN — the noticeboard, first — newest on top, folded past three. */
+  w.__HARNESS_PINS__ = [1, 2, 3, 4].map((i) => ({ event_id: '$p' + i, sender_name: 'Marklifer', body: 'order ' + i }));
+  w.__HARNESS_EMIT__('matrix::rooms', { guild_id: '0-5', rooms: C.S.rooms.map((r) => r.room_id === '!snc:h' ? Object.assign({}, r, { pinned: ['$p1', '$p2', '$p3', '$p4'] }) : r) });
+  T.add('room', { id: '!snc:h' }, 1);
+  const rid = T.state.layout.cards.slice(-1)[0].id;
+  await until(() => d.querySelectorAll('#tm-' + rid + ' .cm-pin').length === 3);
+  const rc = d.querySelector('#tm-' + rid);
+  check('a room opens with its pins showing, newest first, three of them',
+    rc.querySelector('.cm-pin .cm-pin-body').textContent === 'order 4' && /1 more pinned/.test(rc.querySelector('.cm-pins-more').textContent));
+  rc.querySelector('.cm-pins-more').click();
+  await until(() => d.querySelectorAll('#tm-' + rid + ' .cm-pin').length === 4);
+  check('…and the rest unfold', true);
+  check('the header says where, by name — not `#snc:h`',
+    /#snc · SN Corp/.test(rc.querySelector('.cm-head-line').textContent), rc.querySelector('.cm-head-line').textContent);
+
+  /* 8. The bar can be read aloud. */
+  await until(() => rc.querySelector('[data-event="$m1"]'));
+  rc.querySelector('[data-event="$m1"]').click();
+  await until(() => rc.querySelector('.cm-bar'));
+  check('the action bar and its verbs carry names a screen reader can say',
+    rc.querySelector('.cm-bar').getAttribute('role') === 'toolbar'
+    && [...rc.querySelectorAll('.cm-verb')].every((a) => /key/.test(a.getAttribute('aria-label')))
+    && rc.querySelector('[data-event="$m1"]').getAttribute('aria-selected') === 'true');
+
+  /* 9. A picture is shown, not described. */
+  const media0 = calls('matrix_media').length;
+  w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!snc:h', messages: [{ event_id: '$img', sender: '@1-61:h', sender_name: 'JPEG', kind: 'image', ts: 2, body: 'map.png', mxc: 'mxc://h/abc' }] });
+  await until(() => calls('matrix_media').length > media0);
+  check('an image message asks for its bytes once', calls('matrix_media').slice(-1)[0].args.mxc === 'mxc://h/abc');
+  await until(() => rc.querySelector('[data-event="$img"] img.chat-image-img'));
+  check('…and draws the picture when they land',
+    /^data:image\/png/.test(rc.querySelector('[data-event="$img"] img.chat-image-img').src));
+  w.__HARNESS_EMIT__('matrix::timeline', { room_id: '!snc:h', messages: [{ event_id: '$img2', sender: '@1-61:h', sender_name: 'JPEG', kind: 'image', ts: 3, body: 'map2.png', mxc: 'mxc://h/abc' }] });
+  await until(() => rc.querySelector('[data-event="$img2"] img.chat-image-img'));
+  check('…and the same picture again costs nothing', calls('matrix_media').length === media0 + 1);
+
+  /* 10. WHO: present first. */
+  T.add('who', { id: '!snc:h' }, 1);
+  const wid = T.state.layout.cards.slice(-1)[0].id;
+  await until(() => d.querySelectorAll('#tm-' + wid + ' .pc-row, #tm-' + wid + ' [data-player]').length >= 3 || /here/.test(d.querySelector('#tm-' + wid).textContent));
+  const who = d.querySelector('#tm-' + wid);
+  check('WHO says how many are here and puts them first',
+    /1 here · 3 members/.test(who.textContent) && who.textContent.indexOf('JPEG') < who.textContent.indexOf('Beezhan'), who.textContent.replace(/\s+/g, ' ').slice(0, 80));
+
+  /* 11. ⌘K: read all as one row; a level per row. */
+  const rows = T.commsRows('');
+  const all = rows.find((r) => r.acts && r.acts.some((a) => a.label === 'read all'));
+  check('an empty ⌘K offers to read everything in one act', all !== undefined && all.group === 'Unread');
+  const trade = rows.find((r) => r.sub === 'Trade');
+  check('…and a channel row can be set to mentions only from there',
+    trade !== undefined && trade.acts.some((a) => a.label === 'mentions only')
+    && !rows.find((r) => r.sub === 'JPEG').acts.some((a) => /mentions/.test(a.label)));
+  dom.window.close();
 }
 
 // ── The connective tissue: knowing where you are while three windows move ──
@@ -723,13 +902,14 @@ async function load(qs) {
   await until(() => C.S.timelines['!snc:h'].find((m) => m.event_id === '$e1').edited);
   const first = d.querySelector('#tm-grid [data-type="room"]');
   await until(() => first.querySelector('[data-event="$e1"] .chat-msg-edited'));
-  check('an edited message keeps what it used to say, one hover away',
-    /was: attack at dawn/.test(first.querySelector('[data-event="$e1"] .chat-msg-edited').title));
+  /* IN the row, not in a tooltip: a hover is a fact only a mouse can reach. */
+  check('an edited message says what it used to say, in the row',
+    /before: attack at dawn/.test(first.querySelector('[data-event="$e1"] .cm-was').textContent));
 
   /* Palette rows: the room leads, the word follows, and a waiting row can be
    * dealt with without opening it. */
   const rows = T.commsRows('', C.S.rooms);
-  const row = rows.find((r) => r.group === 'Waiting');
+  const row = rows.find((r) => r.group === 'Unread' && r.words === 'ROOM');
   check('a waiting row leads with the ROOM and carries verbs', row.lead === true && row.acts.some((a) => a.label === 'read')
     && row.acts.some((a) => /mute/.test(a.label)));
   /* And SAY is a row you can SEE — `suggestFor` lists only words that open a

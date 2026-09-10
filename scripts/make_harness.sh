@@ -629,10 +629,20 @@ cat > "$FIX" <<'EOF'
     ] },
     matrix_dm: { room_id: '!dm-jpeg:h', name: 'JPEG' },
     matrix_members: { members: [
-      { user_id: '@1-61:h', player_id: '1-61', name: 'JPEG' },
+      // Alphabetical would put Beezhan first; PRESENT first puts JPEG first.
+      { user_id: '@1-77:h', player_id: '1-77', name: 'Beezhan' },
+      { user_id: '@1-61:h', player_id: '1-61', name: 'JPEG',
+        presence: { state: 'online', currently_active: true } },
       { user_id: '@1-194:h', player_id: '1-194', name: 'Marklifer' },
     ] },
-    matrix_join: { ok: true, room_id: '!help:h' },
+    get matrix_pinned() { return { messages: window.__HARNESS_PINS__ || [] }; },
+    matrix_pin: { ok: true },
+    matrix_media: { data_url: 'data:image/png;base64,iVBORw0KGgo=', mime: 'image/png' },
+    /* `{ ok: true }` and NOTHING else — Rust does not name the room, and the
+     * room reaches the list on the next sync, not on the reply. A fixture
+     * that answered `room_id` here hid a bug that turned every successful
+     * join from the directory into "nothing joined". */
+    matrix_join: { ok: true },
     matrix_leave: { ok: true },
     matrix_mute: { ok: true },
     matrix_mark_read: { ok: true },
