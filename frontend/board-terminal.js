@@ -2517,7 +2517,11 @@
       line('IMPORT', 'Open a workspace someone shared', '<code>', function () { fillCommand('IMPORT '); });
       // The bar's RESET button went with the bar; this is the same verb.
       line('RESET', 'Back to the default page', '', function () { Terminal.execute('RESET'); });
-      line('PET · COMPANION', 'The desktop companion', '', function () { Terminal.execute('PET'); });
+      // PET is deliberately NOT listed. The companion is gated off in Rust
+      // (`companion.json` → `enabled`), and a reference entry for something
+      // that answers "switched off" is worse than no entry. The verb itself
+      // still parses and still works, so turning the flag on needs no change
+      // here — see `mcp/companion.rs`.
 
       host.appendChild(list);
       return Promise.resolve();

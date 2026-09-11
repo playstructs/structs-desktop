@@ -37,6 +37,18 @@ const FILENAME: &str = "companion.json";
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CompanionConfig {
+    /// OFF, and not offered anywhere, until this is turned on.
+    ///
+    /// The companion is unfinished: it cannot be dragged on macOS yet and it
+    /// has little to say. A half-working window that floats over everything is
+    /// worse than no window, so it is gated rather than shipped quiet — and
+    /// the gate removes the way IN (the menu-bar entry), not just the window,
+    /// because an entry that opens something unusable is the actual problem.
+    ///
+    /// Turn it on with `mcp_config_set { domain: "companion", payload: { enabled: true } }`,
+    /// or by hand in `companion.json`.
+    #[serde(default)]
+    pub enabled: bool,
     /// Whether the pet was on screen at last exit, so it comes back.
     #[serde(default)]
     pub shown: bool,
@@ -44,6 +56,30 @@ pub struct CompanionConfig {
 
 fn load() -> CompanionConfig {
     crate::mcp::config_store::load_config(FILENAME)
+}
+
+/// Is the companion available at all?
+pub fn is_enabled() -> bool {
+    load().enabled
+}
+
+/// Turn the whole feature on or off. Switching it off also takes the window
+/// down, so the setting and the screen never disagree.
+pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) {
+    let mut cfg = load();
+    cfg.enabled = enabled;
+    if !enabled {
+        cfg.shown = false;
+    }
+    save(&cfg);
+    if !enabled {
+        if let Some(w) = app.get_webview_window(LABEL) {
+            let _ = w.close();
+        }
+    }
+    // The menu bar is where this is visible, so it has to be rebuilt either
+    // way: the entry appears when it is on and is GONE when it is off.
+    let _ = install_tray(app);
 }
 
 fn save(c: &CompanionConfig) {
@@ -56,6 +92,9 @@ fn save(c: &CompanionConfig) {
 /// app in front of what the player is doing. That is the entire difference
 /// between a companion and an interruption.
 pub fn show(app: &tauri::AppHandle) -> Result<(), String> {
+    if !is_enabled() {
+        return Err("the companion is switched off".into());
+    }
     if let Some(w) = app.get_webview_window(LABEL) {
         let _ = w.show();
         return Ok(());
@@ -112,9 +151,19 @@ pub fn is_open(app: &tauri::AppHandle) -> bool {
 
 /// Reopen the pet if it was on screen at last exit.
 pub fn reopen_if_persisted(app: &tauri::AppHandle) {
-    if load().shown {
+    if should_reopen(&load()) {
         let _ = show(app);
     }
+}
+
+/// Should the pet come back at launch?
+///
+/// Split out because of one specific trap: a `companion.json` written BEFORE
+/// the feature was gated says `shown: true` and knows nothing about `enabled`,
+/// which then deserializes to its default of false. Anyone who had the pet
+/// open when it was ungated must not have it reappear now that it is off.
+pub fn should_reopen(cfg: &CompanionConfig) -> bool {
+    cfg.enabled && cfg.shown
 }
 
 // ── What it says ────────────────────────────────────────────────────────────
@@ -244,6 +293,12 @@ pub fn push(app: &tauri::AppHandle) {
 
 #[tauri::command]
 pub fn companion_toggle(app: tauri::AppHandle) -> Result<Value, String> {
+    // `show` refuses too; this is here so the ⌘K word says the same thing the
+    // menu bar does by saying nothing — one message, not a window that opens
+    // and then cannot be used.
+    if !is_enabled() {
+        return Err("the companion is switched off".into());
+    }
     if is_open(&app) {
         hide(&app);
         return Ok(json!({ "open": false }));
@@ -348,12 +403,32 @@ pub fn install_tray(app: &tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let open_crew = MenuItem::with_id(app, "tray_crew", "Crew", true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    let toggle_pet = MenuItem::with_id(app, "tray_pet", TRAY_SHOW, true, None::<&str>)
-        .map_err(|e| e.to_string())?;
     let sep = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let quit = PredefinedMenuItem::quit(app, Some("Quit Structs")).map_err(|e| e.to_string())?;
-    let menu = Menu::with_items(app, &[&open_board, &open_crew, &toggle_pet, &sep, &quit])
-        .map_err(|e| e.to_string())?;
+
+    /* The pet's entry is BUILT ONLY WHEN THE FEATURE IS ON.
+     *
+     * Not disabled, not greyed, not renamed — absent. A greyed-out item still
+     * tells everyone there is a thing here they cannot have, and a live one
+     * that opens a window you then cannot drag or use is exactly what this
+     * gate exists to prevent. Off means there is no door.
+     */
+    let toggle_pet = if is_enabled() {
+        Some(
+            MenuItem::with_id(app, "tray_pet", TRAY_SHOW, true, None::<&str>)
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        vec![&open_board, &open_crew];
+    if let Some(item) = toggle_pet.as_ref() {
+        items.push(item);
+    }
+    items.push(&sep);
+    items.push(&quit);
+    let menu = Menu::with_items(app, &items).map_err(|e| e.to_string())?;
 
     let tray = TrayIconBuilder::with_id("structs")
         .icon(app.default_window_icon().cloned().ok_or("no app icon")?)
@@ -390,10 +465,12 @@ pub fn install_tray(app: &tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     if let Ok(mut slot) = tray_slot().lock() {
+        // Dropping the previous TrayIcon removes it from the menu bar. Without
+        // this, toggling the feature would leave a second icon behind.
         *slot = Some(tray);
     }
     if let Ok(mut slot) = pet_item_slot().lock() {
-        *slot = Some(toggle_pet);
+        *slot = toggle_pet;
     }
     refresh_tray_labels(app);
     Ok(())
@@ -507,5 +584,25 @@ mod tests {
     #[test]
     fn the_companion_is_off_until_it_is_opened() {
         assert!(!CompanionConfig::default().shown);
+    }
+
+    /// The whole feature is gated, and the gate defaults closed.
+    #[test]
+    fn the_companion_is_switched_off_by_default() {
+        assert!(!CompanionConfig::default().enabled);
+    }
+
+    /// A config written before the gate existed says `shown: true` and nothing
+    /// about `enabled`, which defaults to false. That pet must stay down.
+    #[test]
+    fn a_config_from_before_the_gate_does_not_reopen_the_pet() {
+        let legacy: CompanionConfig = serde_json::from_str(r#"{"shown":true}"#).unwrap();
+        assert!(legacy.shown, "the old field is still read");
+        assert!(!should_reopen(&legacy), "but it is not enough on its own");
+
+        let on = CompanionConfig { enabled: true, shown: true };
+        assert!(should_reopen(&on));
+        let off_screen = CompanionConfig { enabled: true, shown: false };
+        assert!(!should_reopen(&off_screen));
     }
 }

@@ -441,6 +441,22 @@ pub async fn announce(work: &crate::hasher::CrewWork, object_id: &str, block_sta
     let Some(c) = crew::all().into_iter().find(|c| c.room_id == work.room_id) else {
         return;
     };
+    // A crew that is a plain link — "my guild", "this friend" — has nowhere to
+    // announce. The work still landed and the chain still recorded who did it;
+    // there is simply no room to point the owner at the receipt, so they will
+    // not be credited automatically. Said out loud rather than failing quietly.
+    if !crew::is_matrix_room(&c.room_id) {
+        tlog(
+            "crew",
+            Sev::Notice,
+            format!(
+                "finished {object_id} for {} — {} has no room, so nothing was announced \
+                 and no credit will be raised",
+                work.owner_player, c.name
+            ),
+        );
+        return;
+    }
     let body = format!(
         "Finished {} on {} for {} \u{2014} tx {}",
         work.task.as_str(),

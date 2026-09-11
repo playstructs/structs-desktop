@@ -204,19 +204,15 @@
   });
 
   function drag() {
-    // The window's own API when the runtime exposes it, and a command when it
-    // does not. Both end in the same place; neither depends on Tauri's
-    // internals.
-    var T = window.__TAURI__;
-    try {
-      if (T && T.window && typeof T.window.getCurrentWindow === 'function') {
-        var win = T.window.getCurrentWindow();
-        if (win && typeof win.startDragging === 'function') {
-          win.startDragging();
-          return;
-        }
-      }
-    } catch (e) { /* fall through to the command */ }
+    /* One path, and it is OUR command.
+     *
+     * The first version tried `getCurrentWindow().startDragging()` first and
+     * fell back to the command — except `startDragging()` returns a PROMISE,
+     * so a rejection (a missing `core:window:allow-start-dragging` capability,
+     * say) landed nowhere: the try/catch only wrapped the synchronous call and
+     * the early `return` meant the fallback never ran. A silent no-op that
+     * looks like working code.
+     */
     invoke('companion_drag').catch(function () {});
   }
 

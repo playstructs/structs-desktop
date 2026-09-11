@@ -167,7 +167,32 @@ impl Default for Pay {
     }
 }
 
-/// A crew: a Matrix room, a role, and what we've opened to whom.
+/// A crew's id.
+///
+/// Usually a Matrix room, because that is where announcements go — but NOT
+/// always, and requiring one was the first thing that made this confusing.
+/// "Help my guild" and "help this friend" are complete thoughts on their own;
+/// making somebody go and create a room first, before they could say either,
+/// put a piece of chat plumbing in front of a game decision.
+///
+/// So a crew may also be `guild:<id>` or `player:<id>` — a link with no room.
+/// Everything works the same except payout announcements, which need somewhere
+/// to be announced.
+pub fn is_matrix_room(id: &str) -> bool {
+    id.starts_with('!')
+}
+
+/// The id of the "my guild" crew.
+pub fn guild_crew_id(guild_id: &str) -> String {
+    format!("guild:{guild_id}")
+}
+
+/// The id of the crew that is one friend.
+pub fn friend_crew_id(player_id: &str) -> String {
+    format!("player:{player_id}")
+}
+
+/// A crew: a room or a link, a role, and what we've opened to whom.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Crew {
     /// The room IS the crew's identity. Everything else here is local
@@ -219,7 +244,7 @@ pub fn get(room_id: &str) -> Option<Crew> {
 /// Add or replace a crew, keyed by room. Returns the stored copy.
 pub fn upsert(crew: Crew) -> Result<Crew, String> {
     if crew.room_id.trim().is_empty() {
-        return Err("a crew is a room; this one has no room id".into());
+        return Err("a crew needs an id".into());
     }
     let mut cfg = CONFIG.write().map_err(|_| "crew config unavailable")?;
     match cfg.crews.iter_mut().find(|c| c.room_id == crew.room_id) {
@@ -765,6 +790,175 @@ pub async fn crew_roster(guild_id: String, room_id: String) -> Result<Value, Str
         }));
     }
     Ok(json!({ "members": out, "player_id": mine, "guild_id": my_guild }))
+}
+
+
+// ── The two things anybody actually wants to say ────────────────────────────
+//
+// "I want to help my guild" and "I want to help this person" are complete
+// thoughts, and each used to take five controls: make a room a crew, pick a
+// scope, pick a role, switch on grinding, then grant. Every one of those is a
+// consequence of the decision, not part of it — so each is now ONE call that
+// does the lot, and the panel above it is two buttons.
+//
+// Both directions open at once, deliberately. "Helping" that only ran one way
+// would need a sixth control to explain which way, and a crew where nobody
+// helps back is not a crew. Either side can be closed again afterwards.
+
+/// Rank 101 reaches everybody: the chain's default rank for a new member sits
+/// above anything an admin hands out, and "my guild" has to mean the whole
+/// guild or the button is a lie.
+const DEFAULT_GUILD_RANK: u64 = 101;
+
+/// Saying "I want to help" has to actually start the helping. Leaving the loop
+/// switched off behind a button labelled Help is the kind of thing that makes
+/// somebody conclude the feature does not work.
+fn start_helping() {
+    let mut cfg = crate::mcp::crew_work::get();
+    if !cfg.enabled {
+        cfg.enabled = true;
+        crate::mcp::crew_work::set(cfg);
+    }
+}
+
+/// Open your work to your guild, and start doing theirs.
+///
+/// One transaction (`MsgPermissionGuildRankSet`), one config write. `rank` is
+/// the worst guild rank still allowed; the default reaches everybody.
+#[tauri::command]
+pub async fn crew_help_guild(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    guild_id: Option<String>,
+    rank: Option<u64>,
+) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    let (mine, my_guild) = me()?;
+    let guild = guild_id.filter(|g| !g.is_empty()).unwrap_or(my_guild);
+    if guild.is_empty() {
+        return Err("you are not in a guild".into());
+    }
+    // A rank of 0 means "granted to nobody" on chain, which would silently do
+    // the opposite of what the button says.
+    let rank = rank.filter(|r| *r >= 1).unwrap_or(DEFAULT_GUILD_RANK);
+
+    open_to_guild(&app, 0, &mine, &guild, rank).await?;
+
+    let id = guild_crew_id(&guild);
+    let mut crew = get(&id).unwrap_or(Crew {
+        room_id: id.clone(),
+        guild_id: guild.clone(),
+        name: "My guild".into(),
+        ..Default::default()
+    });
+    crew.scope = Scope::Guild;
+    crew.role = Role::Work;
+    crew.guild_rank_open = Some(rank);
+    upsert(crew)?;
+    start_helping();
+    Ok(json!({ "ok": true, "guild_id": guild, "rank": rank }))
+}
+
+/// Open your work to one player, and start doing theirs.
+#[tauri::command]
+pub async fn crew_help_player(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    player_id: String,
+) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    let (mine, my_guild) = me()?;
+    let friend = player_id.trim().to_string();
+    if crate::matrix::refs::parse_id(&friend).is_none() {
+        return Err(format!("{friend} is not a player id"));
+    }
+
+    grant(&app, 0, &mine, &friend, PERM_HASH_ALL).await?;
+
+    let id = friend_crew_id(&friend);
+    let mut crew = get(&id).unwrap_or(Crew {
+        room_id: id.clone(),
+        guild_id: my_guild,
+        name: friend.clone(),
+        ..Default::default()
+    });
+    crew.scope = Scope::Chosen;
+    crew.chosen = vec![friend.clone()];
+    crew.role = Role::Work;
+    if !crew.granted.contains(&friend) {
+        crew.granted.push(friend.clone());
+    }
+    upsert(crew)?;
+    start_helping();
+    Ok(json!({ "ok": true, "player_id": friend }))
+}
+
+/// Stop. Closes our side on chain and takes the link out of the list.
+#[tauri::command]
+pub async fn crew_stop(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    crew_id: String,
+) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    let (mine, _) = me()?;
+    let Some(crew) = get(&crew_id) else {
+        return Err(format!("{crew_id} is not a crew here"));
+    };
+    // Withdraw the grant this link stands on, whichever kind it is. A link
+    // removed locally while the grant stays open on chain is the version where
+    // somebody keeps finishing your work and you cannot see why.
+    if crew.guild_rank_open.is_some() && !crew.guild_id.is_empty() {
+        close_to_guild(&app, 0, &mine, &crew.guild_id).await?;
+    }
+    for p in crew.granted.clone() {
+        revoke(&app, 0, &mine, &p, PERM_HASH_ALL).await?;
+    }
+    remove(&crew_id)?;
+    Ok(json!({ "ok": true }))
+}
+
+/// Everyone we are linked to, in one flat list — the only thing the simple
+/// panel shows. Two directions per row, because a half-open link is normal.
+#[tauri::command]
+pub async fn crew_links() -> Result<Value, String> {
+    let (mine, my_guild) = me()?;
+    let client = CosmosClient::new();
+    let mut rows: Vec<Value> = Vec::new();
+    for c in all() {
+        let (kind, subject) = match c.scope {
+            Scope::Guild => ("guild", c.guild_id.clone()),
+            _ => ("player", c.chosen.first().cloned().unwrap_or_default()),
+        };
+        // For a guild link there is nobody to ask about individually; the
+        // grant IS the state. For a person, ask the chain both ways.
+        let (theirs, ours) = if kind == "player" && !subject.is_empty() {
+            (
+                authority_of(&client, &mine, &subject, &my_guild, TaskType::Mine).await.ok(),
+                authority_of(&client, &subject, &mine, &my_guild, TaskType::Mine).await.ok(),
+            )
+        } else {
+            (None, None)
+        };
+        rows.push(json!({
+            "crew_id": c.room_id,
+            "kind": kind,
+            "subject": subject,
+            "name": c.name,
+            "working": c.role.grinds(),
+            "open_to_guild": c.guild_rank_open,
+            "they_can_help_me": theirs,
+            "i_can_help_them": ours,
+        }));
+    }
+    Ok(json!({
+        "links": rows,
+        "player_id": mine,
+        "guild_id": my_guild,
+        "helping": crate::mcp::crew_work::get().enabled,
+        "taking": crate::mcp::crew_work::taking_now(),
+        "helped": crate::mcp::crew_work::helped_total(),
+    }))
 }
 
 #[cfg(test)]

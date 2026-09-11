@@ -692,6 +692,26 @@ cat > "$FIX" <<'EOF'
       mine: [{ object_id: '5-2184', owner_player: '1-61', task: 'MINE',
                block_start: 2400000, difficulty_target: 14000, planet_id: '2-223' }],
     },
+    // The simple panel: two choices, then a flat list of who you are linked
+    // to. One guild link and one person, which is the state that exercises
+    // both row shapes.
+    crew_links: {
+      links: [
+        { crew_id: 'guild:0-1', kind: 'guild', subject: '0-1', name: 'My guild',
+          working: true, open_to_guild: 101, they_can_help_me: null, i_can_help_them: null },
+        { crew_id: 'player:1-61', kind: 'player', subject: '1-61', name: 'JPEG',
+          working: true, open_to_guild: null,
+          they_can_help_me: 'granted', i_can_help_them: 'denied' },
+      ],
+      player_id: '1-194', guild_id: '0-1', helping: true, taking: 1, helped: 12,
+    },
+    crew_help_guild: { ok: true, guild_id: '0-1', rank: 101 },
+    crew_help_player: { ok: true, player_id: '1-61' },
+    crew_stop: { ok: true },
+    mcp_player_search: { players: [
+      { player_id: '1-61', name: 'JPEG', pfp_attrs: null },
+      { player_id: '1-248', name: 'Phoniffer', pfp_attrs: null },
+    ] },
     crew_roster: {
       members: [
         { player_id: '1-61', name: 'JPEG', user_id: '@1-61:h', pfp_attrs: null, tag: 'SN',

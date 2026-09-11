@@ -1983,6 +1983,23 @@ pub async fn mcp_config_set_impl(
                 },
             }))
         }
+        // The desktop companion, off by default and gated whole: see
+        // `mcp::companion::CompanionConfig::enabled`. Turning it off also
+        // closes the window and rebuilds the menu bar without its entry.
+        "companion" => {
+            let enabled = payload
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .ok_or("companion: enabled (bool) required")?;
+            crate::mcp::companion::set_enabled(&app, enabled);
+            board_feed::push(
+                &app,
+                board_feed::Severity::Notice,
+                "companion",
+                format!("companion → {}", if enabled { "ENABLED" } else { "off" }),
+            );
+            Ok(json!({ "ok": true, "companion": { "enabled": enabled } }))
+        }
         other => Err(format!("unknown config domain '{other}'")),
     }
 }

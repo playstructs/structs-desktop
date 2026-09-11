@@ -156,12 +156,6 @@
   // row says which of the four roads the permission came down — owner, a
   // direct grant, or a guild rank — because they expire differently and a
   // single "allowed" could not explain tomorrow's failure.
-  var CREW_ROLES = [
-    { value: 'off', label: 'Paused' },
-    { value: 'help_only', label: 'Help only' },
-    { value: 'collect_only', label: 'Collect only' },
-    { value: 'work', label: 'Work' },
-  ];
   var AUTH_CHIP = {
     owner: ['Yours', 'ok'], granted: ['Granted', 'ok'],
     guild_rank: ['By rank', 'ok'], denied: ['Closed', 'muted'],
@@ -173,151 +167,91 @@
 
   T.register('crew', {
     label: 'Crew',
-    describe: function (p) { return 'Crew' + (p && p.room ? ' · ' + shortRoom(p.room) : ''); },
+    describe: function () { return 'Crew'; },
     cadenceMs: 20000,
-    params: [{ key: 'room', label: 'Crew room', kind: 'text', placeholder: '!crew:server' }],
     render: function (host, p, ctx) {
-      return Promise.all([invoke('crew_list'), invoke('crew_work_config')]).then(function (r) {
-        var d = r[0] || {}, w = r[1] || {};
-        var crews = d.crews || [];
+      return invoke('crew_links').then(function (d) {
+        var links = (d && d.links) || [];
         host.innerHTML = '';
-        if (!crews.length) {
-          host.appendChild(H.stateBlock('info', 'No crew yet.'));
-          host.appendChild(addCrewTicket(d, ctx));
-          return;
+
+        /* State first, and only when there is any.
+         *
+         * A card that opens with four tiles of zeroes teaches nobody
+         * anything. Before you have linked to anyone there is nothing true to
+         * say, so it says nothing and asks the question instead. */
+        if (links.length) {
+          host.appendChild(tiles([
+            ['helping', d.helping ? 'on' : 'off', null, d.helping ? 'live' : 'muted'],
+            ['doing now', H.fmtInt(d.taking || 0), null, (d.taking || 0) ? 'live' : 'muted'],
+            ['finished', H.fmtInt(d.helped || 0)],
+          ]));
         }
-        var room = (p && p.room) || crews[0].room_id;
-        var crew = crews.filter(function (c) { return c.room_id === room; })[0] || crews[0];
-        room = crew.room_id;
 
-        if (crews.length > 1) {
-          host.appendChild(H.navStrip(crews.map(function (c) {
-            return { key: c.room_id, label: c.name || shortRoom(c.room_id) };
-          }), room, function (k) { T.setParams(ctx.id, { room: k }); }));
-        }
+        cap(host, links.length ? 'Help someone else' : 'Who do you want to help?');
+        var pick = H.el('div', 'tm-doors-row');
+        host.appendChild(pick);
 
-        var cfg = w.config || {};
-        host.appendChild(tiles([
-          ['role', roleLabel(crew.role)],
-          ['scope', String(crew.scope || 'room')],
-          ['open to', crew.guild_rank_open ? 'guild ≤ ' + crew.guild_rank_open
-            : (crew.granted || []).length ? (crew.granted.length + ' granted') : 'nobody', null,
-            crew.guild_rank_open || (crew.granted || []).length ? 'ok' : 'muted'],
-          ['helping', cfg.enabled ? 'on' : 'off', null, cfg.enabled ? 'live' : 'muted'],
-        ]));
-
-        // What this machine is actually doing for the crew right now. A role
-        // set to Work with nothing being taken is the case worth seeing.
-        var slot = H.el('div', 'tm-cap');
-        host.appendChild(slot);
-        invoke('crew_work_preview', { roomId: room })
-          .then(function (pv) {
-            slot.innerHTML = '';
-            slot.appendChild(tiles([
-              ['epoch', String(pv.epoch == null ? '—' : pv.epoch)],
-              ['my slot', pv.slot == null ? 'not in crew' : String(pv.slot + 1) + ' of ' + (pv.members || []).length,
-                null, pv.slot == null ? 'bad' : null],
-              ['ripe', H.fmtInt((pv.ripe || 0))],
-              ['taking', H.fmtInt((pv.mine || []).length), null, (pv.mine || []).length ? 'live' : 'muted'],
-            ]));
-            (pv.mine || []).forEach(function (t) {
-              slot.appendChild(H.resultRow({
-                icon: t.task === 'REFINE' ? 'icon-refine' : 'icon-mine',
-                title: t.object_id, subtitle: String(t.task) + ' · ' + (t.owner_player || ''),
-                chips: [H.statTile('anchor', String(t.block_start))],
-              }));
-            });
-          })
-          .catch(function (e) { slot.innerHTML = ''; slot.appendChild(H.alertLine(String(e), 'icon-alert')); });
-
-        host.appendChild(H.field('This machine', H.selectBox(crew.role || 'off', CREW_ROLES, function (v) {
-          crew.role = v;
-          invoke('crew_save', { crew: crew }).then(function () { T.refresh(ctx.id, true); })
-            .catch(function (e) { Board.stamp && Board.stamp('crew: ' + e); });
-        })));
-        host.appendChild(H.field('Grinding for crews', H.checkbox(!!cfg.enabled, null, function (on) {
-          cfg.enabled = on;
-          invoke('crew_work_set', { config: cfg }).then(function () { T.refresh(ctx.id, true); })
-            .catch(function (e) { Board.stamp && Board.stamp('crew: ' + e); });
-        })));
-
-        // The roster: two directions, because a half-open crew is the normal
-        // state and one chip could not show it.
-        var people = H.el('div');
-        cap(host, 'Crew');
-        host.appendChild(people);
-        invoke('crew_roster', { guildId: crew.guild_id || d.guild_id || '', roomId: room })
-          .then(function (rr) {
-            people.innerHTML = '';
-            var ms = (rr && rr.members) || [];
-            if (!ms.length) { people.appendChild(H.stateBlock('info', 'Nobody else in this room plays.')); return; }
-            ms.forEach(function (m) {
-              /* The door follows the DIRECT grant, not "may they help at all".
-               * Somebody reaching our work down the guild-rank road has no
-               * per-person record to revoke — offering "Close my work" there
-               * would send a revoke of a grant that never existed and leave
-               * them still able to help, which is the worst of both answers. */
-              var granted = m.they_can_help_me === 'granted';
-              var pc = PC();
-              var row = H.resultRow({
-                portrait: pc ? pc.portrait(m.pfp_attrs) : null,
-                icon: pc ? null : 'icon-member',
-                title: String(m.name || m.player_id), subtitle: String(m.player_id),
-                chips: [authChip('they help me', m.they_can_help_me), authChip('i help them', m.i_can_help_them)],
-                action: doorRow([{
-                  label: granted ? 'Close my work' : 'Open my work', primary: !granted,
-                  onClick: function (a) {
-                    a.textContent = '…';
-                    invoke(granted ? 'crew_revoke' : 'crew_grant', { helperPlayerId: m.player_id, roomId: room })
-                      .then(function () { T.refresh(ctx.id, true); })
-                      .catch(function (e) { a.textContent = String(e); });
-                  },
-                }]),
-              });
-              people.appendChild(row);
-            });
-          })
-          .catch(function (e) { people.innerHTML = ''; people.appendChild(H.alertLine(String(e), 'icon-alert')); });
-
-        // Open to a whole guild at a rank — one transaction instead of one per
-        // crewmate, and the only sane shape for a guild of two hundred.
-        cap(host, 'Guild');
-        host.appendChild(ticket({
-          cta: crew.guild_rank_open ? 'Change rank' : 'Open to guild',
-          fields: [{ key: 'rank', label: 'Worst rank allowed', kind: 'amount',
-            value: String(crew.guild_rank_open || 1), placeholder: '1' }],
-          confirm: function (v) {
-            return { title: 'Open your proofs to the guild?', cta: 'Open', rows: [
-              ['Guild', String(crew.guild_id || d.guild_id || '?')],
-              ['Rank', String(v.rank || 1) + ' or better'],
-              ['Grants', 'hash_build, hash_mine, hash_refine, hash_raid'],
-            ] };
-          },
-          submit: function (v) {
-            return invoke('crew_open_guild', { guildId: crew.guild_id || d.guild_id || null,
-              rank: Number(v.rank) || 1, roomId: room });
-          },
-          done: function () { T.refresh(ctx.id, true); },
+        // ── My guild ──
+        // One button, one transaction. Everything that used to be a separate
+        // control — scope, role, switching the loop on — follows from the
+        // sentence "I want to help my guild" and is done for you.
+        pick.appendChild(armed({
+          label: 'My guild',
+          confirm: d.guild_id ? 'Open your work to ' + d.guild_id + '?' : 'You are not in a guild',
+          enabled: !!d.guild_id,
+          run: function () { return invoke('crew_help_guild', {}); },
+          after: function () { T.refresh(ctx.id, true); },
         }));
-        if (crew.guild_rank_open) {
-          host.appendChild(doorRow([{ label: 'Close to guild', onClick: function (a) {
-            a.textContent = '…';
-            invoke('crew_close_guild', { guildId: crew.guild_id || d.guild_id || null, roomId: room })
-              .then(function () { T.refresh(ctx.id, true); })
-              .catch(function (e) { a.textContent = String(e); });
-          } }]));
-        }
-        host.appendChild(addCrewTicket(d, ctx));
+
+        // ── A friend ──
+        var friendBox = H.el('div');
+        pick.appendChild(armed({
+          label: 'A friend',
+          toggle: function () {
+            friendBox.hidden = !friendBox.hidden;
+            if (!friendBox.hidden) friendPicker(friendBox, ctx);
+          },
+        }));
+        friendBox.hidden = true;
+        host.appendChild(friendBox);
+
+        if (!links.length) return;
+
+        // ── Who you are linked to ──
+        cap(host, 'Linked');
+        links.forEach(function (l) {
+          var guild = l.kind === 'guild';
+          var chips = guild
+            ? [H.statTile('open to', 'rank ' + (l.open_to_guild || '?'), null, 'ok')]
+            : [authChip('they help me', l.they_can_help_me),
+               authChip('i help them', l.i_can_help_them)];
+          var pc = PC();
+          host.appendChild(H.resultRow({
+            portrait: guild || !pc ? null : pc.portrait(null),
+            icon: guild ? 'icon-guild' : (pc ? null : 'icon-member'),
+            title: String(l.name || l.subject),
+            subtitle: guild ? 'your whole guild' : String(l.subject),
+            chips: chips,
+            action: armed({
+              label: 'Stop',
+              destructive: true,
+              confirm: 'Close this and stop helping?',
+              run: function () { return invoke('crew_stop', { crewId: l.crew_id }); },
+              after: function () { T.refresh(ctx.id, true); },
+            }),
+          }));
+        });
       }).catch(function (e) { fail(host, 'crew', e); });
     },
   });
 
   /* Money, on the game's own ladder.
    *
-   * `90 ualpha` is a denom string and a raw integer; the game says `90μg`
+   * `90 ualpha` is a denom string and a raw integer; the game says `90\u03bcg`
    * everywhere else and a card that says otherwise reads as a different
    * application. A guild token has no ladder, so it stays a count — but it
-   * still gets a name rather than its wire denom. */
+   * still gets a name rather than its wire denom.
+   */
   function denomLabel(denom) {
     var d = String(denom || '');
     return d === 'ualpha' ? 'Alpha' : d.indexOf('uguild.') === 0 ? 'Guild token' : d;
@@ -335,48 +269,93 @@
     var cut = s.indexOf(':');
     return (cut > 0 ? s.slice(0, cut) : s).replace(/^!/, '');
   }
-  function roleLabel(v) {
-    var m = CREW_ROLES.filter(function (r) { return r.value === v; })[0];
-    return m ? m.label : 'Paused';
+
+  /* A button that asks before it acts, in place.
+   *
+   * Deliberately NOT `confirmModal`: a full-screen scrim for "open your work
+   * to your guild" is heavier than the decision, and the modal did not appear
+   * at all when the crew card was driven in its own popped-out window
+   * (reproduced three times against the running app, 2026-09-11; the same
+   * click opens it in the jsdom harness, so the cause is the window, not this
+   * code). An inline second click needs no overlay to be right.
+   */
+  function armed(spec) {
+    var a = H.el('a', 'sui-screen-btn ' + (spec.destructive ? 'sui-mod-destructive' : 'sui-mod-primary'));
+    a.href = 'javascript:void(0)';
+    var label = H.el('span', null, spec.label);
+    a.appendChild(label);
+    if (spec.enabled === false) {
+      a.classList.add('is-disabled');
+      a.title = spec.confirm || '';
+      return a;
+    }
+    var armedNow = false, timer = null;
+    function disarm() {
+      armedNow = false;
+      label.textContent = spec.label;
+      a.classList.remove('sui-mod-destructive');
+      if (spec.destructive) a.classList.add('sui-mod-destructive');
+      if (timer) { clearTimeout(timer); timer = null; }
+    }
+    a.addEventListener('click', function () {
+      if (spec.toggle) { spec.toggle(); return; }
+      if (!armedNow) {
+        armedNow = true;
+        label.textContent = spec.confirm || 'Sure?';
+        // Arming that never expires is a button that stays a trap. Half a
+        // minute is long enough to read it and short enough to forget safely.
+        timer = setTimeout(disarm, 30000);
+        return;
+      }
+      disarm();
+      label.textContent = 'Working…';
+      spec.run()
+        .then(function () { if (spec.after) spec.after(); })
+        .catch(function (e) { label.textContent = String(e); });
+    });
+    return a;
   }
 
-  // Turning a room into a crew is local: it writes a config file and sends
-  // nothing. Opening your work to the people in it is the separate, signed act
-  // above, which is why they are not one button.
-  function addCrewTicket(d, ctx) {
-    var box = H.el('div');
-    cap(box, 'Add a crew');
-    invoke('matrix_rooms', { guildId: d.guild_id || '' })
-      .then(function (r) {
-        var rooms = (r && r.rooms) || [];
-        if (!rooms.length) { box.appendChild(H.stateBlock('info', 'No Comms rooms joined.')); return; }
-        box.appendChild(ticket({
-          cta: 'Make a crew',
-          fields: [{ key: 'room', label: 'Room', kind: 'choice',
-            options: rooms.map(function (rm) {
-              return { value: rm.room_id, label: String(rm.name || shortRoom(rm.room_id)) };
-            }) }],
-          confirm: function (v) {
-            return { title: 'Make this room a crew?', cta: 'Make a crew', rows: [
-              ['Room', shortRoom(v.room)],
-              ['Signs', 'nothing — this is a local setting'],
-            ] };
-          },
-          submit: function (v) {
-            if (!v.room) return Promise.reject('choose a room');
-            var name = (rooms.filter(function (rm) { return rm.room_id === v.room; })[0] || {}).name;
-            return invoke('crew_save', { crew: {
-              room_id: v.room, guild_id: d.guild_id || '', name: String(name || shortRoom(v.room)),
-              role: 'off', scope: 'room', chosen: [], granted: [], guild_rank_open: null,
-              pay: { enabled: false, denom: 'ualpha', rate_per_difficulty: 0,
-                     epoch_secs: 3600, epoch_cap: 0, per_helper_cap: 0 },
-            } });
-          },
-          done: function () { T.refresh(ctx.id, true); },
+  /* Choosing a person. The same search the Pay card uses, because "who" is
+   * the same question here and a second way to answer it is a second thing to
+   * learn. */
+  function friendPicker(box, ctx) {
+    box.innerHTML = '';
+    var input = H.textBox('', 'name or 1-61');
+    var results = H.el('div');
+    box.appendChild(H.field('Who', input));
+    box.appendChild(results);
+    var timer = null;
+    function search() {
+      var q = String(T.readControl(input) || '').trim();
+      if (q.length < 2) { results.innerHTML = ''; return; }
+      // A whole id needs no search: it IS the answer.
+      if (/^1-\d+$/.test(q)) { show([{ player_id: q, name: q }]); return; }
+      invoke('mcp_player_search', { query: q })
+        .then(function (r) { show((r && (r.players || r.results)) || []); })
+        .catch(function (e) { results.innerHTML = ''; results.appendChild(H.alertLine(String(e), 'icon-alert')); });
+    }
+    function show(rows) {
+      results.innerHTML = '';
+      rows.slice(0, 6).forEach(function (r) {
+        var pc = PC();
+        results.appendChild(H.resultRow({
+          portrait: pc ? pc.portrait(r.pfp || r.pfp_attrs) : null,
+          icon: pc ? null : 'icon-member',
+          title: String(r.name || r.player_id), subtitle: String(r.player_id),
+          action: armed({
+            label: 'Help them',
+            confirm: 'Open your work to ' + (r.name || r.player_id) + '?',
+            run: function () { return invoke('crew_help_player', { playerId: r.player_id }); },
+            after: function () { T.refresh(ctx.id, true); },
+          }),
         }));
-      })
-      .catch(function () { box.appendChild(H.stateBlock('info', 'Comms is not connected.')); });
-    return box;
+      });
+    }
+    input.addEventListener('input', function () {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(search, 250);
+    });
   }
 
   // ── CREW PAY ──────────────────────────────────────────────────────────

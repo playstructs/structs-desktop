@@ -73,7 +73,7 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   dom.window.close();
 }
 
-// ── The crew card ────────────────────────────────────────────────────────
+// ── The crew card: two choices, and nothing else to learn ────────────────
 {
   const dom = await load('?view=terminal');
   const w = dom.window, d = w.document;
@@ -85,50 +85,48 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
     return c && text(c).length > 4 ? c : null;
   });
   check('the crew card renders', host !== null);
-  const body = text(host);
+
   if (!host) { console.log('  (skipping the rest: nothing rendered)'); }
   else {
+  const body = text(host);
+  const buttons = () => [...host.querySelectorAll('a.sui-screen-btn')].map((b) => text(b));
 
-  check('the crew names its room', /Night shift/.test(body), body.slice(0, 160));
-  check('…and says what this machine is doing for it', /Work/.test(body));
+  /* The whole point of the rewrite. The panel used to open by asking which
+   * Matrix ROOM to turn into a crew — chat plumbing in front of a game
+   * decision — and it was reported as extremely confusing. It now asks the
+   * only question there is, and offers the only two answers. */
+  check('it asks who you want to help, not which room to configure',
+    /help/i.test(body) && !/room/i.test(body), body.slice(0, 240));
+  check('…and the two answers are the guild and a person',
+    buttons().some((b) => /My guild/.test(b)) && buttons().some((b) => /A friend/.test(b)),
+    buttons().join(' | '));
+  check('…with no role, scope, epoch or threshold to choose first',
+    !/(scope|epoch|slot|threshold|ripe|role)/i.test(body), body.slice(0, 300));
 
-  // The assignment, which is the whole mechanism: which slot we hold in the
-  // rotation and what that gives us this epoch. A card that showed only
-  // "helping: on" could not tell an idle crew from a working one.
-  await until(() => /my slot/.test(text(host)));
-  check('…and which slot of the rotation is ours', /my slot/.test(text(host)) && /2 of 2/.test(text(host)),
-    text(host).slice(0, 400));
-  check('…and the task it takes from that slot', /5-2184/.test(text(host)));
+  // Nothing that spends or signs may fire on a single click.
+  const guild = [...host.querySelectorAll('a.sui-screen-btn')].find((b) => /My guild/.test(text(b)));
+  const before = (w.__HARNESS_CALLS__ || []).length;
+  guild.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('one click on a signing action only ARMS it',
+    (w.__HARNESS_CALLS__ || []).slice(before).every((c) => c.cmd !== 'crew_help_guild')
+      && /\?/.test(text(guild)),
+    text(guild));
+  guild.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'crew_help_guild'));
+  check('…and the second click does it', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'crew_help_guild'));
 
-  // Two directions. The fixture is deliberately half-open: 1-61 may finish our
-  // work, we may not finish theirs. One chip would have to pick a side.
-  await until(() => /JPEG/.test(text(host)));
-  const rows = [...host.querySelectorAll('.sui-result, .tm-row, [class*="result"]')]
-    .map((r) => text(r)).filter((t) => /JPEG/.test(t));
-  check('a crewmate shows BOTH directions of permission', rows.length > 0
-    && /they help me/i.test(rows[0]) && /i help them/i.test(rows[0]), rows[0]);
-  check('…granted reads as granted, and closed as closed', rows.length > 0
-    && /Granted/.test(rows[0]) && /Closed/.test(rows[0]), rows[0]);
-  check('…and a rank grant says it came from a rank, not from a grant',
-    /By rank/.test(text(host)), text(host).slice(0, 600));
+  /* The confirm is INLINE. `confirmModal` did not appear at all when this card
+   * was driven in its own popped-out window against the running app, so the
+   * primary actions must not depend on it. */
+  check('the confirm needs no overlay', d.querySelector('.ops-modal-overlay') === null);
 
-  // The door on an open link must CLOSE it. Offering "Open my work" to
-  // somebody who already has it is how a grant gets sent twice.
-  const jpegRow = [...host.querySelectorAll('*')].find(
-    (n) => n.className && String(n.className).includes('result') && /JPEG/.test(text(n)));
-  const door = jpegRow && [...jpegRow.querySelectorAll('a.sui-screen-btn')][0];
-  check('an already-open link offers to close, not to open again',
-    door && /Close my work/.test(text(door)), door ? text(door) : 'no door');
-
-  /* Somebody reaching our work by RANK has no per-person grant to withdraw.
-   * Offering "Close my work" there would send a revoke of a record that never
-   * existed and leave them able to help anyway — a button that reports
-   * success and changes nothing. */
-  const rankRow = [...host.querySelectorAll('*')].find(
-    (n) => n.className && String(n.className).includes('result') && /Phoniffer/.test(text(n)));
-  const rankDoor = rankRow && [...rankRow.querySelectorAll('a.sui-screen-btn')][0];
-  check('a rank-granted crewmate is not offered a revoke that would do nothing',
-    rankDoor && /Open my work/.test(text(rankDoor)), rankDoor ? text(rankDoor) : 'no door');
+  // The list: a guild link and a person read differently, and a person shows
+  // both directions because a half-open link is the normal state.
+  check('a guild link says it is the whole guild',
+    /My guild/.test(body) && /whole guild/.test(body), body.slice(0, 400));
+  check('a person shows both directions',
+    /JPEG/.test(body) && /they help me/i.test(body) && /i help them/i.test(body), body.slice(0, 600));
+  check('…and every link can be stopped', buttons().some((b) => /Stop/.test(b)));
   }
   dom.window.close();
 }
