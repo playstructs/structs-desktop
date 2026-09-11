@@ -2,6 +2,7 @@ pub mod cpu;
 pub mod difficulty;
 pub mod gpu;
 pub mod pool;
+pub mod retune;
 pub mod scheduler;
 pub mod tuner;
 pub mod types;
@@ -164,6 +165,12 @@ static VPLAYER_HASHES: std::sync::LazyLock<dashmap::DashMap<String, (u32, crate:
 
 pub fn register_vplayer_hash(object_id: String, index: u32, task_type: crate::mcp::types::TaskType) {
     VPLAYER_HASHES.insert(object_id, (index, task_type));
+}
+
+/// Who signs this object's completion, if anyone. Read before a restart so the
+/// registration can be carried across it (see `retune`).
+pub fn vplayer_hash(object_id: &str) -> Option<(u32, crate::mcp::types::TaskType)> {
+    VPLAYER_HASHES.get(object_id).map(|v| *v)
 }
 
 // ── Borrowed proof-of-work ──
@@ -717,6 +724,41 @@ mod anchor_tests {
         assert_eq!(anchor_field_for(TaskType::Raid), None);
         assert_eq!(TaskType::parse("nonsense"), None, "an unknown kind never reaches the anchor table");
     }
+
+    /// A task restarted under the same pid (the watchdog's stall remedy, a raid
+    /// retune) is registered BEFORE the old worker unwinds into `reap_self`.
+    /// `reap_self` used to drop the vplayer mapping unconditionally, so the old
+    /// worker silently unregistered the REPLACEMENT's completion signer: the
+    /// new proof solved, `maybe_complete_virtual` found no entry and returned,
+    /// and the work was thrown away with nothing logged.
+    #[test]
+    fn a_restarted_task_keeps_its_vplayer_registration() {
+        use crate::hasher::types::{TaskHandle, TaskParams, TaskRegistry};
+        use crate::mcp::types::TaskType;
+        use std::sync::Arc;
+
+        let pid = "9-61-reap-test";
+        let registry = Arc::new(TaskRegistry::new());
+        let old = Arc::new(TaskHandle::new(TaskParams::for_raid(pid, "2-855", 2_000_000, 238)));
+        let new = Arc::new(TaskHandle::new(TaskParams::for_raid(pid, "2-855", 2_000_000, 213)));
+
+        // The replacement is what the registry holds; the old handle is the one
+        // whose worker is unwinding.
+        registry.tasks.insert(pid.to_string(), new.clone());
+        super::register_vplayer_hash(pid.to_string(), 7, TaskType::Raid);
+
+        super::reap_self(&registry, pid, &old);
+        assert!(
+            super::vplayer_hash(pid).is_some(),
+            "the superseded worker must not unregister the replacement's signer"
+        );
+        assert!(registry.tasks.contains_key(pid), "nor evict the replacement");
+
+        // The genuine owner's reap still cleans up.
+        super::reap_self(&registry, pid, &new);
+        assert!(super::vplayer_hash(pid).is_none());
+        assert!(!registry.tasks.contains_key(pid));
+    }
 }
 
 pub fn ensure_gpu_init() -> bool {
@@ -790,9 +832,16 @@ fn reap_self(registry: &Arc<TaskRegistry>, pid: &str, handle: &Arc<TaskHandle>) 
         .is_some_and(|e| Arc::ptr_eq(e.value(), handle));
     if is_current {
         registry.tasks.remove(pid);
+        // Drop any orphaned vplayer-hash mapping (normally removed on
+        // completion) — under the SAME guard as the registry slot, never
+        // unconditionally. A task restarted for this pid (the watchdog's stall
+        // remedy, a raid retune) is registered BEFORE this worker unwinds, so
+        // an unguarded remove silently unregisters the REPLACEMENT: it solves,
+        // `maybe_complete_virtual` finds no entry, and the proof is never
+        // submitted. Silent loss, and it applied to every task class.
+        VPLAYER_HASHES.remove(pid);
+        retune::forget(pid);
     }
-    // Drop any orphaned vplayer-hash mapping (normally removed on completion).
-    VPLAYER_HASHES.remove(pid);
 }
 
 #[tauri::command]

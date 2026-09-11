@@ -312,6 +312,11 @@ pub(crate) mod frame {
         pub planet_id: String,
         #[serde(default, deserialize_with = "numeric")]
         pub planetary_shield: Option<u64>,
+        /// The chain sends the previous value alongside the new one, so a
+        /// frame carries its own delta — which is the size of the
+        /// contribution that was just built, onlined, or destroyed.
+        #[serde(default, deserialize_with = "numeric")]
+        pub planetary_shield_old: Option<u64>,
     }
     #[derive(Deserialize)]
     pub struct FleetArrive {
@@ -2192,6 +2197,14 @@ mod tests {
         let r = json!({"block_height":2436011,"block":2436011,"planet_id":"2-223"});
         assert_eq!(s.apply("block_raid_start", "structs.planet.2-223.1-194", &r), Applied::Changed);
         assert_eq!(s.planet_entity("2-223").unwrap()["planetAttributes"]["blockStartRaid"], "2436011");
+
+        // The frame carries its own delta. A raid's proof difficulty decays
+        // over exactly this number, so the size of the move is the size of the
+        // contribution that just appeared or died — worth being able to name in
+        // a log line (see hasher::retune).
+        let f: frame::Shield = serde_json::from_value(d).unwrap();
+        assert_eq!(f.planetary_shield, Some(50));
+        assert_eq!(f.planetary_shield_old, Some(25));
     }
 
     #[test]

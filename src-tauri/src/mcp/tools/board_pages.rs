@@ -228,6 +228,44 @@ pub async fn mcp_player_search(query: String) -> Result<Value, String> {
                 f("pfpClientRenderAttributes"), f("planetId"), f("fleetId")) ] }));
         }
     }
+    /* Local first — and almost always last.
+     *
+     * The whole galaxy's names are in the Comms directory (every guild's
+     * roster, restored from disk at launch, refreshed every fifteen
+     * minutes), and the perception snapshot knows each player's planet and
+     * fleet. So `record jpeg` is a scan of a few thousand strings, not the
+     * guild API's search plus six chain reads that made it feel broken. The
+     * network path below is only for a directory that is still empty. */
+    let local = crate::matrix::directory::search(q, 12);
+    if !local.is_empty() {
+        let rows: Vec<Value> = local
+            .into_iter()
+            .map(|(id, ident)| {
+                let (planet, fleet) = crate::mcp::perception::with_snapshot(|s| {
+                    s.players.get(&id).map(|p| {
+                        let t = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        (t("planetId"), t("fleetId"))
+                    })
+                })
+                .flatten()
+                .unwrap_or_default();
+                fn some(s: &str) -> Option<&str> {
+                    if s.is_empty() { None } else { Some(s) }
+                }
+                hit(
+                    &id,
+                    some(&ident.username),
+                    some(&ident.guild_id),
+                    ident.pfp_attrs.as_deref(),
+                    some(&planet),
+                    some(&fleet),
+                )
+            })
+            .collect();
+        // Keep the directory fresh without making this search wait for it.
+        tokio::spawn(crate::matrix::directory::ensure_fresh());
+        return Ok(json!({ "results": rows }));
+    }
     /* ONE shape out of both branches.
      *
      * The guild API's search DTO keys the player as `id`, while the chain

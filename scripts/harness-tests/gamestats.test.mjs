@@ -142,6 +142,38 @@ async function until(fn, ms = 5000) {
   check('hover shows a tooltip with a value', !plot.querySelector('.gs-tip').hidden && !!plot.querySelector('.gs-tip .ops-val'));
   plot.dispatchEvent(new w.Event('pointerleave'));
   check('…that hides on leave', plot.querySelector('.gs-tip').hidden);
+
+  /* …and hides itself even when `pointerleave` NEVER ARRIVES.
+   *
+   * That event does not fire reliably when the pointer leaves the window
+   * rather than the plot — off to another app, or another Structs window —
+   * and the readout then sat on a live chart indefinitely, still showing
+   * whatever the mouse last happened to be over. Reported 2026-09-11.
+   */
+  w.Board._gamestats.tipIdleMs = 40;
+  plot.dispatchEvent(new w.Event('pointermove', { bubbles: true }));
+  check('a readout is up while the pointer is moving', !plot.querySelector('.gs-tip').hidden);
+  await new Promise((r) => setTimeout(r, 120));
+  check('…and expires on its own when the pointer goes away without a leave event',
+    plot.querySelector('.gs-tip').hidden);
+
+  // Movement keeps it alive: a hand still on the mouse must not lose it.
+  plot.dispatchEvent(new w.Event('pointermove', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 25));
+  plot.dispatchEvent(new w.Event('pointermove', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 25));
+  check('…while continued movement keeps it up', !plot.querySelector('.gs-tip').hidden);
+
+  /* Keyboard focus arms nothing. A readout that vanished while you were still
+   * tabbed into the chart would be a different bug. */
+  plot.dispatchEvent(new w.Event('pointerleave'));
+  plot.dispatchEvent(new w.Event('focus'));
+  check('keyboard focus shows a readout', !plot.querySelector('.gs-tip').hidden);
+  await new Promise((r) => setTimeout(r, 120));
+  check('…and it stays while the chart is still focused', !plot.querySelector('.gs-tip').hidden);
+  plot.dispatchEvent(new w.Event('blur'));
+  check('…until blur', plot.querySelector('.gs-tip').hidden);
+  w.Board._gamestats.tipIdleMs = 2500;
   check('the engine card shows the five battery levels as columns', body.querySelectorAll('#gs-engine .gs-col').length === 6);
   check('the ore card has a meter of planets with ore', /planets with ore left/.test(body.querySelector('#gs-ore').textContent) && !!body.querySelector('#gs-ore .gs-meter-fill'));
   check('the raid card shows the funnel and its top gate', /484 → 53/.test(body.querySelector('#gs-raids').textContent) && /ore/.test(body.querySelector('#gs-raids').textContent));

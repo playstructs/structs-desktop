@@ -1872,9 +1872,20 @@ fn proof_running(app: &tauri::AppHandle, fleet_id: &str) -> bool {
 /// on a `work` record, which is where the game's own client reads it
 /// (`TaskStateFactory.initTaskFromWork`) — so read it rather than derive it.
 ///
-/// It matters that this is read and not computed from the live planet: the
-/// value is frozen when the raid arms, while `planetaryShield` keeps moving.
-/// The shield is only a fallback for when the feed is unavailable.
+/// The value is **live, not frozen at arm time** — a claim that stood in this
+/// comment for weeks and is exactly backwards. Verified 2026-08-07 by
+/// destroying one Orbital Shield Generator mid-raid: the chain's RAID `work`
+/// record went 238 → 213, precisely that struct's −25 contribution. It has to
+/// be live, or `shield_grind_round` thirty lines above — which spends shots on
+/// the defender's shield structs specifically to shorten our own proof — would
+/// be pointless.
+///
+/// So this read is the START of the story, not the end: a task that begins
+/// grinding here is frozen against a number that keeps moving, and
+/// [`crate::hasher::retune`] is what keeps it tracking. Reading the work record
+/// rather than the planet still matters at start time (it is the chain's own
+/// answer); the shield is the fallback when the feed is unavailable, and the
+/// two agree.
 async fn raid_difficulty_target(
     client: &CosmosClient,
     raider_player: &str,
@@ -2126,6 +2137,42 @@ mod tests {
         assert!(calculate_difficulty(100, SHIELD) > calculate_difficulty(100, BAD));
         // And it does eventually decay to 1, once age reaches the shield.
         assert_eq!(calculate_difficulty(SHIELD, SHIELD), 1);
+    }
+
+    /// The range is LIVE, not frozen when the raid arms — the fact the doc
+    /// comment on `raid_difficulty_target` got backwards, and the reason
+    /// `shield_grind_round` spends shots on shield structs at all. Observed
+    /// 2026-08-07: one Orbital Shield Generator destroyed mid-raid moved the
+    /// chain's RAID work record 238 → 213, exactly its −25 contribution.
+    ///
+    /// Both directions matter, and they are not symmetric. A shield that FALLS
+    /// leaves our held proof valid but needlessly strong; one that RISES makes
+    /// it too weak to be accepted at all. `hasher::retune` is what acts on this.
+    #[test]
+    fn the_decay_range_is_live_so_a_shield_kill_shortens_our_own_proof() {
+        use crate::hasher::difficulty::calculate_difficulty;
+        const ARMED: u64 = 238; // at arm time
+        const AFTER_KILL: u64 = 213; // one Orbital Shield Generator later
+
+        // Killing a contributor is a strictly easier proof at every age that
+        // still asks for work.
+        for age in [4u64, 20, 100, 200] {
+            assert!(
+                calculate_difficulty(age, AFTER_KILL) <= calculate_difficulty(age, ARMED),
+                "age {age}: a smaller shield must never be the harder proof"
+            );
+        }
+        assert!(calculate_difficulty(100, AFTER_KILL) < calculate_difficulty(100, ARMED));
+
+        // And the dangerous direction: a defender who BUILDS raises the
+        // chain's requirement above the one a frozen task is solving for, so
+        // the proof it finds is rejected.
+        let held = calculate_difficulty(100, ARMED);
+        let chain_wants = calculate_difficulty(100, ARMED + 50); // an Ore Bunker
+        assert!(
+            chain_wants > held,
+            "a rebuilt shield must demand more than the range we started with"
+        );
     }
 
     /// The shape the crust guard exists for, held onto for the operator who

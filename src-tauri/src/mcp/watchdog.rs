@@ -112,6 +112,18 @@ fn note_hash_restart(id: &str) -> u32 {
 
 static HASH_PROGRESS: LazyLock<Mutex<HashMap<String, (u64, f64)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A task was re-issued in place under this pid: judge it on its own evidence.
+///
+/// The stall detector remembers `(iterations, when they last changed)`, and a
+/// re-issue carries `iterations` forward unchanged — so without this the fresh
+/// task inherits a progress entry that already looks frozen and can be reaped
+/// on its predecessor's record. Deliberately NOT `note_hash_restart`: that
+/// count is the give-up budget for a dead engine, and a healthy raid proof
+/// tracking a moving planetary shield is not a failure.
+pub fn note_hash_restarted(id: &str) {
+    lock_recover(&HASH_PROGRESS).remove(id);
+}
 /// finding key (e.g. "wedged:auto_build", "sync") -> consecutive checks the
 /// condition survived a remediation attempt.
 static REMEDY_FAILS: LazyLock<Mutex<HashMap<String, u32>>> =

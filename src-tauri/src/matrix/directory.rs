@@ -300,6 +300,46 @@ pub fn name_belongs_to_a_player(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Players whose id or name matches `q`, best first: the exact id, the exact
+/// name, names that start with it, names that contain it, then ids that
+/// start with it. A scan of the whole galaxy in memory — a few thousand
+/// strings — so a keystroke in the palette is answered in microseconds,
+/// where it used to wait on the guild API's search and six chain reads.
+pub fn search(q: &str, limit: usize) -> Vec<(String, Ident)> {
+    ensure_restored();
+    let want = q.trim().to_lowercase();
+    if want.is_empty() {
+        return Vec::new();
+    }
+    let Ok(map) = PLAYERS.read() else { return Vec::new() };
+    let mut scored: Vec<(u8, String, Ident)> = map
+        .iter()
+        .filter_map(|(id, i)| {
+            let name = i.username.to_lowercase();
+            let rank = if *id == want {
+                0
+            } else if name == want {
+                1
+            } else if name.starts_with(&want) {
+                2
+            } else if name.contains(&want) {
+                3
+            } else if id.starts_with(&want) {
+                4
+            } else {
+                return None;
+            };
+            Some((rank, id.clone(), i.clone()))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.2.username.to_lowercase().cmp(&b.2.username.to_lowercase()))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    scored.into_iter().take(limit).map(|(_, id, i)| (id, i)).collect()
+}
+
 pub fn all() -> Vec<(String, Ident)> {
     PLAYERS
         .read()
@@ -384,6 +424,21 @@ pub fn matrix_id_for(player_id: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn search_ranks_exact_then_prefix_then_substring_and_never_leaves_the_process() {
+        for (id, name) in [("1-777001", "Sea-Rat"), ("1-777002", "Ratchet"), ("1-777003", "rat"), ("1-777004", "Pirate")] {
+            remember_for_test(id, Ident { username: name.into(), tag: "T".into(), guild_id: "0-9".into(), pfp_attrs: None });
+        }
+        let ids: Vec<String> = search("rat", 10).into_iter().map(|(id, _)| id).filter(|id| id.starts_with("1-7770")).collect();
+        assert_eq!(ids, vec!["1-777003", "1-777002", "1-777004", "1-777001"], "exact, then prefix, then substrings by name");
+        assert_eq!(search("1-777004", 10)[0].0, "1-777004", "an id is found by its id");
+        assert!(search("", 10).is_empty());
+        assert_eq!(search("RATCH", 1).len(), 1, "the limit holds and case does not matter");
+        for id in ["1-777001", "1-777002", "1-777003", "1-777004"] {
+            forget_for_test(id);
+        }
+    }
+
     use super::*;
 
     #[test]

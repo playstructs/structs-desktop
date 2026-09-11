@@ -285,4 +285,30 @@ mod checkpoint_tests {
         let tries = 16f64.powi(DIFFICULTY_START as i32);
         assert!(tries / 40_000_000.0 < 5.0 * 60.0, "{tries} tries at difficulty {DIFFICULTY_START}");
     }
+
+    /// The invariant the whole raid-retune feature rests on, and nothing pinned
+    /// it before: `difficulty_target` is a decay RANGE, so a BIGGER range is a
+    /// HARDER proof at any given age. A raid's range is the target planet's
+    /// live `planetaryShield` — which is why a defender who builds a shield
+    /// struct mid-raid invalidates the attacker's in-flight proof, and why
+    /// killing one shortens it.
+    #[test]
+    fn a_bigger_range_is_a_harder_proof() {
+        // 238 and 213 are a real observation: one Orbital Shield Generator
+        // (contribution 25) destroyed mid-raid, 2026-08-07.
+        for age in [2u64, 10, 50, 125, 238, 1_000, 10_000, 100_000] {
+            assert!(
+                calculate_difficulty(age, 238) >= calculate_difficulty(age, 213),
+                "age {age}: a bigger shield must never be the easier proof"
+            );
+        }
+        // And strictly harder somewhere in the range that matters.
+        assert!(calculate_difficulty(100, 238) > calculate_difficulty(100, 213));
+        // Below age 2 the curve is pinned regardless of range: you cannot
+        // complete on the block you initiated.
+        for range in [2u64, 213, 238, 28_000] {
+            assert_eq!(calculate_difficulty(0, range), 64);
+            assert_eq!(calculate_difficulty(1, range), 64);
+        }
+    }
 }

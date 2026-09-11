@@ -469,6 +469,14 @@ pub(crate) fn task_summary(snapshot: &crate::hasher::types::TaskStateSnapshot) -
         "eta": eta,
         "current_difficulty": current_difficulty,
         "difficulty_target": snapshot.difficulty_target,
+        // A RAID's decay range is the target planet's LIVE shield, so unlike
+        // every other task type its `difficulty_target` moves under it. Say so,
+        // and say how often it has — a frozen count on a contested planet means
+        // the retune is not seeing the shield.
+        "target_source": (snapshot.task_type.as_deref() == Some("RAID"))
+            .then_some("live planetary shield"),
+        "retunes": (snapshot.task_type.as_deref() == Some("RAID"))
+            .then(|| crate::hasher::retune::retunes_for(&snapshot.object_id)),
         "hashrate": hashrate_display,
         "hashrate_per_ms": snapshot.estimated_hashrate,
         "iterations": snapshot.iterations,

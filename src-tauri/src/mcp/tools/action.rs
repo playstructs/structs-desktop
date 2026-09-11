@@ -736,12 +736,7 @@ async fn action_raid(
         ))];
     }
 
-    let (fleet_id, difficulty_target) = {
-        let gs = GAME_STATE.read().unwrap();
-        let fleet_id = gs.fleet_id.clone().unwrap_or_default();
-        let difficulty = gs.get_difficulty_for_struct(&fleet_id, "RAID").unwrap_or(700);
-        (fleet_id, difficulty)
-    };
+    let fleet_id = GAME_STATE.read().unwrap().fleet_id.clone().unwrap_or_default();
     if fleet_id.is_empty() {
         return vec![Content::text("Error: No fleet found for this player.")];
     }
@@ -751,14 +746,26 @@ async fn action_raid(
     // down/absent — NOT the current block (docs: {fleetId}@{planetId}RAID{blockStart}NONCE).
     // 0 ⇒ the planet isn't raidable (chain error "raid_clock_unset"); grinding
     // at any other block is wasted (rejected, or trivial-difficulty-collapse guard).
-    let block_height = {
+    //
+    // The same read supplies the proof's decay RANGE. It is the planet's live
+    // `planetaryShield`, not a per-type constant: this used to be
+    // `get_difficulty_for_struct(&fleet_id, "RAID").unwrap_or(700)`, which
+    // could only ever be 700 — that function returns `None` for RAID, and a
+    // fleet id is not in `GameState.structs` anyway. 700 is the Ore
+    // Extractor/Refinery BUILD range; against a shield above it the client
+    // believes the requirement has decayed further than the chain does and
+    // every proof is rejected with `work failure for input (…)`. Exactly the
+    // `raid_difficulty: 4` failure documented in mcp/auto_raid.rs.
+    let (block_height, difficulty_target) = {
         let client = crate::mcp::cosmos_client::CosmosClient::new();
         match client.query_entity("planet", target_id).await {
-            Ok(v) => v
-                .get("planetAttributes")
-                .and_then(|x| x.get("blockStartRaid"))
-                .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
-                .unwrap_or(0),
+            Ok(v) => {
+                let view = crate::mcp::types::EntityView::new(&v);
+                (
+                    view.planet_block("blockStartRaid").get(),
+                    view.planet_attr_u64("planetaryShield").max(2),
+                )
+            }
             Err(e) => return vec![Content::text(format!("raid: planet {} lookup failed: {}", target_id, e))],
         }
     };

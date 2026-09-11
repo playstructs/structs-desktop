@@ -48,6 +48,10 @@
   // it draws is fixed by the dataviz method: a 2px line per series, a zero
   // baseline for counts (a chart that autoscales 4→5 to its full height
   // turns noise into a swing), the min/max/last figures at the edges, time
+  /* How long a hover readout survives a motionless pointer. Long enough to
+   * read three series, short enough that a chart left alone goes clean. */
+  var TIP_IDLE_MS = 2500;
+
   // ticks along the baseline, gaps broken rather than bridged, and a hover
   // layer — crosshair plus one tooltip listing every series at that X. Text
   // lives in HTML beside the stretched SVG so it never distorts, and it wears
@@ -277,8 +281,34 @@
       tip.style.left = (f * 100) + '%';
       tip.classList.toggle('gs-tip-flip', f > 0.6);
     }
-    function hide() { cross.style.display = 'none'; tip.hidden = true; }
-    plot.addEventListener('pointermove', function (e) { showAt(indexAt(e.clientX)); });
+    function hide() {
+      cross.style.display = 'none';
+      tip.hidden = true;
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    }
+
+    /* The readout must not outlive the pointer.
+     *
+     * `pointerleave` covers the pointer crossing the plot's edge and is the
+     * ordinary case — but it does NOT fire reliably when the pointer leaves
+     * the WINDOW entirely (to another app, to another Structs window), and
+     * the tooltip then sat on a live chart indefinitely, still showing the
+     * reading from wherever the mouse happened to be. Reported 2026-09-11.
+     *
+     * So it also expires on its own. The timer is armed by pointer movement
+     * ONLY, and restarts on each move: a hand still on the mouse keeps the
+     * readout up, a hand that has gone loses it a moment later. Keyboard
+     * focus deliberately arms nothing — that readout is dismissed by blur,
+     * and a tooltip that vanished while you were still tabbed into the chart
+     * would be a different bug.
+     */
+    var idleTimer = null;
+    function armIdle() {
+      if (idleTimer) clearTimeout(idleTimer);
+      var ms = Number(Board._gamestats && Board._gamestats.tipIdleMs);
+      idleTimer = setTimeout(hide, ms > 0 ? ms : TIP_IDLE_MS);
+    }
+    plot.addEventListener('pointermove', function (e) { showAt(indexAt(e.clientX)); armIdle(); });
     plot.addEventListener('pointerleave', hide);
     plot.tabIndex = 0;
     plot.addEventListener('focus', function () { showAt(n - 1); });
@@ -872,6 +902,8 @@
   // a chart can lie without erroring, so they are asserted directly on inputs
   // the fixture cannot produce — an all-gap series, a lone island sample.
   Board._gamestats = { sparkline: sparkline, chart: chart, meter: meter, columns: columns, seriesValues: seriesValues, state: state,
+    // Overridable so a test does not have to wait out the real delay.
+    tipIdleMs: TIP_IDLE_MS,
     // The Terminal places these one at a time; each returns a finished card.
     ensureBoot: ensureBoot,
     cards: { liveness: livenessCard, universe: universeCard, trends: function () { return trendsCard(); }, engine: engineCard,

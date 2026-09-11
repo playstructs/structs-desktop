@@ -2329,7 +2329,7 @@
           // error page where the completions go.
           searchCache[q] = [];
         });
-      }, 220);
+      }, 120);   // the search is a local scan now; the debounce is the only latency left
     }
     function close() { items = []; cursor = -1; show(false); }
     function run(line) {

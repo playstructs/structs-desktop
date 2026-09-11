@@ -146,6 +146,24 @@ pub fn ingest(app: &tauri::AppHandle, event: GameEvent) {
         }
     }
 
+    // ── A raid proof's decay range IS the target planet's shield. ──
+    // `difficulty_target` is captured once into an immutable `TaskParams`, so
+    // a proof that starts grinding is frozen against a number that keeps
+    // moving: a defender who builds or onlines a contributor raises the
+    // chain's requirement above ours and every solve from then on is a
+    // guaranteed `work failure`, while a contributor destroyed (often by our
+    // own siege — auto_raid::shield_grind_round shoots them for exactly this
+    // reason) lowers it and we keep grinding the harder curve for nothing.
+    // Retune here rather than on the loop cadence: the frame that moved the
+    // shield is right in our hands. Hooked AFTER `perception::on_grass` above,
+    // so the snapshot already carries the new value and its write lock is
+    // released before we touch the task registry and the hasher pool.
+    if event.category == "shield_change" {
+        if let Some(planet) = event.detail.get("planet_id").and_then(|v| v.as_str()) {
+            crate::hasher::retune::note_shield_change(app, planet);
+        }
+    }
+
     // `block` ticks (~every 6s) are RELAY-ONLY: buffered they'd drown the
     // 1000-entry ring (and every policy/threat scan over it) within the hour,
     // but the GRASS page wants the heartbeat.

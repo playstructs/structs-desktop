@@ -171,6 +171,13 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                         "pending": crate::hasher::pool::pending_len(),
                         "cap": crate::hasher::max_concurrent(),
                     },
+                    // A raid proof's decay range is the target's live shield,
+                    // so raids get restarted against a new range as the
+                    // defender's shield structs are built and killed. Zero
+                    // retunes across a contested raid means the retune is not
+                    // seeing the shield; a runaway count means it is chasing
+                    // one that oscillates faster than a proof can be ground.
+                    "raid_retune": crate::hasher::retune::stats(),
                 })),
                 Err(e) => err(e),
             }

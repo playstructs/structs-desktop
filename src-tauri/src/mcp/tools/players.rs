@@ -1861,7 +1861,17 @@ pub async fn execute(
                         if block == 0 {
                             return vec![Content::text(format!("raid: planet {} isn't raidable (blockStartRaid=0) — the defender's CMD ship must be down/absent first.", target))];
                         }
-                        (fleet.clone(), "RAID", TaskParams::for_raid(&fleet, &target, block, dt("difficulty_target", 700)))
+                        // The decay RANGE of a raid proof is the target's live
+                        // `planetaryShield` — which the read above already
+                        // carries. The old default of 700 was the Ore
+                        // Extractor/Refinery BUILD range: against a bigger
+                        // shield it makes the client think the requirement has
+                        // decayed further than the chain does, and every proof
+                        // comes back `work failure for input (…)`.
+                        let shield = crate::mcp::types::EntityView::new(&entity)
+                            .planet_attr_u64("planetaryShield")
+                            .max(2);
+                        (fleet.clone(), "RAID", TaskParams::for_raid(&fleet, &target, block, dt("difficulty_target", shield)))
                     }
                     _ => unreachable!(),
                 };

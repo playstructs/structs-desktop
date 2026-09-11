@@ -666,12 +666,21 @@ try {{
                         // sync-tick fallback AND the watchdog in one stroke.
                         let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             mcp::watchdog::check(&app_handle_tick);
+                            // Backstop for the raid retune: a `shield_change`
+                            // frame can be shed (the ingest path sheds while a
+                            // bulk refresh drains), and a refresh installs a
+                            // whole new snapshot with no frame at all. Rides
+                            // this timer rather than `watchdog::check` because
+                            // that self-throttles to once a minute and a raid
+                            // window is only a few minutes long; `sweep` has
+                            // its own, tighter throttle.
+                            hasher::retune::sweep(&app_handle_tick);
                         }));
                         if check.is_err() {
                             mcp::telemetry::tlog(
                                 "watchdog",
                                 mcp::telemetry::Sev::Error,
-                                "watchdog check panicked — resilience loop continuing",
+                                "watchdog check or raid retune sweep panicked — resilience loop continuing",
                             );
                         }
                     }
