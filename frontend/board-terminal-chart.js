@@ -280,6 +280,21 @@
           return;
         }
         return invoke('terminal_chart_series', { series: list.slice(0, MAX_SERIES), windowS: windowS, points: 160 }).then(function (d) {
+          /* Zoom to the data there is. An hour of five-minute samples on a
+           * seven-day grid is one point per series — "collecting…" on every
+           * pane while the ring plainly holds a morning's worth. The window
+           * the player chose stays chosen (the strip still says 7d); the
+           * plot shows what exists and its caption says since when. */
+          var fit = zoomWindow(d, windowS);
+          if (fit) {
+            return invoke('terminal_chart_series', { series: list.slice(0, MAX_SERIES), windowS: fit, points: 160 }).then(function (d2) {
+              lastData[ctx.id] = d2;
+              host.innerHTML = '';
+              host.appendChild(windowStrip(p, ctx));
+              drawPanes(host, p, ctx, d2, { index: index, mode: mode, scale: scale, windowS: fit, since: d2.start_ms });
+              host.appendChild(editor(host, p, ctx));
+            });
+          }
           lastData[ctx.id] = d;
           host.innerHTML = '';
           host.appendChild(windowStrip(p, ctx));
@@ -307,6 +322,22 @@
     strip.classList.add('ch-windows');
     return strip;
   }
+
+  /* The window that fits the data, or null when the chosen one does: when no
+   * series has two known points on the grid but some has two samples, the
+   * span from the earliest sample to now, with a little room, snapped to at
+   * least ten minutes. */
+  function zoomWindow(d, windowS) {
+    var series = (d && d.series) || [];
+    var known = function (s) { return (s.values || []).filter(function (v) { return v != null; }).length; };
+    if (series.some(function (s) { return !s.error && known(s) >= 2; })) return null;
+    var firsts = series.filter(function (s) { return !s.error && Number(s.samples) >= 2 && s.first_ms; }).map(function (s) { return Number(s.first_ms); });
+    if (!firsts.length) return null;
+    var span = (d.end_ms || Date.now()) - Math.min.apply(null, firsts);
+    var fit = Math.max(600, Math.ceil((span / 1000) * 1.15));
+    return fit < windowS * 0.5 ? fit : null;
+  }
+  T._chartZoomWindow = zoomWindow;
 
   function clock(ms, windowS) {
     var t = new Date(ms);
@@ -366,7 +397,7 @@
       var cap = H.el('div', 'gs-cap');
       // One series: its own name says what it is; several: the unit they share.
       cap.appendChild(H.el('span', 'fstat-l', pane.series.length === 1 ? (pane.series[0].label || (UNIT_LABEL[pane.unit] || pane.unit)) : (UNIT_LABEL[pane.unit] || pane.unit)));
-      cap.appendChild(H.el('span', 'fstat-l ops-muted', o.mode + (o.scale === 'log' ? ' · log' : '')));
+      cap.appendChild(H.el('span', 'fstat-l ops-muted', o.mode + (o.scale === 'log' ? ' · log' : '') + (o.since ? ' · since ' + clock(o.since, o.windowS) : '')));
       box.appendChild(cap);
       var fmt = UNIT_FMT[pane.unit] || H.fmtInt;
       var paneRefs = [];

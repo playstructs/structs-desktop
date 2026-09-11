@@ -1900,6 +1900,25 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     w.__HARNESS_EMIT__('terminal-workspaces', { active: 'main', names: ['main', 'war-room'] });
     await w.Board.Terminal.switchWorkspace('main');
     check('…but a newer version for this workspace reloads the layout from Rust', w.Board.Terminal.state.layout.cards.length === 6 && d.querySelectorAll('#tm-grid .tm-card').length === 6);
+
+    /* A workspace being MADE: Rust used to announce every name but the new
+     * one, and this page read its own workspace as deleted, re-switched,
+     * re-activated, and the reloads ping-ponged until the first save landed
+     * — a card added meanwhile was overwritten. Two guards: the page
+     * registers the name before switching, and "gone" means not listed AND
+     * not the one Rust calls active. */
+    const mark = (w.__HARNESS_CALLS__ || []).length;
+    await w.Board.Terminal.createWorkspace('fresh-1');
+    const seq = (w.__HARNESS_CALLS__ || []).slice(mark).filter((c) => /^terminal_(layout_set|workspace_activate)$/.test(c.cmd)).map((c) => c.cmd + ':' + (c.args.workspace || c.args.name));
+    check('a new workspace is registered in Rust (an empty layout under its name) BEFORE it is activated', seq[0] === 'terminal_layout_set:fresh-1' && seq.indexOf('terminal_workspace_activate:fresh-1') > 0, seq.join(' '));
+    w.Board.Terminal.execute('PEOPLE');
+    const n = w.Board.Terminal.state.layout.cards.length;
+    w.__HARNESS_EMIT__('terminal-workspaces', { active: 'fresh-1', names: ['main', 'war-room'] });
+    await tick(80);
+    check('an announcement that omits this workspace but calls it active is not a deletion: nothing switches, the cards stay', w.Board.Terminal.state.ws === 'fresh-1' && w.Board.Terminal.state.layout.cards.length === n && w.Board.Terminal.state.workspaces.join(',') === 'main,war-room');
+    w.__HARNESS_EMIT__('terminal-workspaces', { active: 'main', names: ['main', 'war-room'] });
+    await until(() => w.Board.Terminal.state.ws === 'main');
+    check('…while one that neither lists it nor calls it active still is', w.Board.Terminal.state.ws === 'main');
   }
 
   run('NOPE');

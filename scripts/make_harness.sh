@@ -892,10 +892,12 @@ cat > "$FIX" <<'EOF'
         var base = unit === 'rate' ? 2 : unit === 'ratio' ? 1.2 : unit === 'count' ? 3 : 4000;
         var vals = [];
         var lead = Math.min(12, Math.floor(points / 10));   // null before the first sample, scaled to the grid
+        // `sparse`: an hour of samples asked for on a long window — one grid point.
+        if (sr.subject === 'sparse' && windowS > 7200) lead = points - 1;
         for (var i = 0; i < points; i++) vals.push(i < lead ? null : base + (unit === 'rate' || unit === 'ratio' ? 0.1 * Math.sin(i / 9 + k) : Math.round(base * 0.2 * Math.sin(i / 11 + k)) + i));
         return { source: sr.source, metric: sr.metric, subject: sr.subject || null, unit: unit,
           label: sr.metric.replace(/_/g, ' ') + (sr.subject ? ' · ' + sr.subject : ''),
-          samples: 46, first_ms: start + 12 * step, last: vals[points - 1], values: vals };
+          samples: sr.subject === 'sparse' ? 12 : 46, first_ms: sr.subject === 'sparse' ? end - 3600000 : start + 12 * step, last: vals[points - 1], values: vals };
       });
       return { start_ms: start, end_ms: end, step_ms: step, points: points, window_s: windowS, series: list };
     },

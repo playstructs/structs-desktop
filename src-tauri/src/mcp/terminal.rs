@@ -280,6 +280,18 @@ pub fn terminal_workspace_activate(app: tauri::AppHandle, name: String) -> Resul
 pub fn workspace_activate_impl(name: String) -> Result<Value, String> {
     let name = sane_card_id(&name).ok_or_else(|| format!("workspace {name:?} is not a plain name"))?;
     let mut st = lock(&STORE);
+    /* A name this store has never seen is a workspace being made: register it
+     * empty, so the announcement that follows lists it. It used to announce
+     * every workspace BUT the new one — the page that had just made it read
+     * that as "deleted", switched to the active one (itself), activated
+     * again, and the reloads ping-ponged until the first save landed; a card
+     * added meanwhile was overwritten. */
+    if !st.workspaces.contains_key(&name) {
+        st.workspaces.insert(name.clone(), Layout::default());
+    }
+    if !st.order.contains(&name) {
+        st.order.push(name.clone());
+    }
     st.active = name;
     save_store(&st);
     drop(st);
@@ -2232,6 +2244,24 @@ mod tests {
             }
             st.order.retain(|n| !n.starts_with("order-test-"));
         }
+    }
+
+    #[test]
+    fn activating_a_name_never_stored_registers_it_so_the_announcement_lists_it() {
+        let name = "activate-fresh-test".to_string();
+        {
+            let mut st = lock(&STORE);
+            st.workspaces.remove(&name);
+            st.order.retain(|n| n != &name);
+        }
+        let r = workspace_activate_impl(name.clone()).unwrap();
+        assert_eq!(r["active"], name.as_str());
+        let names: Vec<String> = r["names"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert!(names.contains(&name), "a workspace being made is listed by the announcement that activates it: {names:?}");
+        assert_eq!(terminal_layout_get(Some(name.clone())).cards.len(), 0, "registered empty");
+        let mut st = lock(&STORE);
+        st.workspaces.remove(&name);
+        st.order.retain(|n| n != &name);
     }
 
     #[test]

@@ -86,6 +86,19 @@ const S = (list) => JSON.stringify(list);
   T.remove(card.id);
 }
 
+// ── zoom to the data there is ───────────────────────────────────────────────
+{
+  console.log('\n— zoom to data');
+  const card = T.add('chart', { series: S([{ source: 'stat', metric: 'ore', subject: 'sparse' }]), window: '604800' }, 2);
+  const node = await until(() => { const n = d.querySelector('#tm-' + card.id); return n && n.querySelector('.gs-chart svg path') ? n : null; });
+  const asks = calls().filter((c) => c.cmd === 'terminal_chart_series' && c.args.series[0].subject === 'sparse').map((c) => c.args.windowS);
+  check('an hour of samples on a seven-day grid is re-asked for on a window that fits, and drawn', !!node && asks.length === 2 && asks[0] === 604800 && asks[1] >= 3600 && asks[1] <= 4200, JSON.stringify(asks));
+  check('the pane says since when; the strip still says what was chosen', /since \d\d:\d\d/.test(node.querySelector('.ch-pane .gs-cap').textContent) && node.querySelector('.ch-windows .sui-mod-active').textContent === '7d');
+  check('the helper: no zoom when any series already has two points, or when nothing has two samples', T._chartZoomWindow({ end_ms: 1e12, series: [{ values: [1, 2], samples: 5, first_ms: 1e12 - 3600e3 }] }, 604800) === null && T._chartZoomWindow({ end_ms: 1e12, series: [{ values: [null, 1], samples: 1, first_ms: 1e12 - 60e3 }] }, 604800) === null && T._chartZoomWindow({ end_ms: 1e12, series: [{ values: [null, 1], samples: 12, first_ms: 1e12 - 3600e3 }] }, 604800) === 4140);
+  check('…and never for a window the data nearly fills', T._chartZoomWindow({ end_ms: 1e12, series: [{ values: [null, 1], samples: 12, first_ms: 1e12 - 3000e3 }] }, 3600) === null);
+  T.remove(card.id);
+}
+
 // ── editor adds a series ────────────────────────────────────────────────────
 {
   console.log('\n— editor');

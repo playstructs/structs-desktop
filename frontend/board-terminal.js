@@ -238,7 +238,9 @@
       if (!p || !Array.isArray(p.names) || !p.names.length) return;
       state.workspaces = p.names;
       state.active = p.active || p.names[0];
-      if (p.names.indexOf(state.ws) < 0) {
+      /* Gone means gone: not in the list AND not the one Rust calls active.
+       * A name being made is active before it is listed. */
+      if (p.names.indexOf(state.ws) < 0 && p.active !== state.ws) {
         if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
         state.ws = null;
         switchWorkspace(state.active);
@@ -268,8 +270,14 @@
   function createWorkspace(name) {
     var clean = String(name || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
     if (!clean) { Board.stamp && Board.stamp('a workspace needs a plain name'); return Promise.resolve(); }
-    if (state.workspaces.indexOf(clean) < 0) state.workspaces.push(clean);
-    return switchWorkspace(clean).then(function () { return persist(); });
+    /* Registered in Rust BEFORE it is switched to: an activate for a name the
+     * store has never seen announced a list without it, and this page read
+     * its own new workspace as deleted (see the listener below). An empty
+     * layout under the name first; the switch then finds it. */
+    var fresh = state.workspaces.indexOf(clean) < 0;
+    if (fresh) state.workspaces.push(clean);
+    var register = fresh ? invoke('terminal_layout_set', { workspace: clean, layout: { version: 0, cards: [] } }).catch(function () {}) : Promise.resolve();
+    return register.then(function () { return switchWorkspace(clean); }).then(function () { return persist(); });
   }
   Terminal.createWorkspace = createWorkspace;
 
