@@ -37,6 +37,30 @@ pub const BOARD_COOKIE: &str = "structs_board";
 
 static WEB_BOARD_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// How many web-board event streams are open right now. A browser tab on the
+/// web board is a reader the stats engine has to sweep for, exactly as a
+/// native Terminal window is (`game_stats::watched`): with the web page as
+/// the only viewer the engine never swept at all — `heavy_updated_ms` stayed
+/// 0 for an hour and every live player was an id without a name.
+static VIEWERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub fn viewers() -> usize {
+    VIEWERS.load(Ordering::Relaxed)
+}
+/// One open event stream; the count falls when the stream is dropped, which
+/// is when the browser tab closes or reconnects.
+struct Viewer;
+impl Viewer {
+    fn open() -> Self {
+        VIEWERS.fetch_add(1, Ordering::Relaxed);
+        Viewer
+    }
+}
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        VIEWERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Load the persisted flag into the runtime atomic. Called at server start.
 pub fn init_from_config() {
     let cfg = crate::mcp::config::McpConfig::load();
@@ -274,8 +298,12 @@ async fn board_events() -> Response {
     // any listener registered for a name not on that list silently never fired
     // until the next reconnect. With an envelope the client needs one listener
     // and a new event type works with no client change at all.
+    // The viewer lives inside the stream's closure, so it is counted for
+    // exactly as long as the stream is.
+    let viewer = Viewer::open();
     let stream = tokio_stream::wrappers::BroadcastStream::new(BOARD_BUS.subscribe()).filter_map(
-        |msg| -> Option<Result<SseEvent, Infallible>> {
+        move |msg| -> Option<Result<SseEvent, Infallible>> {
+            let _open = &viewer;
             match msg {
                 Ok((name, payload)) => Some(Ok(SseEvent::default()
                     .event("board")
@@ -290,6 +318,18 @@ async fn board_events() -> Response {
 #[cfg(test)]
 mod asset_tests {
     use super::*;
+
+    #[test]
+    fn an_open_event_stream_counts_as_a_viewer_until_it_is_dropped() {
+        let before = viewers();
+        let a = Viewer::open();
+        let b = Viewer::open();
+        assert_eq!(viewers(), before + 2);
+        drop(a);
+        assert_eq!(viewers(), before + 1);
+        drop(b);
+        assert_eq!(viewers(), before);
+    }
 
     fn rebase(s: &str) -> String {
         String::from_utf8(rebase_css_urls(s.as_bytes())).unwrap()

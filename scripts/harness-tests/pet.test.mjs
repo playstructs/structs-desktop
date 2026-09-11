@@ -53,10 +53,27 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   check('the page links all four stylesheets, in order',
     order.every((i) => i > 0) && order.every((v, i) => i === 0 || v > order[i - 1]), order.join(','));
 
-  // A window-wide drag region swallows every click on the controls above it.
-  check('only the portrait is a drag surface',
-    (html.match(/data-tauri-drag-region/g) || []).length === 1
-      && /id="pet-portrait"[^>]*data-tauri-drag-region/.test(html));
+  /* `data-tauri-drag-region` must NOT be how this window moves.
+   *
+   * Tauri's injected handler (tauri/src/window/scripts/drag.js) tests
+   * `e.target.getAttribute('data-tauri-drag-region')` — the EXACT target, with
+   * no walk up the tree. The drag surface here is a div full of <img> layers,
+   * so the target is always an image, the attribute is never found, and the
+   * window is pinned to wherever it first opened. It shipped that way once.
+   * The attribute looks like it works, which is what makes it worth pinning.
+   */
+  check('the window does not rely on a drag region its own children defeat',
+    !/data-tauri-drag-region/.test(html));
+  check('…it asks the window to drag itself, from a mousedown on the portrait',
+    /nodes\.portrait\.addEventListener\('mousedown'/.test(code)
+      && /startDragging|companion_drag/.test(code));
+
+  /* An always-on-top window with no close control is a window somebody has to
+   * quit the app to be rid of. */
+  check('there is a close control on the pet itself',
+    /id="pet-close"/.test(html) && /icon-close/.test(html));
+  check('…and Escape does the same thing',
+    /'Escape'/.test(code) && /companion_dismiss/.test(code));
 
   const css = read('frontend/pet.css');
   check('nothing paints a ground behind the window — the desktop IS the ground',
@@ -94,51 +111,83 @@ const Pet = w.StructsPet;
 check('the companion boots', !!Pet);
 
 if (Pet) {
-  // Nothing confirmed yet.
-  Pet.apply({ line1: '— α / h', line2: '', player_id: '1-194', pfp: null, face: 'goal' });
-  check('an unconfirmed rate is an em dash, not a zero',
-    text(d.getElementById('pet-line1')) === '— α / h'
-      && !/0/.test(text(d.getElementById('pet-line1'))));
-  check('it knows whose colony it is', text(d.getElementById('pet-name')) === '1-194');
-  check('…and draws a portrait even with no attributes on chain',
-    d.querySelector('#pet-portrait .pc-pfp') !== null);
+  /* ── Silence is the default ──────────────────────────────────────────────
+   *
+   * This window sits on top of whatever the player is doing. The first
+   * version filled it with a rate, a Goal/Work toggle and their own player
+   * id — all true, none of it worth interrupting anyone for, and it read as
+   * a grey slab parked on their screen. A quiet colony must be a character
+   * and NO text.
+   */
+  Pet.apply({ note: null, tone: '', pfp: null });
+  check('a quiet colony says nothing at all',
+    d.getElementById('pet-note').hidden === true
+      && text(d.getElementById('pet-note')) === '');
+  check('…but the character is still there', d.querySelector('#pet-portrait .pc-pfp') !== null);
+  check('…and nothing on it names the player to themselves',
+    !/1-194|MARKLIFER/i.test(text(d.getElementById('pet'))), text(d.getElementById('pet')));
 
-  // Trouble has to be visible without reading the words.
-  Pet.apply({ line1: 'Work needs attention', line2: 'signing is wedged', trouble: 'signing is wedged' });
-  check('trouble marks the whole bubble, not just the text',
-    d.getElementById('pet').classList.contains('pet-mod-trouble'));
-  check('…and the detail is on hover rather than wrapped across the window',
-    d.getElementById('pet-bubble').title === 'signing is wedged');
+  // Something broken, which is what this window is FOR.
+  Pet.apply({ note: 'Signing is wedged', tone: 'bad', door: 'board' });
+  check('a problem gets words', d.getElementById('pet-note').hidden === false
+    && text(d.getElementById('pet-note')) === 'Signing is wedged');
+  check('…and is marked as a problem, not just phrased as one',
+    d.getElementById('pet').classList.contains('pet-mod-bad'));
+  d.getElementById('pet-note').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('…and opens what it is about',
+    calls.some((c) => c.cmd === 'companion_open' && c.args.what === 'board'));
 
-  // Working.
-  Pet.apply({ line1: 'Helping', line2: '3 running · 12 finished', trouble: '', crew_helped: 12 });
-  check('a working crew says what it is doing',
-    text(d.getElementById('pet-line1')) === 'Helping'
-      && /3 running/.test(text(d.getElementById('pet-line2'))));
-  check('…and trouble clears when it is over',
-    !d.getElementById('pet').classList.contains('pet-mod-trouble'));
+  // Money owed — the other thing nothing else in the app will nag about.
+  Pet.apply({ note: '90μg owed', tone: '', door: 'crewpay' });
+  check('an unpaid helper gets words too', text(d.getElementById('pet-note')) === '90μg owed');
+  check('…without being dressed as a failure',
+    !d.getElementById('pet').classList.contains('pet-mod-bad'));
 
-  // The face toggle is the game's own nav item, and switching it tells Rust.
-  const faces = [...d.querySelectorAll('#pet-faces .sui-screen-nav-item')];
-  check('the two faces are the game’s nav items', faces.length === 2
-    && faces.map((f) => text(f)).join(',') === 'Goal,Work');
-  faces[1].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  check('…and choosing one is remembered in Rust, not just on screen',
-    calls.some((c) => c.cmd === 'companion_face' && c.args.face === 'work'));
+  // And it has to go quiet again.
+  Pet.apply({ note: null, tone: '' });
+  check('…and the words go away when the reason does',
+    d.getElementById('pet-note').hidden === true);
 
-  // Every door opens a window that is allowed to act. The pet acts on nothing.
-  d.getElementById('pet-bubble').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  check('the bubble opens the colony', calls.some((c) => c.cmd === 'companion_open' && c.args.what === 'board'));
-  d.getElementById('pet-name').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  check('…and the name opens the crew', calls.some((c) => c.cmd === 'companion_open' && c.args.what === 'crew'));
   check('the companion signs nothing and spends nothing',
     !calls.some((c) => /transfer|settle|grant|revoke|sign/i.test(c.cmd)),
     calls.map((c) => c.cmd).join(','));
 
+  /* Moving it and closing it, driven the way a person drives them.
+   *
+   * The drag assertion is deliberately about the EVENT, not the attribute: a
+   * mousedown on the portrait must reach the window however that is plumbed,
+   * because the previous plumbing looked correct and did nothing.
+   */
+  {
+    const before = calls.length;
+    const port = d.getElementById('pet-portrait');
+    // Mousedown on a CHILD of the drag surface — an image layer — which is
+    // what the pointer actually lands on and what defeated the old approach.
+    const inner = port.querySelector('.pc-pfp') || port;
+    inner.dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    check('dragging works when the pointer lands on the portrait’s art, not just its box',
+      calls.slice(before).some((c) => c.cmd === 'companion_drag'),
+      calls.slice(before).map((c) => c.cmd).join(',') || 'nothing invoked');
+  }
+  {
+    const before = calls.length;
+    d.getElementById('pet-close').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    check('the close control puts it away',
+      calls.slice(before).some((c) => c.cmd === 'companion_dismiss'));
+  }
+  {
+    const before = calls.length;
+    d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    check('…and so does Escape', calls.slice(before).some((c) => c.cmd === 'companion_dismiss'));
+    const after = calls.length;
+    d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+    check('…while any other key leaves it alone', calls.length === after);
+  }
+
   // A portrait is five <img> layers; rebuilding it every push is a request
   // storm and a flicker, and it almost never changes.
   const before = d.querySelector('#pet-portrait .pc-pfp');
-  Pet.apply({ line1: 'Helping', line2: 'still going' });
+  Pet.apply({ note: 'still going' });
   check('an unchanged portrait is not redrawn',
     d.querySelector('#pet-portrait .pc-pfp') === before);
 }

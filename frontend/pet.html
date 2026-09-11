@@ -14,20 +14,20 @@
   <link rel="stylesheet" href="pet.css">
 </head>
 <body class="pet-body">
+  <!-- Bottom-aligned on purpose. The window is transparent, so the room above
+       the portrait costs the player nothing while it is empty — and when
+       there IS something to say, the note grows upward into it rather than
+       pushing the character around the screen. -->
   <div id="pet" class="pet">
-    <!-- The bubble is a button: clicking it opens the colony, which is the
-         one thing a companion is for. -->
-    <a id="pet-bubble" class="pet-bubble" href="javascript:void(0)">
-      <span id="pet-line1" class="pet-line1">Structs</span>
-      <span id="pet-line2" class="pet-line2"></span>
+    <a id="pet-close" class="pet-close" href="javascript:void(0)" title="Hide the companion">
+      <i class="sui-icon icon-close sui-icon-sm"></i>
     </a>
-    <div id="pet-faces" class="pet-faces"></div>
-    <!-- The drag surface is the portrait and nothing else: a window-wide drag
-         region would swallow every click on the controls above it. -->
-    <div id="pet-portrait" class="pet-portrait" data-tauri-drag-region>
+    <!-- Hidden until there is something worth interrupting for. Most of the
+         time this window is a character and nothing else. -->
+    <a id="pet-note" class="pet-note" href="javascript:void(0)" hidden></a>
+    <div id="pet-portrait" class="pet-portrait" title="Drag to move">
       <canvas id="pet-spark" class="pet-spark" width="128" height="128" aria-hidden="true"></canvas>
     </div>
-    <a id="pet-name" class="pet-name" href="javascript:void(0)"></a>
   </div>
   <script src="bridge.js"></script>
   <script src="events.js"></script>

@@ -39,13 +39,17 @@ pub const WINDOW_LABEL: &str = "gamestats";
 /// Is anyone looking? The Game Stats window, or any Terminal window — the
 /// Terminal draws these cards too, and an engine that only sweeps for one
 /// of its two readers leaves the other on dashes. Minimized does not count:
-/// a parked window must not cost the shared API anything.
+/// a parked window must not cost the shared API anything. A browser tab on
+/// the web board is a reader too: with it as the only viewer the engine
+/// never swept, and its liveness card listed an hour of players by id.
 pub fn watched(app: &tauri::AppHandle) -> bool {
     use tauri::Manager;
-    app.webview_windows()
-        .iter()
-        .filter(|(label, _)| label.as_str() == WINDOW_LABEL || crate::mcp::terminal::is_terminal_label(label))
-        .any(|(_, w)| !w.is_minimized().unwrap_or(false))
+    crate::mcp::web_board::viewers() > 0
+        || app
+            .webview_windows()
+            .iter()
+            .filter(|(label, _)| label.as_str() == WINDOW_LABEL || crate::mcp::terminal::is_terminal_label(label))
+            .any(|(_, w)| !w.is_minimized().unwrap_or(false))
 }
 
 /// Series ring capacity. One point per block at ~5.28s is roughly an hour of

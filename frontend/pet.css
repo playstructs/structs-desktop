@@ -1,19 +1,21 @@
 /* The companion window.
  *
- * The window itself is transparent and undecorated, so everything visible is
- * painted here. Nothing may set a background on html or body: the ground IS
- * the player's desktop.
+ * The window is transparent and undecorated, so everything visible is painted
+ * here — and, just as important, everything NOT painted here costs the player
+ * nothing. The layout is bottom-aligned so the character sits at the bottom of
+ * the window and a note grows upward into empty, invisible space. Nothing
+ * moves on screen when the note comes and goes.
  *
- * Two house rules bite hard in a window this small:
- *   - `main.css` centres the body, and it is invisible until a block goes
- *     full-width, so alignment is set explicitly;
+ * Two house rules bite hard at this size:
+ *   - `main.css` centres the body, invisibly, until a block goes full-width;
  *   - pixel art has square corners. SUI sets `border-radius: 0` fourteen
- *     times on purpose; a rounded corner is a shape the tileset cannot draw.
+ *     times on purpose.
  */
 html, body.pet-body {
   background: transparent;
   margin: 0;
   padding: 0;
+  height: 100%;
   overflow: hidden;
   text-align: left;
 }
@@ -22,42 +24,57 @@ html, body.pet-body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: flex-end;   /* the character sits at the bottom */
   gap: var(--spacing-xs);
   padding: var(--spacing-sm);
-  text-align: center;
+  height: 100%;
   width: 100%;
   box-sizing: border-box;
+  text-align: center;
 }
 
-/* The speech bubble: the game's own panel surface, not a new one. */
-.pet-bubble {
+/* The way out. Small and quiet, but always there — an affordance that only
+ * appears on hover is one somebody has to already know about. It sits in the
+ * transparent margin, so it takes no room from anything.
+ */
+.pet-close {
+  align-self: flex-end;
+  margin-bottom: auto;
+  color: var(--text-hint);
+  text-decoration: none;
+  line-height: 1;
+  opacity: 0.5;
+}
+.pet-close:hover { opacity: 1; color: var(--text-body); }
+
+/* The note. Only ever on screen when there is something to act on, so it is
+ * allowed to be loud: a panel surface, a border, and the game's warning colour
+ * when something is wrong.
+ */
+/* `[hidden]` and `.pet-note` are the same specificity, and this file loads
+ * after normalize — so a bare `display: block` here WINS over hidden, and the
+ * note rendered as an empty panel parked above the character. */
+.pet-note[hidden] { display: none; }
+.pet-note {
   display: block;
-  width: 100%;
+  max-width: 100%;
   box-sizing: border-box;
-  padding: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-sm);
   background: var(--surface-panel);
   border: 1px solid var(--border-subtle);
   color: var(--text-body);
   text-decoration: none;
   text-align: center;
 }
-.pet-bubble:hover { border-color: var(--border-strong); }
-.pet-line1 { display: block; color: var(--text-body); }
-.pet-line2 {
-  display: block;
-  color: var(--text-hint);
-  margin-top: var(--spacing-xs);
-  min-height: 1em;
+.pet-note:hover { border-color: var(--border-strong); }
+.pet-mod-bad .pet-note {
+  color: var(--text-warning);
+  border-color: var(--text-warning);
 }
-.pet-mod-trouble .pet-line1 { color: var(--text-warning); }
 
-/* Which face the caption leads with. The game's own nav item. */
-.pet-faces { width: 100%; }
-.pet-faces .sui-screen-nav-items { justify-content: center; }
-
-/* The portrait is 128px because the art is: four times the 32px source, on
- * the same doubling the rest of the game uses. It is also the drag handle, so
- * it has to look draggable and must not be selectable.
+/* The portrait is 128px because the art is: four times the 32px source, on the
+ * same doubling the rest of the game uses. It is also the drag handle, so it
+ * has to look draggable and must not be selectable.
  */
 .pet-portrait {
   position: relative;
@@ -69,10 +86,23 @@ html, body.pet-body {
 .pet-portrait:active { cursor: grabbing; }
 .pet-portrait .pc-pfp,
 .pet-portrait .pc-pfp img { width: 100%; height: 100%; }
+/* No frame and no backdrop behind the character.
+ *
+ * Everywhere else a portrait sits in a bordered tile and its background layer
+ * belongs there. Here the frame is the player's WALLPAPER: the art has to
+ * stand on it, not sit in a square pasted over it. Three things make the
+ * square — the component's own border and surface, and the art's own
+ * background layer — and all three have to go.
+ */
+.pet-portrait .pc-pfp {
+  background: transparent;
+  border: 0;
+  overflow: visible;
+}
+.pet-portrait .pfp-layer-background { display: none; }
 
 /* Celebration, drawn over the portrait and never in the way of it. Sized by
- * its parent rather than by an offset, so there is no magic number to keep in
- * step with the portrait.
+ * its parent, so there is no magic number to keep in step with the art.
  */
 .pet-spark {
   position: absolute;
@@ -81,13 +111,3 @@ html, body.pet-body {
   height: 100%;
   pointer-events: none;
 }
-
-.pet-name {
-  display: inline-block;
-  padding: var(--spacing-xs) var(--spacing-sm);
-  background: var(--surface-default);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-hint);
-  text-decoration: none;
-}
-.pet-name:hover { color: var(--text-body); }

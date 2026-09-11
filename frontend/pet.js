@@ -1,9 +1,10 @@
 /* The desktop companion.
  *
- * A 225x300 transparent window that floats over everything and says what the
- * colony and the crew are doing. Its whole state arrives on ONE pushed event
- * (`companion`); this file never polls Rust and never decides anything — every
- * door here opens a window that is already allowed to act.
+ * A small transparent window that floats over everything and, nearly always,
+ * says NOTHING. It is a character on the desktop; words appear only when
+ * something needs a person. Its whole state arrives on ONE pushed event
+ * (`companion`); this file never polls Rust and never decides anything — the
+ * one door it has opens a window that is already allowed to act.
  *
  * THE PERFORMANCE RULE, which is not a style preference:
  *
@@ -40,16 +41,13 @@
 
   var nodes = {
     root: document.getElementById('pet'),
-    bubble: document.getElementById('pet-bubble'),
-    line1: document.getElementById('pet-line1'),
-    line2: document.getElementById('pet-line2'),
-    faces: document.getElementById('pet-faces'),
+    note: document.getElementById('pet-note'),
     portrait: document.getElementById('pet-portrait'),
     spark: document.getElementById('pet-spark'),
-    name: document.getElementById('pet-name'),
+    close: document.getElementById('pet-close'),
   };
 
-  var state = { face: 'goal', line1: 'Structs', line2: '', pfp: null, player_id: '' };
+  var state = { note: null, tone: '', door: 'board', pfp: null };
   var drawnPfp = ' ';   // a value no attribute string can equal
   var bob = 0;
   var sparkFrom = 0;
@@ -76,37 +74,22 @@
     nodes.portrait.insertBefore(art, nodes.portrait.firstChild);
   }
 
-  // ── The caption ────────────────────────────────────────────────────────
+  /* ── What it says ───────────────────────────────────────────────────────
+   *
+   * Nothing, nearly always. Rust decides whether there is a note at all (see
+   * `companion::caption`); this only draws one when there is.
+   *
+   * The bar for putting words on a window that floats over somebody's work is
+   * not "is this true" — it is *would they want to stop and act on it*. A
+   * rate, a crew they switched on themselves, and their own player id all
+   * failed that, and the first version showed all three.
+   */
   function draw() {
-    nodes.line1.textContent = state.line1 || 'Structs';
-    nodes.line2.textContent = state.line2 || '';
-    nodes.root.classList.toggle('pet-mod-trouble', !!state.trouble);
-    nodes.bubble.title = state.trouble || '';
-    nodes.name.textContent = state.player_id || '';
+    var note = state.note;
+    nodes.note.hidden = !note;
+    nodes.note.textContent = note || '';
+    nodes.root.classList.toggle('pet-mod-bad', state.tone === 'bad');
     drawPortrait();
-    drawFaces();
-  }
-
-  function drawFaces() {
-    if (nodes.faces.getAttribute('data-face') === state.face) return;
-    nodes.faces.setAttribute('data-face', state.face);
-    nodes.faces.innerHTML = '';
-    var wrap = el('div', 'sui-screen sui-screen-full-width');
-    var bar = el('div', 'sui-screen-nav');
-    var list = el('div', 'sui-screen-nav-items');
-    [['goal', 'Goal'], ['work', 'Work']].forEach(function (f) {
-      var a = el('a', 'sui-screen-nav-item' + (state.face === f[0] ? ' sui-mod-active' : ''), f[1]);
-      a.href = 'javascript:void(0)';
-      a.addEventListener('click', function () {
-        state.face = f[0];
-        drawFaces();
-        invoke('companion_face', { face: f[0] }).catch(function () {});
-      });
-      list.appendChild(a);
-    });
-    bar.appendChild(list);
-    wrap.appendChild(bar);
-    nodes.faces.appendChild(wrap);
   }
 
   // ── Celebration ────────────────────────────────────────────────────────
@@ -191,11 +174,58 @@
     lastHelped = helped;
   }
 
-  nodes.bubble.addEventListener('click', function () {
-    invoke('companion_open', { what: 'board' }).catch(function () {});
+  // The note is the only door, and only while there is one: it opens the
+  // window that can act on whatever it is about. A quiet pet offers nothing,
+  // which is correct — the menu bar and ⌘K are both a keystroke away.
+  nodes.note.addEventListener('click', function () {
+    invoke('companion_open', { what: state.door || 'board' }).catch(function () {});
   });
-  nodes.name.addEventListener('click', function () {
-    invoke('companion_open', { what: 'crew' }).catch(function () {});
+
+  // ── Getting out of the way, and getting rid of it ──────────────────────
+  //
+  // This window floats over everything the player is doing. Both of these are
+  // the price of that, not features:
+  //
+  //   MOVING IT. `data-tauri-drag-region` cannot do the job — Tauri's handler
+  //   tests `e.target.getAttribute(...)` on the EXACT target with no walk up
+  //   the tree, and this drag surface is a div full of <img> layers, so the
+  //   target is always an image and the attribute is never found. The window
+  //   was pinned to wherever it first opened. Asking the window to drag
+  //   itself works whatever the portrait is made of.
+  //
+  //   CLOSING IT. A close control on the thing itself, plus Escape. Neither
+  //   requires finding another window first, which is the whole point: if the
+  //   only way to dismiss something is somewhere else, it is not dismissable
+  //   at the moment you want it gone.
+  nodes.portrait.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return;
+    e.preventDefault();      // no text cursor, no image drag
+    drag();
+  });
+
+  function drag() {
+    // The window's own API when the runtime exposes it, and a command when it
+    // does not. Both end in the same place; neither depends on Tauri's
+    // internals.
+    var T = window.__TAURI__;
+    try {
+      if (T && T.window && typeof T.window.getCurrentWindow === 'function') {
+        var win = T.window.getCurrentWindow();
+        if (win && typeof win.startDragging === 'function') {
+          win.startDragging();
+          return;
+        }
+      }
+    } catch (e) { /* fall through to the command */ }
+    invoke('companion_drag').catch(function () {});
+  }
+
+  function dismiss() {
+    invoke('companion_dismiss').catch(function () {});
+  }
+  nodes.close.addEventListener('click', dismiss);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') dismiss();
   });
 
   if (window.StructsEvents) {
@@ -206,5 +236,8 @@
   setInterval(idle, IDLE_MS);
 
   // For the harness, which drives this without a Tauri runtime.
-  window.StructsPet = { apply: apply, sparkle: sparkle, state: function () { return state; } };
+  window.StructsPet = {
+    apply: apply, sparkle: sparkle, state: function () { return state; },
+    drag: drag, dismiss: dismiss,
+  };
 })();

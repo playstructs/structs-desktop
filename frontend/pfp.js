@@ -69,7 +69,13 @@
       PFP_LAYERS.forEach(function (part) {
         if (!isLayer(part, pfp[part])) return;
         var im = img();
-        im.className = 'pfp-viewer-layer';
+        /* The part is named on the element as well as implied by its order.
+         *
+         * A caller that wants a portrait WITHOUT its background — the desktop
+         * companion, where the art has to sit on the player's wallpaper rather
+         * than on a blue square — would otherwise have to reach for
+         * `img:first-child` and silently break the day this order changes. */
+        im.className = 'pfp-viewer-layer pfp-layer-' + part;
         im.src = layerSrc(part, pfp[part]);
         im.alt = '';
         frame.appendChild(im);

@@ -1,6 +1,6 @@
 //! The desktop companion.
 //!
-//! A 225×280 window with no chrome that floats over everything, follows you
+//! A 200×220 window with no chrome that floats over everything, follows you
 //! across Spaces, and says what your colony and your crew are doing. It is the
 //! part of this app you leave running when the app itself is closed.
 //!
@@ -35,24 +35,11 @@ pub const LABEL: &str = "pet";
 
 const FILENAME: &str = "companion.json";
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CompanionConfig {
     /// Whether the pet was on screen at last exit, so it comes back.
     #[serde(default)]
     pub shown: bool,
-    /// Which face the caption shows first: the colony, or the crew.
-    #[serde(default = "default_face")]
-    pub face: String,
-}
-
-fn default_face() -> String {
-    "goal".into()
-}
-
-impl Default for CompanionConfig {
-    fn default() -> Self {
-        Self { shown: false, face: default_face() }
-    }
 }
 
 fn load() -> CompanionConfig {
@@ -75,7 +62,12 @@ pub fn show(app: &tauri::AppHandle) -> Result<(), String> {
     }
     let w = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("pet.html".into()))
         .title("Structs")
-        .inner_size(225.0, 300.0)
+        // Sized for the character plus the tallest note it can show, and no
+        // more. The window is transparent and bottom-aligned, so the room
+        // above the portrait is invisible while it is empty — but it is still
+        // the player's screen, and a window reserving space it rarely uses is
+        // the thing this was rebuilt to stop doing.
+        .inner_size(200.0, 220.0)
         .resizable(false)
         // No chrome and no ground: the visible shape is whatever the page
         // paints, which is how a bubble and a portrait can float without a
@@ -127,43 +119,36 @@ pub fn reopen_if_persisted(app: &tauri::AppHandle) {
 
 // ── What it says ────────────────────────────────────────────────────────────
 
-/// The caption, chosen by priority.
+/// What is worth interrupting somebody for.
 ///
-/// Ordered by what would make somebody look: a crew that has stopped working
-/// beats a crew that is working, which beats the hourly figure. The one rule
-/// that overrides all of it is honesty — a number this app has not confirmed
-/// is never shown as a number. droidsh writes `— α / h` until the figures are
-/// in, and being trusted about the small readings is the only reason the big
-/// ones are believed.
-pub fn caption(state: &Value) -> (String, String) {
+/// **Nothing, most of the time.** This window sits on top of whatever the
+/// player is actually doing, so the bar for putting words on it is not "is
+/// this true" or "is this interesting" — it is *would they want to stop and
+/// act on it*. A rate they can read in the menu bar, a crew they turned on
+/// themselves, and their own player id all fail that test.
+///
+/// So the pet is SILENT unless something needs them. A quiet colony is a
+/// character on the desktop and no text at all.
+pub fn caption(state: &Value) -> Option<Note> {
     let s = |k: &str| state.get(k).and_then(|v| v.as_str()).unwrap_or("");
-    let n = |k: &str| state.get(k).and_then(|v| v.as_f64());
-    let b = |k: &str| state.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let n = |k: &str| state.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-    if !s("trouble").is_empty() {
-        return ("Work needs attention".into(), s("trouble").to_string());
+    // Something is broken and will stay broken until a person looks.
+    let trouble = s("trouble");
+    if !trouble.is_empty() {
+        return Some(Note { text: trouble.to_string(), tone: "bad", door: "board" });
     }
-    if b("crew_working") {
-        let helping = n("crew_taking").unwrap_or(0.0) as u64;
-        let done = n("crew_helped").unwrap_or(0.0) as u64;
-        return (
-            "Helping".into(),
-            if done > 0 {
-                format!("{helping} running · {done} finished")
-            } else {
-                format!("{helping} running")
-            },
-        );
+    // Somebody did work for us and has not been paid. Actionable, and the one
+    // thing nothing else in the app will nag about.
+    let owed = n("owed_base");
+    if owed > 0.0 {
+        return Some(Note {
+            text: format!("{} owed", fmt_alpha(owed)),
+            tone: "",
+            door: "crewpay",
+        });
     }
-    if let Some(owed) = n("owed_base").filter(|v| *v > 0.0) {
-        return ("Owed".into(), format!("{} to pay", fmt_alpha(owed)));
-    }
-    match n("alpha_per_hour") {
-        // Confirmed, so it may be a number.
-        Some(v) => (format!("+{} α / h", fmt_alpha(v)), s("reserve_line").to_string()),
-        // Not confirmed. An em dash, never a zero: a zero is a claim.
-        None => ("— α / h".into(), s("reserve_line").to_string()),
-    }
+    None
 }
 
 /// The game's own ladder, in the one place Rust needs it here.
@@ -171,9 +156,31 @@ fn fmt_alpha(ualpha: f64) -> String {
     crate::mcp::tools::format::format_alpha(ualpha)
 }
 
+/// A line on the pet, and what clicking it opens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Note {
+    pub text: String,
+    /// `"bad"` paints it as a warning; empty is ordinary.
+    pub tone: &'static str,
+    pub door: &'static str,
+}
+
+/// The continuous readout — the menu bar's job, not the pet's.
+///
+/// A number that changes every few minutes belongs somewhere the eye can
+/// ignore it. Putting it on the pet meant a slab of grey saying `— α / h`,
+/// which is a large amount of somebody's screen spent on "no news".
+fn rate_line(state: &Value) -> String {
+    match state.get("alpha_per_hour").and_then(|v| v.as_f64()) {
+        // Confirmed, so it may be a number.
+        Some(v) => format!("+{} α / h", fmt_alpha(v)),
+        // Not confirmed. An em dash, never a zero: a zero is a claim.
+        None => "— α / h".into(),
+    }
+}
+
 /// Gather what the pet draws. One read, pushed; the window never polls.
-pub fn state(app: &tauri::AppHandle) -> Value {
-    let cfg = load();
+pub fn state(_app: &tauri::AppHandle) -> Value {
     let player_id = crate::game_state::GAME_STATE
         .read()
         .ok()
@@ -186,13 +193,12 @@ pub fn state(app: &tauri::AppHandle) -> Value {
         .into_iter()
         .find(|r| r.player_id == player_id)
         .and_then(|r| r.pfp_attrs);
-    // Left unset until there is a confirmed figure to put here. See `caption`:
-    // an absent rate draws an em dash, and that is the intended reading.
+    // Left unset until there is a confirmed figure. `rate_line` draws an em
+    // dash for it, and that is the intended reading.
     let alpha_ph: Option<f64> = None;
+
     let crews = crate::mcp::crew::all();
     let work = crate::mcp::crew_work::get();
-    let taking = crate::mcp::crew_work::taking_now();
-    let helped = crate::mcp::crew_work::helped_total();
     let owed: f64 = crate::mcp::crew_pay::credits()
         .iter()
         .filter(|c| c.settled_at.is_none())
@@ -200,23 +206,25 @@ pub fn state(app: &tauri::AppHandle) -> Value {
         .sum();
 
     let mut v = json!({
-        "player_id": player_id,
         "pfp": pfp,
-        "face": cfg.face,
-        "crews": crews.len(),
         "crew_working": work.enabled && crews.iter().any(|c| c.role.grinds()),
-        "crew_taking": taking,
-        "crew_helped": helped,
+        "crew_helped": crate::mcp::crew_work::helped_total(),
         "owed_base": owed,
         "alpha_per_hour": alpha_ph,
-        "reserve_line": "",
         "trouble": "",
         "at_ms": now_millis(),
-        "open": is_open(app),
     });
-    let (line1, line2) = caption(&v);
-    v["line1"] = json!(line1);
-    v["line2"] = json!(line2);
+    // The pet reads exactly one thing: whether there is anything to say.
+    match caption(&v) {
+        Some(note) => {
+            v["note"] = json!(note.text);
+            v["tone"] = json!(note.tone);
+            v["door"] = json!(note.door);
+        }
+        None => {
+            v["note"] = Value::Null;
+        }
+    }
     v
 }
 
@@ -225,6 +233,7 @@ pub fn push(app: &tauri::AppHandle) {
     // The menu bar is updated whether or not the pet is on screen: it is the
     // readout for people who never open the window.
     refresh_tray(app);
+    refresh_tray_labels(app);
     if !is_open(app) {
         return;
     }
@@ -243,19 +252,35 @@ pub fn companion_toggle(app: tauri::AppHandle) -> Result<Value, String> {
     Ok(json!({ "open": true }))
 }
 
+/// Put it away. The pet's own close control, and the Escape key.
+///
+/// A window that floats over everything MUST have a way out that does not
+/// require finding another window first. `companion_toggle` needs somewhere to
+/// be typed; this needs only the thing you are already looking at.
+#[tauri::command]
+pub fn companion_dismiss(app: tauri::AppHandle) -> Result<Value, String> {
+    hide(&app);
+    Ok(json!({ "open": false }))
+}
+
+/// Let the player move it.
+///
+/// `data-tauri-drag-region` cannot do this job here. Tauri's injected handler
+/// tests `e.target.getAttribute('data-tauri-drag-region')` — the EXACT target,
+/// with no walk up the tree — and the portrait's drag surface is a `<div>` full
+/// of `<img>` layers, so the target is always one of the images and the
+/// attribute is never found. The region was dead by construction: the window
+/// was pinned to wherever it first opened.
+///
+/// Asking the window to drag itself works whatever the children are.
+#[tauri::command]
+pub fn companion_drag(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.start_dragging().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn companion_state(app: tauri::AppHandle) -> Result<Value, String> {
     Ok(state(&app))
-}
-
-/// Which face the caption leads with. A preference, saved, nothing else.
-#[tauri::command]
-pub fn companion_face(app: tauri::AppHandle, face: String) -> Result<Value, String> {
-    let mut cfg = load();
-    cfg.face = if face == "work" { "work".into() } else { "goal".into() };
-    save(&cfg);
-    push(&app);
-    Ok(json!({ "face": cfg.face }))
 }
 
 /// The pet's doors open windows; it never acts itself.
@@ -265,8 +290,8 @@ pub fn companion_open(app: tauri::AppHandle, what: String) -> Result<Value, Stri
         "board" => {
             crate::mcp::board_feed::open_board_window(app.clone())?;
         }
-        "crew" => {
-            crate::mcp::terminal::open_terminal_card_new(app.clone(), "crew".into(), Some(json!({})), None)?;
+        "crew" | "crewpay" => {
+            crate::mcp::terminal::open_terminal_card_new(app.clone(), what.clone(), Some(json!({})), None)?;
         }
         _ => return Err(format!("{what} is not something the companion opens")),
     }
@@ -301,7 +326,7 @@ fn tray_slot() -> &'static Mutex<Option<TrayIcon>> {
 /// `caption` decided, including the em dash when nothing is confirmed. A
 /// trailing mark says whether anybody needs to do something.
 pub fn tray_title(state: &Value) -> String {
-    let (line1, _) = caption(state);
+    let line1 = rate_line(state);
     let trouble = state.get("trouble").and_then(|v| v.as_str()).unwrap_or("");
     let working = state.get("crew_working").and_then(|v| v.as_bool()).unwrap_or(false);
     let mark = if !trouble.is_empty() {
@@ -323,7 +348,7 @@ pub fn install_tray(app: &tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let open_crew = MenuItem::with_id(app, "tray_crew", "Crew", true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    let toggle_pet = MenuItem::with_id(app, "tray_pet", "Show the companion", true, None::<&str>)
+    let toggle_pet = MenuItem::with_id(app, "tray_pet", TRAY_SHOW, true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let sep = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let quit = PredefinedMenuItem::quit(app, Some("Quit Structs")).map_err(|e| e.to_string())?;
@@ -355,6 +380,9 @@ pub fn install_tray(app: &tauri::AppHandle) -> Result<(), String> {
                 } else {
                     let _ = show(app);
                 }
+                // A menu item that still says "Show" after showing it is a
+                // menu item nobody trusts to hide anything.
+                refresh_tray_labels(app);
             }
             _ => {}
         })
@@ -364,7 +392,30 @@ pub fn install_tray(app: &tauri::AppHandle) -> Result<(), String> {
     if let Ok(mut slot) = tray_slot().lock() {
         *slot = Some(tray);
     }
+    if let Ok(mut slot) = pet_item_slot().lock() {
+        *slot = Some(toggle_pet);
+    }
+    refresh_tray_labels(app);
     Ok(())
+}
+
+const TRAY_SHOW: &str = "Show the companion";
+const TRAY_HIDE: &str = "Hide the companion";
+
+static PET_ITEM: OnceLock<Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>>> = OnceLock::new();
+
+fn pet_item_slot() -> &'static Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>> {
+    PET_ITEM.get_or_init(|| Mutex::new(None))
+}
+
+/// Make the menu say what the click will do.
+pub fn refresh_tray_labels(app: &tauri::AppHandle) {
+    let text = if is_open(app) { TRAY_HIDE } else { TRAY_SHOW };
+    if let Ok(slot) = pet_item_slot().lock() {
+        if let Some(item) = slot.as_ref() {
+            let _ = item.set_text(text);
+        }
+    }
 }
 
 /// Update the menu-bar line. Cheap enough to call on every tick; skipped when
@@ -390,66 +441,67 @@ pub fn refresh_tray(app: &tauri::AppHandle) {
 mod tests {
     use super::*;
 
+    /// The rule the whole window rests on. Everything the first version
+    /// showed — a rate, a Goal/Work toggle, the player's own id — was true
+    /// and none of it was worth interrupting anyone for.
     #[test]
-    fn trouble_outranks_everything() {
-        let (a, b) = caption(&json!({ "trouble": "signing is wedged", "crew_working": true,
-                                      "alpha_per_hour": 95.0 }));
-        assert_eq!(a, "Work needs attention");
-        assert_eq!(b, "signing is wedged");
+    fn a_quiet_colony_says_nothing() {
+        assert_eq!(caption(&json!({})), None);
+        // A crew doing exactly what it was told to do is not news.
+        assert_eq!(caption(&json!({ "crew_working": true, "crew_helped": 12 })), None);
+        // Nor is a rate: that is the menu bar's job.
+        assert_eq!(caption(&json!({ "alpha_per_hour": 95_000_000.0 })), None);
     }
 
     #[test]
-    fn a_working_crew_says_what_it_is_doing() {
-        let (a, b) = caption(&json!({ "crew_working": true, "crew_taking": 3, "crew_helped": 12 }));
-        assert_eq!(a, "Helping");
-        assert_eq!(b, "3 running · 12 finished");
-        // Nothing finished yet is not "0 finished" — a fresh session should
-        // not open by reporting a zero.
-        let (_, b2) = caption(&json!({ "crew_working": true, "crew_taking": 1, "crew_helped": 0 }));
-        assert_eq!(b2, "1 running");
+    fn something_broken_gets_words() {
+        let n = caption(&json!({ "trouble": "signing is wedged" })).unwrap();
+        assert_eq!(n.text, "signing is wedged");
+        assert_eq!(n.tone, "bad");
+        assert_eq!(n.door, "board");
     }
 
-    /// The rule the whole face rests on: a figure this app has not confirmed
-    /// is shown as an em dash. A zero would be a claim, and one wrong claim
-    /// costs the reader their trust in every other reading on the window.
+    /// The one thing nothing else in the app nags about.
     #[test]
-    fn an_unconfirmed_rate_is_a_dash_and_never_a_zero() {
-        let (a, _) = caption(&json!({}));
-        assert_eq!(a, "— α / h");
-        assert!(!a.contains('0'));
+    fn an_unpaid_helper_gets_words() {
+        let n = caption(&json!({ "owed_base": 900.0 })).unwrap();
+        assert!(n.text.ends_with(" owed"), "{}", n.text);
+        assert_eq!(n.tone, "");
+        assert_eq!(n.door, "crewpay");
     }
 
     #[test]
-    fn a_confirmed_rate_is_a_number() {
-        let (a, _) = caption(&json!({ "alpha_per_hour": 95_000_000.0 }));
-        assert!(a.starts_with("+") && a.ends_with(" α / h"), "{a}");
+    fn a_problem_outranks_a_debt() {
+        let n = caption(&json!({ "trouble": "signing is wedged", "owed_base": 900.0 })).unwrap();
+        assert_eq!(n.tone, "bad");
+    }
+
+    /// The menu bar keeps the continuous readout, and keeps the honesty rule
+    /// with it: a figure this app has not confirmed is an em dash, never a
+    /// zero. A zero is a claim.
+    #[test]
+    fn the_menu_bar_does_not_invent_a_rate() {
+        assert!(tray_title(&json!({})).contains("\u{2014}"));
+        assert!(!tray_title(&json!({})).contains('0'));
     }
 
     #[test]
-    fn what_is_owed_is_worth_saying_when_nothing_is_running() {
-        let (a, _) = caption(&json!({ "owed_base": 900.0 }));
-        assert_eq!(a, "Owed");
+    fn a_confirmed_rate_is_a_number_in_the_menu_bar() {
+        let t = tray_title(&json!({ "alpha_per_hour": 95_000_000.0 }));
+        assert!(t.contains('+') && t.contains("\u{3b1} / h"), "{t}");
     }
 
-    /// The menu-bar line is the whole notification layer, so what it says
-    /// when something is wrong has to be distinguishable at a glance from
-    /// what it says when nothing is.
+    /// The menu-bar line is the whole notification layer, so trouble and work
+    /// have to be distinguishable at a glance.
     #[test]
     fn the_menu_bar_marks_trouble_and_work_differently() {
         let idle = tray_title(&json!({}));
-        let working = tray_title(&json!({ "crew_working": true, "crew_taking": 2 }));
+        let working = tray_title(&json!({ "crew_working": true }));
         let bad = tray_title(&json!({ "trouble": "signing is wedged" }));
-        assert!(!idle.contains('!') && !idle.contains('↗'), "{idle}");
-        assert!(working.ends_with(" · ↗"), "{working}");
-        assert!(bad.ends_with(" · !"), "{bad}");
+        assert!(!idle.contains('!') && !idle.contains('\u{2197}'), "{idle}");
+        assert!(working.ends_with(" \u{b7} \u{2197}"), "{working}");
+        assert!(bad.ends_with(" \u{b7} !"), "{bad}");
         assert_ne!(working, bad);
-    }
-
-    /// ...and it inherits the caption's honesty: no confirmed figure, no
-    /// number in the menu bar either.
-    #[test]
-    fn the_menu_bar_does_not_invent_a_rate() {
-        assert!(tray_title(&json!({})).contains("—"));
     }
 
     #[test]
