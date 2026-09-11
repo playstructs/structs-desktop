@@ -169,6 +169,25 @@ fn main() {
             matrix::matrix_work_status,
             matrix::matrix_mute,
             matrix::matrix_work_submit,
+            // Crews — team hashing over the chain's own hash-permission bits.
+            mcp::crew::crew_list,
+            mcp::crew::crew_save,
+            mcp::crew::crew_forget,
+            mcp::crew::crew_grant,
+            mcp::crew::crew_revoke,
+            mcp::crew::crew_open_guild,
+            mcp::crew::crew_close_guild,
+            mcp::crew::crew_roster,
+            mcp::crew_work::crew_work_config,
+            mcp::crew_work::crew_work_set,
+            mcp::crew_work::crew_work_preview,
+            mcp::crew_pay::crew_ledger,
+            mcp::crew_pay::crew_settle,
+            mcp::crew_pay::crew_claim,
+            mcp::companion::companion_toggle,
+            mcp::companion::companion_state,
+            mcp::companion::companion_face,
+            mcp::companion::companion_open,
             matrix::matrix_pinned,
             matrix::matrix_pin,
             matrix::matrix_refs,
@@ -597,6 +616,14 @@ try {{
             mcp::board_feed::reopen_if_persisted(app.handle());
             // Likewise the Terminal and any card it had popped out.
             mcp::terminal::reopen_if_persisted(app.handle());
+            // ...and the companion, which is the one window a player is most
+            // likely to have meant to leave on screen.
+            // The menu bar is the readout that survives every window being
+            // closed, so it goes up whether or not the pet is showing.
+            if let Err(e) = mcp::companion::install_tray(app.handle()) {
+                eprintln!("[companion] no menu-bar item: {e}");
+            }
+            mcp::companion::reopen_if_persisted(app.handle());
 
             // On-chain guild directory refresh (non-blocking; persisted config
             // is authoritative at boot). Keeps guild infra URLs fresh and

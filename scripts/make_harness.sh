@@ -669,6 +669,62 @@ cat > "$FIX" <<'EOF'
     mcp_board_html: '<div class="sui-data-card-row">harness ops snapshot</div>',
     mcp_board_feed: [],
     mcp_health: { ok: true },
+    // ── Crew ──
+    // One crew, half-open: they finish our work, we are not yet allowed to
+    // finish theirs. That asymmetry is the normal state and the one the card
+    // has to draw honestly.
+    crew_list: {
+      crews: [{
+        room_id: '!crew:example.org', guild_id: '0-1', name: 'Night shift',
+        role: 'work', scope: 'room', chosen: [], granted: ['1-61'], guild_rank_open: null,
+        pay: { enabled: true, denom: 'ualpha', rate_per_difficulty: 10,
+               epoch_secs: 3600, epoch_cap: 500, per_helper_cap: 200 },
+      }],
+      player_id: '1-194', guild_id: '0-1', perm_hash_all: 15728640,
+    },
+    crew_work_config: {
+      config: { enabled: true, interval_secs: 120, difficulty_threshold: 8, max_slots: 4, dry_run: false },
+      epoch_blocks: 60,
+      tally: { helped: [{ player_id: '1-61', proofs: 3 }] },
+    },
+    crew_work_preview: {
+      epoch: 40123, block: 2407400, members: ['1-61', '1-194'], slot: 1, ripe: 4,
+      mine: [{ object_id: '5-2184', owner_player: '1-61', task: 'MINE',
+               block_start: 2400000, difficulty_target: 14000, planet_id: '2-223' }],
+    },
+    crew_roster: {
+      members: [
+        { player_id: '1-61', name: 'JPEG', user_id: '@1-61:h', pfp_attrs: null, tag: 'SN',
+          they_can_help_me: 'granted', i_can_help_them: 'denied' },
+        { player_id: '1-248', name: 'Phoniffer', user_id: '@1-248:h', pfp_attrs: null, tag: null,
+          they_can_help_me: 'guild_rank', i_can_help_them: 'granted' },
+      ],
+      player_id: '1-194', guild_id: '0-1',
+    },
+    crew_ledger: {
+      credits: [
+        { id: 'tx1|5-2184', ts_ms: 1757000000000, room_id: '!crew:example.org',
+          helper_player: '1-61', object_id: '5-2184', category: 'mine', difficulty: 9,
+          tx_hash: 'AA', amount_base: 90, denom: 'ualpha', settled_at: null, settle_tx: null },
+        { id: 'tx2|5-99', ts_ms: 1756900000000, room_id: '!crew:example.org',
+          helper_player: '1-248', object_id: '5-99', category: 'refine', difficulty: 4,
+          tx_hash: 'BB', amount_base: 40, denom: 'ualpha', settled_at: 1756900500000, settle_tx: 'CC' },
+      ],
+      owed_base: 90,
+      plan: [{ helper_player: '1-61', amount_base: 90, denom: 'ualpha',
+               credit_ids: ['tx1|5-2184'], capped: false }],
+      spent_this_epoch: 40,
+    },
+    matrix_rooms: { guild_id: '0-1', rooms: [
+      { room_id: '!crew:example.org', name: 'Night shift' },
+      { room_id: '!lobby:example.org', name: 'Lobby' },
+    ] },
+    crew_save: { ok: true },
+    crew_grant: { ok: true },
+    crew_revoke: { ok: true },
+    crew_open_guild: { ok: true },
+    crew_close_guild: { ok: true },
+    crew_settle: { paid: [], spent_this_epoch: 40 },
     // The ops cards read what the Team Ops pages read.
     mcp_work: {
       counts: { running: 2, waiting: 5, completed: 40 },

@@ -2682,6 +2682,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     }
                     for (room_id, messages) in d.deltas {
                         maybe_notify(&app, &guild_id, &room_id, &messages, &session);
+                        crate::mcp::crew_pay::absorb_done_frames(&room_id, &messages);
                         let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::timeline",
                             json!({

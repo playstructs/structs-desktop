@@ -72,7 +72,7 @@
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
     ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats']],
-    ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results']],
+    ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
     ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['System', ['health']],
@@ -1588,6 +1588,12 @@
     MEMBERS: ['members', 'id'], ROSTER_OF: ['members', 'id'],
     // Placement: what can stand here, and in which free slot.
     BUILD: ['build', 'id'], DEPLOY: ['build', 'id'],
+    // Other people's machines finishing your proofs, and yours finishing
+    // theirs. `HELPERS` because that is what they are; `BOUNTY` and `OWED`
+    // because the money question is asked in different words than the
+    // membership one.
+    CREW: ['crew'], HELPERS: ['crew'], CREWMATES: ['crew'],
+    BOUNTY: ['crewpay'], OWED: ['crewpay'], PAYOUTS: ['crewpay'],
   };
   Terminal.WORDS = WORDS;
 
@@ -1747,6 +1753,10 @@
     if (COMMS_WORDS[head]) return { kind: 'comms', subject: rest || null };
     if (head === 'PRESET' || head === 'PRESETS') return { kind: 'preset', name: String(rest || '').toLowerCase() };
     if (head === 'SHARE') return { kind: 'share' };
+    // The companion is a WINDOW, not a card: it has no grid slot and no
+    // params, and it works the same from the palette over the game as from
+    // the Terminal — so it is parsed here beside the other bare verbs.
+    if (head === 'PET' || head === 'COMPANION') return { kind: 'pet' };
     // The bar's RESET button went with the bar; this is the same verb.
     if (head === 'RESET') return { kind: 'reset' };
     if (head === 'IMPORT') return rest ? { kind: 'import', text: rest } : null;
@@ -1860,6 +1870,15 @@
           if (cmd) cmd.classList.add('is-err');
           Board.stamp && Board.stamp('comms: ' + e);
         });
+      return true;
+    }
+    if (plan.kind === 'pet') {
+      // Above the palette-only gate: the companion opens no card and mutates
+      // no workspace, so the one surface that refuses every other verb can
+      // still reach it.
+      invoke('companion_toggle')
+        .then(function () { tellHost('ran'); })
+        .catch(function (e) { Board.stamp && Board.stamp('companion: ' + e); });
       return true;
     }
     if (state.paletteOnly) {
@@ -2340,6 +2359,16 @@
     cmd.addEventListener('input', function () { cmd.classList.remove('is-err'); histAt = -1; refresh(); });
     cmd.addEventListener('focus', refresh);
     cmd.addEventListener('blur', function () { setTimeout(close, 120); });
+    /* Escape on KEYUP as well: framed over the game (WKWebView, the frame's
+     * input focused) the keydown for Escape alone never reached the page —
+     * arrows and letters did — while the keyup still does. Seen live on
+     * 2026-09-10; the scrim click closed it, the key did not. Harmless when
+     * the keydown already closed it: there is nothing left to close. */
+    cmd.addEventListener('keyup', function (e) {
+      if (e.key !== 'Escape') return;
+      var p = palette();
+      if (p && !p.hidden) { close(); Terminal.closePalette(); }
+    });
     cmd.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') { close(); Terminal.closePalette(); return; }
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -2488,6 +2517,7 @@
       line('IMPORT', 'Open a workspace someone shared', '<code>', function () { fillCommand('IMPORT '); });
       // The bar's RESET button went with the bar; this is the same verb.
       line('RESET', 'Back to the default page', '', function () { Terminal.execute('RESET'); });
+      line('PET · COMPANION', 'The desktop companion', '', function () { Terminal.execute('PET'); });
 
       host.appendChild(list);
       return Promise.resolve();

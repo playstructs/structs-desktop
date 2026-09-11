@@ -271,6 +271,162 @@ pub fn maybe_report_borrowed(app_handle: &AppHandle, snap: &TaskStateSnapshot) {
     });
 }
 
+// ── Crew proof-of-work ──
+// A task somebody in our crew owns, which they have granted us the right to
+// FINISH. Unlike borrowed work, this one is submitted here: the chain checks
+// the single `PermHash*` bit matching the message against the owner's player
+// object (`keeper/player_cache.go` → `CanMineHashedBy`), and a grant makes our
+// signature as good as theirs for this one purpose.
+//
+// Deliberately a third registry rather than a flag on the other two. The three
+// do different things with the same solved nonce — submit as ourselves, report
+// and submit nothing, submit for someone else — and the distance between
+// "report a number" and "sign a transaction naming a stranger's object" is
+// exactly the distance that should not be one mistyped boolean.
+#[derive(Debug, Clone)]
+pub struct CrewWork {
+    /// The player who owns the object. Not read from the task: read from the
+    /// chain when the work was selected, and carried so the ledger can credit
+    /// the right person without asking again.
+    pub owner_player: String,
+    /// The crew this was done for — a Matrix room id.
+    pub room_id: String,
+    pub task: crate::mcp::types::TaskType,
+    /// HD index of the identity that signs. Zero is the primary.
+    pub index: u32,
+}
+
+static CREW_HASHES: std::sync::LazyLock<dashmap::DashMap<String, CrewWork>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+pub fn register_crew_hash(object_id: String, work: CrewWork) {
+    CREW_HASHES.insert(object_id, work);
+}
+
+pub fn forget_crew_hash(object_id: &str) {
+    CREW_HASHES.remove(object_id);
+}
+
+pub fn crew_hash(object_id: &str) -> Option<CrewWork> {
+    CREW_HASHES.get(object_id).map(|v| v.clone())
+}
+
+/// How many crew tasks are registered here right now.
+pub fn crew_hash_count() -> u64 {
+    CREW_HASHES.len() as u64
+}
+
+/// Is this object already being ground here, for anyone?
+///
+/// The registry is keyed by object id alone and `start_hash_task_core` cancels
+/// any existing task with the same id — so enqueueing a crew task for an
+/// object we are already working would silently evict our own work. Asked
+/// before a crew task is ever started.
+pub fn already_hashing(object_id: &str, registry: &TaskRegistry) -> bool {
+    registry.tasks.contains_key(object_id)
+}
+
+/// A task ground for a crewmate: submit it on their behalf.
+///
+/// The sibling of `maybe_complete_virtual`, and it carries the same staleness
+/// guard for the same reason — the completion message has no anchor in it, so
+/// the chain checks the nonce against its own current clock and a cycle that
+/// turned over mid-grind makes the proof dead on arrival. That risk is HIGHER
+/// here, not lower: the object is somebody else's, so its cycle can also be
+/// closed by its owner, or by another crewmate, while we are still grinding.
+pub fn maybe_complete_for_crew(app_handle: &AppHandle, snap: &TaskStateSnapshot) {
+    if !snap.result_exists {
+        return;
+    }
+    let Some((_k, work)) = CREW_HASHES.remove(&snap.object_id) else {
+        return;
+    };
+    let Some(nonce) = snap.result_nonce.clone().filter(|n| !n.is_empty()) else {
+        return;
+    };
+    let proof = snap.result_hash.clone().unwrap_or_default();
+    let kind = work.task;
+    let type_url = kind.completion_type_url();
+    let payload = kind.completion_payload(&snap.object_id, &proof, &nonce);
+
+    let app = app_handle.clone();
+    let object_id = snap.object_id.clone();
+    let solved_anchor = snap.block_start;
+    tauri::async_runtime::spawn(async move {
+        let client = crate::mcp::cosmos_client::CosmosClient::new();
+        let struct_id = crate::mcp::types::StructId::parse(&object_id).ok();
+        let mut ore_planet: Option<crate::mcp::types::PlanetId> = None;
+        if let (Some(_), Some(sid)) = (anchor_field_for(kind), struct_id.as_ref()) {
+            if let Ok((live, planet, _owner)) =
+                crate::mcp::verify::solved_anchor_live(&client, sid, kind).await
+            {
+                ore_planet = planet;
+                let live = live.get();
+                if live != 0 && live != solved_anchor {
+                    crate::mcp::telemetry::tlog(
+                        "crew",
+                        crate::mcp::telemetry::Sev::Notice,
+                        format!(
+                            "{kind} proof for {}'s {object_id} abandoned: solved against {solved_anchor}, \
+                             chain is now at {live} — somebody got there first",
+                            work.owner_player
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+        let guard = ore_planet.map(|planet_id| crate::mcp::tx_retry::FreshAnchor {
+            planet_id,
+            task_type: kind,
+            solved_anchor: crate::mcp::types::Block::new(solved_anchor),
+        });
+
+        PENDING_COMPLETIONS.insert(object_id.clone(), solved_anchor);
+        let signed = crate::mcp::tx_retry::sign_with_retry_guarded(
+            &app,
+            work.index,
+            type_url,
+            payload,
+            &crate::mcp::types::Context::parse(&format!("crew_complete:{object_id}")),
+            guard,
+        )
+        .await;
+        PENDING_COMPLETIONS.remove(&object_id);
+
+        match signed {
+            Ok(v) => {
+                crate::mcp::telemetry::tlog(
+                    "crew",
+                    crate::mcp::telemetry::Sev::Info,
+                    format!("finished {kind} on {object_id} for {}", work.owner_player),
+                );
+                crate::mcp::crew_work::note_helped(&work, &object_id);
+                // Tell the room where the receipt is. The owner cannot credit
+                // what they cannot find, and a transaction they did not sign
+                // is not something their client would otherwise look at.
+                if let Some(tx) = v
+                    .get("transactionHash")
+                    .or_else(|| v.get("txhash"))
+                    .and_then(|h| h.as_str())
+                {
+                    crate::mcp::crew_pay::announce(&work, &object_id, solved_anchor, tx).await;
+                }
+            }
+            Err(e) => {
+                // A loss here is ordinary and cheap: the ante throttles proofs
+                // to one per object per block, so a crewmate who beat us to it
+                // costs a rejected transaction and nothing else.
+                crate::mcp::telemetry::tlog(
+                    "crew",
+                    crate::mcp::telemetry::Sev::Notice,
+                    format!("{kind} completion for {object_id} did not land: {e}"),
+                );
+            }
+        }
+    });
+}
+
 /// Completions that have been dispatched but not yet resolved, as
 /// `object_id -> the anchor the proof was solved against`.
 ///

@@ -61,6 +61,22 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…so nothing is listening either', (w.__HARNESS_LISTENERS__ ? Object.keys(w.__HARNESS_LISTENERS__) : []).length === 0,
     Object.keys(w.__HARNESS_LISTENERS__ || {}).join(', '));
 
+  /* Escape reaches the framed palette only as a KEYUP (WKWebView swallows
+   * the keydown when the frame's input has focus), so keyup closes it too
+   * and tells the host. */
+  {
+    const told = [];
+    const orig = w.parent && w.parent !== w ? null : null;
+    const cmd = d.getElementById('tm-cmd');
+    const pal = d.getElementById('tm-palette');
+    pal.hidden = false;
+    cmd.dispatchEvent(new w.KeyboardEvent('keyup', { key: 'Escape', bubbles: true }));
+    check('Escape on keyup closes the palette (the keydown never arrives in the framed WKWebView)', pal.hidden === true, String(pal.hidden));
+    pal.hidden = false;
+    cmd.dispatchEvent(new w.KeyboardEvent('keyup', { key: 'a', bubbles: true }));
+    check('…and any other keyup leaves it open', pal.hidden === false);
+  }
+
   /* The stamp the palette CSS keys on lands on <html> BEFORE the first
    * stylesheet is parsed, so the board's skeleton is never painted in the
    * frame. The observer watched from before <html> existed. */
@@ -95,6 +111,25 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('a verb that would rewrite a workspace is refused, not half done',
     T.execute('RESET') === false && T.execute('PRESET war') === false,
     String(T.execute('RESET')));
+
+  /* PET is the one verb here that is neither a card nor a workspace edit.
+   *
+   * It opens a WINDOW — the desktop companion — so it touches no layout and
+   * has nothing to be half done. It is therefore handled ABOVE the
+   * palette-only gate on purpose, and this is the check that keeps it there:
+   * move it below and the companion becomes unreachable from the ⌘K over the
+   * game, which is the only surface most people will ever type it into.
+   */
+  {
+    const before = (w.__HARNESS_CALLS__ || []).length;
+    check('PET opens the companion from the palette, where every other non-card verb is refused',
+      T.execute('PET') === true
+      && (w.__HARNESS_CALLS__ || []).slice(before).some((c) => c.cmd === 'companion_toggle'),
+      JSON.stringify((w.__HARNESS_CALLS__ || []).slice(before).map((c) => c.cmd)));
+    check('…and it still adds no card and rewrites no layout',
+      !(w.__HARNESS_CALLS__ || []).slice(before).some(
+        (c) => c.cmd === 'terminal_layout_set' || c.cmd === 'open_terminal_card_new'));
+  }
 
   await tick(50);
   check('…and running one tells the host to put the overlay away',

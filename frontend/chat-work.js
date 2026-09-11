@@ -165,17 +165,26 @@
     }
     Chat.verifyWork = verifyWork;
 
-    // Submitting is the owner's act and costs them charge, so it is a separate
-    // click from checking — and it only appears once the proof has been
-    // checked. A button that both verifies and spends would make the check
-    // invisible at exactly the moment it matters.
+    // Submitting is the owner's act, so it is a separate click from checking
+    // — and it only appears once the proof has been checked. A button that
+    // both verifies and submits would make the check invisible at exactly the
+    // moment it matters.
+    //
+    // It does NOT cost charge, whatever this used to say. A completion is a
+    // PROOF message, not a charge message: `app/ante/maps.go`'s
+    // `ChargeMessages` lists the eight that are (activate, attack, build
+    // initiate, defense set/clear, move, stealth on/off) and no completion is
+    // among them, the miner-complete keeper never calls `Discharge`, and our
+    // own `loop_util::CHARGED_TYPES` agrees. What it does spend is a
+    // TRANSACTION — one in flight per address at a time — which is the
+    // resource actually worth telling somebody they are about to use.
     function offerSubmit(w, card) {
       if (card.querySelector('.chat-work-submit')) return;
       var b = el('a', 'sui-panel-btn sui-mod-default chat-ref-action chat-work-submit');
       b.href = 'javascript:void(0)';
       b.appendChild(icon('icon-send-alpha', 'sui-icon-sm'));
       b.appendChild(el('span', null, 'Submit'));
-      b.title = 'Submit this proof yourself — it costs your charge, not theirs';
+      b.title = 'Submit this proof yourself — it costs you a transaction, not them';
       b.addEventListener('click', function () {
         var line = card.querySelector('.chat-work-verdict');
         line.className = 'chat-work-verdict';

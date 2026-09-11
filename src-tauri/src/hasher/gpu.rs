@@ -557,5 +557,6 @@ fn emit_event(app_handle: &tauri::AppHandle, event: &str, handle: &TaskHandle) {
         crate::mcp::telemetry::record_solve(&snapshot, "gpu");
         crate::hasher::maybe_complete_virtual(app_handle, &snapshot);
         crate::hasher::maybe_report_borrowed(app_handle, &snapshot);
+        crate::hasher::maybe_complete_for_crew(app_handle, &snapshot);
     }
 }

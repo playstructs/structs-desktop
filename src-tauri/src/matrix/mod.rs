@@ -697,6 +697,18 @@ pub async fn post_work_result(
     client::send_work(&session, room_id, body, work, Some(reply_to)).await
 }
 
+/// Post a work frame that answers nothing — a crew announcement rather than a
+/// reply to an offer.
+pub async fn post_work(
+    guild_id: &str,
+    room_id: &str,
+    body: &str,
+    work: Value,
+) -> Result<String, String> {
+    let session = session_for(guild_id)?;
+    client::send_work(&session, room_id, body, work, None).await
+}
+
 /// Ask a room for help with a proof.
 ///
 /// The anchor comes from the CHAIN, never from the caller: a proof is
@@ -1645,8 +1657,17 @@ static MEDIA_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<String,
 /// Who is in this room.
 #[tauri::command]
 pub async fn matrix_members(guild_id: String, room_id: String) -> Result<Value, String> {
-    let session = session_for(&guild_id)?;
-    Ok(json!({ "members": client::members(&session, &room_id).await? }))
+    Ok(json!({ "members": crew_members(&guild_id, &room_id).await? }))
+}
+
+/// The same list, for callers inside Rust.
+///
+/// `mcp::crew` needs a room's membership to answer who is in a crew, and it
+/// has no business holding a Matrix session — sessions live here, behind
+/// `session_for`, and that is the only place identity is resolved.
+pub async fn crew_members(guild_id: &str, room_id: &str) -> Result<Vec<Value>, String> {
+    let session = session_for(guild_id)?;
+    client::members(&session, room_id).await
 }
 
 // ── The window ──────────────────────────────────────────────────────────────

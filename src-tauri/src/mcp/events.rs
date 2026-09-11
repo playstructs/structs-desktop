@@ -68,6 +68,13 @@ pub enum AppEvent {
     TransferIntent(Value),
     /// Comms keeps its `matrix::` namespace; it goes through the same path.
     Matrix { name: String, payload: Value },
+    /// The desktop companion's whole state, pushed on a change.
+    ///
+    /// One event carrying everything rather than a stream of small ones: the
+    /// pet is a 225x280 window that redraws in full, and a window that has to
+    /// assemble its picture from four events is a window that can show half a
+    /// picture.
+    Companion(Value),
 }
 
 impl AppEvent {
@@ -89,6 +96,7 @@ impl AppEvent {
             Self::Raid { label, name, .. } => format!("{name}::{label}"),
             Self::TransferIntent(_) => "transfer-intent".into(),
             Self::Matrix { name, .. } => name.clone(),
+            Self::Companion(_) => "companion".into(),
         }
     }
 
@@ -116,13 +124,14 @@ impl AppEvent {
             Self::Raid { label, .. } => Audience::Window(label.clone()),
             Self::TransferIntent(_) => Audience::Window("transfer".into()),
             Self::Matrix { .. } => Audience::All,
+            Self::Companion(_) => Audience::Window(crate::mcp::companion::LABEL.into()),
         }
     }
 
     pub fn payload(&self) -> Value {
         match self {
             Self::HashProgress(v) | Self::HashComplete(v) | Self::TxRequest(v) | Self::VplayerRequest(v)
-            | Self::TxqRequest(v) | Self::TransferIntent(v) => v.clone(),
+            | Self::TxqRequest(v) | Self::TransferIntent(v) | Self::Companion(v) => v.clone(),
             Self::ForceResync { hard } => json!({ "hard": hard }),
             Self::TaskOverrides { max_concurrent } => json!({ "maxConcurrent": max_concurrent }),
             Self::HashEnabled { enabled } => json!({ "enabled": enabled }),
@@ -291,6 +300,7 @@ mod tests {
             (AppEvent::UiDirective { main: true, directive: Value::Null }, "mcp_ui_directive"),
             (AppEvent::Board { name: "board-update", payload: Value::Null }, "board-update"),
             (AppEvent::Raid { label: "raid-2-1".into(), name: "raid:attack", payload: Value::Null }, "raid:attack::raid-2-1"),
+            (AppEvent::Companion(Value::Null), "companion"),
             (AppEvent::TransferIntent(Value::Null), "transfer-intent"),
             (AppEvent::Matrix { name: "matrix::rooms".into(), payload: Value::Null }, "matrix::rooms"),
         ];

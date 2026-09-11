@@ -1,0 +1,93 @@
+/* The companion window.
+ *
+ * The window itself is transparent and undecorated, so everything visible is
+ * painted here. Nothing may set a background on html or body: the ground IS
+ * the player's desktop.
+ *
+ * Two house rules bite hard in a window this small:
+ *   - `main.css` centres the body, and it is invisible until a block goes
+ *     full-width, so alignment is set explicitly;
+ *   - pixel art has square corners. SUI sets `border-radius: 0` fourteen
+ *     times on purpose; a rounded corner is a shape the tileset cannot draw.
+ */
+html, body.pet-body {
+  background: transparent;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+}
+
+.pet {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  text-align: center;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* The speech bubble: the game's own panel surface, not a new one. */
+.pet-bubble {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--spacing-sm);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-body);
+  text-decoration: none;
+  text-align: center;
+}
+.pet-bubble:hover { border-color: var(--border-strong); }
+.pet-line1 { display: block; color: var(--text-body); }
+.pet-line2 {
+  display: block;
+  color: var(--text-hint);
+  margin-top: var(--spacing-xs);
+  min-height: 1em;
+}
+.pet-mod-trouble .pet-line1 { color: var(--text-warning); }
+
+/* Which face the caption leads with. The game's own nav item. */
+.pet-faces { width: 100%; }
+.pet-faces .sui-screen-nav-items { justify-content: center; }
+
+/* The portrait is 128px because the art is: four times the 32px source, on
+ * the same doubling the rest of the game uses. It is also the drag handle, so
+ * it has to look draggable and must not be selectable.
+ */
+.pet-portrait {
+  position: relative;
+  width: 128px;
+  height: 128px;
+  cursor: grab;
+  user-select: none;
+}
+.pet-portrait:active { cursor: grabbing; }
+.pet-portrait .pc-pfp,
+.pet-portrait .pc-pfp img { width: 100%; height: 100%; }
+
+/* Celebration, drawn over the portrait and never in the way of it. Sized by
+ * its parent rather than by an offset, so there is no magic number to keep in
+ * step with the portrait.
+ */
+.pet-spark {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.pet-name {
+  display: inline-block;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--surface-default);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-hint);
+  text-decoration: none;
+}
+.pet-name:hover { color: var(--text-body); }

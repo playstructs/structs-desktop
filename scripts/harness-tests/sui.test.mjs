@@ -167,6 +167,12 @@ const BUDGET = {
   // +10 (2026-09-09): the reaction and reply rules that arrived from chat.html.
   // +1 (2026-09-09): the id chip's hairline, arrived from board.html.
   'chat-rows.css':      [0, 30],
+  // The companion window. Four: the portrait's 128px width and height (4x the
+  // 32px source, the same doubling the rest of the game uses) and two 1px
+  // hairlines, on the bubble and on the name capsule.
+  'pet.css':            [0, 4],
+  'pet.html':           [0, 0],
+  'pet.js':             [0, 0],
   // The guild emblem (72px / 24px) and its 1px frame.
   'guildcard.css':      [0, 10],
   // The owner line's 24px portrait and the unit/owner type sizes.

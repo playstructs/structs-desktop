@@ -581,6 +581,20 @@ pub async fn sync_game_state(
         tokio::spawn(async move {
             crate::mcp::auto_sweep::tick(&app_s, false).await;
         });
+        // Crew work rides the same tick: it only ever fills hashing slots the
+        // local colony left free, so it has to be scheduled AFTER the loops
+        // that claim them — auto_harvest and auto_build above.
+        let app_c = app_handle.clone();
+        tokio::spawn(async move {
+            crate::mcp::crew_work::tick(&app_c, false).await;
+        });
+        let app_p = app_handle.clone();
+        tokio::spawn(async move {
+            crate::mcp::crew_pay::tick(&app_p, false).await;
+        });
+        // The companion draws from what those loops just did, so it is told
+        // after them rather than polling for it.
+        crate::mcp::companion::push(&app_handle);
         // Backfill of primary control over the vplayers. Rides the sync tick
         // rather than the roster sweep on purpose: the roster sweep only runs
         // while the Team Ops window is open, and this grant needs to converge

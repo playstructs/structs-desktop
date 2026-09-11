@@ -605,6 +605,27 @@ impl fmt::Display for TaskType {
     }
 }
 
+/// On the wire a task kind is its own spelling — `"MINE"`, not `"Mine"`.
+///
+/// Hand-written rather than derived because the derived form would invent a
+/// second vocabulary for a value the chain, the Comms wire format, the MCP
+/// tool and every log line already spell one way. `parse` is deliberately the
+/// same forgiving one a human's typing goes through.
+impl serde::Serialize for TaskType {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TaskType {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Self::parse(&raw).ok_or_else(|| {
+            serde::de::Error::custom(format!("{raw:?} is not a kind of work the chain proves"))
+        })
+    }
+}
+
 /// Where a struct stands: on a planet or in a fleet. The wire strings
 /// (`planet` / `fleet`) are the chain's `locationType` values.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

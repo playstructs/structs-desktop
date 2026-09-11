@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Structs</title>
+  <!-- All four, in this order. Linking only main.css gets the colours but
+       neither the FONT nor any SUI component. -->
+  <link rel="stylesheet" href="css/normalize.css">
+  <link rel="stylesheet" href="css/structicons.css">
+  <link rel="stylesheet" href="css/sui/sui.css">
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="playercard.css">
+  <link rel="stylesheet" href="pet.css">
+</head>
+<body class="pet-body">
+  <div id="pet" class="pet">
+    <!-- The bubble is a button: clicking it opens the colony, which is the
+         one thing a companion is for. -->
+    <a id="pet-bubble" class="pet-bubble" href="javascript:void(0)">
+      <span id="pet-line1" class="pet-line1">Structs</span>
+      <span id="pet-line2" class="pet-line2"></span>
+    </a>
+    <div id="pet-faces" class="pet-faces"></div>
+    <!-- The drag surface is the portrait and nothing else: a window-wide drag
+         region would swallow every click on the controls above it. -->
+    <div id="pet-portrait" class="pet-portrait" data-tauri-drag-region>
+      <canvas id="pet-spark" class="pet-spark" width="128" height="128" aria-hidden="true"></canvas>
+    </div>
+    <a id="pet-name" class="pet-name" href="javascript:void(0)"></a>
+  </div>
+  <script src="bridge.js"></script>
+  <script src="events.js"></script>
+  <script src="pfp.js"></script>
+  <script src="playercard.js"></script>
+  <script src="units.js"></script>
+  <script src="pet.js"></script>
+</body>
+</html>

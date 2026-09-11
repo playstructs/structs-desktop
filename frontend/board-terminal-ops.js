@@ -143,6 +143,347 @@
 
   // ── Hashing (mcp_work) ───────────────────────────────────────────────────
   var TASK_ICON = { MINE: 'icon-mine', REFINE: 'icon-refine', BUILD: 'icon-in-progress', RAID: 'icon-raid' };
+  // ── CREW ──────────────────────────────────────────────────────────────
+  //
+  // A crew is other people's machines finishing your proofs, and yours
+  // finishing theirs. Two cards because there are two questions and they are
+  // asked at different times: WHO is in it and what is open to whom (this
+  // card), and what that costs (the next one).
+  //
+  // The grant is the part that reads alarming and is not: the chain's
+  // `PermHash*` bits gate exactly four completion messages and nothing else,
+  // so opening your work hands over no tokens, no structs and no account. The
+  // row says which of the four roads the permission came down — owner, a
+  // direct grant, or a guild rank — because they expire differently and a
+  // single "allowed" could not explain tomorrow's failure.
+  var CREW_ROLES = [
+    { value: 'off', label: 'Paused' },
+    { value: 'help_only', label: 'Help only' },
+    { value: 'collect_only', label: 'Collect only' },
+    { value: 'work', label: 'Work' },
+  ];
+  var AUTH_CHIP = {
+    owner: ['Yours', 'ok'], granted: ['Granted', 'ok'],
+    guild_rank: ['By rank', 'ok'], denied: ['Closed', 'muted'],
+  };
+  function authChip(label, v) {
+    var a = AUTH_CHIP[String(v || 'denied')] || ['Unknown', 'muted'];
+    return H.statTile(label, a[0], null, v == null ? 'muted' : a[1]);
+  }
+
+  T.register('crew', {
+    label: 'Crew',
+    describe: function (p) { return 'Crew' + (p && p.room ? ' · ' + shortRoom(p.room) : ''); },
+    cadenceMs: 20000,
+    params: [{ key: 'room', label: 'Crew room', kind: 'text', placeholder: '!crew:server' }],
+    render: function (host, p, ctx) {
+      return Promise.all([invoke('crew_list'), invoke('crew_work_config')]).then(function (r) {
+        var d = r[0] || {}, w = r[1] || {};
+        var crews = d.crews || [];
+        host.innerHTML = '';
+        if (!crews.length) {
+          host.appendChild(H.stateBlock('info', 'No crew yet.'));
+          host.appendChild(addCrewTicket(d, ctx));
+          return;
+        }
+        var room = (p && p.room) || crews[0].room_id;
+        var crew = crews.filter(function (c) { return c.room_id === room; })[0] || crews[0];
+        room = crew.room_id;
+
+        if (crews.length > 1) {
+          host.appendChild(H.navStrip(crews.map(function (c) {
+            return { key: c.room_id, label: c.name || shortRoom(c.room_id) };
+          }), room, function (k) { T.setParams(ctx.id, { room: k }); }));
+        }
+
+        var cfg = w.config || {};
+        host.appendChild(tiles([
+          ['role', roleLabel(crew.role)],
+          ['scope', String(crew.scope || 'room')],
+          ['open to', crew.guild_rank_open ? 'guild ≤ ' + crew.guild_rank_open
+            : (crew.granted || []).length ? (crew.granted.length + ' granted') : 'nobody', null,
+            crew.guild_rank_open || (crew.granted || []).length ? 'ok' : 'muted'],
+          ['helping', cfg.enabled ? 'on' : 'off', null, cfg.enabled ? 'live' : 'muted'],
+        ]));
+
+        // What this machine is actually doing for the crew right now. A role
+        // set to Work with nothing being taken is the case worth seeing.
+        var slot = H.el('div', 'tm-cap');
+        host.appendChild(slot);
+        invoke('crew_work_preview', { roomId: room })
+          .then(function (pv) {
+            slot.innerHTML = '';
+            slot.appendChild(tiles([
+              ['epoch', String(pv.epoch == null ? '—' : pv.epoch)],
+              ['my slot', pv.slot == null ? 'not in crew' : String(pv.slot + 1) + ' of ' + (pv.members || []).length,
+                null, pv.slot == null ? 'bad' : null],
+              ['ripe', H.fmtInt((pv.ripe || 0))],
+              ['taking', H.fmtInt((pv.mine || []).length), null, (pv.mine || []).length ? 'live' : 'muted'],
+            ]));
+            (pv.mine || []).forEach(function (t) {
+              slot.appendChild(H.resultRow({
+                icon: t.task === 'REFINE' ? 'icon-refine' : 'icon-mine',
+                title: t.object_id, subtitle: String(t.task) + ' · ' + (t.owner_player || ''),
+                chips: [H.statTile('anchor', String(t.block_start))],
+              }));
+            });
+          })
+          .catch(function (e) { slot.innerHTML = ''; slot.appendChild(H.alertLine(String(e), 'icon-alert')); });
+
+        host.appendChild(H.field('This machine', H.selectBox(crew.role || 'off', CREW_ROLES, function (v) {
+          crew.role = v;
+          invoke('crew_save', { crew: crew }).then(function () { T.refresh(ctx.id, true); })
+            .catch(function (e) { Board.stamp && Board.stamp('crew: ' + e); });
+        })));
+        host.appendChild(H.field('Grinding for crews', H.checkbox(!!cfg.enabled, null, function (on) {
+          cfg.enabled = on;
+          invoke('crew_work_set', { config: cfg }).then(function () { T.refresh(ctx.id, true); })
+            .catch(function (e) { Board.stamp && Board.stamp('crew: ' + e); });
+        })));
+
+        // The roster: two directions, because a half-open crew is the normal
+        // state and one chip could not show it.
+        var people = H.el('div');
+        cap(host, 'Crew');
+        host.appendChild(people);
+        invoke('crew_roster', { guildId: crew.guild_id || d.guild_id || '', roomId: room })
+          .then(function (rr) {
+            people.innerHTML = '';
+            var ms = (rr && rr.members) || [];
+            if (!ms.length) { people.appendChild(H.stateBlock('info', 'Nobody else in this room plays.')); return; }
+            ms.forEach(function (m) {
+              /* The door follows the DIRECT grant, not "may they help at all".
+               * Somebody reaching our work down the guild-rank road has no
+               * per-person record to revoke — offering "Close my work" there
+               * would send a revoke of a grant that never existed and leave
+               * them still able to help, which is the worst of both answers. */
+              var granted = m.they_can_help_me === 'granted';
+              var pc = PC();
+              var row = H.resultRow({
+                portrait: pc ? pc.portrait(m.pfp_attrs) : null,
+                icon: pc ? null : 'icon-member',
+                title: String(m.name || m.player_id), subtitle: String(m.player_id),
+                chips: [authChip('they help me', m.they_can_help_me), authChip('i help them', m.i_can_help_them)],
+                action: doorRow([{
+                  label: granted ? 'Close my work' : 'Open my work', primary: !granted,
+                  onClick: function (a) {
+                    a.textContent = '…';
+                    invoke(granted ? 'crew_revoke' : 'crew_grant', { helperPlayerId: m.player_id, roomId: room })
+                      .then(function () { T.refresh(ctx.id, true); })
+                      .catch(function (e) { a.textContent = String(e); });
+                  },
+                }]),
+              });
+              people.appendChild(row);
+            });
+          })
+          .catch(function (e) { people.innerHTML = ''; people.appendChild(H.alertLine(String(e), 'icon-alert')); });
+
+        // Open to a whole guild at a rank — one transaction instead of one per
+        // crewmate, and the only sane shape for a guild of two hundred.
+        cap(host, 'Guild');
+        host.appendChild(ticket({
+          cta: crew.guild_rank_open ? 'Change rank' : 'Open to guild',
+          fields: [{ key: 'rank', label: 'Worst rank allowed', kind: 'amount',
+            value: String(crew.guild_rank_open || 1), placeholder: '1' }],
+          confirm: function (v) {
+            return { title: 'Open your proofs to the guild?', cta: 'Open', rows: [
+              ['Guild', String(crew.guild_id || d.guild_id || '?')],
+              ['Rank', String(v.rank || 1) + ' or better'],
+              ['Grants', 'hash_build, hash_mine, hash_refine, hash_raid'],
+            ] };
+          },
+          submit: function (v) {
+            return invoke('crew_open_guild', { guildId: crew.guild_id || d.guild_id || null,
+              rank: Number(v.rank) || 1, roomId: room });
+          },
+          done: function () { T.refresh(ctx.id, true); },
+        }));
+        if (crew.guild_rank_open) {
+          host.appendChild(doorRow([{ label: 'Close to guild', onClick: function (a) {
+            a.textContent = '…';
+            invoke('crew_close_guild', { guildId: crew.guild_id || d.guild_id || null, roomId: room })
+              .then(function () { T.refresh(ctx.id, true); })
+              .catch(function (e) { a.textContent = String(e); });
+          } }]));
+        }
+        host.appendChild(addCrewTicket(d, ctx));
+      }).catch(function (e) { fail(host, 'crew', e); });
+    },
+  });
+
+  /* Money, on the game's own ladder.
+   *
+   * `90 ualpha` is a denom string and a raw integer; the game says `90μg`
+   * everywhere else and a card that says otherwise reads as a different
+   * application. A guild token has no ladder, so it stays a count — but it
+   * still gets a name rather than its wire denom. */
+  function denomLabel(denom) {
+    var d = String(denom || '');
+    return d === 'ualpha' ? 'Alpha' : d.indexOf('uguild.') === 0 ? 'Guild token' : d;
+  }
+  function amt(base, denom) {
+    var n = Number(base) || 0;
+    var U = window.StructsUnits;
+    if (String(denom || 'ualpha') === 'ualpha' && U) return U.fmtAlpha(n);
+    return H.fmtInt(n) + ' ' + denomLabel(denom);
+  }
+  function plural(n, one) { return H.fmtInt(n) + ' ' + one + (Number(n) === 1 ? '' : 's'); }
+
+  function shortRoom(id) {
+    var s = String(id || '');
+    var cut = s.indexOf(':');
+    return (cut > 0 ? s.slice(0, cut) : s).replace(/^!/, '');
+  }
+  function roleLabel(v) {
+    var m = CREW_ROLES.filter(function (r) { return r.value === v; })[0];
+    return m ? m.label : 'Paused';
+  }
+
+  // Turning a room into a crew is local: it writes a config file and sends
+  // nothing. Opening your work to the people in it is the separate, signed act
+  // above, which is why they are not one button.
+  function addCrewTicket(d, ctx) {
+    var box = H.el('div');
+    cap(box, 'Add a crew');
+    invoke('matrix_rooms', { guildId: d.guild_id || '' })
+      .then(function (r) {
+        var rooms = (r && r.rooms) || [];
+        if (!rooms.length) { box.appendChild(H.stateBlock('info', 'No Comms rooms joined.')); return; }
+        box.appendChild(ticket({
+          cta: 'Make a crew',
+          fields: [{ key: 'room', label: 'Room', kind: 'choice',
+            options: rooms.map(function (rm) {
+              return { value: rm.room_id, label: String(rm.name || shortRoom(rm.room_id)) };
+            }) }],
+          confirm: function (v) {
+            return { title: 'Make this room a crew?', cta: 'Make a crew', rows: [
+              ['Room', shortRoom(v.room)],
+              ['Signs', 'nothing — this is a local setting'],
+            ] };
+          },
+          submit: function (v) {
+            if (!v.room) return Promise.reject('choose a room');
+            var name = (rooms.filter(function (rm) { return rm.room_id === v.room; })[0] || {}).name;
+            return invoke('crew_save', { crew: {
+              room_id: v.room, guild_id: d.guild_id || '', name: String(name || shortRoom(v.room)),
+              role: 'off', scope: 'room', chosen: [], granted: [], guild_rank_open: null,
+              pay: { enabled: false, denom: 'ualpha', rate_per_difficulty: 0,
+                     epoch_secs: 3600, epoch_cap: 0, per_helper_cap: 0 },
+            } });
+          },
+          done: function () { T.refresh(ctx.id, true); },
+        }));
+      })
+      .catch(function () { box.appendChild(H.stateBlock('info', 'Comms is not connected.')); });
+    return box;
+  }
+
+  // ── CREW PAY ──────────────────────────────────────────────────────────
+  //
+  // What the crew has earned and what it has been paid. The ledger is written
+  // from the chain's own `EventHashSuccess` receipts, never from a message, so
+  // every row here names a transaction that can be looked up.
+  T.register('crewpay', {
+    label: 'Bounty',
+    describe: function (p) { return 'Bounty' + (p && p.room ? ' · ' + shortRoom(p.room) : ''); },
+    cadenceMs: 30000,
+    params: [{ key: 'room', label: 'Crew room', kind: 'text', placeholder: '!crew:server' }],
+    render: function (host, p, ctx) {
+      return invoke('crew_list').then(function (d) {
+        var crews = (d && d.crews) || [];
+        host.innerHTML = '';
+        if (!crews.length) { host.appendChild(H.stateBlock('info', 'No crew yet.')); return; }
+        var room = (p && p.room) || crews[0].room_id;
+        var crew = crews.filter(function (c) { return c.room_id === room; })[0] || crews[0];
+        room = crew.room_id;
+        if (crews.length > 1) {
+          host.appendChild(H.navStrip(crews.map(function (c) {
+            return { key: c.room_id, label: c.name || shortRoom(c.room_id) };
+          }), room, function (k) { T.setParams(ctx.id, { room: k }); }));
+        }
+        return invoke('crew_ledger', { roomId: room }).then(function (l) {
+          var pay = crew.pay || {};
+          var plan = (l && l.plan) || [];
+          var due = plan.reduce(function (n, s) { return n + (s.amount_base || 0); }, 0);
+          var den = pay.denom || 'ualpha';
+          host.appendChild(tiles([
+            [['rate', denomLabel(den)], pay.rate_per_difficulty
+              ? amt(pay.rate_per_difficulty, den) + ' / difficulty' : 'unset',
+              null, pay.rate_per_difficulty ? null : 'muted'],
+            ['owed', amt(l.owed_base || 0, den)],
+            ['this epoch', amt(l.spent_this_epoch || 0, den)
+              + (pay.epoch_cap ? ' / ' + amt(pay.epoch_cap, den) : '')],
+            ['due now', amt(due, den), null, due ? 'live' : 'muted'],
+          ]));
+
+          host.appendChild(H.field('Pay automatically', H.checkbox(!!pay.enabled, null, function (on) {
+            crew.pay = Object.assign({}, pay, { enabled: on });
+            invoke('crew_save', { crew: crew }).then(function () { T.refresh(ctx.id, true); })
+              .catch(function (e) { Board.stamp && Board.stamp('crew: ' + e); });
+          })));
+          host.appendChild(ticket({
+            cta: 'Save terms',
+            fields: [
+              { key: 'denom', label: 'Token', kind: 'choice', value: pay.denom || 'ualpha', options: [
+                { value: 'ualpha', label: 'Alpha' },
+              ].concat(d.guild_id ? [{ value: 'uguild.' + d.guild_id, label: 'Guild token' }] : []) },
+              { key: 'rate', label: 'Per difficulty', kind: 'amount', value: String(pay.rate_per_difficulty || 0) },
+              { key: 'per_helper_cap', label: 'Cap per helper', kind: 'amount', value: String(pay.per_helper_cap || 0) },
+              { key: 'epoch_cap', label: 'Cap per epoch', kind: 'amount', value: String(pay.epoch_cap || 0) },
+            ],
+            confirm: function (v) {
+              return { title: 'Set this crew’s terms?', cta: 'Save', rows: [
+                ['Token', String(v.denom)],
+                ['Rate', String(v.rate || 0) + ' per difficulty'],
+                ['Per helper', Number(v.per_helper_cap) ? String(v.per_helper_cap) : 'no cap'],
+                ['Per epoch', Number(v.epoch_cap) ? String(v.epoch_cap) : 'no cap'],
+              ] };
+            },
+            submit: function (v) {
+              crew.pay = { enabled: !!pay.enabled, denom: String(v.denom || 'ualpha'),
+                rate_per_difficulty: Number(v.rate) || 0, epoch_secs: pay.epoch_secs || 3600,
+                epoch_cap: Number(v.epoch_cap) || 0, per_helper_cap: Number(v.per_helper_cap) || 0 };
+              return invoke('crew_save', { crew: crew });
+            },
+            done: function () { T.refresh(ctx.id, true); },
+          }));
+
+          plan.forEach(function (s) {
+            host.appendChild(H.resultRow({
+              icon: 'icon-send-alpha', title: String(s.helper_player),
+              subtitle: amt(s.amount_base, s.denom) + ' · ' + plural(s.credit_ids.length, 'proof'),
+              chips: s.capped ? [H.statTile('capped', 'yes', null, 'bad')] : [],
+            }));
+          });
+          if (due > 0) {
+            host.appendChild(doorRow([{ label: 'Pay now', primary: true, onClick: function (a) {
+              a.textContent = '…';
+              invoke('crew_settle', { roomId: room })
+                .then(function () { T.refresh(ctx.id, true); })
+                .catch(function (e) { a.textContent = String(e); });
+            } }]));
+          }
+
+          cap(host, 'Receipts');
+          var rows = (l.credits || []).slice().sort(function (a, b) { return b.ts_ms - a.ts_ms; }).slice(0, 20);
+          if (!rows.length) { host.appendChild(H.stateBlock('info', 'Nobody has finished anything for you yet.')); return; }
+          rows.forEach(function (c) {
+            host.appendChild(H.resultRow({
+              icon: c.category === 'refine' ? 'icon-refine' : 'icon-mine',
+              title: String(c.helper_player) + ' · ' + c.object_id,
+              subtitle: String(c.category) + ' · difficulty ' + c.difficulty,
+              chips: [
+                H.statTile('owed', amt(c.amount_base, c.denom)),
+                H.statTile('paid', c.settled_at ? 'yes' : 'no', null, c.settled_at ? 'ok' : 'muted'),
+              ],
+            }));
+          });
+        });
+      }).catch(function (e) { fail(host, 'crew pay', e); });
+    },
+  });
+
   T.register('pow', {
     label: 'Proof queue', describe: function () { return 'Proof queue'; }, cadenceMs: 5000,
     render: function (host, p, ctx) {

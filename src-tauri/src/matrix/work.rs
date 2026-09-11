@@ -118,9 +118,28 @@ pub fn parse(content: &Value) -> Option<Value> {
             }
             out["nonce"] = json!(nonce);
         }
+        // A crewmate finished this one themselves and is telling us where to
+        // look. The hash is a POINTER, not evidence: what settles the claim is
+        // the transaction it names, read from the chain by whoever is paying.
+        "done" => {
+            let tx = w.get("tx").and_then(|t| t.as_str())?;
+            if !tx_hash_is_sound(tx) {
+                return None;
+            }
+            out["tx"] = json!(tx.to_uppercase());
+        }
         _ => return None,
     }
     Some(out)
+}
+
+/// A Cosmos transaction hash: 64 hex characters and nothing else.
+///
+/// Checked before the string is ever put in a URL. It is read off a federated
+/// message, and the only defence against a hostile one is refusing to carry
+/// anything that is not exactly the shape of a hash.
+pub fn tx_hash_is_sound(tx: &str) -> bool {
+    tx.len() == 64 && tx.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -154,6 +173,29 @@ mod tests {
     fn a_nonce_that_does_not_meet_the_difficulty_is_refused() {
         // 32 leading zero-nibbles is unreachable for this input.
         assert!(verify("5-2184", "MINE", 812004, None, "12345", 60).is_none());
+    }
+
+    #[test]
+    fn a_done_frame_carries_a_well_formed_transaction_hash() {
+        let good = "A".repeat(64);
+        let c = json!({ "structs.work": { "v": 1, "kind": "done", "task": "MINE",
+            "object": "5-2184", "block_start": 812004, "tx": good } });
+        assert_eq!(parse(&c).unwrap()["tx"], json!(good));
+    }
+
+    /// This string goes into a URL. Anything that is not exactly a hash is
+    /// refused before it can get there.
+    #[test]
+    fn a_done_frame_with_anything_but_a_hash_is_refused() {
+        for bad in ["", "not-a-hash", "../../secret", &"A".repeat(63), &"A".repeat(65), &format!("{}z", "A".repeat(63))] {
+            let c = json!({ "structs.work": { "v": 1, "kind": "done", "task": "MINE",
+                "object": "5-2184", "block_start": 812004, "tx": bad } });
+            assert!(parse(&c).is_none(), "{bad:?} must not parse");
+        }
+        // ...and one with no tx at all is not a done frame.
+        let c = json!({ "structs.work": { "v": 1, "kind": "done", "task": "MINE",
+            "object": "5-2184", "block_start": 812004 } });
+        assert!(parse(&c).is_none());
     }
 
     #[test]
