@@ -1,10 +1,12 @@
 name: CI
 
+# Only on pull requests (plus manual runs). Pushes to main normally arrive
+# alongside a `v*` tag, and the Release workflow already builds every platform
+# from that same commit — running CI too just duplicated the work on every push.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   check:
