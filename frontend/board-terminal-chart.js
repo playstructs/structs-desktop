@@ -345,6 +345,9 @@
     if (old) { old.parentNode.removeChild(old); return null; }
     var strip = H.el('div', 'ch-strip');
     node.appendChild(strip);
+    // The body scrolls past a tall chart; a strip that opens below the fold
+    // is a door that seems to do nothing.
+    if (strip.scrollIntoView) { try { strip.scrollIntoView({ block: 'nearest' }); } catch (e) { strip.scrollIntoView(false); } }
     return strip;
   }
   function cardParams(cardId) {
