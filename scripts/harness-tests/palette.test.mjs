@@ -20,7 +20,14 @@ function check(name, ok, detail) {
   console.log((ok ? '  ok ' : 'FAIL ') + name + (ok || detail == null ? '' : ' — ' + detail));
   if (!ok) failures++;
 }
-const load = (q) => JSDOM.fromFile(harness, { url: pathToFileURL(harness).href + q, runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true });
+const load = (q) => JSDOM.fromFile(harness, { url: pathToFileURL(harness).href + q, runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true, beforeParse(win) {
+  // The order of: the palette stamp landing on <html>, and the first <link>.
+  win.__STAMP_ORDER__ = [];
+  new win.MutationObserver((recs) => { recs.forEach((r) => {
+    if (r.type === 'attributes' && r.attributeName === 'data-view' && !win.__STAMP_ORDER__.includes('stamp')) win.__STAMP_ORDER__.push('stamp');
+    if (r.type === 'childList') r.addedNodes.forEach((n) => { if (n.nodeName === 'LINK' && !win.__STAMP_ORDER__.includes('link')) win.__STAMP_ORDER__.push('link'); });
+  }); }).observe(win.document, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-view'] });
+} });
 async function until(fn, ms = 6000) {
   const t0 = Date.now();
   for (;;) { const v = fn(); if (v) return v; if (Date.now() - t0 > ms) return null; await new Promise((r) => setTimeout(r, 50)); }
@@ -54,12 +61,17 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…so nothing is listening either', (w.__HARNESS_LISTENERS__ ? Object.keys(w.__HARNESS_LISTENERS__) : []).length === 0,
     Object.keys(w.__HARNESS_LISTENERS__ || {}).join(', '));
 
+  /* The stamp the palette CSS keys on lands on <html> BEFORE the first
+   * stylesheet is parsed, so the board's skeleton is never painted in the
+   * frame. The observer watched from before <html> existed. */
+  check('palette mode is stamped on <html> before the first stylesheet is parsed', w.__STAMP_ORDER__.indexOf('stamp') === 0 && w.__STAMP_ORDER__.indexOf('link') === 1, JSON.stringify(w.__STAMP_ORDER__));
+
   /* Registration is free — the registry is filled at script-eval with no I/O —
    * so the grammar is whole even though the page fetched nothing. */
   const T = w.Board.Terminal;
   check('the grammar is whole: every card, its groups and its completions',
     T.types().length > 20 && T.groups().length >= 6
-    && T.suggestFor('').filter((o) => o.group !== 'Comms').length === T.types().length
+    && T.suggestFor('').filter((o) => o.group !== 'Comms' && o.group !== 'Charts').length === T.types().length
     && T.suggestFor('').filter((o) => o.group === 'Comms').length === 4,
     T.types().length + ' types, ' + T.suggestFor('').length + ' rows');
   check('…including subject-first completion, which is what the palette is FOR',
@@ -130,6 +142,11 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const key = (init) => w.dispatchEvent(new w.KeyboardEvent('keydown', Object.assign({ bubbles: true, cancelable: true }, init)));
   key({ key: 'k', metaKey: true });
   check('⌘K builds the overlay and shows it', host() !== null && host().style.display === 'block');
+  /* …but keeps it invisible until the frame says it is ready: a page still
+   * loading is never on screen, whatever it happens to be painting. */
+  check('…invisible until the frame is ready', host().style.visibility === 'hidden');
+  check('the frame is warmed after load, at idle — never on the game\'s own load path',
+    /addEventListener\('load', scheduleWarm/.test(code) && /requestIdleCallback/.test(code) && /setTimeout\(warm, WARM_AFTER_MS\)/.test(code) && /if \(host\) return;/.test(code));
   const frame = host().querySelector('iframe');
   check('…which frames the real palette, not a copy of it',
     frame !== null && /board\.html\?view=palette/.test(frame.getAttribute('src')), frame && frame.getAttribute('src'));
@@ -157,6 +174,9 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const ask = (id, cmd) => w.dispatchEvent(new w.MessageEvent('message', {
     data: { structs: 'bridge', kind: 'invoke', id, cmd, args: {} }, origin: w.location.origin, source: fakeFrame,
   }));
+  const tell = (act) => w.dispatchEvent(new w.MessageEvent('message', { data: { structs: 'palette', act }, origin: w.location.origin, source: fakeFrame }));
+  tell('ready');
+  check('the frame saying ready makes the host visible and re-sends open', host().style.visibility === 'visible' && replies.some((m) => m.structs === 'palette' && m.act === 'open'));
   ask(1, 'open_terminal_card_new');
   ask(2, 'mcp_transfer_execute');
   ask(3, 'mcp_action');

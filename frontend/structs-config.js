@@ -3636,18 +3636,20 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       terminal_charts: 1,
     };
 
-    var host = null, frame = null, open = false;
+    var host = null, frame = null, open = false, ready = false;
 
     function ensure() {
       if (host) return host;
       host = document.createElement('div');
       host.id = HOST_ID;
-      /* Inline, not a stylesheet: four declarations that must not depend on
+      /* Inline, not a stylesheet: five declarations that must not depend on
        * the game's cascade, on a node that exists only while it is open.
        * `2147483647` is the same ceiling the debug bar uses — the palette is
-       * modal and nothing the game draws may sit over it. */
+       * modal and nothing the game draws may sit over it. `visibility:hidden`
+       * until the frame says it is ready: a page still loading is never on
+       * screen, whatever it happens to be painting. */
       host.setAttribute('style', [
-        'position:fixed', 'inset:0', 'z-index:2147483647', 'display:none',
+        'position:fixed', 'inset:0', 'z-index:2147483647', 'display:none', 'visibility:hidden',
       ].join(';'));
       frame = document.createElement('iframe');
       frame.src = SRC;
@@ -3684,6 +3686,21 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     }
     function toggle() { if (open) hide(); else show(); }
 
+    /* Warm the frame once the game has loaded and gone quiet, so the first
+     * ⌘K is instant instead of a page load. After `load` and then at idle:
+     * never on the game's own load path. The host stays display:none, so
+     * nothing is on screen; `ready` arrives with `open` false and only lifts
+     * the visibility for later. */
+    var WARM_AFTER_MS = 5000;
+    function warm() {
+      if (host) return;
+      var idle = window.requestIdleCallback || function (fn) { return setTimeout(fn, 1000); };
+      idle(function () { ensure(); }, { timeout: 15000 });
+    }
+    function scheduleWarm() { setTimeout(warm, WARM_AFTER_MS); }
+    if (document.readyState === 'complete') scheduleWarm();
+    else window.addEventListener('load', scheduleWarm, { once: true });
+
     /* Capture phase. The webapp binds its own keys on document and window, and
      * a palette that only opens when the game happens not to want ⌘K is a
      * palette you cannot rely on. */
@@ -3704,6 +3721,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
       // The frame telling us it is up, or that it is done.
       if (m.structs === 'palette') {
+        if (m.act === 'ready') { ready = true; if (host) host.style.visibility = 'visible'; }
         if (m.act === 'ready' && open) { post({ structs: 'palette', act: 'open' }); try { frame.contentWindow.focus(); } catch (e2) {} }
         if (m.act === 'close' || m.act === 'ran') hide();
         return;

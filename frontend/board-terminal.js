@@ -1746,7 +1746,13 @@
     var saved = Terminal.savedChart(head);
     if (saved && parts.length === 1) return card('chart', Object.assign({}, saved.params, { name: saved.name }));
     var w = WORDS[head];
-    if (!w) return null;
+    if (!w) {
+      /* A built-in chart's word — `RATES`, `PULSE` — only once the card
+       * words have said no, so the library can never shadow a card. */
+      var tpl = Terminal.chartTemplate && Terminal.chartTemplate(head);
+      if (tpl && parts.length === 1) return card('chart', Terminal.chartTemplateParams(tpl));
+      return null;
+    }
     var type = w[0], arg = w[1];
     if (type === 'chart') return card('chart', Terminal.chartParamsFor(rest));
     if (!arg) return card(type, {});
@@ -1806,6 +1812,8 @@
     if (!r) return {};
     var saved = Terminal.savedChart(r);
     if (saved) return Object.assign({}, saved.params, { name: saved.name });
+    var tpl = Terminal.chartTemplate && Terminal.chartTemplate(r);
+    if (tpl) return Terminal.chartTemplateParams(tpl);
     if (ID_RE.test(r)) {
       var s = Terminal.defaultChartSeries ? Terminal.defaultChartSeries(r) : null;
       return s ? { series: JSON.stringify([s]) } : { series: '[]' };
@@ -1891,6 +1899,23 @@
 
   var HISTORY_MAX = 50;
   var cmdHistory = [];
+  /* Every chart the palette can open by name: the ones you saved, then the
+   * library — minus any template whose word a saved chart has taken. */
+  function chartRows(filter) {
+    var out = [];
+    (Terminal.charts || []).forEach(function (c) {
+      if (filter && !filter(c.word || '', c.name || '')) return;
+      out.push({ line: 'CHART ' + c.name, words: c.word || 'CHART', what: c.name, sub: c.word ? 'CHART ' + c.name : '', group: 'Charts', run: true });
+    });
+    (Terminal.chartTemplates ? Terminal.chartTemplates() : []).forEach(function (t) {
+      if (Terminal.savedChart(t.word)) return;
+      if (filter && !filter(t.word, t.name)) return;
+      out.push({ line: 'CHART ' + t.name, words: t.word, what: t.name, sub: 'CHART ' + t.name, group: 'Charts', run: true });
+    });
+    return out;
+  }
+  Terminal.chartRows = chartRows;
+
   function suggestFor(line) {
     var raw = String(line || '');
     var parts = raw.trim().split(/\s+/).filter(Boolean);
@@ -1909,10 +1934,8 @@
       out.push({ line: 'DM ', words: 'DM', what: 'Message a player', arg: '<player>', group: 'Comms', run: false });
       out.push({ line: 'ROOM ', words: 'ROOM', what: 'A conversation, by subject', arg: '<id · #alias>', group: 'Comms', run: false });
       out.push({ line: 'SAY ', words: 'SAY', what: 'Draft a line in Comms', arg: '<text>', group: 'Comms', run: false });
-      // The charts a player has saved, by name, each under the word it answers to.
-      (Terminal.charts || []).forEach(function (c) {
-        out.push({ line: 'CHART ' + c.name, words: c.word || 'CHART', what: c.name, sub: c.word ? 'CHART ' + c.name : '', group: 'Charts', run: true });
-      });
+      // The charts a player has saved and the library, each under its word.
+      chartRows().forEach(function (r) { out.push(r); });
       Terminal.groups().forEach(function (g) {
         g.options.forEach(function (o) {
           var word = wordFor(o.value);
@@ -1948,10 +1971,22 @@
           });
       }
     }
+    /* `CHART ` and `CHART Mar`: the charts you saved, by name, as the word's
+     * own choices — the way `STATS ` lists its set. */
+    if (WORDS[head] && WORDS[head][0] === 'chart' && (parts.length > 1 || trailingSpace)) {
+      var typedName = parts.slice(1).join(' ').toLowerCase();
+      return chartRows(function (word, name) { return String(name).toLowerCase().indexOf(typedName) === 0; });
+    }
     // A word being typed. Every word that starts this way, one row per CARD so
     // the aliases (MKT / MARKET) do not fill the list with the same answer.
     if (parts.length > 1 || trailingSpace) return [];
     var seen = {}, out = [];
+    /* A saved chart completes like any word: by the ⌘K word it was given
+     * (`LM` → LMKT) or by the start of its name. It leads — you saved it. */
+    chartRows(function (word, name) {
+      var w = String(word || '').toUpperCase(), n = String(name || '').toUpperCase();
+      return (w && w.indexOf(head) === 0) || n.indexOf(head) === 0;
+    }).forEach(function (r) { out.push(r); });
     Object.keys(WORDS).forEach(function (word) {
       if (word.indexOf(head) !== 0) return;
       var w = WORDS[word], def = TYPES[w[0]];
@@ -1962,7 +1997,10 @@
       seen[key] = { line: word + (arg ? ' ' : ''), words: word, what: def.label, arg: arg, run: !arg };
       out.push(seen[key]);
     });
-    out.sort(function (a, b) { return a.words < b.words ? -1 : a.words > b.words ? 1 : 0; });
+    out.sort(function (a, b) {
+      if (!!a.group !== !!b.group) return a.group ? -1 : 1;   // saved charts first
+      return a.words < b.words ? -1 : a.words > b.words ? 1 : 0;
+    });
     return out;
   }
   Terminal.suggestFor = suggestFor;

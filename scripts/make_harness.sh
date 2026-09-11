@@ -774,7 +774,7 @@ cat > "$FIX" <<'EOF'
       function row(i, name, role, pid, charge, alpha, ore, pore, mine, refine, extra) {
         var r = { index: i, name: name, role: role, player_id: pid, charge: charge,
           alpha_ualpha: alpha, ore: ore, planet_ore: pore, mine_eta_s: mine, refine_eta_s: refine,
-          planet_id: '2-' + pid.split('-')[1], fleet_id: '9-' + pid.split('-')[1],
+          planet_id: '2-' + pid.split('-')[1], fleet_id: '9-' + pid.split('-')[1], guild_id: '0-1',
           structs_load: 0, fetched_at_ms: now, err: null,
           pfp_attrs: JSON.stringify({ head: 1 + (i || 0) * 7, neck: 1 + (i || 0) % 9, body: 1 + (i || 0) * 5,
                                       arms: 1 + (i || 0) * 3, background: 1 + (i || 0) % 6 }) };

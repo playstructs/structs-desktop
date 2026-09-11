@@ -38,14 +38,32 @@
   var INDEX = [{ value: '0', label: 'as measured' }, { value: '1', label: 'indexed to 100' }];
   var OBJECT_TYPES = ['planet', 'player', 'struct', 'fleet', 'reactor', 'substation', 'guild', 'infusion', 'allocation', 'provider', 'agreement'];
 
-  // Units → the game's own ladders. `rate` is alpha per kW·day, `mw` megawatts.
+  // A rate or a ratio at the precision it has: 16363.6 → 16,364; 12.852 →
+  // 12.85; 0.005455 → 0.00546. Two fixed decimals showed the cheapest
+  // provider on the market as 0.01, the same figure as one twice its price.
+  function sig(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return '—';
+    var a = Math.abs(n);
+    if (a >= 1000) return H.fmtInt(Math.round(n));
+    if (a >= 100) return n.toFixed(1);
+    if (a >= 1) return n.toFixed(2);
+    if (a === 0) return '0';
+    return n.toPrecision(3).replace(/\.?0+$/, '');
+  }
+  T._chartSig = sig;
+  T._chartFmt = function (unit, v) { return (UNIT_FMT[unit] || H.fmtInt)(v); };
+
+  // Units → the game's own ladders. `rate` is alpha per kW·day; `power` and
+  // `mw` are both the chain's milliwatts, which is what fmtWatts takes
+  // (2,012,907,666 is the 2.01 MW the market card shows).
   var UNIT_FMT = {
     ore: function (v) { return H.fmtOre(v); },
     alpha: function (v) { return H.fmtAlpha(v); },
     power: function (v) { return H.fmtWatts(v); },
-    mw: function (v) { return H.fmtWatts(v * 1e6); },
-    rate: function (v) { return Number(v).toFixed(2) + '/kW·d'; },
-    ratio: function (v) { return Number(v).toFixed(3); },
+    mw: function (v) { return H.fmtWatts(v); },   // the chain's milliwatts, the ladder fmtWatts already speaks
+    rate: function (v) { return sig(v) + '/kW·d'; },
+    ratio: function (v) { return sig(v); },
     count: function (v) { return H.fmtInt(v); },
     raw: function (v) { return H.fmtInt(v); },
     pct: function (v) { return Number(v).toFixed(0) + '%'; },
@@ -133,6 +151,79 @@
   }
   T._chartIndexed = indexed;
 
+  // ── the library ─────────────────────────────────────────────────────────
+  // Built-in charts, each under a ⌘K word of its own. `{player}` `{planet}`
+  // `{fleet}` `{guild}` are yours, read from the roster when the chart
+  // opens; `providers` is every provider the catalogue knows, up to the six
+  // a chart carries. A chart you save under the same word takes the word.
+  // Card words always win over these — the grammar asks for a template only
+  // after the card words have said no.
+  var TEMPLATES = [
+    { word: 'RATES',    name: 'Energy market',  window: '604800',  series: [{ source: 'market', metric: 'best' }, { source: 'market', metric: 'median' }, { source: 'market', metric: 'open_capacity_mw' }, { source: 'market', metric: 'offers' }] },
+    { word: 'OFFERS',   name: 'Provider rates', window: '604800',  series: 'providers' },
+    { word: 'RESERVES', name: 'My ore',         window: '604800',  series: [{ source: 'stat', metric: 'ore', subject: '{player}' }, { source: 'stat', metric: 'ore', subject: '{planet}' }, { source: 'stat', metric: 'ore', subject: '{fleet}' }] },
+    { word: 'LOAD',     name: 'My power',       window: '86400',   series: [{ source: 'stat', metric: 'capacity', subject: '{player}' }, { source: 'stat', metric: 'load', subject: '{player}' }, { source: 'stat', metric: 'structs_load', subject: '{player}' }] },
+    { word: 'TOKEN',    name: 'My guild token', window: '2592000', series: [{ source: 'bank', metric: 'ratio', subject: '{guild}' }, { source: 'bank', metric: 'collateral', subject: '{guild}' }, { source: 'bank', metric: 'supply', subject: '{guild}' }] },
+    { word: 'GALAXY',   name: 'Galaxy energy',  window: '604800',  series: [{ source: 'galaxy', metric: 'capacity', subject: 'substation' }, { source: 'galaxy', metric: 'load', subject: 'substation' }, { source: 'galaxy', metric: 'fuel', subject: 'reactor' }] },
+    { word: 'DEPOSITS', name: 'Galaxy ore',     window: '604800',  series: [{ source: 'galaxy', metric: 'ore', subject: 'planet' }, { source: 'galaxy', metric: 'ore', subject: 'player' }, { source: 'galaxy', metric: 'ore', subject: 'fleet' }] },
+    { word: 'PULSE',    name: 'Chain pulse',    window: '3600',    series: [{ source: 'chain', metric: 'chain_tx' }, { source: 'chain', metric: 'events' }, { source: 'chain', metric: 'proofs' }] },
+    { word: 'COMBAT',   name: 'Combat',         window: '3600',    series: [{ source: 'chain', metric: 'raids' }, { source: 'chain', metric: 'combat' }, { source: 'chain', metric: 'transfers' }] },
+  ];
+  T.chartTemplates = function () { return TEMPLATES.slice(); };
+  T.chartTemplate = function (wordOrName) {
+    var key = String(wordOrName || '').trim();
+    if (!key) return null;
+    return TEMPLATES.filter(function (t) { return t.word === key.toUpperCase(); })[0]
+      || TEMPLATES.filter(function (t) { return t.name.toLowerCase() === key.toLowerCase(); })[0]
+      || null;
+  };
+  // The params a template opens with: the series come when the card first
+  // draws, so the grammar never waits on the roster.
+  T.chartTemplateParams = function (t) { return { template: t.word, name: t.name, window: t.window, series: '[]' }; };
+
+  var rosterMe = null, rosterAt = 0;
+  function me() {
+    if (rosterMe && Date.now() - rosterAt < 300000) return Promise.resolve(rosterMe);
+    return invoke('mcp_roster').then(function (snap) {
+      var rows = (snap && snap.rows) || [];
+      rosterMe = rows.filter(function (r) { return r.role === 'primary'; })[0] || rows[0] || null;
+      rosterAt = Date.now();
+      return rosterMe;
+    });
+  }
+  function resolveTemplate(t) {
+    if (t.series === 'providers') {
+      return loadCatalog().then(function () {
+        var def = sourceDef('provider');
+        return ((def && def.known) || []).slice(0, MAX_SERIES).map(function (id) { return { source: 'provider', metric: 'rate', subject: id }; });
+      });
+    }
+    var fill = function (m) {
+      var map = { '{player}': m && m.player_id, '{planet}': m && m.planet_id, '{fleet}': m && m.fleet_id, '{guild}': m && m.guild_id };
+      return t.series.map(function (s) {
+        if (!s.subject || !/^\{/.test(s.subject)) return s;
+        return map[s.subject] ? Object.assign({}, s, { subject: String(map[s.subject]) }) : null;
+      }).filter(Boolean);
+    };
+    var mine = t.series.some(function (s) { return /^\{/.test(s.subject || ''); });
+    return mine ? me().then(fill) : Promise.resolve(fill(null));
+  }
+  T._chartResolveTemplate = resolveTemplate;
+
+  /* The library as a row of the card's own buttons: what an empty chart
+   * offers instead of a sentence about what it could show. */
+  function templateRow(p, ctx) {
+    var row = H.el('div', 'ch-templates');
+    TEMPLATES.forEach(function (t) {
+      var a = H.el('a', 'sui-screen-btn sui-mod-secondary', t.name);
+      a.href = 'javascript:void(0)';
+      a.title = '⌘K ' + t.word;
+      a.addEventListener('click', function (ev) { ev.preventDefault(); T.setParams(ctx.id, Object.assign({}, p, T.chartTemplateParams(t))); });
+      row.appendChild(a);
+    });
+    return row;
+  }
+
   // ── the card ────────────────────────────────────────────────────────────
   T.register('chart', {
     label: 'Chart', defaultWidth: 2, cadenceMs: 60000,
@@ -168,9 +259,23 @@
       var index = String(p.index || '0') === '1';
       var mode = p.mode || 'line', scale = p.scale || 'linear';
       host.innerHTML = '';
+      var tpl = p.template && !list.length ? T.chartTemplate(p.template) : null;
+      if (tpl) {
+        return resolveTemplate(tpl).then(function (series) {
+          var next = Object.assign({}, p, { series: JSON.stringify(series) });
+          delete next.template;
+          if (!series.length) {
+            host.appendChild(H.stateBlock('info', tpl.series === 'providers' ? 'no providers on the market yet' : 'no roster yet'));
+            return loadCatalog().then(function () { host.appendChild(editor(host, next, ctx)); });
+          }
+          T.setParams(ctx.id, next);
+        }).catch(function (e) {
+          host.appendChild(H.stateBlock('error', 'chart unavailable: ' + e));
+        });
+      }
       return loadCatalog().then(function () {
         if (!list.length) {
-          host.appendChild(H.stateBlock('info', 'Add a series below, or open one from ⌘K: CHART 2-29604, CHART market.'));
+          host.appendChild(templateRow(p, ctx));
           host.appendChild(editor(host, p, ctx));
           return;
         }

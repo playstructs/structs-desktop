@@ -87,7 +87,9 @@ pub fn note_market(m: &Value) {
         let cap_used = parse_num(pr.get("capacity_used")).unwrap_or(0.0);
         let row = json!({
             "ts_ms": now,
-            "rate": p.get("alpha_per_kw_day").cloned().unwrap_or(Value::Null),
+            // The market card nests the priced rate under `provider`; an
+            // older reading carried it at the top. Read it where it is.
+            "rate": pr.get("alpha_per_kw_day").or_else(|| p.get("alpha_per_kw_day")).cloned().unwrap_or(Value::Null),
             "free_w": cap_max.map(|c| (c - cap_used).max(0.0)),
             "capacity_max": cap_max,
         });
@@ -126,7 +128,9 @@ const MARKET_METRICS: &[(&str, &str, &str)] = &[
 ];
 const PROVIDER_METRICS: &[(&str, &str, &str)] = &[
     ("rate", "rate", "rate"),
-    ("free_w", "power", "free capacity"),
+    // `free_w` is still sampled into the ring, but not offered: a market
+    // reading carries no used capacity, so "free" would only ever equal
+    // the maximum — a series that is always a lie is worse than none.
     ("capacity_max", "power", "capacity"),
 ];
 const BANK_METRICS: &[(&str, &str, &str)] = &[
@@ -454,8 +458,8 @@ mod tests {
         let m = json!({
             "best_alpha_per_kw_day": 2.0, "median_alpha_per_kw_day": 3.0, "open_capacity_mw": 12.5, "priced": 4,
             "providers": [
-                { "id": "10-4", "alpha_per_kw_day": 2.0, "provider": { "capacity_max": 5000.0, "capacity_used": 1500.0 } },
-                { "id": "10-5", "alpha_per_kw_day": null, "provider": { "capacity_max": 800.0 } }
+                { "id": "10-4", "provider": { "alpha_per_kw_day": 2.0, "capacity_max": 5000.0, "capacity_used": 1500.0 } },
+                { "id": "10-5", "provider": { "alpha_per_kw_day": null, "capacity_max": 800.0 } }
             ]
         });
         {
@@ -470,6 +474,7 @@ mod tests {
         assert_eq!(r.samples[0]["offers"], 2);
         assert_eq!(r.samples[0]["best"], 2.0);
         assert_eq!(r.providers["10-4"][0]["free_w"], 3500.0);
+        assert_eq!(r.providers["10-4"][0]["rate"], 2.0, "the rate lives under `provider` in a market reading");
         assert!(r.providers["10-5"][0]["rate"].is_null());
     }
 }

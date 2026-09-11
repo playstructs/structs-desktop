@@ -3,6 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <title>Structs — Team Ops</title>
+  <script>
+    /* Palette mode is decided BEFORE the first paint. Framed over the game
+       for ⌘K, this page used to show the board's skeleton — nav, surfaces,
+       "loading…" — for as long as its scripts took to load, because the
+       stamp the palette CSS keys on was set by board.js at init, last of
+       all. board.js still sets it; by then it must already be true. */
+    if (/[?&]view=palette\b/.test(location.search || '')) document.documentElement.setAttribute('data-view', 'palette');
+  </script>
   <link rel="stylesheet" href="css/normalize.css" />
   <link rel="stylesheet" href="css/structicons.css" />
   <link rel="stylesheet" href="css/sui/sui.css" />
@@ -1487,6 +1495,7 @@
     #board-layout .ch-legend-item .ch-x:hover { color: var(--text-enemy-primary); }
     #board-layout .ch-pane { margin-bottom: var(--spacing-md); }
     #board-layout .ch-windows { margin: 0 0 var(--spacing-sm); }
+    #board-layout .ch-templates { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); text-align: left; }
     #board-layout .ch-windows .sui-screen-nav { padding: 0; }
     #board-layout .ch-delta { color: var(--text-hint); }
     #board-layout .ch-refs { margin-left: var(--spacing-sm); }

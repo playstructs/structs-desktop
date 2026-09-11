@@ -106,7 +106,10 @@
      * event looks like beside a busy hour. A flat line still needs a band. */
     var least = spec.least != null ? spec.least : (spec.zero ? 2 : 0);
     if (max < min + least) max = min + least;
-    if (max === min) max = min + 1;
+    /* A flat series still needs a band. Ten percent of its own size, not a
+     * fixed unit: a rate steady at 0.0055 on a band of 0.0055..1.0055 is a
+     * line on the floor under an axis that says nothing about it. */
+    if (max === min) max = min + (min === 0 ? 1 : Math.abs(min) * 0.1);
     var span = max - min;
 
     /* A log scale draws log10 of every positive value and labels the axis
@@ -118,7 +121,7 @@
       nums = nums.map(tx).filter(finite);
       if (nums.length < 2) return collecting();
       min = Math.min.apply(null, nums); max = Math.max.apply(null, nums);
-      if (max === min) max = min + 1;
+      if (max === min) max = min + 0.1;   // a tenth of a decade on the log axis
       span = max - min;
     }
     var untx = log ? function (y) { return Math.pow(10, y); } : function (y) { return y; };
