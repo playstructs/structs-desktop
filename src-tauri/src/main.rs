@@ -180,6 +180,8 @@ fn main() {
             mcp::crew::crew_roster,
             mcp::crew::crew_help_guild,
             mcp::crew::crew_help_player,
+            mcp::crew::crew_pay_anyone,
+            mcp::crew_work::crew_threshold_set,
             mcp::crew::crew_stop,
             mcp::crew::crew_links,
             mcp::crew_work::crew_work_config,

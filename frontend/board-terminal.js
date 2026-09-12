@@ -1548,6 +1548,8 @@
   var COMMS_WORDS = {
     COMMS: 1, INBOX: 1, DMS: 1, UNREAD: 1, CHANNELS: 1, BROWSE: 1, DIRECTORY: 1,
     ROOM: 1, DM: 1, MSG: 1, MESSAGE: 1, TALK: 1, CHAT: 1, WHO: 1, INROOM: 1, FIND: 1, SEARCH: 1,
+    // The work bus is hidden from the channel list; this is its door.
+    BUS: 1,
   };
   var WORDS = {
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['feed'], FLOW: ['feed'],
@@ -1750,7 +1752,7 @@
       var m = /^([#!][^\s]+|\d+-\d+)\s+([\s\S]+)$/.exec(rest);
       return m ? { kind: 'say', subject: m[1], text: m[2] } : { kind: 'say', text: rest };
     }
-    if (COMMS_WORDS[head]) return { kind: 'comms', subject: rest || null };
+    if (COMMS_WORDS[head]) return { kind: 'comms', subject: rest || (head === 'BUS' ? 'bus' : null) };
     if (head === 'PRESET' || head === 'PRESETS') return { kind: 'preset', name: String(rest || '').toLowerCase() };
     if (head === 'SHARE') return { kind: 'share' };
     // The companion is a WINDOW, not a card: it has no grid slot and no

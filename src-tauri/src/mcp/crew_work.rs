@@ -145,11 +145,28 @@ fn h64(parts: &[&str]) -> u64 {
 /// finishes and frees the slot, and difficulty only ever falls, so nothing is
 /// starved by waiting.
 pub fn order_tasks(tasks: &mut [CrewTask], epoch: u64) {
+    order_tasks_paid(tasks, epoch, &std::collections::HashMap::new());
+}
+
+/// The same order, with paying owners first — best published rate at the
+/// head, then the unpaid in the usual cheapest-first order.
+///
+/// This is the point at which terms on the bus change what a helper DOES
+/// rather than only what it sees. Every machine reads the same room state,
+/// so the ordering stays the one ordering the rendezvous depends on; a
+/// machine that has not yet seen a rate falls into a nonce race on that
+/// task, which is the same thing that happens for any other lag.
+pub fn order_tasks_paid(tasks: &mut [CrewTask], epoch: u64, rates: &std::collections::HashMap<String, f64>) {
     let at = epoch_block(epoch);
+    let rate = |t: &CrewTask| rates.get(&t.owner_player).copied().unwrap_or(0.0);
     tasks.sort_by(|a, b| {
-        let da = calculate_difficulty(at.saturating_sub(a.block_start), a.difficulty_target);
-        let db = calculate_difficulty(at.saturating_sub(b.block_start), b.difficulty_target);
-        da.cmp(&db)
+        rate(b)
+            .total_cmp(&rate(a))
+            .then_with(|| {
+                let da = calculate_difficulty(at.saturating_sub(a.block_start), a.difficulty_target);
+                let db = calculate_difficulty(at.saturating_sub(b.block_start), b.difficulty_target);
+                da.cmp(&db)
+            })
             .then_with(|| h64(&[&a.key(), &epoch.to_string()]).cmp(&h64(&[&b.key(), &epoch.to_string()])))
             .then_with(|| a.key().cmp(&b.key()))
     });
@@ -175,6 +192,17 @@ pub fn slot_of(me: &str, members: &[String], epoch: u64) -> Option<usize> {
 /// Returns nothing when we are not in the crew — selecting work for a crew you
 /// are not a member of is how two machines end up doing the same job.
 pub fn assign(tasks: &[CrewTask], members: &[String], me: &str, epoch: u64, take: usize) -> Vec<CrewTask> {
+    assign_paid(tasks, members, me, epoch, take, &std::collections::HashMap::new())
+}
+
+pub fn assign_paid(
+    tasks: &[CrewTask],
+    members: &[String],
+    me: &str,
+    epoch: u64,
+    take: usize,
+    rates: &std::collections::HashMap<String, f64>,
+) -> Vec<CrewTask> {
     if tasks.is_empty() || take == 0 {
         return Vec::new();
     }
@@ -183,7 +211,7 @@ pub fn assign(tasks: &[CrewTask], members: &[String], me: &str, epoch: u64, take
         return Vec::new();
     };
     let mut ordered = tasks.to_vec();
-    order_tasks(&mut ordered, epoch);
+    order_tasks_paid(&mut ordered, epoch, rates);
     let n = crew.len().max(1);
     let len = ordered.len();
     // Wrapping the start is what turns "more machines than tasks" from idle
@@ -242,6 +270,14 @@ pub struct CrewWorkConfig {
     /// the bus, and results fall back to the crew's own room.
     #[serde(default = "default_bus")]
     pub bus: String,
+    /// Take the work of owners who have published a rate on the bus first,
+    /// best rate leading. Off, and every ripe task is just a task.
+    #[serde(default = "yes")]
+    pub prefer_paying: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_bus() -> String {
@@ -267,6 +303,7 @@ impl Default for CrewWorkConfig {
             max_slots: default_max_slots(),
             dry_run: false,
             bus: default_bus(),
+            prefer_paying: true,
         }
     }
 }
@@ -308,7 +345,7 @@ pub fn last_pass() -> Value {
     LAST_PASS.read().ok().and_then(|p| p.clone()).unwrap_or(Value::Null)
 }
 
-fn note_pass(epoch: u64, submitting: usize, reporting: usize, declined: usize, ripe: usize, free: usize, members: usize) {
+fn note_pass(epoch: u64, submitting: usize, reporting: usize, declined: usize, ripe: usize, free: usize, members: usize, paid: usize) {
     if let Ok(mut p) = LAST_PASS.write() {
         *p = Some(json!({
             "epoch": epoch,
@@ -319,6 +356,8 @@ fn note_pass(epoch: u64, submitting: usize, reporting: usize, declined: usize, r
             // Left alone for a local reason — already ours, already queued,
             // or nowhere to post a result. Not a chain refusal.
             "declined": declined,
+            // Of those taken, how many were for an owner who pays.
+            "paid": paid,
             "ripe": ripe, "free": free, "members": members,
             "at_ms": now_millis(),
         }));
@@ -327,14 +366,38 @@ fn note_pass(epoch: u64, submitting: usize, reporting: usize, declined: usize, r
 
 pub fn note_helped(work: &crate::hasher::CrewWork, object_id: &str) {
     *HELPED.entry(work.owner_player.clone()).or_insert(0) += 1;
-    let _ = object_id;
+    note_event("finished", format!("finished {} {object_id} for {}", work.task.as_str(), work.owner_player));
+}
+
+/// What has happened lately, newest first — the only trace of a system
+/// that is otherwise deliberately invisible.
+///
+/// A ring, in memory, for the card: `posted` (our proof went to the bus),
+/// `finished` (a proof of ours was spent, by us or by its owner), `accepted`
+/// (we spent a crewmate's), `refused` (the chain said no), `credit` (money
+/// owed either way). Not a log — the log has it all — but the six lines a
+/// player looks at when they wonder whether any of this is doing anything.
+const FEED_KEEP: usize = 40;
+static FEED: LazyLock<RwLock<std::collections::VecDeque<Value>>> =
+    LazyLock::new(|| RwLock::new(std::collections::VecDeque::with_capacity(FEED_KEEP)));
+
+pub fn note_event(kind: &str, text: String) {
+    if let Ok(mut f) = FEED.write() {
+        f.push_front(json!({ "kind": kind, "text": text, "at_ms": now_millis() }));
+        f.truncate(FEED_KEEP);
+    }
+}
+
+pub fn feed() -> Vec<Value> {
+    FEED.read().map(|f| f.iter().cloned().collect()).unwrap_or_default()
 }
 
 /// An owner told the room they spent a proof of ours (a `done` frame naming
 /// us as the helper). That is a finished job by any reading: we computed it,
 /// they paid the transaction, the chain took it.
-pub fn note_finished_by_owner(owner: &str) {
+pub fn note_finished_by_owner(owner: &str, object: &str) {
     *HELPED.entry(owner.to_string()).or_insert(0) += 1;
+    note_event("finished", format!("{owner} spent our proof for {object}"));
 }
 
 /// Cycles we have already POSTED a proof for, `object -> anchor`.
@@ -351,6 +414,7 @@ static REPORTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub fn note_reported(object: &str, anchor: u64) {
     REPORTED.insert(object.to_string(), anchor);
     REPORTED_TOTAL.fetch_add(1, Ordering::Relaxed);
+    note_event("posted", format!("posted a proof for {object} (cycle {anchor})"));
 }
 
 pub fn reported_this_cycle(object: &str, anchor: u64) -> bool {
@@ -467,6 +531,7 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
     let mut submitting = 0usize;
     let mut reporting = 0usize;
     let mut declined = 0usize;
+    let mut paid = 0usize;
     let mut looked_at = 0usize;
     let mut crew_size = 0usize;
 
@@ -485,11 +550,12 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
             continue; // a crew of one is just a colony
         }
         let tasks = ripe_tasks(&members, &me, current_block, cfg.difficulty_threshold);
+        let rates = if cfg.prefer_paying { crate::mcp::crew_pay::rates_by_player() } else { Default::default() };
         looked_at += tasks.len();
         if tasks.is_empty() {
             continue;
         }
-        let mine = assign(&tasks, &members, &me, epoch, free - (submitting + reporting));
+        let mine = assign_paid(&tasks, &members, &me, epoch, free - (submitting + reporting), &rates);
         if mine.is_empty() {
             continue;
         }
@@ -511,8 +577,8 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
                 break;
             }
             match start_one(app_handle, &client, &c, &t, &me, &my_guild, &registry).await {
-                Ok(Took::Submitting) => submitting += 1,
-                Ok(Took::Reporting) => reporting += 1,
+                Ok(Took::Submitting) => { submitting += 1; if rates.contains_key(&t.owner_player) { paid += 1; } }
+                Ok(Took::Reporting) => { reporting += 1; if rates.contains_key(&t.owner_player) { paid += 1; } }
                 Ok(Took::Declined) => declined += 1,
                 Err(e) => tlog(
                     "crew",
@@ -529,7 +595,7 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
      * exactly like a loop with nothing to do — and it took reading the
      * arithmetic, not the logs, to find that out.
      */
-    note_pass(epoch, submitting, reporting, declined, looked_at, free, crew_size);
+    note_pass(epoch, submitting, reporting, declined, looked_at, free, crew_size, paid);
     tlog(
         "crew",
         Sev::Debug,
@@ -602,7 +668,10 @@ async fn start_one(
      * we take nothing this pass.
      */
     let authority = crew::authority_of(client, &t.owner_player, me, my_guild, t.task).await?;
-    let params = TaskParams::for_ore(&t.object_id, t.task.as_str(), t.block_start, t.difficulty_target);
+    let mut params = TaskParams::for_ore(&t.object_id, t.task.as_str(), t.block_start, t.difficulty_target);
+    // Somebody else's work starts at the crew threshold, not the pool's
+    // global start: "difficulty 3 for others, 5 for mine" has to mean it.
+    params.difficulty_start = Some(get().difficulty_threshold);
 
     if authority.allows() {
         crate::hasher::start_hash_task_core(params, app_handle.clone(), registry)?;
@@ -672,6 +741,8 @@ async fn members_of(c: &Crew, me: &str) -> Vec<String> {
             .map(|r| r.player_id)
             .collect(),
         Scope::Guild => guild_members(&c.guild_id),
+        // Terms only: nobody's work is ours to take through it.
+        Scope::Anyone => Vec::new(),
         Scope::Room => crate::matrix::crew_members(&c.guild_id, &c.room_id)
             .await
             .unwrap_or_default()
@@ -812,6 +883,18 @@ pub fn crew_work_set(
     Ok(json!({ "ok": true, "config": get() }))
 }
 
+/// The one knob most players touch: how cheap somebody else's proof has to
+/// be before this machine will grind it. Separate from the harvest loop's
+/// threshold for our own rigs, on purpose.
+#[tauri::command]
+pub fn crew_threshold_set(window: tauri::WebviewWindow, threshold: u64) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    let mut cfg = get();
+    cfg.difficulty_threshold = threshold.clamp(1, 64);
+    set(cfg);
+    Ok(json!({ "ok": true, "difficulty_threshold": get().difficulty_threshold }))
+}
+
 /// What this machine would take right now, without taking it.
 #[tauri::command]
 pub async fn crew_work_preview(room_id: String) -> Result<Value, String> {
@@ -829,7 +912,8 @@ pub async fn crew_work_preview(room_id: String) -> Result<Value, String> {
     let epoch = epoch_of(current_block);
     let members = members_of(&c, &me).await;
     let tasks = ripe_tasks(&members, &me, current_block, cfg.difficulty_threshold);
-    let mine = assign(&tasks, &members, &me, epoch, cfg.max_slots);
+    let rates = if cfg.prefer_paying { crate::mcp::crew_pay::rates_by_player() } else { Default::default() };
+    let mine = assign_paid(&tasks, &members, &me, epoch, cfg.max_slots, &rates);
     Ok(json!({
         "epoch": epoch,
         "block": current_block,
@@ -947,6 +1031,18 @@ mod tests {
 
     /// One proof per cycle: once ours is posted the task is left alone until
     /// the anchor moves, and a new cycle is a new job.
+    /// Newest first, bounded, and a posted proof shows up in it.
+    #[test]
+    fn the_feed_is_newest_first_and_bounded() {
+        for i in 0..(FEED_KEEP + 5) {
+            note_event("posted", format!("event {i}"));
+        }
+        let f = feed();
+        assert_eq!(f.len(), FEED_KEEP);
+        assert_eq!(f[0]["text"], format!("event {}", FEED_KEEP + 4));
+        assert_eq!(f[0]["kind"], "posted");
+    }
+
     #[test]
     fn a_reported_cycle_is_remembered_until_the_anchor_moves() {
         note_reported("5-777777", 100);
@@ -1003,6 +1099,31 @@ mod tests {
 
     /// Difficulty is judged at the epoch boundary precisely so two machines a
     /// few seconds apart cannot disagree about the ordering.
+    /// A published rate moves an owner's work to the front, best rate
+    /// first; the unpaid keep their cheapest-first order behind them. And
+    /// it stays one deterministic order, which the rendezvous needs.
+    #[test]
+    fn paying_owners_go_first_best_rate_leading() {
+        let mut t = vec![
+            task("5-1", "1-61", 100, 14_000),   // cheapest, unpaid
+            task("5-2", "1-62", 900, 14_000),   // pays 5
+            task("5-3", "1-63", 950, 14_000),   // pays 12
+            task("5-4", "1-61", 500, 14_000),   // unpaid
+        ];
+        let rates: std::collections::HashMap<String, f64> =
+            [("1-62".to_string(), 5.0), ("1-63".to_string(), 12.0)].into_iter().collect();
+        let mut again = t.clone();
+        order_tasks_paid(&mut t, 100, &rates);
+        order_tasks_paid(&mut again, 100, &rates);
+        assert_eq!(t, again);
+        let ids: Vec<_> = t.iter().map(|x| x.object_id.as_str()).collect();
+        assert_eq!(ids, vec!["5-3", "5-2", "5-1", "5-4"]);
+        // No rates: the old order exactly.
+        let mut plain = t.clone();
+        order_tasks(&mut plain, 100);
+        assert_eq!(plain[0].object_id, "5-1");
+    }
+
     #[test]
     fn ordering_is_judged_at_the_epoch_boundary_not_now() {
         let mut a = vec![task("5-1", "1-61", 100, 14_000), task("5-2", "1-61", 900, 14_000)];

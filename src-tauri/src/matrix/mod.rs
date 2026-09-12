@@ -706,6 +706,12 @@ pub async fn post_work(
     work: Value,
 ) -> Result<String, String> {
     let session = session_for(guild_id)?;
+    // On the bus a frame is its own event type: machines read it, people
+    // do not. In a conversation it stays a message with the frame beside a
+    // line, because somebody there is meant to read it.
+    if is_work_bus(room_id) {
+        return client::send_work_event(&session, room_id, work).await;
+    }
     client::send_work(&session, room_id, body, work, None).await
 }
 
@@ -1694,6 +1700,17 @@ pub const DEFAULT_WORK_BUS: &str = "#bus:matrix.beta.playstructs.com";
 static WORK_BUS: std::sync::LazyLock<RwLock<std::collections::HashMap<String, String>>> =
     std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
 
+/// Whether the "bus unreachable" notice has been given for the current
+/// failure. The sync loop asks for the bus every pass, so without this a
+/// homeserver that is down for an hour would say so 120 times.
+static BUS_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn bus_trouble(msg: String) {
+    if !BUS_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::mcp::telemetry::tlog("crew", crate::mcp::telemetry::Sev::Notice, msg);
+    }
+}
+
 /// The bus room for a guild session: resolved from its alias, joined if we
 /// are not in it, and remembered.
 ///
@@ -1719,11 +1736,7 @@ pub async fn work_bus(guild_id: &str) -> Option<(String, String)> {
     let room_id = match client::room_id_for_alias(&session, &alias).await {
         Some(r) => r,
         None => {
-            crate::mcp::telemetry::tlog(
-                "crew",
-                crate::mcp::telemetry::Sev::Notice,
-                format!("work bus {alias} does not resolve; results will use the crew's own room"),
-            );
+            bus_trouble(format!("work bus {alias} does not resolve; results will use the crew's own room"));
             return None;
         }
     };
@@ -1732,11 +1745,7 @@ pub async fn work_bus(guild_id: &str) -> Option<(String, String)> {
         // Joining by ALIAS is what lets the homeserver find the room across
         // the federation; by id it would need the server name spelled out.
         if let Err(e) = client::join(&session, &alias).await {
-            crate::mcp::telemetry::tlog(
-                "crew",
-                crate::mcp::telemetry::Sev::Notice,
-                format!("could not join the work bus {alias}: {e}"),
-            );
+            bus_trouble(format!("could not join the work bus {alias}: {e}"));
             return None;
         }
         let _ = client::refresh_directory(guild_id, &session).await;
@@ -1744,7 +1753,24 @@ pub async fn work_bus(guild_id: &str) -> Option<(String, String)> {
     if let Ok(mut m) = WORK_BUS.write() {
         m.insert(guild_id.to_string(), room_id.clone());
     }
+    BUS_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
+    // Terms saved while the bus was unreachable were never published; now
+    // it is, say what we pay (or that we do not).
+    tauri::async_runtime::spawn(crate::mcp::crew_pay::publish_helpers_terms());
     Some((guild_id.to_string(), room_id))
+}
+
+/// Put our pay terms on the bus as state keyed by our own user id.
+pub async fn publish_pay_terms(guild_id: &str, terms: Value) -> Result<String, String> {
+    // The cached room only: `work_bus` itself spawns this after joining,
+    // and resolving through it here would make the future recursive.
+    let bus = WORK_BUS
+        .read()
+        .ok()
+        .and_then(|m| m.get(guild_id).cloned())
+        .ok_or("no work bus joined yet to publish on")?;
+    let session = session_for(guild_id)?;
+    client::send_state(&session, &bus, crate::mcp::crew_pay::PAY_STATE_TYPE, &session.user_id, terms).await
 }
 
 /// Is this room the bus? Answered from the cache, so it is cheap enough for
@@ -1948,6 +1974,14 @@ pub async fn matrix_open(
 async fn resolve_subject(guild_id: &str, session: &store::Session, s: &str) -> Result<String, String> {
     if s.starts_with('!') {
         return Ok(s.to_string());
+    }
+    // The work bus, by its name rather than its alias: the room is hidden
+    // from the list, so this is the door to it.
+    if s.eq_ignore_ascii_case("bus") {
+        return work_bus(guild_id)
+            .await
+            .map(|(_, r)| r)
+            .ok_or_else(|| "the work bus is switched off or unreachable".to_string());
     }
     if s.starts_with('#') {
         return client::room_id_for_alias(session, s)

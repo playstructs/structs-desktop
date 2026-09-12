@@ -115,6 +115,44 @@ pub enum Scope {
     Chosen,
     /// This machine's own roster — the players whose keys we hold.
     Roster,
+    /// Nobody in particular: whoever's proof we spend. Grinds for no one —
+    /// it exists to carry PAY TERMS for helpers we have no link with, which
+    /// on the bus is most of them.
+    Anyone,
+}
+
+/// The id of the one crew that covers anyone who helps.
+pub const HELPERS_CREW: &str = "helpers";
+
+/// The terms-only crew, as first created: switched off, paying nothing,
+/// until somebody sets a rate on the bounty card.
+pub fn helpers_crew(guild_id: &str) -> Crew {
+    Crew {
+        room_id: HELPERS_CREW.to_string(),
+        guild_id: guild_id.to_string(),
+        name: "Anyone who helps".to_string(),
+        role: Role::Off,
+        scope: Scope::Anyone,
+        ..Default::default()
+    }
+}
+
+/// Which crew's terms a helper is paid under. Pure, so it can be tested
+/// without a config store: the most specific link wins — named as a friend,
+/// then the room the frame arrived in, then their guild, then anyone.
+pub fn pick_crew(crews: &[Crew], helper: &str, room_id: &str, their_guild: Option<&str>) -> Option<Crew> {
+    if let Some(c) = crews.iter().find(|c| c.scope == Scope::Chosen && c.chosen.iter().any(|p| p == helper)) {
+        return Some(c.clone());
+    }
+    if let Some(c) = crews.iter().find(|c| c.room_id == room_id) {
+        return Some(c.clone());
+    }
+    if let Some(g) = their_guild {
+        if let Some(c) = crews.iter().find(|c| c.scope == Scope::Guild && c.guild_id == g) {
+            return Some(c.clone());
+        }
+    }
+    crews.iter().find(|c| c.scope == Scope::Anyone).cloned()
 }
 
 /// What a crew pays for confirmed work.
@@ -146,6 +184,12 @@ pub struct Pay {
     /// Ceiling on what any single helper is paid in one epoch.
     #[serde(default)]
     pub per_helper_cap: f64,
+    /// A helper is paid only once they are owed at least this much, so a
+    /// busy crew settles in a few transactions an epoch rather than one per
+    /// proof. Zero pays whatever is owed. Never above the per-helper cap —
+    /// a floor the cap can never reach would pay nobody, ever.
+    #[serde(default)]
+    pub min_payout: f64,
 }
 
 fn default_denom() -> String {
@@ -164,6 +208,7 @@ impl Default for Pay {
             epoch_secs: default_epoch_secs(),
             epoch_cap: 0.0,
             per_helper_cap: 0.0,
+            min_payout: 0.0,
         }
     }
 }
@@ -253,7 +298,19 @@ pub fn upsert(crew: Crew) -> Result<Crew, String> {
         None => cfg.crews.push(crew.clone()),
     }
     crate::mcp::config_store::save_config(FILENAME, &*cfg);
+    drop(cfg);
+    announce_terms_if_public(&crew.room_id);
     Ok(crew)
+}
+
+/// The "anyone" terms are a public offer, so a change to them is announced
+/// on the bus. Every other crew's pay is between its members.
+fn announce_terms_if_public(room_id: &str) {
+    if room_id != HELPERS_CREW {
+        return;
+    }
+    #[cfg(not(test))]
+    tauri::async_runtime::spawn(crate::mcp::crew_pay::publish_helpers_terms());
 }
 
 /// Forget a crew locally. Deliberately does NOT revoke: leaving a room and
@@ -267,6 +324,10 @@ pub fn remove(room_id: &str) -> Result<bool, String> {
     let removed = cfg.crews.len() != before;
     if removed {
         crate::mcp::config_store::save_config(FILENAME, &*cfg);
+    }
+    drop(cfg);
+    if removed {
+        announce_terms_if_public(room_id);
     }
     Ok(removed)
 }
@@ -1099,21 +1160,27 @@ pub async fn crew_stop(
 /// belong to, or a room crew the result arrived in. None ⇒ no terms ⇒ no
 /// credit, which is a choice the player made by not setting any.
 pub fn crew_for_helper(helper: &str, room_id: &str) -> Option<Crew> {
-    let crews = all();
-    if let Some(c) = crews.iter().find(|c| c.scope == Scope::Chosen && c.chosen.iter().any(|p| p == helper)) {
-        return Some(c.clone());
-    }
-    if let Some(c) = crews.iter().find(|c| c.room_id == room_id) {
-        return Some(c.clone());
-    }
     let their_guild = crate::mcp::perception::with_snapshot(|s| {
         s.player_row(helper)
             .and_then(|p| p.get("guildId"))
             .and_then(|g| g.as_str())
             .map(str::to_string)
     })
-    .flatten()?;
-    crews.into_iter().find(|c| c.scope == Scope::Guild && c.guild_id == their_guild)
+    .flatten();
+    pick_crew(&all(), helper, room_id, their_guild.as_deref())
+}
+
+/// Start paying anyone who helps: creates the terms-only crew if there is
+/// none, and returns it. Setting the rate is the bounty card's job.
+#[tauri::command]
+pub fn crew_pay_anyone(window: tauri::WebviewWindow) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    let (_, my_guild) = me()?;
+    if let Some(c) = get(HELPERS_CREW) {
+        return Ok(json!({ "ok": true, "crew": c, "created": false }));
+    }
+    let c = upsert(helpers_crew(&my_guild))?;
+    Ok(json!({ "ok": true, "crew": c, "created": true }))
 }
 
 /// Everyone we are linked to, in one flat list — the only thing the simple
@@ -1126,6 +1193,7 @@ pub async fn crew_links() -> Result<Value, String> {
     for c in all() {
         let (kind, subject) = match c.scope {
             Scope::Guild => ("guild", c.guild_id.clone()),
+            Scope::Anyone => ("anyone", String::new()),
             _ => ("player", c.chosen.first().cloned().unwrap_or_default()),
         };
         /* For a person, ask the chain both ways.
@@ -1149,6 +1217,9 @@ pub async fn crew_links() -> Result<Value, String> {
             "crew_id": c.room_id,
             "kind": kind,
             "subject": subject,
+            "pay_enabled": c.pay.enabled,
+            "rate": c.pay.rate_per_difficulty,
+            "denom": c.pay.denom,
             "name": c.name,
             "working": c.role.grinds(),
             "open_to_guild": c.guild_rank_open,
@@ -1164,6 +1235,13 @@ pub async fn crew_links() -> Result<Value, String> {
         "taking": crate::mcp::crew_work::taking_now(),
         "helped": crate::mcp::crew_work::helped_total(),
         "reported": crate::mcp::crew_work::reported_total(),
+        "feed": crate::mcp::crew_work::feed(),
+        "bus": crate::mcp::crew_submit::stats(),
+        "rates": crate::mcp::crew_pay::terms_on_bus(),
+        // Two thresholds, deliberately: what we grind for others, and what
+        // the harvest loop grinds for us.
+        "crew_threshold": crate::mcp::crew_work::get().difficulty_threshold,
+        "own_threshold": crate::mcp::auto_harvest::get().difficulty_threshold,
         // What the loop last saw. Without this, a crew that is working
         // perfectly and a crew nobody has opened their work to look identical
         // — both are simply "0 finished".
@@ -1323,6 +1401,28 @@ mod tests {
         assert!(Role::HelpOnly.grinds() && !Role::HelpOnly.submits());
         assert!(!Role::CollectOnly.grinds() && Role::CollectOnly.submits());
         assert!(Role::Work.grinds() && Role::Work.submits());
+    }
+
+    /// The most specific link pays: a named friend over the room, the room
+    /// over their guild, their guild over "anyone" — and "anyone" catches
+    /// the helper with no link at all, which on the bus is most of them.
+    #[test]
+    fn the_most_specific_link_pays_and_anyone_catches_the_rest() {
+        let mk = |id: &str, scope: Scope| Crew { room_id: id.into(), guild_id: "0-1".into(), scope, ..Default::default() };
+        let mut friend = mk("player:1-195", Scope::Chosen);
+        friend.chosen = vec!["1-195".into()];
+        let room = mk("!night:h", Scope::Room);
+        let guild = mk("guild:0-1", Scope::Guild);
+        let anyone = mk(HELPERS_CREW, Scope::Anyone);
+        let crews = vec![anyone.clone(), guild.clone(), room.clone(), friend.clone()];
+        assert_eq!(pick_crew(&crews, "1-195", "!bus:h", Some("0-1")).unwrap().room_id, "player:1-195");
+        assert_eq!(pick_crew(&crews, "1-61", "!night:h", Some("0-9")).unwrap().room_id, "!night:h");
+        assert_eq!(pick_crew(&crews, "1-61", "!bus:h", Some("0-1")).unwrap().room_id, "guild:0-1");
+        assert_eq!(pick_crew(&crews, "1-61", "!bus:h", Some("0-9")).unwrap().room_id, HELPERS_CREW);
+        assert_eq!(pick_crew(&crews, "1-61", "!bus:h", None).unwrap().room_id, HELPERS_CREW);
+        assert!(pick_crew(&crews[1..], "1-61", "!bus:h", None).is_none(), "no anyone, no link, no bill");
+        let h = helpers_crew("0-1");
+        assert!(!h.pay.enabled && h.pay.rate_per_difficulty == 0.0 && !h.role.grinds(), "terms only, and off until set");
     }
 
     #[test]

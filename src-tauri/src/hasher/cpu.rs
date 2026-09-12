@@ -55,7 +55,10 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
             progress.block_current_estimated = block_est;
         }
 
-        let difficulty_start = crate::hasher::difficulty_start();
+        // A task may carry its own start — crew work grinds for other
+        // people at a threshold the player sets separately from their own —
+        // and the pool's global is the default, not the rule.
+        let difficulty_start = handle.params.difficulty_start.unwrap_or_else(crate::hasher::difficulty_start);
         if difficulty <= difficulty_start {
             break difficulty;
         }

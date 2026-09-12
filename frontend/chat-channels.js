@@ -88,7 +88,7 @@
         portrait.appendChild(mark);
       } else {
         var well = el('div', 'chat-room-icon');
-        well.appendChild(icon(r.icon || 'icon-beacon', 'sui-icon-md'));
+        well.appendChild(icon(r.system ? 'icon-computer' : (r.icon || 'icon-beacon'), 'sui-icon-md'));
         portrait.appendChild(well);
       }
       left.appendChild(portrait);
@@ -155,7 +155,10 @@
         q.title = 'Silenced';
         right.appendChild(q);
       }
-      if (r.unread) {
+      // The bus is never "unread": nobody is expected to read it, and a
+      // four-digit badge on a machine channel is the one thing in the list
+      // that would pull the eye for no reason.
+      if (r.unread && !r.system) {
         // Warning colour when you were named in it — the one badge in the list
         // that should pull the eye. Never for a silenced room: the whole point
         // of muting is that being named there stops pulling the eye.
@@ -277,6 +280,9 @@
       // thing this file already warns about is deriving the list twice.
       if (S.listOnly === 'direct' && (r.section !== 'direct' || r.home_rank != null)) return false;
       if (S.listOnly === 'rooms' && r.section === 'direct') return false;
+      // Machine traffic — the work bus — is not a channel anyone reads. It
+      // is joined, it works, and it stays out of the list until asked for.
+      if (r.system && !S.showSystem) return false;
       var q = String(S.roomFilter || '').trim().toLowerCase();
       if (!q) return true;
       return String(r.name || '').toLowerCase().indexOf(q) !== -1 ||
@@ -307,6 +313,18 @@
       newMsg.appendChild(icon('icon-add sui-text-secondary'));
       newMsg.addEventListener('click', function () { go('people'); });
       if (S.listOnly !== 'rooms') right.appendChild(newMsg);
+      /* The door to the work bus, only when there is one. A control for a
+       * room you have not got teaches nothing; a hidden room with no door
+       * is a room you cannot check when you want to. */
+      if (S.rooms.some(function (r) { return r.system && r.joined; })) {
+        var sys = el('a', 'sui-nav-btn');
+        sys.id = 'chat-system-rooms';
+        sys.href = 'javascript:void(0)';
+        sys.title = S.showSystem ? 'Hide the work bus' : 'Show the work bus';
+        sys.appendChild(icon('icon-computer ' + (S.showSystem ? 'sui-text-primary' : 'sui-text-secondary')));
+        sys.addEventListener('click', function () { S.showSystem = !S.showSystem; render(); });
+        right.appendChild(sys);
+      }
       var res = headerResources();
       if (res) right.appendChild(res);
 

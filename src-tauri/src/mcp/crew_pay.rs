@@ -52,6 +52,150 @@ const FILENAME: &str = "crew_ledger.json";
 /// last week", short enough that the file never becomes a database.
 const KEEP_SETTLED_MS: f64 = 30.0 * 24.0 * 3_600_000.0;
 
+// ── Terms, published ────────────────────────────────────────────────────────
+//
+// What a payer offers, as ROOM STATE on the bus: `structs.pay`, state_key =
+// the payer's own Matrix id. State, not a message, because only the current
+// value matters and a machine joining later must see it without scrolling
+// history; the payer's id as the key because Matrix lets only that user set
+// a state event keyed by their id, so the terms are authentic without any
+// signature of ours. A helper reads these to know what finishing somebody's
+// work is worth BEFORE spending GPU on it.
+
+pub const PAY_STATE_TYPE: &str = "structs.pay";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Terms {
+    pub enabled: bool,
+    pub denom: String,
+    pub rate_per_difficulty: f64,
+    pub epoch_cap: f64,
+    pub per_helper_cap: f64,
+    pub min_payout: f64,
+}
+
+/// What we publish for a crew's pay. Off is published too — a rate that
+/// was withdrawn must not go on being advertised.
+pub fn terms_of(pay: &Pay) -> Value {
+    json!({
+        "v": 1,
+        "enabled": pay.enabled && pay.rate_per_difficulty > 0.0,
+        "denom": pay.denom,
+        "rate_per_difficulty": pay.rate_per_difficulty,
+        "epoch_cap": pay.epoch_cap,
+        "per_helper_cap": pay.per_helper_cap,
+        "min_payout": pay.min_payout,
+    })
+}
+
+/// Strict: this is another player's JSON. A rate has to be a finite,
+/// non-negative number and a denom has to look like one; anything else is
+/// not terms, and is not shown as terms.
+pub fn parse_terms(content: &Value) -> Option<Terms> {
+    if content.get("v").and_then(|v| v.as_u64()) != Some(1) {
+        return None;
+    }
+    let num = |k: &str| -> Option<f64> {
+        let x = content.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        (x.is_finite() && x >= 0.0).then_some(x)
+    };
+    let denom = content.get("denom").and_then(|d| d.as_str()).unwrap_or("");
+    if denom.is_empty()
+        || denom.len() > 64
+        || !denom.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return None;
+    }
+    Some(Terms {
+        enabled: content.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false),
+        denom: denom.to_string(),
+        rate_per_difficulty: num("rate_per_difficulty")?,
+        epoch_cap: num("epoch_cap")?,
+        per_helper_cap: num("per_helper_cap")?,
+        min_payout: num("min_payout")?,
+    })
+}
+
+/// `matrix user -> terms`, as last seen on the bus.
+static TERMS_ON_BUS: LazyLock<RwLock<std::collections::HashMap<String, Terms>>> =
+    LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+
+/// Called by the sync loop for every `structs.pay` state event.
+pub fn note_terms_on_bus(user_id: &str, content: &Value) {
+    if !user_id.starts_with('@') {
+        return; // not keyed by a user: not terms anyone vouched for
+    }
+    let Some(t) = parse_terms(content) else { return };
+    if let Ok(mut m) = TERMS_ON_BUS.write() {
+        m.insert(user_id.to_string(), t);
+    }
+}
+
+/// Who is paying, best rate first — for the helper's card. Off and zero
+/// are left out: an offer of nothing is not an offer.
+pub fn terms_on_bus() -> Vec<Value> {
+    let me = crate::mcp::crew::primary_player().unwrap_or_default();
+    let mut out: Vec<(f64, Value)> = TERMS_ON_BUS
+        .read()
+        .map(|m| {
+            m.iter()
+                .filter(|(_, t)| t.enabled && t.rate_per_difficulty > 0.0)
+                .filter_map(|(u, t)| {
+                    let pid = crate::matrix::directory::player_id_of(u)?;
+                    if pid == me {
+                        return None; // our own offer is on the bounty card
+                    }
+                    let name = crate::matrix::directory::get(&pid).map(|i| i.username).unwrap_or_default();
+                    Some((t.rate_per_difficulty, json!({
+                        "payer": pid, "name": name, "denom": t.denom,
+                        "rate": t.rate_per_difficulty, "per_helper_cap": t.per_helper_cap,
+                        "min_payout": t.min_payout,
+                    })))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
+/// `player id -> rate per difficulty` for everyone paying on the bus, for
+/// the helper's task ordering. Our own terms are not a reason to prefer
+/// our own work — that is the harvest loop's job, not the crew's.
+pub fn rates_by_player() -> std::collections::HashMap<String, f64> {
+    let me = crate::mcp::crew::primary_player().unwrap_or_default();
+    TERMS_ON_BUS
+        .read()
+        .map(|m| {
+            m.iter()
+                .filter(|(_, t)| t.enabled && t.rate_per_difficulty > 0.0)
+                .filter_map(|(u, t)| {
+                    let pid = crate::matrix::directory::player_id_of(u)?;
+                    (pid != me).then_some((pid, t.rate_per_difficulty))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Publish our "anyone who helps" terms — or their absence — on the bus.
+pub async fn publish_helpers_terms() {
+    let terms = match crew::get(crew::HELPERS_CREW) {
+        Some(c) => terms_of(&c.pay),
+        None => json!({ "v": 1, "enabled": false, "denom": "ualpha",
+                        "rate_per_difficulty": 0.0, "epoch_cap": 0.0, "per_helper_cap": 0.0,
+                        "min_payout": 0.0 }),
+    };
+    let guild = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.guild_id.clone()).unwrap_or_default();
+    if guild.is_empty() {
+        return;
+    }
+    match crate::matrix::publish_pay_terms(&guild, terms).await {
+        Ok(_) => tlog("crew", Sev::Info, "pay terms published on the bus".to_string()),
+        Err(e) => tlog("crew", Sev::Notice, format!("pay terms not published: {e}")),
+    }
+}
+
 // ── The receipt ─────────────────────────────────────────────────────────────
 
 /// What consensus says about one finished proof.
@@ -264,6 +408,13 @@ pub fn payable(credits: &[Credit], pay: &Pay, room_id: &str, already_spent: f64)
         if owed <= 0.0 {
             continue;
         }
+        // Batching: below the floor, the debt simply waits. The floor can
+        // never exceed the per-helper cap, or a capped helper would never
+        // reach it and never be paid.
+        let floor = if pay.per_helper_cap > 0.0 { pay.min_payout.min(pay.per_helper_cap) } else { pay.min_payout };
+        if floor > 0.0 && owed < floor {
+            continue;
+        }
         let mut amount = owed;
         let mut capped = false;
         if pay.per_helper_cap > 0.0 && amount > pay.per_helper_cap {
@@ -405,6 +556,10 @@ pub async fn absorb_claim(
                 credit.helper_player, credit.category, credit.object_id, credit.difficulty,
                 credit.amount_base, credit.denom
             ),
+        );
+        crate::mcp::crew_work::note_event(
+            "credit",
+            format!("{} owed {} {} for {}", credit.helper_player, credit.amount_base, credit.denom, credit.object_id),
         );
         return Ok(Some(credit));
     }
@@ -657,6 +812,7 @@ mod tests {
             epoch_secs: 3600,
             epoch_cap,
             per_helper_cap: per_helper,
+            min_payout: 0.0,
         }
     }
 
@@ -736,6 +892,33 @@ mod tests {
         assert_eq!(got[0].object_id, "5-99");
     }
 
+    /// Terms are another player's JSON: a rate must be a finite non-negative
+    /// number, a denom must look like one, and anything else is not shown.
+    #[test]
+    fn terms_off_the_bus_are_read_strictly() {
+        let ok = json!({ "v": 1, "enabled": true, "denom": "ualpha", "rate_per_difficulty": 10.0,
+                         "epoch_cap": 500.0, "per_helper_cap": 200.0 });
+        let t = parse_terms(&ok).expect("terms");
+        assert!(t.enabled && t.rate_per_difficulty == 10.0 && t.denom == "ualpha");
+        assert!(parse_terms(&json!({ "v": 2, "denom": "ualpha" })).is_none(), "unknown version");
+        assert!(parse_terms(&json!({ "v": 1, "denom": "ualpha", "rate_per_difficulty": -1 })).is_none(), "negative");
+        let words = parse_terms(&json!({ "v": 1, "denom": "ualpha", "rate_per_difficulty": "lots" })).unwrap();
+        assert_eq!(words.rate_per_difficulty, 0.0, "a rate that is not a number pays nothing");
+        assert!(parse_terms(&json!({ "v": 1, "denom": "<b>x</b>" })).is_none(), "a denom is not markup");
+        assert!(parse_terms(&json!({ "v": 1 })).is_none(), "no denom, no terms");
+        // Published terms round-trip, and "on at zero" publishes as off.
+        let mut pay = Pay::default();
+        pay.enabled = true;
+        assert_eq!(parse_terms(&terms_of(&pay)).unwrap().enabled, false);
+        pay.rate_per_difficulty = 3.0;
+        assert!(parse_terms(&terms_of(&pay)).unwrap().enabled);
+        // Only a user-keyed state event is anyone's word.
+        note_terms_on_bus("not-a-user", &ok);
+        note_terms_on_bus("@1-999999:h", &ok);
+        assert!(TERMS_ON_BUS.read().unwrap().contains_key("@1-999999:h"));
+        assert!(!TERMS_ON_BUS.read().unwrap().contains_key("not-a-user"));
+    }
+
     #[test]
     fn a_transaction_with_no_completion_credits_nothing() {
         assert!(parse_receipts(&json!({ "tx_response": { "events": [] } })).is_empty());
@@ -768,6 +951,30 @@ mod tests {
         assert!(payable(&cs, &p, ROOM, 0.0).is_empty());
         // ...and a rate of zero pays nothing even when enabled.
         assert!(payable(&cs, &pay(0.0, 0.0, 0.0), ROOM, 0.0).is_empty());
+    }
+
+    /// Below the floor a debt waits; at it, it is paid whole. A floor above
+    /// the per-helper cap collapses to the cap, or a capped helper would
+    /// never be paid at all.
+    #[test]
+    fn a_payout_waits_for_the_floor_then_batches() {
+        let mut terms = pay(1.0, 0.0, 0.0);
+        terms.min_payout = 100.0;
+        let small = vec![credit("a", "1-61", 40.0, 1.0), credit("b", "1-61", 30.0, 2.0)];
+        assert!(payable(&small, &terms, ROOM, 0.0).is_empty(), "70 owed, floor 100: waits");
+        let enough = vec![credit("a", "1-61", 40.0, 1.0), credit("b", "1-61", 30.0, 2.0), credit("c", "1-61", 50.0, 3.0)];
+        let plan = payable(&enough, &terms, ROOM, 0.0);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].amount_base, 120.0, "paid whole, in one transaction");
+        assert_eq!(plan[0].credit_ids.len(), 3);
+        // Floor 100 but a cap of 50: the floor is the cap.
+        let mut capped = terms.clone();
+        capped.per_helper_cap = 50.0;
+        let plan = payable(&enough, &capped, ROOM, 0.0);
+        assert_eq!(plan.len(), 1, "a floor the cap cannot reach still pays");
+        assert_eq!(plan[0].amount_base, 50.0);
+        // Published and read back.
+        assert_eq!(parse_terms(&terms_of(&terms)).unwrap().min_payout, 100.0);
     }
 
     #[test]
@@ -871,12 +1078,19 @@ mod tests {
 /// invented hashes costs one failed lookup each and credits nothing.
 pub fn absorb_done_frames(room_id: &str, messages: &[crate::matrix::client::Message]) {
     let me = crate::mcp::crew::primary_player().unwrap_or_default();
+    let now = now_millis() as u64;
     for m in messages {
         if m.is_self {
             continue; // our own announcement is not a bill we owe ourselves
         }
         let Some(w) = m.work.as_ref() else { continue };
         if w.get("kind").and_then(|k| k.as_str()) != Some("done") {
+            continue;
+        }
+        // The launch backlog again: an old `done` was credited before the
+        // restart (the ledger is on disk and idempotent) or counted on the
+        // helper's card in a session that is over. Neither wants a tx fetch.
+        if !crate::mcp::crew_submit::fresh_enough(m.ts, now) {
             continue;
         }
         let (Some(tx), Some(object)) = (
@@ -891,7 +1105,7 @@ pub fn absorb_done_frames(room_id: &str, messages: &[crate::matrix::client::Mess
          * helper whose card says 0 forever concludes the feature is broken. */
         if !me.is_empty() && w.get("helper").and_then(|h| h.as_str()) == Some(me.as_str()) {
             let owner = crate::matrix::directory::player_id_of(&m.sender).unwrap_or_default();
-            crate::mcp::crew_work::note_finished_by_owner(&owner);
+            crate::mcp::crew_work::note_finished_by_owner(&owner, &object);
             tlog("crew", Sev::Info, format!("{owner} finished {object} from our proof: {tx}"));
             continue;
         }

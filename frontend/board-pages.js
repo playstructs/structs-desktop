@@ -4321,11 +4321,23 @@
       label: 'delegation', icon: 'icon-key', short: 'every player grants the primary full control',
       chips: [{ key: 'max_grants_per_scan', label: 'per scan' }],
     },
+    crew_work: {
+      label: 'crew_work', icon: 'icon-mine', short: 'grind crewmates\' proofs when they are cheap',
+      chips: [{ key: 'difficulty_threshold', label: 'difficulty' }, { key: 'max_slots', label: 'slots' }],
+    },
+    crew_submit: {
+      label: 'crew_submit', icon: 'icon-key', short: 'sign the proofs crewmates post to the bus',
+      chips: [{ key: 'max_per_hour', label: 'per hour' }],
+    },
   };
 
   // Per-field presentation. Anything not listed still renders — the type of the
   // value decides the control — so a new knob on the Rust side needs no UI work.
   var FIELD_META = {
+    bus: { label: 'work bus', hint: '#bus:server — empty turns the bus off' },
+    prefer_paying: { label: 'paying owners first' },
+    max_slots: { label: 'hashing slots', min: 0, max: 32, step: 1 },
+    max_per_hour: { label: 'signs per hour', min: 0, max: 600, step: 10 },
     autonomy: { label: 'autonomy', options: ['advise', 'auto'], hint: 'advise proposes; auto signs' },
     mode: { label: 'response mode', options: ['harden', 'counter', 'decapitate'] },
     posture: { label: 'posture', options: ['cautious', 'opportunist', 'aggressive'], hint: 'rewrites every gate in this card' },
@@ -4547,7 +4559,7 @@
           : String(v);
         return statTile(c.label, text, c.icon || null);
       });
-      chips.push(statTile('every', fmtCadence(cfg.interval_secs)));
+      if (cfg.interval_secs != null) chips.push(statTile('every', fmtCadence(cfg.interval_secs)));
       if (cfg.autonomy) {
         chips.push(statTile('autonomy', cfg.autonomy, null, cfg.autonomy === 'auto' ? 'live' : ''));
       }

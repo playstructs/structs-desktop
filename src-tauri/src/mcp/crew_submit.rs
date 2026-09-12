@@ -46,6 +46,12 @@ pub struct CrewSubmitConfig {
     /// Transactions this may spend in an hour. The lane is the scarce
     /// resource — one in flight per address — so a room that suddenly
     /// produces hundreds of results must not drain it.
+    ///
+    /// 240, not 60: the first live helper produced ~115 good proofs an hour
+    /// and the old ceiling threw away 51 of them in two hours, each one a
+    /// completion the chain would have taken. Every vplayer signs on its own
+    /// address, so four a minute is nowhere near the lane; it is a ceiling
+    /// against a flood, not a budget.
     #[serde(default = "default_hourly")]
     pub max_per_hour: usize,
 }
@@ -54,7 +60,7 @@ fn yes() -> bool {
     true
 }
 fn default_hourly() -> usize {
-    60
+    240
 }
 
 impl Default for CrewSubmitConfig {
@@ -86,6 +92,45 @@ static ACCEPTED: LazyLock<Mutex<HashMap<String, f64>>> = LazyLock::new(|| Mutex:
 
 /// Timestamps of the transactions this has spent, for the hourly ceiling.
 static SPENT: LazyLock<Mutex<Vec<f64>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+// ── What the bus has been doing ─────────────────────────────────────────────
+//
+// Counters for the card. The loop is silent and the room is hidden, so this
+// is how a player learns that proofs are arriving and whether they are being
+// spent — and, when they are not, that the ceiling is why. Found necessary
+// the first live afternoon: 51 refusals sat at debug level while the card
+// said nothing.
+use std::sync::atomic::{AtomicU64, Ordering};
+static ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REFUSED_CEILING: AtomicU64 = AtomicU64::new(0);
+static REFUSED_OTHER: AtomicU64 = AtomicU64::new(0);
+static LAST_FRAME_MS: AtomicU64 = AtomicU64::new(0);
+
+fn note_frame() {
+    LAST_FRAME_MS.store(now_millis() as u64, Ordering::Relaxed);
+}
+
+pub fn note_outcome(outcome: &Result<Option<String>, String>) {
+    match outcome {
+        Ok(Some(_)) => ACCEPTED_TOTAL.fetch_add(1, Ordering::Relaxed),
+        Ok(None) => 0,
+        Err(e) if e.contains("hourly ceiling") => REFUSED_CEILING.fetch_add(1, Ordering::Relaxed),
+        Err(_) => REFUSED_OTHER.fetch_add(1, Ordering::Relaxed),
+    };
+}
+
+/// The bus, as numbers: when a result last arrived, how much of the hour's
+/// ceiling is spent, and what was refused.
+pub fn stats() -> Value {
+    json!({
+        "signed_this_hour": spent_this_hour(),
+        "ceiling": get().max_per_hour,
+        "accepted_total": ACCEPTED_TOTAL.load(Ordering::Relaxed),
+        "refused_ceiling": REFUSED_CEILING.load(Ordering::Relaxed),
+        "refused_other": REFUSED_OTHER.load(Ordering::Relaxed),
+        "last_frame_ms": LAST_FRAME_MS.load(Ordering::Relaxed),
+    })
+}
 
 const CYCLE_MEMORY_MS: f64 = 6.0 * 3_600_000.0;
 
@@ -164,6 +209,23 @@ impl Signer {
 
 // ── Accepting a result ──────────────────────────────────────────────────────
 
+/// How old a result frame may be and still be worth checking.
+///
+/// A launch replays the bus's recent history into the sync loop, and a
+/// proof posted twenty minutes ago has either been spent — by us before the
+/// restart, or by whoever else was listening — or its cycle has moved on.
+/// Checking it costs two chain reads and a claim slot to learn that; the
+/// first live restart spent that on a backlog of three-hour-old frames and
+/// was refused for every one. Twenty minutes is a full pass plus slack.
+pub const STALE_FRAME_MS: u64 = 20 * 60 * 1000;
+
+/// Is a frame recent enough to act on? Pure, for the test; a frame with no
+/// timestamp is treated as fresh, since refusing it would refuse a whole
+/// homeserver that omits the field.
+pub fn fresh_enough(ts_ms: u64, now_ms: u64) -> bool {
+    ts_ms == 0 || now_ms.saturating_sub(ts_ms) <= STALE_FRAME_MS
+}
+
 /// Pick the result frames out of a batch of new messages and finish them.
 ///
 /// Called from the Matrix sync loop, so a result completes whether or not the
@@ -179,12 +241,18 @@ pub fn absorb_result_frames(
     if !cfg.enabled {
         return;
     }
+    let now = now_millis() as u64;
+    let mut stale = 0usize;
     for m in messages {
         if m.is_self {
             continue; // our own report; we are not our own helper
         }
         let Some(w) = m.work.as_ref() else { continue };
         if w.get("kind").and_then(|k| k.as_str()) != Some("result") {
+            continue;
+        }
+        if !fresh_enough(m.ts, now) {
+            stale += 1;
             continue;
         }
         let (Some(object), Some(task), Some(nonce), Some(anchor)) = (
@@ -195,6 +263,7 @@ pub fn absorb_result_frames(
         ) else {
             continue;
         };
+        note_frame();
         let target = w.get("target").and_then(|v| v.as_str()).map(str::to_string);
         // Who did the work, from the Matrix sender — a player id IS a Matrix
         // localpart here, and it is the only thing about the message that is
@@ -204,7 +273,9 @@ pub fn absorb_result_frames(
         let room = room_id.to_string();
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            match accept(&app, &object, &task, anchor, &nonce, target.as_deref(), helper.as_deref(), &guild, &room).await {
+            let out = accept(&app, &object, &task, anchor, &nonce, target.as_deref(), helper.as_deref(), &guild, &room).await;
+            note_outcome(&out);
+            match out {
                 Ok(Some(v)) => tlog(
                     "crew",
                     Sev::Info,
@@ -214,6 +285,9 @@ pub fn absorb_result_frames(
                 Err(e) => tlog("crew", Sev::Debug, format!("{object} not accepted: {e}")),
             }
         });
+    }
+    if stale > 0 {
+        tlog("crew", Sev::Debug, format!("left {stale} stale result frame(s) alone — older than the freshness window"));
     }
 }
 
@@ -245,7 +319,8 @@ pub async fn accept(
     let client = CosmosClient::new();
 
     // WHOSE is it? From the chain, never from the message.
-    let owner = object_owner(&client, object, kind).await?;
+    let on_chain = object_view(&client, object, kind).await?;
+    let owner = on_chain.owner.clone();
     let signer = match signer_for(&owner, &primary) {
         Some(s) => s,
         // Not one of ours. The primary may still hold a hash grant on them —
@@ -271,8 +346,8 @@ pub async fn accept(
      * shipped verify path had done since it was written — demanded thousands
      * of leading zeros and refused every real proof ever computed.
      */
-    let (range, planet) = task_view(&owner, object, kind)
-        .ok_or("cannot establish this task's difficulty range from our own state")?;
+    let (range, planet) = task_view(&owner, object, kind, &on_chain)
+        .ok_or("cannot establish this task's difficulty range from our own state or the chain")?;
     /* Would the chain even take it? Asked BEFORE the nonce is checked and
      * long before a transaction is spent. The first live pass spent one
      * every two minutes being told "planet (2-29903) is empty, nothing to
@@ -311,11 +386,20 @@ pub async fn accept(
              * answer, and releasing it here had this machine re-spending a
              * transaction on every re-post of the same proof. The claim
              * stays until the cycle memory expires or the anchor moves. */
-            if !chain_refused(e) {
+            if chain_refused(e) {
+                crate::mcp::crew_work::note_event(
+                    "refused",
+                    format!("chain refused {}'s proof for {object}: {e}", helper.unwrap_or("a crewmate")),
+                );
+            } else {
                 release(object, anchor);
             }
         }
         Ok(tx) => {
+            crate::mcp::crew_work::note_event(
+                "accepted",
+                format!("spent {}'s proof for {object}: {tx}", helper.unwrap_or("a crewmate")),
+            );
             // Say so where the proof came from, naming who computed it, so
             // the helper's own card can count a job finished.
             tell_the_room(guild_id, room_id, object, kind, anchor, tx, helper);
@@ -400,7 +484,10 @@ fn credit_helper(helper: &str, room_id: &str, object: &str, kind: TaskType, bar:
         settle_tx: None,
     };
     match crate::mcp::crew_pay::record(credit) {
-        Ok(true) => tlog("crew", Sev::Info, format!("{helper} owed for {object} at bar {bar}")),
+        Ok(true) => {
+            tlog("crew", Sev::Info, format!("{helper} owed for {object} at bar {bar}"));
+            crate::mcp::crew_work::note_event("credit", format!("{helper} owed for {object} at bar {bar}"));
+        }
         Ok(false) => {}
         Err(e) => tlog("crew", Sev::Notice, format!("could not credit {helper}: {e}")),
     }
@@ -478,21 +565,60 @@ async fn submit(
     })
 }
 
-async fn object_owner(client: &CosmosClient, object: &str, kind: TaskType) -> Result<String, String> {
+/// What the chain says about the object: who owns it, what type it is, and
+/// which planet it stands on. One read, used for the owner AND as the
+/// fallback for the difficulty range.
+struct ObjectView {
+    owner: String,
+    type_id: Option<String>,
+    planet: Option<String>,
+}
+
+async fn object_view(client: &CosmosClient, object: &str, kind: TaskType) -> Result<ObjectView, String> {
     let (entity, cap) = if kind == TaskType::Raid { ("fleet", "Fleet") } else { ("struct", "Struct") };
     let v = client.entity(entity, object).await?;
-    v.get(cap)
-        .and_then(|s| s.get("owner"))
+    let e = v.get(cap).cloned().unwrap_or(Value::Null);
+    let owner = e
+        .get("owner")
         .and_then(|o| o.as_str())
         .filter(|o| !o.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| format!("{object} has no owner on chain"))
+        .ok_or_else(|| format!("{object} has no owner on chain"))?;
+    let type_id = e.get("type").and_then(|t| t.as_str()).map(str::to_string);
+    let planet = match e.get("locationType").and_then(|t| t.as_str()) {
+        Some("planet") => e.get("locationId").and_then(|l| l.as_str()).map(str::to_string),
+        _ => None,
+    };
+    Ok(ObjectView { owner, type_id, planet })
 }
 
 /// The struct type's difficulty range for this kind of work, and the planet
-/// whose clock it runs on, from OUR view of the world. `None` is a refusal,
-/// not a zero.
-fn task_view(owner: &str, object: &str, kind: TaskType) -> Option<(u64, Option<String>)> {
+/// whose clock it runs on: from OUR view of the world first, and failing
+/// that from the type the chain just told us. `None` is a refusal, not a
+/// zero.
+///
+/// The fallback exists because a helper's snapshot and ours disagree all
+/// afternoon — their rig is ripe in theirs and offline, or unknown, in ours
+/// — and the first live run refused 34 valid proofs for want of a row we did
+/// not need: the range is a property of the TYPE, and the type was already
+/// in the reply that named the owner. The chain still judges the anchor.
+fn task_view(owner: &str, object: &str, kind: TaskType, on_chain: &ObjectView) -> Option<(u64, Option<String>)> {
+    if let Some(v) = local_task_view(owner, object, kind) {
+        return Some(v);
+    }
+    let type_id = on_chain.type_id.as_deref()?;
+    let gs = crate::game_state::GAME_STATE.read().ok()?;
+    let t = gs.struct_types.get(type_id)?;
+    let range = match kind {
+        TaskType::Mine => t.ore_mining_difficulty,
+        TaskType::Refine => t.ore_refining_difficulty,
+        TaskType::Build => t.build_difficulty,
+        TaskType::Raid => 0,
+    };
+    (range > 0).then(|| (range, on_chain.planet.clone()))
+}
+
+fn local_task_view(owner: &str, object: &str, kind: TaskType) -> Option<(u64, Option<String>)> {
     if let Some(rows) = crate::mcp::perception::work_for_player(owner) {
         for r in rows {
             if r.get("object_id").and_then(|v| v.as_str()) == Some(object)
@@ -567,6 +693,33 @@ mod tests {
     /// The chain's no is final for the cycle; only not reaching it is worth
     /// another try. Getting this backwards re-spends a transaction on every
     /// re-post of the same refused proof.
+    /// Outcomes are counted for the card: spent, refused at the ceiling,
+    /// refused for anything else; "not ours" is not an event at all.
+    #[test]
+    fn outcomes_are_tallied_for_the_card() {
+        let before = stats();
+        note_outcome(&Ok(Some("TX".into())));
+        note_outcome(&Ok(None));
+        note_outcome(&Err("hourly ceiling of 240 submissions reached".into()));
+        note_outcome(&Err("that nonce does not solve this task".into()));
+        let after = stats();
+        let d = |k: &str| after[k].as_u64().unwrap() - before[k].as_u64().unwrap();
+        assert_eq!((d("accepted_total"), d("refused_ceiling"), d("refused_other")), (1, 1, 1));
+        assert!(after["ceiling"].as_u64().unwrap() >= 240, "the ceiling is a flood guard, not a budget");
+    }
+
+    /// The backlog a launch replays is mostly spent or dead; a frame older
+    /// than the window is left alone without a chain read.
+    #[test]
+    fn old_frames_from_the_backlog_are_left_alone() {
+        let now = 10_000_000_000u64;
+        assert!(fresh_enough(now - 60_000, now), "a minute old is fresh");
+        assert!(fresh_enough(now - STALE_FRAME_MS, now), "at the window is still fresh");
+        assert!(!fresh_enough(now - STALE_FRAME_MS - 1, now), "past it is not");
+        assert!(fresh_enough(0, now), "no timestamp is not a reason to refuse");
+        assert!(fresh_enough(now + 5_000, now), "a clock slightly ahead is fresh, not negative");
+    }
+
     #[test]
     fn a_chain_refusal_is_final_and_a_transport_failure_is_not() {
         assert!(chain_refused("failed to execute message; message index: 0: planet (2-29903) is empty, nothing to mine"));

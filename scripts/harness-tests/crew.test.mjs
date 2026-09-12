@@ -139,9 +139,20 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   check('a person shows both directions of signing rights',
     /JPEG/.test(body) && /they may finish mine/i.test(body) && /i may finish theirs/i.test(body), body.slice(0, 600));
   check('…and every link can be stopped', buttons().some((b) => /Stop/.test(b)));
+  check('terms for anyone who helps show as a link with their rate',
+    /Anyone who helps/.test(body) && /per difficulty/.test(body) && /paying helpers\s*on|on\s*paying helpers/.test(body), body.slice(0, 700));
   // A proof handed over Comms is work done, and the only visible trace of
   // the no-grant path; it shows once there is one (fixture: 3) and not as a
   // fourth zero before then.
+  check('the bus reads as numbers: arrivals, the hour against its ceiling, proofs spent',
+    /signed this hour/.test(body) && /60\D*of\D*60/.test(body) && /92\s*spent/.test(body), body.slice(0, 500));
+  check('…and a ceiling that is losing proofs says so, and where the knob is',
+    /51 refused at the ceiling/.test(body) && /crew_submit/.test(body), body.slice(0, 500));
+  check('the two thresholds sit side by side: theirs to set, mine to read',
+    /Their work at difficulty/.test(body) && /4\s*mine at ≤/.test(body), body.slice(0, 500));
+  check('rates published on the bus are listed for a helper, with the cap',
+    /Paying on the bus/.test(body) && /JPEG/.test(body) && /per difficulty/.test(body) && /up to/.test(body), body.slice(0, 900));
+  check('recent activity is listed, newest first', /Recent/.test(body) && body.indexOf('spent 1-195') < body.indexOf('posted a proof'), body.slice(0, 500));
   check('proofs posted to comms are counted on the card', /finished\D*3\D*posted/.test(body), body.slice(0, 400));
 
   /* "It doesn't seem to be doing anything" has to be answerable FROM THE CARD.
@@ -162,7 +173,7 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   });
   const body2 = host2 ? text(host2) : '';
   check('an idle crew says where the gap is',
-    /7 left alone/.test(body2) && /no room in common/.test(body2), body2.slice(0, 300));
+    /7 left alone/.test(body2) && !/no room in common/.test(body2), body2.slice(0, 300));
 
   // …and "nothing ripe" must not be blamed on permission.
   idle.last_pass = { epoch: 2, submitting: 0, reporting: 0, started: 0, declined: 0, ripe: 0, free: 4, members: 300, at_ms: 2 };
@@ -193,6 +204,9 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   const body = text(host);
   if (!host) { console.log('  (skipping the rest: nothing rendered)'); }
   else {
+  check('the payout floor is shown and editable', /pays from/.test(body) && /Pay once owed/.test(body), body.slice(0, 400));
+  check('…and offers to pay anyone who helps when no such terms exist',
+    /Pay anyone who helps/.test(body), body.slice(0, 300));
 
   check('the rate is per difficulty, not per proof', /10\u03bcg \/ difficulty/.test(body), body.slice(0, 200));
   // Money is on the game's own ladder here as everywhere else: 90 ualpha is

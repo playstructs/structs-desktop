@@ -168,155 +168,243 @@
     return H.statTile(label, a[0], null, v == null ? 'muted' : a[1]);
   }
 
+  /* Which cards have their friend picker open. A refresh replaces the
+   * card's body, and a picker replaced mid-search was the bug that first
+   * froze this card's cadence at zero; now the card keeps refreshing and
+   * simply leaves a body alone while somebody is typing in it. */
+  var PICKER_OPEN = {};
+
   T.register('crew', {
     label: 'Crew',
     describe: function () { return 'Crew'; },
-    /* Never on a timer. This card holds UNSAVED STATE — the friend picker and
-     * whatever is half-typed into it — and a periodic re-render throws it
-     * away mid-keystroke. Watched live 2026-09-11: the picker vanished under
-     * a player id being typed into it. The Deliver card carries `cadenceMs: 0`
-     * for exactly this reason; every action here already refreshes the card
-     * itself when it completes. */
-    cadenceMs: 0,
+    cadenceMs: 20000,
     render: function (host, p, ctx) {
+      if (PICKER_OPEN[ctx.id] && !ctx.first) return Promise.resolve();
       return invoke('crew_links').then(function (d) {
         var links = (d && d.links) || [];
         host.innerHTML = '';
+        function refresh() { PICKER_OPEN[ctx.id] = false; T.refresh(ctx.id, true); }
 
-        /* State first, and only when there is any.
+        /* ── Sections, arranged by what the reader needs first ──────────
          *
-         * A card that opens with four tiles of zeroes teaches nobody
-         * anything. Before you have linked to anyone there is nothing true to
-         * say, so it says nothing and asks the question instead. */
-        if (links.length) {
+         * Nobody linked yet: the question is the whole card, so it leads and
+         * the bus, rates and recent activity follow as context. Linked: the
+         * state leads, the links are the card, and "help someone else" is
+         * the afterthought it is. Every section draws nothing when it has
+         * nothing true to say. */
+
+        function stateSection() {
+          if (!links.length) return;
           var state = [
             ['helping', d.helping ? 'on' : 'off', null, d.helping ? 'live' : 'muted'],
             ['doing now', H.fmtInt(d.taking || 0), null, (d.taking || 0) ? 'live' : 'muted'],
             ['finished', H.fmtInt(d.helped || 0)],
           ];
-          // Proofs handed over Comms for somebody with the authority to
-          // spend. Only once there are any: a fourth zero says nothing.
           if (d.reported) state.push(['posted', H.fmtInt(d.reported)]);
           host.appendChild(tiles(state));
-          /* Why nothing is happening, when nothing is happening.
-           *
-           * A crew that works perfectly and a crew nobody has opened their
-           * work to both read as "0 finished". The loop already knows the
-           * difference — it counts what it SAW and what it was PERMITTED to
-           * take — so say it rather than leaving the player to guess.
-           */
+          /* Two thresholds, side by side: how cheap somebody else's proof
+           * must be before this machine grinds it, and the one the harvest
+           * loop uses for your own rigs. The first is set here; the second
+           * is the harvest loop's own knob and is shown so the two can be
+           * read together. */
+          if (d.crew_threshold != null) {
+            var th = H.el('div', 'tm-doors-row');
+            th.appendChild(H.field('Their work at difficulty ≤',
+              H.stepper(Number(d.crew_threshold) || 1, { min: 1, max: 64, step: 1, width: '3.5em' }, function (nv) {
+                invoke('crew_threshold_set', { threshold: Number(nv) })
+                  .then(refresh)
+                  .catch(function (e) { Board.stamp && Board.stamp('crew: ' + e); });
+              })));
+            if (d.own_threshold != null) th.appendChild(H.statTile('mine at ≤', String(d.own_threshold), null, 'muted'));
+            host.appendChild(th);
+          }
           var lp = d.last_pass;
+          // Why nothing is happening, as state: what was ripe and what was
+          // left alone. The reasons are the loop's own and are in its log.
           if (lp && d.helping && !(d.taking || 0)) {
             if (!lp.ripe) {
               host.appendChild(H.stateBlock('info',
-                'Nothing ripe to help with across ' + H.fmtInt(lp.members || 0) + ' crewmate(s).'));
+                'Nothing ripe across ' + H.fmtInt(lp.members || 0) + ' crewmate(s).'));
             } else if (!lp.started) {
-              /* Not a permission problem: a proof needs no rights to COMPUTE.
-               * Every ripe task was declined locally — already ours, already
-               * queued, or nowhere to post a result (no room in common). */
               host.appendChild(H.stateBlock('warning',
-                H.fmtInt(lp.ripe) + ' task(s) ready, ' + H.fmtInt(lp.declined || 0)
-                + ' left alone — already yours, already queued, or no room in common to post a result.'));
+                H.fmtInt(lp.ripe) + ' ready · ' + H.fmtInt(lp.declined || 0) + ' left alone'));
             }
           }
           if (lp && lp.started) {
             host.appendChild(tiles([
               ['signing here', H.fmtInt(lp.submitting || 0), null, (lp.submitting || 0) ? 'live' : 'muted'],
               ['posting to comms', H.fmtInt(lp.reporting || 0), null, (lp.reporting || 0) ? 'live' : 'muted'],
+              ['for pay', H.fmtInt(lp.paid || 0), null, (lp.paid || 0) ? 'live' : 'muted'],
             ]));
           }
         }
 
-        cap(host, links.length ? 'Help someone else' : 'Who do you want to help?');
-        var pick = H.el('div', 'tm-doors-row');
-        host.appendChild(pick);
+        function busSection() {
+          var bus = d.bus || {};
+          if (!(bus.last_frame_ms || bus.accepted_total)) return;
+          var age = bus.last_frame_ms ? Date.now() - bus.last_frame_ms : null;
+          var atCeiling = !!bus.ceiling && (bus.signed_this_hour || 0) >= bus.ceiling;
+          var paying = links.some(function (l) { return l.pay_enabled && l.rate; });
+          host.appendChild(tiles([
+            ['bus', age == null ? 'quiet' : H.ago(bus.last_frame_ms) + ' ago', null,
+              age != null && age < 600000 ? 'live' : 'muted'],
+            ['signed this hour', H.fmtInt(bus.signed_this_hour || 0) + ' of ' + H.fmtInt(bus.ceiling || 0), null,
+              atCeiling ? 'warn' : null],
+            ['spent', H.fmtInt(bus.accepted_total || 0)],
+            ['paying helpers', paying ? 'on' : 'off', null, paying ? 'live' : 'muted'],
+          ]));
+          if (bus.refused_ceiling) {
+            host.appendChild(H.stateBlock('warning',
+              H.fmtInt(bus.refused_ceiling) + ' refused at the ceiling · CONFIG › crew_submit'));
+          }
+        }
 
-        // ── My guild ──
-        // One button, one transaction. Everything that used to be a separate
-        // control — scope, role, switching the loop on — follows from the
-        // sentence "I want to help my guild" and is done for you.
-        pick.appendChild(armed({
-          label: 'My guild',
-          confirm: d.guild_id ? 'Start helping ' + d.guild_id + '?' : 'You are not in a guild',
-          enabled: !!d.guild_id,
-          // Helping signs nothing: computing a proof needs no rights. Letting
-          // the guild finish YOUR work is the separate door on the link below.
-          run: function () { return invoke('crew_help_guild', { openMyWork: false }); },
-          after: function () { T.refresh(ctx.id, true); },
-        }));
-
-        // ── A friend ──
-        var friendBox = H.el('div');
-        pick.appendChild(armed({
-          label: 'A friend',
-          toggle: function () {
-            friendBox.hidden = !friendBox.hidden;
-            if (!friendBox.hidden) friendPicker(friendBox, ctx);
-          },
-        }));
-        friendBox.hidden = true;
-        host.appendChild(friendBox);
-
-        if (!links.length) return;
-
-        // ── Who you are linked to ──
-        cap(host, 'Linked');
-        links.forEach(function (l) {
-          var guild = l.kind === 'guild';
-          var chips = guild
-            ? [H.statTile('they may finish mine', l.open_to_guild ? 'rank ≤ ' + l.open_to_guild : 'no', null, l.open_to_guild ? 'ok' : 'muted')]
-            : [authChip('they may finish mine', l.they_can_help_me),
-               authChip('i may finish theirs', l.i_can_help_them)];
-          /* Opening your work is the one thing here that signs a transaction,
-           * so it is its own armed button and never a side effect of helping.
-           * A guild link opens by rank; a person by a direct grant. */
-          var opened = guild ? !!l.open_to_guild : l.they_can_help_me === 'granted';
-          var openDoor = armed({
-            label: opened ? 'Close my work' : 'Let them finish mine',
-            destructive: opened,
-            confirm: opened
-              ? (guild ? 'Stop the guild finishing your work?' : 'Withdraw ' + (l.name || l.subject) + '\u2019s right to finish yours?')
-              : (guild ? 'Let anyone in ' + l.subject + ' finish your proofs?' : 'Let ' + (l.name || l.subject) + ' finish your proofs?'),
-            run: function () {
-              if (guild) return invoke(opened ? 'crew_close_guild' : 'crew_open_guild',
-                { guildId: l.subject, rank: 101, roomId: l.crew_id });
-              return invoke(opened ? 'crew_revoke' : 'crew_grant',
-                { helperPlayerId: l.subject, roomId: l.crew_id });
-            },
-            after: function () { T.refresh(ctx.id, true); },
+        function ratesSection() {
+          var rates = (d.rates || []).slice(0, 5);
+          if (!rates.length) return;
+          cap(host, 'Paying on the bus');
+          var rt = H.resultTable();
+          rt.classList.add('list-short');
+          rates.forEach(function (r) {
+            rt.appendChild(H.resultRow({
+              icon: 'icon-send-alpha',
+              title: String(r.name || r.payer),
+              subtitle: amt(r.rate, r.denom || 'ualpha') + ' per difficulty'
+                + (r.per_helper_cap ? ' · up to ' + amt(r.per_helper_cap, r.denom || 'ualpha') + ' each' : '')
+                + (r.min_payout ? ' · paid from ' + amt(r.min_payout, r.denom || 'ualpha') : ''),
+            }));
           });
-          var pc = PC();
-          host.appendChild(H.resultRow({
-            portrait: guild || !pc ? null : pc.portrait(null),
-            icon: guild ? 'icon-guild' : (pc ? null : 'icon-member'),
-            title: String(l.name || l.subject),
-            subtitle: guild ? 'your whole guild' : String(l.subject),
-            chips: chips,
-            action: (function () {
-              var row = H.el('div', 'tm-doors-row');
-              row.appendChild(openDoor);
-              row.appendChild(armed({
+          host.appendChild(rt);
+        }
+
+        function recentSection() {
+          var feed = (d.feed || []).slice(0, 6);
+          if (!feed.length) return;
+          cap(host, 'Recent');
+          var FEED_ICON = { posted: 'icon-outgoing', finished: 'icon-success', accepted: 'icon-success',
+            refused: 'icon-blocked', credit: 'icon-send-alpha' };
+          var ft = H.resultTable();
+          ft.classList.add('list-short');
+          feed.forEach(function (f) {
+            ft.appendChild(H.resultRow({
+              icon: FEED_ICON[f.kind] || 'icon-info',
+              title: String(f.text || ''),
+              subtitle: f.at_ms ? H.ago(f.at_ms) + ' ago' : '',
+            }));
+          });
+          host.appendChild(ft);
+        }
+
+        function doorsSection() {
+          cap(host, links.length ? 'Help someone else' : 'Who do you want to help?');
+          var pick = H.el('div', 'tm-doors-row');
+          host.appendChild(pick);
+          // One button, one call. Scope, role and switching the loop on all
+          // follow from "I want to help my guild" and are done for you.
+          // Helping signs nothing: computing a proof needs no rights. Letting
+          // the guild finish YOUR work is the separate door on the link.
+          pick.appendChild(armed({
+            label: 'My guild',
+            confirm: d.guild_id ? 'Start helping ' + d.guild_id + '?' : 'You are not in a guild',
+            enabled: !!d.guild_id,
+            run: function () { return invoke('crew_help_guild', { openMyWork: false }); },
+            after: refresh,
+          }));
+          var friendBox = H.el('div');
+          pick.appendChild(armed({
+            label: 'A friend',
+            toggle: function () {
+              friendBox.hidden = !friendBox.hidden;
+              PICKER_OPEN[ctx.id] = !friendBox.hidden;
+              if (!friendBox.hidden) friendPicker(friendBox, ctx, refresh);
+            },
+          }));
+          friendBox.hidden = true;
+          host.appendChild(friendBox);
+        }
+
+        function linkedSection() {
+          if (!links.length) return;
+          cap(host, 'Linked');
+          links.forEach(function (l) {
+            var guild = l.kind === 'guild';
+            if (l.kind === 'anyone') {
+              // Terms for whoever helps: a rate or none, a door to set it,
+              // and a way to stop. Nothing to open, nothing to grant.
+              var doors = H.el('div', 'tm-doors-row');
+              var setRate = H.el('a', 'sui-screen-btn sui-mod-primary');
+              setRate.href = 'javascript:void(0)';
+              setRate.appendChild(H.el('span', null, l.pay_enabled && l.rate ? 'Terms' : 'Set a rate'));
+              setRate.addEventListener('click', function () { T.add('crewpay', { room: l.crew_id }); });
+              doors.appendChild(setRate);
+              doors.appendChild(armed({
+                label: 'Stop',
+                destructive: true,
+                confirm: 'Stop paying helpers?',
+                run: function () { return invoke('crew_stop', { crewId: l.crew_id }); },
+                after: refresh,
+              }));
+              host.appendChild(H.resultRow({
+                icon: 'icon-send-alpha',
+                title: 'Anyone who helps',
+                subtitle: l.pay_enabled && l.rate ? amt(l.rate, l.denom || 'ualpha') + ' per difficulty' : 'not paying',
+                chips: [H.statTile('paying', l.pay_enabled ? 'on' : 'off', null, l.pay_enabled ? 'live' : 'muted')],
+                action: doors,
+              }));
+              return;
+            }
+            var chips = guild
+              ? [H.statTile('they may finish mine', l.open_to_guild ? 'rank ≤ ' + l.open_to_guild : 'no', null, l.open_to_guild ? 'ok' : 'muted')]
+              : [authChip('they may finish mine', l.they_can_help_me),
+                 authChip('i may finish theirs', l.i_can_help_them)];
+            // Opening your work is the one thing here that signs a
+            // transaction, so it is its own armed button and never a side
+            // effect of helping. A guild opens by rank; a person by grant.
+            var opened = guild ? !!l.open_to_guild : l.they_can_help_me === 'granted';
+            var openDoor = armed({
+              label: opened ? 'Close my work' : 'Let them finish mine',
+              destructive: opened,
+              confirm: opened
+                ? (guild ? 'Stop the guild finishing your work?' : 'Withdraw ' + (l.name || l.subject) + '’s right to finish yours?')
+                : (guild ? 'Let anyone in ' + l.subject + ' finish your proofs?' : 'Let ' + (l.name || l.subject) + ' finish your proofs?'),
+              run: function () {
+                if (guild) return invoke(opened ? 'crew_close_guild' : 'crew_open_guild',
+                  { guildId: l.subject, rank: 101, roomId: l.crew_id });
+                return invoke(opened ? 'crew_revoke' : 'crew_grant',
+                  { helperPlayerId: l.subject, roomId: l.crew_id });
+              },
+              after: refresh,
+            });
+            var pc = PC();
+            var row = H.el('div', 'tm-doors-row');
+            row.appendChild(openDoor);
+            row.appendChild(armed({
               label: 'Stop',
               destructive: true,
               confirm: 'Close this and stop helping?',
               run: function () { return invoke('crew_stop', { crewId: l.crew_id }); },
-              after: function () { T.refresh(ctx.id, true); },
-              }));
-              return row;
-            })(),
-          }));
-        });
+              after: refresh,
+            }));
+            host.appendChild(H.resultRow({
+              portrait: guild || !pc ? null : pc.portrait(null),
+              icon: guild ? 'icon-guild' : (pc ? null : 'icon-member'),
+              title: String(l.name || l.subject),
+              subtitle: guild ? 'your whole guild' : String(l.subject),
+              chips: chips,
+              action: row,
+            }));
+          });
+        }
+
+        if (!links.length) {
+          doorsSection(); busSection(); ratesSection(); recentSection();
+        } else {
+          stateSection(); busSection(); linkedSection(); ratesSection(); recentSection(); doorsSection();
+        }
       }).catch(function (e) { fail(host, 'crew', e); });
     },
   });
 
-  /* Money, on the game's own ladder.
-   *
-   * `90 ualpha` is a denom string and a raw integer; the game says `90\u03bcg`
-   * everywhere else and a card that says otherwise reads as a different
-   * application. A guild token has no ladder, so it stays a count — but it
-   * still gets a name rather than its wire denom.
-   */
   function denomLabel(denom) {
     var d = String(denom || '');
     return d === 'ualpha' ? 'Alpha' : d.indexOf('uguild.') === 0 ? 'Guild token' : d;
@@ -384,7 +472,7 @@
   /* Choosing a person. The same search the Pay card uses, because "who" is
    * the same question here and a second way to answer it is a second thing to
    * learn. */
-  function friendPicker(box, ctx) {
+  function friendPicker(box, ctx, refresh) {
     box.innerHTML = '';
     var input = H.textBox('', 'name or 1-61');
     var results = H.el('div');
@@ -412,7 +500,7 @@
             label: 'Help them',
             confirm: 'Start helping ' + (r.name || r.player_id) + '?',
             run: function () { return invoke('crew_help_player', { playerId: r.player_id, openMyWork: false }); },
-            after: function () { T.refresh(ctx.id, true); },
+            after: refresh || function () { T.refresh(ctx.id, true); },
           }),
         }));
       });
@@ -437,7 +525,21 @@
       return invoke('crew_list').then(function (d) {
         var crews = (d && d.crews) || [];
         host.innerHTML = '';
-        if (!crews.length) { host.appendChild(H.stateBlock('info', 'No crew yet.')); return; }
+        /* One door, for the ordinary case: the people finishing your work
+         * over the bus are not linked to you at all, so no crew's terms
+         * cover them. "Anyone who helps" is a terms-only crew — it grinds
+         * for nobody — and it appears here like any other once made. */
+        if (!crews.some(function (c) { return c.scope === 'anyone'; })) {
+          var doors = H.el('div', 'tm-doors-row');
+          doors.appendChild(armed({
+            label: 'Pay anyone who helps',
+            confirm: 'Set terms for anyone whose proof you spend?',
+            run: function () { return invoke('crew_pay_anyone', {}); },
+            after: function () { T.setParams(ctx.id, { room: 'helpers' }); T.refresh(ctx.id, true); },
+          }));
+          host.appendChild(doors);
+        }
+        if (!crews.length) return;
         var room = (p && p.room) || crews[0].room_id;
         var crew = crews.filter(function (c) { return c.room_id === room; })[0] || crews[0];
         room = crew.room_id;
@@ -459,6 +561,7 @@
             ['this epoch', amt(l.spent_this_epoch || 0, den)
               + (pay.epoch_cap ? ' / ' + amt(pay.epoch_cap, den) : '')],
             ['due now', amt(due, den), null, due ? 'live' : 'muted'],
+            ['pays from', pay.min_payout ? amt(pay.min_payout, den) : 'any amount', null, pay.min_payout ? null : 'muted'],
           ]));
 
           host.appendChild(H.field('Pay automatically', H.checkbox(!!pay.enabled, null, function (on) {
@@ -475,6 +578,9 @@
               { key: 'rate', label: 'Per difficulty', kind: 'amount', value: String(pay.rate_per_difficulty || 0) },
               { key: 'per_helper_cap', label: 'Cap per helper', kind: 'amount', value: String(pay.per_helper_cap || 0) },
               { key: 'epoch_cap', label: 'Cap per epoch', kind: 'amount', value: String(pay.epoch_cap || 0) },
+              // Batching: a helper is paid once they are owed this much, so a
+              // busy crew settles in a few transactions, not one per proof.
+              { key: 'min_payout', label: 'Pay once owed', kind: 'amount', value: String(pay.min_payout || 0) },
             ],
             confirm: function (v) {
               return { title: 'Set this crew’s terms?', cta: 'Save', rows: [
@@ -482,12 +588,14 @@
                 ['Rate', String(v.rate || 0) + ' per difficulty'],
                 ['Per helper', Number(v.per_helper_cap) ? String(v.per_helper_cap) : 'no cap'],
                 ['Per epoch', Number(v.epoch_cap) ? String(v.epoch_cap) : 'no cap'],
+                ['Pay once owed', Number(v.min_payout) ? String(v.min_payout) : 'any amount'],
               ] };
             },
             submit: function (v) {
               crew.pay = { enabled: !!pay.enabled, denom: String(v.denom || 'ualpha'),
                 rate_per_difficulty: Number(v.rate) || 0, epoch_secs: pay.epoch_secs || 3600,
-                epoch_cap: Number(v.epoch_cap) || 0, per_helper_cap: Number(v.per_helper_cap) || 0 };
+                epoch_cap: Number(v.epoch_cap) || 0, per_helper_cap: Number(v.per_helper_cap) || 0,
+                min_payout: Number(v.min_payout) || 0 };
               return invoke('crew_save', { crew: crew });
             },
             done: function () { T.refresh(ctx.id, true); },

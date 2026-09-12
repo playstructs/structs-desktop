@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 const src = fs.readFileSync(new URL('../../frontend/chat-channels.js', import.meta.url), 'utf8');
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
-function boot(rooms, fixtures = {}) {
+function boot(rooms, fixtures = {}, tweak = null) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { runScripts: 'outside-only' });
   const w = dom.window;
   w.eval(src);
@@ -36,6 +36,7 @@ function boot(rooms, fixtures = {}) {
     noticeBlock: (t, d) => el('div', 'notice', t + ' ' + d),
     S, Chat: {},
   };
+  if (tweak) tweak(ctx);
   return { w, ch: w.ChatChannels(ctx), calls, S, ctx };
 }
 
@@ -119,3 +120,35 @@ const R = (o) => Object.assign({ room_id: '!' + o.name + ':matrix.oh.energy', jo
 }
 
 console.log('chat-channels: all checks passed');
+
+// 8. The work bus is machine traffic: joined, but not in the list until asked
+//    for, and then back out again. The door exists only when the room does.
+{
+  const rooms = [R({ name: 'lobby' }), R({ name: 'bus', canonical_alias: '#bus:h', system: true, unread: 900 })];
+  const { ch, S, w } = boot(rooms);
+  assert.equal(JSON.stringify(ch.filteredRooms().map((r) => r.name)), JSON.stringify(['lobby']),
+    'the bus is hidden by default');
+  S.showSystem = true;
+  assert.equal(JSON.stringify(ch.filteredRooms().map((r) => r.name).sort()), JSON.stringify(['bus', 'lobby']),
+    'and shown when asked for');
+  S.showSystem = false;
+  // The stub header drops its actions; keep them so the door can be found.
+  const keepActions = (ctx) => { ctx.pageHeader = (label, _x, right) => { const h = ctx.el('div', 'hdr', label); if (right) h.appendChild(right); return h; }; };
+  const a = boot(rooms, {}, keepActions);
+  a.w.document.body.appendChild(a.ch.renderChannels());
+  const door = a.w.document.getElementById('chat-system-rooms');
+  assert.ok(door, 'there is a door to the bus when a bus room is joined');
+  door.click();
+  assert.equal(a.S.showSystem, true, 'and it reveals the bus');
+  const b = boot([R({ name: 'lobby' })], {}, keepActions);
+  b.w.document.body.appendChild(b.ch.renderChannels());
+  assert.equal(b.w.document.getElementById('chat-system-rooms'), null, 'and none when there is no bus');
+  // Revealed, the bus carries no unread badge: nobody is meant to read it.
+  const c = boot(rooms, {}, keepActions);
+  c.S.showSystem = true;
+  const page = c.ch.renderChannels();
+  const busRow = Array.from(page.querySelectorAll('.sui-result-row')).find((r) => /bus/.test(r.textContent));
+  assert.ok(busRow, 'the bus row is drawn when shown');
+  assert.equal(busRow.querySelector('.chat-room-unread'), null, 'without an unread badge');
+}
+

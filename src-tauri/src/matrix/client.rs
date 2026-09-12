@@ -172,6 +172,11 @@ pub struct Room {
     /// Silenced: still counted as unread, never allowed to interrupt.
     #[serde(default)]
     pub muted: bool,
+    /// Machine traffic — the work bus. Hidden from the list unless asked
+    /// for, never counted as unread, never a notification: a firehose of
+    /// nonces is not a conversation waiting for anyone.
+    #[serde(default)]
+    pub system: bool,
     /// Event ids the room has pinned, newest last, as the room itself states
     /// them. Ids only — the events are fetched on demand.
     #[serde(default)]
@@ -594,6 +599,13 @@ mod pin_tests {
 ///
 /// Returns `None` whenever the directory cannot name the home guild's server,
 /// which degrades to "nothing is pinned" rather than to a wrong guess.
+/// Is this alias the work bus? Decided by the alias, not by whether the bus
+/// has been resolved yet, so a room is classified the moment it is seen.
+fn is_system_alias(alias: Option<&str>) -> bool {
+    let bus = crate::mcp::crew_work::get().bus;
+    !bus.is_empty() && alias == Some(bus.as_str())
+}
+
 fn home_rank(alias: Option<&str>) -> Option<u8> {
     let home = super::directory::server_name_for_guild(HOME_GUILD)?;
     pinned_rank_for(alias?, &home)
@@ -1343,6 +1355,15 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         // by DEFAULT) came through as a stream of nonsense with no hint that
         // encryption was the reason.
         ("notice", "encrypted message — this app cannot read it".to_string())
+    } else if etype == super::work::EVENT_TYPE {
+        /* A work frame as its own event: no body of its own, so the line
+         * is written here from the frame. Malformed is dropped whole — a
+         * half-parsed frame rendered as a card is an invitation to spend an
+         * hour of GPU on nonsense, and this is other people's JSON. */
+        match super::work::parse_event(etype, &content) {
+            Some(w) => ("text", super::work::body_for(&w)),
+            None => return None,
+        }
     } else if etype.starts_with("m.room.") {
         // Anything else that IS state but has no rendering of its own: still
         // worth a line, because a silently dropped event looks like a bug.
@@ -1401,7 +1422,7 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
     Some(Message {
         event_id: event_id.to_string(),
         thread_root,
-        work: super::work::parse(&content),
+        work: super::work::parse_event(etype, &content),
         edited: false,
         reactions: Vec::new(),
         reply_to,
@@ -1626,6 +1647,14 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                         .and_then(|t| t.as_str())
                         .map(|s| s.to_string());
                 }
+                // A payer's terms, keyed by their own id — which only they
+                // can set, so the key IS the vouching. Read from any room:
+                // the authenticity is in the key, not the room.
+                t if t == crate::mcp::crew_pay::PAY_STATE_TYPE => {
+                    if let (Some(key), Some(c)) = (ev.get("state_key").and_then(|k| k.as_str()), content) {
+                        crate::mcp::crew_pay::note_terms_on_bus(key, c);
+                    }
+                }
                 // The room's own shortlist: the current target, the standing
                 // rules — the handful of things everyone in here needs. Ids
                 // only; the events themselves are fetched on demand, because a
@@ -1765,8 +1794,10 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         // Computed before the literal: `display` and `final_alias` are moved
         // into it.
         let rank = if is_dm { None } else { home_rank(final_alias.as_deref()) };
+        let system = is_system_alias(final_alias.as_deref());
         let entry = Room {
             home_rank: rank,
+            system,
             room_id: room_id.clone(),
             icon: if dm_peer.is_some() {
                 "icon-member"
@@ -2054,6 +2085,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             let entry = Room {
                 room_id: room_id.clone(),
                 name: display,
+                system: is_system_alias(alias.as_deref()),
                 canonical_alias: alias.clone(),
                 topic,
                 members: 0,
@@ -2307,7 +2339,7 @@ fn sum_unread<'a>(rooms: impl Iterator<Item = &'a Room>) -> (u64, bool) {
     let mut mention = false;
     for room in rooms {
         // A room merely visible in the directory is not a message to anyone.
-        if !room.joined {
+        if !room.joined || room.system {
             continue;
         }
         count = count.saturating_add(room.unread);
@@ -2948,6 +2980,7 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
             room_id.to_string(),
             Room {
                 home_rank: rank,
+                system: is_system_alias(alias.as_deref()),
                 room_id: room_id.to_string(),
                 icon: icon_for(&name, alias.as_deref()),
                 name,
@@ -3068,6 +3101,7 @@ pub async fn browse(
         let rank = home_rank(alias.as_deref());
         out.push(Room {
             home_rank: rank,
+            system: is_system_alias(alias.as_deref()),
             room_id: room_id.to_string(),
             icon: icon_for(&name, alias.as_deref()),
             name,
@@ -3110,6 +3144,7 @@ pub async fn browse(
                 room_id: s.room_id.clone(),
                 icon: icon_for(&s.name, Some(&s.alias)),
                 name: s.name,
+                system: is_system_alias(Some(&s.alias)),
                 canonical_alias: Some(s.alias),
                 topic: s.topic,
                 members: s.members,
@@ -3794,6 +3829,58 @@ pub async fn set_muted(session: &Session, room_id: &str, muted: bool) -> Result<
 /// The `body` is what every other client shows — a player on Element must
 /// still be able to read what was asked, even though only Structs can act on
 /// it.
+/// Set one state event: `PUT /rooms/{room}/state/{type}/{key}`. The server
+/// keeps only the latest per `(type, key)`, which is what makes state the
+/// right place for a value rather than a history.
+pub async fn send_state(
+    session: &Session,
+    room_id: &str,
+    etype: &str,
+    state_key: &str,
+    content: Value,
+) -> Result<String, String> {
+    let url = format!(
+        "{}/rooms/{}/state/{}/{}",
+        base(session),
+        urlseg(room_id),
+        urlseg(etype),
+        urlseg(state_key)
+    );
+    let v = authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&content)
+    })
+    .await?;
+    v.get("event_id")
+        .and_then(|e| e.as_str())
+        .map(String::from)
+        .ok_or_else(|| "the homeserver accepted it but returned no event id".into())
+}
+
+/// Send a work frame as its own event type — the bus form.
+///
+/// The content is the frame and nothing else: no `msgtype`, no `body`, no
+/// prose. A chat client renders nothing, push rules count nothing, and the
+/// bus stops being a wall of text anywhere but here, where it is drawn from
+/// the frame. See `work::EVENT_TYPE`.
+pub async fn send_work_event(session: &Session, room_id: &str, work: Value) -> Result<String, String> {
+    let txn = format!("structs{}{}", auth::now_secs(), TXN.fetch_add(1, Ordering::Relaxed));
+    let url = format!(
+        "{}/rooms/{}/send/{}/{}",
+        base(session),
+        urlseg(room_id),
+        urlseg(super::work::EVENT_TYPE),
+        urlseg(&txn)
+    );
+    let v = authed(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&work)
+    })
+    .await?;
+    v.get("event_id")
+        .and_then(|e| e.as_str())
+        .map(String::from)
+        .ok_or_else(|| "the homeserver accepted it but returned no event id".into())
+}
+
 pub async fn send_work(
     session: &Session,
     room_id: &str,
@@ -4597,6 +4684,7 @@ mod tests {
             room_id: id.into(), name: String::new(), canonical_alias: None, topic: None, members: 1,
             joined, invited: false, invited_by: None, replaced_by: None, encrypted: false, muted: false,
             pinned: Vec::new(), unread: 0, mention: false, section: "direct", home_rank: None,
+            system: false,
             icon: "icon-member", pfp_attrs: None, player_id: None,
         };
         let mut gs = GuildState::default();
@@ -5160,6 +5248,28 @@ mod tests {
         assert_eq!(said("@nameless:h"), "nameless");
 
         directory::forget_for_test("1-194");
+    }
+
+    /// A frame sent as its own event type is a message with a card and a
+    /// line written from the frame; a malformed one is not a message at all.
+    #[test]
+    fn a_typed_work_event_is_a_message_with_its_frame() {
+        let gs = GuildState::default();
+        let ev = json!({
+            "type": super::super::work::EVENT_TYPE, "event_id": "$w", "sender": "@1-195:h",
+            "origin_server_ts": 1,
+            "content": { "v": 1, "kind": "result", "task": "MINE", "object": "5-2184",
+                         "block_start": 812004, "nonce": "12345" }
+        });
+        let m = render_event(&ev, &gs, "!bus:h", "@me:h").expect("a message");
+        assert_eq!(m.work.as_ref().and_then(|w| w.get("kind")).and_then(|k| k.as_str()), Some("result"));
+        assert!(m.body.contains("5-2184"), "the line is written from the frame: {}", m.body);
+
+        let bad = json!({
+            "type": super::super::work::EVENT_TYPE, "event_id": "$b", "sender": "@1-195:h",
+            "origin_server_ts": 2, "content": { "v": 1, "kind": "result" }
+        });
+        assert!(render_event(&bad, &gs, "!bus:h", "@me:h").is_none(), "malformed is dropped whole");
     }
 
     /// Backfilling must not destroy what arrived while it was running.
@@ -5940,6 +6050,7 @@ mod tests {
             mention,
             icon: "icon-guild".into(),
             section: "local".into(),
+            system: false,
             home_rank: None,
             pfp_attrs: None,
             player_id: None,
@@ -5947,6 +6058,12 @@ mod tests {
 
         // Across every network, not one: a player asking "is anything waiting"
         // should not have to work out which guild it was on.
+        // The work bus is machine traffic: however many frames pile up, it
+        // is not a message waiting for anyone.
+        let mut bus = room(50, true, true);
+        bus.system = true;
+        assert_eq!(sum_unread([bus].iter()), (0, false));
+
         let rooms = vec![room(3, false, true), room(4, true, true)];
         assert_eq!(sum_unread(rooms.iter()), (7, true));
 

@@ -34,6 +34,27 @@
 
     function workKey(w) { return w.object + '|' + w.task + '|' + w.block_start; }
 
+    /* Has the room already seen this cycle SPENT? A `done` frame names the
+     * object, the anchor and the transaction, and it arrives after the
+     * result it answers, so this is read off the timeline at render time
+     * rather than remembered in order. A spent cycle is dead by definition,
+     * so a result that has one is neither checked against the chain nor
+     * offered for submission — on the bus that is hundreds of cards and
+     * hundreds of chain reads that would otherwise happen on opening it. */
+    function spentIn(w) {
+      var msgs = (S && S.messages) || [];
+      for (var i = msgs.length - 1; i >= 0; i--) {
+        var m = msgs[i];
+        var d = m && m.work;
+        if (d && d.kind === 'done' && d.object === w.object && d.task === w.task
+            && Number(d.block_start) === Number(w.block_start)) {
+          return { by: m.sender_name || m.sender || '', tx: d.tx || '', helper: d.helper || null };
+        }
+      }
+      return null;
+    }
+    function shortTx(tx) { return tx ? String(tx).slice(0, 10) + '\u2026' : ''; }
+
     function checkWorkFresh(w) {
       var key = workKey(w);
       if (Object.prototype.hasOwnProperty.call(workFresh, key)) return;
@@ -55,8 +76,28 @@
       var w = m.work;
       if (!w) return null;
       var offer = w.kind === 'offer';
-      checkWorkFresh(w);
-      var stale = workFresh[workKey(w)] === false;
+      /* A spend, announced. No actions and no chain read: the transaction
+       * IS the outcome, and the card only has to say whose work it was. */
+      if (w.kind === 'done') {
+        var dcard = el('div', 'chat-ref chat-work chat-kind-done');
+        var dhead = el('div', 'chat-ref-head');
+        dhead.appendChild(icon(WORK_ICON[w.task] || 'icon-computer', 'sui-icon-md'));
+        dhead.appendChild(el('span', 'chat-ref-title', 'Spent \u00b7 ' + (WORK_LABEL[w.task] || w.task)));
+        dcard.appendChild(dhead);
+        var dfacts = el('div', 'chat-ref-facts');
+        var dfact = function (k, v) {
+          dfacts.appendChild(el('span', 'chat-ref-key', k));
+          dfacts.appendChild(el('span', 'chat-ref-val', v));
+        };
+        dfact(w.task === 'RAID' ? 'Fleet' : 'Struct', w.object);
+        if (w.helper) dfact('Proof by', w.helper);
+        if (w.tx) dfact('Tx', shortTx(w.tx));
+        dcard.appendChild(dfacts);
+        return dcard;
+      }
+      var spent = !offer ? spentIn(w) : null;
+      if (!spent) checkWorkFresh(w);
+      var stale = !spent && workFresh[workKey(w)] === false;
       var card = el('div', 'chat-ref chat-work chat-kind-' + (offer ? 'offer' : 'result')
         + (stale ? ' chat-mod-stale' : ''));
 
@@ -87,6 +128,15 @@
         var gone = el('div', 'chat-work-verdict chat-mod-bad');
         gone.textContent = 'That cycle has turned over — this can no longer be proved.';
         card.appendChild(gone);
+        return card;
+      }
+
+      // Already spent: say by whom, and offer nothing — a second submission
+      // of a spent cycle can only be refused.
+      if (spent) {
+        var was = el('div', 'chat-work-verdict chat-mod-good');
+        was.textContent = 'Spent' + (spent.by ? ' by ' + spent.by : '') + (spent.tx ? ' \u2014 tx ' + shortTx(spent.tx) : '');
+        card.appendChild(was);
         return card;
       }
 

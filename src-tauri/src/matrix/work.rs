@@ -110,6 +110,47 @@ pub fn verify_at(
 /// Strict on purpose. This is other people's JSON arriving over federation,
 /// and a half-parsed offer renders as a card inviting somebody to spend an
 /// hour of GPU on nonsense.
+/// The event type a work frame is sent AS on the bus.
+///
+/// A frame used to ride inside an `m.room.message` beside a human `body`,
+/// which made every other Matrix client render the bus as a firehose of
+/// chat and made every frame carry prose nobody reads. As its own event
+/// type it is still federated, ordered and persisted exactly the same, but
+/// a chat client shows nothing, push rules count nothing, and a sync filter
+/// can select or exclude it by name.
+pub const EVENT_TYPE: &str = "structs.work";
+
+/// Read a frame off an event of either shape: the typed event, whose
+/// content IS the frame, or the older message with the frame beside its
+/// body. Both are read for as long as any machine may still send the old
+/// one; the content rules are identical.
+pub fn parse_event(etype: &str, content: &Value) -> Option<Value> {
+    if etype == EVENT_TYPE {
+        parse(&json!({ "structs.work": content }))
+    } else {
+        parse(content)
+    }
+}
+
+/// The one line a person would read for a frame that carries no body of
+/// its own. Written for the timeline, not for parsing — nothing reads it.
+pub fn body_for(w: &Value) -> String {
+    let s = |k: &str| w.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let anchor = w.get("block_start").and_then(|b| b.as_u64()).unwrap_or(0);
+    match s("kind") {
+        "offer" => format!("Work wanted: {} {} @{}", s("object"), s("task"), anchor),
+        "result" => format!("Solved {} {} @{}: nonce {}", s("object"), s("task"), anchor, s("nonce")),
+        "done" => format!(
+            "Finished {} on {}{} \u{2014} tx {}",
+            s("task"),
+            s("object"),
+            w.get("helper").and_then(|h| h.as_str()).map(|h| format!(" from {h}'s proof")).unwrap_or_default(),
+            s("tx")
+        ),
+        _ => String::new(),
+    }
+}
+
 pub fn parse(content: &Value) -> Option<Value> {
     let w = content.get("structs.work")?;
     if w.get("v").and_then(|v| v.as_u64()) != Some(1) {
@@ -295,6 +336,20 @@ mod tests {
             }
         }
         json!({ "body": "work wanted", "structs.work": w })
+    }
+
+    /// The typed event's content IS the frame; the old message wraps it.
+    /// Same rules, same result, and a frame that fails them fails both ways.
+    #[test]
+    fn a_typed_event_and_a_wrapped_message_read_the_same() {
+        let frame = json!({ "v": 1, "kind": "result", "task": "MINE", "object": "5-2184",
+            "block_start": 812004, "nonce": "12345" });
+        let typed = parse_event(EVENT_TYPE, &frame).expect("typed");
+        let wrapped = parse_event("m.room.message", &json!({ "body": "x", "structs.work": frame })).expect("wrapped");
+        assert_eq!(typed, wrapped);
+        assert!(parse_event(EVENT_TYPE, &json!({ "v": 1, "kind": "result" })).is_none(), "malformed is malformed");
+        assert!(parse_event("m.room.message", &json!({ "body": "hello" })).is_none(), "a plain message has no frame");
+        assert!(body_for(&typed).contains("5-2184") && body_for(&typed).contains("12345"));
     }
 
     #[test]

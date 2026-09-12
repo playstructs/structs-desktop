@@ -101,3 +101,29 @@ const result = { id: '$e2', work: { kind: 'result', task: 'MINE', object: '5-218
 }
 
 console.log('chatwork: ok');
+
+// 7. A spend, announced: a `done` frame is a statement, not a task — no
+//    action, no chain read — and the result it answers reads as spent too,
+//    whichever order they arrived in. On the bus that is hundreds of cards.
+{
+  const { work, calls, S } = (() => { const b = boot({ matrix_work_status: { known: true, live: true } }); return { ...b, S: b.ctx.S }; })();
+  const done = { id: '$e3', sender: '@1-194:h', sender_name: 'Marklifer',
+    work: { kind: 'done', task: 'MINE', object: '5-2184', block_start: 812004, tx: '322E2F5B5B01A75615D10D5BEC8658D70FD7BEED62C502DCD2DD8A7FC516B4AA', helper: '1-195' } };
+  const dcard = work.workCard(done);
+  assert.ok(dcard.className.includes('chat-kind-done'));
+  assert.ok(dcard.textContent.includes('Spent'), 'a done frame says spent');
+  assert.ok(dcard.textContent.includes('1-195'), 'and whose proof it was');
+  assert.equal(dcard.querySelector('.chat-ref-action'), null, 'with nothing to click');
+  assert.equal(calls.filter(([c]) => c === 'matrix_work_status').length, 0, 'and no chain read for a done');
+
+  S.messages = [result, done];
+  const rcard = work.workCard(result);
+  assert.ok(rcard.textContent.includes('Spent by Marklifer'), 'the result it answers reads as spent');
+  assert.equal(rcard.querySelector('.chat-ref-action'), null, 'no Check, no Submit');
+  assert.equal(calls.filter(([c]) => c === 'matrix_work_status').length, 0, 'and still no chain read');
+
+  S.messages = [result];
+  const live = work.workCard(result);
+  assert.ok(live.querySelector('.chat-ref-action'), 'an unspent result keeps its Check');
+}
+

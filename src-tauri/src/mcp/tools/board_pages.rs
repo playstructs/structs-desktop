@@ -516,6 +516,8 @@ fn loops_json() -> Value {
         "response": crate::mcp::auto_response::get(),
         "raid": crate::mcp::auto_raid::get(),
         "delegation": crate::mcp::delegation::get(),
+        "crew_work": crate::mcp::crew_work::get(),
+        "crew_submit": crate::mcp::crew_submit::get(),
     })
 }
 
@@ -1759,6 +1761,30 @@ pub async fn mcp_config_set_impl(
                         c.max_sends_per_scan
                     );
                     crate::mcp::auto_sweep::set(c);
+                    s
+                }
+                "crew_work" => {
+                    let c: crate::mcp::crew_work::CrewWorkConfig =
+                        serde_json::from_value(cfg).map_err(|e| e.to_string())?;
+                    let s = format!(
+                        "crew_work → {} (difficulty ≤ {}, {} slot(s), bus {})",
+                        if c.enabled { "ON" } else { "off" },
+                        c.difficulty_threshold,
+                        c.max_slots,
+                        if c.bus.is_empty() { "off" } else { c.bus.as_str() }
+                    );
+                    crate::mcp::crew_work::set(c);
+                    s
+                }
+                "crew_submit" => {
+                    let c: crate::mcp::crew_submit::CrewSubmitConfig =
+                        serde_json::from_value(cfg).map_err(|e| e.to_string())?;
+                    let s = format!(
+                        "crew_submit → {} ({} per hour)",
+                        if c.enabled { "ON" } else { "off" },
+                        c.max_per_hour
+                    );
+                    crate::mcp::crew_submit::set(c);
                     s
                 }
                 "delegation" => {
