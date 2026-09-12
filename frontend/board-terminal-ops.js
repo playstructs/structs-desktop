@@ -168,7 +168,13 @@
   T.register('crew', {
     label: 'Crew',
     describe: function () { return 'Crew'; },
-    cadenceMs: 20000,
+    /* Never on a timer. This card holds UNSAVED STATE — the friend picker and
+     * whatever is half-typed into it — and a periodic re-render throws it
+     * away mid-keystroke. Watched live 2026-09-11: the picker vanished under
+     * a player id being typed into it. The Deliver card carries `cadenceMs: 0`
+     * for exactly this reason; every action here already refreshes the card
+     * itself when it completes. */
+    cadenceMs: 0,
     render: function (host, p, ctx) {
       return invoke('crew_links').then(function (d) {
         var links = (d && d.links) || [];

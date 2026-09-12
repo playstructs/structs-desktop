@@ -395,7 +395,14 @@ const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js'
 // ingested, so every surface downstream inherits it.
 {
   console.log('\n— owned names');
-  const dir = readFileSync(root + '/src-tauri/src/matrix/directory.rs', 'utf8');
+  /* Production code only. A `#[cfg(test)]` fixture builds an `Ident` from a
+   * literal and is not an ingestion path — but it looks exactly like one to a
+   * regex, and one tripped this check the moment a unit test was added to
+   * directory.rs. Scoping the scan keeps the rule strict where it matters
+   * instead of making it noisy enough to start ignoring. */
+  const dirAll = readFileSync(root + '/src-tauri/src/matrix/directory.rs', 'utf8');
+  const cut = dirAll.indexOf('#[cfg(test)]');
+  const dir = cut > 0 ? dirAll.slice(0, cut) : dirAll;
   const usernames = [...dir.matchAll(/username:\s*([^,\n]+)/g)]
     .map((m) => m[1].trim())
     .filter((v) => v !== 'String');            // the struct field declaration

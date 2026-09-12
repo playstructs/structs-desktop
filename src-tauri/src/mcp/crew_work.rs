@@ -293,15 +293,26 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
         return Ok(()); // we do not know who we are yet
     }
 
-    // Free slots AFTER our own work. The registry is the honest count: it
-    // holds every task this machine is grinding, ours and the crew's alike.
     let registry = app_handle
         .state::<std::sync::Arc<crate::hasher::types::TaskRegistry>>()
         .inner()
         .clone();
-    let in_flight = registry.tasks.len();
-    let ceiling = crate::hasher::max_concurrent() as usize;
-    let free = ceiling.saturating_sub(in_flight).min(cfg.max_slots);
+
+    /* How many crew tasks may start: `max_slots` minus the crew tasks already
+     * here. NOT the registry's size against `max_concurrent`.
+     *
+     * Those are two different quantities and conflating them made this loop
+     * dead on arrival. The registry holds the whole QUEUE — every task waiting
+     * for a worker — while `max_concurrent` bounds how many grind AT ONCE. On
+     * this machine that was 923 against 10, so `10 - 923` saturated to zero
+     * and the loop returned before doing anything, on every tick, forever. Any
+     * machine running more than ten players would have hit it.
+     *
+     * Own work still wins, by the pool rather than by arithmetic here: it
+     * admits the easiest RIPE task first (`hasher::pool::pop_ripest`), so a
+     * crew task competes on equal terms instead of jumping a queue.
+     */
+    let free = cfg.max_slots.saturating_sub(crate::hasher::crew_hash_count() as usize);
     if free == 0 {
         return Ok(());
     }
@@ -309,6 +320,7 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
     let epoch = epoch_of(current_block);
     let client = CosmosClient::new();
     let mut started = 0usize;
+    let mut looked_at = 0usize;
 
     for c in crews {
         if started >= free {
@@ -319,6 +331,7 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
             continue; // a crew of one is just a colony
         }
         let tasks = ripe_tasks(&members, &me, current_block, cfg.difficulty_threshold);
+        looked_at += tasks.len();
         if tasks.is_empty() {
             continue;
         }
@@ -354,6 +367,20 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
             }
         }
     }
+    /* A pass that did nothing has to SAY it did nothing.
+     *
+     * The first version returned early in five places without a word, so a
+     * loop that was structurally incapable of ever starting a task looked
+     * exactly like a loop with nothing to do — and it took reading the
+     * arithmetic, not the logs, to find that out.
+     */
+    tlog(
+        "crew",
+        Sev::Debug,
+        format!(
+            "epoch {epoch}: {started} started, {looked_at} ripe task(s) seen, {free} slot(s) free"
+        ),
+    );
     Ok(())
 }
 
@@ -674,6 +701,35 @@ mod tests {
         assert_eq!(epoch_of(EPOCH_BLOCKS - 1), 0);
         assert_eq!(epoch_of(EPOCH_BLOCKS), 1);
         assert_eq!(epoch_block(3), 3 * EPOCH_BLOCKS);
+    }
+
+    /* The arithmetic that made this loop dead on arrival.
+     *
+     * `max_slots` is a budget for CREW tasks. It must never be measured
+     * against the whole task registry, which is the queue: on a real machine
+     * that was 923 waiting tasks against a concurrency of 10, so the old
+     * `max_concurrent - registry.len()` saturated to zero and no crew task
+     * could ever start. Pinned as arithmetic because that is all it ever was.
+     */
+    fn free_slots(max_slots: usize, crew_in_flight: usize) -> usize {
+        max_slots.saturating_sub(crew_in_flight)
+    }
+
+    #[test]
+    fn crew_slots_are_budgeted_against_crew_tasks_not_the_whole_queue() {
+        // Nothing of ours in flight: the full budget is available, however
+        // deep the machine's own queue happens to be.
+        assert_eq!(free_slots(4, 0), 4);
+        assert_eq!(free_slots(4, 3), 1);
+        assert_eq!(free_slots(4, 4), 0);
+        // …and it never goes negative.
+        assert_eq!(free_slots(4, 99), 0);
+
+        // The bug, stated: a 923-deep queue against a concurrency of 10 left
+        // nothing, forever, no matter how much crew budget was configured.
+        let old_way = 10usize.saturating_sub(923).min(4);
+        assert_eq!(old_way, 0, "this is what shipped");
+        assert_eq!(free_slots(4, 0), 4, "and this is what it should have been");
     }
 
     #[test]
