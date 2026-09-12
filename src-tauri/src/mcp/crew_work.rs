@@ -238,6 +238,14 @@ pub struct CrewWorkConfig {
     /// Compute and log the assignment, start nothing.
     #[serde(default)]
     pub dry_run: bool,
+    /// The room every work frame goes to and is read from. Empty disables
+    /// the bus, and results fall back to the crew's own room.
+    #[serde(default = "default_bus")]
+    pub bus: String,
+}
+
+fn default_bus() -> String {
+    crate::matrix::DEFAULT_WORK_BUS.to_string()
 }
 
 fn default_interval() -> u64 {
@@ -258,6 +266,7 @@ impl Default for CrewWorkConfig {
             difficulty_threshold: default_threshold(),
             max_slots: default_max_slots(),
             dry_run: false,
+            bus: default_bus(),
         }
     }
 }
@@ -1092,6 +1101,17 @@ mod tests {
         let old_way = 10usize.saturating_sub(923).min(4);
         assert_eq!(old_way, 0, "this is what shipped");
         assert_eq!(free_slots(4, 0), 4, "and this is what it should have been");
+    }
+
+    /// The bus is on by default and is the one well-known room; a config
+    /// written before the bus existed reads the default, not an empty string.
+    #[test]
+    fn the_work_bus_is_the_default_destination() {
+        assert_eq!(CrewWorkConfig::default().bus, crate::matrix::DEFAULT_WORK_BUS);
+        let old: CrewWorkConfig = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(old.bus, crate::matrix::DEFAULT_WORK_BUS);
+        let off: CrewWorkConfig = serde_json::from_str(r#"{"bus":""}"#).unwrap();
+        assert!(off.bus.is_empty());
     }
 
     #[test]

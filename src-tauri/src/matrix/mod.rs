@@ -1687,11 +1687,82 @@ pub async fn matrix_members(guild_id: String, room_id: String) -> Result<Value, 
 /// Resolution, in order: the crew's own room when it has one; otherwise a DM
 /// with the person it is about. `None` means there is nowhere to send, and a
 /// proof with nowhere to go is not worth the GPU.
+/// The one room every work frame is posted to and read from.
+pub const DEFAULT_WORK_BUS: &str = "#bus:matrix.beta.playstructs.com";
+
+/// `guild session -> room id` of the bus, once resolved and joined.
+static WORK_BUS: std::sync::LazyLock<RwLock<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+
+/// The bus room for a guild session: resolved from its alias, joined if we
+/// are not in it, and remembered.
+///
+/// A crew decides WHICH work this machine does; it never decides where the
+/// result goes. Every result, and every `done` that spends one, goes to this
+/// one room and is read from this one room, whatever the crew was — a guild,
+/// a friend, a chat room. The first live run posted into the guild's general
+/// channel and read from every room the sync loop touched; a dedicated bus is
+/// noisier to look at and far simpler to reason about, and nobody's
+/// conversation is the transport any more.
+///
+/// `None` only when the alias cannot be resolved or joined — the caller falls
+/// back to the room it would have used before the bus existed.
+pub async fn work_bus(guild_id: &str) -> Option<(String, String)> {
+    if let Some(r) = WORK_BUS.read().ok().and_then(|m| m.get(guild_id).cloned()) {
+        return Some((guild_id.to_string(), r));
+    }
+    let alias = crate::mcp::crew_work::get().bus;
+    if alias.is_empty() {
+        return None;
+    }
+    let session = session_for(guild_id).ok()?;
+    let room_id = match client::room_id_for_alias(&session, &alias).await {
+        Some(r) => r,
+        None => {
+            crate::mcp::telemetry::tlog(
+                "crew",
+                crate::mcp::telemetry::Sev::Notice,
+                format!("work bus {alias} does not resolve; results will use the crew's own room"),
+            );
+            return None;
+        }
+    };
+    let joined = client::rooms_of(guild_id).iter().any(|r| r.room_id == room_id && r.joined);
+    if !joined {
+        // Joining by ALIAS is what lets the homeserver find the room across
+        // the federation; by id it would need the server name spelled out.
+        if let Err(e) = client::join(&session, &alias).await {
+            crate::mcp::telemetry::tlog(
+                "crew",
+                crate::mcp::telemetry::Sev::Notice,
+                format!("could not join the work bus {alias}: {e}"),
+            );
+            return None;
+        }
+        let _ = client::refresh_directory(guild_id, &session).await;
+    }
+    if let Ok(mut m) = WORK_BUS.write() {
+        m.insert(guild_id.to_string(), room_id.clone());
+    }
+    Some((guild_id.to_string(), room_id))
+}
+
+/// Is this room the bus? Answered from the cache, so it is cheap enough for
+/// the sync loop and honest: an unresolved bus is not the bus yet.
+pub fn is_work_bus(room_id: &str) -> bool {
+    WORK_BUS.read().map(|m| m.values().any(|r| r == room_id)).unwrap_or(false)
+}
+
 pub async fn report_room(
     guild_id: &str,
     crew_room: &str,
     about_player: &str,
 ) -> Option<(String, String)> {
+    // The bus first, whatever the crew is. Everything below is the fallback
+    // for a bus we could not reach.
+    if let Some(bus) = work_bus(guild_id).await {
+        return Some(bus);
+    }
     if crew_room.starts_with('!') {
         return Some((guild_id.to_string(), crew_room.to_string()));
     }

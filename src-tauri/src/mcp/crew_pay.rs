@@ -342,9 +342,6 @@ pub async fn absorb_claim(
     if !crate::matrix::work::tx_hash_is_sound(tx_hash) {
         return Err("that is not a transaction hash".into());
     }
-    let Some(c) = crew::get(room_id) else {
-        return Ok(None); // not a crew of ours; nothing to owe
-    };
     let (me, _) = match crate::game_state::GAME_STATE.read() {
         Ok(gs) => (gs.player_id.clone().unwrap_or_default(), ()),
         Err(_) => return Err("game state unavailable".into()),
@@ -376,12 +373,19 @@ pub async fn absorb_claim(
     if helper == me || helper.is_empty() {
         return Ok(None);
     }
+    // Whose terms? The claim arrived on the bus, which is nobody's crew; the
+    // crew is the one that covers the HELPER — the friend link naming them,
+    // the room they are in, or the guild link for their guild.
+    let Some(c) = crew::crew_for_helper(&helper, room_id) else {
+        return Ok(None); // no link with this person; nothing to owe
+    };
 
     let amount = (c.pay.rate_per_difficulty * r.difficulty as f64).max(0.0);
     let credit = Credit {
         id: format!("{}|{}", tx_hash.to_uppercase(), r.object_id),
         ts_ms: now_millis(),
-        room_id: room_id.to_string(),
+        // Filed under the crew, not the bus: settlement runs per crew.
+        room_id: c.room_id.clone(),
         helper_player: helper,
         object_id: r.object_id.clone(),
         category: r.category.clone(),
@@ -441,22 +445,24 @@ pub async fn announce(work: &crate::hasher::CrewWork, object_id: &str, block_sta
     let Some(c) = crew::all().into_iter().find(|c| c.room_id == work.room_id) else {
         return;
     };
-    // A crew that is a plain link — "my guild", "this friend" — has nowhere to
-    // announce. The work still landed and the chain still recorded who did it;
-    // there is simply no room to point the owner at the receipt, so they will
-    // not be credited automatically. Said out loud rather than failing quietly.
-    if !crew::is_matrix_room(&c.room_id) {
+    // The bus, whatever the crew is. A plain link — "my guild", "this
+    // friend" — has no room of its own, and before the bus that meant
+    // nothing was announced and no credit could be raised; now the receipt
+    // pointer goes where every owner is listening.
+    let Some((guild_id, room_id)) = crate::matrix::work_bus(&c.guild_id).await.or_else(|| {
+        crew::is_matrix_room(&c.room_id).then(|| (c.guild_id.clone(), c.room_id.clone()))
+    }) else {
         tlog(
             "crew",
             Sev::Notice,
             format!(
-                "finished {object_id} for {} — {} has no room, so nothing was announced \
-                 and no credit will be raised",
+                "finished {object_id} for {} — no bus and {} has no room, so nothing was \
+                 announced and no credit will be raised",
                 work.owner_player, c.name
             ),
         );
         return;
-    }
+    };
     let body = format!(
         "Finished {} on {} for {} \u{2014} tx {}",
         work.task.as_str(),
@@ -469,7 +475,7 @@ pub async fn announce(work: &crate::hasher::CrewWork, object_id: &str, block_sta
         "task": work.task.as_str(), "object": object_id,
         "block_start": block_start, "tx": tx_hash,
     });
-    if let Err(e) = crate::matrix::post_work(&c.guild_id, &c.room_id, &body, payload).await {
+    if let Err(e) = crate::matrix::post_work(&guild_id, &room_id, &body, payload).await {
         // Not being able to say so does not undo the work: the proof landed,
         // the chain has the receipt, and the owner's client can still find it
         // on its next sweep. Worth a line, not a retry storm.
@@ -864,7 +870,6 @@ mod tests {
 /// Every frame is checked independently and against the chain. A room full of
 /// invented hashes costs one failed lookup each and credits nothing.
 pub fn absorb_done_frames(room_id: &str, messages: &[crate::matrix::client::Message]) {
-    let ours = crew::get(room_id).is_some();
     let me = crate::mcp::crew::primary_player().unwrap_or_default();
     for m in messages {
         if m.is_self {
@@ -889,9 +894,6 @@ pub fn absorb_done_frames(room_id: &str, messages: &[crate::matrix::client::Mess
             crate::mcp::crew_work::note_finished_by_owner(&owner);
             tlog("crew", Sev::Info, format!("{owner} finished {object} from our proof: {tx}"));
             continue;
-        }
-        if !ours {
-            continue; // a claim is only a bill inside a crew of ours
         }
         let room = room_id.to_string();
         tauri::async_runtime::spawn(async move {

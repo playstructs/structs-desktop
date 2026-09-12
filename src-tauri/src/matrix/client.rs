@@ -2680,13 +2680,31 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                             }),
                         );
                     }
+                    // Work frames live on ONE room, the bus, and only the
+                    // primary session reads them: a secondary identity
+                    // reading the same room would try to accept every
+                    // proof the primary just posted. Resolved here (cached
+                    // after the first time) so the first frames after a
+                    // launch are not missed while the bus is still unknown.
+                    let bus = if guild_id.contains('#') {
+                        None
+                    } else {
+                        super::work_bus(&guild_id).await.map(|(_, r)| r)
+                    };
                     for (room_id, messages) in d.deltas {
-                        maybe_notify(&app, &guild_id, &room_id, &messages, &session);
-                        crate::mcp::crew_pay::absorb_done_frames(&room_id, &messages);
-                        // A crewmate's PROOF, finished here without a click.
-                        // Verified against our own reading of the task, and
-                        // only ever signed for an account we hold a key for.
-                        crate::mcp::crew_submit::absorb_result_frames(&app, &guild_id, &room_id, &messages);
+                        if super::is_work_bus(&room_id) {
+                            // A firehose by design; never an interruption.
+                        } else {
+                            maybe_notify(&app, &guild_id, &room_id, &messages, &session);
+                        }
+                        if bus.as_deref() == Some(room_id.as_str()) {
+                            crate::mcp::crew_pay::absorb_done_frames(&room_id, &messages);
+                            // A crewmate's PROOF, finished here without a
+                            // click. Verified against our own reading of the
+                            // task, and only ever signed for an account we
+                            // hold a key for.
+                            crate::mcp::crew_submit::absorb_result_frames(&app, &guild_id, &room_id, &messages);
+                        }
                         let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::timeline",
                             json!({
