@@ -860,6 +860,15 @@ pub async fn matrix_work_params(object_id: String, task: String) -> Result<Value
                "block_start": block_start, "difficulty": difficulty }))
 }
 
+/// The chain height this app last saw. Zero while it does not know, which
+/// `verify_at` treats as "refuse", never as "anything goes".
+fn current_block() -> u64 {
+    crate::game_state::GAME_STATE
+        .read()
+        .map(|g| g.current_block_height)
+        .unwrap_or(0)
+}
+
 fn num_of(v: &Value) -> Option<u64> {
     v.as_u64()
         .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
@@ -885,8 +894,13 @@ pub async fn matrix_work_submit(
         return Err(format!("{} is not a kind of work with a completion", task.to_uppercase()));
     };
     let task = kind.as_str().to_string();
-    let Some(proof) = work::verify(
-        &object_id, &task, block_start, target_id.as_deref(), &nonce, difficulty,
+    // `difficulty` from the window is the struct type's RANGE, as the offer
+    // carried it. The bar is derived from it and the current block here —
+    // handing the range straight to the check demanded thousands of leading
+    // zeros and refused every real proof.
+    let at_block = current_block();
+    let Some(proof) = work::verify_at(
+        &object_id, &task, block_start, target_id.as_deref(), &nonce, difficulty, at_block,
     ) else {
         return Err("that nonce does not solve this task".into());
     };
@@ -1053,13 +1067,14 @@ pub async fn matrix_work_verify(
     nonce: String,
     target_id: Option<String>,
 ) -> Result<Value, String> {
-    let proof = work::verify(
+    let proof = work::verify_at(
         &object_id,
         &task.to_uppercase(),
         block_start,
         target_id.as_deref(),
         &nonce,
         difficulty,
+        current_block(),
     );
     Ok(match proof {
         Some(hash) => json!({ "ok": true, "proof": hash }),
@@ -1658,6 +1673,49 @@ static MEDIA_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<String,
 #[tauri::command]
 pub async fn matrix_members(guild_id: String, room_id: String) -> Result<Value, String> {
     Ok(json!({ "members": crew_members(&guild_id, &room_id).await? }))
+}
+
+/// Somewhere a proof result can be posted so that whoever CAN submit it will
+/// see it.
+///
+/// This is the whole point of sharing over Comms rather than over permissions:
+/// computing a proof needs no rights at all, so a helper with no grant is
+/// still useful — they compute and post the number, and the account that holds
+/// the authority signs it. A grant only becomes necessary when the helper
+/// wants to submit for themselves.
+///
+/// Resolution, in order: the crew's own room when it has one; otherwise a DM
+/// with the person it is about. `None` means there is nowhere to send, and a
+/// proof with nowhere to go is not worth the GPU.
+pub async fn report_room(
+    guild_id: &str,
+    crew_room: &str,
+    about_player: &str,
+) -> Option<(String, String)> {
+    if crew_room.starts_with('!') {
+        return Some((guild_id.to_string(), crew_room.to_string()));
+    }
+    let session = session_for(guild_id).ok()?;
+    // A crew that is one person is a conversation with that person.
+    if let Some(pid) = crew_room.strip_prefix("player:") {
+        let their_id = directory::matrix_id_resolving(pid).await.ok()?;
+        let room = client::open_dm(guild_id, &session, &their_id).await.ok()?;
+        return Some((guild_id.to_string(), room));
+    }
+    // A guild crew posts where the guild already talks — the first joined
+    // room. Deliberately not a new room: creating one nobody is watching is
+    // the same as having nowhere to send.
+    if crew_room.starts_with("guild:") {
+        let _ = about_player;
+        // The guild's own pinned channel, which every member is auto-joined
+        // to — lowest `home_rank` first. "The first joined room" was whatever
+        // happened to sort first on THIS machine, and a result posted where
+        // the owner is not listening is a proof that never lands.
+        let mut rooms: Vec<_> = client::rooms_of(guild_id).into_iter().filter(|r| r.joined).collect();
+        rooms.sort_by_key(|r| (r.home_rank.is_none(), r.home_rank.unwrap_or(u8::MAX), r.room_id.clone()));
+        return rooms.into_iter().next().map(|r| (guild_id.to_string(), r.room_id));
+    }
+    None
 }
 
 /// The same list, for callers inside Rust.

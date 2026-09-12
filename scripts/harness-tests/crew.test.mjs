@@ -113,7 +113,16 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
     text(guild));
   guild.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'crew_help_guild'));
-  check('…and the second click does it', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'crew_help_guild'));
+  const helpCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'crew_help_guild');
+  check('…and the second click does it', !!helpCall);
+  /* Helping must not sign anything. The first version opened your work to
+   * ~2,500 accounts inside a button that said "help" — a chain transaction as
+   * a side effect. Computing a proof needs no rights, so starting to help is
+   * local, and opening your work is its own door. */
+  check('helping does NOT open your work as a side effect',
+    helpCall && helpCall.args && helpCall.args.openMyWork === false, JSON.stringify(helpCall && helpCall.args));
+  check('…the explicit door exists on each link, and says what it signs',
+    buttons().some((b) => /Let them finish mine|Close my work/.test(b)), buttons().join(' | '));
 
   /* The confirm is INLINE. `confirmModal` did not appear at all when this card
    * was driven in its own popped-out window against the running app, so the
@@ -124,9 +133,43 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   // both directions because a half-open link is the normal state.
   check('a guild link says it is the whole guild',
     /My guild/.test(body) && /whole guild/.test(body), body.slice(0, 400));
-  check('a person shows both directions',
-    /JPEG/.test(body) && /they help me/i.test(body) && /i help them/i.test(body), body.slice(0, 600));
+  /* The chips are about SIGNING rights only — anybody may compute a proof for
+   * anybody — so they say "finish", never "help": a Closed chip must not read
+   * as "cannot help". */
+  check('a person shows both directions of signing rights',
+    /JPEG/.test(body) && /they may finish mine/i.test(body) && /i may finish theirs/i.test(body), body.slice(0, 600));
   check('…and every link can be stopped', buttons().some((b) => /Stop/.test(b)));
+
+  /* "It doesn't seem to be doing anything" has to be answerable FROM THE CARD.
+   *
+   * A crew nobody has opened their work to looks exactly like a crew that is
+   * working: both show 0 finished. Reported live 2026-09-11 by a second
+   * machine that had opened ITS work to the guild and sat idle, because
+   * opening your own side grants you nothing — each side opens separately.
+   */
+  const idle = { links: JSON.parse(JSON.stringify(w.__HARNESS_FIXTURES__.crew_links.links)),
+    player_id: '1-194', guild_id: '0-1', helping: true, taking: 0, helped: 0,
+    last_pass: { epoch: 1, submitting: 0, reporting: 0, started: 0, declined: 7, ripe: 7, free: 4, members: 300, at_ms: 1 } };
+  w.__HARNESS_FIXTURES__.crew_links = idle;
+  const card2 = w.Board.Terminal.add('crew', {}, 2);
+  const host2 = await until(() => {
+    const c = d.querySelector('#tm-grid .tm-card[data-card="' + ((card2 && card2.id) || '') + '"] .tm-body');
+    return c && text(c).length > 4 ? c : null;
+  });
+  const body2 = host2 ? text(host2) : '';
+  check('an idle crew says where the gap is',
+    /7 left alone/.test(body2) && /no room in common/.test(body2), body2.slice(0, 300));
+
+  // …and "nothing ripe" must not be blamed on permission.
+  idle.last_pass = { epoch: 2, submitting: 0, reporting: 0, started: 0, declined: 0, ripe: 0, free: 4, members: 300, at_ms: 2 };
+  const card3 = w.Board.Terminal.add('crew', {}, 2);
+  const host3 = await until(() => {
+    const c = d.querySelector('#tm-grid .tm-card[data-card="' + ((card3 && card3.id) || '') + '"] .tm-body');
+    return c && /Nothing ripe|allowed to finish/.test(text(c)) ? c : null;
+  });
+  check('…and a quiet crew is not misreported as a permission problem',
+    host3 !== null && /Nothing ripe/.test(text(host3)) && !/left alone/.test(text(host3)),
+    host3 ? text(host3).slice(0, 200) : 'no render');
   }
   dom.window.close();
 }

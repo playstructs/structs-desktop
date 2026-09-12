@@ -188,6 +188,8 @@ fn main() {
             mcp::crew_pay::crew_ledger,
             mcp::crew_pay::crew_settle,
             mcp::crew_pay::crew_claim,
+            mcp::crew_submit::crew_submit_config,
+            mcp::crew_submit::crew_submit_set,
             mcp::companion::companion_toggle,
             mcp::companion::companion_dismiss,
             mcp::companion::companion_drag,

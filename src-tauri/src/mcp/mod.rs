@@ -13,6 +13,7 @@ pub mod cache_store;
 pub mod cosmos_client;
 pub mod crew;
 pub mod crew_pay;
+pub mod crew_submit;
 pub mod crew_work;
 pub mod delegation;
 pub mod enrich;

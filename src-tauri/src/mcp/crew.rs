@@ -32,6 +32,7 @@
 //! reject, and `send_guard` already taught this codebase what "unknown is not
 //! yes" is worth.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -309,6 +310,20 @@ pub struct AuthorityFacts {
     pub owner: String,
     /// Us — whoever would sign the completion.
     pub me: String,
+    /// What the SIGNING ADDRESS itself is allowed to do.
+    ///
+    /// The chain gates a completion at TWO independent layers and this is the
+    /// first: an ante decorator tests the signing address's own permission
+    /// bits before the message ever reaches a handler
+    /// (`x/structs/keeper/…_complete.go`, and the ladder in
+    /// `permissions_context.go`). Owning the object does not exempt you.
+    ///
+    /// This check was missing entirely. A primary address carries `PermAll` so
+    /// it passes in the ordinary case, which is exactly why its absence was
+    /// invisible — but any narrower key (a worker address granted only
+    /// `PermPlay`) would grind a full proof and then be refused at ante, and
+    /// we would have spent the GPU to find out.
+    pub address_mask: u64,
     /// The direct object-permission mask we hold on the owner's player object.
     pub direct_mask: u64,
     /// Our guild rank (lower is more privileged; the chain compares `<=`).
@@ -324,10 +339,15 @@ pub struct AuthorityFacts {
 /// explicit grant, or a guild-rank threshold — for the SINGLE bit that matches
 /// this message kind, never the composite.
 pub fn decide(facts: &AuthorityFacts, task: TaskType) -> Authority {
+    let bit = bit_for(task);
+    // Layer 1 first, and it is unconditional: without the bit on the signing
+    // ADDRESS nothing else matters, not even owning the object.
+    if facts.address_mask & bit != bit {
+        return Authority::Denied;
+    }
     if !facts.owner.is_empty() && facts.owner == facts.me {
         return Authority::Owner;
     }
-    let bit = bit_for(task);
     if facts.direct_mask & bit == bit {
         return Authority::Granted;
     }
@@ -356,15 +376,63 @@ static AUTH_CACHE: LazyLock<dashmap::DashMap<String, (AuthorityFactsCached, f64)
 
 #[derive(Debug, Clone)]
 struct AuthorityFactsCached {
+    address_mask: u64,
     direct_mask: u64,
     my_rank: u64,
     rank_records: Vec<(u64, u64)>,
 }
 
+/// The signing address's own permission bits, and the address it read them
+/// from. Cached per SIGNER — it does not vary by owner, so a crew of fifty
+/// costs one read, not fifty.
+static ADDRESS_MASK: LazyLock<dashmap::DashMap<String, (u64, f64)>> =
+    LazyLock::new(dashmap::DashMap::new);
+
 /// Drop every cached answer. Called after we grant or revoke, so the card
 /// shows what we just did rather than what was true five minutes ago.
 pub fn forget_authority() {
     AUTH_CACHE.clear();
+    ADDRESS_MASK.clear();
+}
+
+/// What the chain lets THIS signing address do, whoever owns the object.
+///
+/// `/structs/address/{addr}` also names the player it belongs to, and that is
+/// checked: an address whose `playerId` is not us is not our authority to
+/// spend, however permissive its bits.
+async fn address_mask_of(client: &CosmosClient, me: &str) -> Result<u64, String> {
+    let now = now_millis();
+    if let Some(hit) = ADDRESS_MASK.get(me) {
+        if now - hit.1 < AUTH_TTL_MS {
+            return Ok(hit.0);
+        }
+    }
+    let player = client.entity("player", me).await?;
+    let address = player
+        .get("Player")
+        .and_then(|p| p.get("primaryAddress"))
+        .and_then(|a| a.as_str())
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| format!("{me} has no address on chain"))?
+        .to_string();
+    let rec = client.lcd_get(&format!("/structs/address/{address}")).await?;
+    let belongs = rec
+        .get("address")
+        .and_then(|a| a.get("playerId").or_else(|| rec.get("playerId")))
+        .or_else(|| rec.get("playerId"))
+        .and_then(|p| p.as_str())
+        .unwrap_or_default();
+    if belongs != me {
+        return Err(format!("{address} is registered to {belongs}, not {me}"));
+    }
+    let mask = rec
+        .get("address")
+        .and_then(|a| a.get("permissions"))
+        .or_else(|| rec.get("permissions"))
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(0);
+    ADDRESS_MASK.insert(me.to_string(), (mask, now));
+    Ok(mask)
 }
 
 /// May `me` submit a `task` completion for an object owned by `owner`?
@@ -383,8 +451,15 @@ pub async fn authority_of(
     if owner.is_empty() || me.is_empty() {
         return Err("authority needs both an owner and a signer".into());
     }
+    // Layer 1 is about US, not about the owner, so it is read even when we own
+    // the object — the ante does not exempt an owner either.
+    let address_mask = address_mask_of(client, me).await?;
     if owner == me {
-        return Ok(Authority::Owner);
+        return Ok(if address_mask & bit_for(task) == bit_for(task) {
+            Authority::Owner
+        } else {
+            Authority::Denied
+        });
     }
     let key = format!("{owner}|{me}|{my_guild}");
     let now = now_millis();
@@ -395,6 +470,7 @@ pub async fn authority_of(
                 &AuthorityFacts {
                     owner: owner.to_string(),
                     me: me.to_string(),
+                    address_mask: c.address_mask,
                     direct_mask: c.direct_mask,
                     my_rank: c.my_rank,
                     rank_records: c.rank_records,
@@ -420,7 +496,7 @@ pub async fn authority_of(
     AUTH_CACHE.insert(
         key,
         (
-            AuthorityFactsCached { direct_mask, my_rank, rank_records: rank_records.clone() },
+            AuthorityFactsCached { address_mask, direct_mask, my_rank, rank_records: rank_records.clone() },
             now,
         ),
     );
@@ -428,6 +504,7 @@ pub async fn authority_of(
         &AuthorityFacts {
             owner: owner.to_string(),
             me: me.to_string(),
+            address_mask,
             direct_mask,
             my_rank,
             rank_records,
@@ -478,6 +555,80 @@ async fn player_guild_rank(client: &CosmosClient, player_id: &str) -> Result<u64
         .and_then(|p| p.get("guildRank"))
         .and_then(|r| r.as_u64().or_else(|| r.as_str().and_then(|s| s.parse().ok())))
         .unwrap_or(u64::MAX))
+}
+
+/// Everyone who has opened their work to us, straight from the chain.
+///
+/// THE DIRECTION MATTERS, and getting it backwards is what makes a crew look
+/// broken. Opening your work to a guild grants OTHERS the right to finish
+/// YOUR proofs; it grants you nothing. Helping is two-sided and each side
+/// opens separately, so "who am I in a guild with" is not an answer to "whose
+/// work may I finish" — only this is.
+///
+/// It is also the only affordable shape. Asking per candidate is one read per
+/// player per pass, which for a 2,500-member guild is a scan measured in
+/// minutes; this is one paginated walk of the records that name US, however
+/// large the guild.
+///
+/// `permissionId` is `"{owner}@{signer}"`. The endpoint filters AFTER
+/// pagination, so an empty page is not the end of the list — stopping there
+/// would silently under-report who we may help.
+pub async fn grants_to_me(client: &CosmosClient, me: &str) -> Result<HashMap<String, u64>, String> {
+    let mut out: HashMap<String, u64> = HashMap::new();
+    let mut cursor: Option<String> = None;
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        let mut path = format!("/structs/permission/player/{me}?pagination.limit=1000");
+        if let Some(c) = &cursor {
+            path.push_str(&format!("&pagination.key={}", urlencode(c)));
+        }
+        let page = client.lcd_get(&path).await?;
+        for rec in page
+            .get("permissionRecords")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let Some(id) = rec.get("permissionId").and_then(|v| v.as_str()) else { continue };
+            let Some((owner, signer)) = id.split_once('@') else { continue };
+            if signer != me || crate::matrix::refs::parse_id(owner).is_none() {
+                continue;
+            }
+            let value = rec
+                .get("value")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0);
+            out.insert(owner.to_string(), value);
+        }
+        let next = page
+            .get("pagination")
+            .and_then(|p| p.get("next_key"))
+            .and_then(|k| k.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if next.is_empty() {
+            break;
+        }
+        // A cursor that repeats, or a walk that will not end, is a broken
+        // inventory — and an under-reported one reads as "nobody has opened
+        // their work to you", which is a lie we must not tell quietly.
+        if !seen.insert(next.clone()) || seen.len() > 200 {
+            return Err("permission inventory did not terminate".into());
+        }
+        cursor = Some(next);
+    }
+    Ok(out)
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
 
 // ── Opening and closing your work ───────────────────────────────────────────
@@ -614,6 +765,11 @@ pub async fn close_to_guild(
 // Comms is deliberately not on that list: it renders text written by federated
 // strangers, and the rule that chat ASKS while Team Ops DECIDES is the same
 // rule that keeps a chat message from naming where money goes.
+
+/// Who this machine is, on chain. Public because the submit path needs it too.
+pub fn primary_player() -> Result<String, String> {
+    crate::mcp::delegation::primary_player_id().ok_or_else(|| "this app does not know who you are yet".into())
+}
 
 fn me() -> Result<(String, String), String> {
     let gs = crate::game_state::GAME_STATE
@@ -831,6 +987,7 @@ pub async fn crew_help_guild(
     window: tauri::WebviewWindow,
     guild_id: Option<String>,
     rank: Option<u64>,
+    open_my_work: Option<bool>,
 ) -> Result<Value, String> {
     crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
     let (mine, my_guild) = me()?;
@@ -842,7 +999,17 @@ pub async fn crew_help_guild(
     // the opposite of what the button says.
     let rank = rank.filter(|r| *r >= 1).unwrap_or(DEFAULT_GUILD_RANK);
 
-    open_to_guild(&app, 0, &mine, &guild, rank).await?;
+    /* Helping signs NOTHING.
+     *
+     * Computing a proof needs no rights, so starting to help is a local
+     * decision. The first version also opened this player's work to the
+     * guild in the same click — a chain transaction handing rights to ~2,500
+     * accounts, buried inside a button that said "help". Letting others
+     * finish YOUR work is a separate act with its own button, and it is
+     * `open_my_work` here only so a caller can ask for both deliberately. */
+    if open_my_work.unwrap_or(false) {
+        open_to_guild(&app, 0, &mine, &guild, rank).await?;
+    }
 
     let id = guild_crew_id(&guild);
     let mut crew = get(&id).unwrap_or(Crew {
@@ -853,7 +1020,9 @@ pub async fn crew_help_guild(
     });
     crew.scope = Scope::Guild;
     crew.role = Role::Work;
-    crew.guild_rank_open = Some(rank);
+    if open_my_work.unwrap_or(false) {
+        crew.guild_rank_open = Some(rank);
+    }
     upsert(crew)?;
     start_helping();
     Ok(json!({ "ok": true, "guild_id": guild, "rank": rank }))
@@ -865,6 +1034,7 @@ pub async fn crew_help_player(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     player_id: String,
+    open_my_work: Option<bool>,
 ) -> Result<Value, String> {
     crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
     let (mine, my_guild) = me()?;
@@ -873,7 +1043,11 @@ pub async fn crew_help_player(
         return Err(format!("{friend} is not a player id"));
     }
 
-    grant(&app, 0, &mine, &friend, PERM_HASH_ALL).await?;
+    // See `crew_help_guild`: helping is local; opening your work is a
+    // separate, explicit transaction.
+    if open_my_work.unwrap_or(false) {
+        grant(&app, 0, &mine, &friend, PERM_HASH_ALL).await?;
+    }
 
     let id = friend_crew_id(&friend);
     let mut crew = get(&id).unwrap_or(Crew {
@@ -885,7 +1059,7 @@ pub async fn crew_help_player(
     crew.scope = Scope::Chosen;
     crew.chosen = vec![friend.clone()];
     crew.role = Role::Work;
-    if !crew.granted.contains(&friend) {
+    if open_my_work.unwrap_or(false) && !crew.granted.contains(&friend) {
         crew.granted.push(friend.clone());
     }
     upsert(crew)?;
@@ -918,6 +1092,30 @@ pub async fn crew_stop(
     Ok(json!({ "ok": true }))
 }
 
+/// The crew whose terms apply to a helper who just did work for us.
+///
+/// A result carries no crew id — the helper may not even know they are in
+/// one — so it is matched here: a crew that names them, a guild crew they
+/// belong to, or a room crew the result arrived in. None ⇒ no terms ⇒ no
+/// credit, which is a choice the player made by not setting any.
+pub fn crew_for_helper(helper: &str, room_id: &str) -> Option<Crew> {
+    let crews = all();
+    if let Some(c) = crews.iter().find(|c| c.scope == Scope::Chosen && c.chosen.iter().any(|p| p == helper)) {
+        return Some(c.clone());
+    }
+    if let Some(c) = crews.iter().find(|c| c.room_id == room_id) {
+        return Some(c.clone());
+    }
+    let their_guild = crate::mcp::perception::with_snapshot(|s| {
+        s.player_row(helper)
+            .and_then(|p| p.get("guildId"))
+            .and_then(|g| g.as_str())
+            .map(str::to_string)
+    })
+    .flatten()?;
+    crews.into_iter().find(|c| c.scope == Scope::Guild && c.guild_id == their_guild)
+}
+
 /// Everyone we are linked to, in one flat list — the only thing the simple
 /// panel shows. Two directions per row, because a half-open link is normal.
 #[tauri::command]
@@ -930,8 +1128,15 @@ pub async fn crew_links() -> Result<Value, String> {
             Scope::Guild => ("guild", c.guild_id.clone()),
             _ => ("player", c.chosen.first().cloned().unwrap_or_default()),
         };
-        // For a guild link there is nobody to ask about individually; the
-        // grant IS the state. For a person, ask the chain both ways.
+        /* For a person, ask the chain both ways.
+         *
+         * For a GUILD the old comment here said "the grant IS the state",
+         * which was only half true and hid the half that matters: opening
+         * your work to a guild does NOT let you finish anyone else's. Each
+         * side opens its own, and one player pressing the button achieves
+         * nothing visible on their own. What the card needs is `last_pass`
+         * above — whether the loop found work it was permitted to take.
+         */
         let (theirs, ours) = if kind == "player" && !subject.is_empty() {
             (
                 authority_of(&client, &mine, &subject, &my_guild, TaskType::Mine).await.ok(),
@@ -958,6 +1163,10 @@ pub async fn crew_links() -> Result<Value, String> {
         "helping": crate::mcp::crew_work::get().enabled,
         "taking": crate::mcp::crew_work::taking_now(),
         "helped": crate::mcp::crew_work::helped_total(),
+        // What the loop last saw. Without this, a crew that is working
+        // perfectly and a crew nobody has opened their work to look identical
+        // — both are simply "0 finished".
+        "last_pass": crate::mcp::crew_work::last_pass(),
     }))
 }
 
@@ -965,10 +1174,14 @@ pub async fn crew_links() -> Result<Value, String> {
 mod tests {
     use super::*;
 
+    /// A signing address that holds every hash bit — the ordinary case, since
+    /// a player's primary address carries `PermAll`. Tests that care about the
+    /// address layer set it explicitly.
     fn facts(direct: u64, rank: u64, records: Vec<(u64, u64)>) -> AuthorityFacts {
         AuthorityFacts {
             owner: "1-61".into(),
             me: "1-194".into(),
+            address_mask: PERM_HASH_ALL,
             direct_mask: direct,
             my_rank: rank,
             rank_records: records,
@@ -982,6 +1195,33 @@ mod tests {
         assert_eq!(PERM_HASH_REFINE, 4_194_304);
         assert_eq!(PERM_HASH_RAID, 8_388_608);
         assert_eq!(PERM_HASH_ALL, 15_728_640);
+    }
+
+    /* Layer 1: the SIGNING ADDRESS's own bits, checked by the ante before the
+     * message reaches a handler. It outranks everything — owning the object
+     * does not exempt you from it.
+     *
+     * This check was missing entirely and its absence was invisible, because a
+     * primary address carries `PermAll` and always passed. A narrower key
+     * would have ground a whole proof and then been refused at ante.
+     */
+    #[test]
+    fn an_address_without_the_bit_is_refused_even_to_the_owner() {
+        let mut f = facts(PERM_HASH_ALL, 0, vec![]);
+        f.me = f.owner.clone();          // we own it outright
+        f.address_mask = 1;              // …but the key may only PLAY
+        assert_eq!(decide(&f, TaskType::Mine), Authority::Denied);
+        // With the bit, the same owner is allowed.
+        f.address_mask = PERM_HASH_ALL;
+        assert_eq!(decide(&f, TaskType::Mine), Authority::Owner);
+    }
+
+    #[test]
+    fn the_address_layer_is_per_bit_too() {
+        let mut f = facts(PERM_HASH_ALL, 0, vec![]);
+        f.address_mask = PERM_HASH_MINE;   // this key may finish mining only
+        assert_eq!(decide(&f, TaskType::Mine), Authority::Granted);
+        assert_eq!(decide(&f, TaskType::Raid), Authority::Denied);
     }
 
     #[test]

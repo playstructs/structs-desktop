@@ -56,6 +56,7 @@ const FILENAME: &str = "crew_work.json";
 /// boundary, not the wall clock, that every machine agrees on.
 pub const EPOCH_BLOCKS: u64 = 60;
 
+
 // ── The pure core ───────────────────────────────────────────────────────────
 
 /// A crewmate's task that this machine could take.
@@ -75,6 +76,45 @@ impl CrewTask {
     fn key(&self) -> String {
         format!("{}|{}|{}", self.object_id, self.task.as_str(), self.block_start)
     }
+
+    /// What the chain actually pays for, once.
+    ///
+    /// Since v0.21.0 the ore clock lives on the PLANET, not the struct, so
+    /// every rig standing on one planet shares a single mine cycle and a
+    /// single refine cycle. Completing the first one restarts the clock and
+    /// every other proof for that cycle is then dead — so a planet with three
+    /// extractors offered three tasks of which two were guaranteed waste: GPU
+    /// spent, a transaction lane spent, and a "work failure" to show for it.
+    ///
+    /// Keyed by planet for ore and by object for everything else, because
+    /// BUILD anchors on the struct and RAID on the fleet.
+    fn cycle(&self) -> String {
+        match (self.task.is_ore(), self.planet_id.as_deref()) {
+            (true, Some(planet)) => {
+                format!("{}|{}|{}|{}", self.owner_player, self.task.as_str(), planet, self.block_start)
+            }
+            _ => format!("{}|{}", self.owner_player, self.key()),
+        }
+    }
+}
+
+/// One task per cycle, chosen the same way by every machine.
+///
+/// Lowest key wins — a stable, arbitrary choice that two clients reading the
+/// same chain both reach, so they converge on the same rig rather than each
+/// picking a different one and racing for the same reward.
+pub fn one_per_cycle(tasks: Vec<CrewTask>) -> Vec<CrewTask> {
+    let mut by_cycle: std::collections::BTreeMap<String, CrewTask> = Default::default();
+    for t in tasks {
+        let c = t.cycle();
+        match by_cycle.get(&c) {
+            Some(kept) if kept.key() <= t.key() => {}
+            _ => {
+                by_cycle.insert(c, t);
+            }
+        }
+    }
+    by_cycle.into_values().collect()
 }
 
 pub fn epoch_of(block: u64) -> u64 {
@@ -221,6 +261,35 @@ pub fn set(cfg: CrewWorkConfig) {
 /// what our card shows about our own afternoon.
 static HELPED: LazyLock<dashmap::DashMap<String, u64>> = LazyLock::new(dashmap::DashMap::new);
 
+/// What the last pass actually saw.
+///
+/// "It doesn't seem to be doing anything" is the hardest report to act on, and
+/// this loop can be doing nothing for five different legitimate reasons. The
+/// pass already computes the answer; keeping it costs nothing and turns that
+/// report into a reading.
+static LAST_PASS: LazyLock<RwLock<Option<Value>>> = LazyLock::new(|| RwLock::new(None));
+
+pub fn last_pass() -> Value {
+    LAST_PASS.read().ok().and_then(|p| p.clone()).unwrap_or(Value::Null)
+}
+
+fn note_pass(epoch: u64, submitting: usize, reporting: usize, declined: usize, ripe: usize, free: usize, members: usize) {
+    if let Ok(mut p) = LAST_PASS.write() {
+        *p = Some(json!({
+            "epoch": epoch,
+            // What became of the tasks we took: signed here, or posted to
+            // Comms for somebody with the authority. Both are work done.
+            "submitting": submitting, "reporting": reporting,
+            "started": submitting + reporting,
+            // Left alone for a local reason — already ours, already queued,
+            // or nowhere to post a result. Not a chain refusal.
+            "declined": declined,
+            "ripe": ripe, "free": free, "members": members,
+            "at_ms": now_millis(),
+        }));
+    }
+}
+
 pub fn note_helped(work: &crate::hasher::CrewWork, object_id: &str) {
     *HELPED.entry(work.owner_player.clone()).or_insert(0) += 1;
     let _ = object_id;
@@ -319,14 +388,32 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
 
     let epoch = epoch_of(current_block);
     let client = CosmosClient::new();
-    let mut started = 0usize;
+    /* Who has actually opened their work to us — one paginated read, whatever
+     * the crew's size.
+     *
+     * This is the difference between a crew that works and one that looks
+     * dead. Being in a guild with somebody grants nothing; each side opens its
+     * own work separately. Asking "may I help you?" per candidate is also the
+     * only other option, and at guild scale that is thousands of reads and a
+     * scan measured in minutes.
+     */
+    let mut submitting = 0usize;
+    let mut reporting = 0usize;
+    let mut declined = 0usize;
     let mut looked_at = 0usize;
+    let mut crew_size = 0usize;
 
     for c in crews {
-        if started >= free {
+        if submitting + reporting >= free {
             break;
         }
         let members = members_of(&c, &me).await;
+        /* Everyone in scope is a candidate. Nobody is filtered out for lack
+         * of a grant, because computing a proof needs none — a helper with no
+         * rights at all still posts the number for the owner to sign. Only
+         * the tasks we actually TAKE (at most `max_slots`) are asked about, so
+         * a guild of thousands costs one store walk and a handful of reads. */
+        crew_size = crew_size.max(members.len().saturating_sub(1));
         if members.len() < 2 {
             continue; // a crew of one is just a colony
         }
@@ -335,7 +422,7 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
         if tasks.is_empty() {
             continue;
         }
-        let mine = assign(&tasks, &members, &me, epoch, free - started);
+        let mine = assign(&tasks, &members, &me, epoch, free - (submitting + reporting));
         if mine.is_empty() {
             continue;
         }
@@ -353,12 +440,13 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
             continue;
         }
         for t in mine {
-            if started >= free {
+            if submitting + reporting >= free {
                 break;
             }
             match start_one(app_handle, &client, &c, &t, &me, &my_guild, &registry).await {
-                Ok(true) => started += 1,
-                Ok(false) => {}
+                Ok(Took::Submitting) => submitting += 1,
+                Ok(Took::Reporting) => reporting += 1,
+                Ok(Took::Declined) => declined += 1,
                 Err(e) => tlog(
                     "crew",
                     Sev::Notice,
@@ -374,11 +462,13 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
      * exactly like a loop with nothing to do — and it took reading the
      * arithmetic, not the logs, to find that out.
      */
+    note_pass(epoch, submitting, reporting, declined, looked_at, free, crew_size);
     tlog(
         "crew",
         Sev::Debug,
         format!(
-            "epoch {epoch}: {started} started, {looked_at} ripe task(s) seen, {free} slot(s) free"
+            "epoch {epoch}: {submitting} to submit, {reporting} to report, {declined} declined, \
+             {looked_at} ripe across {crew_size} crewmate(s), {free} slot(s) free"
         ),
     );
     Ok(())
@@ -393,37 +483,109 @@ async fn start_one(
     me: &str,
     my_guild: &str,
     registry: &std::sync::Arc<crate::hasher::types::TaskRegistry>,
-) -> Result<bool, String> {
+) -> Result<Took, String> {
     // The registry is keyed by object id and starting a task CANCELS any other
     // with the same id, so this check is not an optimisation — without it a
     // crew task could evict one of our own mines.
+    /* Our own loops get first claim on an object, and say so.
+     *
+     * These two returns are the ordinary case whenever a crewmate is also
+     * somebody THIS machine already works for — every roster player, for us —
+     * and a silent `false` made "correctly declined" indistinguishable from
+     * "quietly broken" while the whole feature was being debugged. Debug, not
+     * notice: on a busy machine it is the common path, not a problem.
+     */
     if crate::hasher::already_hashing(&t.object_id, registry) {
-        return Ok(false);
+        tlog(
+            "crew",
+            Sev::Debug,
+            format!("{} left alone: this machine is already grinding it", t.object_id),
+        );
+        return Ok(Took::Declined);
     }
     if crate::hasher::completion_in_flight(&t.object_id) == Some(t.block_start) {
-        return Ok(false); // somebody's proof for this exact cycle is already queued
+        tlog(
+            "crew",
+            Sev::Debug,
+            format!("{} left alone: a proof for cycle {} is already queued", t.object_id, t.block_start),
+        );
+        return Ok(Took::Declined);
     }
-    // Permission before power. An unreadable answer is NOT a yes: it comes
-    // back as an error and we simply do not take the task this pass.
+    /* Authority decides HOW we help, not WHETHER we help.
+     *
+     * Computing a proof needs no rights whatsoever — the grinding input is
+     * public — so a helper with no grant is still useful: they compute the
+     * nonce and post it, and an account that holds the authority signs it.
+     * That is what Comms is for, and it is the ordinary case. A grant is only
+     * needed for the helper to submit for THEMSELVES.
+     *
+     * Refusing the task when we cannot submit, which is what this did, threw
+     * away the entire no-permission path and made a helper with no grants
+     * useless — exactly the "it isn't doing anything" report.
+     *
+     * An unreadable answer is still not a yes: it comes back as an error and
+     * we take nothing this pass.
+     */
     let authority = crew::authority_of(client, &t.owner_player, me, my_guild, t.task).await?;
-    if !authority.allows() {
-        return Ok(false);
+    let params = TaskParams::for_ore(&t.object_id, t.task.as_str(), t.block_start, t.difficulty_target);
+
+    if authority.allows() {
+        crate::hasher::start_hash_task_core(params, app_handle.clone(), registry)?;
+        crate::hasher::register_crew_hash(
+            t.object_id.clone(),
+            crate::hasher::CrewWork {
+                owner_player: t.owner_player.clone(),
+                room_id: crew_of.room_id.clone(),
+                task: t.task,
+                // Index 0: we help as ourselves.
+                index: 0,
+            },
+        );
+        return Ok(Took::Submitting);
     }
 
-    let params = TaskParams::for_ore(&t.object_id, t.task.as_str(), t.block_start, t.difficulty_target);
+    // No authority: compute it and hand the number to somebody who has some.
+    let Some((guild_id, room_id)) =
+        crate::matrix::report_room(&crew_of.guild_id, &crew_of.room_id, &t.owner_player).await
+    else {
+        tlog(
+            "crew",
+            Sev::Debug,
+            format!(
+                "{} left alone: no authority to submit and nowhere to post a result",
+                t.object_id
+            ),
+        );
+        return Ok(Took::Declined);
+    };
     crate::hasher::start_hash_task_core(params, app_handle.clone(), registry)?;
-    crate::hasher::register_crew_hash(
+    crate::hasher::register_borrowed_hash(
         t.object_id.clone(),
-        crate::hasher::CrewWork {
-            owner_player: t.owner_player.clone(),
-            room_id: crew_of.room_id.clone(),
-            task: t.task,
-            // Index 0: we help as ourselves. A crewmate granted OUR player,
-            // not one of our virtual ones.
-            index: 0,
+        crate::hasher::BorrowedWork {
+            guild_id,
+            room_id,
+            // Nobody asked: this is an unsolicited result, so it threads under
+            // nothing.
+            offer_event: String::new(),
+            task: t.task.as_str().to_string(),
+            target: None,
+            block_start: t.block_start,
+            difficulty: t.difficulty_target,
         },
     );
-    Ok(true)
+    Ok(Took::Reporting)
+}
+
+/// What one task became.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Took {
+    /// Ground here and signed here: we hold the authority.
+    Submitting,
+    /// Ground here, posted to Comms for somebody who does.
+    Reporting,
+    /// Left alone for a local reason (already ours, already queued, nowhere
+    /// to send). Not a refusal by the chain.
+    Declined,
 }
 
 /// Who counts as this crew, minus us.
@@ -475,13 +637,13 @@ fn guild_members(guild_id: &str) -> Vec<String> {
 /// galaxy — so a crew of fifty costs no extra chain reads to plan for.
 fn ripe_tasks(members: &[String], me: &str, current_block: u64, threshold: u64) -> Vec<CrewTask> {
     let mut out = Vec::new();
-    for pid in members {
-        if pid == me {
-            continue; // our own work is the harvest loop's job, not the crew's
-        }
-        let Some(rows) = crate::mcp::perception::work_for_player(pid) else {
-            continue;
-        };
+    // Our own work is the harvest loop's job, not the crew's.
+    let wanted: std::collections::HashSet<String> =
+        members.iter().filter(|p| p.as_str() != me).cloned().collect();
+    // One walk of the store for everybody, not one per member — the
+    // difference between a pass and a multi-minute scan at guild scale.
+    let by_owner = crate::mcp::perception::work_for_players(&wanted);
+    for (pid, rows) in by_owner {
         for r in rows {
             let Some(category) = r.get("category").and_then(|c| c.as_str()) else {
                 continue;
@@ -516,7 +678,7 @@ fn ripe_tasks(members: &[String], me: &str, current_block: u64, threshold: u64) 
         }
     }
     out.retain(|t| !t.object_id.is_empty());
-    out
+    one_per_cycle(out)
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -713,6 +875,58 @@ mod tests {
      */
     fn free_slots(max_slots: usize, crew_in_flight: usize) -> usize {
         max_slots.saturating_sub(crew_in_flight)
+    }
+
+    fn ore(id: &str, owner: &str, planet: &str, anchor: u64) -> CrewTask {
+        CrewTask {
+            object_id: id.into(),
+            owner_player: owner.into(),
+            task: TaskType::Mine,
+            block_start: anchor,
+            difficulty_target: 14_000,
+            planet_id: Some(planet.into()),
+        }
+    }
+
+    /* One ore clock per PLANET since v0.21.0, so every rig on a planet shares
+     * one cycle. Offering one task per rig meant a three-extractor planet
+     * produced three proofs, of which two were guaranteed dead the instant the
+     * first landed and restarted the clock — GPU and a transaction lane spent
+     * for a "work failure". */
+    #[test]
+    fn rigs_sharing_one_planet_cycle_collapse_to_one_task() {
+        let tasks = vec![
+            ore("5-300", "1-61", "2-9", 1000),
+            ore("5-100", "1-61", "2-9", 1000),
+            ore("5-200", "1-61", "2-9", 1000),
+        ];
+        let kept = one_per_cycle(tasks);
+        assert_eq!(kept.len(), 1, "one planet, one mine cycle, one proof");
+        assert_eq!(kept[0].object_id, "5-100", "and the choice is stable, not incidental");
+    }
+
+    /// Two machines must collapse to the SAME rig, or they each pick a
+    /// different one and race for a reward only one of them can have.
+    #[test]
+    fn every_machine_collapses_to_the_same_rig() {
+        let a = vec![ore("5-300", "1-61", "2-9", 1000), ore("5-100", "1-61", "2-9", 1000)];
+        let mut b = a.clone();
+        b.reverse();
+        assert_eq!(one_per_cycle(a)[0].object_id, one_per_cycle(b)[0].object_id);
+    }
+
+    #[test]
+    fn separate_planets_owners_cycles_and_kinds_stay_separate() {
+        let mut refine = ore("5-101", "1-61", "2-9", 1000);
+        refine.task = TaskType::Refine;
+        let tasks = vec![
+            ore("5-100", "1-61", "2-9", 1000),   // planet 2-9, mine, cycle 1000
+            ore("5-400", "1-61", "2-8", 1000),   // a different planet
+            ore("5-500", "1-62", "2-9", 1000),   // a different owner
+            ore("5-600", "1-61", "2-9", 2000),   // a later cycle on the same planet
+            refine,                              // mine and refine are two clocks
+        ];
+        assert_eq!(one_per_cycle(tasks).len(), 5);
     }
 
     #[test]

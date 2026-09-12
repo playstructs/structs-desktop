@@ -48,7 +48,7 @@ pub fn verify(
     block_start: u64,
     target_id: Option<&str>,
     nonce: &str,
-    difficulty: u64,
+    required_zeros: u64,
 ) -> Option<String> {
     // A nonce is any string: the chain hashes `prefix + nonce` verbatim and
     // only OUR grinders happen to iterate integers. Refusing non-digits
@@ -61,11 +61,47 @@ pub fn verify(
     }
     let message = format!("{}{}", prefix(object_id, task, block_start, target_id), nonce);
     let hash: [u8; 32] = Sha256::digest(message.as_bytes()).into();
-    if crate::hasher::difficulty::check_difficulty(&hash, difficulty) {
+    if crate::hasher::difficulty::check_difficulty(&hash, required_zeros) {
         Some(hex::encode(hash))
     } else {
         None
     }
+}
+
+/// How many leading zero nibbles a proof needs RIGHT NOW.
+///
+/// Two numbers wear the name "difficulty" in this game and they are three
+/// orders of magnitude apart: the struct type's difficulty RANGE (`14000`,
+/// `28000` — the number of blocks over which the puzzle decays to trivial)
+/// and the leading-zero count the hash must actually show at a given age
+/// (`64` at anchor, `7` a few hours later). `check_difficulty` wants the
+/// second; every caller had the first.
+///
+/// The consequence was that `verify` demanded 28,000 leading zeros of a
+/// 64-nibble hash, so no real proof could ever have been accepted — only the
+/// tests passed, and they passed because their fixtures used `5`.
+pub fn required_zeros(anchor: u64, difficulty_range: u64, at_block: u64) -> u64 {
+    crate::hasher::difficulty::calculate_difficulty(at_block.saturating_sub(anchor), difficulty_range)
+}
+
+/// `verify`, for callers holding the RANGE and a block height rather than a
+/// zero count. Judged at `at_block`: difficulty only ever falls with age, so a
+/// proof that met the bar when it was ground still meets it now, and the
+/// chain will judge it at inclusion — later still.
+pub fn verify_at(
+    object_id: &str,
+    task: &str,
+    block_start: u64,
+    target_id: Option<&str>,
+    nonce: &str,
+    difficulty_range: u64,
+    at_block: u64,
+) -> Option<String> {
+    if difficulty_range == 0 || at_block == 0 {
+        return None; // a bar of nothing would accept anything
+    }
+    verify(object_id, task, block_start, target_id, nonce,
+           required_zeros(block_start, difficulty_range, at_block))
 }
 
 /// Read a `structs.work` block out of a message, if it carries one and it is
@@ -167,6 +203,35 @@ mod tests {
         let got = verify("5-2184", "MINE", 812004, None, "12345", 0).unwrap();
         let expect = hex::encode(Sha256::digest(b"5-2184MINE812004NONCE12345"));
         assert_eq!(got, expect);
+    }
+
+    /// The units bug, pinned at the magnitude that exposed it. A live task
+    /// reads `target 28000 | current 7`: the range is 28,000 and the bar is
+    /// 7 nibbles. Handing the range to `check_difficulty` demanded 28,000
+    /// zeros and refused every proof that was ever computed. This brute-forces
+    /// a nonce that genuinely clears the CURRENT bar and insists it verifies.
+    #[test]
+    fn a_real_proof_verifies_against_the_current_bar_not_the_range() {
+        let (object, task, anchor, range) = ("5-2184", "MINE", 100u64, 28_000u64);
+        // A cycle most of the way through its range: the bar is a nibble or
+        // two, whatever the curve says — the test derives it rather than
+        // assuming it, so it pins the units and not the decay formula.
+        let at = anchor + range;
+        let bar = required_zeros(anchor, range, at);
+        assert!((1..=2).contains(&bar), "bar {bar} at full age is a nibble or two, not thousands");
+        let p = prefix(object, task, anchor, None);
+        let nonce = (0u64..)
+            .map(|n| n.to_string())
+            .find(|n| crate::hasher::difficulty::check_difficulty(
+                &Sha256::digest(format!("{p}{n}").as_bytes()).into(), bar))
+            .unwrap();
+        assert!(verify_at(object, task, anchor, None, &nonce, range, at).is_some());
+        // The same nonce handed the RANGE as a zero count is what shipped.
+        assert!(verify(object, task, anchor, None, &nonce, range).is_none(),
+            "28,000 leading zeros: the bug, stated");
+        // A bar of nothing must not accept anything.
+        assert!(verify_at(object, task, anchor, None, &nonce, 0, at).is_none());
+        assert!(verify_at(object, task, anchor, None, &nonce, range, 0).is_none());
     }
 
     #[test]

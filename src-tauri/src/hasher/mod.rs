@@ -266,10 +266,17 @@ pub fn maybe_report_borrowed(app_handle: &AppHandle, snap: &TaskStateSnapshot) {
             "difficulty": work.difficulty,
             "nonce": nonce, "proof": proof,
         });
-        match crate::matrix::post_work_result(
-            &work.guild_id, &work.room_id, &body, payload, &work.offer_event,
-        )
-        .await
+        // Threaded under the offer when somebody asked; a plain message when
+        // this was volunteered, which is how crew work reports.
+        let posted = if work.offer_event.is_empty() {
+            crate::matrix::post_work(&work.guild_id, &work.room_id, &body, payload).await
+        } else {
+            crate::matrix::post_work_result(
+                &work.guild_id, &work.room_id, &body, payload, &work.offer_event,
+            )
+            .await
+        };
+        match posted
         {
             Ok(_) => eprintln!("[Comms] reported borrowed proof for {}", object_id),
             Err(e) => eprintln!("[Comms] could not report borrowed proof: {}", e),
@@ -451,6 +458,19 @@ static PENDING_COMPLETIONS: std::sync::LazyLock<dashmap::DashMap<String, u64>> =
 /// The anchor this object already has a completion in flight for, if any.
 pub fn completion_in_flight(object_id: &str) -> Option<u64> {
     PENDING_COMPLETIONS.get(object_id).map(|v| *v)
+}
+
+/// Claim this cycle while a completion is being signed for it.
+///
+/// Held by every path that submits, not just the local harvest one: a proof
+/// arriving from a crewmate has to take the same claim, or our own loop would
+/// see a still-ripe struct and grind the very same proof beside it.
+pub fn note_completion_in_flight(object_id: &str, anchor: u64) {
+    PENDING_COMPLETIONS.insert(object_id.to_string(), anchor);
+}
+
+pub fn clear_completion_in_flight(object_id: &str) {
+    PENDING_COMPLETIONS.remove(object_id);
 }
 
 /// If the completed task belongs to a virtual player, sign+broadcast its

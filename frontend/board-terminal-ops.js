@@ -156,6 +156,9 @@
   // row says which of the four roads the permission came down — owner, a
   // direct grant, or a guild rank — because they expire differently and a
   // single "allowed" could not explain tomorrow's failure.
+  /* These chips are about SIGNING rights only. Anybody may compute a proof
+   * for anybody — the grinding input is public — so "Closed" here never
+   * means "cannot help"; it means "cannot finish it without you". */
   var AUTH_CHIP = {
     owner: ['Yours', 'ok'], granted: ['Granted', 'ok'],
     guild_rank: ['By rank', 'ok'], denied: ['Closed', 'muted'],
@@ -191,6 +194,33 @@
             ['doing now', H.fmtInt(d.taking || 0), null, (d.taking || 0) ? 'live' : 'muted'],
             ['finished', H.fmtInt(d.helped || 0)],
           ]));
+          /* Why nothing is happening, when nothing is happening.
+           *
+           * A crew that works perfectly and a crew nobody has opened their
+           * work to both read as "0 finished". The loop already knows the
+           * difference — it counts what it SAW and what it was PERMITTED to
+           * take — so say it rather than leaving the player to guess.
+           */
+          var lp = d.last_pass;
+          if (lp && d.helping && !(d.taking || 0)) {
+            if (!lp.ripe) {
+              host.appendChild(H.stateBlock('info',
+                'Nothing ripe to help with across ' + H.fmtInt(lp.members || 0) + ' crewmate(s).'));
+            } else if (!lp.started) {
+              /* Not a permission problem: a proof needs no rights to COMPUTE.
+               * Every ripe task was declined locally — already ours, already
+               * queued, or nowhere to post a result (no room in common). */
+              host.appendChild(H.stateBlock('warning',
+                H.fmtInt(lp.ripe) + ' task(s) ready, ' + H.fmtInt(lp.declined || 0)
+                + ' left alone — already yours, already queued, or no room in common to post a result.'));
+            }
+          }
+          if (lp && lp.started) {
+            host.appendChild(tiles([
+              ['signing here', H.fmtInt(lp.submitting || 0), null, (lp.submitting || 0) ? 'live' : 'muted'],
+              ['posting to comms', H.fmtInt(lp.reporting || 0), null, (lp.reporting || 0) ? 'live' : 'muted'],
+            ]));
+          }
         }
 
         cap(host, links.length ? 'Help someone else' : 'Who do you want to help?');
@@ -203,9 +233,11 @@
         // sentence "I want to help my guild" and is done for you.
         pick.appendChild(armed({
           label: 'My guild',
-          confirm: d.guild_id ? 'Open your work to ' + d.guild_id + '?' : 'You are not in a guild',
+          confirm: d.guild_id ? 'Start helping ' + d.guild_id + '?' : 'You are not in a guild',
           enabled: !!d.guild_id,
-          run: function () { return invoke('crew_help_guild', {}); },
+          // Helping signs nothing: computing a proof needs no rights. Letting
+          // the guild finish YOUR work is the separate door on the link below.
+          run: function () { return invoke('crew_help_guild', { openMyWork: false }); },
           after: function () { T.refresh(ctx.id, true); },
         }));
 
@@ -228,9 +260,27 @@
         links.forEach(function (l) {
           var guild = l.kind === 'guild';
           var chips = guild
-            ? [H.statTile('open to', 'rank ' + (l.open_to_guild || '?'), null, 'ok')]
-            : [authChip('they help me', l.they_can_help_me),
-               authChip('i help them', l.i_can_help_them)];
+            ? [H.statTile('they may finish mine', l.open_to_guild ? 'rank ≤ ' + l.open_to_guild : 'no', null, l.open_to_guild ? 'ok' : 'muted')]
+            : [authChip('they may finish mine', l.they_can_help_me),
+               authChip('i may finish theirs', l.i_can_help_them)];
+          /* Opening your work is the one thing here that signs a transaction,
+           * so it is its own armed button and never a side effect of helping.
+           * A guild link opens by rank; a person by a direct grant. */
+          var opened = guild ? !!l.open_to_guild : l.they_can_help_me === 'granted';
+          var openDoor = armed({
+            label: opened ? 'Close my work' : 'Let them finish mine',
+            destructive: opened,
+            confirm: opened
+              ? (guild ? 'Stop the guild finishing your work?' : 'Withdraw ' + (l.name || l.subject) + '\u2019s right to finish yours?')
+              : (guild ? 'Let anyone in ' + l.subject + ' finish your proofs?' : 'Let ' + (l.name || l.subject) + ' finish your proofs?'),
+            run: function () {
+              if (guild) return invoke(opened ? 'crew_close_guild' : 'crew_open_guild',
+                { guildId: l.subject, rank: 101, roomId: l.crew_id });
+              return invoke(opened ? 'crew_revoke' : 'crew_grant',
+                { helperPlayerId: l.subject, roomId: l.crew_id });
+            },
+            after: function () { T.refresh(ctx.id, true); },
+          });
           var pc = PC();
           host.appendChild(H.resultRow({
             portrait: guild || !pc ? null : pc.portrait(null),
@@ -238,13 +288,18 @@
             title: String(l.name || l.subject),
             subtitle: guild ? 'your whole guild' : String(l.subject),
             chips: chips,
-            action: armed({
+            action: (function () {
+              var row = H.el('div', 'tm-doors-row');
+              row.appendChild(openDoor);
+              row.appendChild(armed({
               label: 'Stop',
               destructive: true,
               confirm: 'Close this and stop helping?',
               run: function () { return invoke('crew_stop', { crewId: l.crew_id }); },
               after: function () { T.refresh(ctx.id, true); },
-            }),
+              }));
+              return row;
+            })(),
           }));
         });
       }).catch(function (e) { fail(host, 'crew', e); });
@@ -351,8 +406,8 @@
           title: String(r.name || r.player_id), subtitle: String(r.player_id),
           action: armed({
             label: 'Help them',
-            confirm: 'Open your work to ' + (r.name || r.player_id) + '?',
-            run: function () { return invoke('crew_help_player', { playerId: r.player_id }); },
+            confirm: 'Start helping ' + (r.name || r.player_id) + '?',
+            run: function () { return invoke('crew_help_player', { playerId: r.player_id, openMyWork: false }); },
             after: function () { T.refresh(ctx.id, true); },
           }),
         }));

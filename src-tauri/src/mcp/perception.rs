@@ -1596,6 +1596,74 @@ pub fn work_for_player(pid: &str) -> Option<Vec<Value>> {
     .flatten()
 }
 
+/// `work_for_player`, for MANY players in ONE pass over the struct store.
+///
+/// The per-player form filters the whole store each call — fine for one
+/// roster, ruinous for a crew: a guild of 2,500 candidates against 55,790
+/// structs is 139 million row visits per pass, which is the "whole-guild scan
+/// measured in minutes" that made helping look dead. Bucketing by owner first
+/// makes the cost the size of the store, whatever the crew's size.
+///
+/// Rows are identical to `work_for_player`'s, so the two cannot drift.
+pub fn work_for_players(pids: &std::collections::HashSet<String>) -> std::collections::HashMap<String, Vec<Value>> {
+    let mut out: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
+    if pids.is_empty() {
+        return out;
+    }
+    let types: std::collections::HashMap<String, (u64, u64, u64)> = match crate::game_state::GAME_STATE.read() {
+        Ok(gs) => gs.struct_types.values()
+            .map(|t| (t.id.to_string(), (t.build_difficulty, t.ore_mining_difficulty, t.ore_refining_difficulty)))
+            .collect(),
+        Err(_) => return out,
+    };
+    with_snapshot(|s| {
+        for row in s.structs.values() {
+            if !pids.contains(&row.owner) {
+                continue;
+            }
+            let st = s.struct_status(&row.id);
+            if st & status::DESTROYED != 0 {
+                continue;
+            }
+            let (build_d, mine_d, refine_d) = types.get(&row.type_id).copied().unwrap_or((0, 0, 0));
+            let on_planet = row.location_type == "planet";
+            let planet_id = if on_planet { row.location_id.clone() } else { String::new() };
+            let mut push = |category: &str, block_start: u64, difficulty_target: u64| {
+                out.entry(row.owner.clone()).or_default().push(json!({
+                    "object_id": row.id,
+                    "player_id": row.owner,
+                    "target_id": row.id,
+                    "category": category,
+                    "block_start": block_start,
+                    "difficulty_target": difficulty_target,
+                    "location_type": row.location_type,
+                    "location_id": row.location_id,
+                    "planet_id": if planet_id.is_empty() { Value::Null } else { json!(planet_id) },
+                }));
+            };
+            if st & status::BUILT == 0 {
+                push("BUILD", s.sattr(&row.id, S_BUILD), build_d);
+                continue;
+            }
+            if !on_planet || st & status::ONLINE == 0 {
+                continue;
+            }
+            if mine_d > 0 {
+                let clock = s.planet_attr(&planet_id, "blockStartOreMine").unwrap_or(0);
+                if clock > 0 { push("MINE", clock, mine_d); }
+            }
+            if refine_d > 0 {
+                let clock = s.planet_attr(&planet_id, "blockStartOreRefine").unwrap_or(0);
+                if clock > 0 { push("REFINE", clock, refine_d); }
+            }
+        }
+    });
+    for rows in out.values_mut() {
+        rows.sort_by(|a, b| a["object_id"].as_str().cmp(&b["object_id"].as_str()));
+    }
+    out
+}
+
 /// A completion we signed landed: the chain restarted that planet's clock at
 /// the inclusion block. Record it NOW rather than waiting for the next sweep
 /// — with the clock frames not reaching us from production, the two-minute
