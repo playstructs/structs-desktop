@@ -189,11 +189,15 @@
          * anything. Before you have linked to anyone there is nothing true to
          * say, so it says nothing and asks the question instead. */
         if (links.length) {
-          host.appendChild(tiles([
+          var state = [
             ['helping', d.helping ? 'on' : 'off', null, d.helping ? 'live' : 'muted'],
             ['doing now', H.fmtInt(d.taking || 0), null, (d.taking || 0) ? 'live' : 'muted'],
             ['finished', H.fmtInt(d.helped || 0)],
-          ]));
+          ];
+          // Proofs handed over Comms for somebody with the authority to
+          // spend. Only once there are any: a fourth zero says nothing.
+          if (d.reported) state.push(['posted', H.fmtInt(d.reported)]);
+          host.appendChild(tiles(state));
           /* Why nothing is happening, when nothing is happening.
            *
            * A crew that works perfectly and a crew nobody has opened their

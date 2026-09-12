@@ -163,6 +163,12 @@ pub fn parse(content: &Value) -> Option<Value> {
                 return None;
             }
             out["tx"] = json!(tx.to_uppercase());
+            // Who computed it, when the SPENDER is telling the room. A
+            // player id or nothing — never an arbitrary string to render.
+            out["helper"] = json!(w
+                .get("helper")
+                .and_then(|h| h.as_str())
+                .filter(|h| super::refs::parse_id(h).is_some()));
         }
         _ => return None,
     }

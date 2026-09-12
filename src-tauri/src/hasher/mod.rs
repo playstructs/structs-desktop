@@ -278,7 +278,14 @@ pub fn maybe_report_borrowed(app_handle: &AppHandle, snap: &TaskStateSnapshot) {
         };
         match posted
         {
-            Ok(_) => eprintln!("[Comms] reported borrowed proof for {}", object_id),
+            Ok(_) => {
+                // Volunteered crew work: remember the cycle is answered, or
+                // the next pass grinds and posts the same nonce again.
+                if work.offer_event.is_empty() {
+                    crate::mcp::crew_work::note_reported(&object_id, work.block_start);
+                }
+                eprintln!("[Comms] reported borrowed proof for {}", object_id)
+            }
             Err(e) => eprintln!("[Comms] could not report borrowed proof: {}", e),
         }
         let _ = &app;

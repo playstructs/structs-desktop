@@ -139,6 +139,10 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   check('a person shows both directions of signing rights',
     /JPEG/.test(body) && /they may finish mine/i.test(body) && /i may finish theirs/i.test(body), body.slice(0, 600));
   check('…and every link can be stopped', buttons().some((b) => /Stop/.test(b)));
+  // A proof handed over Comms is work done, and the only visible trace of
+  // the no-grant path; it shows once there is one (fixture: 3) and not as a
+  // fourth zero before then.
+  check('proofs posted to comms are counted on the card', /finished\D*3\D*posted/.test(body), body.slice(0, 400));
 
   /* "It doesn't seem to be doing anything" has to be answerable FROM THE CARD.
    *

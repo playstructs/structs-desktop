@@ -1664,6 +1664,16 @@ pub fn work_for_players(pids: &std::collections::HashSet<String>) -> std::collec
     out
 }
 
+/// Ore held by a player or lying on a planet, from the snapshot.
+///
+/// `None` means we hold no row for that object at all — unknown, which is
+/// not zero. A proof for an extractor on a drained planet is refused by the
+/// chain every time and the anchor never moves, so a caller that cannot tell
+/// "drained" from "unread" grinds it forever.
+pub fn ore_of(oid: &str) -> Option<u64> {
+    with_snapshot(|s| s.grid_attr(oid, "ore")).flatten()
+}
+
 /// A completion we signed landed: the chain restarted that planet's clock at
 /// the inclusion block. Record it NOW rather than waiting for the next sweep
 /// — with the clock frames not reaching us from production, the two-minute

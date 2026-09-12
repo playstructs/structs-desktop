@@ -1163,6 +1163,7 @@ pub async fn crew_links() -> Result<Value, String> {
         "helping": crate::mcp::crew_work::get().enabled,
         "taking": crate::mcp::crew_work::taking_now(),
         "helped": crate::mcp::crew_work::helped_total(),
+        "reported": crate::mcp::crew_work::reported_total(),
         // What the loop last saw. Without this, a crew that is working
         // perfectly and a crew nobody has opened their work to look identical
         // — both are simply "0 finished".

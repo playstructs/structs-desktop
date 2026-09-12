@@ -169,7 +169,12 @@ impl Signer {
 /// Called from the Matrix sync loop, so a result completes whether or not the
 /// Comms window is open. A closed window must never be the reason a crewmate's
 /// proof goes unspent.
-pub fn absorb_result_frames(app: &tauri::AppHandle, room_id: &str, messages: &[crate::matrix::client::Message]) {
+pub fn absorb_result_frames(
+    app: &tauri::AppHandle,
+    guild_id: &str,
+    room_id: &str,
+    messages: &[crate::matrix::client::Message],
+) {
     let cfg = get();
     if !cfg.enabled {
         return;
@@ -195,10 +200,11 @@ pub fn absorb_result_frames(app: &tauri::AppHandle, room_id: &str, messages: &[c
         // localpart here, and it is the only thing about the message that is
         // authenticated (by the homeserver, not by us).
         let helper = crate::matrix::directory::player_id_of(&m.sender);
+        let guild = guild_id.to_string();
         let room = room_id.to_string();
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            match accept(&app, &object, &task, anchor, &nonce, target.as_deref(), helper.as_deref(), &room).await {
+            match accept(&app, &object, &task, anchor, &nonce, target.as_deref(), helper.as_deref(), &guild, &room).await {
                 Ok(Some(v)) => tlog(
                     "crew",
                     Sev::Info,
@@ -221,6 +227,7 @@ pub async fn accept(
     nonce: &str,
     target: Option<&str>,
     helper: Option<&str>,
+    guild_id: &str,
     room_id: &str,
 ) -> Result<Option<String>, String> {
     let cfg = get();
@@ -264,8 +271,15 @@ pub async fn accept(
      * shipped verify path had done since it was written — demanded thousands
      * of leading zeros and refused every real proof ever computed.
      */
-    let range = difficulty_for(&owner, object, kind)
+    let (range, planet) = task_view(&owner, object, kind)
         .ok_or("cannot establish this task's difficulty range from our own state")?;
+    /* Would the chain even take it? Asked BEFORE the nonce is checked and
+     * long before a transaction is spent. The first live pass spent one
+     * every two minutes being told "planet (2-29903) is empty, nothing to
+     * mine" for a proof that was, as a proof, perfect. */
+    if let Some(why) = crate::mcp::crew_work::nothing_to_do(kind, planet.as_deref(), &owner) {
+        return Err(format!("{why}; not submitted"));
+    }
     let at_block = crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0);
     let Some(proof) =
         crate::matrix::work::verify_at(object, kind.as_str(), anchor, target, nonce, range, at_block)
@@ -291,13 +305,20 @@ pub async fn accept(
 
     let out = submit(app, object, kind, anchor, &proof, nonce, &signer).await;
     match &out {
-        Err(_) => {
-            // A cycle that failed for a transport reason may be answered
-            // again; one the chain rejected will simply fail the anchor check
-            // next time, which is cheaper than never trying again.
-            release(object, anchor);
+        Err(e) => {
+            /* A transport failure may be answered again. A refusal by the
+             * chain may NOT: the same cycle with the same nonce gets the same
+             * answer, and releasing it here had this machine re-spending a
+             * transaction on every re-post of the same proof. The claim
+             * stays until the cycle memory expires or the anchor moves. */
+            if !chain_refused(e) {
+                release(object, anchor);
+            }
         }
         Ok(tx) => {
+            // Say so where the proof came from, naming who computed it, so
+            // the helper's own card can count a job finished.
+            tell_the_room(guild_id, room_id, object, kind, anchor, tx, helper);
             /* Pay the person who did the work.
              *
              * This is the only place the reward loop closes for the ordinary
@@ -313,6 +334,49 @@ pub async fn accept(
         }
     }
     out.map(Some)
+}
+
+/// The chain said no, and will keep saying no for this cycle: wrong nonce
+/// for its clock, an empty planet, an owner who cannot afford the refine.
+/// Only a failure to REACH the chain is worth answering again.
+fn chain_refused(e: &str) -> bool {
+    e.contains("failed to execute message") || e.contains("cycle moved on") || e.contains("work failure")
+}
+
+/// A `done` frame back into the room the result came from.
+///
+/// Not evidence of anything — the transaction is — but it is how the helper's
+/// machine learns its proof was spent, and the only thing in the room that
+/// says whose work it was.
+fn tell_the_room(
+    guild_id: &str,
+    room_id: &str,
+    object: &str,
+    kind: TaskType,
+    anchor: u64,
+    tx: &str,
+    helper: Option<&str>,
+) {
+    if !crate::matrix::work::tx_hash_is_sound(tx) {
+        return;
+    }
+    let body = format!(
+        "Finished {} on {} from {}'s proof \u{2014} tx {}",
+        kind.as_str(),
+        object,
+        helper.unwrap_or("a crewmate"),
+        tx
+    );
+    let payload = json!({
+        "v": 1, "kind": "done", "task": kind.as_str(), "object": object,
+        "block_start": anchor, "tx": tx, "helper": helper,
+    });
+    let (guild, room, object) = (guild_id.to_string(), room_id.to_string(), object.to_string());
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::matrix::post_work(&guild, &room, &body, payload).await {
+            tlog("crew", Sev::Debug, format!("finished {object} but could not say so in the room: {e}"));
+        }
+    });
 }
 
 /// Record what a helper is owed for a proof we just submitted for them.
@@ -380,6 +444,7 @@ async fn submit(
         _ => None,
     };
 
+    let clock_planet = guard.as_ref().map(|g| g.planet_id.clone());
     crate::hasher::note_completion_in_flight(object, anchor);
     let res = crate::mcp::tx_retry::sign_with_retry_guarded(
         app,
@@ -391,6 +456,19 @@ async fn submit(
     )
     .await;
     crate::hasher::clear_completion_in_flight(object);
+    // The chain restarted the planet's clock at inclusion: tell the local
+    // source of truth now, or the harvest loop re-nominates this rig against
+    // the consumed anchor and grinds a proof the chain then refuses.
+    if let (Ok(v), Some(planet)) = (&res, clock_planet.as_ref()) {
+        let height = v
+            .get("height")
+            .and_then(|h| h.as_u64().or_else(|| h.as_str().and_then(|s| s.parse().ok())))
+            .filter(|h| *h > 0)
+            .unwrap_or_else(|| {
+                crate::game_state::GAME_STATE.read().ok().map(|g| g.current_block_height).unwrap_or(0)
+            });
+        crate::mcp::perception::note_clock_restart(planet, kind, crate::mcp::types::Block::new(height));
+    }
     res.map(|v| {
         v.get("transactionHash")
             .or_else(|| v.get("txhash"))
@@ -411,9 +489,10 @@ async fn object_owner(client: &CosmosClient, object: &str, kind: TaskType) -> Re
         .ok_or_else(|| format!("{object} has no owner on chain"))
 }
 
-/// The struct type's difficulty range for this kind of work, from OUR view of
-/// the world. `None` is a refusal, not a zero.
-fn difficulty_for(owner: &str, object: &str, kind: TaskType) -> Option<u64> {
+/// The struct type's difficulty range for this kind of work, and the planet
+/// whose clock it runs on, from OUR view of the world. `None` is a refusal,
+/// not a zero.
+fn task_view(owner: &str, object: &str, kind: TaskType) -> Option<(u64, Option<String>)> {
     if let Some(rows) = crate::mcp::perception::work_for_player(owner) {
         for r in rows {
             if r.get("object_id").and_then(|v| v.as_str()) == Some(object)
@@ -421,7 +500,8 @@ fn difficulty_for(owner: &str, object: &str, kind: TaskType) -> Option<u64> {
             {
                 let d = crate::mcp::perception::to_u64(r.get("difficulty_target"));
                 if d > 0 {
-                    return Some(d);
+                    let planet = r.get("planet_id").and_then(|p| p.as_str()).map(str::to_string);
+                    return Some((d, planet));
                 }
             }
         }
@@ -431,6 +511,7 @@ fn difficulty_for(owner: &str, object: &str, kind: TaskType) -> Option<u64> {
         .ok()
         .and_then(|gs| gs.get_difficulty_for_struct(object, kind.as_str()))
         .filter(|d| *d > 0)
+        .map(|d| (d, None))
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -483,6 +564,18 @@ mod tests {
     /// Without a chain read, we can only name a signer for an account we hold
     /// a key for. A stranger's object comes back `None` here and is then asked
     /// about ON CHAIN — a real grant to the primary is the only other way in.
+    /// The chain's no is final for the cycle; only not reaching it is worth
+    /// another try. Getting this backwards re-spends a transaction on every
+    /// re-post of the same refused proof.
+    #[test]
+    fn a_chain_refusal_is_final_and_a_transport_failure_is_not() {
+        assert!(chain_refused("failed to execute message; message index: 0: planet (2-29903) is empty, nothing to mine"));
+        assert!(chain_refused("cycle moved on: solved against 2572000, chain is at 2572700"));
+        assert!(chain_refused("work failure: hash does not meet difficulty"));
+        assert!(!chain_refused("timed out waiting for the signing bridge"));
+        assert!(!chain_refused("connection reset by peer"));
+    }
+
     #[test]
     fn a_key_we_hold_is_a_signer_and_a_stranger_is_a_question_for_the_chain() {
         assert_eq!(signer_for("1-194", "1-194"), Some(Signer::Own(0)));

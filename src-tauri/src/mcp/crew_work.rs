@@ -33,7 +33,7 @@
 //! and watches their own mining stop will turn it off and never turn it on
 //! again — and they would be right to.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -185,10 +185,36 @@ pub fn assign(tasks: &[CrewTask], members: &[String], me: &str, epoch: u64, take
     let mut ordered = tasks.to_vec();
     order_tasks(&mut ordered, epoch);
     let n = crew.len().max(1);
+    let len = ordered.len();
     // Wrapping the start is what turns "more machines than tasks" from idle
     // machines into several nonce searches on the same hard task.
-    let start = slot % ordered.len();
-    ordered.into_iter().skip(start).step_by(n).take(take).collect()
+    let start = slot % len;
+    let idx: Vec<usize> = if n <= len {
+        // Enough tasks to go round: a plain stride, disjoint by construction.
+        (start..len).step_by(n).take(take).collect()
+    } else {
+        /* More crewmates than tasks. The stride landed on the same index for
+         * every k once n was a multiple of len — a guild of 2,500 against 50
+         * ripe tasks — so a machine with four free slots took ONE task while
+         * the other forty-nine sat there. Walk the neighbours instead:
+         * distinct tasks, in an order every machine computes the same way.
+         * Two machines on one task is the nonce race the wrap already
+         * promised; two machines each idle on three slots is not. */
+        let step = (n % len).max(1);
+        let mut v: Vec<usize> = Vec::with_capacity(take.min(len));
+        for k in 0..len {
+            let i = (start + k * step) % len;
+            if v.contains(&i) {
+                break;
+            }
+            v.push(i);
+            if v.len() == take {
+                break;
+            }
+        }
+        v
+    };
+    idx.into_iter().map(|i| ordered[i].clone()).collect()
 }
 
 // ── Configuration ───────────────────────────────────────────────────────────
@@ -293,6 +319,38 @@ fn note_pass(epoch: u64, submitting: usize, reporting: usize, declined: usize, r
 pub fn note_helped(work: &crate::hasher::CrewWork, object_id: &str) {
     *HELPED.entry(work.owner_player.clone()).or_insert(0) += 1;
     let _ = object_id;
+}
+
+/// An owner told the room they spent a proof of ours (a `done` frame naming
+/// us as the helper). That is a finished job by any reading: we computed it,
+/// they paid the transaction, the chain took it.
+pub fn note_finished_by_owner(owner: &str) {
+    *HELPED.entry(owner.to_string()).or_insert(0) += 1;
+}
+
+/// Cycles we have already POSTED a proof for, `object -> anchor`.
+///
+/// The hasher forgets a borrowed task the moment its result goes out, so the
+/// next pass found the same task ripe, ground the identical puzzle and posted
+/// the identical nonce — every two minutes, for as long as the owner had not
+/// spent it (live 2026-09-12: 5-254363, three times in six minutes). A cycle
+/// can use exactly one proof; once ours is in the room there is nothing more
+/// this machine can add until the anchor moves.
+static REPORTED: LazyLock<dashmap::DashMap<String, u64>> = LazyLock::new(dashmap::DashMap::new);
+static REPORTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+pub fn note_reported(object: &str, anchor: u64) {
+    REPORTED.insert(object.to_string(), anchor);
+    REPORTED_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn reported_this_cycle(object: &str, anchor: u64) -> bool {
+    REPORTED.get(object).map(|a| *a == anchor).unwrap_or(false)
+}
+
+/// How many proofs we have posted to Comms for somebody else to spend.
+pub fn reported_total() -> u64 {
+    REPORTED_TOTAL.load(Ordering::Relaxed)
 }
 
 /// How many proofs we have finished for other people this session.
@@ -511,6 +569,14 @@ async fn start_one(
         );
         return Ok(Took::Declined);
     }
+    if reported_this_cycle(&t.object_id, t.block_start) {
+        tlog(
+            "crew",
+            Sev::Debug,
+            format!("{} left alone: our proof for cycle {} is already in the room", t.object_id, t.block_start),
+        );
+        return Ok(Took::Declined);
+    }
     /* Authority decides HOW we help, not WHETHER we help.
      *
      * Computing a proof needs no rights whatsoever — the grinding input is
@@ -635,6 +701,41 @@ fn guild_members(guild_id: &str) -> Vec<String> {
 ///
 /// Read straight from the perception snapshot, which already holds the whole
 /// galaxy — so a crew of fifty costs no extra chain reads to plan for.
+/// Is there anything for the chain to ACCEPT?
+///
+/// A nonce for an extractor on a drained planet, or for a refinery whose
+/// owner holds no ore, is a perfectly valid proof the chain refuses every
+/// time ("planet (2-29903) is empty, nothing to mine"), and because the
+/// refusal never moves the anchor the task reads as ripe forever. The first
+/// live crew pass found exactly this: a helper posted the same proof for
+/// 5-254363 every two minutes and the owner spent a transaction being refused
+/// each time. The harvest loop has carried this guard since the futile-mining
+/// incident; crew work needs the same one on BOTH ends.
+///
+/// `None` is unknown and is allowed through — a read failure must not silence
+/// a whole crew — only a reading of zero says no.
+pub fn worth_doing(task: TaskType, planet_ore: Option<u64>, owner_ore: Option<u64>) -> bool {
+    match task {
+        TaskType::Mine => planet_ore != Some(0),
+        TaskType::Refine => owner_ore != Some(0),
+        _ => true,
+    }
+}
+
+/// Why the chain would refuse this task right now, from our own reading of
+/// the world; `None` when it would not.
+pub fn nothing_to_do(task: TaskType, planet: Option<&str>, owner: &str) -> Option<String> {
+    let planet_ore = planet.and_then(crate::mcp::perception::ore_of);
+    let owner_ore = crate::mcp::perception::ore_of(owner);
+    if worth_doing(task, planet_ore, owner_ore) {
+        return None;
+    }
+    Some(match task {
+        TaskType::Mine => format!("planet {} is empty, nothing to mine", planet.unwrap_or("?")),
+        _ => format!("{owner} holds no ore to refine"),
+    })
+}
+
 fn ripe_tasks(members: &[String], me: &str, current_block: u64, threshold: u64) -> Vec<CrewTask> {
     let mut out = Vec::new();
     // Our own work is the harvest loop's job, not the crew's.
@@ -667,13 +768,17 @@ fn ripe_tasks(members: &[String], me: &str, current_block: u64, threshold: u64) 
             if !crate::mcp::auto_harvest::is_ripe(age, difficulty_target, threshold) {
                 continue;
             }
+            let planet_id = r.get("planet_id").and_then(|p| p.as_str()).map(str::to_string);
+            if nothing_to_do(task, planet_id.as_deref(), &pid).is_some() {
+                continue;
+            }
             out.push(CrewTask {
                 object_id: r.get("object_id").and_then(|o| o.as_str()).unwrap_or_default().to_string(),
                 owner_player: pid.clone(),
                 task,
                 block_start,
                 difficulty_target,
-                planet_id: r.get("planet_id").and_then(|p| p.as_str()).map(str::to_string),
+                planet_id,
             });
         }
     }
@@ -790,13 +895,56 @@ mod tests {
     fn more_machines_than_tasks_race_instead_of_idling() {
         let t = tasks(2);
         let m = members(5);
-        let mut total = 0;
+        let mut firsts: Vec<String> = Vec::new();
         for who in &m {
             let got = assign(&t, &m, who, 3, 4);
-            assert_eq!(got.len(), 1, "{who} should still have something to do");
-            total += got.len();
+            // Free slots race every task there is rather than idling on
+            // one; there are only two, so two.
+            assert_eq!(got.len(), 2, "{who} should race both tasks");
+            assert_ne!(got[0].object_id, got[1].object_id, "and not the same one twice");
+            firsts.push(got[0].object_id.clone());
         }
-        assert_eq!(total, 5);
+        // The task a machine starts on still spreads across the crew.
+        assert!(firsts.iter().any(|f| f != &firsts[0]), "everyone opened on the same task");
+    }
+
+    /// A guild of thousands against a handful of ripe tasks is the ordinary
+    /// shape, and the stride used to land on the same index for every slot
+    /// once the roster was a multiple of the task count.
+    #[test]
+    fn a_big_roster_still_fills_every_free_slot() {
+        let t = tasks(50);
+        let m = members(2500);
+        let got = assign(&t, &m, "1-1234", 9, 4);
+        assert_eq!(got.len(), 4);
+        let mut ids: Vec<_> = got.iter().map(|x| x.object_id.clone()).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "four slots, four different tasks");
+    }
+
+    /// The chain refuses a proof for an empty planet or a penniless refiner
+    /// every time, and the anchor never moves, so the task is ripe forever.
+    /// Unknown is not zero: a missing reading must not silence the crew.
+    #[test]
+    fn drained_work_is_not_worth_doing_but_unread_work_is() {
+        assert!(!worth_doing(TaskType::Mine, Some(0), Some(5)));
+        assert!(worth_doing(TaskType::Mine, Some(3), Some(0)));
+        assert!(worth_doing(TaskType::Mine, None, None));
+        assert!(!worth_doing(TaskType::Refine, Some(9), Some(0)));
+        assert!(worth_doing(TaskType::Refine, Some(0), Some(1)));
+        assert!(worth_doing(TaskType::Refine, None, None));
+        assert!(worth_doing(TaskType::Build, Some(0), Some(0)));
+    }
+
+    /// One proof per cycle: once ours is posted the task is left alone until
+    /// the anchor moves, and a new cycle is a new job.
+    #[test]
+    fn a_reported_cycle_is_remembered_until_the_anchor_moves() {
+        note_reported("5-777777", 100);
+        assert!(reported_this_cycle("5-777777", 100));
+        assert!(!reported_this_cycle("5-777777", 160));
+        assert!(!reported_this_cycle("5-777778", 100));
+        assert!(reported_total() >= 1);
     }
 
     #[test]

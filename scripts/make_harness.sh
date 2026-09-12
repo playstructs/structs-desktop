@@ -703,7 +703,7 @@ cat > "$FIX" <<'EOF'
           working: true, open_to_guild: null,
           they_can_help_me: 'granted', i_can_help_them: 'denied' },
       ],
-      player_id: '1-194', guild_id: '0-1', helping: true, taking: 1, helped: 12,
+      player_id: '1-194', guild_id: '0-1', helping: true, taking: 1, helped: 12, reported: 3,
       last_pass: { epoch: 42864, submitting: 1, reporting: 0, started: 1, declined: 0, ripe: 4, free: 3, members: 2, at_ms: 1789180818485 },
     },
     crew_help_guild: { ok: true, guild_id: '0-1', rank: 101 },

@@ -864,9 +864,8 @@ mod tests {
 /// Every frame is checked independently and against the chain. A room full of
 /// invented hashes costs one failed lookup each and credits nothing.
 pub fn absorb_done_frames(room_id: &str, messages: &[crate::matrix::client::Message]) {
-    if crew::get(room_id).is_none() {
-        return; // not a crew of ours
-    }
+    let ours = crew::get(room_id).is_some();
+    let me = crate::mcp::crew::primary_player().unwrap_or_default();
     for m in messages {
         if m.is_self {
             continue; // our own announcement is not a bill we owe ourselves
@@ -881,6 +880,19 @@ pub fn absorb_done_frames(room_id: &str, messages: &[crate::matrix::client::Mess
         ) else {
             continue;
         };
+        /* Somebody spent a proof WE computed. Not a bill — we did the work
+         * and they paid the transaction — but it is the only way the
+         * reporting path ever reads as "finished" on this machine, and a
+         * helper whose card says 0 forever concludes the feature is broken. */
+        if !me.is_empty() && w.get("helper").and_then(|h| h.as_str()) == Some(me.as_str()) {
+            let owner = crate::matrix::directory::player_id_of(&m.sender).unwrap_or_default();
+            crate::mcp::crew_work::note_finished_by_owner(&owner);
+            tlog("crew", Sev::Info, format!("{owner} finished {object} from our proof: {tx}"));
+            continue;
+        }
+        if !ours {
+            continue; // a claim is only a bill inside a crew of ours
+        }
         let room = room_id.to_string();
         tauri::async_runtime::spawn(async move {
             if let Err(e) = absorb_claim(&room, &tx, &object).await {
