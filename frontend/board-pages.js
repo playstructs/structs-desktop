@@ -4322,11 +4322,11 @@
       chips: [{ key: 'max_grants_per_scan', label: 'per scan' }],
     },
     crew_work: {
-      label: 'crew_work', icon: 'icon-mine', short: 'grind crewmates\' proofs when they are cheap',
+      label: 'cluster (work)', icon: 'icon-mine', short: 'grind the cluster\'s proofs when they are cheap',
       chips: [{ key: 'difficulty_threshold', label: 'difficulty' }, { key: 'max_slots', label: 'slots' }],
     },
     crew_submit: {
-      label: 'crew_submit', icon: 'icon-key', short: 'sign the proofs crewmates post to the bus',
+      label: 'cluster (sign)', icon: 'icon-key', short: 'sign the proofs pherals send',
       chips: [{ key: 'max_per_hour', label: 'per hour' }],
     },
   };

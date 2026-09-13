@@ -48,7 +48,7 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   await until(() => w.Board && w.Board.Terminal && w.Board.Terminal.WORDS);
   const T = w.Board.Terminal;
 
-  for (const [word, type] of [['CREW', 'crew'], ['HELPERS', 'crew'], ['CREWMATES', 'crew'],
+  for (const [word, type] of [['CLUSTER', 'crew'], ['ASSIMILATE', 'crew'], ['ASSIMILATION', 'crew'], ['PHERALS', 'crew'], ['PROXIES', 'crew'],
     ['BOUNTY', 'crewpay'], ['OWED', 'crewpay'], ['PAYOUTS', 'crewpay']]) {
     const p = T.parse(word);
     check(`${word} opens the ${type} card`, p && p.kind === 'card' && p.type === type,
@@ -95,8 +95,8 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
    * Matrix ROOM to turn into a crew — chat plumbing in front of a game
    * decision — and it was reported as extremely confusing. It now asks the
    * only question there is, and offers the only two answers. */
-  check('it asks who you want to help, not which room to configure',
-    /help/i.test(body) && !/room/i.test(body), body.slice(0, 240));
+  check('it asks you to assimilate, not which room to configure',
+    /assimilate/i.test(body) && !/room/i.test(body), body.slice(0, 240));
   check('…and the two answers are the guild and a person',
     buttons().some((b) => /My guild/.test(b)) && buttons().some((b) => /A friend/.test(b)),
     buttons().join(' | '));
@@ -122,7 +122,7 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   check('helping does NOT open your work as a side effect',
     helpCall && helpCall.args && helpCall.args.openMyWork === false, JSON.stringify(helpCall && helpCall.args));
   check('…the explicit door exists on each link, and says what it signs',
-    buttons().some((b) => /Let them finish mine|Close my work/.test(b)), buttons().join(' | '));
+    buttons().some((b) => /Make them my proxy|Revoke proxy/.test(b)), buttons().join(' | '));
 
   /* The confirm is INLINE. `confirmModal` did not appear at all when this card
    * was driven in its own popped-out window against the running app, so the
@@ -137,25 +137,25 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
    * anybody — so they say "finish", never "help": a Closed chip must not read
    * as "cannot help". */
   check('a person shows both directions of signing rights',
-    /JPEG/.test(body) && /they may finish mine/i.test(body) && /i may finish theirs/i.test(body), body.slice(0, 600));
+    /JPEG/.test(body) && /my proxy/i.test(body) && /their proxy/i.test(body), body.slice(0, 600));
   check('…and every link can be stopped', buttons().some((b) => /Stop/.test(b)));
   check('terms for anyone who helps show as a link with their rate',
-    /Anyone who helps/.test(body) && /per difficulty/.test(body) && /paying helpers\s*on|on\s*paying helpers/.test(body), body.slice(0, 700));
+    /Any pheral/.test(body) && /per difficulty/.test(body) && /paying pherals\s*on|on\s*paying pherals/.test(body), body.slice(0, 700));
   // A proof handed over Comms is work done, and the only visible trace of
   // the no-grant path; it shows once there is one (fixture: 3) and not as a
   // fourth zero before then.
   check('the bus reads as numbers: arrivals, the hour against its ceiling, proofs spent',
     /signed this hour/.test(body) && /60\D*of\D*60/.test(body) && /92\s*spent/.test(body), body.slice(0, 500));
   check('…and a ceiling that is losing proofs says so, and where the knob is',
-    /51 refused at the ceiling/.test(body) && /crew_submit/.test(body), body.slice(0, 500));
+    /51 refused at the ceiling/.test(body) && /cluster \(sign\)/.test(body), body.slice(0, 500));
   check('the two thresholds sit side by side: theirs to set, mine to read',
-    /Their work at difficulty/.test(body) && /4\s*mine at ≤/.test(body), body.slice(0, 500));
+    /Cluster work at difficulty/.test(body) && /4\s*mine at ≤/.test(body), body.slice(0, 500));
   check('rates published on the bus are listed for a helper, with the cap',
-    /Paying on the bus/.test(body) && /JPEG/.test(body) && /per difficulty/.test(body) && /up to/.test(body), body.slice(0, 900));
+    /Paying in the cluster/.test(body) && /JPEG/.test(body) && /per difficulty/.test(body) && /up to/.test(body), body.slice(0, 900));
   check('a node behind the chain is said in so many words, with the lag',
     /448 blocks behind the chain/.test(body) && /holding proofs/.test(body), body.slice(0, 700));
   check('recent activity is listed, newest first', /Recent/.test(body) && body.indexOf('spent 1-195') < body.indexOf('posted a proof'), body.slice(0, 500));
-  check('proofs posted to comms are counted on the card', /finished\D*3\D*posted/.test(body), body.slice(0, 400));
+  check('proofs posted to comms are counted on the card', /finished\D*3\D*sent to the cluster/.test(body), body.slice(0, 400));
 
   /* "It doesn't seem to be doing anything" has to be answerable FROM THE CARD.
    *
@@ -208,7 +208,7 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   else {
   check('the payout floor is shown and editable', /pays from/.test(body) && /Pay once owed/.test(body), body.slice(0, 400));
   check('…and offers to pay anyone who helps when no such terms exist',
-    /Pay anyone who helps/.test(body), body.slice(0, 300));
+    /Pay pherals/.test(body), body.slice(0, 300));
 
   check('the rate is per difficulty, not per proof', /10\u03bcg \/ difficulty/.test(body), body.slice(0, 200));
   // Money is on the game's own ladder here as everywhere else: 90 ualpha is

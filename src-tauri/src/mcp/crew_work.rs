@@ -397,7 +397,7 @@ pub fn feed() -> Vec<Value> {
 /// they paid the transaction, the chain took it.
 pub fn note_finished_by_owner(owner: &str, object: &str) {
     *HELPED.entry(owner.to_string()).or_insert(0) += 1;
-    note_event("finished", format!("{owner} spent our proof for {object}"));
+    note_event("finished", format!("{owner} assimilated our proof for {object}"));
 }
 
 /// Cycles we have already POSTED a proof for, `object -> anchor`.
@@ -414,7 +414,7 @@ static REPORTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub fn note_reported(object: &str, anchor: u64) {
     REPORTED.insert(object.to_string(), anchor);
     REPORTED_TOTAL.fetch_add(1, Ordering::Relaxed);
-    note_event("posted", format!("posted a proof for {object} (cycle {anchor})"));
+    note_event("posted", format!("sent {object} to the cluster (cycle {anchor})"));
 }
 
 pub fn reported_this_cycle(object: &str, anchor: u64) -> bool {

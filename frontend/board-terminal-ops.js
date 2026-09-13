@@ -175,8 +175,8 @@
   var PICKER_OPEN = {};
 
   T.register('crew', {
-    label: 'Crew',
-    describe: function () { return 'Crew'; },
+    label: 'Cluster',
+    describe: function () { return 'Cluster'; },
     cadenceMs: 20000,
     render: function (host, p, ctx) {
       if (PICKER_OPEN[ctx.id] && !ctx.first) return Promise.resolve();
@@ -196,11 +196,11 @@
         function stateSection() {
           if (!links.length) return;
           var state = [
-            ['helping', d.helping ? 'on' : 'off', null, d.helping ? 'live' : 'muted'],
+            ['you are', d.helping ? 'us' : 'me', null, d.helping ? 'live' : 'muted'],
             ['doing now', H.fmtInt(d.taking || 0), null, (d.taking || 0) ? 'live' : 'muted'],
             ['finished', H.fmtInt(d.helped || 0)],
           ];
-          if (d.reported) state.push(['posted', H.fmtInt(d.reported)]);
+          if (d.reported) state.push(['sent to the cluster', H.fmtInt(d.reported)]);
           host.appendChild(tiles(state));
           /* Two thresholds, side by side: how cheap somebody else's proof
            * must be before this machine grinds it, and the one the harvest
@@ -209,7 +209,7 @@
            * read together. */
           if (d.crew_threshold != null) {
             var th = H.el('div', 'tm-doors-row');
-            th.appendChild(H.field('Their work at difficulty ≤',
+            th.appendChild(H.field('Cluster work at difficulty ≤',
               H.stepper(Number(d.crew_threshold) || 1, { min: 1, max: 64, step: 1, width: '3.5em' }, function (nv) {
                 invoke('crew_threshold_set', { threshold: Number(nv) })
                   .then(refresh)
@@ -224,7 +224,7 @@
           if (lp && d.helping && !(d.taking || 0)) {
             if (!lp.ripe) {
               host.appendChild(H.stateBlock('info',
-                'Nothing ripe across ' + H.fmtInt(lp.members || 0) + ' crewmate(s).'));
+                'Nothing ripe across ' + H.fmtInt(lp.members || 0) + ' in the cluster.'));
             } else if (!lp.started) {
               host.appendChild(H.stateBlock('warning',
                 H.fmtInt(lp.ripe) + ' ready · ' + H.fmtInt(lp.declined || 0) + ' left alone'));
@@ -232,8 +232,8 @@
           }
           if (lp && lp.started) {
             host.appendChild(tiles([
-              ['signing here', H.fmtInt(lp.submitting || 0), null, (lp.submitting || 0) ? 'live' : 'muted'],
-              ['posting to comms', H.fmtInt(lp.reporting || 0), null, (lp.reporting || 0) ? 'live' : 'muted'],
+              ['as proxy', H.fmtInt(lp.submitting || 0), null, (lp.submitting || 0) ? 'live' : 'muted'],
+              ['as pheral', H.fmtInt(lp.reporting || 0), null, (lp.reporting || 0) ? 'live' : 'muted'],
               ['for pay', H.fmtInt(lp.paid || 0), null, (lp.paid || 0) ? 'live' : 'muted'],
             ]));
           }
@@ -246,12 +246,12 @@
           var atCeiling = !!bus.ceiling && (bus.signed_this_hour || 0) >= bus.ceiling;
           var paying = links.some(function (l) { return l.pay_enabled && l.rate; });
           host.appendChild(tiles([
-            ['bus', age == null ? 'quiet' : H.ago(bus.last_frame_ms) + ' ago', null,
+            ['cluster', age == null ? 'quiet' : H.ago(bus.last_frame_ms) + ' ago', null,
               age != null && age < 600000 ? 'live' : 'muted'],
             ['signed this hour', H.fmtInt(bus.signed_this_hour || 0) + ' of ' + H.fmtInt(bus.ceiling || 0), null,
               atCeiling ? 'warn' : null],
             ['spent', H.fmtInt(bus.accepted_total || 0)],
-            ['paying helpers', paying ? 'on' : 'off', null, paying ? 'live' : 'muted'],
+            ['paying pherals', paying ? 'on' : 'off', null, paying ? 'live' : 'muted'],
           ]));
           // The node we transact through, only when it is the problem: a
           // node behind the chain swallows every transaction, and nothing
@@ -263,14 +263,14 @@
           }
           if (bus.refused_ceiling) {
             host.appendChild(H.stateBlock('warning',
-              H.fmtInt(bus.refused_ceiling) + ' refused at the ceiling · CONFIG › crew_submit'));
+              H.fmtInt(bus.refused_ceiling) + ' refused at the ceiling · CONFIG › cluster (sign)'));
           }
         }
 
         function ratesSection() {
           var rates = (d.rates || []).slice(0, 5);
           if (!rates.length) return;
-          cap(host, 'Paying on the bus');
+          cap(host, 'Paying in the cluster');
           var rt = H.resultTable();
           rt.classList.add('list-short');
           rates.forEach(function (r) {
@@ -304,7 +304,7 @@
         }
 
         function doorsSection() {
-          cap(host, links.length ? 'Help someone else' : 'Who do you want to help?');
+          cap(host, links.length ? 'Assimilate more' : 'Assimilate');
           var pick = H.el('div', 'tm-doors-row');
           host.appendChild(pick);
           // One button, one call. Scope, role and switching the loop on all
@@ -313,7 +313,7 @@
           // the guild finish YOUR work is the separate door on the link.
           pick.appendChild(armed({
             label: 'My guild',
-            confirm: d.guild_id ? 'Start helping ' + d.guild_id + '?' : 'You are not in a guild',
+            confirm: d.guild_id ? 'Assimilate with ' + d.guild_id + '?' : 'You are not in a guild',
             enabled: !!d.guild_id,
             run: function () { return invoke('crew_help_guild', { openMyWork: false }); },
             after: refresh,
@@ -333,7 +333,7 @@
 
         function linkedSection() {
           if (!links.length) return;
-          cap(host, 'Linked');
+          cap(host, 'Assimilated');
           links.forEach(function (l) {
             var guild = l.kind === 'guild';
             if (l.kind === 'anyone') {
@@ -348,13 +348,13 @@
               doors.appendChild(armed({
                 label: 'Stop',
                 destructive: true,
-                confirm: 'Stop paying helpers?',
+                confirm: 'Stop paying pherals?',
                 run: function () { return invoke('crew_stop', { crewId: l.crew_id }); },
                 after: refresh,
               }));
               host.appendChild(H.resultRow({
                 icon: 'icon-send-alpha',
-                title: 'Anyone who helps',
+                title: 'Any pheral',
                 subtitle: l.pay_enabled && l.rate ? amt(l.rate, l.denom || 'ualpha') + ' per difficulty' : 'not paying',
                 chips: [H.statTile('paying', l.pay_enabled ? 'on' : 'off', null, l.pay_enabled ? 'live' : 'muted')],
                 action: doors,
@@ -362,19 +362,19 @@
               return;
             }
             var chips = guild
-              ? [H.statTile('they may finish mine', l.open_to_guild ? 'rank ≤ ' + l.open_to_guild : 'no', null, l.open_to_guild ? 'ok' : 'muted')]
-              : [authChip('they may finish mine', l.they_can_help_me),
-                 authChip('i may finish theirs', l.i_can_help_them)];
+              ? [H.statTile('my proxies', l.open_to_guild ? 'rank ≤ ' + l.open_to_guild : 'none', null, l.open_to_guild ? 'ok' : 'muted')]
+              : [authChip('my proxy', l.they_can_help_me),
+                 authChip('their proxy', l.i_can_help_them)];
             // Opening your work is the one thing here that signs a
             // transaction, so it is its own armed button and never a side
             // effect of helping. A guild opens by rank; a person by grant.
             var opened = guild ? !!l.open_to_guild : l.they_can_help_me === 'granted';
             var openDoor = armed({
-              label: opened ? 'Close my work' : 'Let them finish mine',
+              label: opened ? 'Revoke proxy' : 'Make them my proxy',
               destructive: opened,
               confirm: opened
-                ? (guild ? 'Stop the guild finishing your work?' : 'Withdraw ' + (l.name || l.subject) + '’s right to finish yours?')
-                : (guild ? 'Let anyone in ' + l.subject + ' finish your proofs?' : 'Let ' + (l.name || l.subject) + ' finish your proofs?'),
+                ? (guild ? 'Revoke the guild as your proxy?' : 'Revoke ' + (l.name || l.subject) + ' as your proxy?')
+                : (guild ? 'Make anyone in ' + l.subject + ' your proxy?' : 'Make ' + (l.name || l.subject) + ' your proxy?'),
               run: function () {
                 if (guild) return invoke(opened ? 'crew_close_guild' : 'crew_open_guild',
                   { guildId: l.subject, rank: 101, roomId: l.crew_id });
@@ -389,7 +389,7 @@
             row.appendChild(armed({
               label: 'Stop',
               destructive: true,
-              confirm: 'Close this and stop helping?',
+              confirm: 'Leave, and stop assimilating?',
               run: function () { return invoke('crew_stop', { crewId: l.crew_id }); },
               after: refresh,
             }));
@@ -505,8 +505,8 @@
           icon: pc ? null : 'icon-member',
           title: String(r.name || r.player_id), subtitle: String(r.player_id),
           action: armed({
-            label: 'Help them',
-            confirm: 'Start helping ' + (r.name || r.player_id) + '?',
+            label: 'Assimilate',
+            confirm: 'Assimilate with ' + (r.name || r.player_id) + '?',
             run: function () { return invoke('crew_help_player', { playerId: r.player_id, openMyWork: false }); },
             after: refresh || function () { T.refresh(ctx.id, true); },
           }),
@@ -528,7 +528,7 @@
     label: 'Bounty',
     describe: function (p) { return 'Bounty' + (p && p.room ? ' · ' + shortRoom(p.room) : ''); },
     cadenceMs: 30000,
-    params: [{ key: 'room', label: 'Crew room', kind: 'text', placeholder: '!crew:server' }],
+    params: [{ key: 'room', label: 'Cluster', kind: 'text', placeholder: 'helpers' }],
     render: function (host, p, ctx) {
       return invoke('crew_list').then(function (d) {
         var crews = (d && d.crews) || [];
@@ -540,8 +540,8 @@
         if (!crews.some(function (c) { return c.scope === 'anyone'; })) {
           var doors = H.el('div', 'tm-doors-row');
           doors.appendChild(armed({
-            label: 'Pay anyone who helps',
-            confirm: 'Set terms for anyone whose proof you spend?',
+            label: 'Pay pherals',
+            confirm: 'Set what pherals are paid?',
             run: function () { return invoke('crew_pay_anyone', {}); },
             after: function () { T.setParams(ctx.id, { room: 'helpers' }); T.refresh(ctx.id, true); },
           }));
@@ -591,7 +591,7 @@
               { key: 'min_payout', label: 'Pay once owed', kind: 'amount', value: String(pay.min_payout || 0) },
             ],
             confirm: function (v) {
-              return { title: 'Set this crew’s terms?', cta: 'Save', rows: [
+              return { title: 'Set the cluster’s terms?', cta: 'Save', rows: [
                 ['Token', String(v.denom)],
                 ['Rate', String(v.rate || 0) + ' per difficulty'],
                 ['Per helper', Number(v.per_helper_cap) ? String(v.per_helper_cap) : 'no cap'],

@@ -196,6 +196,9 @@ static TERMS_PUBLISHED: AtomicBool = AtomicBool::new(false);
 /// seconds to refuse the same event.
 static TERMS_NEXT_TRY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const TERMS_RETRY_MS: u64 = 5 * 60 * 1000;
+/// When the terms could only go out as a timeline event, they age out with
+/// the room's retention (a day on the bus) and are said again well inside it.
+const TERMS_REPUBLISH_MS: u64 = 6 * 60 * 60 * 1000;
 
 /// Publish once per session, when the guild is known and the bus is joined.
 /// The bus is joined during the first sync, a second after launch, when the
@@ -230,9 +233,14 @@ pub async fn publish_helpers_terms() {
         return;
     }
     match crate::matrix::publish_pay_terms(&guild, terms).await {
-        Ok(_) => {
+        Ok(crate::matrix::TermsMode::State) => {
             TERMS_PUBLISHED.store(true, Ordering::Relaxed);
-            tlog("crew", Sev::Info, "pay terms published on the bus".to_string());
+            tlog("crew", Sev::Info, "pay terms published on the bus (state)".to_string());
+        }
+        Ok(crate::matrix::TermsMode::Timeline) => {
+            // Not "published" for good: due again before retention eats it.
+            TERMS_NEXT_TRY_MS.store(now_millis() as u64 + TERMS_REPUBLISH_MS, Ordering::Relaxed);
+            tlog("crew", Sev::Info, "pay terms published on the bus (timeline; republished every 6 h)".to_string());
         }
         Err(e) => tlog("crew", Sev::Notice, format!("pay terms not published: {e}")),
     }

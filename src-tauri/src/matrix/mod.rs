@@ -1761,7 +1761,16 @@ pub async fn work_bus(guild_id: &str) -> Option<(String, String)> {
 }
 
 /// Put our pay terms on the bus as state keyed by our own user id.
-pub async fn publish_pay_terms(guild_id: &str, terms: Value) -> Result<String, String> {
+/// How the terms went out — which decides whether they must go out again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermsMode {
+    /// Room state: the server keeps the latest for good.
+    State,
+    /// A timeline event: subject to the room's retention, so republished.
+    Timeline,
+}
+
+pub async fn publish_pay_terms(guild_id: &str, terms: Value) -> Result<TermsMode, String> {
     // The cached room only: `work_bus` itself spawns this after joining,
     // and resolving through it here would make the future recursive.
     let bus = WORK_BUS
@@ -1770,7 +1779,19 @@ pub async fn publish_pay_terms(guild_id: &str, terms: Value) -> Result<String, S
         .and_then(|m| m.get(guild_id).cloned())
         .ok_or("no work bus joined yet to publish on")?;
     let session = session_for(guild_id)?;
-    client::send_state(&session, &bus, crate::mcp::crew_pay::PAY_STATE_TYPE, &session.user_id, terms).await
+    match client::send_state(&session, &bus, crate::mcp::crew_pay::PAY_STATE_TYPE, &session.user_id, terms.clone()).await {
+        Ok(_) => Ok(TermsMode::State),
+        /* A public room reserves state for power level 50; the bus's own
+         * levels grant nobody anything (`users: {}`), so as members we
+         * cannot set it — the live answer was `M_FORBIDDEN`. A timeline
+         * event of the same type is open to every member, is vouched for by
+         * its sender the same way, and only differs in being subject to the
+         * room's retention — so it is republished on a schedule. */
+        Err(e) if e.contains("M_FORBIDDEN") => client::send_event(&session, &bus, crate::mcp::crew_pay::PAY_STATE_TYPE, terms)
+            .await
+            .map(|_| TermsMode::Timeline),
+        Err(e) => Err(e),
+    }
 }
 
 /// Is this room the bus? Answered from the cache, so it is cheap enough for

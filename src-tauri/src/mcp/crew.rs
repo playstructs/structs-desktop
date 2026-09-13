@@ -130,7 +130,7 @@ pub fn helpers_crew(guild_id: &str) -> Crew {
     Crew {
         room_id: HELPERS_CREW.to_string(),
         guild_id: guild_id.to_string(),
-        name: "Anyone who helps".to_string(),
+        name: "Any pheral".to_string(),
         role: Role::Off,
         scope: Scope::Anyone,
         ..Default::default()

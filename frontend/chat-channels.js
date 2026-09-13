@@ -320,7 +320,7 @@
         var sys = el('a', 'sui-nav-btn');
         sys.id = 'chat-system-rooms';
         sys.href = 'javascript:void(0)';
-        sys.title = S.showSystem ? 'Hide the work bus' : 'Show the work bus';
+        sys.title = S.showSystem ? 'Hide the cluster' : 'Show the cluster';
         sys.appendChild(icon('icon-computer ' + (S.showSystem ? 'sui-text-primary' : 'sui-text-secondary')));
         sys.addEventListener('click', function () { S.showSystem = !S.showSystem; render(); });
         right.appendChild(sys);

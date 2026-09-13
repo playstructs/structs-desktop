@@ -1651,7 +1651,15 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 // can set, so the key IS the vouching. Read from any room:
                 // the authenticity is in the key, not the room.
                 t if t == crate::mcp::crew_pay::PAY_STATE_TYPE => {
-                    if let (Some(key), Some(c)) = (ev.get("state_key").and_then(|k| k.as_str()), content) {
+                    // As state the key is the payer's id; as a timeline
+                    // event (the fallback where members may not set
+                    // state) the sender is — and the homeserver vouches for
+                    // the sender exactly as it vouches for a state key.
+                    let key = ev
+                        .get("state_key")
+                        .and_then(|k| k.as_str())
+                        .or_else(|| ev.get("sender").and_then(|k| k.as_str()));
+                    if let (Some(key), Some(c)) = (key, content) {
                         crate::mcp::crew_pay::note_terms_on_bus(key, c);
                     }
                 }
@@ -3863,16 +3871,23 @@ pub async fn send_state(
 /// bus stops being a wall of text anywhere but here, where it is drawn from
 /// the frame. See `work::EVENT_TYPE`.
 pub async fn send_work_event(session: &Session, room_id: &str, work: Value) -> Result<String, String> {
+    send_event(session, room_id, super::work::EVENT_TYPE, work).await
+}
+
+/// Send a timeline event of any type. Any member may, at the room's
+/// `events_default` — unlike state, which a public room reserves for power
+/// level 50 and up.
+pub async fn send_event(session: &Session, room_id: &str, etype: &str, content: Value) -> Result<String, String> {
     let txn = format!("structs{}{}", auth::now_secs(), TXN.fetch_add(1, Ordering::Relaxed));
     let url = format!(
         "{}/rooms/{}/send/{}/{}",
         base(session),
         urlseg(room_id),
-        urlseg(super::work::EVENT_TYPE),
+        urlseg(etype),
         urlseg(&txn)
     );
     let v = authed(session, move |c, s| {
-        c.put(&url).bearer_auth(&s.access_token).json(&work)
+        c.put(&url).bearer_auth(&s.access_token).json(&content)
     })
     .await?;
     v.get("event_id")

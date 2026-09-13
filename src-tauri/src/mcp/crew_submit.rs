@@ -303,7 +303,7 @@ pub fn drain_held(app: &tauri::AppHandle) {
             let out = accept(&app, &h.object, &h.task, h.anchor, &h.nonce, h.target.as_deref(), h.helper.as_deref(), &h.guild, &h.room).await;
             note_outcome(&out);
             match out {
-                Ok(Some(v)) => tlog("crew", Sev::Info, format!("finished {} from a crewmate's proof: {v}", h.object)),
+                Ok(Some(v)) => tlog("crew", Sev::Info, format!("finished {} from a pheral: {v}", h.object)),
                 Ok(None) => {}
                 Err(e) => tlog("crew", Sev::Debug, format!("{} not accepted: {e}", h.object)),
             }
@@ -383,7 +383,7 @@ pub fn absorb_result_frames(
                 Ok(Some(v)) => tlog(
                     "crew",
                     Sev::Info,
-                    format!("finished {object} from a crewmate's proof: {v}"),
+                    format!("finished {object} from a pheral: {v}"),
                 ),
                 Ok(None) => {}
                 Err(e) => tlog("crew", Sev::Debug, format!("{object} not accepted: {e}")),
@@ -496,7 +496,7 @@ pub async fn accept(
             if chain_refused(e) {
                 crate::mcp::crew_work::note_event(
                     "refused",
-                    format!("chain refused {}'s proof for {object}: {e}", helper.unwrap_or("a crewmate")),
+                    format!("chain refused {}'s proof for {object}: {e}", helper.unwrap_or("a pheral")),
                 );
             } else {
                 release(object, anchor);
@@ -505,7 +505,7 @@ pub async fn accept(
         Ok(tx) => {
             crate::mcp::crew_work::note_event(
                 "accepted",
-                format!("spent {}'s proof for {object}: {tx}", helper.unwrap_or("a crewmate")),
+                format!("assimilated {}'s proof for {object}: {tx}", helper.unwrap_or("a pheral")),
             );
             // Say so where the proof came from, naming who computed it, so
             // the helper's own card can count a job finished.
@@ -555,7 +555,7 @@ fn tell_the_room(
         "Finished {} on {} from {}'s proof \u{2014} tx {}",
         kind.as_str(),
         object,
-        helper.unwrap_or("a crewmate"),
+        helper.unwrap_or("a pheral"),
         tx
     );
     let payload = json!({
