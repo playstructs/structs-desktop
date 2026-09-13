@@ -375,6 +375,8 @@ pub fn note_event(app: &tauri::AppHandle, event: &GameEvent) {
             .get("height")
             .map(|h| num(Some(h)) as u64)
             .unwrap_or(0);
+        // The chain's live head, for the node-behind check.
+        crate::mcp::chain_health::note_live_head(height);
         // Engine gauges at the block boundary — the same numbers status
         // shows, sampled once a block so they can be drawn against time.
         let gate = crate::mcp::tx_gate::snapshot();

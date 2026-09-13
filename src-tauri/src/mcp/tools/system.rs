@@ -97,6 +97,7 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                     "tuner": crate::hasher::tuner::last_signal(),
                 },
                 "events": crate::mcp::events::table(),
+                "chain": crate::mcp::chain_health::status(),
                 "capacity": crate::mcp::capacity::snapshot(),
                 "telemetry": {
                     "dropped_messages": telemetry::dropped_count(),
@@ -286,6 +287,7 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 "sign_mode": crate::mcp::vplayer_bridge::sign_mode(),
                 "grass_source": crate::mcp::grass_native::source().name(),
                 "grass": crate::mcp::grass_native::health(),
+                "chain": crate::mcp::chain_health::status(),
                 "guild_auth": crate::mcp::guild_auth::health(),
                 "native_signer": crate::mcp::native_signer::health(),
                 "verify": crate::mcp::verify::health(),

@@ -1407,6 +1407,15 @@
     strip.appendChild(statTile('sync age', duration(age), null,
       syncBad ? 'bad' : 'ok'));
 
+    // The node we transact through, against the chain's live head. A node
+    // that is behind swallows every write; it read as "ok" here for 75
+    // minutes on 2026-09-12. Shown only once both heads are known.
+    var ch = h.chain || {};
+    if (ch.lag != null) {
+      strip.appendChild(statTile('node lag', ch.lag + ' block' + (ch.lag === 1 ? '' : 's'), null,
+        ch.stalled ? 'bad' : (ch.lag > 5 ? 'live' : 'ok')));
+    }
+
     var overdue = h.loops_overdue || [];
     var wedged = h.loops_wedged || [];
     strip.appendChild(statTile('loops overdue', overdue.length || '0', null,
@@ -1443,6 +1452,10 @@
         // Name the loops, don't just count them — "2 overdue" is not
         // actionable, "auto_raid overdue" is. (The snapshot reports names.)
         var notes = el('div', 'hblocked');
+        if (h.chain && h.chain.stalled) {
+          notes.appendChild(stateBlock('error', 'reactor node ' + (h.chain.lag || 0) +
+            ' blocks behind the chain \u2014 transactions sent to it will not land'));
+        }
         (h.loops_wedged || []).forEach(function (w) {
           notes.appendChild(stateBlock('error', w + ' wedged — its scan has been running long enough ' +
             'that the single-flight guard never cleared'));

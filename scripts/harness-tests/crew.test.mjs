@@ -152,6 +152,8 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
     /Their work at difficulty/.test(body) && /4\s*mine at ≤/.test(body), body.slice(0, 500));
   check('rates published on the bus are listed for a helper, with the cap',
     /Paying on the bus/.test(body) && /JPEG/.test(body) && /per difficulty/.test(body) && /up to/.test(body), body.slice(0, 900));
+  check('a node behind the chain is said in so many words, with the lag',
+    /448 blocks behind the chain/.test(body) && /holding proofs/.test(body), body.slice(0, 700));
   check('recent activity is listed, newest first', /Recent/.test(body) && body.indexOf('spent 1-195') < body.indexOf('posted a proof'), body.slice(0, 500));
   check('proofs posted to comms are counted on the card', /finished\D*3\D*posted/.test(body), body.slice(0, 400));
 

@@ -11,6 +11,7 @@ pub mod config;
 pub mod config_store;
 pub mod cache_store;
 pub mod cosmos_client;
+pub mod chain_health;
 pub mod crew;
 pub mod crew_pay;
 pub mod crew_submit;

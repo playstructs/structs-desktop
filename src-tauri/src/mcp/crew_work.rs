@@ -454,10 +454,17 @@ pub fn helped_tally() -> Value {
 pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     // Housekeeping that must not wait for helping to be switched on: proofs
     // held from before the world was loaded, and our own terms on the bus.
+    crate::mcp::chain_health::poll(app_handle, &CosmosClient::new()).await;
     crate::mcp::crew_submit::drain_held(app_handle);
     crate::mcp::crew_pay::ensure_terms_published().await;
     let cfg = get();
     if !cfg.enabled {
+        return;
+    }
+    // Nothing we grind can be spent while the node is behind; and a proof
+    // posted now for somebody else to spend meets the same node on their
+    // machine. Every guild transacts through the same reactor endpoint.
+    if crate::mcp::chain_health::lcd_stalled() {
         return;
     }
     let now = now_millis();

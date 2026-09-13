@@ -77,14 +77,19 @@ pub struct Terms {
 /// What we publish for a crew's pay. Off is published too — a rate that
 /// was withdrawn must not go on being advertised.
 pub fn terms_of(pay: &Pay) -> Value {
+    // Amounts travel as STRINGS. Matrix canonical JSON has no floats — the
+    // homeserver refused the first publish with `M_BAD_JSON: Bad JSON
+    // value: float` — and the chain's own APIs already carry every amount
+    // as a string, so this is the wire's convention, not a workaround.
+    let amt = |x: f64| -> String { format!("{x}") };
     json!({
         "v": 1,
         "enabled": pay.enabled && pay.rate_per_difficulty > 0.0,
         "denom": pay.denom,
-        "rate_per_difficulty": pay.rate_per_difficulty,
-        "epoch_cap": pay.epoch_cap,
-        "per_helper_cap": pay.per_helper_cap,
-        "min_payout": pay.min_payout,
+        "rate_per_difficulty": amt(pay.rate_per_difficulty),
+        "epoch_cap": amt(pay.epoch_cap),
+        "per_helper_cap": amt(pay.per_helper_cap),
+        "min_payout": amt(pay.min_payout),
     })
 }
 
@@ -95,8 +100,14 @@ pub fn parse_terms(content: &Value) -> Option<Terms> {
     if content.get("v").and_then(|v| v.as_u64()) != Some(1) {
         return None;
     }
+    // A string is the published form; a bare number is accepted too, for
+    // any client that writes one. Anything unparseable reads as 0.
     let num = |k: &str| -> Option<f64> {
-        let x = content.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let v = content.get(k);
+        let x = v
+            .and_then(|v| v.as_f64())
+            .or_else(|| v.and_then(|v| v.as_str()).and_then(|s| s.trim().parse::<f64>().ok()))
+            .unwrap_or(0.0);
         (x.is_finite() && x >= 0.0).then_some(x)
     };
     let denom = content.get("denom").and_then(|d| d.as_str()).unwrap_or("");
@@ -180,6 +191,11 @@ pub fn rates_by_player() -> std::collections::HashMap<String, f64> {
 
 /// Whether this session has managed to publish its terms yet.
 static TERMS_PUBLISHED: AtomicBool = AtomicBool::new(false);
+/// Not before this instant, after a failure: the tick runs every few
+/// seconds and the first live launch asked the homeserver twice every ten
+/// seconds to refuse the same event.
+static TERMS_NEXT_TRY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const TERMS_RETRY_MS: u64 = 5 * 60 * 1000;
 
 /// Publish once per session, when the guild is known and the bus is joined.
 /// The bus is joined during the first sync, a second after launch, when the
@@ -189,10 +205,15 @@ pub async fn ensure_terms_published() {
     if TERMS_PUBLISHED.load(Ordering::Relaxed) {
         return;
     }
+    let now = now_millis() as u64;
+    if now < TERMS_NEXT_TRY_MS.load(Ordering::Relaxed) {
+        return;
+    }
     let guild = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.guild_id.clone()).unwrap_or_default();
     if guild.is_empty() {
         return;
     }
+    TERMS_NEXT_TRY_MS.store(now + TERMS_RETRY_MS, Ordering::Relaxed);
     publish_helpers_terms().await;
 }
 
@@ -201,8 +222,8 @@ pub async fn publish_helpers_terms() {
     let terms = match crew::get(crew::HELPERS_CREW) {
         Some(c) => terms_of(&c.pay),
         None => json!({ "v": 1, "enabled": false, "denom": "ualpha",
-                        "rate_per_difficulty": 0.0, "epoch_cap": 0.0, "per_helper_cap": 0.0,
-                        "min_payout": 0.0 }),
+                        "rate_per_difficulty": "0", "epoch_cap": "0", "per_helper_cap": "0",
+                        "min_payout": "0" }),
     };
     let guild = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.guild_id.clone()).unwrap_or_default();
     if guild.is_empty() {
@@ -927,6 +948,20 @@ mod tests {
         assert_eq!(words.rate_per_difficulty, 0.0, "a rate that is not a number pays nothing");
         assert!(parse_terms(&json!({ "v": 1, "denom": "<b>x</b>" })).is_none(), "a denom is not markup");
         assert!(parse_terms(&json!({ "v": 1 })).is_none(), "no denom, no terms");
+        // Nothing published may be a float: Matrix canonical JSON forbids it.
+        fn no_floats(v: &Value) -> bool {
+            match v {
+                Value::Number(n) => n.is_i64() || n.is_u64(),
+                Value::Array(a) => a.iter().all(no_floats),
+                Value::Object(o) => o.values().all(no_floats),
+                _ => true,
+            }
+        }
+        let mut p = Pay::default();
+        p.rate_per_difficulty = 12.5;
+        assert!(no_floats(&terms_of(&p)), "{}", terms_of(&p));
+        assert_eq!(parse_terms(&terms_of(&p)).unwrap().rate_per_difficulty, 12.5, "and the string reads back exactly");
+        assert_eq!(parse_terms(&json!({ "v": 1, "denom": "ualpha", "rate_per_difficulty": 7 })).unwrap().rate_per_difficulty, 7.0, "a bare number still reads");
         // Published terms round-trip, and "on at zero" publishes as off.
         let mut pay = Pay::default();
         pay.enabled = true;

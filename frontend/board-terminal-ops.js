@@ -253,6 +253,14 @@
             ['spent', H.fmtInt(bus.accepted_total || 0)],
             ['paying helpers', paying ? 'on' : 'off', null, paying ? 'live' : 'muted'],
           ]));
+          // The node we transact through, only when it is the problem: a
+          // node behind the chain swallows every transaction, and nothing
+          // else on this card can explain a bus that is live and a spend
+          // count that has stopped.
+          if (bus.node_stalled) {
+            host.appendChild(H.stateBlock('error',
+              'node ' + H.fmtInt(bus.node_lag || 0) + ' blocks behind the chain \u2014 holding proofs until it catches up'));
+          }
           if (bus.refused_ceiling) {
             host.appendChild(H.stateBlock('warning',
               H.fmtInt(bus.refused_ceiling) + ' refused at the ceiling · CONFIG › crew_submit'));

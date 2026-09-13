@@ -711,7 +711,7 @@ cat > "$FIX" <<'EOF'
       player_id: '1-194', guild_id: '0-1', helping: true, taking: 1, helped: 12, reported: 3,
       rates: [{ payer: '1-61', name: 'JPEG', denom: 'ualpha', rate: 12, per_helper_cap: 300, min_payout: 100 }],
       crew_threshold: 8, own_threshold: 4,
-      bus: { signed_this_hour: 60, ceiling: 60, accepted_total: 92, refused_ceiling: 51, refused_other: 3, last_frame_ms: 1789180818485 },
+      bus: { signed_this_hour: 60, ceiling: 60, accepted_total: 92, refused_ceiling: 51, refused_other: 3, last_frame_ms: 1789180818485, node_lag: 448, node_stalled: true },
       feed: [
         { kind: 'accepted', text: 'spent 1-195\'s proof for 5-254363: ABCDEF', at_ms: 1789180818485 },
         { kind: 'posted', text: 'posted a proof for 5-262430 (cycle 2572000)', at_ms: 1789180800000 },

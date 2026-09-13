@@ -129,6 +129,8 @@ pub fn stats() -> Value {
         "refused_ceiling": REFUSED_CEILING.load(Ordering::Relaxed),
         "refused_other": REFUSED_OTHER.load(Ordering::Relaxed),
         "last_frame_ms": LAST_FRAME_MS.load(Ordering::Relaxed),
+        "node_lag": crate::mcp::chain_health::lcd_lag(),
+        "node_stalled": crate::mcp::chain_health::lcd_stalled(),
     })
 }
 
@@ -236,7 +238,10 @@ pub fn world_ready() -> bool {
         .read()
         .map(|g| !g.struct_types.is_empty() && g.current_block_height > 0)
         .unwrap_or(false);
-    gs_ok && crate::mcp::perception::with_snapshot(|_| ()).is_some()
+    // A node that is behind the chain takes a transaction and never gossips
+    // it. Held, not refused: the anchor does not move while the node is
+    // stuck, so the proof is as good when the node catches up as now.
+    gs_ok && crate::mcp::perception::with_snapshot(|_| ()).is_some() && !crate::mcp::chain_health::lcd_stalled()
 }
 
 /// A result that arrived before the world was loaded, kept to be judged
@@ -286,9 +291,15 @@ pub fn drain_held(app: &tauri::AppHandle) {
         Sev::Info,
         format!("world loaded: judging {} held result frame(s), {} too old", fresh.len(), stale.len()),
     );
-    for h in fresh {
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
+    /* One at a time, with a breath between. Judging 33 held frames in
+     * parallel at the first live launch put 33 signed transactions into
+     * the mempool inside a second: 27 came back `code 19` (already in the
+     * mempool cache — the retry layer re-broadcast bytes that were still
+     * queued) and the rest sat until they were dropped. The lane is the
+     * scarce resource, and a backlog is by definition not urgent. */
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for h in fresh {
             let out = accept(&app, &h.object, &h.task, h.anchor, &h.nonce, h.target.as_deref(), h.helper.as_deref(), &h.guild, &h.room).await;
             note_outcome(&out);
             match out {
@@ -296,9 +307,14 @@ pub fn drain_held(app: &tauri::AppHandle) {
                 Ok(None) => {}
                 Err(e) => tlog("crew", Sev::Debug, format!("{} not accepted: {e}", h.object)),
             }
-        });
-    }
+            tokio::time::sleep(std::time::Duration::from_millis(HELD_SPACING_MS)).await;
+        }
+    });
 }
+
+/// Between two held frames being judged: roughly a block, so each
+/// transaction has a chance to be included before the next is signed.
+const HELD_SPACING_MS: u64 = 3_000;
 
 /// Pick the result frames out of a batch of new messages and finish them.
 ///

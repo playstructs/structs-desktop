@@ -679,7 +679,11 @@ pub fn health_snapshot() -> Value {
     let bridge = crate::mcp::vplayer_bridge::health();
     let bridge_down =
         bridge["down"].as_bool().unwrap_or(false) && now - app_start > BRIDGE_GRACE_MS;
-    let status = if bridge_down || sync_stalled || !wedged.is_empty() {
+    // A reactor node behind the chain is the same severity as a dead bridge
+    // — every write is accepted and none lands — and it was equally
+    // invisible here: 75 minutes of "ok" on 2026-09-12 with nothing landing.
+    let node_behind = crate::mcp::chain_health::lcd_stalled();
+    let status = if bridge_down || sync_stalled || node_behind || !wedged.is_empty() {
         "degraded"
     } else if !overdue.is_empty() {
         "warn"
@@ -689,6 +693,7 @@ pub fn health_snapshot() -> Value {
     json!({
         "status": status,
         "signing_bridge": bridge,
+        "chain": crate::mcp::chain_health::status(),
         "grass": crate::mcp::grass_native::health(),
         "guild_auth": crate::mcp::guild_auth::health(),
         "sync_age_ms": sync_age_ms as u64,
