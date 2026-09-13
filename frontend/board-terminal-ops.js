@@ -267,6 +267,28 @@
           }
         }
 
+        function pheralsSection() {
+          /* Who is contributing to you: sent, spent, last heard from. The
+           * one list on this card with faces on it, and the natural place
+           * for a pay door later. Only once someone has. */
+          var ph = (d.pherals || []).slice(0, 8);
+          if (!ph.length) return;
+          cap(host, 'Pherals');
+          var pt = H.resultTable();
+          pt.classList.add('list-short');
+          ph.forEach(function (r) {
+            var pc = PC();
+            pt.appendChild(H.resultRow({
+              portrait: pc ? pc.portrait(null) : null,
+              icon: pc ? null : 'icon-member',
+              title: String(r.name || r.player),
+              subtitle: H.fmtInt(r.spent || 0) + ' spent of ' + H.fmtInt(r.sent || 0) + ' sent'
+                + (r.last_ms ? ' \u00b7 ' + H.ago(r.last_ms) + ' ago' : ''),
+            }));
+          });
+          host.appendChild(pt);
+        }
+
         function ratesSection() {
           var rates = (d.rates || []).slice(0, 5);
           if (!rates.length) return;
@@ -405,9 +427,9 @@
         }
 
         if (!links.length) {
-          doorsSection(); busSection(); ratesSection(); recentSection();
+          doorsSection(); busSection(); pheralsSection(); ratesSection(); recentSection();
         } else {
-          stateSection(); busSection(); linkedSection(); ratesSection(); recentSection(); doorsSection();
+          stateSection(); busSection(); linkedSection(); pheralsSection(); ratesSection(); recentSection(); doorsSection();
         }
       }).catch(function (e) { fail(host, 'crew', e); });
     },

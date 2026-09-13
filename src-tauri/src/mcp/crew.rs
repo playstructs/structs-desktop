@@ -1238,6 +1238,7 @@ pub async fn crew_links() -> Result<Value, String> {
         "feed": crate::mcp::crew_work::feed(),
         "bus": crate::mcp::crew_submit::stats(),
         "rates": crate::mcp::crew_pay::terms_on_bus(),
+        "pherals": crate::mcp::crew_submit::pherals(),
         // Two thresholds, deliberately: what we grind for others, and what
         // the harvest loop grinds for us.
         "crew_threshold": crate::mcp::crew_work::get().difficulty_threshold,

@@ -150,6 +150,8 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
     /51 refused at the ceiling/.test(body) && /cluster \(sign\)/.test(body), body.slice(0, 500));
   check('the two thresholds sit side by side: theirs to set, mine to read',
     /Cluster work at difficulty/.test(body) && /4\s*mine at ≤/.test(body), body.slice(0, 500));
+  check('the pherals contributing to you are listed with sent, spent and last heard from',
+    /Pherals/.test(body) && /Reactin/.test(body) && /12 spent of 15 sent/.test(body), body.slice(0, 900));
   check('rates published on the bus are listed for a helper, with the cap',
     /Paying in the cluster/.test(body) && /JPEG/.test(body) && /per difficulty/.test(body) && /up to/.test(body), body.slice(0, 900));
   check('a node behind the chain is said in so many words, with the lag',

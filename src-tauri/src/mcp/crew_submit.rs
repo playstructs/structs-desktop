@@ -119,6 +119,51 @@ pub fn note_outcome(outcome: &Result<Option<String>, String>) {
     };
 }
 
+// ── Who is contributing ─────────────────────────────────────────────────────
+//
+// Per pheral: what they sent, what we spent, when we last heard from them.
+// The owner's side of the cluster is otherwise a total with no faces on
+// it, and "who is actually doing this for me" is the first question a
+// player asks once anything is.
+
+#[derive(Default, Clone)]
+struct PheralTally {
+    sent: u64,
+    spent: u64,
+    last_ms: u64,
+}
+
+static PHERALS: LazyLock<dashmap::DashMap<String, PheralTally>> = LazyLock::new(dashmap::DashMap::new);
+
+fn note_pheral(helper: Option<&str>, spent: bool) {
+    let Some(h) = helper else { return };
+    let mut e = PHERALS.entry(h.to_string()).or_default();
+    if spent {
+        e.spent += 1;
+    } else {
+        e.sent += 1;
+        e.last_ms = now_millis() as u64;
+    }
+}
+
+/// Everyone who has sent us a proof this session, most recent first.
+pub fn pherals() -> Vec<Value> {
+    let mut out: Vec<(u64, Value)> = PHERALS
+        .iter()
+        .map(|e| {
+            let name = crate::matrix::directory::get(e.key()).map(|i| i.username).unwrap_or_default();
+            (e.last_ms, json!({
+                "player": e.key(), "name": name,
+                "sent": e.sent, "spent": e.spent, "last_ms": e.last_ms,
+            }))
+        })
+        .collect();
+    // Most recent first; the id breaks a tie so the list never reshuffles
+    // between two refreshes for no reason.
+    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1["player"].as_str().cmp(&b.1["player"].as_str())));
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
 /// The bus, as numbers: when a result last arrived, how much of the hour's
 /// ceiling is spent, and what was refused.
 pub fn stats() -> Value {
@@ -363,6 +408,7 @@ pub fn absorb_result_frames(
         // localpart here, and it is the only thing about the message that is
         // authenticated (by the homeserver, not by us).
         let helper = crate::matrix::directory::player_id_of(&m.sender);
+        note_pheral(helper.as_deref(), false);
         if !ready {
             // Not refused: kept. A proof judged against an empty world is
             // a proof thrown away.
@@ -503,6 +549,7 @@ pub async fn accept(
             }
         }
         Ok(tx) => {
+            note_pheral(helper, true);
             crate::mcp::crew_work::note_event(
                 "accepted",
                 format!("spent {}'s contribution for {object}: {tx}", helper.unwrap_or("a pheral")),
@@ -819,6 +866,28 @@ mod tests {
     /// than the window is left alone without a chain read.
     /// What arrives before the world is loaded is kept, not refused — and
     /// kept within a bound, so a very long outage cannot grow it forever.
+    /// A pheral is counted by what they sent and what we spent, and listed
+    /// most recently heard from first.
+    #[test]
+    fn pherals_are_tallied_by_sent_and_spent() {
+        PHERALS.clear();
+        note_pheral(Some("1-900001"), false);
+        note_pheral(Some("1-900001"), false);
+        note_pheral(Some("1-900001"), true);
+        note_pheral(Some("1-900002"), false);
+        note_pheral(None, false);
+        // Two notes inside one millisecond are a tie on time; the test is
+        // about the order, so give them distinct times explicitly.
+        PHERALS.get_mut("1-900001").unwrap().last_ms = 1_000;
+        PHERALS.get_mut("1-900002").unwrap().last_ms = 2_000;
+        let v = pherals();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0]["player"], "1-900002", "most recent first");
+        let one = v.iter().find(|p| p["player"] == "1-900001").unwrap();
+        assert_eq!((one["sent"].as_u64(), one["spent"].as_u64()), (Some(2), Some(1)));
+        PHERALS.clear();
+    }
+
     #[test]
     fn early_frames_are_held_within_a_bound() {
         let mk = |i: usize| Held {
