@@ -505,7 +505,7 @@ pub async fn accept(
         Ok(tx) => {
             crate::mcp::crew_work::note_event(
                 "accepted",
-                format!("assimilated {}'s proof for {object}: {tx}", helper.unwrap_or("a pheral")),
+                format!("spent {}'s contribution for {object}: {tx}", helper.unwrap_or("a pheral")),
             );
             // Say so where the proof came from, naming who computed it, so
             // the helper's own card can count a job finished.

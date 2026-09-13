@@ -48,7 +48,7 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   await until(() => w.Board && w.Board.Terminal && w.Board.Terminal.WORDS);
   const T = w.Board.Terminal;
 
-  for (const [word, type] of [['CLUSTER', 'crew'], ['ASSIMILATE', 'crew'], ['ASSIMILATION', 'crew'], ['PHERALS', 'crew'], ['PROXIES', 'crew'],
+  for (const [word, type] of [['CLUSTER', 'crew'], ['CONTRIBUTE', 'crew'], ['SYNC', 'crew'], ['SYNCHRONIZED', 'crew'], ['PHERALS', 'crew'], ['PROXIES', 'crew'],
     ['BOUNTY', 'crewpay'], ['OWED', 'crewpay'], ['PAYOUTS', 'crewpay']]) {
     const p = T.parse(word);
     check(`${word} opens the ${type} card`, p && p.kind === 'card' && p.type === type,
@@ -95,8 +95,8 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
    * Matrix ROOM to turn into a crew — chat plumbing in front of a game
    * decision — and it was reported as extremely confusing. It now asks the
    * only question there is, and offers the only two answers. */
-  check('it asks you to assimilate, not which room to configure',
-    /assimilate/i.test(body) && !/room/i.test(body), body.slice(0, 240));
+  check('it asks you to contribute, not which room to configure',
+    /contribute/i.test(body) && !/room/i.test(body), body.slice(0, 240));
   check('…and the two answers are the guild and a person',
     buttons().some((b) => /My guild/.test(b)) && buttons().some((b) => /A friend/.test(b)),
     buttons().join(' | '));

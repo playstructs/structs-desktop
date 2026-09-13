@@ -1590,13 +1590,13 @@
     MEMBERS: ['members', 'id'], ROSTER_OF: ['members', 'id'],
     // Placement: what can stand here, and in which free slot.
     BUILD: ['build', 'id'], DEPLOY: ['build', 'id'],
-    /* The Cluster: every machine's shared processing. Joining it is
-     * ASSIMILATION — the strategy of the game now — and the alternative is
-     * independence. `HELPERS` for the people; `BOUNTY` and `OWED` because
+    /* The Cluster: every machine's shared processing. You CONTRIBUTE work
+     * to it and are then SYNCHRONIZED with it — the strategy of the game
+     * now — and the alternative is independence. `HELPERS` for the people; `BOUNTY` and `OWED` because
      * the money question is asked in different words than the joining one.
      * The card's internal type stays `crew`; the word a player types is the
      * word the game uses. */
-    CLUSTER: ['crew'], ASSIMILATE: ['crew'], ASSIMILATION: ['crew'], PHERALS: ['crew'], PROXIES: ['crew'],
+    CLUSTER: ['crew'], CONTRIBUTE: ['crew'], SYNC: ['crew'], SYNCHRONIZED: ['crew'], PHERALS: ['crew'], PROXIES: ['crew'],
     BOUNTY: ['crewpay'], OWED: ['crewpay'], PAYOUTS: ['crewpay'],
   };
   Terminal.WORDS = WORDS;

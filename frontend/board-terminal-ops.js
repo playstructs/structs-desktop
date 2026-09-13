@@ -196,7 +196,7 @@
         function stateSection() {
           if (!links.length) return;
           var state = [
-            ['you are', d.helping ? 'us' : 'me', null, d.helping ? 'live' : 'muted'],
+            ['you are', d.helping ? 'in sync' : 'me', null, d.helping ? 'live' : 'muted'],
             ['doing now', H.fmtInt(d.taking || 0), null, (d.taking || 0) ? 'live' : 'muted'],
             ['finished', H.fmtInt(d.helped || 0)],
           ];
@@ -304,7 +304,7 @@
         }
 
         function doorsSection() {
-          cap(host, links.length ? 'Assimilate more' : 'Assimilate');
+          cap(host, links.length ? 'Contribute more' : 'Contribute');
           var pick = H.el('div', 'tm-doors-row');
           host.appendChild(pick);
           // One button, one call. Scope, role and switching the loop on all
@@ -313,7 +313,7 @@
           // the guild finish YOUR work is the separate door on the link.
           pick.appendChild(armed({
             label: 'My guild',
-            confirm: d.guild_id ? 'Assimilate with ' + d.guild_id + '?' : 'You are not in a guild',
+            confirm: d.guild_id ? 'Contribute to ' + d.guild_id + '?' : 'You are not in a guild',
             enabled: !!d.guild_id,
             run: function () { return invoke('crew_help_guild', { openMyWork: false }); },
             after: refresh,
@@ -333,7 +333,7 @@
 
         function linkedSection() {
           if (!links.length) return;
-          cap(host, 'Assimilated');
+          cap(host, 'Synchronized');
           links.forEach(function (l) {
             var guild = l.kind === 'guild';
             if (l.kind === 'anyone') {
@@ -389,7 +389,7 @@
             row.appendChild(armed({
               label: 'Stop',
               destructive: true,
-              confirm: 'Leave, and stop assimilating?',
+              confirm: 'Stop contributing, and leave?',
               run: function () { return invoke('crew_stop', { crewId: l.crew_id }); },
               after: refresh,
             }));
@@ -505,8 +505,8 @@
           icon: pc ? null : 'icon-member',
           title: String(r.name || r.player_id), subtitle: String(r.player_id),
           action: armed({
-            label: 'Assimilate',
-            confirm: 'Assimilate with ' + (r.name || r.player_id) + '?',
+            label: 'Contribute',
+            confirm: 'Contribute to ' + (r.name || r.player_id) + '?',
             run: function () { return invoke('crew_help_player', { playerId: r.player_id, openMyWork: false }); },
             after: refresh || function () { T.refresh(ctx.id, true); },
           }),

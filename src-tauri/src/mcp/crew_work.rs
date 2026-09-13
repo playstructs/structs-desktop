@@ -397,7 +397,7 @@ pub fn feed() -> Vec<Value> {
 /// they paid the transaction, the chain took it.
 pub fn note_finished_by_owner(owner: &str, object: &str) {
     *HELPED.entry(owner.to_string()).or_insert(0) += 1;
-    note_event("finished", format!("{owner} assimilated our proof for {object}"));
+    note_event("finished", format!("{owner} spent our contribution for {object}"));
 }
 
 /// Cycles we have already POSTED a proof for, `object -> anchor`.
