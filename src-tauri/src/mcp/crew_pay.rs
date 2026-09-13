@@ -178,6 +178,24 @@ pub fn rates_by_player() -> std::collections::HashMap<String, f64> {
         .unwrap_or_default()
 }
 
+/// Whether this session has managed to publish its terms yet.
+static TERMS_PUBLISHED: AtomicBool = AtomicBool::new(false);
+
+/// Publish once per session, when the guild is known and the bus is joined.
+/// The bus is joined during the first sync, a second after launch, when the
+/// guild id is not loaded yet — so the publish that fires then goes
+/// nowhere, and this one, from the crew tick, is the one that lands.
+pub async fn ensure_terms_published() {
+    if TERMS_PUBLISHED.load(Ordering::Relaxed) {
+        return;
+    }
+    let guild = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.guild_id.clone()).unwrap_or_default();
+    if guild.is_empty() {
+        return;
+    }
+    publish_helpers_terms().await;
+}
+
 /// Publish our "anyone who helps" terms — or their absence — on the bus.
 pub async fn publish_helpers_terms() {
     let terms = match crew::get(crew::HELPERS_CREW) {
@@ -191,7 +209,10 @@ pub async fn publish_helpers_terms() {
         return;
     }
     match crate::matrix::publish_pay_terms(&guild, terms).await {
-        Ok(_) => tlog("crew", Sev::Info, "pay terms published on the bus".to_string()),
+        Ok(_) => {
+            TERMS_PUBLISHED.store(true, Ordering::Relaxed);
+            tlog("crew", Sev::Info, "pay terms published on the bus".to_string());
+        }
         Err(e) => tlog("crew", Sev::Notice, format!("pay terms not published: {e}")),
     }
 }

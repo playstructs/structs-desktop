@@ -452,6 +452,10 @@ pub fn helped_tally() -> Value {
 
 /// One pass: for every crew we grind for, take our slice and start it.
 pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
+    // Housekeeping that must not wait for helping to be switched on: proofs
+    // held from before the world was loaded, and our own terms on the bus.
+    crate::mcp::crew_submit::drain_held(app_handle);
+    crate::mcp::crew_pay::ensure_terms_published().await;
     let cfg = get();
     if !cfg.enabled {
         return;

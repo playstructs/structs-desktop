@@ -226,6 +226,80 @@ pub fn fresh_enough(ts_ms: u64, now_ms: u64) -> bool {
     ts_ms == 0 || now_ms.saturating_sub(ts_ms) <= STALE_FRAME_MS
 }
 
+/// Is the world loaded enough to judge a proof? A launch replays the bus
+/// into the sync loop about one second in — before the perception snapshot
+/// and the struct-type table exist — and the first live restart refused 28
+/// valid frames with "cannot establish this task's difficulty range" for
+/// exactly that reason. None of them were ever seen again.
+pub fn world_ready() -> bool {
+    let gs_ok = crate::game_state::GAME_STATE
+        .read()
+        .map(|g| !g.struct_types.is_empty() && g.current_block_height > 0)
+        .unwrap_or(false);
+    gs_ok && crate::mcp::perception::with_snapshot(|_| ()).is_some()
+}
+
+/// A result that arrived before the world was loaded, kept to be judged
+/// once it is. Bounded, and still subject to the freshness window when it
+/// is finally looked at.
+#[derive(Clone)]
+struct Held {
+    guild: String,
+    room: String,
+    object: String,
+    task: String,
+    anchor: u64,
+    nonce: String,
+    target: Option<String>,
+    helper: Option<String>,
+    ts: u64,
+}
+
+const HOLD_MAX: usize = 200;
+static HELD: LazyLock<Mutex<Vec<Held>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn hold(h: Held) {
+    if let Ok(mut v) = HELD.lock() {
+        if v.len() < HOLD_MAX {
+            v.push(h);
+        }
+    }
+}
+
+/// Judge what was held, now that the world is loaded. Called from the
+/// crew tick and from the next batch of frames, whichever comes first.
+pub fn drain_held(app: &tauri::AppHandle) {
+    if !world_ready() {
+        return;
+    }
+    let held: Vec<Held> = match HELD.lock() {
+        Ok(mut v) => std::mem::take(&mut *v),
+        Err(_) => return,
+    };
+    if held.is_empty() {
+        return;
+    }
+    let now = now_millis() as u64;
+    let (fresh, stale): (Vec<Held>, Vec<Held>) = held.into_iter().partition(|h| fresh_enough(h.ts, now));
+    tlog(
+        "crew",
+        Sev::Info,
+        format!("world loaded: judging {} held result frame(s), {} too old", fresh.len(), stale.len()),
+    );
+    for h in fresh {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let out = accept(&app, &h.object, &h.task, h.anchor, &h.nonce, h.target.as_deref(), h.helper.as_deref(), &h.guild, &h.room).await;
+            note_outcome(&out);
+            match out {
+                Ok(Some(v)) => tlog("crew", Sev::Info, format!("finished {} from a crewmate's proof: {v}", h.object)),
+                Ok(None) => {}
+                Err(e) => tlog("crew", Sev::Debug, format!("{} not accepted: {e}", h.object)),
+            }
+        });
+    }
+}
+
 /// Pick the result frames out of a batch of new messages and finish them.
 ///
 /// Called from the Matrix sync loop, so a result completes whether or not the
@@ -241,8 +315,12 @@ pub fn absorb_result_frames(
     if !cfg.enabled {
         return;
     }
+    // Anything held from before the world was loaded goes first.
+    drain_held(app);
+    let ready = world_ready();
     let now = now_millis() as u64;
     let mut stale = 0usize;
+    let mut held = 0usize;
     for m in messages {
         if m.is_self {
             continue; // our own report; we are not our own helper
@@ -269,6 +347,16 @@ pub fn absorb_result_frames(
         // localpart here, and it is the only thing about the message that is
         // authenticated (by the homeserver, not by us).
         let helper = crate::matrix::directory::player_id_of(&m.sender);
+        if !ready {
+            // Not refused: kept. A proof judged against an empty world is
+            // a proof thrown away.
+            hold(Held {
+                guild: guild_id.to_string(), room: room_id.to_string(),
+                object, task, anchor, nonce, target, helper, ts: m.ts,
+            });
+            held += 1;
+            continue;
+        }
         let guild = guild_id.to_string();
         let room = room_id.to_string();
         let app = app.clone();
@@ -288,6 +376,9 @@ pub fn absorb_result_frames(
     }
     if stale > 0 {
         tlog("crew", Sev::Debug, format!("left {stale} stale result frame(s) alone — older than the freshness window"));
+    }
+    if held > 0 {
+        tlog("crew", Sev::Info, format!("holding {held} result frame(s) until the world is loaded"));
     }
 }
 
@@ -710,6 +801,22 @@ mod tests {
 
     /// The backlog a launch replays is mostly spent or dead; a frame older
     /// than the window is left alone without a chain read.
+    /// What arrives before the world is loaded is kept, not refused — and
+    /// kept within a bound, so a very long outage cannot grow it forever.
+    #[test]
+    fn early_frames_are_held_within_a_bound() {
+        let mk = |i: usize| Held {
+            guild: "0-1".into(), room: "!bus:h".into(), object: format!("5-{i}"), task: "MINE".into(),
+            anchor: 100, nonce: "1".into(), target: None, helper: None, ts: 0,
+        };
+        HELD.lock().unwrap().clear();
+        for i in 0..(HOLD_MAX + 25) {
+            hold(mk(i));
+        }
+        assert_eq!(HELD.lock().unwrap().len(), HOLD_MAX);
+        HELD.lock().unwrap().clear();
+    }
+
     #[test]
     fn old_frames_from_the_backlog_are_left_alone() {
         let now = 10_000_000_000u64;
