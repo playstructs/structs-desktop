@@ -88,20 +88,36 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
 
   if (!host) { console.log('  (skipping the rest: nothing rendered)'); }
   else {
-  const body = text(host);
+  // What the card says BEFORE anything is opened: the quiet view.
+  const quiet = text(host);
   const buttons = () => [...host.querySelectorAll('a.sui-screen-btn')].map((b) => text(b));
+  /* The card is quiet by default: one status line, the state, doors, and
+   * folded rows. The checks below read the sections, so open every fold
+   * and the Contribute door first — each click re-renders the card. */
+  const openAll = async () => {
+    for (let i = 0; i < 6; i++) {
+      const fold = [...host.querySelectorAll('.tm-fold')].find((f) => /\u25b8/.test(text(f)));
+      if (!fold) break;
+      fold.click();
+      await until(() => host.querySelectorAll('.tm-fold-body').length >= i + 1, 2000);
+    }
+    const contribute = [...host.querySelectorAll('a.sui-screen-btn')].find((b) => /^Contribute/.test(text(b)));
+    if (contribute) contribute.click();
+  };
+  await openAll();
+  const body = text(host);
 
   /* The whole point of the rewrite. The panel used to open by asking which
    * Matrix ROOM to turn into a crew — chat plumbing in front of a game
    * decision — and it was reported as extremely confusing. It now asks the
    * only question there is, and offers the only two answers. */
   check('it asks you to contribute, not which room to configure',
-    /contribute/i.test(body) && !/room/i.test(body), body.slice(0, 240));
+    /contribute/i.test(quiet) && !/room/i.test(quiet), quiet.slice(0, 240));
   check('…and the two answers are the guild and a person',
     buttons().some((b) => /My guild/.test(b)) && buttons().some((b) => /A friend/.test(b)),
     buttons().join(' | '));
   check('…with no role, scope, epoch or threshold to choose first',
-    !/(scope|epoch|slot|threshold|ripe|role)/i.test(body), body.slice(0, 300));
+    !/(scope|epoch|slot|ripe|role)/i.test(quiet), quiet.slice(0, 300));
 
   // Nothing that spends or signs may fire on a single click.
   const guild = [...host.querySelectorAll('a.sui-screen-btn')].find((b) => /My guild/.test(text(b)));
@@ -140,12 +156,12 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
     /JPEG/.test(body) && /my proxy/i.test(body) && /their proxy/i.test(body), body.slice(0, 600));
   check('…and every link can be stopped', buttons().some((b) => /Stop/.test(b)));
   check('terms for anyone who helps show as a link with their rate',
-    /Any pheral/.test(body) && /per difficulty/.test(body) && /paying pherals\s*on|on\s*paying pherals/.test(body), body.slice(0, 700));
+    /Any pheral/.test(body) && /per difficulty/.test(body) && /on\s*paying|paying\s*on/.test(body), body.slice(0, 700));
   // A proof handed over Comms is work done, and the only visible trace of
   // the no-grant path; it shows once there is one (fixture: 3) and not as a
   // fourth zero before then.
-  check('the bus reads as numbers: arrivals, the hour against its ceiling, proofs spent',
-    /signed this hour/.test(body) && /60\D*of\D*60/.test(body) && /92\s*spent/.test(body), body.slice(0, 500));
+  check('the status line reads as words: state, pherals, spent this hour, the node',
+    /in sync/.test(quiet) && /1 pheral/.test(quiet) && /60 spent this hour/.test(quiet) && /node 448 behind/.test(quiet), quiet.slice(0, 300));
   check('…and a ceiling that is losing proofs says so, and where the knob is',
     /51 refused at the ceiling/.test(body) && /cluster \(sign\)/.test(body), body.slice(0, 500));
   check('the two thresholds sit side by side: theirs to set, mine to read',

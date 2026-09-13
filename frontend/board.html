@@ -1416,6 +1416,31 @@
     /* The planet card draws no slots of its own any more: it embeds the live
        map, which draws them as art and animates them (see `mapFrame`). */
     .tm-doors-row { display: flex; flex-wrap: wrap; gap: var(--spacing-md); margin-top: var(--spacing-md); }
+    /* The Cluster card's quiet layout: one status line, one large state
+       word, doors, and folded rows. */
+    .tm-status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md) var(--spacing-lg);
+      padding: var(--spacing-md) var(--spacing-lg); border: 1px solid var(--border-subtle); background: var(--surface-neutral-body); }
+    .tm-status .fstat-l { color: var(--text-body); }
+    .tm-status .fstat-l.is-live { color: var(--text-warning); }
+    .tm-status .fstat-l.is-bad { color: var(--text-enemy-primary); }
+    .tm-status .fstat-l.is-sep { color: var(--text-hint); }
+    .tm-dots { display: flex; gap: var(--spacing-sm); margin-left: auto; }
+    .tm-dot { width: 10px; height: 10px; background: var(--border-subtle); }
+    .tm-dot.is-pheral { background: var(--text-warning); }
+    .tm-dot.is-proxy { background: var(--accent-primary); }
+    .tm-hero { display: flex; flex-direction: column; align-items: center; gap: var(--spacing-sm); padding: var(--spacing-xxl) 0 var(--spacing-lg); }
+    /* The game's display type, as its h1: the one word on the card meant
+       to be read first. */
+    .tm-hero-v { font-family: 'ExtremeHazard', sans-serif; font-size: 16px; line-height: 24px; text-transform: uppercase; color: var(--text-warning); }
+    .tm-hero-v.is-me { color: var(--text-hint); }
+    .tm-hero-l { letter-spacing: 1px; }
+    .tm-hero + .tm-doors-row { justify-content: center; margin-top: 0; }
+    .tm-folds { display: flex; flex-direction: column; margin-top: var(--spacing-lg); border-top: 1px solid var(--border-subtle); }
+    .tm-fold { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md);
+      padding: var(--spacing-md) var(--spacing-sm); border-bottom: 1px solid var(--border-subtle); cursor: pointer; user-select: none; -webkit-user-select: none; }
+    .tm-fold .fstat-l { color: var(--text-body); }
+    .tm-fold-caret { color: var(--text-hint); }
+    .tm-fold-body { padding: var(--spacing-sm) 0 var(--spacing-lg); border-bottom: 1px solid var(--border-subtle); }
     /* The ops cards: a strip of readings first, rows under it. */
     .tm-tiles { margin-bottom: var(--spacing-md); gap: var(--spacing-md) var(--spacing-xl); }
     .tm-tx { text-align: left; }

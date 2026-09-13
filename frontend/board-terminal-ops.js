@@ -173,6 +173,10 @@
    * froze this card's cadence at zero; now the card keeps refreshing and
    * simply leaves a body alone while somebody is typing in it. */
   var PICKER_OPEN = {};
+  /* Which folds are open, per card. The card is quiet by default — one
+   * status line, one state, doors — and everything else is a row you open.
+   * A refresh must not close what you opened. */
+  var FOLDS_OPEN = {};
 
   T.register('crew', {
     label: 'Cluster',
@@ -182,240 +186,170 @@
       if (PICKER_OPEN[ctx.id] && !ctx.first) return Promise.resolve();
       return invoke('crew_links').then(function (d) {
         var links = (d && d.links) || [];
+        var bus = d.bus || {};
+        var pherals = d.pherals || [];
+        var rates = d.rates || [];
+        var feed = d.feed || [];
+        var lp = d.last_pass;
         host.innerHTML = '';
+        var open = FOLDS_OPEN[ctx.id] || (FOLDS_OPEN[ctx.id] = {});
         function refresh() { PICKER_OPEN[ctx.id] = false; T.refresh(ctx.id, true); }
+        function lbl(text, mod) { return H.el('span', 'fstat-l' + (mod ? ' is-' + mod : ''), text); }
+        function sep() { return lbl('·', 'sep'); }
 
-        /* ── Sections, arranged by what the reader needs first ──────────
-         *
-         * Nobody linked yet: the question is the whole card, so it leads and
-         * the bus, rates and recent activity follow as context. Linked: the
-         * state leads, the links are the card, and "help someone else" is
-         * the afterthought it is. Every section draws nothing when it has
-         * nothing true to say. */
+        /* ── One status line ──────────────────────────────────────────
+         * Everything a glance needs, as words, plus one square per
+         * peripheral: amber for a pheral heard from this session, teal
+         * for a proxy you have granted. */
+        var status = H.el('div', 'tm-status');
+        status.appendChild(lbl(d.helping ? 'in sync' : 'me', d.helping ? 'live' : null));
+        status.appendChild(sep());
+        status.appendChild(lbl(plural(pherals.length, 'pheral')));
+        if (bus.ceiling) {
+          status.appendChild(sep());
+          status.appendChild(lbl(H.fmtInt(bus.signed_this_hour || 0) + ' spent this hour'));
+        }
+        if (bus.node_lag != null) {
+          status.appendChild(sep());
+          status.appendChild(lbl(bus.node_stalled ? 'node ' + H.fmtInt(bus.node_lag) + ' behind' : 'node ok', bus.node_stalled ? 'bad' : null));
+        }
+        var dots = H.el('div', 'tm-dots');
+        pherals.slice(0, 12).forEach(function () { dots.appendChild(H.el('div', 'tm-dot is-pheral')); });
+        links.filter(function (l) { return l.kind !== 'anyone' && (l.they_can_help_me === 'granted' || l.open_to_guild); })
+          .slice(0, 6).forEach(function () { dots.appendChild(H.el('div', 'tm-dot is-proxy')); });
+        if (dots.childNodes.length) status.appendChild(dots);
+        host.appendChild(status);
 
-        function stateSection() {
-          if (!links.length) return;
-          var state = [
-            ['you are', d.helping ? 'in sync' : 'me', null, d.helping ? 'live' : 'muted'],
-            ['doing now', H.fmtInt(d.taking || 0), null, (d.taking || 0) ? 'live' : 'muted'],
-            ['finished', H.fmtInt(d.helped || 0)],
-          ];
-          if (d.reported) state.push(['sent to the cluster', H.fmtInt(d.reported)]);
-          host.appendChild(tiles(state));
-          /* Two thresholds, side by side: how cheap somebody else's proof
-           * must be before this machine grinds it, and the one the harvest
-           * loop uses for your own rigs. The first is set here; the second
-           * is the harvest loop's own knob and is shown so the two can be
-           * read together. */
-          if (d.crew_threshold != null) {
-            var th = H.el('div', 'tm-doors-row');
-            th.appendChild(H.field('Cluster work at difficulty ≤',
-              H.stepper(Number(d.crew_threshold) || 1, { min: 1, max: 64, step: 1, width: '3.5em' }, function (nv) {
-                invoke('crew_threshold_set', { threshold: Number(nv) })
-                  .then(refresh)
-                  .catch(function (e) { Board.stamp && Board.stamp('crew: ' + e); });
-              })));
-            if (d.own_threshold != null) th.appendChild(H.statTile('mine at ≤', String(d.own_threshold), null, 'muted'));
-            host.appendChild(th);
-          }
-          var lp = d.last_pass;
-          // Why nothing is happening, as state: what was ripe and what was
-          // left alone. The reasons are the loop's own and are in its log.
-          if (lp && d.helping && !(d.taking || 0)) {
-            if (!lp.ripe) {
-              host.appendChild(H.stateBlock('info',
-                'Nothing ripe across ' + H.fmtInt(lp.members || 0) + ' in the cluster.'));
-            } else if (!lp.started) {
-              host.appendChild(H.stateBlock('warning',
-                H.fmtInt(lp.ripe) + ' ready · ' + H.fmtInt(lp.declined || 0) + ' left alone'));
-            }
-          }
-          if (lp && lp.started) {
-            host.appendChild(tiles([
-              ['as proxy', H.fmtInt(lp.submitting || 0), null, (lp.submitting || 0) ? 'live' : 'muted'],
-              ['as pheral', H.fmtInt(lp.reporting || 0), null, (lp.reporting || 0) ? 'live' : 'muted'],
-              ['for pay', H.fmtInt(lp.paid || 0), null, (lp.paid || 0) ? 'live' : 'muted'],
-            ]));
+        /* ── Trouble is never folded ───────────────────────────────── */
+        if (bus.node_stalled) {
+          host.appendChild(H.stateBlock('error',
+            'node ' + H.fmtInt(bus.node_lag || 0) + ' blocks behind the chain — holding proofs until it catches up'));
+        }
+        if (bus.refused_ceiling) {
+          host.appendChild(H.stateBlock('warning',
+            H.fmtInt(bus.refused_ceiling) + ' refused at the ceiling · CONFIG › cluster (sign)'));
+        }
+        if (lp && d.helping && !(d.taking || 0) && links.length) {
+          if (!lp.ripe) {
+            host.appendChild(H.stateBlock('info', 'Nothing ripe across ' + H.fmtInt(lp.members || 0) + ' in the cluster.'));
+          } else if (!lp.started) {
+            host.appendChild(H.stateBlock('warning', H.fmtInt(lp.ripe) + ' ready · ' + H.fmtInt(lp.declined || 0) + ' left alone'));
           }
         }
 
-        function busSection() {
-          var bus = d.bus || {};
-          if (!(bus.last_frame_ms || bus.accepted_total)) return;
-          var age = bus.last_frame_ms ? Date.now() - bus.last_frame_ms : null;
-          var atCeiling = !!bus.ceiling && (bus.signed_this_hour || 0) >= bus.ceiling;
-          var paying = links.some(function (l) { return l.pay_enabled && l.rate; });
-          host.appendChild(tiles([
-            ['cluster', age == null ? 'quiet' : H.ago(bus.last_frame_ms) + ' ago', null,
-              age != null && age < 600000 ? 'live' : 'muted'],
-            ['signed this hour', H.fmtInt(bus.signed_this_hour || 0) + ' of ' + H.fmtInt(bus.ceiling || 0), null,
-              atCeiling ? 'warn' : null],
-            ['spent', H.fmtInt(bus.accepted_total || 0)],
-            ['paying pherals', paying ? 'on' : 'off', null, paying ? 'live' : 'muted'],
-          ]));
-          // The node we transact through, only when it is the problem: a
-          // node behind the chain swallows every transaction, and nothing
-          // else on this card can explain a bus that is live and a spend
-          // count that has stopped.
-          if (bus.node_stalled) {
-            host.appendChild(H.stateBlock('error',
-              'node ' + H.fmtInt(bus.node_lag || 0) + ' blocks behind the chain \u2014 holding proofs until it catches up'));
+        /* ── The state, large, with whom ───────────────────────────── */
+        var hero = H.el('div', 'tm-hero');
+        hero.appendChild(H.el('div', 'tm-hero-v' + (d.helping ? '' : ' is-me'), d.helping ? 'in sync' : 'me'));
+        var with_ = [];
+        var guildLink = links.filter(function (l) { return l.kind === 'guild'; })[0];
+        var friends = links.filter(function (l) { return l.kind === 'player'; });
+        if (guildLink) with_.push(guildLink.name && guildLink.name !== 'My guild' ? guildLink.name : 'your guild');
+        if (friends.length) with_.push(friends.length === 1 ? (friends[0].name || friends[0].subject) : plural(friends.length, 'friend'));
+        hero.appendChild(H.el('div', 'fstat-l tm-hero-l',
+          d.helping && with_.length ? 'you are · with ' + with_.join(' and ')
+            : d.helping ? 'you are' : 'you are · on your own'));
+        host.appendChild(hero);
+
+        /* ── Doors ─────────────────────────────────────────────────────
+         * "Contribute" opens the two answers — my guild, a friend — in
+         * place. For a newcomer they are open already: the question is
+         * the card. "Pay pherals" is the bounty card's door. */
+        var doors = H.el('div', 'tm-doors-row');
+        var pickBox = H.el('div');
+        pickBox.hidden = !!links.length && !open.contribute;
+        doors.appendChild(armed({
+          label: links.length ? 'Contribute more' : 'Contribute',
+          toggle: function () { open.contribute = pickBox.hidden; pickBox.hidden = !pickBox.hidden; },
+        }));
+        var pay = H.el('a', 'sui-screen-btn sui-mod-default');
+        pay.href = 'javascript:void(0)';
+        pay.appendChild(H.el('span', null, 'Pay pherals'));
+        pay.addEventListener('click', function () { T.add('crewpay', { room: 'helpers' }); });
+        doors.appendChild(pay);
+        host.appendChild(doors);
+
+        var pick = H.el('div', 'tm-doors-row');
+        pick.style.justifyContent = 'center';
+        pick.appendChild(armed({
+          label: 'My guild',
+          confirm: d.guild_id ? 'Contribute to ' + d.guild_id + '?' : 'You are not in a guild',
+          enabled: !!d.guild_id,
+          run: function () { return invoke('crew_help_guild', { openMyWork: false }); },
+          after: refresh,
+        }));
+        var friendBox = H.el('div');
+        pick.appendChild(armed({
+          label: 'A friend',
+          toggle: function () {
+            friendBox.hidden = !friendBox.hidden;
+            PICKER_OPEN[ctx.id] = !friendBox.hidden;
+            if (!friendBox.hidden) friendPicker(friendBox, ctx, refresh);
+          },
+        }));
+        friendBox.hidden = true;
+        pickBox.appendChild(pick);
+        pickBox.appendChild(friendBox);
+        host.appendChild(pickBox);
+
+        /* ── Folds ─────────────────────────────────────────────────────
+         * Each is one row with a count; open, it shows the section it
+         * names. Nothing is drawn for a section with nothing in it. */
+        var folds = H.el('div', 'tm-folds');
+        function fold(key, label, build) {
+          var row = H.el('div', 'tm-fold');
+          row.setAttribute('data-fold', key);
+          row.appendChild(H.el('span', 'fstat-l', label));
+          row.appendChild(H.el('span', 'fstat-l tm-fold-caret', open[key] ? '▾' : '▸'));
+          row.addEventListener('click', function () { open[key] = !open[key]; T.refresh(ctx.id, true); });
+          folds.appendChild(row);
+          if (open[key]) {
+            var body = H.el('div', 'tm-fold-body');
+            build(body);
+            folds.appendChild(body);
           }
-          if (bus.refused_ceiling) {
-            host.appendChild(H.stateBlock('warning',
-              H.fmtInt(bus.refused_ceiling) + ' refused at the ceiling · CONFIG › cluster (sign)'));
-          }
         }
 
-        function pheralsSection() {
-          /* Who is contributing to you: sent, spent, last heard from. The
-           * one list on this card with faces on it, and the natural place
-           * for a pay door later. Only once someone has. */
-          var ph = (d.pherals || []).slice(0, 8);
-          if (!ph.length) return;
-          cap(host, 'Pherals');
-          var pt = H.resultTable();
-          pt.classList.add('list-short');
-          ph.forEach(function (r) {
-            var pc = PC();
-            pt.appendChild(H.resultRow({
-              portrait: pc ? pc.portrait(null) : null,
-              icon: pc ? null : 'icon-member',
-              title: String(r.name || r.player),
-              subtitle: H.fmtInt(r.spent || 0) + ' spent of ' + H.fmtInt(r.sent || 0) + ' sent'
-                + (r.last_ms ? ' \u00b7 ' + H.ago(r.last_ms) + ' ago' : ''),
-            }));
-          });
-          host.appendChild(pt);
-        }
-
-        function ratesSection() {
-          var rates = (d.rates || []).slice(0, 5);
-          if (!rates.length) return;
-          cap(host, 'Paying in the cluster');
-          var rt = H.resultTable();
-          rt.classList.add('list-short');
-          rates.forEach(function (r) {
-            rt.appendChild(H.resultRow({
-              icon: 'icon-send-alpha',
-              title: String(r.name || r.payer),
-              subtitle: amt(r.rate, r.denom || 'ualpha') + ' per difficulty'
-                + (r.per_helper_cap ? ' · up to ' + amt(r.per_helper_cap, r.denom || 'ualpha') + ' each' : '')
-                + (r.min_payout ? ' · paid from ' + amt(r.min_payout, r.denom || 'ualpha') : ''),
-            }));
-          });
-          host.appendChild(rt);
-        }
-
-        function recentSection() {
-          var feed = (d.feed || []).slice(0, 6);
-          if (!feed.length) return;
-          cap(host, 'Recent');
-          var FEED_ICON = { posted: 'icon-outgoing', finished: 'icon-success', accepted: 'icon-success',
-            refused: 'icon-blocked', credit: 'icon-send-alpha' };
-          var ft = H.resultTable();
-          ft.classList.add('list-short');
-          feed.forEach(function (f) {
-            ft.appendChild(H.resultRow({
-              icon: FEED_ICON[f.kind] || 'icon-info',
-              title: String(f.text || ''),
-              subtitle: f.at_ms ? H.ago(f.at_ms) + ' ago' : '',
-            }));
-          });
-          host.appendChild(ft);
-        }
-
-        function doorsSection() {
-          cap(host, links.length ? 'Contribute more' : 'Contribute');
-          var pick = H.el('div', 'tm-doors-row');
-          host.appendChild(pick);
-          // One button, one call. Scope, role and switching the loop on all
-          // follow from "I want to help my guild" and are done for you.
-          // Helping signs nothing: computing a proof needs no rights. Letting
-          // the guild finish YOUR work is the separate door on the link.
-          pick.appendChild(armed({
-            label: 'My guild',
-            confirm: d.guild_id ? 'Contribute to ' + d.guild_id + '?' : 'You are not in a guild',
-            enabled: !!d.guild_id,
-            run: function () { return invoke('crew_help_guild', { openMyWork: false }); },
-            after: refresh,
-          }));
-          var friendBox = H.el('div');
-          pick.appendChild(armed({
-            label: 'A friend',
-            toggle: function () {
-              friendBox.hidden = !friendBox.hidden;
-              PICKER_OPEN[ctx.id] = !friendBox.hidden;
-              if (!friendBox.hidden) friendPicker(friendBox, ctx, refresh);
-            },
-          }));
-          friendBox.hidden = true;
-          host.appendChild(friendBox);
-        }
-
-        function linkedSection() {
-          if (!links.length) return;
-          cap(host, 'Synchronized');
+        if (links.length) fold('sync', 'Synchronized · ' + H.fmtInt(links.length), function (body) {
           links.forEach(function (l) {
             var guild = l.kind === 'guild';
             if (l.kind === 'anyone') {
-              // Terms for whoever helps: a rate or none, a door to set it,
-              // and a way to stop. Nothing to open, nothing to grant.
-              var doors = H.el('div', 'tm-doors-row');
+              var ad = H.el('div', 'tm-doors-row');
               var setRate = H.el('a', 'sui-screen-btn sui-mod-primary');
               setRate.href = 'javascript:void(0)';
               setRate.appendChild(H.el('span', null, l.pay_enabled && l.rate ? 'Terms' : 'Set a rate'));
               setRate.addEventListener('click', function () { T.add('crewpay', { room: l.crew_id }); });
-              doors.appendChild(setRate);
-              doors.appendChild(armed({
-                label: 'Stop',
-                destructive: true,
-                confirm: 'Stop paying pherals?',
-                run: function () { return invoke('crew_stop', { crewId: l.crew_id }); },
-                after: refresh,
-              }));
-              host.appendChild(H.resultRow({
-                icon: 'icon-send-alpha',
-                title: 'Any pheral',
+              ad.appendChild(setRate);
+              ad.appendChild(armed({ label: 'Stop', destructive: true, confirm: 'Stop paying pherals?',
+                run: function () { return invoke('crew_stop', { crewId: l.crew_id }); }, after: refresh }));
+              body.appendChild(H.resultRow({
+                icon: 'icon-send-alpha', title: 'Any pheral',
                 subtitle: l.pay_enabled && l.rate ? amt(l.rate, l.denom || 'ualpha') + ' per difficulty' : 'not paying',
                 chips: [H.statTile('paying', l.pay_enabled ? 'on' : 'off', null, l.pay_enabled ? 'live' : 'muted')],
-                action: doors,
+                action: ad,
               }));
               return;
             }
             var chips = guild
               ? [H.statTile('my proxies', l.open_to_guild ? 'rank ≤ ' + l.open_to_guild : 'none', null, l.open_to_guild ? 'ok' : 'muted')]
-              : [authChip('my proxy', l.they_can_help_me),
-                 authChip('their proxy', l.i_can_help_them)];
-            // Opening your work is the one thing here that signs a
-            // transaction, so it is its own armed button and never a side
-            // effect of helping. A guild opens by rank; a person by grant.
+              : [authChip('my proxy', l.they_can_help_me), authChip('their proxy', l.i_can_help_them)];
             var opened = guild ? !!l.open_to_guild : l.they_can_help_me === 'granted';
-            var openDoor = armed({
+            var row = H.el('div', 'tm-doors-row');
+            row.appendChild(armed({
               label: opened ? 'Revoke proxy' : 'Make them my proxy',
               destructive: opened,
               confirm: opened
                 ? (guild ? 'Revoke the guild as your proxy?' : 'Revoke ' + (l.name || l.subject) + ' as your proxy?')
                 : (guild ? 'Make anyone in ' + l.subject + ' your proxy?' : 'Make ' + (l.name || l.subject) + ' your proxy?'),
               run: function () {
-                if (guild) return invoke(opened ? 'crew_close_guild' : 'crew_open_guild',
-                  { guildId: l.subject, rank: 101, roomId: l.crew_id });
-                return invoke(opened ? 'crew_revoke' : 'crew_grant',
-                  { helperPlayerId: l.subject, roomId: l.crew_id });
+                if (guild) return invoke(opened ? 'crew_close_guild' : 'crew_open_guild', { guildId: l.subject, rank: 101, roomId: l.crew_id });
+                return invoke(opened ? 'crew_revoke' : 'crew_grant', { helperPlayerId: l.subject, roomId: l.crew_id });
               },
               after: refresh,
-            });
-            var pc = PC();
-            var row = H.el('div', 'tm-doors-row');
-            row.appendChild(openDoor);
-            row.appendChild(armed({
-              label: 'Stop',
-              destructive: true,
-              confirm: 'Stop contributing, and leave?',
-              run: function () { return invoke('crew_stop', { crewId: l.crew_id }); },
-              after: refresh,
             }));
-            host.appendChild(H.resultRow({
+            row.appendChild(armed({ label: 'Stop', destructive: true, confirm: 'Stop contributing, and leave?',
+              run: function () { return invoke('crew_stop', { crewId: l.crew_id }); }, after: refresh }));
+            var pc = PC();
+            body.appendChild(H.resultRow({
               portrait: guild || !pc ? null : pc.portrait(null),
               icon: guild ? 'icon-guild' : (pc ? null : 'icon-member'),
               title: String(l.name || l.subject),
@@ -424,13 +358,67 @@
               action: row,
             }));
           });
-        }
+        });
 
-        if (!links.length) {
-          doorsSection(); busSection(); pheralsSection(); ratesSection(); recentSection();
-        } else {
-          stateSection(); busSection(); linkedSection(); pheralsSection(); ratesSection(); recentSection(); doorsSection();
-        }
+        if (pherals.length) fold('pherals', 'Pherals · ' + H.fmtInt(pherals.length), function (body) {
+          var pt = H.resultTable(); pt.classList.add('list-short');
+          pherals.slice(0, 8).forEach(function (r) {
+            var pc = PC();
+            pt.appendChild(H.resultRow({
+              portrait: pc ? pc.portrait(null) : null, icon: pc ? null : 'icon-member',
+              title: String(r.name || r.player),
+              subtitle: H.fmtInt(r.spent || 0) + ' spent of ' + H.fmtInt(r.sent || 0) + ' sent' + (r.last_ms ? ' · ' + H.ago(r.last_ms) + ' ago' : ''),
+            }));
+          });
+          body.appendChild(pt);
+        });
+
+        if (rates.length) fold('rates', 'Paying in the cluster · ' + H.fmtInt(rates.length), function (body) {
+          var rt = H.resultTable(); rt.classList.add('list-short');
+          rates.slice(0, 5).forEach(function (r) {
+            rt.appendChild(H.resultRow({
+              icon: 'icon-send-alpha', title: String(r.name || r.payer),
+              subtitle: amt(r.rate, r.denom || 'ualpha') + ' per difficulty'
+                + (r.per_helper_cap ? ' · up to ' + amt(r.per_helper_cap, r.denom || 'ualpha') + ' each' : '')
+                + (r.min_payout ? ' · paid from ' + amt(r.min_payout, r.denom || 'ualpha') : ''),
+            }));
+          });
+          body.appendChild(rt);
+        });
+
+        if (feed.length) fold('recent', 'Recent · ' + H.fmtInt(feed.length), function (body) {
+          var FEED_ICON = { posted: 'icon-outgoing', finished: 'icon-success', accepted: 'icon-success', refused: 'icon-blocked', credit: 'icon-send-alpha' };
+          var ft = H.resultTable(); ft.classList.add('list-short');
+          feed.slice(0, 6).forEach(function (f) {
+            ft.appendChild(H.resultRow({ icon: FEED_ICON[f.kind] || 'icon-info', title: String(f.text || ''),
+              subtitle: f.at_ms ? H.ago(f.at_ms) + ' ago' : '' }));
+          });
+          body.appendChild(ft);
+        });
+
+        if (d.crew_threshold != null) fold('thresholds',
+          'Thresholds · cluster ≤ ' + H.fmtInt(d.crew_threshold) + (d.own_threshold != null ? ' · mine ≤ ' + H.fmtInt(d.own_threshold) : ''),
+          function (body) {
+            var th = H.el('div', 'tm-doors-row');
+            th.appendChild(H.field('Cluster work at difficulty ≤',
+              H.stepper(Number(d.crew_threshold) || 1, { min: 1, max: 64, step: 1, width: '3.5em' }, function (nv) {
+                invoke('crew_threshold_set', { threshold: Number(nv) }).then(refresh)
+                  .catch(function (e) { Board.stamp && Board.stamp('crew: ' + e); });
+              })));
+            if (d.own_threshold != null) th.appendChild(H.statTile('mine at ≤', String(d.own_threshold), null, 'muted'));
+            body.appendChild(th);
+            if (lp && lp.started) {
+              body.appendChild(tiles([
+                ['as proxy', H.fmtInt(lp.submitting || 0), null, (lp.submitting || 0) ? 'live' : 'muted'],
+                ['as pheral', H.fmtInt(lp.reporting || 0), null, (lp.reporting || 0) ? 'live' : 'muted'],
+                ['for pay', H.fmtInt(lp.paid || 0), null, (lp.paid || 0) ? 'live' : 'muted'],
+                ['finished', H.fmtInt(d.helped || 0)],
+                ['sent to the cluster', H.fmtInt(d.reported || 0)],
+              ]));
+            }
+          });
+
+        if (folds.childNodes.length) host.appendChild(folds);
       }).catch(function (e) { fail(host, 'crew', e); });
     },
   });
