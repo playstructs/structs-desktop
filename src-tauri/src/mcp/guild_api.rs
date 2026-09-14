@@ -104,6 +104,99 @@ struct EnvelopeWithTotal {
 /// Does a walk continue after a page of `this_len` rows, given the first
 /// page had `first_len`? The first page reveals the server's real page size
 /// (whatever `?limit=` it clamped to); any shorter page is the last.
+/// The roles the indexer writes on `structs.planet_activity_player` — the
+/// server's own allowlist (`TableReadManager::PLANET_ACTIVITY_PLAYER_ROLES`).
+pub const ACTIVITY_ROLES: &[&str] = &[
+    "attacker", "target", "owner", "planet_owner", "defender", "protected", "fleet_owner",
+];
+
+/// The categories the per-player feed serves (the server's
+/// `PLANET_ACTIVITY_PLAYER_CATEGORIES`); anything else is a 400.
+pub const ACTIVITY_CATEGORIES: &[&str] = &[
+    "struct_attack", "raid_status", "fleet_arrive", "fleet_depart", "struct_status",
+    "struct_health", "struct_move", "struct_block_build_start", "struct_block_ore_mine_start",
+    "struct_block_ore_refine_start", "struct_defense_add", "struct_defense_remove",
+    "shield_change", "block_raid_start",
+];
+
+/// What `planet_activity_by_player` asks the feed for. `Default` is the
+/// whole feed, every role, collapsed to one row per event.
+#[derive(Clone, Debug, Default)]
+pub struct ActivityFilter {
+    pub category: Option<String>,
+    /// One of `ACTIVITY_ROLES`. Refused (not ignored) on a guild that does
+    /// not filter by role — see `activity_roles_supported`.
+    pub role: Option<String>,
+    /// Only rows with `block_height > since_height`. Applied server-side
+    /// where the guild knows the parameter and client-side always.
+    pub since_height: Option<u64>,
+}
+
+impl ActivityFilter {
+    /// The query string, `?`-prefixed, or empty. `limit` is NOT here — the
+    /// page reader appends it.
+    pub fn query_string(&self) -> String {
+        let mut q: Vec<String> = Vec::new();
+        if let Some(c) = self.category.as_deref().filter(|c| !c.is_empty()) {
+            q.push(format!("category={c}"));
+        }
+        if let Some(r) = self.role.as_deref().filter(|r| !r.is_empty()) {
+            q.push(format!("role={r}"));
+        }
+        if let Some(h) = self.since_height {
+            q.push(format!("since_height={h}"));
+        }
+        if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) }
+    }
+}
+
+/// Drop rows at or below the high-water mark. A row with no readable
+/// `block_height` is kept: the feed has always carried the column, so its
+/// absence is a shape we have not seen, not a row below the mark.
+pub fn apply_since_height(mut rows: Vec<Value>, since: Option<u64>) -> Vec<Value> {
+    let Some(since) = since else { return rows };
+    rows.retain(|r| {
+        r.get("block_height")
+            .and_then(|h| h.as_u64().or_else(|| h.as_str().and_then(|s| s.trim().parse().ok())))
+            .map(|h| h > since)
+            .unwrap_or(true)
+    });
+    rows
+}
+
+/// A role no indexer will ever write; the probe asks for it on purpose.
+const ROLE_PROBE_VALUE: &str = "probe";
+pub const ROLE_FILTER_UNSUPPORTED: &str =
+    "the guild does not filter activity by role yet — an older guild API ignores the parameter and would answer every role";
+static ACTIVITY_ROLE_PROBE: std::sync::Mutex<Option<(bool, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// Read the probe: a 400 naming `role_invalid` is the new server saying no
+/// to a bad role (so it WOULD honour a good one); a 200 is the old server
+/// ignoring the parameter. Anything else is a real failure to surface.
+pub fn classify_role_probe(probe: &Result<Value, String>) -> Result<bool, String> {
+    match probe {
+        Ok(_) => Ok(false),
+        Err(e) if e.contains("role_invalid") => Ok(true),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+/// `data` of a validated envelope as a list (`null` → empty).
+fn envelope_rows(env: &Value) -> Result<Vec<Value>, String> {
+    match env.get("data") {
+        Some(Value::Array(a)) => Ok(a.clone()),
+        Some(Value::Null) | None => Ok(vec![]),
+        Some(other) => Err(format!("expected a list, got {other}")),
+    }
+}
+
+/// `meta.height` of an envelope, when the caller asked for it.
+fn envelope_height(env: &Value) -> Option<u64> {
+    env.get("meta")
+        .and_then(|m| m.get("height"))
+        .and_then(|h| h.as_u64().or_else(|| h.as_str().and_then(|s| s.parse().ok())))
+}
+
 pub fn page_walk_continues(first_len: usize, this_len: usize) -> bool {
     first_len > 0 && this_len == first_len
 }
@@ -314,32 +407,59 @@ impl GuildApiClient {
 
     /* Every activity row that names this player, on either side of it.
      *
-     * `structs.planet_activity` has no `player_id` column — attribution lives
-     * inside the JSON `detail` (`attackerPlayerId` / `targetPlayerId`, and for
-     * a raid only a `fleet_id` you have to resolve) — and until this route
-     * shipped the API offered only `/all`, `/planet/{id}` and `/category/{c}`.
-     * That made every per-player combat figure a full-table walk, which is why
-     * the achievement cards treat its absence as UNKNOWN rather than zero.
+     * Served from `structs.planet_activity_player`, a side table the indexer
+     * writes at insert time: one row per (event, player, ROLE). Ownership is
+     * as-of-event, so a struct that changes hands no longer takes its past
+     * with it (history before 2026-09-15 was backfilled with the ownership of
+     * that day). The roles the indexer assigns, measured on the mirror:
+     *
+     *   struct_attack           attacker · target
+     *   raid_status             fleet_owner · planet_owner
+     *   fleet_arrive/depart     fleet_owner · planet_owner
+     *   struct_defense_add/rm   defender · protected
+     *   struct_status/health/move/block_build_start   owner
+     *   struct_block_ore_*      owner · planet_owner
+     *   shield_change · block_raid_start              planet_owner
+     *
+     * Without a `role` the server collapses dual-role rows (`DISTINCT ON` the
+     * parent event) so a self-raid is one row, not two; with a `role` every
+     * row is that role's. Rows are the parent's columns, unchanged:
+     * `time, seq, planet_id, block_height, category, detail` (+ decoded
+     * `detail_json`), newest first on `(block_height, time, planet_id, seq)`.
+     *
+     * `since_height` is a high-water mark (`block_height > n`), not a cursor —
+     * OFFSET paging still applies inside it. It is ALSO applied here on the
+     * rows, because a guild that predates the parameter ignores it and
+     * answers the whole feed; the client-side pass makes the result the same
+     * on both. `role` cannot be repaired that way (an older guild silently
+     * returns every role, mislabelled), so a role filter is refused outright
+     * when the probe says the guild does not know the parameter — see
+     * [`activity_roles_supported`].
      *
      * The walk is written out rather than handed to `walk_list` because the
-     * optional `?category=` has to survive the `/page/{n}` segment, and
-     * `walk_list` builds that segment by string append.
+     * query string has to survive the `/page/{n}` segment, and `walk_list`
+     * builds that segment by string append.
      *
      * Returns (rows, height, completed) — `completed: false` means the walk
      * hit `max_pages` and the rows are a truncated tail, never a total. */
     pub async fn planet_activity_by_player(
         &self,
         player_id: &str,
-        category: Option<&str>,
+        filter: &ActivityFilter,
         limit: usize,
         max_pages: u32,
     ) -> Result<(Vec<Value>, Option<u64>, bool), String> {
+        if let Some(role) = filter.role.as_deref() {
+            if !ACTIVITY_ROLES.contains(&role) {
+                return Err(format!("{role:?} is not an activity role ({})", ACTIVITY_ROLES.join(", ")));
+            }
+            if !self.activity_roles_supported(player_id).await? {
+                return Err(ROLE_FILTER_UNSUPPORTED.into());
+            }
+        }
         // `list_page_with_meta` appends `?limit=`/`&limit=` itself — adding a
         // second one here silently halved the page size on the first walk.
-        let query = match category {
-            Some(c) if !c.is_empty() => format!("?category={c}"),
-            _ => String::new(),
-        };
+        let query = filter.query_string();
         let mut rows = Vec::new();
         let mut height: Option<u64> = None;
         let mut page_size: Option<usize> = None;
@@ -364,13 +484,110 @@ impl GuildApiClient {
             rows.extend(items);
             let first = *page_size.get_or_insert(n);
             if !page_walk_continues(first, n) {
-                return Ok((rows, height, true));
+                break;
             }
             if page >= max_pages {
-                return Ok((rows, height, false));
+                return Ok((apply_since_height(rows, filter.since_height), height, false));
             }
             page += 1;
         }
+        Ok((apply_since_height(rows, filter.since_height), height, true))
+    }
+
+    /// One page of the per-player feed, for the raw `structs_intel query`
+    /// probe (`type: planet_activity, filter: {by: player, value: 1-61}`).
+    pub async fn planet_activity_by_player_page(
+        &self,
+        player_id: &str,
+        page: u32,
+    ) -> Result<GuildPage<Value>, String> {
+        self.get_page(
+            &format!("/api/planet-activity/player/{}/page/{}", player_id, page),
+            page,
+        )
+        .await
+    }
+
+    /// Does this guild filter the per-player feed by `role`?
+    ///
+    /// The parameter arrived with the side-table cutover; a guild from before
+    /// it does not reject an unknown query parameter, it IGNORES it — so a
+    /// `role=target` read of an older guild answers every role with a
+    /// straight face, and "attacks on me" quietly becomes "every attack I
+    /// was part of". The only way to tell the two apart is to ask for a role
+    /// that cannot exist: the new code answers 400 `role_invalid`, the old
+    /// code answers 200. Probed once an hour so a deploy is picked up
+    /// without a restart, and shared by every caller.
+    pub async fn activity_roles_supported(&self, player_id: &str) -> Result<bool, String> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+        if let Some((ok, at)) = *ACTIVITY_ROLE_PROBE.lock().unwrap_or_else(|e| e.into_inner()) {
+            if at.elapsed() < TTL {
+                return Ok(ok);
+            }
+        }
+        let probe = self
+            .get_envelope(&format!("/api/planet-activity/player/{player_id}/page/1?limit=1&role={ROLE_PROBE_VALUE}"))
+            .await;
+        let ok = classify_role_probe(&probe)?;
+        *ACTIVITY_ROLE_PROBE.lock().unwrap_or_else(|e| e.into_inner()) = Some((ok, std::time::Instant::now()));
+        Ok(ok)
+    }
+
+    /// Per-player DAILY activity counts for the last 30 days, straight from
+    /// the indexer's continuous aggregate: rows `{bucket, category, role,
+    /// count}`, one per (day, category, role) the player appears in. Empty
+    /// days are ABSENT (this is a complete count over the window, so absence
+    /// here IS zero — unlike the stat store); the current day is partial.
+    ///
+    /// Roles are per event, so summing every role of one category
+    /// double-counts events where the player holds two roles at once (their
+    /// own struct on their own planet, a self-raid). Read one role, or the
+    /// role a category is keyed on — see `planet_activity_by_player`.
+    ///
+    /// Daily only: the server answers 400 for `bucket=1h`. A guild that has
+    /// not deployed the route answers 404, which the error carries verbatim
+    /// so a caller can say "not served yet" rather than "zero".
+    pub async fn planet_activity_player_stats(
+        &self,
+        player_id: &str,
+        category: Option<&str>,
+        role: Option<&str>,
+    ) -> Result<(Vec<Value>, Option<u64>), String> {
+        let mut q: Vec<String> = Vec::new();
+        if let Some(c) = category.filter(|c| !c.is_empty()) {
+            q.push(format!("category={c}"));
+        }
+        if let Some(r) = role.filter(|r| !r.is_empty()) {
+            if !ACTIVITY_ROLES.contains(&r) {
+                return Err(format!("{r:?} is not an activity role ({})", ACTIVITY_ROLES.join(", ")));
+            }
+            q.push(format!("role={r}"));
+        }
+        let query = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
+        let env = self
+            .get_envelope(&format!("/api/planet-activity/player/{player_id}/stats{query}"))
+            .await?;
+        Ok((envelope_rows(&env)?, envelope_height(&env)))
+    }
+
+    /// Galaxy-wide activity counts per bucket and category over the last 30
+    /// days (`/api/planet-activity/stats`): rows `{bucket, category, count}`.
+    /// `bucket` is `1h` or `1d`; the window is fixed server-side at 30 days
+    /// either way. Read from the hourly/daily continuous aggregates, so it
+    /// is cheap enough to poll. Empty buckets are absent and mean zero.
+    pub async fn planet_activity_stats(
+        &self,
+        category: Option<&str>,
+        bucket: &str,
+    ) -> Result<(Vec<Value>, Option<u64>), String> {
+        let mut q = vec![format!("bucket={bucket}")];
+        if let Some(c) = category.filter(|c| !c.is_empty()) {
+            q.push(format!("category={c}"));
+        }
+        let env = self
+            .get_envelope(&format!("/api/planet-activity/stats?{}", q.join("&")))
+            .await?;
+        Ok((envelope_rows(&env)?, envelope_height(&env)))
     }
 
     // -- planet-raid --
@@ -1297,6 +1514,17 @@ impl GuildApiClient {
     /// Galaxy-wide LOCF-aligned totals per bucket (wishlist #11): rows carry
     /// a `bucket` timestamp and a running `sum` for every object of
     /// `object_type`, absent objects carried forward, never zero-filled.
+    ///
+    /// Since the 2026-09-15 cutover this reads `structs.stat_rollup`, an
+    /// hourly snapshot the indexer writes at :02 past the hour, rather than a
+    /// LOCF CTE over the raw samples. Same columns (`bucket, sum, avg,
+    /// population, samples`), three differences a reader must expect:
+    /// an hour with no rollup row is ABSENT (it used to be present with a
+    /// null `sum`); the unfinished current hour is absent until the cron
+    /// writes it, so the newest row is up to an hour old; and `object_type`
+    /// is now required for every metric (the old query skipped it for the
+    /// single-type metrics). `1d` rows are the LAST hourly rollup of each day
+    /// with `samples` summed over the day.
     pub async fn stat_aggregate(
         &self,
         metric: &str,
@@ -1427,6 +1655,54 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn activity_filter_query_string_is_empty_by_default_and_joins_the_rest() {
+        assert_eq!(ActivityFilter::default().query_string(), "");
+        let f = ActivityFilter { category: Some("struct_attack".into()), role: Some("target".into()), since_height: Some(2_600_000) };
+        assert_eq!(f.query_string(), "?category=struct_attack&role=target&since_height=2600000");
+        // An empty string is "not asked", the same as None.
+        let g = ActivityFilter { category: Some(String::new()), role: None, since_height: None };
+        assert_eq!(g.query_string(), "");
+    }
+
+    #[test]
+    fn since_height_is_applied_client_side_too() {
+        // An older guild ignores the parameter and answers the whole feed;
+        // the client pass makes both guilds answer the same rows.
+        let rows = vec![
+            json!({ "block_height": 10, "seq": 1 }),
+            json!({ "block_height": "11", "seq": 2 }),
+            json!({ "block_height": 12, "seq": 3 }),
+            json!({ "seq": 4 }),
+        ];
+        let kept = apply_since_height(rows.clone(), Some(11));
+        let seqs: Vec<u64> = kept.iter().map(|r| r["seq"].as_u64().unwrap()).collect();
+        assert_eq!(seqs, vec![3, 4], "strictly above the mark; an unreadable height is kept");
+        assert_eq!(apply_since_height(rows, None).len(), 4);
+    }
+
+    #[test]
+    fn role_probe_tells_a_new_guild_from_an_old_one() {
+        // New server: 400 role_invalid → it WOULD honour a real role.
+        let rejected: Result<Value, String> = Err("Guild API 400 https://x/api/planet-activity/player/1-61/page/1?limit=1&role=probe: {\"success\":false,\"errors\":{\"role_invalid\":\"role is not allowlisted\"}}".into());
+        assert_eq!(classify_role_probe(&rejected), Ok(true));
+        // Old server: the parameter is ignored and the page comes back.
+        let ignored: Result<Value, String> = Ok(json!({ "success": true, "data": [] }));
+        assert_eq!(classify_role_probe(&ignored), Ok(false));
+        // Anything else is a real failure, not an answer.
+        let down: Result<Value, String> = Err("Guild API HTTP error: connection refused".into());
+        assert!(classify_role_probe(&down).is_err());
+    }
+
+    #[test]
+    fn activity_role_and_category_lists_match_the_server_allowlists() {
+        // TableReadManager::PLANET_ACTIVITY_PLAYER_ROLES / _CATEGORIES.
+        assert_eq!(ACTIVITY_ROLES.len(), 7);
+        assert_eq!(ACTIVITY_CATEGORIES.len(), 14);
+        assert!(ACTIVITY_ROLES.contains(&"fleet_owner"));
+        assert!(ACTIVITY_CATEGORIES.contains(&"block_raid_start"));
+    }
 
     #[test]
     fn envelope_accepts_array_errors() {

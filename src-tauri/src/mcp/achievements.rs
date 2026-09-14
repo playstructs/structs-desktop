@@ -10,17 +10,19 @@
 //! |---|---|---|---|
 //! | `profile`  | `/api/player/{id}/{ore/stats,planet/completed,raid/launched}` | yes | yes |
 //! | `ledger`   | `/api/ledger/list/player/{id}` walked by action | yes | yes |
-//! | `activity` | `/api/planet-activity/player/{id}` — **the new route** | yes | yes |
+//! | `activity` | `/api/planet-activity/player/{id}` — every event that names them, any role | yes | yes |
 //! | `local`    | our own GRASS-fed tail, when the route is absent | no — since install | only what we watched |
 //!
-//! Everything combat-shaped lives in the `activity` tier, because
-//! `structs.planet_activity` carries no `player_id` column and the older API
-//! offered no player filter: the only routes were `/all`, `/planet/{id}` and
-//! `/category/{c}`. Until `/player/{id}` answers, every combat counter here is
-//! **`null`, never `0`** — `stats_absence_vs_zero` is the lesson that made
-//! that rule: `num()` answering 0 for an absent key wrote false zeros that
-//! flattened every sparkline in Game Stats. A tile that says "—" is telling
-//! the truth; a tile that says "0" is lying.
+//! Everything combat-shaped lives in the `activity` tier. The per-player
+//! route is served from `structs.planet_activity_player`, attribution the
+//! indexer writes at insert time (as-of-event ownership, one row per role,
+//! collapsed to one per event when no role is asked for — see
+//! `guild_api::planet_activity_by_player`). On a guild that has not shipped
+//! it every combat counter here is **`null`, never `0`** —
+//! `stats_absence_vs_zero` is the lesson that made that rule: `num()`
+//! answering 0 for an absent key wrote false zeros that flattened every
+//! sparkline in Game Stats. A tile that says "—" is telling the truth; a tile
+//! that says "0" is lying.
 //!
 //! ## Damage is `damageDealt − damageReduction`
 //!
@@ -654,8 +656,13 @@ async fn ledger_totals(client: &GuildApiClient, id: &str) -> Result<HashMap<&'st
 
 /// Walk the per-player activity feed and fold every row.
 ///
-/// This is the route that does not exist yet. When it 404s the caller leaves
-/// every combat counter unknown rather than zero.
+/// The whole feed, every role, one row per event: the folds below decide
+/// which side of a row is ours from `detail` (attacker vs target, our fleet
+/// vs our planet), so a role filter would only hide the other half. The
+/// extra rows the side table attributes — `planet_owner` on ore clocks,
+/// `protected` on defense edges — are categories no fold reads, so they cost
+/// a few bytes and count nothing. When the route 404s the caller leaves every
+/// combat counter unknown rather than zero.
 async fn activity_totals(
     client: &GuildApiClient,
     id: &str,
@@ -663,7 +670,7 @@ async fn activity_totals(
     mine: &Owned,
 ) -> Result<(), String> {
     let (mut rows, _, complete) = client
-        .planet_activity_by_player(id, None, PAGE, MAX_PAGES)
+        .planet_activity_by_player(id, &crate::mcp::guild_api::ActivityFilter::default(), PAGE, MAX_PAGES)
         .await?;
     for key in COMBAT_KEYS {
         rec.mark(key);
@@ -725,9 +732,12 @@ async fn activity_totals(
     }
 
     /* `raids_initiated` is counted here from real `raid_status` rows on our
-     * own fleet, which is a better answer than the profile endpoint's — so
-     * once the walk succeeds it replaces it. The two are the same
-     * achievement, so they share one tile rather than disagreeing on two. */
+     * own fleet. The profile endpoint (`/raid/launched`) counts the same
+     * thing since the 2026-09-15 webapp — `raid_status = initiated` on fleets
+     * the player owns; before that it counted fleets departing the player's
+     * OWN planets, a different number — so once the walk succeeds it
+     * replaces the profile figure, and the two agree on a new guild. They
+     * are the same achievement, so they share one tile. */
     if let Some(n) = rec.counters.get("raids_initiated").copied() {
         rec.set("raids_launched", n);
     }

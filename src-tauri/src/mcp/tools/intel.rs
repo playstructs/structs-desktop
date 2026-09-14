@@ -2611,6 +2611,8 @@ fn parse_timestamp(v: Option<&Value>) -> Option<i64> {
 #[derive(Debug, Deserialize)]
 pub struct RawQueryFilter {
     /// Filter dimension, e.g. "planet", "owner", "location", "provider".
+    /// For `planet_activity`: "planet", "category", "player" (every event
+    /// that names the player, any role) or "all".
     pub by: String,
     /// Filter value (the ID, owner address, etc.).
     pub value: String,
@@ -2729,6 +2731,9 @@ async fn route_guild_query(
         // planet-activity
         ("planet_activity", "planet") => g.planet_activity_by_planet(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
         ("planet_activity", "category") => g.planet_activity_by_category(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
+        // Every event that names a player, any role (indexer-side attribution
+        // since the 2026-09-15 cutover; a 404 means the guild predates it).
+        ("planet_activity", "player") => g.planet_activity_by_player_page(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
         ("planet_activity", "all") | ("planet_activity", "") => g.planet_activity_all(page).await.map(crate::mcp::guild_api::GuildPage::into_response),
 
         // struct-defender
