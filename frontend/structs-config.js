@@ -3634,6 +3634,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       matrix_open: 1,
       // Saved charts, so a chart's own ⌘K word works over the game too.
       terminal_charts: 1,
+      /* `MAP` is the full map viewer — the Raid View window, ungated and
+       * read-only — and bare `MAP` is your own planet, which the roster's
+       * primary row names. Both were refused here, so the word parsed, the
+       * row appeared, and Enter did nothing. */
+      mcp_raid_view_open: 1, mcp_roster: 1,
     };
 
     var host = null, frame = null, open = false, ready = false;

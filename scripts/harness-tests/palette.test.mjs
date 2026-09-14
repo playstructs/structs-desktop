@@ -105,6 +105,18 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     JSON.stringify((w.__HARNESS_CALLS__ || []).slice(-1)));
   check('…and never adds a card here — there is no layout, and touching one would throw',
     !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_layout_set'));
+  /* `MAP` over the game is the full viewer — the Raid View window — not a
+   * one-card Terminal window around the map frame. It parsed and its row
+   * appeared, and Enter did nothing: the two commands it needs were not on
+   * the game window's allowlist (the exact-match check below is what says so). */
+  check('MAP <id> over the game opens the Raid View window, not a card window',
+    T.execute('MAP 2-29604') === true
+    && (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_raid_view_open' && c.args.planetId === '2-29604')
+    && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'open_terminal_card_new' && c.args.kind === 'map'),
+    JSON.stringify((w.__HARNESS_CALLS__ || []).slice(-1)));
+  check('…bare MAP asks the roster for your own planet', T.execute('MAP') === true
+    && await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_roster'))
+    && await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_raid_view_open' && c.args.planetId === '2-194')));
 
   /* The other verbs all MUTATE a workspace this page never loaded. A preset
    * would overwrite the layout with `state.layout` still null. */
@@ -231,7 +243,9 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
    * palette's own code calls (search, prose search, SAY, the rows' acts, the
    * server names); it must match the allowlist exactly, so a command added to
    * one side without the other fails here rather than in the window. */
-  const PALETTE_CALLS = ['open_terminal_card_new', 'log_ui_events', 'mcp_player_search', 'matrix_open', 'terminal_charts'];
+  const PALETTE_CALLS = ['open_terminal_card_new', 'log_ui_events', 'mcp_player_search', 'matrix_open', 'terminal_charts',
+    // `MAP <id>` is the Raid View window; bare `MAP` reads the roster for your own planet.
+    'mcp_raid_view_open', 'mcp_roster'];
   const cfgSrc = readFileSync(resolve(repo, 'frontend/structs-config.js'), 'utf8');
   const listed = (cfgSrc.match(/var FRAME_CMDS = \{([\s\S]*?)\};/) || ['', ''])[1].match(/\b[a-z_]+(?=: 1)/g) || [];
   check('the palette frame may invoke exactly what the palette page calls',
