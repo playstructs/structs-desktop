@@ -615,68 +615,17 @@ pub async fn snapshot_planet(
         None,
     );
 
-    // The DEFENDER's fleet first. A planet's `locationList` holds only
-    // VISITING fleets — the owner's own fleet, even onStation at this exact
-    // planet, is not in it (verified live: 2-2124 is 1-274's active planet,
-    // fleet 9-274 sits there onStation, and the list is empty). Without this
-    // read, a defended raid renders with the defender's entire fleet — command
-    // ship included — missing. `Player.fleetId` names it.
-    let mut fleets: Vec<String> = vec![];
-    if let Some(owner_id) = owner.as_deref() {
-        let owner_fleet = match client.entity("player", owner_id).await {
-            Ok(v) => str_of(v.get("Player").unwrap_or(&v).get("fleetId")),
-            Err(_) => None,
-        };
-        if let Some(fid) = owner_fleet {
-            if let Ok(fleet) = client.entity("fleet", &fid).await {
-                let fbody = fleet.get("Fleet").unwrap_or(&fleet);
-                // Only when it is actually HERE — the owner may be off raiding
-                // someone else, and a fleet that left must not be drawn.
-                if str_of(fbody.get("locationId")).as_deref() == Some(planet_id) {
-                    placements.extend(fleet_placements(fbody));
-                    fleets.push(fid);
-                }
-            }
-        }
+    // Every fleet docked here, the defender's own and every visitor, each
+    // with its body — see `fleets_docked_at` for the three sources and why
+    // no single one of them is enough.
+    let docked = fleets_docked_at(client, planet_id, body, owner.as_deref()).await;
+    if docked.warning.is_some() {
+        warning = docked.warning;
     }
-
-    // Then every VISITING fleet. The linked list's naming is from the CHAIN's
-    // perspective and inverts intuition — verified live with two fleets at
-    // 2-1590: START's `locationListBackward` points at the next fleet, and
-    // `locationListForward` points from the LAST back toward the start. So
-    // start→forward (the obvious reading) enumerates exactly one fleet and
-    // silently drops every later arrival. Walk BOTH directions, deduped, so
-    // either reading of the naming still enumerates the whole list.
-    for (head, link) in [
-        ("locationListStart", "locationListBackward"),
-        ("locationListLast", "locationListForward"),
-    ] {
-        let mut next = str_of(body.get(head));
-        while let Some(fleet_id) = next.take() {
-            if fleets.len() >= MAX_FLEETS_AT_PLANET {
-                break;
-            }
-            if fleets.contains(&fleet_id) {
-                break; // reached fleets the other walk already covered
-            }
-            let Ok(fleet) = client.entity("fleet", &fleet_id).await else {
-                warning = Some(format!("fleet {fleet_id} unavailable"));
-                break;
-            };
-            let fbody = fleet.get("Fleet").unwrap_or(&fleet);
-            // The pointers DANGLE: when the last visitor leaves, the chain
-            // clears `locationListStart` but leaves `locationListLast` naming
-            // the departed fleet (verified live on 2-2124 — start "", last
-            // "9-275", 9-275 onStation at its own home). A fleet the list
-            // names is only real if the fleet itself agrees it is here;
-            // otherwise it would render as a ghost army.
-            if str_of(fbody.get("locationId")).as_deref() != Some(planet_id) {
-                break;
-            }
-            placements.extend(fleet_placements(fbody));
-            fleets.push(fleet_id);
-            next = str_of(fbody.get(link));
-        }
+    let mut fleets: Vec<String> = Vec::with_capacity(docked.fleets.len());
+    for (fid, fbody) in &docked.fleets {
+        placements.extend(fleet_placements(fbody));
+        fleets.push(fid.clone());
     }
 
     // One read per struct supplies type, health and status together.
@@ -764,42 +713,125 @@ pub async fn locations_at_planet(
     out.insert(planet_id.to_string());
     let Ok(planet) = client.entity("planet", planet_id).await else { return out };
     let body = planet.get("Planet").unwrap_or(&planet);
+    let owner = str_of(body.get("owner"));
+    let docked = fleets_docked_at(client, planet_id, body, owner.as_deref()).await;
+    out.extend(docked.fleets.into_iter().map(|(fid, _)| fid));
+    out
+}
 
-    // The owner's own fleet is never in the visitor list even when on station.
-    if let Some(owner_id) = str_of(body.get("owner")) {
-        if let Ok(v) = client.entity("player", &owner_id).await {
-            if let Some(fid) = str_of(v.get("Player").unwrap_or(&v).get("fleetId")) {
-                if let Ok(fleet) = client.entity("fleet", &fid).await {
-                    let fbody = fleet.get("Fleet").unwrap_or(&fleet);
-                    if str_of(fbody.get("locationId")).as_deref() == Some(planet_id) {
-                        out.insert(fid);
-                    }
+/// What [`fleets_docked_at`] found: each fleet with its body, in a stable
+/// order (owner first, then the chain's list, then cache-only finds).
+struct Docked {
+    fleets: Vec<(String, Value)>,
+    warning: Option<String>,
+}
+
+/// Every fleet docked at a planet, from three sources, because no single one
+/// of them sees every fleet:
+///
+/// 1. The OWNER's fleet, via `Player.fleetId`. A planet's `locationList`
+///    holds only VISITING fleets — the owner's own, even onStation at this
+///    exact planet, is not in it (verified live: 2-2124 is 1-274's active
+///    planet, fleet 9-274 sits there onStation, and the list is empty).
+///    Without this read a defended raid renders with the defender's entire
+///    fleet — command ship included — missing.
+///
+/// 2. The chain's VISITOR list. Its naming is from the CHAIN's perspective
+///    and inverts intuition — verified live with two fleets at 2-1590:
+///    START's `locationListBackward` points at the next fleet, and
+///    `locationListForward` points from the LAST back toward the start. So
+///    start→forward (the obvious reading) enumerates exactly one fleet and
+///    silently drops every later arrival. Both directions are walked,
+///    deduped. The pointers also DANGLE: when the last visitor leaves, the
+///    chain clears `locationListStart` but leaves `locationListLast` naming
+///    the departed fleet (2-2124 — start "", last "9-275", 9-275 onStation at
+///    its own home), so a fleet the list names counts only if the fleet
+///    itself agrees it is here.
+///
+/// 3. The perception CACHE's own placement of fleets. The planet body here
+///    is normally the cache's, and the cache is fed by the guild catalog,
+///    whose planet rows carry NO list pointers at all — so source 2 finds
+///    nothing on a cache-fed board, and it is the cache that the stream
+///    keeps current (`fleet_arrive` moves the fleet row within a block).
+///    This is the source that draws a raider while the raid is on; without
+///    it the 2-21740 window (2026-09-14) showed the raid in its log and an
+///    empty attacker half on its board.
+///
+/// Every fleet, whatever named it, is drawn only if its own row says it is
+/// here. A fleet whose row is unreadable is reported in `warning` rather
+/// than silently dropped.
+async fn fleets_docked_at(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    planet_id: &str,
+    body: &Value,
+    owner: Option<&str>,
+) -> Docked {
+    let mut found: Vec<(String, Value)> = vec![];
+    let mut warning = None;
+    let here = |fbody: &Value| str_of(fbody.get("locationId")).as_deref() == Some(planet_id);
+
+    // 1. The owner's own fleet, only when it is actually HERE — the owner
+    // may be off raiding someone else, and a fleet that left must not be drawn.
+    if let Some(owner_id) = owner {
+        let owner_fleet = match client.entity("player", owner_id).await {
+            Ok(v) => str_of(v.get("Player").unwrap_or(&v).get("fleetId")),
+            Err(_) => None,
+        };
+        if let Some(fid) = owner_fleet {
+            if let Ok(fleet) = client.entity("fleet", &fid).await {
+                let fbody = fleet.get("Fleet").unwrap_or(&fleet);
+                if here(fbody) {
+                    found.push((fid, fbody.clone()));
                 }
             }
         }
     }
 
-    // Visitors. Same both-directions walk, and the same dangling-pointer guard,
-    // as the spectator board.
+    // 2. The chain's visitor list, both directions.
     for (head, link) in [
         ("locationListStart", "locationListBackward"),
         ("locationListLast", "locationListForward"),
     ] {
         let mut next = str_of(body.get(head));
         while let Some(fleet_id) = next.take() {
-            if out.len() > MAX_FLEETS_AT_PLANET + 1 || out.contains(&fleet_id) {
+            if found.len() >= MAX_FLEETS_AT_PLANET {
                 break;
             }
-            let Ok(fleet) = client.entity("fleet", &fleet_id).await else { break };
+            if found.iter().any(|(id, _)| *id == fleet_id) {
+                break; // reached fleets the other walk already covered
+            }
+            let Ok(fleet) = client.entity("fleet", &fleet_id).await else {
+                warning = Some(format!("fleet {fleet_id} unavailable"));
+                break;
+            };
             let fbody = fleet.get("Fleet").unwrap_or(&fleet);
-            if str_of(fbody.get("locationId")).as_deref() != Some(planet_id) {
+            if !here(fbody) {
                 break;
             }
-            out.insert(fleet_id);
             next = str_of(fbody.get(link));
+            found.push((fleet_id, fbody.clone()));
         }
     }
-    out
+
+    // 3. Whatever the cache places here that the list did not name.
+    for fleet_id in crate::mcp::perception::fleets_at(planet_id) {
+        if found.len() >= MAX_FLEETS_AT_PLANET {
+            break;
+        }
+        if found.iter().any(|(id, _)| *id == fleet_id) {
+            continue;
+        }
+        let Ok(fleet) = client.entity("fleet", &fleet_id).await else {
+            warning = Some(format!("fleet {fleet_id} unavailable"));
+            continue;
+        };
+        let fbody = fleet.get("Fleet").unwrap_or(&fleet);
+        if here(fbody) {
+            found.push((fleet_id, fbody.clone()));
+        }
+    }
+
+    Docked { fleets: found, warning }
 }
 
 /// Resolve `defended` across a board: any struct named by another struct's
@@ -1500,6 +1532,31 @@ struct Watch {
     /// immediately instead of waiting out the 20-second cadence. The game
     /// reacts to arrivals instantly; a spectator should too.
     force_snapshot: bool,
+    /// Rings the watcher out of its sleep when `force_snapshot` is set. A
+    /// quiet planet's tick is 20 s, so without this a raider's arrival — the
+    /// one moment a quiet planet stops being quiet — waited out most of a
+    /// tick before it was drawn.
+    wake: std::sync::Arc<tokio::sync::Notify>,
+}
+
+/// Force a snapshot for every watch on `planet_id` and wake their watchers.
+/// Called from the stream hook, which runs AFTER `perception::on_grass` has
+/// folded the frame into the cache, so the rebuild it triggers already sees
+/// the fleet that just moved.
+fn force_snapshots_for(planet_id: &str) {
+    let wakes: Vec<std::sync::Arc<tokio::sync::Notify>> = {
+        let mut w = WATCHES.lock().unwrap();
+        w.values_mut()
+            .filter(|e| e.planet_id.as_deref() == Some(planet_id))
+            .map(|e| {
+                e.force_snapshot = true;
+                e.wake.clone()
+            })
+            .collect()
+    };
+    for n in wakes {
+        n.notify_one();
+    }
 }
 
 static WATCHES: LazyLock<Mutex<HashMap<String, Watch>>> =
@@ -1534,6 +1591,7 @@ pub fn attach(app: &tauri::AppHandle, target: &Target, window_label: &str) -> bo
                 shot_cursor: fresh_shot_cursor(),
                 log_cursor: fresh_shot_cursor(),
                 generation: 0,
+                wake: std::sync::Arc::new(tokio::sync::Notify::new()),
                 force_snapshot: false,
             }
         });
@@ -1620,7 +1678,7 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
         let mut raid_hot = true;
         loop {
             // Exit as soon as nobody is looking, or the feature was disabled.
-            let (target, windows, planet_id, generation) = {
+            let (target, windows, planet_id, generation, wake) = {
                 let w = WATCHES.lock().unwrap();
                 match w.get(&key) {
                     Some(e) if !e.windows.is_empty() => (
@@ -1628,6 +1686,7 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                         e.windows.clone(),
                         e.planet_id.clone(),
                         e.generation,
+                        e.wake.clone(),
                     ),
                     _ => return,
                 }
@@ -1763,10 +1822,13 @@ fn spawn_watcher(app: tauri::AppHandle, key: String) {
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(
-                if raid_hot { SHOT_POLL_MS } else { SHOT_POLL_QUIET_MS },
-            ))
-            .await;
+            // Sleep out the tick — or less, if a frame forces a snapshot.
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(
+                    if raid_hot { SHOT_POLL_MS } else { SHOT_POLL_QUIET_MS },
+                )) => {}
+                _ = wake.notified() => {}
+            }
         }
     });
 }
@@ -1914,12 +1976,7 @@ pub fn note_event(app: &tauri::AppHandle, event: &crate::mcp::event_buffer::Game
         return;
     }
     if raid_changed {
-        let mut w = WATCHES.lock().unwrap();
-        for e in w.values_mut() {
-            if e.planet_id.as_deref() == Some(planet_id.as_str()) {
-                e.force_snapshot = true;
-            }
-        }
+        force_snapshots_for(&planet_id);
     }
     // Shots and battle-log rows: the frame IS the activity row the poll used
     // to fetch, so the same collectors turn it into the same payloads, and
@@ -1972,12 +2029,7 @@ pub fn note_event(app: &tauri::AppHandle, event: &crate::mcp::event_buffer::Game
     // remove a whole fleet's structs, so ask the watcher for a fresh snapshot
     // on its next tick (≤4s) instead of waiting out the snapshot cadence.
     if event.category == "fleet_arrive" || event.category == "fleet_depart" {
-        let mut w = WATCHES.lock().unwrap();
-        for e in w.values_mut() {
-            if e.planet_id.as_deref() == Some(planet_id.as_str()) {
-                e.force_snapshot = true;
-            }
-        }
+        force_snapshots_for(&planet_id);
     }
     let payload = json!({
         "category": event.category,

@@ -219,7 +219,11 @@ fn expected_listeners(name: &str, announced: &[String]) -> Vec<String> {
     if name.starts_with("matrix::") {
         return pick(&|l| l.starts_with("chat"));
     }
-    if name.starts_with("raid:") {
+    // A spectator feed (`raid-snapshot::raid-2-21740`) is for the one
+    // window its suffix names. `raid:` matched nothing the app emits, so
+    // every raid feed fell through to "main" and `status` reported a window
+    // that WAS listening as unheard.
+    if name.starts_with("raid") && name.contains("::") {
         return name.rsplit("::").next().map(|l| pick(&|x| x == l)).unwrap_or_default();
     }
     if name == "transfer-intent" {
@@ -356,7 +360,8 @@ mod tests {
     fn expected_listeners_follow_the_naming_conventions() {
         let open: Vec<String> = ["main", "board", "gamestats", "chat-0-1", "raid-2-9"].iter().map(|s| s.to_string()).collect();
         assert_eq!(expected_listeners("matrix::rooms", &open), vec!["chat-0-1"]);
-        assert_eq!(expected_listeners("raid:attack::raid-2-9", &open), vec!["raid-2-9"]);
+        assert_eq!(expected_listeners("raid-snapshot::raid-2-9", &open), vec!["raid-2-9"]);
+        assert!(expected_listeners("raid-delta::raid-2-77", &open).is_empty(), "that window is closed, not deaf");
         assert_eq!(expected_listeners("board-update", &open), vec!["board", "gamestats"]);
         assert_eq!(expected_listeners("structs:force-resync", &open), vec!["main"]);
         assert!(expected_listeners("transfer-intent", &open).is_empty(), "Pay window closed");

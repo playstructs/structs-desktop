@@ -619,6 +619,23 @@ impl Snapshot {
         self.fleets.get(fid).map(|row| json!({ "Fleet": row }))
     }
 
+    /// Every fleet the cache places AT `planet_id`: the owner's own when on
+    /// station, and every visitor — a raider above all. The planet row cannot
+    /// answer this (the guild feed has no `locationListStart`/`Last`, and the
+    /// stream patches fleet rows, never list pointers), so the fleets are
+    /// scanned instead: a few thousand rows, well under a millisecond, in a
+    /// stable order so a board built from it never reshuffles.
+    pub fn fleets_at(&self, planet_id: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .fleets
+            .iter()
+            .filter(|(_, f)| str_of(f, "locationType") == "planet" && str_of(f, "locationId") == planet_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Exactly `loop_util::player_struct_ids`, from the snapshot: the union
     /// of the player's planet + fleet slot arrays plus the fleet's
     /// `commandStruct`, de-duplicated in order.
@@ -894,26 +911,57 @@ impl Snapshot {
                 // be explored while current planet has ore", 59 rejects in a
                 // day) and auto_build to a slot on a planet that no longer
                 // existed. Move the player now.
+                //
+                // EVERY fleet that arrives moves in the cache, not only the
+                // owner's. A visitor's arrival (a raider's, above all) used to
+                // be dropped here, so its fleet row kept saying "home" for the
+                // whole raid. The fleet row is the only place a visitor can be
+                // found from — the guild feed carries no `locationListStart`
+                // on the planet row and the stream never patches list
+                // pointers — so the raid view's board drew the attacker half
+                // empty for a raid it was showing the log of (2-21740,
+                // 2026-09-14). The owner's planet still moves only for the
+                // owner's own fleet.
                 "fleet_arrive" => {
                     let f = parsed!(frame::FleetArrive);
                     let planet = subj.object.as_ref().and_then(|o| o.as_planet());
-                    match (crate::mcp::types::FleetId::parse(&f.fleet_id), planet, subj.player.as_ref()) {
-                        (Ok(f), Some(planet), Some(owner)) if f.index() == owner.index() => {
-                            let pid = owner.to_string();
-                            let planet_s = planet.to_string();
-                            match self.players.get_mut(&pid) {
-                                Some(row) if row.get("planetId").and_then(|v| v.as_str()) != Some(planet_s.as_str()) => {
-                                    if let Some(obj) = row.as_object_mut() {
-                                        obj.insert("planetId".into(), Value::String(planet_s.clone()));
-                                    }
-                                    if let Some(fl) = self.fleets.get_mut(&f.to_string()).and_then(|v| v.as_object_mut()) {
-                                        fl.insert("locationType".into(), Value::String("planet".into()));
-                                        fl.insert("locationId".into(), Value::String(planet_s));
-                                    }
-                                    Applied::Changed
-                                }
-                                _ => Applied::Ignored,
+                    let (Ok(fleet), Some(planet)) = (crate::mcp::types::FleetId::parse(&f.fleet_id), planet) else {
+                        return Applied::Ignored;
+                    };
+                    let planet_s = planet.to_string();
+                    let mut changed = false;
+                    if let Some(fl) = self.fleets.get_mut(&fleet.to_string()).and_then(|v| v.as_object_mut()) {
+                        if fl.get("locationId").and_then(|v| v.as_str()) != Some(planet_s.as_str()) {
+                            fl.insert("locationType".into(), Value::String("planet".into()));
+                            fl.insert("locationId".into(), Value::String(planet_s.clone()));
+                            changed = true;
+                        }
+                    }
+                    if let Some(owner) = subj.player.as_ref().filter(|o| o.index() == fleet.index()) {
+                        if let Some(obj) = self.players.get_mut(&owner.to_string()).and_then(|v| v.as_object_mut()) {
+                            if obj.get("planetId").and_then(|v| v.as_str()) != Some(planet_s.as_str()) {
+                                obj.insert("planetId".into(), Value::String(planet_s.clone()));
+                                changed = true;
                             }
+                        }
+                    }
+                    if changed { Applied::Changed } else { Applied::Ignored }
+                }
+                // The mirror: a fleet that left is no longer here. Only a row
+                // still pointing at THIS planet is cleared — the arrive at the
+                // destination is a separate frame on a separate subject and
+                // may land first; the depart that follows must not undo it.
+                "fleet_depart" => {
+                    let f = parsed!(frame::FleetArrive);
+                    let planet = subj.object.as_ref().and_then(|o| o.as_planet());
+                    let (Ok(fleet), Some(planet)) = (crate::mcp::types::FleetId::parse(&f.fleet_id), planet) else {
+                        return Applied::Ignored;
+                    };
+                    let planet_s = planet.to_string();
+                    match self.fleets.get_mut(&fleet.to_string()).and_then(|v| v.as_object_mut()) {
+                        Some(fl) if fl.get("locationId").and_then(|v| v.as_str()) == Some(planet_s.as_str()) => {
+                            fl.insert("locationId".into(), Value::String(String::new()));
+                            Applied::Changed
                         }
                         _ => Applied::Ignored,
                     }
@@ -1752,6 +1800,12 @@ fn maybe_hot_refresh(client: &CosmosClient) {
 // chain) and the result is folded in so the next caller hits. Every other
 // entity kind goes straight to the chain as before.
 
+/// [`Snapshot::fleets_at`] against the current snapshot; empty when there
+/// is no snapshot yet (the caller then has only the chain's own walk).
+pub fn fleets_at(planet_id: &str) -> Vec<String> {
+    with_snapshot(|s| s.fleets_at(planet_id)).unwrap_or_default()
+}
+
 pub fn snapshot_entity(kind: &str, id: &str) -> Option<Value> {
     with_snapshot(|s| match kind {
         "struct" => s.struct_entity(id),
@@ -1763,7 +1817,7 @@ pub fn snapshot_entity(kind: &str, id: &str) -> Option<Value> {
     .flatten()
 }
 
-fn absorb_entity(kind: &str, v: &Value) {
+pub(crate) fn absorb_entity(kind: &str, v: &Value) {
     match kind {
         "struct" => absorb_struct_entity(v),
         "planet" => absorb_planet_entity(v),
@@ -2407,12 +2461,76 @@ mod guild_ingest_tests {
         assert_eq!(r, Applied::Changed);
         assert_eq!(snap.players["1-375"]["planetId"], "2-28817");
         assert_eq!(snap.fleets["9-375"]["locationId"], "2-28817");
-        // Someone ELSE's fleet arriving (a raider) does not move the owner.
+        // Someone ELSE's fleet arriving (a raider the store does not know)
+        // does not move the owner.
         let r = snap.apply("fleet_arrive", "structs.planet.2-28817.1-375", &json!({"fleet_id": "9-999", "fleet_status": "onStation", "block_height": 2_480_001}));
         assert_eq!(r, Applied::Ignored);
         assert_eq!(snap.players["1-375"]["planetId"], "2-28817");
         // Same planet again is no change.
         let r = snap.apply("fleet_arrive", "structs.planet.2-28817.1-375", &json!({"fleet_id": "9-375", "block_height": 2_480_002}));
+        assert_eq!(r, Applied::Ignored);
+    }
+
+    /// The raid on 2-21740 (2026-09-14): 9-194 raided 1-61's planet, the
+    /// window showed the log and an empty attacker half, because the raider's
+    /// arrival never moved its fleet row. A visitor's arrival moves the
+    /// FLEET; the planet's owner stays where they are.
+    #[test]
+    fn a_raiders_arrival_moves_its_fleet_row_but_not_the_owner() {
+        let mut snap = Snapshot::from_pages(
+            &[],
+            &[],
+            &[],
+            &[],
+            &[
+                json!({"id": "1-61", "planetId": "2-21740", "fleetId": "9-61"}),
+                json!({"id": "1-194", "planetId": "2-223", "fleetId": "9-194"}),
+            ],
+            &[],
+            &[
+                json!({"id": "9-61", "locationType": "planet", "locationId": "2-21740"}),
+                json!({"id": "9-194", "locationType": "planet", "locationId": "2-223"}),
+            ],
+        );
+        assert_eq!(snap.fleets_at("2-21740"), vec!["9-61".to_string()]);
+        // Depart home, arrive at the target: two frames, two subjects.
+        let r = snap.apply("fleet_depart", "structs.planet.2-223.1-194", &json!({"fleet_id": "9-194", "fleet_status": "onStation", "block_height": 2_613_416}));
+        assert_eq!(r, Applied::Changed);
+        assert_eq!(snap.fleets["9-194"]["locationId"], "");
+        let r = snap.apply("fleet_arrive", "structs.planet.2-21740.1-61", &json!({"fleet_id": "9-194", "fleet_list": ["9-194"], "fleet_status": "away", "block_height": 2_613_416}));
+        assert_eq!(r, Applied::Changed);
+        assert_eq!(snap.fleets["9-194"]["locationId"], "2-21740");
+        assert_eq!(snap.players["1-194"]["planetId"], "2-223", "a raid is not an explore");
+        assert_eq!(snap.players["1-61"]["planetId"], "2-21740", "the defender did not move");
+        assert_eq!(snap.fleets_at("2-21740"), vec!["9-194".to_string(), "9-61".to_string()]);
+        // The retreat: the same two frames the other way round.
+        let r = snap.apply("raid_status", "structs.planet.2-21740.1-61", &json!({"fleet_id": "9-194", "status": "attackerRetreated", "block_height": 2_613_446}));
+        let _ = r;
+        let r = snap.apply("fleet_depart", "structs.planet.2-21740.1-61", &json!({"fleet_id": "9-194", "fleet_status": "away", "block_height": 2_613_446}));
+        assert_eq!(r, Applied::Changed);
+        let r = snap.apply("fleet_arrive", "structs.planet.2-223.1-194", &json!({"fleet_id": "9-194", "fleet_status": "onStation", "block_height": 2_613_446}));
+        assert_eq!(r, Applied::Changed);
+        assert_eq!(snap.fleets["9-194"]["locationId"], "2-223");
+        assert_eq!(snap.fleets_at("2-21740"), vec!["9-61".to_string()]);
+    }
+
+    /// The arrive can be delivered before the depart (separate subjects,
+    /// same block). A depart must only clear a row that still points at the
+    /// planet being left, or it would undo the arrival it trails.
+    #[test]
+    fn a_depart_delivered_after_the_arrive_does_not_undo_it() {
+        let mut snap = Snapshot::from_pages(
+            &[], &[], &[], &[], &[],
+            &[],
+            &[json!({"id": "9-194", "locationType": "planet", "locationId": "2-223"})],
+        );
+        let r = snap.apply("fleet_arrive", "structs.planet.2-21740.1-61", &json!({"fleet_id": "9-194", "block_height": 2_613_416}));
+        assert_eq!(r, Applied::Changed);
+        let r = snap.apply("fleet_depart", "structs.planet.2-223.1-194", &json!({"fleet_id": "9-194", "block_height": 2_613_416}));
+        assert_eq!(r, Applied::Ignored, "the row already points elsewhere");
+        assert_eq!(snap.fleets["9-194"]["locationId"], "2-21740");
+        // A fleet the store has never seen is nothing to move.
+        let r = snap.apply("fleet_arrive", "structs.planet.2-21740.1-61", &json!({"fleet_id": "9-777", "block_height": 2_613_417}));
         assert_eq!(r, Applied::Ignored);
     }
 

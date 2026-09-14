@@ -819,6 +819,30 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   run('FLEET 9-12');
   check('FLEET with an id opens that fleet on the map, not the roster', w.Board.Terminal.state.layout.cards.some((c) => c.type === 'map' && c.params.id === '9-12'));
   check('…and a layout saved when the roster was called `fleet` still opens', w.Board.Terminal.migrate({ cards: [{ id: 'fleet-9', type: 'fleet', params: {}, w: 2 }] }).cards[0].type === 'armada');
+  /* MAP is the full map viewer — the Raid View WINDOW — not a map card.
+   * From ⌘K over the game the card form opened a one-card Terminal window
+   * around the same frame: a Terminal component where a map was asked for. */
+  {
+    const T = w.Board.Terminal;
+    const plan = (l) => T.parse(l);
+    check('MAP <id> is a window plan, not a card', plan('MAP 2-29604')?.kind === 'map' && plan('MAP 2-29604').id === '2-29604' && plan('MAP 9-61').id === '9-61');
+    check('…subject-first too', plan('2-29604 MAP')?.kind === 'map' && plan('2-29604 MAP').id === '2-29604');
+    check('…bare MAP is a plan (your own planet)', plan('MAP')?.kind === 'map' && plan('MAP').id === null);
+    check('…and an id of the wrong kind is refused', plan('MAP 1-61') === null && plan('MAP 0-1') === null);
+    const cardsBefore = T.state.layout.cards.length;
+    const opens = () => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_raid_view_open');
+    const before = opens().length;
+    run('MAP 2-29604');
+    check('MAP <planet> opens the Raid View window for it', opens().length === before + 1 && opens().slice(-1)[0].args.planetId === '2-29604', JSON.stringify(opens().slice(-1)[0]));
+    run('MAP 9-61');
+    check('MAP <fleet> opens the Raid View window following the fleet', opens().slice(-1)[0].args.fleetId === '9-61');
+    check('…and neither added a card', T.state.layout.cards.length === cardsBefore);
+    run('MAP');
+    const roster = await w.__TAURI__.core.invoke('mcp_roster');
+    const me = (roster.rows || []).find((r) => r.role === 'primary') || (roster.rows || [])[0];
+    const mine = await until(() => opens().slice(-1)[0].args.planetId === me.planet_id ? opens().slice(-1)[0] : null);
+    check('bare MAP opens your own planet', mine !== null, JSON.stringify({ me, last: opens().slice(-1)[0] }));
+  }
   /* The live tape and the ops feed became one card. An ALIAS type would have
    * kept old layouts working and walked straight past `single` — which is
    * exactly what a real board did after the rebuild: a `tape` plus three

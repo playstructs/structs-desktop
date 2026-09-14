@@ -2018,12 +2018,26 @@ async fn query_battle_log(client: &CosmosClient, args: &Value) -> Vec<Content> {
     let mut out = String::new();
     out.push_str(&format!("Battle log — planet {} (category: {})\n", planet_id, category));
     let mut shown = 0;
+    let every_category = category == "all" || category == "*";
     for ev in events.iter() {
         let cat = ev.get("category").and_then(|x| x.as_str()).unwrap_or("");
-        if cat != category {
+        if !every_category && cat != category {
             continue;
         }
         let detail = coerce_detail(&ev.get("detail").cloned().unwrap_or(Value::Null));
+        if cat != "struct_attack" {
+            // `all` used to be filtered out entirely (no row's category is
+            // literally "all"), answering "no matching events" for a planet
+            // whose raid the guild had just recorded. Non-attack rows are
+            // one line each: the chain's own category and its detail.
+            let when = ev.get("time").and_then(|x| x.as_str()).unwrap_or("");
+            out.push_str(&format!("\n• [{}] {} {}\n", when, cat, detail));
+            shown += 1;
+            if shown >= limit {
+                break;
+            }
+            continue;
+        }
         let attacker = detail.get("attackerStructId").and_then(|x| x.as_str());
         let attacker_type = detail.get("attackerStructType").and_then(|x| x.as_str()).unwrap_or("?");
         let weapon = detail.get("weaponSystem").and_then(|x| x.as_str()).unwrap_or("");

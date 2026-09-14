@@ -1767,6 +1767,16 @@
     /* A saved chart's own word opens it — `OHM` — and `CHART <name>` too. */
     var saved = Terminal.savedChart(head);
     if (saved && parts.length === 1) return card('chart', Object.assign({}, saved.params, { name: saved.name }));
+    /* MAP is the FULL map viewer — the Raid View window, the one the game's
+     * own planet cards open — not a map card. From ⌘K over the game the card
+     * form opened a one-card Terminal window around the same frame: a
+     * Terminal component where a map was asked for. The card still exists
+     * (a bare fleet id, `FLEET 9-12`, a door) for people building a grid;
+     * the WORD opens the viewer. With no id it is your own planet. */
+    if (head === 'MAP') {
+      if (rest && !acceptsId('map', rest)) return null;
+      return { kind: 'map', id: rest || null };
+    }
     var w = WORDS[head];
     if (!w) {
       /* A built-in chart's word — `RATES`, `PULSE` — only once the card
@@ -1874,6 +1884,12 @@
           if (cmd) cmd.classList.add('is-err');
           Board.stamp && Board.stamp('comms: ' + e);
         });
+      return true;
+    }
+    if (plan.kind === 'map') {
+      // A window, like the companion: no card, no workspace, so it works the
+      // same over the game as in the Terminal.
+      Terminal.openMapWindow(plan.id);
       return true;
     }
     if (plan.kind === 'pet') {
@@ -2219,6 +2235,28 @@
    * in one call: the card is appended to a real workspace, so it is in the
    * layout, an open Terminal sees it appear, and it comes back at the next
    * launch — a palette pick is a card you made, not a dialog that evaporates. */
+  /* The full map viewer for a planet or a fleet: the Raid View window. No
+   * id means your own planet — the roster's primary row knows it, and that
+   * read is one the palette frame over the game is allowed. */
+  Terminal.openMapWindow = function (id) {
+    var open = function (target) {
+      var t = String(target);
+      return invoke('mcp_raid_view_open', t.indexOf('9-') === 0 ? { fleetId: t } : { planetId: t })
+        .then(function () { tellHost('ran'); });
+    };
+    var p = id ? open(id) : invoke('mcp_roster').then(function (snap) {
+      var rows = (snap && snap.rows) || [];
+      var me = rows.filter(function (r) { return r.role === 'primary'; })[0] || rows[0];
+      var target = me && (me.planet_id || me.fleet_id);
+      if (!target) throw new Error('no planet yet');
+      return open(target);
+    });
+    return p.catch(function (e) {
+      var cmd = document.getElementById('tm-cmd');
+      if (cmd) cmd.classList.add('is-err');
+      Board.stamp && Board.stamp('map: ' + e);
+    });
+  };
   Terminal.openInWindow = function (type, params) {
     invoke('open_terminal_card_new', { kind: type, params: params || {} })
       .then(function () { tellHost('ran'); })
