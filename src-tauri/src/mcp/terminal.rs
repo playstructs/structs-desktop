@@ -1108,6 +1108,52 @@ pub async fn terminal_guild_bank_history(guild_id: String) -> Result<Value, Stri
 
 // ── Tearsheets ──────────────────────────────────────────────────────────────
 
+/// The last 30 days of a player's activity, from the indexer's per-player
+/// daily aggregate (`{bucket, category, role, count}` rows), as the four
+/// combat figures a card can print and a per-day series behind them. Each
+/// figure is ONE (category, role) pair — never a sum over roles, which would
+/// count a self-raid twice. A day the aggregate leaves out had nothing in
+/// it, so the series carries a zero there rather than a gap.
+pub(crate) fn fold_activity_month(rows: &[Value]) -> Value {
+    const KEYS: &[(&str, &str, &str)] = &[
+        ("attacks_made", "struct_attack", "attacker"),
+        ("attacks_taken", "struct_attack", "target"),
+        ("raids_as_raider", "raid_status", "fleet_owner"),
+        ("raids_as_target", "raid_status", "planet_owner"),
+    ];
+    let mut totals: std::collections::BTreeMap<&str, f64> = KEYS.iter().map(|(k, _, _)| (*k, 0.0)).collect();
+    let mut days: std::collections::BTreeMap<String, serde_json::Map<String, Value>> = std::collections::BTreeMap::new();
+    for r in rows {
+        let cat = r.get("category").and_then(|v| v.as_str()).unwrap_or("");
+        let role = r.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let Some((key, _, _)) = KEYS.iter().find(|(_, c, ro)| *c == cat && *ro == role) else { continue };
+        let key: &str = key;
+        let n = parse_num(r.get("count")).unwrap_or(0.0);
+        *totals.entry(key).or_insert(0.0) += n;
+        let bucket = r.get("bucket").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if bucket.is_empty() {
+            continue;
+        }
+        let day = days.entry(bucket.clone()).or_insert_with(|| {
+            let mut m = serde_json::Map::new();
+            m.insert("bucket".into(), json!(bucket));
+            for (k, _, _) in KEYS {
+                m.insert((*k).into(), json!(0.0));
+            }
+            m
+        });
+        let cur = day.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        day.insert(key.into(), json!(cur + n));
+    }
+    let mut out = serde_json::Map::new();
+    out.insert("days".into(), json!(30));
+    for (k, v) in totals {
+        out.insert(k.into(), json!(v));
+    }
+    out.insert("series".into(), Value::Array(days.into_values().map(Value::Object).collect()));
+    Value::Object(out)
+}
+
 /// Everything the app knows about one player on one page: who they are
 /// (identity table), where they stand (the perception snapshot: planet,
 /// fleet, charge, last action), how they rank (the Game Stats boards), and
@@ -1142,11 +1188,12 @@ pub async fn terminal_tearsheet(id: String) -> Result<Value, String> {
                     .map(|r| json!({ "rank": r.get("rank").cloned().unwrap_or(Value::Null), "value": r.get("value").cloned().unwrap_or(Value::Null) }))
                     .unwrap_or(Value::Null)
             };
-            let (ore, planets, raids, ledger) = tokio::join!(
+            let (ore, planets, raids, ledger, activity) = tokio::join!(
                 client.guild.player_ore_stats(&id),
                 client.guild.player_planets_completed(&id),
                 client.guild.player_raids_launched(&id),
                 client.guild.ledger_count_by_player(&id),
+                client.guild.planet_activity_player_stats(&id, None, None),
             );
             let section = |r: Result<Value, String>| match r { Ok(v) => v, Err(e) => json!({ "unavailable": e }) };
             Ok(json!({
@@ -1154,6 +1201,7 @@ pub async fn terminal_tearsheet(id: String) -> Result<Value, String> {
                 "identity": ident, "standing": standing,
                 "ranks": { "alpha": rank_in("alpha"), "ore": rank_in("ore"), "structs_load": rank_in("structs_load") },
                 "ore": section(ore), "planets": section(planets), "raids": section(raids), "ledger": section(ledger),
+                "activity": section(activity.map(|(rows, _)| fold_activity_month(&rows))),
             }))
         }
         0 => {
@@ -1948,6 +1996,38 @@ pub async fn terminal_scout(target: String) -> Result<Value, String> {
         "defender": scout_side(&structs, &types, "defender"),
         "attacker": scout_side(&structs, &types, "attacker"),
     }))
+}
+
+#[cfg(test)]
+mod activity_month_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_month_of_activity_folds_one_role_per_figure_and_zero_fills_the_day() {
+        let rows = vec![
+            json!({ "bucket": "2026-09-13 00:00:00+00", "category": "struct_attack", "role": "attacker", "count": 24 }),
+            json!({ "bucket": "2026-09-13 00:00:00+00", "category": "struct_attack", "role": "target", "count": "3" }),
+            json!({ "bucket": "2026-09-14 00:00:00+00", "category": "struct_attack", "role": "attacker", "count": 1 }),
+            json!({ "bucket": "2026-09-14 00:00:00+00", "category": "raid_status", "role": "fleet_owner", "count": 4 }),
+            json!({ "bucket": "2026-09-14 00:00:00+00", "category": "raid_status", "role": "planet_owner", "count": 4 }),
+            // Roles no figure reads (a self-owned ore clock is both) count nothing.
+            json!({ "bucket": "2026-09-14 00:00:00+00", "category": "struct_block_ore_mine_start", "role": "owner", "count": 9 }),
+            json!({ "bucket": "2026-09-14 00:00:00+00", "category": "struct_block_ore_mine_start", "role": "planet_owner", "count": 9 }),
+        ];
+        let v = fold_activity_month(&rows);
+        assert_eq!(v["attacks_made"], json!(25.0));
+        assert_eq!(v["attacks_taken"], json!(3.0));
+        assert_eq!(v["raids_as_raider"], json!(4.0));
+        assert_eq!(v["raids_as_target"], json!(4.0), "a self-raid is one on each side, never two on one");
+        let series = v["series"].as_array().unwrap();
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[1]["attacks_taken"], json!(0.0), "a figure with no row that day is a zero, not absent");
+        assert_eq!(series[0]["bucket"], json!("2026-09-13 00:00:00+00"));
+        let empty = fold_activity_month(&[]);
+        assert_eq!(empty["attacks_made"], json!(0.0));
+        assert!(empty["series"].as_array().unwrap().is_empty());
+    }
 }
 
 #[cfg(test)]

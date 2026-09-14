@@ -168,6 +168,9 @@
     { word: 'DEPOSITS', name: 'Galaxy ore',     window: '604800',  series: [{ source: 'galaxy', metric: 'ore', subject: 'planet' }, { source: 'galaxy', metric: 'ore', subject: 'player' }, { source: 'galaxy', metric: 'ore', subject: 'fleet' }] },
     { word: 'PULSE',    name: 'Chain pulse',    window: '3600',    series: [{ source: 'chain', metric: 'chain_tx' }, { source: 'chain', metric: 'events' }, { source: 'chain', metric: 'proofs' }] },
     { word: 'COMBAT',   name: 'Combat',         window: '3600',    series: [{ source: 'chain', metric: 'raids' }, { source: 'chain', metric: 'combat' }, { source: 'chain', metric: 'transfers' }] },
+    // Counts per day are bars, not a line: a line between two days invents a slope.
+    { word: 'ACTIVITY', name: 'My activity',    window: '2592000', mode: 'bars', series: [{ source: 'activity', metric: 'attacks_made', subject: '{player}' }, { source: 'activity', metric: 'attacks_taken', subject: '{player}' }, { source: 'activity', metric: 'raids_as_raider', subject: '{player}' }, { source: 'activity', metric: 'raids_as_target', subject: '{player}' }] },
+    { word: 'TRAFFIC',  name: 'Galaxy activity', window: '604800', mode: 'bars', series: [{ source: 'traffic', metric: 'struct_attack' }, { source: 'traffic', metric: 'raid_status' }, { source: 'traffic', metric: 'fleet_arrive' }, { source: 'traffic', metric: 'struct_block_build_start' }] },
   ];
   T.chartTemplates = function () { return TEMPLATES.slice(); };
   T.chartTemplate = function (wordOrName) {
@@ -179,7 +182,11 @@
   };
   // The params a template opens with: the series come when the card first
   // draws, so the grammar never waits on the roster.
-  T.chartTemplateParams = function (t) { return { template: t.word, name: t.name, window: t.window, series: '[]' }; };
+  T.chartTemplateParams = function (t) {
+    var p = { template: t.word, name: t.name, window: t.window, series: '[]' };
+    if (t.mode) p.mode = t.mode;
+    return p;
+  };
 
   var rosterMe = null, rosterAt = 0;
   function me() {
@@ -445,8 +452,11 @@
           subjectSel = H.selectBox(state.subject, known.map(function (id) { return { value: id, label: id }; }), function (v) { state.subject = v; });
           row.appendChild(H.field('Provider', subjectSel));
         } else {
-          subjectBox = H.textBox(state.subject, def.subject === 'guild' ? '0-1' : '2-29604', function (v) { state.subject = v; });
-          row.appendChild(H.field(def.subject === 'guild' ? 'Guild' : 'Object', subjectBox));
+          // What kind of id the source takes, as the placeholder and the label.
+          var kinds = { guild: ['0-1', 'Guild'], player: ['1-61', 'Player'] };
+          var kind = kinds[def.subject] || ['2-29604', 'Object'];
+          subjectBox = H.textBox(state.subject, kind[0], function (v) { state.subject = v; });
+          row.appendChild(H.field(kind[1], subjectBox));
         }
       }
       var addBtn = H.el('a', 'sui-screen-btn sui-mod-primary', 'Add');

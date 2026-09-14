@@ -2855,11 +2855,16 @@
         var stat = function (v, key) { var n = v == null ? null : (key ? v[key] : v); if (n == null) return null; var f = Number(n); return isFinite(f) ? f : null; };
         var mined = stat(d.ore_stats, 'mined'), seized = stat(d.ore_stats, 'seized');
         var planets = stat(d.planets_completed, 'count'), raids = stat(d.raids_launched, 'count');
-        var record = (mined != null || seized != null || planets != null || raids != null) ? [
+        // The last 30 days beside the lifetime figures, from the indexer's
+        // per-player daily aggregate; absent on a guild that does not serve it.
+        var atk = stat(d.activity, 'attacks_made'), hit = stat(d.activity, 'attacks_taken');
+        var record = (mined != null || seized != null || planets != null || raids != null || atk != null) ? [
           { label: 'planets', value: planets == null ? null : H.fmtInt(planets) },
           { label: 'raids', value: raids == null ? null : H.fmtInt(raids) },
           { label: 'mined', value: mined == null ? null : H.fmtOre(mined) },
           { label: 'stolen', value: seized == null ? null : H.fmtOre(seized) },
+          atk == null ? null : { label: 'attacks 30d', value: H.fmtInt(atk), title: 'attacks made in the last 30 days' },
+          hit == null ? null : { label: 'attacked 30d', value: H.fmtInt(hit), title: 'attacks taken in the last 30 days' },
         ] : [];
         /* Three doors, one row: send them Alpha, message them, share them.
          * Everything about this player is INSIDE the frame now; the buttons

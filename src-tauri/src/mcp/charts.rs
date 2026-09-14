@@ -14,9 +14,17 @@
 //!   market  the energy market: best/median alpha per kW·day, capacity for sale,
 //!           offers; and per provider its rate and free capacity — sampled here
 //!   chain   the last hour by block — the game-stats ring
+//!   activity  one player's events per day, by category and ROLE — the
+//!           indexer's per-player daily aggregate (30d)
+//!   traffic   the galaxy's events per hour/day, by category — the
+//!           indexer's activity aggregates (30d)
 //!
 //! Every answer is resampled to `points` even slots: null before the first
 //! sample, carried forward after (a reading nobody took is not a zero).
+//! The two activity sources are the exception in one respect: they are
+//! COMPLETE counts over their window, so a bucket the server leaves out is a
+//! bucket with nothing in it, and they are zero-filled before resampling —
+//! a quiet day draws as zero, not as yesterday repeated.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -148,6 +156,34 @@ const CHAIN_METRICS: &[(&str, &str, &str)] = &[
     ("draw", "power", "galaxy draw"),
     ("proofs", "count", "proofs per block"),
 ];
+/// Per-player activity: metric → (category, role, label). Every metric is
+/// ONE (category, role) pair, never a sum over roles — a player who owns
+/// the struct AND the planet is on both rows of an ore clock, and a
+/// self-raid is both `fleet_owner` and `planet_owner`, so a sum would count
+/// those twice. The roles are the ones the indexer writes per category
+/// (measured on the mirror; see `guild_api::planet_activity_by_player`).
+const ACTIVITY_METRICS: &[(&str, &str, &str, &str)] = &[
+    ("attacks_made", "struct_attack", "attacker", "attacks made"),
+    ("attacks_taken", "struct_attack", "target", "attacks taken"),
+    ("raids_as_raider", "raid_status", "fleet_owner", "raid events as raider"),
+    ("raids_as_target", "raid_status", "planet_owner", "raid events on my planets"),
+    ("raid_proofs_on_me", "block_raid_start", "planet_owner", "raid proofs against my planets"),
+    ("shield_changes", "shield_change", "planet_owner", "shield changes"),
+    ("builds", "struct_block_build_start", "owner", "builds started"),
+    ("mining", "struct_block_ore_mine_start", "owner", "mining started"),
+    ("refining", "struct_block_ore_refine_start", "owner", "refining started"),
+    ("status_changes", "struct_status", "owner", "struct status changes"),
+    ("health_changes", "struct_health", "owner", "struct health changes"),
+    ("moves", "struct_move", "owner", "struct moves"),
+    ("defenses_set", "struct_defense_add", "defender", "defenses set"),
+    ("defenses_cleared", "struct_defense_remove", "defender", "defenses cleared"),
+    ("departures", "fleet_depart", "fleet_owner", "fleet departures"),
+    ("arrivals", "fleet_arrive", "fleet_owner", "fleet arrivals"),
+    ("visitors", "fleet_arrive", "planet_owner", "fleets arriving at my planets"),
+];
+/// Galaxy-wide activity: one metric per category, plus `all`. Categories
+/// are disjoint per event, so `all` is an honest sum.
+const TRAFFIC_ALL: &str = "all";
 
 #[tauri::command]
 pub fn terminal_chart_catalog() -> Value {
@@ -163,6 +199,13 @@ pub fn terminal_chart_catalog() -> Value {
         t.iter().map(|(m, u, l)| json!({ "metric": m, "unit": u, "label": l })).collect()
     };
     let providers: Vec<String> = lock(&MARKET).providers.keys().cloned().collect();
+    let activity: Vec<Value> = ACTIVITY_METRICS
+        .iter()
+        .map(|(m, cat, role, l)| json!({ "metric": m, "unit": "count", "label": l, "category": cat, "role": role }))
+        .collect();
+    let traffic: Vec<Value> = std::iter::once(json!({ "metric": TRAFFIC_ALL, "unit": "count", "label": "all events" }))
+        .chain(crate::mcp::guild_api::ACTIVITY_CATEGORIES.iter().map(|c| json!({ "metric": c, "unit": "count", "label": c.replace('_', " ") })))
+        .collect();
     json!({
         "sources": [
             { "source": "stat", "label": "an object", "subject": "id", "metrics": stat },
@@ -171,6 +214,8 @@ pub fn terminal_chart_catalog() -> Value {
             { "source": "market", "label": "the energy market", "subject": null, "metrics": list(MARKET_METRICS) },
             { "source": "provider", "label": "one provider", "subject": "provider", "metrics": list(PROVIDER_METRICS), "known": providers },
             { "source": "chain", "label": "the last hour, by block", "subject": null, "metrics": list(CHAIN_METRICS) },
+            { "source": "activity", "label": "a player's activity, per day", "subject": "player", "metrics": activity },
+            { "source": "traffic", "label": "the galaxy's activity", "subject": null, "metrics": traffic },
         ],
         "windows": [21600, 86400, 604800, 2592000],
         "market_samples": lock(&MARKET).samples.len(),
@@ -293,8 +338,64 @@ async fn fetch_one(req: &SeriesReq, start_s: u64, end_s: u64, window_s: u64) -> 
                 .collect();
             Ok((samples, unit.to_string(), label.to_string()))
         }
+        "activity" => {
+            let pid = req.subject.clone().unwrap_or_default();
+            let Some((_, category, role, label)) = ACTIVITY_METRICS.iter().find(|(m, _, _, _)| *m == req.metric) else {
+                return Err(format!("unknown activity metric {}", req.metric));
+            };
+            if object_type_of(&pid) != Some("player") {
+                return Err(format!("{pid} is not a player id"));
+            }
+            let (rows, _) = client.guild.planet_activity_player_stats(&pid, Some(category), Some(role)).await?;
+            let samples = zero_fill(&bucket_counts(&rows), start_s as f64 * 1000.0, end_s as f64 * 1000.0, DAY_MS);
+            Ok((samples, "count".to_string(), format!("{label} · {pid}")))
+        }
+        "traffic" => {
+            let all = req.metric == TRAFFIC_ALL;
+            if !all && !crate::mcp::guild_api::ACTIVITY_CATEGORIES.contains(&req.metric.as_str()) {
+                return Err(format!("unknown traffic metric {}", req.metric));
+            }
+            // Two days of hourly bars is readable; past that, days.
+            let (bucket, step_ms) = if window_s <= 172_800 { ("1h", HOUR_MS) } else { ("1d", DAY_MS) };
+            let category = if all { None } else { Some(req.metric.as_str()) };
+            let (rows, _) = client.guild.planet_activity_stats(category, bucket).await?;
+            let samples = zero_fill(&bucket_counts(&rows), start_s as f64 * 1000.0, end_s as f64 * 1000.0, step_ms);
+            let label = if all { "all events".to_string() } else { req.metric.replace('_', " ") };
+            Ok((samples, "count".to_string(), format!("galaxy {label}")))
+        }
         other => Err(format!("unknown source {other}")),
     }
+}
+
+const HOUR_MS: f64 = 3_600_000.0;
+const DAY_MS: f64 = 86_400_000.0;
+
+/// `bucket → Σ count` over aggregate rows (`{bucket, count, …}`); rows of the
+/// same bucket (several categories or roles) add up.
+fn bucket_counts(rows: &[Value]) -> BTreeMap<i64, f64> {
+    let mut out: BTreeMap<i64, f64> = BTreeMap::new();
+    for r in rows {
+        let Some(t) = r.get("bucket").and_then(|v| v.as_str()).and_then(crate::mcp::raid_view::parse_guild_time) else { continue };
+        let Some(n) = parse_num(r.get("count")) else { continue };
+        *out.entry(t as i64).or_insert(0.0) += n;
+    }
+    out
+}
+
+/// One sample per bucket across the whole window, zero where the server
+/// had no row. Buckets are epoch-aligned (UTC hours and days, as the
+/// aggregates are); the first is the one containing `start_ms`, the last
+/// the one containing `end_ms`. Rows outside the window are dropped.
+fn zero_fill(counts: &BTreeMap<i64, f64>, start_ms: f64, end_ms: f64, step_ms: f64) -> Vec<(f64, f64)> {
+    let first = (start_ms / step_ms).floor() * step_ms;
+    let last = (end_ms / step_ms).floor() * step_ms;
+    let mut out = Vec::new();
+    let mut t = first;
+    while t <= last {
+        out.push((t, counts.get(&(t as i64)).copied().unwrap_or(0.0)));
+        t += step_ms;
+    }
+    out
 }
 
 /// Every series of a chart, on one grid. A series that fails answers with
@@ -448,9 +549,47 @@ mod tests {
     fn the_catalogue_names_every_source() {
         let c = terminal_chart_catalog();
         let sources: Vec<&str> = c["sources"].as_array().unwrap().iter().map(|s| s["source"].as_str().unwrap()).collect();
-        assert_eq!(sources, vec!["stat", "galaxy", "bank", "market", "provider", "chain"]);
+        assert_eq!(sources, vec!["stat", "galaxy", "bank", "market", "provider", "chain", "activity", "traffic"]);
         assert_eq!(c["sources"][0]["metrics"].as_array().unwrap().len(), STAT_METRICS.len());
         assert!(c["sources"][3]["metrics"].as_array().unwrap().iter().any(|m| m["metric"] == "best"));
+    }
+
+    #[test]
+    fn activity_metrics_use_only_roles_and_categories_the_server_allows() {
+        use crate::mcp::guild_api::{ACTIVITY_CATEGORIES, ACTIVITY_ROLES};
+        let mut seen = std::collections::HashSet::new();
+        for (m, cat, role, _) in ACTIVITY_METRICS {
+            assert!(ACTIVITY_CATEGORIES.contains(cat), "{m}: {cat} is not a feed category");
+            assert!(ACTIVITY_ROLES.contains(role), "{m}: {role} is not a role");
+            assert!(seen.insert(*m), "{m} listed twice");
+            // The alert key is dotted (series.activity.<metric>.<subject>).
+            assert!(!m.contains('.'), "{m} would break the alert key");
+        }
+        let c = terminal_chart_catalog();
+        let traffic = c["sources"][7]["metrics"].as_array().unwrap();
+        assert_eq!(traffic.len(), ACTIVITY_CATEGORIES.len() + 1);
+        assert_eq!(traffic[0]["metric"], "all");
+    }
+
+    #[test]
+    fn zero_fill_makes_a_quiet_bucket_a_zero_not_a_repeat() {
+        // Three days: counts on day 0 and day 2, nothing on day 1.
+        let d = DAY_MS;
+        let rows = vec![
+            json!({ "bucket": "1970-01-01 00:00:00+00", "category": "struct_attack", "role": "attacker", "count": 3 }),
+            json!({ "bucket": "1970-01-01 00:00:00+00", "category": "struct_attack", "role": "target", "count": "2" }),
+            json!({ "bucket": "1970-01-03 00:00:00+00", "category": "struct_attack", "role": "attacker", "count": 5 }),
+            json!({ "bucket": "1970-01-09 00:00:00+00", "category": "struct_attack", "role": "attacker", "count": 99 }),
+        ];
+        let counts = bucket_counts(&rows);
+        assert_eq!(counts.get(&0), Some(&5.0), "roles of one bucket add up");
+        // Window: from mid day 0 to mid day 2 — buckets 0, 1, 2; day 8 is outside.
+        let filled = zero_fill(&counts, d * 0.5, d * 2.5, d);
+        assert_eq!(filled, vec![(0.0, 5.0), (d, 0.0), (2.0 * d, 5.0)]);
+        // Through the resampler a quiet day stays zero (a stat series would
+        // have carried the 5 forward).
+        let values = locf(&filled, d * 0.5, d, 2);
+        assert_eq!(values, vec![Some(0.0), Some(5.0)]);
     }
 
     #[test]

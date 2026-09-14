@@ -461,7 +461,9 @@ cat > "$FIX" <<'EOF'
       identity: { username: 'JPEG', pfp_attrs: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}', tag: 'OH', guild_name: 'Orbital Hydro', planet_id: '2-223', fleet_id: '9-61' },
       standing: { planet_id: '2-223', fleet_id: '9-61', guild_id: '0-2', last_action: 4200700, ago_blocks: 19, charge: 19, known: true },
       ranks: { alpha: { rank: 1, value: 49340000000 }, ore: null, structs_load: { rank: 4, value: 12000 } },
-      ore: { mined: '1200', refined: '900' }, planets: { count: 14 }, raids: { launched: 33, won: 30 }, ledger: { unavailable: 'Login required' } },
+      ore: { mined: '1200', refined: '900' }, planets: { count: 14 }, raids: { launched: 33, won: 30 }, ledger: { unavailable: 'Login required' },
+      // 30 days of the indexer's per-player daily aggregate, folded per role.
+      activity: { days: 30, attacks_made: 214, attacks_taken: 95, raids_as_raider: 41, raids_as_target: 22, series: [{ bucket: '2026-09-13 00:00:00+00', attacks_made: 24, attacks_taken: 3 }] } },
     // The planet card reads the spectator snapshot the raid view draws from.
     mcp_raid_state: { snapshot: {
       planet_id: '2-15361', owner: '1-61', owner_name: 'JPEG', owner_pfp: '{"head":3,"neck":2,"body":4,"arms":5,"background":1}',
@@ -971,13 +973,16 @@ cat > "$FIX" <<'EOF'
         { source: 'market', label: 'the energy market', subject: null, metrics: [{ metric: 'best', unit: 'rate', label: 'best rate' }, { metric: 'offers', unit: 'count', label: 'offers' }] },
         { source: 'provider', label: 'one provider', subject: 'provider', metrics: [{ metric: 'rate', unit: 'rate', label: 'rate' }], known: ['10-4'] },
         { source: 'chain', label: 'the last hour, by block', subject: null, metrics: [{ metric: 'chain_tx', unit: 'count', label: 'tx per block' }] },
+        { source: 'activity', label: "a player's activity, per day", subject: 'player', metrics: [{ metric: 'attacks_made', unit: 'count', label: 'attacks made', category: 'struct_attack', role: 'attacker' }, { metric: 'attacks_taken', unit: 'count', label: 'attacks taken', category: 'struct_attack', role: 'target' }] },
+        { source: 'traffic', label: "the galaxy's activity", subject: null, metrics: [{ metric: 'all', unit: 'count', label: 'all events' }, { metric: 'struct_attack', unit: 'count', label: 'struct attack' }] },
       ],
       windows: [21600, 86400, 604800, 2592000], market_samples: 12,
     },
     terminal_chart_series: function (args) {
       var points = Number((args && args.points) || 120), windowS = Number((args && args.windowS) || 86400);
       var end = Date.now(), start = end - windowS * 1000, step = (windowS * 1000) / points;
-      var UNIT = { stat: { ore: 'ore', load: 'power' }, galaxy: { load: 'power' }, bank: { ratio: 'ratio' }, market: { best: 'rate', offers: 'count' }, provider: { rate: 'rate' }, chain: { chain_tx: 'count' } };
+      var UNIT = { stat: { ore: 'ore', load: 'power' }, galaxy: { load: 'power' }, bank: { ratio: 'ratio' }, market: { best: 'rate', offers: 'count' }, provider: { rate: 'rate' }, chain: { chain_tx: 'count' },
+        activity: { attacks_made: 'count', attacks_taken: 'count', raids_as_raider: 'count', raids_as_target: 'count' }, traffic: { all: 'count', struct_attack: 'count', raid_status: 'count', fleet_arrive: 'count', struct_block_build_start: 'count' } };
       var list = ((args && args.series) || []).map(function (sr, k) {
         var unit = (UNIT[sr.source] || {})[sr.metric];
         if (!unit) return { source: sr.source, metric: sr.metric, subject: sr.subject || null, error: 'unknown ' + sr.source + ' metric ' + sr.metric, values: [] };
