@@ -1113,7 +1113,9 @@ pub async fn terminal_guild_bank_history(guild_id: String) -> Result<Value, Stri
 /// combat figures a card can print and a per-day series behind them. Each
 /// figure is ONE (category, role) pair — never a sum over roles, which would
 /// count a self-raid twice. A day the aggregate leaves out had nothing in
-/// it, so the series carries a zero there rather than a gap.
+/// it, so the series carries a zero there rather than a gap. Scalars only
+/// beside `series`, so the tearsheet's generic section printer (which skips
+/// objects) shows the four figures and nothing else.
 pub(crate) fn fold_activity_month(rows: &[Value]) -> Value {
     const KEYS: &[(&str, &str, &str)] = &[
         ("attacks_made", "struct_attack", "attacker"),
@@ -1146,7 +1148,6 @@ pub(crate) fn fold_activity_month(rows: &[Value]) -> Value {
         day.insert(key.into(), json!(cur + n));
     }
     let mut out = serde_json::Map::new();
-    out.insert("days".into(), json!(30));
     for (k, v) in totals {
         out.insert(k.into(), json!(v));
     }

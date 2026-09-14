@@ -423,15 +423,44 @@
     },
   });
 
+  /* denom -> the bank's own row for it (display_name, guild_id, exponent),
+   * learned from `mcp_inventory` whenever a card that pays renders. A denom
+   * the bank has never shown us is printed as itself: never invented. */
+  var DENOM_REGISTRY = {};
   function denomLabel(denom) {
     var d = String(denom || '');
-    return d === 'ualpha' ? 'Alpha' : d.indexOf('uguild.') === 0 ? 'Guild token' : d;
+    if (d === 'ualpha') return 'Alpha';
+    var info = DENOM_REGISTRY[d];
+    if (info && info.display_name) return info.display_name + (info.guild_id ? ' (' + info.guild_id + ')' : '');
+    var m = /^uguild\.(\d+-\d+)$/.exec(d);
+    return m ? 'Guild token (' + m[1] + ')' : d;
   }
   function amt(base, denom) {
     var n = Number(base) || 0;
     var U = window.StructsUnits;
-    if (String(denom || 'ualpha') === 'ualpha' && U) return U.fmtAlpha(n);
-    return H.fmtInt(n) + ' ' + denomLabel(denom);
+    var d = String(denom || 'ualpha');
+    if (d === 'ualpha' && U) return U.fmtAlpha(n);
+    var info = DENOM_REGISTRY[d];
+    if (info && info.exponent) return H.fmtNum(n / Math.pow(10, info.exponent)) + ' ' + denomLabel(d);
+    return H.fmtInt(n) + ' ' + denomLabel(d);
+  }
+  /* What you can pay in: Alpha, then every guild token the bank holds for
+   * you, and your own guild's even at a zero balance — plus whatever the
+   * saved terms already name, so an old choice is never silently dropped. */
+  function tokenOptions(myGuild, current) {
+    var opts = [{ value: 'ualpha', label: 'Alpha' }];
+    var seen = { ualpha: true };
+    Object.keys(DENOM_REGISTRY).forEach(function (den) {
+      if (den.indexOf('uguild.') !== 0 || seen[den]) return;
+      seen[den] = true;
+      opts.push({ value: den, label: denomLabel(den) });
+    });
+    if (myGuild && !seen['uguild.' + myGuild]) {
+      seen['uguild.' + myGuild] = true;
+      opts.push({ value: 'uguild.' + myGuild, label: denomLabel('uguild.' + myGuild) });
+    }
+    if (current && !seen[current]) opts.push({ value: current, label: denomLabel(current) });
+    return opts;
   }
   function plural(n, one) { return H.fmtInt(n) + ' ' + one + (Number(n) === 1 ? '' : 's'); }
 
@@ -540,8 +569,19 @@
     cadenceMs: 30000,
     params: [{ key: 'room', label: 'Cluster', kind: 'text', placeholder: 'helpers' }],
     render: function (host, p, ctx) {
-      return invoke('crew_list').then(function (d) {
+      /* The bank beside the terms: every guild mints its own token and names
+       * it, so "Guild token" was never a name — the choice is between
+       * Alpha and each guild token you actually hold, called what its guild
+       * calls it, with the guild id because two guilds may pick one name. */
+      return Promise.all([
+        invoke('crew_list'),
+        invoke('mcp_inventory', { player: 'primary' }).catch(function () { return null; }),
+      ]).then(function (both) {
+        var d = both[0], inv = both[1];
         var crews = (d && d.crews) || [];
+        ((inv && inv.assets) || []).forEach(function (a) {
+          if (a && a.denom) DENOM_REGISTRY[a.denom] = a;
+        });
         host.innerHTML = '';
         /* One door, for the ordinary case: the people finishing your work
          * over the bus are not linked to you at all, so no crew's terms
@@ -569,86 +609,141 @@
         return invoke('crew_ledger', { roomId: room }).then(function (l) {
           var pay = crew.pay || {};
           var plan = (l && l.plan) || [];
+          var credits = (l && l.credits) || [];
           var due = plan.reduce(function (n, s) { return n + (s.amount_base || 0); }, 0);
           var den = pay.denom || 'ualpha';
+          var open = FOLDS_OPEN[ctx.id] || (FOLDS_OPEN[ctx.id] = {});
+
           host.appendChild(tiles([
-            [['rate', denomLabel(den)], pay.rate_per_difficulty
-              ? amt(pay.rate_per_difficulty, den) + ' / difficulty' : 'unset',
-              null, pay.rate_per_difficulty ? null : 'muted'],
-            ['owed', amt(l.owed_base || 0, den)],
-            ['this epoch', amt(l.spent_this_epoch || 0, den)
-              + (pay.epoch_cap ? ' / ' + amt(pay.epoch_cap, den) : '')],
+            ['owed', amt(l.owed_base || 0, den), null, (l.owed_base || 0) ? 'live' : 'muted'],
+            ['this epoch', amt(l.spent_this_epoch || 0, den) + (pay.epoch_cap ? ' / ' + amt(pay.epoch_cap, den) : '')],
             ['due now', amt(due, den), null, due ? 'live' : 'muted'],
-            ['pays from', pay.min_payout ? amt(pay.min_payout, den) : 'any amount', null, pay.min_payout ? null : 'muted'],
           ]));
 
-          host.appendChild(H.field('Pay automatically', H.checkbox(!!pay.enabled, null, function (on) {
+          /* ── Terms, as one sentence ─────────────────────────────────
+           * The five numbers read as what they are — one rule for paying
+           * — with each value editable where it sits. Saved as a whole,
+           * behind an armed button; the automatic switch saves on its own
+           * because it is the one thing here a player flips in a hurry. */
+          cap(host, 'Terms');
+          var draft = {
+            denom: den, rate: pay.rate_per_difficulty || 0, per_helper_cap: pay.per_helper_cap || 0,
+            epoch_cap: pay.epoch_cap || 0, min_payout: pay.min_payout || 0,
+          };
+          var unit = den === 'ualpha' ? 'μg' : denomLabel(den);
+          function word(t) { return H.el('span', 'fstat-v tm-word', t); }
+          function num(key) {
+            var tb = H.textBox(String(draft[key] || 0), '0', function (v) { draft[key] = Number(String(v).replace(/[^0-9.]/g, '')) || 0; });
+            tb.classList.add('tm-inline');
+            return tb;
+          }
+          function line() {
+            var l = H.el('div', 'tm-sentence-line');
+            for (var i = 0; i < arguments.length; i++) l.appendChild(arguments[i]);
+            return l;
+          }
+          var sentence = H.el('div', 'tm-sentence');
+          var tokenSel = H.selectBox(den, tokenOptions(d.guild_id, den), function (v) { draft.denom = String(v || 'ualpha'); });
+          sentence.appendChild(line(word('Pay pherals in'), tokenSel, word('at'), num('rate'), word(unit + ' per difficulty,')));
+          sentence.appendChild(line(word('up to'), num('per_helper_cap'), word(unit + ' per pheral and'), num('epoch_cap'), word(unit + ' per epoch,')));
+          sentence.appendChild(line(word('settling once a pheral is owed'), num('min_payout'), word(unit + '.')));
+          var foot = H.el('div', 'tm-sentence-foot');
+          var auto = H.el('div', 'tm-doors-row');
+          auto.style.marginTop = '0';
+          auto.appendChild(H.checkbox(!!pay.enabled, 'pay automatically', function (on) {
             crew.pay = Object.assign({}, pay, { enabled: on });
             invoke('crew_save', { crew: crew }).then(function () { T.refresh(ctx.id, true); })
               .catch(function (e) { Board.stamp && Board.stamp('crew: ' + e); });
-          })));
-          host.appendChild(ticket({
-            cta: 'Save terms',
-            fields: [
-              { key: 'denom', label: 'Token', kind: 'choice', value: pay.denom || 'ualpha', options: [
-                { value: 'ualpha', label: 'Alpha' },
-              ].concat(d.guild_id ? [{ value: 'uguild.' + d.guild_id, label: 'Guild token' }] : []) },
-              { key: 'rate', label: 'Per difficulty', kind: 'amount', value: String(pay.rate_per_difficulty || 0) },
-              { key: 'per_helper_cap', label: 'Cap per helper', kind: 'amount', value: String(pay.per_helper_cap || 0) },
-              { key: 'epoch_cap', label: 'Cap per epoch', kind: 'amount', value: String(pay.epoch_cap || 0) },
-              // Batching: a helper is paid once they are owed this much, so a
-              // busy crew settles in a few transactions, not one per proof.
-              { key: 'min_payout', label: 'Pay once owed', kind: 'amount', value: String(pay.min_payout || 0) },
-            ],
-            confirm: function (v) {
-              return { title: 'Set the cluster’s terms?', cta: 'Save', rows: [
-                ['Token', String(v.denom)],
-                ['Rate', String(v.rate || 0) + ' per difficulty'],
-                ['Per helper', Number(v.per_helper_cap) ? String(v.per_helper_cap) : 'no cap'],
-                ['Per epoch', Number(v.epoch_cap) ? String(v.epoch_cap) : 'no cap'],
-                ['Pay once owed', Number(v.min_payout) ? String(v.min_payout) : 'any amount'],
-              ] };
-            },
-            submit: function (v) {
-              crew.pay = { enabled: !!pay.enabled, denom: String(v.denom || 'ualpha'),
-                rate_per_difficulty: Number(v.rate) || 0, epoch_secs: pay.epoch_secs || 3600,
-                epoch_cap: Number(v.epoch_cap) || 0, per_helper_cap: Number(v.per_helper_cap) || 0,
-                min_payout: Number(v.min_payout) || 0 };
+          }));
+          foot.appendChild(auto);
+          foot.appendChild(armed({
+            label: 'Save terms',
+            confirm: 'Save these terms?',
+            run: function () {
+              crew.pay = { enabled: !!pay.enabled, denom: draft.denom, rate_per_difficulty: draft.rate,
+                epoch_secs: pay.epoch_secs || 3600, epoch_cap: draft.epoch_cap,
+                per_helper_cap: draft.per_helper_cap, min_payout: draft.min_payout };
               return invoke('crew_save', { crew: crew });
             },
-            done: function () { T.refresh(ctx.id, true); },
+            after: function () { T.refresh(ctx.id, true); },
           }));
+          sentence.appendChild(foot);
+          host.appendChild(sentence);
 
-          plan.forEach(function (s) {
-            host.appendChild(H.resultRow({
-              icon: 'icon-send-alpha', title: String(s.helper_player),
-              subtitle: amt(s.amount_base, s.denom) + ' · ' + plural(s.credit_ids.length, 'proof'),
-              chips: s.capped ? [H.statTile('capped', 'yes', null, 'bad')] : [],
-            }));
+          /* ── Ledger, per pheral ─────────────────────────────────────
+           * What each pheral is owed is the page's real content: proofs,
+           * the difficulty those proofs cleared, the amount, and whether it
+           * has been paid, is waiting, or sits under the floor. */
+          var byPheral = {};
+          credits.forEach(function (c) {
+            var r = byPheral[c.helper_player] || (byPheral[c.helper_player] = { who: c.helper_player, proofs: 0, difficulty: 0, owed: 0, paid: 0, denom: c.denom });
+            r.proofs += 1;
+            r.difficulty += Number(c.difficulty) || 0;
+            if (c.settled_at) r.paid += Number(c.amount_base) || 0; else r.owed += Number(c.amount_base) || 0;
           });
-          if (due > 0) {
-            host.appendChild(doorRow([{ label: 'Pay now', primary: true, onClick: function (a) {
-              a.textContent = '…';
-              invoke('crew_settle', { roomId: room })
-                .then(function () { T.refresh(ctx.id, true); })
-                .catch(function (e) { a.textContent = String(e); });
-            } }]));
+          var floor = pay.per_helper_cap > 0 ? Math.min(pay.min_payout || 0, pay.per_helper_cap) : (pay.min_payout || 0);
+          var ledger = Object.keys(byPheral).map(function (k) { return byPheral[k]; })
+            .sort(function (a, b) { return (b.owed - a.owed) || (b.paid - a.paid); });
+          if (ledger.length) {
+            cap(host, 'Ledger');
+            var head = H.el('div', 'tm-ledger is-head');
+            ['pheral', 'proofs', 'difficulty', 'owed', 'state'].forEach(function (t, i) {
+              head.appendChild(H.el('div', 'fstat-l' + (i ? ' tm-ledger-r' : ''), t));
+            });
+            host.appendChild(head);
+            ledger.forEach(function (r) {
+              var state = r.owed > 0 && floor > 0 && r.owed < floor ? 'below floor' : r.owed > 0 ? 'owed' : 'paid';
+              var mod = state === 'owed' ? 'is-owed' : state === 'paid' ? 'is-paid' : 'is-floor';
+              var row = H.el('div', 'tm-ledger');
+              row.appendChild(H.el('div', 'fstat-v', String(r.who)));
+              row.appendChild(H.el('div', 'fstat-v tm-ledger-r', H.fmtInt(r.proofs)));
+              row.appendChild(H.el('div', 'fstat-v tm-ledger-r', H.fmtInt(r.difficulty)));
+              row.appendChild(H.el('div', 'fstat-v tm-ledger-r ' + mod, amt(r.owed > 0 ? r.owed : r.paid, r.denom || den)));
+              row.appendChild(H.el('div', 'fstat-l tm-ledger-r ' + mod, state));
+              host.appendChild(row);
+            });
           }
 
-          cap(host, 'Receipts');
-          var rows = (l.credits || []).slice().sort(function (a, b) { return b.ts_ms - a.ts_ms; }).slice(0, 20);
-          if (!rows.length) { host.appendChild(H.stateBlock('info', 'Nobody has finished anything for you yet.')); return; }
-          rows.forEach(function (c) {
-            host.appendChild(H.resultRow({
-              icon: c.category === 'refine' ? 'icon-refine' : 'icon-mine',
-              title: String(c.helper_player) + ' · ' + c.object_id,
-              subtitle: String(c.category) + ' · difficulty ' + c.difficulty,
-              chips: [
-                H.statTile('owed', amt(c.amount_base, c.denom)),
-                H.statTile('paid', c.settled_at ? 'yes' : 'no', null, c.settled_at ? 'ok' : 'muted'),
-              ],
+          /* ── Settle: the button says what it will do ───────────────── */
+          var settle = H.el('div', 'tm-doors-row');
+          if (due > 0) {
+            settle.appendChild(armed({
+              label: 'Settle ' + amt(due, den) + ' to ' + plural(plan.length, 'pheral'),
+              confirm: 'Send ' + amt(due, den) + ' now?',
+              run: function () { return invoke('crew_settle', { roomId: room }); },
+              after: function () { T.refresh(ctx.id, true); },
             }));
-          });
+          } else {
+            settle.appendChild(H.el('span', 'fstat-l', ledger.length ? 'nothing due' : 'nobody has finished anything for you yet'));
+          }
+          host.appendChild(settle);
+
+          /* ── Receipts, folded ───────────────────────────────────────── */
+          if (credits.length) {
+            var folds = H.el('div', 'tm-folds');
+            var row = H.el('div', 'tm-fold');
+            row.setAttribute('data-fold', 'receipts');
+            row.appendChild(H.el('span', 'fstat-l', 'Receipts · ' + H.fmtInt(credits.length)));
+            row.appendChild(H.el('span', 'fstat-l tm-fold-caret', open.receipts ? '▾' : '▸'));
+            row.addEventListener('click', function () { open.receipts = !open.receipts; T.refresh(ctx.id, true); });
+            folds.appendChild(row);
+            if (open.receipts) {
+              var body = H.el('div', 'tm-fold-body');
+              credits.slice().sort(function (a, b) { return b.ts_ms - a.ts_ms; }).slice(0, 20).forEach(function (c) {
+                body.appendChild(H.resultRow({
+                  icon: c.category === 'refine' ? 'icon-refine' : 'icon-mine',
+                  title: String(c.helper_player) + ' · ' + c.object_id,
+                  subtitle: String(c.category) + ' · difficulty ' + c.difficulty,
+                  chips: [
+                    H.statTile('owed', amt(c.amount_base, c.denom)),
+                    H.statTile('paid', c.settled_at ? 'yes' : 'no', null, c.settled_at ? 'ok' : 'muted'),
+                  ],
+                }));
+              });
+              folds.appendChild(body);
+            }
+            host.appendChild(folds);
+          }
         });
       }).catch(function (e) { fail(host, 'crew pay', e); });
     },

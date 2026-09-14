@@ -148,10 +148,13 @@ pub async fn mcp_player_profile(player: String) -> Result<Value, String> {
     let entity = client.query_entity("player", &pid).await?;
 
     let g = &client.guild;
-    let (ore, planets, raids, infusions, allocations) = tokio::join!(
+    let (ore, planets, raids, activity, infusions, allocations) = tokio::join!(
         g.player_ore_stats(&pid),
         g.player_planets_completed(&pid),
         g.player_raids_launched(&pid),
+        // The last 30 days beside the lifetime figures (indexer per-player
+        // daily aggregate); `None` on a guild that does not serve it.
+        g.planet_activity_player_stats(&pid, None, None),
         g.infusion_by_player(&pid, 1),
         // `controller`, not `source`: this is the same reader our OWN
         // allocations page uses, so "outgoing" means the same thing on both
@@ -180,6 +183,7 @@ pub async fn mcp_player_profile(player: String) -> Result<Value, String> {
         "ore_stats": ore.ok(),
         "planets_completed": planets.ok(),
         "raids_launched": raids.ok(),
+        "activity": activity.ok().map(|(rows, _)| crate::mcp::terminal::fold_activity_month(&rows)),
         "infusions": infusions.ok().map(|p| p.items),
         "allocations": allocations.ok().map(|p| p.items),
     }))

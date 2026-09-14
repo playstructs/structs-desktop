@@ -1441,6 +1441,23 @@
     .tm-fold .fstat-l { color: var(--text-body); }
     .tm-fold-caret { color: var(--text-hint); }
     .tm-fold-body { padding: var(--spacing-sm) 0 var(--spacing-lg); border-bottom: 1px solid var(--border-subtle); }
+    /* The Bounty card: terms as one sentence with the numbers editable in
+       place, and a per-pheral ledger. */
+    .tm-sentence { display: flex; flex-direction: column; gap: var(--spacing-md); padding: var(--spacing-lg);
+      border: 1px solid var(--border-subtle); background: var(--surface-neutral-body); }
+    .tm-sentence-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-sm) var(--spacing-md); }
+    .tm-word { line-height: 1.6; color: var(--text-body); }
+    .tm-inline { display: inline-flex; width: auto; }
+    .tm-inline input { width: 5em; text-align: right; }
+    .tm-sentence-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md);
+      padding-top: var(--spacing-md); }
+    .tm-ledger { display: grid; grid-template-columns: minmax(0, 1.6fr) repeat(4, minmax(0, 1fr)); gap: var(--spacing-md);
+      align-items: center; padding: var(--spacing-md) var(--spacing-md); border-bottom: 1px solid var(--border-subtle); }
+    .tm-ledger.is-head { padding-top: 0; padding-bottom: var(--spacing-sm); }
+    .tm-ledger-r { text-align: right; justify-content: flex-end; }
+    .tm-ledger .is-owed { color: var(--text-warning); }
+    .tm-ledger .is-paid { color: var(--text-player-primary); }
+    .tm-ledger .is-floor { color: var(--text-hint); }
     /* The ops cards: a strip of readings first, rows under it. */
     .tm-tiles { margin-bottom: var(--spacing-md); gap: var(--spacing-md) var(--spacing-xl); }
     .tm-tx { text-align: left; }

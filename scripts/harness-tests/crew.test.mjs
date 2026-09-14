@@ -221,14 +221,24 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
     return c && /rate|owed/i.test(text(c)) ? c : null;
   });
   check('the bounty card renders', host !== null);
-  const body = text(host);
   if (!host) { console.log('  (skipping the rest: nothing rendered)'); }
   else {
-  check('the payout floor is shown and editable', /pays from/.test(body) && /Pay once owed/.test(body), body.slice(0, 400));
+  // Receipts are folded; open them so the checks below can read them.
+  const fold = host.querySelector('.tm-fold');
+  if (fold) { fold.click(); await until(() => host.querySelector('.tm-fold-body'), 2000); }
+  const body = text(host);
+  const inputs = [...host.querySelectorAll('input')].map((i) => i.value);
+  check('the payout floor is in the sentence and editable',
+    /settling once a pheral is owed/.test(body) && inputs.includes('50'), body.slice(0, 400) + ' | ' + inputs.join(','));
+  // A guild token is named as its guild names it, with the guild id — never
+  // "Guild token", since every guild mints one.
+  const tokenOpts = [...host.querySelectorAll('option')].map((o) => o.textContent);
+  check('the token choice names each guild token with its guild id',
+    tokenOpts.some((t) => /Hydro \(0-1\)/.test(t)) && !tokenOpts.some((t) => /^Guild token$/.test(t)), tokenOpts.join(' | '));
   check('…and offers to pay anyone who helps when no such terms exist',
     /Pay pherals/.test(body), body.slice(0, 300));
 
-  check('the rate is per difficulty, not per proof', /10\u03bcg \/ difficulty/.test(body), body.slice(0, 200));
+  check('the rate is per difficulty, not per proof', /per difficulty/.test(body) && inputs.includes('10'), body.slice(0, 200) + ' | ' + inputs.join(','));
   // Money is on the game's own ladder here as everywhere else: 90 ualpha is
   // `90\u03bcg`, not a bare integer beside a wire denom.
   check('what is owed is shown against what the epoch has already spent',
@@ -239,8 +249,10 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   // amount was computed from. A row showing only an amount cannot be checked.
   check('a receipt names the worker, the object and the difficulty',
     /1-61/.test(body) && /5-2184/.test(body) && /difficulty 9/.test(body), body.slice(-400));
-  check('…and a settlement counts proofs in the singular when there is one',
-    /\u00b7 1 proof(?!s)/.test(body), body.slice(0, 500));
+  check('…and the settle button says what it will do, in the singular when there is one',
+    /Settle 90\u03bcg to 1 pheral(?!s)/.test(body), body.slice(0, 500));
+  check('the ledger shows each pheral with what is owed and its state',
+    /1-61/.test(body) && /owed/.test(body) && /1-248/.test(body) && /paid/.test(body) && /Ledger/.test(body), body.slice(0, 600));
   check('…and whether it has been paid', /paid/.test(body));
 
   // A settled credit and an unsettled one must not look alike.

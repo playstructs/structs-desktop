@@ -4010,7 +4010,7 @@
           strip.appendChild(H.statTile(['Planet', 'home'], String(st.planet_id || '—')));
           strip.appendChild(H.statTile(['Fleet', 'id'], String(st.fleet_id || '—')));
           host.appendChild(strip);
-          [['ore', 'Ore'], ['planets', 'Planets completed'], ['raids', 'Raids launched'], ['ledger', 'Ledger']].forEach(function (sec) {
+          [['ore', 'Ore'], ['planets', 'Planets completed'], ['raids', 'Raids launched'], ['activity', 'Activity · 30 days'], ['ledger', 'Ledger']].forEach(function (sec) {
             var box = sheetSection(sec[1], t[sec[0]]);
             if (box) host.appendChild(box);
           });
