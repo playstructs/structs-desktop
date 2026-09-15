@@ -174,10 +174,27 @@ pub async fn struct_act_impl(
         .filter_map(|c| c.as_text().map(|t| t.text.clone()))
         .collect::<Vec<_>>()
         .join("\n");
-    if text.starts_with("Error:") || text.starts_with("Blocked:") || text.starts_with("No virtual player") {
+    if act_text_is_failure(&text) {
         return Err(text);
     }
     Ok(text)
+}
+
+/// The façade answers in prose. Everything it says when a message did NOT go
+/// out has to come back as an error, or the map's action bar holds its lock
+/// for a tx that never existed ("Executing" until the timeout) — which is
+/// what a refused build did. "submitted — tx …" is the only success shape.
+pub fn act_text_is_failure(text: &str) -> bool {
+    let t = text.trim_start();
+    let lower = t.to_ascii_lowercase();
+    t.starts_with("Error:")
+        || lower.starts_with("blocked:")
+        || t.starts_with("No virtual player")
+        || t.starts_with("Virtual player has no on-chain id")
+        || t.starts_with("Unknown ")
+        || lower.contains(" failed")
+        || lower.contains("refused")
+        || lower.contains("rejected")
 }
 
 pub async fn execute(
@@ -2169,6 +2186,18 @@ mod struct_act_tests {
         assert_eq!(msg["slot"], 3);
         assert_eq!(location_type_to_enum("Fleet"), 9);
         assert_eq!(location_type_to_enum("garbage"), 2);
+    }
+
+    #[test]
+    fn facade_prose_that_means_no_tx_is_an_error() {
+        assert!(act_text_is_failure("[vplayer 1] build failed: struct limit"));
+        assert!(act_text_is_failure("[vplayer 1] mine failed to start: no clock"));
+        assert!(act_text_is_failure("Error: build: unknown struct type 'X'"));
+        assert!(act_text_is_failure("BLOCKED: guild substation 3-1 can't power another player."));
+        assert!(act_text_is_failure("No virtual player matches 'x'."));
+        assert!(act_text_is_failure("player_send refused: bad address"));
+        assert!(!act_text_is_failure("[vplayer 1] build submitted — tx ABC123\nRead the outcome via structs_intel battle_log / structs_events."));
+        assert!(!act_text_is_failure("[vplayer 2] activate submitted — tx (pending)"));
     }
 
     #[test]

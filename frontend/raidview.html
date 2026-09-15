@@ -215,6 +215,22 @@
       outline-color: var(--text-enemy-primary);
     }
 
+    /* The tooltip: the game's `.sui-tooltip` frame, hosted in the HUD layer
+       (raidview.js `initTooltips`). The frame is sui.css's; what is set here
+       is only the shape of what goes in it — a label line over body lines,
+       each line kept whole — and the one thing the frame lacks, a stacking
+       direction (`inline-flex` with no direction laid the label and the body
+       side by side). Pointer events stay off: the HUD layer passes clicks
+       through to the map, and a tooltip must not catch the mouse-up that
+       closes it. */
+    #rv-hud .sui-tooltip { flex-direction: column; align-items: flex-start; gap: var(--spacing-xs);
+      pointer-events: none; }
+    #rv-hud .rv-tip-label { color: var(--text-hint); white-space: nowrap; }
+    /* Facts wrap at the frame's 320px, never mid-word; a value and its
+       explanation ("275 — raids cannot seize until it falls") is two lines
+       there, which reads better than a frame the text runs out of. */
+    #rv-hud .rv-tip-body { text-align: left; white-space: normal; overflow-wrap: anywhere; }
+
     /* The Cheatsheet is a POPOVER (Design System: "a popover used to display
        information about an ability or Struct"), appended to <body> and
        positioned fixed, so nothing here can clip it. Nothing of ours styles

@@ -371,6 +371,9 @@
   /// the stream answers; here a dropped tx (chain_health, LCD stall) would
   /// otherwise wedge the bar for good, so it lets go and says so.
   var EXECUTING_TIMEOUT_MS = 120000;
+  /// A build indicator with no struct behind it after this long was a tx
+  /// that never landed and whose receipt this window never heard.
+  var PENDING_BUILD_MAX_MS = 10 * 60000;
   /// Ambit bitmask → names, the chain's `possible_ambit` / `*_weapon_ambits`
   /// encoding (Water=2, Land=4, Air=8, Space=16, Local=32). `local` means
   /// "the attacker's own ambit" — the game's ambits_array carries the literal
@@ -1291,7 +1294,22 @@
     var mine = state.executing;
     refreshBar();
     return T.core.invoke('mcp_struct_act', { player: player, action: action, args: args }).then(function (r) {
-      note(label + ' — ' + String(r || 'sent').split('\n')[0].slice(0, 140), 'sui-mod-primary');
+      var text = String(r || 'sent');
+      // The façade answers in prose, and older builds answered a refusal
+      // ("[vplayer 1] build failed: … cannot handle new load") as a success.
+      // Read it as the refusal it is, whichever side forgot to.
+      if (actTextIsFailure(text)) throw text;
+      note(label + ' — ' + text.split('\n')[0].slice(0, 140), 'sui-mod-primary');
+      // The receipt names the tx; a settlement that later says it failed
+      // (`raid-tx`) releases the lock by that hash.
+      var m = /\btx ([0-9A-Fa-f]{16,})/.exec(text);
+      if (m && state.executing === mine) mine.tx = m[1].toUpperCase();
+      // A build's lock ends at the broadcast: the struct it makes arrives
+      // with a later snapshot (the tile keeps its indicator until then), and
+      // a chain rejection reaches the tile through `raid-tx`. Holding the bar
+      // until the tile filled meant "Executing" for as long as the cache took
+      // to learn the new struct — minutes, sometimes.
+      if (mine.action === 'build' && state.executing === mine) state.executing = null;
       // The chain charges the player on inclusion; the bar says so now,
       // the way the game's optimistic last-action block does.
       if (lock.cost) state.chargeOverride[player] = 0;
@@ -1309,9 +1327,23 @@
       note(label + ' refused: ' + String(e).slice(0, 160), 'sui-mod-destructive');
       if (state.executing === mine) state.executing = null;
       refreshBar();
+      throw e;
     });
   }
-  function act(s, action, args, label, lock) { return invokeAct(s.owner, action, args, label, Object.assign({ structId: s.id }, lock || {})); }
+  /* Mirror of `players::act_text_is_failure`: the only success shape is
+   * "… submitted — tx …". */
+  function actTextIsFailure(text) {
+    var t = String(text || '').replace(/^\s+/, '');
+    var lower = t.toLowerCase();
+    return /^error:/i.test(t) || lower.indexOf('blocked:') === 0 || t.indexOf('No virtual player') === 0
+      || t.indexOf('Virtual player has no on-chain id') === 0 || t.indexOf('Unknown ') === 0
+      || lower.indexOf(' failed') >= 0 || lower.indexOf('refused') >= 0 || lower.indexOf('rejected') >= 0;
+  }
+  function act(s, action, args, label, lock) {
+    // A refusal is already reported in the notice strip; the button's
+    // caller has nothing more to do with it.
+    return invokeAct(s.owner, action, args, label, Object.assign({ structId: s.id }, lock || {})).catch(function () {});
+  }
   /* The frame (or snapshot) that answers the action in flight has landed:
    * release the lock. `expect` reads the struct's CURRENT state, so a
    * snapshot that already shows the end state settles it too. */
@@ -1320,6 +1352,11 @@
     if (!ex) return;
     var done = false;
     if (hint && hint.attackerId && ex.action === 'attack' && hint.attackerId === ex.structId) done = true;
+    // A build's confirmation is the frame that announces the struct (the
+    // game clears its lock on the MATERIALIZED status / build-start frame).
+    // The tile itself fills only when a snapshot carries the new struct,
+    // which can be a cache refresh away — too late to hold the bar for.
+    else if (hint && hint.buildStarted && ex.action === 'build' && (!hint.player || !ex.player || hint.player === ex.player)) done = true;
     else if (typeof ex.expect === 'function') {
       var s = ex.structId ? state.structsById[ex.structId] : null;
       try { done = !!ex.expect(s); } catch (e) { done = false; }
@@ -1521,10 +1558,13 @@
       invokeAct(actor, 'build', { struct_type: typeName, ambit: ambit, slot: slot },
         'Build ' + typeName + ' on ' + ambit + (kind === 'cmd' ? '' : ' ' + (slot + 1)),
         { tileKey: key, cost: row.build_charge, expect: function () { return occupied(anchors[key]); } }).then(function () {
-        // A refusal leaves nothing pending on the tile.
-        if (!state.executing || state.executing.tileKey !== key) {
-          if (!occupied(anchors[key])) { delete state.pendingBuilds[key]; paintPendingTile(key); }
-        }
+        // Broadcast: the lock is already released; the indicator stays until
+        // the struct lands, a receipt says the tx failed, or it goes stale.
+      }, function () {
+        // Refused before it left: nothing is pending on the tile.
+        delete state.pendingBuilds[key];
+        paintPendingTile(key);
+        refreshBar();
       });
       refreshBar();
     });
@@ -2776,50 +2816,78 @@
       clearTimeout(timer);
       if (bubble.parentElement) bubble.parentElement.removeChild(bubble);
       timer = setTimeout(function () {
-        var host = trigger.parentElement;
+        // The bubble lives in the HUD layer, not in the trigger's parent.
+        // The game appends to the parent, and here that parent is the
+        // portrait's 48px screen: an absolutely positioned box shrinks to
+        // fit the width of its containing block, so the bubble came out one
+        // word wide and wrapped every line ("Defender / — this / planet's").
+        // The HUD layer is the full stage, scaled exactly as the panels are,
+        // so the bubble keeps the panels' pixel size and the game's 320px
+        // max width means what it says.
+        var host = document.getElementById('rv-hud') || trigger.parentElement;
         if (!host) return;
-        // The bubble is positioned against its offset parent, so that parent
-        // must not be `static` — the same guard the game applies.
-        if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
         host.appendChild(bubble);
-        // Newlines in the data attribute become real line breaks.
-        //
         // `esc` is what makes this safe, and it is NOT belt-and-braces: this
         // comment used to say the text was "ours (never user content)", which
         // is false — the defender portrait's tooltip carries a player's
         // on-chain NAME, and players choose those. Escaping each segment
-        // before joining is the only thing standing between a name of
-        // `<img src=x onerror=…>` and script running in somebody else's raid
-        // window. Do not remove it as redundant.
-        bubble.innerHTML = String(trigger.dataset.suiTooltip || '')
-          .split('\n').map(esc).join('<br>');
+        // is the only thing standing between a name of `<img src=x
+        // onerror=…>` and script running in somebody else's raid window.
+        // Do not remove it as redundant.
+        //
+        // Shape: the first line of a multi-line tooltip is what the thing IS
+        // and is set as a label (the design system's small uppercase strip,
+        // the way a data card names its row); the lines after it are the
+        // facts, in body text. A one-line tooltip is just its line.
+        var lines = String(trigger.dataset.suiTooltip || '').split('\n')
+          .map(function (l) { return l.trim(); }).filter(function (l) { return l; });
+        bubble.innerHTML = '';
+        if (lines.length > 1) {
+          var label = document.createElement('div');
+          label.className = 'rv-tip-label sui-text-label';
+          label.textContent = lines.shift();
+          bubble.appendChild(label);
+        }
+        var body = document.createElement('div');
+        body.className = 'rv-tip-body';
+        body.innerHTML = lines.map(esc).join('<br>');
+        bubble.appendChild(body);
         bubble.classList.add('sui-mod-show');
-        place(bubble, trigger, trigger.dataset.suiModPlacement === 'bottom');
+        place(bubble, trigger, host, trigger.dataset.suiModPlacement === 'bottom');
       }, 100);
     }
 
+    /* The trigger's box in the host's LAYOUT coordinates — offsets summed up
+     * the offset-parent chain, so the HUD's scale transform (which changes
+     * screen pixels, not layout) cancels out. */
+    function boxIn(node, host) {
+      var x = 0, y = 0, n = node;
+      while (n && n !== host) { x += n.offsetLeft; y += n.offsetTop; n = n.offsetParent; }
+      return { left: x, top: y, width: node.offsetWidth, height: node.offsetHeight };
+    }
+
     // Horizontally centre, then sit above/below — flipping to the other side
-    // when there is not enough room, exactly as SUIUtil does.
-    function place(bub, origin, below) {
-      var r = origin.getBoundingClientRect();
+    // when there is not enough room, exactly as SUIUtil does — against the
+    // HOST's edges, which are the stage's.
+    function place(bub, origin, host, below) {
+      var o = boxIn(origin, host);
+      var W = host.clientWidth || window.innerWidth, H = host.clientHeight || window.innerHeight;
+      var gap = 4;
       // `SUIUtil.horizontallyCenter`, ported in full. Centring plus a
       // `Math.max(0, …)` floor only guards the LEFT edge, so a trigger in the
       // right-hand action bar pushed most of its tooltip past the window —
       // there has to be a matching right-edge case that aligns the bubble's
       // right edge to the trigger's instead.
-      if (r.left - (origin.offsetWidth / 2) < bub.offsetWidth / 2) {
-        bub.style.left = origin.offsetLeft + 'px';
-      } else if ((origin.offsetWidth / 2) + (window.innerWidth - r.right) < bub.offsetWidth / 2) {
-        bub.style.left = ((origin.offsetLeft + origin.offsetWidth) - bub.offsetWidth) + 'px';
-      } else {
-        bub.style.left = (origin.offsetLeft - (bub.offsetWidth - origin.offsetWidth) / 2) + 'px';
-      }
-      var fitsBelow = (window.innerHeight - r.bottom) >= bub.offsetHeight;
-      var fitsAbove = r.top >= bub.offsetHeight;
+      var centred = o.left - (bub.offsetWidth - o.width) / 2;
+      if (centred < gap) bub.style.left = Math.max(gap, o.left) + 'px';
+      else if (centred + bub.offsetWidth > W - gap) bub.style.left = Math.max(gap, Math.min(o.left + o.width, W - gap) - bub.offsetWidth) + 'px';
+      else bub.style.left = centred + 'px';
+      var fitsBelow = (H - (o.top + o.height)) >= bub.offsetHeight + gap;
+      var fitsAbove = o.top >= bub.offsetHeight + gap;
       var putBelow = below ? (fitsBelow || !fitsAbove) : (!fitsAbove && fitsBelow);
       bub.style.top = putBelow
-        ? (origin.offsetTop + origin.offsetHeight) + 'px'
-        : (origin.offsetTop - bub.offsetHeight) + 'px';
+        ? (o.top + o.height + gap) + 'px'
+        : (o.top - bub.offsetHeight - gap) + 'px';
     }
 
     function triggerFor(node) {
@@ -2998,7 +3066,8 @@
     // in-flight action whose end state the snapshot shows has landed.
     Object.keys(state.pendingBuilds).forEach(function (key) {
       var mount = anchors[key];
-      if (!mount || occupied(mount)) delete state.pendingBuilds[key];
+      var stale = Date.now() - (state.pendingBuilds[key].at || 0) > PENDING_BUILD_MAX_MS;
+      if (!mount || occupied(mount) || stale) delete state.pendingBuilds[key];
       else paintPendingTile(key);            // the rebuild wiped the indicator
     });
     settleExecuting();
@@ -3050,6 +3119,7 @@
         if (s && hud) renderHud(hud, s, hp);
       }
     } else if (d.category === 'struct_status') {
+      detail.__subject = d.subject;
       applyStatusDelta(detail);
     } else if (d.category === 'struct_move') {
       applyMoveDelta(detail);
@@ -3058,9 +3128,41 @@
     } else if (d.category === 'struct_block_build_start') {
       // The chain has the struct; the forced snapshot brings its type and
       // seat. Nothing to draw yet, but a build sent from here is confirmed.
-      settleExecuting();
+      settleExecuting({ buildStarted: true, player: subjectPlayer(d.subject) });
     }
     renderHeader();
+  }
+
+  /* `structs.planet.<planet>.<player>` — the player a planet-scoped frame is
+   * about, or null when the subject does not say. */
+  function subjectPlayer(subject) {
+    var parts = String(subject || '').split('.');
+    var last = parts[parts.length - 1];
+    return /^1-\d+$/.test(last || '') ? last : null;
+  }
+
+  /* A `tx_settled` receipt for a tx this window sent. A failure or a drop
+   * releases the lock and says why — the game's signing queue settles its
+   * ActionBarLock the same way. A success for a BUILD releases it too: the
+   * initiate is on the chain, and the struct follows in the next snapshot. */
+  function applyTxSettled(p) {
+    var ex = state.executing;
+    if (!ex || !p) return;
+    var hash = String(p.transactionHash || p.hash || '').toUpperCase();
+    if (!ex.tx || !hash || hash !== ex.tx) return;
+    var status = String(p.status || '').toLowerCase();
+    var code = p.code == null ? null : Number(p.code);
+    var failed = status === 'failed' || status === 'dropped' || (code != null && code !== 0);
+    if (failed) {
+      state.executing = null;
+      delete state.chargeOverride[ex.player];
+      if (ex.tileKey) { delete state.pendingBuilds[ex.tileKey]; paintPendingTile(ex.tileKey); }
+      note(ex.label + ' failed on chain' + (p.error ? ': ' + String(p.error).slice(0, 140) : ''), 'sui-mod-destructive');
+      refreshBar();
+    } else if (ex.action === 'build') {
+      state.executing = null;
+      refreshBar();
+    }
   }
 
   /* STRUCT_STATUS_FLAGS, the chain's status bitfield. */
@@ -3098,7 +3200,14 @@
       refreshBar();
       return;
     }
-    if (!s) return;                                 // a struct the snapshot will bring
+    if (!s) {
+      // A struct the snapshot will bring — its first frame (materialised)
+      // is the build confirmation the bar is waiting for.
+      if ((status & STATUS.MATERIALIZED) !== 0 && (was == null || (was & STATUS.MATERIALIZED) === 0)) {
+        settleExecuting({ buildStarted: true, player: subjectPlayer(detail.__subject) });
+      }
+      return;
+    }
     if (flipped(STATUS.BUILT) && (status & STATUS.BUILT) !== 0) {
       s.built = true;
       s.online = (status & STATUS.ONLINE) !== 0;
@@ -3335,6 +3444,7 @@
     window.StructsEvents.listen(scoped('raid-delta'), function (e) { applyDelta(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-attacks'), function (e) { applyAttacks(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-log'), function (e) { applyLog(e.payload || {}); });
+    window.StructsEvents.listen(scoped('raid-tx'), function (e) { applyTxSettled(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-target-moved'), function (e) {
       var p = e.payload || {};
       note('Fleet ' + p.fleet_id + (p.planet_id ? ' arrived at planet ' + p.planet_id : ' left orbit'),
@@ -3446,6 +3556,8 @@
     _chargeOfPlayer: chargeOfPlayer,
     _deployableTypes: deployableTypes,
     _settleExecuting: settleExecuting,
+    _applyTxSettled: applyTxSettled,
+    actTextIsFailure: actTextIsFailure,
     _applyStatusDelta: applyStatusDelta,
     _applyMoveDelta: applyMoveDelta,
     _applyDefenseDelta: applyDefenseDelta,

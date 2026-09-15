@@ -76,9 +76,11 @@
       }
       var shieldRes = document.getElementById('rv-shield-res');
       if (shieldRes) {
+        // First line = the label the tooltip draws as its strip; the facts
+        // follow on their own lines.
         shieldRes.setAttribute('data-sui-tooltip',
-          'Planetary shield ' + fmtNum(shield)
-          + (shield > 0 ? ' — raids cannot seize until it falls' : ' — DOWN, the planet is vulnerable')
+          'Planetary shield\n' + fmtNum(shield)
+          + (shield > 0 ? ' — raids cannot seize until it falls' : ' — down, the planet is vulnerable')
           + (status ? '\nRaid: ' + humanStatus(status) : ''));
       }
 
@@ -93,7 +95,7 @@
         paintComposerIdentity();
       }
       renderSide('def', snap.owner, snap.owner_name, snap.owner_charge, snap.owner_pfp,
-        'Defender — this planet\'s owner');
+        'Defender — planet owner');
       var raiding = snap.raiding_fleet || state().raidingFleet;
       var br = document.getElementById('rv-hud-br');
       if (br) br.classList.toggle('hidden', !raiding);

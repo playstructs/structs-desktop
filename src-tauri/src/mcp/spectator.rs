@@ -2056,6 +2056,23 @@ const WATCHED_CATEGORIES: &[&str] = &[
 /// `structs.>`, so every planet's events arrive here regardless of who is
 /// watching — this only decides where they go.
 pub fn note_event(app: &tauri::AppHandle, event: &crate::mcp::event_buffer::GameEvent) {
+    // A settlement names a tx, not a planet. The window that sent that tx
+    // holds its action bar locked until it hears back: a chain rejection has
+    // to reach it, or "Executing" outlives the failure. Every open raid
+    // window gets the receipt; each matches on the hash it was handed.
+    if event.category == "tx_settled" {
+        let labels: Vec<String> = {
+            let w = WATCHES.lock().unwrap();
+            let mut all: Vec<String> = w.values().flat_map(|e| e.windows.iter().cloned()).collect();
+            all.sort();
+            all.dedup();
+            all
+        };
+        for label in labels {
+            emit(app, &label, "raid-tx", event.detail.clone());
+        }
+        return;
+    }
     let Some(planet_id) = planet_of(event) else {
         return;
     };

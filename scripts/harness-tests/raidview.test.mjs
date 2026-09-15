@@ -97,6 +97,24 @@ const S = RV._state;
       === 'img/structs/submersible/submersible-struct-base.png');
 }
 
+// ── Tooltips: hosted in the HUD layer, a label over body lines ─────────────
+{
+  const d = w.document;
+  const portrait = d.getElementById('rv-def-portrait');
+  portrait.dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 160));
+  const tip = d.getElementById('rv-tooltip');
+  check('press-and-hold on the defender portrait shows the game\'s tooltip frame',
+    !!tip && tip.classList.contains('sui-mod-show') && tip.classList.contains('sui-tooltip'));
+  check('…hosted in the HUD layer, not the portrait\'s 48px screen (that is what wrapped it one word wide)',
+    !!tip && tip.parentElement === d.getElementById('rv-hud'));
+  check('…its first line is a label, the facts under it are body lines',
+    !!tip && tip.querySelector('.rv-tip-label.sui-text-label') && /Defender/.test(tip.querySelector('.rv-tip-label').textContent)
+      && /Harness \(1-9\)/.test(tip.querySelector('.rv-tip-body').textContent), tip && tip.textContent);
+  w.dispatchEvent(new w.MouseEvent('mouseup'));
+  check('…and releasing hides it', !tip.parentElement);
+}
+
 // ── Badges ──────────────────────────────────────────────────────────────────
 check('offline struct wears the game\'s energy-deactivated badge',
   RV._badgesFor(S.structsById['5-4']).includes('sui-icon-energy-deactivated'));
@@ -1263,7 +1281,9 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   check('Build signs as the planet owner for that ambit and slot', bd.player === '1-9' && bd.action === 'build' && bd.args.struct_type === 'SAM Launcher' && bd.args.ambit === 'air' && bd.args.slot === 0);
   check('the tile shows the deployment indicator while the build is on its way', !!S.pendingBuilds['plan|air|0'] && !!RV._anchors()['plan|air|0'].querySelector('.rv-pending img'));
   check('…which is not an occupant: the tile stays free for the struct', !RV._occupied(RV._anchors()['plan|air|0']));
-  S.executing = null; // the chain's struct_block_build_start / snapshot
+  await new Promise((r) => setTimeout(r, 30));
+  check('a build\'s lock ends at the broadcast (the struct follows in a snapshot; the indicator stays)',
+    !S.executing && !!S.pendingBuilds['plan|air|0']);
   airTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true })); airTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   check('…and its bar is the pending-build form: the type\'s abbreviation, a progress bar, cancel not yet possible',
     /SAM/.test(chunk.querySelector('.sui-screen-info').textContent) && !!chunk.querySelector('.sui-action-bar-progress-bar') && !!chunk.querySelector('a.sui-panel-btn.sui-mod-disabled i.icon-close'));
@@ -1288,6 +1308,45 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   check('Escape cancels a pending action', !S.pending);
 
+  console.log('\n— receipts and frames release the lock');
+  check('the façade\'s prose for "no tx went out" reads as a refusal, its one success shape does not',
+    RV.actTextIsFailure('[vplayer 1] build failed: failed to execute message; player (1-271) cannot handle new load requirements')
+      && RV.actTextIsFailure('BLOCKED: guild substation cannot power another player') && RV.actTextIsFailure('Error: build: unknown struct type')
+      && !RV.actTextIsFailure('[vplayer 1] build submitted — tx 5D9F9B18\nRead the outcome via structs_intel'));
+  // A lock whose tx the chain rejects must not outlive the rejection.
+  fresh(); sel('5-1');
+  chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"]').click();
+  RV._anchors()[RV.anchorKeyFor(S.structsById['5-21'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await until(() => S.executing && S.executing.action === 'attack');
+  S.executing.tx = 'ABCDEF0123456789ABCD';
+  RV._applyTxSettled({ transactionHash: 'ffff0000ffff0000ffff', status: 'failed', code: 5 });
+  check('a receipt for some other tx changes nothing', !!S.executing);
+  RV._applyTxSettled({ transactionHash: 'abcdef0123456789abcd', status: 'failed', code: 5, error: 'out of charge' });
+  check('the receipt for OUR tx, failed, releases the lock and says why',
+    !S.executing && /failed on chain/.test(d.getElementById('rv-note').textContent) && RV._chargeOfPlayer('1-9') !== 0);
+  fresh(); sel('5-1');
+  chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"]').click();
+  RV._anchors()[RV.anchorKeyFor(S.structsById['5-21'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await until(() => S.executing && S.executing.action === 'attack');
+  S.executing.tx = 'ABCDEF0123456789ABCD';
+  RV._applyTxSettled({ transactionHash: 'ABCDEF0123456789ABCD', status: 'succeeded', code: 0 });
+  check('…a success keeps an attack locked until its shots arrive', !!S.executing);
+  RV._applyAttacks({ generation: S.generation, attacks: [{ attacker_id: '5-1', shots: [] }] });
+  fresh();
+  // A build lock (pinned here as if the broadcast had not yet answered) is
+  // released by the frame announcing the struct, on the acting player.
+  S.executing = { player: '1-9', action: 'build', tileKey: 'plan|air|1', label: 'Build', since: Date.now(), expect: () => false };
+  RV._applyDelta({ category: 'struct_block_build_start', subject: 'structs.planet.2-1.1-194', detail: { struct_id: '5-99' } });
+  check('a build-start frame for another player does not release it', !!S.executing);
+  RV._applyDelta({ category: 'struct_status', subject: 'structs.planet.2-1.1-9', detail: { struct_id: '5-98', status_old: 0, status: 1 } });
+  check('the MATERIALIZED frame for the acting player does', !S.executing);
+  S.executing = { player: '1-9', action: 'build', tileKey: 'plan|air|1', label: 'Build', since: Date.now(), expect: () => false };
+  RV._applyDelta({ category: 'struct_block_build_start', subject: 'structs.planet.2-1.1-9', detail: { struct_id: '5-98' } });
+  check('…and so does the build-start frame', !S.executing);
+  S.pendingBuilds['plan|air|1'] = { type: 'Tank', actor: '1-9', at: Date.now() - 11 * 60000 };
+  RV._applySnapshot({ generation: S.generation, snapshot: Object.assign({}, S.snapshot, { fetched_at_ms: S.snapshot.fetched_at_ms + 1 }) });
+  check('an indicator nothing ever materialised behind expires with the snapshot', !S.pendingBuilds['plan|air|1']);
+
   console.log('\n— consume alpha');
   // The fixture has no generator; the button's form is checked on a stand-in.
   S.structTypes['14'].power_generation = 'smallGenerator';
@@ -1298,9 +1357,11 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   const form = chunk.querySelector('.rv-infuse');
   check('…which opens the amount form in the bar', !!form && !!form.querySelector('input[type="number"]'));
   form.querySelector('input').value = '3';
+  const n0 = calls().length;
   form.querySelector('a.sui-screen-btn').click();
-  await until(() => calls().length >= 9);
-  check('…and sends the infusion in ualpha, as the game converts it', calls()[8].args.action === 'generator_infuse' && calls()[8].args.args.struct_id === '5-6' && calls()[8].args.args.amount === '3000000ualpha');
+  await until(() => calls().length > n0);
+  const infuse = calls()[n0].args;
+  check('…and sends the infusion in ualpha, as the game converts it', infuse.action === 'generator_infuse' && infuse.args.struct_id === '5-6' && infuse.args.amount === '3000000ualpha');
   S.executing = null;
   S.structTypes['14'].power_generation = 'noPowerGeneration';
 
