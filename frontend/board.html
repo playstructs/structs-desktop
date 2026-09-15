@@ -1443,13 +1443,17 @@
     .tm-fold-body { padding: var(--spacing-sm) 0 var(--spacing-lg); border-bottom: 1px solid var(--border-subtle); }
     /* The Bounty card: terms as one sentence with the numbers editable in
        place, and a per-pheral ledger. */
-    .tm-sentence { display: flex; flex-direction: column; gap: var(--spacing-md); padding: var(--spacing-lg);
+    /* The Bounty card's terms: one row per setting, label left and control
+       right, so nothing depends on the window's width. */
+    .tm-terms { display: flex; flex-direction: column; gap: var(--spacing-sm); padding: var(--spacing-md) var(--spacing-lg);
       border: 1px solid var(--border-subtle); background: var(--surface-neutral-body); }
-    .tm-sentence-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-sm) var(--spacing-md); }
-    .tm-word { line-height: 1.6; color: var(--text-body); }
-    .tm-inline { display: inline-flex; width: auto; }
-    .tm-inline input { width: 5em; text-align: right; }
-    .tm-sentence-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md);
+    .tm-term { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-lg); padding: var(--spacing-sm) 0; }
+    .tm-term-l { display: flex; flex-direction: column; gap: var(--spacing-xs); min-width: 0; }
+    .tm-term-l .fstat-l { color: var(--text-body); }
+    .tm-term-l .fstat-l.is-hint { color: var(--text-hint); letter-spacing: 0; }
+    .tm-term-c { display: flex; align-items: center; gap: var(--spacing-sm); flex: none; }
+    .tm-term-c input { text-align: right; }
+    .tm-terms-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--spacing-md);
       padding-top: var(--spacing-md); }
     .tm-ledger { display: grid; grid-template-columns: minmax(0, 1.6fr) repeat(4, minmax(0, 1fr)); gap: var(--spacing-md);
       align-items: center; padding: var(--spacing-md) var(--spacing-md); border-bottom: 1px solid var(--border-subtle); }

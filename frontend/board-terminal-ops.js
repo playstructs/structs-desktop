@@ -620,34 +620,43 @@
             ['due now', amt(due, den), null, due ? 'live' : 'muted'],
           ]));
 
-          /* ── Terms, as one sentence ─────────────────────────────────
-           * The five numbers read as what they are — one rule for paying
-           * — with each value editable where it sits. Saved as a whole,
+          /* ── Terms, one row per setting ───────────────────────────
+           * Label left, control right; a hint under the two that earn one.
+           * Nothing here depends on the window's width. Saved as a whole
            * behind an armed button; the automatic switch saves on its own
-           * because it is the one thing here a player flips in a hurry. */
+           * because it is the one thing a player flips in a hurry. */
           cap(host, 'Terms');
           var draft = {
             denom: den, rate: pay.rate_per_difficulty || 0, per_helper_cap: pay.per_helper_cap || 0,
             epoch_cap: pay.epoch_cap || 0, min_payout: pay.min_payout || 0,
           };
           var unit = den === 'ualpha' ? 'μg' : denomLabel(den);
-          function word(t) { return H.el('span', 'fstat-v tm-word', t); }
+          function term(label, hint, control) {
+            var row = H.el('div', 'tm-term');
+            var l = H.el('div', 'tm-term-l');
+            l.appendChild(H.el('span', 'fstat-l', label));
+            if (hint) l.appendChild(H.el('span', 'fstat-l is-hint', hint));
+            row.appendChild(l);
+            var c = H.el('div', 'tm-term-c');
+            c.appendChild(control);
+            row.appendChild(c);
+            return row;
+          }
           function num(key) {
             var tb = H.textBox(String(draft[key] || 0), '0', function (v) { draft[key] = Number(String(v).replace(/[^0-9.]/g, '')) || 0; });
-            tb.classList.add('tm-inline');
-            return tb;
+            tb.size = 7;
+            var c = H.el('span');
+            c.appendChild(tb);
+            c.appendChild(H.el('span', 'fstat-l', ' ' + unit));
+            return c;
           }
-          function line() {
-            var l = H.el('div', 'tm-sentence-line');
-            for (var i = 0; i < arguments.length; i++) l.appendChild(arguments[i]);
-            return l;
-          }
-          var sentence = H.el('div', 'tm-sentence');
-          var tokenSel = H.selectBox(den, tokenOptions(d.guild_id, den), function (v) { draft.denom = String(v || 'ualpha'); });
-          sentence.appendChild(line(word('Pay pherals in'), tokenSel, word('at'), num('rate'), word(unit + ' per difficulty,')));
-          sentence.appendChild(line(word('up to'), num('per_helper_cap'), word(unit + ' per pheral and'), num('epoch_cap'), word(unit + ' per epoch,')));
-          sentence.appendChild(line(word('settling once a pheral is owed'), num('min_payout'), word(unit + '.')));
-          var foot = H.el('div', 'tm-sentence-foot');
+          var terms = H.el('div', 'tm-terms');
+          terms.appendChild(term('token', null, H.selectBox(den, tokenOptions(d.guild_id, den), function (v) { draft.denom = String(v || 'ualpha'); })));
+          terms.appendChild(term('per difficulty', null, num('rate')));
+          terms.appendChild(term('cap per pheral', 'per epoch', num('per_helper_cap')));
+          terms.appendChild(term('cap per epoch', null, num('epoch_cap')));
+          terms.appendChild(term('pay once owed', 'batches payouts', num('min_payout')));
+          var foot = H.el('div', 'tm-terms-foot');
           var auto = H.el('div', 'tm-doors-row');
           auto.style.marginTop = '0';
           auto.appendChild(H.checkbox(!!pay.enabled, 'pay automatically', function (on) {
@@ -667,8 +676,8 @@
             },
             after: function () { T.refresh(ctx.id, true); },
           }));
-          sentence.appendChild(foot);
-          host.appendChild(sentence);
+          terms.appendChild(foot);
+          host.appendChild(terms);
 
           /* ── Ledger, per pheral ─────────────────────────────────────
            * What each pheral is owed is the page's real content: proofs,

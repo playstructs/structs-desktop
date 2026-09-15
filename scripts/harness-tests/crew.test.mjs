@@ -228,8 +228,8 @@ const text = (n) => (n ? n.textContent.replace(/\s+/g, ' ').trim() : '');
   if (fold) { fold.click(); await until(() => host.querySelector('.tm-fold-body'), 2000); }
   const body = text(host);
   const inputs = [...host.querySelectorAll('input')].map((i) => i.value);
-  check('the payout floor is in the sentence and editable',
-    /settling once a pheral is owed/.test(body) && inputs.includes('50'), body.slice(0, 400) + ' | ' + inputs.join(','));
+  check('the payout floor is a row of its own and editable',
+    /pay once owed/i.test(body) && inputs.includes('50'), body.slice(0, 400) + ' | ' + inputs.join(','));
   // A guild token is named as its guild names it, with the guild id — never
   // "Guild token", since every guild mints one.
   const tokenOpts = [...host.querySelectorAll('option')].map((o) => o.textContent);
