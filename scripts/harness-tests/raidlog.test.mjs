@@ -103,3 +103,35 @@ const iso = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, 
 }
 
 console.log('raid-log: all checks passed');
+
+// Rows name who did it: a chip from the log's identity map, or from the
+// snapshot's own two players, or the bare id.
+{
+  const { lg, w } = boot({ snapshot: { planet_id: '2-1', owner: '1-2136', owner_name: 'Sheldon', owner_pfp: '{"head":1}', raider_id: '1-61', raider_name: null, raider_pfp: null }, generation: 1 },
+    { mcp_raid_log: { rows: [
+      { date: '2026-09-15', time: '20:28', category: 'struct_attack', kind: 'combat', detail: 'MA 5-1 → CMD 5-2', actor: '1-61', target: '1-2136' },
+      { date: '2026-09-15', time: '20:27', category: 'struct_defense_add', kind: 'defense', detail: '5-3 now defends 5-2', actor: '1-2136' },
+      { date: '2026-09-15', time: '20:26', category: 'shield_change', kind: 'defense', detail: 'shield 1 → 2' },
+    ], players: { '1-61': { name: 'JPEG', pfp: '{"head":10}', tag: 'SN.C' } } } });
+  lg.logState.open = true;
+  lg.refreshLog();
+  await new Promise((r) => setTimeout(r, 30));
+  const d = w.document;
+  const rows = [...d.querySelectorAll('.rv-log-row')];
+  assert.equal(rows.length, 3);
+  const actor = rows[0].querySelector('.rv-log-who .rv-log-actor');
+  assert.ok(actor, 'an attack row shows its attacker');
+  assert.equal(actor.getAttribute('data-player-id'), '1-61');
+  assert.match(actor.textContent, /SN\.C/, 'with the guild tag from the log\'s identity map');
+  assert.match(actor.textContent, /JPEG/);
+  const target = rows[0].querySelector('.rv-log-d .rv-log-target');
+  assert.ok(target && target.getAttribute('data-player-id') === '1-2136', 'and its victim after the line');
+  assert.match(target.textContent, /Sheldon/, 'the victim is the planet owner, named from the snapshot');
+  assert.match(rows[1].querySelector('.rv-log-who').textContent, /Sheldon/, 'a defence row names the owner');
+  assert.equal(rows[2].querySelector('.rv-log-who').children.length, 0, 'a row about no one has an empty cell, not a wrong chip');
+  // Compared as text: the object comes from the window's realm, whose
+  // Object prototype is not Node's, and deepEqual tells them apart.
+  assert.equal(JSON.stringify(lg.whoIs('1-999')), JSON.stringify({ id: '1-999', name: null, pfp: null, tag: null }));
+  lg.rememberPlayers({ '1-999': { name: 'Late', pfp: null, tag: null } });
+  assert.equal(lg.whoIs('1-999').name, 'Late', 'a live push can name a player later');
+}

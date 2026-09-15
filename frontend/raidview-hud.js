@@ -17,6 +17,10 @@
   'use strict';
   window.RaidHud = function (ctx) {
     var state = ctx.state, target = ctx.target, chat = ctx.chat, paintComposerIdentity = ctx.paintComposerIdentity;
+    // Optional: per-block charge from the map (raidview.js). Without it the
+    // snapshot's own figures stand, as they always did.
+    var chargeOfPlayer = typeof ctx.chargeOfPlayer === 'function' ? ctx.chargeOfPlayer : function (pid, fallback) { return fallback; };
+    var chargeSince = typeof ctx.chargeSince === 'function' ? ctx.chargeSince : function () { return null; };
 
 
 
@@ -90,17 +94,22 @@
       // Defender (bottom-left) and raider (bottom-right).
       // The viewer's charge is a fact about THIS player, not the raid, but it
       // arrives on the same snapshot and changes on the same clock.
-      if (snap.viewer_charge != null) {
-        chat().myCharge = snap.viewer_charge;
+      // Charge moves per block (the game's CHARGE_LEVEL_CHANGED): derived
+      // from the head and each player's lastAction when the snapshot carries
+      // them, the snapshot's own figure otherwise.
+      var mine = chargeSince(snap.viewer_last_action);
+      if (mine == null) mine = snap.viewer_charge;
+      if (mine != null) {
+        chat().myCharge = mine;
         paintComposerIdentity();
       }
-      renderSide('def', snap.owner, snap.owner_name, snap.owner_charge, snap.owner_pfp,
+      renderSide('def', snap.owner, snap.owner_name, chargeOfPlayer(snap.owner, snap.owner_charge), snap.owner_pfp,
         'Defender — planet owner');
       var raiding = snap.raiding_fleet || state().raidingFleet;
       var br = document.getElementById('rv-hud-br');
       if (br) br.classList.toggle('hidden', !raiding);
       if (raiding) {
-        renderSide('atk', snap.raider_id || raiding, snap.raider_name, snap.raider_charge,
+        renderSide('atk', snap.raider_id || raiding, snap.raider_name, chargeOfPlayer(snap.raider_id, snap.raider_charge),
           snap.raider_pfp, 'Raider — fleet ' + raiding);
       }
     }

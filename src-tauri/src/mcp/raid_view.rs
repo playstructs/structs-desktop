@@ -560,7 +560,8 @@ pub async fn mcp_raid_log(planet_id: String, limit: Option<usize>) -> Result<Val
             break;
         }
     }
-    Ok(json!({ "planet_id": planet_id, "rows": rows }))
+    let players = identities_for(&rows, false).await;
+    Ok(json!({ "planet_id": planet_id, "rows": rows, "players": players }))
 }
 
 /// Activity rows newer than `cursor`, oldest-first, ready for the log to
@@ -607,8 +608,14 @@ fn log_row(item: &Value) -> Value {
         None => Value::Null,
     };
     let ts = item.get("time").and_then(|v| v.as_str()).unwrap_or("");
+    let (actor, target) = activity_players(&category, &detail);
     json!({
         "time": short_time(ts),
+        // WHO did it, and to whom — player ids the renderer turns into
+        // portrait chips. A log that named only struct ids read as a list
+        // of serial numbers; which side was winning was not on the page.
+        "actor": actor,
+        "target": target,
         // The DATE, kept separate. Rows are strictly newest-first, but with
         // only a clock the log read as unsorted the moment it crossed midnight
         // — 12:51, then 14:46, then 19:28, each a different day. The renderer
@@ -619,6 +626,100 @@ fn log_row(item: &Value) -> Value {
         "detail": describe_activity(&category, &detail),
         "block": item.get("block_height").cloned().unwrap_or(Value::Null),
     })
+}
+
+/// The players a row is about: `(actor, target)`. An attack names both
+/// players itself; every other category names a struct, a fleet or the
+/// planet, whose OWNER the perception cache knows. Unknown → None, and the
+/// renderer shows no chip rather than a wrong one.
+fn activity_players(category: &str, d: &Value) -> (Option<String>, Option<String>) {
+    let s = |k: &str| text(d.get(k));
+    let owner_of = |kind: &str, id: Option<String>| -> Option<String> {
+        let id = id?;
+        let v = crate::mcp::perception::snapshot_entity(kind, &id)?;
+        let wrapper = match kind { "struct" => "Struct", "fleet" => "Fleet", "planet" => "Planet", _ => return None };
+        text(v.get(wrapper).and_then(|b| b.get("owner")))
+    };
+    match category {
+        "struct_attack" => {
+            let target = d
+                .get("eventAttackShotDetail")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|shot| text(shot.get("targetPlayerId")));
+            (s("attackerPlayerId").or_else(|| owner_of("struct", s("attackerStructId"))), target)
+        }
+        "struct_defense_add" | "struct_defense_remove" => (owner_of("struct", s("defender_struct_id")), None),
+        "fleet_arrive" | "fleet_depart" | "raid_status" => (owner_of("fleet", s("fleet_id")), None),
+        "shield_change" | "block_raid_start" => (owner_of("planet", s("planet_id")), None),
+        _ => (s("player_id").or_else(|| owner_of("struct", s("struct_id"))), None),
+    }
+}
+
+/// `{ pid: {name, pfp, tag} }` for every player the rows name — from what is
+/// already known (the game-stats identity sweep carries the guild tag; the
+/// spectator's memo carries name + portrait), reading the chain for a player
+/// nobody has met yet. `sync_only` skips that read: the live-stream path is
+/// synchronous, and the window fills the rest from its own snapshot.
+pub async fn identities_for(rows: &[Value], sync_only: bool) -> Value {
+    let mut ids: Vec<String> = rows
+        .iter()
+        .flat_map(|r| [text(r.get("actor")), text(r.get("target"))])
+        .flatten()
+        .collect();
+    ids.sort();
+    ids.dedup();
+    let mut out = serde_json::Map::new();
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    for pid in ids {
+        let mut name: Option<String> = None;
+        let mut pfp: Option<String> = None;
+        let mut tag: Option<String> = None;
+        if let Some(ident) = crate::mcp::game_stats::identity(&pid) {
+            name = text(ident.get("username"));
+            pfp = text(ident.get("pfp_attrs"));
+            tag = text(ident.get("tag"));
+        }
+        if name.is_none() || pfp.is_none() {
+            let known = if sync_only {
+                crate::mcp::spectator::remembered_identity(&pid)
+            } else {
+                let row = crate::mcp::perception::snapshot_entity("player", &pid)
+                    .and_then(|v| v.get("Player").cloned())
+                    .unwrap_or(Value::Null);
+                Some(crate::mcp::spectator::player_identity(&client, &pid, &row).await)
+            };
+            if let Some((n, p)) = known {
+                name = name.or(n);
+                pfp = pfp.or(p);
+            }
+        }
+        out.insert(pid, json!({ "name": name, "pfp": pfp, "tag": tag }));
+    }
+    Value::Object(out)
+}
+
+/// `identities_for` without any read: the stream path.
+pub fn identities_for_sync(rows: &[Value]) -> Value {
+    let mut ids: Vec<String> = rows
+        .iter()
+        .flat_map(|r| [text(r.get("actor")), text(r.get("target"))])
+        .flatten()
+        .collect();
+    ids.sort();
+    ids.dedup();
+    let mut out = serde_json::Map::new();
+    for pid in ids {
+        let ident = crate::mcp::game_stats::identity(&pid);
+        let memo = crate::mcp::spectator::remembered_identity(&pid);
+        let name = ident.as_ref().and_then(|i| text(i.get("username"))).or_else(|| memo.as_ref().and_then(|m| m.0.clone()));
+        let pfp = ident.as_ref().and_then(|i| text(i.get("pfp_attrs"))).or_else(|| memo.as_ref().and_then(|m| m.1.clone()));
+        let tag = ident.as_ref().and_then(|i| text(i.get("tag")));
+        if name.is_some() || pfp.is_some() || tag.is_some() {
+            out.insert(pid, json!({ "name": name, "pfp": pfp, "tag": tag }));
+        }
+    }
+    Value::Object(out)
 }
 
 /// The guild's pages write `2026-07-30 18:02:51.403416+00` (a space between
@@ -1091,6 +1192,25 @@ mod log_tests {
         let out = describe_activity("struct_attack", &d);
         assert!(out.contains("1 dmg"), "should report what landed, got: {out}");
         assert!(!out.contains("2 dmg"), "must not report the pre-armour roll: {out}");
+    }
+
+    #[test]
+    fn rows_name_the_players_an_attack_involves() {
+        let d = json!({
+            "attackerPlayerId": "1-61", "attackerStructId": "5-1",
+            "eventAttackShotDetail": [{ "targetPlayerId": "1-2136", "targetStructId": "5-2" }]
+        });
+        assert_eq!(activity_players("struct_attack", &d), (Some("1-61".into()), Some("1-2136".into())));
+        // Other categories resolve through the cache; with no cache they say
+        // nothing rather than guessing.
+        let d = json!({ "defender_struct_id": "5-9", "protected_struct_id": "5-8" });
+        assert_eq!(activity_players("struct_defense_add", &d), (None, None));
+        let d = json!({ "struct_id": "5-9", "player_id": "1-194" });
+        assert_eq!(activity_players("struct_status", &d), (Some("1-194".into()), None));
+        let row = log_row(&json!({ "time": "2026-07-30 18:02:51+00", "category": "struct_attack",
+            "detail": "{\"attackerPlayerId\":\"1-61\",\"attackerStructId\":\"5-1\",\"targetStructId\":\"5-2\"}" }));
+        assert_eq!(row["actor"], "1-61");
+        assert!(row["target"].is_null());
     }
 
     #[test]

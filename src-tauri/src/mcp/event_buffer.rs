@@ -173,6 +173,18 @@ pub fn ingest(app: &tauri::AppHandle, event: GameEvent) {
     // Queue background name lookups for any ids this event mentions (cheap
     // scan; fetches spawn; resolved names push to the board as grass-lookups).
     crate::mcp::enrich::note_event(app, &event);
+    // The block heartbeat: advance the head every loop and window reads
+    // charge against, and tell the raid windows so their batteries move per
+    // block the way the game's do.
+    if event.category == "block" {
+        let height = event
+            .detail
+            .get("height")
+            .and_then(|h| h.as_u64().or_else(|| h.as_f64().map(|f| f as u64)).or_else(|| h.as_str().and_then(|s| s.parse().ok())))
+            .unwrap_or(0);
+        crate::game_state::note_block(height);
+        crate::mcp::spectator::note_block(app, height);
+    }
     // Route live deltas to any open spectator window watching this planet. A
     // no-op (and near-free) unless Raid View is enabled AND a window is up.
     crate::mcp::spectator::note_event(app, &event);

@@ -1264,18 +1264,37 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   fresh();
   const airTile = RV._tileAnchors()['plan|air|0'];
   airTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  await until(() => chunk.querySelector('.rv-build select option[value="SAM Launcher"]'));
-  const build = chunk.querySelector('.rv-build');
-  check('an empty slot on our side offers the game\'s deploy: only the planet types whose possible ambits include this tile\'s',
-    !!build && [...build.querySelectorAll('option')].map((o) => o.value).join(',') === ',SAM Launcher');
+  const deployDoor = chunk.querySelector('a.sui-panel-btn[data-action="deploy_menu"]');
+  check('an empty slot on our side offers the game\'s deploy DOOR in the button group — and nothing else in the chunk',
+    !!deployDoor && deployDoor.classList.contains('sui-mod-default') && !chunk.querySelector('select, input'));
+  deployDoor.click();
+  await until(() => d.querySelector('#rv-picker .rv-pick[data-type="SAM Launcher"]'));
+  const picker = d.getElementById('rv-picker');
+  check('pressing it opens the type list as a popover beside the bar, in the cheatsheet frame, not inside the chunk',
+    !!picker && picker.classList.contains('sui-cheatsheet') && picker.parentElement === d.body && !chunk.contains(picker));
+  check('…listing only the planet types whose possible ambits include this tile\'s',
+    [...picker.querySelectorAll('.rv-pick')].map((r) => r.getAttribute('data-type')).join(',') === 'SAM Launcher');
+  // The owner's charge (5) is below the build's level (8): the row is shown
+  // but inert, as the game greys a type the battery cannot pay for.
+  check('a type the battery cannot pay for is listed but inert', picker.querySelector('.rv-pick').classList.contains('rv-pick-off'));
+  picker.querySelector('.rv-pick').click();
+  check('…and pressing it sends nothing', calls().length === 6 && !!d.getElementById('rv-picker'));
+  d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('Escape closes the popover', !d.getElementById('rv-picker'));
+  S.snapshot.owner_charge = 9;
+  chunk.querySelector('a.sui-panel-btn[data-action="deploy_menu"]').click();
+  await until(() => d.querySelector('#rv-picker .rv-pick[data-type="SAM Launcher"]:not(.rv-pick-off)'));
+  const picker2 = d.getElementById('rv-picker');
+  check('with the charge for it, the row is live', !!picker2);
   check('the deployable filter: command tiles take only the command ship, fleet tiles the rest of the fleet, each by ambit',
     RV._deployableTypes(S.catalog, 'cmd', 'space').map((t) => t.name).join() === 'Command Ship'
       && RV._deployableTypes(S.catalog, 'fleet', 'water').map((t) => t.name).join() === 'Submersible'
       && RV._deployableTypes(S.catalog, 'fleet', 'air').length === 0
       && RV._deployableTypes(S.catalog, 'plan', 'land').map((t) => t.name).sort().join() === 'Planetary Defense Cannon,SAM Launcher,Tank',
     ['cmd/space', 'fleet/water', 'fleet/air', 'plan/land'].map((k) => { const [a, b] = k.split('/'); return k + '=' + RV._deployableTypes(S.catalog, a, b).map((t) => t.name).join('+'); }).join(' '));
-  build.querySelector('select').value = 'SAM Launcher';
-  build.querySelector('a.sui-screen-btn').click();
+  picker2.querySelector('.rv-pick[data-type="SAM Launcher"]').click();
+  check('choosing a type closes the popover', !d.getElementById('rv-picker'));
+  S.snapshot.owner_charge = 5;
   await until(() => calls().length >= 7);
   const bd = calls()[6].args;
   check('Build signs as the planet owner for that ambit and slot', bd.player === '1-9' && bd.action === 'build' && bd.args.struct_type === 'SAM Launcher' && bd.args.ambit === 'air' && bd.args.slot === 0);
@@ -1287,22 +1306,39 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   airTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true })); airTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   check('…and its bar is the pending-build form: the type\'s abbreviation, a progress bar, cancel not yet possible',
     /SAM/.test(chunk.querySelector('.sui-screen-info').textContent) && !!chunk.querySelector('.sui-action-bar-progress-bar') && !!chunk.querySelector('a.sui-panel-btn.sui-mod-disabled i.icon-close'));
+  // The chain names the struct before any snapshot seats it: cancel comes alive.
+  RV._applyDelta({ category: 'struct_block_build_start', subject: 'structs.planet.2-1.1-194', detail: { struct_id: '5-77' } });
+  check('a build-start frame for someone else\'s build names nothing of ours', S.pendingBuilds['plan|air|0'].structId === null);
+  RV._applyDelta({ category: 'struct_block_build_start', subject: 'structs.planet.2-1.1-9', detail: { struct_id: '5-78' } });
+  check('…ours takes the id from OUR build-start frame and the pending bar\'s cancel goes live',
+    S.pendingBuilds['plan|air|0'].structId === '5-78' && !!chunk.querySelector('a.sui-panel-btn.sui-mod-default[data-action="build_cancel"][data-struct="5-78"]'));
+  {
+    const n1 = calls().length;
+    chunk.querySelector('a.sui-panel-btn[data-action="build_cancel"]').click();
+    await until(() => calls().length > n1);
+    const cx = calls()[n1].args;
+    check('pressing it cancels THAT struct as the planet owner', cx.player === '1-9' && cx.action === 'build_cancel' && cx.args.struct_id === '5-78');
+    RV._applyDelta({ category: 'struct_status', subject: 'structs.planet.2-1.1-9', detail: { struct_id: '5-78', status_old: 1, status: 33 } });
+    check('…and the frame that destroys the unbuilt struct frees the tile and the bar', !S.pendingBuilds['plan|air|0'] && !S.executing
+      && !RV._anchors()['plan|air|0'].querySelector('.rv-pending'));
+  }
   delete S.pendingBuilds['plan|air|0'];
   fresh();
   // A struct the chain is still building: the building bar, with a LIVE cancel for its owner.
   S.structsById['5-4'].built = false;
   sel('5-4');
   check('a struct still being built offers Cancel (build_cancel) to its owner', !!chunk.querySelector('a.sui-panel-btn.sui-mod-default[data-action="build_cancel"]'));
+  const n2 = calls().length;
   chunk.querySelector('a.sui-panel-btn[data-action="build_cancel"]').click();
-  await until(() => calls().length >= 8);
-  check('…and pressing it sends the cancel', calls()[7].args.action === 'build_cancel' && calls()[7].args.args.struct_id === '5-4');
+  await until(() => calls().length > n2);
+  check('…and pressing it sends the cancel', calls()[n2].args.action === 'build_cancel' && calls()[n2].args.args.struct_id === '5-4');
   S.executing = null; S.structsById['5-4'].built = true;
   RV._applyStatusDelta({ struct_id: '5-4', status_old: 1, status: 3 });
   check('the BUILT bit arriving plays the deployment animation for that ambit', anims.some((x) => /deployment_land/.test(x.p.path)));
   flush();
   const enemyTile = RV._tileAnchors()['fleet|attacker|land|1'];
   enemyTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  check('an empty slot on the raider\'s side offers nothing — we do not control the raider', !atk.querySelector('.rv-build'));
+  check('an empty slot on the raider\'s side offers no deploy door — we do not control the raider', !atk.querySelector('a[data-action="deploy_menu"]'));
   fresh(); sel('5-1');
   chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"]').click();
   d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
@@ -1347,6 +1383,42 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   RV._applySnapshot({ generation: S.generation, snapshot: Object.assign({}, S.snapshot, { fetched_at_ms: S.snapshot.fetched_at_ms + 1 }) });
   check('an indicator nothing ever materialised behind expires with the snapshot', !S.pendingBuilds['plan|air|1']);
 
+  console.log('\n— charge moves per block');
+  // The snapshot carries the head and each player's lastAction; every block
+  // heartbeat then moves the battery, as the game's CHARGE_LEVEL_CHANGED does.
+  fresh();
+  RV._applySnapshot({ generation: S.generation, snapshot: Object.assign({}, S.snapshot,
+    { fetched_at_ms: S.snapshot.fetched_at_ms + 2, height: 1000, owner_last_action: 990, viewer_last_action: 996 }) });
+  check('with the head and lastAction known, charge is height − (lastAction + 1), not the snapshot\'s frozen figure',
+    RV._chargeOfPlayer('1-9') === 9 && S.height === 1000, String(RV._chargeOfPlayer('1-9')));
+  check('…and the defender battery shows that level (level 5 of the ladder)',
+    d.querySelectorAll('#rv-def-battery .sui-battery-chunk.sui-mod-filled').length === 5);
+  RV._applyBlock({ height: 1003 });
+  check('a block heartbeat advances it without a snapshot', RV._chargeOfPlayer('1-9') === 12 && S.height === 1003);
+  RV._applyBlock({ height: 1001 });
+  check('…and never rewinds it', S.height === 1003);
+  RV._applySnapshot({ generation: S.generation, snapshot: Object.assign({}, S.snapshot,
+    { fetched_at_ms: S.snapshot.fetched_at_ms + 3, height: 1004, owner_last_action: 1002 }) });
+  check('an action the chain recorded resets it: 1 block since', RV._chargeOfPlayer('1-9') === 1);
+  RV._applyBlock({ height: 1006 });
+  check('…and it climbs again per block', RV._chargeOfPlayer('1-9') === 3);
+  // An action sent from here zeroes charge at the current head until the
+  // chain's own lastAction has caught up, then climbs from there.
+  sel('5-1');
+  S.chargeOverride['1-9'] = 1006;
+  check('an action just sent reads as charge 0 at this head', RV._chargeOfPlayer('1-9') === 0);
+  RV._applyBlock({ height: 1008 });
+  check('…and accrues from the block it was sent at', RV._chargeOfPlayer('1-9') === 1);
+  RV._applySnapshot({ generation: S.generation, snapshot: Object.assign({}, S.snapshot,
+    { fetched_at_ms: S.snapshot.fetched_at_ms + 4, height: 1008, owner_last_action: 1002 }) });
+  check('a snapshot whose lastAction predates the send keeps the local one (no charge handed back)', RV._chargeOfPlayer('1-9') === 1);
+  RV._applySnapshot({ generation: S.generation, snapshot: Object.assign({}, S.snapshot,
+    { fetched_at_ms: S.snapshot.fetched_at_ms + 5, height: 1009, owner_last_action: 1006 }) });
+  check('…until the chain has it, which then stands', RV._chargeOfPlayer('1-9') === 2 && S.chargeOverride['1-9'] == null);
+  RV._applySnapshot({ generation: S.generation, snapshot: Object.assign({}, S.snapshot, { fetched_at_ms: S.snapshot.fetched_at_ms + 6 }) });
+  S.height = 0;
+  fresh();
+
   console.log('\n— consume alpha');
   // The fixture has no generator; the button's form is checked on a stand-in.
   S.structTypes['14'].power_generation = 'smallGenerator';
@@ -1354,8 +1426,8 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   const consume = chunk.querySelector('a.sui-panel-btn[data-action="infuse"]');
   check('a controlled online generator gets a LIVE Consume Alpha button', !!consume && consume.classList.contains('sui-mod-default'));
   consume.click();
-  const form = chunk.querySelector('.rv-infuse');
-  check('…which opens the amount form in the bar', !!form && !!form.querySelector('input[type="number"]'));
+  const form = d.querySelector('#rv-picker .rv-infuse');
+  check('…which opens the amount form as a popover, not in the bar', !!form && !!form.querySelector('input[type="number"]') && !chunk.querySelector('input'));
   form.querySelector('input').value = '3';
   const n0 = calls().length;
   form.querySelector('a.sui-screen-btn').click();

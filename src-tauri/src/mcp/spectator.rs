@@ -533,6 +533,15 @@ pub struct Snapshot {
     /// the same fact to draw the same bar.
     pub owner_overloaded: Option<bool>,
     pub raider_overloaded: Option<bool>,
+    /// The block the charges below were measured at, and each player's
+    /// `lastAction` block — so the window can re-derive charge itself on
+    /// every block heartbeat (`raid-block`) instead of holding the figure a
+    /// 20 s snapshot froze: `charge = height − (lastAction + 1)`, the game's
+    /// ChargeCalculator.calcCharge.
+    pub height: u64,
+    pub owner_last_action: Option<f64>,
+    pub raider_last_action: Option<f64>,
+    pub viewer_last_action: Option<f64>,
     /// The VIEWER's own charge — the player this app is signed in as, who is
     /// usually neither combatant. Read from `GAME_STATE`, which derives it the
     /// way the game itself does (`ChargeCalculator.calcCharge`), so the rail's
@@ -584,6 +593,10 @@ pub async fn snapshot_planet(
                 raider_pfp: None,
                 owner_overloaded: None,
                 raider_overloaded: None,
+                height: 0,
+                owner_last_action: None,
+                raider_last_action: None,
+                viewer_last_action: None,
                 fetched_at_ms: crate::hasher::types::now_millis(),
                 warning: Some(format!("planet unavailable: {e}")),
             }
@@ -700,6 +713,13 @@ pub async fn snapshot_planet(
         raider_pfp: None,
         owner_overloaded: owner_hud.5,
         raider_overloaded: None,
+        height: crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0),
+        owner_last_action: owner_hud.6,
+        raider_last_action: None,
+        viewer_last_action: crate::game_state::GAME_STATE
+            .read()
+            .ok()
+            .and_then(|g| g.last_action_block_height.map(|b| b as f64)),
         fetched_at_ms: crate::hasher::types::now_millis(),
         warning,
     }
@@ -912,6 +932,8 @@ type OwnerHud = (
     Option<String>,
     Option<String>,
     Option<bool>,
+    // the `lastAction` block, for the window's own per-block charge
+    Option<f64>,
 );
 
 /// A name for one of OUR players when the chain carries none: the primary from
@@ -937,10 +959,10 @@ async fn read_owner_hud(
     owner: Option<&str>,
 ) -> OwnerHud {
     let Some(pid) = owner else {
-        return (None, None, None, None, None, None);
+        return (None, None, None, None, None, None, None);
     };
     let Ok(p) = client.entity("player", pid).await else {
-        return (None, None, None, None, None, None);
+        return (None, None, None, None, None, None, None);
     };
     let ga = p.get("gridAttributes");
     let f = |k: &str| ga.and_then(|g| g.get(k)).and_then(|v| {
@@ -949,7 +971,8 @@ async fn read_owner_hud(
     let ore = f("ore");
     // Charge is derived, not stored: it is the block count since the player's
     // last action, which is exactly how the game computes it.
-    let charge = f("lastAction").map(|last| {
+    let last_action = f("lastAction");
+    let charge = last_action.map(|last| {
         let now = crate::game_state::GAME_STATE
             .read()
             .map(|g| g.current_block_height)
@@ -996,22 +1019,85 @@ async fn read_owner_hud(
         fmt_watts(total_capacity / 1000.0)
     ));
     let body = p.get("Player").unwrap_or(&p);
-    // The LCD player entity spells the display name `name`; `username` is the
-    // INDEXER/webapp-API alias for the same value and is never present here, so
-    // reading it always missed and every player showed as a bare "1-272". Keep
-    // the local fallback for a player whose name we know but whose read failed.
-    let name = str_of(body.get("name"))
-        .or_else(|| str_of(body.get("username")))
-        .or_else(|| local_player_name(pid));
-    // The pfp is LAYERED, not a URL: `pfpClientRenderAttributes` is a JSON
-    // string of part indices that the renderer stacks as images, the same way
-    // the game's PfpViewerComponent and the Team Ops roster do.
-    let pfp = str_of(body.get("pfpClientRenderAttributes"))
-        .or_else(|| str_of(body.get("pfp_client_render_attributes")));
+    // Name and portrait: what the row carries, else the identity resolver
+    // (roster, then the chain, remembered). The cache's player rows are the
+    // guild list's `{id, planetId, fleetId}` — no name, no portrait — so
+    // reading them off the row alone drew BOTH HUD faces as the placeholder
+    // and named the raider by fleet.
+    let (name, pfp) = player_identity(client, pid, body).await;
     // `Player.isOverloaded()`: total load over total capacity, the same two
     // sums the energy readout above is built from.
     let overloaded = Some(total_load > total_capacity);
-    (ore, charge, energy, name, pfp, overloaded)
+    (ore, charge, energy, name, pfp, overloaded, last_action)
+}
+
+/// A player's name and layered portrait (`pfpClientRenderAttributes`, a JSON
+/// string of part indices the renderer stacks). The cached player row has
+/// neither: the guild feed's player list is `{id, planetId, fleetId}`. So:
+/// the row when it does carry them (an LCD-absorbed row), else the roster
+/// (our own players, already read), else ONE chain read per player,
+/// remembered for [`IDENTITY_TTL_MS`] — a portrait changes rarely and a raid
+/// window asks every 20 s. A failed read is remembered too, so a player the
+/// chain cannot answer for costs one request per TTL, not one per snapshot.
+pub async fn player_identity(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    pid: &str,
+    row: &Value,
+) -> (Option<String>, Option<String>) {
+    let mut name = str_of(row.get("name")).or_else(|| str_of(row.get("username")));
+    let mut pfp = str_of(row.get("pfpClientRenderAttributes"))
+        .or_else(|| str_of(row.get("pfp_client_render_attributes")));
+    if name.is_none() || pfp.is_none() {
+        if let Some(r) = crate::mcp::roster_cache::all_rows().into_iter().find(|r| r.player_id == pid) {
+            name = name.or(r.chain_name.clone()).or_else(|| Some(r.name.clone()).filter(|n| !n.is_empty()));
+            pfp = pfp.or(r.pfp_attrs.clone());
+        }
+    }
+    if name.is_none() || pfp.is_none() {
+        let now = crate::hasher::types::now_millis();
+        let cached = IDENTITY
+            .lock()
+            .map(|m| m.get(pid).filter(|e| now - e.at_ms < IDENTITY_TTL_MS).map(|e| (e.name.clone(), e.pfp.clone())))
+            .unwrap_or(None);
+        let (n2, p2) = match cached {
+            Some(hit) => hit,
+            None => {
+                let fetched = match client.query_entity("player", pid).await {
+                    Ok(v) => {
+                        let b = v.get("Player").unwrap_or(&v);
+                        (
+                            str_of(b.get("name")).or_else(|| str_of(b.get("username"))),
+                            str_of(b.get("pfpClientRenderAttributes")).or_else(|| str_of(b.get("pfp_client_render_attributes"))),
+                        )
+                    }
+                    Err(_) => (None, None),
+                };
+                if let Ok(mut m) = IDENTITY.lock() {
+                    m.insert(pid.to_string(), Identity { name: fetched.0.clone(), pfp: fetched.1.clone(), at_ms: now });
+                }
+                fetched
+            }
+        };
+        name = name.or(n2);
+        pfp = pfp.or(p2);
+    }
+    // Keep the local fallback for a player whose name we know but whose read
+    // failed.
+    (name.or_else(|| local_player_name(pid)), pfp)
+}
+
+struct Identity {
+    name: Option<String>,
+    pfp: Option<String>,
+    at_ms: f64,
+}
+static IDENTITY: LazyLock<Mutex<HashMap<String, Identity>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const IDENTITY_TTL_MS: f64 = 15.0 * 60_000.0;
+
+/// Tests and the intel layer: a remembered identity, without a read.
+pub fn remembered_identity(pid: &str) -> Option<(Option<String>, Option<String>)> {
+    let now = crate::hasher::types::now_millis();
+    IDENTITY.lock().ok()?.get(pid).filter(|e| now - e.at_ms < IDENTITY_TTL_MS).map(|e| (e.name.clone(), e.pfp.clone()))
 }
 
 /// The capacity a player receives from the substation they are connected to.
@@ -1295,6 +1381,7 @@ pub async fn enriched_snapshot(
             snap.raider_name = hud.3;
             snap.raider_pfp = hud.4;
             snap.raider_overloaded = hud.5;
+            snap.raider_last_action = hud.6;
         }
     }
     snap
@@ -1483,6 +1570,16 @@ pub fn is_command_type(name: &str) -> bool {
 #[cfg(test)]
 mod catalog_tests {
     use super::*;
+
+    #[test]
+    fn remembered_identity_expires() {
+        let now = crate::hasher::types::now_millis();
+        IDENTITY.lock().unwrap().insert("1-777".into(), Identity { name: Some("Test".into()), pfp: Some("{\"head\":1}".into()), at_ms: now });
+        assert_eq!(remembered_identity("1-777"), Some((Some("Test".into()), Some("{\"head\":1}".into()))));
+        IDENTITY.lock().unwrap().insert("1-778".into(), Identity { name: None, pfp: None, at_ms: now - IDENTITY_TTL_MS - 1.0 });
+        assert_eq!(remembered_identity("1-778"), None, "a stale entry reads as unknown");
+        assert_eq!(remembered_identity("1-779"), None);
+    }
 
     #[test]
     fn only_the_command_ship_is_a_command_type() {
@@ -2050,6 +2147,26 @@ const WATCHED_CATEGORIES: &[&str] = &[
     "struct_block_build_start",
 ];
 
+/// The block heartbeat, to every open raid window: `raid-block {height}`.
+/// The window re-derives each player's charge from it, so the batteries
+/// move per block the way the game's own do. One tiny emit per window per
+/// ~5 s; nothing when no window is open.
+pub fn note_block(app: &tauri::AppHandle, height: u64) {
+    if height == 0 {
+        return;
+    }
+    let labels: Vec<String> = {
+        let Ok(w) = WATCHES.lock() else { return };
+        let mut all: Vec<String> = w.values().flat_map(|e| e.windows.iter().cloned()).collect();
+        all.sort();
+        all.dedup();
+        all
+    };
+    for label in labels {
+        emit(app, &label, "raid-block", json!({ "height": height }));
+    }
+}
+
 /// Route a live event to any window watching the planet it concerns.
 ///
 /// Called from the single GRASS ingest point. The webapp already subscribes
@@ -2125,7 +2242,10 @@ pub fn note_event(app: &tauri::AppHandle, event: &crate::mcp::event_buffer::Game
                     e.log_cursor = log_high;
                 }
             }
-            let payload = json!({ "generation": generation, "rows": rows });
+            // Identities from what is already known (this path is sync);
+            // the window fills the rest from its snapshot's two players.
+            let players = crate::mcp::raid_view::identities_for_sync(&rows);
+            let payload = json!({ "generation": generation, "rows": rows, "players": players });
             for label in &labels {
                 emit(app, label, "raid-log", payload.clone());
             }

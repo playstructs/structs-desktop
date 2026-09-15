@@ -350,18 +350,27 @@
     /// the raider (a third fleet parked here), and `overloaded` is the
     /// game's `Player.isOverloaded()` from the same load/capacity pair.
     controlledInfo: {},
-    /// Charge spent locally since the last snapshot: `{ [player_id]: 0 }`.
-    /// The chain resets a player's charge on every action; the snapshot
-    /// that says so is up to 20 s away, and the game zeroes its own battery
-    /// optimistically (setOptimisticLastActionBlockHeight) for the same
-    /// reason. Cleared when a snapshot lands.
+    /// An action sent since the last snapshot: `{ [player_id]: <block> }`,
+    /// the head at the moment it went out. The chain resets a player's
+    /// lastAction on every action; the snapshot that says so is up to 20 s
+    /// away, and the game moves its own lastAction optimistically
+    /// (setOptimisticLastActionBlockHeight) for the same reason. Charge is
+    /// then derived from it per block; dropped once a snapshot's lastAction
+    /// has caught up.
     chargeOverride: {},
+    /// The chain's head as this window last heard it (the snapshot, then
+    /// every `raid-block` heartbeat), and each known player's lastAction
+    /// block — the two numbers charge is made of.
+    height: 0,
+    lastAction: {},
     /// An action on its way to the chain — the game's ActionBarLock. While
     /// set, that player's bar shows "Executing" and takes no other action;
     /// cleared by the stream frame that confirms it (`settleExecuting`), by a
     /// refusal, or by the timeout in EXECUTING_TIMEOUT_MS.
     /// `{ player, structId, tileKey, label, expect(struct) → bool, since }`.
     executing: null,
+    /// The one open popover (deploy list / consume form): `{key, node}`.
+    popover: null,
     /// Builds sent from an empty tile, keyed by tile key, until the chain
     /// materialises the struct (the game's `pendingBuilds`). The tile shows
     /// the deployment indicator and its bar the pending-build form meanwhile.
@@ -1169,6 +1178,7 @@
   /* ── Selection ─────────────────────────────────────────────────────────── */
 
   function selectStruct(id) {
+    if (state.popover) closePopover();
     state.selectedTile = null;
     state.selectedId = (state.selectedId === id) ? null : id;  // click again to clear
     applySelection(state.selectedId);
@@ -1179,6 +1189,7 @@
    * and without it half the board is inert to the pointer in a way the game's
    * map is not. `info` is `{key, icon, label, side}`. */
   function selectTile(info) {
+    if (state.popover) closePopover();
     state.selectedId = null;
     var same = state.selectedTile && state.selectedTile.key === info.key;
     state.selectedTile = same ? null : info;
@@ -1242,14 +1253,37 @@
   /* A player's charge as this window best knows it: zero if they acted
    * since the last snapshot, else the snapshot's figure for the owner or the
    * raider, else the roster's (a controlled third party). */
-  function chargeOfPlayer(pid) {
-    if (!pid) return null;
-    if (state.chargeOverride[pid] != null) return state.chargeOverride[pid];
+  /* ChargeCalculator.calcCharge: blocks since the action after the last. */
+  function chargeSince(lastAction) {
+    if (lastAction == null || !(state.height > 0)) return null;
+    return Math.max(0, state.height - (Number(lastAction) + 1));
+  }
+  function chargeOfPlayer(pid, fallback) {
+    if (!pid) return fallback == null ? null : fallback;
+    // Acted since the last snapshot: charge from that block, per heartbeat.
+    if (state.chargeOverride[pid] != null) {
+      var c = chargeSince(state.chargeOverride[pid]);
+      return c == null ? 0 : c;
+    }
+    // Known lastAction: derive it live, so the battery moves with the chain.
+    var live = chargeSince(state.lastAction[pid]);
+    if (live != null) return live;
     var snap = state.snapshot || {};
     if (pid === snap.owner && snap.owner_charge != null) return snap.owner_charge;
     if (pid === snap.raider_id && snap.raider_charge != null) return snap.raider_charge;
     var info = state.controlledInfo[pid];
-    return info && info.charge != null ? info.charge : null;
+    if (info && info.charge != null) return info.charge;
+    return fallback == null ? null : fallback;
+  }
+  /* A block landed: the head moved, so every battery and every charge gate
+   * may have. Cheap — the HUD repaint is a few nodes and the bar only
+   * redraws while one is open. */
+  function applyBlock(p) {
+    var h = Number(p && p.height) || 0;
+    if (!(h > state.height)) return;
+    state.height = h;
+    renderHeader();
+    refreshBar();
   }
   function chargeOf(s) { return chargeOfPlayer(s.owner); }
   /* `Player.isOverloaded()` for a player on this board: the snapshot's
@@ -1312,7 +1346,7 @@
       if (mine.action === 'build' && state.executing === mine) state.executing = null;
       // The chain charges the player on inclusion; the bar says so now,
       // the way the game's optimistic last-action block does.
-      if (lock.cost) state.chargeOverride[player] = 0;
+      if (lock.cost) state.chargeOverride[player] = state.height || 0;
       renderHeader();
       refreshBar();
       // A confirmation that never comes must not hold the bar for good.
@@ -1522,55 +1556,144 @@
       return t.category === 'fleet' && !isCmd;
     });
   }
-  /** The empty tile's build control: a type picker and a Build door. */
-  function buildControl(tile, actor) {
-    var box = el('div', 'rv-build');
+  /* The empty tile's deploy door — the game's `icon-deploy` button in the
+   * bar's button group (showEmptyTileActionBar). Live when the tile's owner
+   * is ours and their bar is free; a press opens the type list as a POPOVER
+   * beside the bar, the way the game's DeployOffcanvas opens beside its.
+   * The list used to be a native <select> and a text button INSIDE the
+   * chunk, which at the HUD's 2x made the bar twice the map's width. */
+  function deployButton(tile, actor) {
+    var live = actor && !isLocked(actor) ? {
+      action: 'deploy_menu',
+      onClick: function () { openDeployPicker(tile, actor); },
+      active: state.popover && state.popover.key === 'deploy:' + tile.key ? 'sui-mod-active-defense' : null,
+    } : null;
+    return abilityBtn('icon-deploy', 'Deploy', { 'data-action': 'deploy_menu', 'data-tile': tile.key }, live);
+  }
+  /* Send the build for a picked type; the tile shows its indicator at once. */
+  function sendBuild(tile, actor, typeName) {
     var parts = tile.key.split('|');
     var kind = parts[0];
     var ambit = parts[0] === 'plan' ? parts[1] : parts[2];
     var slot = kind === 'cmd' ? 0 : (Number(parts[parts.length - 1]) || 0);
-    var sel = el('select', 'sui-input-text');
-    var first = el('option', null, 'choose a struct');
-    first.value = '';
-    sel.appendChild(first);
-    var charge = chargeOfPlayer(actor);
-    loadTypeCatalog().then(function (types) {
-      deployableTypes(types, kind, ambit).forEach(function (t) {
-        var o = el('option', null, t.name + (t.build_charge ? ' · charge ' + t.build_charge : ''));
-        o.value = t.name;
-        // StructManager.getDeploymentBlockerInsufficientCharge: listed, but
-        // not choosable, until the battery reaches the build's level.
-        if (t.build_charge && charge != null && !chargeSufficient(charge, t.build_charge)) o.disabled = true;
-        sel.appendChild(o);
-      });
-    });
-    box.appendChild(sel);
-    var go = el('a', 'sui-screen-btn sui-mod-primary', 'Build');
-    go.href = 'javascript: void(0)';
-    if (isLocked(actor)) go.classList.add('sui-mod-disabled');
-    go.addEventListener('click', function () {
-      if (!sel.value || isLocked(actor)) return;
-      var typeName = sel.value;
-      var row = (state.catalog || []).filter(function (t) { return t.name === typeName; })[0] || {};
-      var key = tile.key;
-      state.pendingBuilds[key] = { type: typeName, actor: actor, at: Date.now(), class_abbreviation: abbreviationFor(row) };
+    var row = (state.catalog || []).filter(function (t) { return t.name === typeName; })[0] || {};
+    var key = tile.key;
+    state.pendingBuilds[key] = { type: typeName, actor: actor, at: Date.now(), class_abbreviation: abbreviationFor(row), structId: null };
+    paintPendingTile(key);
+    invokeAct(actor, 'build', { struct_type: typeName, ambit: ambit, slot: slot },
+      'Build ' + typeName + ' on ' + ambit + (kind === 'cmd' ? '' : ' ' + (slot + 1)),
+      { tileKey: key, cost: row.build_charge, expect: function () { return occupied(anchors[key]); } }).then(function () {
+      // Broadcast: the lock is already released; the indicator stays until
+      // the struct lands, a receipt says the tx failed, or it goes stale.
+    }, function () {
+      // Refused before it left: nothing is pending on the tile.
+      delete state.pendingBuilds[key];
       paintPendingTile(key);
-      invokeAct(actor, 'build', { struct_type: typeName, ambit: ambit, slot: slot },
-        'Build ' + typeName + ' on ' + ambit + (kind === 'cmd' ? '' : ' ' + (slot + 1)),
-        { tileKey: key, cost: row.build_charge, expect: function () { return occupied(anchors[key]); } }).then(function () {
-        // Broadcast: the lock is already released; the indicator stays until
-        // the struct lands, a receipt says the tx failed, or it goes stale.
-      }, function () {
-        // Refused before it left: nothing is pending on the tile.
-        delete state.pendingBuilds[key];
-        paintPendingTile(key);
-        refreshBar();
-      });
       refreshBar();
     });
-    box.appendChild(go);
-    return box;
+    refreshBar();
   }
+  /* The deploy list: one row per type the game's menu would offer this tile
+   * (`deployableTypes`), its build charge beside it; a row the player's
+   * battery cannot pay for yet is shown but inert, as the game greys it. */
+  function openDeployPicker(tile, actor) {
+    var parts = tile.key.split('|');
+    var kind = parts[0];
+    var ambit = parts[0] === 'plan' ? parts[1] : parts[2];
+    var charge = chargeOfPlayer(actor);
+    var body = el('div', 'rv-pick-list');
+    loadTypeCatalog().then(function (types) {
+      var rows = deployableTypes(types, kind, ambit);
+      if (!rows.length) body.appendChild(el('div', 'sui-cheatsheet-description', 'Nothing can be built on this tile.'));
+      rows.forEach(function (t) {
+        var can = !(t.build_charge && charge != null && !chargeSufficient(charge, t.build_charge));
+        var r = el('a', 'sui-cheatsheet-property rv-pick' + (can ? '' : ' rv-pick-off'));
+        r.href = 'javascript: void(0)';
+        r.setAttribute('data-type', t.name);
+        var info = el('div', 'sui-cheatsheet-property-info');
+        info.appendChild(el('div', 'sui-cheatsheet-property-label', t.name));
+        r.appendChild(info);
+        if (t.build_charge) r.appendChild(el('div', 'sui-cheatsheet-cost rv-pick-cost', String(t.build_charge)));
+        if (can) {
+          r.addEventListener('click', function (ev) {
+            ev.preventDefault(); ev.stopPropagation();
+            closePopover();
+            sendBuild(tile, actor, t.name);
+          });
+        }
+        body.appendChild(r);
+      });
+      // The rows arrive after the frame was placed: place it again at its
+      // real height, or it grows down over the bar it was put above.
+      placePopover();
+    });
+    openPopover('deploy:' + tile.key, 'Deploy · ' + ambit, body, tile.side === 'attacker' ? 'enemy' : 'player');
+  }
+  /* The Consume Alpha form, as a popover: an amount in Alpha (whole units,
+   * as the game's stepper takes) and a send door. The chain takes ualpha,
+   * so the message carries the game's own conversion. */
+  function openInfusePicker(s) {
+    var body = el('div', 'rv-pick-list rv-infuse');
+    var input = el('input', 'sui-input-text');
+    input.type = 'number'; input.min = '1'; input.step = '1'; input.value = '1';
+    input.setAttribute('aria-label', 'Alpha to consume');
+    body.appendChild(input);
+    var go = el('a', 'sui-screen-btn sui-mod-primary', 'Consume');
+    go.href = 'javascript: void(0)';
+    go.addEventListener('click', function (ev) {
+      ev.preventDefault(); ev.stopPropagation();
+      var amount = Math.floor(Number(input.value));
+      if (!(amount > 0) || isLocked(s.owner)) return;
+      closePopover();
+      act(s, 'generator_infuse', { struct_id: s.id, amount: String(amount * 1000000) + 'ualpha' },
+        'Consume ' + amount + ' alpha in ' + (s.type_name || s.id),
+        { expect: function () { return false; } });
+    });
+    body.appendChild(go);
+    openPopover('infuse:' + s.id, 'Consume Alpha', body, s.side === 'attacker' ? 'enemy' : 'player');
+    setTimeout(function () { try { input.focus(); input.select(); } catch (e) { /* not focusable yet */ } }, 0);
+  }
+  /* One popover at a time: the cheatsheet frame (sui.css's own), fixed,
+   * placed beside the bar the way a cheatsheet is placed beside its
+   * trigger. `key` says what it is for, so a second press on the same door
+   * closes it and a press elsewhere replaces it. Closed by Escape, by a
+   * click outside, by a snapshot that rebuilds the bar, or when it sends. */
+  function openPopover(key, title, bodyNode, theme) {
+    if (state.popover && state.popover.key === key) { closePopover(); return; }
+    closePopover();
+    var pop = el('div', 'sui-cheatsheet rv-popover sui-theme-' + (theme || 'player'));
+    pop.id = 'rv-picker';
+    pop.style.position = 'fixed';
+    pop.appendChild(el('div', 'sui-cheatsheet-top-frame'));
+    var t = el('div', 'sui-cheatsheet-title');
+    t.appendChild(el('div', 'sui-cheatsheet-title-text', String(title || '').toUpperCase()));
+    pop.appendChild(t);
+    var content = el('div', 'sui-cheatsheet-content');
+    content.appendChild(bodyNode);
+    pop.appendChild(content);
+    pop.addEventListener('mousedown', function (ev) { ev.stopPropagation(); });
+    document.body.appendChild(pop);
+    state.popover = { key: key, node: pop };
+    placePopover();
+    refreshBar();
+  }
+  /* Beside whichever bar is open — the door that opened it, else the chunk.
+   * Re-run whenever the popover's content changes size. */
+  function placePopover() {
+    var pop = state.popover && state.popover.node;
+    if (!pop) return;
+    var anchor = document.querySelector('#rv-def-chunk:not(.hidden) a[data-action="deploy_menu"], #rv-atk-chunk:not(.hidden) a[data-action="deploy_menu"], #rv-def-chunk:not(.hidden) a[data-action="infuse"], #rv-atk-chunk:not(.hidden) a[data-action="infuse"]')
+      || document.querySelector('#rv-def-chunk:not(.hidden), #rv-atk-chunk:not(.hidden)');
+    if (anchor) placeCheatsheet(pop, anchor.getBoundingClientRect());
+  }
+  function closePopover() {
+    if (!state.popover) return;
+    var node = state.popover.node;
+    state.popover = null;
+    if (node && node.parentElement) node.parentElement.removeChild(node);
+    refreshBar();
+  }
+
   /* The header the game gives a type: its class abbreviation, which only
    * the type record carries; the catalogue row has the name. */
   function abbreviationFor(row) {
@@ -1819,34 +1942,11 @@
       out.push(abilityBtn('icon-send-alpha', 'Consume Alpha',
         { 'data-sui-cheatsheet': key, 'data-selected-property': 'power_generation', 'data-struct': s.id, 'data-action': 'infuse' },
         liveIf(s, 0, true, 'infuse', function () {
-          arm({ action: 'infuse', struct: s, prompt: 'Consume Alpha', kind: 'form' });
-        }, 'sui-mod-active-defense')));
+          openInfusePicker(s);
+        }, 'sui-mod-active-defense', !!(state.popover && state.popover.key === 'infuse:' + s.id))));
     }
     return out;
   }
-  /* The Consume Alpha form, in the bar under the buttons: an amount in Alpha
-   * (whole units, as the game's stepper takes) and a send door. The chain
-   * takes ualpha, so the message carries the game's own conversion. */
-  function infuseControl(s) {
-    var box = el('div', 'rv-build rv-infuse');
-    var input = el('input', 'sui-input-text');
-    input.type = 'number'; input.min = '1'; input.step = '1'; input.value = '1';
-    input.setAttribute('aria-label', 'Alpha to consume');
-    box.appendChild(input);
-    var go = el('a', 'sui-screen-btn sui-mod-primary', 'Consume');
-    go.href = 'javascript: void(0)';
-    go.addEventListener('click', function () {
-      var amount = Math.floor(Number(input.value));
-      if (!(amount > 0) || isLocked(s.owner)) return;
-      act(s, 'generator_infuse', { struct_id: s.id, amount: String(amount * 1000000) + 'ualpha' },
-        'Consume ' + amount + ' alpha in ' + (s.type_name || s.id),
-        { expect: function () { return false; } });
-      cancelPending();
-    });
-    box.appendChild(go);
-    return box;
-  }
-
   /** The Power Switch group. Player style only, per the spec: "The Enemy style
    * of Action Chunk does not display the power switch."
    *
@@ -1951,16 +2051,32 @@
       var group = el('div', 'sui-action-bar-btn-group');
       // Cancelling needs no charge, no power and no online state — only
       // ownership, a struct the chain still knows, and a free bar.
-      var live = s && controls(s) && !s.destroyed && !isLocked(s.owner) ? {
-        action: 'build_cancel',
-        onClick: function () {
-          var victim = s.id;
-          act(s, 'build_cancel', { struct_id: s.id }, 'Cancel build: ' + (s.type_name || s.id),
-            { expect: function (x) { return !x || x.destroyed || !state.structsById[victim]; } });
-        },
-        active: null,
-      } : null;
-      group.appendChild(abilityBtn('icon-close', 'Cancel build', { 'data-struct': s ? s.id : '', 'data-action': 'build_cancel' }, live));
+      var live = null;
+      if (s && controls(s) && !s.destroyed && !isLocked(s.owner)) {
+        live = {
+          action: 'build_cancel',
+          onClick: function () {
+            var victim = s.id;
+            act(s, 'build_cancel', { struct_id: s.id }, 'Cancel build: ' + (s.type_name || s.id),
+              { expect: function (x) { return !x || x.destroyed || !state.structsById[victim]; } });
+          },
+          active: null,
+        };
+      } else if (pend && pend.structId && !isLocked(pend.actor)) {
+        // The chain has named the struct (build-start / materialised frame)
+        // but no snapshot has seated it yet. The game's pending bar keeps
+        // cancel inert only until the id is known — so does this one.
+        var sid = pend.structId, actor = pend.actor, key = pendingKey;
+        live = {
+          action: 'build_cancel',
+          onClick: function () {
+            invokeAct(actor, 'build_cancel', { struct_id: sid }, 'Cancel build: ' + (pend.type || sid),
+              { structId: sid, tileKey: key, expect: function () { return !state.pendingBuilds[key]; } }).catch(function () {});
+          },
+          active: null,
+        };
+      }
+      group.appendChild(abilityBtn('icon-close', 'Cancel build', { 'data-struct': s ? s.id : (pend && pend.structId) || '', 'data-action': 'build_cancel' }, live));
       row.appendChild(group);
     }
     chunk.appendChild(row);
@@ -2047,6 +2163,14 @@
     row.appendChild(screen);
 
     var btns = s ? abilityButtons(s, st) : [];
+    // An empty slot on a controlled side offers the game's deploy door —
+    // planetary slots, fleet tiles and the command tile alike. Someone
+    // else's tile shows no door, as the game's right-hand bar shows none.
+    if (!s && sel.tile) {
+      var tparts = sel.tile.key.split('|');
+      var actor = (tparts[0] === 'plan' || tparts[0] === 'fleet' || tparts[0] === 'cmd') ? tileActor(sel.tile) : null;
+      if (actor) btns.push(deployButton(sel.tile, actor));
+    }
     if (btns.length) {
       var group = el('div', 'sui-action-bar-btn-group');
       btns.forEach(function (n) { group.appendChild(n); });
@@ -2054,17 +2178,6 @@
     }
 
     chunk.appendChild(row);
-    // An empty slot on a controlled side builds, as the game's deploy menu
-    // does — planetary slots, fleet tiles and the command tile alike.
-    if (!s && sel.tile) {
-      var tparts = sel.tile.key.split('|');
-      var actor = (tparts[0] === 'plan' || tparts[0] === 'fleet' || tparts[0] === 'cmd') ? tileActor(sel.tile) : null;
-      if (actor) chunk.appendChild(buildControl(sel.tile, actor));
-    }
-    // Consume Alpha opens its amount form under the buttons.
-    if (s && state.pending && state.pending.kind === 'form' && state.pending.struct.id === s.id) {
-      chunk.appendChild(infuseControl(s));
-    }
 
     // Every trigger in this chunk paints in its own bar's theme.
     var trigs = chunk.querySelectorAll('[data-sui-cheatsheet]');
@@ -2778,6 +2891,9 @@
   var hud = window.RaidHud({
     state: function () { return state; }, target: function () { return TARGET; },
     chat: function () { return chatState; }, paintComposerIdentity: function () { return paintComposerIdentity(); },
+    // Live charge (per block heartbeat) for a player, else the snapshot's figure.
+    chargeOfPlayer: function (pid, fallback) { return chargeOfPlayer(pid, fallback); },
+    chargeSince: function (last) { return chargeSince(last); },
   });
   var renderHeader = hud.renderHeader, renderSide = hud.renderSide, paintPfp = hud.paintPfp;
   var paintBattery = hud.paintBattery, whoLine = hud.whoLine, chargeLevel = hud.chargeLevel;
@@ -3047,9 +3163,18 @@
     // Snapshot health is authoritative once the queue has drained; while it is
     // playing, the sequence's own values win.
     if (!playing) state.liveHealth = {};
-    // The snapshot carries fresh charge for both combatants; the local
-    // zero from an action sent since is superseded.
-    state.chargeOverride = {};
+    // The head and each player's lastAction, for per-block charge. A local
+    // lastAction from an action sent since is kept until the chain's own
+    // has caught up with it — a snapshot read just before inclusion would
+    // otherwise hand the charge back for one cycle.
+    if (Number(snap.height) > state.height) state.height = Number(snap.height);
+    state.lastAction = {};
+    if (snap.owner && snap.owner_last_action != null) state.lastAction[snap.owner] = Number(snap.owner_last_action);
+    if (snap.raider_id && snap.raider_last_action != null) state.lastAction[snap.raider_id] = Number(snap.raider_last_action);
+    Object.keys(state.chargeOverride).forEach(function (pid) {
+      var known = state.lastAction[pid];
+      if (known == null || known >= state.chargeOverride[pid]) delete state.chargeOverride[pid];
+    });
 
     // The rebuild replaces every mount, so every idle player must go first or
     // lottie keeps animating into detached nodes forever.
@@ -3129,8 +3254,33 @@
       // The chain has the struct; the forced snapshot brings its type and
       // seat. Nothing to draw yet, but a build sent from here is confirmed.
       settleExecuting({ buildStarted: true, player: subjectPlayer(d.subject) });
+      noteBuildStarted(detail.struct_id || detail.structId, subjectPlayer(d.subject));
     }
     renderHeader();
+  }
+
+  /* A frame named a struct that is being built: the oldest pending build of
+   * that player (or any, when the frame does not say whose) that has no id
+   * yet takes it, and its bar's cancel comes alive. A build the map did not
+   * send has no pending entry and changes nothing here. */
+  function noteBuildStarted(structId, player) {
+    if (!structId) return;
+    var keys = Object.keys(state.pendingBuilds).filter(function (k) {
+      var p = state.pendingBuilds[k];
+      return !p.structId && (!player || !p.actor || p.actor === player);
+    }).sort(function (a, b) { return (state.pendingBuilds[a].at || 0) - (state.pendingBuilds[b].at || 0); });
+    if (!keys.length) return;
+    state.pendingBuilds[keys[0]].structId = structId;
+    refreshBar();
+  }
+  /* The struct a pending build was waiting on is gone (its cancel landed,
+   * or the chain undid it): the tile is free again. */
+  function forgetPendingStruct(structId) {
+    var hit = false;
+    Object.keys(state.pendingBuilds).forEach(function (k) {
+      if (state.pendingBuilds[k].structId === structId) { delete state.pendingBuilds[k]; paintPendingTile(k); hit = true; }
+    });
+    if (hit) { settleExecuting(); refreshBar(); }
   }
 
   /* `structs.planet.<planet>.<player>` — the player a planet-scoped frame is
@@ -3196,6 +3346,9 @@
         if (node) node.innerHTML = '';
         if (s) paintBadges(s);
       }
+      // A struct destroyed before any snapshot seated it was a build this
+      // map sent and then cancelled: its tile is free again.
+      if (!s) forgetPendingStruct(sid);
       settleExecuting();
       refreshBar();
       return;
@@ -3205,6 +3358,7 @@
       // is the build confirmation the bar is waiting for.
       if ((status & STATUS.MATERIALIZED) !== 0 && (was == null || (was & STATUS.MATERIALIZED) === 0)) {
         settleExecuting({ buildStarted: true, player: subjectPlayer(detail.__subject) });
+        noteBuildStarted(sid, subjectPlayer(detail.__subject));
       }
       return;
     }
@@ -3439,12 +3593,16 @@
     // Charge accrues per block; the roster's copy is refreshed so a bar that
     // was waiting on charge wakes up without a click.
     setInterval(loadRoster, 60000);
-    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') cancelPending(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { cancelPending(); closePopover(); } });
+    // A press anywhere but inside the popover closes it (the popover stops
+    // its own mousedown).
+    document.addEventListener('mousedown', function () { if (state.popover) closePopover(); });
     window.StructsEvents.listen(scoped('raid-snapshot'), function (e) { applySnapshot(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-delta'), function (e) { applyDelta(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-attacks'), function (e) { applyAttacks(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-log'), function (e) { applyLog(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-tx'), function (e) { applyTxSettled(e.payload || {}); });
+    window.StructsEvents.listen(scoped('raid-block'), function (e) { applyBlock(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-target-moved'), function (e) {
       var p = e.payload || {};
       note('Fleet ' + p.fleet_id + (p.planet_id ? ' arrived at planet ' + p.planet_id : ' left orbit'),
@@ -3557,6 +3715,8 @@
     _deployableTypes: deployableTypes,
     _settleExecuting: settleExecuting,
     _applyTxSettled: applyTxSettled,
+    _applyBlock: applyBlock,
+    _noteBuildStarted: noteBuildStarted,
     actTextIsFailure: actTextIsFailure,
     _applyStatusDelta: applyStatusDelta,
     _applyMoveDelta: applyMoveDelta,
@@ -3565,6 +3725,8 @@
     _syncIdle: syncIdle,
     _refreshBar: refreshBar,
     _arm: arm,
+    _openDeployPicker: openDeployPicker,
+    _closePopover: closePopover,
     _playing: function () { return playing; },
     ambitsOfMask: ambitsOfMask,
     ambitsContain: ambitsContain,

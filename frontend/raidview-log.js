@@ -18,7 +18,42 @@
   window.RaidLog = function (ctx) {
     var el = ctx.el, humanStatus = ctx.humanStatus, state = ctx.state;
 
-    var logState = { rows: [], open: false, loading: false, pending: false, planetId: null };
+    var logState = { rows: [], open: false, loading: false, pending: false, planetId: null,
+      /** Who the rows name: `{ pid: {name, pfp, tag} }`, merged from every
+       * load and every live push. The snapshot's two players are answered
+       * from the snapshot itself (see `whoIs`). */
+      players: {} };
+    function rememberPlayers(map) {
+      Object.keys(map || {}).forEach(function (pid) {
+        var have = logState.players[pid] || {};
+        var got = map[pid] || {};
+        logState.players[pid] = { name: got.name || have.name || null, pfp: got.pfp || have.pfp || null, tag: got.tag || have.tag || null };
+      });
+    }
+    /** Name, portrait and tag for a player id, from the log's map or the
+     * snapshot (owner / raider); id alone when nothing is known. */
+    function whoIs(pid) {
+      var p = logState.players[pid] || {};
+      var snap = state().snapshot || {};
+      var name = p.name, pfp = p.pfp;
+      if (pid === snap.owner) { name = name || snap.owner_name; pfp = pfp || snap.owner_pfp; }
+      if (pid === snap.raider_id) { name = name || snap.raider_name; pfp = pfp || snap.raider_pfp; }
+      return { id: pid, name: name || null, pfp: pfp || null, tag: p.tag || null };
+    }
+    /** The chip: the shared person line (portrait, [TAG] name, #id) when the
+     * card component is loaded, a bare "[TAG] name" otherwise. */
+    function personChip(pid, cls) {
+      var who = whoIs(pid);
+      var PC = window.StructsPlayerCard;
+      var node = PC && PC.parts && PC.parts.personLine ? PC.parts.personLine(who, {}) : null;
+      if (!node) {
+        node = el('span', 'pc-person', (who.tag ? '[' + who.tag + '] ' : '') + (who.name || who.id));
+        node.setAttribute('data-player-id', pid);
+      }
+      node.classList.add(cls);
+      node.title = (who.name || pid) + (who.name ? ' (' + pid + ')' : '');
+      return node;
+    }
 
     /** How many log rows are kept in memory, for both the initial fetch and the
      * live stream's ceiling. */
@@ -41,6 +76,7 @@
     }
 
     function applyLog(payload) {
+      if (payload && payload.players) rememberPlayers(payload.players);
       if (!state().snapshot) return;
       if (payload.generation !== state().generation) return;   // stale planet
       var rows = payload.rows || [];
@@ -73,6 +109,7 @@
         .then(function (d) {
           logState.rows = (d && d.rows) || [];
           logState.planetId = planetId;
+          rememberPlayers(d && d.players);
           renderLog();
         })
         .catch(function (e) { renderLogError(String(e)); })
@@ -230,7 +267,18 @@
         var row = el('div', 'rv-log-row rv-k-' + kind + (LOG_TONE[kind] ? ' ' + LOG_TONE[kind] : ''));
         row.appendChild(el('div', 'rv-log-t', r.time || ''));
         row.appendChild(el('div', 'rv-log-cat sui-text-label', logLabel(r.category)));
-        row.appendChild(el('div', 'rv-log-d', r.detail || ''));
+        // WHO: the acting player as a portrait chip. Every row has the cell
+        // so the detail column lines up; a row about no one leaves it empty.
+        var who = el('div', 'rv-log-who');
+        if (r.actor) who.appendChild(personChip(r.actor, 'rv-log-actor'));
+        row.appendChild(who);
+        var d = el('div', 'rv-log-d', r.detail || '');
+        // An attack also names its victim: the target player, after the line.
+        if (r.target && r.target !== r.actor) {
+          d.appendChild(document.createTextNode(' '));
+          d.appendChild(personChip(r.target, 'rv-log-target'));
+        }
+        row.appendChild(d);
         body.appendChild(row);
       });
     }
@@ -241,6 +289,7 @@
     }
 
     return {
+      whoIs: whoIs, rememberPlayers: rememberPlayers,
       logState: logState, LOG_LIMIT: LOG_LIMIT, LOG_KINDS: LOG_KINDS, logFilter: logFilter, logKey: logKey,
       logKind: logKind, logLabel: logLabel, dayLabel: dayLabel, applyLog: applyLog, refreshLog: refreshLog,
       renderLogFilters: renderLogFilters, renderLog: renderLog, renderLogError: renderLogError,

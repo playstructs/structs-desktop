@@ -16,6 +16,9 @@
   <link rel="stylesheet" href="css/main.css" />
   <!-- The chat message row, shared with the other window that draws one. -->
   <link rel="stylesheet" href="chat-rows.css" />
+  <!-- The person line (portrait, [TAG] name, #id) the battle log names its
+       players with — the same component every other window draws people with. -->
+  <link rel="stylesheet" href="playercard.css" />
   <link rel="stylesheet" href="embed.css" />
   <style>
     /* ── Raid View ────────────────────────────────────────────────────────
@@ -172,8 +175,20 @@
     }
     .rv-cell.rv-move-target { cursor: crosshair; }
     .rv-switch { display: inline-block; cursor: pointer; }
-    .rv-build { display: flex; gap: var(--spacing-md); align-items: center; padding: var(--spacing-sm) var(--spacing-md); }
-    .rv-build .sui-input-text { min-width: 0; }
+    /* The deploy list and the consume form are POPOVERS in the cheatsheet
+       frame, beside the bar — never inside the chunk, which at the HUD's 2x
+       made the bar wider than the map. Rows are the cheatsheet's own property
+       rows; a row the battery cannot pay for is shown, dimmed and inert. */
+    .rv-popover { min-width: 220px; max-width: 320px; }
+    .rv-popover .sui-cheatsheet-content { width: 100%; }
+    .rv-pick-list { display: flex; flex-direction: column; gap: var(--spacing-xs); width: 100%; }
+    a.rv-pick, a.rv-pick:link, a.rv-pick:visited { display: flex; align-items: center; gap: var(--spacing-md); width: 100%;
+      padding: var(--spacing-xs) var(--spacing-sm); color: var(--text-body); text-decoration: none; }
+    a.rv-pick:hover { background: var(--surface-player-highlight); }
+    a.rv-pick .sui-cheatsheet-property-info { flex: 1 1 auto; min-width: 0; }
+    a.rv-pick .rv-pick-cost { flex: none; }
+    a.rv-pick.rv-pick-off { opacity: .5; cursor: not-allowed; }
+    .rv-infuse { flex-direction: row; align-items: center; gap: var(--spacing-md); }
     .rv-infuse input { width: 96px; }
     /* A build sent from this tile and not yet materialised: the deployment
        indicator, where the struct will stand. */
@@ -414,7 +429,10 @@
          makes a few hundred of them skimmable. An unknown future category
          falls back to its humanised chain name and is ellipsised rather than
          being allowed to wrap and break the rhythm. */
-      display: grid; grid-template-columns: 62px 78px 1fr; gap: var(--spacing-md);
+      /* The WHO column sizes to its chip, up to 160px, and to nothing on a
+         row about no one — each row is its own grid, so an empty cell never
+         holds a column of space open across the list. */
+      display: grid; grid-template-columns: 62px 78px fit-content(160px) 1fr; gap: var(--spacing-md);
       align-items: baseline; padding: var(--spacing-xs) 0;
       border-bottom: 1px solid var(--border-subtle);   /* rgba(57,73,88) IS this token */
     }
@@ -427,6 +445,20 @@
     .rv-log-row.rv-warn .rv-log-cat { color: var(--text-warning); }
     .rv-log-row.rv-dim .rv-log-cat { color: var(--text-hint); }
     .rv-log-d { color: var(--text-body); word-break: break-word; text-align: left; }
+    /* WHO did it. The shared person line at the log's own line height: a
+       16px portrait beside "[TAG] NAME", one line, ellipsised — the row stays
+       one line tall, which is what keeps a few hundred of them skimmable.
+       The id is dropped from the chip (the title carries it): three columns
+       of ids already run down the page. */
+    .rv-log-who { min-width: 0; overflow: hidden; }
+    .rv-log-who .pc-person, .rv-log-d .pc-person { max-width: 100%; gap: var(--spacing-sm); white-space: nowrap; overflow: hidden; }
+    .rv-log-row .pc-person .pc-pfp, .rv-log-row .pc-person .pc-pfp .pfp-viewer-layer { width: 16px; height: 16px; }
+    .rv-log-row .pc-person .pc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; min-width: 0; }
+    .rv-log-row .pc-person .pc-id { display: none; }
+    .rv-log-row .pc-person .pc-nm { overflow: hidden; text-overflow: ellipsis; }
+    /* The victim, named after an attack's detail line. */
+    .rv-log-d .pc-person { vertical-align: middle; margin-left: var(--spacing-sm); }
+    .rv-log-d .rv-log-target::before { content: '→ '; color: var(--text-hint); }
     #rv-log-body, .rv-log-row { text-align: left; }
 
     /* Combat is the story; bookkeeping is context. A left rule and a brighter
@@ -924,6 +956,7 @@
   <script src="events.js"></script>
   <script src="chatrow.js"></script>
   <script src="pfp.js"></script>
+  <script src="playercard.js"></script>
   <script src="raidview-comms.js"></script>
   <script src="raidview-log.js"></script>
   <script src="raidview-sheet.js"></script>

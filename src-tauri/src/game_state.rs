@@ -432,7 +432,13 @@ pub async fn sync_game_state(
 
     {
         let mut gs = GAME_STATE.write().map_err(|e| e.to_string())?;
+        // The webview's copy of the head is a ~10 s poll; the block heartbeat
+        // has usually moved it on since (`note_block`). Never rewind it.
+        let live = gs.current_block_height;
         *gs = state;
+        if gs.current_block_height < live {
+            gs.current_block_height = live;
+        }
     }
 
     if let Some(assess) = assessment {
@@ -649,6 +655,23 @@ pub fn set_sync_interval(ms: u64) {
 
 /// Snapshot of the current sync interval for non-async callers (e.g. the
 /// Rust-driven sync-tick loop). Returns the same value as `get_sync_interval`.
+/// A `block` heartbeat frame from GRASS: the chain's head, NOW. Charge is
+/// `height − (lastAction + 1)` everywhere it is computed (roster, snapshots,
+/// loop gating), and it used to move only when the game window's ~10 s state
+/// push landed — so every battery stepped in ten-second lurches and a loop
+/// could judge charge against a head up to two blocks stale. The heartbeat
+/// is per block (~5 s); this keeps the head on it.
+pub fn note_block(height: u64) {
+    if height == 0 {
+        return;
+    }
+    if let Ok(mut gs) = GAME_STATE.write() {
+        if height > gs.current_block_height {
+            gs.current_block_height = height;
+        }
+    }
+}
+
 pub fn current_sync_interval_ms() -> u64 {
     SYNC_INTERVAL_MS.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -776,4 +799,23 @@ pub async fn notify_hash_complete(
 pub async fn conn_log(msg: String) -> Result<(), String> {
     crate::mcp::telemetry::tlog("conn", crate::mcp::telemetry::Sev::Notice, &msg);
     Ok(())
+}
+
+#[cfg(test)]
+mod head_tests {
+    use super::*;
+
+    /// The block heartbeat moves the head forward and never back; the
+    /// webview's ~10 s copy can only lag it (`sync_game_state` keeps the max).
+    #[test]
+    fn heartbeat_advances_the_head_and_never_rewinds_it() {
+        let before = GAME_STATE.read().unwrap().current_block_height;
+        let target = before.max(1) + 1_000_000;
+        note_block(target);
+        assert_eq!(GAME_STATE.read().unwrap().current_block_height, target);
+        note_block(target - 5);
+        assert_eq!(GAME_STATE.read().unwrap().current_block_height, target, "an older height is ignored");
+        note_block(0);
+        assert_eq!(GAME_STATE.read().unwrap().current_block_height, target, "a zero (no height) is ignored");
+    }
 }
