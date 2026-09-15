@@ -621,18 +621,27 @@ fn log_row(item: &Value) -> Value {
     })
 }
 
+/// The guild's pages write `2026-07-30 18:02:51.403416+00` (a space between
+/// date and clock); the live stream's rows (`spectator::row_from_event`) are
+/// RFC 3339, `2026-09-15T16:58:19.751Z`. Both shapes reach `log_row`, so the
+/// date/clock split accepts either separator. Splitting on the space alone
+/// left every streamed row with the whole timestamp in BOTH fields, and the
+/// renderer's day header read "UNDEFINED NAN UNDEFINED NAN".
+fn split_date_clock(ts: &str) -> Option<(&str, &str)> {
+    ts.split_once(|c| c == ' ' || c == 'T')
+}
+
 /// `2026-07-30 18:02:51.403416+00` → `18:02:51`. Falls back to the raw string
 /// so an unexpected format still shows something.
 fn short_time(ts: &str) -> String {
-    ts.split(' ')
-        .nth(1)
-        .map(|t| t.split('.').next().unwrap_or(t).to_string())
+    split_date_clock(ts)
+        .map(|(_, t)| t.split(['.', '+', 'Z']).next().unwrap_or(t).to_string())
         .unwrap_or_else(|| ts.to_string())
 }
 
 /// `2026-07-30 18:02:51.403416+00` → `2026-07-30`.
 fn day_of(ts: &str) -> String {
-    ts.split(' ').next().unwrap_or("").to_string()
+    split_date_clock(ts).map(|(d, _)| d).unwrap_or("").to_string()
 }
 
 /// Which family a row belongs to. The log interleaves fourteen categories and
@@ -1206,6 +1215,14 @@ mod log_tests {
     #[test]
     fn timestamps_reduce_to_clock_time() {
         assert_eq!(short_time("2026-07-30 18:02:51.403416+00"), "18:02:51");
+        assert_eq!(day_of("2026-07-30 18:02:51.403416+00"), "2026-07-30");
+        // The live stream's rows are RFC 3339 with a `T` and a `Z`, and must
+        // reduce to the same two fields the page's rows do — otherwise the
+        // renderer's day header breaks on the streamed rows.
+        assert_eq!(short_time("2026-09-15T16:58:19.751Z"), "16:58:19");
+        assert_eq!(day_of("2026-09-15T16:58:19.751Z"), "2026-09-15");
+        assert_eq!(short_time("2026-09-15T16:58:19Z"), "16:58:19");
+        assert_eq!(short_time("2026-09-15T16:58:19+00:00"), "16:58:19");
         // Unexpected shapes fall back to the raw value rather than vanishing.
         assert_eq!(short_time("whenever"), "whenever");
         assert_eq!(short_time(""), "");

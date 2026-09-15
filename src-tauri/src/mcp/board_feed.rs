@@ -47,6 +47,10 @@ pub struct FeedEntry {
     /// Short source tag, e.g. "auto_defend", "threats", "policy".
     pub source: String,
     pub message: String,
+    /// A planet or fleet id the row is about — the board draws a door that
+    /// opens the Map Viewer there. Absent on rows about nothing in particular.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 const FEED_CAP: usize = 300;
@@ -63,11 +67,18 @@ static LAST_AUTO_OPEN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 /// `Important` entries also auto-open the window (debounced, and only if the
 /// player enabled the `board_auto_open` policy).
 pub fn push(app: &tauri::AppHandle, severity: Severity, source: &str, message: impl Into<String>) {
+    push_target(app, severity, source, message, None);
+}
+
+/// `push` for a row about a place: the board offers to open the Map Viewer
+/// on `target` (a planet or fleet id) from the row.
+pub fn push_target(app: &tauri::AppHandle, severity: Severity, source: &str, message: impl Into<String>, target: Option<String>) {
     let entry = FeedEntry {
         ts_ms: now_millis(),
         severity: severity.as_str(),
         source: source.to_string(),
         message: message.into(),
+        target: target.and_then(|t| crate::notifications::map_target(Some(&t))),
     };
     if let Ok(mut feed) = FEED.lock() {
         if feed.len() >= FEED_CAP {
@@ -326,6 +337,7 @@ mod tests {
                 severity: "info",
                 source: "test".into(),
                 message: format!("m{}", i),
+                target: None,
             });
         }
         assert_eq!(feed.len(), FEED_CAP);

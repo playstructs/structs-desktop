@@ -147,7 +147,10 @@
      * on all of them is noise. */
     function dayLabel(iso) {
       if (!iso) return '';
-      var parts = iso.split('-');
+      // Tolerate a full timestamp ("2026-09-15T16:58:19Z"): the day is what
+      // precedes the clock. A bare split on '-' read "15T16:58…" as the day
+      // and labelled the group "UNDEFINED NAN UNDEFINED NAN".
+      var parts = iso.split(/[T ]/)[0].split('-');
       if (parts.length !== 3) return iso;
       var d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
       var today = new Date();

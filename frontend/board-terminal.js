@@ -2073,6 +2073,51 @@
     return name ? tag + String(name) : String((h && h.player_id) || '');
   }
 
+  /* A player's name for a card header. `describe()` runs before any read,
+   * so a RECORD card is born as "Record 1-303"; once the name is known the
+   * header reads "Record Trendy (1-303)" — the id kept, since two players
+   * may share a name and the id is what every other card is addressed by.
+   * One lookup per id per window; a name the chain does not know leaves the
+   * header as it was. Repainted through `retitle`, never persisted. */
+  var playerNames = {};
+  function playerName(id) {
+    if (!id) return Promise.resolve(null);
+    if (!playerNames[id]) {
+      playerNames[id] = invoke('mcp_player_search', { query: id }).then(function (res) {
+        var hits = (res && (res.results || res.players)) || [];
+        var hit = hits.filter(function (x) { return x && x.player_id === id; })[0];
+        var name = hit && (hit.username || hit.name);
+        return name && String(name) !== id ? String(name) : null;
+      }).catch(function () { delete playerNames[id]; return null; });
+    }
+    return playerNames[id];
+  }
+  Terminal.playerName = playerName;
+  /* The same for a guild, from the game-stats snapshot every guild card
+   * already boots (one shared pull, then live): "Guild Orbital Hydro (0-5)". */
+  function guildName(id) {
+    if (!id || !Board._gamestats) return Promise.resolve(null);
+    return Board._gamestats.ensureBoot().then(function () {
+      var snap = Board._gamestats.state.snap;
+      var g = ((snap && snap.guilds) || []).filter(function (x) { return x.guild_id === id; })[0];
+      return g && g.name ? String(g.name) : null;
+    }).catch(function () { return null; });
+  }
+  Terminal.guildName = guildName;
+  /* `prefix` is everything before the name, separator included — "Record ",
+   * "Wallet · " — so each card keeps the spelling its describe() chose. A
+   * name the card has already resolved is painted at once; otherwise the
+   * lookup runs and the header updates when it lands. */
+  function retitleAs(ctx, prefix, id, name, lookup) {
+    if (!ctx || !ctx.id || !id) return;
+    var paint = function (n) { if (n && n !== id) Terminal.retitle(ctx.id, prefix + n + ' (' + id + ')'); };
+    if (name) paint(name); else lookup(id).then(paint);
+  }
+  function retitlePlayer(ctx, prefix, id, name) { retitleAs(ctx, prefix, id, name, playerName); }
+  function retitleGuild(ctx, prefix, id, name) { retitleAs(ctx, prefix, id, name, guildName); }
+  Terminal.retitlePlayer = retitlePlayer;
+  Terminal.retitleGuild = retitleGuild;
+
   /* Half an id is nobody's question — the guild API answers `1-` with a 400,
    * which the Pay window learned by printing one at the player. A WHOLE id is
    * a fine thing to look up: it is how a player id resolves to their planet. */
@@ -2805,7 +2850,7 @@
      * frame. Profile is the read Explore uses, so this card and that page
      * cannot disagree; detail is still asked for the struct count, and a
      * failure of either half leaves a blank field, never an error page. */
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a player id.')); return; }
       var soft = function (name, args) { return invoke(name, args).catch(function () { return null; }); };
       return Promise.all([
@@ -2822,6 +2867,7 @@
         // Names: the chain's own first, then the roster's (which is the
         // callsign we gave a virtual player), then the id.
         var name = entS(ent, 'name') || (hit && hit.username) || (det.name && det.name !== 'primary' ? det.name : null) || id;
+        retitlePlayer(ctx, 'Player ', id, name);
         var attrs = entS(ent, 'pfpClientRenderAttributes') || (hit && hit.pfp) || null;
         if (!res[0] && !res[1] && !hit) { host.appendChild(H.stateBlock('info', 'No player ' + p.id)); return; }
         var alpha = entN(ent, ['playerInventory', 'rocks', 'amount']);
@@ -2929,10 +2975,11 @@
         { icon: 'icon-member', title: 'The player', onClick: function () { add('player', { id: id }); } },
       ];
     },
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a player id.')); return; }
       var A = window.StructsAchievements;
       if (!A) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', 'the achievement catalogue did not load')); return; }
+      retitlePlayer(ctx, 'Record ', p.id);
       return invoke('terminal_achievements', { player: p.id }).then(function (d) {
         host.innerHTML = '';
         host.appendChild(A.rack(d, { onlyFamily: p.family || null }));
@@ -2969,11 +3016,12 @@
       if (!id) return [];
       return [{ icon: 'icon-success', title: 'Service record', onClick: function () { add('record', { id: id }); } }];
     },
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a player id.')); return; }
       var A = window.StructsAchievements;
       if (!A) { host.innerHTML = ''; host.appendChild(H.stateBlock('error', 'the achievement catalogue did not load')); return; }
       var cols = p.columns ? String(p.columns).split(',') : null;
+      retitlePlayer(ctx, 'Tally ', p.id);
       return invoke('terminal_achievements', { player: p.id }).then(function (d) {
         host.innerHTML = '';
         host.appendChild(A.matrix(d, { columns: cols }));
@@ -2987,7 +3035,7 @@
     cadenceMs: 60000, usesRefs: true,
     // The chain's own record first (`matrix_refs`, the same read Comms uses):
     // a guild absent from the leaderboard used to render nothing at all.
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a guild id.')); return; }
       var R = ensureRefs();
       var ref = R && R.cards[p.id];
@@ -3004,6 +3052,7 @@
         push(g ? H.fmtAlpha(g.alpha) : st.alpha_text, 'sui-icon-alpha-matter', 'Alpha');
         push(g ? H.fmtWatts(g.structs_load) : st.capacity_text, 'sui-icon-energy', 'Structs load');
         push(g ? H.fmtInt(g.planets) : st.planets_text, 'sui-icon-md icon-planet', 'Planets');
+        retitleGuild(ctx, 'Guild ', p.id, (ref && ref.title) || (g && g.name) || null);
         host.appendChild(window.StructsGuildCard.card({
           id: p.id,
           name: (ref && ref.title) || (g && g.name) || null,
@@ -3632,9 +3681,10 @@
     describe: function (p) { return 'Book · ' + (p.id || 'primary'); },
     params: [{ key: 'id', label: 'Player id', kind: 'id', kinds: [1], placeholder: '1-194' }],
     cadenceMs: 60000,
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       var who = p.id || (Board.primaryId ? Board.primaryId() : '');
       if (!who) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a player id.')); return; }
+      if (p.id) retitlePlayer(ctx, 'Book · ', p.id);
       return invoke('terminal_agreements', { player: who }).then(function (b) {
         host.innerHTML = '';
         var strip = H.el('div', 'hstrip gs-strip');
@@ -3854,9 +3904,10 @@
     label: 'Guild token', defaultWidth: 2, describe: function (p) { return 'Guild token · ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Guild id', kind: 'id', kinds: [0], placeholder: '0-1' }],
     cadenceMs: 60000,
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       host.innerHTML = '';
       if (!p.id) { host.appendChild(H.stateBlock('info', 'Configure this card with a guild id.')); return; }
+      retitleGuild(ctx, 'Guild token · ', p.id);
       return Promise.all([invoke('terminal_guild_banks'), invoke('terminal_guild_bank_history', { guildId: p.id }).catch(function () { return null; })]).then(function (res) {
         var banks = res[0] || {}, hist = res[1];
         var b = ((banks.banks) || []).filter(function (x) { return x.guild_id === p.id; })[0];
@@ -3988,12 +4039,13 @@
     label: 'Tearsheet', defaultWidth: 2, describe: function (p) { return 'Tearsheet · ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Player or guild id', kind: 'id', kinds: [0, 1], placeholder: '1-194 or 0-1' }],
     cadenceMs: 120000,
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       host.innerHTML = '';
       if (!p.id) { host.appendChild(H.stateBlock('info', 'Configure this card with a player or guild id.')); return; }
       return invoke('terminal_tearsheet', { id: p.id }).then(function (t) {
         if (t.kind === 'player') {
           var id = t.identity || {}, st = t.standing || {};
+          retitlePlayer(ctx, 'Tearsheet · ', t.id, id.username);
           var attrs = id.pfp_attrs; if (attrs && typeof attrs !== 'string') attrs = JSON.stringify(attrs);
           var r = { player_id: t.id, planet_id: st.planet_id, fleet_id: st.fleet_id };
           host.appendChild(window.StructsPlayerCard.card({
@@ -4016,6 +4068,7 @@
           });
         } else {
           var g = t.board || {};
+          retitleGuild(ctx, 'Tearsheet · ', t.id, g.name);
           host.appendChild(window.StructsGuildCard.card({
             id: t.id, name: g.name || null, tag: g.tag || null, logo: g.logo || null,
             readings: [

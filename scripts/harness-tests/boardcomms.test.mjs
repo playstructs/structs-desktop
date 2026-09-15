@@ -89,6 +89,29 @@ await new Promise((r) => setTimeout(r, 50));
 check('clicking it opens Comms',
   w.__HARNESS_CALLS__.some((c) => c.cmd === 'matrix_open' && c.args.subject == null && c.args.draft == null));
 
+// ── A row about a place opens the map there ────────────────────────────────
+// The same window a click on the native notification opens.
+console.log('\n— opening the map from a feed line');
+{
+  const feed = d.getElementById('feed-list');
+  w.Board._feedAddForTest({ message: 'Raid armed — scout1', ts_ms: 2, severity: 'important', source: 'team', target: '2-33978' });
+  const row = feed.firstChild;
+  const door = row.querySelector('.feed-open');
+  check('a feed line that names a planet carries a door to the map', !!door && door.dataset.target === '2-33978');
+  check('…as quiet as the share door beside it', !!door && w.getComputedStyle(door).opacity === '0');
+  door.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 50));
+  const opened = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'mcp_raid_view_open').pop();
+  check('clicking it opens the Map Viewer on that planet', !!opened && opened.args.planetId === '2-33978', JSON.stringify(opened && opened.args));
+  w.Board._feedAddForTest({ message: 'Fleet under fire', ts_ms: 3, severity: 'important', source: 'combat', target: '9-194' });
+  feed.firstChild.querySelector('.feed-open').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 50));
+  const fleet = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'mcp_raid_view_open').pop();
+  check('…and a fleet id follows the fleet', !!fleet && fleet.args.fleetId === '9-194');
+  w.Board._feedAddForTest({ message: 'watchdog line', ts_ms: 4, severity: 'notice', source: 'watchdog' });
+  check('a line about nothing in particular has no door', !feed.firstChild.querySelector('.feed-open'));
+}
+
 // ── Telling the guild ──────────────────────────────────────────────────────
 // The console can hear Comms; this is the other direction. Everything the app
 // notices on your behalf lived in a window only you can see.

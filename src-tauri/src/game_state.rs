@@ -450,16 +450,22 @@ pub async fn sync_game_state(
             } else {
                 assess.detail.clone()
             };
-            crate::notifications::notify_on("combat_alert", &title, &body);
+            // Where a click goes: the fleet while it is away (that is where
+            // the fight is), the home planet otherwise.
+            let target = GAME_STATE.read().ok().and_then(|g| {
+                crate::notifications::primary_target(g.planet_id.as_deref(), g.fleet_id.as_deref(), g.fleet_status.as_deref())
+            });
+            crate::notifications::notify_on_target("combat_alert", &title, &body, target.as_deref());
             // No main-window toast: the native notification above + this
             // Important feed entry (which can auto-open the Team Ops window if
             // the player opted in) are the alert surfaces. Agent/automation
             // visuals never overlay the game view.
-            crate::mcp::board_feed::push(
+            crate::mcp::board_feed::push_target(
                 &app_handle,
                 crate::mcp::board_feed::Severity::Important,
                 "combat",
                 format!("{} — {}", assess.headline, assess.detail),
+                target,
             );
         }
         // Tier 1 — per-policy response.
@@ -539,20 +545,28 @@ pub async fn sync_game_state(
             .unwrap_or(false);
         if combat_alert_on {
             let since = *TEAM_HW.lock().unwrap();
-            let (hw, lines) = crate::mcp::tools::events::poll_team_threats(since).await;
+            let (hw, groups) = crate::mcp::tools::events::poll_team_threats_by_planet(since).await;
             *TEAM_HW.lock().unwrap() = hw;
-            if !lines.is_empty() {
+            // One alert PER PLANET (most urgent first, at most three a tick),
+            // so a click opens the Map Viewer on the planet it names rather
+            // than on whichever of several was listed first. Everything
+            // still lands in the feed, each row with its own door.
+            for (planet, lines) in groups.into_iter().take(3) {
                 let n = lines.len();
                 let body = lines.into_iter().take(6).collect::<Vec<_>>().join("; ");
-                let title = format!("⚠ Structs: {} team threat(s) detected", n);
-                crate::notifications::notify_on("team_threat", &title, &body);
+                let title = match &planet {
+                    Some(p) => format!("⚠ Structs: {} team threat(s) at planet {}", n, p),
+                    None => format!("⚠ Structs: {} team threat(s) detected", n),
+                };
+                crate::notifications::notify_on_target("team_threat", &title, &body, planet.as_deref());
                 // Vplayer info stays OUT of the main game window: pipe it into
                 // the Team Ops feed instead (Important ⇒ the window auto-opens).
-                crate::mcp::board_feed::push(
+                crate::mcp::board_feed::push_target(
                     &app_handle,
                     crate::mcp::board_feed::Severity::Important,
                     "team",
                     format!("{} team threat(s): {}", n, body),
+                    planet,
                 );
             }
         }

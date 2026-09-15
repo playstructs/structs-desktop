@@ -1004,8 +1004,9 @@
     describe: function (p) { return 'Members · ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Guild', kind: 'id', kinds: [0], placeholder: '0-1' }],
     cadenceMs: 120000,
-    render: function (host, p) {
+    render: function (host, p, ctx) {
       if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a guild id.')); return; }
+      T.retitleGuild(ctx, 'Members · ', p.id);
       return Promise.all([invoke('terminal_guild_members', { guildId: p.id }), T.standingLists()]).then(function (res) {
         var d = res[0] || {}, lists = res[1];
         host.innerHTML = '';
@@ -2107,6 +2108,9 @@
       return invoke('mcp_inventory', { player: p.id || 'primary' }).then(function (d) {
         host.innerHTML = '';
         var who = (d && d.player) || {};
+        // The inventory answers for whoever it could read, so its name is
+        // only this card's name when its id is this card's id.
+        if (p.id) T.retitlePlayer(ctx, 'Wallet · ', p.id, who.player_id === p.id ? who.name : null);
         cap(host, (who.name || who.player_id || 'primary') + (who.player_id ? ' · ' + who.player_id : ''));
         var assets = (d && d.assets) || [];
         if (!assets.length) { host.appendChild(H.stateBlock('info', 'No balances read yet.')); return; }
@@ -2238,6 +2242,7 @@
     params: [{ key: 'id', label: 'Player', kind: 'id', kinds: [1], placeholder: '1-194' }],
     cadenceMs: 30000,
     render: function (host, p, ctx) {
+      if (p.id) T.retitlePlayer(ctx, 'Fleet · ', p.id);
       return invoke('terminal_fleet_where', { player: p.id || 'primary' }).then(function (d) {
         host.innerHTML = '';
         d = d || {};

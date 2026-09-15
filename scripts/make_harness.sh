@@ -1312,6 +1312,10 @@ cat > "$RFIX" <<'EOF'
       owner: '1-9', ambit: 'land', slot: 3, health: 3, max_health: 3, destroyed: false,
       online: false, built: true, hidden: false, defending: false, defended: false,
       protects: null, is_command: false, side: 'defender' },
+    { id: '5-6', type_id: '14', type_name: 'Ore Extractor', type_slug: 'ore_extractor', category: 'planet',
+      owner: '1-9', ambit: 'water', slot: 0, health: 6, max_health: 6, destroyed: false,
+      online: true, built: true, hidden: false, defending: false, defended: false,
+      protects: null, is_command: false, side: 'defender' },
     { id: '5-5', type_id: '13', type_name: 'Submersible', type_slug: 'submersible', category: 'fleet',
       owner: '1-9', ambit: 'water', slot: 0, health: 3, max_health: 3, destroyed: false,
       online: true, built: true, hidden: false, defending: false, defended: false,
@@ -1326,6 +1330,13 @@ cat > "$RFIX" <<'EOF'
       owner: '1-194', ambit: 'space', slot: 0, health: 6, max_health: 6, destroyed: false,
       online: true, built: true, hidden: false, defending: false, defended: false,
       protects: null, is_command: true, side: 'attacker' },
+    // A raider on LAND, in reach of the defender's Tanks; the command ship
+    // above is in space, out of their reach — the pair the target-validity
+    // checks need.
+    { id: '5-21', type_id: '10', type_name: 'Tank', type_slug: 'tank', category: 'fleet',
+      owner: '1-194', ambit: 'land', slot: 0, health: 3, max_health: 3, destroyed: false,
+      online: true, built: true, hidden: false, defending: false, defended: false,
+      protects: null, is_command: false, side: 'attacker' },
   ];
   // The type records the action bar draws from — the fields
   // `parse_struct_type` fills, for the three types on the board.
@@ -1347,11 +1358,20 @@ cat > "$RFIX" <<'EOF'
     }, o);
   }
   var STRUCT_TYPES = {
-    '10': stype({ class_abbreviation: 'TNK', class_name: 'Tank', primary_weapon: 'unguidedWeaponry', unit_defenses: 'armour' }),
-    '11': stype({ class_abbreviation: 'PDC', class_name: 'Planetary Defense Cannon', planetary_defenses: 'defensiveCannon' }),
-    '12': stype({ class_abbreviation: 'SAM', class_name: 'SAM Launcher', primary_weapon: 'guidedWeaponry', primary_weapon_control: 'guided' }),
-    '13': stype({ class_abbreviation: 'SUB', class_name: 'Submersible', category: 'fleet', primary_weapon: 'unguidedWeaponry', stealth_systems: true, movable: true }),
-    '1': stype({ class_abbreviation: 'CMD', class_name: 'Command Ship', category: 'fleet', primary_weapon: 'unguidedWeaponry', movable: true }),
+    '10': stype({ class_abbreviation: 'TNK', class_name: 'Tank', primary_weapon: 'unguidedWeaponry', unit_defenses: 'armour',
+      primary_weapon_ambits: 4, possible_ambit: 4 }),
+    '11': stype({ class_abbreviation: 'PDC', class_name: 'Planetary Defense Cannon', planetary_defenses: 'defensiveCannon', possible_ambit: 6 }),
+    '12': stype({ class_abbreviation: 'SAM', class_name: 'SAM Launcher', primary_weapon: 'guidedWeaponry', primary_weapon_control: 'guided',
+      primary_weapon_ambits: 24, possible_ambit: 12 }),
+    // An economic struct with an active loop — the idle-layer checks.
+    '14': stype({ class_abbreviation: 'ORE', class_name: 'Ore Extractor', planetary_mining: 'oreMiningRig', possible_ambit: 6 }),
+    // Weapon reach is a bitmask (Water=2 Land=4 Air=8 Space=16 Local=32):
+    // the Submersible's torpedo reaches water; the Command Ship's missile
+    // is "local" (its own ambit) and it may drift to any of the four.
+    '13': stype({ class_abbreviation: 'SUB', class_name: 'Submersible', category: 'fleet', primary_weapon: 'unguidedWeaponry', stealth_systems: true, movable: true,
+      primary_weapon_ambits: 2, possible_ambit: 2 }),
+    '1': stype({ class_abbreviation: 'CMD', class_name: 'Command Ship', category: 'fleet', primary_weapon: 'unguidedWeaponry', movable: true,
+      primary_weapon_ambits: 32, possible_ambit: 30, move_charge: 3 }),
   };
   var SNAP = {
     // The viewer's own charge — drives the composer's battery, and is not
@@ -1369,9 +1389,11 @@ cat > "$RFIX" <<'EOF'
   var F = {
     // The state pull carries the type catalogue the deploy picker lists.
     mcp_raid_state: { snapshot: SNAP, catalog: [
-      { id: 10, name: 'Tank', category: 'planet', build_charge: 8 },
-      { id: 1, name: 'Command Ship', category: 'fleet', build_charge: 8 },
-      { id: 13, name: 'Submersible', category: 'fleet', build_charge: 8 },
+      { id: 10, name: 'Tank', category: 'planet', build_charge: 8, possible_ambit: 4, is_command: false },
+      { id: 11, name: 'Planetary Defense Cannon', category: 'planet', build_charge: 8, possible_ambit: 6, is_command: false },
+      { id: 12, name: 'SAM Launcher', category: 'planet', build_charge: 8, possible_ambit: 12, is_command: false },
+      { id: 1, name: 'Command Ship', category: 'fleet', build_charge: 8, possible_ambit: 30, is_command: true },
+      { id: 13, name: 'Submersible', category: 'fleet', build_charge: 8, possible_ambit: 2, is_command: false },
     ] },
     // Who this install can sign for is the roster: the planet owner (1-9)
     // is ours, so the defender's action bars come alive; the raider is not.

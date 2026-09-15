@@ -805,12 +805,19 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     // Notifications section switches on (Rust: notifications::CHANNELS). Rust
     // is the gate — passing the category through is the whole wiring, and a
     // category with no switch yet still notifies (is_on fails open).
-    function sendNotification(title, body, channel) {
+    // `target` is the planet (or fleet) the alert is about: clicking the
+    // notification opens the Map Viewer there. Every grass frame that rates
+    // an alert names its planet, in the detail or the subject.
+    function sendNotification(title, body, channel, target) {
       if (window.__TAURI__) {
         window.__TAURI__.core.invoke('send_notification',
-          { title: title, body: body, channel: channel || null })
+          { title: title, body: body, channel: channel || null, target: target || null })
           .catch(function(e) { console.warn('[Structs Notify] Failed:', e); });
       }
+    }
+    function notificationTarget(d) {
+      var detail = (d && d.detail) || {};
+      return detail.planet_id || subjectPlanetId(d && d.subject) || detail.fleet_id || null;
     }
 
     // ── Notification Preferences ──
@@ -1013,7 +1020,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
                 var title = typeof eventDef.title === 'function' ? eventDef.title(data, ctx) : eventDef.title;
                 var body = eventDef.format(data, ctx);
                 console.info('[Structs Notify] Sending notification:', title, '—', body);
-                sendNotification(title, body, data.category);
+                sendNotification(title, body, data.category, notificationTarget(data));
               }
 
               if (needsDelay) {

@@ -363,7 +363,31 @@ pub async fn build_owned(team: bool) -> Owned {
 /// alerts). Classifies recent buffer events newer than `since` and returns one
 /// alert line per threat + the new high-water timestamp. First call (since == 0)
 /// only establishes the baseline — it never alerts on already-buffered history.
+/// One team alert, grouped by the planet it concerns so a click on the
+/// notification can open the Map Viewer THERE: `(planet id, lines)`. Threats
+/// the scan cannot place go under `None`. Order: highest-priority threat
+/// first, so a tick with several fires the most urgent planet's alert first.
+pub fn group_threats(hits: Vec<(Option<String>, u8, String)>) -> Vec<(Option<String>, Vec<String>)> {
+    let mut groups: Vec<(Option<String>, u8, Vec<String>)> = vec![];
+    for (planet, prio, line) in hits {
+        if let Some(g) = groups.iter_mut().find(|g| g.0 == planet) {
+            g.1 = g.1.max(prio);
+            g.2.push(line);
+        } else {
+            groups.push((planet, prio, vec![line]));
+        }
+    }
+    groups.sort_by(|a, b| b.1.cmp(&a.1));
+    groups.into_iter().map(|(p, _, l)| (p, l)).collect()
+}
+
 pub async fn poll_team_threats(since: f64) -> (f64, Vec<String>) {
+    let (hw, groups) = poll_team_threats_by_planet(since).await;
+    (hw, groups.into_iter().flat_map(|(_, lines)| lines).collect())
+}
+
+/// `poll_team_threats`, keeping which planet each alert is about.
+pub async fn poll_team_threats_by_planet(since: f64) -> (f64, Vec<(Option<String>, Vec<String>)>) {
     let client = crate::mcp::cosmos_client::CosmosClient::new();
     let t = crate::mcp::virtual_players::team_owned(&client).await;
     let mut o = Owned::default();
@@ -376,17 +400,17 @@ pub async fn poll_team_threats(since: f64) -> (f64, Vec<String>) {
 
     let recent = event_buffer::get_recent(200, None, None);
     let mut hw = since;
-    let mut lines = Vec::new();
+    let mut hits = Vec::new();
     for e in &recent {
         hw = hw.max(e.timestamp);
         if since <= 0.0 || e.timestamp <= since || o.flat.is_empty() {
             continue;
         }
         if let Some(t) = classify(e, &o) {
-            lines.push(format!("{} — {}", t.label(), o.label_for(e)));
+            hits.push((o.planet_for(e), t.priority(), format!("{} — {}", t.label(), o.label_for(e))));
         }
     }
-    (hw, lines)
+    (hw, group_threats(hits))
 }
 
 pub async fn execute(params: EventParams) -> Vec<Content> {
@@ -602,6 +626,21 @@ mod tests {
         o.label_by_planet.insert("2-422".into(), "worker153".into());
         o.refresh_flat();
         o
+    }
+
+    #[test]
+    fn team_threats_group_by_planet_most_urgent_first() {
+        let g = group_threats(vec![
+            (Some("2-1".into()), 3, "Taking damage — worker1".into()),
+            (Some("2-2".into()), 5, "Raid armed — worker2".into()),
+            (Some("2-1".into()), 4, "Struct lost — worker1".into()),
+            (None, 2, "Hostile inbound — you".into()),
+        ]);
+        assert_eq!(g.len(), 3);
+        assert_eq!(g[0].0.as_deref(), Some("2-2"));
+        assert_eq!(g[1].0.as_deref(), Some("2-1"));
+        assert_eq!(g[1].1.len(), 2);
+        assert_eq!(g[2].0, None);
     }
 
     #[test]

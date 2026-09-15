@@ -527,6 +527,12 @@ pub struct Snapshot {
     pub raider_name: Option<String>,
     pub raider_charge: Option<f64>,
     pub raider_pfp: Option<String>,
+    /// `Player.isOverloaded()` for each side — total load over total
+    /// capacity. The game's action bar shows `icon-disabled` and refuses
+    /// every action on an overloaded player's online structs; the map needs
+    /// the same fact to draw the same bar.
+    pub owner_overloaded: Option<bool>,
+    pub raider_overloaded: Option<bool>,
     /// The VIEWER's own charge — the player this app is signed in as, who is
     /// usually neither combatant. Read from `GAME_STATE`, which derives it the
     /// way the game itself does (`ChargeCalculator.calcCharge`), so the rail's
@@ -576,6 +582,8 @@ pub async fn snapshot_planet(
                 raider_name: None,
                 raider_charge: None,
                 raider_pfp: None,
+                owner_overloaded: None,
+                raider_overloaded: None,
                 fetched_at_ms: crate::hasher::types::now_millis(),
                 warning: Some(format!("planet unavailable: {e}")),
             }
@@ -690,6 +698,8 @@ pub async fn snapshot_planet(
         raider_name: None,
         raider_charge: None,
         raider_pfp: None,
+        owner_overloaded: owner_hud.5,
+        raider_overloaded: None,
         fetched_at_ms: crate::hasher::types::now_millis(),
         warning,
     }
@@ -895,7 +905,14 @@ mod defence_tests {
 /// failed read must dim one HUD chip, never cost the caller its map. The
 /// energy string is formatted here rather than in JS so the window and the
 /// game's own HUD phrase it the same way.
-type OwnerHud = (Option<f64>, Option<f64>, Option<String>, Option<String>, Option<String>);
+type OwnerHud = (
+    Option<f64>,
+    Option<f64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<bool>,
+);
 
 /// A name for one of OUR players when the chain carries none: the primary from
 /// the synced game state, virtual players from the registry.
@@ -920,10 +937,10 @@ async fn read_owner_hud(
     owner: Option<&str>,
 ) -> OwnerHud {
     let Some(pid) = owner else {
-        return (None, None, None, None, None);
+        return (None, None, None, None, None, None);
     };
     let Ok(p) = client.entity("player", pid).await else {
-        return (None, None, None, None, None);
+        return (None, None, None, None, None, None);
     };
     let ga = p.get("gridAttributes");
     let f = |k: &str| ga.and_then(|g| g.get(k)).and_then(|v| {
@@ -991,7 +1008,10 @@ async fn read_owner_hud(
     // the game's PfpViewerComponent and the Team Ops roster do.
     let pfp = str_of(body.get("pfpClientRenderAttributes"))
         .or_else(|| str_of(body.get("pfp_client_render_attributes")));
-    (ore, charge, energy, name, pfp)
+    // `Player.isOverloaded()`: total load over total capacity, the same two
+    // sums the energy readout above is built from.
+    let overloaded = Some(total_load > total_capacity);
+    (ore, charge, energy, name, pfp, overloaded)
 }
 
 /// The capacity a player receives from the substation they are connected to.
@@ -1257,6 +1277,26 @@ pub async fn enriched_snapshot(
     let (status, fleet) = raid_state_for(client, planet_id).await;
     snap.raid_status = status;
     snap.raiding_fleet = fleet;
+    // The raider's own HUD facts. These four fields were declared and never
+    // filled: the enemy action bar named the FLEET where the game names the
+    // player, its battery was always empty, and a controlled raider's
+    // structs could never pass the charge gate (`chargeOf` matched the
+    // owner against a raider id that was always None). The fleet row names
+    // its owner; the owner read is the same one the defender gets.
+    if let Some(fid) = snap.raiding_fleet.clone() {
+        let raider = match client.entity("fleet", &fid).await {
+            Ok(f) => str_of(f.get("Fleet").unwrap_or(&f).get("owner")),
+            Err(_) => None,
+        };
+        if let Some(raider_id) = raider {
+            let hud = read_owner_hud(client, Some(&raider_id)).await;
+            snap.raider_id = Some(raider_id);
+            snap.raider_charge = hud.1;
+            snap.raider_name = hud.3;
+            snap.raider_pfp = hud.4;
+            snap.raider_overloaded = hud.5;
+        }
+    }
     snap
 }
 
@@ -1412,10 +1452,54 @@ pub fn type_catalog() -> Value {
     let mut rows: Vec<Value> = gs
         .struct_types
         .values()
-        .map(|t| json!({ "id": t.id, "name": t.name, "category": t.category, "build_charge": t.build_charge }))
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "name": t.name,
+                "category": t.category,
+                "build_charge": t.build_charge,
+                // The game's deploy picker (StructTypeCollection.
+                // fetchAllByTileTypeAndAmbit) offers a type only on tiles
+                // whose ambit its `possible_ambit` mask allows, and seats the
+                // command ship on COMMAND tiles, everything else fleet-side on
+                // FLEET tiles. Without these two the map's picker listed every
+                // fleet type on every tile.
+                "possible_ambit": t.possible_ambit,
+                "is_command": is_command_type(&t.name),
+            })
+        })
         .collect();
     rows.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
     Value::Array(rows)
+}
+
+/// The chain's struct type record carries no "is this the command ship"
+/// flag; the game's Guild API record does (`is_command`), and it is true for
+/// exactly one type. Mirrors `Fleet.commandStruct` naming the CMD ship.
+pub fn is_command_type(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Command Ship")
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_command_ship_is_a_command_type() {
+        assert!(is_command_type("Command Ship"));
+        assert!(is_command_type("command ship"));
+        assert!(!is_command_type("Battleship"));
+        assert!(!is_command_type(""));
+    }
+
+    #[test]
+    fn watched_categories_cover_the_games_struct_listener() {
+        // StructListener re-renders and animates on each of these; a window
+        // that does not hear them draws the change a snapshot cycle late.
+        for c in ["struct_move", "struct_defense_add", "struct_defense_remove", "struct_block_build_start", "struct_status"] {
+            assert!(WATCHED_CATEGORIES.contains(&c), "{c} must reach the window");
+        }
+    }
 }
 
 /// Resolve one placement into a drawable struct.
@@ -1956,6 +2040,14 @@ const WATCHED_CATEGORIES: &[&str] = &[
     "fleet_arrive",
     "fleet_depart",
     "block_raid_start",
+    // The game's StructListener animates and re-renders on these; the window
+    // used to learn of them only from the next 20 s snapshot, so a move,
+    // a defence change or a build start showed a full cycle late and never
+    // played its animation (struct_move is depart+arrive in the game).
+    "struct_move",
+    "struct_defense_add",
+    "struct_defense_remove",
+    "struct_block_build_start",
 ];
 
 /// Route a live event to any window watching the planet it concerns.
@@ -2028,7 +2120,13 @@ pub fn note_event(app: &tauri::AppHandle, event: &crate::mcp::event_buffer::Game
     // Fleet movement changes WHO IS ON THE BOARD — deltas alone can't add or
     // remove a whole fleet's structs, so ask the watcher for a fresh snapshot
     // on its next tick (≤4s) instead of waiting out the snapshot cadence.
-    if event.category == "fleet_arrive" || event.category == "fleet_depart" {
+    // A struct move re-seats a tile and a build start adds a struct the
+    // deltas cannot describe (its type comes from the entity), so both ask
+    // for the same early snapshot.
+    if matches!(
+        event.category.as_str(),
+        "fleet_arrive" | "fleet_depart" | "struct_move" | "struct_block_build_start"
+    ) {
         force_snapshots_for(&planet_id);
     }
     let payload = json!({

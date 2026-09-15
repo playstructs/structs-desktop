@@ -269,7 +269,9 @@ fn main() {
         .setup(|app| {
             use tauri::{Manager, WebviewWindowBuilder, WebviewUrl};
 
-            // Request notification permission at startup
+            // Request notification permission at startup — and bind the app
+            // so a clicked alert can open the Map Viewer on its target.
+            notifications::bind_app(app.handle());
             notifications::request_permission();
 
             // Hold an NSProcessInfo activity for the lifetime of the app to

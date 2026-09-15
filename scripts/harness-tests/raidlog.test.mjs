@@ -30,6 +30,7 @@ const iso = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, 
   assert.equal(lg.dayLabel(iso(today)), 'TODAY'); assert.equal(lg.dayLabel(iso(y)), 'YESTERDAY');
   assert.match(lg.dayLabel(iso(old)), /^(SUN|MON|TUE|WED|THU|FRI|SAT) \d{1,2} [A-Z]{3}/);
   assert.equal(lg.dayLabel(''), '');
+  assert.equal(lg.dayLabel(iso(today) + 'T16:58:19.751Z'), 'TODAY', 'a full timestamp still labels by its day');
 }
 
 // 2. Rendering: grouped by day, filtered to the story, the count says what the filter hides.

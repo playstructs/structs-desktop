@@ -134,15 +134,20 @@
        read for its TEXT into a column of buttons; `margin-left: auto` keeps it
        pinned right so rows do not jitter when it appears. Focus-visible as
        well as hover, so it is reachable without a mouse. */
-    .feed-share {
+    .feed-share, .feed-open {
       flex: none; margin-left: auto; opacity: 0;
       color: var(--text-hint); text-decoration: none;
       transition: opacity .12s ease-out;
     }
+    /* Two doors on one row sit together at the right; only the first takes
+       the free space. */
+    .feed-open + .feed-share { margin-left: var(--spacing-sm); }
     #feed-list li:hover .feed-share,
     #feed-alerts li:hover .feed-share,
-    .feed-share:focus-visible { opacity: 1; }
-    .feed-share:hover { color: var(--accent-primary); }
+    #feed-list li:hover .feed-open,
+    #feed-alerts li:hover .feed-open,
+    .feed-share:focus-visible, .feed-open:focus-visible { opacity: 1; }
+    .feed-share:hover, .feed-open:hover { color: var(--accent-primary); }
     /* Told already — so a glance down the feed says what has been passed on. */
     .feed-share.feed-shared { opacity: 1; color: var(--accent-secondary); }
     #feed-alerts { list-style: none; margin: 0; padding: 0; width: 100%;

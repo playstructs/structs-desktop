@@ -1550,9 +1550,30 @@
     count.hidden = true;
     li.appendChild(count);
     li.appendChild(el('span', 'feed-msg', e.message));
+    if (e.target) li.appendChild(feedOpen(e.target));
     li.appendChild(feedShare());
     if (opts && opts.noCollapse) li.dataset.tkey = '';
     return li;
+  }
+
+  /* "Show me." A row about a PLACE — a raid on a planet, a fleet under fire
+   * — carries the id of that place, and this opens the Map Viewer on it: the
+   * same window a click on the native notification opens. As quiet as the
+   * share door beside it, for the same reason. */
+  function feedOpen(target) {
+    var a = el('a', 'feed-open');
+    a.href = 'javascript:void(0)';
+    a.title = 'Open the map on ' + target;
+    a.setAttribute('aria-label', a.title);
+    a.dataset.target = target;
+    a.appendChild(el('i', 'icon-raid'));
+    a.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      var args = String(target).indexOf('9-') === 0 ? { fleetId: target } : { planetId: target };
+      Board.T.core.invoke('mcp_raid_view_open', args)
+        .catch(function (err) { a.title = String(err).slice(0, 120); });
+    });
+    return a;
   }
 
   /* "Tell the guild."

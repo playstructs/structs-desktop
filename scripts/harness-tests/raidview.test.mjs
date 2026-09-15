@@ -1062,81 +1062,276 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
 }
 
 // ── The action bar acts for players this install controls ─────────────────
+//
+// Lottie is replaced with a stub for this block so every animation the bar
+// triggers completes on demand (`flush()`), not on a file the harness cannot
+// load — the sequencing (lock → confirm → release, depart → re-seat →
+// arrive) is what is under test, and it must not wait 4 s per bundle.
 {
   const d = w.document;
   const calls = () => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'mcp_struct_act');
+  const realLottie = w.lottie;
+  const anims = [];
+  w.lottie = { loadAnimation(p) {
+    const h = {};
+    const a = { isLoaded: true, addEventListener(n, f) { (h[n] = h[n] || []).push(f); }, destroy() { a.destroyed = true; }, stop() {}, goToAndPlay() {}, play() {} };
+    if (p.container && p.container.appendChild) { const m = d.createElement('svg'); m.className = 'stub-lottie'; p.container.appendChild(m); }
+    anims.push({ a, h, p });
+    return a;
+  } };
+  const flush = () => { anims.splice(0).forEach(({ h }) => { (h.DOMLoaded || []).forEach((f) => f()); (h.complete || []).forEach((f) => f()); }); };
+
   await until(() => S.controlled && S.controlled['1-9']);
   check('the view learns who this install can sign for', S.controlled['1-9'] === true && !S.controlled['1-194']);
   RV.cancelPending();
   const sel = (id) => { if (S.selectedId !== id) RV.selectStruct(id); };
-  sel('5-1'); // our Tank, online, owner 1-9 (charge 5)
   const chunk = d.getElementById('rv-def-chunk');
+  // The charge an action spends locally stays spent until a snapshot brings
+  // the chain's figure; between sub-tests this stands in for that snapshot.
+  const fresh = () => { S.chargeOverride = {}; RV._refreshBar(); };
+
+  console.log('\n— reach, charge, the lock');
+  check('ambit masks decode the chain\'s bits, `local` included',
+    RV.ambitsOfMask(30).join() === 'water,land,air,space' && RV.ambitsOfMask(32).join() === 'local' && RV.ambitsOfMask(0).length === 0);
+  check('`local` reaches the attacker\'s own ambit and nothing else',
+    RV.ambitsContain(['local'], 'space', 'space') && !RV.ambitsContain(['local'], 'air', 'space') && RV.ambitsContain(['air', 'space'], 'AIR', 'land'));
+  check('charge is compared by LEVEL, as ChargeCalculator does',
+    RV.chargeSufficient(5, 3) && !RV.chargeSufficient(2, 3) && !RV.chargeSufficient(0, 1) && RV.chargeSufficient(100, 8) && RV.chargeLevelOf(4) === 4);
+
+  sel('5-1'); // our Tank, online, owner 1-9 (charge 5)
   const fire = chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"]');
   check('an owned, online, charged struct gets a LIVE weapon button in the game\'s default style', !!fire && fire.classList.contains('sui-mod-default') && !fire.classList.contains('sui-mod-disabled'));
-  check('…and its power switch is a control, not a picture', !!chunk.querySelector('a.rv-switch[data-action="deactivate"]'));
+  const sw = chunk.querySelector('a.rv-switch[data-action="deactivate"] img');
+  check('…and its power switch is a control showing the ON art', !!sw && sw.getAttribute('data-state') === 'on' && /panel-switch-on/.test(sw.src));
   fire.click();
-  check('pressing a weapon arms target selection: the header becomes the prompt and the button goes active-offense', S.pending && S.pending.action === 'attack' && /Select Target/.test(chunk.querySelector('.sui-screen-info').textContent) && !!chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"].sui-mod-active-offense'));
-  const enemy = d.querySelector('[id$="slot-5-20"]');
-  check('the enemy command ship is marked as a target, our own structs are not', d.querySelectorAll('.rv-can-target').length === 1 && enemy && enemy.classList.contains('rv-can-target'));
-  RV._anchors()[RV.anchorKeyFor(S.structsById['5-20'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  const head = chunk.querySelector('.sui-screen-info');
+  check('pressing a weapon arms target selection: the header becomes the INVERTED prompt and the button goes active-offense',
+    S.pending && S.pending.action === 'attack' && /Select Target/.test(head.textContent) && head.classList.contains('sui-mod-inverted')
+      && !!chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"].sui-mod-active-offense'));
+  const cmd = d.querySelector('[id$="slot-5-20"]'), raiderTank = d.querySelector('[id$="slot-5-21"]');
+  check('only the enemy in the weapon\'s reach is a target: the land raider, not the command ship in space',
+    raiderTank && raiderTank.classList.contains('rv-can-target') && cmd && cmd.classList.contains('rv-invalid-target') && !cmd.classList.contains('rv-can-target'));
+  check('…our own structs are dimmed as invalid too, the acting struct left alone',
+    d.querySelector('[id$="slot-5-2"]').classList.contains('rv-invalid-target') && !d.querySelector('[id$="slot-5-1"]').classList.contains('rv-invalid-target')
+      && d.querySelectorAll('.rv-can-target').length === 1);
+  // A hidden struct is reachable only from its own ambit (AttackTargetUtil.isConcealedFrom).
+  S.structsById['5-21'].hidden = true; S.structsById['5-21'].ambit = 'space';
+  check('a struct in stealth outside the attacker\'s ambit is concealed', !RV._validTarget(S.structsById['5-21']));
+  S.structsById['5-21'].ambit = 'land';
+  check('…and reachable again from within it', RV._validTarget(S.structsById['5-21']));
+  S.structsById['5-21'].hidden = false;
+  check('clicking an invalid target cancels the action', (RV._anchors()[RV.anchorKeyFor(S.structsById['5-20'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true })), !S.pending && calls().length === 0));
+  sel('5-1'); chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"]').click();
+  RV._anchors()[RV.anchorKeyFor(S.structsById['5-21'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await until(() => calls().length >= 1);
   const shot = calls()[0].args;
-  check('clicking the target fires the attack AS the owner, with the game\'s own message arguments', shot.player === '1-9' && shot.action === 'attack' && shot.args.attacker_id === '5-1' && shot.args.target_id === '5-20' && shot.args.weapon === 'primary');
-  check('…and target selection ends', !S.pending && d.querySelectorAll('.rv-can-target').length === 0);
+  check('clicking the target fires the attack AS the owner, with the game\'s own message arguments', shot.player === '1-9' && shot.action === 'attack' && shot.args.attacker_id === '5-1' && shot.args.target_id === '5-21' && shot.args.weapon === 'primary');
+  check('…and target selection ends', !S.pending && d.querySelectorAll('.rv-can-target, .rv-invalid-target').length === 0);
+  check('the bar LOCKS while the action is on its way: "Executing" and no buttons (the game\'s ActionBarLock)',
+    !!S.executing && S.executing.player === '1-9' && /Executing/.test(chunk.textContent) && chunk.querySelectorAll('a.sui-panel-btn').length === 0
+      && !!chunk.querySelector('.sui-action-bar-progress-bar.sui-mod-animated'));
+  await until(() => RV._chargeOfPlayer('1-9') === 0);
+  check('…and the owner\'s charge is spent locally, as the game\'s optimistic last-action block does', RV._chargeOfPlayer('1-9') === 0 && !RV._canAct(S.structsById['5-2'], 1, true));
+  sel('5-2');
+  check('every struct of the locked player shows Executing, not just the acting one', /Executing/.test(chunk.textContent));
+  RV._applyAttacks({ generation: S.generation, attacks: [{ attacker_id: '5-9', shots: [] }] });
+  check('someone else\'s shot does not release it', !!S.executing);
+  RV._applyAttacks({ generation: S.generation, attacks: [{ attacker_id: '5-1', shots: [] }] });
+  check('the shot that confirms the attack releases the lock', !S.executing && !/Executing/.test(chunk.textContent));
+  fresh(); // the next snapshot would carry fresh charge; stand in for it
   sel('5-1');
+  check('…and the buttons are back', !!chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"].sui-mod-default'));
+
+  console.log('\n— the switch');
   chunk.querySelector('a.rv-switch').click();
   await until(() => calls().length >= 2);
   check('the switch deactivates an online struct', calls()[1].args.action === 'deactivate' && calls()[1].args.args.struct_id === '5-1' && calls()[1].args.player === '1-9');
+  check('…and locks the bar until the chain answers', !!S.executing && S.executing.action === 'deactivate');
+  RV._applyStatusDelta({ struct_id: '5-1', status_old: 7, status: 3 });
+  check('the struct_status frame (ONLINE bit off) confirms it: state, badge and lock all follow',
+    S.structsById['5-1'].online === false && !S.executing && RV._badgesFor(S.structsById['5-1']).includes('sui-icon-energy-deactivated'));
+  sel('5-1');
+  const sw2 = chunk.querySelector('a.rv-switch[data-action="activate"] img');
+  check('…and the switch now shows OFF and offers to activate', !!sw2 && sw2.getAttribute('data-state') === 'off');
+  check('offline: the properties screen shows the unpowered glyph and the weapon is inert',
+    !!chunk.querySelector('.sui-screen-properties i.icon-unpowered') && !!chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"].sui-mod-disabled'));
+  RV._applyStatusDelta({ struct_id: '5-1', status_old: 3, status: 7 });
+  check('…and back on again from the frame', S.structsById['5-1'].online === true && !RV._badgesFor(S.structsById['5-1']).includes('sui-icon-energy-deactivated'));
+  S.controlledInfo['1-9'] = { charge: 5, overloaded: true };
+  sel('5-3'); fresh();   // 5-3: an online Cannon of ours (5-2 is wreckage since the destroy check above)
+  check('an overloaded owner: `icon-disabled` in the screen, every action refused, the no-power badge',
+    !!chunk.querySelector('.sui-screen-properties i.icon-disabled') && !chunk.querySelector('a.sui-panel-btn.sui-mod-default')
+      && RV._badgesFor(S.structsById['5-3']).includes('sui-icon-no-power'),
+    chunk.innerHTML.replace(/\s+/g, ' ').slice(0, 400) + ' badges=' + RV._badgesFor(S.structsById['5-3']).join());
+  check('…but the switch still turns it OFF — that is the action that relieves the grid', !!chunk.querySelector('a.rv-switch[data-action="deactivate"]'));
+  S.controlledInfo['1-9'] = { charge: 5, overloaded: false };
+  fresh();
+
+  console.log('\n— stealth');
   sel('5-5'); // our Submersible: stealth, movable, fleet
   const stealth = chunk.querySelector('a.sui-panel-btn[data-action="stealth"]');
   stealth.click();
   await until(() => calls().length >= 3);
   check('stealth acts at once (no target to choose)', calls()[2].args.action === 'stealth_activate' && calls()[2].args.args.struct_id === '5-5');
-  const move = chunk.querySelector('a.sui-panel-btn[data-action="move"]');
-  move.click();
+  RV._applyStatusDelta({ struct_id: '5-5', status_old: 7, status: 23 });
+  check('the HIDDEN bit confirms it and plays the cloak', S.structsById['5-5'].hidden === true && !S.executing && anims.some((x) => /stealth_activate/.test(x.p.path)));
+  flush();
+  fresh(); sel('5-5');
+  check('…the button is now pressed (active-defense) and offers to leave stealth',
+    !!chunk.querySelector('a.sui-panel-btn[data-action="stealth"].sui-mod-active-defense') && /Leave Stealth/.test(chunk.querySelector('a.sui-panel-btn[data-action="stealth"]').title));
+  check('a hidden Submersible draws its periscope art, not a dimmed hull; any other hull dims',
+    RV.stealthClass({ hidden: true, type_slug: 'submersible' }) === '' && RV.stealthClass({ hidden: true, type_slug: 'tank' }) === ' rv-stealth'
+      && /submersible-struct-hidden/.test(d.querySelector('[id$="struct-5-5"] img:not(.rv-top):not(.rv-bottom)').src));
+  RV._applyStatusDelta({ struct_id: '5-5', status_old: 23, status: 7 });
+  flush();
+  check('…and leaves it from the frame', S.structsById['5-5'].hidden === false);
+
+  console.log('\n— move');
+  fresh(); sel('5-5');
+  chunk.querySelector('a.sui-panel-btn[data-action="move"]').click();
   const tiles = RV._tileAnchors();
-  const freeFleetTiles = Object.keys(tiles).filter((k) => tiles[k].classList.contains('rv-can-target'));
-  check('Move marks the empty tiles on our own side and nothing on the enemy\'s', freeFleetTiles.length > 0 && freeFleetTiles.every((k) => k.startsWith('fleet|defender|') || k.startsWith('plan|')) && !freeFleetTiles.some((k) => k.startsWith('fleet|attacker|')));
-  tiles[freeFleetTiles[0]].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  const moveTiles = Object.keys(tiles).filter((k) => tiles[k].classList.contains('rv-move-target'));
+  check('Move marks the empty tiles of our side the struct may occupy — water only, for a Submersible — with the focus-move cursor',
+    moveTiles.length > 0 && moveTiles.every((k) => k.startsWith('fleet|defender|water|')) && !Object.keys(tiles).some((k) => k.startsWith('fleet|attacker|') && tiles[k].classList.contains('rv-move-target')));
+  tiles[moveTiles[0]].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await until(() => calls().length >= 4);
   const mv = calls()[3].args;
-  check('clicking a marked tile deploys there', mv.action === 'deploy' && mv.args.struct_id === '5-5' && typeof mv.args.ambit === 'string' && typeof mv.args.slot === 'number');
-  sel('5-5');
+  check('clicking a marked tile deploys there, within the FLEET (the game sends the struct\'s own location type)',
+    mv.action === 'deploy' && mv.args.struct_id === '5-5' && mv.args.ambit === 'water' && typeof mv.args.slot === 'number' && mv.args.location_type === 'fleet');
+  const toSlot = mv.args.slot;
+  RV._applyMoveDelta({ struct_id: '5-5', ambit: 'water', slot: toSlot });
+  check('the struct_move frame plays DEPART first', anims.some((x) => /move_depart/.test(x.p.path)) && S.structsById['5-5'].slot === 0);
+  flush();
+  check('…re-seats the struct when it ends, and plays ARRIVE at the new tile',
+    S.structsById['5-5'].slot === toSlot && RV._occupied(RV._anchors()['fleet|defender|water|' + toSlot]) && anims.some((x) => /move_arrive/.test(x.p.path)));
+  flush();
+  check('…which releases the lock', !S.executing);
+  fresh();
+  // The Command Ship moves between the command tiles of its own side.
+  sel('5-9');
+  chunk.querySelector('a.sui-panel-btn[data-action="move"]').click();
+  const cmdTiles = Object.keys(tiles).filter((k) => tiles[k].classList.contains('rv-move-target'));
+  check('a Command Ship\'s Move targets the empty COMMAND tiles of its side (all four ambits are possible for it)',
+    cmdTiles.length === 3 && cmdTiles.every((k) => k.startsWith('cmd|defender|')) && !cmdTiles.includes('cmd|defender|land'));
+  RV.cancelPending();
+
+  console.log('\n— defend');
+  fresh(); sel('5-5');
   chunk.querySelector('a.sui-panel-btn[data-action="defend"]').click();
-  check('Defend waits for a friendly struct', S.pending && S.pending.kind === 'friendly' && !!S.structsById['5-3'] && d.querySelectorAll('.rv-can-target').length >= 3);
+  check('Defend waits for a friendly struct: ours ringed, the raider\'s dimmed',
+    S.pending && S.pending.kind === 'friendly' && d.querySelectorAll('.rv-can-target').length >= 3 && d.querySelector('[id$="slot-5-21"]').classList.contains('rv-invalid-target'));
   RV._anchors()[RV.anchorKeyFor(S.structsById['5-3'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await until(() => calls().length >= 5);
   check('…and choosing one sets the defense', calls()[4].args.action === 'defend' && calls()[4].args.args.defender_id === '5-5' && calls()[4].args.args.protected_id === '5-3');
-  // A fleet struct already standing guard offers to stand down instead.
-  S.structsById['5-5'].defending = true;
-  RV.selectStruct('5-5'); RV.selectStruct('5-5');
+  RV._applyDefenseDelta(true, { defender_struct_id: '5-5', protected_struct_id: '5-3' });
+  check('the struct_defense_add frame confirms it: both relations, the badges, the lock',
+    S.structsById['5-5'].protects === '5-3' && S.structsById['5-5'].defending === true && S.structsById['5-3'].defended === true && !S.executing
+      && RV._badgesFor(S.structsById['5-5']).includes('sui-icon-defending'));
+  fresh(); sel('5-5');
   const clear = chunk.querySelector('a.sui-panel-btn[data-action="defend"]');
-  check('a defender that already stands guard offers Clear Defense instead', !!clear && /Clear Defense/.test(clear.title));
+  check('a defender that already stands guard shows the button PRESSED and offers Clear Defense', !!clear && clear.classList.contains('sui-mod-active-defense') && /Clear Defense/.test(clear.title));
   clear.click();
   await until(() => calls().length >= 6);
   check('…and pressing it clears the defense at once', calls()[5].args.action === 'defense_clear' && calls()[5].args.args.defender_id === '5-5');
-  S.structsById['5-5'].defending = false;
+  RV._applyDefenseDelta(false, { defender_struct_id: '5-5', protected_struct_id: '5-3' });
+  check('…confirmed by struct_defense_remove', S.structsById['5-5'].protects === null && !S.structsById['5-5'].defending && !S.executing);
+  fresh();
+
+  console.log('\n— not ours');
   sel('5-20'); // the raider's ship: not ours
   const atk = d.getElementById('rv-atk-chunk');
   check('a struct we do not control keeps the inert bar: every button disabled, no switch', atk.querySelectorAll('a.sui-panel-btn').length > 0 && [...atk.querySelectorAll('a.sui-panel-btn')].every((a) => a.classList.contains('sui-mod-disabled')) && !atk.querySelector('a.rv-switch'));
-  // Building on an empty slot of our side.
+
+  console.log('\n— build');
+  fresh();
   const airTile = RV._tileAnchors()['plan|air|0'];
   airTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  await until(() => chunk.querySelector('.rv-build select option[value="Tank"]'));
+  await until(() => chunk.querySelector('.rv-build select option[value="SAM Launcher"]'));
   const build = chunk.querySelector('.rv-build');
-  check('an empty slot on our side offers the game\'s deploy: a picker of planet types (no fleet types) and a Build door', !!build && [...build.querySelectorAll('option')].map((o) => o.value).join(',') === ',Tank');
-  build.querySelector('select').value = 'Tank';
+  check('an empty slot on our side offers the game\'s deploy: only the planet types whose possible ambits include this tile\'s',
+    !!build && [...build.querySelectorAll('option')].map((o) => o.value).join(',') === ',SAM Launcher');
+  check('the deployable filter: command tiles take only the command ship, fleet tiles the rest of the fleet, each by ambit',
+    RV._deployableTypes(S.catalog, 'cmd', 'space').map((t) => t.name).join() === 'Command Ship'
+      && RV._deployableTypes(S.catalog, 'fleet', 'water').map((t) => t.name).join() === 'Submersible'
+      && RV._deployableTypes(S.catalog, 'fleet', 'air').length === 0
+      && RV._deployableTypes(S.catalog, 'plan', 'land').map((t) => t.name).sort().join() === 'Planetary Defense Cannon,SAM Launcher,Tank',
+    ['cmd/space', 'fleet/water', 'fleet/air', 'plan/land'].map((k) => { const [a, b] = k.split('/'); return k + '=' + RV._deployableTypes(S.catalog, a, b).map((t) => t.name).join('+'); }).join(' '));
+  build.querySelector('select').value = 'SAM Launcher';
   build.querySelector('a.sui-screen-btn').click();
   await until(() => calls().length >= 7);
   const bd = calls()[6].args;
-  check('Build signs as the planet owner for that ambit and slot', bd.player === '1-9' && bd.action === 'build' && bd.args.struct_type === 'Tank' && bd.args.ambit === 'air' && bd.args.slot === 0);
-  const enemyTile = RV._tileAnchors()['fleet|attacker|land|0'];
+  check('Build signs as the planet owner for that ambit and slot', bd.player === '1-9' && bd.action === 'build' && bd.args.struct_type === 'SAM Launcher' && bd.args.ambit === 'air' && bd.args.slot === 0);
+  check('the tile shows the deployment indicator while the build is on its way', !!S.pendingBuilds['plan|air|0'] && !!RV._anchors()['plan|air|0'].querySelector('.rv-pending img'));
+  check('…which is not an occupant: the tile stays free for the struct', !RV._occupied(RV._anchors()['plan|air|0']));
+  S.executing = null; // the chain's struct_block_build_start / snapshot
+  airTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true })); airTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('…and its bar is the pending-build form: the type\'s abbreviation, a progress bar, cancel not yet possible',
+    /SAM/.test(chunk.querySelector('.sui-screen-info').textContent) && !!chunk.querySelector('.sui-action-bar-progress-bar') && !!chunk.querySelector('a.sui-panel-btn.sui-mod-disabled i.icon-close'));
+  delete S.pendingBuilds['plan|air|0'];
+  fresh();
+  // A struct the chain is still building: the building bar, with a LIVE cancel for its owner.
+  S.structsById['5-4'].built = false;
+  sel('5-4');
+  check('a struct still being built offers Cancel (build_cancel) to its owner', !!chunk.querySelector('a.sui-panel-btn.sui-mod-default[data-action="build_cancel"]'));
+  chunk.querySelector('a.sui-panel-btn[data-action="build_cancel"]').click();
+  await until(() => calls().length >= 8);
+  check('…and pressing it sends the cancel', calls()[7].args.action === 'build_cancel' && calls()[7].args.args.struct_id === '5-4');
+  S.executing = null; S.structsById['5-4'].built = true;
+  RV._applyStatusDelta({ struct_id: '5-4', status_old: 1, status: 3 });
+  check('the BUILT bit arriving plays the deployment animation for that ambit', anims.some((x) => /deployment_land/.test(x.p.path)));
+  flush();
+  const enemyTile = RV._tileAnchors()['fleet|attacker|land|1'];
   enemyTile.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   check('an empty slot on the raider\'s side offers nothing — we do not control the raider', !atk.querySelector('.rv-build'));
-  sel('5-1');
+  fresh(); sel('5-1');
   chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"]').click();
   d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   check('Escape cancels a pending action', !S.pending);
+
+  console.log('\n— consume alpha');
+  // The fixture has no generator; the button's form is checked on a stand-in.
+  S.structTypes['14'].power_generation = 'smallGenerator';
+  fresh(); sel('5-6');
+  const consume = chunk.querySelector('a.sui-panel-btn[data-action="infuse"]');
+  check('a controlled online generator gets a LIVE Consume Alpha button', !!consume && consume.classList.contains('sui-mod-default'));
+  consume.click();
+  const form = chunk.querySelector('.rv-infuse');
+  check('…which opens the amount form in the bar', !!form && !!form.querySelector('input[type="number"]'));
+  form.querySelector('input').value = '3';
+  form.querySelector('a.sui-screen-btn').click();
+  await until(() => calls().length >= 9);
+  check('…and sends the infusion in ualpha, as the game converts it', calls()[8].args.action === 'generator_infuse' && calls()[8].args.args.struct_id === '5-6' && calls()[8].args.args.amount === '3000000ualpha');
+  S.executing = null;
+  S.structTypes['14'].power_generation = 'noPowerGeneration';
+
+  console.log('\n— animations do not erase the idle loop, snapshots wait for the fight');
+  const ore = S.structsById['5-6'];
+  // Off, then on again: the loop that started at boot (real lottie) is torn
+  // down and restarted under the stub — the ShowStructStillEvent cycle.
+  ore.online = false; RV._syncIdle(ore);
+  const idleMount = d.getElementById(RV.domId('idle', '5-6'));
+  check('switching an economic struct OFF stops its loop and shows the still',
+    !!idleMount && !idleMount.querySelector('.stub-lottie, svg') && !d.getElementById(RV.domId('struct', '5-6')).classList.contains('rv-invisible'));
+  ore.online = true; RV._syncIdle(ore);
+  check('…and ON again starts it, hiding the still (the loop bundle carries the hull)',
+    d.getElementById(RV.domId('struct', '5-6')).classList.contains('rv-invisible'));
+  check('an online economic struct idles in its OWN layer, under the combat mount', !!idleMount && !!idleMount.querySelector('.stub-lottie') && idleMount.classList.contains('rv-idle'));
+  RV._applyStatusDelta({ struct_id: '5-6', status_old: 1, status: 7 });   // a build completing: plays DEPLOYMENT over it
+  check('a combat/status animation plays in the combat mount, HUD hidden meanwhile',
+    !!d.getElementById(RV.domId('anim', '5-6')).querySelector('.stub-lottie') && d.getElementById(RV.domId('hud', '5-6')).classList.contains('rv-invisible'));
+  const snapBefore = S.snapshot;
+  RV._applySnapshot({ generation: S.generation, snapshot: Object.assign({}, snapBefore, { fetched_at_ms: snapBefore.fetched_at_ms + 1 }) });
+  check('a snapshot landing mid-sequence is DEFERRED, not applied over the fight', RV._playing() && S.snapshot === snapBefore);
+  flush();
+  // Re-queried: the deferred snapshot below rebuilds the grid when the
+  // queue drains, so the mount to look at is whichever one is in the
+  // document now.
+  const idleNow = d.getElementById(RV.domId('idle', '5-6'));
+  check('when the sequence ends the idle loop is still there and the HUD is back',
+    !!idleNow && !!idleNow.querySelector('.stub-lottie') && !d.getElementById(RV.domId('hud', '5-6')).classList.contains('rv-invisible'),
+    idleNow ? idleNow.innerHTML.slice(0, 120) : 'no idle mount');
+  check('…and the deferred snapshot is applied', S.snapshot !== snapBefore && S.snapshot.fetched_at_ms === snapBefore.fetched_at_ms + 1);
+  w.lottie = realLottie;
 }
 
 /* ── Comms is a rail beside the map and a PAGE on its own ──────────────────

@@ -91,4 +91,26 @@ function boot() {
   assert.ok(!el().classList.contains('rv-vis'));
 }
 
+// 6. The bubble's copy of a template bundle gets the struct's own art, like the tile's.
+{
+  const { w, pp, addStruct } = boot();
+  addStruct('5-1', 'defender', { top: 700, bottom: 828, left: 0, right: 128 });
+  const handlers = {};
+  w.lottie = { loadAnimation: () => ({ addEventListener(n, f) { handlers[n] = f; }, destroy() {} }) };
+  const swaps = [];
+  const pp2 = w.RaidPip({
+    state: () => ({ structsById: { '5-1': { id: '5-1', side: 'defender', type_slug: 'tank', max_health: 3 } } }),
+    domId: (kind, id) => kind + '-' + id, currentHealth: () => 2,
+    renderStill: (node) => { node.textContent = 'still'; }, stillFlags: () => ({ during: false, after: true }),
+    flipsLayer: () => false, lottiePath: (n) => n,
+    injectStructArt: (box, s, hp) => swaps.push([box.className, s.id, hp]),
+  });
+  pp2.pipOnAnimation({ structId: '5-1', names: ['DESTROY_WATER'], healthAfter: 0 }, 'DESTROY_WATER');
+  assert.ok(handlers.DOMLoaded, 'the bubble listens for the SVG being built');
+  handlers.DOMLoaded();
+  assert.deepEqual(swaps, [['rv-anim', '5-1', 0]], 'and swaps the placeholder hull for this struct at the health the sequence reached');
+  // The module still works without the hook (older callers, the tests above).
+  assert.ok(pp.pipOnAnimation !== undefined);
+}
+
 console.log('raid-pip: all checks passed');

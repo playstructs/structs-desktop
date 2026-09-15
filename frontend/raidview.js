@@ -344,7 +344,65 @@
     /// An action waiting on a target: `{action, struct, weapon, prompt, kind}`
     /// where kind is 'enemy' (attack), 'friendly' (defend) or 'tile' (move).
     pending: null,
+    /// What the roster knows about each controlled player beyond the
+    /// snapshot — `{ [player_id]: { charge, overloaded } }`. Charge from the
+    /// roster answers for a controlled player who is neither the owner nor
+    /// the raider (a third fleet parked here), and `overloaded` is the
+    /// game's `Player.isOverloaded()` from the same load/capacity pair.
+    controlledInfo: {},
+    /// Charge spent locally since the last snapshot: `{ [player_id]: 0 }`.
+    /// The chain resets a player's charge on every action; the snapshot
+    /// that says so is up to 20 s away, and the game zeroes its own battery
+    /// optimistically (setOptimisticLastActionBlockHeight) for the same
+    /// reason. Cleared when a snapshot lands.
+    chargeOverride: {},
+    /// An action on its way to the chain — the game's ActionBarLock. While
+    /// set, that player's bar shows "Executing" and takes no other action;
+    /// cleared by the stream frame that confirms it (`settleExecuting`), by a
+    /// refusal, or by the timeout in EXECUTING_TIMEOUT_MS.
+    /// `{ player, structId, tileKey, label, expect(struct) → bool, since }`.
+    executing: null,
+    /// Builds sent from an empty tile, keyed by tile key, until the chain
+    /// materialises the struct (the game's `pendingBuilds`). The tile shows
+    /// the deployment indicator and its bar the pending-build form meanwhile.
+    pendingBuilds: {},
   };
+  /// How long an unconfirmed action holds the bar. The game holds it until
+  /// the stream answers; here a dropped tx (chain_health, LCD stall) would
+  /// otherwise wedge the bar for good, so it lets go and says so.
+  var EXECUTING_TIMEOUT_MS = 120000;
+  /// Ambit bitmask → names, the chain's `possible_ambit` / `*_weapon_ambits`
+  /// encoding (Water=2, Land=4, Air=8, Space=16, Local=32). `local` means
+  /// "the attacker's own ambit" — the game's ambits_array carries the literal
+  /// word and AmbitUtil.contains resolves it against the attacker.
+  var AMBIT_BITS = { water: 2, land: 4, air: 8, space: 16, local: 32 };
+  function ambitsOfMask(mask) {
+    var out = [];
+    mask = Number(mask) || 0;
+    Object.keys(AMBIT_BITS).forEach(function (k) { if (mask & AMBIT_BITS[k]) out.push(k); });
+    return out;
+  }
+  /* AmbitUtil.contains: does the list reach `target`, with `local` standing
+   * for the attacker's own ambit? */
+  function ambitsContain(list, target, local) {
+    target = String(target || '').toLowerCase();
+    local = String(local || '').toLowerCase();
+    return (list || []).some(function (a) {
+      a = String(a).toLowerCase();
+      return a === target || (a === 'local' && !!local && local === target);
+    });
+  }
+  // Port of ChargeCalculator: raw charge → level 0-5, and the game's
+  // sufficiency rule compares LEVELS, not raw counts (isChargeLevelSufficient).
+  var CHARGE_LADDER = [0, 1, 2, 3, 5, 8];
+  function chargeLevelOf(charge) {
+    if (charge == null) return 0;
+    for (var i = 0; i < CHARGE_LADDER.length; i++) if (Number(charge) <= CHARGE_LADDER[i]) return i;
+    return CHARGE_LADDER.length - 1;
+  }
+  function chargeSufficient(available, required) {
+    return chargeLevelOf(available) >= chargeLevelOf(required);
+  }
 
   function el(tag, cls, text) {
     var n = document.createElement(tag);
@@ -903,6 +961,13 @@
     return n;
   }
 
+  /* Does a mount hold a struct? The pending-build indicator that a sent
+   * build paints there is not one — the tile stays free until the chain
+   * materialises the struct. */
+  function occupied(mount) {
+    return !!(mount && mount.querySelector && mount.querySelector('.rv-struct-wrap'));
+  }
+
   /* Mount every struct into its anchor. Returns how many had nowhere to go
    * (e.g. a third attacker command ship in one ambit — the game's own board
    * cannot seat that either). */
@@ -911,7 +976,10 @@
     (structs || []).forEach(function (s) {
       var mount = anchors[anchorKeyFor(s)];
       if (!mount) { unplaced++; return; }
-      if (mount.childNodes.length) { unplaced++; return; } // seat taken
+      if (occupied(mount)) { unplaced++; return; } // seat taken
+      // The struct the pending build was waiting for has arrived.
+      var pendingBox = mount.querySelector('.rv-pending');
+      if (pendingBox) pendingBox.remove();
       mount.appendChild(structNode(s));
       // Selecting a struct opens its readout. The game's tile-selection layer
       // exists to choose a target for an ACTION; here the same gesture is
@@ -1002,6 +1070,13 @@
     // only the first is shown (the game's own icon for exactly this state).
     if (vis.offline && !s.destroyed && s.built !== false && s.online === false) {
       out.push('sui-icon-energy-deactivated');
+    }
+    // `sui-icon-no-power` = the OWNER's grid is overloaded
+    // (renderIndicatorIsOverloaded). Known for either combatant since the
+    // snapshot carries `Player.isOverloaded()`, and for controlled players
+    // from the roster; unknown owners simply never show it.
+    if (vis.offline && !s.destroyed && s.built !== false && s.online !== false && overloaded(s.owner)) {
+      out.push('sui-icon-no-power');
     }
     if (vis.defended && !s.destroyed && s.defended) out.push('sui-icon-defended');
     if (vis.defending && !s.destroyed && !!s.protects) out.push('sui-icon-defending');
@@ -1161,30 +1236,103 @@
      charge is what is spent. Availability follows ActionBarComponent's
      isActionAvailable: owned, online state matching, charge sufficient. */
   function controls(s) { return !!(s && s.owner && state.controlled[s.owner]); }
-  function chargeOf(s) {
+  /* A player's charge as this window best knows it: zero if they acted
+   * since the last snapshot, else the snapshot's figure for the owner or the
+   * raider, else the roster's (a controlled third party). */
+  function chargeOfPlayer(pid) {
+    if (!pid) return null;
+    if (state.chargeOverride[pid] != null) return state.chargeOverride[pid];
     var snap = state.snapshot || {};
-    if (s.owner === snap.owner) return snap.owner_charge;
-    if (s.owner === snap.raider_id) return snap.raider_charge;
-    return null;
+    if (pid === snap.owner && snap.owner_charge != null) return snap.owner_charge;
+    if (pid === snap.raider_id && snap.raider_charge != null) return snap.raider_charge;
+    var info = state.controlledInfo[pid];
+    return info && info.charge != null ? info.charge : null;
   }
-  function canAct(s, cost, needOnline) {
+  function chargeOf(s) { return chargeOfPlayer(s.owner); }
+  /* `Player.isOverloaded()` for a player on this board: the snapshot's
+   * answer for either combatant, the roster's for anyone else we control. */
+  function overloaded(pid) {
+    var snap = state.snapshot || {};
+    if (pid && pid === snap.owner && snap.owner_overloaded != null) return !!snap.owner_overloaded;
+    if (pid && pid === snap.raider_id && snap.raider_overloaded != null) return !!snap.raider_overloaded;
+    var info = state.controlledInfo[pid];
+    return !!(info && info.overloaded);
+  }
+  /* ActionBarComponent.isActionAvailable: ours, the right online state, no
+   * lock held, the grid not overloaded (unless the action is the one that
+   * relieves it), and charge at the level the action needs. */
+  function canAct(s, cost, needOnline, requiresPower) {
     if (!controls(s) || s.destroyed) return false;
+    if (s.built === false) return false;
     if (needOnline != null && (s.online !== false) !== needOnline) return false;
-    var ch = chargeOf(s);
-    if (cost && ch != null && Number(ch) < Number(cost)) return false;
+    if (isLocked(s.owner)) return false;
+    if (requiresPower !== false && overloaded(s.owner)) return false;
+    if (cost && !chargeSufficient(chargeOf(s), cost)) return false;
     return true;
   }
-  function invokeAct(player, action, args, label) {
+  /* The game's ActionBarLock.isLocked, per player: an action of theirs is
+   * on its way to the chain and nothing else may be sent meanwhile. */
+  function isLocked(pid) {
+    var ex = state.executing;
+    return !!(ex && ex.player === pid);
+  }
+  /* Send one struct action as its owner. Locks the owner's bar until the
+   * stream confirms it (`expect` describes the confirming state), spends
+   * their charge locally, and reports the outcome in the notice strip. */
+  function invokeAct(player, action, args, label, lock) {
     var T = window.__TAURI__;
     if (!T || !T.core) return Promise.resolve();
     note(label + '…', 'sui-mod-secondary');
+    lock = lock || {};
+    state.executing = {
+      player: player, action: action, structId: lock.structId || (args && args.struct_id) || null,
+      tileKey: lock.tileKey || null, label: label, expect: lock.expect || null, since: Date.now(),
+    };
+    var mine = state.executing;
+    refreshBar();
     return T.core.invoke('mcp_struct_act', { player: player, action: action, args: args }).then(function (r) {
       note(label + ' — ' + String(r || 'sent').split('\n')[0].slice(0, 140), 'sui-mod-primary');
+      // The chain charges the player on inclusion; the bar says so now,
+      // the way the game's optimistic last-action block does.
+      if (lock.cost) state.chargeOverride[player] = 0;
+      renderHeader();
+      refreshBar();
+      // A confirmation that never comes must not hold the bar for good.
+      setTimeout(function () {
+        if (state.executing === mine) {
+          state.executing = null;
+          note(label + ': no confirmation from the chain yet', 'sui-mod-warning');
+          refreshBar();
+        }
+      }, EXECUTING_TIMEOUT_MS);
     }).catch(function (e) {
       note(label + ' refused: ' + String(e).slice(0, 160), 'sui-mod-destructive');
+      if (state.executing === mine) state.executing = null;
+      refreshBar();
     });
   }
-  function act(s, action, args, label) { return invokeAct(s.owner, action, args, label); }
+  function act(s, action, args, label, lock) { return invokeAct(s.owner, action, args, label, Object.assign({ structId: s.id }, lock || {})); }
+  /* The frame (or snapshot) that answers the action in flight has landed:
+   * release the lock. `expect` reads the struct's CURRENT state, so a
+   * snapshot that already shows the end state settles it too. */
+  function settleExecuting(hint) {
+    var ex = state.executing;
+    if (!ex) return;
+    var done = false;
+    if (hint && hint.attackerId && ex.action === 'attack' && hint.attackerId === ex.structId) done = true;
+    else if (typeof ex.expect === 'function') {
+      var s = ex.structId ? state.structsById[ex.structId] : null;
+      try { done = !!ex.expect(s); } catch (e) { done = false; }
+    }
+    if (!done) return;
+    state.executing = null;
+    refreshBar();
+  }
+  /* Redraw whichever bar is open — after a lock, a delta, or a charge
+   * change. The selection itself is untouched. */
+  function refreshBar() {
+    if (state.selectedId || state.selectedTile) applySelection(state.selectedId);
+  }
   /** Arm an action that needs a target, or disarm it when pressed again. */
   function arm(p) {
     var same = state.pending && state.pending.struct.id === p.struct.id && state.pending.action === p.action && state.pending.weapon === p.weapon;
@@ -1198,39 +1346,76 @@
     markTargets();
     if (state.selectedId) applySelection(state.selectedId);
   }
-  /** Is `t` a valid target for the pending action? */
+  /* The ambits the pending weapon can reach — StructType.primary_weapon_
+   * ambits_array, decoded from the chain's bitmask. */
+  function weaponAmbits(s, weapon) {
+    var st = typeOf(s);
+    if (!st) return [];
+    return ambitsOfMask(weapon === 'secondary' ? st.secondary_weapon_ambits : st.primary_weapon_ambits);
+  }
+  /** Is `t` a valid target for the pending action?
+   *
+   * Attack: AttackTargetUtil.isValidTarget — not ours, within the weapon's
+   * reach (with `local` meaning the attacker's own ambit), and not a struct
+   * in stealth outside that ambit (concealed). Defend: the game's rule from
+   * MapTileSelectionComponent — ours, and not the defender itself. */
   function validTarget(t) {
     var p = state.pending;
     if (!p || !t || t.destroyed) return false;
-    if (p.kind === 'enemy') return t.side !== p.struct.side && t.owner !== p.struct.owner;
+    if (p.kind === 'enemy') {
+      if (t.owner === p.struct.owner || t.id === p.struct.id) return false;
+      if (!ambitsContain(weaponAmbits(p.struct, p.weapon), t.ambit, p.struct.ambit)) return false;
+      if (t.hidden && String(t.ambit).toLowerCase() !== String(p.struct.ambit).toLowerCase()) return false;
+      return true;
+    }
     if (p.kind === 'friendly') return t.owner === p.struct.owner && t.id !== p.struct.id;
     return false;
   }
+  /* Move targets — MapTileSelectionComponent.showMoveTargets: the EMPTY
+   * command tiles on the struct's own side whose ambit its `possible_ambit`
+   * allows. Only the Command Ship is movable, and it lives in the command
+   * column, so a fleet struct that is not the command ship (a hypothetical
+   * movable one) would target the empty fleet tiles of its side instead. */
   function validTile(tile) {
     var p = state.pending;
     if (!p || p.kind !== 'tile' || !tile) return false;
     if (tile.side !== p.struct.side) return false;
     var key = tile.key.split('|');
-    if (key[0] !== 'fleet' && key[0] !== 'plan') return false;
+    var want = p.struct.is_command ? 'cmd' : (p.struct.category === 'planet' ? 'plan' : 'fleet');
+    if (key[0] !== want) return false;
+    var ambit = key[0] === 'plan' ? key[1] : key[2];
+    var st = typeOf(p.struct);
+    var allowed = st && st.possible_ambit ? ambitsOfMask(st.possible_ambit) : [String(p.struct.ambit).toLowerCase()];
+    if (allowed.indexOf(String(ambit).toLowerCase()) < 0) return false;
     var mount = anchors[tile.key];
-    return !!mount && !mount.childNodes.length;
+    return !!mount && !occupied(mount);
   }
-  /** Paint (or clear) the ring that says "this can be the target". */
+  /** Paint (or clear) the target markers for the pending action.
+   *
+   * The game dims every struct the action cannot land on
+   * (`.mod-invalid-selection`, opacity .5) and marks move targets with the
+   * focus-move cursor; the acting struct is left alone. The accent ring on
+   * a valid target is this window's own addition — it reads at spectator
+   * zoom where a dimmed neighbour does not. */
   function markTargets() {
-    var marked = document.querySelectorAll('.rv-can-target');
-    for (var i = 0; i < marked.length; i++) marked[i].classList.remove('rv-can-target');
-    if (!state.pending) return;
-    Object.keys(state.structsById).forEach(function (id) {
-      if (!validTarget(state.structsById[id])) return;
-      var wrap = document.getElementById(domId('slot', id));
-      if (wrap) wrap.classList.add('rv-can-target');
-    });
-    if (state.pending.kind === 'tile') {
+    var marked = document.querySelectorAll('.rv-can-target, .rv-invalid-target, .rv-move-target');
+    for (var i = 0; i < marked.length; i++) marked[i].classList.remove('rv-can-target', 'rv-invalid-target', 'rv-move-target');
+    var p = state.pending;
+    if (!p) return;
+    if (p.kind === 'enemy' || p.kind === 'friendly') {
+      Object.keys(state.structsById).forEach(function (id) {
+        if (id === p.struct.id) return;
+        var wrap = document.getElementById(domId('slot', id));
+        if (!wrap) return;
+        wrap.classList.add(validTarget(state.structsById[id]) ? 'rv-can-target' : 'rv-invalid-target');
+      });
+    }
+    if (p.kind === 'tile') {
       Object.keys(tileAnchors).forEach(function (key) {
         var parts = key.split('|');
         var side = parts[0] === 'plan' ? 'defender' : parts[1];
         var ambit = parts[0] === 'plan' ? parts[1] : parts[2];
-        if (validTile({ key: key, side: side, label: ambit })) tileAnchors[key].classList.add('rv-can-target');
+        if (validTile({ key: key, side: side, label: ambit })) tileAnchors[key].classList.add('rv-move-target');
       });
     }
   }
@@ -1240,12 +1425,16 @@
     var p = state.pending;
     if (!p) return false;
     if (!validTarget(t)) { cancelPending(); return false; }
+    var st = typeOf(p.struct) || {};
     if (p.action === 'attack') {
       act(p.struct, 'attack', { attacker_id: p.struct.id, target_id: t.id, weapon: p.weapon || 'primary' },
-        (p.struct.type_name || p.struct.id) + ' fires at ' + (t.type_name || t.id));
+        (p.struct.type_name || p.struct.id) + ' fires at ' + (t.type_name || t.id),
+        { cost: p.weapon === 'secondary' ? st.secondary_weapon_charge : st.primary_weapon_charge });
     } else if (p.action === 'defend') {
+      var ward = t.id;
       act(p.struct, 'defend', { defender_id: p.struct.id, protected_id: t.id },
-        (p.struct.type_name || p.struct.id) + ' defends ' + (t.type_name || t.id));
+        (p.struct.type_name || p.struct.id) + ' defends ' + (t.type_name || t.id),
+        { cost: st.defend_change_charge, expect: function (s) { return !!s && s.protects === ward; } });
     }
     cancelPending();
     return true;
@@ -1256,9 +1445,16 @@
     if (!validTile(tile)) { cancelPending(); return false; }
     var parts = tile.key.split('|');
     var ambit = parts[0] === 'plan' ? parts[1] : parts[2];
-    var slot = Number(parts[parts.length - 1]) || 0;
-    act(p.struct, 'deploy', { struct_id: p.struct.id, ambit: ambit, slot: slot },
-      (p.struct.type_name || p.struct.id) + ' moves to ' + ambit + ' ' + (slot + 1));
+    // Command tiles have one slot per ambit (always 0); fleet and planetary
+    // keys end in their slot number.
+    var slot = parts[0] === 'cmd' ? 0 : (Number(parts[parts.length - 1]) || 0);
+    var st = typeOf(p.struct) || {};
+    var mover = p.struct;
+    act(p.struct, 'deploy', { struct_id: p.struct.id, ambit: ambit, slot: slot, location_type: p.struct.category === 'planet' ? 'planet' : 'fleet' },
+      (p.struct.type_name || p.struct.id) + ' moves to ' + ambit + (parts[0] === 'cmd' ? '' : ' ' + (slot + 1)),
+      { cost: st.move_charge, expect: function (s) {
+        return !!s && String(s.ambit).toLowerCase() === ambit && Number(s.slot) === slot && s.id === mover.id;
+      } });
     cancelPending();
     return true;
   }
@@ -1272,30 +1468,87 @@
   /** The type catalogue rides on the state pull (`catalog`), so the picker
    * never asks Rust a second question. */
   function loadTypeCatalog() { return Promise.resolve(state.catalog || []); }
+  /* The types the game's deploy menu lists for a tile —
+   * StructTypeCollection.fetchAllByTileTypeAndAmbit: the tile's ambit must
+   * be in the type's `possible_ambit`; planetary slots take planet types,
+   * fleet tiles take fleet types that are not the command ship, command
+   * tiles take only the command ship. A catalogue row without the mask
+   * (an older backend) is offered everywhere its category allows. */
+  function deployableTypes(types, tileKind, ambit) {
+    return (types || []).filter(function (t) {
+      if (t.possible_ambit != null && ambitsOfMask(t.possible_ambit).indexOf(String(ambit).toLowerCase()) < 0) return false;
+      // A catalogue from before the flag existed names the command ship
+      // the way the chain does.
+      var isCmd = t.is_command != null ? !!t.is_command : /^command ship$/i.test(String(t.name || ''));
+      if (tileKind === 'plan') return t.category === 'planet';
+      if (tileKind === 'cmd') return isCmd;
+      return t.category === 'fleet' && !isCmd;
+    });
+  }
   /** The empty tile's build control: a type picker and a Build door. */
   function buildControl(tile, actor) {
     var box = el('div', 'rv-build');
     var parts = tile.key.split('|');
-    var isFleet = parts[0] === 'fleet';
+    var kind = parts[0];
     var ambit = parts[0] === 'plan' ? parts[1] : parts[2];
-    var slot = Number(parts[parts.length - 1]) || 0;
+    var slot = kind === 'cmd' ? 0 : (Number(parts[parts.length - 1]) || 0);
     var sel = el('select', 'sui-input-text');
     var first = el('option', null, 'choose a struct');
     first.value = '';
     sel.appendChild(first);
+    var charge = chargeOfPlayer(actor);
     loadTypeCatalog().then(function (types) {
-      types.filter(function (t) { return isFleet ? t.category === 'fleet' : t.category !== 'fleet'; })
-        .forEach(function (t) { var o = el('option', null, t.name + (t.build_charge ? ' · charge ' + t.build_charge : '')); o.value = t.name; sel.appendChild(o); });
+      deployableTypes(types, kind, ambit).forEach(function (t) {
+        var o = el('option', null, t.name + (t.build_charge ? ' · charge ' + t.build_charge : ''));
+        o.value = t.name;
+        // StructManager.getDeploymentBlockerInsufficientCharge: listed, but
+        // not choosable, until the battery reaches the build's level.
+        if (t.build_charge && charge != null && !chargeSufficient(charge, t.build_charge)) o.disabled = true;
+        sel.appendChild(o);
+      });
     });
     box.appendChild(sel);
     var go = el('a', 'sui-screen-btn sui-mod-primary', 'Build');
     go.href = 'javascript: void(0)';
+    if (isLocked(actor)) go.classList.add('sui-mod-disabled');
     go.addEventListener('click', function () {
-      if (!sel.value) return;
-      invokeAct(actor, 'build', { struct_type: sel.value, ambit: ambit, slot: slot }, 'Build ' + sel.value + ' on ' + ambit + ' ' + (slot + 1));
+      if (!sel.value || isLocked(actor)) return;
+      var typeName = sel.value;
+      var row = (state.catalog || []).filter(function (t) { return t.name === typeName; })[0] || {};
+      var key = tile.key;
+      state.pendingBuilds[key] = { type: typeName, actor: actor, at: Date.now(), class_abbreviation: abbreviationFor(row) };
+      paintPendingTile(key);
+      invokeAct(actor, 'build', { struct_type: typeName, ambit: ambit, slot: slot },
+        'Build ' + typeName + ' on ' + ambit + (kind === 'cmd' ? '' : ' ' + (slot + 1)),
+        { tileKey: key, cost: row.build_charge, expect: function () { return occupied(anchors[key]); } }).then(function () {
+        // A refusal leaves nothing pending on the tile.
+        if (!state.executing || state.executing.tileKey !== key) {
+          if (!occupied(anchors[key])) { delete state.pendingBuilds[key]; paintPendingTile(key); }
+        }
+      });
+      refreshBar();
     });
     box.appendChild(go);
     return box;
+  }
+  /* The header the game gives a type: its class abbreviation, which only
+   * the type record carries; the catalogue row has the name. */
+  function abbreviationFor(row) {
+    var byId = row && row.id != null ? (state.structTypes || {})[String(row.id)] : null;
+    return (byId && byId.class_abbreviation) || (row && row.name) || 'struct';
+  }
+  /* A tile with a build on its way shows the deployment indicator, as the
+   * game's RenderDeploymentIndicatorEvent does the moment the deploy menu
+   * sends. Cleared when the struct materialises or the build is refused. */
+  function paintPendingTile(key) {
+    var mount = anchors[key];
+    if (!mount) return;
+    var old = mount.querySelector('.rv-pending');
+    if (old) old.remove();
+    if (!state.pendingBuilds[key] || occupied(mount)) return;
+    var box = el('div', 'rv-pending');
+    box.appendChild(layer('img/structs/deployment-indicator/deployment-indicator.gif', ''));
+    mount.appendChild(box);
   }
 
   /* ── Action Bar ──────────────────────────────────────────────────────────
@@ -1400,6 +1653,12 @@
       out.push(propIcon('icon-unpowered', { key: 'icon-unpowered' }));
       return out;
     }
+    // Online but the owner's grid is over capacity: the game shows the
+    // single `icon-disabled` and offers nothing (showStructActionBar).
+    if (overloaded(s.owner)) {
+      out.push(propIcon('icon-disabled', { key: 'icon-disabled' }));
+      return out;
+    }
     if (!st) return out;
     [
       ['passive_weaponry', st.passive_weaponry],
@@ -1431,6 +1690,9 @@
     a.title = title;
     Object.keys(data || {}).forEach(function (k) { a.setAttribute(k, data[k]); });
     a.appendChild(el('i', 'sui-icon-md ' + iconClass));
+    // Named by its action whether or not it is live — the game's buttons
+    // carry per-action ids in both states; only the handler is conditional.
+    if (data && data['data-action']) a.setAttribute('data-action', data['data-action']);
     if (live) {
       a.setAttribute('data-action', live.action);
       a.addEventListener('click', function (ev) { ev.preventDefault(); ev.stopPropagation(); live.onClick(); });
@@ -1440,12 +1702,12 @@
   /** The live form of a button when the viewer controls the struct and the
    * action is available; null (inert) otherwise. `armedClass` marks the
    * button whose target is being chosen, in the game's own active colour. */
-  function liveIf(s, cost, needOnline, action, onClick, armedClass) {
+  function liveIf(s, cost, needOnline, action, onClick, armedClass, pressed) {
     if (!canAct(s, cost, needOnline)) return null;
     var p = state.pending;
     var parts = action.split(':');
     var armed = p && p.struct.id === s.id && p.action === parts[0] && (p.weapon || '') === (parts[1] || '');
-    return { action: action, onClick: onClick, active: armed ? armedClass : null };
+    return { action: action, onClick: onClick, active: (armed || pressed) ? armedClass : null };
   }
 
   /** The ability buttons this struct type would offer, in `buildStructAction
@@ -1462,7 +1724,7 @@
       out.push(abilityBtn(
         st.primary_weapon_control === 'guided' ? 'icon-smart-weapon' : 'icon-ballistic-weapon',
         labelOr(st.primary_weapon_label, 'Primary Weapon'),
-        { 'data-sui-cheatsheet': key, 'data-selected-property': 'primary_weapon', 'data-struct': s.id },
+        { 'data-sui-cheatsheet': key, 'data-selected-property': 'primary_weapon', 'data-struct': s.id, 'data-action': 'attack:primary' },
         liveIf(s, st.primary_weapon_charge, true, 'attack:primary', function () {
           arm({ action: 'attack', weapon: 'primary', struct: s, prompt: 'Select Target', kind: 'enemy' });
         }, 'sui-mod-active-offense')));
@@ -1471,21 +1733,27 @@
       out.push(abilityBtn(
         st.secondary_weapon_control === 'guided' ? 'icon-smart-weapon' : 'icon-ballistic-weapon',
         labelOr(st.secondary_weapon_label, 'Secondary Weapon'),
-        { 'data-sui-cheatsheet': key, 'data-selected-property': 'secondary_weapon', 'data-struct': s.id },
+        { 'data-sui-cheatsheet': key, 'data-selected-property': 'secondary_weapon', 'data-struct': s.id, 'data-action': 'attack:secondary' },
         liveIf(s, st.secondary_weapon_charge, true, 'attack:secondary', function () {
           arm({ action: 'attack', weapon: 'secondary', struct: s, prompt: 'Select Target', kind: 'enemy' });
         }, 'sui-mod-active-offense')));
     }
     if (st.stealth_systems) {
+      // Pressed (active-defense) while the struct IS hidden — the game's
+      // data-active-defense on the stealth button.
       out.push(abilityBtn('icon-stealth', s.hidden ? 'Leave Stealth' : 'Stealth Mode',
-        { 'data-sui-cheatsheet': key, 'data-selected-property': 'stealth_systems', 'data-struct': s.id },
+        { 'data-sui-cheatsheet': key, 'data-selected-property': 'unit_defenses', 'data-struct': s.id,
+          'data-active-defense': s.hidden ? '1' : '0', 'data-action': 'stealth' },
         liveIf(s, st.stealth_activate_charge, true, 'stealth', function () {
-          act(s, s.hidden ? 'stealth_deactivate' : 'stealth_activate', { struct_id: s.id }, (s.hidden ? 'Leave stealth: ' : 'Stealth: ') + (s.type_name || s.id));
-        })));
+          var wantHidden = !s.hidden;
+          act(s, wantHidden ? 'stealth_activate' : 'stealth_deactivate', { struct_id: s.id },
+            (wantHidden ? 'Stealth: ' : 'Leave stealth: ') + (s.type_name || s.id),
+            { cost: st.stealth_activate_charge, expect: function (x) { return !!x && !!x.hidden === wantHidden; } });
+        }, 'sui-mod-active-defense', s.hidden)));
     }
     if (st.movable) {
       out.push(abilityBtn('icon-move', labelOr(st.drive_label, 'Move'),
-        { 'data-sui-cheatsheet': key, 'data-selected-property': 'movable', 'data-struct': s.id },
+        { 'data-sui-cheatsheet': key, 'data-selected-property': 'movable', 'data-struct': s.id, 'data-action': 'move' },
         liveIf(s, st.move_charge, true, 'move', function () {
           arm({ action: 'move', struct: s, prompt: 'Select Tile', kind: 'tile' });
         }, 'sui-mod-active-defense')));
@@ -1493,18 +1761,50 @@
     // Defend is the game's one button keyed by action rather than property.
     // A defender that already stands guard offers to stand down instead.
     if (st.category === 'fleet') {
+      // Pressed while the struct stands guard (data-active-defense) — a
+      // press then clears the defence, exactly as the game's button does.
       out.push(abilityBtn('icon-defend', s.defending ? 'Clear Defense' : 'Defend',
-        { 'data-sui-cheatsheet': key, 'data-action-button': 'defend', 'data-struct': s.id },
+        { 'data-sui-cheatsheet': key, 'data-action-button': 'defend', 'data-struct': s.id,
+          'data-active-defense': s.defending ? '1' : '0', 'data-action': 'defend' },
         liveIf(s, st.defend_change_charge, true, 'defend', function () {
-          if (s.defending) act(s, 'defense_clear', { defender_id: s.id }, 'Clear defense: ' + (s.type_name || s.id));
-          else arm({ action: 'defend', struct: s, prompt: 'Select Struct', kind: 'friendly' });
-        }, 'sui-mod-active-defense')));
+          if (s.defending) {
+            act(s, 'defense_clear', { defender_id: s.id }, 'Clear defense: ' + (s.type_name || s.id),
+              { cost: st.defend_change_charge, expect: function (x) { return !!x && !x.protects; } });
+          } else arm({ action: 'defend', struct: s, prompt: 'Select Struct', kind: 'friendly' });
+        }, 'sui-mod-active-defense', s.defending)));
     }
     if (equipped(st.power_generation)) {
+      // ConsumeAlphaOffcanvas: an amount of Alpha to burn into the
+      // generator. No charge cost; online only.
       out.push(abilityBtn('icon-send-alpha', 'Consume Alpha',
-        { 'data-sui-cheatsheet': key, 'data-selected-property': 'power_generation', 'data-struct': s.id }));
+        { 'data-sui-cheatsheet': key, 'data-selected-property': 'power_generation', 'data-struct': s.id, 'data-action': 'infuse' },
+        liveIf(s, 0, true, 'infuse', function () {
+          arm({ action: 'infuse', struct: s, prompt: 'Consume Alpha', kind: 'form' });
+        }, 'sui-mod-active-defense')));
     }
     return out;
+  }
+  /* The Consume Alpha form, in the bar under the buttons: an amount in Alpha
+   * (whole units, as the game's stepper takes) and a send door. The chain
+   * takes ualpha, so the message carries the game's own conversion. */
+  function infuseControl(s) {
+    var box = el('div', 'rv-build rv-infuse');
+    var input = el('input', 'sui-input-text');
+    input.type = 'number'; input.min = '1'; input.step = '1'; input.value = '1';
+    input.setAttribute('aria-label', 'Alpha to consume');
+    box.appendChild(input);
+    var go = el('a', 'sui-screen-btn sui-mod-primary', 'Consume');
+    go.href = 'javascript: void(0)';
+    go.addEventListener('click', function () {
+      var amount = Math.floor(Number(input.value));
+      if (!(amount > 0) || isLocked(s.owner)) return;
+      act(s, 'generator_infuse', { struct_id: s.id, amount: String(amount * 1000000) + 'ualpha' },
+        'Consume ' + amount + ' alpha in ' + (s.type_name || s.id),
+        { expect: function () { return false; } });
+      cancelPending();
+    });
+    box.appendChild(go);
+    return box;
   }
 
   /** The Power Switch group. Player style only, per the spec: "The Enemy style
@@ -1516,14 +1816,27 @@
   function panelSwitch(s) {
     var group = el('div', 'sui-action-bar-panel-switch-group');
     var img = document.createElement('img');
-    img.src = '/img/sui/panel/panel-switch-'
-      + (s.online === false ? 'off' : 'on') + '.png';
-    img.alt = s.online === false ? 'powered off' : 'powered on';
     img.style.height = '48px';
-    // A controlled struct's switch is the game's: it activates or deactivates.
     var st = typeOf(s);
     var off = s.online === false;
-    if (canAct(s, off ? (st && st.activate_charge) : 0, null)) {
+    // ActionBarComponent.getPanelSwitchState: ON when the struct is online
+    // and may be switched off (no charge, power not required), OFF when it
+    // is offline and the owner has the charge to activate it, DISABLED
+    // otherwise — which is also the readout for a struct that is not ours.
+    // Ours is decided by who signs, not by which side of the board it is
+    // on: a controlled raider's struct gets the same switch.
+    var switchState = 'disabled';
+    if (canAct(s, 0, true, false)) switchState = 'on';
+    else if (canAct(s, st && st.activate_charge, false, false)) switchState = 'off';
+    else if (!controls(s)) switchState = off ? 'off' : 'on';   // a spectator's readout
+    // Relative, like every other asset here: the absolute `/img/…` the game
+    // uses resolves at the origin root, which the web board does not serve.
+    img.src = 'img/sui/panel/panel-switch-' + switchState + '.png';
+    img.alt = switchState === 'disabled' ? 'switch unavailable' : (off ? 'powered off' : 'powered on');
+    img.setAttribute('data-state', switchState);
+    var canToggle = controls(s) && switchState !== 'disabled';
+    img.style.cursor = canToggle ? 'pointer' : (controls(s) ? 'not-allowed' : 'default');
+    if (canToggle) {
       var a = el('a', 'rv-switch');
       a.href = 'javascript: void(0)';
       a.title = off ? 'Activate' : 'Deactivate';
@@ -1531,13 +1844,86 @@
       a.appendChild(img);
       a.addEventListener('click', function (ev) {
         ev.preventDefault(); ev.stopPropagation();
-        act(s, off ? 'activate' : 'deactivate', { struct_id: s.id }, (off ? 'Activate ' : 'Deactivate ') + (s.type_name || s.id));
+        var wantOnline = off;
+        act(s, wantOnline ? 'activate' : 'deactivate', { struct_id: s.id },
+          (wantOnline ? 'Activate ' : 'Deactivate ') + (s.type_name || s.id),
+          { cost: wantOnline ? (st && st.activate_charge) : 0,
+            expect: function (x) { return !!x && (x.online !== false) === wantOnline; } });
       });
       group.appendChild(a);
     } else {
       group.appendChild(img);
     }
     return group;
+  }
+  /* The game's "Executing" bar: header, an animated progress bar in the
+   * properties screen, no buttons (showExecutingActionBar). */
+  function executingChunk(chunk) {
+    var headWrap = el('div', 'sui-screen sui-screen-full-width');
+    headWrap.appendChild(el('div', 'sui-screen-info', 'Executing'));
+    chunk.appendChild(headWrap);
+    var row = el('div', 'sui-action-bar-bottom-row');
+    var screen = el('div', 'sui-screen');
+    var props = el('div', 'sui-screen-properties');
+    var wrap = el('div', 'sui-action-bar-progress-bar-wrapper');
+    wrap.appendChild(el('div', 'sui-action-bar-progress-bar sui-mod-animated'));
+    props.appendChild(wrap);
+    screen.appendChild(props);
+    row.appendChild(screen);
+    chunk.appendChild(row);
+  }
+  /* Ten chunks, `filled` of them lit — ActionBarComponent.renderProgressBar. */
+  function progressBar(fraction) {
+    var bar = el('div', 'sui-action-bar-progress-bar');
+    var filled = Math.floor(Math.max(0, Math.min(1, Number(fraction) || 0)) * 10);
+    for (var i = 0; i < 10; i++) bar.appendChild(el('div', 'sui-action-bar-progress-bar-chunk' + (i < filled ? ' sui-mod-filled' : '')));
+    return bar;
+  }
+  /* A struct still being built (showBuildingActionBar), or a build sent from
+   * this tile and not yet materialised (showPendingBuildActionBar): the
+   * abbreviation, a progress bar for the owner (a wreckage glyph for anyone
+   * else — the game's `enemy-struct-deploying`), and a cancel door that is
+   * live only for the owner of a struct the chain already knows. Build
+   * progress is the hasher's, which this window does not read, so the
+   * owner's bar is the animated one rather than a percentage it would be
+   * guessing. */
+  function buildingChunk(chunk, s, pendingKey) {
+    var pend = pendingKey ? state.pendingBuilds[pendingKey] : null;
+    var st = s ? typeOf(s) : null;
+    var head = s ? ((st && st.class_abbreviation) || s.type_name || 'struct') : ((pend && pend.class_abbreviation) || 'struct');
+    var headWrap = el('div', 'sui-screen sui-screen-full-width');
+    headWrap.appendChild(el('div', 'sui-screen-info', head));
+    chunk.appendChild(headWrap);
+    var row = el('div', 'sui-action-bar-bottom-row');
+    var screen = el('div', 'sui-screen');
+    var props = el('div', 'sui-screen-properties');
+    var owned = s ? controls(s) : !!(pend && state.controlled[pend.actor]);
+    if (owned) {
+      var wrap = el('div', 'sui-action-bar-progress-bar-wrapper');
+      wrap.appendChild(s ? (function () { var b = progressBar(0); b.classList.add('sui-mod-animated'); return b; })() : progressBar(0));
+      props.appendChild(wrap);
+    } else {
+      props.appendChild(propIcon('icon-wreckage', { key: 'enemy-struct-deploying' }));
+    }
+    screen.appendChild(props);
+    row.appendChild(screen);
+    if (owned) {
+      var group = el('div', 'sui-action-bar-btn-group');
+      // Cancelling needs no charge, no power and no online state — only
+      // ownership, a struct the chain still knows, and a free bar.
+      var live = s && controls(s) && !s.destroyed && !isLocked(s.owner) ? {
+        action: 'build_cancel',
+        onClick: function () {
+          var victim = s.id;
+          act(s, 'build_cancel', { struct_id: s.id }, 'Cancel build: ' + (s.type_name || s.id),
+            { expect: function (x) { return !x || x.destroyed || !state.structsById[victim]; } });
+        },
+        active: null,
+      } : null;
+      group.appendChild(abilityBtn('icon-close', 'Cancel build', { 'data-struct': s ? s.id : '', 'data-action': 'build_cancel' }, live));
+      row.appendChild(group);
+    }
+    chunk.appendChild(row);
   }
 
   /** Fill (or clear) one action bar's Action Chunk.
@@ -1561,6 +1947,22 @@
 
     var s = sel.struct || null;
     var st = s ? typeOf(s) : null;
+    var theme = which === 'def' ? 'player' : 'enemy';
+
+    // The lock: while THIS side's player has an action on its way, the bar
+    // shows Executing and nothing else (showActionBarFor's first branch).
+    var sidePlayer = s ? s.owner : tileActor(sel.tile);
+    if (sidePlayer && isLocked(sidePlayer)) {
+      executingChunk(chunk);
+      return;
+    }
+    // A struct still being built, or a tile with a build on its way.
+    if ((s && s.built === false) || (!s && sel.tile && state.pendingBuilds[sel.tile.key])) {
+      buildingChunk(chunk, s, s ? null : sel.tile.key);
+      var t2 = chunk.querySelectorAll('[data-sui-cheatsheet]');
+      for (var j = 0; j < t2.length; j++) t2[j].setAttribute('data-sui-theme', theme);
+      return;
+    }
 
     // Header screen — the chain's own class abbreviation for a struct, the
     // tile's label for an empty tile. Uppercased by sui.css, not by us.
@@ -1568,10 +1970,12 @@
       ? ((st && st.class_abbreviation) || s.type_name || s.type_slug || 'struct')
       : (sel.tile.label || 'tile');
     // While an action waits on a target the header turns into the prompt,
-    // as the game's showTargetSelectionPrompt does.
-    if (s && state.pending && state.pending.struct.id === s.id) headText = state.pending.prompt;
+    // as the game's showTargetSelectionPrompt does — inverted, so the bar
+    // reads as asking rather than naming.
+    var prompting = s && state.pending && state.pending.struct.id === s.id;
+    if (prompting) headText = state.pending.prompt;
     var headWrap = el('div', 'sui-screen sui-screen-full-width');
-    var headScreen = el('div', 'sui-screen-info', headText);
+    var headScreen = el('div', 'sui-screen-info' + (prompting ? ' sui-mod-inverted' : ''), headText);
     // The header opens the WHOLE-STRUCT Cheatsheet — the card with the model
     // number, build cost and every equipped system. In the game that card is
     // reached from the deploy menu, which a spectator has no equivalent of;
@@ -1585,8 +1989,10 @@
 
     var row = el('div', 'sui-action-bar-bottom-row');
 
-    // Power switch: struct tiles, player style only.
-    if (s && which === 'def') row.appendChild(panelSwitch(s));
+    // Power switch: struct tiles. The spec's Enemy style has none because
+    // an enemy's switch is nobody's to press; a struct THIS install signs
+    // for gets its switch whichever side of the board it stands on.
+    if (s && (which === 'def' || controls(s))) row.appendChild(panelSwitch(s));
 
     var screen = el('div', 'sui-screen');
     var props = el('div', 'sui-screen-properties');
@@ -1608,15 +2014,19 @@
     }
 
     chunk.appendChild(row);
-    // An empty slot on a controlled side builds, as the game's deploy menu does.
+    // An empty slot on a controlled side builds, as the game's deploy menu
+    // does — planetary slots, fleet tiles and the command tile alike.
     if (!s && sel.tile) {
       var tparts = sel.tile.key.split('|');
-      var actor = (tparts[0] === 'plan' || tparts[0] === 'fleet') ? tileActor(sel.tile) : null;
+      var actor = (tparts[0] === 'plan' || tparts[0] === 'fleet' || tparts[0] === 'cmd') ? tileActor(sel.tile) : null;
       if (actor) chunk.appendChild(buildControl(sel.tile, actor));
+    }
+    // Consume Alpha opens its amount form under the buttons.
+    if (s && state.pending && state.pending.kind === 'form' && state.pending.struct.id === s.id) {
+      chunk.appendChild(infuseControl(s));
     }
 
     // Every trigger in this chunk paints in its own bar's theme.
-    var theme = which === 'def' ? 'player' : 'enemy';
     var trigs = chunk.querySelectorAll('[data-sui-cheatsheet]');
     for (var i = 0; i < trigs.length; i++) trigs[i].setAttribute('data-sui-theme', theme);
   }
@@ -1645,13 +2055,23 @@
     var still = el('div', 'rv-struct'
       + (s.side === 'attacker' ? ' rv-attacker' : '')
       // Stealth is chain-visible (structAttributes.isHidden); the game shows a
-      // hidden struct at half opacity rather than removing it.
-      + (s.hidden ? ' rv-stealth' : ''));
+      // hidden struct at half opacity rather than removing it — except the
+      // Submersible, which has hidden-variant art instead (renderStill).
+      + (stealthClass(s)));
     still.id = domId('struct', s.id);
     still.setAttribute('data-struct-id', s.id);
     renderStill(still, s);
     wrap.appendChild(still);
 
+    // The idle loop (active_loop) gets a layer of its OWN, under the combat
+    // mount. It used to share the combat mount: `runAnimation` clears that
+    // mount when a sequence ends, which destroyed the loop's SVG while the
+    // lottie instance lived on — `syncStill` then restarted a player with no
+    // DOM and hid the still, and every economic struct that took a hit
+    // simply vanished until the next snapshot rebuilt it.
+    var idle = el('div', 'rv-idle');
+    idle.id = domId('idle', s.id);
+    wrap.appendChild(idle);
     // Lottie mounts here so an animation never replaces the still underneath —
     // the still has to stay visible for shake and impact to read correctly.
     var anim = el('div', 'rv-anim');
@@ -1688,10 +2108,35 @@
     (art.bottom || []).forEach(function (suffix) {
       node.appendChild(layer(artPath(art.dir, suffix), 'rv-bottom'));
     });
-    node.appendChild(layer(artPath(art.dir, damaged ? 'struct-dmg' : 'struct-base'), ''));
+    // MapStructViewerComponent.renderStructStillInnerHTML: a hidden
+    // Submersible draws its `struct-hidden` variant (periscope only) in place
+    // of the hull, whatever its health.
+    var hull = s.hidden && art.hidden ? 'struct-hidden' : (damaged ? 'struct-dmg' : 'struct-base');
+    node.appendChild(layer(artPath(art.dir, hull), ''));
     (art.top || []).forEach(function (suffix) {
       node.appendChild(layer(artPath(art.dir, suffix), 'rv-top'));
     });
+  }
+
+  /* `.struct-stealth-active` in the game: half opacity for a hidden struct,
+   * EXCEPT the Submersible, whose hidden variant art says it instead. */
+  function stealthClass(s) {
+    if (!s.hidden) return '';
+    var art = ART[s.type_slug];
+    return art && art.hidden ? '' : ' rv-stealth';
+  }
+  /* Re-draw one struct's still, badges and stealth class from its current
+   * state — after a status delta changed it, without rebuilding the grid. */
+  function repaintStruct(id) {
+    var s = state.structsById[id];
+    if (!s) return;
+    var still = document.getElementById(domId('struct', id));
+    var hud = document.getElementById(domId('hud', id));
+    if (still) {
+      still.classList.toggle('rv-stealth', stealthClass(s) !== '');
+      renderStill(still, s);
+    }
+    if (hud) renderHud(hud, s);
   }
 
   function layer(src, cls) {
@@ -1765,6 +2210,10 @@
   var pipModule = window.RaidPip({
     state: function () { return state; }, domId: domId, currentHealth: currentHealth, renderStill: renderStill,
     stillFlags: stillFlags, flipsLayer: flipsLayer, lottiePath: lottiePath,
+    // The bubble plays the SAME template bundle as the tile; without the
+    // swap it showed the template's baked hull (a Destroyer for every water
+    // fight) while the tile showed the right struct.
+    injectStructArt: injectStructArt,
   });
   var isAttackSequence = pipModule.isAttackSequence, pip = pipModule.pip, pipClear = pipModule.pipClear;
   var pipOnAnimation = pipModule.pipOnAnimation, pipUpdateVisibility = pipModule.pipUpdateVisibility;
@@ -1773,6 +2222,7 @@
   var queue = [];
   var playing = false;
   var pendingReconcile = null;
+  var currentEvent = null;
 
   function enqueue(ev) {
     queue.push(ev);
@@ -1801,7 +2251,8 @@
     // indicator is never competing with them on the same tile.
     if (wasIdle) repaintAllBadges();
     var ev = queue.shift();
-    runAnimation(ev, playNext);
+    currentEvent = ev;
+    runAnimation(ev, function () { currentEvent = null; playNext(); });
   }
 
   /* Still-visibility rules, straight from the factory's AnimationEvent flags:
@@ -1893,13 +2344,28 @@
         // removes it, and nothing can resurrect the sprite meanwhile.
         if (ev.healthAfter === 0) s.destroyed = true;
       }
+      // The HUD tile comes back once the animation is done (the game's
+      // ANIMATION_END handler), already redrawn at the health it reached.
+      if (hud) hud.classList.remove('rv-invisible');
       // Restore the still unless this was a destroy — and never resurrect a
       // struct the sequence just emptied.
       if (still && flags.after && ev.healthAfter !== 0) syncStill(ev.structId);
+      // A hook for sequences with side effects between their steps — the
+      // game's `AnimationEvent.onAnimationEnd` (a move re-seats the struct
+      // after DEPART and before ARRIVE).
+      // The hook runs with this event still current, so a loop it wants to
+      // start (a build completing on an extractor) must not read the event
+      // as "still animating": mark it ending first.
+      ev._ending = true;
+      if (typeof ev.onEnd === 'function') { try { ev.onEnd(); } catch (e) { /* a hook must not wedge the queue */ } }
       done();
     };
 
     if (!mount || !window.lottie || !names.length) { finish(); return; }
+    // The game hides the HUD tile while any animation plays over it
+    // (MapStructHUDLayerComponent on ANIMATION): a health bar over an
+    // explosion is noise, and the bar is redrawn on the way back.
+    if (hud) hud.classList.add('rv-invisible');
 
     // Offer the sequence to the Animation Bubble. It decides whether to show
     // one: only for attack sequences, and only while the acting tile is fully
@@ -1946,7 +2412,13 @@
       anim.addEventListener('DOMLoaded', function () {
         injectStructArt(box, s, ev.healthAfter != null ? ev.healthAfter : currentHealth(s));
       });
+      // Once per layer, whichever of complete / failure / timeout comes
+      // first — a second call would count the layer down twice and end a
+      // multi-layer moment early.
+      var layerDone = false;
       var cleanup = function () {
+        if (layerDone) return;
+        layerDone = true;
         try { anim.destroy(); } catch (e2) {}
         oneDone();
       };
@@ -1954,6 +2426,10 @@
       // A bundle that fails to load must not wedge the queue for good.
       anim.addEventListener('data_failed', cleanup);
       setTimeout(function () { if (anim && !anim.isLoaded) cleanup(); }, 4000);
+      // Nor may one that loads and never completes: snapshots now WAIT for
+      // the queue, so a stuck layer would freeze the whole board. No bundle
+      // runs anywhere near this long.
+      setTimeout(cleanup, 15000);
     });
   }
 
@@ -1971,7 +2447,7 @@
     // (showStructStill: offline → loop stops, still shows).
     if (s.online === false || s.built === false) return;
     if (idleAnims[s.id]) return;
-    var mount = document.getElementById(domId('anim', s.id));
+    var mount = document.getElementById(domId('idle', s.id));
     if (!mount) return;
     try {
       idleAnims[s.id] = window.lottie.loadAnimation({
@@ -1997,7 +2473,23 @@
     if (!a) return;
     try { a.destroy(); } catch (e) {}
     delete idleAnims[structId];
+    var mount = document.getElementById(domId('idle', structId));
+    if (mount) mount.innerHTML = '';
     setStillHidden(structId, false);
+  }
+  /* The struct's online state changed (a status delta, or its own switch):
+   * the game's ShowStructStillEvent — start or stop the loop, and show
+   * exactly one of loop/still. Never while the struct is animating: the
+   * sequence's completion calls syncStill itself. */
+  function syncIdle(s) {
+    if (!s || isAnimating(s.id)) return;
+    if (s.online === false || s.built === false || s.destroyed) stopIdle(s.id);
+    else startIdle(s);
+    syncStill(s.id);
+  }
+  function isAnimating(structId) {
+    if (queue.some(function (ev) { return ev.structId === structId; })) return true;
+    return !!(currentEvent && currentEvent.structId === structId && !currentEvent._ending);
   }
   /* Whichever of loop/still should show right now, show exactly one. */
   function syncStill(structId) {
@@ -2162,7 +2654,15 @@
    * a departure over the wreckage would read as an escape. */
   function choreographMovement(before, after) {
     Object.keys(after).forEach(function (id) {
-      if (before[id]) return;
+      if (before[id]) {
+        // Same struct, different seat, and no move frame played it (the
+        // frame re-seats state before the snapshot, so a handled move shows
+        // no difference here): arrive at the new tile.
+        if (anchorKeyFor(before[id]) !== anchorKeyFor(after[id])) {
+          enqueue({ structId: id, typeSlug: after[id].type_slug, names: ['MOVE_ARRIVE'], healthAfter: null });
+        }
+        return;
+      }
       var s = after[id];
       var ambit = String(s.ambit || LAND).toUpperCase();
       enqueue({
@@ -2428,6 +2928,17 @@
     var snap = payload.snapshot;
     if (!snap) return;
     var generationChanged = payload.generation !== state.generation;
+    // A snapshot landing MID-SEQUENCE rebuilds every mount the sequence is
+    // animating into: the lottie completes into a detached node and the
+    // fight goes invisible. The game defers state-driven renders until the
+    // queue drains (RENDER_STRUCT_HUD → deferredHudRenders); the whole
+    // snapshot waits here for the same reason. The newest one wins. A
+    // re-target (generation change) still lands at once — it clears the
+    // queue itself.
+    if (playing && !generationChanged) {
+      pendingReconcile = function () { applySnapshot(payload); };
+      return;
+    }
     state.generation = payload.generation;
     state.snapshot = snap;
     // The log is per-planet: load it once the planet is known, and reload it
@@ -2468,6 +2979,9 @@
     // Snapshot health is authoritative once the queue has drained; while it is
     // playing, the sequence's own values win.
     if (!playing) state.liveHealth = {};
+    // The snapshot carries fresh charge for both combatants; the local
+    // zero from an action sent since is superseded.
+    state.chargeOverride = {};
 
     // The rebuild replaces every mount, so every idle player must go first or
     // lottie keeps animating into detached nodes forever.
@@ -2480,6 +2994,15 @@
     if (!generationChanged && Object.keys(previous).length) {
       choreographMovement(previous, state.structsById);
     }
+    // A pending build whose tile is now occupied has materialised; an
+    // in-flight action whose end state the snapshot shows has landed.
+    Object.keys(state.pendingBuilds).forEach(function (key) {
+      var mount = anchors[key];
+      if (!mount || occupied(mount)) delete state.pendingBuilds[key];
+      else paintPendingTile(key);            // the rebuild wiped the indicator
+    });
+    settleExecuting();
+    if (state.pending) markTargets();
     if (snap.raid_status) showBanner(snap.raid_status);
     renderHeader();
     var notices = [];
@@ -2527,26 +3050,121 @@
         if (s && hud) renderHud(hud, s, hp);
       }
     } else if (d.category === 'struct_status') {
-      // Bit 32 is the destroyed flag.
-      var sid = detail.struct_id || detail.structId;
-      var status = numOf(detail.status);
-      if (sid && status != null && (status & 32) !== 0) {
-        // ALWAYS update state, even mid-sequence: emptying only the DOM node
-        // let syncStill/renderStill resurrect the sprite until the next
-        // snapshot. The visual clear still waits for the queue (its own
-        // destroy event owns the frames while playing).
-        var ds = state.structsById[sid];
-        if (ds) ds.destroyed = true;
-        state.liveHealth[sid] = 0;
-        if (!playing) {
-          stopIdle(sid);
-          var node = document.getElementById(domId('struct', sid));
-          if (node) node.innerHTML = '';
-          if (ds) paintBadges(ds);
-        }
-      }
+      applyStatusDelta(detail);
+    } else if (d.category === 'struct_move') {
+      applyMoveDelta(detail);
+    } else if (d.category === 'struct_defense_add' || d.category === 'struct_defense_remove') {
+      applyDefenseDelta(d.category === 'struct_defense_add', detail);
+    } else if (d.category === 'struct_block_build_start') {
+      // The chain has the struct; the forced snapshot brings its type and
+      // seat. Nothing to draw yet, but a build sent from here is confirmed.
+      settleExecuting();
     }
     renderHeader();
+  }
+
+  /* STRUCT_STATUS_FLAGS, the chain's status bitfield. */
+  var STATUS = { MATERIALIZED: 1, BUILT: 2, ONLINE: 4, STORED: 8, HIDDEN: 16, DESTROYED: 32, LOCKED: 64 };
+
+  /* One struct_status frame, decoded the way StructListener.handleStructStatus
+   * decodes it: which bit flipped decides what plays and what re-renders.
+   *   BUILT 0→1     the deployment animation (StructManager.refreshStruct)
+   *   HIDDEN 0→1/1→0 the stealth activate / deactivate animation
+   *   DESTROYED 0→1  wreckage (the destroy animation came with the shot)
+   *   ONLINE change  loop/still swap, badges, the bar (ShowStructStillEvent)
+   * Every transition re-reads the flags into state, so the bar and badges
+   * describe the struct as the chain now has it. */
+  function applyStatusDelta(detail) {
+    var sid = detail.struct_id || detail.structId;
+    var status = numOf(detail.status);
+    if (!sid || status == null) return;
+    var was = numOf(detail.status_old);
+    var s = state.structsById[sid];
+    var flipped = function (bit) { return was != null && ((was & bit) !== 0) !== ((status & bit) !== 0); };
+    if ((status & STATUS.DESTROYED) !== 0) {
+      // ALWAYS update state, even mid-sequence: emptying only the DOM node
+      // let syncStill/renderStill resurrect the sprite until the next
+      // snapshot. The visual clear still waits for the queue (its own
+      // destroy event owns the frames while playing).
+      if (s) s.destroyed = true;
+      state.liveHealth[sid] = 0;
+      if (!playing) {
+        stopIdle(sid);
+        var node = document.getElementById(domId('struct', sid));
+        if (node) node.innerHTML = '';
+        if (s) paintBadges(s);
+      }
+      settleExecuting();
+      refreshBar();
+      return;
+    }
+    if (!s) return;                                 // a struct the snapshot will bring
+    if (flipped(STATUS.BUILT) && (status & STATUS.BUILT) !== 0) {
+      s.built = true;
+      s.online = (status & STATUS.ONLINE) !== 0;
+      enqueue({ structId: sid, typeSlug: s.type_slug, names: ['DEPLOYMENT_' + String(s.ambit || LAND).toUpperCase()], healthAfter: null,
+        onEnd: function () { repaintStruct(sid); syncIdle(s); } });
+      repaintStruct(sid);
+    } else if (flipped(STATUS.HIDDEN)) {
+      s.hidden = (status & STATUS.HIDDEN) !== 0;
+      enqueue({ structId: sid, typeSlug: s.type_slug, names: [s.hidden ? 'STEALTH_ACTIVATE' : 'STEALTH_DEACTIVATE'], healthAfter: null,
+        onEnd: function () { repaintStruct(sid); if (state.pending) markTargets(); } });
+    }
+    if (flipped(STATUS.ONLINE)) {
+      s.online = (status & STATUS.ONLINE) !== 0;
+      syncIdle(s);
+      paintBadges(s);
+    }
+    settleExecuting();
+    refreshBar();
+  }
+
+  /* A struct changed seat: depart from the old tile, re-seat, arrive at the
+   * new one — StructListener.handleStructMove, with the re-seat as the
+   * depart event's onAnimationEnd. The frame names the new ambit and slot;
+   * a command ship keeps slot 0 in its command column. */
+  function applyMoveDelta(detail) {
+    var sid = detail.struct_id || detail.structId;
+    var s = sid && state.structsById[sid];
+    if (!s) return;
+    var ambit = String(detail.ambit || s.ambit).toLowerCase();
+    var slot = numOf(detail.slot);
+    if (slot == null) slot = s.slot;
+    if (ambit === String(s.ambit).toLowerCase() && slot === s.slot) return;
+    var reseat = function () {
+      var from = anchors[anchorKeyFor(s)];
+      s.ambit = ambit;
+      s.slot = slot;
+      var to = anchors[anchorKeyFor(s)];
+      var wrap = document.getElementById(domId('slot', sid));
+      if (wrap && to && !occupied(to)) { to.appendChild(wrap); }
+      else if (wrap && from && to && to !== from) { /* seat taken: the snapshot will sort it out */ }
+      if (state.selectedId === sid) applySelection(sid);
+      if (state.pending) markTargets();
+    };
+    enqueue({ structId: sid, typeSlug: s.type_slug, names: ['MOVE_DEPART'], healthAfter: null, onEnd: reseat });
+    enqueue({ structId: sid, typeSlug: s.type_slug, names: ['MOVE_ARRIVE'], healthAfter: null,
+      onEnd: function () { settleExecuting(); refreshBar(); } });
+  }
+
+  /* A defence was set or cleared: both structs' relation flags follow, and
+   * with them the badges, the web and the bar. */
+  function applyDefenseDelta(added, detail) {
+    var defender = state.structsById[detail.defender_struct_id];
+    var ward = state.structsById[detail.protected_struct_id];
+    if (defender) {
+      defender.protects = added ? (detail.protected_struct_id || null) : null;
+      defender.defending = added;
+    }
+    Object.keys(state.structsById).forEach(function (id) {
+      var x = state.structsById[id];
+      x.defended = defendersOf(x).length > 0;
+    });
+    if (ward) ward.defended = defendersOf(ward).length > 0;
+    repaintAllBadges();
+    if (state.selectedId) renderDefendWeb(state.structsById[state.selectedId]);
+    settleExecuting();
+    refreshBar();
   }
 
   function applyAttacks(payload) {
@@ -2556,7 +3174,11 @@
     if (!state.snapshot) return;
     if (payload.generation !== state.generation) return;   // stale planet
     state.lastEventMs = Date.now();
-    (payload.attacks || []).forEach(choreograph);
+    (payload.attacks || []).forEach(function (attack) {
+      choreograph(attack);
+      // The shot that confirms an attack sent from this bar.
+      settleExecuting({ attackerId: attack.attacker_id });
+    });
     renderHeader();
   }
 
@@ -2681,10 +3303,33 @@
     wireMapPan();
     // Who this install can sign for is the roster: the primary and every
     // virtual player with an on-chain id. The cache answers at once.
-    T.core.invoke('mcp_roster', {}).then(function (snap) {
-      ((snap && snap.rows) || []).forEach(function (r) { if (r && r.player_id) state.controlled[r.player_id] = true; });
-      if (state.selectedId) applySelection(state.selectedId);
-    }).catch(function () { /* no roster: bars stay readouts */ });
+    var loadRoster = function () {
+      return T.core.invoke('mcp_roster', {}).then(function (snap) {
+        ((snap && snap.rows) || []).forEach(function (r) {
+          if (!r || !r.player_id) return;
+          state.controlled[r.player_id] = true;
+          // Charge and the overload verdict, for the bar's gates:
+          // `Player.isOverloaded()` is total load over total capacity.
+          var load = Number(r.load || 0) + Number(r.structs_load || 0);
+          var cap = Number(r.capacity || 0) + Number(r.connection_capacity || 0);
+          state.controlledInfo[r.player_id] = {
+            charge: r.charge != null ? Number(r.charge) : null,
+            // Only when the roster carries BOTH halves of the game's sum. A
+            // row without the substation share (`connection_capacity`)
+            // compares load against a capacity it under-states, and every
+            // worker fed through the guild substation read as overloaded —
+            // its whole bar dead. The snapshot's `owner_overloaded` is the
+            // authoritative answer for the two combatants.
+            overloaded: r.connection_capacity != null ? load > cap : false,
+          };
+        });
+        refreshBar();
+      }).catch(function () { /* no roster: bars stay readouts */ });
+    };
+    loadRoster();
+    // Charge accrues per block; the roster's copy is refreshed so a bar that
+    // was waiting on charge wakes up without a click.
+    setInterval(loadRoster, 60000);
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') cancelPending(); });
     window.StructsEvents.listen(scoped('raid-snapshot'), function (e) { applySnapshot(e.payload || {}); });
     window.StructsEvents.listen(scoped('raid-delta'), function (e) { applyDelta(e.payload || {}); });
@@ -2791,6 +3436,30 @@
     injectStructArt: injectStructArt,
     renderDefendWeb: renderDefendWeb,
     selectStruct: selectStruct,
+    selectTile: selectTile,
+    // The acting layer — pure enough to assert on without a chain.
+    _validTarget: validTarget,
+    _validTile: validTile,
+    _markTargets: markTargets,
+    _canAct: canAct,
+    _isLocked: isLocked,
+    _chargeOfPlayer: chargeOfPlayer,
+    _deployableTypes: deployableTypes,
+    _settleExecuting: settleExecuting,
+    _applyStatusDelta: applyStatusDelta,
+    _applyMoveDelta: applyMoveDelta,
+    _applyDefenseDelta: applyDefenseDelta,
+    _occupied: occupied,
+    _syncIdle: syncIdle,
+    _refreshBar: refreshBar,
+    _arm: arm,
+    _playing: function () { return playing; },
+    ambitsOfMask: ambitsOfMask,
+    ambitsContain: ambitsContain,
+    chargeLevelOf: chargeLevelOf,
+    chargeSufficient: chargeSufficient,
+    stealthClass: stealthClass,
+    STATUS: STATUS,
   };
 
   boot();

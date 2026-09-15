@@ -142,6 +142,9 @@ pub async fn struct_act_impl(
     const ALLOWED: &[&str] = &[
         "activate", "deactivate", "attack", "defend", "defense_clear", "deploy",
         "stealth_activate", "stealth_deactivate", "build", "build_cancel",
+        // The action bar's Consume Alpha button (ConsumeAlphaOffcanvas →
+        // MsgStructGeneratorInfuse).
+        "generator_infuse",
     ];
     if !ALLOWED.contains(&action.as_str()) {
         return Err(format!("'{action}' is not a struct action the map offers"));
@@ -1942,6 +1945,16 @@ pub async fn execute(
 /// Map an ambit name to its chain `ambit` enum int (proto keys.ts):
 /// none=0, water=1, land=2, air=3, space=4, local=5. Build/Move messages take
 /// this enum, NOT the combat reach BITMASK (Water=2/Land=4/…) and NOT a string.
+/// `objectType` enum for the two locations a struct can occupy — the game's
+/// `LOCATION_TYPE_INDEX` (constants/LocationTypes.js). Anything else falls
+/// back to planet, the value every caller sent before the field existed.
+fn location_type_to_enum(name: &str) -> i64 {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "fleet" => 9,
+        _ => 2,
+    }
+}
+
 fn ambit_to_enum(name: &str) -> i64 {
     match name.trim().to_ascii_lowercase().as_str() {
         "water" => 1,
@@ -2000,9 +2013,12 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
             "/structs.structs.MsgStructMove".into(),
             json!({
                 "structId": s("struct_id").ok_or("deploy: struct_id required")?,
-                // locationType is the `objectType` enum (planet = 2); ambit is the
-                // `ambit` enum — both int32, not strings.
-                "locationType": 2,
+                // locationType is the `objectType` enum; ambit is the `ambit`
+                // enum — both int32, not strings. The game sends the struct's
+                // OWN location type (LOCATION_TYPE_INDEX: planet 2, fleet 9):
+                // a Command Ship changing ambit moves within its FLEET, and a
+                // hard-coded planet made every fleet-side move fail.
+                "locationType": location_type_to_enum(s("location_type").as_deref().unwrap_or("planet")),
                 "ambit": ambit_to_enum(s("ambit").as_deref().unwrap_or("space")),
                 "slot": u("slot").unwrap_or(0),
             }),
@@ -2127,5 +2143,51 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
             "action '{}' not supported as a named action. Direct: explore, build, activate, deactivate, deploy, defend, attack, fleet_move, planet_update_name, build_cancel, defense_clear, stealth_activate, stealth_deactivate, storage_stash, storage_recall, generator_infuse, player_send, player_resume, player_update_name. PoW: mine, refine, raid, complete_build. For ANY other message use action \"tx\" {{type_url, msg}}.",
             other
         )),
+    }
+}
+
+#[cfg(test)]
+mod struct_act_tests {
+    use super::*;
+
+    #[test]
+    fn deploy_sends_the_structs_own_location_type() {
+        // A Command Ship changing ambit moves within its FLEET (objectType 9).
+        let (url, msg) = build_virtual_msg(
+            "deploy",
+            &json!({ "struct_id": "5-1", "ambit": "water", "slot": 0, "location_type": "fleet" }),
+            "1-9",
+        )
+        .unwrap();
+        assert_eq!(url, "/structs.structs.MsgStructMove");
+        assert_eq!(msg["locationType"], 9);
+        assert_eq!(msg["ambit"], 1);
+        // Planetary structs (and every caller that predates the field) stay on
+        // the planet.
+        let (_, msg) = build_virtual_msg("deploy", &json!({ "struct_id": "5-2", "ambit": "land", "slot": 3 }), "1-9").unwrap();
+        assert_eq!(msg["locationType"], 2);
+        assert_eq!(msg["slot"], 3);
+        assert_eq!(location_type_to_enum("Fleet"), 9);
+        assert_eq!(location_type_to_enum("garbage"), 2);
+    }
+
+    #[test]
+    fn map_actions_all_have_a_named_message() {
+        // Every action the map's action bar can send must build a message,
+        // or the bar offers a button the façade refuses.
+        for (action, args) in [
+            ("activate", json!({ "struct_id": "5-1" })),
+            ("deactivate", json!({ "struct_id": "5-1" })),
+            ("attack", json!({ "attacker_id": "5-1", "target_id": "5-2", "weapon": "primary" })),
+            ("defend", json!({ "defender_id": "5-1", "protected_id": "5-2" })),
+            ("defense_clear", json!({ "defender_id": "5-1" })),
+            ("deploy", json!({ "struct_id": "5-1", "ambit": "air", "slot": 0, "location_type": "fleet" })),
+            ("stealth_activate", json!({ "struct_id": "5-1" })),
+            ("stealth_deactivate", json!({ "struct_id": "5-1" })),
+            ("build_cancel", json!({ "struct_id": "5-1" })),
+            ("generator_infuse", json!({ "struct_id": "5-1", "amount": "1000000ualpha" })),
+        ] {
+            assert!(build_virtual_msg(action, &args, "1-9").is_ok(), "{action} must build");
+        }
     }
 }

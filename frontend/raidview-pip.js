@@ -20,6 +20,9 @@
   window.RaidPip = function (ctx) {
     var state = ctx.state, domId = ctx.domId, currentHealth = ctx.currentHealth, renderStill = ctx.renderStill;
     var stillFlags = ctx.stillFlags, flipsLayer = ctx.flipsLayer, lottiePath = ctx.lottiePath;
+    // Optional: the tile's struct-art swap, so the bubble's copy of a
+    // template bundle shows the same hull the tile does.
+    var injectStructArt = typeof ctx.injectStructArt === 'function' ? ctx.injectStructArt : null;
 
     /* ── PiP bubble — combat happening off-screen ──────────────────────────
      *
@@ -125,6 +128,14 @@
             container: animBox, renderer: 'svg', loop: false, autoplay: true,
             path: lottiePath(name, s.type_slug),
           });
+          // The game's PIP is a full MapStructViewerComponent, which swaps
+          // the template's placeholder hull for the struct's own art. A raw
+          // bundle in the bubble showed a Destroyer for any water struct —
+          // the "wrong unit" beside a tile showing the right one.
+          if (injectStructArt && pip.anim && pip.anim.addEventListener) {
+            var box = animBox, who = s, hp = healthNow;
+            pip.anim.addEventListener('DOMLoaded', function () { injectStructArt(box, who, hp); });
+          }
         } catch (e) { /* the still alone is still informative */ }
       }
       return true;
