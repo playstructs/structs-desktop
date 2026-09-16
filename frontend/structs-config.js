@@ -3755,6 +3755,116 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     });
   })();
 
+  // ── Replicants on the game HUD ───────────────────────────────────────────
+  //
+  // A third status-bar panel, top-centre between the game's own two: how many
+  // replicants you have, the team's Alpha production per day, and how hard
+  // the hasher is working the machine. Drawn with the HUD's own classes
+  // (`sui-status-bar-panel`, `sui-resource`) inside `#hud-container`, so it
+  // scales, layers and themes exactly as the corners do.
+  //
+  // It exists ONLY while there are replicants. No replicants, no panel — not
+  // an empty one, not a zero. A click opens the Replication card in its own
+  // window, the same way a ⌘K pick does.
+  //
+  // The HUD re-renders its container wholesale on occasion (HUDViewModel
+  // sets its innerHTML), which would take our panel with it; a childList
+  // observer on the container puts it back. The read is `terminal_replication`
+  // — the card's own read, so the two never disagree — every 15 s, with its
+  // power figure cached in Rust for a minute.
+  (function () {
+    var TAURI = window.__TAURI__;
+    if (!TAURI || !TAURI.core) return;
+
+    var ID = 'structs-replicants-hud';
+    var STYLE_ID = ID + '-style';
+    var POLL_MS = 15000;
+    var last = null;
+    var observed = null;
+
+    function css() {
+      if (document.getElementById(STYLE_ID)) return;
+      var st = document.createElement('style');
+      st.id = STYLE_ID;
+      // The corners sit at `top: 2px` (main.css); the centre matches them.
+      st.textContent = '.status-bar-panel-top-center{position:absolute;top:2px;left:50%;transform:translateX(-50%);pointer-events:initial;cursor:pointer}'
+        + '.status-bar-panel-top-center .sui-resource{cursor:pointer}';
+      document.head.appendChild(st);
+    }
+
+    function res(icon, key, title) {
+      return '<a class="sui-resource" href="javascript:void(0)" title="' + title + '">'
+        + '<i class="sui-icon ' + icon + '"></i><span data-k="' + key + '"></span></a>';
+    }
+
+    function build() {
+      var el = document.createElement('div');
+      el.id = ID;
+      el.className = 'sui-status-bar-panel status-bar-panel-top-center hidden';
+      el.innerHTML = res('sui-icon-players', 'replicants', 'Replicants')
+        + res('sui-icon-alpha-matter', 'alpha_day', 'Alpha production per day')
+        + res('icon-computer', 'cpu', 'Hashing · CPU');
+      el.addEventListener('click', function (e) {
+        e.preventDefault();
+        TAURI.core.invoke('open_terminal_card_new', { kind: 'replication', params: {} }).catch(function () {});
+      });
+      return el;
+    }
+
+    function ensure() {
+      var hud = document.getElementById('hud-container');
+      if (!hud) return null;
+      var el = document.getElementById(ID);
+      if (!el) {
+        css();
+        el = build();
+        hud.appendChild(el);
+        paint(el, last);
+      }
+      if (observed !== hud) {
+        observed = hud;
+        new MutationObserver(function () {
+          if (!document.getElementById(ID)) ensure();
+        }).observe(hud, { childList: true });
+      }
+      return el;
+    }
+
+    function fmtAlphaDay(perHour) {
+      if (perHour == null || isNaN(perHour)) return '—';
+      var U = window.StructsUnits;
+      var day = Number(perHour) * 24;
+      return (U && U.fmtAlpha ? U.fmtAlpha(day) : String(Math.round(day))) + '/d';
+    }
+
+    function paint(el, d) {
+      if (!el) return;
+      var n = d ? Number(d.replicants) || 0 : 0;
+      // The whole panel goes with the count: nothing to replicate with, nothing to show.
+      el.classList.toggle('hidden', n <= 0);
+      if (n <= 0) return;
+      var set = function (k, v) { var s = el.querySelector('[data-k="' + k + '"]'); if (s) s.textContent = v; };
+      set('replicants', String(n));
+      set('alpha_day', fmtAlphaDay(d.rates && d.rates.alpha_ualpha_h));
+      var cpu = d.hashing && d.hashing.cpu_1m;
+      set('cpu', cpu == null ? '—' : Math.round(Number(cpu) * 100) + '%');
+    }
+
+    function tick() {
+      TAURI.core.invoke('terminal_replication').then(function (d) {
+        last = d || null;
+        paint(ensure(), last);
+      }).catch(function () {
+        // A failed read keeps the last figures; a HUD that flickers on every
+        // hiccup is worse than one a poll stale.
+        ensure();
+      });
+    }
+
+    var start = function () { tick(); setInterval(tick, POLL_MS); };
+    if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+  })();
+
 } else if (!window.__STRUCTS_CONFIG__) {
   console.info('No guild config injected (running outside Tauri)');
 }

@@ -242,9 +242,13 @@ pub fn state(_app: &tauri::AppHandle) -> Value {
         .into_iter()
         .find(|r| r.player_id == player_id)
         .and_then(|r| r.pfp_attrs);
-    // Left unset until there is a confirmed figure. `rate_line` draws an em
-    // dash for it, and that is the intended reading.
-    let alpha_ph: Option<f64> = None;
+    // The team's refined Alpha per hour from the rates sampler (the same
+    // figure the Replication card and the HUD readout draw). `None` until two
+    // samples an hour apart exist, and `rate_line` draws an em dash for it —
+    // a zero would be a claim the sampler has not yet earned.
+    let alpha_ph: Option<f64> = crate::mcp::rates::snapshot()
+        .get("alpha_ualpha_h")
+        .and_then(|v| v.as_f64());
 
     let crews = crate::mcp::crew::all();
     let work = crate::mcp::crew_work::get();
