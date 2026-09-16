@@ -500,22 +500,22 @@ pub fn open_terminal_card(app: tauri::AppHandle, workspace: Option<String>, card
         focus(&w);
         return Ok(());
     }
+    let kind = lock(&STORE)
+        .workspaces
+        .get(&ws_name)
+        .and_then(|l| l.cards.iter().find(|c| c.id == id))
+        .map(|c| c.kind.clone());
     // The page names the card the way it names it on screen ("Energy
     // market", "Player 1-61"); the type name is the fallback for a boot-time
     // reopen, which has no page yet.
     let title = title
         .map(|t| t.chars().filter(|c| !c.is_control()).take(60).collect::<String>())
         .filter(|t| !t.trim().is_empty())
-        .or_else(|| {
-            lock(&STORE)
-                .workspaces
-                .get(&ws_name)
-                .and_then(|l| l.cards.iter().find(|c| c.id == id))
-                .map(|c| c.kind.clone())
-        })
+        .or_else(|| kind.clone())
         .map(|t| format!("Structs — {t}"))
         .unwrap_or_else(|| "Structs — Terminal card".into());
-    let w = build(&app, &label, &format!("board.html?view=terminal&ws={ws_name}&card={id}"), &title, (640.0, 620.0))?;
+    let size = card_window_size(kind.as_deref().unwrap_or(""));
+    let w = build(&app, &label, &format!("board.html?view=terminal&ws={ws_name}&card={id}"), &title, size)?;
     let key = format!("{ws_name}/{id}");
     let forget = key.clone();
     w.on_window_event(move |event| {
@@ -535,6 +535,18 @@ pub fn open_terminal_card(app: tauri::AppHandle, workspace: Option<String>, card
     spine(&app);
     focus(&w);
     Ok(())
+}
+
+/// A popped-out card's window, sized to the card. Most cards are lists that
+/// grow with their data and get the roomy default; a card whose content is
+/// fixed gets a window that fits it, or it sits above a slab of empty panel.
+/// The window-state plugin remembers a size the player sets afterwards.
+pub fn card_window_size(kind: &str) -> (f64, f64) {
+    match kind {
+        // The button, the switch, two counts, six figures in two rows.
+        "replication" => (460.0, 450.0),
+        _ => (640.0, 620.0),
+    }
 }
 
 /// Create ONE card and open it in its own window.
@@ -2034,6 +2046,13 @@ mod activity_month_tests {
 #[cfg(test)]
 mod same_card_tests {
     use super::*;
+
+    #[test]
+    fn a_fixed_card_gets_a_window_that_fits_and_lists_keep_the_default() {
+        assert_eq!(card_window_size("replication"), (460.0, 450.0));
+        assert_eq!(card_window_size("armada"), (640.0, 620.0));
+        assert_eq!(card_window_size(""), (640.0, 620.0));
+    }
     use serde_json::json;
 
     /// Through serde, the way a card really arrives — so the test needs no

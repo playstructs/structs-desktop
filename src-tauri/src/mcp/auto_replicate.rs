@@ -651,20 +651,36 @@ pub async fn terminal_replication(app: tauri::AppHandle) -> Result<Value, String
     let sig = signals(gp.as_ref(), &cfg);
     let (room, why) = room_for(&cfg, &sig);
     let mut v = view();
+    let queue_now = v.get("queue").and_then(|q| q.as_u64()).unwrap_or(0);
     if let Some(o) = v.as_object_mut() {
         // The room as it stands NOW, not as the last round saw it.
         o.insert("room_now".into(), json!(room));
         o.insert("room_reason".into(), json!(why));
+        // Energy, the way the create gate sees it: the substation's
+        // per-connection share now, and what it becomes once the queue has
+        // been born — the keeper's own dilution rule, `(capacity − load) /
+        // connectionCount` (grid_context.go), with the queue added to the
+        // count. The card draws the projection in amber while a queue exists.
         o.insert(
             "energy".into(),
             match gp.as_ref() {
-                Some(g) => json!({
-                    "used_mw": g.sub_load,
-                    "available_mw": g.sub_capacity,
-                    "connections": g.sub_connection_count,
-                    "share_if_one_more_mw": g.share_if_one_more,
-                    "supportable_more": sig.energy_room,
-                }),
+                Some(g) => {
+                    let queue = queue_now;
+                    let available = (g.sub_capacity - g.sub_load).max(0.0);
+                    let after = if g.sub_connection_count + queue > 0 {
+                        available / (g.sub_connection_count + queue) as f64
+                    } else {
+                        available
+                    };
+                    json!({
+                        "connection_capacity_mw": g.sub_connection_capacity,
+                        "connection_count": g.sub_connection_count,
+                        "queue": queue,
+                        "after_queue_mw": if queue > 0 { Some(after) } else { None },
+                        "min_share_mw": cfg.min_share_mw,
+                        "supportable_more": sig.energy_room,
+                    })
+                }
                 None => Value::Null,
             },
         );

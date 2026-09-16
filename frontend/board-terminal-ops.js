@@ -2788,6 +2788,17 @@
     });
   }
   var rpRate = function (v, fmt) { return v == null || isNaN(v) ? '—' : fmt(v) + '/h'; };
+  // The substation's per-connection share now and, while presses wait, what
+  // it becomes once they are born — the keeper's own dilution rule, in amber.
+  var energyValue = function (en) {
+    if (!en || en.connection_capacity_mw == null) return '—';
+    var node = H.el('span', 'rp-energy');
+    node.appendChild(document.createTextNode(H.fmtWatts(en.connection_capacity_mw)));
+    if (en.after_queue_mw != null && Number(en.queue) > 0) {
+      node.appendChild(H.el('span', 'sui-text-warning rp-energy-after', ' → ' + H.fmtWatts(en.after_queue_mw)));
+    }
+    return node;
+  };
   T.register('replication', {
     label: 'Replication', describe: function () { return 'Replication'; }, cadenceMs: 5000, defaultWidth: 1,
     render: function (host, p, ctx) {
@@ -2858,7 +2869,7 @@
         var cpu = hs.cpu_1m == null ? null : Math.round(Number(hs.cpu_1m) * 100);
         var kd = r.kd;
         var strip = tiles([
-          [['energy', 'use / available'], en ? H.fmtWatts(en.used_mw) + ' / ' + H.fmtWatts(en.available_mw) : '—', 'sui-icon-energy',
+          [['energy', 'per connection'], energyValue(en), 'sui-icon-energy',
             !en ? 'muted' : (d.room_reason === 'energy' ? 'bad' : 'ok')],
           [['hashing', hs.pending != null ? H.fmtInt(hs.pending) + ' waiting' : 'cpu · 1m'], cpu == null ? '—' : cpu + '%', 'icon-computer',
             cpu == null ? 'muted' : (hs.saturated || d.room_reason === 'hashing' ? 'bad' : null)],

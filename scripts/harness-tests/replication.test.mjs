@@ -76,7 +76,9 @@ const text = (n) => (n && n.textContent || '').replace(/\s+/g, ' ').trim();
     check('six figures: energy, hashing, ore, alpha, raids, k/d',
       labels.join(',') === 'energy,hashing,ore,alpha,raids,k/d', labels.join(','));
     const val = (i) => text(tiles[i].querySelector('.fstat-v'));
-    check('energy is use / available on the game\'s power ladder', / \/ /.test(val(0)) && /W/.test(val(0)), val(0));
+    check('energy is the substation\'s per-connection share on the game\'s power ladder', /^10\.5KW/.test(val(0)), val(0));
+    check('…and while presses wait, the share after they are born, in amber',
+      /→ 10\.47KW/.test(val(0)) && !!tiles[0].querySelector('.rp-energy-after.sui-text-warning'), val(0));
     check('hashing is the CPU figure', val(1) === '62%', val(1));
     check('production and raids are rates per hour', /\/h$/.test(val(2)) && /\/h$/.test(val(3)) && /\/h$/.test(val(4)), [val(2), val(3), val(4)].join('|'));
     check('k/d is one number over kills · losses', val(5) === '1.8' && /41 · 23/.test(text(tiles[5])), text(tiles[5]));
