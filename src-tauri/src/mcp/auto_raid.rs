@@ -2,26 +2,38 @@
 //!
 //! ## What the data says raiding actually is
 //!
-//! From 300 reconstructed raid episodes in `planet_activity`:
+//! From every raid episode in `planet_activity` (1,550 status rows, 2026-03 →
+//! 2026-09-16; the 92 terminal raids since chain v0.21.0 on 2026-08-24 are the
+//! ones the current defaults are tuned on):
 //!
-//! * **Vulnerability is the whole game.** Post-2026-06-15 (when the current
-//!   mechanic landed), raids that saw `shieldsVulnerable` went 69 successful vs
-//!   7 retreats; raids that never saw it went **0 successful vs 50 retreats**.
-//!   Not "unlikely" — zero. So `require_vulnerable_now` defaults on, and moving
-//!   a fleet onto a healthy planet is strictly self-harm: it drops YOUR shields
-//!   for a raid that cannot complete.
-//! * **Loot is a lottery with a fat tail.** 123 successful raids yielded 1,336
-//!   ore total but a **median of 1**, and 52 of them seized nothing at all.
-//!   Nine raids carried 74% of all ore ever stolen. Hence `min_ore`: below it,
-//!   the Command Ship risk is unpriced.
-//! * **Shield strength does NOT predict the outcome** (successes averaged 127.9,
-//!   retreats 111.5, both spanning 25–325). Shield is a *timer* — it sets the
-//!   raid proof's difficulty range — not a defence. It is scored as speed, never
-//!   as strength.
-//! * **Our own offensive record is the warning.** 22 raids: 2 wins, 11 retreats,
-//!   and **9 `attackerDefeated`** — a 41% rate against an ecosystem baseline of
-//!   5%, every one of them the primary's Command Ship dying in the field. That
-//!   is why only profiles granting `raids` fly them, never the primary.
+//! * **A raid that never opens never wins.** 0 of 63 raids that never reached
+//!   `shieldsVulnerable` seized anything, in every era. But since v0.21.0
+//!   **20 of the 24 successes were SIEGES** — the attacker killed the
+//!   defender's Command Ship itself — and they carried 9,351 of 10,109 ore.
+//!   Walk-ins onto an already-open planet: 4 wins, 758 ore. So the loop
+//!   sieges by default; "only already-vulnerable targets" is the cautious
+//!   posture, not the norm.
+//! * **Loot moved from lottery to prize.** Successful raids now take a median
+//!   of 401 ore (1 of 24 seized nothing); before v0.21 the median was 1. The
+//!   one gate that matters is `min_ore`.
+//! * **Defended targets are where the ore is.** Targets with 12+ defence edges
+//!   went 11 wins / 6 defeats / 3 retreats and held all the big piles; a
+//!   defender-count cap would have excluded every large haul. Defensive
+//!   pressure is SCORED, never gated.
+//! * **An active defender is worth more, not less.** Owners who acted in the
+//!   30 minutes before the raid: 63 ore per attempt; owners idle a day: 25.
+//!   The "skip awake defenders" gate declined the best targets.
+//! * **Hour of day is noise** once the raider is a bot: the old 15–20 UTC
+//!   sweet spot inverted after July. Gone.
+//! * **Shield strength does NOT predict the outcome.** It is the proof timer,
+//!   not a defence, so it counts against a target only as time exposed.
+//! * **Our own waste was the raider that could not shoot.** 27 of our 31
+//!   retreats since v0.21 were one raider flying to the same 2-ore grudge
+//!   target, sitting 54 minutes without a single viable shot, coming home, and
+//!   going straight back after the cooldown. Dispatch now refuses a raider
+//!   with no viable shot into the Command Ship's ambit, a siege that cannot
+//!   fire aborts within three scans, and every failed attempt doubles that
+//!   planet's cooldown.
 //!
 //! ## Shape
 //!
@@ -50,9 +62,30 @@ const FILENAME: &str = "auto_raid.json";
 /// the raid proof's block cost into wall-clock minutes for the gates.
 pub const BLOCK_SECONDS: f64 = 5.76;
 
-/// Ore pile that counts as "the jackpot" when normalising the prize term. The
-/// largest raid ever recorded seized 173.
-const ORE_SCALE: f64 = 175.0;
+/// Ore pile that counts as "the jackpot" when normalising the prize term.
+/// Successful raids since chain v0.21.0 take a median of 401 ore (max 1,059).
+const ORE_SCALE: f64 = 400.0;
+
+/// How long a swept candidate roster stays fresh. Identity and guild rarely
+/// change; the expensive per-target reads happen in `evaluate`, not here.
+const ROSTER_TTL_SECS: f64 = 6.0 * 3600.0;
+/// LCD list pages walked when the perception snapshot has not loaded yet —
+/// the fallback path only. 30 pages × 100 = the whole galaxy.
+const SWEEP_FALLBACK_PAGES: usize = 30;
+/// Candidates evaluated per scan (four reads each). The vetoed universe is a
+/// few hundred players, so this covers all of it every scan.
+const EVALUATE_PER_SCAN: usize = 400;
+/// Consecutive siege rounds that fire nothing before the expedition is called
+/// off. A raider parked at a target it cannot shoot is the single largest
+/// waste in the record (27 trips × 54 minutes, zero shots).
+const SIEGE_IDLE_ROUNDS: usize = 3;
+/// Blocks a cautious (no-siege) raider waits for a closed window to reopen.
+const ONGOING_GRACE_BLOCKS: u64 = 60;
+/// A failed attempt doubles the target's cooldown, up to 2^this.
+const MAX_COOLDOWN_DOUBLINGS: u32 = 4;
+/// Difficulty the raid proof is expected to decay to before it is worth
+/// hashing — only used to turn a shield into "minutes exposed" for the score.
+const RAID_PROOF_DIFFICULTY: u64 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -67,115 +100,42 @@ pub enum RaidPosture {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AutoRaidConfig {
     pub enabled: bool,
     pub autonomy: Autonomy,
+    /// Scan cadence. Also the siege cadence: each supervise pass fires at most
+    /// one round per expedition.
     pub interval_secs: u64,
     /// Preset that rewrites the gates below in one move. Explicit edits to the
-    /// individual gates survive until the posture is set again.
+    /// individual gates survive until the posture is set again. `cautious` is
+    /// the only posture that will not siege: it raids open windows only.
     pub posture: RaidPosture,
 
-    // ── Hard gates ──
+    // ── Gates ──
     /// A raid seizes ALL of the target's stored ore, so this is the whole prize.
-    /// Median historical haul is 1 ore; below this a raid is negative EV.
     pub min_ore: f64,
     /// 0..100 blended score floor.
     pub min_score: f64,
-    /// Wall-clock budget for the raid proof, derived from the target's shield.
-    pub max_raid_minutes: u32,
-    /// Skip targets whose Command Ship is behind more defenders than this.
-    pub max_defenders: usize,
-    /// Never move onto a planet that isn't already vulnerable. 0-for-50 says
-    /// turning this off is how raids get wasted.
-    pub require_vulnerable_now: bool,
-    /// Allow manufacturing the window by killing the defender's Command Ship.
-    pub allow_siege: bool,
-    pub siege_max_shots: usize,
-    /// Skip a target whose owner acted this recently — an awake defender can
-    /// restore shields mid-raid and strand the fleet.
-    pub skip_if_defender_active_mins: u32,
-    /// Restrict dispatch to these UTC hours. Historical success is 39–57% in
-    /// 15:00–20:00 UTC and 0–13% in 00:00–04:00. Empty = any hour.
-    pub raid_hours_utc: Vec<u32>,
+    /// Recall the raider this many minutes after dispatch, whatever state the
+    /// raid is in. Successful raids since v0.21.0 finished in a median of 19
+    /// minutes (p90 36, max 91); retreats that ran long won nothing.
+    pub give_up_after_mins: u32,
+
+    // ── Fleet management ──
+    pub max_concurrent_raids: usize,
+    /// Per-target planet cooldown after any attempt. Doubles per consecutive
+    /// failure on that planet (up to 16×) and resets on a seize.
+    pub target_cooldown_mins: u32,
 
     // ── Scoring weights (the playstyle dial) ──
     pub w_ore: f64,
-    pub w_vulnerability: f64,
+    /// Window already open now (no siege needed).
+    pub w_opening: f64,
+    /// Little return fire, few defenders, a short proof.
     pub w_weakness: f64,
+    /// Grudge heat or priority-guild weight, whichever is higher.
     pub w_grudge: f64,
-    pub w_guild: f64,
-    pub w_speed: f64,
-    pub w_history: f64,
-
-    // ── Fleet management ──
-    /// Explicit raider player ids; empty = every player whose profile has
-    /// the `raids` capability.
-    pub raider_players: Vec<String>,
-    pub max_concurrent_raids: usize,
-    /// Per-target planet cooldown after any attempt.
-    pub target_cooldown_mins: u32,
-    /// Give up if the defender restores shields (`ongoing`) for this many blocks.
-    pub abort_on_ongoing_blocks: u64,
-    /// Recall the raider when its own Command Ship drops below this HP.
-    ///
-    /// MARGIN, NOT A TRIPWIRE. Weapons do 2 damage and a player acts once per
-    /// block, so a Command Ship walks 6 -> 4 -> 2 -> dead in three blocks. The
-    /// old default of 3.0 fired at 2 HP — ONE block, about five seconds, to get
-    /// a recall signed and included. Losing it does not merely end the raid: it
-    /// STRANDS the fleet, because `fleet_move` is refused without an online
-    /// command struct, until an ~8 minute rebuild. 4.0 fires at 3 HP and buys a
-    /// second block.
-    pub abort_cmd_hp_below: f64,
-    /// Absolute wall-clock cap on one expedition.
-    pub max_raid_wall_minutes: u32,
-    pub return_home_after: bool,
-
-    // ── Discovery cost controls ──
-    /// How long a swept roster of enemy players stays fresh.
-    pub roster_ttl_secs: u64,
-    /// Max LCD list pages to walk when sweeping for candidates.
-    pub sweep_max_pages: usize,
-    /// Max candidates given the expensive per-target reads each scan.
-    pub evaluate_per_scan: usize,
-    /// Difficulty the raid proof must decay to before we start hashing.
-    pub raid_difficulty: u64,
-    /// Skip targets whose PLANET has this much ore or less left in the crust.
-    ///
-    /// Not the same prize as `min_ore` (the defender's *stored* pile). This one
-    /// is a survival check on the raid itself: an exhausted planet makes its
-    /// owner re-planet, which voids the raid outright. One unit of headroom is
-    /// enough to lose the race, so the default leaves two.
-    ///
-    /// `serde(default)` is not optional here: without it, adding this field
-    /// broke every EXISTING `auto_raid.json` on disk. `load_config` swallows a
-    /// parse failure and falls back to `Default`, whose `enabled` is false — so
-    /// the loop silently switched itself off, and the watchdog stayed quiet
-    /// because it reads `enabled` from that same poisoned config. Twenty-four
-    /// hours of zero raids with a config file that plainly said `true`.
-    #[serde(default = "default_min_planet_ore")]
-    pub min_planet_ore: f64,
-
-    /// Skip a target whose Command Ship sits in an ambit this raider cannot put
-    /// a VIABLE shot into.
-    ///
-    /// Viable means counter-immune or cross-ambit. A same-ambit shot eats the
-    /// full counter and is exactly what the survivability gate refuses, so a
-    /// fleet whose only reach into that ambit is same-ambit will fly out, sit
-    /// there, and never fire — while its OWN planet is raidable for the whole
-    /// trip. Measured on the live roster 2026-08-18: most fleets answer only
-    /// one or two of the four ambits, so this is the common case, not an edge.
-    #[serde(default = "default_true")]
-    pub require_reachable_command_ship: bool,
-
-    pub dry_run: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_min_planet_ore() -> f64 {
-    0.0
 }
 
 impl Default for AutoRaidConfig {
@@ -183,38 +143,17 @@ impl Default for AutoRaidConfig {
         let mut c = Self {
             enabled: false,
             autonomy: Autonomy::Advise,
-            interval_secs: 300,
+            interval_secs: 120,
             posture: RaidPosture::Opportunist,
-            min_ore: 15.0,
-            min_score: 55.0,
-            max_raid_minutes: 20,
-            max_defenders: 4,
-            require_vulnerable_now: true,
-            allow_siege: false,
-            siege_max_shots: 12,
-            skip_if_defender_active_mins: 30,
-            raid_hours_utc: vec![],
-            w_ore: 1.0,
-            w_vulnerability: 1.0,
-            w_weakness: 0.8,
-            w_grudge: 1.2,
-            w_guild: 0.5,
-            w_speed: 0.4,
-            w_history: 0.6,
-            raider_players: vec![],
-            max_concurrent_raids: 1,
+            min_ore: 5.0,
+            min_score: 40.0,
+            give_up_after_mins: 60,
+            max_concurrent_raids: 2,
             target_cooldown_mins: 120,
-            abort_on_ongoing_blocks: 30,
-            abort_cmd_hp_below: 4.0,
-            max_raid_wall_minutes: 90,
-            return_home_after: true,
-            roster_ttl_secs: 21_600,
-            sweep_max_pages: 8,
-            evaluate_per_scan: 25,
-            raid_difficulty: 4,
-            min_planet_ore: 0.0,
-            require_reachable_command_ship: true,
-            dry_run: false,
+            w_ore: 1.0,
+            w_opening: 1.0,
+            w_weakness: 0.6,
+            w_grudge: 0.6,
         };
         c.apply_posture(RaidPosture::Opportunist);
         c
@@ -222,22 +161,26 @@ impl Default for AutoRaidConfig {
 }
 
 impl AutoRaidConfig {
-    /// Rewrite the hard gates from a posture preset. Mirrors how
+    /// Rewrite the gates from a posture preset. Mirrors how
     /// `doctrine::preset_bundle` works: the preset is a starting point, and any
     /// field the operator sets afterwards wins until the posture is set again.
     pub fn apply_posture(&mut self, p: RaidPosture) {
         self.posture = p;
-        let (min_ore, min_score, minutes, defenders, vuln, siege) = match p {
-            RaidPosture::Cautious => (30.0, 75.0, 10, 2, true, false),
-            RaidPosture::Opportunist => (15.0, 55.0, 20, 4, true, false),
-            RaidPosture::Aggressive => (5.0, 35.0, 45, 8, false, true),
+        let (min_ore, min_score, give_up) = match p {
+            RaidPosture::Cautious => (30.0, 60.0, 30),
+            RaidPosture::Opportunist => (5.0, 40.0, 60),
+            RaidPosture::Aggressive => (1.0, 25.0, 90),
         };
         self.min_ore = min_ore;
         self.min_score = min_score;
-        self.max_raid_minutes = minutes;
-        self.max_defenders = defenders;
-        self.require_vulnerable_now = vuln;
-        self.allow_siege = siege;
+        self.give_up_after_mins = give_up;
+    }
+
+    /// May a raider open the window itself by killing the defender's Command
+    /// Ship? Everything but `cautious`. Since v0.21.0 this is how 20 of 24
+    /// successful raids happened.
+    pub fn sieges(&self) -> bool {
+        self.posture != RaidPosture::Cautious
     }
 }
 
@@ -297,6 +240,10 @@ static BOARD: LazyLock<Mutex<Vec<Candidate>>> = LazyLock::new(|| Mutex::new(Vec:
 static TARGET_COOLDOWN: LazyLock<Mutex<HashMap<String, f64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Our own outcome ledger per target planet: (attempts, wins).
 static HISTORY: LazyLock<Mutex<HashMap<String, (u32, u32)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Consecutive failures per target planet. Each one doubles the cooldown, so
+/// the loop backs off a target it keeps bouncing off instead of re-flying the
+/// same losing trip every two hours.
+static FAIL_STREAK: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Expeditions currently in flight, keyed by raider player id.
 static ACTIVE: LazyLock<Mutex<HashMap<String, Expedition>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -318,6 +265,8 @@ struct RaidMemory {
     board: Vec<Candidate>,
     cooldown: HashMap<String, f64>,
     history: HashMap<String, (u32, u32)>,
+    /// Consecutive failed attempts per target planet; drives the cooldown.
+    fail_streak: HashMap<String, u32>,
     active: HashMap<String, Expedition>,
 }
 
@@ -344,6 +293,11 @@ fn ensure_restored() {
                 h.entry(k).or_insert(v);
             }
         }
+        if let Ok(mut f) = FAIL_STREAK.lock() {
+            for (k, v) in m.fail_streak {
+                f.entry(k).or_insert(v);
+            }
+        }
         if let Ok(mut a) = ACTIVE.lock() {
             for (k, v) in m.active {
                 a.entry(k).or_insert(v);
@@ -360,6 +314,7 @@ fn persist_memory() {
         board: BOARD.lock().map(|b| b.clone()).unwrap_or_default(),
         cooldown: TARGET_COOLDOWN.lock().map(|c| c.clone()).unwrap_or_default(),
         history: HISTORY.lock().map(|h| h.clone()).unwrap_or_default(),
+        fail_streak: FAIL_STREAK.lock().map(|f| f.clone()).unwrap_or_default(),
         active: ACTIVE.lock().map(|a| a.clone()).unwrap_or_default(),
     };
     crate::mcp::cache_store::save_in_background(RAID_CACHE, m);
@@ -379,8 +334,11 @@ pub struct Expedition {
     pub hashing: bool,
     /// First block at which we saw the target's shields back up.
     pub ongoing_since_block: Option<u64>,
-    /// Shots spent so far trying to open the window by force (`allow_siege`).
+    /// Shots spent so far trying to open the window by force.
     pub siege_shots: usize,
+    /// Consecutive siege rounds that could not fire. `SIEGE_IDLE_ROUNDS` of
+    /// them end the expedition.
+    pub idle_rounds: usize,
     pub note: String,
 }
 
@@ -476,34 +434,37 @@ pub fn raid_ready_minutes(shield: u64, difficulty: u64) -> f64 {
 /// silently moving the `min_score` goalposts.
 pub fn score(c: &Candidate, cfg: &AutoRaidConfig) -> f64 {
     let ore_term = (c.stored_ore.max(0.0) + 1.0).ln() / (ORE_SCALE + 1.0).ln();
-    let vuln_term = if c.vulnerable {
+    // An open window is a raid we can start proving on arrival; a closed one
+    // is a siege first. Partial credit only when this posture will siege —
+    // a cautious loop cannot use a closed window at all.
+    let opening_term = if c.vulnerable {
         1.0
-    } else if cfg.allow_siege {
+    } else if cfg.sieges() {
         0.4
     } else {
         0.0
     };
-    // Defensive pressure: registered defenders on the Command Ship plus the size
-    // of the fleet that would shoot back.
-    let pressure = ((c.defenders_on_cmd as f64) / 8.0 + (c.enemy_fleet_structs as f64) / 16.0).min(1.0);
+    // Defensive pressure: registered defenders on the Command Ship, the size of
+    // the fleet that would shoot back, and how long the proof keeps us exposed
+    // (the shield is a timer, not a defence — a 325 shield is ~40 minutes on
+    // station). Scored, never gated: the richest targets in the record were
+    // the best defended.
+    let pressure = ((c.defenders_on_cmd as f64) / 8.0
+        + (c.enemy_fleet_structs as f64) / 16.0
+        + c.raid_minutes.max(0.0) / 120.0)
+        .min(1.0);
     let weakness_term = 1.0 - pressure;
-    let grudge_term = crate::mcp::combat_lists::grudge_heat(c.player_id.as_str()).min(1.0);
-    let guild_term = crate::mcp::combat_lists::guild_weight(Some(&c.guild_id)).min(1.0);
-    let speed_term = if cfg.max_raid_minutes == 0 {
-        0.0
-    } else {
-        (1.0 - c.raid_minutes / cfg.max_raid_minutes as f64).clamp(0.0, 1.0)
-    };
-    let history_term = history_win_rate(&c.planet_id);
+    // Personal grudge or standing priority on the whole guild, whichever the
+    // operator has set higher.
+    let grudge_term = crate::mcp::combat_lists::grudge_heat(c.player_id.as_str())
+        .max(crate::mcp::combat_lists::guild_weight(Some(&c.guild_id)))
+        .min(1.0);
 
     let terms = [
         (cfg.w_ore, ore_term),
-        (cfg.w_vulnerability, vuln_term),
+        (cfg.w_opening, opening_term),
         (cfg.w_weakness, weakness_term),
         (cfg.w_grudge, grudge_term),
-        (cfg.w_guild, guild_term),
-        (cfg.w_speed, speed_term),
-        (cfg.w_history, history_term),
     ];
     let total_w: f64 = terms.iter().map(|(w, _)| w.max(0.0)).sum();
     if total_w <= 0.0 {
@@ -511,17 +472,6 @@ pub fn score(c: &Candidate, cfg: &AutoRaidConfig) -> f64 {
     }
     let sum: f64 = terms.iter().map(|(w, t)| w.max(0.0) * t.clamp(0.0, 1.0)).sum();
     (100.0 * sum / total_w).clamp(0.0, 100.0)
-}
-
-/// Our record against this planet: 0.5 when we've never tried it (neutral), the
-/// realised win rate otherwise.
-fn history_win_rate(planet_id: &str) -> f64 {
-    HISTORY
-        .lock()
-        .ok()
-        .and_then(|h| h.get(planet_id).copied())
-        .map(|(att, win)| if att == 0 { 0.5 } else { win as f64 / att as f64 })
-        .unwrap_or(0.5)
 }
 
 /// Hard gates, evaluated BEFORE the score so nothing can outrank a veto.
@@ -550,77 +500,25 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
     if c.stored_ore < cfg.min_ore {
         return Some(format!("ore {:.0} < min_ore {:.0}", c.stored_ore, cfg.min_ore));
     }
-    // A raid is void the moment the defender re-planets, and re-planeting is
-    // routine: a planet is exhaustible, and when its crust runs dry the owner
-    // explores onto a fresh one. That destroys every struct on the old planet
-    // AND ends any raid in progress as `demilitarized` with ZERO ore seized.
-    //
-    // Observed live 2026-08-07 on 2-6607: we killed the defender's Command
-    // Ship, armed the clock, and then its own extractor mined the planet's last
-    // ore. The owner explored, and our raid — clock running, proof in flight —
-    // was voided for nothing. The defender kept all 65 ore.
-    //
-    // That is real, but it is a LOST RAID, not a lost war — the raider survives,
-    // the defender has burned its own planet and every struct on it to escape,
-    // and the new planet is a target like any other. Defaulting to a refusal
-    // priced that risk far too high: measured 2026-08-19, this one gate blocked
-    // 19 of 88 candidates, including the two most-wanted targets on the board,
-    // in a galaxy where exhausted crusts are the norm rather than the exception.
-    //
-    // So it is OFF by default (`min_planet_ore: 0` = no minimum). Raise it to
-    // decline the thin end of the risk — a value of N skips planets with fewer
-    // than N ore in the ground.
-    if c.planet_ore_remaining < cfg.min_planet_ore {
-        return Some(format!(
-            "planet has {:.0} ore left (< min_planet_ore {:.0}) — defender re-planets and voids the raid",
-            c.planet_ore_remaining, cfg.min_planet_ore
-        ));
-    }
     // Someone is already parked here. A planet runs ONE raid at a time — and
     // as of chain v0.21.0 the enemy-fleet queue is CAPPED at one: a second
-    // arrival is turned around and sent home by the chain itself (before 0.21
-    // it parked inert). The gate stays because the trip is still a pure loss —
-    // travel out and back with the raider's OWN planet exposed the whole time —
-    // but the old conscription hazard (a parked fleet auto-promoted into the
-    // raid slot when the first raider left) died with the queue.
+    // arrival is turned around and sent home by the chain itself. The trip is
+    // a pure loss — travel out and back with the raider's OWN planet exposed
+    // the whole time.
     if let Some(fid) = &c.occupied_by {
         return Some(format!("fleet {fid} is already raiding here — a second fleet is inert"));
     }
-    if cfg.require_vulnerable_now && !c.vulnerable {
-        // The decisive gate: 0 of 50 non-vulnerable raids in the dataset ever
-        // succeeded, and going anyway drops our own shields for the trip.
-        return Some("shields not vulnerable (0-for-50 historically)".into());
-    }
-    if c.raid_minutes > cfg.max_raid_minutes as f64 {
-        return Some(format!(
-            "raid proof needs ~{:.0} min > max_raid_minutes {}",
-            c.raid_minutes, cfg.max_raid_minutes
-        ));
-    }
-    if c.defenders_on_cmd > cfg.max_defenders {
-        return Some(format!(
-            "{} defenders on the Command Ship > max_defenders {}",
-            c.defenders_on_cmd, cfg.max_defenders
-        ));
+    // A raid that never opens never wins (0 of 63 in the record). Cautious
+    // will not open one itself, so it only flies at windows already open; the
+    // other postures siege, which is where 20 of the last 24 successes came
+    // from.
+    if !cfg.sieges() && !c.vulnerable {
+        return Some("shields up — cautious posture raids only open windows".into());
     }
     if cooldown_remaining_mins > 0.0 {
         return Some(format!("target cooldown, {:.0} min left", cooldown_remaining_mins));
     }
-    if cfg.skip_if_defender_active_mins > 0 {
-        let active_mins = c.blocks_since_action as f64 * BLOCK_SECONDS / 60.0;
-        if active_mins < cfg.skip_if_defender_active_mins as f64 {
-            return Some(format!(
-                "defender acted {:.0} min ago (< {})",
-                active_mins, cfg.skip_if_defender_active_mins
-            ));
-        }
-    }
     None
-}
-
-/// Is `hour_utc` inside the configured raid window? An empty list means always.
-pub fn in_raid_window(cfg: &AutoRaidConfig, hour_utc: u32) -> bool {
-    cfg.raid_hours_utc.is_empty() || cfg.raid_hours_utc.contains(&hour_utc)
 }
 
 // ─────────────────────────────── the loop ───────────────────────────────────
@@ -706,11 +604,11 @@ async fn scan(
     }
 
     // ── Phase A: candidates. ──
-    let roster = refresh_roster(&client, cfg).await;
+    let roster = refresh_roster(&client).await;
     if roster.is_empty() {
         return;
     }
-    let batch = next_batch(&roster, cfg.evaluate_per_scan);
+    let batch = next_batch(&roster, EVALUATE_PER_SCAN);
 
     // ── Phase B: evaluate + score. ──
     let client_c = client.clone();
@@ -827,8 +725,7 @@ async fn scan(
         return;
     }
 
-    let advise = cfg.autonomy == Autonomy::Advise || cfg.dry_run;
-    if advise {
+    if cfg.autonomy == Autonomy::Advise {
         crate::mcp::board_feed::push(
             app,
             crate::mcp::board_feed::Severity::Notice,
@@ -848,13 +745,6 @@ async fn scan(
         return;
     }
 
-    if !in_raid_window(cfg, current_hour_utc()) {
-        run.blocked(format!(
-            "outside the configured raid window (UTC hour {} not in raid_hours_utc)",
-            current_hour_utc()
-        ));
-        return;
-    }
     match dispatch(app, &client, cfg, &target).await {
         Ok(msg) => {
             run.acted();   // clears any blocked reason from an earlier scan
@@ -872,14 +762,14 @@ async fn scan(
     }
 }
 
-/// Sweep the chain's player list into a cached roster of non-team candidates.
-/// Deliberately bounded (`sweep_max_pages`) and long-lived (`roster_ttl_secs`):
-/// identity and guild rarely change, and the expensive per-target reads happen
-/// in `evaluate`, not here.
-async fn refresh_roster(client: &CosmosClient, cfg: &AutoRaidConfig) -> Vec<RosterEntry> {
+/// Sweep the perception snapshot (or, before it loads, the chain's player
+/// list) into a cached roster of non-team candidates. Long-lived
+/// (`ROSTER_TTL_SECS`): identity and guild rarely change, and the expensive
+/// per-target reads happen in `evaluate`, not here.
+async fn refresh_roster(client: &CosmosClient) -> Vec<RosterEntry> {
     {
         let cache = ROSTER.lock().unwrap();
-        if !cache.1.is_empty() && now_millis() - cache.0 < cfg.roster_ttl_secs as f64 * 1000.0 {
+        if !cache.1.is_empty() && now_millis() - cache.0 < ROSTER_TTL_SECS * 1000.0 {
             return cache.1.clone();
         }
     }
@@ -899,8 +789,8 @@ async fn refresh_roster(client: &CosmosClient, cfg: &AutoRaidConfig) -> Vec<Rost
     };
     // The whole player table is in the perception snapshot (every player,
     // GRASS-fresh); walking the chain's player store in pages of 100 — up to
-    // `sweep_max_pages` LCD requests per roster — is only the fallback for a
-    // snapshot that has not loaded yet.
+    // `SWEEP_FALLBACK_PAGES` LCD requests per roster — is only the fallback
+    // for a snapshot that has not loaded yet.
     let from_snapshot: Vec<serde_json::Value> =
         crate::mcp::perception::with_snapshot(|s| s.players.values().cloned().collect()).unwrap_or_default();
     if !from_snapshot.is_empty() {
@@ -909,7 +799,7 @@ async fn refresh_roster(client: &CosmosClient, cfg: &AutoRaidConfig) -> Vec<Rost
         }
     } else {
         let mut key: Option<String> = None;
-        for _ in 0..cfg.sweep_max_pages.max(1) {
+        for _ in 0..SWEEP_FALLBACK_PAGES {
             let Ok(page) = client.list_entities("player", key.as_deref(), Some(100)).await else { break };
             if let Some(arr) = page.get("Player").and_then(|x| x.as_array()) {
                 for p in arr {
@@ -1097,7 +987,7 @@ async fn evaluate(client: &CosmosClient, player_id: &crate::mcp::types::PlayerId
         planet_ore_remaining,
         occupied_by,
         planetary_shield,
-        raid_minutes: raid_ready_minutes(planetary_shield, get().raid_difficulty),
+        raid_minutes: raid_ready_minutes(planetary_shield, RAID_PROOF_DIFFICULTY),
         vulnerable,
         vulnerability_reason: if vulnerable {
             format!("VULNERABLE — {}", reasons.join(", "))
@@ -1115,28 +1005,63 @@ async fn evaluate(client: &CosmosClient, player_id: &crate::mcp::types::PlayerId
     })
 }
 
+/// Minutes of cooldown left on a target. The configured cooldown doubles for
+/// every consecutive failed attempt on that planet (capped at 2^4 = 16×), so a
+/// target we keep bouncing off drifts from two hours to a day and a half
+/// instead of being re-flown every two hours forever.
 fn cooldown_remaining_mins(planet_id: &str, cooldown_mins: u32) -> f64 {
     let now = now_millis();
+    let streak = FAIL_STREAK
+        .lock()
+        .ok()
+        .and_then(|f| f.get(planet_id).copied())
+        .unwrap_or(0)
+        .min(MAX_COOLDOWN_DOUBLINGS);
+    let effective = effective_cooldown_mins(cooldown_mins, streak);
     TARGET_COOLDOWN
         .lock()
         .ok()
         .and_then(|m| m.get(planet_id).copied())
         .map(|t| {
             let elapsed_mins = (now - t) / 60_000.0;
-            (cooldown_mins as f64 - elapsed_mins).max(0.0)
+            (effective - elapsed_mins).max(0.0)
         })
         .unwrap_or(0.0)
 }
 
-fn current_hour_utc() -> u32 {
-    // Chain block height is the only monotonic clock available inside a loop
-    // (Date::now is unavailable in some build paths), so derive the hour from
-    // the system clock via std, which IS available here.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| ((d.as_secs() / 3600) % 24) as u32)
-        .unwrap_or(0)
+/// Pure: the cooldown after `streak` consecutive failures.
+pub fn effective_cooldown_mins(cooldown_mins: u32, streak: u32) -> f64 {
+    cooldown_mins as f64 * (1u32 << streak.min(MAX_COOLDOWN_DOUBLINGS)) as f64
+}
+
+/// Book the end of an expedition against its target planet.
+fn record_outcome(planet_id: &str, won: bool) {
+    if won {
+        if let Ok(mut h) = HISTORY.lock() {
+            h.entry(planet_id.to_string()).or_insert((0, 0)).1 += 1;
+        }
+        if let Ok(mut f) = FAIL_STREAK.lock() {
+            f.remove(planet_id);
+        }
+    } else if let Ok(mut f) = FAIL_STREAK.lock() {
+        *f.entry(planet_id.to_string()).or_insert(0) += 1;
+    }
+    // The cooldown runs from the END of the attempt, not its dispatch — a
+    // 90-minute siege used to come home with most of its cooldown spent.
+    if let Ok(mut c) = TARGET_COOLDOWN.lock() {
+        c.insert(planet_id.to_string(), now_millis());
+    }
+}
+
+/// Did the chain already close this expedition as a seize? On `raidSuccessful`
+/// the raiding fleet is sent home by the chain, so a fleet found back at its
+/// own planet with the raid recorded against it is a win — anything else that
+/// ends an expedition is a failure for cooldown purposes.
+async fn expedition_won(client: &CosmosClient, ex: &Expedition) -> bool {
+    let Ok(raid) = client.guild.planet_raid_active_by_fleet(&ex.fleet_id).await else { return false };
+    let r = raid.as_array().and_then(|a| a.first()).cloned().unwrap_or(raid);
+    r.get("planet_id").and_then(|x| x.as_str()) == Some(ex.target_planet.as_str())
+        && r.get("status").and_then(|x| x.as_str()) == Some("raidSuccessful")
 }
 
 /// A raider's own combat hulls, reduced to what readiness needs. Fleet structs
@@ -1181,7 +1106,7 @@ async fn dispatch(
     cfg: &AutoRaidConfig,
     target: &Candidate,
 ) -> Result<String, String> {
-    let (raider_pid, raider_idx) = pick_raider(client, cfg).await.ok_or_else(|| {
+    let (raider_pid, raider_idx) = pick_raider(client).await.ok_or_else(|| {
         "no idle raider available (need a profile with `raids`, a live Command Ship, and a fleet on station)".to_string()
     })?;
     let (fleet_id, home_planet) = raider_location(client, &raider_pid)
@@ -1190,8 +1115,10 @@ async fn dispatch(
 
     // Can this raider actually hurt the thing it is being sent to kill?
     // Checked HERE rather than in `gate` because it depends on the raider that
-    // was picked, not on the target alone.
-    if cfg.require_reachable_command_ship && !target.command_ambit.is_empty() {
+    // was picked, not on the target alone. Not optional: with this check
+    // switched off one raider flew 27 round trips to a planet it could not put
+    // a shot into, 54 minutes each, and fired nothing.
+    if !target.command_ambit.is_empty() {
         let bit = crate::mcp::tools::format::ambit_bit(&target.command_ambit);
         if bit != 0 {
             let hulls = raider_hulls(client, &raider_pid, &fleet_id).await;
@@ -1242,6 +1169,7 @@ async fn dispatch(
             hashing: false,
             ongoing_since_block: None,
             siege_shots: 0,
+            idle_rounds: 0,
             note: "en route".into(),
         },
     );
@@ -1253,8 +1181,7 @@ async fn dispatch(
 
 /// An idle raider: role `Raider`, fleet on station at its own planet, Command
 /// Ship alive, and not already on an expedition.
-async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(String, u32)> {
-    use crate::mcp::virtual_players::VPlayerRole;
+async fn pick_raider(client: &CosmosClient) -> Option<(String, u32)> {
     let busy: Vec<String> = ACTIVE.lock().map(|a| a.keys().cloned().collect()).unwrap_or_default();
     let candidates: Vec<(String, u32)> = {
         let reg = crate::mcp::virtual_players::REGISTRY.read().ok()?;
@@ -1262,10 +1189,7 @@ async fn pick_raider(client: &CosmosClient, cfg: &AutoRaidConfig) -> Option<(Str
             .iter()
             .filter(|p| raids(p))
             .filter_map(|p| p.player_id.clone().map(|id| (id, p.index)))
-            .filter(|(id, _)| {
-                !busy.contains(id)
-                    && (cfg.raider_players.is_empty() || cfg.raider_players.contains(id))
-            })
+            .filter(|(id, _)| !busy.contains(id))
             .collect()
     };
     // Eligible raiders with the ore they are carrying, so the pick can prefer the
@@ -1362,7 +1286,6 @@ async fn raider_location(client: &CosmosClient, pid: &str) -> Option<(String, St
 /// carry `hashing: false`, which is exactly what makes `supervise` restart the
 /// proof (or abort and sail home) on the very next pass.
 async fn readopt_expeditions(client: &CosmosClient) {
-    use crate::mcp::virtual_players::VPlayerRole;
     let raiders: Vec<(String, u32)> = {
         let Ok(reg) = crate::mcp::virtual_players::REGISTRY.read() else { return };
         reg.players
@@ -1413,6 +1336,7 @@ async fn readopt_expeditions(client: &CosmosClient) {
                 hashing: false,
                 ongoing_since_block: None,
                 siege_shots: 0,
+                idle_rounds: 0,
                 note: "re-adopted after restart".into(),
             },
         );
@@ -1443,11 +1367,17 @@ async fn supervise(
 
         // ── Abort conditions, cheapest first. ──
         let mut abort: Option<String> = None;
-        if elapsed_mins > cfg.max_raid_wall_minutes as f64 {
-            abort = Some(format!("exceeded max_raid_wall_minutes ({})", cfg.max_raid_wall_minutes));
+        // Set when the chain has already closed the raid in our favour and
+        // sent the fleet home — the expedition is over, not aborted.
+        let mut won = false;
+        if elapsed_mins > cfg.give_up_after_mins as f64 {
+            abort = Some(format!("gave up after {} min", cfg.give_up_after_mins));
         }
-        // The raider's own Command Ship dying while away is exactly how our 9
-        // `attackerDefeated` losses happened; pull out before that.
+        // A raider without a Command Ship can neither raid nor move; the
+        // expedition is over. There is deliberately no "recall at N HP" rule:
+        // hulls are the raid's budget (operator doctrine), our winning raids
+        // lost none, and our losses were decided by the defender's response,
+        // not by how early we ran.
         if abort.is_none() {
             if let Ok(fl) = client.entity("fleet", &ex.fleet_id).await {
                 let cmd = fl
@@ -1461,12 +1391,26 @@ async fn supervise(
                     let sa = e.get("structAttributes");
                     if crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isDestroyed"))) {
                         abort = Some("raider Command Ship destroyed".into());
-                    } else {
-                        let hp = crate::mcp::types::EntityView::new(&e).struct_attr_u64("health") as f64;
-                        if hp > 0.0 && hp < cfg.abort_cmd_hp_below {
-                            abort = Some(format!("raider Command Ship at {hp:.0} HP"));
-                        }
                     }
+                }
+                // The chain sends a fleet home the moment its raid seizes (and
+                // turns a second arrival around). A fleet found back at its
+                // own planet is therefore an expedition that has ENDED, and
+                // the raid record says how. Before this, a win sat here as a
+                // "siege" that could not fire until the give-up timer ran out,
+                // and was then booked as a failure.
+                let where_now = fl
+                    .get("Fleet")
+                    .and_then(|x| x.get("locationId"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default();
+                if abort.is_none() && where_now == ex.home_planet {
+                    won = expedition_won(client, &ex).await;
+                    abort = Some(if won {
+                        "raid seized — fleet home".into()
+                    } else {
+                        "fleet already home (chain closed the raid)".into()
+                    });
                 }
             }
         }
@@ -1489,28 +1433,34 @@ async fn supervise(
                 .unwrap_or((0, 0));
             if clock == 0 {
                 // Siege: the clock stays unset while the defender's Command Ship
-                // is up, so with `allow_siege` we spend the trip trying to take
-                // it down rather than waiting out the abort timer. Capped by
-                // `siege_max_shots` across the whole expedition — this is the
-                // expensive, provocative path and it should never run away.
-                if cfg.allow_siege && ex.siege_shots < cfg.siege_max_shots {
-                    let spent = siege_round(app, client, cfg, &ex).await;
+                // is up, so every posture but cautious spends the trip trying to
+                // take it down rather than waiting out the timer. Bounded by
+                // `give_up_after_mins` — and by the raider's ability to fire at
+                // all: a round that cannot shoot is counted, and three in a row
+                // end the trip. That is the failure the record is full of.
+                if cfg.sieges() {
+                    let spent = siege_round(app, client, &ex).await;
                     if spent > 0 {
                         ex.siege_shots += spent;
-                        ex.note = format!("siege — {}/{} shots spent", ex.siege_shots, cfg.siege_max_shots);
-                        // Keep the abort clock parked while we're making progress.
-                        ex.ongoing_since_block = None;
+                        ex.idle_rounds = 0;
+                        ex.note = format!("siege — {} shots spent", ex.siege_shots);
                         ACTIVE.lock().unwrap().insert(ex.raider_player.clone(), ex);
                         continue;
                     }
-                }
-                let since = *ex.ongoing_since_block.get_or_insert(current_block);
-                if current_block.saturating_sub(since) > cfg.abort_on_ongoing_blocks {
-                    abort = Some(if cfg.allow_siege {
-                        "siege failed to open a window".into()
+                    ex.idle_rounds += 1;
+                    if ex.idle_rounds >= SIEGE_IDLE_ROUNDS {
+                        abort = Some(format!(
+                            "siege cannot fire — {} scans without a viable shot at the Command Ship",
+                            ex.idle_rounds
+                        ));
                     } else {
-                        "defender restored shields (raid clock unset)".to_string()
-                    });
+                        ex.note = format!("siege — waiting for a shot ({}/{})", ex.idle_rounds, SIEGE_IDLE_ROUNDS);
+                    }
+                } else {
+                    let since = *ex.ongoing_since_block.get_or_insert(current_block);
+                    if current_block.saturating_sub(since) > ONGOING_GRACE_BLOCKS {
+                        abort = Some("defender restored shields (raid clock unset)".to_string());
+                    }
                 }
             } else {
                 ex.ongoing_since_block = None;
@@ -1588,12 +1538,12 @@ async fn supervise(
                             format!("{}: raid proof failed to start: {}", ex.raider_player, e),
                         ),
                     }
-                } else if abort.is_none() && cfg.allow_siege && ex.siege_shots < cfg.siege_max_shots {
-                    // Proof grinding: spend leftover siege budget on the
-                    // defender's planetary-shield structs — the raid difficulty
-                    // is a decay range tracking the LIVE shield, so every kill
-                    // shortens our own proof (and 1-61 does exactly this to us).
-                    let spent = shield_grind_round(app, client, cfg, &ex).await;
+                } else if abort.is_none() && cfg.sieges() {
+                    // Proof grinding: keep shooting the defender's
+                    // planetary-shield structs — the raid difficulty is a decay
+                    // range tracking the LIVE shield, so every kill shortens our
+                    // own proof (and 1-61 does exactly this to us).
+                    let spent = shield_grind_round(app, client, &ex).await;
                     if spent > 0 {
                         ex.siege_shots += spent;
                     }
@@ -1603,7 +1553,11 @@ async fn supervise(
 
         match abort {
             Some(why) => {
-                if cfg.return_home_after {
+                // Always bring the fleet home: a raider left standing at an
+                // enemy planet is a queued loss, and its own planet is raidable
+                // for as long as it is away. Skipped only when the chain has
+                // already returned it.
+                if !why.contains("home") {
                     let _ = crate::mcp::tx_retry::sign_with_retry(
                         app,
                         ex.raider_index,
@@ -1615,6 +1569,7 @@ async fn supervise(
                     )
                     .await;
                 }
+                record_outcome(&ex.target_planet, won);
                 ACTIVE.lock().unwrap().remove(&ex.raider_player);
                 crate::mcp::board_feed::push(
                     app,
@@ -1641,7 +1596,6 @@ async fn supervise(
 async fn siege_round(
     app: &tauri::AppHandle,
     client: &CosmosClient,
-    cfg: &AutoRaidConfig,
     ex: &Expedition,
 ) -> usize {
     // Re-resolve the defender's Command Ship each round: it may have been
@@ -1688,7 +1642,7 @@ async fn siege_round(
         }
         Err(_) => cmd.to_string(),
     };
-    fire_best_at(app, client, cfg, ex, &fire_at, "siege").await
+    fire_best_at(app, client, ex, &fire_at, "siege").await
 }
 
 /// While the raid proof is grinding, every planetary-shield contributor the
@@ -1701,7 +1655,6 @@ async fn siege_round(
 async fn shield_grind_round(
     app: &tauri::AppHandle,
     client: &CosmosClient,
-    cfg: &AutoRaidConfig,
     ex: &Expedition,
 ) -> usize {
     let structs = crate::mcp::loop_util::player_structs(client, &ex.target_player).await;
@@ -1740,7 +1693,7 @@ async fn shield_grind_round(
             ex.raider_player, target, contrib
         ),
     );
-    fire_best_at(app, client, cfg, ex, &target, "shield-grind").await
+    fire_best_at(app, client, ex, &target, "shield-grind").await
 }
 
 /// Fire the raider's best co-located shooter (evasion-, armour- and
@@ -1748,7 +1701,6 @@ async fn shield_grind_round(
 async fn fire_best_at(
     app: &tauri::AppHandle,
     client: &CosmosClient,
-    cfg: &AutoRaidConfig,
     ex: &Expedition,
     target: &str,
     label: &str,
@@ -1762,8 +1714,7 @@ async fn fire_best_at(
         return 0;
     };
     // One shot per player per charge cycle, best (evasion- and counter-aware)
-    // first, bounded by whatever siege budget is left.
-    let budget = cfg.siege_max_shots.saturating_sub(ex.siege_shots);
+    // first. Bounded by the expedition's give-up timer, not a shot count.
     let mut shots: Vec<&crate::mcp::tools::intel::StrikeRow> =
         plan.rows.iter().filter(|r| r.reachable).collect();
     shots.sort_by(|a, b| {
@@ -1771,9 +1722,6 @@ async fn fire_best_at(
             .cmp(&b.counter_risk)
             .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
     });
-    if budget == 0 || cfg.dry_run {
-        return 0;
-    }
     // Survival is a RANKING, not a filter: prefer a shooter that outlives its
     // own shot, but when every reaching hull is doomed, the best doomed one
     // fires anyway — a siege that stops shooting has already lost, and the
@@ -2013,48 +1961,23 @@ mod tests {
         let cfg: AutoRaidConfig =
             serde_json::from_str(older).expect("an older config must still deserialize");
         assert!(cfg.enabled, "the operator's enabled flag must survive an upgrade");
-        assert_eq!(cfg.min_planet_ore, 0.0, "missing field takes the intended default");
+        assert_eq!(cfg.posture, RaidPosture::Opportunist, "known fields still read");
+        assert_eq!(cfg.w_opening, 1.0, "a field the file predates takes its default");
+        assert_eq!(cfg.give_up_after_mins, 60, "…and so does every other new one");
     }
 
-    /// An exhausted crust is a raid we might LOSE, not a raid we should refuse.
-    /// The defender escapes by destroying its own planet and everything on it,
-    /// and the raider comes home to pick a new target — so the default is to
-    /// take the shot. Raising the floor is how an operator declines it.
-    #[test]
-    fn an_exhausted_planet_is_raided_by_default_and_skipped_only_on_request() {
-        isolate_lists();
-        let mut cfg = AutoRaidConfig::default();
-        assert_eq!(cfg.min_planet_ore, 0.0, "the crust guard ships OFF");
 
-        let mut c = cand();
-        c.planet_ore_remaining = 0.0;
-        assert!(
-            gate(&c, &cfg, 0.0).is_none(),
-            "a dry planet must be raidable by default, got {:?}",
-            gate(&c, &cfg, 0.0)
-        );
-
-        // Opting back in: N skips planets with fewer than N ore in the ground.
-        cfg.min_planet_ore = 2.0;
-        assert!(gate(&c, &cfg, 0.0).is_some(), "0 ore must be skipped at a floor of 2");
-        c.planet_ore_remaining = 1.0;
-        assert!(gate(&c, &cfg, 0.0).is_some(), "1 ore must be skipped at a floor of 2");
-        c.planet_ore_remaining = 2.0;
-        assert!(
-            gate(&c, &cfg, 0.0).is_none(),
-            "the floor is inclusive — exactly N must still be raidable"
-        );
-    }
-
+    /// Off and advising on first launch — but once armed, the default posture
+    /// sieges. Since v0.21.0 that is where 20 of 24 successful raids came from.
     #[test]
     fn defaults_are_safe_and_opportunist() {
         isolate_lists();
         let c = AutoRaidConfig::default();
         assert!(!c.enabled);
         assert_eq!(c.autonomy, Autonomy::Advise);
-        assert!(c.require_vulnerable_now);
-        assert!(!c.allow_siege);
-        assert_eq!(c.max_concurrent_raids, 1);
+        assert_eq!(c.posture, RaidPosture::Opportunist);
+        assert!(c.sieges(), "the default posture must be able to open a window");
+        assert_eq!(c.max_concurrent_raids, 2);
     }
 
     /// Each posture must produce exactly the documented gate table.
@@ -2092,15 +2015,16 @@ mod tests {
         isolate_lists();
         let mut c = AutoRaidConfig::default();
         c.apply_posture(RaidPosture::Cautious);
-        assert_eq!((c.min_ore, c.min_score, c.max_raid_minutes, c.max_defenders), (30.0, 75.0, 10, 2));
-        assert!(c.require_vulnerable_now && !c.allow_siege);
+        assert_eq!((c.min_ore, c.min_score, c.give_up_after_mins), (30.0, 60.0, 30));
+        assert!(!c.sieges());
 
         c.apply_posture(RaidPosture::Opportunist);
-        assert_eq!((c.min_ore, c.min_score, c.max_raid_minutes, c.max_defenders), (15.0, 55.0, 20, 4));
+        assert_eq!((c.min_ore, c.min_score, c.give_up_after_mins), (5.0, 40.0, 60));
+        assert!(c.sieges());
 
         c.apply_posture(RaidPosture::Aggressive);
-        assert_eq!((c.min_ore, c.min_score, c.max_raid_minutes, c.max_defenders), (5.0, 35.0, 45, 8));
-        assert!(!c.require_vulnerable_now && c.allow_siege);
+        assert_eq!((c.min_ore, c.min_score, c.give_up_after_mins), (1.0, 25.0, 90));
+        assert!(c.sieges());
     }
 
     /// The docs state a shield of 125 reaches difficulty 1 at age 125 blocks —
@@ -2175,26 +2099,6 @@ mod tests {
         );
     }
 
-    /// The shape the crust guard exists for, held onto for the operator who
-    /// turns it back on: a fat pile of STORED ore over a dry crust. Observed
-    /// live on 2-6607 — clock armed, proof in flight, owner re-planeted, prize
-    /// gone. The guard now ships off (see
-    /// `an_exhausted_planet_is_raided_by_default_and_skipped_only_on_request`),
-    /// so this asserts it still bites once asked for.
-    #[test]
-    fn a_nearly_exhausted_planet_is_gated_out_when_the_guard_is_enabled() {
-        isolate_lists();
-        let cfg = AutoRaidConfig { min_planet_ore: 2.0, ..AutoRaidConfig::default() };
-        let mut c = cand();
-        // Plenty of STORED ore — the prize looks great — but the crust is dry.
-        c.stored_ore = 500.0;
-        c.planet_ore_remaining = 1.0;
-        let why = gate(&c, &cfg, 0.0).expect("a dry planet must be gated out");
-        assert!(why.contains("voids the raid"), "unexpected reason: {why}");
-        // A planet with crust left is fine.
-        c.planet_ore_remaining = 5.0;
-        assert_eq!(gate(&c, &cfg, 0.0), None);
-    }
 
     /// A planet runs ONE raid. The second fleet to arrive is inert in both
     /// directions — verified live on 2-7324, where a third party's Tank and the
@@ -2214,14 +2118,17 @@ mod tests {
         assert_eq!(gate(&c, &cfg, 0.0), None);
     }
 
+    /// A closed window is a siege, and only the cautious posture refuses one.
     #[test]
-    fn a_non_vulnerable_target_is_gated_out() {
+    fn a_closed_window_is_gated_only_for_cautious() {
         isolate_lists();
-        let cfg = AutoRaidConfig::default();
+        let mut cfg = AutoRaidConfig::default();
         let mut c = cand();
         c.vulnerable = false;
-        let why = gate(&c, &cfg, 0.0).expect("must be blocked");
-        assert!(why.contains("vulnerable"), "got: {why}");
+        assert_eq!(gate(&c, &cfg, 0.0), None, "opportunist sieges");
+        cfg.apply_posture(RaidPosture::Cautious);
+        let why = gate(&c, &cfg, 0.0).expect("cautious must refuse");
+        assert!(why.contains("shields up"), "got: {why}");
     }
 
     #[test]
@@ -2233,26 +2140,31 @@ mod tests {
         assert!(gate(&c, &cfg, 0.0).unwrap().contains("min_ore"));
     }
 
+    /// Defenders, fleet size and proof length are SCORED, never gated: the
+    /// richest targets in the record (12+ defence edges, 325 shield) were the
+    /// ones worth flying at.
     #[test]
-    fn a_slow_proof_and_a_thick_guard_are_gated_out() {
+    fn a_slow_proof_and_a_thick_guard_are_scored_not_gated() {
         isolate_lists();
         let cfg = AutoRaidConfig::default();
-        let mut slow = cand();
-        slow.raid_minutes = 999.0;
-        assert!(gate(&slow, &cfg, 0.0).unwrap().contains("max_raid_minutes"));
-
-        let mut guarded = cand();
-        guarded.defenders_on_cmd = 99;
-        assert!(gate(&guarded, &cfg, 0.0).unwrap().contains("max_defenders"));
+        let mut hard = cand();
+        hard.raid_minutes = 45.0;
+        hard.defenders_on_cmd = 12;
+        hard.enemy_fleet_structs = 16;
+        assert_eq!(gate(&hard, &cfg, 0.0), None);
+        assert!(score(&hard, &cfg) < score(&cand(), &cfg));
     }
 
+    /// An awake defender is not a reason to skip (owners active in the last 30
+    /// minutes returned 63 ore per attempt against 25 for a day-idle owner);
+    /// a cooldown is.
     #[test]
-    fn an_awake_defender_and_a_cooldown_both_block() {
+    fn an_awake_defender_passes_and_a_cooldown_blocks() {
         isolate_lists();
         let cfg = AutoRaidConfig::default();
         let mut fresh = cand();
         fresh.blocks_since_action = 10; // ~1 minute ago
-        assert!(gate(&fresh, &cfg, 0.0).unwrap().contains("acted"));
+        assert_eq!(gate(&fresh, &cfg, 0.0), None);
         assert!(gate(&cand(), &cfg, 45.0).unwrap().contains("cooldown"));
     }
 
@@ -2301,55 +2213,47 @@ mod tests {
         // All-zero weights degrade to 0 rather than dividing by zero.
         cfg = AutoRaidConfig::default();
         cfg.w_ore = 0.0;
-        cfg.w_vulnerability = 0.0;
+        cfg.w_opening = 0.0;
         cfg.w_weakness = 0.0;
         cfg.w_grudge = 0.0;
-        cfg.w_guild = 0.0;
-        cfg.w_speed = 0.0;
-        cfg.w_history = 0.0;
         assert_eq!(score(&cand(), &cfg), 0.0);
     }
 
     #[test]
-    fn siege_gives_a_non_vulnerable_target_partial_credit_but_only_when_allowed() {
+    fn siege_gives_a_closed_window_partial_credit_but_only_when_the_posture_sieges() {
         isolate_lists();
         let mut cfg = AutoRaidConfig::default();
         let mut c = cand();
         c.vulnerable = false;
-        let closed = score(&c, &cfg);
-        cfg.allow_siege = true;
-        assert!(score(&c, &cfg) > closed);
+        let sieging = score(&c, &cfg);
+        cfg.apply_posture(RaidPosture::Cautious);
+        assert!(score(&c, &cfg) < sieging);
     }
 
-    /// Aggressive posture is the only configuration that lets a non-vulnerable
-    /// target through the gate — and it must also turn siege on, because
-    /// otherwise the raider would sit at the planet doing nothing until the
-    /// abort timer fired. The two settings have to move together.
+    /// Every posture that lets a closed window through the gate must also
+    /// siege, or the raider would sit at the planet doing nothing until the
+    /// give-up timer fired. One switch, `posture`, decides both.
     #[test]
-    fn only_aggressive_dispatches_against_a_closed_window_and_it_sieges() {
+    fn a_posture_that_accepts_a_closed_window_sieges() {
         isolate_lists();
         let mut c = cand();
         c.vulnerable = false;
-
         let mut cfg = AutoRaidConfig::default();
-        for p in [RaidPosture::Cautious, RaidPosture::Opportunist] {
+        for p in [RaidPosture::Cautious, RaidPosture::Opportunist, RaidPosture::Aggressive] {
             cfg.apply_posture(p);
-            assert!(gate(&c, &cfg, 0.0).is_some(), "{p:?} must refuse a closed window");
+            assert_eq!(gate(&c, &cfg, 0.0).is_none(), cfg.sieges(), "{p:?}");
         }
-        cfg.apply_posture(RaidPosture::Aggressive);
-        assert!(gate(&c, &cfg, 0.0).is_none(), "aggressive should accept it");
-        assert!(cfg.allow_siege, "…and must be able to force the window open");
-        assert!(cfg.siege_max_shots > 0, "…with a non-zero shot budget");
     }
 
+    /// A target we keep bouncing off backs off geometrically: 27 identical
+    /// failed trips two hours apart is the pattern this exists to end.
     #[test]
-    fn raid_window_is_open_when_unconfigured() {
-        isolate_lists();
-        let mut cfg = AutoRaidConfig::default();
-        assert!(in_raid_window(&cfg, 3));
-        cfg.raid_hours_utc = vec![15, 16, 17, 18, 19, 20];
-        assert!(in_raid_window(&cfg, 17));
-        assert!(!in_raid_window(&cfg, 3));
+    fn a_failed_attempt_doubles_the_cooldown_up_to_a_cap() {
+        assert_eq!(effective_cooldown_mins(120, 0), 120.0);
+        assert_eq!(effective_cooldown_mins(120, 1), 240.0);
+        assert_eq!(effective_cooldown_mins(120, 3), 960.0);
+        assert_eq!(effective_cooldown_mins(120, 4), 1920.0);
+        assert_eq!(effective_cooldown_mins(120, 9), 1920.0, "capped at 2^4");
     }
 
     #[test]

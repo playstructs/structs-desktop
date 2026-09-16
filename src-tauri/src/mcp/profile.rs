@@ -291,10 +291,21 @@ pub struct Profile {
     pub defence: DefenceStance,
     #[serde(default)]
     pub avatar: Option<AvatarLayers>,
+    /// How often autonomous replication picks this snapshot, relative to the
+    /// other snapshots (`auto_replicate`). Weights are RELATIVE, never
+    /// percentages: 60 · 25 · 15 and 12 · 5 · 3 mean the same mix. 0 means
+    /// the loop never picks it — it stays assignable by hand. Defaults to 1
+    /// so a profile stored before the field existed keeps an equal share.
+    #[serde(default = "default_replication_weight")]
+    pub replication_weight: f64,
 }
 
 fn current_schema() -> u32 {
     SCHEMA
+}
+
+fn default_replication_weight() -> f64 {
+    1.0
 }
 
 /// The shipped profiles, derived from the SAME const tables the loops used
@@ -329,6 +340,7 @@ pub static BUILTIN: LazyLock<Vec<Profile>> = LazyLock::new(|| {
                 ..Default::default()
             },
             avatar: None,
+            replication_weight: 25.0,
         },
         Profile {
             id: "productive".into(),
@@ -352,6 +364,9 @@ pub static BUILTIN: LazyLock<Vec<Profile>> = LazyLock::new(|| {
                 ..Default::default()
             },
             avatar: None,
+            // The flywheel is what replication is for; bait and raiders are
+            // the seasoning. Relative, so a fork can be weighted beside them.
+            replication_weight: 60.0,
         },
         Profile {
             id: "raider".into(),
@@ -375,6 +390,7 @@ pub static BUILTIN: LazyLock<Vec<Profile>> = LazyLock::new(|| {
                 guards_on_blocker: 2,
             },
             avatar: None,
+            replication_weight: 15.0,
         },
     ]
 });
@@ -396,6 +412,12 @@ pub fn validate(p: &Profile) -> Result<(), String> {
     }
     if p.label.trim().is_empty() {
         return Err(format!("profile '{}' needs a label", p.id));
+    }
+    if !p.replication_weight.is_finite() || !(0.0..=100.0).contains(&p.replication_weight) {
+        return Err(format!(
+            "profile '{}': replication weight {} is outside 0..100",
+            p.id, p.replication_weight
+        ));
     }
     if p.schema > SCHEMA {
         return Err(format!(
@@ -780,6 +802,7 @@ pub fn find(id: &str) -> Profile {
             limits: TemperamentLimits::default(),
             defence: DefenceStance::default(),
             avatar: None,
+            replication_weight: 1.0,
         })
 }
 
@@ -991,6 +1014,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn replication_weight_is_relative_and_bounded() {
+        // Built-ins carry the shipped mix; a stored profile without the field
+        // loads at 1 (an equal share), never at 0 (never picked).
+        assert_eq!(find("productive").replication_weight, 60.0);
+        assert_eq!(find("bait").replication_weight, 25.0);
+        assert_eq!(find("raider").replication_weight, 15.0);
+        let old: Profile = serde_json::from_value(serde_json::to_value(sample()).map(|mut v| {
+            v.as_object_mut().unwrap().remove("replication_weight");
+            v
+        }).unwrap()).unwrap();
+        assert_eq!(old.replication_weight, 1.0);
+        let mut p = sample();
+        p.replication_weight = -1.0;
+        assert!(validate(&p).unwrap_err().contains("replication weight"));
+        p.replication_weight = 101.0;
+        assert!(validate(&p).is_err());
+        p.replication_weight = 0.0;
+        assert!(validate(&p).is_ok(), "0 is a legal weight: never picked, still assignable");
+    }
+
     fn sample() -> Profile {
         Profile {
             id: "vulture".into(),
@@ -1007,6 +1051,7 @@ mod tests {
             limits: TemperamentLimits::default(),
             defence: DefenceStance::default(),
             avatar: None,
+            replication_weight: 1.0,
         }
     }
 

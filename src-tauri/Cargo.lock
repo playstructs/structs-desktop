@@ -5715,6 +5715,7 @@ dependencies = [
  "image",
  "k256",
  "keyring",
+ "libc",
  "notify-rust",
  "num_cpus",
  "objc2",

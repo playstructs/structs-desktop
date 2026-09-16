@@ -623,6 +623,18 @@ pub async fn sync_game_state(
         tokio::spawn(async move {
             crate::mcp::delegation::tick(&app_dg, false).await;
         });
+        // Replication rides the same tick, AFTER delegation so a fresh
+        // replicant is grantable before any other loop touches it. The rates
+        // sampler behind the Replication card runs whether or not the loop is
+        // on — the card's figures are not a reward for switching it on.
+        let app_rp = app_handle.clone();
+        tokio::spawn(async move {
+            crate::mcp::auto_replicate::tick(&app_rp, false).await;
+        });
+        let app_rt = app_handle.clone();
+        tokio::spawn(async move {
+            crate::mcp::rates::tick(&app_rt).await;
+        });
         // Combat loops. auto_response deliberately rides the sync tick at its
         // own 20 s cadence — a raid resolves in about four minutes end to end,
         // and every defensive win on record fired back inside the first two.

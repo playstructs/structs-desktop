@@ -60,56 +60,30 @@ pub enum Autonomy {
     Auto,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ResponseMode {
-    /// Never shoot: refine the threatened ore and alert. No offensive tx at all.
-    Harden,
-    /// Shoot the struct that shot us.
-    Counter,
-    /// Prefer the raider's Command Ship — killing it ends the raid outright and
-    /// is the only deterministic defensive win in the data (16/16).
-    #[default]
-    Decapitate,
-}
+/// Ignore repeat triggers from the same attacker inside this window for plain
+/// skirmishes; one fight produces dozens of events. Raids bypass it entirely
+/// (see `cooldown_gags_us`).
+const INCIDENT_COOLDOWN_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AutoResponseConfig {
     /// Master on/off. Off by default — it can auto-sign attacks.
     pub enabled: bool,
     /// advise (surface the plan) | auto (fire).
     pub autonomy: Autonomy,
     /// Scan cadence. Short on purpose: the whole response budget is ~4 minutes.
+    /// Raid events also force a tick, so this is the fallback, not the latency.
     pub interval_secs: u64,
-    pub mode: ResponseMode,
-    /// Cap on shots fired per incident. Each shot is one player's whole charge bar.
-    pub max_shots_per_incident: usize,
-    /// Rolling one-hour ceiling across all incidents — the runaway guard.
-    ///
-    /// Sized so ONE raid can actually be fought to a conclusion. A 6 HP Command
-    /// Ship behind a blocker takes ~1 net damage per shot (observed: "2 dmg,
-    /// 1 blocked"), so ending a raid needs 6-12 shots inside a ~4 minute
-    /// window. At the old 30/hour a defender ran dry after two minutes and the
-    /// raid finished unopposed.
+    /// Rolling one-hour ceiling across all incidents — the runaway guard, and
+    /// the ONLY cap. Per-incident caps decided nothing in the record: winning
+    /// defences used 3–5 shots, losing ones 10–20, and the operator raised
+    /// every cap to the sky within a week. One raid is bounded by its own
+    /// four-minute window and by how many hulls stand at the planet.
     pub max_shots_per_hour: usize,
-    /// Ignore repeat triggers from the same attacker inside this window; one
-    /// fight produces dozens of events.
-    pub incident_cooldown_secs: u64,
-    /// Charge headroom required above the weapon's cost before a struct fires.
-    pub min_charge_margin: u64,
-    /// Rank shooters sitting in an ambit the target's defenders cannot counter
-    /// into — the docs' "single biggest combat lever".
-    pub prefer_counter_free_ambit: bool,
-    /// On a raid alarm, immediately refine the attacked player's stored ore.
-    /// Refining is the only thing that makes ore unstealable, and a raid seizes
-    /// ALL of it — the docs rank this the highest-impact defensive action.
-    pub panic_refine: bool,
     /// Let the primary contribute shots. Off by default: its charge is better
     /// spent on its own defense, and it is the galaxy's biggest ore pile.
     pub include_primary_shooters: bool,
-    /// Compute and log everything, sign nothing — independent of `autonomy` so
-    /// you can rehearse an `auto` config safely.
-    pub dry_run: bool,
 }
 
 impl Default for AutoResponseConfig {
@@ -118,15 +92,8 @@ impl Default for AutoResponseConfig {
             enabled: false,
             autonomy: Autonomy::Advise,
             interval_secs: 20,
-            mode: ResponseMode::Decapitate,
-            max_shots_per_incident: 8,
-            max_shots_per_hour: 120,
-            incident_cooldown_secs: 300,
-            min_charge_margin: 2,
-            prefer_counter_free_ambit: true,
-            panic_refine: true,
+            max_shots_per_hour: 240,
             include_primary_shooters: false,
-            dry_run: false,
         }
     }
 }
@@ -648,7 +615,7 @@ async fn handle_alarm(
     // So whenever we are raided while our own fleet is away, recall it. This is
     // deliberately not gated on `mode`: like `panic_refine` it is purely
     // defensive and never fires a shot.
-    if let (true, Some(defender), false) = (alarm.is_raid, &alarm.defender_player, cfg.dry_run) {
+    if let (true, Some(defender)) = (alarm.is_raid, &alarm.defender_player) {
         // Power first, then position. A Command Ship that is merely switched
         // OFF arms `blockStartRaid` with the fleet still on station, and it is
         // also the precondition the chain checks before allowing a recall — so
@@ -675,26 +642,7 @@ async fn handle_alarm(
     // have to survive. At the shipped 300s cooldown a defender got ONE shot per
     // raid against an attacker firing every 38 seconds.
     let cooldown_key = attacker_player.clone().unwrap_or_else(|| alarm.planet_id.clone());
-    if cooldown_gags_us(alarm.is_raid, in_cooldown(&cooldown_key, cfg.incident_cooldown_secs)) {
-        return Ok(());
-    }
-
-    if cfg.mode == ResponseMode::Harden {
-        record_incident(Incident {
-            at_ms: now_millis(),
-            planet_id: alarm.planet_id.clone(),
-            defender_player: alarm.label.clone(),
-            attacker_player,
-            attacker_struct: attack.as_ref().and_then(|a| a.attacker_struct_id.clone()),
-            fire_target: None,
-            target_kind: "none".into(),
-            mode: "harden".into(),
-            shots_planned: 0,
-            shots_fired: 0,
-            projected_damage: 0.0,
-            note: "harden mode — refined ore and alerted, no offensive response".into(),
-        });
-        alert(app, alarm, "hardening only (mode: harden)");
+    if cooldown_gags_us(alarm.is_raid, in_cooldown(&cooldown_key, INCIDENT_COOLDOWN_SECS)) {
         return Ok(());
     }
 
@@ -723,19 +671,15 @@ async fn handle_alarm(
 
     // ── 4. Pick what to shoot. ──
     // Decapitate: the raider's Command Ship. Killing it while its fleet is away
-    // sets `attackerDefeated` and sends the fleet home — 16/16 in the data, and
-    // the only mechanic that ends a raid without losing the ore.
-    let (fire_target, target_kind) = match cfg.mode {
-        ResponseMode::Decapitate => match raider_fleet.as_ref().and_then(|f| f.command_struct.clone()) {
-            Some(cmd) => (Some(cmd), "raider_command_ship"),
-            // No live Command Ship (fleet already left, or it is a plain
-            // attack rather than a raid) — fall back to the shooter.
-            None => (
-                attack.as_ref().and_then(|a| a.attacker_struct_id.clone()),
-                "attacking_struct",
-            ),
-        },
-        _ => (
+    // sets `attackerDefeated` and sends the fleet home — every one of the 53
+    // attackerDefeated raids on record, and the only mechanic that ends a raid
+    // without losing the ore. There is no "shoot whoever shot us" mode any
+    // more: it was strictly worse and nobody used it.
+    let (fire_target, target_kind) = match raider_fleet.as_ref().and_then(|f| f.command_struct.clone()) {
+        Some(cmd) => (Some(cmd), "raider_command_ship"),
+        // No live Command Ship (fleet already left, or it is a plain
+        // attack rather than a raid) — fall back to the shooter.
+        None => (
             attack.as_ref().and_then(|a| a.attacker_struct_id.clone()),
             "attacking_struct",
         ),
@@ -884,31 +828,24 @@ async fn handle_alarm(
         // insufficient-charge reject that costs one ledgered tx — the raid
         // costs the fleet. Skip only on a KNOWN-low reading.
         if let Some(c) = charge_ready.get(pid) {
-            if *c < weapon_cost(&r.struct_id, &r.weapon) + cfg.min_charge_margin {
+            if *c < weapon_cost(&r.struct_id, &r.weapon) {
                 continue;
             }
         }
+        // Least counter risk first, then damage. counter_risk is the honest
+        // number (it includes same-ambit counters that reach-based exposure
+        // misses — the CMD's 2/2). This used to be a switch; off, the loop
+        // fed 3 HP hulls into a defended Command Ship's counters for nothing.
         let e = best.entry(pid.to_string()).or_insert(r);
-        let better = if cfg.prefer_counter_free_ambit {
-            // counter_risk is the honest number (it includes same-ambit
-            // counters that reach-based exposure misses — the CMD's 2/2).
-            (r.counter_risk, -r.score) < (e.counter_risk, -e.score)
-        } else {
-            r.score > e.score
-        };
-        if better {
+        if (r.counter_risk, -r.score) < (e.counter_risk, -e.score) {
             *e = r;
         }
     }
     let mut shots: Vec<&crate::mcp::tools::intel::StrikeRow> = best.into_values().collect();
     shots.sort_by(|a, b| {
-        if cfg.prefer_counter_free_ambit {
-            a.counter_risk
-                .cmp(&b.counter_risk)
-                .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
-        } else {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
-        }
+        a.counter_risk
+            .cmp(&b.counter_risk)
+            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
     });
     // Reorder by temperament. The list is already filtered to reachable shots
     // with charge ready, so every ordering here is legal — what varies is which
@@ -938,8 +875,6 @@ async fn handle_alarm(
         }
         shots = reordered;
     }
-    shots.truncate(cfg.max_shots_per_incident);
-
     let projected: f64 = shots.iter().map(|s| s.expected_dmg).sum();
     let planned = shots.len();
 
@@ -957,7 +892,7 @@ async fn handle_alarm(
     }
 
     // ── 6. Fire, or surface the plan. ──
-    let advise = cfg.autonomy == Autonomy::Advise || cfg.dry_run;
+    let advise = cfg.autonomy == Autonomy::Advise;
     let mut fired = 0usize;
     if advise {
         let lines: Vec<String> = shots
@@ -1653,7 +1588,6 @@ mod tests {
         assert!(!c.enabled, "must not fight on first launch");
         assert_eq!(c.autonomy, Autonomy::Advise, "enabling it shows the plan first");
         assert!(!c.include_primary_shooters, "the primary's charge stays home");
-        assert_eq!(c.mode, ResponseMode::Decapitate);
     }
 
     /// A raid must never be gagged by the per-attacker cooldown: the raider
@@ -1794,11 +1728,24 @@ mod tests {
         INCIDENT_SEEN.lock().unwrap().clear();
     }
 
+    /// A config file written before the 2026-09-16 simplification carries
+    /// fields that no longer exist (mode, per-incident cap, panic_refine…).
+    /// It must still load with `enabled` intact: `load_config` falls back to
+    /// `Default` on a parse failure, and Default is OFF — the same silent
+    /// switch-off that took auto_raid offline for a day once.
     #[test]
-    fn modes_round_trip_through_json() {
-        for m in ["harden", "counter", "decapitate"] {
-            let parsed: ResponseMode = serde_json::from_str(&format!("\"{m}\"")).unwrap();
-            assert_eq!(serde_json::to_string(&parsed).unwrap(), format!("\"{m}\""));
-        }
+    fn an_older_config_file_still_loads_and_stays_enabled() {
+        let older = r#"{
+            "enabled": true, "autonomy": "auto", "interval_secs": 20,
+            "mode": "decapitate", "max_shots_per_incident": 500,
+            "max_shots_per_hour": 524, "incident_cooldown_secs": 20,
+            "min_charge_margin": 0, "prefer_counter_free_ambit": false,
+            "panic_refine": true, "include_primary_shooters": false,
+            "dry_run": false
+        }"#;
+        let cfg: AutoResponseConfig = serde_json::from_str(older).expect("older file must load");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.autonomy, Autonomy::Auto);
+        assert_eq!(cfg.max_shots_per_hour, 524, "the operator's value survives");
     }
 }

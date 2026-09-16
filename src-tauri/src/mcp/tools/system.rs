@@ -69,17 +69,14 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 "auto_response": {
                     "enabled": resp_cfg.enabled,
                     "autonomy": format!("{:?}", resp_cfg.autonomy),
-                    "dry_run": resp_cfg.dry_run,
                     "WILL_NOT_FIRE": !resp_cfg.enabled
-                        || resp_cfg.dry_run
                         || format!("{:?}", resp_cfg.autonomy).eq_ignore_ascii_case("advise"),
                 },
                 "auto_raid": {
                     "enabled": raid_cfg.enabled,
                     "autonomy": format!("{:?}", raid_cfg.autonomy),
-                    "dry_run": raid_cfg.dry_run,
+                    "posture": format!("{:?}", raid_cfg.posture).to_lowercase(),
                     "WILL_NOT_DISPATCH": !raid_cfg.enabled
-                        || raid_cfg.dry_run
                         || format!("{:?}", raid_cfg.autonomy).eq_ignore_ascii_case("advise"),
                 },
             });

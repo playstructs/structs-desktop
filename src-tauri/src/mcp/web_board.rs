@@ -961,6 +961,16 @@ async fn board_invoke(
                 .into(),
         ),
         "terminal_market" => from_result(crate::mcp::terminal::terminal_market().await),
+        // The Replication card: a read, and the press (the bearer token is
+        // the operator authority here, as it is for mcp_config_set).
+        "terminal_replication" => from_result(crate::mcp::auto_replicate::terminal_replication(st.app.clone()).await),
+        "mcp_replicate" => from_result(
+            crate::mcp::auto_replicate::mcp_replicate(
+                st.app.clone(),
+                body.get("n").and_then(|v| v.as_u64()).map(|n| n as u32),
+            )
+            .await,
+        ),
         "terminal_ore_radar" => ok_json(crate::mcp::terminal::terminal_ore_radar(
             body.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize),
         )),

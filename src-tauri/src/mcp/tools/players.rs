@@ -929,48 +929,19 @@ pub async fn execute(
                 };
                 changed = true;
             }
-            if let Some(v) = a.get("mode").and_then(|v| v.as_str()) {
-                cfg.mode = match v.to_ascii_lowercase().as_str() {
-                    "harden" => ar::ResponseMode::Harden,
-                    "counter" => ar::ResponseMode::Counter,
-                    "decapitate" => ar::ResponseMode::Decapitate,
-                    other => {
-                        return vec![Content::text(format!(
-                            "mode '{other}' unknown — use harden | counter | decapitate."
-                        ))]
-                    }
-                };
-                changed = true;
-            }
             // Keep the floor at 5 s: the loop is deliberately fast, but a
             // 0-second interval would spin the event drain on every sync tick.
             if let Some(v) = a.get("interval_secs").and_then(|v| v.as_u64()) {
                 cfg.interval_secs = v.max(5);
                 changed = true;
             }
-            for (key, slot) in [
-                ("max_shots_per_incident", &mut cfg.max_shots_per_incident),
-                ("max_shots_per_hour", &mut cfg.max_shots_per_hour),
-            ] {
-                if let Some(v) = a.get(key).and_then(|v| v.as_u64()) {
-                    *slot = v as usize;
-                    changed = true;
-                }
-            }
-            if let Some(v) = a.get("incident_cooldown_secs").and_then(|v| v.as_u64()) {
-                cfg.incident_cooldown_secs = v;
+            if let Some(v) = a.get("max_shots_per_hour").and_then(|v| v.as_u64()) {
+                cfg.max_shots_per_hour = v as usize;
                 changed = true;
             }
-            for (key, slot) in [
-                ("prefer_counter_free_ambit", &mut cfg.prefer_counter_free_ambit),
-                ("panic_refine", &mut cfg.panic_refine),
-                ("include_primary_shooters", &mut cfg.include_primary_shooters),
-                ("dry_run", &mut cfg.dry_run),
-            ] {
-                if let Some(v) = a.get(key).and_then(|v| v.as_bool()) {
-                    *slot = v;
-                    changed = true;
-                }
+            if let Some(v) = a.get("include_primary_shooters").and_then(|v| v.as_bool()) {
+                cfg.include_primary_shooters = v;
+                changed = true;
             }
             if changed {
                 ar::set(cfg.clone());
@@ -982,16 +953,13 @@ pub async fn execute(
             }
             let (used, cap) = ar::shot_budget();
             vec![Content::text(format!(
-                "Raid response {} ({:?}, mode {:?}) — scans every {}s · ≤{} shots/incident · budget {}/{} this hour · counter-free ambit {} · panic refine {}{}\n{}",
+                "Raid response {} ({:?}) — scans every {}s · budget {}/{} shots this hour · primary shoots {}{}\n{}",
                 if cfg.enabled { "ON" } else { "OFF" },
                 cfg.autonomy,
-                cfg.mode,
                 cfg.interval_secs,
-                cfg.max_shots_per_incident,
                 used,
                 cap,
-                cfg.prefer_counter_free_ambit,
-                cfg.panic_refine,
+                cfg.include_primary_shooters,
                 if changed { " (updated)" } else { "" },
                 if cfg.enabled {
                     "Watch the WAR page's INCIDENTS card. In `advise` it posts the plan; set autonomy:\"auto\" to have it fire."
@@ -1265,14 +1233,10 @@ pub async fn execute(
             for (key, slot) in [
                 ("min_ore", &mut cfg.min_ore),
                 ("min_score", &mut cfg.min_score),
-                ("abort_cmd_hp_below", &mut cfg.abort_cmd_hp_below),
                 ("w_ore", &mut cfg.w_ore),
-                ("w_vulnerability", &mut cfg.w_vulnerability),
+                ("w_opening", &mut cfg.w_opening),
                 ("w_weakness", &mut cfg.w_weakness),
                 ("w_grudge", &mut cfg.w_grudge),
-                ("w_guild", &mut cfg.w_guild),
-                ("w_speed", &mut cfg.w_speed),
-                ("w_history", &mut cfg.w_history),
             ] {
                 if let Some(v) = a.get(key).and_then(|v| v.as_f64()) {
                     *slot = v;
@@ -1280,49 +1244,20 @@ pub async fn execute(
                 }
             }
             for (key, slot) in [
-                ("max_raid_minutes", &mut cfg.max_raid_minutes),
+                ("give_up_after_mins", &mut cfg.give_up_after_mins),
                 ("target_cooldown_mins", &mut cfg.target_cooldown_mins),
-                ("skip_if_defender_active_mins", &mut cfg.skip_if_defender_active_mins),
-                ("max_raid_wall_minutes", &mut cfg.max_raid_wall_minutes),
             ] {
                 if let Some(v) = a.get(key).and_then(|v| v.as_u64()) {
                     *slot = v as u32;
                     changed = true;
                 }
             }
-            for (key, slot) in [
-                ("max_defenders", &mut cfg.max_defenders),
-                ("max_concurrent_raids", &mut cfg.max_concurrent_raids),
-                ("siege_max_shots", &mut cfg.siege_max_shots),
-                ("evaluate_per_scan", &mut cfg.evaluate_per_scan),
-                ("sweep_max_pages", &mut cfg.sweep_max_pages),
-            ] {
-                if let Some(v) = a.get(key).and_then(|v| v.as_u64()) {
-                    *slot = v as usize;
-                    changed = true;
-                }
-            }
-            for (key, slot) in [
-                ("require_vulnerable_now", &mut cfg.require_vulnerable_now),
-                ("allow_siege", &mut cfg.allow_siege),
-                ("return_home_after", &mut cfg.return_home_after),
-                ("dry_run", &mut cfg.dry_run),
-            ] {
-                if let Some(v) = a.get(key).and_then(|v| v.as_bool()) {
-                    *slot = v;
-                    changed = true;
-                }
+            if let Some(v) = a.get("max_concurrent_raids").and_then(|v| v.as_u64()) {
+                cfg.max_concurrent_raids = v as usize;
+                changed = true;
             }
             if let Some(v) = a.get("interval_secs").and_then(|v| v.as_u64()) {
                 cfg.interval_secs = v.max(60);
-                changed = true;
-            }
-            if let Some(arr) = a.get("raid_hours_utc").and_then(|v| v.as_array()) {
-                cfg.raid_hours_utc = arr.iter().filter_map(|v| v.as_u64()).map(|v| (v % 24) as u32).collect();
-                changed = true;
-            }
-            if let Some(arr) = a.get("raider_players").and_then(|v| v.as_array()) {
-                cfg.raider_players = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
                 changed = true;
             }
             if changed {
@@ -1335,16 +1270,15 @@ pub async fn execute(
             }
             let board = arl::target_board();
             let mut out = format!(
-                "Raid targeting {} ({:?}, posture {:?}) — min_ore {:.0} · min_score {:.0} · ≤{} min proof · ≤{} defenders · vulnerable-only {} · siege {} · ≤{} concurrent{}\n",
+                "Raid targeting {} ({:?}, posture {:?}) — min_ore {:.0} · min_score {:.0} · siege {} · give up after {} min · cooldown {} min (doubles per failure) · ≤{} concurrent{}\n",
                 if cfg.enabled { "ON" } else { "OFF" },
                 cfg.autonomy,
                 cfg.posture,
                 cfg.min_ore,
                 cfg.min_score,
-                cfg.max_raid_minutes,
-                cfg.max_defenders,
-                cfg.require_vulnerable_now,
-                cfg.allow_siege,
+                if cfg.sieges() { "yes" } else { "no (cautious: open windows only)" },
+                cfg.give_up_after_mins,
+                cfg.target_cooldown_mins,
                 cfg.max_concurrent_raids,
                 if changed { " (updated)" } else { "" }
             );
@@ -1353,9 +1287,16 @@ pub async fn execute(
             } else {
                 out.push_str("Top targets:\n");
                 for c in board.iter().take(8) {
+                    // Three states, not two: a target can clear every gate and
+                    // still sit under min_score — printing that as GO sent
+                    // operators hunting for a gate that was not the problem.
                     out.push_str(&format!(
                         "  {} {} ({}) — {:.0} ore · shield {} (~{:.0} min) · {} defenders · score {:.0} — {}\n",
-                        if c.blocked_by.is_none() { "GO  " } else { "no-go" },
+                        match (c.blocked_by.is_none(), c.score >= cfg.min_score) {
+                            (true, true) => "GO   ",
+                            (true, false) => "low  ",
+                            _ => "no-go",
+                        },
                         c.name,
                         c.planet_id,
                         c.stored_ore,
@@ -1371,7 +1312,7 @@ pub async fn execute(
             if !active.is_empty() {
                 out.push_str(&format!("{} expedition(s) in flight.\n", active.len()));
             }
-            out.push_str("Raids are flown by VPlayerRole::Raider accounts only — the primary never leaves home.\n");
+            out.push_str("Raids are flown by players whose profile grants `raids` — the primary never leaves home. `low` = passed every gate but under min_score.\n");
             vec![Content::text(out)]
         }
 

@@ -514,6 +514,19 @@ cat > "$FIX" <<'EOF'
      * solves: "1 alpha" beside "3 ohm" is not a comparison until both are
      * restated off the guild bank's collateral ratio, which is what
      * `alpha_per_kw_day` is. */
+    /* The Replication card. `mcp_replicate` answers like the Rust press:
+     * the queue after the press, so a stale optimistic count is corrected. */
+    terminal_replication: {
+      queue: 7, replicants: 182, incubating: [{ index: 1204, name: 'Kelmoran', snapshot: 'productive', started_ms: 0 }],
+      room: 2, room_now: 2, room_reason: 'energy', max_per_round: 5, enabled: true,
+      held: { n: 6, reason: 'energy' }, next_round_ms: 192000, last_round_ms: 0, births_24h: 11, running: false,
+      energy: { used_mw: 38000000000, available_mw: 46000000000, connections: 183, share_if_one_more_mw: 4300000, supportable_more: 2 },
+      hashing: { cpu_1m: 0.62, pending: 1657, workers: 8, running: 2, max_concurrent: 12, saturated: false },
+      rates: { ore_g_h: 1200, alpha_ualpha_h: 340000000, seized_g_h: 210, window_h: 1.02, partial: false, kills_24h: 41, losses_24h: 23, kd: 1.78, sampled_at_ms: 0, samples: 5, next_sample_ms: 900000 },
+      config: { enabled: true, interval_secs: 300, max_per_round: 5, min_share_mw: 4000000, cpu_ceiling: 0.85, pending_per_worker: 4, ceiling: 0, dry_run: false, random_rounds: true, weights: {} },
+      snapshots: [{ id: 'bait', weight: 25, n: 40 }, { id: 'productive', weight: 60, n: 120 }, { id: 'raider', weight: 15, n: 22 }],
+    },
+    mcp_replicate: function (a) { return { queue: 7 + ((a && a.n) || 1), replicants: 182, incubating: [], held: { n: 0, reason: null } }; },
     terminal_market: { at_ms: 0, height: 4200719,
       best_alpha_per_kw_day: 16364, median_alpha_per_kw_day: 49091,
       priced: 2, unpriced: 0, open_capacity_mw: 1050000000,

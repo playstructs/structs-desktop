@@ -418,3 +418,104 @@ mod tests {
         assert_eq!(store.players[0].role, VPlayerRole::Bait);
     }
 }
+
+// ── THE signup path ──────────────────────────────────────────────────────────
+
+/// What one birth produced, for callers that count.
+#[derive(Debug, Clone, Serialize)]
+pub struct Spawned {
+    pub index: u32,
+    pub name: String,
+    pub address: String,
+    /// None while the chain has not assigned an id yet (the delegation
+    /// backfill and the roster sweep adopt it later).
+    pub player_id: Option<String>,
+    /// Whether the bootstrap explore landed. Without it a player is an empty
+    /// guild membership — no planet, no fleet, no Command Ship — until
+    /// `auto_harvest` explores it.
+    pub explored: bool,
+}
+
+/// Birth one virtual player: derive HD `index` → guild signup through the
+/// webview façade (keys never leave JS; ~180 s budget) → registry row →
+/// grant the primary full control → bootstrap explore → role portrait.
+///
+/// The mass launch and `auto_replicate` both come through here so the steps
+/// cannot drift apart. `profile` is the behavioural snapshot the row is born
+/// with (`None` = the built-in named by `role`). Everything after the registry
+/// write is best-effort and reported, not fatal: a signup that landed is a
+/// player we own, whatever happened to its first transactions.
+pub async fn spawn_one(
+    app: &tauri::AppHandle,
+    index: u32,
+    name: String,
+    auto_name: bool,
+    role: VPlayerRole,
+    profile: Option<String>,
+    guild_id: Option<String>,
+) -> Result<Spawned, String> {
+    use crate::mcp::telemetry::{tlog, Sev};
+    use serde_json::json;
+
+    let data = crate::mcp::vplayer_bridge::call(
+        app,
+        "signup",
+        json!({ "index": index, "name": name, "guild_id": guild_id }),
+        180,
+    )
+    .await?;
+    let address = data.get("address").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let player_id = data.get("player_id").and_then(|v| v.as_str()).map(String::from);
+    if address.is_empty() {
+        return Err(format!("signup returned no address: {data}"));
+    }
+    {
+        let mut reg = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+        reg.players.push(VirtualPlayer {
+            index,
+            address: address.clone(),
+            player_id: player_id.clone(),
+            name: name.clone(),
+            created_at: crate::hasher::types::now_millis(),
+            role,
+            profile,
+            auto_name,
+        });
+        let _ = reg.save();
+    }
+    let mut explored = false;
+    if let Some(pid) = player_id.as_deref() {
+        // Started before the explore rather than after: an explore that fails
+        // must not leave the player unreachable from the primary key.
+        crate::mcp::delegation::grant_on_create(app, index, pid);
+        match crate::mcp::tx_retry::sign_with_retry(
+            app,
+            index,
+            "/structs.structs.MsgPlanetExplore",
+            json!({ "playerId": pid }),
+            &format!("launch:{pid}"),
+        )
+        .await
+        {
+            Ok(_) => {
+                invalidate_owned(pid);
+                explored = true;
+            }
+            Err(e) => tlog("launch", Sev::Warn, format!("{name} created but explore failed: {e}")),
+        }
+        // Its role-themed portrait, so it lands in the roster already looking
+        // like its squad. Ledgered so the attempt reaches the Tx page.
+        let attrs = crate::mcp::pfp::role_pfp_attrs(role.as_str(), index);
+        let _ = crate::mcp::tx_retry::sign_with_retry(
+            app,
+            index,
+            "/structs.structs.MsgPlayerUpdatePfpClientRenderAttributes",
+            json!({ "playerId": pid, "pfpClientRenderAttributes": attrs }),
+            &format!("pfp:{pid}"),
+        )
+        .await;
+    } else {
+        tlog("launch", Sev::Warn, format!("{name} created; player id pending — the backfill adopts it"));
+    }
+    Ok(Spawned { index, name, address, player_id, explored })
+}

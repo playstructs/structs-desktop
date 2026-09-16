@@ -72,7 +72,7 @@
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
     ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats']],
-    ['Armada', ['armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
+    ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
     ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['System', ['health']],
@@ -1561,7 +1561,9 @@
     LOG: ['log', 'id'], BATTLE: ['log', 'id'],
     POW: ['pow'], HASH: ['pow'], SOLVE: ['solve'], TASKS: ['tasks'], QUEUE: ['queue'], TX: ['queue'], RESULTS: ['results'],
     GRID: ['grid'], FUEL: ['fuel'], ALLOC: ['allocations'], ALLOCATIONS: ['allocations'], MARGINS: ['halt'],
-    ARMADA: ['armada'], ROSTER: ['armada'], SQUAD: ['armada'], RAIDS: ['raids'], POSTURE: ['posture'], WAR: ['posture'], TARGETS: ['targets'],
+    ARMADA: ['armada'], ROSTER: ['armada'], SQUAD: ['armada'],
+    // The lore wrapper over launching players: one button, one switch.
+    REPLICATE: ['replication'], REPLICANTS: ['replication'], CLONE: ['replication'], RAIDS: ['raids'], POSTURE: ['posture'], WAR: ['posture'], TARGETS: ['targets'],
     GRUDGES: ['grudges'], VETOES: ['vetoes'], INCIDENTS: ['incidents'], WALLET: ['wallet', 'optid'], HEALTH: ['health'],
     SETTINGS: ['page', 'config'],
     STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], STREAM: ['feed'],

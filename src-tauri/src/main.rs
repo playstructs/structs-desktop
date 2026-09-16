@@ -102,6 +102,8 @@ fn main() {
             mcp::terminal::terminal_layout_get,
             mcp::terminal::terminal_layout_set,
             mcp::terminal::terminal_market,
+            mcp::auto_replicate::mcp_replicate,
+            mcp::auto_replicate::terminal_replication,
             mcp::terminal::terminal_ore_radar,
             mcp::terminal::terminal_agreements,
             mcp::terminal::terminal_guild_bank_mint,

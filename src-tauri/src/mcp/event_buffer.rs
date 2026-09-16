@@ -191,6 +191,9 @@ pub fn ingest(app: &tauri::AppHandle, event: GameEvent) {
     // Per-block sampling for the Game Stats window. Counter math only; the
     // per-block push inside is gated on that window existing.
     crate::mcp::game_stats::note_event(app, &event);
+    // Kills and losses for the Replication card's K/D, from the same volley
+    // frames the achievements fold reads — counted live, never re-walked.
+    crate::mcp::rates::on_grass(&event);
     // Live-relay to the Team Ops GRASS page when it exists (mirror of the
     // board_feed pattern). Board closing mid-emit is a benign race — the
     // event is already in the ring for the next back-fill.

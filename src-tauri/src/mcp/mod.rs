@@ -27,6 +27,8 @@ pub mod terminal;
 pub mod charts;
 pub mod auto_infuse;
 pub mod auto_sweep;
+pub mod auto_replicate;
+pub mod rates;
 pub mod game_stats;
 pub mod grass_native;
 pub mod guild_api;

@@ -1881,8 +1881,8 @@
     var next = Object.assign({}, cfg, { enabled: !cfg.enabled });
     return invoke('mcp_config_set', { domain: 'loop', payload: { loop: which, config: next } }).then(function () { T.refresh(ctx.id, true); }).catch(function (e) { Board.stamp && Board.stamp('loop: ' + e); });
   }
-  var AUTONOMY_OPTS = [{ value: 'off', label: 'off' }, { value: 'advise', label: 'advise' }, { value: 'act', label: 'act' }];
-  var POSTURE_OPTS = [{ value: 'opportunist', label: 'opportunist' }, { value: 'aggressive', label: 'aggressive' }, { value: 'defensive', label: 'defensive' }];
+  var AUTONOMY_OPTS = [{ value: 'advise', label: 'advise' }, { value: 'auto', label: 'auto' }];
+  var POSTURE_OPTS = [{ value: 'cautious', label: 'cautious' }, { value: 'opportunist', label: 'opportunist' }, { value: 'aggressive', label: 'aggressive' }];
   T.register('posture', {
     label: 'War posture', describe: function () { return 'War posture'; }, cadenceMs: 15000,
     render: function (host, p, ctx) {
@@ -1923,7 +1923,10 @@
           return { loop: 'raid', config: Object.assign({}, raid, { autonomy: v }) };
         }));
         strip.appendChild(pick('Raid posture', raid.posture, POSTURE_OPTS, function (v) {
-          return { loop: 'raid', config: Object.assign({}, raid, { posture: v }) };
+          // A posture rewrites the gates under it (same contract as the War
+          // page): tell the backend to apply it rather than round-trip stale
+          // gate values.
+          return { loop: 'raid', config: Object.assign({}, raid, { posture: v }), apply_posture: true };
         }));
         host.appendChild(strip);
       }).catch(function (e) { fail(host, 'war', e); });
@@ -2757,6 +2760,118 @@
           if (intent && intent.playerId) choose(intent.playerId, intent.name, intent.pfp_attrs, null);
         }).catch(function () {});
       });
+    },
+  });
+
+  // ── Replication (terminal_replication · mcp_replicate) ───────────────────
+  //
+  // The no-decisions wrapper over launching virtual players: one button that
+  // is always allowed, one switch, two counts, six figures. The card never
+  // creates a player. A press is `queue += 1`; the auto_replicate loop births
+  // what the machine can afford this round (energy room × hashing room × the
+  // per-round cap) and pushes `replication` on every change, so the counts
+  // move on the press and on each birth without waiting for the re-read.
+  // Vocabulary is the card's — replicate / replicant / behavioural snapshot;
+  // the commands keep launch / vplayer / profile.
+  var RP = { cards: {}, listening: false };
+  function rpListen() {
+    if (RP.listening || !window.StructsEvents) return;
+    RP.listening = true;
+    window.StructsEvents.listen('replication', function (e) {
+      var v = e && e.payload;
+      if (!v) return;
+      Object.keys(RP.cards).forEach(function (id) {
+        var c = RP.cards[id];
+        if (!c.host || !c.host.isConnected) { delete RP.cards[id]; return; }
+        c.paint(v);
+      });
+    });
+  }
+  var rpRate = function (v, fmt) { return v == null || isNaN(v) ? '—' : fmt(v) + '/h'; };
+  T.register('replication', {
+    label: 'Replication', describe: function () { return 'Replication'; }, cadenceMs: 5000, defaultWidth: 1,
+    render: function (host, p, ctx) {
+      return invoke('terminal_replication').then(function (d) {
+        host.innerHTML = '';
+        var wrap = H.el('div', 'rp');
+
+        // The button, and the switch under it.
+        var hero = H.el('div', 'rp-hero');
+        var btn = H.el('a', 'sui-screen-btn sui-mod-primary rp-replicate');
+        btn.href = 'javascript:void(0)';
+        btn.appendChild(H.el('span', 'sui-text-display', 'Replicate'));
+        hero.appendChild(btn);
+        var cfg = d.config || { enabled: !!d.enabled };
+        hero.appendChild(H.checkbox(!!d.enabled, 'Autonomous Replication', function (on) {
+          var next = JSON.parse(JSON.stringify(cfg));
+          next.enabled = on;
+          invoke('mcp_config_set', { domain: 'loop', payload: { loop: 'replicate', config: next } })
+            .then(function () { cfg = next; })
+            .catch(function (e) { Board.stamp && Board.stamp('replication: ' + e); });
+        }));
+        wrap.appendChild(hero);
+
+        // The two counts. The queue's second line is the one word of state
+        // that explains a number that is not moving: `held · energy`.
+        var counts = H.el('div', 'rp-counts');
+        var qV = H.el('span', 'sui-text-display'), qL2 = H.el('div', 'fstat-l fstat-l2 rp-queue-why hidden');
+        var qWrap = H.el('div', 'fstat-v is-q'); qWrap.appendChild(qV);
+        var qT = H.el('div', 'fstat rp-queue'); qT.appendChild(qWrap); qT.appendChild(H.el('div', 'fstat-l', 'Replication Queue')); qT.appendChild(qL2);
+        var nV = H.el('span', 'sui-text-display');
+        var nWrap = H.el('div', 'fstat-v is-n'); nWrap.appendChild(nV);
+        var nT = H.el('div', 'fstat rp-replicants'); nT.appendChild(nWrap); nT.appendChild(H.el('div', 'fstat-l', 'Replicants'));
+        counts.appendChild(qT); counts.appendChild(nT);
+        wrap.appendChild(counts);
+
+        var local = Number(d.queue) || 0;
+        var paint = function (v) {
+          if (v.queue != null) local = Number(v.queue) || 0;
+          qV.textContent = String(local);
+          if (v.replicants != null) nV.textContent = H.fmtInt(v.replicants);
+          var inc = (v.incubating || []).length;
+          var held = v.held && v.held.n ? Number(v.held.n) : 0;
+          var parts = [];
+          if (inc) parts.push(inc + ' incubating');
+          if (held && v.held.reason) parts.push('held · ' + v.held.reason);
+          qL2.textContent = parts.join(' · ');
+          qL2.classList.toggle('hidden', !parts.length);
+          qL2.classList.toggle('is-held', !!(held && v.held.reason));
+        };
+        paint(d);
+        // The press shows before the round trip. The TRUTH arrives as the
+        // `replication` event Rust pushes on every change — never from the
+        // command's answer, which can land after a later event (a birth) and
+        // would drag the count back to a stale number. A refusal takes the
+        // press back.
+        btn.addEventListener('click', function () {
+          local += 1;
+          qV.textContent = String(local);
+          invoke('mcp_replicate', { n: 1 })
+            .catch(function (e) { local = Math.max(0, local - 1); qV.textContent = String(local); Board.stamp && Board.stamp('replicate: ' + e); });
+        });
+        RP.cards[ctx.id] = { host: host, paint: paint };
+        rpListen();
+
+        // The six figures.
+        wrap.appendChild(H.el('div', 'rp-sep'));
+        var en = d.energy, hs = d.hashing || {}, r = d.rates || {};
+        var cpu = hs.cpu_1m == null ? null : Math.round(Number(hs.cpu_1m) * 100);
+        var kd = r.kd;
+        var strip = tiles([
+          [['energy', 'use / available'], en ? H.fmtWatts(en.used_mw) + ' / ' + H.fmtWatts(en.available_mw) : '—', 'sui-icon-energy',
+            !en ? 'muted' : (d.room_reason === 'energy' ? 'bad' : 'ok')],
+          [['hashing', hs.pending != null ? H.fmtInt(hs.pending) + ' waiting' : 'cpu · 1m'], cpu == null ? '—' : cpu + '%', 'icon-computer',
+            cpu == null ? 'muted' : (hs.saturated || d.room_reason === 'hashing' ? 'bad' : null)],
+          [['ore', 'production'], rpRate(r.ore_g_h, H.fmtOre), 'sui-icon-alpha-ore', r.ore_g_h == null ? 'muted' : 'ok'],
+          [['alpha', 'production'], rpRate(r.alpha_ualpha_h, H.fmtAlpha), 'sui-icon-alpha-matter', r.alpha_ualpha_h == null ? 'muted' : 'ok'],
+          [['raids', 'ore seized'], rpRate(r.seized_g_h, H.fmtOre), 'icon-raid', r.seized_g_h == null ? 'muted' : null],
+          [['k/d', H.fmtInt(r.kills_24h || 0) + ' · ' + H.fmtInt(r.losses_24h || 0)], kd == null ? '—' : String(Math.round(Number(kd) * 10) / 10), 'sui-icon-destroyed',
+            kd == null ? 'muted' : (Number(kd) >= 1 ? 'ok' : 'bad')],
+        ]);
+        strip.classList.add('rp-stats');
+        wrap.appendChild(strip);
+        host.appendChild(wrap);
+      }).catch(function (e) { fail(host, 'replication', e); });
     },
   });
 

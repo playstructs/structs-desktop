@@ -517,6 +517,7 @@ fn loops_json() -> Value {
         "defend": auto_defend::get(),
         "infuse": auto_infuse::get(),
         "sweep": crate::mcp::auto_sweep::get(),
+        "replicate": crate::mcp::auto_replicate::get(),
         "response": crate::mcp::auto_response::get(),
         "raid": crate::mcp::auto_raid::get(),
         "delegation": crate::mcp::delegation::get(),
@@ -1551,7 +1552,6 @@ pub async fn mcp_war_bundle() -> Result<Value, String> {
         "response": crate::mcp::auto_response::get(),
         "raid": crate::mcp::auto_raid::get(),
         "postures": ["cautious", "opportunist", "aggressive"],
-        "modes": ["harden", "counter", "decapitate"],
     }))
 }
 
@@ -1675,6 +1675,16 @@ pub async fn mcp_config_set_impl(
                     let saved = pr::set(p)?;
                     format!("profile '{}' saved ({} rows)", saved.id, saved.loadout.len())
                 }
+                // The one field of a BUILT-IN that may change: its replication
+                // weight, kept as an override on the loop because the built-in
+                // document itself is read-only.
+                "weight" => {
+                    let w = payload
+                        .get("weight")
+                        .and_then(|v| v.as_f64())
+                        .ok_or("profile weight: weight required")?;
+                    crate::mcp::auto_replicate::set_weight(&id, w)?
+                }
                 "assign" => {
                     let who = payload
                         .get("player")
@@ -1755,6 +1765,18 @@ pub async fn mcp_config_set_impl(
                     auto_infuse::set(c);
                     s
                 }
+                "replicate" => {
+                    let c: crate::mcp::auto_replicate::AutoReplicateConfig =
+                        serde_json::from_value(cfg).map_err(|e| e.to_string())?;
+                    let s = format!(
+                        "auto_replicate → {} (up to {} per round, every {} s)",
+                        if c.enabled { "ON" } else { "off" },
+                        c.max_per_round,
+                        c.interval_secs
+                    );
+                    crate::mcp::auto_replicate::set(c);
+                    s
+                }
                 "sweep" => {
                     let c: crate::mcp::auto_sweep::AutoSweepConfig =
                         serde_json::from_value(cfg).map_err(|e| e.to_string())?;
@@ -1806,10 +1828,10 @@ pub async fn mcp_config_set_impl(
                     let c: crate::mcp::auto_response::AutoResponseConfig =
                         serde_json::from_value(cfg).map_err(|e| e.to_string())?;
                     let s = format!(
-                        "auto_response → {} ({:?}, {:?})",
+                        "auto_response → {} ({:?}, {} shots/h)",
                         if c.enabled { "ON" } else { "off" },
                         c.autonomy,
-                        c.mode
+                        c.max_shots_per_hour
                     );
                     crate::mcp::auto_response::set(c);
                     s
@@ -2199,6 +2221,7 @@ pub async fn mcp_profiles_get() -> Value {
                 "temperament": p.temperament,
                 "limits": p.limits,
                 "temperament_label": p.temperament_label(),
+                "replication_weight": crate::mcp::auto_replicate::weight_of(p),
                 "preview": {
                     "verdict": pv.verdict,
                     "blind": pv.blind,

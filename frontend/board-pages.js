@@ -96,7 +96,7 @@
     actions.appendChild(scanSel); actions.appendChild(scanBtn);
     body.appendChild(actions);
 
-    // ── Launch row ──
+    // ── Replicate row (mass action `launch_players`) ──
     var launch = H.el('div', null);
     launch.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;align-items:center;font-size:12px;';
     var countIn = H.el('input'); countIn.type = 'number'; countIn.min = '1'; countIn.max = '50'; countIn.value = '1';
@@ -108,7 +108,7 @@
     [['productive', 'productive'], ['bait', 'bait'], ['raider', 'raider']].forEach(function (o) {
       var op = H.el('option', null, o[1]); op.value = o[0]; launchRole.appendChild(op);
     });
-    var launchBtn = massBtn('launch-btn', 'sui-icon-players', 'Launch', 'sui-mod-secondary');
+    var launchBtn = massBtn('launch-btn', 'sui-icon-players', 'Replicate', 'sui-mod-secondary');
     var launchHint = H.el('span', 'ops-muted'); launchHint.id = 'launch-hint';
     function launchPreview() {
       var n = parseInt(countIn.value, 10) || 1;
@@ -127,9 +127,9 @@
     launchBtn.addEventListener('click', function () {
       var n = parseInt(countIn.value, 10) || 1;
       runMass({ action: 'launch_players', mode: 'execute', args: { count: n, role: launchRole.value } },
-        'Launching ' + n + ' ' + launchRole.value + '…');
+        'Replicating ' + n + ' ' + launchRole.value + '…');
     });
-    launch.appendChild(document.createTextNode('Launch '));
+    launch.appendChild(document.createTextNode('Replicate '));
     launch.appendChild(countIn);
     launch.appendChild(launchRole);
     launch.appendChild(launchBtn);
@@ -597,12 +597,21 @@
     });
   }
 
+  // Mass-job labels as the player reads them; the wire ids stay as they are.
+  var MASS_LABEL = { launch_players: 'replicate', sweep_alpha: 'sweep', set_role: 'set role', force_scan: 'scan' };
+  function massLabel(action) { return MASS_LABEL[action] || String(action || ''); }
+
   function showProgress(text, frac) {
     var prog = document.getElementById('mass-progress');
     if (!prog) return;
     prog.hidden = false;
     prog.firstChild.textContent = text;
-    prog.lastChild.firstChild.style.width = Math.round(frac * 100) + '%';
+    // The bar is SUI's chunked component: fill is "how many chunks carry
+    // sui-mod-filled", not a width. (Setting `style.width` on the first
+    // chunk — the old hand-rolled `.bar` API — stretched one 6px chunk to
+    // N% and left the other nine empty.)
+    var fresh = H.progressBar(frac);
+    prog.replaceChild(fresh, prog.lastChild);
   }
   function hideProgressSoon() {
     setTimeout(function () {
@@ -732,12 +741,12 @@
       });
       window.StructsEvents.listen('board-mass-progress', function (e) {
         var p = e && e.payload;
-        if (p) showProgress(p.action + ' ' + p.done + '/' + p.total + ' (' + p.ok + ' ok, ' + p.failed + ' failed)', p.done / p.total);
+        if (p) showProgress(massLabel(p.action) + ' ' + p.done + '/' + p.total + ' (' + p.ok + ' ok, ' + p.failed + ' failed)', p.done / p.total);
       });
       window.StructsEvents.listen('board-mass-done', function (e) {
         var p = e && e.payload;
         setJobRunning(false);
-        if (p) showProgress(p.action + ' done: ' + p.ok + '/' + p.total + ' ok', 1);
+        if (p) showProgress(massLabel(p.action) + ' done: ' + p.ok + '/' + p.total + ' ok', 1);
         hideProgressSoon();
       });
     },
@@ -3784,16 +3793,13 @@
     //    ask before reading any of the rest. ──
     var sbody = H.el('div');
     sbody.appendChild(H.row('Raid response',
-      (resp.enabled ? 'ON' : 'off') + ' · ' + (resp.autonomy || '?') + ' · ' + (resp.mode || '?'),
+      (resp.enabled ? 'ON' : 'off') + ' · ' + (resp.autonomy || '?'),
       resp.enabled ? 'icon-defend' : 'icon-blocked'));
     sbody.appendChild(H.row('Raid targeting',
       (raid.enabled ? 'ON' : 'off') + ' · ' + (raid.autonomy || '?') + ' · ' + (raid.posture || '?'),
       raid.enabled ? 'icon-raid' : 'icon-blocked'));
     var sb = d.shot_budget || {};
     sbody.appendChild(H.row('Retaliation budget', (sb.used || 0) + ' / ' + (sb.cap || 0) + ' shots this hour', 'icon-dmg'));
-    if (resp.dry_run || raid.dry_run) {
-      sbody.appendChild(H.alertLine('dry-run is on — plans are computed and logged, nothing signs.', 'icon-tip'));
-    }
     body.appendChild(H.card('POSTURE', sbody));
 
     // ── Target board (auto_raid phase B output). ──
@@ -4308,9 +4314,13 @@
         { key: 'max_sends_per_scan', label: 'per scan' },
       ],
     },
+    replicate: {
+      label: 'auto_replicate', icon: 'icon-add', short: 'birth replicants as energy and hashing allow',
+      chips: [{ key: 'max_per_round', label: 'per round' }],
+    },
     response: {
       label: 'auto_response', icon: 'icon-counter', short: 'answer a raid inside its 2-minute window',
-      chips: [{ key: 'mode', label: 'response' }], war: true,
+      chips: [{ key: 'max_shots_per_hour', label: 'shots / h', icon: 'icon-dmg' }], war: true,
     },
     raid: {
       label: 'auto_raid', icon: 'icon-raid', short: 'score targets, fly expendable raiders',
@@ -4339,14 +4349,20 @@
     max_slots: { label: 'hashing slots', min: 0, max: 32, step: 1 },
     max_per_hour: { label: 'signs per hour', min: 0, max: 600, step: 10 },
     autonomy: { label: 'autonomy', options: ['advise', 'auto'], hint: 'advise proposes; auto signs' },
-    mode: { label: 'response mode', options: ['harden', 'counter', 'decapitate'] },
-    posture: { label: 'posture', options: ['cautious', 'opportunist', 'aggressive'], hint: 'rewrites every gate in this card' },
+    posture: { label: 'posture', options: ['cautious', 'opportunist', 'aggressive'],
+      hint: 'rewrites min ore, min score and give-up below · cautious never sieges' },
   preset: { label: 'preset', options: ['off','measured','human','wild'], hint: 'rewrites every temperament in this card' },
   temperature: { label: 'temperature', min: 0, max: 5, step: 0.05, hint: '0 = always the best move; higher samples among the good ones' },
   mistake_rate: { label: 'mistake rate', min: 0, max: 1, step: 0.01, hint: 'chance of a deliberately worse but still legal move' },
   hesitate_min_ms: { label: 'hesitate min', min: 0, max: 30000, step: 100, unit: 'ms' },
   hesitate_max_ms: { label: 'hesitate max', min: 0, max: 30000, step: 100, unit: 'ms' },
     interval_secs: { label: 'scan every', min: 5, unit: 's' },
+    max_per_round: { label: 'births per round', min: 1, max: 20, step: 1 },
+    cpu_ceiling: { label: 'cpu ceiling', min: 0.1, max: 2, step: 0.05, hint: '1-minute load average over cores' },
+    pending_per_worker: { label: 'busy backlog per worker', min: 1, max: 32, step: 1 },
+    ceiling: { label: 'replicant ceiling', min: 0, step: 10, hint: '0 = unlimited' },
+    random_rounds: { label: 'random round size', hint: 'an autonomous round births anywhere from 0 to the room' },
+    min_share_mw: { label: 'min share per player', min: 0, step: 500000, unit: 'mW' },
     difficulty_threshold: { label: 'harvest at difficulty ≤', min: 1, max: 64 },
     complete_difficulty: { label: 'complete at difficulty ≤', min: 1, max: 64 },
     keep_grams: { label: 'Alpha reserve', min: 0, unit: 'g' },
@@ -4361,43 +4377,20 @@
       hint: 'paces the backfill so a big roster never queues thousands of txs at once' },
     min_ore: { label: 'min ore (the whole prize)', min: 0, unit: 'g' },
     min_score: { label: 'min score (0-100)', min: 0, max: 100 },
-    max_raid_minutes: { label: 'max raid proof (min)', min: 1 },
-    max_defenders: { label: 'max defenders on their CMD', min: 0 },
-    skip_if_defender_active_mins: { label: 'skip if defender acted within (min)', min: 0 },
-    target_cooldown_mins: { label: 'target cooldown (min)', min: 0 },
+    give_up_after_mins: { label: 'give up after', min: 1, unit: 'min' },
+    target_cooldown_mins: { label: 'target cooldown', min: 0, unit: 'min', hint: 'doubles for every failed attempt on that planet, resets on a seize' },
     max_concurrent_raids: { label: 'max concurrent raids', min: 1 },
-    abort_cmd_hp_below: { label: 'recall raider below CMD HP', min: 0 },
-    abort_on_ongoing_blocks: { label: 'give up after (blocks)', min: 0 },
-    max_raid_wall_minutes: { label: 'max expedition (min)', min: 1 },
-    siege_max_shots: { label: 'siege shot budget', min: 0 },
-    require_vulnerable_now: { label: 'only raid already-vulnerable targets' },
-    allow_siege: { label: 'allow siege (kill their CMD to open the window)' },
-    return_home_after: { label: 'return home when done' },
-    max_shots_per_incident: { label: 'max shots / incident', min: 0 },
     max_shots_per_hour: { label: 'max shots / hour', min: 0 },
-    incident_cooldown_secs: { label: 'incident cooldown (s)', min: 0 },
-    min_charge_margin: { label: 'charge headroom before firing', min: 0 },
-    prefer_counter_free_ambit: { label: 'prefer a counter-free ambit (free shots)' },
-    panic_refine: { label: 'panic-refine the threatened ore' },
     include_primary_shooters: { label: 'let the primary shoot too' },
     include_primary: { label: 'include the primary player' },
     include_bait: { label: 'include bait players' },
     auto_explore: { label: 'explore when the planet runs dry' },
     refine: { label: 'refine, not just mine' },
     dry_run: { label: 'dry run (compute, never sign)' },
-    roster_ttl_secs: { label: 'candidate roster freshness (s)', min: 60 },
-    sweep_max_pages: { label: 'sweep depth (pages)', min: 1 },
-    evaluate_per_scan: { label: 'candidates scored per scan', min: 1 },
-    raid_difficulty: { label: 'raid proof difficulty', min: 1, max: 64 },
-    raid_hours_utc: { label: 'raid only during (UTC hours)', hint: 'comma-separated, empty = any hour' },
-    raider_players: { label: 'raider players', hint: 'comma-separated ids, empty = every raider' },
     w_ore: { label: 'weight: ore held', step: 0.1, min: 0 },
-    w_vulnerability: { label: 'weight: vulnerable now', step: 0.1, min: 0 },
-    w_weakness: { label: 'weight: weak defences', step: 0.1, min: 0 },
-    w_grudge: { label: 'weight: grudge heat', step: 0.1, min: 0 },
-    w_guild: { label: 'weight: priority guild', step: 0.1, min: 0 },
-    w_speed: { label: 'weight: fast raid proof', step: 0.1, min: 0 },
-    w_history: { label: 'weight: our record here', step: 0.1, min: 0 },
+    w_opening: { label: 'weight: window already open', step: 0.1, min: 0 },
+    w_weakness: { label: 'weight: weak defences', step: 0.1, min: 0, hint: 'few defenders, small fleet, short proof' },
+    w_grudge: { label: 'weight: grudge / priority guild', step: 0.1, min: 0 },
   };
 
   function prettyKey(k) { return k.replace(/_/g, ' '); }
@@ -4496,7 +4489,7 @@
       } else if (Array.isArray(v)) {
         ctl = H.textBox(v.join(', '), fm.hint, function (nv) {
           var parts = nv.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-          // Numeric arrays (raid_hours_utc) must stay numbers on the wire.
+          // Numeric arrays must stay numbers on the wire.
           draft[k] = parts.map(function (s) { return /^\d+$/.test(s) ? Number(s) : s; });
           commit();
         });
@@ -5198,6 +5191,14 @@
       p.temperament.temperature,
       { min: 0, max: (p.limits && p.limits.temperature_max) || 5, step: 0.05, width: '4.5em' },
       function (v) { if (p.builtin) return readOnly(); p.temperament.temperature = v; save(); }
+    )));
+    // How often autonomous replication births this snapshot, relative to the
+    // others. The one field a BUILT-IN may change: Rust keeps its value as an
+    // override on the loop, so the read-only document stays read-only.
+    body.appendChild(H.row('Replication weight', H.stepper(
+      p.replication_weight == null ? 1 : p.replication_weight,
+      { min: 0, max: 100, step: 1, width: '4.5em' },
+      function (v) { profSet({ action: 'weight', id: p.id, weight: v }); }
     )));
 
     // ── Defends: priority order, first survivor takes the blocker ──

@@ -75,6 +75,10 @@ pub enum AppEvent {
     /// assemble its picture from four events is a window that can show half a
     /// picture.
     Companion(Value),
+    /// The Replication card's whole state (queue, incubating, replicants,
+    /// room), pushed on every change so a press and a birth both move the
+    /// counts without a poll.
+    Replication(Value),
 }
 
 impl AppEvent {
@@ -97,6 +101,7 @@ impl AppEvent {
             Self::TransferIntent(_) => "transfer-intent".into(),
             Self::Matrix { name, .. } => name.clone(),
             Self::Companion(_) => "companion".into(),
+            Self::Replication(_) => "replication".into(),
         }
     }
 
@@ -125,13 +130,14 @@ impl AppEvent {
             Self::TransferIntent(_) => Audience::Window("transfer".into()),
             Self::Matrix { .. } => Audience::All,
             Self::Companion(_) => Audience::Window(crate::mcp::companion::LABEL.into()),
+            Self::Replication(_) => Audience::Board,
         }
     }
 
     pub fn payload(&self) -> Value {
         match self {
             Self::HashProgress(v) | Self::HashComplete(v) | Self::TxRequest(v) | Self::VplayerRequest(v)
-            | Self::TxqRequest(v) | Self::TransferIntent(v) | Self::Companion(v) => v.clone(),
+            | Self::TxqRequest(v) | Self::TransferIntent(v) | Self::Companion(v) | Self::Replication(v) => v.clone(),
             Self::ForceResync { hard } => json!({ "hard": hard }),
             Self::TaskOverrides { max_concurrent } => json!({ "maxConcurrent": max_concurrent }),
             Self::HashEnabled { enabled } => json!({ "enabled": enabled }),
@@ -305,6 +311,7 @@ mod tests {
             (AppEvent::Board { name: "board-update", payload: Value::Null }, "board-update"),
             (AppEvent::Raid { label: "raid-2-1".into(), name: "raid:attack", payload: Value::Null }, "raid:attack::raid-2-1"),
             (AppEvent::Companion(Value::Null), "companion"),
+            (AppEvent::Replication(Value::Null), "replication"),
             (AppEvent::TransferIntent(Value::Null), "transfer-intent"),
             (AppEvent::Matrix { name: "matrix::rooms".into(), payload: Value::Null }, "matrix::rooms"),
         ];

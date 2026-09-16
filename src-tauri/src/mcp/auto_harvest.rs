@@ -61,8 +61,9 @@ pub struct AutoHarvestConfig {
     /// When a vplayer's planet is mined out (planet ore = 0), auto-explore a fresh
     /// planet so mining/production can continue. The old planet's structs are
     /// destroyed on explore (chain), and auto-build rebuilds the extractor (+
-    /// refinery for productive) on the new planet. Off by default — it destroys
-    /// the old planetary build-out each cycle.
+    /// refinery for productive) on the new planet. On by default: a mined-out
+    /// planet produces nothing, so leaving it is the only way the economy keeps
+    /// running; the rebuild is the price of that, not a reason to sit idle.
     pub auto_explore: bool,
 }
 
@@ -74,7 +75,7 @@ impl Default for AutoHarvestConfig {
             interval_secs: 60,
             refine: true,
             include_primary: false,
-            auto_explore: false,
+            auto_explore: true,
         }
     }
 }
@@ -616,6 +617,9 @@ mod tests {
         assert_eq!(c.difficulty_threshold, 4);
         assert!(c.refine);
         assert!(!c.include_primary);
+        // Re-planeting a mined-out planet is how the economy keeps running;
+        // the loop's explore branch itself skips the primary (no HD index).
+        assert!(c.auto_explore);
     }
 
     #[test]

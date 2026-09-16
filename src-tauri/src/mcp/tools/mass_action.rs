@@ -19,8 +19,8 @@ use std::sync::Arc;
 use crate::hasher::types::now_millis;
 use crate::mcp::telemetry::{tlog, Sev};
 use crate::mcp::tools::board_pages::require_board;
-use crate::mcp::virtual_players::{self, VPlayerRole, VirtualPlayer, REGISTRY};
-use crate::mcp::{board_feed, loop_util, roster_cache, tx_retry, vplayer_bridge};
+use crate::mcp::virtual_players::{self, VPlayerRole, REGISTRY};
+use crate::mcp::{board_feed, loop_util, roster_cache, tx_retry};
 
 /// Sweep sign fan-out: stay well under the vplayer bridge SIGN_GATE (8) so a
 /// sweep never starves the auto-loops of signing slots.
@@ -441,78 +441,27 @@ async fn launch_players(app: tauri::AppHandle, request: MassActionRequest) -> Re
                     Some(p) => format!("{p}{index}"),
                     None => crate::mcp::callsign::name_for(index),
                 };
-                // Façade signup: derive index → sign guild-join → poll player id.
-                let result = vplayer_bridge::call(
-                    &app,
-                    "signup",
-                    json!({ "index": index, "name": name }),
-                    180,
-                )
-                .await;
-                match result {
-                    Ok(data) => {
-                        let address = data.get("address").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let player_id = data.get("player_id").and_then(|v| v.as_str()).map(String::from);
-                        if address.is_empty() {
-                            failed.fetch_add(1, Ordering::Relaxed);
-                            tlog("launch", Sev::Warn, format!("idx {index}: signup returned no address"));
+                // THE signup path, shared with auto_replicate: signup →
+                // registry → grant the primary → bootstrap explore →
+                // portrait. One body, so the steps cannot drift apart.
+                match virtual_players::spawn_one(&app, index, name.clone(), auto_name, role, None, None).await {
+                    Ok(sp) if sp.explored => {
+                        ok.fetch_add(1, Ordering::Relaxed);
+                        board_feed::push(
+                            &app,
+                            board_feed::Severity::Info,
+                            "launch",
+                            format!("{name} ({}) launched + explored", sp.player_id.as_deref().unwrap_or("pending")),
+                        );
+                    }
+                    Ok(sp) => {
+                        // Created but not bootstrapped — the auto loops can't
+                        // manage it until an explore lands.
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        if sp.player_id.is_some() {
+                            tlog("launch", Sev::Warn, format!("{name} created but explore failed — see the tx ledger"));
                         } else {
-                            {
-                                let mut reg = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
-                                reg.players.push(VirtualPlayer {
-                            // New players inherit their role's built-in profile.
-                            profile: None,
-                                    index,
-                                    address,
-                                    player_id: player_id.clone(),
-                                    name: name.clone(),
-                                    created_at: now_millis(),
-                                    role,
-                                    auto_name,
-                                });
-                                let _ = reg.save();
-                            }
-                            // Hand the primary full permissions on the new
-                            // player (best-effort; the delegation loop backfills
-                            // anything that misses). Started before the explore
-                            // rather than after: an explore that fails must not
-                            // leave the player unreachable from the primary key.
-                            if let Some(pid) = player_id.as_deref() {
-                                crate::mcp::delegation::grant_on_create(&app, index, pid);
-                            }
-                            // Bootstrap explore — a fresh player owns NOTHING
-                            // until this lands (no planet/fleet/CmdShip).
-                            if let Some(pid) = player_id {
-                                let res = tx_retry::sign_with_retry(
-                                    &app,
-                                    index,
-                                    "/structs.structs.MsgPlanetExplore",
-                                    json!({ "playerId": pid }),
-                                    &format!("launch:{pid}"),
-                                )
-                                .await;
-                                match res {
-                                    Ok(_) => {
-                                        virtual_players::invalidate_owned(&pid);
-                                        ok.fetch_add(1, Ordering::Relaxed);
-                                        board_feed::push(
-                                            &app,
-                                            board_feed::Severity::Info,
-                                            "launch",
-                                            format!("{name} ({pid}) launched + explored"),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        // Created but not bootstrapped — auto loops
-                                        // can't manage it until an explore lands.
-                                        failed.fetch_add(1, Ordering::Relaxed);
-                                        tlog("launch", Sev::Warn, format!("{name} created but explore failed: {e}"));
-                                    }
-                                }
-                            } else {
-                                failed.fetch_add(1, Ordering::Relaxed);
-                                tlog("launch", Sev::Warn, format!("{name} created; player id pending — explore it manually shortly"));
-                            }
+                            tlog("launch", Sev::Warn, format!("{name} created; player id pending — explore it manually shortly"));
                         }
                     }
                     Err(e) => {
