@@ -109,7 +109,6 @@
   function marksFor(m, e) {
     var d = defaultsOf(m.id), list = [];
     if (m.kind !== 'oneshot') list.push({ value: m.kind === 'music' ? 'music' : 'loop', title: 'plays as a ' + m.kind });
-    if (m.optional) list.push({ value: 'optional', title: 'a refinement nobody has to map' });
     if (e.delay_ms !== d.delay_ms) list.push({ value: e.delay_ms + 'ms', title: 'delay' });
     if (e.loop !== d.loop) list.push({ value: e.loop ? 'loop' : 'once', title: 'loop' });
     if (e.loop && e.loop_count !== d.loop_count) list.push({ value: '×' + (e.loop_count || '∞'), title: 'loop count' });

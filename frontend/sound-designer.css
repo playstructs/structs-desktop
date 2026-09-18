@@ -1,8 +1,23 @@
 /* The sound designer card (board-terminal-sound.js). Tokens only. */
 .sd { text-align: left; display: flex; flex-direction: column; gap: var(--spacing-md); }
-.sd-head { display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: flex-end; }
-.sd-head .sui-input-text, .sd-settings .sui-input-text { min-width: 0; }
-.sd-head .sui-screen-btn { margin-bottom: var(--spacing-xs); }
+.sd-head { display: flex; flex-wrap: wrap; gap: var(--spacing-sm) var(--spacing-xl); align-items: center; }
+/* Inline fields. The board's cfg-field rule puts a caption beside its control
+   but keeps SUI's width:100%, so each stepper took a whole line with its
+   caption at the far left. Here a field is exactly as wide as its caption and
+   control, and the strip wraps as a whole. */
+#board-layout .sd-head label.sui-input-text.cfg-field,
+#board-layout .sd-settings label.sui-input-text.cfg-field {
+  width: auto; flex: 0 0 auto; gap: var(--spacing-sm); padding: 0;
+}
+#board-layout .sd-head label.sui-input-text.cfg-field > span:first-child,
+#board-layout .sd-settings label.sui-input-text.cfg-field > span:first-child {
+  flex: none; white-space: nowrap;
+}
+.sd-head .sui-screen-btn { flex: none; }
+/* The checkbox label sits after the box art, as the Replication card places it;
+   SUI's default margin lands it on the box. */
+#board-layout .sd .sui-checkbox-container.has-label { width: auto; flex: none; }
+#board-layout .sd .sui-checkbox-container.has-label label { margin-left: calc(var(--form-input-height-total) + var(--spacing-sm)); white-space: nowrap; }
 .sd-body { display: flex; flex-direction: column; gap: var(--spacing-sm); }
 .sd-list { display: flex; flex-direction: column; }
 
@@ -20,7 +35,7 @@
 .sd-chip-x { display: inline-flex; color: var(--text-hint); }
 .sd-chip-x:hover { color: var(--text-enemy-primary); }
 .sd-doors { flex: 0 0 auto; }
-.sd-settings { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: flex-end; padding-top: var(--spacing-sm); }
+.sd-settings { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: var(--spacing-sm) var(--spacing-xl); align-items: center; padding-top: var(--spacing-sm); }
 
 .sd-tape { display: flex; flex-direction: column; gap: var(--spacing-xs); }
 .sd-tape-row { display: grid; grid-template-columns: auto auto 1fr auto; gap: var(--spacing-md); align-items: center; padding: var(--spacing-xs) var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
