@@ -79,6 +79,10 @@ pub enum AppEvent {
     /// room), pushed on every change so a press and a birth both move the
     /// counts without a poll.
     Replication(Value),
+    /// The sound system: `sound-config` (the whole JS-facing config, on every
+    /// change) and `sound-trace` (cues fired in any window while the designer
+    /// is tracing). Every window plays its own cues, so both go everywhere.
+    Sound { name: &'static str, payload: Value },
 }
 
 impl AppEvent {
@@ -102,6 +106,7 @@ impl AppEvent {
             Self::Matrix { name, .. } => name.clone(),
             Self::Companion(_) => "companion".into(),
             Self::Replication(_) => "replication".into(),
+            Self::Sound { name, .. } => (*name).into(),
         }
     }
 
@@ -131,6 +136,7 @@ impl AppEvent {
             Self::Matrix { .. } => Audience::All,
             Self::Companion(_) => Audience::Window(crate::mcp::companion::LABEL.into()),
             Self::Replication(_) => Audience::Board,
+            Self::Sound { .. } => Audience::All,
         }
     }
 
@@ -144,7 +150,7 @@ impl AppEvent {
             Self::SyncTick | Self::UpdateReady => Value::Null,
             Self::UpdateProgress(p) => json!(p),
             Self::UiDirective { directive, .. } => directive.clone(),
-            Self::Board { payload, .. } | Self::Raid { payload, .. } | Self::Matrix { payload, .. } => payload.clone(),
+            Self::Board { payload, .. } | Self::Raid { payload, .. } | Self::Matrix { payload, .. } | Self::Sound { payload, .. } => payload.clone(),
         }
     }
 }
@@ -314,6 +320,7 @@ mod tests {
             (AppEvent::Replication(Value::Null), "replication"),
             (AppEvent::TransferIntent(Value::Null), "transfer-intent"),
             (AppEvent::Matrix { name: "matrix::rooms".into(), payload: Value::Null }, "matrix::rooms"),
+            (AppEvent::Sound { name: "sound-config", payload: Value::Null }, "sound-config"),
         ];
         for (ev, name) in &pins {
             assert_eq!(ev.name(), *name);
@@ -336,6 +343,8 @@ mod tests {
         assert_eq!(AppEvent::TransferIntent(Value::Null).audience(), Audience::Window("transfer".into()));
         assert_eq!(AppEvent::TxRequest(Value::Null).audience(), Audience::Main);
         assert_eq!(AppEvent::Matrix { name: "matrix::seen".into(), payload: Value::Null }.audience(), Audience::All);
+        // Every window plays its own cues, so the sound config and the trace go everywhere.
+        assert_eq!(AppEvent::Sound { name: "sound-trace", payload: Value::Null }.audience(), Audience::All);
         assert_eq!(AppEvent::TaskOverrides { max_concurrent: 4 }.payload(), json!({ "maxConcurrent": 4 }));
     }
 

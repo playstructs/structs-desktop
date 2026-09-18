@@ -9,7 +9,7 @@
     "test:replication": "node replication.test.mjs",
     "test:replicanthud": "node replicanthud.test.mjs",
     "test:grassparse": "node grassparse.test.mjs",
-    "test:all": "node structsevents.test.mjs && node chatwork.test.mjs && node chatrefs.test.mjs && node chatcomplete.test.mjs && node chatreactions.test.mjs && node chatcommands.test.mjs && node playercard.test.mjs && node guildcard.test.mjs && node providercard.test.mjs && node structs-cards.test.mjs && node achievements.test.mjs && node bridge.test.mjs && node terminal.test.mjs && node palette.test.mjs && node crew.test.mjs && node pet.test.mjs && node gamestats.test.mjs && node profiles.test.mjs && node replication.test.mjs && node replicanthud.test.mjs && node raidview.test.mjs && node infusions.test.mjs && node chat.test.mjs && node notifications.test.mjs && node grassparse.test.mjs",
+    "test:all": "node structsevents.test.mjs && node chatwork.test.mjs && node chatrefs.test.mjs && node chatcomplete.test.mjs && node chatreactions.test.mjs && node chatcommands.test.mjs && node playercard.test.mjs && node guildcard.test.mjs && node providercard.test.mjs && node structs-cards.test.mjs && node achievements.test.mjs && node bridge.test.mjs && node terminal.test.mjs && node palette.test.mjs && node crew.test.mjs && node pet.test.mjs && node gamestats.test.mjs && node profiles.test.mjs && node replication.test.mjs && node replicanthud.test.mjs && node raidview.test.mjs && node infusions.test.mjs && node chat.test.mjs && node notifications.test.mjs && node grassparse.test.mjs && node sound.test.mjs && node sound-catalogue.test.mjs && node sound-hooks.test.mjs && node sounds-card.test.mjs",
     "test:playercard": "node playercard.test.mjs",
     "test:guildcard": "node guildcard.test.mjs",
     "test:providercard": "node providercard.test.mjs",
@@ -28,7 +28,11 @@
     "test:chatrefs": "node chatrefs.test.mjs",
     "test:chatcomplete": "node chatcomplete.test.mjs",
     "test:chatreactions": "node chatreactions.test.mjs",
-    "test:chatcommands": "node chatcommands.test.mjs"
+    "test:chatcommands": "node chatcommands.test.mjs",
+    "test:sound": "node sound.test.mjs",
+    "test:sound-catalogue": "node sound-catalogue.test.mjs",
+    "test:sound-hooks": "node sound-hooks.test.mjs",
+    "test:sounds-card": "node sounds-card.test.mjs"
   },
   "devDependencies": {
     "jsdom": "^24.0.0"

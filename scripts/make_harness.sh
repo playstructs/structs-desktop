@@ -430,6 +430,11 @@ cat > "$FIX" <<'EOF'
 
   var F = {
     mcp_game_stats_snapshot: SNAPSHOT,
+    // The sound designer: one mapped mount, everything else silent.
+    sound_config_get: { version: 1, master_volume: 1, music_volume: 0.7, sfx_volume: 1, muted: false, trace: false,
+      mounts: { 'ui.press': { files: [{ name: 'click.wav', size: 1200, mtime_ms: 1, ok: true }], delay_ms: 50 },
+                'alert.ore_received': { files: [{ name: 'lost.mp3', size: 0, mtime_ms: 0, ok: false, reason: 'missing' }] } } },
+    sound_config_set: null, sound_mount_set: null, sound_mount_delete: null, sound_pick_file: { cancelled: true }, sound_trace_set: null, sound_reveal_config: null,
     // The Terminal: a saved layout, the market, and the windows it has open.
     terminal_layout_get: { version: 3, cards: [
       { id: 'people-1', type: 'people', params: {}, w: 1 },

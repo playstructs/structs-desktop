@@ -983,6 +983,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               if (window.__STRUCTS_REACTIVITY__) {
                 window.__STRUCTS_REACTIVITY__.onGrassFrame(data.category);
               }
+              // The sound hooks (setupStructsSound) see every frame here, BEFORE the
+              // game's own listener enqueues its animations — that ordering is
+              // what lets an EVADE animation learn its cause. Not gated by the
+              // notifications switch below.
+              if (window.__STRUCTS_SOUND_GRASS__) {
+                try { window.__STRUCTS_SOUND_GRASS__(data); } catch (e) { /* a sound hook must never stop the feed */ }
+              }
 
               // Desktop notifications are independently gated (the feed + reactivity above always run).
               if (!window.__STRUCTS_NOTIFICATIONS__.enabled) return;
@@ -3584,6 +3591,433 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     }
   })();
 
+  /* ── [structs-universe] sound hooks ───────────────────────────────────────
+   *
+   * Where the game's moments become sound CUES. Nothing here plays anything:
+   * every hook asks the engine (frontend/sound.js) to cue a candidate list
+   * built by the catalogue (frontend/sound-catalogue.js), and the engine plays
+   * whichever mount a designer has pointed at a file — or records a miss for
+   * the designer's tape.
+   *
+   * Zero-patch on purpose. The game dispatches its animation queue as window
+   * events (ANIMATION / ANIMATION_END / ANIMATION_QUEUE_EMPTY), its selection
+   * and charge as window events, and exposes gameState / menuPage on window;
+   * the only things WRAPPED are three methods of the action-bar lock (arm /
+   * confirm / cancel are not events) and the menu router (screen changes).
+   * Every wrap carries a `__structsPatched` sentinel and calls through.
+   *
+   * The evade CAUSE (kinetic shield vs armour vs jamming) is not on the
+   * animation event; it is per shot on the grass `struct_attack` frame, which
+   * our socket tap sees BEFORE the game's listener enqueues the animations.
+   * So the tap feeds a per-target FIFO of causes that the EVADE animation
+   * pops. The FIFO is flushed when the queue empties, so a stale cause can
+   * never dress the next fight's evade.
+   *
+   * This block invokes nothing itself — the engine does — and it must not
+   * inherit the notifications' `enabled` gate or their 2 s struct delay: a
+   * sound that lands two seconds after its animation is worse than silence.
+   */
+  (function setupStructsSound() {
+    'use strict';
+    var Cat = null;
+    function cat() { return Cat || (Cat = window.StructsSoundCatalogue || null); }
+    function S() { return window.StructsSound || null; }
+    function cue(candidates, ctx) {
+      var s = S();
+      if (!s || !candidates || !candidates.length) return null;
+      try { return s.cue(candidates, ctx || {}); } catch (e) { return null; }
+    }
+    function loop(candidates, key) {
+      var s = S();
+      if (!s || !candidates || !candidates.length) return null;
+      try { return s.loop(candidates, key); } catch (e) { return null; }
+    }
+    function stop(h) { var s = S(); if (!s || !h) return; try { s.stop(h); } catch (e) { /* already gone */ } }
+    function musicSet(id, o) { var s = S(); if (!s) return; try { s.music(id, o); } catch (e) { /* engine absent */ } }
+
+    var lastAt = {};
+    function recently(key, ms) {
+      var t = Date.now();
+      if (lastAt[key] && t - lastAt[key] < ms) return true;
+      lastAt[key] = t;
+      return false;
+    }
+    function poll(ready, then, ms) {
+      (function again() {
+        var v;
+        try { v = ready(); } catch (e) { v = null; }
+        if (v) { then(v); return; }
+        setTimeout(again, ms || 250);
+      })();
+    }
+
+    // ── Game lookups ──
+    function me() {
+      try {
+        var kp = window.gameState && window.gameState.keyPlayers;
+        var p = kp && kp.player;
+        if (!p || !p.id) return null;
+        return { playerId: p.id, planetId: p.planet && p.planet.id, fleetId: p.fleet && p.fleet.id };
+      } catch (e) { return null; }
+    }
+    function findStruct(id) {
+      try {
+        var kp = window.gameState && window.gameState.keyPlayers;
+        if (!kp || !id) return null;
+        var keys = Object.keys(kp);
+        for (var i = 0; i < keys.length; i++) {
+          var p = kp[keys[i]];
+          if (p && p.structs && p.structs[id]) return p.structs[id];
+        }
+      } catch (e) { /* no game state yet */ }
+      return null;
+    }
+    function typeOf(s) {
+      try { return s && window.gameState.structTypes.getStructTypeById(s.type) || null; } catch (e) { return null; }
+    }
+    function slugOf(s) {
+      var t = typeOf(s), C = cat();
+      return t && C && t.type ? C.slug(t.type) : null;
+    }
+    function ambitOf(s) { return s && s.operating_ambit ? String(s.operating_ambit).toLowerCase() : null; }
+    function passiveOf(t) { return t && t.passive_weaponry || null; }
+    function isOnline(s) { try { return !!(s && s.isOnline()); } catch (e) { return false; } }
+
+    // ── Combat context from the grass frame (tap → FIFO → animation) ──
+    var evadeFifo = {};      // targetStructId → [evadedCause, …]
+    var lastCause = {};      // targetStructId → the cause the EVADE animation used
+    var counterSet = {};     // structId → ts of a counter-fire
+    var COUNTER_TTL_MS = 10000;
+    function noteAttack(detail) {
+      var shots = detail && detail.eventAttackShotDetail;
+      if (!shots || !shots.length) return;
+      var t = Date.now();
+      for (var i = 0; i < shots.length; i++) {
+        var shot = shots[i] || {};
+        if (shot.evaded && shot.targetStructId) {
+          (evadeFifo[shot.targetStructId] = evadeFifo[shot.targetStructId] || []).push(shot.evadedCause || '');
+        }
+        if (shot.targetCountered && shot.targetStructId) counterSet[shot.targetStructId] = t;
+        var counters = shot.eventAttackDefenderCounterDetail || [];
+        for (var k = 0; k < counters.length; k++) {
+          if (counters[k] && counters[k].counterByStructId) counterSet[counters[k].counterByStructId] = t;
+        }
+      }
+      if (detail.planetaryDefenseCannonDamageToAttacker) {
+        var pdc = planetaryStructOfType('planetary_defense_cannon');
+        if (pdc) counterSet[pdc.id] = t;
+      }
+    }
+    function planetaryStructOfType(slug) {
+      try {
+        var kp = window.gameState && window.gameState.keyPlayers;
+        var keys = Object.keys(kp || {});
+        for (var i = 0; i < keys.length; i++) {
+          var structs = kp[keys[i]] && kp[keys[i]].structs;
+          var ids = Object.keys(structs || {});
+          for (var j = 0; j < ids.length; j++) {
+            var s = structs[ids[j]];
+            if (s && slugOf(s) === slug && !(s.isDestroyed && s.isDestroyed())) return s;
+          }
+        }
+      } catch (e) { /* no game state */ }
+      return null;
+    }
+    function isCounter(id) {
+      var t = counterSet[id];
+      if (!t) return false;
+      if (Date.now() - t > COUNTER_TTL_MS) { delete counterSet[id]; return false; }
+      return true;
+    }
+    function flushCombat() { evadeFifo = {}; lastCause = {}; counterSet = {}; }
+
+    // ── Animation queue ──
+    window.addEventListener('ANIMATION', function (e) {
+      var C = cat();
+      if (!C || !e) return;
+      var names = e.animationNames || [];
+      var s = findStruct(e.structId);
+      var t = typeOf(s);
+      var ctx = { typeSlug: slugOf(s), targetAmbit: ambitOf(s), passiveWeaponry: passiveOf(t), counter: isCounter(e.structId) };
+      if (e.options && e.options.healthAfter != null) ctx.healthAfter = e.options.healthAfter;
+      if (names.indexOf('EVADE') >= 0) {
+        var q = evadeFifo[e.structId];
+        ctx.evadedCause = q && q.length ? q.shift() : null;
+        lastCause[e.structId] = ctx.evadedCause;
+      }
+      var cues = C.animationCues(names, ctx);
+      for (var i = 0; i < cues.length; i++) cue(cues[i].candidates, cues[i].ctx);
+    });
+    window.addEventListener('ANIMATION_END', function (e) {
+      var C = cat();
+      if (!C || !e) return;
+      var cues = C.animationEndCues(e.animationName, { evadedCause: lastCause[e.structId] });
+      for (var i = 0; i < cues.length; i++) cue(cues[i].candidates, cues[i].ctx);
+    });
+    window.addEventListener('ANIMATION_QUEUE_EMPTY', flushCombat);
+
+    // ── Grass (fed by the socket tap in setupStructsNotifications) ──
+    var raidSeen = {};        // planet_id → last status cued
+    var breach = false;       // our shield is down and a raid is on
+    var focus = { id: null, slug: null, handle: null };
+    function ourRaid(d, ctx) {
+      if (!d || !ctx) return null;
+      if (d.planet_id && d.planet_id === ctx.planetId) return 'defending';
+      if (d.fleet_id && d.fleet_id === ctx.fleetId) return 'attacking';
+      return null;
+    }
+    var TERMINAL = { attackerDefeated: 1, attackerRetreated: 1, raidSuccessful: 1, demilitarized: 1 };
+    function onRaidStatus(d) {
+      var ctx = me();
+      var side = ourRaid(d, ctx);
+      if (!side) return;
+      var key = (d.planet_id || '') + ':' + (d.fleet_id || '');
+      if (raidSeen[key] === d.status) return;
+      raidSeen[key] = d.status;
+      var st = d.status;
+      if (side === 'defending') {
+        if (st === 'initiated' || st === 'ongoing') {
+          if (!recently('db:raid-base', 2000)) cue(['raid.base_raided.alert'], { raid: st });
+          musicSet('raid.base_raided.music', { layer: 'override' });
+        } else if (st === 'shieldsVulnerable') {
+          breach = true;
+          if (!recently('db:raid-breach', 2000)) cue(['raid.shield_breach.alert'], { raid: st });
+          musicSet('raid.shield_breach.music', { layer: 'override' });
+        } else if (st === 'attackerDefeated' || st === 'attackerRetreated') {
+          cue(['banner.victory'], { raid: st });
+        } else if (st === 'raidSuccessful') {
+          cue(['banner.defeat'], { raid: st });
+        }
+      } else {
+        if (st === 'initiated' || st === 'ongoing') {
+          if (!recently('db:raid-initiated', 2000)) cue(['raid.initiated.alert'], { raid: st });
+          musicSet('raid.initiated.music', { layer: 'override' });
+        } else if (st === 'raidSuccessful') {
+          cue(['banner.victory'], { raid: st });
+        } else if (st === 'attackerDefeated' || st === 'attackerRetreated') {
+          cue(['banner.defeat'], { raid: st });
+        }
+      }
+      if (TERMINAL[st]) {
+        musicSet(null, { layer: 'override' });
+        if (breach && side === 'defending') { breach = false; cue(['raid.shield_restored.alert'], { raid: st }); }
+        delete raidSeen[key];
+      }
+    }
+    function onShieldChange(data, ctx) {
+      if (!breach || !ctx) return;
+      var subj = String(data.subject || '');
+      if (subj.indexOf('structs.planet.' + ctx.planetId + '.') !== 0) return;
+      var d = data.detail || {};
+      var shield = Number(d.planetary_shield != null ? d.planetary_shield : (d.planetaryShield != null ? d.planetaryShield : data.value));
+      if (isFinite(shield) && shield > 0) {
+        breach = false;
+        cue(['raid.shield_restored.alert'], { shield: shield });
+      }
+    }
+    function ledger(data) {
+      var d = data.detail || {};
+      var action = d.action || data.action, direction = d.direction || data.direction, denom = d.denom || data.denom, pid = d.player_id || data.player_id;
+      return { action: action, direction: direction, denom: denom, playerId: pid };
+    }
+    function onGrassFrame(data) {
+      if (!data || !data.category) return;
+      var ctx = me();
+      var d = data.detail || {};
+      switch (data.category) {
+        case 'struct_attack': noteAttack(d); break;
+        case 'raid_status': onRaidStatus(d); break;
+        case 'shield_change': onShieldChange(data, ctx); break;
+        case 'fleet_arrive':
+          if (ctx && d.fleet_id === ctx.fleetId) cue(['move.arrive'], { fleet: d.fleet_id });
+          break;
+        case 'fleet_depart':
+          if (ctx && d.fleet_id === ctx.fleetId) cue(['move.depart'], { fleet: d.fleet_id });
+          break;
+        case 'mined': {
+          var m = ledger(data);
+          if (ctx && m.playerId === ctx.playerId && m.direction === 'credit' && (!m.denom || m.denom === 'ore') && !recently('db:alert-ore', 3000)) {
+            cue(cat().resultChain('ore_extractor', focus.slug === 'ore_extractor'), { amount: d.amount });
+          }
+          break;
+        }
+        case 'refined': {
+          var r = ledger(data);
+          if (ctx && r.playerId === ctx.playerId && r.direction === 'credit' && r.denom === 'ualpha' && !recently('db:alert-refined', 3000)) {
+            cue(cat().resultChain('ore_refinery', focus.slug === 'ore_refinery'), { amount: d.amount });
+          }
+          break;
+        }
+        case 'received': {
+          var subj = String(data.subject || '');
+          var mine = ctx && (subj.indexOf('.' + ctx.playerId + '.') >= 0 || subj.slice(-(String(ctx.playerId).length + 1)) === '.' + ctx.playerId);
+          if (mine && !recently('db:alert-alpha', 3000)) cue(['alert.alpha_received'], { amount: d.amount || data.amount });
+          break;
+        }
+        default: break;
+      }
+    }
+    window.__STRUCTS_SOUND_GRASS__ = onGrassFrame;
+
+    // ── Multi-stage actions: wrap the action-bar lock ──
+    // Arm and cancel are deferred one tick because the game clears and re-arms
+    // in the same call (releaseConflictingAction), and ACTIVATE / DEACTIVATE /
+    // STEALTH arm and lock back to back — those are one-press commits.
+    poll(function () { return window.gameState && window.gameState.actionBarLock; }, function (lock) {
+      if (lock.setCurrentAction && lock.setCurrentAction.__structsPatched) return;
+      var pending = null;   // { phase, action, timer }
+      function schedule(phase, action) {
+        clear();
+        pending = { phase: phase, action: action, timer: setTimeout(function () {
+          pending = null;
+          cue(cat().stageChain(phase, action), { action: action, phase: phase });
+        }, 0) };
+      }
+      function clear() { if (pending) { clearTimeout(pending.timer); pending = null; } }
+      function wrap(name, fn) {
+        var orig = lock[name];
+        if (typeof orig !== 'function') return;
+        var w = function () {
+          try { fn.apply(this, arguments); } catch (e) { /* a hook must not break the lock */ }
+          return orig.apply(this, arguments);
+        };
+        w.__structsPatched = true;
+        lock[name] = w;
+      }
+      wrap('setCurrentAction', function (action) {
+        if (!action || this.isLocked()) return;
+        schedule('arm', action);
+      });
+      wrap('lock', function () {
+        var action = this.getCurrentAction && this.getCurrentAction();
+        clear();
+        if (action) cue(cat().stageChain('confirm', action), { action: action, phase: 'confirm' });
+      });
+      wrap('clear', function () {
+        var action = this.getCurrentAction && this.getCurrentAction();
+        if (action && !this.isLocked()) schedule('cancel', action);
+      });
+    });
+
+    // ── The rocker switch, and the confirmed power transition ──
+    document.addEventListener('click', function (e) {
+      var el = e.target;
+      if (!el || typeof el.closest !== 'function') return;
+      var img = el.closest('.sui-action-bar-panel-switch-group img[data-state]');
+      if (!img) return;
+      if (img.getAttribute('data-state') === 'disabled') cue(['ui.denied'], { rocker: true });
+      else cue(['ui.rocker.click'], { rocker: img.getAttribute('data-state') });
+    }, true);
+    window.addEventListener('SHOW_STRUCT_STILL', function (e) {
+      var id = e && e.structId;
+      if (!id) return;
+      var lock = window.gameState && window.gameState.actionBarLock;
+      var action = lock && lock.getCurrentAction ? lock.getCurrentAction() : null;
+      var s = findStruct(id);
+      if (action === 'ACTIVATE') cue(cat().startupChain(slugOf(s) || ''), { struct: id });
+      else if (action === 'DEACTIVATE') cue(['ui.rocker.power_down'], { struct: id });
+      if (focus.id === id) refocus(s);
+    });
+
+    // ── Screen navigation ──
+    poll(function () { return window.menuPage && window.menuPage.router; }, function (router) {
+      if (typeof router.goto !== 'function' || router.goto.__structsPatched) return;
+      var orig = router.goto;
+      var lastTriple = null;
+      var w = function (controller, page, options) {
+        try {
+          var triple = String(controller) + '/' + String(page) + '/' + JSON.stringify(options || {});
+          var preview = router.mode && String(router.mode).toUpperCase() === 'PREVIEW';
+          if (!preview && triple !== lastTriple && !recently('db:screen-nav', 300)) cue(['ui.screen.nav'], { page: String(controller) + '/' + String(page) });
+          lastTriple = triple;
+        } catch (e) { /* a hook must not stop navigation */ }
+        return orig.apply(this, arguments);
+      };
+      w.__structsPatched = true;
+      router.goto = w;
+    });
+
+    // ── Focus / selection ──
+    function unfocus() {
+      if (focus.handle) { stop(focus.handle); focus.handle = null; }
+      if (focus.slug === 'ore_bunker') cue(['focus.ore_bunker.close'], { struct: focus.id });
+      focus.id = null; focus.slug = null;
+    }
+    function refocus(s) {
+      var C = cat();
+      if (!C || !s) return;
+      var slug = slugOf(s);
+      if (C.INDUSTRY_SLUGS.indexOf(slug) >= 0) {
+        if (focus.handle) { stop(focus.handle); focus.handle = null; }
+        focus.handle = loop(C.focusChain(slug, isOnline(s)), 'focus');
+      }
+    }
+    window.addEventListener('STRUCT_SELECTION_CHANGED', function (e) {
+      var C = cat();
+      var id = e && e.structId ? e.structId : null;
+      if (!C) return;
+      if (id === focus.id) return;
+      unfocus();
+      if (!id) return;
+      var s = findStruct(id);
+      var slug = slugOf(s);
+      focus.id = id; focus.slug = slug;
+      if (!slug) return;
+      if (C.INDUSTRY_SLUGS.indexOf(slug) >= 0) focus.handle = loop(C.focusChain(slug, isOnline(s)), 'focus');
+      else if (slug === 'ore_bunker') cue(['focus.ore_bunker.open'], { struct: id });
+      else cue(C.focusChain(slug, isOnline(s)), { struct: id });
+    });
+
+    // ── Battery ──
+    var lastLevel = null;
+    window.addEventListener('CHARGE_LEVEL_CHANGED', function (e) {
+      var ctx = me();
+      if (!e || (ctx && e.playerId && e.playerId !== ctx.playerId)) return;
+      var level = Number(e.chargeLevel);
+      if (!isFinite(level)) return;
+      if (lastLevel !== null && level > lastLevel) cue(['ui.battery.slice'], { level: level });
+      lastLevel = level;
+    });
+
+    // ── HR bot (onboarding) ──
+    var hrbotOn = false, hrbotLines = 0;
+    function hasBot(node) {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.id === 'hrbot-talking-large' || node.id === 'hrbot-talking-small') return true;
+      return typeof node.querySelector === 'function' && !!node.querySelector('#hrbot-talking-large, #hrbot-talking-small');
+    }
+    poll(function () { return document.getElementById('menu-page-body-content') && document.getElementById('menu-page-dialogue-screen-content'); }, function () {
+      var body = document.getElementById('menu-page-body-content');
+      var dialogue = document.getElementById('menu-page-dialogue-screen-content');
+      var indicator = document.getElementById('menu-page-dialogue-indicator-content');
+      function scan(muts) {
+        var added = false, removed = false;
+        for (var i = 0; i < muts.length; i++) {
+          var m = muts[i];
+          for (var a = 0; a < m.addedNodes.length; a++) if (hasBot(m.addedNodes[a])) added = true;
+          for (var r = 0; r < m.removedNodes.length; r++) if (hasBot(m.removedNodes[r])) removed = true;
+        }
+        var present = !!document.querySelector('#hrbot-talking-large, #hrbot-talking-small');
+        if ((added || present) && !hrbotOn) { hrbotOn = true; hrbotLines = 0; cue(['hrbot.start']); }
+        else if (removed && !present && hrbotOn) { hrbotOn = false; cue(['hrbot.end']); }
+      }
+      new MutationObserver(scan).observe(body, { childList: true, subtree: true });
+      if (indicator) new MutationObserver(scan).observe(indicator, { childList: true, subtree: true });
+      new MutationObserver(function () {
+        if (!hrbotOn) return;
+        hrbotLines++;
+        if (hrbotLines > 1) cue(['hrbot.line'], { line: hrbotLines });
+      }).observe(dialogue, { childList: true });
+    });
+
+    // ── Music: the soundtrack starts with the session ──
+    window.addEventListener('LOGIN_COMPLETE', function () {
+      lastLevel = null;
+      unfocus();
+      musicSet('music.ambient', { layer: 'base' });
+    });
+  })();
+
   /* ── [structs-universe] ⌘K over the game ──────────────────────────────────
    *
    * The Terminal's command palette, on the game window. One keystroke from
@@ -3682,6 +4116,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     function show() {
       ensure().style.display = 'block';
       open = true;
+      if (window.StructsSound) window.StructsSound.cue(['ui.palette.open'], { palette: true });
       // The frame may still be loading on the very first press; it asks for
       // this itself when it is ready, so both orders work.
       post({ structs: 'palette', act: 'open' });
@@ -3691,6 +4126,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       if (!host) return;
       host.style.display = 'none';
       open = false;
+      if (window.StructsSound) window.StructsSound.cue(['ui.palette.close'], { palette: true });
       post({ structs: 'palette', act: 'close' });
       // Give the keyboard back to the game, or the next keystroke goes
       // nowhere: the frame still holds focus after it is hidden.
@@ -3735,6 +4171,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       if (m.structs === 'palette') {
         if (m.act === 'ready') { ready = true; if (host) host.style.visibility = 'visible'; }
         if (m.act === 'ready' && open) { post({ structs: 'palette', act: 'open' }); try { frame.contentWindow.focus(); } catch (e2) {} }
+        if (m.act === 'ran' && window.StructsSound) window.StructsSound.cue(['ui.screen.nav'], { palette: true });
         if (m.act === 'close' || m.act === 'ran') hide();
         return;
       }

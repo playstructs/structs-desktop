@@ -2468,6 +2468,46 @@
     });
   }
 
+  /* ── Sound ──
+   * The cue table lives in sound-catalogue.js and is shared with the game
+   * window, so the Map Viewer and the game name the same mount for the same
+   * moment. Both engine and catalogue are optional here (the raid harness
+   * loads neither). */
+  var idleSounds = {};
+  function soundCues(ev, names, s) {
+    var S = window.StructsSound, C = window.StructsSoundCatalogue;
+    if (!S || !C) return;
+    try {
+      var cues = C.animationCues(names, {
+        typeSlug: ev.typeSlug || (s && s.type_slug),
+        targetAmbit: s && s.ambit ? String(s.ambit).toLowerCase() : null,
+        healthAfter: ev.healthAfter,
+        counter: !!ev.counter,
+        passiveWeaponry: s && s.passive_weaponry,
+      });
+      for (var i = 0; i < cues.length; i++) S.cue(cues[i].candidates, cues[i].ctx);
+    } catch (e) { /* a sound must never stop the choreography */ }
+  }
+  function soundEndCues(names) {
+    var S = window.StructsSound, C = window.StructsSoundCatalogue;
+    if (!S || !C || !names || !names.length) return;
+    try {
+      var cues = C.animationEndCues(names[names.length - 1], {});
+      for (var i = 0; i < cues.length; i++) S.cue(cues[i].candidates, cues[i].ctx);
+    } catch (e) { /* silent */ }
+  }
+  function soundIdleStart(s) {
+    var S = window.StructsSound;
+    if (!S || idleSounds[s.id]) return;
+    try { idleSounds[s.id] = S.loop(['ambient.' + s.type_slug], 'idle:' + s.id); } catch (e) { /* silent */ }
+  }
+  function soundIdleStop(structId) {
+    var S = window.StructsSound, h = idleSounds[structId];
+    if (!h) return;
+    delete idleSounds[structId];
+    if (S) { try { S.stop(h); } catch (e) { /* silent */ } }
+  }
+
   /* Play one queue event over a struct, then hand back control.
    *
    * ALL of the event's names play SIMULTANEOUSLY — impact and shake are two
@@ -2511,6 +2551,7 @@
       // as "still animating": mark it ending first.
       ev._ending = true;
       if (typeof ev.onEnd === 'function') { try { ev.onEnd(); } catch (e) { /* a hook must not wedge the queue */ } }
+      soundEndCues(names);
       done();
     };
 
@@ -2526,6 +2567,10 @@
     // Design System, Animation Bubble). Without this call the whole bubble
     // path is unreachable, which is precisely what it was.
     pipOnAnimation(ev, names[0]);
+
+    // Sound: the same names the game plays, offered as cues. The engine plays
+    // what a designer has mapped and records the rest for the tape.
+    soundCues(ev, names, s);
 
     // The still hides while the animation owns the tile (evades excepted),
     // and the idle loop pauses with it.
@@ -2615,14 +2660,17 @@
       // The loop bundle CONTAINS the struct art — the still must hide or the
       // sprite doubles (hideStructStill/showStructStill do exactly this).
       setStillHidden(s.id, true);
+      soundIdleStart(s);
     } catch (e) { /* no idle animation is not an error */ }
   }
   function pauseIdle(structId) {
     var a = idleAnims[structId];
     if (a) { try { a.stop(); } catch (e) {} }
+    soundIdleStop(structId);
   }
   function stopIdle(structId) {
     var a = idleAnims[structId];
+    soundIdleStop(structId);
     if (!a) return;
     try { a.destroy(); } catch (e) {}
     delete idleAnims[structId];
@@ -2650,6 +2698,8 @@
     if (a) {
       try { a.goToAndPlay(0); } catch (e) {}
       setStillHidden(structId, true);
+      var idleStruct = state.structsById[structId];
+      if (idleStruct) soundIdleStart(idleStruct);
     } else {
       setStillHidden(structId, false);
     }
@@ -2688,11 +2738,14 @@
     var running = numOf(attack.attacker_health_before);   // attacker HP as counters land
     var attackerDead = false;
 
-    function attackAnim(structId, slug, weaponSystem) {
+    function attackAnim(structId, slug, weaponSystem, counter) {
       events.push({
         structId: structId, typeSlug: slug,
         names: [weaponSystem === SECONDARY ? 'ATTACK_SECONDARY_WEAPON' : 'ATTACK_PRIMARY_WEAPON'],
         healthAfter: null,
+        // A counter-fire, for the sound layer (the game's passive weaponry
+        // cue); the animation itself is the same.
+        counter: !!counter,
       });
     }
     function destroyName(victim, ambitHint) {
@@ -2716,7 +2769,7 @@
     (attack.shots || []).forEach(function (shot) {
       (shot.eventAttackDefenderCounterDetail || []).forEach(function (c) {
         var cs = structsById[c.counterByStructId];
-        attackAnim(c.counterByStructId, cs && cs.type_slug, c.counterByStructWeaponSystem);
+        attackAnim(c.counterByStructId, cs && cs.type_slug, c.counterByStructWeaponSystem, true);
         attackerHit(c.counterByStructType || (cs && cs.type_name),
           c.counterByStructOperatingAmbit || (cs && cs.ambit),
           c.counterByStructWeaponSystem, numOf(c.counterDamage), truthy(c.counterDestroyedAttacker));
@@ -2764,7 +2817,7 @@
       }
 
       if (!truthy(shot.targetDestroyed) && truthy(shot.targetCountered)) {
-        attackAnim(shot.targetStructId, tgt && tgt.type_slug, shot.targetCounterWeaponSystem);
+        attackAnim(shot.targetStructId, tgt && tgt.type_slug, shot.targetCounterWeaponSystem, true);
         attackerHit(shot.targetStructType || (tgt && tgt.type_name), tgtAmbit,
           shot.targetCounterWeaponSystem, numOf(shot.targetCounteredDamage),
           truthy(shot.targetCounterDestroyedAttacker));
@@ -2774,7 +2827,7 @@
     if (truthy(attack.pdc_damage_to_attacker)) {
       var pdc = planetaryStructOfType(structsById, 'planetary_defense_cannon');
       if (pdc) {
-        attackAnim(pdc.id, pdc.type_slug, PRIMARY);
+        attackAnim(pdc.id, pdc.type_slug, PRIMARY, true);
         attackerHit('Planetary Defense Cannon', pdc.ambit, PRIMARY, numOf(attack.pdc_damage),
           truthy(attack.pdc_destroyed_attacker));
       }
@@ -2854,6 +2907,9 @@
     }
     if (bannerShownFor === status) return;
     bannerShownFor = status;
+    if (window.StructsSound) {
+      try { window.StructsSound.cue([name === 'VICTORY_BANNER' ? 'banner.victory' : 'banner.defeat'], { raid: status }); } catch (e) { /* silent */ }
+    }
     if (!window.lottie) return;
     var host = document.getElementById('rv-banner');
     if (!host) return;

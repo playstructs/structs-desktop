@@ -55,3 +55,12 @@ src-tauri/icons/Structs Icon.png
 # Docs
 proposals/
 docs/
+
+# Local audio for the sound designer (⌘K → SOUNDS). Files are pointed at by
+# absolute path in <config_dir>/structs-app/sound.json and never ship in the
+# bundle; scripts/sound-convert.sh writes sound/mp3 and sound/wav here.
+sound/
+*.aif
+*.aiff
+*.wav
+*.mp3

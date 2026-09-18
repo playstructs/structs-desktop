@@ -75,7 +75,7 @@
     ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
     ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
-    ['System', ['health']],
+    ['System', ['health', 'sounds']],
   ];
   function cardGroups() {
     var seen = {}, out = [];
@@ -1552,6 +1552,8 @@
     BUS: 1,
   };
   var WORDS = {
+    // The sound designer (board-terminal-sound.js): every mount point, its file and settings, and the tape.
+    SOUNDS: ['sounds'], SFX: ['sounds'], AUDIO: ['sounds'],
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['feed'], FLOW: ['feed'],
     DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
     BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
@@ -4218,6 +4220,10 @@
     // A chip in the rail opening a planet or fleet as a raid view — the
     // spectator window, which is ungated. Read-only, and nothing it shows moves value.
     mcp_raid_view_open: 1,
+    // The sound engine inside an embedded Map Viewer: read the mount config,
+    // fetch bytes of a file ALREADY in it, report cues. Never pick or set a
+    // file — those stay with the Terminal's own designer card.
+    sound_config_get: 1, sound_bytes: 1, sound_trace: 1,
   };
   Terminal.frameMayInvoke = function (cmd) {
     var name = String(cmd || '');

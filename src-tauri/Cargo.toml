@@ -24,6 +24,9 @@ tokio = { version = "1", features = ["full"] }
 # Update awareness: compare app version to latest GitHub release, open releases page
 semver = "1"
 tauri-plugin-opener = "2"
+# Native file picker for the sound designer. Called from RUST only
+# (mcp/sound.rs); no dialog:* permission is granted to any webview.
+tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 # Hasher: multi-threaded SHA256 proof-of-work
 sha2 = "0.10"

@@ -1,0 +1,30 @@
+/* The sound designer card (board-terminal-sound.js). Tokens only. */
+.sd { text-align: left; display: flex; flex-direction: column; gap: var(--spacing-md); }
+.sd-head { display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: flex-end; }
+.sd-head .sui-input-text, .sd-settings .sui-input-text { min-width: 0; }
+.sd-head .sui-screen-btn { margin-bottom: var(--spacing-xs); }
+.sd-body { display: flex; flex-direction: column; gap: var(--spacing-sm); }
+.sd-list { display: flex; flex-direction: column; }
+
+.sd-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md); padding: var(--spacing-sm) var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); }
+.sd-row.is-selected { background: var(--surface-panel); box-shadow: inset 2px 0 0 var(--accent-primary); }
+.sd-row[data-state="silent"] .sd-label { color: var(--text-hint); }
+.sd-ident { flex: 1 1 200px; min-width: 0; cursor: pointer; }
+.sd-label { display: block; color: var(--text-body); }
+.sd-when { display: block; color: var(--text-hint); }
+.sd-files { display: flex; flex-wrap: wrap; gap: var(--spacing-xs); align-items: center; flex: 1 1 160px; min-width: 0; }
+.sd-chip { display: inline-flex; align-items: center; gap: var(--spacing-xs); padding: 0 var(--spacing-sm); border: 1px solid var(--border-subtle); color: var(--text-body); max-width: 100%; }
+.sd-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sd-chip-bad { border-color: var(--text-warning); }
+.sd-chip.sd-silent { color: var(--text-hint); border-style: dashed; }
+.sd-chip-x { display: inline-flex; color: var(--text-hint); }
+.sd-chip-x:hover { color: var(--text-enemy-primary); }
+.sd-doors { flex: 0 0 auto; }
+.sd-settings { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: flex-end; padding-top: var(--spacing-sm); }
+
+.sd-tape { display: flex; flex-direction: column; gap: var(--spacing-xs); }
+.sd-tape-row { display: grid; grid-template-columns: auto auto 1fr auto; gap: var(--spacing-md); align-items: center; padding: var(--spacing-xs) var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
+.sd-tape-row .sd-cands { grid-column: 1 / -1; color: var(--text-hint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sd-tape-row.sd-silent .sd-cue { color: var(--text-warning); }
+.sd-tape-row.sd-hit .sd-cue { color: var(--text-player-primary); }
+.sd-t, .sd-w { color: var(--text-hint); white-space: nowrap; }

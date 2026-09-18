@@ -14,7 +14,9 @@
 (function () {
   'use strict';
   if (window.__STRUCTS_UI_TELEMETRY__) return;
-  window.__STRUCTS_UI_TELEMETRY__ = true;
+  // Truthy for the guard above; `controlFor` is lent to sound.js so a click
+  // sound and a click log agree on which control was pressed.
+  window.__STRUCTS_UI_TELEMETRY__ = { controlFor: null };
 
   var FLUSH_MS = 2000;
   /// Hard cap per flush; beyond this the batch is truncated and the drop is
@@ -76,6 +78,8 @@
     }
     return null;
   }
+
+  window.__STRUCTS_UI_TELEMETRY__.controlFor = controlFor;
 
   function push(kind, el) {
     if (!el) return;

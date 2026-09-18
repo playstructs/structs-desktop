@@ -30,6 +30,9 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // The sound designer's native file picker. Only Rust calls it
+        // (mcp/sound.rs); no webview holds a dialog:* permission.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Remember every window's position/size/maximized state across
         // launches, keyed by window label — the game view, Team Ops, the
@@ -199,6 +202,15 @@ fn main() {
             mcp::companion::companion_drag,
             mcp::companion::companion_state,
             mcp::companion::companion_open,
+            mcp::sound::sound_config_get,
+            mcp::sound::sound_config_set,
+            mcp::sound::sound_mount_set,
+            mcp::sound::sound_mount_delete,
+            mcp::sound::sound_pick_file,
+            mcp::sound::sound_bytes,
+            mcp::sound::sound_trace,
+            mcp::sound::sound_trace_set,
+            mcp::sound::sound_reveal_config,
             matrix::matrix_pinned,
             matrix::matrix_pin,
             matrix::matrix_refs,
