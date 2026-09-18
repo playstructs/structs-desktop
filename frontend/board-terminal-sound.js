@@ -126,15 +126,17 @@
     });
     return line;
   }
+  // Every setting is a captioned cell — caption left, control right — so a
+  // switch lines up with a stepper instead of reading as loose text.
   function settings(m, e) {
     var box = H.el('div', 'sd-settings');
     box.appendChild(H.field('Delay ms', H.stepper(e.delay_ms, { min: 0, max: 60000, step: 50, width: '5em' }, function (v) { write(m.id, { delay_ms: Number(v) || 0 }); })));
     if (m.kind !== 'music') {
-      box.appendChild(H.checkbox(!!e.loop, 'Loop', function (on) { write(m.id, { loop: !!on }); }));
+      box.appendChild(H.field('Loop', H.checkbox(!!e.loop, null, function (on) { write(m.id, { loop: !!on }); })));
       box.appendChild(H.field('Loop count', H.stepper(e.loop_count, { min: 0, max: 1000, step: 1, width: '4em' }, function (v) { write(m.id, { loop_count: Number(v) || 0 }); })));
     }
     box.appendChild(H.field('Volume %', H.stepper(Math.round(e.volume * 100), { min: 0, max: 200, step: 5, width: '4em' }, function (v) { write(m.id, { volume: (Number(v) || 0) / 100 }); })));
-    box.appendChild(H.checkbox(e.enabled !== false, 'Enabled', function (on) { write(m.id, { enabled: !!on }); }));
+    box.appendChild(H.field('Enabled', H.checkbox(e.enabled !== false, null, function (on) { write(m.id, { enabled: !!on }); })));
     if (e.files.length > 1 || m.kind === 'music') {
       box.appendChild(H.field('Pick', H.selectBox(e.pick, [{ value: 'random', label: 'random' }, { value: 'sequence', label: 'in order' }], function (v) { write(m.id, { pick: v }); })));
     }
@@ -232,7 +234,7 @@
         head.appendChild(H.field('Master %', H.stepper(vol('master_volume'), { min: 0, max: 200, step: 5, width: '4em' }, function (v) { writeGlobal({ master_volume: (Number(v) || 0) / 100 }); })));
         head.appendChild(H.field('Music %', H.stepper(vol('music_volume'), { min: 0, max: 200, step: 5, width: '4em' }, function (v) { writeGlobal({ music_volume: (Number(v) || 0) / 100 }); })));
         head.appendChild(H.field('SFX %', H.stepper(vol('sfx_volume'), { min: 0, max: 200, step: 5, width: '4em' }, function (v) { writeGlobal({ sfx_volume: (Number(v) || 0) / 100 }); })));
-        head.appendChild(H.checkbox(!!cfg.muted, 'Mute', function (on) { writeGlobal({ muted: !!on }); }));
+        head.appendChild(H.field('Mute', H.checkbox(!!cfg.muted, null, function (on) { writeGlobal({ muted: !!on }); })));
         var stop = H.el('a', 'sui-screen-btn sui-mod-secondary sd-stop', 'Stop all');
         stop.href = 'javascript:void(0)';
         stop.addEventListener('click', stopAll);
