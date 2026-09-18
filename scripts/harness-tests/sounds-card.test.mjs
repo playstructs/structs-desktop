@@ -61,7 +61,14 @@ const text = (n) => (n && n.textContent || '').replace(/\s+/g, ' ').trim();
     check('it read the config once and switched tracing on', callsFor('sound_config_get').length === readsBefore + 1 && callsFor('sound_trace_set').some((c) => c.args && c.args.enabled === true));
     const tabs = [...host.querySelectorAll('.sui-screen-nav-item')].map(text);
     check('every catalogue group is a tab, plus the Tape', C.GROUPS.every((g) => tabs.some((t) => t.indexOf(g) === 0)) && tabs.some((t) => t.indexOf('Tape') === 0), tabs.join('|'));
-    check('the head has master / music / sfx steppers and a mute', host.querySelectorAll('.sd-head .sui-input-stepper').length === 3 && host.querySelector('.sd-head .sui-checkbox'));
+    const tiles = [...host.querySelectorAll('.sd-hud .sd-tile')];
+    check('the head is four readouts: master, music, sfx and the sound switch', tiles.length === 4 && text(tiles[1]).replace(/\s+/g, '') === '70%Music' && text(tiles[3]).replace(/\s+/g, '') === 'ONSound', tiles.map(text).join('|'));
+    check('no stepper is open until a tile is pressed', !host.querySelector('.sd-hud-open'));
+    tiles[1].click();
+    check('pressing the music tile opens its typed field', host.querySelector('.sd-hud-open input[type=text]') && host.querySelector('.sd-tile[data-knob="music_volume"].is-open'));
+    const card0 = d.querySelector('#tm-grid .tm-card[data-card="' + id + '"]');
+    const own = [...card0.querySelectorAll('.tm-doors .tm-door-own')].map((a) => a.title);
+    check('Stop all and Show sound.json are title-bar doors', own.includes('Stop all') && own.includes('Show sound.json'), own.join('|'));
 
     // Every mount in every group has a row.
     let missing = [];
@@ -98,13 +105,22 @@ const text = (n) => (n && n.textContent || '').replace(/\s+/g, ' ').trim();
     await tick(20);
     const sel = host.querySelector('.sd-row[data-mount="ui.press"]');
     check('clicking a row selects it and opens its settings', sel && sel.classList.contains('is-selected') && sel.querySelector('.sd-settings'));
-    const steppers = [...sel.querySelectorAll('.sd-settings .sui-input-stepper')];
-    check('the settings are delay, loop count and volume steppers with loop and enabled switches', steppers.length === 3 && sel.querySelectorAll('.sd-settings .sui-checkbox').length === 2);
-    const plus = steppers[0].querySelector('button:last-of-type');
-    plus.click(); plus.click();
+    const caps = [...sel.querySelectorAll('.sd-settings label.cfg-field > span:first-child')].map(text);
+    check('six stacked fields in setting order, no steppers', caps.join('|') === 'Delay ms|Volume %|Loop|Loop count|Pick|Enabled' && !sel.querySelector('.sd-settings .sui-input-stepper'), caps.join('|'));
+    const typed = sel.querySelectorAll('.sd-settings input[type=text]');
+    check('delay, volume and loop count are typed fields; loop and enabled are switches', typed.length === 3 && sel.querySelectorAll('.sd-settings .sui-checkbox').length === 2 && sel.querySelector('.sd-settings select'));
+    const setVal = (input, v) => { input.value = v; input.dispatchEvent(new w.Event('change', { bubbles: true })); };
+    setVal(typed[0], '120'); setVal(typed[0], '150');
     await tick(400);
     const writes = callsFor('sound_mount_set').slice(before);
-    check('two steps become one debounced sound_mount_set patch for that mount', writes.length === 1 && writes[0].args.id === 'ui.press' && writes[0].args.patch && writes[0].args.patch.delay_ms === 150, JSON.stringify(writes.map((c) => c.args)));
+    check('two commits become one debounced sound_mount_set patch for that mount', writes.length === 1 && writes[0].args.id === 'ui.press' && writes[0].args.patch && writes[0].args.patch.delay_ms === 150, JSON.stringify(writes.map((c) => c.args)));
+    setVal(typed[0], '999999');
+    check('a value over the range is clamped in the field', typed[0].value === '60000');
+    setVal(typed[0], 'abc');
+    check('a non-number falls back to the catalogue default', typed[0].value === '0');
+    setVal(typed[1], '80');
+    await tick(400);
+    check('volume is written as a fraction', callsFor('sound_mount_set').some((c) => c.args.id === 'ui.press' && c.args.patch.volume === 0.8));
 
     // The event repaints; the command's answer does not.
     const reads = callsFor('sound_config_get').length;
@@ -113,8 +129,8 @@ const text = (n) => (n && n.textContent || '').replace(/\s+/g, ' ').trim();
     await tick(30);
     check('a sound-config event repaints the rows without another read',
       text(host.querySelector('.sd-row[data-mount="ui.denied"] .sd-chip-name')) === 'buzz.mp3' && host.querySelectorAll('.sd-row[data-mount="ui.press"] .sd-chip').length === 2 && callsFor('sound_config_get').length === reads);
-    check('…and the head follows it', host.querySelector('.sd-head .sui-checkbox').checked === true && host.querySelector('.sd-head input[type=number]').value === '50');
-    check('a mount with two files offers the pick', host.querySelector('.sd-row[data-mount="ui.press"] .sd-settings select'));
+    check('…and the head follows it', /MUTED/.test(text(host.querySelector('.sd-tile[data-knob="muted"]'))) && text(host.querySelector('.sd-tile[data-knob="master_volume"] .fstat-v')) === '50%');
+    check('the pick is offered', host.querySelector('.sd-row[data-mount="ui.press"] .sd-settings select'));
 
     // Doors.
     const pressRow = host.querySelector('.sd-row[data-mount="ui.press"]');
@@ -129,10 +145,17 @@ const text = (n) => (n && n.textContent || '').replace(/\s+/g, ' ').trim();
     check('the × on a chip removes that file by index', callsFor('sound_mount_set').some((c) => c.args.id === 'ui.press' && c.args.patch.remove_file === 0));
 
     // The head writes the globals.
-    const head = host.querySelector('.sd-head');
-    head.querySelector('.sui-checkbox').click();
+    host.querySelector('.sd-tile[data-knob="muted"]').click();
     await tick(20);
-    check('mute writes sound_config_set', callsFor('sound_config_set').some((c) => c.args.patch && c.args.patch.muted === false));
+    check('the sound tile toggles mute through sound_config_set', callsFor('sound_config_set').some((c) => c.args.patch && c.args.patch.muted === false));
+    host.querySelector('.sd-tile[data-knob="sfx_volume"]').click();
+    await tick(20);
+    const sfx = host.querySelector('.sd-hud-open input[type=text]');
+    sfx.value = '105'; sfx.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await tick(20);
+    check('a volume tile\'s field writes that volume', callsFor('sound_config_set').some((c) => c.args.patch && c.args.patch.sfx_volume === 1.05), JSON.stringify(callsFor('sound_config_set').map((c) => c.args.patch)));
+    host.querySelector('.sd-hud-open .sd-done').click();
+    check('Done closes the drawer', !host.querySelector('.sd-hud-open'));
 
     // The tape.
     [...host.querySelectorAll('.sui-screen-nav-item')].find((t) => text(t).indexOf('Tape') === 0).click();

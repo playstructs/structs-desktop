@@ -25,7 +25,8 @@
   var TAPE_MAX = 50;
   var WRITE_MS = 300;
 
-  var SD = { cards: {}, listening: false, cfg: null, tape: [], view: null, selected: null, filter: '' };
+  var SD = { cards: {}, listening: false, cfg: null, tape: [], view: null, selected: null, filter: '', open: null };
+  var KNOBS = [['master_volume', 'Master'], ['music_volume', 'Music'], ['sfx_volume', 'SFX']];
 
   function stamp(msg) { if (Board.stamp) Board.stamp('sounds: ' + msg); }
   function mountOf(id) { return (SD.cfg && SD.cfg.mounts && SD.cfg.mounts[id]) || null; }
@@ -88,6 +89,29 @@
   function stopAll() { var S = Snd(); if (S) S.stopAll({ music: true }); }
 
   // ── Pieces ──
+  // A typed number: the game's text field under a caption. Commits on Enter or
+  // blur, clamped to the setting's range; a non-number goes back to the
+  // catalogue default. No −/+ — the designer knows the number they want.
+  function numField(value, opts, onCommit) {
+    var input = H.el('input');
+    input.type = 'text';
+    input.inputMode = 'numeric';
+    input.value = value == null ? '' : String(value);
+    input.style.width = opts.width || '6em';
+    var last = Number(value);
+    function commit() {
+      var n = parseFloat(String(input.value).replace(/[^0-9.\-]/g, ''));
+      if (!isFinite(n)) n = opts.def;
+      if (opts.min != null) n = Math.max(opts.min, n);
+      if (opts.max != null) n = Math.min(opts.max, n);
+      if (opts.step === 1) n = Math.round(n);
+      input.value = String(n);
+      if (n !== last) { last = n; onCommit(n); }
+    }
+    input.addEventListener('change', commit);
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); commit(); input.blur(); } });
+    return input;
+  }
   function fmtTime(ms) {
     var d = new Date(ms || Date.now());
     var two = function (n) { return (n < 10 ? '0' : '') + n; };
@@ -126,20 +150,20 @@
     });
     return line;
   }
-  // Every setting is a captioned cell — caption left, control right — so a
-  // switch lines up with a stepper instead of reading as loose text.
+  // The selected row's settings: one line of stacked fields, caption over its
+  // value, in the order a designer sets them. Typed numbers, two switches, one
+  // pick. Files stay on the row line; the row's doors are the audition.
   function settings(m, e) {
+    var d = defaultsOf(m.id);
     var box = H.el('div', 'sd-settings');
-    box.appendChild(H.field('Delay ms', H.stepper(e.delay_ms, { min: 0, max: 60000, step: 50, width: '5em' }, function (v) { write(m.id, { delay_ms: Number(v) || 0 }); })));
+    box.appendChild(H.field('Delay ms', numField(e.delay_ms, { min: 0, max: 60000, step: 1, def: d.delay_ms, width: '5em' }, function (n) { write(m.id, { delay_ms: n }); })));
+    box.appendChild(H.field('Volume %', numField(Math.round(e.volume * 100), { min: 0, max: 200, step: 1, def: Math.round(d.volume * 100), width: '4em' }, function (n) { write(m.id, { volume: n / 100 }); })));
     if (m.kind !== 'music') {
       box.appendChild(H.field('Loop', H.checkbox(!!e.loop, null, function (on) { write(m.id, { loop: !!on }); })));
-      box.appendChild(H.field('Loop count', H.stepper(e.loop_count, { min: 0, max: 1000, step: 1, width: '4em' }, function (v) { write(m.id, { loop_count: Number(v) || 0 }); })));
+      box.appendChild(H.field('Loop count', numField(e.loop_count, { min: 0, max: 1000, step: 1, def: d.loop_count, width: '4em' }, function (n) { write(m.id, { loop_count: n }); })));
     }
-    box.appendChild(H.field('Volume %', H.stepper(Math.round(e.volume * 100), { min: 0, max: 200, step: 5, width: '4em' }, function (v) { write(m.id, { volume: (Number(v) || 0) / 100 }); })));
+    box.appendChild(H.field('Pick', H.selectBox(e.pick, [{ value: 'random', label: 'random' }, { value: 'sequence', label: 'in order' }], function (v) { write(m.id, { pick: v }); })));
     box.appendChild(H.field('Enabled', H.checkbox(e.enabled !== false, null, function (on) { write(m.id, { enabled: !!on }); })));
-    if (e.files.length > 1 || m.kind === 'music') {
-      box.appendChild(H.field('Pick', H.selectBox(e.pick, [{ value: 'random', label: 'random' }, { value: 'sequence', label: 'in order' }], function (v) { write(m.id, { pick: v }); })));
-    }
     return box;
   }
   function row(m, card) {
@@ -209,6 +233,12 @@
     label: 'Sounds', describe: function () { return 'Sounds'; },
     single: true, cadenceMs: 0, defaultWidth: 2,
     params: [],
+    doors: function () {
+      return [
+        { icon: 'icon-close', title: 'Stop all', onClick: stopAll },
+        { icon: 'icon-edit', title: 'Show sound.json', onClick: function () { invoke('sound_reveal_config').catch(function (e) { stamp(String(e)); }); } },
+      ];
+    },
     render: function (host, p, ctx) {
       var C = Cat();
       host.innerHTML = '';
@@ -227,22 +257,44 @@
       wrap.appendChild(nav);
       wrap.appendChild(body);
 
+      // The header is the game's own status-bar idea: four readouts in the
+      // display face. A volume tile opens its stepper in a thin drawer; the
+      // SOUND tile is the mute switch itself. Stop all and Show sound.json
+      // are doors in the card's title bar (see `doors` below).
       function paintHead() {
         head.innerHTML = '';
         var cfg = SD.cfg || {};
         var vol = function (k) { return Math.round(Number(cfg[k] == null ? 1 : cfg[k]) * 100); };
-        head.appendChild(H.field('Master %', H.stepper(vol('master_volume'), { min: 0, max: 200, step: 5, width: '4em' }, function (v) { writeGlobal({ master_volume: (Number(v) || 0) / 100 }); })));
-        head.appendChild(H.field('Music %', H.stepper(vol('music_volume'), { min: 0, max: 200, step: 5, width: '4em' }, function (v) { writeGlobal({ music_volume: (Number(v) || 0) / 100 }); })));
-        head.appendChild(H.field('SFX %', H.stepper(vol('sfx_volume'), { min: 0, max: 200, step: 5, width: '4em' }, function (v) { writeGlobal({ sfx_volume: (Number(v) || 0) / 100 }); })));
-        head.appendChild(H.field('Mute', H.checkbox(!!cfg.muted, null, function (on) { writeGlobal({ muted: !!on }); })));
-        var stop = H.el('a', 'sui-screen-btn sui-mod-secondary sd-stop', 'Stop all');
-        stop.href = 'javascript:void(0)';
-        stop.addEventListener('click', stopAll);
-        head.appendChild(stop);
-        var reveal = H.el('a', 'sui-screen-btn sui-mod-secondary sd-reveal', 'Show sound.json');
-        reveal.href = 'javascript:void(0)';
-        reveal.addEventListener('click', function () { invoke('sound_reveal_config').catch(function (e) { stamp(String(e)); }); });
-        head.appendChild(reveal);
+        var hud = H.el('div', 'sd-hud');
+        KNOBS.forEach(function (k) {
+          var t = H.el('div', 'fstat sd-tile' + (SD.open === k[0] ? ' is-open' : ''));
+          t.setAttribute('data-knob', k[0]);
+          t.tabIndex = 0;
+          t.appendChild(H.el('div', 'fstat-v', vol(k[0]) + '%'));
+          t.appendChild(H.el('div', 'fstat-l', k[1]));
+          t.addEventListener('click', function () { SD.open = SD.open === k[0] ? null : k[0]; paintHead(); });
+          hud.appendChild(t);
+        });
+        var snd = H.el('div', 'fstat sd-tile' + (cfg.muted ? ' is-muted' : ''));
+        snd.setAttribute('data-knob', 'muted');
+        snd.tabIndex = 0;
+        snd.appendChild(H.el('div', 'fstat-v', cfg.muted ? 'MUTED' : 'ON'));
+        snd.appendChild(H.el('div', 'fstat-l', 'Sound'));
+        snd.addEventListener('click', function () { writeGlobal({ muted: !cfg.muted }); });
+        hud.appendChild(snd);
+        head.appendChild(hud);
+        var open = KNOBS.filter(function (k) { return k[0] === SD.open; })[0];
+        if (open) {
+          var drawer = H.el('div', 'sd-hud-open stk');
+          drawer.appendChild(H.field(open[1] + ' %', numField(vol(open[0]), { min: 0, max: 200, step: 1, def: 100, width: '4em' }, function (n) {
+            var patch = {}; patch[open[0]] = n / 100; writeGlobal(patch);
+          })));
+          var done = H.el('a', 'sui-screen-btn sui-mod-secondary sd-done', 'Done');
+          done.href = 'javascript:void(0)';
+          done.addEventListener('click', function () { SD.open = null; paintHead(); });
+          drawer.appendChild(done);
+          head.appendChild(drawer);
+        }
       }
       function paintNav() {
         nav.innerHTML = '';

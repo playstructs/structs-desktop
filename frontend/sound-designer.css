@@ -1,26 +1,25 @@
 /* The sound designer card (board-terminal-sound.js). Tokens only. */
 .sd { text-align: left; display: flex; flex-direction: column; gap: var(--spacing-md); }
-.sd-head { display: flex; flex-wrap: wrap; gap: var(--spacing-sm) var(--spacing-xl); align-items: center; }
-/* Inline fields. The board's cfg-field rule puts a caption beside its control
-   but keeps SUI's width:100%, so each stepper took a whole line with its
-   caption at the far left. Here a field is exactly as wide as its caption and
-   control, and the strip wraps as a whole. */
-#board-layout .sd-head label.sui-input-text.cfg-field {
-  width: auto; flex: 0 0 auto; gap: var(--spacing-sm); padding: 0;
-}
-#board-layout .sd-head label.sui-input-text.cfg-field > span:first-child {
-  flex: none; white-space: nowrap;
-}
-.sd-head .sui-screen-btn { flex: none; }
+/* The header: the game's status-bar readouts. A volume tile opens its stepper
+   in a thin drawer; the SOUND tile toggles mute. */
+.sd-hud { display: flex; align-items: flex-start; gap: var(--spacing-xxxl); padding: var(--spacing-xs) 0; }
+.sd-hud .sd-tile { align-items: flex-start; cursor: pointer; }
+.sd-hud .sd-tile .fstat-v { font-family: 'ExtremeHazard', sans-serif; font-size: 16px; line-height: 24px; }
+.sd-hud .sd-tile.is-open .fstat-v { color: var(--accent-primary-active); }
+.sd-hud .sd-tile.is-muted .fstat-v { color: var(--text-warning); }
+.sd-hud-open { display: flex; align-items: flex-end; gap: var(--spacing-xl); padding: 0 0 var(--spacing-sm); border-bottom: 1px solid var(--border-subtle); }
+.sd-hud-open .sui-screen-btn { flex: none; }
 /* A switch with no text of its own is exactly one box wide. */
 #board-layout .sd .sui-checkbox-container:not(.has-label) { width: var(--form-input-height-total); flex: none; }
-/* The checkbox label sits after the box art, as the Replication card places it;
-   SUI's default margin lands it on the box. */
 .sd-body { display: flex; flex-direction: column; gap: var(--spacing-sm); }
 .sd-list { display: flex; flex-direction: column; }
 
 .sd-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md); padding: var(--spacing-sm) var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); }
-.sd-row.is-selected { background: var(--surface-panel); box-shadow: inset 2px 0 0 var(--accent-primary); }
+/* The selected row: a dark player surface, so its captions keep their
+   contrast (the light panel surface washed them out), and the accent bar. */
+.sd-row.is-selected { background: var(--surface-player-body); box-shadow: inset 2px 0 0 var(--accent-primary); }
+.sd-row.is-selected .sd-label { color: var(--text-body); }
+.sd-row.is-selected .sd-when { color: var(--text-body); opacity: .8; }
 .sd-row[data-state="silent"] .sd-label { color: var(--text-hint); }
 .sd-ident { flex: 1 1 200px; min-width: 0; cursor: pointer; }
 .sd-label { display: block; color: var(--text-body); }
@@ -33,13 +32,18 @@
 .sd-chip-x { display: inline-flex; color: var(--text-hint); }
 .sd-chip-x:hover { color: var(--text-enemy-primary); }
 .sd-doors { flex: 0 0 auto; }
-/* Settings: captioned cells, each as wide as its caption and control, wrapping
-   as a row. Same shape as the head, so a switch reads like a stepper. */
-.sd-settings { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-xs) var(--spacing-xl); padding-top: var(--spacing-sm); }
-#board-layout .sd-settings label.sui-input-text.cfg-field {
-  width: auto; flex: 0 0 auto; gap: var(--spacing-sm); padding: 0; min-height: var(--form-input-height-total);
+/* Settings: one line of stacked fields — caption over its value (the drawer's
+   layout, SUI's own), sized to content, wrapping only when the card is narrow. */
+.sd-settings { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: var(--spacing-sm) var(--spacing-xxl); align-items: flex-end; padding: var(--spacing-sm) 0 var(--spacing-xs); border-top: 1px solid var(--border-subtle); margin-top: var(--spacing-xs); }
+#board-layout .sd-settings label.sui-input-text.cfg-field,
+#board-layout .sd-hud-open label.sui-input-text.cfg-field {
+  flex-direction: column; align-items: stretch; justify-content: flex-start; gap: var(--spacing-xs); width: auto; min-width: 0; padding: 0;
 }
-#board-layout .sd-settings label.sui-input-text.cfg-field > span:first-child { flex: none; white-space: nowrap; }
+#board-layout .sd-settings label.sui-input-text.cfg-field > span:first-child,
+#board-layout .sd-hud-open label.sui-input-text.cfg-field > span:first-child { flex: none; min-height: 0; white-space: nowrap; }
+.sd-settings input[type=text], .sd-hud-open input[type=text] { align-self: flex-start; min-width: 0; }
+.sd-settings .sui-checkbox-container { align-self: flex-start; }
+.sd-settings select { min-width: 0; }
 
 .sd-tape { display: flex; flex-direction: column; gap: var(--spacing-xs); }
 .sd-tape-row { display: grid; grid-template-columns: auto auto 1fr auto; gap: var(--spacing-md); align-items: center; padding: var(--spacing-xs) var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
