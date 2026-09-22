@@ -501,16 +501,49 @@
     if (!c && el && typeof el.closest === 'function') c = el.closest(PRESS_SELECTOR);
     return c;
   }
+  // What kind of control was pressed, from its markup: a tab, a screen
+  // button (Retreat, Confirm), an action-bar button, a dialogue button, a
+  // close. The catalogue keeps one mount per kind under `ui.press.<kind>`.
+  function pressKind(c, cls) {
+    var id = String(c.id || '');
+    if (/\bsui-screen-nav-item\b/.test(cls)) return 'tab';
+    if (/\bsui-screen-nav-close\b/.test(cls) || id === 'menu-page-nav-close') return 'close';
+    if (/dialogue-btn/.test(id)) return 'dialogue';
+    if (/\bsui-panel-btn\b/.test(cls)) return 'action';
+    if (/\bsui-screen-btn\b/.test(cls)) return 'button';
+    return 'other';
+  }
+  // The button's own name: its action attribute; else a game id that names
+  // it (an action-bar or menu-page button, shorn of the prefix and the -btn
+  // suffix); else its label; else whatever id it has.
+  function pressName(c) {
+    var id = String(c.id || '');
+    var raw = (c.getAttribute && c.getAttribute('data-action-button')) || '';
+    if (!raw && /-action-bar-|^menu-page-|-btn$/.test(id)) raw = id.replace(/^[a-z_]+-action-bar-/, '').replace(/^menu-page-/, '').replace(/-btn$/, '');
+    if (!raw) raw = (c.textContent || '').trim();
+    if (!raw) raw = id;
+    return raw;
+  }
   function onPress(e) {
     var c = pressControl(e.target);
     if (!c) return;
     var cls = (typeof c.className === 'string') ? c.className : '';
     if (/\bsui-mod-disabled\b|\bsui-mod-disabled-active\b/.test(cls) || c.disabled) { cue(['ui.denied'], { source: 'press' }); return; }
-    if (/\bsui-screen-nav-item\b/.test(cls) && rt.windowName() !== 'main') { cue(['ui.screen.nav'], { source: 'nav' }); return; }
+    // A map tile: a unit on it is announced by the game's selection event
+    // (the hooks cue Select Unit); an empty one is its own cue.
+    if (/\bmap-tile-selection-tile\b/.test(cls)) {
+      if (!(c.getAttribute && c.getAttribute('data-struct-id'))) cue(['ui.select.tile'], { source: 'tile' });
+      return;
+    }
+    var kind = pressKind(c, cls);
+    if (kind === 'tab' && rt.windowName() !== 'main') { cue(['ui.screen.nav'], { source: 'nav' }); return; }
     var t = rt.now();
     if (t - lastPress < 40) return;
     lastPress = t;
-    cue(['ui.press'], { source: 'press' });
+    var C = window.StructsSoundCatalogue;
+    var name = pressName(c);
+    var cands = C && typeof C.pressChain === 'function' ? C.pressChain(name, kind) : ['ui.press'];
+    cue(cands, { source: 'press', kind: kind, button: C && C.pressSlug ? C.pressSlug(name) : name });
   }
 
   // ── Boot ─────────────────────────────────────────────────────────────────

@@ -237,6 +237,13 @@
       return [
         { icon: 'icon-close', title: 'Stop all', onClick: stopAll },
         { icon: 'icon-edit', title: 'Show sound.json', onClick: function () { invoke('sound_reveal_config').catch(function (e) { stamp(String(e)); }); } },
+        // The mapping travels as one zip: sound.json plus every file it names.
+        { icon: 'icon-link-out', title: 'Export sounds (zip)', onClick: function () {
+          invoke('sound_export').then(function (r) { if (r && r.ok) stamp('exported ' + r.files + ' file(s) to ' + r.name); }).catch(function (e) { stamp('export: ' + e); });
+        } },
+        { icon: 'icon-copy', title: 'Import sounds (zip)', onClick: function () {
+          invoke('sound_import').then(function (r) { if (r && r.ok) stamp('imported ' + r.mounts + ' mount(s), ' + r.files + ' file(s)'); }).catch(function (e) { stamp('import: ' + e); });
+        } },
       ];
     },
     render: function (host, p, ctx) {
@@ -320,10 +327,22 @@
         body.appendChild(tape);
         paintNav();
       }
+      // Buttons the catalogue does not name still reach the tape under their
+      // own name (`ui.press.<name>`); once a designer maps one it is in the
+      // config, and the UI group shows it as a row of its own.
+      function extraPressMounts() {
+        var ids = Object.keys((SD.cfg && SD.cfg.mounts) || {});
+        return ids.filter(function (id) { return /^ui\.press\./.test(id) && !C.byId[id]; }).map(function (id) {
+          var name = id.slice('ui.press.'.length).replace(/_/g, ' ');
+          return { id: id, group: 'UI', label: 'Button · ' + name, when: 'the ' + name + ' button', kind: 'oneshot', optional: false, defaults: defaultsOf(id) };
+        });
+      }
       function paintGroup() {
         body.innerHTML = '';
         var list = H.el('div', 'sd-list');
-        C.MOUNTS.filter(function (m) { return m.group === SD.view; }).forEach(function (m) { list.appendChild(row(m, card)); });
+        var mounts = C.MOUNTS.filter(function (m) { return m.group === SD.view; });
+        if (SD.view === 'UI') mounts = mounts.concat(extraPressMounts());
+        mounts.forEach(function (m) { list.appendChild(row(m, card)); });
         body.appendChild(list);
       }
       function paint() {

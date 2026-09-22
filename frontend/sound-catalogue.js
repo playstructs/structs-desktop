@@ -188,8 +188,8 @@
   add('focus.ore_bunker.open', 'Industry', 'Ore Bunker · Focus', 'a bunker is selected (doors open)');
   add('focus.ore_bunker.close', 'Industry', 'Ore Bunker · Unfocus', 'a bunker is deselected (doors close)');
 
-  // Focus (unit-specific selection sounds; all optional)
-  add('focus.struct', 'Focus', 'Focus (any struct)', 'any struct is selected', { optional: true });
+  // Focus (unit-specific selection sounds; all optional — `focus.struct`,
+  // the tail every one of them falls to, lives in the UI group as Select Unit)
   ALL_SLUGS.forEach(function (s) {
     add('focus.' + s, 'Focus', typeLabel(s) + ' · Focus', 'a ' + TYPES[s].name + ' is selected', { optional: true });
   });
@@ -199,6 +199,26 @@
 
   // UI
   add('ui.press', 'UI', 'Standard Button Press', 'any button');
+  // Kinds of button, so a tab is not a Retreat: the press delegate names the
+  // control's kind from its markup, and the catalogue keeps one mount per kind.
+  var PRESS_KINDS = [
+    ['tab', 'Tab', 'a screen tab is switched'],
+    ['button', 'Screen Button', 'a screen button (Retreat, Confirm, Cancel…)'],
+    ['action', 'Action Bar Button', 'an action-bar button (attack, move, defend…)'],
+    ['dialogue', 'Dialogue Button', 'a dialogue button'],
+    ['close', 'Close', 'a screen is closed'],
+  ];
+  PRESS_KINDS.forEach(function (k) { add('ui.press.' + k[0], 'UI', 'Button · ' + k[1], k[2]); });
+  // Buttons named in the game's own screens (their label or action id); any
+  // other button still reaches the tape under its own name and can be mapped.
+  var PRESS_NAMED = ['retreat', 'confirm', 'cancel', 'command', 'dismiss', 'view', 'scan', 'depart', 'logout',
+    'defend', 'move', 'primary_weapon', 'secondary_weapon', 'stealth', 'consume_alpha', 'deploy',
+    'manage_device', 'recover_account', 'new_player', 'returning_player'];
+  PRESS_NAMED.forEach(function (n) {
+    add('ui.press.' + n, 'UI', 'Button · ' + cap(n).replace(/_/g, ' '), 'the ' + n.replace(/_/g, ' ') + ' button', { optional: true });
+  });
+  add('focus.struct', 'UI', 'Select Unit (any)', 'a struct on the map is selected');
+  add('ui.select.tile', 'UI', 'Select Empty Tile', 'an empty map tile is selected');
   add('ui.denied', 'UI', 'Denied', 'a disabled button, or not enough charge');
   add('ui.stage.arm', 'UI', 'Multi-stage · arm', 'an ability is armed and waits for a target');
   add('ui.stage.confirm', 'UI', 'Multi-stage · confirm', 'a target is chosen and the action is sent');
@@ -268,6 +288,23 @@
   }
   function deployChain(ambit) {
     return chain(['deploy.' + String(ambit || '').toLowerCase(), 'deploy']);
+  }
+  // A button press: its own name first (kept even when the catalogue has no
+  // row for it, so the tape can name it and a pick can map it), then its kind.
+  var PRESS_KIND_IDS = {};
+  PRESS_KINDS.forEach(function (k) { PRESS_KIND_IDS[k[0]] = 1; });
+  function pressSlug(text) {
+    return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32);
+  }
+  function pressChain(slug, kind) {
+    var s = pressSlug(slug);
+    var out = chain([PRESS_KIND_IDS[kind] ? 'ui.press.' + kind : null, 'ui.press']);
+    if (s && !PRESS_KIND_IDS[s] && out.indexOf('ui.press.' + s) < 0) out.unshift('ui.press.' + s);
+    return out;
+  }
+  // Selecting a unit on the map: the type's own sound, then the generic one.
+  function selectChain(typeSlug) {
+    return chain(['focus.' + slug(typeSlug), 'focus.struct']);
   }
   function focusChain(typeSlug, online) {
     var s = slug(typeSlug);
@@ -384,6 +421,11 @@
     stealthChain: stealthChain,
     deployChain: deployChain,
     focusChain: focusChain,
+    selectChain: selectChain,
+    pressChain: pressChain,
+    pressSlug: pressSlug,
+    PRESS_KINDS: PRESS_KINDS,
+    PRESS_NAMED: PRESS_NAMED,
     startupChain: startupChain,
     resultChain: resultChain,
     stageChain: stageChain,

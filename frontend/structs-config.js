@@ -3963,9 +3963,11 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       var slug = slugOf(s);
       focus.id = id; focus.slug = slug;
       if (!slug) return;
+      // Selecting a unit: its own sound or the generic Select Unit, always;
+      // then what the type adds — an industry loop, the bunker's doors.
+      cue(C.selectChain(slug), { struct: id });
       if (C.INDUSTRY_SLUGS.indexOf(slug) >= 0) focus.handle = loop(C.focusChain(slug, isOnline(s)), 'focus');
       else if (slug === 'ore_bunker') cue(['focus.ore_bunker.open'], { struct: id });
-      else cue(C.focusChain(slug, isOnline(s)), { struct: id });
     });
 
     // ── Battery ──

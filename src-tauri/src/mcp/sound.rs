@@ -510,6 +510,197 @@ pub fn sound_reveal_config(window: tauri::WebviewWindow) -> Result<(), String> {
     tauri_plugin_opener::reveal_item_in_dir(&path).map_err(|e| e.to_string())
 }
 
+// ── Export / import: the mapping travels as one zip ─────────────────────────
+//
+// `sound.json` inside the zip is the config with every file rewritten to
+// `files/<nnn>-<name>`, and those entries carry the bytes. Import extracts the
+// files into `<config_dir>/structs-app/sounds/<stamp>/` (file NAMES only —
+// never a path from the archive), then each mount in the zip replaces the
+// mount of the same id here: its files and its settings. Mounts the zip does
+// not mention, and the local volumes, are left alone.
+
+/// How many entries an archive may carry before it is refused.
+const IMPORT_MAX_ENTRIES: usize = 600;
+
+/// The manifest and the (zip name, source path) pairs an export writes.
+/// Files that fail the vet are skipped rather than failing the whole export.
+pub fn export_plan(cfg: &SoundConfig) -> (Value, Vec<(String, PathBuf)>) {
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
+    let mut mounts = serde_json::Map::new();
+    let mut n = 0usize;
+    for (id, m) in &cfg.mounts {
+        let mut names = Vec::new();
+        for p in &m.files {
+            if vet_file(p, MAX_BYTES).is_err() {
+                continue;
+            }
+            n += 1;
+            let name = format!("files/{n:03}-{}", file_name(p));
+            names.push(name.clone());
+            entries.push((name, p.clone()));
+        }
+        let mut o = serde_json::to_value(m).unwrap_or_else(|_| json!({}));
+        o["files"] = json!(names);
+        mounts.insert(id.clone(), o);
+    }
+    let manifest = json!({
+        "format": "structs-sounds",
+        "version": 1,
+        "master_volume": cfg.master_volume,
+        "music_volume": cfg.music_volume,
+        "sfx_volume": cfg.sfx_volume,
+        "muted": cfg.muted,
+        "mounts": Value::Object(mounts),
+    });
+    (manifest, entries)
+}
+
+/// Apply an imported manifest: every mount it names replaces ours, its zip
+/// file names resolved through `extracted` (zip name → local path). Answers
+/// (mounts replaced, files attached).
+pub fn import_apply(cfg: &mut SoundConfig, manifest: &Value, extracted: &BTreeMap<String, PathBuf>) -> Result<(usize, usize), String> {
+    if manifest.get("format").and_then(|v| v.as_str()) != Some("structs-sounds") {
+        return Err("not a Structs sounds zip (no format tag in sound.json)".into());
+    }
+    let mounts = manifest.get("mounts").and_then(|v| v.as_object()).ok_or("sound.json has no mounts")?;
+    let mut nm = 0usize;
+    let mut nf = 0usize;
+    for (id, v) in mounts {
+        let id = sane_mount_id(id).ok_or_else(|| format!("mount id {id:?} is not a plain id"))?;
+        let mut m: Mount = serde_json::from_value(v.clone()).map_err(|e| format!("mount {id}: {e}"))?;
+        let names: Vec<String> = v
+            .get("files")
+            .and_then(|f| f.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        m.files = names.iter().filter_map(|n| extracted.get(n).cloned()).collect();
+        nf += m.files.len();
+        cfg.mounts.insert(id, m);
+        nm += 1;
+    }
+    Ok((nm, nf))
+}
+
+fn write_zip(path: &Path, manifest: &Value, entries: &[(String, PathBuf)]) -> Result<(), String> {
+    use std::io::Write;
+    let file = std::fs::File::create(path).map_err(|e| format!("create {}: {e}", file_name(path)))?;
+    let mut z = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    z.start_file("sound.json", opts).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
+    z.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    // Audio is already compressed (mp3) or big (wav); store it as is.
+    let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, src) in entries {
+        let bytes = std::fs::read(src).map_err(|e| format!("read {}: {e}", file_name(src)))?;
+        z.start_file(name, stored).map_err(|e| e.to_string())?;
+        z.write_all(&bytes).map_err(|e| e.to_string())?;
+    }
+    z.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read a sounds zip: its manifest, and its audio extracted into `into` by
+/// file NAME (an archive path is never trusted), vetted by extension and size.
+fn read_zip(path: &Path, into: &Path) -> Result<(Value, BTreeMap<String, PathBuf>), String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", file_name(path)))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("not a zip: {e}"))?;
+    if archive.len() > IMPORT_MAX_ENTRIES {
+        return Err(format!("zip has {} entries (cap {IMPORT_MAX_ENTRIES})", archive.len()));
+    }
+    std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
+    let mut manifest: Option<Value> = None;
+    let mut extracted = BTreeMap::new();
+    for i in 0..archive.len() {
+        let mut f = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = f.name().to_string();
+        if name == "sound.json" {
+            let mut text = String::new();
+            f.read_to_string(&mut text).map_err(|e| e.to_string())?;
+            manifest = Some(serde_json::from_str(&text).map_err(|e| format!("sound.json: {e}"))?);
+            continue;
+        }
+        if f.is_dir() || !name.starts_with("files/") || f.size() > MAX_BYTES {
+            continue;
+        }
+        let Some(rel) = f.enclosed_name() else { continue };
+        let Some(base) = rel.file_name().and_then(|b| b.to_str()).map(String::from) else { continue };
+        let dest = into.join(&base);
+        if !ext_allowed(&dest) {
+            continue;
+        }
+        let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
+        std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+        extracted.insert(name, dest);
+    }
+    let manifest = manifest.ok_or("no sound.json in the zip")?;
+    Ok((manifest, extracted))
+}
+
+/// Save the whole mapping as one zip, where the player chooses.
+#[tauri::command]
+pub async fn sound_export(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    let (manifest, entries) = export_plan(&read());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Export sounds")
+        .add_filter("Zip", &["zip"])
+        .set_file_name("structs-sounds.zip")
+        .set_parent(&window)
+        .save_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let Some(picked) = rx.await.map_err(|_| "dialog closed".to_string())? else {
+        return Ok(json!({ "cancelled": true }));
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let n = entries.len();
+    let nm = manifest["mounts"].as_object().map(|m| m.len()).unwrap_or(0);
+    let name = file_name(&path);
+    tokio::task::spawn_blocking(move || write_zip(&path, &manifest, &entries))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(json!({ "ok": true, "files": n, "mounts": nm, "name": name }))
+}
+
+/// Load a sounds zip: its files land under the app's config dir and every
+/// mount it names replaces ours.
+#[tauri::command]
+pub async fn sound_import(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Import sounds")
+        .add_filter("Zip", &["zip"])
+        .set_parent(&window)
+        .pick_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let Some(picked) = rx.await.map_err(|_| "dialog closed".to_string())? else {
+        return Ok(json!({ "cancelled": true }));
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let stamp = crate::hasher::types::now_millis() as u64;
+    let into = crate::mcp::config_store::config_path("sounds").ok_or("no config dir")?.join(stamp.to_string());
+    let (manifest, extracted) = tokio::task::spawn_blocking(move || read_zip(&path, &into))
+        .await
+        .map_err(|e| e.to_string())??;
+    let (nm, nf) = {
+        let mut c = write();
+        let r = import_apply(&mut c, &manifest, &extracted)?;
+        save(&c);
+        r
+    };
+    announce(&app);
+    Ok(json!({ "ok": true, "mounts": nm, "files": nf }))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -643,6 +834,55 @@ mod tests {
         assert!(v["mounts"]["ui.press"].get("loop").is_none(), "absent stays absent");
         assert_eq!(v["music_volume"], 0.7);
         assert_eq!(v["trace"], false);
+    }
+
+    #[test]
+    fn an_export_names_every_vetted_file_and_an_import_puts_it_back() {
+        let mut c = SoundConfig::default();
+        let a = temp_wav("export-a.wav", 8);
+        let b = temp_wav("export-b.mp3", 8);
+        mount_add_file_impl(&mut c, "ui.press", a.clone(), None).unwrap();
+        mount_add_file_impl(&mut c, "ui.press", PathBuf::from("/nowhere/lost.wav"), None).unwrap();
+        mount_add_file_impl(&mut c, "music.ambient", b.clone(), None).unwrap();
+        mount_set_impl(&mut c, "music.ambient", &json!({ "loop": true, "volume": 0.5 })).unwrap();
+        let (manifest, entries) = export_plan(&c);
+        assert_eq!(manifest["format"], "structs-sounds");
+        assert_eq!(entries.len(), 2, "the missing file is skipped");
+        // Mounts are a BTreeMap: music.ambient is numbered before ui.press.
+        assert_eq!(manifest["mounts"]["music.ambient"]["files"], json!(["files/001-export-b.mp3"]));
+        assert_eq!(manifest["mounts"]["ui.press"]["files"], json!(["files/002-export-a.wav"]));
+        assert_eq!(manifest["mounts"]["music.ambient"]["loop"], true);
+        assert!(manifest["mounts"]["ui.press"].get("loop").is_none(), "absent settings stay absent");
+
+        // Round trip through a real zip into a temp dir.
+        let zip_path = crate::mcp::config_store::config_path("export-test.zip").unwrap();
+        write_zip(&zip_path, &manifest, &entries).unwrap();
+        let into = crate::mcp::config_store::config_path("import-test-dir").unwrap();
+        let (back, extracted) = read_zip(&zip_path, &into).unwrap();
+        assert_eq!(extracted.len(), 2);
+        assert!(extracted["files/002-export-a.wav"].starts_with(&into));
+
+        let mut d = SoundConfig::default();
+        mount_add_file_impl(&mut d, "ui.denied", PathBuf::from("/keep/me.wav"), None).unwrap();
+        let (nm, nf) = import_apply(&mut d, &back, &extracted).unwrap();
+        assert_eq!((nm, nf), (2, 2));
+        assert_eq!(d.mounts["music.ambient"].looping, Some(true));
+        assert_eq!(d.mounts["music.ambient"].volume, Some(0.5));
+        assert_eq!(d.mounts["music.ambient"].files, vec![extracted["files/001-export-b.mp3"].clone()]);
+        assert_eq!(d.mounts["ui.denied"].files, vec![PathBuf::from("/keep/me.wav")], "a mount the zip does not name is untouched");
+        let _ = std::fs::remove_dir_all(&into);
+        let _ = std::fs::remove_file(&zip_path);
+    }
+
+    #[test]
+    fn an_import_refuses_what_is_not_a_sounds_zip() {
+        let mut c = SoundConfig::default();
+        assert!(import_apply(&mut c, &json!({ "mounts": {} }), &BTreeMap::new()).is_err(), "no format tag");
+        assert!(import_apply(&mut c, &json!({ "format": "structs-sounds" }), &BTreeMap::new()).is_err(), "no mounts");
+        assert!(import_apply(&mut c, &json!({ "format": "structs-sounds", "mounts": { "Bad Id": {} } }), &BTreeMap::new()).is_err());
+        let ok = import_apply(&mut c, &json!({ "format": "structs-sounds", "mounts": { "ui.press": { "files": ["files/001-x.wav"], "delay_ms": 20 } } }), &BTreeMap::new()).unwrap();
+        assert_eq!(ok, (1, 0), "a file the zip did not carry is simply not attached");
+        assert_eq!(c.mounts["ui.press"].delay_ms, Some(20));
     }
 
     #[test]

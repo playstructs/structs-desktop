@@ -51,7 +51,10 @@ const note = (list) => { list.forEach((id) => produced.add(id)); return list; };
 let helperOk = true, helperWhy = '';
 const walk = (name, list) => {
   note(list);
-  if (!inside(list) || !endsReal(list)) { helperOk = false; helperWhy = helperWhy || name + ' → ' + JSON.stringify(list); }
+  // A press chain may lead with a button's own name the catalogue does not
+  // know (that is the point: the tape names it); everything after it must be real.
+  const body = name === 'press' && list.length && !C.has(list[0]) ? list.slice(1) : list;
+  if (!inside(body) || !endsReal(body)) { helperOk = false; helperWhy = helperWhy || name + ' → ' + JSON.stringify(list); }
 };
 for (const s of C.FIRE_SLUGS) for (const w of ['primary', 'secondary', 'primaryWeapon', 'secondaryWeapon']) walk('fire ' + s + ' ' + w, C.fireChain(s, w));
 for (const c of C.CLASSES) for (const a of C.AMBITS.concat([null])) for (const k of [true, false]) walk('impact', C.impactChain(c, a, k));
@@ -63,9 +66,19 @@ for (const s of C.INDUSTRY_SLUGS) { walk('startup', C.startupChain(s)); walk('re
 walk('startup other', C.startupChain('tank'));
 for (const ph of C.STAGES) for (const a of C.ACTIONS.concat(['ATTACK_PRIMARY_WEAPON', 'nonsense'])) walk('stage', C.stageChain(ph, a));
 for (const p of Object.keys(C.PASSIVE).concat(['noPassiveWeaponry', null])) walk('counter', C.counterChain(p));
+for (const s of C.ALL_SLUGS) walk('select', C.selectChain(s));
+for (const k of C.PRESS_KINDS.map((k) => k[0]).concat(['other'])) for (const n of C.PRESS_NAMED.concat(['', null])) walk('press', C.pressChain(n, k));
 // evadeEndChain may legitimately be empty (armour has no end); when it answers, it answers real ids.
 for (const cause of Object.keys(C.EVADE_CAUSES)) { const l = C.evadeEndChain(cause); note(l); if (!inside(l)) { helperOk = false; helperWhy = 'evadeEnd ' + cause; } }
 check('every chain is catalogue ids ending on a non-optional tail', helperOk, helperWhy);
+
+console.log('\n— presses and selection');
+check('a named button, its kind, then the generic press', same(C.pressChain('Retreat', 'button'), ['ui.press.retreat', 'ui.press.button', 'ui.press']));
+check('an unknown button keeps its own name first so the tape can show it and a pick can map it', same(C.pressChain('Scan Deeper', 'button'), ['ui.press.scan_deeper', 'ui.press.button', 'ui.press']));
+check('an unknown kind falls to the generic press', same(C.pressChain('', 'other'), ['ui.press']));
+check('a name that is a kind is not doubled', same(C.pressChain('tab', 'tab'), ['ui.press.tab', 'ui.press']));
+check('selecting a unit: its type, then Select Unit', same(C.selectChain('tank'), ['focus.tank', 'focus.struct']) && !C.byId['focus.struct'].optional && C.byId['focus.struct'].group === 'UI');
+check('an empty tile has its own mount', C.has('ui.select.tile'));
 
 console.log('\n— the shared mapper');
 const cues = (names, ctx) => C.animationCues(names, ctx).map((c) => c.candidates);

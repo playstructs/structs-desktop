@@ -211,6 +211,8 @@ fn main() {
             mcp::sound::sound_trace,
             mcp::sound::sound_trace_set,
             mcp::sound::sound_reveal_config,
+            mcp::sound::sound_export,
+            mcp::sound::sound_import,
             matrix::matrix_pinned,
             matrix::matrix_pin,
             matrix::matrix_refs,

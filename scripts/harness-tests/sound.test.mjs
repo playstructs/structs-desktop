@@ -277,14 +277,29 @@ function engine(opts) {
     d.getElementById('ok').querySelector('i').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
     d.getElementById('no').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
     d.getElementById('text').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
-    const cues = e.S.trace.recent().map((r) => r.candidates[0]);
-    check('an icon inside a button is the button (ui.press), a disabled button is ui.denied, text is nothing', cues.join(',') === 'ui.press,ui.denied', cues.join(','));
+    const recs = e.S.trace.recent();
+    check('an icon inside a screen button is the button: its own name, its kind, then the generic press',
+      recs.length === 2 && JSON.stringify(recs[0].candidates) === JSON.stringify(['ui.press.ok', 'ui.press.button', 'ui.press']) && recs[0].ctx.kind === 'button', JSON.stringify(recs[0] && recs[0].candidates));
+    check('a disabled button is ui.denied, text is nothing', recs[1].candidates[0] === 'ui.denied');
     e.setNow(1010);
     d.getElementById('ok').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
     check('presses are debounced 40 ms', e.S.trace.recent().length === 2);
     e.setNow(2000);
     d.getElementById('nav').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
-    check('in the game window a nav item is a press (the router wrap plays the screen)', e.S.trace.recent().slice(-1)[0].candidates[0] === 'ui.press');
+    check('in the game window a nav item is a TAB press (the router wrap plays the screen)', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.press.nav', 'ui.press.tab', 'ui.press']));
+    // Retreat is a planet card's secondary button: named by its label.
+    d.body.innerHTML += '<a class="sui-screen-btn sui-mod-secondary" id="rt">Retreat</a><a class="sui-panel-btn sui-mod-default" id="player-action-bar-defend-btn" data-action-button="defend"></a><a id="menu-page-dialogue-btn-a" class="sui-panel-btn sui-mod-default">OK</a><a class="map-tile-selection-tile" role="button" data-struct-id="5-1" id="t1"></a><a class="map-tile-selection-tile" role="button" data-struct-id="" id="t2"></a>';
+    e.setNow(3000); d.getElementById('rt').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
+    check('Retreat → ui.press.retreat, then the screen-button kind', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.press.retreat', 'ui.press.button', 'ui.press']));
+    e.setNow(4000); d.getElementById('player-action-bar-defend-btn').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
+    check('an action-bar button is named by its action attribute', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.press.defend', 'ui.press.action', 'ui.press']));
+    e.setNow(5000); d.getElementById('menu-page-dialogue-btn-a').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
+    check('a dialogue button is the dialogue kind', e.S.trace.recent().slice(-1)[0].candidates.indexOf('ui.press.dialogue') === 1);
+    const n0 = e.S.trace.recent().length;
+    e.setNow(6000); d.getElementById('t1').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
+    check('a map tile with a unit on it is NOT a press (the selection event cues it)', e.S.trace.recent().length === n0);
+    e.setNow(7000); d.getElementById('t2').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
+    check('an empty map tile is Select Empty Tile', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.select.tile']));
     const b = engine({ win: 'board', page: 'board.html' });
     b.boot(); await tick();
     b.w.document.body.innerHTML = '<div class="sui-screen-nav-item" id="nav"></div>';

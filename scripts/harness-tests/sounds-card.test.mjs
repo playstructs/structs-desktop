@@ -68,7 +68,13 @@ const text = (n) => (n && n.textContent || '').replace(/\s+/g, ' ').trim();
     check('pressing the music tile opens its typed field', host.querySelector('.sd-hud-open input[type=text]') && host.querySelector('.sd-tile[data-knob="music_volume"].is-open'));
     const card0 = d.querySelector('#tm-grid .tm-card[data-card="' + id + '"]');
     const own = [...card0.querySelectorAll('.tm-doors .tm-door-own')].map((a) => a.title);
-    check('Stop all and Show sound.json are title-bar doors', own.includes('Stop all') && own.includes('Show sound.json'), own.join('|'));
+    check('Stop all, Show sound.json, Export and Import are title-bar doors', own.includes('Stop all') && own.includes('Show sound.json') && own.some((t) => /^Export sounds/.test(t)) && own.some((t) => /^Import sounds/.test(t)), own.join('|'));
+    [...card0.querySelectorAll('.tm-doors .tm-door-own')].find((a) => /^Import sounds/.test(a.title)).click();
+    await tick(20);
+    check('the Import door asks Rust for a zip', callsFor('sound_import').length === 1);
+    [...card0.querySelectorAll('.tm-doors .tm-door-own')].find((a) => /^Export sounds/.test(a.title)).click();
+    await tick(20);
+    check('the Export door asks Rust to write one', callsFor('sound_export').length === 1);
 
     // Every mount in every group has a row.
     let missing = [];
@@ -129,6 +135,12 @@ const text = (n) => (n && n.textContent || '').replace(/\s+/g, ' ').trim();
     await tick(30);
     check('a sound-config event repaints the rows without another read',
       text(host.querySelector('.sd-row[data-mount="ui.denied"] .sd-chip-name')) === 'buzz.mp3' && host.querySelectorAll('.sd-row[data-mount="ui.press"] .sd-chip').length === 2 && callsFor('sound_config_get').length === reads);
+    w.__HARNESS_EMIT__('sound-config', { version: 1, master_volume: 0.5, music_volume: 0.7, sfx_volume: 1, muted: true, trace: true,
+      mounts: { 'ui.press': { files: [{ name: 'click.wav', size: 1, mtime_ms: 1, ok: true }, { name: 'click-2.wav', size: 1, mtime_ms: 1, ok: true }] }, 'ui.denied': { files: [{ name: 'buzz.mp3', size: 1, mtime_ms: 1, ok: true }] },
+                'ui.press.scan_deeper': { files: [{ name: 'deep.wav', size: 1, mtime_ms: 1, ok: true }] } } });
+    await tick(30);
+    const dyn = host.querySelector('.sd-row[data-mount="ui.press.scan_deeper"]');
+    check('a mapped button the catalogue does not name gets a row of its own in UI', dyn && /scan deeper/i.test(text(dyn)) && text(dyn.querySelector('.sd-chip-name')) === 'deep.wav');
     check('…and the head follows it', /MUTED/.test(text(host.querySelector('.sd-tile[data-knob="muted"]'))) && text(host.querySelector('.sd-tile[data-knob="master_volume"] .fstat-v')) === '50%');
     check('the pick is offered', host.querySelector('.sd-row[data-mount="ui.press"] .sd-settings select'));
 
