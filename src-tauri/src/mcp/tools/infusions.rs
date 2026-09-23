@@ -41,7 +41,7 @@ use serde_json::{json, Value};
 
 use crate::mcp::cosmos_client::CosmosClient;
 use crate::mcp::loop_util::parse_f64 as num;
-use crate::mcp::tools::board_pages::require_board;
+use crate::mcp::tools::board_pages::require_trusted;
 
 /// 1 gram of Alpha = 1e6 ualpha, and `ReactorFuelToEnergyConversion = 1`, so a
 /// gram of fuel at ratio 1 is 1e6 mW = 1 kW of power before commission.
@@ -1117,7 +1117,7 @@ pub async fn mcp_infusion_infuse(
     reactor_id: String,
     amount_ualpha: f64,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_infusion_infuse_impl(app, address, reactor_id, amount_ualpha).await
 }
 
@@ -1178,7 +1178,7 @@ pub async fn mcp_infusion_defuse(
     reactor_id: String,
     amount_ualpha: f64,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_infusion_defuse_impl(app, address, reactor_id, amount_ualpha).await
 }
 
@@ -1237,7 +1237,7 @@ pub async fn mcp_infusion_migrate(
     to_reactor_id: String,
     amount_ualpha: f64,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_infusion_migrate_impl(app, address, from_reactor_id, to_reactor_id, amount_ualpha).await
 }
 
@@ -1315,7 +1315,7 @@ pub async fn mcp_infusion_cancel_defusion(
     amount_ualpha: f64,
     creation_height: String,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_infusion_cancel_defusion_impl(app, address, validator, amount_ualpha, creation_height).await
 }
 
@@ -1368,7 +1368,7 @@ pub async fn mcp_infusion_restart(
     window: tauri::WebviewWindow,
     reactor_id: String,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_infusion_restart_impl(app, reactor_id).await
 }
 

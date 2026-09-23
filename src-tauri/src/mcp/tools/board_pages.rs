@@ -1,7 +1,8 @@
 //! Tauri commands backing the Team Ops Command Center pages (FLEET / ENERGY /
 //! WORK / CONFIG). All read commands return JSON the page renders client-side;
-//! the write command (`mcp_config_set`) and every mass action are gated to the
-//! board window (`require_board`) and audit into the event feed.
+//! the write command (`mcp_config_set`) and every mass action are refused to
+//! windows showing other players' content (`require_trusted`) and audit into
+//! the event feed.
 //!
 //! The agent-facing `structs_board` MCP tool and `render_board` (OPS page) are
 //! deliberately untouched — human and agent read the same underlying state
@@ -15,58 +16,63 @@ use crate::hasher::types::TaskRegistry;
 use crate::mcp::telemetry;
 use crate::mcp::{auto_build, auto_defend, auto_harvest, auto_infuse, board_feed, roster_cache};
 
-/// Guard: only the Team Ops window may invoke mutating dashboard commands.
-/// Tauri commands are callable from EVERY webview (including the main game
-/// window and anything it loads); nothing else in the app enforces caller
-/// identity, so this is the fence around the signing/config surface.
-pub(crate) fn require_board(window: &tauri::WebviewWindow) -> Result<(), String> {
-    require_window(window, &["board"])
+/// Guard for every command that signs, spends or rewrites config.
+///
+/// Tauri commands are callable from EVERY webview, so the app decides which
+/// windows may act. This used to be a per-command ALLOWLIST of labels, and
+/// every window built for the player — the Terminal, each popped-out card, Pay
+/// — was refused by its own app until someone remembered to name it there
+/// ("command restricted to 'board' (called from 'terminal-…-fuel-1')").
+///
+/// The fence that matters is narrower: a window whose document renders
+/// content written by OTHER players. Those are refused; every other window the
+/// app builds is trusted. See `is_untrusted_label` for the list.
+///
+/// Pages embedded in an iframe share their HOST window's label, so the two
+/// frame bridges carry their own measured allowlists: `Terminal.frameMayInvoke`
+/// (board-terminal.js) and `FRAME_CMDS` (structs-config.js, ⌘K over the game).
+/// `terminal.test.mjs` / `palette.test.mjs` keep them in step with the pages.
+pub(crate) fn require_trusted(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let label = window.label();
+    if is_untrusted_label(label) {
+        return Err(format!(
+            "'{label}' shows other players' content and may not sign or change settings"
+        ));
+    }
+    Ok(())
 }
 
-/// The gate, as an explicit ALLOWLIST of window labels.
-///
-/// Kept per-command rather than widened globally. When the focused Pay window
-/// arrived it needed to run one command — the transfer — and adding its label
-/// to `require_board` itself would have handed it every mass action, every
-/// config write and every roster command as a side effect. A window earns one
-/// capability at a time.
-///
-/// The rule this encodes is not "not chat". It is that a window which renders
-/// text written by federated strangers is never on one of these lists, and
-/// membership is stated at the command it protects.
-///
-/// One label in an allowlist is a CLASS rather than a name: `"terminal"`
-/// matches the Terminal window and every card it pops out
-/// (`terminal-<workspace>-<card>`). Those labels are minted per card, so they
-/// cannot be listed — and without this a Deliver card popped into its own
-/// window could draw the whole payment and then be refused by its own app at
-/// the signature, which is what happened.
-///
-/// The Terminal embeds pages (Comms, the raid map) in iframes, and an iframe
-/// shares its host window's label — so anything the Terminal may invoke, an
-/// embedded page could ask it to invoke on its behalf. `Terminal.answerFrame`
-/// answers only a measured allowlist of commands for exactly this reason; the
-/// two halves have to stay in step, and `terminal.test.mjs` checks that they do.
-pub(crate) fn require_window(
-    window: &tauri::WebviewWindow,
-    allowed: &[&str],
-) -> Result<(), String> {
-    let label = window.label();
-    if allowed.contains(&label) {
-        return Ok(());
+/// Windows that render what other players wrote:
+///   * `main` — the game: the webapp plus everything the guild servers feed it
+///   * `chat` / `chat-<player>` — Comms: text from federated strangers
+///   * `raid-<location>` — the raid viewer: the enemy commander's own attrs
+pub(crate) fn is_untrusted_label(label: &str) -> bool {
+    label == "main"
+        || label == "chat"
+        || label.starts_with("chat-")
+        || label.starts_with(crate::mcp::raid_view::LABEL_PREFIX)
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::is_untrusted_label;
+
+    #[test]
+    fn player_windows_are_trusted() {
+        for l in [
+            "board", "terminal", "terminal-ops-fuel-1", "terminal-card-JPEG-fuel-1",
+            "transfer", "stream", "gamestats", "pet",
+        ] {
+            assert!(!is_untrusted_label(l), "{l} should be allowed to act");
+        }
     }
-    if allowed.contains(&"terminal") && crate::mcp::terminal::is_terminal_label(label) {
-        return Ok(());
+
+    #[test]
+    fn windows_showing_other_players_are_not() {
+        for l in ["main", "chat", "chat-1-248", "raid-2-15361"] {
+            assert!(is_untrusted_label(l), "{l} must be refused");
+        }
     }
-    Err(format!(
-        "command restricted to {} (called from '{}')",
-        allowed
-            .iter()
-            .map(|l| format!("'{l}'"))
-            .collect::<Vec<_>>()
-            .join(" or "),
-        window.label()
-    ))
 }
 
 // ── FLEET ────────────────────────────────────────────────────────────────────
@@ -885,15 +891,7 @@ pub async fn mcp_transfer_execute(
     denom: String,
     amount: f64,
 ) -> Result<Value, String> {
-    /* Three surfaces, each named here and each getting nothing else that
-     * `require_board` protects.
-     *
-     * The focused Pay window is SINGLE-PURPOSE: one recipient, one amount, one
-     * button — a narrower place to sign from than the six-area console, not a
-     * wider one. The Terminal is where Deliver actually lives now (the window
-     * itself and every card popped out of it), and it drew the whole payment
-     * and then refused it at the signature until it was named here. */
-    require_window(&window, &["board", "transfer", "terminal"])?;
+    require_trusted(&window)?;
     mcp_transfer_execute_impl(app, from, to, denom, amount).await
 }
 
@@ -1354,7 +1352,7 @@ pub async fn mcp_allocation_set_power(
     allocation_id: String,
     power_mw: f64,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_allocation_set_power_impl(app, allocation_id, power_mw).await
 }
 
@@ -1410,7 +1408,7 @@ pub async fn mcp_allocation_connect(
     allocation_id: String,
     destination_id: String,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_allocation_connect_impl(app, allocation_id, destination_id).await
 }
 
@@ -1455,7 +1453,7 @@ pub async fn mcp_allocation_create(
     allocation_type: String,
     power_mw: f64,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_allocation_create_impl(app, source_object_id, allocation_type, power_mw).await
 }
 
@@ -1596,11 +1594,11 @@ pub async fn mcp_config_set(
     domain: String,
     payload: Value,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_config_set_impl(app, domain, payload).await
 }
 
-/// Body of `mcp_config_set` — the native path enters via the require_board
+/// Body of `mcp_config_set` — the native path enters via the require_trusted
 /// wrapper above; the token-authenticated web dashboard calls this directly
 /// (the bearer token IS the operator authority there). Audit feed pushes live
 /// in here so both paths are logged identically.
@@ -2188,7 +2186,7 @@ pub async fn mcp_callsign_set(
     window: tauri::WebviewWindow,
     config: Value,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_callsign_set_impl(config).await
 }
 
@@ -2294,7 +2292,7 @@ pub async fn mcp_role_pfp_set(
     role: String,
     config: Value,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_role_pfp_set_impl(app, role, config).await
 }
 
@@ -2420,7 +2418,7 @@ pub async fn mcp_tx_mutate(
     id: String,
     new_index: Option<i64>,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_tx_mutate_impl(app, op, id, new_index).await
 }
 

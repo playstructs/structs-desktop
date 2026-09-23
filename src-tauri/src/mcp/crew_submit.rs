@@ -806,7 +806,7 @@ pub fn crew_submit_set(
     window: tauri::WebviewWindow,
     config: CrewSubmitConfig,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     set(config);
     Ok(json!({ "ok": true, "config": get() }))
 }

@@ -1421,27 +1421,24 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     /* ── The Terminal may sign a transfer; an embedded page may not ─────────
      *
      * Deliver is a Terminal card, and the Terminal's windows are labelled
-     * `terminal` / `terminal-<workspace>-<card>` — never `board`. The gate is
-     * an exact-match allowlist, so the card drew a whole payment and was then
-     * refused by its own app at the signature: "command restricted to 'board'
-     * or 'transfer' (called from 'terminal')".
+     * `terminal` / `terminal-<workspace>-<card>`. The gate used to be an
+     * exact-match allowlist per command, so cards drew a whole payment (or an
+     * infusion) and were then refused by their own app at the signature. It is
+     * a DENYLIST now: only windows that render other players' content (the
+     * game, Comms, the raid viewer) are refused, and nothing names the Terminal.
      *
-     * Naming the Terminal there is only safe with the other half in place. A
-     * card can embed a page, an iframe shares its HOST window's label, and the
-     * frame bridge used to forward any command at all — so the Comms window,
-     * which renders text written by federated strangers, could have asked the
+     * That is only safe with the other half in place. A card can embed a page,
+     * an iframe shares its HOST window's label, and the frame bridge used to
+     * forward any command at all — so an embedded page could have asked the
      * Terminal to sign for it. */
     {
       const rs = read('src-tauri/src/mcp/tools/board_pages.rs');
-      check('the transfer gate names the Terminal, since that is where Deliver lives',
-        /require_window\(&window, &\["board", "transfer", "terminal"\]\)/.test(rs));
-      check('…and "terminal" in an allowlist is the CLASS — the popped-out card labels are minted per card',
-        /allowed\.contains\(&"terminal"\)\s*&&\s*crate::mcp::terminal::is_terminal_label\(label\)/.test(rs));
-      /* Widening `require_board` itself would have handed the Terminal every
-       * mass action, every config write and every roster command as a side
-       * effect. It earns one capability. */
-      check('…and it did NOT widen the board gate to get there',
-        /pub\(crate\) fn require_board[^}]*require_window\(window, &\["board"\]\)/s.test(rs));
+      const deny = rs.slice(rs.indexOf('fn is_untrusted_label'));
+      const body = deny.slice(0, deny.indexOf('\n}'));
+      check('no command carries a per-window allowlist any more',
+        !/require_window|require_board/.test(rs));
+      check('…and the Terminal is not refused — no rule in the denylist matches its labels',
+        !/terminal/.test(body), body);
 
       const may = w.Board.Terminal.frameMayInvoke;
       check('an embedded page cannot borrow the signature it just unlocked',

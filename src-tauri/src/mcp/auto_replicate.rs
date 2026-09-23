@@ -635,8 +635,8 @@ pub fn force_reset_running() {
 
 // ── Commands ─────────────────────────────────────────────────────────────────
 
-/// The REPLICATE button. Not board-gated on purpose: the card lives in a
-/// Terminal window, whose label a `require_board` check would refuse.
+/// The REPLICATE button. Ungated: it predates `require_trusted`, which was a
+/// per-window allowlist that would have refused the Terminal card it lives in.
 #[tauri::command]
 pub async fn mcp_replicate(app: tauri::AppHandle, n: Option<u32>) -> Result<Value, String> {
     Ok(press(&app, n.unwrap_or(1)))

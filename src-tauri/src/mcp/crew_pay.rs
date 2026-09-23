@@ -817,7 +817,7 @@ pub async fn crew_settle(
     window: tauri::WebviewWindow,
     room_id: String,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     settle(&app, &room_id).await
 }
 

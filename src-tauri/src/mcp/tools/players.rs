@@ -68,7 +68,7 @@ pub async fn mcp_players(
     role: Option<String>,
     guild_id: Option<String>,
 ) -> Result<String, String> {
-    crate::mcp::tools::board_pages::require_board(&window)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     // Reads and creation only. Acting AS a virtual player goes through
     // commands that each carry their own allowlist — `mcp_struct_act` (struct
     // verbs the map offers) and `terminal_player_explore` (exactly one verb).

@@ -368,8 +368,6 @@ pub fn view(cfg: &SoundConfig) -> Value {
 
 // ── Commands ─────────────────────────────────────────────────────────────────
 
-/// The designer's windows: Team Ops and the Terminal (with its popped cards).
-const WRITERS: &[&str] = &["board", "terminal"];
 
 fn announce(app: &tauri::AppHandle) {
     let v = view(&read());
@@ -385,7 +383,7 @@ pub fn sound_config_get() -> Value {
 /// Master / music / sfx volume and mute.
 #[tauri::command]
 pub fn sound_config_set(window: tauri::WebviewWindow, app: tauri::AppHandle, patch: Value) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     {
         let mut c = write();
         config_set_impl(&mut c, &patch)?;
@@ -398,7 +396,7 @@ pub fn sound_config_set(window: tauri::WebviewWindow, app: tauri::AppHandle, pat
 /// One mount's settings (never its files — see `sound_pick_file`).
 #[tauri::command]
 pub fn sound_mount_set(window: tauri::WebviewWindow, app: tauri::AppHandle, id: String, patch: Value) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     {
         let mut c = write();
         mount_set_impl(&mut c, &id, &patch)?;
@@ -411,7 +409,7 @@ pub fn sound_mount_set(window: tauri::WebviewWindow, app: tauri::AppHandle, id: 
 /// Forget a mount entirely (its files and every setting).
 #[tauri::command]
 pub fn sound_mount_delete(window: tauri::WebviewWindow, app: tauri::AppHandle, id: String) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     {
         let mut c = write();
         c.mounts.remove(&id);
@@ -435,7 +433,7 @@ pub async fn sound_pick_file(
     replace: Option<usize>,
 ) -> Result<Value, String> {
     use tauri_plugin_dialog::DialogExt;
-    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     sane_mount_id(&id).ok_or_else(|| format!("mount id {id:?} is not a plain id"))?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
@@ -492,7 +490,7 @@ pub fn sound_trace(window: tauri::WebviewWindow, app: tauri::AppHandle, cues: Ve
 /// engine learns whether to send traces.
 #[tauri::command]
 pub fn sound_trace_set(window: tauri::WebviewWindow, app: tauri::AppHandle, enabled: bool) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     TRACE.store(enabled, Ordering::Relaxed);
     announce(&app);
     Ok(sound_config_get())
@@ -502,7 +500,7 @@ pub fn sound_trace_set(window: tauri::WebviewWindow, app: tauri::AppHandle, enab
 /// share a mapping by hand (the file holds the absolute paths).
 #[tauri::command]
 pub fn sound_reveal_config(window: tauri::WebviewWindow) -> Result<(), String> {
-    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let path = crate::mcp::config_store::config_path(FILENAME).ok_or("no config dir")?;
     if !path.exists() {
         save(&read());
@@ -642,7 +640,7 @@ fn read_zip(path: &Path, into: &Path) -> Result<(Value, BTreeMap<String, PathBuf
 #[tauri::command]
 pub async fn sound_export(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<Value, String> {
     use tauri_plugin_dialog::DialogExt;
-    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (manifest, entries) = export_plan(&read());
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
@@ -672,7 +670,7 @@ pub async fn sound_export(window: tauri::WebviewWindow, app: tauri::AppHandle) -
 #[tauri::command]
 pub async fn sound_import(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<Value, String> {
     use tauri_plugin_dialog::DialogExt;
-    crate::mcp::tools::board_pages::require_window(&window, WRITERS)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()

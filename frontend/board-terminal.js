@@ -73,7 +73,7 @@
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
     ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats']],
     ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
-    ['Industry', ['grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
+    ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['System', ['health', 'sounds']],
   ];
@@ -1568,7 +1568,10 @@
     REPLICATE: ['replication'], REPLICANTS: ['replication'], CLONE: ['replication'], RAIDS: ['raids'], POSTURE: ['posture'], WAR: ['posture'], TARGETS: ['targets'],
     GRUDGES: ['grudges'], VETOES: ['vetoes'], INCIDENTS: ['incidents'], WALLET: ['wallet', 'optid'], HEALTH: ['health'],
     SETTINGS: ['page', 'config'],
-    STATS: ['stats', 'section'], WORK: ['tasks'], ENERGY: ['grid'], STREAM: ['feed'],
+    STATS: ['stats', 'section'], WORK: ['tasks'], STREAM: ['feed'],
+    // One number, one bar, one button. ENERGY used to open the guild grid;
+    // GRID still does.
+    ENERGY: ['energy'], POWER: ['energy'], HEADROOM: ['energy'],
     INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
     // What a player has DONE (the tiles) and what their hulls have done (the
     // table). `AWARDS` and `HULLS` because that is what each is called out loud.

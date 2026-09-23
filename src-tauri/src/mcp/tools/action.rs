@@ -34,7 +34,7 @@ pub async fn mcp_action(
     action: String,
     args: Option<Value>,
 ) -> Result<String, String> {
-    crate::mcp::tools::board_pages::require_board(&window)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let out = execute(
         &app,
         &registry,

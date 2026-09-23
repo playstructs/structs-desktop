@@ -545,6 +545,8 @@ pub fn card_window_size(kind: &str) -> (f64, f64) {
     match kind {
         // The button, the switch, two counts, six figures in two rows.
         "replication" => (460.0, 450.0),
+        // One number, one bar, one button — and the short flows behind it.
+        "energy" => (460.0, 560.0),
         _ => (640.0, 620.0),
     }
 }
@@ -1584,7 +1586,7 @@ fn deploy_ambits(
 
 #[tauri::command]
 pub fn terminal_deploy_slots(window: tauri::WebviewWindow, id: String) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_board(&window)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let sid = id.trim().to_string();
     if !sid.starts_with("5-") {
         return Err(format!("'{sid}' is not a struct id (expected 5-<number>)"));
@@ -1654,7 +1656,7 @@ pub fn terminal_deploy_slots(window: tauri::WebviewWindow, id: String) -> Result
 /// and cannot tell you that you are away.
 #[tauri::command]
 pub fn terminal_fleet_where(window: tauri::WebviewWindow, player: String) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_board(&window)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let primary = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone());
     let who = if player.trim() == "primary" {
         primary.clone().unwrap_or_default()
@@ -1719,7 +1721,7 @@ pub async fn terminal_fleet_move(
     player: String,
     destination: String,
 ) -> Result<String, String> {
-    crate::mcp::tools::board_pages::require_board(&window)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let player = player.trim().to_string();
     let destination = destination.trim().to_string();
     if player.is_empty() {
@@ -1806,7 +1808,7 @@ pub async fn terminal_player_explore(
     registry: tauri::State<'_, std::sync::Arc<crate::hasher::types::TaskRegistry>>,
     player: String,
 ) -> Result<String, String> {
-    crate::mcp::tools::board_pages::require_board(&window)?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     if player.trim().is_empty() {
         return Err("explore: player required".into());
     }
@@ -2050,6 +2052,7 @@ mod same_card_tests {
     #[test]
     fn a_fixed_card_gets_a_window_that_fits_and_lists_keep_the_default() {
         assert_eq!(card_window_size("replication"), (460.0, 450.0));
+        assert_eq!(card_window_size("energy"), (460.0, 560.0));
         assert_eq!(card_window_size("armada"), (640.0, 620.0));
         assert_eq!(card_window_size(""), (640.0, 620.0));
     }

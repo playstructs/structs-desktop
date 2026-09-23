@@ -9,7 +9,7 @@
 //! (`structs_board web:"on"` or the Team Ops CONFIG page). Auth: the existing
 //! MCP bearer token, delivered once as `?token=` and converted to an HttpOnly
 //! cookie scoped to /board. The bearer token IS the operator authority — the
-//! web path deliberately bypasses `require_board` (which gates the *native*
+//! web path deliberately bypasses `require_trusted` (which gates the *native*
 //! window write commands) by calling the shared `*_impl` bodies, which carry
 //! the audit-feed pushes so web writes are logged identically.
 //!
@@ -971,6 +971,41 @@ async fn board_invoke(
             )
             .await,
         ),
+        // The Energy card: a read, the share write, the keep-powered switch.
+        "terminal_energy" => from_result(
+            crate::mcp::energy_card::terminal_energy(body.get("fresh").and_then(|v| v.as_bool())).await,
+        ),
+        "mcp_energy_share" => from_result(
+            crate::mcp::energy_card::mcp_energy_share_impl(
+                st.app.clone(),
+                body.get("powerMw").and_then(|v| v.as_f64()).unwrap_or(-1.0),
+                s("destinationId"),
+            )
+            .await,
+        ),
+        "mcp_energy_rent" => from_result(
+            crate::mcp::energy_card::mcp_energy_rent_impl(
+                st.app.clone(),
+                s("providerId").unwrap_or_default(),
+                body.get("capacity").and_then(|v| v.as_u64()).unwrap_or(0),
+                body.get("duration").and_then(|v| v.as_u64()).unwrap_or(0),
+            )
+            .await,
+        ),
+        "mcp_energy_sell" => from_result(
+            crate::mcp::energy_card::mcp_energy_sell_impl(
+                st.app.clone(),
+                body.get("powerMw").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                body.get("rate").and_then(|v| v.as_u64()).unwrap_or(0),
+                body.get("maxDays").and_then(|v| v.as_f64()).unwrap_or(7.0),
+            )
+            .await,
+        ),
+        "mcp_energy_keep" => {
+            let mut cfg = crate::mcp::energy_card::config();
+            cfg.enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            ok_json(crate::mcp::energy_card::set_keep(cfg))
+        }
         "terminal_ore_radar" => ok_json(crate::mcp::terminal::terminal_ore_radar(
             body.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize),
         )),

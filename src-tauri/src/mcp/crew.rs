@@ -862,14 +862,14 @@ pub fn crew_list() -> Result<Value, String> {
 
 #[tauri::command]
 pub fn crew_save(window: tauri::WebviewWindow, crew: Crew) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let saved = upsert(crew)?;
     Ok(json!({ "ok": true, "crew": saved }))
 }
 
 #[tauri::command]
 pub fn crew_forget(window: tauri::WebviewWindow, room_id: String) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     Ok(json!({ "ok": true, "removed": remove(&room_id)? }))
 }
 
@@ -881,7 +881,7 @@ pub async fn crew_grant(
     helper_player_id: String,
     room_id: Option<String>,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (mine, _) = me()?;
     grant(&app, 0, &mine, &helper_player_id, PERM_HASH_ALL).await?;
     // Remember locally only AFTER the chain accepted it: `sign_with_retry`
@@ -907,7 +907,7 @@ pub async fn crew_revoke(
     helper_player_id: String,
     room_id: Option<String>,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (mine, _) = me()?;
     revoke(&app, 0, &mine, &helper_player_id, PERM_HASH_ALL).await?;
     if let Some(room) = room_id {
@@ -928,7 +928,7 @@ pub async fn crew_open_guild(
     rank: u64,
     room_id: Option<String>,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (mine, my_guild) = me()?;
     let guild = guild_id.filter(|g| !g.is_empty()).unwrap_or(my_guild);
     if guild.is_empty() {
@@ -951,7 +951,7 @@ pub async fn crew_close_guild(
     guild_id: Option<String>,
     room_id: Option<String>,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (mine, my_guild) = me()?;
     let guild = guild_id.filter(|g| !g.is_empty()).unwrap_or(my_guild);
     if guild.is_empty() {
@@ -1050,7 +1050,7 @@ pub async fn crew_help_guild(
     rank: Option<u64>,
     open_my_work: Option<bool>,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (mine, my_guild) = me()?;
     let guild = guild_id.filter(|g| !g.is_empty()).unwrap_or(my_guild);
     if guild.is_empty() {
@@ -1097,7 +1097,7 @@ pub async fn crew_help_player(
     player_id: String,
     open_my_work: Option<bool>,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (mine, my_guild) = me()?;
     let friend = player_id.trim().to_string();
     if crate::matrix::refs::parse_id(&friend).is_none() {
@@ -1135,7 +1135,7 @@ pub async fn crew_stop(
     window: tauri::WebviewWindow,
     crew_id: String,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (mine, _) = me()?;
     let Some(crew) = get(&crew_id) else {
         return Err(format!("{crew_id} is not a crew here"));
@@ -1174,7 +1174,7 @@ pub fn crew_for_helper(helper: &str, room_id: &str) -> Option<Crew> {
 /// none, and returns it. Setting the rate is the bounty card's job.
 #[tauri::command]
 pub fn crew_pay_anyone(window: tauri::WebviewWindow) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let (_, my_guild) = me()?;
     if let Some(c) = get(HELPERS_CREW) {
         return Ok(json!({ "ok": true, "crew": c, "created": false }));

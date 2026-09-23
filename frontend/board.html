@@ -1460,6 +1460,52 @@
     .rp-sep { border-top: thin solid var(--border-subtle); }
     .tm-tiles.rp-stats { margin-bottom: 0; display: grid; grid-template-columns: repeat(3, auto);
       justify-content: space-between; gap: var(--spacing-md) var(--spacing-lg); }
+    /* The Energy card: one number, one bar, one button. The bar is supply
+       (Own · Shared · Rented) with a marker at the draw; the lit stretch
+       between them is the headroom. No battery — that is the charge bar. */
+    .en { display: flex; flex-direction: column; gap: var(--spacing-md); text-align: left; }
+    .en-head { display: flex; flex-direction: column; gap: var(--spacing-xs); padding-top: var(--spacing-sm); }
+    .en-v { color: var(--text-player-primary); }
+    .en-v.is-warn { color: var(--text-warning); }
+    .en-v.is-bad { color: var(--text-enemy-primary); }
+    .en-barwrap { display: flex; flex-direction: column; gap: var(--spacing-sm); padding-top: var(--spacing-lg); }
+    .en-bar { position: relative; display: flex; gap: 3px; height: 32px; padding: 3px; background: var(--surface-neutral-body);
+      box-shadow: 0 0 0 2px var(--text-player-primary); }
+    .en-seg { display: block; height: 100%; min-width: 2px; }
+    .en-seg.is-own, .en-sw.is-own { background: var(--text-player-primary); }
+    .en-seg.is-shared, .en-sw.is-shared { background: var(--accent-secondary); }
+    .en-seg.is-rented, .en-sw.is-rented { background: var(--text-neutral-primary); }
+    .en-seg.is-extra { background: repeating-linear-gradient(45deg, var(--text-player-primary) 0 3px, transparent 3px 7px); }
+    .en-seg.is-over { background: repeating-linear-gradient(45deg, var(--text-enemy-primary) 0 3px, transparent 3px 7px); }
+    .en-seg.is-rest { background: transparent; min-width: 0; }
+    .en-gap { position: absolute; top: 3px; bottom: 3px; margin-left: 3px; box-shadow: inset 0 0 0 2px var(--text-body); pointer-events: none; }
+    .en-mark { position: absolute; top: -6px; bottom: -6px; width: 3px; margin-left: 2px; background: var(--text-body); }
+    .en-mark-l { position: absolute; top: -22px; transform: translateX(-50%); white-space: nowrap; font-size: 10px; color: var(--text-body); }
+    .en-mark-l.is-right { transform: translateX(-100%); }
+    .en-legend { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-lg); }
+    .en-leg { display: inline-flex; align-items: center; gap: var(--spacing-xs); }
+    .en-sw { display: inline-block; width: 10px; height: 10px; }
+    .en-leg-v { color: var(--text-player-primary); }
+    .en-hero { display: flex; flex-direction: column; align-items: center; gap: var(--spacing-md); padding: var(--spacing-md) 0 var(--spacing-sm); }
+    #board-layout .en-hero > a.sui-screen-btn { width: 100%; height: auto; justify-content: center; padding: var(--spacing-md) var(--spacing-xl); }
+    #board-layout .en-hero .sui-checkbox-container.has-label label { margin-left: calc(var(--form-input-height-total) + var(--spacing-sm)); }
+    #board-layout .en-hero a.en-warn { border-color: var(--text-warning); color: var(--text-warning); }
+    #board-layout .en-hero a.en-bad { border-color: var(--text-enemy-primary); color: var(--text-enemy-primary); }
+    .en-step { display: flex; align-items: center; gap: var(--spacing-md); }
+    .en-way { display: flex; flex-direction: column; gap: var(--spacing-xs); padding: var(--spacing-md); text-decoration: none;
+      border: thin solid var(--border-subtle); background: var(--surface-neutral-body); color: var(--text-body); cursor: pointer; }
+    .en-way.is-on { border-color: var(--text-player-primary); background: var(--surface-player-body); }
+    .en-way.is-off { opacity: .45; cursor: default; }
+    .en-way-top { display: flex; justify-content: space-between; align-items: baseline; }
+    .en-way-c { color: var(--text-player-primary); }
+    .en-chips { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); }
+    #board-layout .en-chips a.en-chip { height: auto; padding: var(--spacing-xs) var(--spacing-md); }
+    .en-actions { display: flex; gap: var(--spacing-sm); justify-content: flex-end; flex-wrap: wrap; }
+    .en-line { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md); }
+    .en-plan { display: flex; flex-direction: column; }
+    .en-note { color: var(--text-hint); }
+    .en-confirm { display: flex; flex-direction: column; gap: var(--spacing-sm); padding: var(--spacing-md); border: thin solid var(--text-player-primary); background: var(--surface-player-body); }
+    .en-confirm-t { color: var(--text-player-highlight); }
     .tm-folds { display: flex; flex-direction: column; margin-top: var(--spacing-lg); border-top: 1px solid var(--border-subtle); }
     .tm-fold { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md);
       padding: var(--spacing-md) var(--spacing-sm); border-bottom: 1px solid var(--border-subtle); cursor: pointer; user-select: none; -webkit-user-select: none; }

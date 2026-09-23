@@ -2,7 +2,7 @@
 //! once" pipeline: Sweep Alpha, Launch Players, Set Role, Force Scans.
 //!
 //! Safety model (user chose one-click, no confirm modal):
-//! * `require_board` — only the Team Ops window can invoke this command.
+//! * `require_trusted` — never from a window that shows other players' content.
 //! * **Ambient dry-run** — the UI continuously shows the computed plan ON the
 //!   button ("Sweep 14 selected · ~340α"); executing echoes that exact plan
 //!   back and each entry is re-validated against the fresh roster before
@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::hasher::types::now_millis;
 use crate::mcp::telemetry::{tlog, Sev};
-use crate::mcp::tools::board_pages::require_board;
+use crate::mcp::tools::board_pages::require_trusted;
 use crate::mcp::virtual_players::{self, VPlayerRole, REGISTRY};
 use crate::mcp::{board_feed, loop_util, roster_cache, tx_retry};
 
@@ -63,11 +63,11 @@ pub async fn mcp_mass_action(
     app: tauri::AppHandle,
     request: MassActionRequest,
 ) -> Result<Value, String> {
-    require_board(&window)?;
+    require_trusted(&window)?;
     mcp_mass_action_impl(app, request).await
 }
 
-/// Body of `mcp_mass_action` — native path enters via the require_board
+/// Body of `mcp_mass_action` — native path enters via the require_trusted
 /// wrapper; the token-authenticated web dashboard calls this directly. The
 /// JOB_RUNNING single-job gate and all audit/ledger lines live in the per-
 /// action fns, shared by both paths.

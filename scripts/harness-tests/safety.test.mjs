@@ -219,20 +219,18 @@ for (const file of FEDERATED) {
 const chat = ['chat.js', 'chat-refs.js', 'chat-complete.js', 'chat-reactions.js', 'chat-commands.js', 'chat-work.js', 'chat-channels.js', 'chat-search.js', 'chat-people.js', 'chat-connection.js', 'chat-pins.js', 'chat-presence.js', 'chat-message.js', 'chat-scroll.js', 'chat-room.js', 'chat-tabs.js', 'chat-rent.js']
   .map((f) => readFileSync(root + '/frontend/' + f, 'utf8')).join('\n');
 
-  // 1. The gate on the command that actually moves funds. It is an explicit
-  //    allowlist of window labels — the hand-off was designed AROUND it rather
-  //    than through it. Two things must hold: the gate is still there, and
-  //    Comms is not on it. The second is the one that matters; the list may
-  //    legitimately grow (the focused Pay window is on it) but never to
-  //    include a window that renders text written by strangers.
+  // 1. The gate on the command that actually moves funds. Every window the
+  //    app builds for the player may sign; the ones that render what OTHER
+  //    players wrote may not — and Comms is the first of those. Two things
+  //    must hold: the command is still gated, and the gate still refuses
+  //    Comms (both its labels), the game and the raid viewer.
   const exec = pages.slice(pages.indexOf('pub async fn mcp_transfer_execute'));
-  const gate = exec.slice(0, 800).match(/require_window\(&window,\s*&\[([^\]]*)\]/);
-  check('mcp_transfer_execute is still gated by a window allowlist', !!gate,
+  check('mcp_transfer_execute is still gated', /require_trusted\(&window\)\?/.test(exec.slice(0, 600)),
     'the gate chat was designed around is gone');
-  const allowed = gate ? gate[1].match(/"[^"]+"/g).map((x) => x.slice(1, -1)) : [];
-  check('…which does not include Comms', !allowed.includes('chat'), allowed.join(', '));
-  check('…and is a real list, not a wildcard',
-    allowed.length > 0 && allowed.every((l) => /^[a-z]+$/.test(l)), allowed.join(', '));
+  const untrusted = pages.slice(pages.indexOf('fn is_untrusted_label'));
+  const body = untrusted.slice(0, untrusted.indexOf('\n}'));
+  check('…which refuses Comms', /label == "chat"/.test(body) && /starts_with\("chat-"\)/.test(body), body);
+  check('…and the game and the raid viewer', /label == "main"/.test(body) && /raid_view::LABEL_PREFIX/.test(body), body);
 
   // 2. Comms hands over an ID, never a destination. If this command ever grew
   //    an address parameter, a crafted card could name where funds go.

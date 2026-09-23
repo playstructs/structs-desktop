@@ -2886,4 +2886,349 @@
     },
   });
 
+  // ── Energy (terminal_energy · mcp_energy_share · mcp_energy_keep) ────────
+  //
+  // The whole power system as one number, one bar and one button. Headroom
+  // is the number; the bar is supply split Own · Shared · Rented with a
+  // marker where the draw sits, and the lit stretch between the two IS the
+  // headroom. The button follows the state: More power, Back online, Share
+  // spare. Every move signs through a command that already exists (infuse,
+  // agreement open, deactivate) except sharing, which is create-or-grow +
+  // connect in one Rust call. No battery: that glyph is the charge bar.
+  var EN = { cards: {} };
+  var enKw = function (mw) { return H.fmtWatts(Math.max(0, Number(mw) || 0)); };
+  // The cheapest alpha-priced offer that can sell `needMw` for `days`, as a
+  // quote: capacity and duration clamped to the provider's bounds, cost in g.
+  function rentQuote(offers, needMw, days, blockSecs) {
+    var blocks = Math.max(1, Math.round(days * 86400 / (blockSecs || 5.3)));
+    var best = null;
+    (offers || []).forEach(function (o) {
+      var cmax = Number(o.capacity_max) || 0, cmin = Number(o.capacity_min) || 0;
+      if (cmax && cmax < needMw) return;
+      var cap = Math.max(needMw, cmin);
+      var dmin = Number(o.duration_min) || 0, dmax = Number(o.duration_max) || 0;
+      var dur = Math.max(blocks, dmin);
+      if (dmax) dur = Math.min(dur, dmax);
+      var rate = Number(o.rate_ualpha_per_mw_block) || 0;
+      var costG = rate * cap * dur / 1e6;
+      var perDayG = rate * cap * (86400 / (blockSecs || 5.3)) / 1e6;
+      var q = { id: o.id, owner: o.owner, capacity_mw: Math.round(cap), duration_blocks: Math.round(dur),
+        days: dur * (blockSecs || 5.3) / 86400, cost_g: costG, per_day_g: perDayG };
+      if (!best || q.cost_g < best.cost_g) best = q;
+    });
+    return best;
+  }
+  function gramsFor(needMw, commission) {
+    var keep = Math.min(1, Math.max(0.01, 1 - (Number(commission) || 0)));
+    return Math.ceil(needMw / keep / 1e6 * 100) / 100;
+  }
+  // The supply bar. Scaled to the larger of supply and draw, with a little air.
+  function supplyBar(d, extraMw) {
+    var own = Number(d.own_mw) || 0, sh = Number(d.shared_mw) || 0, rn = Number(d.rented_mw) || 0;
+    var supply = own + sh + rn, draw = Number(d.draw_mw) || 0, extra = Number(extraMw) || 0;
+    var scale = Math.max(supply + extra, draw) * 1.08 || 1;
+    var bar = H.el('div', 'en-bar');
+    var seg = function (mw, cls) { if (mw <= 0) return; var i = H.el('i', 'en-seg ' + cls); i.style.flex = String(mw); bar.appendChild(i); };
+    seg(own, 'is-own'); seg(sh, 'is-shared'); seg(rn, 'is-rented'); seg(extra, 'is-extra');
+    seg(Math.max(0, draw - supply - extra), 'is-over');
+    seg(Math.max(0, scale - Math.max(supply + extra, draw)), 'is-rest');
+    var at = function (mw) { return (mw / scale * 100).toFixed(2) + '%'; };
+    if (supply + extra > draw) {
+      var gap = H.el('span', 'en-gap');
+      gap.style.left = at(draw);
+      gap.style.width = ((supply + extra - draw) / scale * 100).toFixed(2) + '%';
+      bar.appendChild(gap);
+    }
+    var mk = H.el('span', 'en-mark'); mk.style.left = at(draw); bar.appendChild(mk);
+    var lab = H.el('span', 'en-mark-l', 'draw ' + H.fmtWatts(draw));
+    lab.style.left = at(draw);
+    if (draw / scale > 0.75) lab.classList.add('is-right');
+    bar.appendChild(lab);
+    var wrap = H.el('div', 'en-barwrap'); wrap.appendChild(bar);
+    var legend = H.el('div', 'en-legend');
+    [['Own', own, 'is-own'], ['Shared', sh, 'is-shared'], ['Rented', rn, 'is-rented']].forEach(function (l) {
+      if (!l[1]) return;
+      var it = H.el('span', 'en-leg');
+      it.appendChild(H.el('i', 'en-sw ' + l[2]));
+      it.appendChild(H.el('span', 'fstat-l', l[0]));
+      it.appendChild(H.el('span', 'en-leg-v', H.fmtWatts(l[1])));
+      legend.appendChild(it);
+    });
+    wrap.appendChild(legend);
+    return wrap;
+  }
+  var enBtn = function (label, cls, onClick) {
+    var b = H.el('a', 'sui-screen-btn ' + (cls || 'sui-mod-primary'));
+    b.href = 'javascript:void(0)';
+    b.appendChild(H.el('span', 'sui-text-display', label));
+    b.addEventListener('click', function () { if (!b.classList.contains('sui-mod-disabled')) onClick(b); });
+    return b;
+  };
+  var enSmall = function (label, primary, onClick) {
+    var b = H.el('a', 'sui-screen-btn ' + (primary ? 'sui-mod-primary' : 'sui-mod-secondary'), label);
+    b.href = 'javascript:void(0)';
+    b.addEventListener('click', function () { if (!b.classList.contains('sui-mod-disabled')) onClick(b); });
+    return b;
+  };
+  // The card counts in what the player grows: structs, then replicants.
+  var enUnit = function (d) { return { name: d.unit === 'replicant' ? 'replicant' : 'struct', mw: Number(d.unit_mw) || Number(d.build_mw) || 500000 }; };
+  var enCount = function (n, d) { var u = enUnit(d).name; return H.fmtInt(n) + ' ' + u + (n === 1 ? '' : 's'); };
+  function enHead(d, afterMw) {
+    var head = H.el('div', 'en-head');
+    var dark = d.state === 'dark' && afterMw == null;
+    var h = afterMw == null ? Number(d.headroom_mw) : afterMw;
+    var v = H.el('span', 'sui-text-display en-v ' + (dark ? 'is-bad' : (afterMw == null && d.state === 'thin') ? 'is-warn' : 'is-ok'),
+      dark ? 'Offline' : H.fmtWatts(h));
+    head.appendChild(v);
+    var room = Math.max(0, Math.floor(h / enUnit(d).mw));
+    head.appendChild(H.el('span', 'fstat-l en-sub', dark
+      ? H.fmtWatts(-h) + ' short'
+      : 'room for ' + enCount(room, d) + (afterMw == null ? '' : ' · after')));
+    return head;
+  }
+
+  T.register('energy', {
+    label: 'Energy', describe: function () { return 'Energy'; }, cadenceMs: 15000, defaultWidth: 1,
+    render: function (host, p, ctx) {
+      var st = EN.cards[ctx.id] || (EN.cards[ctx.id] = { view: 'main', builds: 3, way: 'alpha', shareKw: null, note: null, busy: false });
+      if (st.busy) return Promise.resolve();
+      var redraw = function (fresh) {
+        return invoke('terminal_energy', fresh ? { fresh: true } : {}).then(function (d) { draw(d); })
+          .catch(function (e) { fail(host, 'energy', e); });
+      };
+      var go = function (view) { st.view = view; st.note = null; redraw(false); };
+      var run = function (label, steps) {
+        st.busy = true; st.note = label + '…';
+        noteEl && (noteEl.textContent = st.note);
+        return steps().then(function () { st.view = 'main'; st.note = label + ' · done'; })
+          .catch(function (e) { st.note = label + ' · ' + e; })
+          .then(function () { st.busy = false; return redraw(true); });
+      };
+      var noteEl = null;
+      // The confirm is INLINE: confirmModal does not appear in a popped-out
+      // card window (the crew card found this), and ⌘K opens cards there.
+      var lastD = null;
+      var ask = function (title, body, cta, fn) { st.confirm = { title: title, body: body, cta: cta, fn: fn }; draw(lastD); };
+
+      function draw(d) {
+        lastD = d;
+        host.innerHTML = '';
+        var wrap = H.el('div', 'en');
+        if (st.confirm) {
+          var cf = st.confirm;
+          wrap.appendChild(enHead(d));
+          var box = H.el('div', 'en-confirm');
+          box.appendChild(H.el('div', 'fstat-l en-confirm-t', cf.title));
+          box.appendChild(cf.body);
+          wrap.appendChild(box);
+          var ca = H.el('div', 'en-actions');
+          ca.appendChild(enSmall('Cancel', false, function () { st.confirm = null; draw(d); }));
+          ca.appendChild(enSmall(cf.cta, true, function () { st.confirm = null; cf.fn(); }));
+          wrap.appendChild(ca);
+          host.appendChild(wrap);
+          return;
+        }
+        var commission = d.reactor ? Number(d.reactor.commission) || 0 : 0.04;
+        var build = enUnit(d).mw;
+
+        if (st.view === 'more') {
+          if (st.unitSeen !== d.unit) { st.unitSeen = d.unit; st.builds = d.unit === 'replicant' ? 1 : 3; }
+          var need = st.builds * build;
+          var grams = gramsFor(need, commission);
+          // Rented power is connected to the substation the player is on and
+          // split across everyone there — so to GET `need`, rent need × them.
+          var conns = Math.max(1, Number(d.substation && d.substation.connections) || 1);
+          var quote = rentQuote(d.offers, need * conns, 7, d.block_secs);
+          var canAlpha = !!(d.reactor && d.reactor.ready && d.address) && grams <= Number(d.wallet_g || 0);
+          if (!canAlpha && st.way === 'alpha' && quote) st.way = 'rent';
+          wrap.appendChild(enHead(d));
+          var stepRow = H.el('div', 'en-step');
+          stepRow.appendChild(H.stepper(st.builds, { min: 1, max: 40, step: 1, width: '4ch' }, function (n) { st.builds = n; draw(d); }));
+          stepRow.appendChild(H.el('span', 'fstat-l', enUnit(d).name + 's · ' + H.fmtWatts(need)));
+          wrap.appendChild(stepRow);
+          var way = function (key, name, cost, facts, ok) {
+            var b = H.el('a', 'en-way' + (st.way === key ? ' is-on' : '') + (ok ? '' : ' is-off'));
+            b.href = 'javascript:void(0)';
+            var top = H.el('span', 'en-way-top');
+            top.appendChild(H.el('span', 'en-way-n', name)); top.appendChild(H.el('span', 'en-way-c', cost));
+            b.appendChild(top); b.appendChild(H.el('span', 'fstat-l', facts));
+            if (ok) b.addEventListener('click', function () { st.way = key; draw(d); });
+            return b;
+          };
+          wrap.appendChild(way('alpha', 'Use my alpha', grams.toFixed(2) + 'g',
+            canAlpha ? 'yours · take it back anytime' : 'wallet ' + Number(d.wallet_g || 0).toFixed(2) + 'g', canAlpha));
+          if (quote) {
+            wrap.appendChild(way('rent', 'Rent', quote.per_day_g.toFixed(2) + 'g / day',
+              Math.round(quote.days) + ' days · ' + quote.cost_g.toFixed(2) + 'g now · ' + (quote.owner || quote.id)
+                + (conns > 1 ? ' · ' + H.fmtWatts(quote.capacity_mw) + ' onto ' + d.substation.id + ', ' + H.fmtInt(conns) + ' share it' : ''), true));
+          } else if ((d.offers || []).length) {
+            wrap.appendChild(way('rent', 'Rent', '—', 'no offer has ' + H.fmtWatts(need * conns) + (conns > 1 ? ' (' + H.fmtInt(conns) + ' share ' + d.substation.id + ')' : ''), false));
+          }
+          var act = H.el('div', 'en-actions');
+          act.appendChild(enSmall('Back', false, function () { go('main'); }));
+          act.appendChild(enSmall('Power up', true, function () {
+            var body = H.el('div');
+            if (st.way === 'rent' && quote) {
+              body.appendChild(H.row('Rent', H.fmtWatts(quote.capacity_mw) + ' · ' + Math.round(quote.days) + ' days'));
+              body.appendChild(H.row('Paid now', quote.cost_g.toFixed(2) + 'g'));
+              body.appendChild(H.row('From', quote.owner || quote.id));
+              body.appendChild(H.row('Lands on', (d.substation && d.substation.id) || 'your substation'));
+              body.appendChild(H.row('You get', '+' + H.fmtWatts(quote.capacity_mw / conns)));
+              ask('Rent power', body, 'Rent', function () {
+                run('Renting ' + H.fmtWatts(quote.capacity_mw), function () {
+                  return invoke('mcp_energy_rent', { providerId: quote.id, capacity: quote.capacity_mw, duration: quote.duration_blocks });
+                });
+              });
+            } else {
+              body.appendChild(H.row('Use my alpha', grams.toFixed(2) + 'g'));
+              body.appendChild(H.row('Wallet after', (Number(d.wallet_g || 0) - grams).toFixed(2) + 'g'));
+              body.appendChild(H.row('You get', '+' + H.fmtWatts(need)));
+              ask('Power up', body, 'Power up', function () {
+                run('Power up ' + grams.toFixed(2) + 'g', function () {
+                  return invoke('mcp_infusion_infuse', { address: d.address, reactorId: d.reactor.id, amountUalpha: Math.round(grams * 1e6) });
+                });
+              });
+            }
+          }));
+          wrap.appendChild(act);
+        } else if (st.view === 'share') {
+          var spareKw = Math.floor((Number(d.spare_mw) || 0) / 1e6);
+          if (st.shareKw == null || st.shareKw > spareKw) st.shareKw = Math.max(1, Math.min(spareKw, 10));
+          var shareMw = st.shareKw * 1e6;
+          var dests = d.destinations || [];
+          if (!st.dest || (st.dest !== 'market' && !dests.some(function (x) { return x.id === st.dest; }))) st.dest = dests.length ? dests[0].id : 'market';
+          wrap.appendChild(enHead(d, Number(d.headroom_mw) - shareMw));
+          wrap.appendChild(supplyBar({ own_mw: d.own_mw, shared_mw: d.shared_mw, rented_mw: d.rented_mw, draw_mw: Number(d.draw_mw) + shareMw }));
+          var sr = H.el('div', 'en-step');
+          sr.appendChild(H.stepper(st.shareKw, { min: 1, max: Math.max(1, spareKw), step: 1, width: '4ch' }, function (n) { st.shareKw = n; draw(d); }));
+          sr.appendChild(H.el('span', 'fstat-l', 'kW'));
+          wrap.appendChild(sr);
+          // Who gets it: the guild's substation, the one you're on, the
+          // crew's (where the replicants are) — or the market.
+          var DEST_NAME = { guild: 'Guild', mine: 'My substation', crew: 'Crew' };
+          var chips = H.el('div', 'en-chips');
+          dests.concat([{ key: 'market', id: 'market' }]).forEach(function (x) {
+            var label = x.key === 'market' ? 'Market' : (DEST_NAME[x.key] || x.id) + ' · ' + H.fmtInt(Number(x.connections) || 0);
+            var c = enSmall(label, st.dest === x.id, function () { st.dest = x.id; draw(d); });
+            c.classList.add('en-chip');
+            chips.appendChild(c);
+          });
+          wrap.appendChild(chips);
+          var sa = H.el('div', 'en-actions');
+          sa.appendChild(enSmall('Back', false, function () { go('main'); }));
+          if (st.dest === 'market') {
+            var rates = (d.offers || []).map(function (o) { return Number(o.rate_ualpha_per_mw_block) || 0; }).filter(function (r) { return r > 0; });
+            if (st.rate == null) st.rate = rates.length ? Math.max(1, Math.round(Math.min.apply(null, rates))) : 1;
+            if (st.maxDays == null) st.maxDays = 7;
+            var perDay = 86400 / (Number(d.block_secs) || 5.3);
+            var pr = H.el('div', 'en-step');
+            pr.appendChild(H.stepper(st.rate, { min: 1, max: 1000000, step: 1, width: '6ch' }, function (n) { st.rate = n; draw(d); }));
+            pr.appendChild(H.el('span', 'fstat-l', 'ualpha / mW·block = ' + (st.rate * perDay).toFixed(0) + 'g per kW·day'));
+            wrap.appendChild(pr);
+            var dchips = H.el('div', 'en-chips');
+            [1, 7, 30].forEach(function (n) {
+              var c = enSmall('up to ' + n + 'd', st.maxDays === n, function () { st.maxDays = n; draw(d); });
+              c.classList.add('en-chip');
+              dchips.appendChild(c);
+            });
+            wrap.appendChild(dchips);
+            wrap.appendChild(H.row('Earns when sold', '+' + (st.rate * shareMw * perDay / 1e6).toFixed(2) + 'g / day'));
+            if (rates.length) wrap.appendChild(H.row('Cheapest offer now', (Math.min.apply(null, rates) * perDay).toFixed(0) + 'g per kW·day'));
+            if (d.selling) wrap.appendChild(H.row('Adds to your offer', d.selling.provider_id));
+            sa.appendChild(enSmall('Sell ' + st.shareKw + ' kW', true, function () {
+              var body = H.el('div');
+              body.appendChild(H.row('Sell', st.shareKw + ' kW · open market'));
+              body.appendChild(H.row('Price', (st.rate * perDay).toFixed(0) + 'g per kW·day'));
+              body.appendChild(H.row('Agreements', '1 to ' + st.maxDays + ' days'));
+              if (!d.selling) body.appendChild(H.row('Builds', 'a substation of yours + a provider on it'));
+              ask('Sell power', body, 'Sell', function () {
+                run('Selling ' + st.shareKw + ' kW', function () {
+                  return invoke('mcp_energy_sell', { powerMw: shareMw, rate: st.rate, maxDays: st.maxDays });
+                });
+              });
+            }));
+          } else {
+            var dx = dests.filter(function (x) { return x.id === st.dest; })[0] || {};
+            var n = Number(dx.connections) || 0;
+            if (n) wrap.appendChild(H.row('Each of ' + H.fmtInt(n) + ' on ' + dx.id, '+' + H.fmtWatts(shareMw / n)));
+            if (d.unit === 'replicant') wrap.appendChild(H.row('Supports', '+' + enCount(Math.floor(shareMw / build), d)));
+            if (dx.sharing) wrap.appendChild(H.row('Already sharing there', H.fmtWatts(dx.sharing.power_mw)));
+            sa.appendChild(enSmall('Share ' + st.shareKw + ' kW', true, function () {
+              run('Sharing ' + st.shareKw + ' kW', function () { return invoke('mcp_energy_share', { powerMw: shareMw, destinationId: dx.id }); });
+            }));
+          }
+          wrap.appendChild(sa);
+        } else if (st.view === 'online') {
+          var plan = d.online_plan || { pause: [], infuse_g: 0 };
+          wrap.appendChild(enHead(d));
+          var list = H.el('div', 'en-plan');
+          var freed = 0;
+          (plan.pause || []).forEach(function (s) { freed += Number(s.draw_mw) || 0; list.appendChild(H.row('Pause ' + s.name, '−' + H.fmtWatts(s.draw_mw))); });
+          var gIn = Number(plan.infuse_g) || 0;
+          if (gIn > 0) list.appendChild(H.row('Infuse ' + gIn.toFixed(2) + 'g', '+' + H.fmtWatts(gIn * 1e6 * (1 - commission))));
+          list.appendChild(H.row('Command Ship', 'stays on'));
+          wrap.appendChild(list);
+          var after = Number(d.headroom_mw) + freed + gIn * 1e6 * (1 - commission);
+          wrap.appendChild(H.row('After', after >= 0 ? '+' + H.fmtWatts(after) : H.fmtWatts(after) + ' short'));
+          var oa = H.el('div', 'en-actions');
+          oa.appendChild(enSmall('Back', false, function () { go('main'); }));
+          if ((d.offers || []).length) oa.appendChild(enSmall('Rent instead', false, function () { st.way = 'rent'; st.builds = Math.max(1, Math.ceil(-Number(d.headroom_mw) / build) + 1); go('more'); }));
+          oa.appendChild(enSmall('Do it', true, function () {
+            run('Back online', function () {
+              var chain = Promise.resolve();
+              (plan.pause || []).forEach(function (s) {
+                chain = chain.then(function () { return invoke('mcp_action', { action: 'deactivate', args: { struct_id: s.id } }); });
+              });
+              if (gIn > 0) chain = chain.then(function () {
+                return invoke('mcp_infusion_infuse', { address: d.address, reactorId: d.reactor.id, amountUalpha: Math.round(gIn * 1e6) });
+              });
+              return chain;
+            });
+          }));
+          wrap.appendChild(oa);
+        } else {
+          wrap.appendChild(enHead(d));
+          wrap.appendChild(supplyBar(d));
+          var hero = H.el('div', 'en-hero');
+          if (d.state === 'dark') hero.appendChild(enBtn('Back online', 'sui-mod-primary en-bad', function () { go('online'); }));
+          else if (d.state === 'spare') {
+            hero.appendChild(enBtn('Share spare', 'sui-mod-primary', function () { go('share'); }));
+            hero.appendChild(enSmall('More power', false, function () { go('more'); }));
+          } else hero.appendChild(enBtn('More power', 'sui-mod-primary' + (d.state === 'thin' ? ' en-warn' : ''), function () { go('more'); }));
+          var keep = d.keep || {};
+          hero.appendChild(H.checkbox(!!keep.enabled, 'Keep me powered', function (on) {
+            invoke('mcp_energy_keep', { enabled: on }).catch(function (e) { Board.stamp && Board.stamp('energy: ' + e); });
+          }));
+          wrap.appendChild(hero);
+          (d.destinations || []).forEach(function (x) {
+            if (!x.sharing || !(Number(x.sharing.power_mw) > 0)) return;
+            var sh = H.el('div', 'en-line');
+            sh.appendChild(H.el('span', 'fstat-l', 'Sharing ' + H.fmtWatts(x.sharing.power_mw) + ' with ' + x.id));
+            sh.appendChild(enSmall('Stop', false, function () {
+              run('Stopped sharing with ' + x.id, function () { return invoke('mcp_energy_share', { powerMw: 0, destinationId: x.id }); });
+            }));
+            wrap.appendChild(sh);
+          });
+          (d.destinations || []).forEach(function (x) {
+            if (x.key !== 'crew' || x.supportable_more == null) return;
+            wrap.appendChild(H.row('Crew on ' + x.id, H.fmtInt(Number(d.replicants) || 0) + ' replicants · ' + H.fmtInt(Math.max(0, Number(x.supportable_more))) + ' more fit'));
+          });
+          if (d.selling) {
+            wrap.appendChild(H.row('Selling on ' + d.selling.substation_id,
+              H.fmtWatts(d.selling.sold_mw) + ' sold · ' + d.selling.agreements + ' · +' + Number(d.selling.income_g_day || 0).toFixed(2) + 'g/day'));
+          }
+          (d.rentals || []).forEach(function (r) {
+            var days = (Number(r.blocks_remaining) || 0) * (Number(d.block_secs) || 5.3) / 86400;
+            wrap.appendChild(H.row('Rented ' + H.fmtWatts(r.capacity), days >= 1 ? Math.floor(days) + 'd left' : Math.max(0, Math.round(days * 24)) + 'h left'));
+          });
+        }
+        noteEl = H.el('div', 'fstat-l en-note' + (st.note ? '' : ' hidden'), st.note || '');
+        wrap.appendChild(noteEl);
+        host.appendChild(wrap);
+      }
+      return redraw(false);
+    },
+  });
+  T.energy = { rentQuote: rentQuote, gramsFor: gramsFor };
+
 })();

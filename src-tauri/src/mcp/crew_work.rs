@@ -889,7 +889,7 @@ pub fn crew_work_set(
     window: tauri::WebviewWindow,
     config: CrewWorkConfig,
 ) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     set(config);
     Ok(json!({ "ok": true, "config": get() }))
 }
@@ -899,7 +899,7 @@ pub fn crew_work_set(
 /// threshold for our own rigs, on purpose.
 #[tauri::command]
 pub fn crew_threshold_set(window: tauri::WebviewWindow, threshold: u64) -> Result<Value, String> {
-    crate::mcp::tools::board_pages::require_window(&window, &["board", "terminal"])?;
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
     let mut cfg = get();
     cfg.difficulty_threshold = threshold.clamp(1, 64);
     set(cfg);

@@ -2119,7 +2119,7 @@ pub async fn matrix_share(app: tauri::AppHandle, text: String) -> Result<Value, 
 /// Hand a "send Alpha to this player" intent from Comms to Team Ops.
 ///
 /// This command MOVES NO MONEY, and that is deliberate. `mcp_transfer_execute`
-/// is gated `require_board` and re-runs its own preview server-side precisely
+/// refuses Comms (`require_trusted`) and re-runs its own preview server-side precisely
 /// so a stale or hand-crafted payload cannot skip the gates. Comms renders text
 /// written by federated strangers, so it is the last window that should be able
 /// to spend from the wallet. Chat therefore ASKS; Team Ops still decides.

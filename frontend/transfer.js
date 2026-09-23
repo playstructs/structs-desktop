@@ -5,9 +5,9 @@
  * one-line payment, which is a poor place to be asked "are you sure".
  *
  * What this window is NOT is a shortcut. `mcp_transfer_execute` re-runs its own
- * preview server-side whatever calls it, and this window is named in that
- * command's allowlist explicitly rather than by widening `require_board`, so it
- * has gained the ability to run ONE command and nothing else.
+ * preview server-side whatever calls it, and `require_trusted` lets any window
+ * the app builds for the player sign it — only windows that render other
+ * players' content (the game, Comms, the raid viewer) are refused.
  *
  * The recipient's ADDRESS is never typed and never carried in: it is resolved
  * from the CHAIN, by `matrix_open_transfer` when a chat message asked for the

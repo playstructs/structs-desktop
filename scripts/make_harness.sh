@@ -531,6 +531,23 @@ cat > "$FIX" <<'EOF'
       config: { enabled: true, interval_secs: 300, max_per_round: 5, min_share_mw: 4000000, cpu_ceiling: 0.85, pending_per_worker: 4, ceiling: 0, dry_run: false, random_rounds: true, weights: {} },
       snapshots: [{ id: 'bait', weight: 25, n: 40 }, { id: 'productive', weight: 60, n: 120 }, { id: 'raider', weight: 15, n: 22 }],
     },
+    /* The Energy card. A THIN primary (0.7 kW of room) so the button reads
+     * amber, one alpha-priced offer to rent, and a plan for going dark. */
+    terminal_energy: {
+      state: 'thin', own_mw: 12000000, shared_mw: 6900000, rented_mw: 0,
+      supply_mw: 18900000, draw_mw: 18200000, headroom_mw: 700000,
+      build_mw: 500000, unit: 'struct', unit_mw: 500000, replicants: 0, room: 1, spare_mw: 0, wallet_g: 9, address: 'structs1primary', player_id: '1-194',
+      reactor: { id: '3-1', commission: 0.04, ready: true }, substation: { id: '4-9', connections: 5 },
+      destinations: [{ key: 'guild', id: '4-1', connections: 2807 }, { key: 'mine', id: '4-9', connections: 5, sharing: { allocation_id: '6-35', power_mw: 2000000 } }],
+      rented_total_mw: 0, rentals: [], selling: null,
+      offers: [{ id: '10-4', owner: 'Keel Traders', rate_ualpha_per_mw_block: 1, capacity_min: 0, capacity_max: 50000000, duration_min: 0, duration_max: 1000000 }],
+      block_secs: 5.3, online_plan: { infuse_g: 0, pause: [] },
+      keep: { enabled: false, target_builds: 3, reserve_grams: 5, interval_secs: 300 },
+    },
+    mcp_energy_share: { ok: true },
+    mcp_energy_rent: { ok: true, connected: true, agreement_id: '11-58', allocation_id: '6-90', substation_id: '4-9' },
+    mcp_energy_sell: { ok: true, allocation_id: '6-91', substation_id: '4-20' },
+    mcp_energy_keep: function (a) { return { enabled: !!(a && a.enabled), target_builds: 3, reserve_grams: 5, interval_secs: 300 }; },
     mcp_replicate: function (a) { return { queue: 7 + ((a && a.n) || 1), replicants: 182, incubating: [], held: { n: 0, reason: null } }; },
     terminal_market: { at_ms: 0, height: 4200719,
       best_alpha_per_kw_day: 16364, median_alpha_per_kw_day: 49091,

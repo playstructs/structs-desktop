@@ -22,8 +22,8 @@
 //!     whole point of this one is that it is not.
 //!
 //! What it may NOT do is decide anything. Every door on it opens a window that
-//! is already allowed to act — the companion is a face, and `require_window`
-//! deliberately does not list it.
+//! is already allowed to act — the companion is a face, and calls no gated
+//! command itself.
 
 use serde_json::{json, Value};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
