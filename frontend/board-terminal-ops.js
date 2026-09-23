@@ -2896,6 +2896,14 @@
   // agreement open, deactivate) except sharing, which is create-or-grow +
   // connect in one Rust call. No battery: that glyph is the charge bar.
   var EN = { cards: {} };
+  // Grams, readable at any size: 1.57g · 855g · 16,302g · 16.3Mg.
+  var enG = function (g) {
+    g = Number(g) || 0;
+    var a = Math.abs(g);
+    if (a >= 1e6) return (g / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'Mg';
+    if (a >= 1000) return H.fmtInt(Math.round(g)) + 'g';
+    return g.toFixed(2) + 'g';
+  };
   var enKw = function (mw) { return H.fmtWatts(Math.max(0, Number(mw) || 0)); };
   // The cheapest alpha-priced offer that can sell `needMw` for `days`, as a
   // quote: capacity and duration clamped to the provider's bounds, cost in g.
@@ -2970,6 +2978,48 @@
     b.addEventListener('click', function () { if (!b.classList.contains('sui-mod-disabled')) onClick(b); });
     return b;
   };
+  // Amounts move along 1 · 2 · 3 · 5 · 10 · 20 · 30 · 50 · 100 …, so the same
+  // two buttons reach 3 structs and 3,000 replicants in a few presses.
+  function ladder(v, dir) {
+    var steps = [];
+    for (var k = 0; k < 13; k++) [1, 2, 3, 5].forEach(function (m) { steps.push(m * Math.pow(10, k)); });
+    if (dir > 0) { for (var i = 0; i < steps.length; i++) if (steps[i] > v) return steps[i]; return v; }
+    for (var j = steps.length - 1; j >= 0; j--) if (steps[j] < v) return steps[j];
+    return v;
+  }
+  // The mockup's amount: − [+3 STRUCTS] + in the display face, what it is in
+  // kW under it. Two SUI buttons around one number — nothing to type.
+  function bigStep(value, min, max, label, sub, onChange) {
+    var row = H.el('div', 'en-big');
+    var btn = function (icon, next, off) {
+      var b = H.el('a', 'sui-screen-btn sui-mod-secondary en-big-b' + (off ? ' sui-mod-disabled' : ''));
+      b.href = 'javascript:void(0)';
+      b.setAttribute('aria-label', icon === 'icon-add' ? 'more' : 'less');
+      b.appendChild(H.el('i', 'sui-icon sui-icon-md ' + icon));
+      b.addEventListener('click', function () { if (!off) onChange(next); });
+      return b;
+    };
+    row.appendChild(btn('icon-subtract', Math.max(min, ladder(value, -1)), value <= min));
+    var mid = H.el('div', 'en-big-mid');
+    var v = H.el('span', 'sui-text-display en-big-v', label);
+    v.style.setProperty('--n', String(Math.max(4, String(label).length)));
+    mid.appendChild(v);
+    if (sub) mid.appendChild(H.el('span', 'fstat-l en-big-s', sub));
+    row.appendChild(mid);
+    row.appendChild(btn('icon-add', Math.min(max, ladder(value, 1)), value >= max));
+    return row;
+  }
+  // The flow's one action, full width like the card's main button, with a
+  // quiet way back under it.
+  function goRow(label, onGo, onBack) {
+    var box = H.el('div', 'en-hero');
+    box.appendChild(enBtn(label, 'sui-mod-primary', onGo));
+    var back = H.el('a', 'en-back', 'Back');
+    back.href = 'javascript:void(0)';
+    back.addEventListener('click', onBack);
+    box.appendChild(back);
+    return box;
+  }
   // The card counts in what the player grows: structs, then replicants.
   var enUnit = function (d) { return { name: d.unit === 'replicant' ? 'replicant' : 'struct', mw: Number(d.unit_mw) || Number(d.build_mw) || 500000 }; };
   var enCount = function (n, d) { var u = enUnit(d).name; return H.fmtInt(n) + ' ' + u + (n === 1 ? '' : 's'); };
@@ -2996,7 +3046,8 @@
         return invoke('terminal_energy', fresh ? { fresh: true } : {}).then(function (d) { draw(d); })
           .catch(function (e) { fail(host, 'energy', e); });
       };
-      var go = function (view) { st.view = view; st.note = null; redraw(false); };
+      // Switch at once from the last read (a chain read takes seconds), then refresh.
+      var go = function (view) { st.view = view; st.note = null; if (lastD) draw(lastD); redraw(false); };
       var run = function (label, steps) {
         st.busy = true; st.note = label + '…';
         noteEl && (noteEl.textContent = st.note);
@@ -3042,10 +3093,7 @@
           var canAlpha = !!(d.reactor && d.reactor.ready && d.address) && grams <= Number(d.wallet_g || 0);
           if (!canAlpha && st.way === 'alpha' && quote) st.way = 'rent';
           wrap.appendChild(enHead(d));
-          var stepRow = H.el('div', 'en-step');
-          stepRow.appendChild(H.stepper(st.builds, { min: 1, max: 40, step: 1, width: '4ch' }, function (n) { st.builds = n; draw(d); }));
-          stepRow.appendChild(H.el('span', 'fstat-l', enUnit(d).name + 's · ' + H.fmtWatts(need)));
-          wrap.appendChild(stepRow);
+          wrap.appendChild(bigStep(st.builds, 1, 999, '+' + enCount(st.builds, d), H.fmtWatts(need), function (n) { st.builds = n; draw(d); }));
           var way = function (key, name, cost, facts, ok) {
             var b = H.el('a', 'en-way' + (st.way === key ? ' is-on' : '') + (ok ? '' : ' is-off'));
             b.href = 'javascript:void(0)';
@@ -3055,22 +3103,20 @@
             if (ok) b.addEventListener('click', function () { st.way = key; draw(d); });
             return b;
           };
-          wrap.appendChild(way('alpha', 'Use my alpha', grams.toFixed(2) + 'g',
-            canAlpha ? 'yours · take it back anytime' : 'wallet ' + Number(d.wallet_g || 0).toFixed(2) + 'g', canAlpha));
+          wrap.appendChild(way('alpha', 'Use my alpha', enG(grams),
+            canAlpha ? 'yours · take it back anytime' : 'wallet ' + enG(d.wallet_g), canAlpha));
           if (quote) {
-            wrap.appendChild(way('rent', 'Rent', quote.per_day_g.toFixed(2) + 'g / day',
-              Math.round(quote.days) + ' days · ' + quote.cost_g.toFixed(2) + 'g now · ' + (quote.owner || quote.id)
+            wrap.appendChild(way('rent', 'Rent', enG(quote.per_day_g) + ' / day',
+              Math.round(quote.days) + ' days · ' + enG(quote.cost_g) + ' now · ' + (quote.owner || quote.id)
                 + (conns > 1 ? ' · ' + H.fmtWatts(quote.capacity_mw) + ' onto ' + d.substation.id + ', ' + H.fmtInt(conns) + ' share it' : ''), true));
           } else if ((d.offers || []).length) {
             wrap.appendChild(way('rent', 'Rent', '—', 'no offer has ' + H.fmtWatts(need * conns) + (conns > 1 ? ' (' + H.fmtInt(conns) + ' share ' + d.substation.id + ')' : ''), false));
           }
-          var act = H.el('div', 'en-actions');
-          act.appendChild(enSmall('Back', false, function () { go('main'); }));
-          act.appendChild(enSmall('Power up', true, function () {
+          wrap.appendChild(goRow('Power up', function () {
             var body = H.el('div');
             if (st.way === 'rent' && quote) {
               body.appendChild(H.row('Rent', H.fmtWatts(quote.capacity_mw) + ' · ' + Math.round(quote.days) + ' days'));
-              body.appendChild(H.row('Paid now', quote.cost_g.toFixed(2) + 'g'));
+              body.appendChild(H.row('Paid now', enG(quote.cost_g)));
               body.appendChild(H.row('From', quote.owner || quote.id));
               body.appendChild(H.row('Lands on', (d.substation && d.substation.id) || 'your substation'));
               body.appendChild(H.row('You get', '+' + H.fmtWatts(quote.capacity_mw / conns)));
@@ -3080,8 +3126,8 @@
                 });
               });
             } else {
-              body.appendChild(H.row('Use my alpha', grams.toFixed(2) + 'g'));
-              body.appendChild(H.row('Wallet after', (Number(d.wallet_g || 0) - grams).toFixed(2) + 'g'));
+              body.appendChild(H.row('Use my alpha', enG(grams)));
+              body.appendChild(H.row('Wallet after', enG(Number(d.wallet_g || 0) - grams)));
               body.appendChild(H.row('You get', '+' + H.fmtWatts(need)));
               ask('Power up', body, 'Power up', function () {
                 run('Power up ' + grams.toFixed(2) + 'g', function () {
@@ -3089,20 +3135,19 @@
                 });
               });
             }
-          }));
-          wrap.appendChild(act);
+          }, function () { go('main'); }));
         } else if (st.view === 'share') {
           var spareKw = Math.floor((Number(d.spare_mw) || 0) / 1e6);
-          if (st.shareKw == null || st.shareKw > spareKw) st.shareKw = Math.max(1, Math.min(spareKw, 10));
+          // Start near a tenth of the spare, on the ladder.
+          if (st.shareKw == null || st.shareKw > spareKw) st.shareKw = Math.max(1, Math.min(spareKw, ladder(Math.max(1, spareKw / 10) + 1e-9, -1) || 1));
           var shareMw = st.shareKw * 1e6;
           var dests = d.destinations || [];
           if (!st.dest || (st.dest !== 'market' && !dests.some(function (x) { return x.id === st.dest; }))) st.dest = dests.length ? dests[0].id : 'market';
           wrap.appendChild(enHead(d, Number(d.headroom_mw) - shareMw));
           wrap.appendChild(supplyBar({ own_mw: d.own_mw, shared_mw: d.shared_mw, rented_mw: d.rented_mw, draw_mw: Number(d.draw_mw) + shareMw }));
-          var sr = H.el('div', 'en-step');
-          sr.appendChild(H.stepper(st.shareKw, { min: 1, max: Math.max(1, spareKw), step: 1, width: '4ch' }, function (n) { st.shareKw = n; draw(d); }));
-          sr.appendChild(H.el('span', 'fstat-l', 'kW'));
-          wrap.appendChild(sr);
+          wrap.appendChild(bigStep(st.shareKw, 1, Math.max(1, spareKw), H.fmtWatts(shareMw),
+            'powers ' + enCount(Math.floor(shareMw / enUnit(d).mw), d) + ' · of ' + H.fmtWatts(Number(d.spare_mw) || 0) + ' spare',
+            function (n) { st.shareKw = n; draw(d); }));
           // Who gets it: the guild's substation, the one you're on, the
           // crew's (where the replicants are) — or the market.
           var DEST_NAME = { guild: 'Guild', mine: 'My substation', crew: 'Crew' };
@@ -3114,8 +3159,7 @@
             chips.appendChild(c);
           });
           wrap.appendChild(chips);
-          var sa = H.el('div', 'en-actions');
-          sa.appendChild(enSmall('Back', false, function () { go('main'); }));
+          var sa = H.el('div', 'en-hero');
           if (st.dest === 'market') {
             var rates = (d.offers || []).map(function (o) { return Number(o.rate_ualpha_per_mw_block) || 0; }).filter(function (r) { return r > 0; });
             if (st.rate == null) st.rate = rates.length ? Math.max(1, Math.round(Math.min.apply(null, rates))) : 1;
@@ -3123,7 +3167,7 @@
             var perDay = 86400 / (Number(d.block_secs) || 5.3);
             var pr = H.el('div', 'en-step');
             pr.appendChild(H.stepper(st.rate, { min: 1, max: 1000000, step: 1, width: '6ch' }, function (n) { st.rate = n; draw(d); }));
-            pr.appendChild(H.el('span', 'fstat-l', 'ualpha / mW·block = ' + (st.rate * perDay).toFixed(0) + 'g per kW·day'));
+            pr.appendChild(H.el('span', 'fstat-l', enG(st.rate * perDay) + ' per kW·day'));
             wrap.appendChild(pr);
             var dchips = H.el('div', 'en-chips');
             [1, 7, 30].forEach(function (n) {
@@ -3132,17 +3176,17 @@
               dchips.appendChild(c);
             });
             wrap.appendChild(dchips);
-            wrap.appendChild(H.row('Earns when sold', '+' + (st.rate * shareMw * perDay / 1e6).toFixed(2) + 'g / day'));
-            if (rates.length) wrap.appendChild(H.row('Cheapest offer now', (Math.min.apply(null, rates) * perDay).toFixed(0) + 'g per kW·day'));
+            wrap.appendChild(H.row('Earns when sold', '+' + enG(st.rate * shareMw * perDay / 1e6) + ' / day'));
+            if (rates.length) wrap.appendChild(H.row('Cheapest offer now', enG(Math.min.apply(null, rates) * perDay) + ' per kW·day'));
             if (d.selling) wrap.appendChild(H.row('Adds to your offer', d.selling.provider_id));
-            sa.appendChild(enSmall('Sell ' + st.shareKw + ' kW', true, function () {
+            sa.appendChild(enBtn('Sell ' + H.fmtWatts(shareMw), 'sui-mod-primary', function () {
               var body = H.el('div');
-              body.appendChild(H.row('Sell', st.shareKw + ' kW · open market'));
-              body.appendChild(H.row('Price', (st.rate * perDay).toFixed(0) + 'g per kW·day'));
+              body.appendChild(H.row('Sell', H.fmtWatts(shareMw) + ' · open market'));
+              body.appendChild(H.row('Price', enG(st.rate * perDay) + ' per kW·day'));
               body.appendChild(H.row('Agreements', '1 to ' + st.maxDays + ' days'));
               if (!d.selling) body.appendChild(H.row('Builds', 'a substation of yours + a provider on it'));
               ask('Sell power', body, 'Sell', function () {
-                run('Selling ' + st.shareKw + ' kW', function () {
+                run('Selling ' + H.fmtWatts(shareMw), function () {
                   return invoke('mcp_energy_sell', { powerMw: shareMw, rate: st.rate, maxDays: st.maxDays });
                 });
               });
@@ -3151,12 +3195,15 @@
             var dx = dests.filter(function (x) { return x.id === st.dest; })[0] || {};
             var n = Number(dx.connections) || 0;
             if (n) wrap.appendChild(H.row('Each of ' + H.fmtInt(n) + ' on ' + dx.id, '+' + H.fmtWatts(shareMw / n)));
-            if (d.unit === 'replicant') wrap.appendChild(H.row('Supports', '+' + enCount(Math.floor(shareMw / build), d)));
             if (dx.sharing) wrap.appendChild(H.row('Already sharing there', H.fmtWatts(dx.sharing.power_mw)));
-            sa.appendChild(enSmall('Share ' + st.shareKw + ' kW', true, function () {
-              run('Sharing ' + st.shareKw + ' kW', function () { return invoke('mcp_energy_share', { powerMw: shareMw, destinationId: dx.id }); });
+            sa.appendChild(enBtn('Share ' + H.fmtWatts(shareMw), 'sui-mod-primary', function () {
+              run('Sharing ' + H.fmtWatts(shareMw), function () { return invoke('mcp_energy_share', { powerMw: shareMw, destinationId: dx.id }); });
             }));
           }
+          var sback = H.el('a', 'en-back', 'Back');
+          sback.href = 'javascript:void(0)';
+          sback.addEventListener('click', function () { go('main'); });
+          sa.appendChild(sback);
           wrap.appendChild(sa);
         } else if (st.view === 'online') {
           var plan = d.online_plan || { pause: [], infuse_g: 0 };
@@ -3214,8 +3261,13 @@
             wrap.appendChild(H.row('Crew on ' + x.id, H.fmtInt(Number(d.replicants) || 0) + ' replicants · ' + H.fmtInt(Math.max(0, Number(x.supportable_more))) + ' more fit'));
           });
           if (d.selling) {
-            wrap.appendChild(H.row('Selling on ' + d.selling.substation_id,
-              H.fmtWatts(d.selling.sold_mw) + ' sold · ' + d.selling.agreements + ' · +' + Number(d.selling.income_g_day || 0).toFixed(2) + 'g/day'));
+            var sl = d.selling, sold = Number(sl.agreements) || 0;
+            var sell = H.el('div', 'en-line');
+            sell.appendChild(H.el('span', 'fstat-l', 'Selling ' + (Number(sl.offered_mw) > 0 ? H.fmtWatts(sl.offered_mw) + ' ' : '') + 'on ' + sl.substation_id));
+            sell.appendChild(H.el('span', 'fstat-l en-dim', sold
+              ? H.fmtWatts(sl.sold_mw) + ' to ' + sold + ' · +' + enG(sl.income_g_day) + '/day'
+              : 'no buyers yet'));
+            wrap.appendChild(sell);
           }
           (d.rentals || []).forEach(function (r) {
             var days = (Number(r.blocks_remaining) || 0) * (Number(d.block_secs) || 5.3) / 86400;

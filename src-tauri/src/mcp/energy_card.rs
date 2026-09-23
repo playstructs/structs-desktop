@@ -163,9 +163,11 @@ struct Slow {
     destinations: Vec<Value>,
     /// The substation the primary is connected to, and how many share it —
     /// rented power lands THERE, so the player sees `rented ÷ connections`.
-    my_sub: Option<(String, u64)>,
-    /// Our own provider, if we already sell: (provider id, its substation id).
-    provider: Option<(String, String)>,
+    /// (id, connections, the per-player share it pays = its connectionCapacity)
+    my_sub: Option<(String, u64, f64)>,
+    /// Our own provider, if we already sell: (provider id, its substation id,
+    /// what we route into that substation = what is on offer).
+    provider: Option<(String, String, f64)>,
     offers: Vec<Value>,
 }
 static SLOW: LazyLock<Mutex<Slow>> = LazyLock::new(|| Mutex::new(Slow::default()));
@@ -176,21 +178,35 @@ fn invalidate() {
     }
 }
 
-/// A substation's connection count and its unrouted capacity (capacity − load).
-async fn sub_stats(client: &CosmosClient, sub: &str) -> (u64, f64) {
+/// A substation's connection count, its unrouted capacity (capacity − load)
+/// and the share each connected player gets (its `connectionCapacity` — the
+/// PLAYER's own gridAttributes.connectionCapacity reads 0; the share lives here).
+async fn sub_stats(client: &CosmosClient, sub: &str) -> (u64, f64, f64) {
     client
         .query_entity("substation", sub)
         .await
         .ok()
         .map(|v| {
             let g = |k: &str| num(v.pointer(&format!("/gridAttributes/{k}")));
-            (g("connectionCount") as u64, (g("capacity") - g("load")).max(0.0))
+            (g("connectionCount") as u64, (g("capacity") - g("load")).max(0.0), g("connectionCapacity"))
         })
-        .unwrap_or((0, 0.0))
+        .unwrap_or((0, 0.0, 0.0))
 }
 
-async fn connections_of(client: &CosmosClient, sub: &str) -> u64 {
-    sub_stats(client, sub).await.0
+/// The substation a player is connected to. The LCD nests the player's own
+/// fields under `Player` (gridAttributes and playerInventory sit beside it).
+pub fn substation_of(player: &Value) -> String {
+    player
+        .pointer("/Player/substationId")
+        .or_else(|| player.get("substationId"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Rounding leaves `-0.0` behind (0 × −1, 0 ÷ n): never show a negative zero.
+fn nz(v: f64) -> f64 {
+    if v == 0.0 { 0.0 } else { v }
 }
 
 /// Replicants we run (registry rows that have a chain player).
@@ -243,8 +259,9 @@ async fn crew_substation(client: &CosmosClient) -> Option<String> {
     let mut count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     for id in ids {
         if let Ok(v) = client.query_entity("player", &id).await {
-            if let Some(s) = v.get("substationId").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
-                *count.entry(s.to_string()).or_default() += 1;
+            let s = substation_of(&v);
+            if !s.is_empty() {
+                *count.entry(s).or_default() += 1;
             }
         }
     }
@@ -281,7 +298,8 @@ async fn slow(client: &CosmosClient, pid: &str, guild_id: &str, my_sub_id: &str,
     let my_sub = if my_sub_id.is_empty() {
         None
     } else {
-        Some((my_sub_id.to_string(), connections_of(client, my_sub_id).await))
+        let (n, _, share) = sub_stats(client, my_sub_id).await;
+        Some((my_sub_id.to_string(), n, share))
     };
     let crew = crew_substation(client).await;
     let mut destinations: Vec<Value> = Vec::new();
@@ -294,12 +312,12 @@ async fn slow(client: &CosmosClient, pid: &str, guild_id: &str, my_sub_id: &str,
     if let Some(g) = guild.as_ref() {
         add("guild", &g.substation_id, g.sub_connection_count);
     }
-    if let Some((id, n)) = my_sub.as_ref() {
+    if let Some((id, n, _)) = my_sub.as_ref() {
         add("mine", id, *n);
     }
     let mut crew_room: Option<(u64, i64)> = None;
     if let Some(c) = crew.as_deref() {
-        let (n, available) = sub_stats(client, c).await;
+        let (n, available, _) = sub_stats(client, c).await;
         let per = avg_replicant_draw().unwrap_or(0.0).max(crate::mcp::guild_power::MIN_PLAYER_DRAW_MW);
         let (_, more) = crate::mcp::guild_power::derive_headroom(available, n, per);
         crew_room = Some((n, more));
@@ -332,7 +350,12 @@ async fn slow(client: &CosmosClient, pid: &str, guild_id: &str, my_sub_id: &str,
                 .ok()
                 .and_then(|v| v.pointer("/Provider/substationId").and_then(|s| s.as_str()).map(String::from))
                 .unwrap_or_default();
-            Some((id, sub))
+            let offered = if sub.is_empty() {
+                0.0
+            } else {
+                crate::mcp::guild_power::find_dynamic_allocation(client, pid, &sub).await.map(|(_, mw)| mw as f64).unwrap_or(0.0)
+            };
+            Some((id, sub, offered))
         }
         None => None,
     };
@@ -410,16 +433,18 @@ pub async fn terminal_energy(fresh: Option<bool>) -> Result<Value, String> {
     let capacity = g("capacity");
     let load = g("load");
     let structs_load = g("structsLoad");
-    let shared = g("connectionCapacity");
+
     let wallet_g = num(p.pointer("/playerInventory/rocks/amount")) / UALPHA_PER_GRAM;
-    let substation_id = p.get("substationId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let substation_id = substation_of(&p);
 
     let s = slow(&client, &pid, &guild_id, &substation_id, fresh.unwrap_or(false)).await;
     // Rented power is connected to the substation the player is on, so it
     // arrives inside `connectionCapacity`, split across everyone there. Show
     // the player's slice of it as Rented and the rest of the share as Shared.
-    let my_connections = s.my_sub.as_ref().map(|(_, n)| (*n).max(1)).unwrap_or(1) as f64;
-    let rented = (s.rented_mw / my_connections).min(shared);
+    let my_connections = s.my_sub.as_ref().map(|(_, n, _)| (*n).max(1)).unwrap_or(1) as f64;
+    // What the substation pays each connection (0 when not connected).
+    let shared = s.my_sub.as_ref().map(|(_, _, share)| *share).unwrap_or(0.0);
+    let rented = nz((s.rented_mw / my_connections).min(shared));
     let shared = shared - rented;
     let own = capacity;
     let supply = capacity + shared + rented;
@@ -457,11 +482,11 @@ pub async fn terminal_energy(fresh: Option<bool>) -> Result<Value, String> {
         "destinations": s.destinations,
         "rented_total_mw": s.rented_mw,
         "rentals": s.rentals,
-        "selling": s.provider.as_ref().map(|(id, sub)| json!({
-            "provider_id": id, "substation_id": sub,
-            "sold_mw": s.selling.iter().map(|r| num(r.get("capacity"))).sum::<f64>(),
+        "selling": s.provider.as_ref().map(|(id, sub, offered)| json!({
+            "provider_id": id, "substation_id": sub, "offered_mw": offered,
+            "sold_mw": nz(s.selling.iter().map(|r| num(r.get("capacity"))).sum::<f64>()),
             "agreements": s.selling.len(),
-            "income_g_day": s.income_per_block * (86400.0 / BLOCK_SECS) / UALPHA_PER_GRAM,
+            "income_g_day": nz(s.income_per_block * (86400.0 / BLOCK_SECS) / UALPHA_PER_GRAM),
         })),
         "offers": s.offers,
         "block_secs": BLOCK_SECS,
@@ -628,7 +653,7 @@ pub async fn mcp_energy_rent_impl(app: tauri::AppHandle, provider_id: String, ca
         .query_entity("player", &pid)
         .await
         .ok()
-        .and_then(|p| p.get("substationId").and_then(|s| s.as_str()).map(String::from))
+        .map(|p| substation_of(&p))
         .filter(|s| is_substation(s))
         .ok_or("you are not connected to a substation, so rented power would have nowhere to land")?;
     let agreement_of = |a: &Value| {
@@ -697,7 +722,7 @@ pub async fn mcp_energy_sell_impl(app: tauri::AppHandle, power_mw: f64, rate: u6
     let (pid, guild_id, _) = primary()?;
     let client = CosmosClient::new();
     let existing = slow(&client, &pid, &guild_id, "", true).await.provider;
-    if let Some((provider_id, sub)) = existing.filter(|(_, s)| is_substation(s)) {
+    if let Some((provider_id, sub, _)) = existing.filter(|(_, s, _)| is_substation(s)) {
         let out = share_into(&app, &client, &pid, &sub, power_mw).await?;
         return Ok(json!({ "ok": true, "provider_id": provider_id, "substation_id": sub, "grew": out }));
     }
@@ -897,6 +922,16 @@ mod tests {
         // …never below the replication floor, and the floor when unmeasured.
         assert_eq!(unit_for(3, 500_000.0, Some(1e6)), ("replicant", floor));
         assert_eq!(unit_for(3, 500_000.0, None), ("replicant", floor));
+    }
+
+    #[test]
+    fn the_substation_id_is_read_from_under_player() {
+        // The LCD's real shape: the player's own fields nest under `Player`.
+        let lcd = json!({ "Player": { "id": "1-194", "substationId": "4-1" }, "gridAttributes": { "connectionCapacity": "0" } });
+        assert_eq!(substation_of(&lcd), "4-1");
+        assert_eq!(substation_of(&json!({ "substationId": "4-9" })), "4-9");
+        assert_eq!(substation_of(&json!({ "Player": {} })), "");
+        assert!(nz(-0.0).is_sign_positive());
     }
 
     #[test]

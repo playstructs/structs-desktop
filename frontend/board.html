@@ -1465,9 +1465,9 @@
        between them is the headroom. No battery — that is the charge bar. */
     .en { display: flex; flex-direction: column; gap: var(--spacing-md); text-align: left; }
     .en-head { display: flex; flex-direction: column; gap: var(--spacing-xs); padding-top: var(--spacing-sm); }
-    .en-v { color: var(--text-player-primary); }
-    .en-v.is-warn { color: var(--text-warning); }
-    .en-v.is-bad { color: var(--text-enemy-primary); }
+    #board-layout .en-v { color: var(--text-player-primary); font-size: 30px; line-height: 1.1; }
+    #board-layout .en-v.is-warn { color: var(--text-warning); }
+    #board-layout .en-v.is-bad { color: var(--text-enemy-primary); }
     .en-barwrap { display: flex; flex-direction: column; gap: var(--spacing-sm); padding-top: var(--spacing-lg); }
     .en-bar { position: relative; display: flex; gap: 3px; height: 32px; padding: 3px; background: var(--surface-neutral-body);
       box-shadow: 0 0 0 2px var(--text-player-primary); }
@@ -1492,18 +1492,30 @@
     #board-layout .en-hero a.en-warn { border-color: var(--text-warning); color: var(--text-warning); }
     #board-layout .en-hero a.en-bad { border-color: var(--text-enemy-primary); color: var(--text-enemy-primary); }
     .en-step { display: flex; align-items: center; gap: var(--spacing-md); }
+    .en a.en-way, .en a.en-way:link, .en a.en-way:visited { color: var(--text-body); }
     .en-way { display: flex; flex-direction: column; gap: var(--spacing-xs); padding: var(--spacing-md); text-decoration: none;
       border: thin solid var(--border-subtle); background: var(--surface-neutral-body); color: var(--text-body); cursor: pointer; }
     .en-way.is-on { border-color: var(--text-player-primary); background: var(--surface-player-body); }
     .en-way.is-off { opacity: .45; cursor: default; }
     .en-way-top { display: flex; justify-content: space-between; align-items: baseline; }
     .en-way-c { color: var(--text-player-primary); }
+    .en-big { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md); padding: var(--spacing-sm) 0; }
+    #board-layout .en-big a.en-big-b { flex: none; }
+    .en-big-mid { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: var(--spacing-xs); text-align: center; }
+    /* The number takes the room the card has: narrow in a Terminal column,
+       full size in its own window. */
+    .en-big-mid { container-type: inline-size; }
+    #board-layout .en-big-v { color: var(--text-player-primary); white-space: nowrap; line-height: 1.1;
+      font-size: clamp(12px, calc(100cqw / (var(--n, 10) * 1.16)), 32px); }
+    .en a.en-back, .en a.en-back:link, .en a.en-back:visited { color: var(--text-hint); text-decoration: none; cursor: pointer; }
+    .en a.en-back:hover { color: var(--text-body); }
     .en-chips { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); }
     #board-layout .en-chips a.en-chip { height: auto; padding: var(--spacing-xs) var(--spacing-md); }
     .en-actions { display: flex; gap: var(--spacing-sm); justify-content: flex-end; flex-wrap: wrap; }
     .en-line { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md); }
     .en-plan { display: flex; flex-direction: column; }
     .en-note { color: var(--text-hint); }
+    .en-dim { color: var(--text-hint); }
     .en-confirm { display: flex; flex-direction: column; gap: var(--spacing-sm); padding: var(--spacing-md); border: thin solid var(--text-player-primary); background: var(--surface-player-body); }
     .en-confirm-t { color: var(--text-player-highlight); }
     .tm-folds { display: flex; flex-direction: column; margin-top: var(--spacing-lg); border-top: 1px solid var(--border-subtle); }

@@ -67,6 +67,13 @@ if (host) {
   const ways = more ? [...host.querySelectorAll('.en-way')].map(text) : [];
   check('More power offers my alpha and a rent', ways.length === 2 && /Use my alpha/.test(ways[0]) && /Rent/.test(ways[1]), ways.join(' | '));
   check('…3 builds by default, costed with the cut', /1\.57g/.test(ways[0] || ''), ways[0]);
+  const big = host.querySelector('.en-big');
+  check('the amount is the mockup\'s: − [+3 structs] + with the kW under it',
+    big && text(big.querySelector('.en-big-v')) === '+3 structs' && /1\.5\s*kW/i.test(text(big.querySelector('.en-big-s'))) && big.querySelectorAll('a.sui-screen-btn').length === 2,
+    big && text(big));
+  check('…no number field to type in', !host.querySelector('.en input[type=number]'));
+  check('…and Power up is the full-width button, Back a quiet link under it',
+    /Power up/.test(text(host.querySelector('.en-hero a.sui-screen-btn'))) && host.querySelector('.en-hero a.en-back'));
   check('…and the rent is sized for everyone on the substation it lands on', /7\.5\s*kW onto 4-9, 5 share it/i.test(ways[1] || ''), ways[1]);
 
   // ── Share spare: guild · my substation · crew · market ──
@@ -97,7 +104,7 @@ if (host) {
   check('share to guild, my substation or the market', /Guild · 2,807/.test(labels.join('|')) && /My substation · 5/.test(labels.join('|')) && labels.includes('Market'), labels.join(' | '));
   const market = (chips || []).find((c) => text(c) === 'Market');
   market && market.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  const sell = await until(() => [...host3.querySelectorAll('.en-actions a')].find((a) => /^Sell \d+ kW$/.test(text(a))));
+  const sell = await until(() => [...host3.querySelectorAll('.en-hero a.sui-screen-btn')].find((a) => /^Sell [\d.]+\s*kW$/i.test(text(a))));
   check('Market turns the button into Sell, priced per kW·day', sell && /per kW·day/.test(text(host3)), sell && text(sell));
   const before = (w.__HARNESS_CALLS__ || []).length;
   sell && sell.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
@@ -107,7 +114,7 @@ if (host) {
   ok && ok.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   const call = await until(() => (w.__HARNESS_CALLS__ || []).slice(before).find((c) => c.cmd === 'mcp_energy_sell'));
   check('…which signs mcp_energy_sell with the kW, an integer rate and the max days',
-    call && call.args.powerMw === 10000000 && Number.isInteger(call.args.rate) && call.args.rate >= 1 && call.args.maxDays === 7, JSON.stringify(call && call.args));
+    call && call.args.powerMw === 2000000 && Number.isInteger(call.args.rate) && call.args.rate >= 1 && call.args.maxDays === 7, JSON.stringify(call && call.args));
 
   // ── Replicants: the card counts in replicants, sized at the heaviest ──
   F.terminal_energy = Object.assign({}, F.terminal_energy, {
