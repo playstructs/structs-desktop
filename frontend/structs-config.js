@@ -1777,6 +1777,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             data = await comms.loginSignature(args.guild_id, args.timestamp, args.index);
             break;
           }
+          // The same façade signs a guild API's `chat/room/ensure` request —
+          // the message is built there from (kind, id, timestamp), never
+          // accepted from here, so this is no more a signing oracle than login.
+          case 'chatroom_signature': {
+            var commsRoom = window.__STRUCTS_COMMS__;
+            if (!commsRoom || typeof commsRoom.chatroomSignature !== 'function') {
+              respond(false, {}, 'comms façade cannot sign a chat-room request (patch not built)');
+              return;
+            }
+            data = await commsRoom.chatroomSignature(args.kind, args.id, args.timestamp, args.index);
+            break;
+          }
           default: respond(false, {}, 'unknown vplayer op: ' + op); return;
         }
         respond(true, data, null);

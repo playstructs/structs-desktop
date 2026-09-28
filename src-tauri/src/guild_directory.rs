@@ -389,6 +389,47 @@ fn upsert_discovered(existing: &mut Vec<GuildConfig>, found: Vec<GuildConfig>) -
     changed
 }
 
+// ── One guild's manifest, on demand ─────────────────────────────────────────
+
+/// The manifest of one guild — from the persisted directory when it already
+/// carries what Comms needs, otherwise fetched fresh off the guild's on-chain
+/// endpoint and remembered. Comms needs this for guilds it has never heard
+/// of: a planet's room lives on its OWNER's guild homeserver, and its API is
+/// what makes the room.
+pub async fn manifest_for(guild_id: &str) -> Result<GuildConfig, String> {
+    if let Some(c) = guild_config::get_guild_configs()
+        .into_iter()
+        .find(|c| c.guild_id == guild_id)
+    {
+        if !c.guild_api.trim().is_empty() && c.matrix_url.is_some() {
+            return Ok(c);
+        }
+    }
+    let chain = fetch_chain_guild(guild_id).await?;
+    let cfg = fetch_and_validate_guild(&chain).await?;
+    remember(cfg.clone());
+    Ok(cfg)
+}
+
+/// A manifest at an endpoint another guild's API named — the route a 409
+/// from `chat/room/ensure` sends us down. Validated exactly like one the
+/// chain pointed at: the document must claim the id we were told.
+pub async fn manifest_at(guild_id: &str, endpoint: &str) -> Result<GuildConfig, String> {
+    let chain = ChainGuild { id: guild_id.to_string(), endpoint: endpoint.to_string() };
+    let cfg = fetch_and_validate_guild(&chain).await?;
+    remember(cfg.clone());
+    Ok(cfg)
+}
+
+fn remember(cfg: GuildConfig) {
+    let mut all = guild_config::load_configs();
+    if upsert_discovered(&mut all, vec![cfg]) {
+        if let Err(e) = guild_config::save_configs(&all) {
+            eprintln!("[Guild Directory] could not persist a fetched manifest: {e}");
+        }
+    }
+}
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct RefreshReport {
     pub discovered: usize,

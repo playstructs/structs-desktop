@@ -1285,3 +1285,7 @@ the rail's three distinct notices. All four landed the same day; see the
 "Built" section of `comms-session-service.md`. Option D landed the same
 day too: `SELECTED`/`matrix_select` retired, the primary is the only Rust-side
 default, capabilities in the snapshot.
+
+## Chat standard handoff — BUILT 2026-09-28 (needs `make release`)
+
+Ensure-endpoint object rooms, directory-driven guild channels, unencrypted DM reuse, DM fact row. See `comms-session-service.md` → "Chat standard handoff". Owed: power-level gating (≥ 50) once the room payload carries the viewer's power; 429 queueing.

@@ -152,6 +152,9 @@
       // in the app that says so — every other surface just behaves as if
       // Comms is up, because it very nearly always is.
       if (net && net.state) idBody.appendChild(kv('Session', stateLine(net)));
+      // A fact about the network, stated where the network is described: a
+      // direct message on these servers is readable by that guild's operators.
+      idBody.appendChild(kv('Direct messages', 'Readable by guild operators'));
       idBody.appendChild(kv('Matrix ID', S.profile ? S.profile.user_id : (net && net.user_id) || '—'));
       idBody.appendChild(kv('Player', S.profile ? S.profile.display_name : '—'));
       // Whether other clients can see this player's face. It renders correctly

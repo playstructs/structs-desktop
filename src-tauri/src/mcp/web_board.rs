@@ -852,7 +852,7 @@ async fn board_invoke(
         },
         "matrix_take_pending_transfer" => from_result(crate::matrix::matrix_take_pending_transfer()),
         "matrix_object_room_create" => match s("objectId") {
-            Some(o) => from_result(crate::matrix::matrix_object_room_create(s("guildId"), o).await),
+            Some(o) => from_result(crate::matrix::matrix_object_room_create(st.app.clone(), s("guildId"), o).await),
             None => err_json("objectId required".into()),
         },
 

@@ -19,6 +19,19 @@
     var headerResources = ctx.headerResources, pageHeader = ctx.pageHeader, byId = ctx.byId;
     var moveCaretToEnd = ctx.moveCaretToEnd, noticeBlock = ctx.noticeBlock, S = ctx.S, Chat = ctx.Chat || {};
 
+    // The player's own network — whose channels the top group holds.
+    function ownNetwork() {
+      var nets = (S && S.networks) || [];
+      for (var i = 0; i < nets.length; i++) if (nets[i].guild_id === S.guildId) return nets[i];
+      return nets[0] || null;
+    }
+    function guildName() { var n = ownNetwork(); return (n && n.guild_name) || ''; }
+    function guildLogo() {
+      var n = ownNetwork();
+      var logo = n && n.logo ? String(n.logo) : '';
+      return /^(https?:)?\/\/|^[a-z0-9_./-]+$/i.test(logo) && !/^javascript:/i.test(logo) ? logo : '';
+    }
+
     var SECTIONS = [
       // First, always. An invitation is the one row in the list waiting on an
       // answer from you rather than reporting something that happened.
@@ -70,20 +83,17 @@
       if (r.pfp_attrs || r.player_id || isDm) {
         // A direct message IS a person — the same portrait the roster shows.
         portrait.appendChild(pfpPortrait(r.pfp_attrs));
-      } else if (r.home_rank != null) {
-        /* The home channel carries SN Corp's own mark instead of the generic
-         * guild glyph. `img/logo-snc.gif` is the game's asset — the same one the
-         * signup flow shows while connecting to the corp — not something drawn
-         * for this list.
-         *
-         * Straight into the portrait, which is exactly how the webapp's own
-         * Guild Directory renders a guild logo: `.sui-result-row-portrait img`
-         * is `width: 100%`, so it fills the 44px slot. It was nested in a 32px
-         * `.chat-room-icon` first and came out a third of the size, floating in
-         * the corner of a box built for something bigger. */
+      } else if (r.home_rank != null && guildLogo()) {
+        /* A guild channel carries the guild's own mark when the network
+         * publishes one, instead of the generic glyph. Straight into the
+         * portrait, which is exactly how the webapp's own Guild Directory
+         * renders a guild logo: `.sui-result-row-portrait img` is
+         * `width: 100%`, so it fills the 44px slot. (It was SN Corp's logo,
+         * hardcoded, for every guild's channels — the channels are the
+         * player's own guild's now, from its directory, so the mark is too.) */
         var mark = document.createElement('img');
         mark.className = 'chat-room-mark';
-        mark.src = 'img/logo-snc.gif';
+        mark.src = guildLogo();
         mark.alt = '';
         portrait.appendChild(mark);
       } else {
@@ -437,7 +447,8 @@
         var rest = mine.filter(function (r) { return r.home_rank == null; });
         if (home.length) {
           var hGroup = el('div', 'chat-net-group');
-          hGroup.appendChild(el('div', 'chat-net-label', 'Structs'));
+          // The guild's name: these are ITS channels, from its directory.
+          hGroup.appendChild(el('div', 'chat-net-label', guildName() || 'Structs'));
           var hTable = el('div', 'sui-result-table');
           var hList = el('div', 'sui-result-rows');
           home.forEach(function (r) { hList.appendChild(roomRow(r)); });

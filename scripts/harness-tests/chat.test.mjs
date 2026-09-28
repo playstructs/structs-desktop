@@ -59,8 +59,9 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('lands on the channel list', w.Chat._state.view === 'channels', w.Chat._state.view);
 
   const labels = all(d, '.chat-net-label').map(text);
-  check('the home channel sits above every section',
-    labels.join('|') === 'Structs|Direct|Local Net|Galaxy Net', labels.join('|'));
+  // Labelled with the guild's NAME: these are its channels, from its directory.
+  check('the home channel sits above every section, under the guild\'s name',
+    labels.join('|') === 'SN Corp|Direct|Local Net|Galaxy Net', labels.join('|'));
 
   /* SN Corp is pinned, and pinned by the SERVER's judgement.
    *
@@ -102,10 +103,12 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
    * Directory. The mark goes straight into the portrait, exactly as that
    * directory renders it, and is sized by SUI's `.sui-result-row-portrait img`
    * so the two cannot drift apart. */
-  check('the guild mark sits directly in the portrait, as the directory does',
-    !!d.querySelector('.sui-result-row-portrait > img.chat-room-mark')
-    && !d.querySelector('.chat-room-icon img.chat-room-mark'),
-    'nested in a smaller box it renders at a third of the size');
+  // The network publishes no mark, so the guild channels wear the glyph in
+  // the same 44px slot — never a corp logo hardcoded for every guild.
+  check('without a published mark the guild channel wears the glyph in the portrait',
+    !d.querySelector('img.chat-room-mark')
+    && !!homeRows[0].querySelector('.sui-result-row-portrait .chat-room-icon'),
+    homeRows[0].querySelector('.sui-result-row-portrait').innerHTML.slice(0, 90));
   const iconRule = Array.from(d.styleSheets)
     .flatMap((sh) => { try { return Array.from(sh.cssRules); } catch (e) { return []; } })
     .find((r) => r.selectorText === '.chat-room-icon');
@@ -120,9 +123,9 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
         .map((r) => r.cssText).join('\n')),
     'SUI already sizes it; a second opinion is how they drift');
 
-  check('…the first wearing the guild’s own mark, not the generic glyph',
-    homeRows[0].querySelector('img.chat-room-mark')
-      && /logo-snc\.gif$/.test(homeRows[0].querySelector('img.chat-room-mark').getAttribute('src')),
+  check('…the first wearing the guild glyph, not a hardcoded corp logo (the network publishes none)',
+    !homeRows[0].querySelector('img.chat-room-mark')
+      && !!homeRows[0].querySelector('.chat-room-icon'),
     // The portrait, not `.chat-room-icon`: a pinned row has no icon box any
     // more. A detail expression is evaluated even when the check passes, so
     // reading a node that moved crashes the suite instead of failing a check.
@@ -175,9 +178,10 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('…titled by the player rather than by the room id',
     /None => dm_player\.clone\(\)\.unwrap_or\(display\)/.test(rustPins),
     'falling through to `display` prints the raw room id at the reader');
-  check('the pin rule takes the room, not the viewer',
-    /fn pinned_rank_for\(alias: &str, home_server: &str\)/.test(rustPins),
-    (/fn pinned_rank_for\([^)]*\)/.exec(rustPins) || [''])[0]);
+  check('the channel rule takes the room, the viewer\'s own server and its lobby — nothing hardcoded',
+    /fn guild_channel_rank\(alias: &str, own_server: &str, lobby: &str\)/.test(rustPins)
+    && !/PINNED_LOCALPARTS/.test(rustPins),
+    (/fn guild_channel_rank\([^)]*\)/.exec(rustPins) || [''])[0]);
   check('…and every player is put INTO the pinned channels',
     /async fn join_pinned_channels/.test(rustPins)
     && /join\(&session, &alias\)/.test(rustPins));

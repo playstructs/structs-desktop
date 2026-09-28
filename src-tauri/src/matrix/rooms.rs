@@ -14,6 +14,15 @@
 //!   one afternoon.
 //! * **Hosted by the OWNER's guild.** The defender's guild keeps the record of
 //!   its own planet, and the room outlives whoever happens to be attacking it.
+//!
+//! Since 2026-09-28 the rooms are made by the owner guild's API, never by a
+//! player: a homeserver following GUILD-CHAT-STANDARD refuses `createRoom`
+//! with a public preset or an alias from anyone but its guild-bot. The client
+//! resolves the alias on the owner's homeserver and, on 404, asks that guild's
+//! `chat/room/ensure` to make it — signed with the player's chain key, which
+//! works on any guild's API. See `ensure` and `verdict`.
+
+use serde_json::{json, Value};
 
 /// The object types that get a room.
 ///
@@ -24,6 +33,17 @@ pub fn has_room(kind: u8) -> bool {
     matches!(kind, 2 | 9)
 }
 
+/// `2-15361` → `planet`, `9-61` → `fleet`: the `kind` the ensure endpoint
+/// takes, and the first word of the alias.
+pub fn kind_word(object_id: &str) -> Option<&'static str> {
+    let (kind, _) = super::refs::parse_id(object_id)?;
+    match kind {
+        2 => Some("planet"),
+        9 => Some("fleet"),
+        _ => None,
+    }
+}
+
 /// `2-15361` → `planet-2-15361`, `9-61` → `fleet-9-61`.
 ///
 /// The type is spelled out rather than left as a number so the alias reads as
@@ -31,16 +51,15 @@ pub fn has_room(kind: u8) -> bool {
 /// does not. The id is kept whole — never a prefix of it — because a truncated
 /// chain id is the oldest bug in this codebase.
 pub fn alias_localpart(object_id: &str) -> Option<String> {
-    let (kind, _) = super::refs::parse_id(object_id)?;
-    if !has_room(kind) {
-        return None;
-    }
-    let word = match kind {
-        2 => "planet",
-        9 => "fleet",
-        _ => return None,
-    };
+    let word = kind_word(object_id)?;
     Some(format!("{word}-{object_id}"))
+}
+
+/// Whether an alias localpart names an object room rather than a guild
+/// channel. Used to keep `#planet-…` and `#fleet-…` out of the channel
+/// furniture at the top of the list.
+pub fn is_object_localpart(local: &str) -> bool {
+    local.starts_with("planet-") || local.starts_with("fleet-")
 }
 
 /// The full alias, given the server that hosts it.
@@ -84,19 +103,83 @@ async fn owner_of(object_id: &str) -> Option<String> {
     }
 }
 
-/// The alias this object's room lives at, resolved through its owner.
+/// The guild that hosts an object's room: its id, its API and its homeserver
+/// name. Everything the ensure flow needs, from the chain and that guild's
+/// own manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerGuild {
+    pub guild_id: String,
+    pub guild_api: String,
+    pub server: String,
+}
+
+/// Resolve the owner's guild through the chain and its manifest.
 ///
-/// `None` rather than an error for every ordinary miss — an id with no room,
-/// an owner the directory has not seen, a guild that publishes no homeserver.
-/// A caller that cannot find the room simply does not offer one, which is the
-/// right behaviour for a rail beside a map.
-pub async fn alias_for(object_id: &str) -> Option<String> {
-    alias_localpart(object_id)?;                 // reject early: not a room type
+/// `None` for every ordinary miss — an id with no room, an owner the directory
+/// has not seen, a guild that publishes no homeserver. A caller that cannot
+/// find the room simply does not offer one, which is the right behaviour for a
+/// rail beside a map. A guild found to run no chat is remembered for a while,
+/// so a raid window on one of its planets does not fetch its manifest again
+/// every time it opens.
+pub async fn owner_guild(object_id: &str) -> Option<OwnerGuild> {
+    alias_localpart(object_id)?; // reject early: not a room type
     let owner = owner_of(object_id).await?;
     super::directory::ensure_fresh().await;
     let ident = super::directory::get(&owner)?;
-    let server = super::directory::server_name_for_guild(&ident.guild_id)?;
-    alias_on(object_id, &server)
+    guild_by_id(&ident.guild_id).await
+}
+
+/// The same, for a guild the ensure endpoint named in a 409.
+pub async fn guild_at(guild_id: &str, endpoint: &str) -> Option<OwnerGuild> {
+    let cfg = crate::guild_directory::manifest_at(guild_id, endpoint).await.ok()?;
+    owner_guild_from(cfg)
+}
+
+async fn guild_by_id(guild_id: &str) -> Option<OwnerGuild> {
+    if no_chat_recently(guild_id) {
+        return None;
+    }
+    let cfg = match crate::guild_directory::manifest_for(guild_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[Comms] {guild_id}: manifest: {e}");
+            return None;
+        }
+    };
+    let found = owner_guild_from(cfg);
+    if found.is_none() {
+        note_no_chat(guild_id);
+    }
+    found
+}
+
+fn owner_guild_from(cfg: crate::guild_config::GuildConfig) -> Option<OwnerGuild> {
+    let server = super::directory::server_name_for_guild(&cfg.guild_id).or_else(|| {
+        let url = cfg.matrix_url.clone()?;
+        reqwest::Url::parse(&url).ok()?.host_str().map(|h| h.to_string())
+    })?;
+    if cfg.guild_api.trim().is_empty() {
+        return None;
+    }
+    Some(OwnerGuild { guild_id: cfg.guild_id, guild_api: cfg.guild_api, server })
+}
+
+const NO_CHAT_TTL_SECS: u64 = 15 * 60;
+static NO_CHAT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn no_chat_recently(guild_id: &str) -> bool {
+    NO_CHAT
+        .lock()
+        .ok()
+        .and_then(|m| m.get(guild_id).copied())
+        .is_some_and(|until| super::auth::now_secs() < until)
+}
+
+fn note_no_chat(guild_id: &str) {
+    if let Ok(mut m) = NO_CHAT.lock() {
+        m.insert(guild_id.to_string(), super::auth::now_secs() + NO_CHAT_TTL_SECS);
+    }
 }
 
 /// The homeserver an alias lives on.
@@ -106,56 +189,163 @@ pub fn server_of(alias: &str) -> Option<&str> {
     alias.rsplit_once(':').map(|(_, s)| s).filter(|s| !s.is_empty())
 }
 
-/// May WE create the room at this alias?
-///
-/// A client can only claim an alias in its own homeserver's namespace, so this
-/// decides whether a missing room is ours to make or somebody else's to wait
-/// for. Whole-server equality, never a substring test: `oh.energy` is a
-/// suffix of `matrix.oh.energy` and a prefix of `oh.energy.example.com`, and
-/// treating either as a match would have us try to create rooms on a server
-/// that will refuse us — the same shape as the id prefix-collision bug this
-/// codebase has already been bitten by.
-pub fn ours_to_create(alias: &str, own_server: &str) -> bool {
-    !own_server.is_empty() && server_of(alias) == Some(own_server)
+// ── The ensure endpoint ─────────────────────────────────────────────────────
+
+/// What a guild API's answer to `chat/room/ensure` means for us.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// The room exists (made now, or already there): join it via `server`.
+    Room { room_id: String, server: String, created: bool },
+    /// Our owner lookup was stale; this guild hosts it. Fetch its manifest
+    /// and ask there, once.
+    Follow { guild_id: String, endpoint: String },
+    /// Our signature was refused. Sign again, once.
+    Reauth,
+    /// The object does not exist (yet). No room, and no retrying.
+    Gone(String),
+    /// The guild's chat is down or not configured. Back off.
+    Unavailable(String),
+    /// We sent something malformed. A bug, not a condition.
+    Bug(String),
 }
 
-/// Which address this object's room has, and whether it is ours to make.
-///
-/// Split out of `matrix_object_room` because it is the part that has been wrong
-/// twice and the part a network call cannot be pointed at. Inputs are what four
-/// lookups answered; the output is the decision.
-///
-/// * `owner` — the owner's guild's alias, or None when the owner cannot be
-///   resolved to a guild with a known Matrix server. **This is the common
-///   case**, not an edge: most of the galaxy is guilds we hold no config for.
-/// * `owner_room` — whether a room exists at that alias.
-/// * `mine` — the same object's alias on OUR homeserver.
-/// * `mine_room` — whether a room exists at THAT alias.
-///
-/// Returns `(alias, room_id, can_create)`.
-pub fn resolve(
-    owner: Option<String>,
-    owner_room: Option<String>,
-    mine: Option<String>,
-    mine_room: Option<String>,
-    own_server: &str,
-) -> (Option<String>, Option<String>, bool) {
-    // The owner's room wins ONLY if it actually exists — joining theirs is what
-    // keeps one conversation in one place.
-    if let (Some(a), Some(id)) = (&owner, &owner_room) {
-        return (Some(a.clone()), Some(id.clone()), false);
+fn envelope_error(body: &Value) -> String {
+    body.get("errors")
+        .and_then(|e| e.as_object())
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| format!("{}: {}", k, v.as_str().unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
+/// Read the endpoint's answer. Pure, so every row of the response table in
+/// the handoff can be pinned without a guild API.
+pub fn verdict(status: u16, body: &Value) -> Verdict {
+    let data = body.get("data").cloned().unwrap_or(Value::Null);
+    let text = |k: &str| data.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    match status {
+        200 | 201 => match (text("room_id"), text("server_name")) {
+            (Some(room_id), Some(server)) if !room_id.is_empty() && !server.is_empty() => Verdict::Room {
+                room_id,
+                server,
+                created: data.get("created").and_then(|c| c.as_bool()).unwrap_or(status == 201),
+            },
+            _ => Verdict::Bug(format!("ensure answered {status} without a room_id and server_name")),
+        },
+        409 => match (text("owner_guild_id"), text("owner_guild_endpoint")) {
+            (Some(guild_id), Some(endpoint)) if !guild_id.is_empty() && !endpoint.is_empty() => {
+                Verdict::Follow { guild_id, endpoint }
+            }
+            _ => Verdict::Bug("ensure answered 409 without naming the owner guild".into()),
+        },
+        401 => Verdict::Reauth,
+        404 => Verdict::Gone(non_empty(envelope_error(body), "the object does not exist")),
+        400 => Verdict::Bug(non_empty(envelope_error(body), "ensure refused the request")),
+        502 | 503 => Verdict::Unavailable(non_empty(envelope_error(body), "chat is unavailable for this guild")),
+        s => Verdict::Unavailable(non_empty(envelope_error(body), &format!("ensure answered HTTP {s}"))),
     }
-    // Otherwise ours, and this must not depend on the owner resolving at all.
-    // That dependency was the bug: it left `can_create` false, and a rail with
-    // no room has no name, no topic and no composer — unable to START a
-    // conversation, only to read one that already existed.
-    match mine {
-        Some(m) => {
-            let can = mine_room.is_none() && ours_to_create(&m, own_server);
-            (Some(m), mine_room, can)
+}
+
+fn non_empty(s: String, fallback: &str) -> String {
+    if s.is_empty() { fallback.to_string() } else { s }
+}
+
+/// The room the owner guild's API made (or already had) for this object.
+#[derive(Debug, Clone)]
+pub struct Ensured {
+    pub room_id: String,
+    pub server: String,
+    pub created: bool,
+    /// The guild that actually hosts it — after a 409 this differs from the
+    /// one we first asked.
+    pub guild: OwnerGuild,
+}
+
+/// Ask the owner guild to make (or find) the object's room. Signed with the
+/// player's chain key per request, as the endpoint requires; follows one 409
+/// to the guild it names; re-signs once on 401.
+pub async fn ensure(
+    app: &tauri::AppHandle,
+    session_key: &str,
+    object_id: &str,
+    guild: &OwnerGuild,
+) -> Result<Ensured, String> {
+    let kind = kind_word(object_id).ok_or_else(|| format!("{object_id} does not get a room"))?;
+    let as_player = super::store::player_of(session_key);
+    let mut target = guild.clone();
+    let mut followed = false;
+    let mut resigned = false;
+    loop {
+        let (status, body) = ensure_once(app, kind, object_id, &target, as_player).await?;
+        match verdict(status, &body) {
+            Verdict::Room { room_id, server, created } => {
+                return Ok(Ensured { room_id, server, created, guild: target });
+            }
+            Verdict::Follow { guild_id, endpoint } => {
+                if followed {
+                    return Err(format!("{object_id}'s room keeps being referred elsewhere ({guild_id})"));
+                }
+                followed = true;
+                target = guild_at(&guild_id, &endpoint)
+                    .await
+                    .ok_or_else(|| format!("{guild_id} hosts {object_id}'s room but publishes no usable chat service"))?;
+            }
+            Verdict::Reauth => {
+                if resigned {
+                    return Err(format!(
+                        "{} refused our signature twice — check the clock and the login key",
+                        target.guild_id
+                    ));
+                }
+                resigned = true;
+            }
+            Verdict::Gone(why) => return Err(format!("{object_id}: {why}")),
+            Verdict::Unavailable(why) => return Err(format!("{}: {why}", target.guild_id)),
+            Verdict::Bug(why) => return Err(format!("ensure {object_id} on {}: {why}", target.guild_id)),
         }
-        None => (owner, None, false),
     }
+}
+
+async fn ensure_once(
+    app: &tauri::AppHandle,
+    kind: &str,
+    object_id: &str,
+    guild: &OwnerGuild,
+    as_player: Option<&str>,
+) -> Result<(u16, Value), String> {
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(25))
+        .user_agent("StructsDesktop/comms")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let api = guild.guild_api.trim_end_matches('/');
+    // The guild's clock, not ours: the signature is good for ten minutes by
+    // the SERVER's reckoning, and a skewed local clock fails as a signature
+    // error that looks like a key problem — the same rule as login.
+    let ts = super::auth::guild_timestamp(&http, api).await?;
+    let signed = super::auth::sign_chatroom(app, kind, object_id, &ts, as_player).await?;
+    let url = format!("{api}/chat/room/ensure");
+    let body = json!({
+        "kind": kind,
+        "id": object_id,
+        "address": signed.address,
+        "pubkey": signed.pubkey,
+        "signature": signed.signature,
+        "unix_timestamp": ts.parse::<u64>().map(Value::from).unwrap_or_else(|_| Value::from(ts.clone())),
+    });
+    let resp = http
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("{}: ensure: {e}", guild.guild_id))?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    Ok((status, v))
 }
 
 #[cfg(test)]
@@ -178,6 +368,8 @@ mod tests {
     fn an_alias_says_what_the_thing_is() {
         assert_eq!(alias_localpart("2-15361").unwrap(), "planet-2-15361");
         assert_eq!(alias_localpart("9-61").unwrap(), "fleet-9-61");
+        assert_eq!(kind_word("2-15361"), Some("planet"));
+        assert_eq!(kind_word("9-61"), Some("fleet"));
         // Not every id is a room.
         assert!(alias_localpart("5-2184").is_none()); // a struct
         assert!(alias_localpart("1-194").is_none()); // a player
@@ -185,6 +377,11 @@ mod tests {
         assert!(alias_localpart("").is_none());
         assert!(alias_localpart("planet").is_none());
         assert!(alias_localpart("2-").is_none());
+        // Object rooms are not channel furniture.
+        assert!(is_object_localpart("planet-2-15361"));
+        assert!(is_object_localpart("fleet-9-61"));
+        assert!(!is_object_localpart("help"));
+        assert!(!is_object_localpart("planets"), "a channel merely CALLED planets is a channel");
     }
 
     #[test]
@@ -217,106 +414,43 @@ mod tests {
     }
 
     #[test]
-    fn only_our_own_server_is_ours_to_create_on() {
-        let mine = alias_on("2-15361", "matrix.oh.energy").unwrap();
-        assert!(ours_to_create(&mine, "matrix.oh.energy"));
-        // Another guild's planet: theirs to create, ours to wait for.
-        assert!(!ours_to_create(&mine, "matrix.beta.playstructs.com"));
-
-        // The collision class. A substring test would call all three of these
-        // ours, and each would be a create request the server refuses.
-        assert!(!ours_to_create(&mine, "oh.energy"));
-        assert!(!ours_to_create(&mine, "matrix.oh.energy.example.com"));
-        assert!(!ours_to_create(&alias_on("2-1", "oh.energy").unwrap(), "matrix.oh.energy"));
-
-        // No server on either side is not a match — it is "we do not know",
-        // and guessing yes means trying to create somebody else's room.
-        assert!(!ours_to_create(&mine, ""));
-        assert!(!ours_to_create("#planet-2-1", "matrix.oh.energy"));
-        assert!(!ours_to_create("", ""));
-    }
-
-    const MINE: &str = "matrix.oh.energy";
-    fn s(x: &str) -> Option<String> { Some(x.to_string()) }
-
-    #[test]
-    fn an_owner_room_that_exists_is_the_one() {
-        // Joining theirs is what keeps one conversation in one place.
-        let (alias, room, can) = resolve(
-            s("#planet-2-1:their.server"), s("!theirs"),
-            s("#planet-2-1:matrix.oh.energy"), None, MINE);
-        assert_eq!(alias.as_deref(), Some("#planet-2-1:their.server"));
-        assert_eq!(room.as_deref(), Some("!theirs"));
-        assert!(!can, "we never create in somebody else's namespace");
-    }
-
-    #[test]
-    fn an_unresolvable_owner_still_gets_a_room() {
-        /* THE BUG, twice over.
-         *
-         * `alias_for` answers None whenever the owner cannot be resolved to a
-         * guild with a known Matrix server — most of the galaxy. That used to
-         * end with `can_create: false`, and a rail with no room has no name, no
-         * topic and no composer: it could not START a conversation about a
-         * planet, only read one that already existed. That is the state every
-         * raid window opens in.
-         */
-        let (alias, room, can) = resolve(
-            None, None, s("#planet-2-1:matrix.oh.energy"), None, MINE);
-        assert_eq!(alias.as_deref(), Some("#planet-2-1:matrix.oh.energy"));
-        assert_eq!(room, None);
-        assert!(can, "our own server's alias is always ours to create");
-    }
-
-    #[test]
-    fn an_owner_with_no_room_yet_falls_back_to_ours() {
-        // The owner's guild is known but nobody there has made the room.
-        let (alias, _room, can) = resolve(
-            s("#planet-2-1:their.server"), None,
-            s("#planet-2-1:matrix.oh.energy"), None, MINE);
-        assert_eq!(alias.as_deref(), Some("#planet-2-1:matrix.oh.energy"));
-        assert!(can);
-    }
-
-    #[test]
-    fn our_existing_room_is_joined_not_recreated() {
-        let (alias, room, can) = resolve(
-            None, None, s("#planet-2-1:matrix.oh.energy"), s("!ours"), MINE);
-        assert_eq!(alias.as_deref(), Some("#planet-2-1:matrix.oh.energy"));
-        assert_eq!(room.as_deref(), Some("!ours"));
-        assert!(!can, "it already exists");
-    }
-
-    #[test]
-    fn it_never_claims_another_servers_namespace() {
-        /* `resolve` takes `mine` as a parameter, so it must hold for any input
-         * and not merely for the one its caller happens to build. A client can
-         * only claim an alias on its OWN homeserver; answering `can_create` for
-         * anything else is a create request the server will refuse — and,
-         * worse, a composer offered for a room that can never appear.
-         */
-        let (alias, _room, can) = resolve(
-            None, None, s("#planet-2-1:somebody.else"), None, MINE);
-        assert_eq!(alias.as_deref(), Some("#planet-2-1:somebody.else"));
-        assert!(!can, "not our namespace");
-    }
-
-    #[test]
-    fn with_no_address_at_all_there_is_nothing_to_create() {
-        // No object alias anywhere — a type that gets no room, or no server
-        // name known even for us. Must not claim it is creatable.
-        let (alias, room, can) = resolve(None, None, None, None, MINE);
-        assert_eq!(alias, None);
-        assert_eq!(room, None);
-        assert!(!can);
-    }
-
-    #[test]
     fn the_server_is_taken_from_the_right() {
         assert_eq!(server_of("#planet-2-1:matrix.oh.energy"), Some("matrix.oh.energy"));
         // A colon in the localpart must not become the server.
         assert_eq!(server_of("#odd:name:matrix.oh.energy"), Some("matrix.oh.energy"));
         assert_eq!(server_of("#planet-2-1:"), None);
         assert_eq!(server_of("no-colon"), None);
+    }
+
+    /* Every row of the handoff's response table, as the client reads it.
+     * Pure, so a guild API is not needed to know that a 404 is "no room, no
+     * retry" and a 409 is "ask the guild it names".
+     */
+    #[test]
+    fn the_ensure_table_is_read_row_by_row() {
+        let ok = json!({ "success": true, "data": { "room_id": "!r:matrix.crew.oh.energy",
+            "alias": "#planet-2-22432:matrix.crew.oh.energy", "server_name": "matrix.crew.oh.energy", "created": true } });
+        assert_eq!(verdict(201, &ok), Verdict::Room {
+            room_id: "!r:matrix.crew.oh.energy".into(), server: "matrix.crew.oh.energy".into(), created: true });
+        let had = json!({ "data": { "room_id": "!r:s", "server_name": "s", "created": false } });
+        assert_eq!(verdict(200, &had), Verdict::Room { room_id: "!r:s".into(), server: "s".into(), created: false });
+
+        let elsewhere = json!({ "success": false, "errors": { "owner_in_other_guild": "owned by 0-5" },
+            "data": { "owner_guild_id": "0-5", "owner_guild_endpoint": "https://beta.playstructs.com/guild.json" } });
+        assert_eq!(verdict(409, &elsewhere), Verdict::Follow {
+            guild_id: "0-5".into(), endpoint: "https://beta.playstructs.com/guild.json".into() });
+
+        assert_eq!(verdict(401, &json!({ "errors": { "authentication_error": "bad signature" } })), Verdict::Reauth);
+        assert_eq!(verdict(404, &json!({ "errors": { "object_not_found": "no planet 2-99" } })),
+            Verdict::Gone("object_not_found: no planet 2-99".into()));
+        assert!(matches!(verdict(400, &json!({ "errors": { "invalid_object": "kind" } })), Verdict::Bug(_)));
+        assert!(matches!(verdict(502, &json!({ "errors": { "homeserver_error": "down" } })), Verdict::Unavailable(_)));
+        assert!(matches!(verdict(503, &json!({ "errors": { "chat_not_configured": "" } })), Verdict::Unavailable(_)));
+        // A success with no room in it is a bug on one side or the other,
+        // never a room to join by guesswork.
+        assert!(matches!(verdict(200, &json!({ "data": {} })), Verdict::Bug(_)));
+        assert!(matches!(verdict(409, &json!({ "data": {} })), Verdict::Bug(_)));
+        // Anything unlisted is treated as the guild having a bad day.
+        assert!(matches!(verdict(500, &Value::Null), Verdict::Unavailable(_)));
     }
 }

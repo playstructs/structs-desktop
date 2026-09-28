@@ -488,20 +488,20 @@ fn icon_for(name: &str, alias: Option<&str>) -> &'static str {
     }
 }
 
-/* The channels pinned above every section, in this order.
+/* The guild's own channels — the furniture at the top of the list.
  *
- * A PRODUCT decision, not a derivable fact: SN Corp is being treated as the
- * main channel of Structs for now, with the support and infrastructure rooms
- * under it. One list, so adding, reordering or retiring a pin is one edit.
+ * They come from the guild's room DIRECTORY, never from a list in this file:
+ * a homeserver following GUILD-CHAT-STANDARD lets only its guild-bot create
+ * public rooms, aliases and directory entries, so the directory IS the set of
+ * channels the guild's ops made. The lobby (the channel whose localpart is
+ * the guild's own slug) sits first; the rest keep the directory's order.
+ * Object rooms (`#planet-…`, `#fleet-…`) and the work bus are listed there
+ * too and are excluded here: they are places, not furniture.
  *
  * Matched on the alias LOCALPART as a whole token, plus WHOLE-SERVER equality
- * against that guild's own homeserver. Never a substring and never on display
- * name: anyone may publish a room called "SN Corp" — the browse fixture
- * carries exactly that forgery at `#sn-corp-official`, on this very server,
- * whose localpart CONTAINS `sn-corp`. Whole tokens are what separate them.
+ * against the session's own homeserver. Never a substring and never on
+ * display name: anyone may publish a room called "SN Corp" elsewhere.
  */
-const HOME_GUILD: &str = "0-5";
-const PINNED_LOCALPARTS: [&str; 3] = ["sn-corp", "help", "infrastructure"];
 
 /// The alias localpart: `#help:matrix.example` → `help`. Whole tokens only.
 fn alias_localpart_of(alias: &str) -> Option<&str> {
@@ -534,10 +534,10 @@ mod pin_tests {
             "#not-help:matrix.beta.playstructs.com",
             "#infrastructure-wg:matrix.beta.playstructs.com",
         ] {
-            let local = alias_localpart_of(impostor).unwrap();
-            assert!(
-                !PINNED_LOCALPARTS.contains(&local),
-                "{local} must not take a pinned slot"
+            assert_ne!(
+                guild_channel_rank(impostor, "matrix.beta.playstructs.com", "sn-corp"),
+                Some(0),
+                "{impostor} must not take the lobby's slot"
             );
         }
     }
@@ -578,21 +578,21 @@ mod pin_tests {
     }
 
     #[test]
-    fn the_pins_do_not_depend_on_the_viewers_guild() {
+    fn the_channels_are_the_viewers_own_guilds_and_nobody_elses() {
         const SN: &str = "matrix.beta.playstructs.com";
-        assert_eq!(pinned_rank_for("#sn-corp:matrix.beta.playstructs.com", SN), Some(0));
-        assert_eq!(pinned_rank_for("#help:matrix.beta.playstructs.com", SN), Some(1));
-        assert_eq!(pinned_rank_for("#infrastructure:matrix.beta.playstructs.com", SN), Some(2));
-        // A room of the viewer's OWN guild is not pinned just for being theirs.
-        assert_eq!(pinned_rank_for("#orbital-hydro:matrix.crew.oh.energy", SN), None);
-        // …and a pinned NAME on another server is a different room entirely.
-        assert_eq!(pinned_rank_for("#help:matrix.crew.oh.energy", SN), None);
-        assert_eq!(pinned_rank_for("#sn-corp:evil.example", SN), None);
-        // Suffix and prefix of the home server are not the home server.
-        assert_eq!(pinned_rank_for("#help:beta.playstructs.com", SN), None);
-        assert_eq!(pinned_rank_for("#help:matrix.beta.playstructs.com.evil.example", SN), None);
-        // Nothing is pinned when the directory cannot name the home server.
-        assert_eq!(pinned_rank_for("#help:matrix.beta.playstructs.com", ""), None);
+        // The lobby leads; the rest of the directory follows.
+        assert_eq!(guild_channel_rank("#sn-corp:matrix.beta.playstructs.com", SN, "sn-corp"), Some(0));
+        assert_eq!(guild_channel_rank("#help:matrix.beta.playstructs.com", SN, "sn-corp"), Some(1));
+        assert_eq!(guild_channel_rank("#infrastructure:matrix.beta.playstructs.com", SN, "sn-corp"), Some(1));
+        // Another guild's rooms are that guild's furniture, not this viewer's.
+        assert_eq!(guild_channel_rank("#orbital-hydro:matrix.crew.oh.energy", SN, "sn-corp"), None);
+        assert_eq!(guild_channel_rank("#help:matrix.crew.oh.energy", SN, "sn-corp"), None);
+        assert_eq!(guild_channel_rank("#sn-corp:evil.example", SN, "sn-corp"), None);
+        // Suffix and prefix of the own server are not the own server.
+        assert_eq!(guild_channel_rank("#help:beta.playstructs.com", SN, "sn-corp"), None);
+        assert_eq!(guild_channel_rank("#help:matrix.beta.playstructs.com.evil.example", SN, "sn-corp"), None);
+        // Nothing is a channel when the directory cannot name our server.
+        assert_eq!(guild_channel_rank("#help:matrix.beta.playstructs.com", "", "sn-corp"), None);
     }
 
     /* A guild that does not federate must be handled, not hammered.
@@ -644,65 +644,62 @@ mod pin_tests {
     }
 
     #[test]
-    fn the_pins_are_ordered_and_distinct() {
-        // Rank IS the index, so the list order is the on-screen order.
-        assert_eq!(PINNED_LOCALPARTS[0], "sn-corp");
-        assert_eq!(PINNED_LOCALPARTS[1], "help");
-        assert_eq!(PINNED_LOCALPARTS[2], "infrastructure");
-        let mut seen = PINNED_LOCALPARTS.to_vec();
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), PINNED_LOCALPARTS.len(), "a pin is listed twice");
+    fn a_guild_channel_is_a_room_on_the_guilds_own_server_that_is_not_a_place() {
+        let own = "matrix.crew.oh.energy";
+        // The lobby first, every other channel after it.
+        assert_eq!(guild_channel_rank("#orbital-hydro:matrix.crew.oh.energy", own, "orbital-hydro"), Some(0));
+        assert_eq!(guild_channel_rank("#help:matrix.crew.oh.energy", own, "orbital-hydro"), Some(1));
+        assert_eq!(guild_channel_rank("#infrastructure:matrix.crew.oh.energy", own, "orbital-hydro"), Some(1));
+        // Another guild's channel is not this guild's furniture.
+        assert_eq!(guild_channel_rank("#help:matrix.beta.playstructs.com", own, "orbital-hydro"), None);
+        // Whole-server equality: a suffix or a prefix of our server is not us.
+        assert_eq!(guild_channel_rank("#help:crew.oh.energy", own, "orbital-hydro"), None);
+        assert_eq!(guild_channel_rank("#help:matrix.crew.oh.energy.example.com", own, "orbital-hydro"), None);
+        // Object rooms live in the same directory and are places, not furniture.
+        assert_eq!(guild_channel_rank("#planet-2-15361:matrix.crew.oh.energy", own, "orbital-hydro"), None);
+        assert_eq!(guild_channel_rank("#fleet-9-61:matrix.crew.oh.energy", own, "orbital-hydro"), None);
+        // No lobby known: nothing is first, everything is a channel.
+        assert_eq!(guild_channel_rank("#orbital-hydro:matrix.crew.oh.energy", own, ""), Some(1));
+        assert_eq!(guild_channel_rank("#help:matrix.crew.oh.energy", "", "orbital-hydro"), None);
     }
 }
 
-/// Where this room sits among the pinned channels, or `None` for the great
-/// majority that are not pinned at all.
-///
-/// Takes only the alias — the display name is deliberately not an input, so
-/// no future edit can reintroduce name matching by reaching for a parameter
-/// that happens to be in scope.
-///
-/// The server compared is the ROOM's own, taken from its alias — not the
-/// session's.
-///
-/// This read the session's homeserver and refused anything that did not match
-/// SN Corp's, which meant the pin could only ever fire for SN Corp's own
-/// members: an Orbital Hydro player got `None` for every room including the
-/// three pinned ones, because it was asking "am I on SN's server?" instead of
-/// "is this room on SN's server?". The whole point is that these three are
-/// pinned for everyone, so the viewer's guild must not enter into it.
-///
-/// Returns `None` whenever the directory cannot name the home guild's server,
-/// which degrades to "nothing is pinned" rather than to a wrong guess.
-/// Is this alias the work bus? Decided by the alias, not by whether the bus
-/// has been resolved yet, so a room is classified the moment it is seen.
+/// The work bus is machine traffic, not a channel anyone reads.
 fn is_system_alias(alias: Option<&str>) -> bool {
     let bus = crate::mcp::crew_work::get().bus;
     !bus.is_empty() && alias == Some(bus.as_str())
 }
 
-fn home_rank(alias: Option<&str>) -> Option<u8> {
-    let home = super::directory::server_name_for_guild(HOME_GUILD)?;
-    pinned_rank_for(alias?, &home)
+/// Where this room sits among the guild's own channels, or `None` for the
+/// great majority that are not one: rooms on other servers, object rooms, the
+/// work bus. See the note above `alias_localpart_of`.
+fn home_rank_for(session: &Session, alias: Option<&str>) -> Option<u8> {
+    guild_channel_rank(alias?, &server_name(session), &lobby_slug(&session.guild_id))
+}
+
+/// The alias localpart a guild's lobby would have: its name, slugged the way
+/// `discovery::candidate_aliases` does. Empty when the guild is not in the
+/// directory yet, and then no channel is first.
+fn lobby_slug(guild_id: &str) -> String {
+    crate::guild_config::get_guild_configs()
+        .into_iter()
+        .find(|c| c.guild_id == store::guild_of(guild_id))
+        .map(|c| super::discovery::slug(&c.name))
+        .unwrap_or_default()
 }
 
 /// The decision itself, with nothing global in it.
-///
-/// Split out because the bug above was not in the rule but in what was fed to
-/// it, and a rule that can only be exercised through the live guild directory
-/// cannot be asked "does the viewer's own guild change your answer?".
-fn pinned_rank_for(alias: &str, home_server: &str) -> Option<u8> {
+fn guild_channel_rank(alias: &str, own_server: &str, lobby: &str) -> Option<u8> {
     // Whole-server equality, never a substring: `oh.energy` is a suffix of
     // `matrix.oh.energy` and a prefix of `oh.energy.example.com`.
-    if home_server.is_empty() || super::rooms::server_of(alias) != Some(home_server) {
+    if own_server.is_empty() || super::rooms::server_of(alias) != Some(own_server) {
         return None;
     }
     let local = alias_localpart_of(alias)?;
-    PINNED_LOCALPARTS
-        .iter()
-        .position(|p| *p == local)
-        .map(|i| i as u8)
+    if super::rooms::is_object_localpart(local) || is_system_alias(Some(alias)) {
+        return None;
+    }
+    Some(if !lobby.is_empty() && local == lobby { 0 } else { 1 })
 }
 
 // ── Requests ────────────────────────────────────────────────────────────────
@@ -1887,7 +1884,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
 
         // Computed before the literal: `display` and `final_alias` are moved
         // into it.
-        let rank = if is_dm { None } else { home_rank(final_alias.as_deref()) };
+        let rank = if is_dm { None } else { home_rank_for(session, final_alias.as_deref()) };
         let system = is_system_alias(final_alias.as_deref());
         let entry = Room {
             home_rank: rank,
@@ -2660,9 +2657,26 @@ fn pinned_retry_delay_ms(err: &str) -> u64 {
 /// is still recorded rather than dropped on the floor.
 async fn join_pinned_channels(app: &tauri::AppHandle, guild_id: &str) {
     let Some(session) = store::get(guild_id) else { return };
-    let Some(home) = super::directory::server_name_for_guild(HOME_GUILD) else {
-        return;
-    };
+    // The guild's own channels, from its directory. Its ops made them; a
+    // client cannot, and a list in this file would be one guild's.
+    if let Err(e) = refresh_directory(guild_id, &session).await {
+        eprintln!("[Comms] {} room directory: {}", guild_id, e);
+    }
+    let aliases: Vec<String> = STATE
+        .read()
+        .ok()
+        .and_then(|st| {
+            st.get(guild_id).map(|g| {
+                let mut v: Vec<(u8, String)> = g
+                    .rooms
+                    .values()
+                    .filter_map(|r| Some((r.home_rank?, r.canonical_alias.clone()?)))
+                    .collect();
+                v.sort();
+                v.into_iter().map(|(_, a)| a).collect()
+            })
+        })
+        .unwrap_or_default();
     let now = crate::hasher::types::now_millis() as u64;
     let mut state = pinned_state_read();
     // Whose memberships these are. Two identities on one install are two
@@ -2671,8 +2685,7 @@ async fn join_pinned_channels(app: &tauri::AppHandle, guild_id: &str) {
     let mut dirty = false;
     let mut joined_any = false;
 
-    for local in PINNED_LOCALPARTS {
-        let alias = format!("#{local}:{home}");
+    for alias in aliases {
         let rec = mine.entry(alias.clone()).or_default();
         if rec.joined || now < rec.next_try_ms {
             continue;
@@ -3093,7 +3106,7 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
             .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
-        let rank = home_rank(alias.as_deref());
+        let rank = home_rank_for(session, alias.as_deref());
         gs.rooms.insert(
             room_id.to_string(),
             Room {
@@ -3216,7 +3229,7 @@ pub async fn browse(
             .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
-        let rank = home_rank(alias.as_deref());
+        let rank = home_rank_for(session, alias.as_deref());
         out.push(Room {
             home_rank: rank,
             system: is_system_alias(alias.as_deref()),
@@ -3258,7 +3271,7 @@ pub async fn browse(
                 continue;
             }
             out.push(Room {
-                home_rank: home_rank(Some(&s.alias)),
+                home_rank: home_rank_for(session, Some(&s.alias)),
                 room_id: s.room_id.clone(),
                 icon: icon_for(&s.name, Some(&s.alias)),
                 name: s.name,
@@ -3714,7 +3727,10 @@ fn existing_dm(gs: &GuildState, their_id: &str) -> Option<String> {
     gs.dm_with
         .iter()
         .filter(|(room, peer)| {
-            peer.as_str() == their_id && gs.rooms.get(room.as_str()).map(|r| r.joined) == Some(true)
+            // Joined, and readable: an encrypted DM with this person is one
+            // this client cannot show, so a fresh unencrypted one is made.
+            peer.as_str() == their_id
+                && gs.rooms.get(room.as_str()).map(|r| r.joined && !r.encrypted) == Some(true)
         })
         .map(|(room, _)| room.clone())
         .next()
@@ -3872,6 +3888,21 @@ pub async fn join(session: &Session, room_id: &str) -> Result<(), String> {
     let url = format!("{}/join/{}", base(session), urlseg(room_id));
     authed(session, move |c, s| {
         c.post(&url).bearer_auth(&s.access_token).json(&json!({}))
+    })
+    .await
+    .map(|_| ())
+}
+
+/// Join through a named server. A room another guild's API just made is one
+/// our homeserver may not know yet; `server_name` tells it where to ask.
+pub async fn join_via(session: &Session, room_id: &str, server: &str) -> Result<(), String> {
+    let url = format!("{}/join/{}", base(session), urlseg(room_id));
+    let server = server.to_string();
+    authed(session, move |c, s| {
+        c.post(&url)
+            .bearer_auth(&s.access_token)
+            .query(&[("server_name", server.as_str())])
+            .json(&json!({}))
     })
     .await
     .map(|_| ())
@@ -4672,39 +4703,6 @@ pub async fn room_id_for_alias(session: &Session, alias: &str) -> Option<String>
     v.get("room_id")?.as_str().map(|s| s.to_string())
 }
 
-/// Create a public room at `localpart` on OUR homeserver.
-///
-/// A client may only create an alias in its own server's namespace, so this
-/// can only ever make the rooms for objects our guild owns. Rooms for another
-/// guild's planets are theirs to create — which is why the caller treats a
-/// missing room as "not yet", never as a failure.
-pub async fn create_object_room(
-    session: &Session,
-    localpart: &str,
-    name: &str,
-    topic: &str,
-) -> Result<String, String> {
-    let url = format!("{}/createRoom", base(session));
-    let payload = json!({
-        "room_alias_name": localpart,
-        "name": name,
-        "topic": topic,
-        // Public and world-readable: a planet's conversation should be
-        // findable by anyone who can see the planet, including the guild
-        // raiding it. `preset` also publishes the join rule the directory
-        // lookup above relies on.
-        "preset": "public_chat",
-        "visibility": "public",
-    });
-    let v = authed(session, move |c, s| {
-        c.post(&url).bearer_auth(&s.access_token).json(&payload)
-    })
-    .await?;
-    v.get("room_id")
-        .and_then(|r| r.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "createRoom returned no room_id".to_string())
-}
 
 /// The server this session's own account lives on.
 pub fn own_server(session: &Session) -> String {

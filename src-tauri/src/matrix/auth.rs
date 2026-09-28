@@ -394,10 +394,10 @@ fn decode_entities(s: &str) -> String {
 // ── The guild login hop ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct SignedLogin {
-    address: String,
-    pubkey: String,
-    signature: String,
+pub struct SignedLogin {
+    pub address: String,
+    pub pubkey: String,
+    pub signature: String,
 }
 
 /// Ask the game webview to sign the guild's login message. The façade builds
@@ -439,10 +439,44 @@ async fn sign_login(
         .map_err(|e| format!("the signing bridge returned an unexpected shape: {}", e))
 }
 
+/// Ask the game webview to sign a guild API's `chat/room/ensure` request.
+///
+/// The message is `CHATROOM{kind}{id}ADDRESS{address}DATETIME{ts}`, built by
+/// the façade from (kind, id, timestamp) and never accepted from the caller —
+/// the same narrow shape as `login_signature`, so this cannot be used to
+/// sign anything else. It works on ANY guild's API, which is the point: a
+/// planet's room lives on its owner's guild, where we hold no session.
+pub async fn sign_chatroom(
+    app: &tauri::AppHandle,
+    kind: &str,
+    object_id: &str,
+    timestamp: &str,
+    as_player: Option<&str>,
+) -> Result<SignedLogin, String> {
+    let index = match as_player {
+        None => None,
+        Some(pid) => Some(
+            crate::mcp::virtual_players::VirtualPlayerStore::load()
+                .find(pid)
+                .map(|p| p.index)
+                .ok_or_else(|| format!("{pid} is not one of your players"))?,
+        ),
+    };
+    let v = crate::mcp::vplayer_bridge::call(
+        app,
+        "chatroom_signature",
+        json!({ "kind": kind, "id": object_id, "timestamp": timestamp, "index": index }),
+        SIGN_TIMEOUT_SECS,
+    )
+    .await?;
+    serde_json::from_value(v)
+        .map_err(|e| format!("the signing bridge returned an unexpected shape: {}", e))
+}
+
 /// The webapp's timestamp, not ours: the login message expires 600s after the
 /// value the SERVER believes, so a skewed local clock would fail every login
 /// with a signature error that looks like a key problem.
-async fn guild_timestamp(client: &reqwest::Client, guild_api: &str) -> Result<String, String> {
+pub(crate) async fn guild_timestamp(client: &reqwest::Client, guild_api: &str) -> Result<String, String> {
     let url = format!("{}/timestamp", guild_api.trim_end_matches('/'));
     let v: Value = client
         .get(&url)

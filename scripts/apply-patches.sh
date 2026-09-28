@@ -728,6 +728,36 @@ try {
       const signature = await walletManager.createSignatureForProxyMessage(message, privkey);
       return { address: address, pubkey: pubkey, signature: signature };
     },
+    // A guild API's `chat/room/ensure` request (GUILD-CHAT-STANDARD): the
+    // message is CHATROOM{kind}{id}ADDRESS{address}DATETIME{ts}, signed the
+    // same way as login. Built HERE from (kind, id, timestamp) — the caller
+    // cannot hand in a string — so this is no wider a signer than login.
+    // `kind` is 'planet' or 'fleet'; anything else is refused before signing.
+    async chatroomSignature(kind, id, timestamp, index) {
+      if ((kind !== 'planet' && kind !== 'fleet') || !/^[29]-[0-9]+$/.test(String(id || '')) || !timestamp) {
+        throw new Error('chatroomSignature needs a kind (planet|fleet), an object id and a timestamp');
+      }
+      let address, privkey, pubkey;
+      if (index == null) {
+        if (!gameState.signingAccount || !gameState.signingAccount.privkey) {
+          throw new Error('not signed in to the game yet');
+        }
+        address = gameState.signingAccount.address;
+        privkey = gameState.signingAccount.privkey;
+        pubkey = gameState.pubkey;
+      } else {
+        if (typeof __vpDerive !== 'function') {
+          throw new Error('vplayers façade missing; cannot sign as a roster player');
+        }
+        const a = await __vpDerive(index);
+        address = a.address;
+        privkey = a.privkey;
+        pubkey = walletManager.bytesToHex(a.pubkey);
+      }
+      const message = 'CHATROOM' + kind + id + 'ADDRESS' + address + 'DATETIME' + String(timestamp);
+      const signature = await walletManager.createSignatureForProxyMessage(message, privkey);
+      return { address: address, pubkey: pubkey, signature: signature };
+    },
   };
   console.info('[structs-universe] __STRUCTS_COMMS__ ready');
 } catch (e) { console.warn('[structs-universe] comms façade failed', e); }
