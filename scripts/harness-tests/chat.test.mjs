@@ -4070,6 +4070,10 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     w.Chat.presenceDot(null) === null);
 
   // A live update repaints.
+  // …and a repaint must not move a reader who has scrolled down the list: a
+  // presence push arrives every few seconds, and each one put the channel
+  // list back at the top.
+  d.querySelector('.chat-scroll').scrollTop = 250;
   w.__HARNESS_EMIT__('matrix::presence', {
     guild_id: '0-5', presence: { '1-61': { state: 'offline' } },
   });
@@ -4078,6 +4082,15 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('going away updates the dot',
     after.querySelector('.chat-presence').className.includes('chat-mod-away'),
     after.querySelector('.chat-presence').className);
+  check('a repaint keeps the list where the reader scrolled it',
+    d.querySelector('.chat-scroll').scrollTop === 250,
+    String(d.querySelector('.chat-scroll').scrollTop));
+  // Leaving for another page starts that page at the top, as a page should.
+  w.Chat.go('connection');
+  await tick();
+  check('a different page starts at the top',
+    d.querySelector('.chat-scroll').scrollTop === 0,
+    String(d.querySelector('.chat-scroll').scrollTop));
 }
 
 // A homeserver with presence turned off must show nothing, not a dead guild.

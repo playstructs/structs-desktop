@@ -659,6 +659,16 @@
     var timeline = byId('chat-timeline');
     var prevTop = timeline ? timeline.scrollTop : 0;
     noteScrollPosition();
+    /* The page's own scroller, for every view that is not a room. The
+     * timeline has always carried its place across a repaint (`keepPlace`);
+     * the channel list did not, and render() runs on every presence, room and
+     * state push — so a player who had scrolled down the list was put back at
+     * the top a second later, every second. Held only when the same page is
+     * repainted: moving to another view, or another room, starts at the top
+     * as a fresh page should. */
+    var pageScroll = host.querySelector('.chat-scroll');
+    var pageTop = pageScroll ? pageScroll.scrollTop : 0;
+    var samePage = S.renderedPage === pageKey();
     clear(host);
     var node;
     if (S.view === 'room') node = renderRoom();
@@ -686,9 +696,19 @@
     }
     restoreDraft(draft);
     keepPlace(prevTop);
+    if (samePage && pageTop) {
+      var again = node.querySelector('.chat-scroll');
+      if (again) again.scrollTop = pageTop;
+    }
+    S.renderedPage = pageKey();
     renderNav();
   }
   Chat.render = render;
+
+  // Which page a render draws: the view, and for a room which one.
+  function pageKey() {
+    return S.view + (S.view === 'room' ? ':' + S.roomId : '');
+  }
 
   // One marker per room per event: render() runs constantly and the homeserver
   // does not need to hear the same thing twice.
