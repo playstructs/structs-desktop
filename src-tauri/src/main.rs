@@ -141,7 +141,7 @@ fn main() {
             matrix::open_chat_window,
             matrix::close_chat_window,
             matrix::matrix_status,
-            matrix::matrix_select,
+            matrix::matrix_state,
             matrix::matrix_connect,
             matrix::matrix_disconnect,
             matrix::matrix_rooms,

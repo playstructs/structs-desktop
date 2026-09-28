@@ -21,7 +21,7 @@ const FRONTEND = ['frontend/chat.js', 'frontend/chat-refs.js', 'frontend/chat-co
   'frontend/chat-people.js', 'frontend/chat-connection.js', 'frontend/chat-pins.js', 'frontend/chat-presence.js',
   'frontend/chat-message.js', 'frontend/chat-scroll.js', 'frontend/chat-room.js', 'frontend/chat-tabs.js',
   'frontend/chat-rent.js', 'frontend/raidview-comms.js', 'frontend/board.js', 'frontend/board-terminal.js',
-  'frontend/board-terminal-ops.js', 'frontend/board-pages.js'];
+  'frontend/board-terminal-ops.js', 'frontend/board-pages.js', 'frontend/comms-state.js'];
 
 let failures = 0;
 function check(what, ok, detail) {
@@ -156,7 +156,7 @@ function check(what, ok, detail) {
   /* Only the pages the web board SERVES: the board, the Terminal and the raid
    * view's rail. The Comms window is a native window and is never framed
    * over HTTP, so its work-offer, agreement and presence calls need no arm. */
-  const WEB_SERVED = ['frontend/board.js', 'frontend/board-terminal.js', 'frontend/board-terminal-ops.js', 'frontend/board-pages.js', 'frontend/raidview-comms.js'];
+  const WEB_SERVED = ['frontend/board.js', 'frontend/board-terminal.js', 'frontend/board-terminal-ops.js', 'frontend/board-pages.js', 'frontend/raidview-comms.js', 'frontend/comms-state.js'];
   const unrouted = [...new Set(js.filter((c) => WEB_SERVED.includes(c.file)).map((c) => c.cmd))]
     .filter((c) => !routed.has(c) && !deliberate.has(c));
   check('every command the cards call has a web-board arm (or is excluded on purpose)',
@@ -164,7 +164,7 @@ function check(what, ok, detail) {
 
   const emits = {};
   const opaque = new Set();
-  for (const f of ['src-tauri/src/matrix/mod.rs', 'src-tauri/src/matrix/client.rs']) {
+  for (const f of ['src-tauri/src/matrix/mod.rs', 'src-tauri/src/matrix/client.rs', 'src-tauri/src/matrix/session.rs']) {
     const rs = read(f);
     // Every event name that is emitted at all, however its payload is built.
     for (const m of rs.matchAll(/"(matrix::\w+)"/g)) emits[m[1]] = emits[m[1]] || new Set();

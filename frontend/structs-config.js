@@ -1687,6 +1687,16 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
   (function setupCommsUnread() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
+    // The one reading every window shares, when its script is here; the
+    // raw push otherwise.
+    if (window.StructsComms) {
+      window.StructsComms.onChange(function (s) {
+        var u = (s && s.unread) || {};
+        COMMS_UNREAD = { count: Number(u.count) || 0, mention: !!u.mention };
+        paintCommsUnread();
+      });
+      return;
+    }
     window.StructsEvents.listen('matrix::unread', function (event) {
       var p = (event && event.payload) || {};
       COMMS_UNREAD = { count: Number(p.count) || 0, mention: !!p.mention };

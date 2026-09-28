@@ -651,7 +651,8 @@ async fn board_invoke(
          * OIDC hop that belongs in the app), `matrix_open_transfer`,
          * `matrix_share` and `matrix_open_as` (they open native windows nobody
          * is looking at), and every `matrix_work_*` (an offer is a commitment). */
-        "matrix_status" => from_result(crate::matrix::matrix_status(s("as_player")).await),
+        "matrix_status" => from_result(crate::matrix::matrix_status(st.app.clone(), s("as_player")).await),
+        "matrix_state" => from_result(crate::matrix::matrix_state()),
         "matrix_rooms" => match s("guildId").or_else(|| s("guild_id")) {
             Some(g) => from_result(crate::matrix::matrix_rooms(g).await),
             None => err_json("guildId required".into()),

@@ -280,6 +280,82 @@ static STATE: std::sync::LazyLock<RwLock<HashMap<String, GuildState>>> =
 static RUNNING: std::sync::LazyLock<RwLock<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(std::collections::HashSet::new()));
 
+// ── Token lifetime ──────────────────────────────────────────────────────────
+
+/// Refresh this far ahead of the issuer's expiry, so a token is never
+/// presented dead. Reactive-only refresh (on M_UNKNOWN_TOKEN) is kept as a
+/// backstop, but it was the whole strategy once, and at the moment of expiry
+/// every in-flight request hit it at the same time.
+const REFRESH_AHEAD_SECS: u64 = 60;
+
+/// Prefix on an error that means "sign in again", as opposed to "try again".
+/// The sync loop ends on one of these; on anything else it backs off.
+pub const SESSION_DEAD: &str = "session dead: ";
+
+pub fn session_is_dead(e: &str) -> bool {
+    e.starts_with(SESSION_DEAD) || e.contains("M_UNKNOWN_TOKEN")
+}
+
+/// One refresh in flight per identity, ever. MAS rotates refresh tokens, so
+/// two tasks refreshing with the same one race: the second is
+/// `invalid_grant`, and reuse detection may revoke the grant outright.
+/// That race is the most likely reason a session with a working refresh
+/// path stayed dead for sixty hours.
+static REFRESHING: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn refresh_lock(key: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut m = REFRESHING.lock().unwrap_or_else(|p| p.into_inner());
+    m.entry(key.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn key_of(session: &Session) -> String {
+    store::key_for(&session.guild_id, session.player_id.as_deref())
+}
+
+/// Whether this token is about to stop working, by the issuer's own clock.
+fn needs_refresh(session: &Session, now_secs: u64) -> bool {
+    session
+        .expires_at
+        .is_some_and(|e| now_secs + REFRESH_AHEAD_SECS >= e)
+}
+
+/// A fresh session for the identity `stale` belongs to. Waits for any
+/// refresh already in flight, and takes that one's result rather than
+/// spending the refresh token again. A `SESSION_DEAD` error means the
+/// issuer refused: sign in again.
+pub async fn refresh_single_flight(stale: &Session) -> Result<Session, String> {
+    single_flight(stale, store::get, |s| async move { auth::refresh(&s).await }).await
+}
+
+/// The single-flight rule with its collaborators injected, so the test can
+/// count refreshes without a homeserver and without touching the real store.
+async fn single_flight<C, R, Fut>(stale: &Session, current: C, do_refresh: R) -> Result<Session, String>
+where
+    C: Fn(&str) -> Option<Session>,
+    R: Fn(Session) -> Fut,
+    Fut: std::future::Future<Output = Result<Session, auth::RefreshError>>,
+{
+    let key = key_of(stale);
+    let lock = refresh_lock(&key);
+    let _held = lock.lock().await;
+    // Somebody may have finished this while we waited for the lock. A token
+    // that differs from the one we were handed is theirs, and it is newer.
+    if let Some(cur) = current(&key) {
+        if cur.access_token != stale.access_token {
+            return Ok(cur);
+        }
+    }
+    match do_refresh(stale.clone()).await {
+        Ok(next) => Ok(next),
+        Err(auth::RefreshError::Dead(m)) => Err(format!("{SESSION_DEAD}{m}")),
+        Err(auth::RefreshError::Transient(m)) => Err(m),
+    }
+}
+
 static TXN: AtomicU64 = AtomicU64::new(1);
 
 /// Two clients, built once each.
@@ -681,6 +757,16 @@ async fn authed_on(
     build: impl Fn(&reqwest::Client, &Session) -> reqwest::RequestBuilder,
 ) -> Result<Value, String> {
     let client = client.clone();
+    // Ahead of the issuer's clock, not behind it: a token inside its last
+    // minute is swapped before the request goes out, and everything that
+    // would have failed on the expired one never sees it.
+    let fresh;
+    let session = if needs_refresh(session, auth::now_secs()) {
+        fresh = refresh_single_flight(session).await?;
+        &fresh
+    } else {
+        session
+    };
     let mut resp = build(&client, session)
         .send()
         .await
@@ -711,8 +797,8 @@ async fn authed_on(
         return Ok(v);
     }
     let errcode = v.get("errcode").and_then(|e| e.as_str()).unwrap_or("");
-    if errcode == "M_UNKNOWN_TOKEN" && session.refresh_token.is_some() {
-        let refreshed = auth::refresh(session).await?;
+    if errcode == "M_UNKNOWN_TOKEN" {
+        let refreshed = refresh_single_flight(session).await?;
         let resp = build(&client, &refreshed)
             .send()
             .await
@@ -2697,6 +2783,9 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     }
                     failures = 0;
                     backoff = 2;
+                    // Live, said once: the same phase again is not a
+                    // transition and announces nothing.
+                    super::session::transition(&app, &guild_id, super::session::Phase::Live, None);
                     // Identity first: `apply_sync` renders names, tags and
                     // portraits from the directory, and anything not yet in it
                     // renders as a bare player id — permanently, because the
@@ -2840,15 +2929,25 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     // A signed-out session ends the loop; anything else is
                     // transient and worth backing off over rather than
                     // hammering a homeserver that is having a bad time.
-                    if e.contains("M_UNKNOWN_TOKEN") {
+                    if session_is_dead(&e) {
                         eprintln!("[Comms] {} session rejected, stopping sync: {}", guild_id, e);
-                        store::remove(&guild_id);
-                        let reason = "the homeserver ended this session — sign in again";
+                        let reason = "the homeserver ended this session — signing in again";
                         super::note_error(&guild_id, reason);
+                        // The stored entry stays (the OAuth client and the
+                        // identity are still right); the STATE is what says
+                        // nobody may use it. A new sign-in is scheduled by
+                        // `reauth` and needs nobody's click.
+                        super::session::transition(
+                            &app,
+                            &guild_id,
+                            super::session::Phase::Expired,
+                            Some(e.clone()),
+                        );
                         // Partial by necessity (there is no async here to
                         // rebuild the full snapshot); the window re-reads
                         // status when it sees an error-only push.
                         let _ = crate::mcp::events::emit_matrix(&app, "matrix::status", json!({ "error": reason }));
+                        super::reauth(app.clone(), guild_id.clone());
                         break;
                     }
                     eprintln!("[Comms] {} sync: {} (retry in {}s)", guild_id, e, backoff);
@@ -2865,6 +2964,12 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     // would make an ordinary thing look broken.
                     failures += 1;
                     if failures == 2 {
+                        super::session::transition(
+                            &app,
+                            &guild_id,
+                            super::session::Phase::Stalled,
+                            Some(e.clone()),
+                        );
                         let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::sync_health",
                             json!({ "guild_id": guild_id, "ok": false, "reason": e }),
@@ -2877,6 +2982,11 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
         }
         RUNNING.write().unwrap().remove(&guild_id);
     });
+}
+
+/// Whether a sync loop is running for this identity.
+pub fn is_syncing(guild_id: &str) -> bool {
+    RUNNING.read().map(|r| r.contains(guild_id)).unwrap_or(false)
 }
 
 pub fn stop_sync(guild_id: &str) {
@@ -6423,5 +6533,102 @@ mod tests {
         ] {
             assert!(SHIPPED.contains(&icon_for(name, alias)), "{}", name);
         }
+    }
+
+    fn a_session(token: &str, key_player: &str) -> Session {
+        Session {
+            guild_id: "7-9".into(),
+            player_id: Some(key_player.into()),
+            homeserver: "https://h".into(),
+            user_id: format!("@{key_player}:h"),
+            device_id: "d".into(),
+            access_token: token.into(),
+            refresh_token: Some("r1".into()),
+            expires_at: Some(1),
+            client_id: "c".into(),
+            token_endpoint: "https://h/token".into(),
+        }
+    }
+
+    /* Two tasks holding the same stale token refresh it ONCE.
+     *
+     * MAS rotates refresh tokens: the second use of one is `invalid_grant`,
+     * and reuse detection may revoke the whole grant. At the moment a token
+     * expired, the sync long-poll, the avatar heal and the status publish were
+     * all in flight with the same token and each called `refresh` for itself —
+     * the most likely way a session with a working refresh path stayed dead
+     * for sixty hours. The collaborators are injected so this counts refreshes
+     * without a homeserver and without touching the real session file.
+     */
+    #[tokio::test]
+    async fn a_refresh_is_single_flight_per_identity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let stale = a_session("old", "1-7001");
+        let stored: Arc<Mutex<Option<Session>>> = Arc::new(Mutex::new(None));
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let run = |s: Session| {
+            let stored = stored.clone();
+            let refreshes = refreshes.clone();
+            async move {
+                let current = {
+                    let stored = stored.clone();
+                    move |_k: &str| stored.lock().unwrap().clone()
+                };
+                let do_refresh = move |old: Session| {
+                    let stored = stored.clone();
+                    let refreshes = refreshes.clone();
+                    async move {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        // Long enough that the second caller is waiting on
+                        // the lock, not arriving after the fact.
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                        let mut next = old.clone();
+                        next.access_token = "new".into();
+                        next.refresh_token = Some("r2".into());
+                        *stored.lock().unwrap() = Some(next.clone());
+                        Ok::<Session, auth::RefreshError>(next)
+                    }
+                };
+                single_flight(&s, current, do_refresh).await
+            }
+        };
+        let (a, b) = tokio::join!(run(stale.clone()), run(stale.clone()));
+        assert_eq!(a.unwrap().access_token, "new");
+        assert_eq!(b.unwrap().access_token, "new", "the second caller gets the first's token");
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1, "the refresh token was spent exactly once");
+    }
+
+    /// A refused refresh means "sign in again"; a homeserver that could not
+    /// be reached means "wait". The sync loop ends on the first and backs off
+    /// on the second; conflating them is how a dead session "retried" forever.
+    #[tokio::test]
+    async fn a_refused_refresh_is_dead_and_a_blip_is_not() {
+        let stale = a_session("old", "1-7002");
+        let dead = single_flight(&stale, |_| None, |_| async {
+            Err(auth::RefreshError::Dead("token refresh refused (400)".into()))
+        })
+        .await
+        .unwrap_err();
+        assert!(session_is_dead(&dead), "{dead}");
+        assert!(dead.contains("refused (400)"), "the reason survives: {dead}");
+        let blip = single_flight(&stale, |_| None, |_| async {
+            Err(auth::RefreshError::Transient("token refresh: connection reset".into()))
+        })
+        .await
+        .unwrap_err();
+        assert!(!session_is_dead(&blip), "{blip}");
+        assert!(session_is_dead("M_UNKNOWN_TOKEN: Invalid access token"), "the homeserver's own verdict still counts");
+    }
+
+    #[test]
+    fn a_token_is_refreshed_ahead_of_its_expiry_not_after() {
+        let mut s = a_session("t", "1-7003");
+        s.expires_at = Some(1_000);
+        assert!(!needs_refresh(&s, 1_000 - REFRESH_AHEAD_SECS - 1), "well inside its life");
+        assert!(needs_refresh(&s, 1_000 - REFRESH_AHEAD_SECS), "inside the last minute");
+        assert!(needs_refresh(&s, 5_000), "long dead");
+        s.expires_at = None;
+        assert!(!needs_refresh(&s, 5_000), "a token with no declared lifetime is the issuer's to refuse");
     }
 }

@@ -44,6 +44,29 @@
       return row;
     }
 
+    // "Live since 14:02" · "Signing in — Guild login" · "Not receiving
+    // messages — connection refused" · "Signing in again in 8s — token
+    // refresh refused (400)" · "Signed out".
+    function stateLine(net) {
+      var st = net.state;
+      var reason = net.reason ? ' \u2014 ' + net.reason : '';
+      if (st === 'live') return 'Live' + (net.since_ms ? ' since ' + clock(net.since_ms) : '');
+      if (st === 'connecting') return 'Signing in' + (net.step ? ' \u2014 ' + net.step : '');
+      if (st === 'stalled') return 'Not receiving messages' + reason;
+      if (st === 'expired') {
+        var wait = net.next_try_ms ? Math.max(0, Math.round((net.next_try_ms - Date.now()) / 1000)) : null;
+        return 'Signing in again' + (wait != null ? ' in ' + wait + 's' : '') + reason;
+      }
+      if (st === 'signed_out') return 'Signed out';
+      return 'Not started';
+    }
+
+    function clock(ms) {
+      var d = new Date(ms);
+      var h = d.getHours(), m = d.getMinutes();
+      return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+    }
+
     function statusSharingRow() {
       var row = el('div', 'sui-data-card-row');
       row.appendChild(el('span', 'sui-text-hint', 'Activity'));
@@ -124,6 +147,11 @@
       netRow.appendChild(netVal);
       idBody.appendChild(netRow);
       idBody.appendChild(kv('Homeserver', net ? net.homeserver : '—'));
+      // Where the session stands, in Rust's own words (session.rs): live and
+      // since when; stalled and why; signing in again and when. The one row
+      // in the app that says so — every other surface just behaves as if
+      // Comms is up, because it very nearly always is.
+      if (net && net.state) idBody.appendChild(kv('Session', stateLine(net)));
       idBody.appendChild(kv('Matrix ID', S.profile ? S.profile.user_id : (net && net.user_id) || '—'));
       idBody.appendChild(kv('Player', S.profile ? S.profile.display_name : '—'));
       // Whether other clients can see this player's face. It renders correctly
@@ -170,7 +198,10 @@
       // that state and never leaves them signed out.
       var connected = !!(net && net.logged_in);
       var actions = el('div', 'sui-screen-btn-flex-wrapper');
-      if (!connected && !S.connecting) {
+      // Rust is between attempts: Try again jumps the queue and is still
+      // offered. Mid-ladder it is not — a second sign-in would only wait for
+      // the first.
+      if (!connected && !S.connecting && !(net && net.state === 'connecting')) {
         var btn = el('button', 'sui-screen-btn sui-mod-primary');
         btn.id = 'chat-retry';
         btn.textContent = 'Try again';
@@ -193,7 +224,7 @@
 
     return {
       STEP_ICON: STEP_ICON, stepRow: stepRow, kv: kv, statusSharingRow: statusSharingRow,
-      setStatusSharing: setStatusSharing, renderConnection: renderConnection,
+      setStatusSharing: setStatusSharing, renderConnection: renderConnection, stateLine: stateLine,
     };
   };
 })();

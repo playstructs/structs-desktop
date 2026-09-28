@@ -20,15 +20,12 @@ pub mod client;
 pub mod directory;
 pub mod discovery;
 pub mod refs;
+pub mod session;
 pub mod store;
 
 use serde_json::{json, Value};
 use std::sync::RwLock;
 use tauri::{Manager};
-
-/// Which network the window is looking at. Session-scoped: it is a view
-/// preference, not something worth persisting across restarts.
-static SELECTED: RwLock<Option<String>> = RwLock::new(None);
 
 /// Why the last sign-in (or session) for a guild ended, kept until the next
 /// successful connect. Without this, closing and reopening the window after a
@@ -52,6 +49,169 @@ pub fn clear_error(guild_id: &str) {
 fn last_error(guild_id: Option<&str>) -> Option<String> {
     let id = guild_id?;
     LAST_ERROR.read().ok()?.get(id).cloned()
+}
+
+// ── Signing in, and signing in again ────────────────────────────────────────
+
+/// One sign-in in flight per identity. A window and the re-auth loop asking
+/// at the same moment get ONE ladder; the second waits and finds it done.
+static SIGNING_IN: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn sign_in_lock(key: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut m = SIGNING_IN.lock().unwrap_or_else(|p| p.into_inner());
+    m.entry(key.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Climb the ladder for `key`, start its sync, and say so. The one path a
+/// sign-in takes whether a window asked for it or the session expired on
+/// its own — so the ladder, the state and the status pushes cannot differ
+/// between the two.
+pub async fn sign_in(app: &tauri::AppHandle, key: &str) -> Result<Vec<auth::Step>, String> {
+    let lock = sign_in_lock(key);
+    let _held = lock.lock().await;
+    // Finished while we waited for the lock: nothing to climb.
+    if session::phase(key).usable() && store::get(key).is_some() && client::is_syncing(key) {
+        return Ok(Vec::new());
+    }
+    // A sign-in that follows a failure keeps saying why until it succeeds.
+    let previous = session::identity(key).and_then(|i| i.reason);
+    session::transition(app, key, session::Phase::Connecting, previous);
+    let mut ladder = auth::Ladder::new();
+    // Whose sign-in this is. Every chat window receives the broadcast, and a
+    // ladder appearing in the wrong window is worse than no ladder — it says
+    // an identity is connecting when it is not.
+    let who = store::player_of(key).map(|p| p.to_string());
+    let emit_app = app.clone();
+    let emit_key = key.to_string();
+    let emit_who = who.clone();
+    // The window draws the ladder from these pushes, so a sign-in that stalls
+    // on one hop is visibly stalled ON THAT HOP rather than just slow.
+    let emit = move |l: &auth::Ladder| {
+        let _ = crate::mcp::events::emit_matrix(
+            &emit_app,
+            "matrix::status",
+            json!({ "connecting": true, "steps": l.steps(), "as_player": emit_who }),
+        );
+        session::set_step(&emit_app, &emit_key, l.active());
+    };
+    let result = auth::connect(app, key, &mut ladder, emit).await;
+    let steps = ladder.steps();
+    match result {
+        Ok(connected) => {
+            clear_error(key);
+            // A real id from this homeserver settles what it is called.
+            directory::learn_server_name(key, &connected.user_id);
+            client::start_sync(app.clone(), key.to_string());
+            session::transition(app, key, session::Phase::Live, None);
+            let _ = crate::mcp::events::emit_matrix(
+                app,
+                "matrix::status",
+                json!({ "connecting": false, "steps": steps, "error": null, "as_player": who }),
+            );
+            Ok(steps)
+        }
+        Err(e) => {
+            note_error(key, e.clone());
+            session::transition(app, key, session::Phase::Expired, Some(e.clone()));
+            let _ = crate::mcp::events::emit_matrix(
+                app,
+                "matrix::status",
+                json!({ "connecting": false, "steps": steps, "error": e, "as_player": who }),
+            );
+            // The steps ride along on the error path too — the caller shows
+            // the ladder either way, and the failing hop is the whole point.
+            Err(e)
+        }
+    }
+}
+
+/// Identities with a re-auth loop running.
+static REAUTH: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+const REAUTH_MIN_SECS: u64 = 2;
+const REAUTH_MAX_SECS: u64 = 300;
+
+/// Whether anybody is there to sign this identity in for. The primary is
+/// always wanted. A roster player is wanted only while its own Comms window
+/// is open: a thousand-player armada must not be a thousand chat sessions.
+fn wanted(app: &tauri::AppHandle, key: &str) -> bool {
+    match store::player_of(key) {
+        None => true,
+        Some(p) => app.get_webview_window(&chat_window_label(Some(p))).is_some(),
+    }
+}
+
+/// Sign `key` in again, by ourselves, after a little delay — and keep
+/// trying, further apart each time, until it works or the player signs out.
+/// No prompt and no alarm: the credential is the key the player is already
+/// playing with, so there is nothing to ask them. Idempotent: a loop already
+/// running for this identity is left to it.
+pub fn reauth(app: tauri::AppHandle, key: String) {
+    if session::phase(&key) != session::Phase::Expired {
+        return;
+    }
+    if !wanted(&app, &key) {
+        // Parked. `ensure_started` picks it up when its window opens.
+        return;
+    }
+    {
+        let mut r = REAUTH.lock().unwrap_or_else(|p| p.into_inner());
+        if !r.insert(key.clone()) {
+            return;
+        }
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut wait = REAUTH_MIN_SECS;
+        loop {
+            if session::phase(&key) != session::Phase::Expired || !wanted(&app, &key) {
+                break;
+            }
+            let due = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+                + wait * 1000;
+            session::set_next_try(&app, &key, Some(due));
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            if session::phase(&key) != session::Phase::Expired {
+                break;
+            }
+            match sign_in(&app, &key).await {
+                Ok(_) => {
+                    eprintln!("[Comms] {key}: signed in again");
+                    break;
+                }
+                Err(e) => {
+                    wait = (wait * 2).min(REAUTH_MAX_SECS);
+                    eprintln!("[Comms] {key}: sign-in failed: {e} (again in {wait}s)");
+                }
+            }
+        }
+        REAUTH
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key);
+    });
+}
+
+/// Make a stored identity live if it is wanted: start its sync if nothing
+/// has, or schedule its sign-in if it expired while nobody was looking.
+/// Called from every status read, which is how a roster player's window
+/// opening is what brings that identity up.
+fn ensure_started(app: &tauri::AppHandle, key: &str) {
+    if store::get(key).is_none() || !wanted(app, key) {
+        return;
+    }
+    match session::phase(key) {
+        session::Phase::Idle => client::start_sync(app.clone(), key.to_string()),
+        session::Phase::Expired => reauth(app.clone(), key.to_string()),
+        _ => {}
+    }
 }
 
 // ── Status ──────────────────────────────────────────────────────────────────
@@ -92,6 +252,7 @@ fn networks_as(as_player: Option<&str>) -> Vec<Value> {
             let homeserver = c.matrix_url.clone().filter(|m| !m.is_empty())?;
             let key = store::key_for(&c.guild_id, as_player);
             let session = store::get(&key);
+            let id = session::identity(&key);
             Some(json!({
                 // The KEY, so the window addresses its own identity on every
                 // later call without having to remember the split.
@@ -101,22 +262,29 @@ fn networks_as(as_player: Option<&str>) -> Vec<Value> {
                 "tag": c.guild_tag,
                 "homeserver": homeserver,
                 "active": true,
-                "logged_in": session.is_some(),
+                // A STATE, not the existence of a file entry: a token the
+                // issuer has refused was "logged in" by the old reading for
+                // sixty hours.
+                "logged_in": session.is_some() && session::phase(&key).usable(),
                 "user_id": session.as_ref().map(|s| s.user_id.clone()),
+                "state": id.as_ref().map(|i| i.phase).unwrap_or(session::Phase::Idle),
+                "since_ms": id.as_ref().map(|i| i.since_ms),
+                "reason": id.as_ref().and_then(|i| i.reason.clone()),
+                "step": id.as_ref().and_then(|i| i.step.clone()),
+                "next_try_ms": id.as_ref().and_then(|i| i.next_try_ms),
             }))
         })
         .collect()
 }
 
-fn selected_guild() -> Option<String> {
-    if let Ok(g) = SELECTED.read() {
-        if let Some(id) = g.clone() {
-            return Some(id);
-        }
-    }
-    networks()
-        .first()
-        .and_then(|n| n.get("guild_id").and_then(|g| g.as_str()).map(String::from))
+/// The primary's session key — who every window OTHER than a Comms window
+/// speaks as. A Comms window for a roster player always passes its own key;
+/// nothing anywhere falls back to what some window happens to be looking
+/// at. (There used to be a `SELECTED` network, set by the Comms window's nav
+/// and read by the raid rail's and Team Ops' calls: a view preference of one
+/// window deciding another window's identity.)
+fn primary_key() -> Option<String> {
+    own_guild_id().map(|g| store::key_for(&g, None))
 }
 
 /// The HUD's own numbers, formatted by the game's OWN unit ladders.
@@ -155,7 +323,7 @@ fn resources() -> Option<Value> {
 /// primary. Everything downstream keys off the session key, so a window only
 /// has to know who it is once — at boot — and pass that key as its `guild_id`
 /// from then on.
-async fn status_payload_as(as_player: Option<&str>) -> Value {
+async fn status_payload_as(app: &tauri::AppHandle, as_player: Option<&str>) -> Value {
     // Identity for every player in the galaxy, so a timeline can show real
     // names and portraits and any player can be addressed. Cached with a TTL;
     // this is a no-op on all but the first call in 15 minutes.
@@ -179,6 +347,11 @@ async fn status_payload_as(as_player: Option<&str>) -> Value {
     // The SESSION KEY, not the guild id: this is what the window echoes back
     // as `guild_id` on every later call, and it is what selects the identity.
     let key = own_guild_id().map(|g| store::key_for(&g, as_player));
+    // A status read is a window saying it is here: the moment a roster
+    // player's identity becomes wanted.
+    if let Some(k) = key.as_deref() {
+        ensure_started(app, k);
+    }
     let profile = match key.as_deref().and_then(store::get) {
         Some(session) => client::profile(&session).await.ok(),
         None => None,
@@ -196,61 +369,26 @@ async fn status_payload_as(as_player: Option<&str>) -> Value {
 // ── Commands ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn matrix_status(as_player: Option<String>) -> Result<Value, String> {
-    Ok(status_payload_as(as_player.as_deref()).await)
+pub async fn matrix_status(app: tauri::AppHandle, as_player: Option<String>) -> Result<Value, String> {
+    Ok(status_payload_as(&app, as_player.as_deref()).await)
 }
 
+/// The whole connection picture, for any window: every identity's state,
+/// the unread totals, and a sequence number. `matrix::state` pushes the
+/// same shape on every change.
 #[tauri::command]
-pub async fn matrix_select(guild_id: String) -> Result<Value, String> {
-    if let Ok(mut g) = SELECTED.write() {
-        *g = Some(guild_id);
-    }
-    Ok(json!({ "ok": true }))
+pub fn matrix_state() -> Result<Value, String> {
+    Ok(session::snapshot())
 }
 
 #[tauri::command]
 pub async fn matrix_connect(app: tauri::AppHandle, guild_id: String) -> Result<Value, String> {
-    let mut ladder = auth::Ladder::new();
-    // The window draws the ladder from these pushes, so a sign-in that stalls
-    // on one hop is visibly stalled ON THAT HOP rather than just slow.
-    let emit_app = app.clone();
-    // Whose sign-in this is. Every chat window receives the broadcast, and a
-    // ladder appearing in the wrong window is worse than no ladder — it says
-    // an identity is connecting when it is not.
-    let who = store::player_of(&guild_id).map(|p| p.to_string());
-    let emit_who = who.clone();
-    let emit = move |l: &auth::Ladder| {
-        let _ = crate::mcp::events::emit_matrix(&emit_app, 
-            "matrix::status",
-            json!({ "connecting": true, "steps": l.steps(), "as_player": emit_who }),
-        );
-    };
-
-    let result = auth::connect(&app, &guild_id, &mut ladder, emit).await;
-    let steps = ladder.steps();
-
-    match result {
-        Ok(connected) => {
-            clear_error(&guild_id);
-            // A real id from this homeserver settles what it is called.
-            directory::learn_server_name(&guild_id, &connected.user_id);
-            client::start_sync(app.clone(), guild_id.clone());
-            let _ = crate::mcp::events::emit_matrix(&app, 
-                "matrix::status",
-                json!({ "connecting": false, "steps": steps, "error": null,
-                        "as_player": who }),
-            );
-            Ok(json!({ "ok": true, "steps": steps }))
-        }
+    match sign_in(&app, &guild_id).await {
+        Ok(steps) => Ok(json!({ "ok": true, "steps": steps })),
         Err(e) => {
-            note_error(&guild_id, e.clone());
-            let _ = crate::mcp::events::emit_matrix(&app, 
-                "matrix::status",
-                json!({ "connecting": false, "steps": steps, "error": e,
-                        "as_player": who }),
-            );
-            // The steps ride along on the error path too — the caller shows
-            // the ladder either way, and the failing hop is the whole point.
+            // The window shows the failed rung; Rust tries again after a
+            // little delay, without being asked.
+            reauth(app.clone(), guild_id);
             Err(e)
         }
     }
@@ -265,14 +403,16 @@ pub async fn matrix_disconnect(app: tauri::AppHandle, guild_id: String) -> Resul
     }
     store::remove(&guild_id);
     client::stop_sync(&guild_id);
-    // A deliberate sign-out is not a failure to remember.
+    // A deliberate sign-out is not a failure to remember — and not something
+    // the re-auth loop may undo.
     clear_error(&guild_id);
+    session::transition(&app, &guild_id, session::Phase::SignedOut, None);
     // For the identity that signed out. The emit is a broadcast and every chat
     // window receives it, so the payload names whose status it is and a window
     // for another identity ignores it.
     let _ = crate::mcp::events::emit_matrix(&app, 
         "matrix::status",
-        status_payload_as(store::player_of(&guild_id)).await,
+        status_payload_as(&app, store::player_of(&guild_id)).await,
     );
     Ok(json!({ "ok": true }))
 }
@@ -284,7 +424,14 @@ pub async fn matrix_disconnect(app: tauri::AppHandle, guild_id: String) -> Resul
 /// to 0-5" names an identifier the player has never seen and gives them
 /// nothing to do about it.
 fn session_for(guild_id: &str) -> Result<store::Session, String> {
-    store::get(guild_id).ok_or_else(|| "Comms is not connected — open Comms to sign in".to_string())
+    session::usable(guild_id).map_err(|phase| {
+        match phase {
+            session::Phase::Connecting => "Comms is still signing in — try again in a moment",
+            session::Phase::Expired => "Comms session expired — signing in again",
+            _ => "Comms is not connected — open Comms to sign in",
+        }
+        .to_string()
+    })
 }
 
 #[tauri::command]
@@ -1211,7 +1358,7 @@ pub async fn matrix_object_chatter(
     object_id: String,
     limit: Option<u32>,
 ) -> Result<Value, String> {
-    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    let guild = guild_id.or_else(primary_key).unwrap_or_default();
     // Not signed in, or no homeserver: silence, not an error. A raid window
     // must open and work whether or not Comms is connected.
     let Ok(session) = session_for(&guild) else {
@@ -1269,7 +1416,7 @@ pub async fn matrix_status_sharing(
     let mut cfg = crate::mcp::config::McpConfig::load();
     cfg.comms_status_enabled = enabled;
     cfg.save().map_err(|e| e.to_string())?;
-    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    let guild = guild_id.or_else(primary_key).unwrap_or_default();
     // Immediately, in both directions: switching it off must clear what is
     // already published, not merely stop refreshing it.
     push_status(&guild).await;
@@ -1283,7 +1430,7 @@ pub async fn matrix_status_sharing(
 /// in all of them.
 #[tauri::command]
 pub fn matrix_presence(guild_id: Option<String>) -> Result<Value, String> {
-    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    let guild = guild_id.or_else(primary_key).unwrap_or_default();
     // What we ourselves are publishing, so the window can say so plainly
     // rather than the player having to ask another client.
     let sharing = crate::mcp::config::McpConfig::load().comms_status_enabled;
@@ -1330,7 +1477,7 @@ pub async fn matrix_object_room(
     guild_id: Option<String>,
     object_id: String,
 ) -> Result<Value, String> {
-    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    let guild = guild_id.or_else(primary_key).unwrap_or_default();
     let Ok(session) = session_for(&guild) else {
         return Ok(json!({ "connected": false }));
     };
@@ -1402,7 +1549,7 @@ pub async fn matrix_object_room_create(
     guild_id: Option<String>,
     object_id: String,
 ) -> Result<Value, String> {
-    let guild = guild_id.or_else(selected_guild).unwrap_or_default();
+    let guild = guild_id.or_else(primary_key).unwrap_or_default();
     let session = session_for(&guild)?;
     /* The same resolution order the lookup uses, and for the same reason.
      *
@@ -1931,13 +2078,11 @@ pub async fn matrix_message_player(
 ) -> Result<Value, String> {
     open_chat_window(app.clone())?;
 
-    let guild_id = selected_guild()
+    let guild_id = primary_key()
         .ok_or("no guild you belong to runs a comms server")?;
     // The window signs in by itself when it boots, but this call may arrive
     // before that has happened — say so plainly rather than failing obscurely.
-    let session = store::get(&guild_id).ok_or(
-        "Comms is still signing in — try again in a moment",
-    )?;
+    let session = session_for(&guild_id)?;
     let their_id = directory::matrix_id_resolving(player_id.trim()).await?;
     let room_id = client::open_dm(&guild_id, &session, &their_id).await?;
 
@@ -1970,8 +2115,8 @@ pub async fn matrix_open(
     let draft = draft.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
     let mut room_id: Option<String> = None;
     if let Some(s) = subject.as_deref() {
-        let guild_id = selected_guild().ok_or("no guild you belong to runs a comms server")?;
-        let session = store::get(&guild_id).ok_or("Comms is still signing in — try again in a moment")?;
+        let guild_id = primary_key().ok_or("no guild you belong to runs a comms server")?;
+        let session = session_for(&guild_id)?;
         let id = resolve_subject(&guild_id, &session, s).await?;
         set_pending_room(&guild_id, &id);
         let _ = crate::mcp::events::emit_matrix(
@@ -2301,7 +2446,13 @@ pub fn matrix_take_pending_room() -> Result<Value, String> {
 /// hidden rather than merely unlinked.
 pub fn boot(app: tauri::AppHandle) {
     for session in store::all() {
-        client::start_sync(app.clone(), session.guild_id.clone());
+        // The primary only. A roster player's identity comes up when its
+        // own window opens (`ensure_started`) — an armada is not a chat
+        // connection per member.
+        if session.player_id.is_some() {
+            continue;
+        }
+        client::start_sync(app.clone(), store::key_for(&session.guild_id, None));
     }
 }
 

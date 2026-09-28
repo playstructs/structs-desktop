@@ -570,6 +570,14 @@ cat > "$FIX" <<'EOF'
     matrix_take_pending_transfer: null,
     // The guild is talking, and one of the messages named you.
     matrix_unread: { count: 3, mention: true },
+    // The connection picture (session.rs), as comms-state.js reads it cold.
+    get matrix_state() {
+      return window.__HARNESS_MATRIX_OUT__
+        ? { identities: {}, unread: { count: 0, mention: false }, seq: 1 }
+        : { identities: { '0-5': { key: '0-5', phase: 'live', since_ms: 1700000000000, as_player: null, user_id: '@1-194:h',
+              capabilities: { read: true, send: true, rooms_on: 'h', speaking_as: '1-194' } } },
+            unread: { count: 3, mention: true }, seq: 1 };
+    },
     // Comms reaching into the board: who is around, and the two ways to
     // reach them. Absent from this table, the leaderboard would silently
     // lose its social half and the tests would not notice.
@@ -1457,6 +1465,13 @@ cat > "$RFIX" <<'EOF'
     // What people have said about this planet. Tests set
     // __HARNESS_COMMS_OFF__ for a raid window opened without Comms signed in
     // — which must say so rather than reading as "nobody spoke".
+    get matrix_state() {
+      return window.__HARNESS_COMMS_OFF__
+        ? { identities: {}, unread: { count: 0, mention: false }, seq: 1 }
+        : { identities: { '0-5': { key: '0-5', phase: 'live', since_ms: 1700000000000, as_player: null, user_id: '@1-194:h',
+              capabilities: { read: true, send: true, rooms_on: 'h', speaking_as: '1-194' } } },
+            unread: { count: 0, mention: false }, seq: 1 };
+    },
     get matrix_object_chatter() {
       // The guild is answered by the read, so the rail replies into the same
       // guild it was read from rather than inferring one of its own.
@@ -1843,6 +1858,16 @@ cat > "$CFIX" <<'EOF'
       return out;
     },
     matrix_rooms: { guild_id: '0-5', rooms: ROOMS },
+    // The connection picture (session.rs): live for a signed-in variant,
+    // absent otherwise, expired-with-reason after a failed sign-in.
+    get matrix_state() {
+      var loggedIn = window.__HARNESS_LOGGED_IN__ !== undefined ? window.__HARNESS_LOGGED_IN__ : variant === 'default';
+      var ids = {};
+      if (loggedIn) ids['0-5'] = { key: '0-5', phase: 'live', since_ms: 1700000000000, as_player: null, user_id: PROFILE.user_id,
+                                 capabilities: { read: true, send: true, rooms_on: 'matrix.beta.playstructs.com', speaking_as: '1-194' } };
+      else if (variant === 'failed') ids['0-5'] = { key: '0-5', phase: 'expired', since_ms: 1700000000000, as_player: null, reason: 'guild login rejected the signature (1-194 / 0-5)' };
+      return { identities: ids, unread: { count: 0, mention: false }, seq: 1 };
+    },
     // Answers for the room ACTUALLY asked for. A fixture that returns one
     // room whatever you request hides every bug where the view and the header
     // disagree about where you are.
@@ -1980,7 +2005,6 @@ cat > "$CFIX" <<'EOF'
     matrix_dm: { room_id: '!dm-jpeg:matrix.beta.playstructs.com',
                  user_id: '@1-61:matrix.beta.playstructs.com', player_id: '1-61' },
     matrix_leave: { ok: true },
-    matrix_select: { ok: true },
     matrix_connect: { ok: true, steps: STEPS_OK },
     matrix_disconnect: { ok: true },
     close_chat_window: null,

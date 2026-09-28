@@ -1271,3 +1271,17 @@ The map beside the panel already names the planet in its own banner, so the
 rail was saying it twice and spending a line on the repetition. The header is
 now the topic ("Everything said about planet 2-16116."), ellipsised for a
 240px rail, and the separate line is gone.
+
+## Session expiry is silent, and every window judges "connected" alone — BUILT 2026-09-28 (needs a rebuild)
+
+Live: the primary token expired 61 h ago, the two roster identities 27 days
+ago; all three sync loops spin every 60 s on a refresh that is refused. Comms
+shows `logged_in` (= file has an entry) and 61-hour-old presence; the raid rail
+says "not signed in" for any read failure. Full findings and four design
+options in `comms-session-service.md`. Owed, in order: single-flight proactive
+refresh + Rust-side re-auth on `Expired`; a per-identity state enum behind
+`matrix_state` / `matrix::state`; one `comms-state.js` every window reads;
+the rail's three distinct notices. All four landed the same day; see the
+"Built" section of `comms-session-service.md`. Option D landed the same
+day too: `SELECTED`/`matrix_select` retired, the primary is the only Rust-side
+default, capabilities in the snapshot.

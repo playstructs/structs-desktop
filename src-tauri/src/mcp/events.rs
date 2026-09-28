@@ -228,6 +228,17 @@ pub fn note_listening(label: &str, names: Vec<String>) {
 /// window.
 fn expected_listeners(name: &str, announced: &[String]) -> Vec<String> {
     let pick = |f: &dyn Fn(&str) -> bool| announced.iter().filter(|l| f(l)).cloned().collect::<Vec<_>>();
+    // The connection picture and the unread totals are for ANY window that
+    // wants them (Team Ops' door, the game's badge, a raid rail); none is
+    // obliged to, so nobody is ever "unheard" for them.
+    if name == "matrix::state" || name == "matrix::unread" {
+        return Vec::new();
+    }
+    // A raid rail reads the timeline of its object's room beside the Comms
+    // windows.
+    if name == "matrix::timeline" {
+        return pick(&|l| l.starts_with("chat") || l.starts_with("raid-"));
+    }
     if name.starts_with("matrix::") {
         return pick(&|l| l.starts_with("chat"));
     }
@@ -376,6 +387,9 @@ mod tests {
     fn expected_listeners_follow_the_naming_conventions() {
         let open: Vec<String> = ["main", "board", "gamestats", "chat-0-1", "raid-2-9"].iter().map(|s| s.to_string()).collect();
         assert_eq!(expected_listeners("matrix::rooms", &open), vec!["chat-0-1"]);
+        assert_eq!(expected_listeners("matrix::timeline", &open), vec!["chat-0-1", "raid-2-9"], "a raid rail reads its room");
+        assert!(expected_listeners("matrix::state", &open).is_empty(), "anyone may listen, nobody must");
+        assert!(expected_listeners("matrix::unread", &open).is_empty());
         assert_eq!(expected_listeners("raid-snapshot::raid-2-9", &open), vec!["raid-2-9"]);
         assert!(expected_listeners("raid-delta::raid-2-77", &open).is_empty(), "that window is closed, not deaf");
         assert_eq!(expected_listeners("board-update", &open), vec!["board", "gamestats"]);

@@ -1326,10 +1326,11 @@
    * that they had been named in a room — the two halves of the app ran side by
    * side without either knowing the other was busy.
    *
-   * Polled rather than pushed. `matrix_unread` is a synchronous read of state
-   * the sync loop already maintains, and that loop runs app-wide from boot for
-   * any guild with a stored session — it does NOT depend on the Comms window
-   * being open, which is the whole reason this indicator can mean anything.
+   * Read from `StructsComms` (comms-state.js): Rust keeps the totals against
+   * the sync loop, which runs app-wide from boot for the primary — it does
+   * NOT depend on the Comms window being open, which is the whole reason this
+   * indicator can mean anything — and pushes every change. The 15-second
+   * poll survives only as the fallback for a page without that script.
    *
    * Silent when there is nothing: the control hides itself at zero rather than
    * sitting there showing a zero, because a console full of zeroes is a console
@@ -1359,6 +1360,12 @@
     btn.addEventListener('click', function () {
       Board.T.core.invoke('matrix_open', { subject: null, draft: null }).catch(function () {});
     });
+    if (window.StructsComms) {
+      var fromState = function (s) { paintComms(s ? s.unread : null); };
+      window.StructsComms.onChange(fromState);
+      fromState(window.StructsComms.state());
+      return;
+    }
     var tick = function () {
       Board.T.core.invoke('matrix_unread')
         // Comms not signed in is the ordinary case, not an error: the whole

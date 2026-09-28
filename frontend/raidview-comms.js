@@ -13,7 +13,13 @@
 //   window.RaidComms({ el, target, paintPfp, paintBattery, whoLine, fmtNum })
 //     → { chatState, objectTitle, defaultTopic, objectWord, mentionsObject, wireChat,
 //         loadMyPfp, resolveRoom, paintComposerIdentity, inRoom, loadChat, loadRoomChat,
-//         renderChat, syncComposer, sendChat, reachableRoom, wireComposer }
+//         renderChat, syncComposer, sendChat, reachableRoom, wireComposer, onCommsState }
+//
+// Whether Comms is up is NOT decided here. `window.StructsComms` (comms-state.js)
+// holds the one answer every window reads; this rail only says what IT tried
+// and whether that worked. Before this the rail set `connected: false` on any
+// failed read, and a search that timed out was reported as "not signed in"
+// while the Comms window sat beside it, signed in.
 (function () {
   'use strict';
   window.RaidComms = function (ctx) {
@@ -24,6 +30,11 @@
     // is the guild's. Together they are the whole story of a raid.
     var chatState = { rows: [], open: false, loading: false, connected: false,
                       fresh: false,
+                      // Why the last READ failed, when it did. Distinct from
+                      // `connected`: a session that is up and a room that
+                      // could not be read are different facts, and the panel
+                      // says which.
+                      readError: null,
                       sending: false, guildId: null,
                       // The built composer (node/input/send), kept so a repaint
                       // does not throw away the caret mid-sentence.
@@ -89,6 +100,34 @@
       }
     }
 
+    /* The one session this rail speaks as: the primary's. Passed on every
+     * call so Rust does not fall back to whichever network the Comms window
+     * last SELECTED — a view preference of a different window. Undefined
+     * until the state is known, and Rust then answers for the primary. */
+    function sessionKey() {
+      var C = window.StructsComms;
+      var id = C && C.primary();
+      return id ? id.key : undefined;
+    }
+
+    /* Comms' state changed. Up from down: read the room now — the first
+     * attempt was refused, and nothing else would ever retry it. Down from
+     * up, or one kind of down to another: say so. */
+    function onCommsState() {
+      var C = window.StructsComms;
+      if (!C) return;
+      var up = C.signedIn();
+      if (up && !chatState.connected) {
+        chatState.connected = true;
+        chatState.readError = null;
+        resolveRoom().then(loadChat);
+        return;
+      }
+      if (!up) chatState.connected = false;
+      syncComposer();
+      renderChat();
+    }
+
     function wireChat() {
       // No "open in comms" door any more: this rail IS the planet's room, and a
       // link out of it was a leftover from when it was only a digest of what
@@ -98,6 +137,10 @@
       // room lookup comes first because it decides WHICH read happens.
       chatState.open = true;
       loadMyPfp();
+      if (window.StructsComms) {
+        chatState.connected = window.StructsComms.signedIn();
+        window.StructsComms.onChange(onCommsState);
+      }
       resolveRoom().then(loadChat);
 
       // Live, because a raid is live. The panel used to load once on open and
@@ -155,7 +198,7 @@
 
     function resolveRoom() {
       if (!target() || !window.__TAURI__) return Promise.resolve();
-      return window.__TAURI__.core.invoke('matrix_object_room', { objectId: target().id })
+      return window.__TAURI__.core.invoke('matrix_object_room', { objectId: target().id, guildId: sessionKey() })
         .then(function (res) { chatState.room = res || null; })
         // A lookup failure is not a panel failure: the search path still works.
         .catch(function () { chatState.room = null; });
@@ -193,20 +236,37 @@
 
     function loadChat() {
       if (!target() || chatState.loading) return;
+      // Nothing is read with a session the state says is not usable — mid
+      // sign-in the token in hand is the dead one, and the read would only
+      // fail in a way that looks like something else. `onCommsState` reads
+      // the moment it comes up.
+      var C = window.StructsComms;
+      if (C && C.known() && !C.signedIn()) {
+        chatState.connected = false;
+        chatState.readError = null;
+        syncComposer();
+        renderChat();
+        return;
+      }
       if (inRoom()) return loadRoomChat();
       chatState.loading = true;
-      window.__TAURI__.core.invoke('matrix_object_chatter', { objectId: target().id })
+      window.__TAURI__.core.invoke('matrix_object_chatter', { objectId: target().id, guildId: sessionKey() })
         .then(function (res) {
           chatState.loading = false;
+          // Rust's own word on whether there was a session to read with.
           chatState.connected = !!(res && res.connected);
+          chatState.readError = null;
           chatState.guildId = (res && res.guild_id) || null;
           chatState.rows = (res && res.hits) || [];
           syncComposer();
           renderChat();
         })
-        .catch(function () {
+        .catch(function (e) {
+          // The READ failed. That is not "not signed in" — the session is
+          // whatever the state says it is — and the panel must not claim it.
           chatState.loading = false;
           chatState.rows = [];
+          chatState.readError = String(e && e.message || e || 'could not read');
           renderChat();
         });
     }
@@ -225,6 +285,7 @@
       }).then(function (res) {
         chatState.loading = false;
         chatState.connected = true;
+        chatState.readError = null;
         chatState.guildId = chatState.room.guild_id || chatState.guildId;
         var name = (res && res.room && res.room.name) || '';
         chatState.roomName = name;
@@ -289,9 +350,20 @@
       // like the real thing.
       if (!chatState.connected) {
         // A raid window opens whether or not Comms is signed in, and must say
-        // which of "nobody spoke" and "we did not look" is true.
-        body.appendChild(R.notice('Not connected',
-          'Comms is not signed in, so nothing here can be read.'));
+        // which of "nobody spoke" and "we did not look" is true — in the
+        // words every window uses for that state, from the one place that
+        // knows it. Signing in, signing in again and signed out are three
+        // different things to a player waiting for the panel to fill.
+        var C = window.StructsComms;
+        var said = (C && C.describe(C.primary()))
+          || { title: 'Not connected', detail: 'Comms is not signed in, so nothing here can be read.' };
+        body.appendChild(R.notice(said.title, said.detail));
+        return;
+      }
+      if (chatState.readError) {
+        // Signed in, and still nothing: the read itself failed. Named as
+        // such, so "the server timed out" is never dressed as "not signed in".
+        body.appendChild(R.notice('Could not read this channel', chatState.readError));
         return;
       }
       if (!chatState.rows.length) {
@@ -383,7 +455,10 @@
 
       // A composer that cannot send is worse than no composer: it invites a
       // message the player will lose.
-      var usable = chatState.connected && reachableRoom();
+      // …and only when the service says this identity may send: a stalled
+      // session may, a sign-in in flight may not, whatever the room says.
+      var C = window.StructsComms;
+      var usable = chatState.connected && reachableRoom() && (!C || C.can('send'));
       box.classList.toggle('hidden', !usable);
       if (!usable) return;
 
@@ -530,7 +605,7 @@
       mentionsObject: mentionsObject, wireChat: wireChat, loadMyPfp: loadMyPfp, resolveRoom: resolveRoom,
       paintComposerIdentity: paintComposerIdentity, inRoom: inRoom, loadChat: loadChat, loadRoomChat: loadRoomChat,
       renderChat: renderChat, syncComposer: syncComposer, sendChat: sendChat, reachableRoom: reachableRoom,
-      wireComposer: wireComposer,
+      wireComposer: wireComposer, onCommsState: onCommsState,
     };
   };
 })();

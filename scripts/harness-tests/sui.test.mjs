@@ -85,6 +85,7 @@ const BUDGET = {
   'chat-tabs.js':       [0, 0],
   'chat-rent.js':       [0, 0],
   'events.js':          [0, 0],
+  'comms-state.js':     [0, 0],
   'bridge.js':          [0, 0],
   // The one place an embedded page gives up its frame: only the 4px inset
   // and the panel's own widths, all zeroed rather than invented.

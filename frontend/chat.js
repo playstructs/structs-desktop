@@ -754,6 +754,19 @@
     if (st.steps) S.steps = st.steps;
     if (typeof st.connecting === 'boolean') S.connecting = st.connecting;
     if (st.error !== undefined) S.error = st.error;
+    /* The network's STATE, when the snapshot carries one (Rust's per-identity
+     * machine, see session.rs). A stall is read from here as well as from the
+     * `sync_health` push, so a window opened AFTER the stall began still says
+     * so — before this, that fact existed only in an event that had already
+     * fired, and such a window booted into a clean channel list. */
+    if (st.networks) {
+      var mine = null;
+      st.networks.forEach(function (n) { if (n.guild_id === S.guildId) mine = n; });
+      if (mine && mine.state) {
+        S.syncStalled = mine.state === 'stalled' ? (mine.reason || 'not reachable') : null;
+        if (mine.state === 'connecting') S.connecting = true;
+      }
+    }
     if (!S.guildId || !activeNetwork()) {
       var active = null;
       S.networks.forEach(function (n) {
@@ -882,7 +895,8 @@
     var net = activeNetwork();
     S.view = (net && net.logged_in) ? 'channels' : 'connection';
     render();
-    invoke('matrix_select', { guildId: guildId }).catch(function () {});
+    // Nothing to tell Rust: which network this window looks at is this
+    // window's business, and every call it makes carries the key itself.
     if (net && net.logged_in) refreshRooms();
   }
   Chat.selectNetwork = selectNetwork;
@@ -980,6 +994,24 @@
       .catch(function () {});
   }
 
+  /* Signed in — by this window's ask, by the boot finding a session, or by
+   * Rust signing in again on its own: the rooms are loaded and whatever was
+   * asked for while we were not ready is opened. One path, guarded, because
+   * two of those can happen within the same second and each used to load
+   * the rooms for itself. */
+  function afterSignedIn() {
+    if (S.booted || S.bootingRooms) return Promise.resolve();
+    S.bootingRooms = true;
+    S.error = null;
+    S.loading = true;
+    S.view = 'channels';
+    render();
+    loadMyIds();
+    loadPresence();
+    return refreshRooms().then(claimPendingRoom).then(claimPendingDraft).then(booted)
+      .then(function () { S.bootingRooms = false; }, function (e) { S.bootingRooms = false; throw e; });
+  }
+
   function connect() {
     S.connecting = true;
     S.error = null;
@@ -993,15 +1025,7 @@
       })
       .then(function () {
         var net = activeNetwork();
-        if (net && net.logged_in) {
-          S.error = null;
-          S.loading = true;
-          S.view = 'channels';
-          render();
-          loadMyIds();
-          loadPresence();
-          return refreshRooms().then(claimPendingRoom).then(claimPendingDraft).then(booted);
-        }
+        if (net && net.logged_in) return afterSignedIn();
         render();
       })
       .catch(function (e) {
@@ -1221,24 +1245,38 @@
     listen('matrix::sync_health', function (e) { onSyncHealth(e && e.payload); });
     listen('matrix::rooms', function (e) { onRooms(e && e.payload); });
     listen('matrix::status', function (e) { onStatus(e && e.payload); });
+    /* The connection picture moved (session.rs). Re-read the status rather
+     * than apply the push: the status carries this window's own network row
+     * with `logged_in` derived from that same state. A session Rust just
+     * signed in again becomes usable here without a click; one that expired
+     * shows as such rather than as a quiet, empty, "signed in" list. */
+    listen('matrix::state', function () {
+      refreshStatus().then(function () {
+        var net = activeNetwork();
+        if (net && net.logged_in && !S.booted && !S.connecting) return afterSignedIn();
+        render();
+      }).catch(function () {});
+    });
 
     render();
 
     refreshStatus()
       .then(function () {
         var net = activeNetwork();
-        if (net && net.logged_in) {
-          S.view = 'channels';
-          S.loading = true;
-          render();
-          loadMyIds();
-          loadPresence();
-          return refreshRooms().then(claimPendingRoom).then(claimPendingDraft).then(booted);
-        }
+        if (net && net.logged_in) return afterSignedIn();
         S.loading = false;
         if (!net) {
           // Nothing to connect to; the connection page says so.
           S.view = 'connection';
+          render();
+          return;
+        }
+        /* Rust is already signing this identity in (or about to, after a
+         * short delay): show the ladder and wait for it, rather than start a
+         * second sign-in that would queue behind the first. */
+        if (net.state === 'connecting' || net.state === 'expired') {
+          S.view = 'connection';
+          S.connecting = net.state === 'connecting';
           render();
           return;
         }

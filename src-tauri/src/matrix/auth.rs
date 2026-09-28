@@ -109,6 +109,14 @@ impl Ladder {
     pub fn steps(&self) -> Vec<Step> {
         self.steps.clone()
     }
+    /// The rung being climbed right now, by its label — what a window that
+    /// is not drawing the whole ladder says while a sign-in is in flight.
+    pub fn active(&self) -> Option<String> {
+        self.steps
+            .iter()
+            .find(|s| s.state == "active")
+            .map(|s| s.label.to_string())
+    }
 }
 
 /// Marks `key` active, runs `f`, then marks it done (with `detail` from the
@@ -863,18 +871,40 @@ async fn exchange_code(
     Ok((access, refresh, expires_at))
 }
 
+/// Why a refresh did not produce a token — and, more to the point, whether
+/// trying again could. A refused refresh token is DEAD: MAS rotates them,
+/// reuse is `invalid_grant`, and no amount of retrying turns it back into a
+/// session. A homeserver that could not be reached is a blip. The caller
+/// signs in again for the first and waits for the second; conflating them
+/// is how a session stayed dead for sixty hours while the loop "retried".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshError {
+    Dead(String),
+    Transient(String),
+}
+
+impl std::fmt::Display for RefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RefreshError::Dead(s) | RefreshError::Transient(s) => f.write_str(s),
+        }
+    }
+}
+
 /// Trade a refresh token for a new access token. Called by the client layer
-/// when the homeserver answers M_UNKNOWN_TOKEN, so an expiring session heals
-/// itself instead of dropping the player back to the Connect button.
-pub async fn refresh(session: &Session) -> Result<Session, String> {
+/// — proactively as a token nears its expiry, and on M_UNKNOWN_TOKEN as a
+/// backstop — so an expiring session heals itself instead of dropping the
+/// player back to the Connect button. Never call this from two tasks at once
+/// with the same token: go through `client::refresh_single_flight`.
+pub async fn refresh(session: &Session) -> Result<Session, RefreshError> {
     let refresh_token = session
         .refresh_token
         .as_deref()
-        .ok_or("this session has no refresh token")?;
+        .ok_or_else(|| RefreshError::Dead("this session has no refresh token".into()))?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| RefreshError::Transient(e.to_string()))?;
     let form = [
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -885,16 +915,27 @@ pub async fn refresh(session: &Session) -> Result<Session, String> {
         .form(&form)
         .send()
         .await
-        .map_err(|e| format!("token refresh: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("token refresh refused ({})", resp.status().as_u16()));
+        .map_err(|e| RefreshError::Transient(format!("token refresh: {}", e)))?;
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        // 4xx is the issuer's verdict on the token; anything else is the
+        // issuer having a bad day.
+        let msg = format!("token refresh refused ({})", status);
+        return Err(if (400..500).contains(&status) {
+            RefreshError::Dead(msg)
+        } else {
+            RefreshError::Transient(msg)
+        });
     }
-    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| RefreshError::Transient(e.to_string()))?;
     let mut next = session.clone();
     next.access_token = v
         .get("access_token")
         .and_then(|x| x.as_str())
-        .ok_or("refresh response carried no access_token")?
+        .ok_or_else(|| RefreshError::Dead("refresh response carried no access_token".into()))?
         .to_string();
     if let Some(rt) = v.get("refresh_token").and_then(|x| x.as_str()) {
         next.refresh_token = Some(rt.to_string());
@@ -1183,5 +1224,70 @@ mod tests {
         assert_eq!(steps[1].detail.as_deref(), Some("HTTP 404"));
         // Everything after the failure must still read as untried.
         assert!(steps[2..].iter().all(|s| s.state == "todo"));
+    }
+
+    /// A stand-in token endpoint that answers one request with `status`.
+    fn one_shot_issuer(status: &'static str) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                if reader.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                    break;
+                }
+                if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            if len > 0 {
+                use std::io::Read;
+                let mut body = vec![0u8; len];
+                let _ = reader.read_exact(&mut body);
+            }
+            let _ = stream.write_all(
+                format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}").as_bytes(),
+            );
+        });
+        base
+    }
+
+    fn session_at(token_endpoint: &str) -> Session {
+        Session {
+            guild_id: "7-9".into(),
+            player_id: Some("1-7010".into()),
+            homeserver: "http://h".into(),
+            user_id: "@1-7010:h".into(),
+            device_id: "d".into(),
+            access_token: "old".into(),
+            refresh_token: Some("r1".into()),
+            expires_at: Some(1),
+            client_id: "c".into(),
+            token_endpoint: token_endpoint.into(),
+        }
+    }
+
+    /// The issuer's verdict on the TOKEN (4xx) is final; the issuer having a
+    /// bad day (5xx, unreachable) is not. Only a success writes the store, so
+    /// both of these are safe against the real session file.
+    #[tokio::test]
+    async fn a_refused_refresh_is_dead_and_a_failing_issuer_is_transient() {
+        let refused = one_shot_issuer("400 Bad Request");
+        match refresh(&session_at(&format!("{refused}/token"))).await {
+            Err(RefreshError::Dead(m)) => assert!(m.contains("400"), "{m}"),
+            other => panic!("expected Dead, got {other:?}"),
+        }
+        let down = one_shot_issuer("503 Service Unavailable");
+        match refresh(&session_at(&format!("{down}/token"))).await {
+            Err(RefreshError::Transient(m)) => assert!(m.contains("503"), "{m}"),
+            other => panic!("expected Transient, got {other:?}"),
+        }
+        let mut none = session_at("http://127.0.0.1:1/token");
+        none.refresh_token = None;
+        assert!(matches!(refresh(&none).await, Err(RefreshError::Dead(_))), "nothing to refresh with is dead, not a blip");
     }
 }

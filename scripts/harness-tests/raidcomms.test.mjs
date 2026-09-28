@@ -114,4 +114,60 @@ const planet = { id: '2-15361', kind: 'planet' };
   assert.equal(rc.chatState.rows.length, 1); assert.equal(rc.chatState.roomTopic, 'ore');
 }
 
+// 7. Whether Comms is up is StructsComms' word, not the rail's. A failed read
+//    is named as a failed read; a sign-in in flight, a session being taken
+//    again and a signed-out player each get their own notice; and the rail
+//    reads the room by itself the moment the session comes up.
+{
+  const { rc, w, calls } = boot(planet, {
+    mcp_inventory: { player: {} },
+    matrix_object_room: { room_id: '!p:x', joined: true, guild_id: '0-1' },
+    matrix_timeline: { messages: [{ body: 'x' }], room: { name: 'Planet 2-15361', topic: 'ore' } },
+  });
+  const listeners = [];
+  let id = { key: '0-1', phase: 'connecting', step: 'Guild login', as_player: null };
+  w.StructsComms = {
+    known: () => true,
+    can: (what) => id.phase === 'live' || id.phase === 'stalled',
+    primary: () => id, signedIn: () => id.phase === 'live' || id.phase === 'stalled',
+    onChange: (cb) => listeners.push(cb),
+    describe: (i) => i.phase === 'connecting' ? { title: 'Signing in', detail: i.step + '\u2026' }
+      : i.phase === 'expired' ? { title: 'Signing in again', detail: 'The last session ended: ' + i.reason }
+      : i.phase === 'signed_out' ? { title: 'Signed out', detail: 'Open Comms to sign in.' } : null,
+  };
+  rc.wireChat();
+  await tick(10);
+  const body = () => w.document.getElementById('rv-chat-body').textContent;
+  assert.ok(listeners.length === 1, 'the rail subscribes to the one source of connection state');
+  assert.ok(/Signing in Guild login/.test(body()), 'mid-sign-in says so, in the shared words: ' + body());
+  assert.ok(!/Not connected/.test(body()), 'a sign-in in flight is not "not signed in"');
+  assert.equal(calls.filter((c) => c[0] === 'matrix_timeline').length, 0, 'nothing is read before the session is usable');
+  const room = calls.find((c) => c[0] === 'matrix_object_room');
+  assert.equal(room[1].guildId, '0-1', 'the primary\'s own session key rides every call, never the Comms window\'s selection');
+
+  id = { key: '0-1', phase: 'expired', reason: 'token refresh refused (400)', as_player: null };
+  listeners[0]();
+  assert.ok(/Signing in again.*token refresh refused/.test(body()), 'an expired session says it is being taken again: ' + body());
+
+  id = { key: '0-1', phase: 'live', as_player: null };
+  listeners[0]();
+  await tick(10);
+  assert.equal(calls.filter((c) => c[0] === 'matrix_timeline').length, 1, 'coming up reads the room without being asked');
+  assert.equal(rc.chatState.rows.length, 1);
+  assert.ok(rc.chatState.connected);
+
+  // Signed in, and the read fails: that is a failed read, in those words.
+  rc.chatState.room = null;
+  w.__TAURI__.core.invoke = (cmd) => cmd === 'matrix_object_chatter' ? Promise.reject(new Error('the homeserver is rate limiting this; try again in 5s')) : Promise.resolve({});
+  rc.loadChat();
+  await tick(10);
+  assert.ok(/Could not read this channel/.test(body()), 'a failed read is named as one: ' + body());
+  assert.ok(/rate limiting/.test(body()), '…with the reason');
+  assert.ok(rc.chatState.connected, 'and the session is not declared dead by a read');
+
+  id = { key: '0-1', phase: 'signed_out', as_player: null };
+  listeners[0]();
+  assert.ok(/Signed out/.test(body()), 'signed out says so: ' + body());
+}
+
 console.log('raid-comms: all checks passed');
