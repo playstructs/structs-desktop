@@ -2,9 +2,14 @@
 //
 // A task's grinding input is public — object, kind, anchor. Anyone can
 // compute it; only its owner can submit the answer. That asymmetry is what
-// makes asking a room for help safe. This file draws the offer / result
-// cards and drives the three actions (help, check, submit); every network
+// makes asking a room for help safe. This file draws the offer and done
+// cards and drives the one action left in the room (help); every network
 // step is a Rust command.
+//
+// A RESULT draws no card. Its message line already says everything the card
+// said (object, task, anchor, nonce), and the owner no longer checks and
+// submits a helper's nonce by hand here: a delegated proof is submitted by
+// the helper on-chain, and the `done` frame is what the room sees of it.
 //
 // Extracted from chat.js (2026-09-05) as the first section to leave it. It
 // takes its collaborators as a context rather than reaching into the chat
@@ -12,7 +17,7 @@
 // with nothing but a stub `invoke`.
 //
 //   window.ChatWork({ el, icon, invoke, serverIdOf, showError, render, S, Chat })
-//     → { workCard, acceptWork, verifyWork, checkWorkFresh, workKey }
+//     → { workCard, acceptWork, checkWorkFresh, workKey }
 (function () {
   'use strict';
   window.ChatWork = function (ctx) {
@@ -34,25 +39,6 @@
 
     function workKey(w) { return w.object + '|' + w.task + '|' + w.block_start; }
 
-    /* Has the room already seen this cycle SPENT? A `done` frame names the
-     * object, the anchor and the transaction, and it arrives after the
-     * result it answers, so this is read off the timeline at render time
-     * rather than remembered in order. A spent cycle is dead by definition,
-     * so a result that has one is neither checked against the chain nor
-     * offered for submission — on the bus that is hundreds of cards and
-     * hundreds of chain reads that would otherwise happen on opening it. */
-    function spentIn(w) {
-      var msgs = (S && S.messages) || [];
-      for (var i = msgs.length - 1; i >= 0; i--) {
-        var m = msgs[i];
-        var d = m && m.work;
-        if (d && d.kind === 'done' && d.object === w.object && d.task === w.task
-            && Number(d.block_start) === Number(w.block_start)) {
-          return { by: m.sender_name || m.sender || '', tx: d.tx || '', helper: d.helper || null };
-        }
-      }
-      return null;
-    }
     function shortTx(tx) { return tx ? String(tx).slice(0, 10) + '\u2026' : ''; }
 
     function checkWorkFresh(w) {
@@ -95,16 +81,14 @@
         dcard.appendChild(dfacts);
         return dcard;
       }
-      var spent = !offer ? spentIn(w) : null;
-      if (!spent) checkWorkFresh(w);
-      var stale = !spent && workFresh[workKey(w)] === false;
-      var card = el('div', 'chat-ref chat-work chat-kind-' + (offer ? 'offer' : 'result')
-        + (stale ? ' chat-mod-stale' : ''));
+      if (!offer) return null;
+      checkWorkFresh(w);
+      var stale = workFresh[workKey(w)] === false;
+      var card = el('div', 'chat-ref chat-work chat-kind-offer' + (stale ? ' chat-mod-stale' : ''));
 
       var head = el('div', 'chat-ref-head');
       head.appendChild(icon(WORK_ICON[w.task] || 'icon-computer', 'sui-icon-md'));
-      head.appendChild(el('span', 'chat-ref-title',
-        (offer ? 'Work wanted \u00b7 ' : 'Solved \u00b7 ') + (WORK_LABEL[w.task] || w.task)));
+      head.appendChild(el('span', 'chat-ref-title', 'Work wanted \u00b7 ' + (WORK_LABEL[w.task] || w.task)));
       card.appendChild(head);
 
       var facts = el('div', 'chat-ref-facts');
@@ -114,48 +98,29 @@
       };
       fact(w.task === 'RAID' ? 'Fleet' : 'Struct', w.object);
       if (w.target) fact('Target', w.target);
-      // The anchor is the whole reason a proof goes stale: it is the cycle the
+      // The anchor is the whole reason an offer goes stale: it is the cycle the
       // nonce is valid against, and the chain checks against its own current
       // one. Showing it is what lets a player see a dead offer as dead.
       fact('Anchor', 'block ' + w.block_start);
       if (w.difficulty) fact('Difficulty', String(w.difficulty));
-      if (w.nonce) fact('Nonce', w.nonce);
       card.appendChild(facts);
 
-      // A dead cycle cannot be proved against. Say so where the buttons were,
-      // rather than leaving controls that can only fail.
+      // A dead cycle cannot be proved against. Say so where the button was,
+      // rather than leaving a control that can only fail.
       if (stale) {
         var gone = el('div', 'chat-work-verdict chat-mod-bad');
-        gone.textContent = 'That cycle has turned over — this can no longer be proved.';
+        gone.textContent = 'That cycle has turned over \u2014 this can no longer be proved.';
         card.appendChild(gone);
         return card;
       }
 
-      // Already spent: say by whom, and offer nothing — a second submission
-      // of a spent cycle can only be refused.
-      if (spent) {
-        var was = el('div', 'chat-work-verdict chat-mod-good');
-        was.textContent = 'Spent' + (spent.by ? ' by ' + spent.by : '') + (spent.tx ? ' \u2014 tx ' + shortTx(spent.tx) : '');
-        card.appendChild(was);
-        return card;
-      }
-
       var actions = el('div', 'chat-ref-actions');
-      if (offer) {
-        var help = el('a', 'sui-panel-btn sui-mod-default chat-ref-action');
-        help.href = 'javascript:void(0)';
-        help.appendChild(icon('icon-computer', 'sui-icon-sm'));
-        help.appendChild(el('span', null, 'Help'));
-        help.addEventListener('click', function () { acceptWork(m, w, card); });
-        actions.appendChild(help);
-      } else {
-        var check = el('a', 'sui-panel-btn sui-mod-default chat-ref-action');
-        check.href = 'javascript:void(0)';
-        check.appendChild(icon('icon-okay', 'sui-icon-sm'));
-        check.appendChild(el('span', null, 'Check'));
-        check.addEventListener('click', function () { verifyWork(w, card); });
-        actions.appendChild(check);
-      }
+      var help = el('a', 'sui-panel-btn sui-mod-default chat-ref-action');
+      help.href = 'javascript:void(0)';
+      help.appendChild(icon('icon-computer', 'sui-icon-sm'));
+      help.appendChild(el('span', null, 'Help'));
+      help.addEventListener('click', function () { acceptWork(m, w, card); });
+      actions.appendChild(help);
       card.appendChild(actions);
       return card;
     }
@@ -189,77 +154,8 @@
     }
     Chat.acceptWork = acceptWork;
 
-    // Verify before anything else. A result arriving over federation is a
-    // CLAIM: everything but the number is rebuilt from what this side knows,
-    // and the hash is recomputed. A forged one otherwise costs the owner a
-    // failed transaction and its charge.
-    function verifyWork(w, card) {
-      return invoke('matrix_work_verify', {
-        objectId: w.object, task: w.task, blockStart: w.block_start,
-        difficulty: w.difficulty, nonce: w.nonce, targetId: w.target || null,
-      })
-        .then(function (res) {
-          var line = card.querySelector('.chat-work-verdict');
-          if (!line) { line = el('div', 'chat-work-verdict'); card.appendChild(line); }
-          if (res && res.ok) {
-            line.className = 'chat-work-verdict chat-mod-good';
-            line.textContent = 'Checks out. Valid only while block ' + w.block_start
-              + ' is still the live cycle.';
-            offerSubmit(w, card);
-          } else {
-            line.className = 'chat-work-verdict chat-mod-bad';
-            line.textContent = 'That nonce does not solve this task.';
-          }
-        })
-        .catch(function (e) { showError(String(e)); });
-    }
-    Chat.verifyWork = verifyWork;
-
-    // Submitting is the owner's act, so it is a separate click from checking
-    // — and it only appears once the proof has been checked. A button that
-    // both verifies and submits would make the check invisible at exactly the
-    // moment it matters.
-    //
-    // It does NOT cost charge, whatever this used to say. A completion is a
-    // PROOF message, not a charge message: `app/ante/maps.go`'s
-    // `ChargeMessages` lists the eight that are (activate, attack, build
-    // initiate, defense set/clear, move, stealth on/off) and no completion is
-    // among them, the miner-complete keeper never calls `Discharge`, and our
-    // own `loop_util::CHARGED_TYPES` agrees. What it does spend is a
-    // TRANSACTION — one in flight per address at a time — which is the
-    // resource actually worth telling somebody they are about to use.
-    function offerSubmit(w, card) {
-      if (card.querySelector('.chat-work-submit')) return;
-      var b = el('a', 'sui-panel-btn sui-mod-default chat-ref-action chat-work-submit');
-      b.href = 'javascript:void(0)';
-      b.appendChild(icon('icon-send-alpha', 'sui-icon-sm'));
-      b.appendChild(el('span', null, 'Submit'));
-      b.title = 'Submit this proof yourself — it costs you a transaction, not them';
-      b.addEventListener('click', function () {
-        var line = card.querySelector('.chat-work-verdict');
-        line.className = 'chat-work-verdict';
-        line.textContent = 'Submitting\u2026';
-        invoke('matrix_work_submit', {
-          objectId: w.object, task: w.task, blockStart: w.block_start,
-          difficulty: w.difficulty, nonce: w.nonce, targetId: w.target || null,
-        })
-          .then(function () {
-            line.className = 'chat-work-verdict chat-mod-good';
-            line.textContent = 'Submitted.';
-            b.remove();
-          })
-          .catch(function (e) {
-            line.className = 'chat-work-verdict chat-mod-bad';
-            line.textContent = String(e);
-          });
-      });
-      var bar = card.querySelector('.chat-ref-actions');
-      if (bar) bar.appendChild(b);
-    }
-
-
     return {
-      workCard: workCard, acceptWork: acceptWork, verifyWork: verifyWork,
+      workCard: workCard, acceptWork: acceptWork,
       checkWorkFresh: checkWorkFresh, workKey: workKey, WORK_LABEL: WORK_LABEL, WORK_ICON: WORK_ICON,
     };
   };

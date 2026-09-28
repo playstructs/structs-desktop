@@ -3419,7 +3419,8 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('…and the anchor it is valid against',
     text(card).includes('block 812004'), text(card));
 
-  // A result, and the check that must happen before anything else.
+  // A result is its message line. The card that used to repeat it (object,
+  // task, anchor, nonce) and offer a hand check is gone.
   w.__HARNESS_EMIT__('matrix::timeline', {
     guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
     messages: [{
@@ -3430,9 +3431,8 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     }],
   });
   await tick();
-  const result = all(d, '.chat-work').pop();
-  check('a result renders too', text(result).includes('Solved'), text(result));
-  check('…showing the nonce', text(result).includes('918273645'), text(result));
+  check('a result draws no card', all(d, '.chat-work').length === 1, String(all(d, '.chat-work').length));
+  check('…its line already says the nonce', text(d.body).includes('nonce 918273645'));
 
   // Taking on the offer grinds locally. It cannot submit anything: the
   // completion tx names its signer as `creator`, and only the owner's counts.
@@ -3450,92 +3450,6 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
     text(card.querySelector('.chat-work-verdict')).includes('only the owner can submit'),
     text(card.querySelector('.chat-work-verdict')));
 
-  result.querySelector('.chat-ref-action')
-    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  await tick();
-  const call = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_verify').pop();
-  check('checking it recomputes the hash', !!call, JSON.stringify(call && call.args));
-  // Everything but the number is rebuilt from what THIS side knows — a
-  // forged result otherwise costs the owner a failed transaction.
-  check('…from the task, not from the claim',
-    call.args.objectId === '5-2184' && call.args.blockStart === 812004 &&
-    call.args.nonce === '918273645',
-    JSON.stringify(call.args));
-  check('…and says it checks out',
-    text(result.querySelector('.chat-work-verdict')).includes('Checks out'),
-    text(result.querySelector('.chat-work-verdict')));
-  check('…and that the anchor still has to be live',
-    text(result.querySelector('.chat-work-verdict')).includes('812004'),
-    text(result.querySelector('.chat-work-verdict')));
-
-  // Submitting is a SEPARATE click from checking: it costs the OWNER charge,
-  // and one button that both verifies and spends would hide the check at
-  // exactly the moment it matters.
-  check('a checked proof then offers to be submitted',
-    !!result.querySelector('.chat-work-submit'));
-  result.querySelector('.chat-work-submit')
-    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  await tick();
-  const sub = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_submit').pop();
-  check('submitting sends the nonce and the task it solves',
-    !!sub && sub.args.nonce === '918273645' && sub.args.objectId === '5-2184' &&
-    sub.args.blockStart === 812004,
-    JSON.stringify(sub && sub.args));
-  check('…and reports it landed',
-    text(result.querySelector('.chat-work-verdict')) === 'Submitted.',
-    text(result.querySelector('.chat-work-verdict')));
-}
-
-// An unchecked result must not offer a submit button at all.
-{
-  console.log('\n— submit follows checking');
-  const { w, d } = await open();
-  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
-  await tick();
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
-    messages: [{
-      event_id: '$w9', sender: '@1-42:h', sender_name: 'Netlag',
-      body: 'Solved it', kind: 'text', ts: 9,
-      work: { kind: 'result', task: 'MINE', object: '5-2184', target: null,
-              block_start: 812004, difficulty: 5, nonce: '918273645' },
-    }],
-  });
-  await tick();
-  const card = all(d, '.chat-work').pop();
-  check('an unchecked result offers no submit',
-    !card.querySelector('.chat-work-submit'), card.innerHTML.slice(-200));
-  check('…and no submission has been attempted',
-    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_work_submit').length === 0);
-}
-
-// A nonce that does not solve the task must be refused, plainly.
-{
-  console.log('\n— a bad result');
-  const { w, d } = await open();
-  w.__HARNESS_WORK_OK__ = false;
-  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
-  await tick();
-  w.__HARNESS_EMIT__('matrix::timeline', {
-    guild_id: '0-5', room_id: '!snc:matrix.beta.playstructs.com',
-    messages: [{
-      event_id: '$w3', sender: '@1-9:h', sender_name: 'Scout',
-      body: 'Solved it', kind: 'text', ts: 3,
-      work: { kind: 'result', task: 'MINE', object: '5-2184', target: null,
-              block_start: 812004, difficulty: 5, nonce: '1' },
-    }],
-  });
-  await tick();
-  const card = all(d, '.chat-work').pop();
-  card.querySelector('.chat-ref-action')
-    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  await tick();
-  check('a nonce that does not solve it is refused',
-    text(card.querySelector('.chat-work-verdict')).includes('does not solve'),
-    text(card.querySelector('.chat-work-verdict')));
-  check('…and is not dressed up as a success',
-    card.querySelector('.chat-work-verdict').className.includes('chat-mod-bad'),
-    card.querySelector('.chat-work-verdict').className);
 }
 
 // ── A dead offer ───────────────────────────────────────────────────────────

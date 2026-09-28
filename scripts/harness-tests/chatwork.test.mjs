@@ -76,28 +76,14 @@ const result = { id: '$e2', work: { kind: 'result', task: 'MINE', object: '5-218
   assert.ok(card.querySelector('.chat-work-verdict').textContent.includes('Working on it'));
 }
 
-// 4. A result is CHECKED before Submit exists; a bad nonce never offers Submit.
+// 4. A result draws NO card. Its message line already carries the object,
+//    task, anchor and nonce, and nothing in the room checks or submits it by
+//    hand any more — so there is nothing to draw and no chain read to make.
 {
-  const ok = boot({ matrix_work_status: { known: false }, matrix_work_verify: { ok: true }, matrix_work_submit: {} });
-  const card = ok.work.workCard(result);
-  assert.ok(card.querySelector('.chat-ref-action').textContent.includes('Check'));
-  assert.equal(card.querySelector('.chat-work-submit'), null, 'no Submit before a check');
-  card.querySelector('.chat-ref-action').dispatchEvent(new ok.w.Event('click'));
-  await tick();
-  assert.ok(card.querySelector('.chat-work-verdict').textContent.includes('Checks out'));
-  const submit = card.querySelector('.chat-work-submit');
-  assert.ok(submit, 'Submit appears only after the check');
-  submit.dispatchEvent(new ok.w.Event('click'));
-  await tick();
-  assert.ok(ok.calls.some(([c, a]) => c === 'matrix_work_submit' && a.nonce === '12345'));
-  assert.ok(card.querySelector('.chat-work-verdict').textContent.includes('Submitted'));
-
-  const bad = boot({ matrix_work_status: { known: false }, matrix_work_verify: { ok: false } });
-  const c2 = bad.work.workCard(result);
-  c2.querySelector('.chat-ref-action').dispatchEvent(new bad.w.Event('click'));
-  await tick();
-  assert.ok(c2.querySelector('.chat-work-verdict').textContent.includes('does not solve'));
-  assert.equal(c2.querySelector('.chat-work-submit'), null);
+  const { work, calls } = boot({ matrix_work_status: { known: true, live: true } });
+  assert.equal(work.workCard(result), null, 'a result is its message line, not a card');
+  assert.equal(calls.length, 0, 'and asks the chain nothing');
+  assert.equal(work.verifyWork, undefined, 'the hand check is gone with it');
 }
 
 console.log('chatwork: ok');
@@ -116,14 +102,5 @@ console.log('chatwork: ok');
   assert.equal(dcard.querySelector('.chat-ref-action'), null, 'with nothing to click');
   assert.equal(calls.filter(([c]) => c === 'matrix_work_status').length, 0, 'and no chain read for a done');
 
-  S.messages = [result, done];
-  const rcard = work.workCard(result);
-  assert.ok(rcard.textContent.includes('Spent by Marklifer'), 'the result it answers reads as spent');
-  assert.equal(rcard.querySelector('.chat-ref-action'), null, 'no Check, no Submit');
-  assert.equal(calls.filter(([c]) => c === 'matrix_work_status').length, 0, 'and still no chain read');
-
-  S.messages = [result];
-  const live = work.workCard(result);
-  assert.ok(live.querySelector('.chat-ref-action'), 'an unspent result keeps its Check');
 }
 
