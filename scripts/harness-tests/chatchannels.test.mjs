@@ -111,7 +111,7 @@ const R = (o) => Object.assign({ room_id: '!' + o.name + ':matrix.oh.energy', jo
   const { ch, S, w } = boot(rooms);
   const page = ch.renderChannels();
   const labels = [...page.querySelectorAll('.chat-net-label')].map((n) => n.textContent);
-  assert.equal(JSON.stringify(labels), JSON.stringify(['Structs', 'Galaxy Net']), 'the home channel sits above every section');
+  assert.equal(JSON.stringify(labels), JSON.stringify(['Pinned', 'Galaxy Net']), 'the pinned group sits above every section');
   assert.ok(page.querySelector('#chat-room-filter-q'), 'ten rooms earn a filter box');
   S.rooms = rooms.slice(0, 3);
   assert.ok(!ch.renderChannels().querySelector('#chat-room-filter-q'), 'three rooms do not');

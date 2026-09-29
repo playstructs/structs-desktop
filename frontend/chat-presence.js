@@ -8,7 +8,7 @@
 //
 //   window.ChatPresence({ el, icon, invoke, byId, render, moveCaretToEnd, showError, S, Chat })
 //     → { seenLine, onSeen, presenceDot, onSyncHealth, stalledBanner, onPresence,
-//         loadPresence, replyButton, setMuted }
+//         loadPresence, replyButton, setMuted, setPinned }
 (function () {
   'use strict';
   window.ChatPresence = function (ctx) {
@@ -129,10 +129,29 @@
     }
     Chat.setMuted = setMuted;
 
+    /* Pin this room above every section, or take it back out. Optimistic:
+     * the row moves at once, and the room-list push that follows carries the
+     * rank Rust actually assigned (a player's own pin sits after the guild's
+     * default channels). */
+    function setPinned(pinned) {
+      if (!S.roomId) return;
+      return invoke('matrix_room_pin', {
+        guildId: S.guildId, roomId: S.roomId, pinned: pinned,
+      })
+        .then(function () {
+          var rank = pinned ? 99 : null;
+          if (S.room) S.room.home_rank = rank;
+          S.rooms.forEach(function (r) { if (r.room_id === S.roomId) r.home_rank = rank; });
+          render();
+        })
+        .catch(function (e) { showError(String(e)); });
+    }
+    Chat.setPinned = setPinned;
+
     return {
       seenLine: seenLine, onSeen: onSeen, presenceDot: presenceDot, onSyncHealth: onSyncHealth,
       stalledBanner: stalledBanner, onPresence: onPresence, loadPresence: loadPresence,
-      replyButton: replyButton, setMuted: setMuted,
+      replyButton: replyButton, setMuted: setMuted, setPinned: setPinned,
     };
   };
 })();

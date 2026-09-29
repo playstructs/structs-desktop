@@ -8,7 +8,7 @@
 // and a stub StructsChatRow:
 //
 //   window.ChatRoom({ el, icon, byId, clear, invoke, go, S, Chat, render, pageHeader, noticeBlock,
-//                     dayKey, dayLabel, refreshRooms, openRoom, markRead, typingLine, setMuted,
+//                     dayKey, dayLabel, refreshRooms, openRoom, markRead, typingLine, setMuted, setPinned,
 //                     openSearch, pinnedStrip, seenLine, ruleNode, historyButton, messageNode,
 //                     excerpt, editChip, cancelEdit, maybeLoadHistory, noteTyping, submit,
 //                     complete, recall, resetCompletion, clearCompletionHint })
@@ -20,6 +20,7 @@
     var S = ctx.S, Chat = ctx.Chat || {}, render = ctx.render, pageHeader = ctx.pageHeader, noticeBlock = ctx.noticeBlock;
     var dayKey = ctx.dayKey, dayLabel = ctx.dayLabel, refreshRooms = ctx.refreshRooms, openRoom = ctx.openRoom;
     var markRead = ctx.markRead, typingLine = ctx.typingLine, setMuted = ctx.setMuted, openSearch = ctx.openSearch;
+    var setPinned = ctx.setPinned || function () {};
     var pinnedStrip = ctx.pinnedStrip, seenLine = ctx.seenLine, ruleNode = ctx.ruleNode, historyButton = ctx.historyButton;
     var messageNode = ctx.messageNode, excerpt = ctx.excerpt, editChip = ctx.editChip, cancelEdit = ctx.cancelEdit;
     var maybeLoadHistory = ctx.maybeLoadHistory, noteTyping = ctx.noteTyping, submit = ctx.submit, complete = ctx.complete;
@@ -49,6 +50,18 @@
                                     : 'icon-alert sui-text-secondary')));
       quiet.addEventListener('click', function () { setMuted(!muted); });
       right.appendChild(quiet);
+
+      // Pinned above every section, or not. The guild's own channels arrive
+      // pinned; this is the same switch for those and for anything else. The
+      // beacon is the mark the message pins already use.
+      var isPinned = !!(S.room && S.room.home_rank != null);
+      var pin = el('a', 'sui-nav-btn');
+      pin.id = 'chat-room-pin';
+      pin.href = 'javascript:void(0)';
+      pin.title = isPinned ? 'Pinned above the list \u2014 unpin' : 'Pin this room above the list';
+      pin.appendChild(icon(isPinned ? 'icon-beacon sui-text-primary' : 'icon-beacon sui-text-secondary'));
+      pin.addEventListener('click', function () { setPinned(!isPinned); });
+      right.appendChild(pin);
 
       var find = el('a', 'sui-nav-btn');
       find.id = 'chat-room-search';

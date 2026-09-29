@@ -19,6 +19,7 @@ pub mod auth;
 pub mod client;
 pub mod directory;
 pub mod discovery;
+pub mod pins;
 pub mod refs;
 pub mod session;
 pub mod store;
@@ -1446,6 +1447,27 @@ pub fn matrix_presence(guild_id: Option<String>) -> Result<Value, String> {
     }))
 }
 
+/// Pin a room above every section of the list, or take it back out.
+///
+/// The guild's own channels are pinned for everyone by default; a player
+/// may unpin those, and pin anything else, by the same rule. Per identity.
+#[tauri::command]
+pub async fn matrix_room_pin(
+    app: tauri::AppHandle,
+    guild_id: String,
+    room_id: String,
+    pinned: bool,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    client::set_room_pin(&guild_id, &session, &room_id, pinned)?;
+    let _ = crate::mcp::events::emit_matrix(
+        &app,
+        "matrix::rooms",
+        json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
+    );
+    Ok(json!({ "ok": true, "room_id": room_id, "pinned": pinned }))
+}
+
 /// Is anything waiting in Comms?
 ///
 /// For surfaces outside the Comms window — the door into it, most obviously.
@@ -1534,9 +1556,7 @@ pub async fn matrix_object_room_create(
 ) -> Result<Value, String> {
     let guild = guild_id.or_else(primary_key).unwrap_or_default();
     let session = session_for(&guild)?;
-    let host = rooms::owner_guild(&object_id)
-        .await
-        .ok_or_else(|| format!("{object_id}'s owner guild publishes no chat service"))?;
+    let host = rooms::owner_guild_or_why(&object_id).await?;
     let alias = rooms::alias_on(&object_id, &host.server)
         .ok_or_else(|| format!("{object_id} does not get a room"))?;
     // Only when the alias does not resolve: after the first ensure the room

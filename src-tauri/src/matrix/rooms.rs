@@ -122,11 +122,23 @@ pub struct OwnerGuild {
 /// so a raid window on one of its planets does not fetch its manifest again
 /// every time it opens.
 pub async fn owner_guild(object_id: &str) -> Option<OwnerGuild> {
-    alias_localpart(object_id)?; // reject early: not a room type
-    let owner = owner_of(object_id).await?;
+    owner_guild_or_why(object_id).await.ok()
+}
+
+/// The same, saying WHY when there is no host — a planet that is not on
+/// chain and a guild that runs no chat are different things to the player
+/// who just tried to open a room.
+pub async fn owner_guild_or_why(object_id: &str) -> Result<OwnerGuild, String> {
+    alias_localpart(object_id).ok_or_else(|| format!("{object_id} does not get a room"))?;
+    let owner = owner_of(object_id)
+        .await
+        .ok_or_else(|| format!("{object_id} is not on chain, or has no owner"))?;
     super::directory::ensure_fresh().await;
-    let ident = super::directory::get(&owner)?;
-    guild_by_id(&ident.guild_id).await
+    let ident = super::directory::get(&owner)
+        .ok_or_else(|| format!("{object_id}'s owner {owner} is not in the directory yet"))?;
+    guild_by_id(&ident.guild_id)
+        .await
+        .ok_or_else(|| format!("{object_id}'s owner guild {} publishes no chat service", ident.guild_id))
 }
 
 /// The same, for a guild the ensure endpoint named in a 409.

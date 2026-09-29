@@ -303,6 +303,7 @@
   var onSyncHealth = presenceModule.onSyncHealth, stalledBanner = presenceModule.stalledBanner;
   var onPresence = presenceModule.onPresence, loadPresence = presenceModule.loadPresence;
   var replyButton = presenceModule.replyButton, setMuted = presenceModule.setMuted;
+  var setPinned = presenceModule.setPinned;
 
   // ── Object references ─────────────────────────────────────────────────────
   // Lives in chat-refs.js; wired here with the collaborators it needs. Every
@@ -530,6 +531,7 @@
     render: function () { render(); }, pageHeader: pageHeader, noticeBlock: noticeBlock, dayKey: dayKey, dayLabel: dayLabel,
     refreshRooms: refreshRooms, openRoom: openRoom, markRead: markRead, typingLine: typingLine,
     setMuted: function (m) { return setMuted(m); }, openSearch: function (x) { return openSearch(x); },
+    setPinned: function (m) { return setPinned(m); },
     pinnedStrip: function () { return pinnedStrip(); }, seenLine: function () { return seenLine(); },
     ruleNode: function (l, a) { return ruleNode(l, a); }, historyButton: function () { return historyButton(); },
     messageNode: function (m, prev) { return messageNode(m, prev); }, excerpt: function (t) { return excerpt(t); },

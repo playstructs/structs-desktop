@@ -194,8 +194,9 @@ pub struct Room {
     pub mention: bool,
     /// "local" | "galaxy" | "direct" — see `section_for`.
     pub section: &'static str,
-    /// Rank among the channels pinned above every section, or `None` for a
-    /// room that is not pinned. See `home_rank`.
+    /// Rank in the Pinned group above every section, or `None` for a room
+    /// that is not pinned. The guild's own channels are pinned by default
+    /// (lobby 0, the rest 1); the player's own pins follow. See `pins.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_rank: Option<u8>,
     pub icon: &'static str,
@@ -409,9 +410,26 @@ fn server_name(session: &Session) -> String {
 ///
 /// If structs-tel later defines a canonical room taxonomy (per-planet, per-raid
 /// rooms and the Spaces that hold them), this is the one function to change.
-fn section_for(room_id: &str, server: &str) -> &'static str {
+/// Local net or galaxy net: whether the room lives on OUR homeserver.
+///
+/// Judged by the alias's server first. A room id used to carry its server
+/// (`!abc:example.com`); a room on a current room version is an opaque
+/// `!rPiycNx…` with no server in it at all, and reading the id alone put
+/// every new room — the guild's own lobby included — under Galaxy Net.
+fn section_for(room_id: &str, alias: Option<&str>, server: &str) -> &'static str {
+    if server.is_empty() {
+        return "galaxy";
+    }
+    if let Some(a) = alias {
+        if super::rooms::server_of(a) == Some(server) {
+            return "local";
+        }
+        if super::rooms::server_of(a).is_some() {
+            return "galaxy";
+        }
+    }
     match room_id.rsplit_once(':') {
-        Some((_, s)) if !server.is_empty() && s == server => "local",
+        Some((_, s)) if s == server => "local",
         _ => "galaxy",
     }
 }
@@ -673,8 +691,35 @@ fn is_system_alias(alias: Option<&str>) -> bool {
 /// Where this room sits among the guild's own channels, or `None` for the
 /// great majority that are not one: rooms on other servers, object rooms, the
 /// work bus. See the note above `alias_localpart_of`.
-fn home_rank_for(session: &Session, alias: Option<&str>) -> Option<u8> {
-    guild_channel_rank(alias?, &server_name(session), &lobby_slug(&session.guild_id))
+fn home_rank_for(session: &Session, room_id: &str, alias: Option<&str>) -> Option<u8> {
+    let default = alias.and_then(|a| guild_channel_rank(a, &server_name(session), &lobby_slug(&session.guild_id)));
+    super::pins::rank(&session.user_id, room_id, alias, default)
+}
+
+/// Whether this alias is one of the guild's OWN channels — pinned for the
+/// player by default, auto-joined once per install.
+fn is_default_pin(session: &Session, alias: Option<&str>) -> bool {
+    alias.is_some_and(|a| guild_channel_rank(a, &server_name(session), &lobby_slug(&session.guild_id)).is_some())
+}
+
+/// Pin a room above the list for this identity, or take it back out, and
+/// re-rank it in place so the next list push shows the change.
+pub fn set_room_pin(guild_id: &str, session: &Session, room_id: &str, pinned: bool) -> Result<(), String> {
+    let alias = {
+        let map = STATE.read().unwrap();
+        let room = map
+            .get(guild_id)
+            .and_then(|gs| gs.rooms.get(room_id))
+            .ok_or_else(|| format!("{room_id} is not a room this window knows"))?;
+        room.canonical_alias.clone()
+    };
+    let is_default = is_default_pin(session, alias.as_deref());
+    super::pins::set(&session.user_id, room_id, alias.as_deref(), is_default, pinned);
+    let rank = home_rank_for(session, room_id, alias.as_deref());
+    if let Some(r) = STATE.write().unwrap().get_mut(guild_id).and_then(|gs| gs.rooms.get_mut(room_id)) {
+        r.home_rank = rank;
+    }
+    Ok(())
 }
 
 /// The alias localpart a guild's lobby would have: its name, slugged the way
@@ -1884,7 +1929,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
 
         // Computed before the literal: `display` and `final_alias` are moved
         // into it.
-        let rank = if is_dm { None } else { home_rank_for(session, final_alias.as_deref()) };
+        let rank = if is_dm { None } else { home_rank_for(session, &room_id, final_alias.as_deref()) };
         let system = is_system_alias(final_alias.as_deref());
         let entry = Room {
             home_rank: rank,
@@ -1911,7 +1956,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                     None => dm_player.clone().unwrap_or(display),
                 },
             },
-            canonical_alias: final_alias,
+            canonical_alias: final_alias.clone(),
             topic: topic.or_else(|| existing.as_ref().and_then(|r| r.topic.clone())),
             members: members
                 .or_else(|| existing.as_ref().map(|r| r.members))
@@ -1938,7 +1983,7 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             section: if is_dm {
                 SECTION_DIRECT
             } else {
-                section_for(&room_id, &server)
+                section_for(&room_id, final_alias.as_deref(), &server)
             },
             pfp_attrs: dm_ident.as_ref().and_then(|i| i.pfp_attrs.clone()),
             player_id: dm_player,
@@ -2662,6 +2707,10 @@ async fn join_pinned_channels(app: &tauri::AppHandle, guild_id: &str) {
     if let Err(e) = refresh_directory(guild_id, &session).await {
         eprintln!("[Comms] {} room directory: {}", guild_id, e);
     }
+    // The DEFAULTS only — the guild's own channels. A room the player pinned
+    // themselves is one they are in already, or chose not to be.
+    let own_server = server_name(&session);
+    let lobby = lobby_slug(guild_id);
     let aliases: Vec<String> = STATE
         .read()
         .ok()
@@ -2670,7 +2719,10 @@ async fn join_pinned_channels(app: &tauri::AppHandle, guild_id: &str) {
                 let mut v: Vec<(u8, String)> = g
                     .rooms
                     .values()
-                    .filter_map(|r| Some((r.home_rank?, r.canonical_alias.clone()?)))
+                    .filter_map(|r| {
+                        let a = r.canonical_alias.clone()?;
+                        Some((guild_channel_rank(&a, &own_server, &lobby)?, a))
+                    })
                     .collect();
                 v.sort();
                 v.into_iter().map(|(_, a)| a).collect()
@@ -3106,7 +3158,7 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
             .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
-        let rank = home_rank_for(session, alias.as_deref());
+        let rank = home_rank_for(session, room_id, alias.as_deref());
         gs.rooms.insert(
             room_id.to_string(),
             Room {
@@ -3115,7 +3167,7 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
                 room_id: room_id.to_string(),
                 icon: icon_for(&name, alias.as_deref()),
                 name,
-                canonical_alias: alias,
+                canonical_alias: alias.clone(),
                 topic: chunk
                     .get("topic")
                     .and_then(|t| t.as_str())
@@ -3133,7 +3185,7 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
                 replaced_by: None,
                 invited: false,
                 invited_by: None,
-                section: section_for(room_id, &server),
+                section: section_for(room_id, alias.as_deref(), &server),
                     pfp_attrs: None,
                 player_id: None,
             },
@@ -3229,14 +3281,14 @@ pub async fn browse(
             .filter(|s| !s.is_empty())
             .or_else(|| alias.clone())
             .unwrap_or_else(|| room_id.to_string());
-        let rank = home_rank_for(session, alias.as_deref());
+        let rank = home_rank_for(session, room_id, alias.as_deref());
         out.push(Room {
             home_rank: rank,
             system: is_system_alias(alias.as_deref()),
             room_id: room_id.to_string(),
             icon: icon_for(&name, alias.as_deref()),
             name,
-            canonical_alias: alias,
+            canonical_alias: alias.clone(),
             topic: chunk
                 .get("topic")
                 .and_then(|t| t.as_str())
@@ -3254,7 +3306,7 @@ pub async fn browse(
             replaced_by: None,
             invited: false,
             invited_by: None,
-            section: section_for(room_id, &server),
+            section: section_for(room_id, alias.as_deref(), &server),
             pfp_attrs: None,
             player_id: None,
         });
@@ -3271,12 +3323,12 @@ pub async fn browse(
                 continue;
             }
             out.push(Room {
-                home_rank: home_rank_for(session, Some(&s.alias)),
+                home_rank: home_rank_for(session, &s.room_id, Some(&s.alias)),
                 room_id: s.room_id.clone(),
                 icon: icon_for(&s.name, Some(&s.alias)),
                 name: s.name,
                 system: is_system_alias(Some(&s.alias)),
-                canonical_alias: Some(s.alias),
+                canonical_alias: Some(s.alias.clone()),
                 topic: s.topic,
                 members: s.members,
                 joined: joined.contains(&s.room_id),
@@ -3288,7 +3340,7 @@ pub async fn browse(
                 replaced_by: None,
                 invited: false,
                 invited_by: None,
-                section: section_for(&s.room_id, &server),
+                section: section_for(&s.room_id, Some(&s.alias), &server),
                 pfp_attrs: None,
                 player_id: None,
             });
@@ -4847,10 +4899,14 @@ mod tests {
 
     #[test]
     fn sectioning_splits_own_server_from_federated() {
-        assert_eq!(section_for("!abc:example.com", "example.com"), "local");
-        assert_eq!(section_for("!abc:other.example", "example.com"), "galaxy");
+        assert_eq!(section_for("!abc:example.com", None, "example.com"), "local");
+        assert_eq!(section_for("!abc:other.example", None, "example.com"), "galaxy");
+        // An opaque room id says nothing; the alias does.
+        assert_eq!(section_for("!rPiycNxM26foi9c1foQtDg", Some("#lobby:example.com"), "example.com"), "local");
+        assert_eq!(section_for("!rPiycNxM26foi9c1foQtDg", Some("#lobby:other.example"), "example.com"), "galaxy");
+        assert_eq!(section_for("!rPiycNxM26foi9c1foQtDg", None, "example.com"), "galaxy");
         // No server name known yet — never claim a room is local on a guess.
-        assert_eq!(section_for("!abc:example.com", ""), "galaxy");
+        assert_eq!(section_for("!abc:example.com", Some("#a:example.com"), ""), "galaxy");
     }
 
     #[test]

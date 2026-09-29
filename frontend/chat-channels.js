@@ -447,8 +447,9 @@
         var rest = mine.filter(function (r) { return r.home_rank == null; });
         if (home.length) {
           var hGroup = el('div', 'chat-net-group');
-          // The guild's name: these are ITS channels, from its directory.
-          hGroup.appendChild(el('div', 'chat-net-label', guildName() || 'Structs'));
+          // Pinned: the guild's own channels by default, and whatever the
+          // player pinned after them.
+          hGroup.appendChild(el('div', 'chat-net-label', 'Pinned'));
           var hTable = el('div', 'sui-result-table');
           var hList = el('div', 'sui-result-rows');
           home.forEach(function (r) { hList.appendChild(roomRow(r)); });

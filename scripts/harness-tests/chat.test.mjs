@@ -59,9 +59,10 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('lands on the channel list', w.Chat._state.view === 'channels', w.Chat._state.view);
 
   const labels = all(d, '.chat-net-label').map(text);
-  // Labelled with the guild's NAME: these are its channels, from its directory.
-  check('the home channel sits above every section, under the guild\'s name',
-    labels.join('|') === 'SN Corp|Direct|Local Net|Galaxy Net', labels.join('|'));
+  // The guild's channels are PINNED by default, and the player's own pins
+  // join them there: one group, one word.
+  check('the pinned group sits above every section',
+    labels.join('|') === 'Pinned|Direct|Local Net|Galaxy Net', labels.join('|'));
 
   /* SN Corp is pinned, and pinned by the SERVER's judgement.
    *

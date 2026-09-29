@@ -1972,6 +1972,7 @@ cat > "$CFIX" <<'EOF'
             } };
     },
     matrix_status_sharing: { enabled: true, status: 'Fleet away' },
+    matrix_room_pin: { ok: true },
     matrix_mute: { ok: true },
     matrix_redact: { ok: true },
     // Verification is the safety-critical half: a result arriving over

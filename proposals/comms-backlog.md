@@ -1289,3 +1289,7 @@ default, capabilities in the snapshot.
 ## Chat standard handoff — BUILT 2026-09-28 (needs `make release`)
 
 Ensure-endpoint object rooms, directory-driven guild channels, unencrypted DM reuse, DM fact row. See `comms-session-service.md` → "Chat standard handoff". Owed: power-level gating (≥ 50) once the room payload carries the viewer's power; 429 queueing.
+
+## Player pins — BUILT 2026-09-28
+
+Guild channels = default pins; players pin/unpin any room by the same rule (`pins.rs`, `matrix_room_pin`, beacon in the room header). See `comms-session-service.md` → "Player pins". Not built: pinning from the list row itself (only from inside the room), reordering pins.

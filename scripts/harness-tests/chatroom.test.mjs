@@ -29,6 +29,7 @@ function boot(state = {}, fixtures = {}) {
     markRead: (room, id) => calls.push(['markRead', room, id]),
     typingLine: (names) => names.length ? names.join(', ') + ' typing' : '',
     setMuted: (m) => calls.push(['setMuted', m]), openSearch: (x) => calls.push(['openSearch', x]),
+    setPinned: (m) => calls.push(['setPinned', m]),
     pinnedStrip: () => (S.pinsFixture ? el('div', 'pins') : null), seenLine: () => null,
     ruleNode: (l, a) => el('div', 'rule' + (a ? ' alert' : ''), l), historyButton: () => el('div', 'history', 'Load earlier'),
     messageNode: (m) => el('div', 'msg', m.body), excerpt: (t) => t,
@@ -115,6 +116,24 @@ function boot(state = {}, fixtures = {}) {
   host.querySelector('#chat-input').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
   assert.equal(S.replyTo, null);
   host.querySelector('#chat-reply-chip') && host.querySelector('.chat-reply-cancel').click();
+}
+
+// N. Pin above the list: the same switch for a guild default and for anything else.
+{
+  const { rm, calls, S, w } = boot({ room: { name: 'Galaxy Net', home_rank: null } });
+  w.document.body.appendChild(rm.renderRoom());
+  const pin = w.document.getElementById('chat-room-pin');
+  assert.ok(pin, 'the header carries a pin switch');
+  assert.ok(/Pin this room/.test(pin.title));
+  pin.click();
+  assert.deepEqual(calls.find((c) => c[0] === 'setPinned'), ['setPinned', true]);
+  S.room.home_rank = 0;
+  w.document.body.textContent = '';
+  w.document.body.appendChild(rm.renderRoom());
+  const pinned = w.document.getElementById('chat-room-pin');
+  assert.ok(/unpin/.test(pinned.title), 'a pinned room offers to unpin: ' + pinned.title);
+  pinned.click();
+  assert.deepEqual(calls.filter((c) => c[0] === 'setPinned').pop(), ['setPinned', false]);
 }
 
 console.log('chat-room: all checks passed');
