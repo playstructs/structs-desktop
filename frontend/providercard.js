@@ -6,6 +6,7 @@
  * playercard.js; its emblem frame comes from guildcard.css.
  *
  *   StructsProviderCard.card(p, opts)   the game's planet-card frame
+ *   StructsProviderCard.row(p, opts)    one aligned line (`p.sub` rides the id line)
  *   StructsProviderCard.chip(p, opts)   one inline line
  *
  * `p` is a plain description, already formatted:
@@ -177,6 +178,39 @@
     return node;
   }
 
+  /* ── one aligned line: emblem | Provider · badge / id · range | price | doors
+   * The shape a conversation unfurls: the price is the one reading, the
+   * capacity on offer rides the id line, and the rest is the card's. ──── */
+  function row(p, opts) {
+    opts = opts || {};
+    var P = parts();
+    var node = P.el('div', 'pc-row xp-row');
+    node.setAttribute('data-provider-id', str(p.id));
+    node.appendChild(emblem('sm'));
+    var ident = P.el('div', 'pc-ident');
+    var nm = P.el('div', 'pc-name sui-text-label-block');
+    nm.appendChild(P.el('span', 'pc-nm', 'Provider'));
+    var bd = policyBadge(p);
+    if (bd) nm.appendChild(bd);
+    ident.appendChild(nm);
+    var idl = P.el('div', 'pc-id sui-text-label-block');
+    var line = '#' + str(p.id);
+    if (p.capacity) line += ' · ' + str(p.capacity.min) + ' – ' + str(p.capacity.max);
+    if (p.sub) line += ' · ' + str(p.sub);
+    idl.textContent = line;
+    idl.title = line;
+    ident.appendChild(idl);
+    node.appendChild(ident);
+    var reads = P.el('div', 'pc-reads');
+    var cmp = comparableReading(p);
+    if (cmp) reads.appendChild(cmp);
+    else if (p.rate) reads.appendChild(rateReading(p));
+    node.appendChild(reads);
+    node.appendChild(P.actions(opts.actions));
+    P.wireClick(node, opts);
+    return node;
+  }
+
   /* ── one inline line: price, id, policy ────────────────────────────── */
   function chip(p, opts) {
     opts = opts || {};
@@ -201,6 +235,7 @@
   root.StructsProviderCard = {
     POLICY: POLICY,
     card: card,
+    row: row,
     chip: chip,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

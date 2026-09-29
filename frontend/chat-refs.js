@@ -13,7 +13,8 @@
 //
 //   window.ChatRefs({ el, icon, invoke, fmtCount, go, pfpPortrait, presenceDot,
 //                     render, rentForm, startDm, S, Chat })
-//     → { ID_RE, REF_KINDS, refCard, wantRefs, flushRefs, cardNote, cards }
+//     → { ID_RE, REF_KINDS, refCard, refUnfurl, wantRefs, flushRefs, cardNote, cards,
+//         menuItems, primaryOf }
 (function () {
   'use strict';
   window.ChatRefs = function (ctx) {
@@ -252,7 +253,9 @@
                  onClick: function () { runCardAction(card, a.key, box); } };
       });
       if (card.owner && card.owner.id && card.owner.id !== S.playerId) {
-        acts.push({ icon: 'icon-chat', title: 'Message the owner', onClick: function () { startDm(card.owner.id); } });
+        // `icon-phone`: the icon font has no `icon-chat`, and the door it
+        // named drew as an empty 32px hole on four kinds of card.
+        acts.push({ icon: 'icon-phone', title: 'Message the owner', onClick: function () { startDm(card.owner.id); } });
       }
       var opts = { doors: acts };
       var node;
@@ -366,6 +369,282 @@
       return box;
     }
 
+    /* ── The unfurl: a ROW, which opens to the card ───────────────────────
+     *
+     * What a conversation shows for an object someone named. The card above
+     * is ~190px: two of them fill the window, which is why only the first id
+     * in a message ever opened. A row is the same object on one line, so a
+     * message can show everything it named, and the card is one click away.
+     *
+     * A row carries ONE verb — the thing you most likely came to do — and a
+     * menu holding every other. New abilities go in the menu (`menuItems`),
+     * never onto the row.
+     *
+     * Open/closed and menu state live in `S.refUi`, keyed by message and id,
+     * so a repaint of the timeline draws what the reader left. Toggling swaps
+     * the node in place rather than repainting: the scroll position holds and
+     * an open rent form in another row survives.
+     */
+    function ui() {
+      if (!S.refUi) S.refUi = { cards: {}, menu: null, more: {} };
+      return S.refUi;
+    }
+    // The reader's own player id, from the Matrix id the profile carries.
+    function myId() {
+      var m = /^@(\d{1,2}-\d{1,9}):/.exec((S.profile && S.profile.user_id) || '');
+      return m ? m[1] : (S.playerId || null);
+    }
+    function ownerOfCard(card) {
+      if (card.kind === 'player' || card.kind === 'guild') return null;
+      var o = card.owner_ref || card.owner;
+      return o && typeof o === 'object' && o.id ? o : null;
+    }
+    // "[VX] Korrin", or "yours" — who holds it, as the id line says it.
+    function ownerLabel(card) {
+      var o = ownerOfCard(card);
+      if (!o) return null;
+      if (o.id === myId()) return 'yours';
+      return (o.tag ? '[' + o.tag + '] ' : '') + (o.name || o.id);
+    }
+
+    function menuLabel(card, a) {
+      if (a.key === 'watch_planet' && card.planet_id) return 'Watch planet ' + card.planet_id;
+      if (a.key === 'watch_fleet' && card.fleet_id) return 'Follow fleet ' + card.fleet_id;
+      if (a.key === 'send_alpha') return 'Pay in Team Ops';
+      if (a.key === 'message') return 'Message ' + (card.title || card.id);
+      return a.label;
+    }
+    // Every verb a card has, labelled, in the order the menu lists them.
+    function menuItems(card) {
+      // `title` is the door's tooltip, a word; `label` is the menu's line,
+      // which has room to say what and where.
+      var list = cardActions(card).map(function (a) {
+        return { key: a.key, icon: a.icon || 'icon-info', title: a.label, label: menuLabel(card, a) };
+      });
+      if (card.kind === 'guild' && card.id === S.guildId) {
+        list.push({ key: 'channels', icon: 'icon-guild-directory', title: 'Browse channels' });
+      }
+      var o = ownerOfCard(card);
+      if (o && o.id !== myId()) {
+        list.push({ key: 'message_owner', icon: 'icon-phone', title: 'Message ' + (o.name || o.id) });
+      }
+      list.push({ key: 'copy', icon: 'icon-copy', title: 'Copy ' + card.id });
+      return list;
+    }
+    // The row's one verb, by kind; the first of these the card can do.
+    var PRIMARY = {
+      player: ['message'], guild: ['channels', 'site'], planet: ['watch_planet'], fleet: ['watch_fleet'],
+      struct: ['ask_help', 'watch_planet'], substation: ['message_owner'], provider: ['agreement', 'message_owner'],
+    };
+    function primaryOf(card, items) {
+      var want = PRIMARY[card.kind] || [];
+      // Messaging yourself is not a verb; your own card leads with your planet.
+      if (card.kind === 'player' && card.id === myId()) want = ['watch_planet', 'watch_fleet'];
+      for (var i = 0; i < want.length; i++) {
+        for (var j = 0; j < items.length; j++) if (items[j].key === want[i]) return items[j];
+      }
+      return null;
+    }
+
+    // The row itself, from the same components the rest of the app draws.
+    function rowNode(card, doors, onOpen) {
+      var C = window.StructsCards;
+      var who = ownerLabel(card);
+      var d;
+      if (card.kind === 'player' && window.StructsPlayerCard) {
+        var tag = /^\[([^\]]+)\]/.exec(card.subtitle || '');
+        var alpha = (card.rows || []).filter(function (r) { return r.label === 'Alpha'; })[0];
+        return window.StructsPlayerCard.row({
+          id: card.id, name: card.title || card.id, pfp: card.pfp_attrs || null,
+          charge: card.charge == null ? null : card.charge,
+          sub: card.id === myId() ? 'you' : (tag ? '[' + tag[1] + ']' : null),
+          presence: presenceDot(card.id),
+          readings: alpha ? [{ value: alpha.value, icon: READING_ICONS.Alpha, title: 'Alpha' }] : [],
+        }, { actions: doors, onClick: onOpen });
+      }
+      if (card.kind === 'guild' && window.StructsGuildCard) {
+        var st = card.stats || null;
+        return window.StructsGuildCard.row({
+          id: card.id, name: card.title || null, logo: card.logo || null,
+          tag: card.tag || (/^\[([^\]]+)\]/.exec(card.subtitle || '') || [])[1] || null,
+          readings: st ? [
+            { value: st.members_text, icon: 'sui-icon-players', title: 'Members' },
+            st.capacity_text ? { value: st.capacity_text, icon: 'sui-icon-energy', title: 'Capacity' }
+              : { value: st.alpha_text, icon: 'sui-icon-alpha-matter', title: 'Alpha infused' },
+          ] : [],
+        }, { actions: doors, onClick: onOpen });
+      }
+      if (card.kind === 'provider' && window.StructsProviderCard && window.StructsProviderCard.row) {
+        var p = card.provider || {};
+        var isAlpha = p.rate_denom === 'ualpha';
+        return window.StructsProviderCard.row({
+          id: card.id, sub: who, policy: card.policy || (p.open ? 'openMarket' : null),
+          rate: p.rate_amount != null ? {
+            value: fmtCount(p.rate_amount),
+            denomLabel: isAlpha ? null : (p.denom_label || p.rate_denom || null),
+            denomIcon: isAlpha ? 'sui-icon-alpha-matter' : null,
+          } : null,
+          capacity: p.capacity_min != null ? {
+            min: p.capacity_min_text || fmtCount(p.capacity_min) + 'W',
+            max: p.capacity_max_text || fmtCount(p.capacity_max) + 'W',
+          } : null,
+        }, { actions: doors, onClick: onOpen });
+      }
+      if (!C) return null;
+      var opts = { doors: doors, onClick: onOpen };
+      if (card.kind === 'planet' && card.planet_id) {
+        var raided = !!card.raided;
+        d = C.planet.describe({
+          id: card.id, name: /^Planet \d/.test(String(card.title || '')) ? null : card.title,
+          shield: card.shield, raided: raided,
+          // At stake while it is raided; how built-up it is otherwise.
+          ore: raided ? card.ore_text : null, structs: raided ? null : card.structs_text,
+        });
+        d.title = d.title === 'Planet ' + card.id ? 'Planet' : d.title;
+        d.sub = who; d.foot = null;
+        d.emblem = C.emblem.glyph('icon-planet', 'sm', raided ? 'enemy' : 'player');
+        return C.row(d, opts);
+      }
+      if (card.kind === 'fleet' && card.fleet_id) {
+        d = C.fleet.describe({ id: card.id, away: !!card.away, structs: card.structs_text });
+        d.sub = [card.location ? 'at ' + card.location : null, who].filter(Boolean).join(' · ') || null;
+        d.foot = null;
+        d.emblem = C.emblem.art('Command Ship', 'sm');
+        return C.row(d, opts);
+      }
+      if (card.kind === 'struct' && card.type_name) {
+        var s = {
+          id: card.id, type: card.type_name, health: card.health,
+          maxHealth: card.max_health != null ? card.max_health : null,
+          online: !!card.online, built: !!card.built, destroyed: !!card.destroyed,
+        };
+        d = C.struct.describe(s);
+        d.sub = [card.ambit || null, who].filter(Boolean).join(' · ') || null;
+        d.foot = null; d.marks = null;
+        // What it is doing is the reading; a struct named in chat is nearly
+        // always a question about its work. Health is the card's — and ONLINE
+        // is the ordinary case, so only the other states earn the badge.
+        if (card.work_text && !card.destroyed) {
+          d.readings = [{ value: card.work_text, icon: 'sui-icon-md icon-in-progress', title: 'Work' }];
+        }
+        if (s.online && s.built && !s.destroyed) d.badge = null;
+        d.emblem = C.struct.emblemOf(s, 'sm');
+        return C.row(d, opts);
+      }
+      if (card.kind === 'substation' && card.capacity_text) {
+        d = C.substation.describe({
+          id: card.id, load: card.load_mw, capacity: card.capacity_mw,
+          fmt: function (v) { return v === card.load_mw ? card.load_text : card.capacity_text; },
+        });
+        d.sub = who; d.foot = null;
+        d.emblem = C.emblem.glyph('icon-beacon', 'sm', 'secondary');
+        return C.row(d, opts);
+      }
+      return null;
+    }
+
+    /* `key` names this unfurl (message + id). `openByDefault` is for a line
+     * that IS a request for the card, like /whois. */
+    function refUnfurl(card, key, openByDefault) {
+      var state = ui();
+      var open = state.cards[key] != null ? !!state.cards[key] : !!openByDefault;
+      var box;
+      var items = menuItems(card);
+
+      function swap() {
+        var next = refUnfurl(card, key, openByDefault);
+        if (box.parentNode) box.parentNode.replaceChild(next, box);
+      }
+      function setOpen(on) {
+        state.cards[key] = on ? 1 : 0;
+        if (state.menu === key) state.menu = null;
+        swap();
+      }
+      function closeMenu() {
+        state.menu = null;
+        var old = box.querySelector('.chat-ref-menu');
+        if (old) old.parentNode.removeChild(old);
+        var door = box.querySelector('.chat-ref-more-door');
+        if (door) door.classList.remove('sc-on');
+      }
+      function openMenu(list) {
+        closeMenu();
+        state.menu = key;
+        var menu = el('div', 'chat-ref-menu');
+        list.forEach(function (it) {
+          var a = el('a', 'chat-ref-menu-item');
+          a.href = 'javascript:void(0)';
+          a.setAttribute('data-key', it.key);
+          a.appendChild(icon(it.icon, 'sui-icon-sm'));
+          // The type class sits on the span: the window's own `a` rule sets a
+          // face, and it outranks a class on the anchor itself.
+          a.appendChild(el('span', 'sui-text-label-block', it.label || it.title));
+          a.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            closeMenu();
+            if (it.run) it.run(); else runCardAction(card, it.key, box);
+          });
+          menu.appendChild(a);
+        });
+        menu.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { ev.stopPropagation(); closeMenu(); } });
+        // Under the row it belongs to, before any note or form beneath it.
+        box.insertBefore(menu, box.children[1] || null);
+        var door = box.querySelector('.chat-ref-more-door');
+        if (door) door.classList.add('sc-on');
+      }
+
+      if (open) {
+        box = refCard(card);
+        box.classList.add('chat-mod-open');
+        var acts = box.querySelector('.pc-actions');
+        if (!acts) {
+          var body = box.querySelector('.sui-planet-card-body');
+          if (body) {
+            var foot = body.querySelector('.pc-foot');
+            if (!foot) { foot = el('div', 'pc-foot'); body.appendChild(foot); }
+            acts = el('div', 'pc-actions'); foot.appendChild(acts);
+          }
+        }
+        if (acts) {
+          [{ icon: 'icon-copy', title: 'Copy ' + card.id, cls: 'chat-ref-copy', run: function () { runCardAction(card, 'copy', box); } },
+           { icon: 'icon-chevron-up', title: 'Close', cls: 'chat-ref-close', run: function () { setOpen(false); } }].forEach(function (it) {
+            var a = el('a', 'pc-act ' + it.cls);
+            a.href = 'javascript:void(0)';
+            a.title = it.title;
+            a.appendChild(icon(it.icon, 'sui-icon-md'));
+            a.addEventListener('click', function (ev) { ev.stopPropagation(); it.run(); });
+            acts.appendChild(a);
+          });
+        }
+      } else {
+        var first = primaryOf(card, items);
+        var rest = items.filter(function (it) { return it !== first; });
+        rest.unshift({ key: 'open', icon: 'icon-chevron-down', title: 'Open the card', run: function () { setOpen(true); } });
+        var doors = [];
+        if (first) doors.push({ icon: first.icon, title: first.title, onClick: function () { runCardAction(card, first.key, box); } });
+        doors.push({ icon: 'icon-menu', title: 'More', onClick: function (ev, node) {
+          if (node) node.classList.add('chat-ref-more-door');
+          if (box.querySelector('.chat-ref-menu')) closeMenu(); else openMenu(rest);
+        } });
+        var row = rowNode(card, doors, function () { setOpen(true); });
+        if (!row) {
+          // A kind with no row shape (an older Rust, a missing component)
+          // keeps the card it always had.
+          box = refCard(card);
+        } else {
+          row.title = 'Open the card';
+          box = el('div', 'chat-ref chat-mod-card chat-mod-row chat-kind-' + (card.kind || 'thing'));
+          box.appendChild(row);
+          var more = row.querySelectorAll('.pc-act');
+          if (more.length) more[more.length - 1].classList.add('chat-ref-more-door');
+          if (state.menu === key) openMenu(rest);
+        }
+      }
+      box.setAttribute('data-id', card.id);
+      box.setAttribute('data-ref-key', key);
+      return box;
+    }
+
     // A card reports its own outcome, in place. A toast would land in another
     // window and a dialogue would cover the conversation the card belongs to.
     function cardNote(box, text, isError) {
@@ -378,6 +657,21 @@
 
     function runCardAction(card, key, box) {
       if (key === 'message') { startDm(card.id); return; }
+      if (key === 'message_owner') {
+        var o = ownerOfCard(card);
+        if (o) startDm(o.id); else cardNote(box, 'no owner to message', true);
+        return;
+      }
+      if (key === 'channels') { go('browse'); return; }
+      if (key === 'copy') {
+        // The id and nothing else: it is what every command and search takes.
+        var clip = typeof navigator !== 'undefined' && navigator.clipboard;
+        if (!clip || !clip.writeText) { cardNote(box, 'clipboard unavailable', true); return; }
+        clip.writeText(String(card.id))
+          .then(function () { cardNote(box, 'copied ' + card.id); })
+          .catch(function (e) { cardNote(box, String(e), true); });
+        return;
+      }
       if (key === 'watch_planet' || key === 'watch_fleet') {
         var isPlanet = key === 'watch_planet';
         var target = isPlanet ? card.planet_id : card.fleet_id;
@@ -440,8 +734,8 @@
 
 
     return {
-      ID_RE: ID_RE, REF_KINDS: REF_KINDS, refCard: refCard, wantRefs: wantRefs, flushRefs: flushRefs,
-      cardNote: cardNote, cards: refCards,
+      ID_RE: ID_RE, REF_KINDS: REF_KINDS, refCard: refCard, refUnfurl: refUnfurl, wantRefs: wantRefs, flushRefs: flushRefs,
+      cardNote: cardNote, cards: refCards, menuItems: menuItems, primaryOf: primaryOf,
     };
   };
 })();

@@ -127,5 +127,22 @@ const OFFER = {
   check('an inert chip is not a link', inert.tagName === 'SPAN' && text(inert) === '3 snack / mW / blk #10-9', text(inert));
 }
 
+{
+  console.log('\n— row');
+  let opened = 0, rented = 0;
+  const row = XP.row(Object.assign({}, OFFER, { sub: '[OH] Someone' }), {
+    actions: [{ icon: 'icon-transfers', title: 'Rent capacity', onClick: () => { rented++; } }], onClick: () => { opened++; } });
+  check('one line: emblem, identity, the price, the doors',
+    row.classList.contains('pc-row') && !!row.querySelector('.gc-emblem.gc-sm .icon-transfers')
+      && !!row.querySelector('.pc-ident') && row.querySelectorAll('.pc-res').length === 1 && row.querySelectorAll('.pc-act').length === 1);
+  check('the policy is the badge and the range rides the id line',
+    text(row.querySelector('.sui-badge')) === 'OPEN' && /^#10-1 · .+ – .+ · \[OH\] Someone$/.test(text(row.querySelector('.pc-id'))),
+    text(row.querySelector('.pc-id')));
+  row.querySelector('.pc-act').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('a door is never also a row click', rented === 1 && opened === 0);
+  row.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('clicking the row opens', opened === 1);
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

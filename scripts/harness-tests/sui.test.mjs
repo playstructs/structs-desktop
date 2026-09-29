@@ -49,7 +49,10 @@ const BUDGET = {
   // people use, so it wants doing deliberately rather than in a sweep.
   // chat.html −11 (2026-09-09): reactions and replies moved to chat-rows.css,
   // where the raid rail and the Terminal's ROOM card can see them too.
-  'chat.html':          [0, 54],
+  // chat.html +3 (2026-09-29): the reference ROWS — the unfurl column's 600px,
+  // the 340px a card keeps inside it and the action menu's 240px floor, none
+  // of which SUI has a token for. (It stood at 55 against 54 before this.)
+  'chat.html':          [0, 57],
   'chat.js':            [0, 0],
   // The sections extracted from chat.js (2026-09-05) and the shared
   // listener helper: built with textContent and tokens, no pixels of their own.

@@ -158,11 +158,15 @@ fn current_block() -> f64 {
 fn player_card(id: &str, v: &Value) -> Value {
     let p = v.get("Player").unwrap_or(&Value::Null);
     let grid = v.get("gridAttributes").unwrap_or(&Value::Null);
-    let alpha = v
-        .get("playerInventory")
-        .and_then(|i| i.get("rocks"))
-        .map(|r| num(r.get("amount")))
-        .unwrap_or(0.0);
+    // Missing inventory is unknown, not an empty wallet. Snapshot player
+    // entities intentionally omit bank balances.
+    let alpha = v.pointer("/playerInventory/rocks/amount")
+        .and_then(|amount| match amount {
+            Value::String(s) => s.parse::<f64>().ok(),
+            Value::Number(n) => n.as_f64(),
+            _ => None,
+        })
+        .filter(|amount| amount.is_finite() && *amount >= 0.0);
 
     let name = text(p.get("name"));
     let ident = super::directory::get(id);
@@ -206,7 +210,7 @@ fn player_card(id: &str, v: &Value) -> Value {
         // a summary. What is left is what you cannot get from an action:
         // how rich they are, and whether they are holding their power.
         "rows": [
-            row("Alpha", format_alpha(alpha)),
+            row("Alpha", alpha.map(format_alpha).unwrap_or_else(|| "—".into())),
             row("Energy", format!("{}/{}", format_power(load), format_power(capacity))),
         ],
         "actions": actions,
@@ -253,7 +257,6 @@ fn planet_card(id: &str, v: &Value) -> Value {
         "ore_text": format_ore(num(grid.get("ore"))),
         "structs_text": format!("{} / {}", filled, total),
         "raided": status == "raided" || status == "underRaid",
-        "planet_id": id,
         "planet_id": id,
     })
 }
@@ -371,7 +374,6 @@ fn fleet_card(id: &str, v: &Value) -> Value {
         "away": status == "away",
         "location": text(f.get("locationId")),
         "structs_text": format!("{} / {}", filled, total),
-        "fleet_id": id,
         "fleet_id": id,
     })
 }
@@ -597,7 +599,14 @@ pub async fn resolve(id: &str) -> Option<Value> {
     }
     // A destroyed struct or a bad id answers 500 "object not found"; that is a
     // normal outcome here, not something to report.
-    let v = client.entity(entity, id).await.ok()?;
+    // Match the player sheet's full LCD response. The perception snapshot
+    // has identity/grid state but no playerInventory, so it cannot supply
+    // the Alpha reading. The card cache still bounds these network reads.
+    let v = if kind == 1 {
+        client.query_entity(entity, id).await.ok()?
+    } else {
+        client.entity(entity, id).await.ok()?
+    };
 
     let card = match kind {
         0 => guild_card(id, &v),
@@ -735,6 +744,29 @@ mod tests {
         assert_eq!(compact(1_000_000_000.0), "1B");
         // A raw 1000000 pushed "blocks" onto its own line in a 320px card.
         assert!(compact(1_000_000.0).len() <= 3);
+    }
+
+    #[test]
+    fn player_alpha_uses_inventory_micrograms() {
+        let v = json!({
+            "Player": { "name": "JPEG" },
+            "playerInventory": { "rocks": { "amount": "106000000", "denom": "ualpha" } }
+        });
+        assert_eq!(player_card("1-61", &v)["rows"][0]["value"], "106g");
+    }
+
+    #[test]
+    fn absent_player_inventory_is_not_a_zero_balance() {
+        // This is the perception snapshot shape that caused the chat/sheet
+        // discrepancy: power exists while the bank inventory is absent.
+        let v = json!({ "Player": { "name": "JPEG" }, "gridAttributes": {} });
+        assert_eq!(player_card("1-61", &v)["rows"][0]["value"], "—");
+        for amount in [Value::Null, json!("bad"), json!("NaN"), json!("-1")] {
+            let v = json!({ "playerInventory": { "rocks": { "amount": amount } } });
+            assert_eq!(player_card("1-61", &v)["rows"][0]["value"], "—");
+        }
+        let v = json!({ "playerInventory": { "rocks": { "amount": "0" } } });
+        assert_eq!(player_card("1-61", &v)["rows"][0]["value"], format_alpha(0.0));
     }
 
     #[test]

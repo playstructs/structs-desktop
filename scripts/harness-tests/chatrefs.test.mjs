@@ -91,4 +91,28 @@ function boot(fixtures) {
   assert.equal(drawn[1][0].charge, null, 'an unknown charge draws no battery rather than an empty one');
 }
 
+// 5. The unfurl: one verb by kind, the rest in the menu, and the id on the clipboard is the id alone.
+{
+  const { refs, calls, ctx, w } = boot({});
+  ctx.S.profile = { user_id: '@1-194:matrix.x' };
+  const keys = (card) => refs.menuItems(card).map((i) => i.key);
+  const planet = { id: '2-223', kind: 'planet', planet_id: '2-223', owner: { id: '1-61', name: 'JPEG' }, actions: [{ key: 'watch_planet', label: 'Watch', icon: 'icon-planet' }] };
+  assert.deepEqual(keys(planet), ['watch_planet', 'message_owner', 'copy']);
+  assert.equal(refs.primaryOf(planet, refs.menuItems(planet)).key, 'watch_planet');
+  const mine = Object.assign({}, planet, { owner: { id: '1-194', name: 'Me' } });
+  assert.deepEqual(keys(mine), ['watch_planet', 'copy'], 'nobody messages themselves');
+  const working = { id: '5-1', kind: 'struct', type_name: 'Ore Extractor', work_task: 'MINE', planet_id: '2-223', actions: [{ key: 'watch_planet', label: 'Watch', icon: 'icon-planet' }] };
+  assert.equal(refs.primaryOf(working, refs.menuItems(working)).key, 'ask_help', 'a working struct leads with help');
+  const closed = { id: '10-2', kind: 'provider', owner: { id: '1-9', name: 'X' }, actions: [] };
+  assert.equal(refs.primaryOf(closed, refs.menuItems(closed)).key, 'message_owner', 'a closed market cannot be rented, so the row leads with its owner');
+  const self = { id: '1-194', kind: 'player', planet_id: '2-1', actions: [{ key: 'watch_planet', label: 'Planet' }, { key: 'message', label: 'Message' }] };
+  assert.equal(refs.primaryOf(self, refs.menuItems(self)).key, 'watch_planet');
+
+  // With no row component loaded the unfurl is the card it always was.
+  const box = refs.refUnfurl(planet, '$1|2-223', false);
+  assert.ok(box.className.includes('chat-kind-planet'));
+  assert.equal(box.getAttribute('data-id'), '2-223');
+  void calls; void w;
+}
+
 console.log('chatrefs: ok');

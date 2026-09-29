@@ -837,6 +837,16 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('a failed status ask names itself on the connection page', /Comms unreachable/.test(d.body.textContent) && /no tauri bridge for matrix_status/.test(d.body.textContent) && !/No comms server/.test(d.body.textContent), d.body.textContent.slice(0, 200));
 }
 
+// A reference unfurls as a ROW; clicking the row opens it to the card, in
+// place. Returns the node that replaced it.
+async function openCard(w, ref) {
+  const key = ref.getAttribute('data-ref-key');
+  const host = ref.parentNode;
+  ref.querySelector('.pc-row').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  return Array.from(host.children).find((n) => n.getAttribute('data-ref-key') === key);
+}
+
 {
   console.log('\n— reference cards');
   const { w, d } = await open();
@@ -856,11 +866,16 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('the surrounding words survive intact',
     text(msg).includes('hitting') && text(msg).includes('not'), text(msg));
 
-  // Only the FIRST reference opens itself. A message naming four objects would
-  // otherwise bury itself under four cards.
+  // Every NEW object a message names unfurls, as a row — three at most. A row
+  // is one line, so a message naming four things no longer buries itself.
   let cards = msg.querySelectorAll('.chat-ref');
-  check('only the first reference opens itself', cards.length === 1, String(cards.length));
-  check('and it is the first one named',
+  check('each new object unfurls, three at most', cards.length === 3, String(cards.length));
+  check('…as rows, not cards',
+    Array.from(cards).every((c) => c.classList.contains('chat-mod-row') && !c.querySelector('.pc-card')));
+  check('…in the order they were named',
+    Array.from(cards).map((c) => c.getAttribute('data-id')).join(',') === '2-15361,5-2184,1-61',
+    Array.from(cards).map((c) => c.getAttribute('data-id')).join(','));
+  check('the first is the first one named',
     text(cards[0]).includes('2-15361') && text(cards[0]).includes('25'), text(cards[0]));
 
   // Design contract: ONE frame per card, typed by a class. The card used to
@@ -873,28 +888,51 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   // Since the catalogue (structs-cards.js) a planet reference is the same
   // planet card the Terminal draws: shield as a reading with its glyph, the
   // owner as a person, the watch as an emblem click and a door.
-  check('a planet reference is the catalogue planet card',
-    cards[0].querySelector('.pc-card.sc-card[data-kind="planet"]') !== null
+  check('a planet reference is the catalogue planet row',
+    cards[0].querySelector('.pc-row.sc-row[data-kind="planet"]') !== null
       && cards[0].querySelector('.pc-res[title="Planetary shield"]') !== null
-      && text(cards[0]).includes('Phoniffer')
-      && cards[0].querySelector('.pc-act[title="Watch"]') !== null,
+      && text(cards[0]).includes('Phoniffer'),
     cards[0].innerHTML.slice(0, 300));
+  // ONE verb on the row, and the menu for every other.
+  const rowDoors = Array.from(cards[0].querySelectorAll('.pc-act')).map((b) => b.title);
+  check('a row carries one verb and the menu', rowDoors.join(',') === 'Watch,More', rowDoors.join(','));
+  cards[0].querySelector('.pc-act[title="More"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const menu = Array.from(cards[0].querySelectorAll('.chat-ref-menu-item')).map((b) => text(b));
+  check('the menu holds the rest: open, message the owner, copy',
+    menu.join('|') === 'Open the card|Message Phoniffer|Copy 2-15361', menu.join('|'));
+  w.Chat.render();
+  await tick();
+  const again = all(d, '.chat-msg').find((n) => text(n).includes('hitting')).querySelector('.chat-ref');
+  check('an open menu survives a repaint', again.querySelectorAll('.chat-ref-menu-item').length === 3);
+  again.querySelector('.pc-act[title="More"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('…and closes on the second click', again.querySelector('.chat-ref-menu') === null);
 
+  // The row opens to the card it always was, in place.
+  const planetCard = await openCard(w, again);
+  check('clicking the row opens the catalogue planet card',
+    planetCard.querySelector('.pc-card.sc-card[data-kind="planet"]') !== null
+      && planetCard.querySelector('.pc-res[title="Planetary shield"]') !== null
+      && text(planetCard).includes('Phoniffer')
+      && planetCard.querySelector('.pc-act[title="Watch"]') !== null,
+    planetCard.innerHTML.slice(0, 300));
+  planetCard.querySelector('.pc-act[title="Close"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  check('…and Close folds it back to the row',
+    all(d, '.chat-msg').find((n) => text(n).includes('hitting')).querySelector('.chat-ref').classList.contains('chat-mod-row'));
 
-  // The rest are chips that open theirs.
+  // Past the cap, an id is a link that opens its row.
   const openable = Array.from(msg.querySelectorAll('.chat-id.chat-mod-openable'));
-  check('later references are openable', openable.length === 3, String(openable.length));
+  check('an object past the cap is openable', openable.length === 1 && text(openable[0]) === '1-1945',
+    openable.map((c) => text(c)).join(','));
   check('the first is not a control',
     !msg.querySelector('.chat-id').className.includes('chat-mod-openable'));
 
-  openable.find((c) => text(c) === '5-2184')
-    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  await tick();
   const opened = Array.from(
     all(d, '.chat-msg').find((n) => text(n).includes('hitting')).querySelectorAll('.chat-ref'));
-  check('opening one shows its card', opened.length === 2, String(opened.length));
-  check('a struct card carries the work it is doing',
-    opened.some((c) => text(c).includes('Mining')),
+  check('a struct row carries the work it is doing',
+    opened.some((c) => c.getAttribute('data-id') === '5-2184' && text(c).includes('Mining')),
     opened.map((c) => text(c)).join(' | '));
 
   // A fleet and a substation, named in one line: the catalogue draws them the
@@ -903,11 +941,10 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   // Opening a chip re-renders the timeline, so the message node is re-found
   // after each click rather than held.
   const findRecruit = () => all(d, '.chat-msg').find((n) => text(n).includes('is recruiting'));
-  for (const [id, kind] of [['9-61', 'fleet'], ['4-4', 'substation']]) {
-    Array.from(findRecruit().querySelectorAll('.chat-id.chat-mod-openable')).find((c) => text(c) === id)
-      .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-    // The card arrives from the reference lookup, not from cache.
-    await until(() => findRecruit().querySelector('.chat-kind-' + kind + ' .pc-card'));
+  for (const kind of ['fleet', 'substation']) {
+    // The row arrives from the reference lookup, not from cache.
+    await until(() => findRecruit().querySelector('.chat-kind-' + kind + ' .pc-row'));
+    await openCard(w, findRecruit().querySelector('.chat-kind-' + kind));
   }
   const recruit = findRecruit();
   const fleetCard = recruit.querySelector('.chat-kind-fleet .pc-card[data-kind="fleet"]');
@@ -932,23 +969,14 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   check('…and its owner can be messaged from the card',
     subCard && subCard.querySelector('.pc-act[title="Message the owner"]') !== null);
 
-  // Clicking again closes it — the chip is a toggle, not a one-way door.
-  all(d, '.chat-msg').find((n) => text(n).includes('hitting'))
-    .querySelectorAll('.chat-id.chat-mod-openable')[0]
-    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  await tick();
-
   // A player card is also a way to reach them.
-  const msgNow = all(d, '.chat-msg').find((n) => text(n).includes('hitting'));
-  Array.from(msgNow.querySelectorAll('.chat-id.chat-mod-openable'))
-    .find((c) => text(c) === '1-61')
-    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  await tick();
-  const playerCard = Array.from(
+  const playerRow = Array.from(
     all(d, '.chat-msg').find((n) => text(n).includes('hitting')).querySelectorAll('.chat-ref'))
-    // The planet card also carries a portrait now (its owner as a person),
-    // so the player card is found by its kind, not by having a face.
     .find((c) => c.classList.contains('chat-kind-player'));
+  check('a player row leads with Message',
+    Array.from(playerRow.querySelectorAll('.pc-act')).map((b) => b.title).join(',') === 'Message,More',
+    Array.from(playerRow.querySelectorAll('.pc-act')).map((b) => b.title).join(','));
+  const playerCard = await openCard(w, playerRow);
   check('a player card carries their portrait',
     playerCard.querySelectorAll('.pfp-viewer-layer').length === 5,
     String(playerCard.querySelectorAll('.pfp-viewer-layer').length));
@@ -967,7 +995,7 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   const actions = Array.from(playerCard.querySelectorAll('.pc-act'))
     .map((b) => b.title);
   check('a player card offers what the player has',
-    actions.join(',') === 'Planet,Fleet,Message,Pay', actions.join(','));
+    actions.join(',') === 'Planet,Fleet,Message,Pay,Copy 1-61,Close', actions.join(','));
   check('…as icons, not words',
     Array.from(playerCard.querySelectorAll('.pc-act')).every((b) => text(b) === ''));
 
@@ -1419,7 +1447,9 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
   await until(() => d.querySelectorAll('.chat-ref').length > 0);
   const msg = all(d, '.chat-msg').find((n) => text(n).includes('recruiting'));
-  const card = msg.querySelector('.chat-ref.chat-kind-guild');
+  const guildRow = msg.querySelector('.chat-ref.chat-kind-guild');
+  check('a guild unfurls as the shared guild row', !!guildRow && !!guildRow.querySelector('.pc-row.gc-row'), text(msg));
+  const card = await openCard(w, guildRow);
   check('a guild gets the shared guild card', !!card && !!card.querySelector('.gc-card.sui-planet-card'), text(msg));
   check('…tag and name in the header', /^\[SNC\] SN Corp/.test(text(card.querySelector('.pc-name'))), text(card.querySelector('.pc-name')));
   check('…its logo as the emblem', !!card.querySelector('.gc-emblem img[src="img/logo-snc.gif"]'));
@@ -1446,7 +1476,12 @@ const all = (d, sel) => Array.from(d.querySelectorAll(sel));
   await until(() => d.querySelectorAll('.chat-ref').length > 0);
 
   const msg = all(d, '.chat-msg').find((n) => text(n).includes('renting from'));
-  const card = msg.querySelector('.chat-ref');
+  const offer = msg.querySelector('.chat-ref');
+  check('a provider unfurls as a row that leads with renting',
+    !!offer && !!offer.querySelector('.pc-row.xp-row')
+      && Array.from(offer.querySelectorAll('.pc-act')).map((b) => b.title).join(',') === 'Rent capacity,More',
+    text(msg));
+  const card = await openCard(w, offer);
   check('a provider gets a card', !!card, text(msg));
   check('…as the shared provider card', !!card.querySelector('.xp-card.sui-planet-card'));
   // Per MILLIWATT: the chain charges `duration × capacity × rate` with

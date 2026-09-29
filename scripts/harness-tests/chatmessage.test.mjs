@@ -132,4 +132,51 @@ function boot(state = {}, fixtures = {}) {
   assert.equal(has({}), true);
 }
 
+// R. What unfurls: every new object up to three, nothing already named just
+// above, and a message that is only an id gives its place to the row.
+{
+  const t0 = 1787900000000;
+  const line = (n, body, extra) => Object.assign({ event_id: '$' + n, sender: '@a', body, ts: t0 + n * 1000 }, extra || {});
+  const messages = [line(1, 'raid 2-223'), line(2, 'joined', { kind: 'event' }), line(3, '2-223 again, with 9-4'), line(4, '2-223'),
+    line(5, 'a 1-1 b 1-2 c 1-3 d 1-4'), line(6, 'late 2-223', { ts: t0 + 3600 * 1000 })];
+  const { msg, S, ctx } = boot({ messages });
+  const plan = (m) => { const p = msg.unfurlPlan(m); return { auto: Object.keys(p.auto).join(','), held: p.held.join(','), bare: p.bare }; };
+  assert.deepEqual(plan(messages[0]), { auto: '2-223', held: '', bare: false });
+  assert.deepEqual(plan(messages[2]), { auto: '9-4', held: '', bare: false }, 'named two lines up: no second row, and an event line is not a line');
+  assert.deepEqual(plan(messages[3]), { auto: '2-223', held: '', bare: true }, 'a bare id always shows its row');
+  assert.deepEqual(plan(messages[4]), { auto: '1-1,1-2,1-3', held: '1-4', bare: false }, 'three rows, the fourth counted');
+  assert.deepEqual(plan(messages[5]), { auto: '2-223', held: '', bare: false }, 'an hour on, it is new again');
+
+  // Drawn: rows through refUnfurl, keyed by message and id.
+  const keys = [];
+  ctx.refUnfurl = null;
+  const boot2 = boot({ messages });
+  const el2 = boot2.ctx.el;
+  Object.assign(boot2.ctx.refCards, { '2-223': { id: '2-223' }, '9-4': { id: '9-4' }, '1-1': { id: '1-1' }, '1-2': { id: '1-2' }, '1-3': { id: '1-3' }, '1-4': { id: '1-4' } });
+  boot2.ctx.refUnfurl = (c, key, open) => { keys.push([key, open]); return el2('div', 'card', c.id); };
+  const m2 = boot2.w.ChatMessage(boot2.ctx);
+  const repeat = m2.messageNode(messages[2], messages[1]);
+  assert.equal(JSON.stringify([...repeat.querySelectorAll('.card')].map((c) => c.textContent)), JSON.stringify(['9-4']));
+  assert.ok(repeat.querySelector('.chat-id.chat-mod-openable').textContent === '2-223', 'the repeat is a link that opens its row here');
+  assert.ok(!repeat.querySelector('.chat-msg-body').classList.contains('hidden'));
+  const bare = m2.messageNode(messages[3], messages[2]);
+  assert.ok(bare.querySelector('.chat-msg-body').classList.contains('hidden'), 'the row stands in for a bare id');
+  assert.equal(bare.querySelectorAll('.card').length, 1);
+  assert.deepEqual(keys.pop(), ['$4|2-223', false]);
+  const whois = m2.messageNode({ body: '1-1', local: true, ts: t0 }, null);
+  assert.equal(keys.pop()[1], true, 'a local line that is only an id asked for the card');
+  assert.ok(whois.querySelector('.card'));
+  const many = m2.messageNode(messages[4], messages[3]);
+  assert.equal(many.querySelectorAll('.card').length, 3);
+  const more = many.querySelector('.chat-ref-more');
+  assert.equal(more.textContent, '+1 more');
+  more.click();
+  assert.equal(boot2.S.openRefs['1-4'], 1);
+  assert.equal(m2.messageNode(messages[4], messages[3]).querySelectorAll('.card').length, 4);
+  // Unresolved: the id stays on screen as text until there is a row to replace it.
+  const b3 = boot({ messages });
+  assert.ok(!b3.msg.messageNode(messages[3], null).querySelector('.chat-msg-body').classList.contains('hidden'));
+  void S;
+}
+
 console.log('chat-message: all checks passed');

@@ -139,9 +139,11 @@
     // Who is typing in the room being watched. Ephemeral: replaced wholesale
     // by each m.typing, never accumulated.
     typing: [],
-    // Object ids whose card the reader has opened by hand. The first
-    // reference in a message opens itself; these are the rest.
+    // Object ids whose row the reader has opened by hand: ones a message
+    // named but did not unfurl (already on screen above, or past the cap).
     openRefs: {},
+    // Which rows are open as cards, and which menu is up (chat-refs.js).
+    refUi: { cards: {}, menu: null, more: {} },
     // Scrollback: whether the room has more history, and whether a page is
     // already in flight.
     moreHistory: true,
@@ -316,7 +318,7 @@
     S: S, Chat: Chat,
   });
   var ID_RE = refs.ID_RE, REF_KINDS = refs.REF_KINDS, refCards = refs.cards;
-  var refCard = refs.refCard, wantRefs = refs.wantRefs, cardNote = refs.cardNote;
+  var refCard = refs.refCard, refUnfurl = refs.refUnfurl, wantRefs = refs.wantRefs, cardNote = refs.cardNote;
 
   // ── Renting capacity ──────────────────────────────────────────────────────
   // Lives in chat-rent.js. `cardNote` is the refs module's, assigned just
@@ -472,7 +474,7 @@
   var message = window.ChatMessage({
     el: el, invoke: invoke, render: function () { render(); }, mentionsMe: mentionsMe,
     startDm: function (who, body) { return startDm(who, body); },
-    refCards: refCards, refCard: refCard, wantRefs: wantRefs, ID_RE: ID_RE, REF_KINDS: REF_KINDS,
+    refCards: refCards, refCard: refCard, refUnfurl: refUnfurl, wantRefs: wantRefs, ID_RE: ID_RE, REF_KINDS: REF_KINDS,
     loadHistory: function () { return loadHistory(); }, retrySend: function (m) { return retrySend(m); },
     workCard: function (m) { return workCard(m); }, serverIdOf: function (m) { return serverIdOf(m); },
     reactButton: function (m, id) { return reactButton(m, id); }, reactionRow: function (m) { return reactionRow(m); },

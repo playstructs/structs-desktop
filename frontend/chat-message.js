@@ -1,6 +1,6 @@
 // Comms — one message in the timeline: the shared row from chatrow.js plus
 // what only a full timeline has (react, reply, pin, edit, delete), the body
-// with the ids and links inside it marked, the quote line, the cards for
+// with the ids and links inside it marked, the quote line, the rows for
 // whatever it named, pictures, and the labelled rules between messages.
 //
 // The body is textContent for every character: it is split on span
@@ -11,17 +11,17 @@
 // scripts/harness-tests/chatmessage.test.mjs can drive it with a stub
 // `invoke` and a stub StructsChatRow:
 //
-//   window.ChatMessage({ el, invoke, render, mentionsMe, startDm, refCards, refCard, wantRefs,
+//   window.ChatMessage({ el, invoke, render, mentionsMe, startDm, refCards, refCard, refUnfurl, wantRefs,
 //                        ID_RE, REF_KINDS, loadHistory, retrySend, workCard, serverIdOf,
 //                        reactButton, reactionRow, editButton, deleteButton, replyButton,
 //                        pinToggle, isPinned, jumpTo, replyWho, S, Chat })
 //     → { messageNode, trimUrl, refIdsIn, spansIn, fillBody, linkChip, idChip,
-//         historyButton, imageNode, ruleNode, URL_RE }
+//         historyButton, imageNode, ruleNode, URL_RE, unfurlPlan }
 (function () {
   'use strict';
   window.ChatMessage = function (ctx) {
     var el = ctx.el, invoke = ctx.invoke, render = ctx.render, mentionsMe = ctx.mentionsMe, startDm = ctx.startDm;
-    var refCards = ctx.refCards, refCard = ctx.refCard, wantRefs = ctx.wantRefs, ID_RE = ctx.ID_RE, REF_KINDS = ctx.REF_KINDS;
+    var refCards = ctx.refCards, refCard = ctx.refCard, refUnfurl = ctx.refUnfurl, wantRefs = ctx.wantRefs, ID_RE = ctx.ID_RE, REF_KINDS = ctx.REF_KINDS;
     var loadHistory = ctx.loadHistory, retrySend = ctx.retrySend, workCard = ctx.workCard, serverIdOf = ctx.serverIdOf;
     var reactButton = ctx.reactButton, reactionRow = ctx.reactionRow, editButton = ctx.editButton, deleteButton = ctx.deleteButton;
     var replyButton = ctx.replyButton, pinToggle = ctx.pinToggle, isPinned = ctx.isPinned, jumpTo = ctx.jumpTo, replyWho = ctx.replyWho;
@@ -113,27 +113,44 @@
       if (kind === 'emote') body.classList.add('chat-mod-emote');
       else if (kind === 'notice') body.classList.add('chat-mod-notice');
       else if (kind === 'unknown') body.classList.add('chat-mod-unknown');
-      fillBody(body, m.body || '', m.local);
+      var plan = unfurlPlan(m);
+      fillBody(body, m.body || '', m.local, plan.auto);
       wrap.appendChild(body);
 
-      // Cards for whatever the message named, under it. Local lines get them too
-      // — /whois is exactly "show me this card".
-      //
-      // Only the FIRST reference expands on its own. A message naming four
-      // objects would otherwise bury itself under four cards, and the point of a
-      // summary is to be an aside. The rest are chips you can open.
-      {
-        var ids = refIdsIn(m.body);
-        if (ids.length) {
-          wantRefs(ids);
-          var cards = el('div', 'chat-refs');
-          ids.forEach(function (id, i) {
-            if (i > 0 && !S.openRefs[id]) return;
-            var card = refCards[id];
-            if (card) cards.appendChild(refCard(card));
+      // What the message named, under it, as rows that open to cards. Local
+      // lines get them too — /whois is exactly "show me this card".
+      if (plan.ids.length) {
+        wantRefs(plan.ids);
+        var key = msgKey(m);
+        var rows = el('div', 'chat-refs');
+        var drawn = 0;
+        plan.ids.forEach(function (id) {
+          if (!plan.auto[id] && !S.openRefs[id]) return;
+          var card = refCards[id];
+          if (!card) return;
+          rows.appendChild(refUnfurl
+            ? refUnfurl(card, key + '|' + id, plan.bare && !!m.local)
+            : refCard(card));
+          drawn++;
+        });
+        // Named, new to the conversation, and past the cap: counted, not drawn.
+        var held = plan.held.filter(function (id) { return refCards[id] && !S.openRefs[id]; });
+        if (held.length) {
+          var more = el('a', 'chat-ref-more');
+          more.appendChild(el('span', 'sui-text-label-block', '+' + held.length + ' more'));
+          more.href = 'javascript:void(0)';
+          more.title = 'Show ' + held.join(', ');
+          more.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            held.forEach(function (id) { S.openRefs[id] = 1; });
+            render();
           });
-          if (cards.childNodes.length) wrap.appendChild(cards);
+          rows.appendChild(more);
         }
+        if (rows.childNodes.length) wrap.appendChild(rows);
+        // A message that is ONLY an id said nothing the row does not: the row
+        // stands in for it. Until the row exists the id stays, as text.
+        if (plan.bare && drawn) body.classList.add('hidden', 'chat-mod-bare');
       }
 
       // Why it did not send, and a way to send it again. The text itself is
@@ -159,6 +176,55 @@
       if (reacts) wrap.appendChild(reacts);
       return wrap;
     }
+
+    /* Which of the ids a message names unfurl on their own.
+     *
+     * Every NEW object does, up to MAX_ROWS. An object somebody named in the
+     * last few messages does not: a room arguing about one raid names it in
+     * every other line, and the row is already on screen. Its id stays a link
+     * that opens the row here. A message that is only an id always shows it —
+     * the row is all that message says.
+     *
+     * A pure function of the timeline, so every repaint agrees with the last.
+     */
+    var MAX_ROWS = 3;
+    var NEAR_MESSAGES = 8;
+    var NEAR_MS = 15 * 60 * 1000;
+
+    function msgKey(m) {
+      return String(serverIdOf(m) || m.event_id || m.local_id || ('t' + (m.ts || 0)));
+    }
+    function namedJustAbove(m, id) {
+      var list = S.messages || [];
+      var at = list.indexOf(m);
+      if (at <= 0) return false;
+      var looked = 0;
+      for (var i = at - 1; i >= 0 && looked < NEAR_MESSAGES; i--) {
+        var p = list[i];
+        var k = p.kind || 'text';
+        if (k === 'gap' || k === 'event' || !p.body) continue;
+        if (m.ts && p.ts && Number(m.ts) - Number(p.ts) > NEAR_MS) return false;
+        looked++;
+        if (refIdsIn(p.body).indexOf(id) !== -1) return true;
+      }
+      return false;
+    }
+    function unfurlPlan(m) {
+      var plan = { ids: [], auto: {}, held: [], bare: false };
+      if (!m || !m.body) return plan;
+      plan.ids = refIdsIn(m.body);
+      if (!plan.ids.length) return plan;
+      plan.bare = plan.ids.length === 1 && String(m.body).trim() === plan.ids[0];
+      var shown = 0;
+      plan.ids.forEach(function (id) {
+        if (!plan.bare && namedJustAbove(m, id)) return;
+        if (shown >= MAX_ROWS) { plan.held.push(id); return; }
+        plan.auto[id] = 1;
+        shown++;
+      });
+      return plan;
+    }
+    Chat.unfurlPlan = unfurlPlan;
 
     // Links. Only http/https are even looked for — Rust refuses anything else,
     // but not offering it in the first place is the better half of that.
@@ -213,7 +279,9 @@
     // boundaries and each piece is set as text, so no markup from a federated
     // homeserver is ever parsed. The only nodes added are ones this function
     // creates.
-    function fillBody(node, body, isLocal) {
+    // `auto` is the plan's map of ids that unfurl on their own; without one
+    // (a caller with no timeline) the first id is the one that does.
+    function fillBody(node, body, isLocal, auto) {
       if (isLocal) { node.textContent = body; return; }
       var spans = spansIn(body);
       if (!spans.length) { node.textContent = body; return; }
@@ -228,7 +296,7 @@
           // Built in a helper so each chip's handler closes over ITS id: `var`
           // in a loop is function-scoped, and inline closures would every one of
           // them capture the last id in the message.
-          : idChip(sp.text, ids[0] === sp.text));
+          : idChip(sp.text, auto ? !!auto[sp.text] : ids[0] === sp.text));
         at = sp.at + sp.len;
       });
       if (at < body.length) node.appendChild(document.createTextNode(body.slice(at)));
@@ -251,9 +319,11 @@
       return a;
     }
 
-    function idChip(id, isFirst) {
+    // An id whose row is already under the message is just the id. One whose
+    // row is not — named above, or past the cap — opens it here.
+    function idChip(id, unfurled) {
       var chip = el('span', 'chat-id', id);
-      if (isFirst) { chip.title = id; return chip; }
+      if (unfurled) { chip.title = id; return chip; }
       chip.classList.add('chat-mod-openable');
       chip.title = (S.openRefs[id] ? 'Hide ' : 'Show ') + id;
       chip.addEventListener('click', function (ev) {
@@ -332,7 +402,7 @@
     return {
       messageNode: messageNode, trimUrl: trimUrl, refIdsIn: refIdsIn, spansIn: spansIn, fillBody: fillBody,
       linkChip: linkChip, idChip: idChip, historyButton: historyButton, imageNode: imageNode, ruleNode: ruleNode,
-      URL_RE: URL_RE,
+      URL_RE: URL_RE, unfurlPlan: unfurlPlan,
     };
   };
 })();
