@@ -52,7 +52,13 @@
           if (S.view !== 'room' || msg.pending || !serverId) return;
           meta.appendChild(reactButton(msg, serverId));
           meta.appendChild(replyButton(msg));
-          meta.appendChild(pinToggle(msg, isPinned(serverId), serverId));
+          // Pinning needs power 50 on a server following the chat standard.
+          // A control the server will always refuse is not offered; a room
+          // payload that says nothing about power (an older build) offers it.
+          var power = S.room ? S.room.my_power : null;
+          if (power == null || power >= 50) {
+            meta.appendChild(pinToggle(msg, isPinned(serverId), serverId));
+          }
           // Your own only. A moderator could redact anyone's, but offering that
           // to everybody is an invitation to click and be refused.
           if (msg.self && msg.kind !== 'notice') {

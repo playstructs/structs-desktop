@@ -128,6 +128,11 @@
     /* Rows are .sui-result-row; only the icon well needs placing, because the
        roster's portrait well expects a rendered PFP rather than a glyph. */
     .sui-result-row.chat-room-row { cursor: pointer; }
+    /* Pin, unpin, move: on the row, out of the way until the row is under
+       the pointer or the control has keyboard focus. */
+    .chat-room-row .chat-row-ctl { opacity: 0; transition: opacity .1s; margin-left: var(--spacing-sm); }
+    .chat-room-row:hover .chat-row-ctl,
+    .chat-room-row .chat-row-ctl:focus { opacity: 1; }
     /* A subtitle is a subtitle: two lines at most, then it ellipsises. A long
        topic must not make one row as tall as three. */
     .sui-result-row .sui-text-hint {

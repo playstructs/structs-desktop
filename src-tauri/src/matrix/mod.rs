@@ -19,6 +19,7 @@ pub mod auth;
 pub mod client;
 pub mod directory;
 pub mod discovery;
+pub mod dns;
 pub mod pins;
 pub mod refs;
 pub mod session;
@@ -1466,6 +1467,27 @@ pub async fn matrix_room_pin(
         json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
     );
     Ok(json!({ "ok": true, "room_id": room_id, "pinned": pinned }))
+}
+
+/// Move a pinned room one place up or down the Pinned group. Any pinned
+/// room moves — a default as readily as the player's own.
+#[tauri::command]
+pub async fn matrix_room_pin_move(
+    app: tauri::AppHandle,
+    guild_id: String,
+    room_id: String,
+    up: bool,
+) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let moved = client::move_room_pin(&guild_id, &session, &room_id, up)?;
+    if moved {
+        let _ = crate::mcp::events::emit_matrix(
+            &app,
+            "matrix::rooms",
+            json!({ "guild_id": guild_id, "rooms": client::rooms_of(&guild_id) }),
+        );
+    }
+    Ok(json!({ "ok": true, "room_id": room_id, "moved": moved }))
 }
 
 /// Is anything waiting in Comms?

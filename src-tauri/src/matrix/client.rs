@@ -172,6 +172,23 @@ pub struct Room {
     /// Silenced: still counted as unread, never allowed to interrupt.
     #[serde(default)]
     pub muted: bool,
+    /// Another room holds this room's alias now. The rooms players made for
+    /// planets and fleets before the guild API took that over still CLAIM
+    /// `#planet-…` in their own state, while the directory maps the alias to
+    /// the guild-bot's room — so the list showed the planet twice. The one
+    /// the directory names is the room; this one is kept out of the list.
+    #[serde(default)]
+    pub superseded: bool,
+    /// This account's power level here. Pin, redact-others, topic and kick
+    /// need 50 on a server following the chat standard; a control the server
+    /// will always refuse is not offered.
+    #[serde(default)]
+    pub my_power: i64,
+    /// One of the three Structs-wide channels, pinned for everyone by
+    /// default — as opposed to a room this player pinned. Says which rows
+    /// wear SN Corp's mark; the RANK no longer can, since pins reorder.
+    #[serde(default)]
+    pub default_pin: bool,
     /// Machine traffic — the work bus. Hidden from the list unless asked
     /// for, never counted as unread, never a notification: a firehose of
     /// nonces is not a conversation waiting for anyone.
@@ -195,8 +212,9 @@ pub struct Room {
     /// "local" | "galaxy" | "direct" — see `section_for`.
     pub section: &'static str,
     /// Rank in the Pinned group above every section, or `None` for a room
-    /// that is not pinned. The three Structs-wide channels are pinned by
-    /// default (0, 1, 2); the player's own pins follow. See `pins.rs`.
+    /// that is not pinned. The three Structs-wide channels lead by default
+    /// and the player's own pins follow, until the player arranges them
+    /// otherwise. See `pins.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_rank: Option<u8>,
     pub icon: &'static str,
@@ -371,6 +389,7 @@ static TXN: AtomicU64 = AtomicU64::new(1);
 /// even offer to retry.
 fn build_client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .timeout(timeout)
         .user_agent("StructsDesktop/comms")
         .build()
@@ -605,6 +624,38 @@ mod pin_tests {
      * players. The viewer does not appear in this function's arguments.
      */
     #[test]
+    fn an_alias_two_joined_rooms_claim_is_disputed() {
+        let rooms: Vec<(bool, Option<&str>)> = vec![
+            (true, Some("#planet-2-1:s")),  // the room a player made
+            (true, Some("#planet-2-1:s")),  // the room the guild-bot made
+            (true, Some("#lobby:s")),
+            (false, Some("#lobby:s")),      // in the directory, not joined: no dispute
+            (true, None),                   // a DM has no alias to dispute
+        ];
+        assert_eq!(disputed_aliases(rooms.iter().copied()), vec!["#planet-2-1:s".to_string()]);
+        assert!(disputed_aliases(rooms[2..].iter().copied()).is_empty());
+    }
+
+    /* A rate-limited send waits its turn; it is not dropped.
+     *
+     * The wait is read back off the very message `matrix_error` writes, so
+     * the two are tested against each other rather than against a string
+     * somebody typed twice.
+     */
+    #[test]
+    fn a_rate_limited_send_waits_as_long_as_the_server_says() {
+        let refused = matrix_error(429, &json!({ "errcode": "M_LIMIT_EXCEEDED", "retry_after_ms": 2500 }));
+        assert_eq!(rate_limit_wait_ms(&refused), Some(3000), "{refused}");
+        assert_eq!(queue_wait(&refused, 0), Some(3000));
+        assert_eq!(queue_wait(&refused, SEND_QUEUE_MAX_WAIT_MS - 3000), Some(3000), "right up to its patience");
+        assert_eq!(queue_wait(&refused, SEND_QUEUE_MAX_WAIT_MS - 2999), None, "and then it is the player's to retry");
+        // Anything else is a failure, not a queue.
+        assert_eq!(queue_wait("M_FORBIDDEN: You are not in this room", 0), None);
+        assert_eq!(queue_wait("error sending request for url (https://matrix.example/…)", 0), None);
+        assert_eq!(rate_limit_wait_ms("the homeserver is rate limiting this; try again in soon"), None);
+    }
+
+    #[test]
     fn only_the_servers_own_not_found_means_there_is_no_room() {
         assert!(alias_not_found("M_NOT_FOUND: Room alias #planet-2-1:s not found"));
         assert!(alias_not_found("M_NOT_FOUND"));
@@ -635,8 +686,6 @@ mod pin_tests {
         assert_eq!(default_pin_rank_on("#help:matrix.beta.playstructs.com.evil.example", SN), None);
         // Nothing is pinned when the directory cannot name the home server.
         assert_eq!(default_pin_rank_on("#help:matrix.beta.playstructs.com", ""), None);
-        // Every player pin follows every default.
-        assert!(super::super::pins::FIRST_PLAYER_RANK as usize >= DEFAULT_PINS.len());
     }
 
     #[test]
@@ -736,8 +785,47 @@ fn is_system_alias(alias: Option<&str>) -> bool {
 /// great majority that are not one: rooms on other servers, object rooms, the
 /// work bus. See the note above `alias_localpart_of`.
 fn home_rank_for(session: &Session, room_id: &str, alias: Option<&str>) -> Option<u8> {
-    let default = alias.and_then(default_pin_rank);
-    super::pins::rank(&session.user_id, room_id, alias, default)
+    super::pins::rank(&session.user_id, room_id, alias, &default_aliases())
+}
+
+/// The default pins as full aliases, in their default order. Empty until the
+/// directory can name SN Corp's homeserver.
+fn default_aliases() -> Vec<String> {
+    super::directory::server_name_for_guild(HOME_GUILD)
+        .map(|home| DEFAULT_PINS.iter().map(|l| format!("#{l}:{home}")).collect())
+        .unwrap_or_default()
+}
+
+/// Re-rank every room of one identity. A pin, an unpin or a move changes the
+/// place of the rooms AROUND the one that was touched.
+fn rerank_all(guild_id: &str, session: &Session) {
+    let defaults = default_aliases();
+    if let Some(gs) = STATE.write().unwrap().get_mut(guild_id) {
+        for room in gs.rooms.values_mut() {
+            room.home_rank = if room.section == SECTION_DIRECT && room.canonical_alias.is_none() {
+                super::pins::rank(&session.user_id, &room.room_id, None, &defaults)
+            } else {
+                super::pins::rank(&session.user_id, &room.room_id, room.canonical_alias.as_deref(), &defaults)
+            };
+        }
+    }
+}
+
+/// Move a pinned room one place up or down the Pinned group.
+pub fn move_room_pin(guild_id: &str, session: &Session, room_id: &str, up: bool) -> Result<bool, String> {
+    let alias = {
+        let map = STATE.read().unwrap();
+        map.get(guild_id)
+            .and_then(|gs| gs.rooms.get(room_id))
+            .ok_or_else(|| format!("{room_id} is not a room this window knows"))?
+            .canonical_alias
+            .clone()
+    };
+    let moved = super::pins::shift(&session.user_id, room_id, alias.as_deref(), &default_aliases(), up);
+    if moved {
+        rerank_all(guild_id, session);
+    }
+    Ok(moved)
 }
 
 /* The Structs-wide channels, pinned by default for EVERY player.
@@ -786,12 +874,8 @@ pub fn set_room_pin(guild_id: &str, session: &Session, room_id: &str, pinned: bo
             .ok_or_else(|| format!("{room_id} is not a room this window knows"))?;
         room.canonical_alias.clone()
     };
-    let is_default = is_default_pin(session, alias.as_deref());
-    super::pins::set(&session.user_id, room_id, alias.as_deref(), is_default, pinned);
-    let rank = home_rank_for(session, room_id, alias.as_deref());
-    if let Some(r) = STATE.write().unwrap().get_mut(guild_id).and_then(|gs| gs.rooms.get_mut(room_id)) {
-        r.home_rank = rank;
-    }
+    super::pins::set(&session.user_id, room_id, alias.as_deref(), &default_aliases(), pinned);
+    rerank_all(guild_id, session);
     Ok(())
 }
 
@@ -847,6 +931,86 @@ fn rate_limited_for(status: u16, v: &Value) -> Option<u64> {
             .and_then(|r| r.as_u64())
             .unwrap_or(1_000),
     )
+}
+
+/// The longest a SEND will wait in line for a rate limit to lift before it
+/// is handed back as a failure the player can retry.
+const SEND_QUEUE_MAX_WAIT_MS: u64 = 120_000;
+
+/// One send at a time per identity, in the order they were asked for.
+static SEND_TURN: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn send_turn(key: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut m = SEND_TURN.lock().unwrap_or_else(|p| p.into_inner());
+    m.entry(key.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+const RATE_LIMITED: &str = "the homeserver is rate limiting this; try again in ";
+
+/// How long a rate-limit refusal asks us to wait, read back off the message
+/// `matrix_error` and `authed_on` write. `None` for any other failure.
+fn rate_limit_wait_ms(err: &str) -> Option<u64> {
+    let secs = err.strip_prefix(RATE_LIMITED)?.strip_suffix('s')?.trim().parse::<u64>().ok()?;
+    Some(secs.max(1) * 1000)
+}
+
+/// Whether a send that has already waited `waited_ms` should wait again for
+/// this failure, and for how long. Only a rate limit is worth waiting out,
+/// and only while the whole wait stays inside the queue's patience.
+fn queue_wait(err: &str, waited_ms: u64) -> Option<u64> {
+    let wait = rate_limit_wait_ms(err)?;
+    (waited_ms.saturating_add(wait) <= SEND_QUEUE_MAX_WAIT_MS).then_some(wait)
+}
+
+/// A SEND: a message, a reaction, an edit, a redaction.
+///
+/// The homeserver allows one message a second with bursts, and answers 429
+/// with how long to wait. A message refused that way is not a failed
+/// message: it is a message that has to wait its turn. So sends go out one
+/// at a time per identity, in order, and one that is rate limited waits as
+/// long as the server says and goes again — the same request, with the same
+/// transaction id, so a send that did land is never sent twice. Only after
+/// two minutes of that is it handed back to the player as a failure.
+async fn authed_send(
+    session: &Session,
+    build: impl Fn(&reqwest::Client, &Session) -> reqwest::RequestBuilder,
+) -> Result<Value, String> {
+    authed_send_in(session, "person", build).await
+}
+
+/// Machine traffic — work frames on the bus — waits in its OWN line. It is
+/// a firehose by design, and a player's message must never stand behind it.
+async fn authed_send_machine(
+    session: &Session,
+    build: impl Fn(&reqwest::Client, &Session) -> reqwest::RequestBuilder,
+) -> Result<Value, String> {
+    authed_send_in(session, "machine", build).await
+}
+
+async fn authed_send_in(
+    session: &Session,
+    lane: &str,
+    build: impl Fn(&reqwest::Client, &Session) -> reqwest::RequestBuilder,
+) -> Result<Value, String> {
+    let turn = send_turn(&format!("{}|{lane}", key_of(session)));
+    let _mine = turn.lock().await;
+    let mut waited = 0u64;
+    loop {
+        match authed(session, &build).await {
+            Ok(v) => return Ok(v),
+            Err(e) => match queue_wait(&e, waited) {
+                Some(wait) => {
+                    waited = waited.saturating_add(wait);
+                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                }
+                None => return Err(e),
+            },
+        }
+    }
 }
 
 /// Every authenticated call goes through here so that exactly one place knows
@@ -2046,6 +2210,13 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
             replaced_by: replaced_by
                 .or_else(|| existing.as_ref().and_then(|r| r.replaced_by.clone())),
             muted: gs.muted.contains(&room_id),
+            default_pin: is_default_pin(session, final_alias.as_deref()),
+            superseded: existing.as_ref().is_some_and(|r| r.superseded),
+            my_power: gs
+                .power
+                .get(&room_id)
+                .and_then(|p| p.get(&session.user_id).copied())
+                .unwrap_or(0),
             // Absent means "this sync did not mention pins", never "there are
             // none" — the same trap as the unread counts above.
             pinned: pinned
@@ -2302,6 +2473,9 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 invited: true,
                 invited_by: by,
                 muted: false,
+                default_pin: false,
+                superseded: false,
+                my_power: 0,
                 encrypted: false,
                 replaced_by: None,
                 pinned: Vec::new(),
@@ -2548,7 +2722,8 @@ fn sum_unread<'a>(rooms: impl Iterator<Item = &'a Room>) -> (u64, bool) {
     let mut mention = false;
     for room in rooms {
         // A room merely visible in the directory is not a message to anyone.
-        if !room.joined || room.system {
+        // …and neither is an old room another has replaced at its alias.
+        if !room.joined || room.system || room.superseded {
             continue;
         }
         count = count.saturating_add(room.unread);
@@ -2941,6 +3116,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     // makes a sender look like a person.
                     directory::resolve_many(&directory::senders_in(&v)).await;
                     let d = apply_sync(&guild_id, &session, &v);
+                    let settled = settle_alias_disputes(&guild_id, &session).await;
                     // Anyone a room is named after who was unknown a moment
                     // ago; the next pass renders their name.
                     let pending = drain_pending_identity();
@@ -3057,7 +3233,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                             let _ = crate::mcp::events::emit_matrix(&app, "matrix::reactions", p);
                         }
                     }
-                    if d.rooms_changed {
+                    if d.rooms_changed || settled {
                         let _ = crate::mcp::events::emit_matrix(&app, 
                             "matrix::rooms",
                             json!({ "guild_id": guild_id, "rooms": rooms_of(&guild_id) }),
@@ -3264,6 +3440,9 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
                 mention: false,
                 pinned: Vec::new(),
                 muted: false,
+                default_pin: false,
+                superseded: false,
+                my_power: 0,
                 encrypted: false,
                 replaced_by: None,
                 invited: false,
@@ -3385,6 +3564,9 @@ pub async fn browse(
             mention: false,
             pinned: Vec::new(),
             muted: false,
+            default_pin: false,
+            superseded: false,
+            my_power: 0,
             encrypted: false,
             replaced_by: None,
             invited: false,
@@ -3419,6 +3601,9 @@ pub async fn browse(
                 mention: false,
                 pinned: Vec::new(),
                 muted: false,
+                default_pin: false,
+                superseded: false,
+                my_power: 0,
                 encrypted: false,
                 replaced_by: None,
                 invited: false,
@@ -3840,7 +4025,7 @@ pub async fn send_full(
             payload["formatted_body"] = json!(html);
         }
     }
-    let v = authed(session, move |c, s| {
+    let v = authed_send(session, move |c, s| {
         c.put(&url).bearer_auth(&s.access_token).json(&payload)
     })
     .await?;
@@ -4130,7 +4315,7 @@ pub async fn send_state(
         urlseg(etype),
         urlseg(state_key)
     );
-    let v = authed(session, move |c, s| {
+    let v = authed_send(session, move |c, s| {
         c.put(&url).bearer_auth(&s.access_token).json(&content)
     })
     .await?;
@@ -4162,7 +4347,7 @@ pub async fn send_event(session: &Session, room_id: &str, etype: &str, content: 
         urlseg(etype),
         urlseg(&txn)
     );
-    let v = authed(session, move |c, s| {
+    let v = authed_send_machine(session, move |c, s| {
         c.put(&url).bearer_auth(&s.access_token).json(&content)
     })
     .await?;
@@ -4194,7 +4379,7 @@ pub async fn send_work(
     if let Some(target) = reply_to {
         payload["m.relates_to"] = json!({ "m.in_reply_to": { "event_id": target } });
     }
-    let v = authed(session, move |c, s| {
+    let v = authed_send_machine(session, move |c, s| {
         c.put(&url).bearer_auth(&s.access_token).json(&payload)
     })
     .await?;
@@ -4235,7 +4420,7 @@ pub async fn edit(
         "m.new_content": { "msgtype": msgtype, "body": body },
         "m.relates_to": { "rel_type": "m.replace", "event_id": event_id },
     });
-    let v = authed(session, move |c, s| {
+    let v = authed_send(session, move |c, s| {
         c.put(&url).bearer_auth(&s.access_token).json(&payload)
     })
     .await
@@ -4269,7 +4454,7 @@ pub async fn redact(session: &Session, room_id: &str, event_id: &str) -> Result<
         urlseg(event_id),
         urlseg(&txn)
     );
-    authed(session, move |c, s| {
+    authed_send(session, move |c, s| {
         c.put(&url).bearer_auth(&s.access_token).json(&json!({}))
     })
     .await
@@ -4325,7 +4510,7 @@ pub async fn react(
                 "rel_type": "m.annotation", "event_id": event_id, "key": key
             }
         });
-        authed(session, move |c, s| {
+        authed_send(session, move |c, s| {
             c.put(&url).bearer_auth(&s.access_token).json(&payload)
         })
         .await?;
@@ -4356,7 +4541,7 @@ pub async fn react(
         urlseg(&annotation),
         urlseg(&txn)
     );
-    authed(session, move |c, s| {
+    authed_send(session, move |c, s| {
         c.put(&url).bearer_auth(&s.access_token).json(&json!({}))
     })
     .await
@@ -4846,6 +5031,67 @@ pub async fn room_id_for_alias(session: &Session, alias: &str) -> Result<Option<
     }
 }
 
+/// Which room the directory says an alias belongs to, for aliases more than
+/// one of our rooms claims. Asked once per alias per run.
+static ALIAS_OWNER: std::sync::LazyLock<RwLock<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Aliases claimed by more than one joined room.
+fn disputed_aliases<'a>(rooms: impl Iterator<Item = (bool, Option<&'a str>)>) -> Vec<String> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for (joined, alias) in rooms {
+        if let (true, Some(a)) = (joined, alias) {
+            *seen.entry(a).or_default() += 1;
+        }
+    }
+    let mut out: Vec<String> = seen.into_iter().filter(|(_, n)| *n > 1).map(|(a, _)| a.to_string()).collect();
+    out.sort();
+    out
+}
+
+/// Settle which of several rooms claiming one alias IS that alias's room,
+/// by asking the directory, and mark the rest superseded. Returns whether
+/// the list changed. Costs nothing when no alias is disputed.
+async fn settle_alias_disputes(guild_id: &str, session: &Session) -> bool {
+    let disputed = {
+        let map = STATE.read().unwrap();
+        map.get(guild_id)
+            .map(|gs| disputed_aliases(gs.rooms.values().map(|r| (r.joined, r.canonical_alias.as_deref()))))
+            .unwrap_or_default()
+    };
+    if disputed.is_empty() {
+        return false;
+    }
+    for alias in &disputed {
+        let known = ALIAS_OWNER.read().map(|m| m.contains_key(alias)).unwrap_or(true);
+        if known {
+            continue;
+        }
+        // Only an ANSWER settles it: a lookup that failed says nothing.
+        if let Ok(Some(owner)) = room_id_for_alias(session, alias).await {
+            if let Ok(mut m) = ALIAS_OWNER.write() {
+                m.insert(alias.clone(), owner);
+            }
+        }
+    }
+    let owners = ALIAS_OWNER.read().map(|m| m.clone()).unwrap_or_default();
+    let mut changed = false;
+    if let Some(gs) = STATE.write().unwrap().get_mut(guild_id) {
+        for room in gs.rooms.values_mut() {
+            let lost = room
+                .canonical_alias
+                .as_deref()
+                .and_then(|a| owners.get(a))
+                .is_some_and(|owner| owner != &room.room_id);
+            if room.superseded != lost {
+                room.superseded = lost;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 /// Whether a directory lookup's failure is the server saying "no such
 /// alias" rather than the lookup itself failing.
 fn alias_not_found(err: &str) -> bool {
@@ -4953,6 +5199,9 @@ mod tests {
     #[test]
     fn a_left_dm_is_never_reused() {
         let room = |id: &str, joined: bool| Room {
+            default_pin: false,
+            superseded: false,
+            my_power: 0,
             room_id: id.into(), name: String::new(), canonical_alias: None, topic: None, members: 1,
             joined, invited: false, invited_by: None, replaced_by: None, encrypted: false, muted: false,
             pinned: Vec::new(), unread: 0, mention: false, section: "direct", home_rank: None,
@@ -6318,6 +6567,9 @@ mod tests {
             joined,
             pinned: Vec::new(),
             muted: false,
+            default_pin: false,
+            superseded: false,
+            my_power: 0,
             encrypted: false,
             replaced_by: None,
             invited: false,

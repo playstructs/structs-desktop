@@ -330,6 +330,7 @@ async fn ensure_once(
     as_player: Option<&str>,
 ) -> Result<(u16, Value), String> {
     let http = reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .timeout(std::time::Duration::from_secs(25))
         .user_agent("StructsDesktop/comms")
         .build()

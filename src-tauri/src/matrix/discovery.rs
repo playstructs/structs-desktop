@@ -46,6 +46,7 @@ static HOSTS: std::sync::LazyLock<RwLock<HashMap<String, (u64, Option<String>)>>
 /// stack either way, and rebuilding it per probe buys nothing.
 static PROBE: std::sync::LazyLock<Option<reqwest::Client>> = std::sync::LazyLock::new(|| {
     reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
         .build()
         .ok()

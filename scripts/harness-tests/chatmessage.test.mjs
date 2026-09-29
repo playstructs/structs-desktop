@@ -118,4 +118,18 @@ function boot(state = {}, fixtures = {}) {
   assert.ok(calls.some((c) => c[0] === 'loadHistory'));
 }
 
+// N. The pin control is offered only to an account the server would let pin.
+{
+  const m = { event_id: '$e1', sender: '@1-61:h', body: 'hold the line', kind: 'text' };
+  const has = (state) => {
+    const { msg } = boot(state);
+    return !!msg.messageNode(m, null).querySelector('.ctl.pin');
+  };
+  assert.equal(has({ room: { my_power: 0 } }), false, 'power 0 is always refused, so it is not offered');
+  assert.equal(has({ room: { my_power: 50 } }), true, 'a moderator pins');
+  assert.equal(has({ room: { my_power: 100 } }), true);
+  assert.equal(has({ room: {} }), true, 'a payload that says nothing about power still offers it');
+  assert.equal(has({}), true);
+}
+
 console.log('chat-message: all checks passed');

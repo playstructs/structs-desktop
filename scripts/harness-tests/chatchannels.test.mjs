@@ -119,6 +119,41 @@ const R = (o) => Object.assign({ room_id: '!' + o.name + ':matrix.oh.energy', jo
   assert.ok(ch.renderChannels().querySelector('#chat-room-filter-q'), '…unless Ctrl-K asked for it');
 }
 
+// N. Pin, unpin and reorder from the row — without opening the room.
+{
+  const rooms = [
+    R({ room_id: '!a', name: 'SN Corp', home_rank: 0, default_pin: true }),
+    R({ room_id: '!b', name: 'Help', home_rank: 1, default_pin: true }),
+    R({ room_id: '!c', name: 'Trade', home_rank: 2 }),
+    R({ room_id: '!d', name: 'Elsewhere' }),
+  ];
+  const { w, ch, calls } = boot(rooms, { matrix_room_pin: { ok: true }, matrix_room_pin_move: { ok: true, moved: true } });
+  w.document.body.appendChild(ch.renderChannels());
+  const row = (name) => [...w.document.querySelectorAll('.sui-result-row')].find((n) => n.textContent.includes(name));
+  const has = (name, cls) => !!row(name).querySelector('.' + cls);
+  assert.ok(has('Elsewhere', 'chat-row-pin'), 'an unpinned room offers a pin');
+  assert.ok(!has('Elsewhere', 'chat-row-pin-up') && !has('Elsewhere', 'chat-row-pin-down'), 'and has no place to move from');
+  assert.ok(!has('SN Corp', 'chat-row-pin-up') && has('SN Corp', 'chat-row-pin-down'), 'the first cannot go up');
+  assert.ok(has('Help', 'chat-row-pin-up') && has('Help', 'chat-row-pin-down'));
+  assert.ok(has('Trade', 'chat-row-pin-up') && !has('Trade', 'chat-row-pin-down'), 'the last cannot go down');
+  assert.ok(row('SN Corp').querySelector('img.chat-room-mark'), 'a default pin wears the mark');
+  assert.ok(!row('Trade').querySelector('img.chat-room-mark'), 'a room the player pinned keeps its own glyph');
+
+  row('Elsewhere').querySelector('.chat-row-pin').click();
+  row('Help').querySelector('.chat-row-pin').click();
+  row('Trade').querySelector('.chat-row-pin-up').click();
+  row('SN Corp').querySelector('.chat-row-pin-down').click();
+  await tick();
+  const sent = calls.filter((c) => /^matrix_room_pin/.test(c[0])).map((c) => c[0] + ':' + JSON.stringify(c[1]));
+  assert.equal(JSON.stringify(sent), JSON.stringify([
+    'matrix_room_pin:{"guildId":"0-1","roomId":"!d","pinned":true}',
+    'matrix_room_pin:{"guildId":"0-1","roomId":"!b","pinned":false}',
+    'matrix_room_pin_move:{"guildId":"0-1","roomId":"!c","up":true}',
+    'matrix_room_pin_move:{"guildId":"0-1","roomId":"!a","up":false}',
+  ]));
+  assert.ok(!calls.some((c) => c[0] === 'openRoom'), 'arranging the list does not open a room');
+}
+
 console.log('chat-channels: all checks passed');
 
 // 8. The work bus is machine traffic: joined, but not in the list until asked

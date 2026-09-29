@@ -19,10 +19,6 @@
     var headerResources = ctx.headerResources, pageHeader = ctx.pageHeader, byId = ctx.byId;
     var moveCaretToEnd = ctx.moveCaretToEnd, noticeBlock = ctx.noticeBlock, S = ctx.S, Chat = ctx.Chat || {};
 
-    // How many ranks the default pins take (pins.rs FIRST_PLAYER_RANK): a
-    // row ranked below this is one of the three Structs-wide channels.
-    var DEFAULT_PINS = 3;
-
     // The player's own network.
     function ownNetwork() {
       var nets = (S && S.networks) || [];
@@ -70,6 +66,23 @@
     }
     Chat.foreignServerLabel = foreignServerLabel;
 
+    /* One control on a row's right edge. The click belongs to the control:
+     * the row underneath opens the room, and arranging the list must not. The
+     * list itself is repainted by the room push Rust sends when the change
+     * lands, so nothing here guesses the new order. */
+    function rowControl(cls, iconName, title, act) {
+      var a = el('a', 'chat-row-ctl ' + cls);
+      a.href = 'javascript:void(0)';
+      a.title = title;
+      a.appendChild(icon(iconName, 'sui-icon-sm'));
+      a.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        ev.preventDefault();
+        Promise.resolve(act()).catch(function (e) { showError(String(e)); });
+      });
+      return a;
+    }
+
     function roomRow(r, browsing) {
       var row = el('div', 'sui-result-row chat-room-row');
 
@@ -87,7 +100,7 @@
       if (r.pfp_attrs || r.player_id || isDm) {
         // A direct message IS a person — the same portrait the roster shows.
         portrait.appendChild(pfpPortrait(r.pfp_attrs));
-      } else if (r.home_rank != null && r.home_rank < DEFAULT_PINS) {
+      } else if (r.home_rank != null && r.default_pin) {
         /* The Structs-wide channels carry SN Corp's own mark instead of the
          * generic glyph: they are SN Corp's channels, on its homeserver, for
          * every player. `img/logo-snc.gif` is the game's asset — the same one
@@ -238,6 +251,30 @@
         });
         right.appendChild(join);
       }
+      /* Pin, unpin and reorder, on the row itself.
+       *
+       * Only for a room you are IN and only in the list proper: a directory
+       * hit and an invitation are not yours to arrange yet. Revealed on hover
+       * or keyboard focus — a beacon and two chevrons on every row would turn
+       * a list people read into a column of buttons. `first` / `last` come
+       * from whoever built the Pinned group, because a row does not know its
+       * neighbours.
+       */
+      if (r.joined && !browsing && !r.invited && !r.system) {
+        var pinned = r.home_rank != null;
+        if (pinned && !r._pinFirst) right.appendChild(rowControl('chat-row-pin-up', 'icon-chevron-up', 'Move up', function () {
+          return invoke('matrix_room_pin_move', { guildId: S.guildId, roomId: r.room_id, up: true });
+        }));
+        if (pinned && !r._pinLast) right.appendChild(rowControl('chat-row-pin-down', 'icon-chevron-down', 'Move down', function () {
+          return invoke('matrix_room_pin_move', { guildId: S.guildId, roomId: r.room_id, up: false });
+        }));
+        right.appendChild(rowControl('chat-row-pin',
+          'icon-beacon ' + (pinned ? 'sui-text-primary' : 'sui-text-secondary'),
+          pinned ? 'Unpin' : 'Pin above the list',
+          function () {
+            return invoke('matrix_room_pin', { guildId: S.guildId, roomId: r.room_id, pinned: !pinned });
+          }));
+      }
       row.appendChild(right);
 
       if (r.joined) {
@@ -299,6 +336,9 @@
       // Machine traffic — the work bus — is not a channel anyone reads. It
       // is joined, it works, and it stays out of the list until asked for.
       if (r.system && !S.showSystem) return false;
+      // An old room another has replaced at its alias: the directory's room
+      // is the one listed, so a planet is not in the list twice.
+      if (r.superseded) return false;
       var q = String(S.roomFilter || '').trim().toLowerCase();
       if (!q) return true;
       return String(r.name || '').toLowerCase().indexOf(q) !== -1 ||
@@ -458,7 +498,11 @@
           hGroup.appendChild(el('div', 'chat-net-label', 'Pinned'));
           var hTable = el('div', 'sui-result-table');
           var hList = el('div', 'sui-result-rows');
-          home.forEach(function (r) { hList.appendChild(roomRow(r)); });
+          home.forEach(function (r, i) {
+            r._pinFirst = i === 0;
+            r._pinLast = i === home.length - 1;
+            hList.appendChild(roomRow(r));
+          });
           hTable.appendChild(hList);
           hGroup.appendChild(hTable);
           scroll.appendChild(hGroup);

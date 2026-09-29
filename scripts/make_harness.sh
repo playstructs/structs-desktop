@@ -644,7 +644,7 @@ cat > "$FIX" <<'EOF'
         invited: true, invited_by: 'Beezhan', members: 6, unread: 0, mention: false,
         icon: 'icon-guild' },
       { room_id: '!home:h', name: 'Announcements', section: 'local', joined: true,
-        home_rank: 0, members: 900, unread: 0, mention: false, icon: 'icon-beacon' },
+        home_rank: 0, members: 900, default_pin: true, unread: 0, mention: false, icon: 'icon-beacon' },
     ] },
     /* Two guilds, two homeservers. Comms is decentralised and the community
      * meets on ONE of them, so a directory that only ever answers for your own
@@ -1717,11 +1717,11 @@ cat > "$CFIX" <<'EOF'
      * counts, and a "prove the sort" number would have broken all of them. */
     { room_id: '!infra:matrix.beta.playstructs.com', name: 'Infrastructure',
       canonical_alias: '#infrastructure:matrix.beta.playstructs.com', icon: 'icon-beacon',
-      topic: 'Community infrastructure coordination', home_rank: 2,
+      topic: 'Community infrastructure coordination', home_rank: 2, default_pin: true,
       members: 8, joined: true, unread: 0, section: 'galaxy' },
     { room_id: '!help:matrix.beta.playstructs.com', name: 'Help',
       canonical_alias: '#help:matrix.beta.playstructs.com', icon: 'icon-info',
-      topic: 'Support for players, especially new ones', home_rank: 1,
+      topic: 'Support for players, especially new ones', home_rank: 1, default_pin: true,
       members: 12, joined: true, unread: 0, section: 'galaxy' },
     { room_id: '!raid:matrix.beta.playstructs.com', name: 'Raid',
       canonical_alias: '#raid:matrix.beta.playstructs.com', icon: 'icon-raid',
@@ -1733,7 +1733,7 @@ cat > "$CFIX" <<'EOF'
      * ride on it. */
     { room_id: '!snc:matrix.beta.playstructs.com', name: 'SN.Corporation',
       canonical_alias: '#sn-corp:matrix.beta.playstructs.com', icon: 'icon-guild',
-      topic: 'We know better.', home_rank: 0,
+      topic: 'We know better.', home_rank: 0, default_pin: true,
       members: 25, joined: true, unread: 0, section: 'galaxy' },
     /* A near-miss address on SN's OWN server: `help-desk` merely CONTAINS
      * `help`. Whole-token matching, or it takes a pinned slot — the
@@ -1973,6 +1973,7 @@ cat > "$CFIX" <<'EOF'
     },
     matrix_status_sharing: { enabled: true, status: 'Fleet away' },
     matrix_room_pin: { ok: true },
+    matrix_room_pin_move: { ok: true, moved: true },
     matrix_mute: { ok: true },
     matrix_redact: { ok: true },
     // Verification is the safety-critical half: a result arriving over

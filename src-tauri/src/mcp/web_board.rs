@@ -753,6 +753,16 @@ async fn board_invoke(
             ),
             _ => err_json("guildId + roomId required".into()),
         },
+        "matrix_room_pin_move" => match (s("guildId"), s("roomId")) {
+            (Some(g), Some(r)) => from_result(
+                crate::matrix::matrix_room_pin_move(
+                    st.app.clone(), g, r,
+                    body.get("up").and_then(|v| v.as_bool()).unwrap_or(true),
+                )
+                .await,
+            ),
+            _ => err_json("guildId and roomId required".into()),
+        },
         "matrix_room_pin" => match (s("guildId"), s("roomId")) {
             (Some(g), Some(r)) => from_result(
                 crate::matrix::matrix_room_pin(

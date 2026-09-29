@@ -1293,3 +1293,7 @@ Ensure-endpoint object rooms, directory-driven guild channels, unencrypted DM re
 ## Player pins — BUILT 2026-09-28
 
 Guild channels = default pins; players pin/unpin any room by the same rule (`pins.rs`, `matrix_room_pin`, beacon in the room header). See `comms-session-service.md` → "Player pins". Not built: pinning from the list row itself (only from inside the room), reordering pins.
+
+## Review 2026-09-29 — resolver fallback, superseded rooms, power gating — BUILT
+
+See `comms-session-service.md`. Done 2026-09-29: 429 queueing (`authed_send`), pin/unpin/reorder from the list row. Still owed: leaving superseded rooms (offer, do not auto-leave); Stalled state when only NEW connections fail; a "queued" mark on a pending echo that has waited more than a moment; drag to reorder.

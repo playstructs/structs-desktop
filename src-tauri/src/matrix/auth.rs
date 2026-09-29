@@ -188,6 +188,7 @@ fn new_device_id() -> String {
 /// instead of a result.
 fn chain_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .cookie_store(true)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -253,6 +254,7 @@ fn redact(url: &reqwest::Url) -> String {
 /// unstable path for a homeserver that predates the stable endpoint.
 pub async fn fetch_auth_metadata(homeserver: &str) -> Result<AuthMetadata, String> {
     let client = reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
@@ -294,6 +296,7 @@ async fn register_client(meta: &AuthMetadata, homeserver: &str) -> Result<String
         .as_deref()
         .ok_or("this homeserver's auth service does not allow client registration")?;
     let client = reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
@@ -863,6 +866,7 @@ async fn exchange_code(
     verifier: &str,
 ) -> Result<(String, Option<String>, Option<u64>), String> {
     let client = reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
@@ -936,6 +940,7 @@ pub async fn refresh(session: &Session) -> Result<Session, RefreshError> {
         .as_deref()
         .ok_or_else(|| RefreshError::Dead("this session has no refresh token".into()))?;
     let client = reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| RefreshError::Transient(e.to_string()))?;
@@ -984,6 +989,7 @@ pub async fn refresh(session: &Session) -> Result<Session, RefreshError> {
 
 async fn whoami(homeserver: &str, token: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
@@ -1011,6 +1017,7 @@ async fn whoami(homeserver: &str, token: &str) -> Result<String, String> {
 /// blocking the local sign-out over: the token is dropped either way.
 pub async fn logout(session: &Session) {
     let Ok(client) = reqwest::Client::builder()
+        .dns_resolver(super::dns::resolver())
         .timeout(Duration::from_secs(10))
         .build()
     else {

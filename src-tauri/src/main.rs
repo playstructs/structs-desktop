@@ -179,6 +179,7 @@ fn main() {
             matrix::matrix_work_status,
             matrix::matrix_mute,
             matrix::matrix_room_pin,
+            matrix::matrix_room_pin_move,
             matrix::matrix_work_submit,
             // Crews — team hashing over the chain's own hash-permission bits.
             mcp::crew::crew_list,
