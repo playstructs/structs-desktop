@@ -1900,6 +1900,10 @@ pub async fn entity(client: &CosmosClient, kind: &str, id: &str) -> Result<Value
         SNAPSHOT_HITS.fetch_add(1, Ordering::Relaxed);
         return Ok(v);
     }
+    if known_miss(kind, id) {
+        ENTITY_KNOWN_MISSES.fetch_add(1, Ordering::Relaxed);
+        return Err(format!("{kind} {id} not found (asked {}s ago or less)", MISS_TTL_MS / 1000));
+    }
     if matches!(kind, "struct" | "player" | "fleet") && snapshot_source() == SnapshotSource::Guild {
         if let Ok(v) = guild_entity(client, kind, id).await {
             ENTITY_GUILD_READS.fetch_add(1, Ordering::Relaxed);
@@ -1907,10 +1911,113 @@ pub async fn entity(client: &CosmosClient, kind: &str, id: &str) -> Result<Value
             return Ok(v);
         }
     }
-    let v = client.query_entity(kind, id).await?;
+    let v = match client.query_entity(kind, id).await {
+        Ok(v) => v,
+        Err(e) => {
+            if is_not_found(&e) {
+                note_miss(kind, id);
+            }
+            return Err(e);
+        }
+    };
     ENTITY_LCD_READS.fetch_add(1, Ordering::Relaxed);
     absorb_entity(kind, &v);
     Ok(v)
+}
+
+/* ── Misses the chain has already answered ───────────────────────────────
+ *
+ * A destroyed struct is pruned from the snapshot, so every read of one fell
+ * through to the guild and then the chain — which answers 500 "object not
+ * found", is retried as a server error, and is reported as endpoint pressure.
+ * A chat room naming eight dead structs held a lookup for nine seconds and
+ * told every loop the chain was struggling.
+ *
+ * Only a DEFINITE "not found" is remembered, never a timeout or a refusal:
+ * an endpoint that could not answer has not said the object is absent. Only
+ * the kinds the snapshot holds are remembered, because for those the snapshot
+ * is asked first — an object that comes to exist arrives there by GRASS or
+ * the next refresh and is found before this is ever consulted. */
+const MISS_TTL_MS: u64 = 60_000;
+const MISS_MAX: usize = 4_096;
+static MISSES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static ENTITY_KNOWN_MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn miss_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn remembers_misses(kind: &str) -> bool {
+    matches!(kind, "struct" | "planet" | "player" | "fleet")
+}
+
+pub(crate) fn is_not_found(err: &str) -> bool {
+    err.to_ascii_lowercase().contains("not found")
+}
+
+fn miss_key(kind: &str, id: &str) -> String {
+    format!("{kind}:{id}")
+}
+
+fn known_miss_at(kind: &str, id: &str, now: u64) -> bool {
+    if !remembers_misses(kind) {
+        return false;
+    }
+    MISSES
+        .lock()
+        .map(|m| m.get(&miss_key(kind, id)).is_some_and(|at| now.saturating_sub(*at) < MISS_TTL_MS))
+        .unwrap_or(false)
+}
+
+fn known_miss(kind: &str, id: &str) -> bool {
+    known_miss_at(kind, id, miss_clock_ms())
+}
+
+fn note_miss_at(kind: &str, id: &str, now: u64) {
+    if !remembers_misses(kind) {
+        return;
+    }
+    if let Ok(mut m) = MISSES.lock() {
+        if m.len() >= MISS_MAX {
+            m.retain(|_, at| now.saturating_sub(*at) < MISS_TTL_MS);
+        }
+        if m.len() < MISS_MAX {
+            m.insert(miss_key(kind, id), now);
+        }
+    }
+}
+
+fn note_miss(kind: &str, id: &str) {
+    note_miss_at(kind, id, miss_clock_ms());
+}
+
+#[cfg(test)]
+mod miss_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_definite_not_found_is_a_miss() {
+        assert!(is_not_found("API returned 500 Internal Server Error: {\"message\":\"object not found\"}"));
+        assert!(is_not_found("API returned 404 Not Found: "));
+        assert!(!is_not_found("HTTP error: operation timed out"));
+        assert!(!is_not_found("API returned 429 Too Many Requests: slow down"));
+    }
+
+    #[test]
+    fn a_miss_is_remembered_briefly_and_only_for_snapshot_kinds() {
+        // Ids no other test uses: the map is process-wide.
+        note_miss_at("struct", "5-990000001", 1_000);
+        assert!(known_miss_at("struct", "5-990000001", 1_000 + MISS_TTL_MS - 1));
+        assert!(!known_miss_at("struct", "5-990000001", 1_000 + MISS_TTL_MS), "and then asked again");
+        assert!(!known_miss_at("struct", "5-99000000", 1_000), "never by prefix");
+        assert!(!known_miss_at("fleet", "5-990000001", 1_000), "nor across kinds");
+        note_miss_at("provider", "10-990000001", 1_000);
+        assert!(!known_miss_at("provider", "10-990000001", 1_000), "a kind the snapshot does not hold is always asked");
+    }
 }
 
 static SNAPSHOT_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1922,6 +2029,7 @@ pub fn entity_stats() -> Value {
         "snapshot_hits": SNAPSHOT_HITS.load(Ordering::Relaxed),
         "guild_reads": ENTITY_GUILD_READS.load(Ordering::Relaxed),
         "lcd_reads": ENTITY_LCD_READS.load(Ordering::Relaxed),
+        "known_misses": ENTITY_KNOWN_MISSES.load(Ordering::Relaxed),
         "source": snapshot_source().name(),
         "fed_by": fed_by(),
         "hot_age_s": hot_age_ms().map(|a| (a / 1000.0) as u64),

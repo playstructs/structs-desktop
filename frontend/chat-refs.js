@@ -412,7 +412,7 @@
     function menuLabel(card, a) {
       if (a.key === 'watch_planet' && card.planet_id) return 'Watch planet ' + card.planet_id;
       if (a.key === 'watch_fleet' && card.fleet_id) return 'Follow fleet ' + card.fleet_id;
-      if (a.key === 'send_alpha') return 'Pay in Team Ops';
+      if (a.key === 'send_alpha') return 'Transport Goods';
       if (a.key === 'message') return 'Message ' + (card.title || card.id);
       return a.label;
     }

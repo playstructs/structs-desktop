@@ -20,9 +20,18 @@ use std::sync::RwLock;
 
 use crate::mcp::tools::format::{format_alpha, format_ore, format_power};
 
-/// Resolved summaries, so a room full of the same id is one lookup. Chat
-/// references are overwhelmingly repeats — the same raid, the same struct.
+/// Resolved summaries, for the kinds that cost a network read each time: a
+/// player's balance, a guild's figures, a substation, a provider.
+///
+/// NOT planets, structs or fleets. Those are answered by the perception
+/// snapshot (`CosmosClient::entity`), which is already the app's one cache and
+/// is kept current by GRASS — holding a second copy here only made a card
+/// show a shield or a build state up to two minutes after the app knew better.
 const TTL_SECS: u64 = 120;
+
+fn held_here(kind: u8) -> bool {
+    !matches!(kind, 2 | 5 | 9)
+}
 static CACHE: std::sync::LazyLock<RwLock<HashMap<String, (u64, Value)>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -572,7 +581,7 @@ pub async fn resolve(id: &str) -> Option<Value> {
     if !is_referenceable(kind) {
         return None;
     }
-    {
+    if held_here(kind) {
         let cache = CACHE.read().ok()?;
         if let Some((at, v)) = cache.get(id) {
             if super::auth::now_secs().saturating_sub(*at) < TTL_SECS {
@@ -618,6 +627,9 @@ pub async fn resolve(id: &str) -> Option<Value> {
         10 => provider_card(id, &v),
         _ => return None,
     };
+    if !held_here(kind) {
+        return Some(card);
+    }
     if let Ok(mut cache) = CACHE.write() {
         cache.insert(id.to_string(), (super::auth::now_secs(), card.clone()));
         // Bounded: a busy room could otherwise name thousands of objects.
@@ -658,6 +670,16 @@ mod tests {
         // card that says nothing is worse than plain text.
         for k in [3u8, 6, 7, 8, 11] {
             assert!(!is_referenceable(k), "type {} should not be", k);
+        }
+    }
+
+    #[test]
+    fn snapshot_kinds_are_not_cached_a_second_time() {
+        for k in [2u8, 5, 9] {
+            assert!(!held_here(k), "type {} is the snapshot's to answer", k);
+        }
+        for k in [0u8, 1, 4, 10] {
+            assert!(held_here(k), "type {} is a network read and is held", k);
         }
     }
 
