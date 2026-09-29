@@ -1524,7 +1524,7 @@ pub async fn matrix_object_room(
         return Ok(json!({ "connected": true, "alias": null, "room_id": null,
                           "can_create": false, "joined": false, "guild_id": guild }));
     };
-    let room_id = client::room_id_for_alias(&session, &alias).await;
+    let room_id = client::room_id_for_alias(&session, &alias).await?;
     // Membership is the difference between a room we can READ and one we can
     // only see exists. Deliberately not joined here: a raid window opens on
     // every planet the player merely looks at, and auto-joining each one would
@@ -1561,7 +1561,7 @@ pub async fn matrix_object_room_create(
         .ok_or_else(|| format!("{object_id} does not get a room"))?;
     // Only when the alias does not resolve: after the first ensure the room
     // exists, and from then on this is pure Matrix.
-    if let Some(existing) = client::room_id_for_alias(&session, &alias).await {
+    if let Some(existing) = client::room_id_for_alias(&session, &alias).await? {
         client::join_via(&session, &existing, &host.server).await?;
         return Ok(json!({ "room_id": existing, "created": false, "joined": true,
                           "server_name": host.server }));
@@ -1861,9 +1861,13 @@ pub async fn work_bus(guild_id: &str) -> Option<(String, String)> {
     }
     let session = session_for(guild_id).ok()?;
     let room_id = match client::room_id_for_alias(&session, &alias).await {
-        Some(r) => r,
-        None => {
+        Ok(Some(r)) => r,
+        Ok(None) => {
             bus_trouble(format!("work bus {alias} does not resolve; results will use the crew's own room"));
+            return None;
+        }
+        Err(e) => {
+            bus_trouble(format!("work bus {alias} could not be looked up ({e}); results will use the crew's own room"));
             return None;
         }
     };
@@ -2131,7 +2135,7 @@ async fn resolve_subject(guild_id: &str, session: &store::Session, s: &str) -> R
     }
     if s.starts_with('#') {
         return client::room_id_for_alias(session, s)
-            .await
+            .await?
             .ok_or_else(|| format!("no room called {s}"));
     }
     let kind = s.split_once('-').and_then(|(k, rest)| {

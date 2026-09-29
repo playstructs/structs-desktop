@@ -1,10 +1,10 @@
-//! Rooms a player has pinned above every section of the list — and the
-//! guild's own channels, which are pinned for them by default.
+//! Rooms a player has pinned above every section of the list — and the three
+//! Structs-wide channels, which are pinned for every player by default.
 //!
 //! One rule for both: a pinned room carries a rank (`Room::home_rank`) and
-//! sits in the "Pinned" group at the top. The guild's channels get their rank
-//! from the room directory (`client::guild_channel_rank`: lobby first); a
-//! player's own pins come after those, in the order they were pinned. A
+//! sits in the "Pinned" group at the top. The defaults (`#sn-corp`, `#help`,
+//! `#infrastructure` — `client::DEFAULT_PINS`) rank 0, 1, 2; a player's own
+//! pins come after those, in the order they were pinned. A
 //! default the player took OUT stays out — that is the whole difference
 //! between "pinned for you" and "pinned by you", and it is why the file keeps
 //! two lists rather than one.
@@ -30,9 +30,8 @@ pub struct Pins {
 
 type File = HashMap<String, Pins>;
 
-/// Player pins come after the guild's own channels, whose ranks are 0 (the
-/// lobby) and 1 (everything else the guild made).
-pub const FIRST_PLAYER_RANK: u8 = 2;
+/// Player pins come after the default pins, whose ranks are 0, 1 and 2.
+pub const FIRST_PLAYER_RANK: u8 = 3;
 
 static CACHE: RwLock<Option<File>> = RwLock::new(None);
 
@@ -72,9 +71,9 @@ fn save(file: &File) {
 
 /// Where a room sits in the Pinned group, or `None` when it is not pinned.
 ///
-/// `default_rank` is what the guild directory says (lobby 0, other guild
-/// channels 1, everything else None). A player's own pin outranks nothing
-/// and follows the defaults; a default the player unpinned is gone.
+/// `default_rank` is the room's place among the default pins, if it is one.
+/// A player's own pin follows the defaults; a default the player unpinned
+/// is gone.
 pub fn rank(user_id: &str, room_id: &str, alias: Option<&str>, default_rank: Option<u8>) -> Option<u8> {
     let file = load();
     rank_in(file.get(user_id), room_id, alias, default_rank)
@@ -150,7 +149,7 @@ mod tests {
         assert_eq!(rank_in(Some(&p), "!dm", None, None), Some(FIRST_PLAYER_RANK + 1));
         assert!(rank_in(Some(&p), "!trade", None, None) < rank_in(Some(&p), "!dm", None, None));
         // Every player pin sits after every default.
-        assert!(rank_in(Some(&p), "!dm", None, None) > Some(1));
+        assert!(rank_in(Some(&p), "!dm", None, None) > Some(2));
         apply(&mut p, "!trade", None, false, false);
         assert_eq!(rank_in(Some(&p), "!trade", None, None), None);
         assert_eq!(p.pinned, vec!["!dm"]);

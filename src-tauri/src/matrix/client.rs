@@ -195,8 +195,8 @@ pub struct Room {
     /// "local" | "galaxy" | "direct" — see `section_for`.
     pub section: &'static str,
     /// Rank in the Pinned group above every section, or `None` for a room
-    /// that is not pinned. The guild's own channels are pinned by default
-    /// (lobby 0, the rest 1); the player's own pins follow. See `pins.rs`.
+    /// that is not pinned. The three Structs-wide channels are pinned by
+    /// default (0, 1, 2); the player's own pins follow. See `pins.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_rank: Option<u8>,
     pub icon: &'static str,
@@ -595,6 +595,50 @@ mod pin_tests {
         assert!(other.is_none(), "the primary must still have this to do");
     }
 
+    /* The default pins are the same three for EVERYONE.
+     *
+     * The first version compared the SESSION's homeserver to SN Corp's, so it
+     * answered "am I on SN's server?" rather than "is this room on SN's
+     * server?" — and every room came back unpinned for every player outside
+     * SN Corp, which is most of them. A later one made the defaults the
+     * viewer's own guild's channels, and the three vanished for the same
+     * players. The viewer does not appear in this function's arguments.
+     */
+    #[test]
+    fn only_the_servers_own_not_found_means_there_is_no_room() {
+        assert!(alias_not_found("M_NOT_FOUND: Room alias #planet-2-1:s not found"));
+        assert!(alias_not_found("M_NOT_FOUND"));
+        assert!(alias_not_found("HTTP 404"));
+        // A server that could not be reached has said nothing about the room.
+        assert!(!alias_not_found("error sending request for url (https://matrix.example/…)"));
+        assert!(!alias_not_found("M_FORBIDDEN: not allowed"));
+        assert!(!alias_not_found("the homeserver is rate limiting this; try again in 5s"));
+        assert!(!alias_not_found("M_UNKNOWN: M_NOT_FOUND appears in the text"));
+    }
+
+    #[test]
+    fn the_default_pins_do_not_depend_on_the_viewers_guild() {
+        const SN: &str = "matrix.beta.playstructs.com";
+        assert_eq!(default_pin_rank_on("#sn-corp:matrix.beta.playstructs.com", SN), Some(0));
+        assert_eq!(default_pin_rank_on("#help:matrix.beta.playstructs.com", SN), Some(1));
+        assert_eq!(default_pin_rank_on("#infrastructure:matrix.beta.playstructs.com", SN), Some(2));
+        // A room of the viewer's OWN guild is not pinned just for being theirs.
+        assert_eq!(default_pin_rank_on("#orbital-hydro:matrix.crew.oh.energy", SN), None);
+        // A pinned NAME on another server is a different room entirely.
+        assert_eq!(default_pin_rank_on("#help:matrix.crew.oh.energy", SN), None);
+        assert_eq!(default_pin_rank_on("#sn-corp:evil.example", SN), None);
+        // A localpart that merely CONTAINS a pin is a different room.
+        assert_eq!(default_pin_rank_on("#sn-corp-official:matrix.beta.playstructs.com", SN), None);
+        assert_eq!(default_pin_rank_on("#help-desk:matrix.beta.playstructs.com", SN), None);
+        // Suffix and prefix of the home server are not the home server.
+        assert_eq!(default_pin_rank_on("#help:beta.playstructs.com", SN), None);
+        assert_eq!(default_pin_rank_on("#help:matrix.beta.playstructs.com.evil.example", SN), None);
+        // Nothing is pinned when the directory cannot name the home server.
+        assert_eq!(default_pin_rank_on("#help:matrix.beta.playstructs.com", ""), None);
+        // Every player pin follows every default.
+        assert!(super::super::pins::FIRST_PLAYER_RANK as usize >= DEFAULT_PINS.len());
+    }
+
     #[test]
     fn the_channels_are_the_viewers_own_guilds_and_nobody_elses() {
         const SN: &str = "matrix.beta.playstructs.com";
@@ -692,14 +736,43 @@ fn is_system_alias(alias: Option<&str>) -> bool {
 /// great majority that are not one: rooms on other servers, object rooms, the
 /// work bus. See the note above `alias_localpart_of`.
 fn home_rank_for(session: &Session, room_id: &str, alias: Option<&str>) -> Option<u8> {
-    let default = alias.and_then(|a| guild_channel_rank(a, &server_name(session), &lobby_slug(&session.guild_id)));
+    let default = alias.and_then(default_pin_rank);
     super::pins::rank(&session.user_id, room_id, alias, default)
 }
 
-/// Whether this alias is one of the guild's OWN channels — pinned for the
-/// player by default, auto-joined once per install.
-fn is_default_pin(session: &Session, alias: Option<&str>) -> bool {
-    alias.is_some_and(|a| guild_channel_rank(a, &server_name(session), &lobby_slug(&session.guild_id)).is_some())
+/* The Structs-wide channels, pinned by default for EVERY player.
+ *
+ * `#sn-corp`, `#help` and `#infrastructure` are where a new player finds the
+ * game's people, whatever guild they joined — so they are the default pins
+ * for an Orbital Hydro player exactly as for an SN Corp one, and everyone is
+ * put into them once per install. They live on SN Corp's homeserver; the
+ * rule names the ROOM (whole localpart, whole server), never the viewer.
+ * Everything else — the player's own guild lobby included — is pinned by the
+ * player, with the same switch.
+ */
+const HOME_GUILD: &str = "0-5";
+const DEFAULT_PINS: [&str; 3] = ["sn-corp", "help", "infrastructure"];
+
+fn default_pin_rank(alias: &str) -> Option<u8> {
+    let home = super::directory::server_name_for_guild(HOME_GUILD)?;
+    default_pin_rank_on(alias, &home)
+}
+
+/// The decision itself, with nothing global in it. Rank IS the index, so
+/// the list order is the on-screen order.
+fn default_pin_rank_on(alias: &str, home_server: &str) -> Option<u8> {
+    // Whole-server equality, never a substring: `oh.energy` is a suffix of
+    // `matrix.oh.energy` and a prefix of `oh.energy.example.com`.
+    if home_server.is_empty() || super::rooms::server_of(alias) != Some(home_server) {
+        return None;
+    }
+    let local = alias_localpart_of(alias)?;
+    DEFAULT_PINS.iter().position(|p| *p == local).map(|i| i as u8)
+}
+
+/// Whether this alias is one of the default pins.
+fn is_default_pin(_session: &Session, alias: Option<&str>) -> bool {
+    alias.and_then(default_pin_rank).is_some()
 }
 
 /// Pin a room above the list for this identity, or take it back out, and
@@ -2707,11 +2780,16 @@ async fn join_pinned_channels(app: &tauri::AppHandle, guild_id: &str) {
     if let Err(e) = refresh_directory(guild_id, &session).await {
         eprintln!("[Comms] {} room directory: {}", guild_id, e);
     }
-    // The DEFAULTS only — the guild's own channels. A room the player pinned
+    // Two sets, joined once per install each: the Structs-wide default pins
+    // (by alias, across homeservers by federation), and the player's own
+    // guild's channels from its directory. A room the player pinned
     // themselves is one they are in already, or chose not to be.
     let own_server = server_name(&session);
     let lobby = lobby_slug(guild_id);
-    let aliases: Vec<String> = STATE
+    let mut aliases: Vec<String> = super::directory::server_name_for_guild(HOME_GUILD)
+        .map(|home| DEFAULT_PINS.iter().map(|l| format!("#{l}:{home}")).collect())
+        .unwrap_or_default();
+    let own: Vec<String> = STATE
         .read()
         .ok()
         .and_then(|st| {
@@ -2729,6 +2807,11 @@ async fn join_pinned_channels(app: &tauri::AppHandle, guild_id: &str) {
             })
         })
         .unwrap_or_default();
+    for a in own {
+        if !aliases.contains(&a) {
+            aliases.push(a);
+        }
+    }
     let now = crate::hasher::types::now_millis() as u64;
     let mut state = pinned_state_read();
     // Whose memberships these are. Two identities on one install are two
@@ -4747,12 +4830,26 @@ pub async fn media_data_url(
 /// without the other side trusting us — the same fact `discovery.rs` is built
 /// on. `None` means no room with that alias exists yet, which for a per-object
 /// room is the ordinary case rather than an error.
-pub async fn room_id_for_alias(session: &Session, alias: &str) -> Option<String> {
+/// The room an alias names: `Ok(None)` when the homeserver says there is no
+/// such room, `Err` when it could not be asked.
+///
+/// The two used to be one `None`, and a homeserver that refused connections
+/// for a minute made every channel "not exist": the Comms door answered "no
+/// room called #help", and a planet that HAD a room offered to create it.
+/// Only the server's own M_NOT_FOUND means not found.
+pub async fn room_id_for_alias(session: &Session, alias: &str) -> Result<Option<String>, String> {
     let url = format!("{}/directory/room/{}", base(session), urlseg(alias));
-    let v = authed(session, move |c, s| c.get(&url).bearer_auth(&s.access_token))
-        .await
-        .ok()?;
-    v.get("room_id")?.as_str().map(|s| s.to_string())
+    match authed(session, move |c, s| c.get(&url).bearer_auth(&s.access_token)).await {
+        Ok(v) => Ok(v.get("room_id").and_then(|r| r.as_str()).map(|s| s.to_string())),
+        Err(e) if alias_not_found(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether a directory lookup's failure is the server saying "no such
+/// alias" rather than the lookup itself failing.
+fn alias_not_found(err: &str) -> bool {
+    err.split(':').next().map(str::trim) == Some("M_NOT_FOUND") || err.trim() == "HTTP 404"
 }
 
 
