@@ -1970,6 +1970,52 @@
   }
   Terminal.chartRows = chartRows;
 
+  /* The words that open no CARD — a window, or a change to the workspace —
+   * so neither the card menu nor the walk over WORDS can find them. They are
+   * parsed by hand in `Terminal.parse`, and were listed by hand in the empty
+   * palette only: typing `COM` walked the card words and offered a chart,
+   * with COMMS nowhere. One table, read by the empty list and by completion.
+   *
+   * `typedOnly` answers when typed but is not announced: BUS is a door kept
+   * off the channel list, and bare FLEET is the Armada the menu already
+   * names. `workspace` verbs change a layout the palette over the game never
+   * loaded, where `execute` refuses them — so there they are not offered.
+   * PET is absent on purpose, as it is from HELP: the companion is gated off
+   * in Rust. */
+  var VERBS = [
+    { words: ['COMMS', 'INBOX', 'DMS', 'UNREAD'], what: 'Open Comms', group: 'Comms' },
+    { words: ['DM', 'MSG', 'MESSAGE', 'TALK', 'CHAT'], what: 'Message a player', arg: '<player>', group: 'Comms' },
+    { words: ['ROOM'], what: 'A conversation, by subject', arg: '<id · #alias>', group: 'Comms' },
+    { words: ['WHO', 'INROOM'], what: 'Who is in a conversation', arg: '<id · #alias>', group: 'Comms' },
+    { words: ['CHANNELS', 'BROWSE', 'DIRECTORY'], what: 'Every guild\'s channels', group: 'Comms' },
+    { words: ['FIND', 'SEARCH'], what: 'Search everything said', arg: '<text>', group: 'Comms' },
+    { words: ['SAY'], what: 'Draft a line in Comms', arg: '<text>', group: 'Comms' },
+    { words: ['BUS'], what: 'The work bus', group: 'Comms', typedOnly: true },
+    { words: ['FLEET'], what: 'Armada, or a fleet on the map', arg: '[id]', group: 'Armada', typedOnly: true },
+    { words: ['SETTINGS', 'CONFIG'], what: 'Settings', group: 'Workspace', workspace: true },
+    { words: ['PRESET', 'PRESETS'], what: 'A preset page', arg: '<name>', group: 'Workspace', workspace: true },
+    { words: ['SHARE'], what: 'Share this workspace as a code', group: 'Workspace', workspace: true },
+    { words: ['IMPORT'], what: 'Open a workspace someone shared', arg: '<code>', group: 'Workspace', workspace: true },
+    { words: ['RESET'], what: 'Back to the default page', group: 'Workspace', workspace: true },
+  ];
+  Terminal.VERBS = VERBS;
+  /* Rows for the verbs `keep` lets through. With a typed `head`, only the
+   * verbs a word of which starts that way, one row per verb with the
+   * matching aliases on it — and no group, so they file among the words. */
+  function verbRows(keep, head) {
+    var out = [];
+    VERBS.forEach(function (v) {
+      if (v.workspace && state.paletteOnly) return;
+      if (keep && !keep(v)) return;
+      var words = head == null ? [v.words[0]] : v.words.filter(function (w) { return w.indexOf(head) === 0; });
+      if (!words.length) return;
+      var row = { line: words[0] + (v.arg ? ' ' : ''), words: words.join(' · '), what: v.what, arg: v.arg || '', run: !v.arg };
+      if (head == null) row.group = v.group;
+      out.push(row);
+    });
+    return out;
+  }
+
   function suggestFor(line) {
     var raw = String(line || '');
     var parts = raw.trim().split(/\s+/).filter(Boolean);
@@ -1984,10 +2030,7 @@
        * under fifty card rows, they sat below the fold and read as missing.
        * A launcher that cannot reach Comms is a launcher people stop
        * opening. */
-      out.push({ line: 'COMMS', words: 'COMMS', what: 'Open Comms', arg: '', group: 'Comms', run: true });
-      out.push({ line: 'DM ', words: 'DM', what: 'Message a player', arg: '<player>', group: 'Comms', run: false });
-      out.push({ line: 'ROOM ', words: 'ROOM', what: 'A conversation, by subject', arg: '<id · #alias>', group: 'Comms', run: false });
-      out.push({ line: 'SAY ', words: 'SAY', what: 'Draft a line in Comms', arg: '<text>', group: 'Comms', run: false });
+      verbRows(function (v) { return v.group === 'Comms' && !v.typedOnly; }).forEach(function (r) { out.push(r); });
       // The charts a player has saved and the library, each under its word.
       chartRows().forEach(function (r) { out.push(r); });
       Terminal.groups().forEach(function (g) {
@@ -1998,6 +2041,7 @@
           out.push({ line: word + (arg ? ' ' : ''), words: word, what: o.label, arg: arg, group: g.group, run: !arg });
         });
       });
+      verbRows(function (v) { return v.group === 'Workspace'; }).forEach(function (r) { out.push(r); });
       return out;
     }
     var trailingSpace = /\s$/.test(raw);
@@ -2025,6 +2069,13 @@
           });
       }
     }
+    // `PRESET ` — the presets by name, the way `STATS ` lists its set.
+    if ((head === 'PRESET' || head === 'PRESETS') && !state.paletteOnly && (parts.length === 2 || trailingSpace)) {
+      var typedPreset = parts.length === 2 ? parts[1].toLowerCase() : '';
+      return Object.keys(PRESETS).filter(function (k) { return k.indexOf(typedPreset) === 0; }).map(function (k) {
+        return { line: 'PRESET ' + k, words: 'PRESET ' + k, what: PRESETS[k].label || k, run: true };
+      });
+    }
     /* `CHART ` and `CHART Mar`: the charts you saved, by name, as the word's
      * own choices — the way `STATS ` lists its set. */
     if (WORDS[head] && WORDS[head][0] === 'chart' && (parts.length > 1 || trailingSpace)) {
@@ -2051,6 +2102,7 @@
       seen[key] = { line: word + (arg ? ' ' : ''), words: word, what: def.label, arg: arg, run: !arg };
       out.push(seen[key]);
     });
+    verbRows(null, head).forEach(function (r) { out.push(r); });
     out.sort(function (a, b) {
       if (!!a.group !== !!b.group) return a.group ? -1 : 1;   // saved charts first
       return a.words < b.words ? -1 : a.words > b.words ? 1 : 0;

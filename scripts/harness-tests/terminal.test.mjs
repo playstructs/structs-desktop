@@ -125,19 +125,20 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     /* The Comms WORDS are rows of their own group at the end: they open the
      * Comms window, not a card, so the card menu could never list them. */
     const commsRows = empty.filter((o) => o.group === 'Comms');
+    const workspaceRows = empty.filter((o) => o.group === 'Workspace');
     /* And the chart library after them: built-in charts, one row per ⌘K word. */
     const chartRows = empty.filter((o) => o.group === 'Charts');
     check('the card menu is grouped by the board\'s areas, not one flat list', groups.length >= 6 && groups.every((g) => g.group && g.options.length)
-      && new Set(empty.map((o) => o.group)).size === groups.length + 2);
+      && new Set(empty.map((o) => o.group)).size === groups.length + 3);
     check('…every registered card is filed in exactly one named group', groups.every((g) => g.group !== 'More') && all.every((t) => filed.filter((f) => f === t).length === 1) && filed.length === all.length, all.filter((t) => !filed.includes(t)).join(','));
     /* Opened EMPTY, the palette is the card menu: every card, grouped, each
      * row naming the word that opens it. That is what lets the picker go — a
      * strict superset, not a second way in. */
     check('…and an empty palette still offers every card the picker did, each named by the word that opens it',
-      empty.length === all.length + commsRows.length + chartRows.length && chartRows.length >= 9 && empty.every((o) => o.words && o.what), empty.length + ' of ' + all.length);
+      empty.length === all.length + commsRows.length + chartRows.length + workspaceRows.length && chartRows.length >= 9 && empty.every((o) => o.words && o.what), empty.length + ' of ' + all.length);
     check('…Comms first (its words open the window, and last they sat below the fold), then the groups in order',
-      empty.map((o) => o.group).filter((g, i, a) => g !== a[i - 1]).join(' ') === ['Comms', 'Charts'].concat(groups.map((g) => g.group)).join(' ')
-      && commsRows.map((o) => o.words).join(' ') === 'COMMS DM ROOM SAY');
+      empty.map((o) => o.group).filter((g, i, a) => g !== a[i - 1]).join(' ') === ['Comms', 'Charts'].concat(groups.map((g) => g.group), 'Workspace').join(' ')
+      && commsRows.map((o) => o.words).join(' ') === 'COMMS DM ROOM WHO CHANNELS FIND SAY');
     /* Named explicitly, not left to the "everything is filed" rule above: the
      * two achievement cards are the newest, and "is it in the palette yet?"
      * is the first question a build raises about them. */

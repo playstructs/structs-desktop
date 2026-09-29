@@ -88,8 +88,17 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('the grammar is whole: every card, its groups and its completions',
     T.types().length > 20 && T.groups().length >= 6
     && T.suggestFor('').filter((o) => o.group !== 'Comms' && o.group !== 'Charts').length === T.types().length
-    && T.suggestFor('').filter((o) => o.group === 'Comms').length === 4,
+    && T.suggestFor('').filter((o) => o.group === 'Comms').length === 7,
     T.types().length + ' types, ' + T.suggestFor('').length + ' rows');
+  /* Typing must not lose what the empty list showed: `COM` used to walk the
+   * card words only and offer a chart, with COMMS nowhere. */
+  const typed = (l) => T.suggestFor(l).map((r) => r.words).join(' | ');
+  check('the window\'s words complete when typed, aliases on one row',
+    /(^|\| )COMMS( \||$)/.test(typed('COM')) && /DM · DMS|DMS/.test(typed('DM')) && /MSG/.test(typed('MS'))
+    && /ROOM/.test(typed('RO')) && /SAY/.test(typed('SA')) && /FIND/.test(typed('FIN')) && /WHO/.test(typed('WH'))
+    && /CHANNELS · CHAT|CHAT/.test(typed('CHA')) && /FLEET/.test(typed('FL')) && /BUS/.test(typed('BU')), typed('COM'));
+  check('…and the workspace verbs are not offered over the game, where they are refused',
+    !T.suggestFor('').some((o) => o.group === 'Workspace') && !/RESET/.test(typed('RES')) && !/SHARE/.test(typed('SHA')) && !/SETTINGS/.test(typed('SET')));
   check('…including subject-first completion, which is what the palette is FOR',
     T.functionsFor('2-29604').some((f) => f.word === 'PLANET'));
 
