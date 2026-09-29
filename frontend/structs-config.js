@@ -2319,6 +2319,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         + ' display:flex; flex-direction:row; flex-wrap:wrap;'
         + ' gap:var(--spacing-md); align-items:center;">';
       html += '<a href="javascript:void(0)" id="debug-download-logs" class="sui-screen-btn sui-mod-secondary">Download logs</a>';
+      html += '<a href="javascript:void(0)" id="debug-download-key" class="sui-screen-btn sui-mod-secondary">Download account key</a>';
       html += '<a href="javascript:void(0)" id="debug-gamestats" class="sui-screen-btn sui-mod-secondary">Game Stats</a>';
       // The Terminal: one customizable page of cards — markets, stats, the
       // team, comms, the map — that pops out into windows which come back
@@ -2487,6 +2488,31 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               flashBtn(dlEl, 'Saved to Downloads · ' + mb + ' MB');
             }).catch(function(e) {
               flashBtn(dlEl, 'Export failed: ' + e);
+            });
+          });
+        }
+
+        // Account key: the same file signup wrote (identity_backup.rs), as a
+        // fresh timestamped copy in Downloads, revealed in the file manager.
+        var keyEl = document.getElementById('debug-download-key');
+        if (keyEl) {
+          keyEl.addEventListener('click', function() {
+            if (keyEl.dataset.busy === '1') return;
+            keyEl.dataset.busy = '1';
+            if (!window.__TAURI__) { flashBtn(keyEl, 'Desktop app only'); return; }
+            var g = window.gameState || {};
+            if (!g.mnemonic) { flashBtn(keyEl, 'No account key on this device'); return; }
+            var p = g.keyPlayers && g.keyPlayers.player;
+            window.__TAURI__.core.invoke('save_identity_backup', {
+              mnemonic: g.mnemonic,
+              dest: 'download',
+              username: (p && p.player && (p.player.username || p.player.name)) || null,
+              guildId: (p && p.player && p.player.guild_id) || null,
+              playerId: (p && p.id) || null,
+            }).then(function() {
+              flashBtn(keyEl, 'Saved to Downloads');
+            }).catch(function(e) {
+              flashBtn(keyEl, 'Save failed: ' + e);
             });
           });
         }

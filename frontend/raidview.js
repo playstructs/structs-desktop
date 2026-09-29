@@ -270,10 +270,20 @@
   /* Animation name → Lottie bundle path.
    *
    * Every ANIMATION.NAMES.* constant lowercases directly to its directory
-   * under frontend/lottie/. Per-type bundles (attack, active_loop) take the
-   * struct's asset slug as a second segment; shared effects (impact, shake,
-   * destroy, evade) are a single data.json. */
-  var PER_TYPE = { attack_primary_weapon: 1, attack_secondary_weapon: 1, active_loop: 1 };
+   * under frontend/lottie/. Per-type bundles (attack, active_loop, stealth) take
+   * the struct's asset slug as a second segment; shared effects (impact, shake,
+   * destroy, evade) are a single data.json.
+   *
+   * PER_TYPE must match the on-disk layout: a dir listed here is read as
+   * <dir>/<typeSlug>/data.json, one omitted as <dir>/data.json. Getting it wrong
+   * fails silently — lottie just never loads. stealth_* ship as
+   * stealth_bomber/ + submersible/ subdirs, so omitting them made the raid view
+   * request lottie/stealth_activate/data.json (nonexistent) and drop every
+   * stealth toggle animation the main game plays. */
+  var PER_TYPE = {
+    attack_primary_weapon: 1, attack_secondary_weapon: 1, active_loop: 1,
+    stealth_activate: 1, stealth_deactivate: 1,
+  };
   // The banner bundles predate the ANIMATION.NAMES convention and are named in
   // kebab case on disk, so they cannot be derived — map them explicitly rather
   // than let a lowercase() silently miss.

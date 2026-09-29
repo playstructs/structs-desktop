@@ -6,6 +6,7 @@ mod guild_config;
 mod guild_directory;
 mod hasher;
 mod http_proxy;
+mod identity_backup;
 mod macos_keepalive;
 mod matrix;
 mod mcp;
@@ -61,6 +62,7 @@ fn main() {
             http_proxy::proxy_fetch,
             notifications::send_notification,
             mcp::log_bundle::export_log_bundle,
+            identity_backup::save_identity_backup,
             mcp::log_bundle::log_ui_events,
             hasher::start_hash_task,
             hasher::stop_hash_task,
