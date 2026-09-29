@@ -7,9 +7,14 @@
 //! row itself (`action`, `denom`, `direction`, `amount_p`, `player_id`). The
 //! app already keeps every frame for seven days in telemetry's `grass_events`
 //! (`event_buffer::ingest` records before anything else sees it). So a rate
-//! is a sum over that record: the last hour of `mined` ore credited to our
-//! players, the last hour of `refined` ualpha, the last hour of `seized` ore;
-//! kills and losses from `struct_attack` volleys over the last day.
+//! is a sum over that record: the last day of `mined` ore credited to our
+//! players, of `refined` ualpha, of `seized` ore, quoted per hour; kills and
+//! losses from `struct_attack` volleys over the same day.
+//!
+//! The rates were first quoted over the trailing HOUR. Production is a burst,
+//! not a flow — a cohort of replicants mines for hours and refines together —
+//! so on 2026-09-29 every readout said 0 on a day the team refined 2,896
+//! Alpha, because the burst had ended four hours earlier.
 //!
 //! Live frames are folded as they arrive. At start the last 25 hours are read
 //! back from telemetry once, so the figures are there the moment the card
@@ -28,8 +33,10 @@ use crate::mcp::event_buffer::GameEvent;
 use crate::mcp::telemetry::{tlog, Sev};
 use crate::mcp::types::numeric_f64;
 
-/// The window a production rate is quoted over.
+/// The unit a production rate is quoted in.
 const WINDOW_MS: f64 = 3_600_000.0;
+/// The window a production rate is averaged over.
+const RATE_MS: f64 = 24.0 * WINDOW_MS;
 /// Kills and losses are quoted over a day; hits older than this are dropped.
 const KEEP_MS: f64 = 25.0 * 3_600_000.0;
 /// A rate needs at least this much observed time before it is a number.
@@ -262,13 +269,14 @@ fn backfill_rows(since: f64, until: f64) -> Result<(Vec<Hit>, Option<f64>), Stri
 
 // ── The card's read ──────────────────────────────────────────────────────────
 
-/// Sum of a kind over the trailing `window_ms`.
+/// Sum of a kind since `floor`. An empty `f64` sum is `-0.0`, which prints as
+/// "-0"; adding zero makes it the ordinary one.
 fn sum_since(hits: &VecDeque<Hit>, kind: Kind, floor: f64) -> f64 {
-    hits.iter().rev().take_while(|h| h.ts >= floor).filter(|h| h.kind == kind).map(|h| h.amount).sum()
+    hits.iter().rev().take_while(|h| h.ts >= floor).filter(|h| h.kind == kind).map(|h| h.amount).sum::<f64>() + 0.0
 }
 
-/// A rate over the last hour, or over however long the record reaches back
-/// when that is shorter; `null` under five minutes of observation.
+/// An hourly rate over the last day, or over however long the record reaches
+/// back when that is shorter; `null` under five minutes of observation.
 fn per_hour(sum: f64, covered_ms: f64) -> Option<f64> {
     if covered_ms < MIN_COVER_MS {
         return None;
@@ -279,15 +287,14 @@ fn per_hour(sum: f64, covered_ms: f64) -> Option<f64> {
 pub fn snapshot() -> Value {
     let s = lock();
     let now = now_millis();
-    let covered = s.observed_since.map(|o| (now - o).clamp(0.0, WINDOW_MS)).unwrap_or(0.0);
-    let hour = now - WINDOW_MS;
-    let day = now - 24.0 * WINDOW_MS;
+    let covered = s.observed_since.map(|o| (now - o).clamp(0.0, RATE_MS)).unwrap_or(0.0);
+    let day = now - RATE_MS;
     let kills = sum_since(&s.hits, Kind::Kill, day) as usize;
     let losses = sum_since(&s.hits, Kind::Loss, day) as usize;
     json!({
-        "ore_g_h": per_hour(sum_since(&s.hits, Kind::Mined, hour), covered),
-        "alpha_ualpha_h": per_hour(sum_since(&s.hits, Kind::Refined, hour), covered),
-        "seized_g_h": per_hour(sum_since(&s.hits, Kind::Seized, hour), covered),
+        "ore_g_h": per_hour(sum_since(&s.hits, Kind::Mined, day), covered),
+        "alpha_ualpha_h": per_hour(sum_since(&s.hits, Kind::Refined, day), covered),
+        "seized_g_h": per_hour(sum_since(&s.hits, Kind::Seized, day), covered),
         "window_h": if covered > 0.0 { Some(covered / WINDOW_MS) } else { None },
         "kills_24h": kills,
         "losses_24h": losses,
@@ -357,5 +364,12 @@ mod tests {
         assert_eq!(per_hour(21.0, WINDOW_MS / 2.0), Some(42.0));
         // Under five minutes there is no rate, only a dash.
         assert_eq!(per_hour(21.0, 60_000.0), None);
+        // A burst that ended hours ago is still the day's production: 2,400
+        // over a full day is 100 an hour, not the 0 the last hour alone saw.
+        assert_eq!(sum_since(&hits, Kind::Seized, now - WINDOW_MS), 0.0);
+        assert_eq!(per_hour(2400.0, RATE_MS), Some(100.0));
+        // Nothing of a kind sums to a plain zero, never the "-0" an empty
+        // f64 sum prints as.
+        assert!(sum_since(&hits, Kind::Seized, now - WINDOW_MS).is_sign_positive());
     }
 }
