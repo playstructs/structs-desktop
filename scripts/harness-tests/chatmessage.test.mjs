@@ -173,6 +173,17 @@ function boot(state = {}, fixtures = {}) {
   more.click();
   assert.equal(boot2.S.openRefs['1-4'], 1);
   assert.equal(m2.messageNode(messages[4], messages[3]).querySelectorAll('.card').length, 4);
+  // A work frame is a machine's line: its ids are links, never rows, and cost no lookup.
+  const frame = { event_id: '$w', sender: '@bot', body: 'Solved 5-242 MINE @68607: nonce 1', ts: t0, work: { kind: 'result', object: '5-242' } };
+  assert.deepEqual(plan(frame), { auto: '', held: '', bare: false });
+  const b4 = boot({ messages: [frame] });
+  const drawn = b4.msg.messageNode(frame, null);
+  assert.ok(!b4.calls.some((c) => c[0] === 'wantRefs'), 'nothing is looked up for a work frame');
+  assert.ok(drawn.querySelector('.chat-id.chat-mod-openable'), 'its id still opens on request');
+  // A repeat that stays a link is not looked up either.
+  const b5 = boot({ messages });
+  b5.msg.messageNode(messages[2], messages[1]);
+  assert.equal(b5.calls.find((c) => c[0] === 'wantRefs')[1], '9-4');
   // Unresolved: the id stays on screen as text until there is a row to replace it.
   const b3 = boot({ messages });
   assert.ok(!b3.msg.messageNode(messages[3], null).querySelector('.chat-msg-body').classList.contains('hidden'));

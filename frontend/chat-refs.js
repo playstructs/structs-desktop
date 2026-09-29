@@ -73,7 +73,9 @@
 
     function flushRefs() {
       refTimer = null;
-      var batch = refQueue.splice(0, 8);
+      // Newest first. A timeline is painted top to bottom, so the queue ends
+      // with what is on screen — and the reader is at the bottom.
+      var batch = refQueue.splice(-8);
       if (!batch.length) return;
       invoke('matrix_refs', { ids: batch })
         .then(function (res) {

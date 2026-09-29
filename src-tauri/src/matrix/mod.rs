@@ -1649,19 +1649,18 @@ pub async fn matrix_refs(ids: Vec<String>) -> Result<Value, String> {
         .collect();
     directory::resolve_many(&players).await;
 
-    let mut out = Vec::new();
+    // Together, not in turn: a miss is a whole chain read, and eight of them
+    // end to end held a batch for nine seconds before the one id the chain
+    // DID know could answer.
     let mut seen = std::collections::HashSet::new();
-    for id in ids.into_iter().take(MAX * 4) {
-        if out.len() >= MAX {
-            break;
-        }
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        if let Some(card) = refs::resolve(&id).await {
-            out.push(card);
-        }
-    }
+    let wanted: Vec<String> = ids
+        .into_iter()
+        .take(MAX * 4)
+        .filter(|id| seen.insert(id.clone()))
+        .take(MAX)
+        .collect();
+    let found = futures_util::future::join_all(wanted.iter().map(|id| refs::resolve(id))).await;
+    let out: Vec<Value> = found.into_iter().flatten().collect();
     Ok(json!({ "refs": out }))
 }
 

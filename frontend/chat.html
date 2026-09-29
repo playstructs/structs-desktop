@@ -239,6 +239,9 @@
     .chat-ref.chat-mod-row > .pc-row:focus-within .pc-act,
     .chat-ref.chat-mod-row .pc-act.sc-on { opacity: 1; }
     .chat-ref.chat-mod-row .pc-act.sc-on { background: var(--surface-player-highlight); }
+    /* One line means one line: the roster's row stacks the battery over the
+       figures, which made a player's row the only one two readings tall. */
+    .chat-ref.chat-mod-row .pc-row:not(.sc-row) .pc-reads { display: flex; align-items: center; gap: var(--spacing-xl); }
     /* The id line gives before the readings do. */
     .chat-ref.chat-mod-row .pc-ident { min-width: 0; }
     /* Every row is one height: a player's portrait is drawn at the emblem's

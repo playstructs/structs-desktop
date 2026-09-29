@@ -120,7 +120,12 @@
       // What the message named, under it, as rows that open to cards. Local
       // lines get them too — /whois is exactly "show me this card".
       if (plan.ids.length) {
-        wantRefs(plan.ids);
+        // Only what will be drawn is looked up: a repeat that stays a link
+        // costs no chain read until somebody opens it.
+        var wanted = plan.ids.filter(function (id) {
+          return plan.auto[id] || S.openRefs[id] || plan.held.indexOf(id) !== -1;
+        });
+        if (wanted.length) wantRefs(wanted);
         var key = msgKey(m);
         var rows = el('div', 'chat-refs');
         var drawn = 0;
@@ -214,6 +219,11 @@
       if (!m || !m.body) return plan;
       plan.ids = refIdsIn(m.body);
       if (!plan.ids.length) return plan;
+      // A work frame (offer, result, done) is a machine's line and draws its
+      // own card. Its ids stay links: a busy work room named 54 structs in 54
+      // lines, and unfurling them cost a row each and a minute of chain reads
+      // before anything a person had written got its turn.
+      if (m.work) return plan;
       plan.bare = plan.ids.length === 1 && String(m.body).trim() === plan.ids[0];
       var shown = 0;
       plan.ids.forEach(function (id) {
