@@ -14,8 +14,8 @@
   'use strict';
 
   var SCALES = {
-    // milliwatts in
-    power: [[16, 1e18, 'TW'], [10, 1e9, 'MW'], [6, 1e6, 'KW'], [3, 1e3, 'W'], [0, 1, 'mW']],
+    // milliwatts in (1 TW = 1e15 mW; the server's table divides by 1e18)
+    power: [[16, 1e15, 'TW'], [10, 1e9, 'MW'], [6, 1e6, 'KW'], [3, 1e3, 'W'], [0, 1, 'mW']],
     // ualpha in (1 g Alpha = 1e6 ualpha — "Alpha" and "gram" are the same unit)
     alpha: [[16, 1e18, 'Tg'], [10, 1e9, 'Kg'], [6, 1e6, 'g'], [3, 1e3, 'mg'], [0, 1, 'μg']],
     // grams in

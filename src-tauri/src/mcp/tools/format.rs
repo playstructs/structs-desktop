@@ -165,10 +165,14 @@ pub fn format_ore(ore: f64) -> String {
 }
 
 /// Format power (milliwatts → mW/W/KW/MW/TW)
+///
+/// A terawatt is 1e15 mW. The server's table divides its top rung by 1e18 —
+/// a petawatt labelled `TW` — and this copy inherited it; the rung's 16-digit
+/// threshold is kept, only the divisor is corrected.
 pub fn format_power(milliwatts: f64) -> String {
     ladder(
         milliwatts,
-        &[(16, 1e18, "TW"), (10, 1e9, "MW"), (6, 1e6, "KW"), (3, 1e3, "W"), (0, 1.0, "mW")],
+        &[(16, 1e15, "TW"), (10, 1e9, "MW"), (6, 1e6, "KW"), (3, 1e3, "W"), (0, 1.0, "mW")],
     )
 }
 
@@ -182,7 +186,7 @@ pub fn format_power(milliwatts: f64) -> String {
 /// formats every member against the shared step.
 pub fn power_column(values: &[f64]) -> impl Fn(f64) -> String {
     const STEPS: [(usize, f64, &str); 5] = [
-        (16, 1e18, "TW"), (10, 1e9, "MW"), (6, 1e6, "KW"), (3, 1e3, "W"), (0, 1.0, "mW"),
+        (16, 1e15, "TW"), (10, 1e9, "MW"), (6, 1e6, "KW"), (3, 1e3, "W"), (0, 1.0, "mW"),
     ];
     let max = values.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     let len = format!("{}", max.trunc() as i128).len();
@@ -246,6 +250,9 @@ mod tests {
         assert_eq!(format_power(100_000.0), "0.1KW");
         assert_eq!(format_power(15_467_472.0), "15.47KW");
         assert_eq!(format_power(15_515_700_000.0), "15.52MW");
+        // 1e15 mW is one terawatt. The inherited 1e18 divisor printed "0TW".
+        assert_eq!(format_power(1e15), "1TW");
+        assert_eq!(format_power(2.5e16), "25TW");
         // Alpha: 7,546 whole Alpha is 7.55 Kg, not 7.55 mg.
         assert_eq!(format_alpha(7546.0), "7.55mg");
         assert_eq!(format_alpha_whole(7546.0), "7.55Kg");

@@ -29,6 +29,11 @@ for (const [raw, want] of [
 ]) {
   check(`${raw} ualpha reads as ${want}`, U.fmtAlpha(raw) === want, U.fmtAlpha(raw));
 }
+for (const [raw, want] of [
+  [99, '99mW'], [1e5, '0.1KW'], [6877090, '6.88KW'], [1e15, '1TW'], [2.5e16, '25TW'],
+]) {
+  check(`${raw} mW reads as ${want}`, U.fmtWatts(raw) === want, U.fmtWatts(raw));
+}
 check('a missing value is a dash, not a zero', U.fmtAlpha(null) === '—', U.fmtAlpha(null));
 
 console.log('\n— reading back');
