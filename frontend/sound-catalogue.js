@@ -219,6 +219,12 @@
   });
   add('focus.struct', 'UI', 'Select Unit (any)', 'a struct on the map is selected');
   add('ui.select.tile', 'UI', 'Select Empty Tile', 'an empty map tile is selected');
+  // Press-and-hold reveals. Their icons are not buttons: a hold shows the
+  // sheet, the release hides it, and a tap does nothing.
+  add('ui.cheatsheet.open', 'UI', 'Cheatsheet · open', 'a held icon shows its cheatsheet');
+  add('ui.cheatsheet.close', 'UI', 'Cheatsheet · close', 'the cheatsheet hides on release');
+  add('ui.tooltip.open', 'UI', 'Tooltip · open', 'a held icon shows its tooltip');
+  add('ui.tooltip.close', 'UI', 'Tooltip · close', 'the tooltip hides on release');
   add('ui.denied', 'UI', 'Denied', 'a disabled button, or not enough charge');
   add('ui.stage.arm', 'UI', 'Multi-stage · arm', 'an ability is armed and waits for a target');
   add('ui.stage.confirm', 'UI', 'Multi-stage · confirm', 'a target is chosen and the action is sent');

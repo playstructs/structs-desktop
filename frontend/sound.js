@@ -529,6 +529,9 @@
     if (!c) return;
     var cls = (typeof c.className === 'string') ? c.className : '';
     if (/\bsui-mod-disabled\b|\bsui-mod-disabled-active\b/.test(cls) || c.disabled) { cue(['ui.denied'], { source: 'press' }); return; }
+    // A cheatsheet or tooltip icon is not a button: a hold reveals, a release
+    // hides (watchReveals cues those), and a tap is nothing.
+    if (typeof c.closest === 'function' && c.closest('[data-sui-cheatsheet], [data-sui-tooltip]')) return;
     // A map tile: a unit on it is announced by the game's selection event
     // (the hooks cue Select Unit); an empty one is its own cue.
     if (/\bmap-tile-selection-tile\b/.test(cls)) {
@@ -546,6 +549,64 @@
     cue(cands, { source: 'press', kind: kind, button: C && C.pressSlug ? C.pressSlug(name) : name });
   }
 
+  // ── Reveals: the cheatsheet and the tooltip ──────────────────────────────
+  // SUI shows the cheatsheet by APPENDING its container to the body after a
+  // hold and removing it on release; the tooltip lives in the body and gains
+  // `sui-mod-show`. Both are watched, never patched.
+  var revealSeen = { cheatsheet: false, tooltip: false };
+  var hookedTooltips = [];
+  function isCheatsheet(n) { return n && n.nodeType === 1 && /\bsui-cheatsheet\b/.test(String(n.className || '')); }
+  function isTooltip(n) { return n && n.nodeType === 1 && (/\bsui-tooltip\b/.test(String(n.className || '')) || /^sui-tooltip/.test(String(n.id || ''))); }
+  function hookTooltip(el) {
+    if (hookedTooltips.indexOf(el) >= 0 || typeof MutationObserver !== 'function') return;
+    hookedTooltips.push(el);
+    new MutationObserver(function () {
+      var on = /\bsui-mod-show\b/.test(String(el.className || ''));
+      if (on === revealSeen.tooltip) return;
+      revealSeen.tooltip = on;
+      cue([on ? 'ui.tooltip.open' : 'ui.tooltip.close'], { source: 'tooltip' });
+    }).observe(el, { attributes: true, attributeFilter: ['class'] });
+  }
+  // The tooltip container is made once at init but attached beside its
+  // trigger only at the first show, so it cannot be found until then: a press
+  // on a tooltip icon polls for it briefly and hooks it when it lands.
+  function armTooltip() {
+    var tries = 0;
+    (function look() {
+      var el = document.getElementById('sui-tooltip-container') || document.querySelector('.sui-tooltip');
+      if (el) {
+        hookTooltip(el);
+        var on = /\bsui-mod-show\b/.test(String(el.className || ''));
+        if (on && !revealSeen.tooltip) { revealSeen.tooltip = true; cue(['ui.tooltip.open'], { source: 'tooltip' }); }
+        return;
+      }
+      if (++tries < 30) setTimeout(look, 50);
+    })();
+  }
+  function onRevealPress(e) {
+    var t = e && e.target;
+    if (!t || typeof t.closest !== 'function') return;
+    if (t.closest('[data-sui-tooltip]')) armTooltip();
+  }
+  function watchReveals() {
+    if (typeof MutationObserver !== 'function' || !document.body) return;
+    ['mousedown', 'touchstart'].forEach(function (ev) { document.addEventListener(ev, onRevealPress, true); });
+    Array.prototype.forEach.call(document.querySelectorAll('.sui-tooltip, [id^="sui-tooltip"]'), hookTooltip);
+    new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var m = muts[i];
+        for (var a = 0; a < m.addedNodes.length; a++) {
+          var n = m.addedNodes[a];
+          if (isCheatsheet(n) && !revealSeen.cheatsheet) { revealSeen.cheatsheet = true; cue(['ui.cheatsheet.open'], { source: 'cheatsheet' }); }
+          if (isTooltip(n)) hookTooltip(n);
+        }
+        for (var r = 0; r < m.removedNodes.length; r++) {
+          if (isCheatsheet(m.removedNodes[r]) && revealSeen.cheatsheet) { revealSeen.cheatsheet = false; cue(['ui.cheatsheet.close'], { source: 'cheatsheet' }); }
+        }
+      }
+    }).observe(document.body, { childList: true });
+  }
+
   // ── Boot ─────────────────────────────────────────────────────────────────
 
   function boot() {
@@ -553,6 +614,7 @@
     rt.listen('sound-config', function (e) { applyConfig(e && e.payload); });
     reload();
     document.addEventListener('click', onPress, true);
+    watchReveals();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else setTimeout(boot, 0);

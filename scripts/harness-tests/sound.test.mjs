@@ -300,6 +300,32 @@ function engine(opts) {
     check('a map tile with a unit on it is NOT a press (the selection event cues it)', e.S.trace.recent().length === n0);
     e.setNow(7000); d.getElementById('t2').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
     check('an empty map tile is Select Empty Tile', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.select.tile']));
+    // Cheatsheet / tooltip icons: a tap is nothing; the reveal is the cue.
+    d.body.innerHTML += '<a href="javascript:void(0)" data-sui-cheatsheet="Tank" id="cs"><i class="sui-icon icon-info"></i></a><a href="javascript:void(0)" data-sui-tooltip="A hint" id="tt"></a>';
+    const n1 = e.S.trace.recent().length;
+    e.setNow(8000); d.getElementById('cs').querySelector('i').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
+    e.setNow(9000); d.getElementById('tt').dispatchEvent(new e.w.MouseEvent('click', { bubbles: true }));
+    check('tapping a cheatsheet or tooltip icon is not a press', e.S.trace.recent().length === n1);
+    const sheet = d.createElement('div'); sheet.id = 'sui-cheatsheet-container'; sheet.className = 'sui-cheatsheet sui-theme-player';
+    d.body.appendChild(sheet);
+    await tick();
+    check('the cheatsheet appearing (a hold) cues its open', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.cheatsheet.open']));
+    d.body.removeChild(sheet);
+    await tick();
+    check('…and its removal (the release) cues its close', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.cheatsheet.close']));
+    // The tooltip container attaches beside its trigger (not the body) at the
+    // first show, already carrying sui-mod-show: the press arms a hook for it.
+    d.getElementById('tt').dispatchEvent(new e.w.MouseEvent('mousedown', { bubbles: true }));
+    const tip = d.createElement('div'); tip.id = 'sui-tooltip-container'; tip.className = 'sui-tooltip sui-mod-show';
+    d.getElementById('tt').parentElement.appendChild(tip);
+    await tick(120);
+    check('a tooltip shown beside its trigger cues its open', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.tooltip.open']));
+    tip.classList.remove('sui-mod-show');
+    await tick();
+    check('…and losing sui-mod-show cues its close', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.tooltip.close']));
+    tip.classList.add('sui-mod-show');
+    await tick();
+    check('…and the next show is heard through the hook, no new press needed', JSON.stringify(e.S.trace.recent().slice(-1)[0].candidates) === JSON.stringify(['ui.tooltip.open']));
     const b = engine({ win: 'board', page: 'board.html' });
     b.boot(); await tick();
     b.w.document.body.innerHTML = '<div class="sui-screen-nav-item" id="nav"></div>';
