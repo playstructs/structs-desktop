@@ -261,13 +261,11 @@
     var count = function (side) { var n = draft.filter(function (u) { return u.side === side; }).length; return n + (n === 1 ? ' struct' : ' structs'); };
     $('count-you').textContent = count('player');
     $('count-cpu').textContent = count('computer');
-    renderReach($('reach-you'), 'player', draft, true);
-    renderReach($('reach-cpu'), 'computer', draft, true);
     renderChecks();
     renderInspector();
   }
 
-  function renderReach(box, side, units, labelled) {
+  function renderReach(box, side, units) {
     var reach = reachOf(side, units);
     var chips = AMBITS.map(function (a) {
       var c = el('span', a.charAt(0).toUpperCase(), 'sim-chip sui-text-label' + (reach[a] ? (side === 'player' ? ' lit-you' : ' lit-cpu') : ''));
@@ -276,9 +274,7 @@
       return c;
     });
     box.replaceChildren();
-    if (labelled && side === 'player') box.appendChild(el('span', 'Reach', 'sui-text-label sui-text-hint'));
     chips.forEach(function (c) { box.appendChild(c); });
-    if (labelled && side === 'computer') box.appendChild(el('span', 'Reach', 'sui-text-label sui-text-hint'));
   }
 
   function renderChecks() {
@@ -491,8 +487,8 @@
     var theirs = config.units.length - mine;
     $('deploy-you').textContent = mine + ' structs · ' + config.charge.player + ' charge';
     $('deploy-cpu').textContent = theirs + ' structs · ' + config.charge.computer + ' charge';
-    renderReach($('deploy-reach-you'), 'player', config.units, false);
-    renderReach($('deploy-reach-cpu'), 'computer', config.units, false);
+    renderReach($('deploy-reach-you'), 'player', config.units);
+    renderReach($('deploy-reach-cpu'), 'computer', config.units);
     var left = COUNTDOWN;
     $('countdown').textContent = String(left);
     $('deploy').classList.remove('hidden');

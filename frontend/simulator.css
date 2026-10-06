@@ -77,7 +77,7 @@ textarea.sim-input { width: 100%; height: auto; padding: var(--spacing-md) var(-
 /* ── Setup layout ──────────────────────────────────────────────────────── */
 #setup-screen { display: grid; grid-template-columns: minmax(260px, 300px) minmax(0, 1fr) minmax(280px, 330px); grid-template-areas: "round fleets inspector"; gap: var(--spacing-xxl); padding: var(--spacing-xxl) var(--spacing-xxxl); align-items: start; }
 #round { grid-area: round; }
-#fleets { grid-area: fleets; min-width: 0; display: flex; flex-direction: column; gap: var(--spacing-lg); }
+#fleets { grid-area: fleets; min-width: 0; display: flex; flex-direction: column; gap: var(--spacing-lg); container-type: inline-size; }
 #inspector { grid-area: inspector; }
 @media (max-width: 1180px) {
   #setup-screen { grid-template-columns: minmax(0, 1fr) minmax(280px, 330px); grid-template-areas: "round round" "fleets inspector"; }
@@ -90,10 +90,20 @@ textarea.sim-input { width: 100%; height: auto; padding: var(--spacing-md) var(-
   #sim-header { padding: var(--spacing-xl); }
 }
 
-#fleet-head, #defend-banner { display: flex; align-items: center; gap: var(--spacing-lg); min-height: 56px; }
+#defend-banner { display: flex; align-items: center; gap: var(--spacing-lg); min-height: 56px; }
+/* Names left and right, tools between. The names never wrap; when the column
+   is too narrow for all three, the tools take their own row under them. */
+#fleet-head { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); grid-template-areas: "you tools cpu"; align-items: center; gap: var(--spacing-md) var(--spacing-lg); }
+#fleet-head > .sim-side:first-child { grid-area: you; }
+#fleet-head > .sim-side-cpu { grid-area: cpu; }
+#fleet-head > .sim-head-tools { grid-area: tools; }
+#fleet-head .sim-side > span { white-space: nowrap; }
+@container (width <= 640px) {
+  #fleet-head { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "you cpu" "tools tools"; }
+}
 .sim-side { display: flex; flex-direction: column; min-width: 0; }
 .sim-side-cpu { align-items: flex-end; text-align: right; }
-.sim-head-tools { display: flex; gap: var(--spacing-sm); margin: 0 auto; }
+.sim-head-tools { display: flex; justify-content: center; gap: var(--spacing-sm); }
 #defend-banner { padding: var(--spacing-xs) var(--spacing-md) var(--spacing-xs) var(--spacing-lg); background: var(--surface-player-body); box-shadow: 0 0 0 2px var(--accent-primary); }
 #defend-banner #defend-text { margin-right: auto; }
 body.sim-picking #fleet-head { display: none; }
@@ -121,7 +131,6 @@ body.sim-picking #round { opacity: .45; pointer-events: none; }
 .slot .empty-label { opacity: .35; }
 .status-indicators { display: flex; justify-content: center; gap: var(--spacing-xs); position: absolute; left: 0; right: 0; bottom: var(--spacing-sm); pointer-events: none; }
 
-#reach-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--spacing-lg); }
 .sim-reach { display: flex; align-items: center; gap: var(--spacing-sm); }
 .sim-chip { display: inline-flex; align-items: center; gap: var(--spacing-sm); min-height: var(--spacing-xxl); padding: 0 var(--spacing-md); background: var(--surface-neutral-body); box-shadow: 0 0 0 2px var(--border-subtle); color: var(--text-hint); }
 .sim-chip.lit-you { color: var(--page-background); background: var(--accent-primary); box-shadow: 0 0 0 2px var(--accent-primary); }
