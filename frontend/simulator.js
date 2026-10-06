@@ -449,6 +449,7 @@
   }
 
   function stopBattle() {
+    autoPaused = false;
     if (host) { host.destroy(); host = null; }
     clearInterval(clockTimer); clearInterval(countdownTimer); clearTimeout(debriefTimer);
     deploying = false;
@@ -689,8 +690,8 @@
   $('code-close').addEventListener('click', closeCode);
   $('code-load').addEventListener('click', loadCode);
 
-  $('pause').addEventListener('click', function () { if (!host || host.finished || deploying) return; if (host.running) host.stop(); else host.start(); });
-  $('resume').addEventListener('click', function () { if (host && !host.finished) host.start(); });
+  $('pause').addEventListener('click', function () { if (!host || host.finished || deploying) return; autoPaused = false; if (host.running) host.stop(); else host.start(); });
+  $('resume').addEventListener('click', function () { autoPaused = false; if (host && !host.finished) host.start(); });
   $('restart').addEventListener('click', function () { if (initial) start(initial); });
   $('pause-rematch').addEventListener('click', function () { if (initial) start(initial); });
   $('pause-edit').addEventListener('click', function () { toSetup(false); });
@@ -721,7 +722,19 @@
     if (!$('code-dialog').classList.contains('hidden')) closeCode();
     else if (picking) { picking = null; renderSetup(); }
   });
-  document.addEventListener('visibilitychange', function () { if (document.hidden && host && host.running) host.stop(); });
+  /* A hidden window holds the battle; coming back picks it up again. macOS
+   * reports a window as hidden when another one covers it, not only when it
+   * is minimized, so a pause the player did not ask for must not outlive the
+   * cover — a battle the player paused stays paused. */
+  var autoPaused = false;
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      if (host && host.running) { autoPaused = true; host.stop(); }
+    } else if (autoPaused) {
+      autoPaused = false;
+      if (host && !host.finished && !deploying) host.start();
+    }
+  });
   window.addEventListener('beforeunload', function () { stopBattle(); });
 
   window.Simulator = {
