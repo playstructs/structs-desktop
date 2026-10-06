@@ -135,4 +135,17 @@ function boot() {
   assert.ok(el().classList.contains('rv-vis'), 'without retracting: the queue decides that');
 }
 
+// 8. The fight moving to a tile in view retires a bubble still showing an
+//    off-screen struct: the queue may never drain in a busy battle.
+{
+  const { w, pp, addStruct, el } = boot();
+  w.setTimeout = (f) => f();
+  addStruct('5-1', 'defender', { top: 700, bottom: 828, left: 0, right: 128 });
+  addStruct('5-2', 'attacker', { top: 100, bottom: 228, left: 300, right: 428 });
+  pp.pipOnAnimation({ structId: '5-1', names: ['ATTACK_LASER'] }, 'ATTACK_LASER');
+  assert.ok(el().classList.contains('rv-vis') && pp.pip.structId === '5-1');
+  pp.pipOnAnimation({ structId: '5-2', names: ['IMPACT_LASER'] }, 'IMPACT_LASER');
+  assert.ok(!el().classList.contains('rv-vis') && pp.pip.structId === null, 'the stale bubble retracts');
+}
+
 console.log('raid-pip: all checks passed');

@@ -601,6 +601,9 @@
     try { localStorage.setItem(FIT_KEY, m); } catch (e) {}
     syncFitToggle();
     setBoardScale({ keepCentre: true });
+    // A new zoom can bring the bubble's tile into view (or take it out):
+    // nothing scrolled, so the scroll listener never asked.
+    pipUpdateVisibility();
   }
   /* Hand what you are watching to Comms.
    *
@@ -1060,7 +1063,14 @@
   }
 
   function badgesFor(s) {
-    if (playing) return [];                       // a reaction supersedes these
+    // A reaction supersedes these. On a live raid the whole board's indicators
+    // step aside for the sequence — fights are sparse. The simulator animates
+    // most of the time, and the board-wide blackout hid every wreck and guard
+    // icon for most of a battle, so there only the tile acting steps aside.
+    if (playing) {
+      if (params.sim !== '1') return [];
+      if (currentEvent && !currentEvent._ending && currentEvent.structId === s.id) return [];
+    }
     var sel = state.selectedId ? state.structsById[state.selectedId] : null;
     var vis = visibleIndicators(s, sel);
     var out = [];
@@ -2365,7 +2375,23 @@
   var pendingReconcile = null;
   var currentEvent = null;
 
+  /* The simulator can outrun its own animations: two fleets firing on 2 s
+   * blocks queue several sequences a block, the bars step only as each one
+   * plays, and the map fell further behind every block (measured: a backlog
+   * of 10 and growing). Past SIM_BACKLOG the queue FAST-FORWARDS: every
+   * waiting event lands its health and wreckage at once, as if it had played,
+   * and only the animations are skipped. Dropping them outright instead lost
+   * their damage until the next quiet moment, which in a busy battle never
+   * comes. Live raids keep every animation — 6 s blocks, sparse fights. */
+  var SIM_BACKLOG = 3;
   function enqueue(ev) {
+    if (params.sim === '1' && queue.length >= SIM_BACKLOG) {
+      queue.forEach(applyEventHealth);
+      applyEventHealth(ev);
+      queue.length = 0;
+      repaintAllBadges();
+      return;
+    }
     queue.push(ev);
     if (!playing) playNext();
   }
@@ -2398,6 +2424,7 @@
     if (wasIdle) repaintAllBadges();
     var ev = queue.shift();
     currentEvent = ev;
+    if (params.sim === '1' && state.structsById[ev.structId]) paintBadges(state.structsById[ev.structId]);
     runAnimation(ev, function () { currentEvent = null; playNext(); });
   }
 
@@ -2510,6 +2537,25 @@
    * completion, so a three-shot burst steps the bar down three times — and a
    * snapshot that has already moved past this shot cannot erase the
    * intermediate frames. */
+  /* An event's outcome on the board — the health it lands on, and wreckage at
+   * 0 — applied when its animation completes, or straight away when the
+   * simulator fast-forwards a backlog (see enqueue). */
+  function applyEventHealth(ev) {
+    var s = state.structsById[ev.structId];
+    if (ev.healthAfter == null || !s) return;
+    var still = document.getElementById(domId('struct', ev.structId));
+    var hud = document.getElementById(domId('hud', ev.structId));
+    state.liveHealth[ev.structId] = ev.healthAfter;
+    if (still) renderStill(still, s, ev.healthAfter);
+    if (hud) renderHud(hud, s, ev.healthAfter);
+    if (ev.healthAfter === 0 && still) still.innerHTML = '';
+    // Mark wreckage in STATE, not just the DOM: the tile then shows the
+    // destroyed badge (previously unreachable — snapshots drop destroyed
+    // structs, so `destroyed` was never true) until the next snapshot
+    // removes it, and nothing can resurrect the sprite meanwhile.
+    if (ev.healthAfter === 0) s.destroyed = true;
+  }
+
   function runAnimation(ev, done) {
     var mount = document.getElementById(domId('anim', ev.structId));
     var still = document.getElementById(domId('struct', ev.structId));
@@ -2519,17 +2565,7 @@
     var flags = stillFlags(names);
 
     var finish = function () {
-      if (ev.healthAfter != null && s) {
-        state.liveHealth[ev.structId] = ev.healthAfter;
-        if (still) renderStill(still, s, ev.healthAfter);
-        if (hud) renderHud(hud, s, ev.healthAfter);
-        if (ev.healthAfter === 0 && still) still.innerHTML = '';
-        // Mark wreckage in STATE, not just the DOM: the tile then shows the
-        // destroyed badge (previously unreachable — snapshots drop destroyed
-        // structs, so `destroyed` was never true) until the next snapshot
-        // removes it, and nothing can resurrect the sprite meanwhile.
-        if (ev.healthAfter === 0) s.destroyed = true;
-      }
+      applyEventHealth(ev);
       // The HUD tile comes back once the animation is done (the game's
       // ANIMATION_END handler), already redrawn at the health it reached.
       if (hud) hud.classList.remove('rv-invisible');
@@ -2543,6 +2579,7 @@
       // start (a build completing on an extractor) must not read the event
       // as "still animating": mark it ending first.
       ev._ending = true;
+      if (params.sim === '1' && state.structsById[ev.structId]) paintBadges(state.structsById[ev.structId]);
       if (typeof ev.onEnd === 'function') { try { ev.onEnd(); } catch (e) { /* a hook must not wedge the queue */ } }
       soundEndCues(names);
       done();

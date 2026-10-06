@@ -120,6 +120,21 @@
   }
   function pad(n) { return String(n).padStart(2, '0'); }
 
+  /* ── Stalemates ────────────────────────────────────────────────────────── */
+
+  /* The chain never calls a draw; the simulator does, two ways.
+   *
+   * QUIET_MOVES: Command Ships keep repositioning and nobody lands a hit —
+   * Hard dodging out of reach, round after round. Ten of those moves with no
+   * damage between them is a draw.
+   *
+   * QUIET_BLOCKS: nobody moves and nobody hits — what is left on each side
+   * cannot reach the other, and neither commander is shifting. A "can anyone
+   * ever reach anyone" test does not work here: a Command Ship can move to any
+   * ambit and always reaches the other Command Ship, and both exist until the
+   * battle ends. So this is time without damage instead. */
+  var QUIET_MOVES = 10, QUIET_BLOCKS = 100;
+
   /* ── Host ──────────────────────────────────────────────────────────────── */
 
   function Host(opts) {
@@ -146,6 +161,8 @@
     this.stats[this.you.id] = { attacks: 0, damage: 0, evaded: 0, blocked: 0, countered: 0 };
     this.stats[this.cpu.id] = { attacks: 0, damage: 0, evaded: 0, blocked: 0, countered: 0 };
     this.kills = [];
+    this.quietMoves = 0;      // Command Ship moves since the last damage
+    this.lastHurt = this.chain.height;
     // Fielded is counted once: a destroyed struct leaves the chain five
     // blocks later (STRUCT_SWEEP_DELAY), so the store cannot say it later.
     this.fielded = {};
@@ -159,6 +176,8 @@
   Host.BLOCK_MS = BLOCK_MS;
   Host.typeSlug = typeSlug;
   Host.describeActivity = describeActivity;
+  Host.QUIET_MOVES = QUIET_MOVES;
+  Host.QUIET_BLOCKS = QUIET_BLOCKS;
 
   Host.prototype.destroy = function () {
     this.stop();
@@ -412,6 +431,22 @@
     var chain = this.chain, self = this;
     var b = chain.produceBlock();
     this.heartbeat();
+    // Stalemate bookkeeping: any lost health resets the count of Command
+    // Ship moves made without a hit landing.
+    var hurt = false, cmdMoves = 0;
+    b.txs.forEach(function (tx) {
+      if (!tx.ok) return;
+      tx.events.forEach(function (e) {
+        var d = e.detail || {};
+        if (e.category === 'struct_health' && d.health_old != null && d.health < d.health_old) hurt = true;
+        if (e.category === 'struct_move') {
+          var s = chain.structs[d.struct_id], f = s && chain.fleets[s.locationId];
+          if (f && f.commandStruct === s.id) cmdMoves++;
+        }
+      });
+    });
+    this.quietMoves = hurt ? 0 : this.quietMoves + cmdMoves;
+    if (hurt) this.lastHurt = b.height;
     var rows = [];
     var now = new Date();
     var stamp = { date: now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate()), time: pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds()) };
@@ -452,6 +487,12 @@
     if (left.length < 2) {
       var youFleet = chain.players[this.you.id].fleetId;
       this.finished = { winner: left.length === 0 ? 'draw' : left[0] === youFleet ? 'you' : 'cpu', height: b.height };
+      this.stop();
+      return;
+    }
+    var stalemate = this.quietMoves >= QUIET_MOVES ? 'moves' : b.height - this.lastHurt >= QUIET_BLOCKS ? 'quiet' : null;
+    if (stalemate) {
+      this.finished = { winner: 'draw', height: b.height, stalemate: stalemate };
       this.stop();
       return;
     }

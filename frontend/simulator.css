@@ -53,7 +53,7 @@ body[data-screen="battle"] #sim-header { display: none; }
 .sim-field-rule { border-top: 2px solid var(--border-subtle); padding-top: var(--spacing-xl); }
 .sim-row { display: flex; align-items: center; gap: var(--spacing-md); }
 .sim-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--spacing-md); }
-#sim .sim-pair .sui-screen-btn { margin: 2px; padding: 0 var(--spacing-md); white-space: nowrap; }
+#sim .sim-pair .sui-screen-btn { margin: 2px; padding: 0 var(--spacing-md); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .sim-input { height: var(--form-input-height-total); min-width: 0; flex: 1 1 auto; width: 0; padding: 0 var(--spacing-lg); background: var(--surface-neutral-body); border: 2px solid var(--border); color: var(--text-body); font: inherit; }
 textarea.sim-input { width: 100%; height: auto; padding: var(--spacing-md) var(--spacing-lg); resize: vertical; word-break: break-all; }
 

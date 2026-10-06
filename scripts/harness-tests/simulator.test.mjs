@@ -233,6 +233,42 @@ check('…with the production cheatsheet copy merged in', byName.Battleship.prim
   check('…sending only messages it can afford and that are legal', refused === 0, refused + ' of ' + sent + ' refused');
 }
 
+/* ── 2b. Stalemates: the host calls a draw the chain never would ────────── */
+{
+  ctx.window.addEventListener = () => {}; ctx.window.removeEventListener = () => {};
+  ctx.window.location = { origin: '' };
+  Object.assign(ctx, { setTimeout, clearTimeout, Date });
+  if (!ctx.window.SimulatorHost) vm.runInContext(read('frontend/simulator-host.js'), ctx);
+  const Host = ctx.window.SimulatorHost;
+  const host = (structs) => {
+    const h = new Host({ chain: battle(structs, { charge: 0 }), you: { id: '1-1', name: 'You' }, cpu: { id: '1-2', name: 'Computer' }, frame: () => null });
+    h.scheduleBlock = () => {}; h.scheduleAi = () => {}; h.running = true;
+    return h;
+  };
+  // Two Command Ships in different ambits, nobody acting: quiet blocks.
+  const q = host([S('5-1', 'Command Ship', '1-1', 'space'), S('5-2', 'Command Ship', '1-2', 'water')]);
+  let n = 0;
+  while (!q.finished && n < 500) { q.block(); n++; }
+  check('nobody hitting anybody for ' + Host.QUIET_BLOCKS + ' blocks is a draw', q.finished && q.finished.winner === 'draw' && q.finished.stalemate === 'quiet' && n === Host.QUIET_BLOCKS, JSON.stringify(q.finished) + ' after ' + n);
+
+  // A Command Ship shuffling between ambits with no hit landing: quiet moves.
+  const m = host([S('5-1', 'Command Ship', '1-1', 'space'), S('5-2', 'Command Ship', '1-2', 'water')]);
+  const AMB = ['air', 'land', 'space', 'land'];
+  let moves = 0;
+  for (let i = 0; i < 80 && !m.finished; i++) {
+    if (i % 4 === 3) { m.chain.submit('1-1', { '@type': '/structs.structs.MsgStructMove', structId: '5-1', locationType: 'fleet', ambit: AMB[moves % 4], slot: 0 }); moves++; }
+    m.block();
+  }
+  check('…and so are ' + Host.QUIET_MOVES + ' Command Ship moves without a hit', m.finished && m.finished.stalemate === 'moves' && m.quietMoves === Host.QUIET_MOVES, JSON.stringify(m.finished) + ' moves=' + moves + ' quiet=' + m.quietMoves);
+
+  // Any damage resets the count.
+  const d = host([S('5-1', 'Command Ship', '1-1', 'space'), S('5-3', 'Starfighter', '1-1', 'space'), S('5-2', 'Command Ship', '1-2', 'space')]);
+  for (let i = 0; i < 6; i++) d.block();
+  d.chain.submit('1-1', attack('5-3', '5-2'));
+  d.block();
+  check('…a landed hit restarts the clock', !d.finished && d.lastHurt === d.chain.height, 'lastHurt=' + d.lastHurt + ' height=' + d.chain.height);
+}
+
 /* ── 3. The real Map Viewer, driven through the host ────────────────────── */
 {
   const page = resolve(repo, 'frontend/raidview.html');

@@ -11,10 +11,23 @@
 
   var LEVELS = {
     // samples: forks per candidate attack; wait: how much charge it will hold
-    // for a better shot; guard/move/stealth: which tools it uses at all.
-    easy: { reactionMs: 3500, samples: 1, wait: false, guard: false, move: false, stealth: false, noise: 2.5 },
-    difficult: { reactionMs: 1800, samples: 3, wait: true, guard: true, move: false, stealth: false, noise: 0.6 },
-    hard: { reactionMs: 700, samples: 6, wait: true, guard: true, move: true, stealth: true, noise: 0 },
+    // for a better shot; guard/move/stealth: which tools it uses at all;
+    // spread: picks among its top N moves instead of always the best.
+    //
+    // Tuned 2026-10-06 against human stand-ins that act once every ~8 s
+    // (a person reading the board and clicking weapon then target), one with
+    // Difficult-quality choices and one that picks loosely. Win rate for the
+    // person, loose / sharp (60 battles each): Easy 72% / 80%, Difficult 42% / 65%,
+    // Hard 5% / 22% with most of the rest drawn. Reaction slowed again the same
+    // day ("the computer is too fast"): a decision every ~20 / 14 / 8 s.
+    // Before, Difficult decided almost every block and always took its best
+    // look-ahead result — 15% / 50%, and a person was 3 hulls down in a
+    // minute. Charge, not reaction time, sets how often anyone can fire, so
+    // the lever that made it humane was choosing like a person (spread, no
+    // holding charge for the perfect shot), not merely slowing it down.
+    easy: { reactionMs: 20000, samples: 1, wait: false, guard: false, move: false, stealth: false, noise: 2.5 },
+    difficult: { reactionMs: 14000, samples: 3, wait: false, guard: true, move: false, stealth: false, noise: 0.6, spread: 3 },
+    hard: { reactionMs: 8000, samples: 6, wait: true, guard: true, move: true, stealth: true, noise: 0 },
   };
 
   function Ai(playerId, difficulty, seed) {
@@ -151,7 +164,21 @@
 
     options.sort(function (a, b) { return b.value - a.value; });
     var pick = options[0] || null;
-    if (this.difficulty === 'easy' && options.length) pick = options[Math.floor(this.rand() * options.length)];
+    // spread: choose among the top few rather than always the best — a
+    // sound move a person would also find, not the optimum every time.
+    if (L.spread > 1 && options.length) {
+      var top = options.slice(0, L.spread).filter(function (o) { return o.value > -1; });
+      if (top.length) pick = top[Math.floor(this.rand() * top.length)];
+    }
+    // Easy plays loosely, not suicidally: any move at random, except sending
+    // the Command Ship into an exchange its look-ahead expects to lose. Drawing
+    // from every option walked it into guarded targets until the counters
+    // killed it — 38 of 40 benchmark battles over in ~27 blocks. Filtering out
+    // every losing move instead made Easy as strong as Difficult.
+    if (this.difficulty === 'easy' && options.length) {
+      var loose = options.filter(function (o) { return !(command && o.msg.operatingStructId === command.id && o.value < 0); });
+      pick = loose.length ? loose[Math.floor(this.rand() * loose.length)] : null;
+    }
     // Holding charge: a clearly better attack is within reach of more charge.
     if (L.wait && best.cost > charge && (!pick || best.value > pick.value * 1.5 + 1)) return null;
     if (!pick) return null;

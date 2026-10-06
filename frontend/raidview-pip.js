@@ -214,7 +214,13 @@
       var cell = pipCellOf(ev.structId);
       if (pipOffscreen(cell)) {
         pipShow(ev, name);
-      } else if (pip.structId === ev.structId || !pip.structId) {
+      } else if (pip.structId && pip.structId !== ev.structId) {
+        // The fight moved to a tile in view: the map itself is the viewer
+        // now, and a bubble still showing the PREVIOUS struct is stale. Left
+        // up, it waited for the whole queue to drain — in a busy battle that
+        // is never — showing a finished fight beside the live one.
+        pipRequestHide();
+      } else {
         // Tile visible: the map itself is the viewer.
         pipUpdateVisibility();
       }

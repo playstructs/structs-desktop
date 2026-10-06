@@ -549,7 +549,10 @@
     }
     picking = null; changing = false;
     setScreen('setup');
-    if (fresh) loadLayout(); else { selectDefault(); renderRound(); renderSetup(); }
+    // A new encounter starts from the preset as the list shows it, opponent
+    // included; editing fleets keeps everything the round had.
+    if (fresh) { if (settings.preset !== 'random') settings.difficulty = settings.preset; loadLayout(); }
+    else { selectDefault(); renderRound(); renderSetup(); }
   }
 
   /* ── Debrief ───────────────────────────────────────────────────────────── */
@@ -562,7 +565,10 @@
     $('verdict').textContent = cap(verdict);
     $('verdict').className = 'sui-text-display sim-huge ' + verdict;
     $('reason').textContent = f.forfeit ? 'You ended the battle' : verdict === 'victory' ? 'Computer command ship destroyed'
-      : verdict === 'defeat' ? 'Your command ship destroyed' : 'Both command ships destroyed';
+      : verdict === 'defeat' ? 'Your command ship destroyed'
+      : f.stalemate === 'quiet' ? 'Stalemate · ' + Host.QUIET_BLOCKS + ' blocks without a hit'
+      : f.stalemate === 'moves' ? 'Stalemate · ' + Host.QUIET_MOVES + ' command ship moves without a hit'
+      : 'Both command ships destroyed';
     var blocks = Math.max(0, f.height - startHeight);
     $('debrief-meta').textContent = [format(s.elapsedMs), blocks + (blocks === 1 ? ' block' : ' blocks'), initial.difficulty, initial.seed].join(' · ');
 
@@ -593,7 +599,7 @@
 
     var next = LEVELS[LEVELS.indexOf(initial.difficulty) + 1];
     $('db-harder').classList.toggle('hidden', !next);
-    if (next) $('db-harder').textContent = 'Try ' + next;
+    if (next) { $('db-harder').textContent = 'Harder'; $('db-harder').title = 'Rematch against a ' + cap(next) + ' opponent'; }
     setScreen('debrief');
   }
 
