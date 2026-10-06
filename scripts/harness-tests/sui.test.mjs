@@ -38,7 +38,10 @@ const BUDGET = {
   'simulator-types.js': [0, 0],
   'simulator.html': [0, 0],
   'simulator.js': [0, 0],
-  'simulator.css': [4, 25],
+  // Raised 2026-10-06 with the setup → deploy → battle → debrief rebuild:
+  // the file roughly tripled, and what is left is 2px borders, the board's
+  // column widths and breakpoints — none has a token. Hex went DOWN 4 → 1.
+  'simulator.css': [1, 42],
   // file:            colour, px
   //
   // "colour" counts `#rrggbb` AND `rgba()`/`hsl()`. It used to count only the
@@ -500,7 +503,11 @@ console.log('\n— type sizes are SUI roles');
 // 32px is the Game Stats hero figure and only that: the one number the page
 // leads with, in a window that renders 1:1 with no 2× transform, at exactly
 // twice the DirectiveZero face so the pixels stay whole (.gs-hero-v).
-const TYPE_DEBT = { 'structs-config.js': ['15'], 'board.html': ['32'] };
+// 24px and 64px are the Battle Simulator's titles and its VICTORY/DEFEAT
+// verdict: the simulator draws SUI at 2x (labels 16px), so its display face
+// sits at 24px — exactly 3x ExtremeHazard's 8px design size — and the verdict
+// at 64px, exactly 8x. Whole pixels, approved in the 2026-10-06 design round.
+const TYPE_DEBT = { 'structs-config.js': ['15'], 'board.html': ['32'], 'simulator.css': ['24', '64'] };
 for (const file of windowFiles) {
   const src = readFileSync(root + '/frontend/' + file, 'utf8');
   const sizes = [

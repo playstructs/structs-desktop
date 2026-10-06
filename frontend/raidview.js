@@ -1272,12 +1272,25 @@
    * may have. Cheap — the HUD repaint is a few nodes and the bar only
    * redraws while one is open. */
   function applyBlock(p) {
+    // The simulator's battle clock rides on the heartbeat: elapsed time at
+    // the moment it was sent, and whether it is running.
+    if (p && p.clock_ms != null) {
+      state.simClock = { ms: Number(p.clock_ms), running: !!p.running, at: Date.now() };
+      paintSimClock();
+    }
     var h = Number(p && p.height) || 0;
     if (!(h > state.height)) return;
     state.height = h;
     renderHeader();
     refreshBar();
   }
+  function paintSimClock() {
+    var c = state.simClock, n = document.getElementById('rv-clock');
+    if (!c || !n) return;
+    var sec = Math.floor((c.ms + (c.running ? Date.now() - c.at : 0)) / 1000);
+    n.textContent = String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0');
+  }
+  if (params.sim === '1') setInterval(paintSimClock, 250);
   function chargeOf(s) { return chargeOfPlayer(s.owner); }
   /* `Player.isOverloaded()` for a player on this board: the snapshot's
    * answer for either combatant, the roster's for anyone else we control. */
@@ -3147,6 +3160,10 @@
   function note(text, kind) {
     var n = document.getElementById('rv-note');
     n.innerHTML = '';
+    // The simulator shows only what went WRONG: a refusal or a failed tx.
+    // Progress ("…submitted — tx …") is already on the board as the bar's
+    // lock and the animation that follows.
+    if (params.sim === '1' && kind !== 'sui-mod-destructive') text = null;
     if (!text) { n.className = ''; return; }
     n.className = 'on';
     var a = el('div', 'sui-message-inline-alert ' + (kind || 'sui-mod-secondary'));

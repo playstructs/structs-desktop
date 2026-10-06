@@ -11,7 +11,9 @@
 (function (root) {
   'use strict';
 
-  var BLOCK_MS = 6000;   // structs-webapp TaskConstants.ESTIMATED_BLOCK_TIME
+  // A simulator block. The chain's is ~6 s (TaskConstants.ESTIMATED_BLOCK_TIME);
+  // training runs it three times faster. Charge still counts BLOCKS.
+  var BLOCK_MS = 2000;
 
   /* spectator::type_slug — the asset slug for a type name. */
   function typeSlug(name) {
@@ -53,6 +55,7 @@
 
   /* ── raid_view.rs log rows, ported ─────────────────────────────────────── */
 
+  var STATUS_DESTROYED = 32;
   var STATUS_NAMES = [[1, 'materialized'], [2, 'built'], [4, 'online'], [8, 'stored'], [16, 'hidden'], [32, 'destroyed'], [64, 'locked']];
   function statusFlags(mask) {
     var set = STATUS_NAMES.filter(function (f) { return mask & f[0]; }).map(function (f) { return f[1]; });
@@ -127,7 +130,18 @@
     this.elapsed = 0;
     this.lastTick = null;
     this.structTypes = {};
+    // The debrief's tallies, kept as the blocks land: per player, and every
+    // struct destroyed in the order it went.
+    this.stats = {};
+    this.stats[this.you.id] = { attacks: 0, damage: 0, evaded: 0, blocked: 0, countered: 0 };
+    this.stats[this.cpu.id] = { attacks: 0, damage: 0, evaded: 0, blocked: 0, countered: 0 };
+    this.kills = [];
+    // Fielded is counted once: a destroyed struct leaves the chain five
+    // blocks later (STRUCT_SWEEP_DELAY), so the store cannot say it later.
+    this.fielded = {};
+    this.fielded[this.you.id] = this.fielded[this.cpu.id] = 0;
     var self = this;
+    Object.keys(this.chain.structs).forEach(function (id) { var o = self.chain.structs[id].owner; self.fielded[o] = (self.fielded[o] || 0) + 1; });
     Object.keys(this.chain.types).forEach(function (id) { self.structTypes[id] = spectatorType(self.chain.types[id]); });
     this.onMessage = this.onMessage.bind(this);
     root.addEventListener('message', this.onMessage);
@@ -281,14 +295,86 @@
     this.lastTick = Date.now();
     this.scheduleBlock(this.blockMs);
     this.scheduleAi();
+    this.heartbeat();
     this.onChange();
+  };
+  /* raid-block: the head, and the battle clock the board's HUD shows. */
+  Host.prototype.heartbeat = function () {
+    this.emit('raid-block', { height: this.chain.height, clock_ms: this.elapsedMs(), running: this.running });
   };
   Host.prototype.stop = function () {
     if (this.running) this.elapsed += Date.now() - this.lastTick;
     this.running = false;
     clearTimeout(this.blockTimer); this.blockTimer = null;
     clearTimeout(this.aiTimer); this.aiTimer = null;
+    this.heartbeat();
     this.onChange();
+  };
+  /* Block time can change mid-battle: charge counts blocks, not seconds. */
+  Host.prototype.setBlockMs = function (ms) {
+    this.blockMs = ms;
+    if (this.running) this.scheduleBlock(ms);
+  };
+  /* Ending a battle early is a defeat. */
+  Host.prototype.forfeit = function () {
+    if (this.finished) return;
+    this.finished = { winner: 'cpu', height: this.chain.height, forfeit: true };
+    this.stop();
+  };
+  /* One tx's contribution to the tallies and the kill list. */
+  Host.prototype.tally = function (tx, height) {
+    var stats = this.stats, chain = this.chain;
+    var hit = null;
+    tx.events.forEach(function (e) {
+      if (e.category !== 'struct_attack') return;
+      var d = e.detail;
+      hit = d;
+      if (stats[d.attackerPlayerId]) stats[d.attackerPlayerId].attacks++;
+      (d.eventAttackShotDetail || []).forEach(function (shot) {
+        var side = stats[shot.targetPlayerId], own = stats[d.attackerPlayerId];
+        if (own) own.damage += Math.max(0, (Number(shot.damageDealt) || 0) - (Number(shot.damageReduction) || 0));
+        if (!side) return;
+        if (shot.evaded === true) side.evaded++;
+        if (shot.blocked === true) side.blocked++;
+        side.countered += Number(shot.targetCounteredDamage) || 0;
+        (shot.eventAttackDefenderCounterDetail || []).forEach(function (c) { side.countered += Number(c.counterDamage) || 0; });
+      });
+    });
+    var self = this;
+    tx.events.forEach(function (e) {
+      if (e.category !== 'struct_status') return;
+      var d = e.detail;
+      if (!(d.status & STATUS_DESTROYED) || (d.status_old & STATUS_DESTROYED)) return;
+      var s = chain.structs[d.struct_id];
+      if (!s) return;
+      var fleet = chain.fleets[s.locationId];
+      // An attacker that dies in its own attack fell to the counter of
+      // the struct it shot at.
+      var shot = hit && (hit.eventAttackShotDetail || [])[0];
+      var countered = !!hit && hit.attackerStructId === s.id;
+      self.kills.push({
+        height: height, struct_id: s.id, type: chain.typeOf(s).type, owner: s.owner,
+        command: !!(fleet && fleet.commandStruct === s.id), countered: countered,
+        by_type: !hit ? null : countered ? (shot && shot.targetStructType) || null : hit.attackerStructType,
+        by_owner: !hit ? null : countered ? (shot && shot.targetPlayerId) || null : hit.attackerPlayerId,
+      });
+    });
+  };
+  /* What the debrief reads once the battle is over. */
+  Host.prototype.summary = function () {
+    var standing = this.standing(), fielded = this.fielded, lost = {};
+    Object.keys(fielded).forEach(function (pid) { lost[pid] = fielded[pid] - (standing[pid] || 0); });
+    return { finished: this.finished, elapsedMs: this.elapsedMs(), stats: this.stats, kills: this.kills.slice(), lost: lost, fielded: fielded, standing: standing };
+  };
+  /* Structs still standing on each side. */
+  Host.prototype.standing = function () {
+    var chain = this.chain, out = {};
+    out[this.you.id] = out[this.cpu.id] = 0;
+    Object.keys(chain.structs).forEach(function (id) {
+      var s = chain.structs[id];
+      if (!chain.isDestroyed(s)) out[s.owner] = (out[s.owner] || 0) + 1;
+    });
+    return out;
   };
   Host.prototype.elapsedMs = function () { return this.elapsed + (this.running ? Date.now() - this.lastTick : 0); };
   Host.prototype.scheduleBlock = function (ms) {
@@ -298,10 +384,12 @@
   };
   Host.prototype.scheduleAi = function () {
     var self = this;
-    if (!this.ai) return;
-    clearTimeout(this.aiTimer);
+    // A reaction slower than a block carries over: the decision is made on
+    // the chain as it stands when the computer gets to it.
+    if (!this.ai || this.aiTimer) return;
     var delay = this.ai.level.reactionMs * (0.75 + this.ai.rand() * 0.5);
     this.aiTimer = setTimeout(function () {
+      self.aiTimer = null;
       if (!self.running) return;
       var msg = self.ai.decide(self.chain);
       if (msg) self.chain.submit(self.cpu.id, msg);
@@ -313,11 +401,12 @@
     if (!this.running) return;
     var chain = this.chain, self = this;
     var b = chain.produceBlock();
-    this.emit('raid-block', { height: b.height });
+    this.heartbeat();
     var rows = [];
     var now = new Date();
     var stamp = { date: now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate()), time: pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds()) };
     b.txs.forEach(function (tx) {
+      if (tx.ok) self.tally(tx, b.height);
       if (!tx.ok) {
         if (tx.signer === self.you.id) self.emit('raid-tx', { transactionHash: tx.hash, status: 'failed', code: 1, error: tx.error });
         return;

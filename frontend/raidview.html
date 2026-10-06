@@ -719,7 +719,8 @@
     /* The Battle Simulator: two fleets away from home. Nothing to talk about
        and no planet of either side, so no Comms rail and no shield/ore panel;
        the "feed" is local, so no freshness dot. */
-    html[data-sim] #rv-chat, html[data-sim] #rv-hud-tr, html[data-sim] #rv-live { display: none; }
+    html[data-sim] #rv-chat, html[data-sim] #rv-hud-tr, html[data-sim] #rv-where-chip { display: none; }
+    html:not([data-sim]) #rv-sim-clock, html[data-sim] #rv-energy-res { display: none; }
     /* `only=log` / `only=comms`: one rail, full height, no map. Two of these
        can live side by side because each is its own document — the rails own
        fixed element ids, which is why they could not be duplicated in one. */
@@ -772,13 +773,20 @@
   <div id="rv-stage">
   <div id="rv-hud">
     <div id="rv-hud-tl" class="sui-status-bar-panel status-bar-panel-top-left sui-theme-player">
-      <a class="sui-resource" href="javascript: void(0)"
+      <a class="sui-resource" href="javascript: void(0)" id="rv-energy-res"
          data-sui-tooltip="Energy Supply — the defender's capacity in use"
          data-sui-mod-placement="bottom">
         <!-- No text class: `.sui-resource` supplies the typography, exactly as
              StatusBarTopRightComponent leaves its own value span bare. -->
         <span id="rv-energy">—</span>
         <i class="sui-icon sui-icon-energy"></i>
+      </a>
+      <!-- The simulator's battle clock takes the energy slot: neither fleet
+           has a grid of its own there. -->
+      <a class="sui-resource" href="javascript: void(0)" id="rv-sim-clock"
+         data-sui-tooltip="Battle time" data-sui-mod-placement="bottom">
+        <span id="rv-clock">00:00</span>
+        <i class="icon-in-progress"></i>
       </a>
     </div>
 

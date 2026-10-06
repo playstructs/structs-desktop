@@ -17,7 +17,7 @@ pub fn simulator_open(app: tauri::AppHandle) -> Result<(), String> {
     }
     WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App("simulator.html".into()))
         .title("Structs · Simulator")
-        .inner_size(1220.0, 940.0)
+        .inner_size(1440.0, 1000.0)
         .min_inner_size(720.0, 600.0)
         .build()
         .map_err(|e| e.to_string())?;
