@@ -136,6 +136,18 @@
             var box = animBox, who = s, hp = healthNow;
             pip.anim.addEventListener('DOMLoaded', function () { injectStructArt(box, who, hp); });
           }
+          // A bundle that has played out holds its last frame, and many end
+          // blank. The bubble stays up until the whole queue drains — often
+          // seconds of other structs' animations — so without this it showed
+          // the tile's terrain and nothing on it. Hand the bubble back to the
+          // still, as the tile does when its own animation ends.
+          if (pip.anim && pip.anim.addEventListener) {
+            var played = animBox;
+            pip.anim.addEventListener('complete', function () {
+              played.classList.add('rv-invisible');
+              still.classList.remove('rv-invisible');
+            });
+          }
         } catch (e) { /* the still alone is still informative */ }
       }
       return true;

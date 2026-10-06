@@ -850,6 +850,10 @@ fn describe_attack(d: &Value) -> String {
     let mut dealt = 0u64;
     let mut evaded = 0usize;
     let mut blocked = 0usize;
+    // Who stood in the way, and for whom: "Battleship 5-2 blocked for Command
+    // Ship 5-1". A bare "1 blocked" read like a miss; the blocker took the
+    // volley and the line should say so.
+    let mut blocks: Vec<String> = Vec::new();
     let mut destroyed: Vec<String> = Vec::new();
     let mut countered = 0u64;
     let mut targets: Vec<String> = Vec::new();
@@ -860,6 +864,21 @@ fn describe_attack(d: &Value) -> String {
         }
         if flag(shot.get("blocked")) {
             blocked += 1;
+            let bid = shot.get("blockedByStructId").and_then(|v| v.as_str()).unwrap_or("");
+            let btype = shot.get("blockedByStructType").and_then(|v| v.as_str()).unwrap_or("");
+            if !bid.is_empty() || !btype.is_empty() {
+                let blocker = [btype, bid].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" ");
+                let tid = shot.get("targetStructId").and_then(|v| v.as_str()).unwrap_or("");
+                let ttype = shot.get("targetStructType").and_then(|v| v.as_str()).unwrap_or("");
+                let ward = [ttype, tid].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" ");
+                let line = if ward.is_empty() { format!("{blocker} blocked") } else { format!("{blocker} blocked for {ward}") };
+                if !blocks.contains(&line) {
+                    blocks.push(line);
+                }
+                if flag(shot.get("blockerDestroyed")) && !destroyed.contains(&blocker) {
+                    destroyed.push(blocker);
+                }
+            }
         }
         // Counter damage STACKS: the target counters, and so does every armed
         // defender that blocked for it. Measured on a defended Tank — the
@@ -899,7 +918,9 @@ fn describe_attack(d: &Value) -> String {
     if shots.len() > 1 {
         out.push_str(&format!(" over {} shots", shots.len()));
     }
-    if blocked > 0 {
+    if !blocks.is_empty() {
+        out.push_str(&format!(", {}", blocks.join(", ")));
+    } else if blocked > 0 {
         out.push_str(&format!(", {blocked} blocked"));
     }
     if evaded > 0 {
@@ -1115,6 +1136,23 @@ mod log_tests {
         let out = describe_activity("struct_attack", &d);
         assert!(out.contains("0 dmg"), "{out}");
         assert!(out.contains("1 evaded"), "{out}");
+    }
+
+    /// A block names the struct that took the volley and the one it guarded.
+    #[test]
+    fn a_block_names_the_blocker_and_its_ward() {
+        let d = json!({
+            "weaponControl": "guided", "attackerStructId": "5-2003", "attackerStructType": "Starfighter",
+            "eventAttackShotDetail": [{
+                "damage": "2", "damageDealt": "2", "evaded": false, "blocked": true,
+                "blockedByStructId": "5-1002", "blockedByStructType": "Battleship", "blockerDestroyed": true,
+                "targetStructId": "5-1001", "targetStructType": "Command Ship", "targetDestroyed": false
+            }]
+        });
+        assert_eq!(
+            describe_activity("struct_attack", &d),
+            "Starfighter 5-2003 → Command Ship 5-1001 (smart), 2 dmg, Battleship 5-1002 blocked for Command Ship 5-1001 — DESTROYED Battleship 5-1002"
+        );
     }
 
     /// Counter damage stacks: the target counters AND every armed defender that

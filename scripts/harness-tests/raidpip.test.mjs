@@ -113,4 +113,26 @@ function boot() {
   assert.ok(pp.pipOnAnimation !== undefined);
 }
 
+// 7. A played-out bundle hands the bubble back to the still: the bubble stays
+//    up until the queue drains, and a finished bundle often ends blank.
+{
+  const { w, addStruct, el } = boot();
+  addStruct('5-1', 'defender', { top: 700, bottom: 828, left: 0, right: 128 });
+  const handlers = {};
+  w.lottie = { loadAnimation: () => ({ addEventListener(n, f) { handlers[n] = f; }, destroy() {} }) };
+  const pp3 = w.RaidPip({
+    state: () => ({ structsById: { '5-1': { id: '5-1', side: 'defender', type_slug: 'tank', max_health: 3 } } }),
+    domId: (kind, id) => kind + '-' + id, currentHealth: () => 2,
+    renderStill: (node) => { node.textContent = 'still'; }, stillFlags: () => ({ during: false, after: true }),
+    flipsLayer: () => false, lottiePath: (n) => n,
+  });
+  pp3.pipOnAnimation({ structId: '5-1', names: ['ATTACK_LASER'], healthAfter: 2 }, 'ATTACK_LASER');
+  const still = el().querySelector('.rv-struct'), anim = el().querySelector('.rv-anim');
+  assert.ok(still.classList.contains('rv-invisible') && !anim.classList.contains('rv-invisible'), 'while it plays, the bundle owns the sprite');
+  assert.ok(handlers.complete, 'the bubble listens for its bundle finishing');
+  handlers.complete();
+  assert.ok(!still.classList.contains('rv-invisible') && anim.classList.contains('rv-invisible'), 'and then shows the still, not a blank last frame');
+  assert.ok(el().classList.contains('rv-vis'), 'without retracting: the queue decides that');
+}
+
 console.log('raid-pip: all checks passed');

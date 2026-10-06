@@ -73,11 +73,20 @@
     var weapon = d.weaponControl === 'guided' ? 'smart' : d.weaponControl === 'unguided' ? 'ballistic' : '';
     var attacker = d.attackerStructType ? d.attackerStructType + ' ' + d.attackerStructId : d.attackerStructId;
     var shots = d.eventAttackShotDetail || [];
-    var dealt = 0, evaded = 0, blocked = 0, countered = 0, destroyed = [], targets = [];
+    var dealt = 0, evaded = 0, blocked = 0, countered = 0, destroyed = [], targets = [], blocks = [];
     shots.forEach(function (shot) {
       dealt += Math.max(0, (Number(shot.damageDealt) || 0) - (Number(shot.damageReduction) || 0));
       if (shot.evaded === true) evaded++;
-      if (shot.blocked === true) blocked++;
+      if (shot.blocked === true) {
+        blocked++;
+        var blocker = [shot.blockedByStructType, shot.blockedByStructId].filter(Boolean).join(' ');
+        if (blocker) {
+          var ward = [shot.targetStructType, shot.targetStructId].filter(Boolean).join(' ');
+          var line = blocker + ' blocked' + (ward ? ' for ' + ward : '');
+          if (blocks.indexOf(line) < 0) blocks.push(line);
+          if (shot.blockerDestroyed === true && destroyed.indexOf(blocker) < 0) destroyed.push(blocker);
+        }
+      }
       countered += Number(shot.targetCounteredDamage) || 0;
       (shot.eventAttackDefenderCounterDetail || []).forEach(function (c) { countered += Number(c.counterDamage) || 0; });
       var label = shot.targetStructType ? shot.targetStructType + ' ' + shot.targetStructId : shot.targetStructId;
@@ -87,7 +96,8 @@
     var target = targets.length === 1 ? targets[0] : targets.length + ' targets';
     var out = attacker + ' → ' + target + (weapon ? ' (' + weapon + ')' : '') + ', ' + dealt + ' dmg';
     if (shots.length > 1) out += ' over ' + shots.length + ' shots';
-    if (blocked) out += ', ' + blocked + ' blocked';
+    if (blocks.length) out += ', ' + blocks.join(', ');
+    else if (blocked) out += ', ' + blocked + ' blocked';
     if (evaded) out += ', ' + evaded + ' evaded';
     if (countered) out += ', countered for ' + countered;
     if (destroyed.length) out += ' — DESTROYED ' + destroyed.join(', ');
