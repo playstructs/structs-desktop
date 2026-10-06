@@ -2319,7 +2319,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         + ' display:flex; flex-direction:row; flex-wrap:wrap;'
         + ' gap:var(--spacing-md); align-items:center;">';
       html += '<a href="javascript:void(0)" id="debug-download-logs" class="sui-screen-btn sui-mod-secondary">Download logs</a>';
-      html += '<a href="javascript:void(0)" id="debug-download-key" class="sui-screen-btn sui-mod-secondary">Download account key</a>';
+      html += '<a href="javascript:void(0)" id="debug-download-key" class="sui-screen-btn sui-mod-destructive"><i class="sui-icon-md icon-alert"></i><span>Download account key</span></a>';
       html += '<a href="javascript:void(0)" id="debug-gamestats" class="sui-screen-btn sui-mod-secondary">Game Stats</a>';
       // The Terminal: one customizable page of cards — markets, stats, the
       // team, comms, the map — that pops out into windows which come back
@@ -4129,7 +4129,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
        * read-only — and bare `MAP` is your own planet, which the roster's
        * primary row names. Both were refused here, so the word parsed, the
        * row appeared, and Enter did nothing. */
-      mcp_raid_view_open: 1, mcp_roster: 1,
+      mcp_raid_view_open: 1, mcp_roster: 1, simulator_open: 1,
     };
 
     var host = null, frame = null, open = false, ready = false;

@@ -13,6 +13,7 @@ mod mcp;
 mod menu;
 mod notifications;
 mod remote_image;
+mod simulator;
 mod updater;
 
 fn main() {
@@ -260,6 +261,7 @@ fn main() {
             mcp::tools::board_pages::mcp_config_bundle,
             mcp::raid_view::mcp_raids,
             mcp::raid_view::mcp_raid_view_open,
+            simulator::simulator_open,
             mcp::tools::action::mcp_action,
             mcp::tools::players::mcp_struct_act,
             mcp::tools::players::mcp_players,

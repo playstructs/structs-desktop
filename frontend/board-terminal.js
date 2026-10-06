@@ -1767,6 +1767,7 @@
     // The companion is a WINDOW, not a card: it has no grid slot and no
     // params, and it works the same from the palette over the game as from
     // the Terminal — so it is parsed here beside the other bare verbs.
+    if (head === 'SIMULATOR') return rest ? null : { kind: 'simulator' };
     if (head === 'PET' || head === 'COMPANION') return { kind: 'pet' };
     // The bar's RESET button went with the bar; this is the same verb.
     if (head === 'RESET') return { kind: 'reset' };
@@ -1899,6 +1900,11 @@
       Terminal.openMapWindow(plan.id);
       return true;
     }
+    if (plan.kind === 'simulator') {
+      invoke('simulator_open').then(function () { tellHost('ran'); })
+        .catch(function (e) { Board.stamp && Board.stamp('simulator: ' + e); });
+      return true;
+    }
     if (plan.kind === 'pet') {
       // Above the palette-only gate: the companion opens no card and mutates
       // no workspace, so the one surface that refuses every other verb can
@@ -1990,6 +1996,7 @@
     { words: ['CHANNELS', 'BROWSE', 'DIRECTORY'], what: 'Every guild\'s channels', group: 'Comms' },
     { words: ['FIND', 'SEARCH'], what: 'Search everything said', arg: '<text>', group: 'Comms' },
     { words: ['SAY'], what: 'Draft a line in Comms', arg: '<text>', group: 'Comms' },
+    { words: ['SIMULATOR'], what: 'Simulator · single-player fleet battle', group: 'Training' },
     { words: ['BUS'], what: 'The work bus', group: 'Comms', typedOnly: true },
     { words: ['FLEET'], what: 'Armada, or a fleet on the map', arg: '[id]', group: 'Armada', typedOnly: true },
     { words: ['SETTINGS', 'CONFIG'], what: 'Settings', group: 'Workspace', workspace: true },
@@ -2030,7 +2037,7 @@
        * under fifty card rows, they sat below the fold and read as missing.
        * A launcher that cannot reach Comms is a launcher people stop
        * opening. */
-      verbRows(function (v) { return v.group === 'Comms' && !v.typedOnly; }).forEach(function (r) { out.push(r); });
+      verbRows(function (v) { return (v.group === 'Comms' || v.group === 'Training') && !v.typedOnly; }).forEach(function (r) { out.push(r); });
       // The charts a player has saved and the library, each under its word.
       chartRows().forEach(function (r) { out.push(r); });
       Terminal.groups().forEach(function (g) {
@@ -2652,6 +2659,8 @@
       line('SAY', 'Draft a line — SAY 2-15361 <text> in that room, SAY <text> where you are', '<text>', function () { fillCommand('SAY '); });
 
       /* ── The workspace verbs, which open no card ─────────────────────── */
+      section('Training');
+      line('SIMULATOR', 'Single-player fleet battle', '', function () { Terminal.execute('SIMULATOR'); });
       section('Workspace');
       /* The words whose target is not a CARD, so the loop above never sees
        * them: the settings page is a page, and PRESET is a verb. Listed by

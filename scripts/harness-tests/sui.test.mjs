@@ -28,6 +28,17 @@ const css = ['/frontend/css/sui/sui.css', '/frontend/css/main.css']
 const defined = new Set([...css.matchAll(/(--[a-z0-9-]+):/g)].map((m) => m[1]));
 
 const BUDGET = {
+  // Simulator: four terrain colors match Map Viewer; pixels are map/sprite
+  // geometry, hairlines and responsive bounds. Controls and typography are
+  // SUI, and the battle itself is raidview.html.
+  'battle-art.js': [0, 0],
+  'simulator-ai.js': [0, 0],
+  'simulator-chain.js': [0, 0],
+  'simulator-host.js': [0, 0],
+  'simulator-types.js': [0, 0],
+  'simulator.html': [0, 0],
+  'simulator.js': [0, 0],
+  'simulator.css': [4, 25],
   // file:            colour, px
   //
   // "colour" counts `#rrggbb` AND `rgba()`/`hsl()`. It used to count only the

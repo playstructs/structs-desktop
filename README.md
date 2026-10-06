@@ -12,6 +12,7 @@ In the distant future the species of the galaxy are embroiled in a race for Alph
 
 ## Features
 
+- **Battle Simulator** — Cmd/Ctrl-K → Simulator: fleet-vs-fleet battles against a computer player on the real Map Viewer (the game's animations, Action Bar, charge battery and battle log), resolved by a local port of structsd's combat rules block by block. Both fleets are away from home; destroy the enemy command ship to defeat its fleet.
 - **GPU Hashing** — Multi-threaded CPU + GPU SHA256 proof-of-work at ~200M hashes/sec via wgpu
 - **MCP Server** — AI agents can play Structs through the Model Context Protocol (10 tools, 6 prompts, compendium resources)
 - **Perception Layer** — Recon, combat results, a weapon-matrix ruleset, and a damage simulator so agents can see the battlefield and plan attacks without raw DB access
@@ -24,6 +25,12 @@ In the distant future the species of the galaxy are embroiled in a race for Alph
 - **Pixel-Perfect Rendering** — CSS `zoom` replaces `transform: scale()` for crisp pixel art in WKWebView
 - **Background Operation** — App stays active when minimized (no App Nap throttling)
 - **Debug Tab** — In-app diagnostics showing player identity, infrastructure endpoints, MCP status, hash engine, and policies
+
+### Simulator development
+
+`frontend/simulator.html` holds the fleet setup and embeds `raidview.html?sim=1` for the battle. `simulator-chain.js` executes the struct messages (attack, defense set/clear, move, stealth, activate/deactivate) exactly as structsd's keeper does — per-player charge and discharge, evasion and shot rolls on the owner's nonce, defender counters before the block, multi-shot event rows, destruction, fleet defeat and the 5-block sweep — and emits the same events and payloads the Rust spectator sends a live Map Viewer. Blocks arrive every 6 s (the game's estimated block time). `simulator-host.js` answers the board through `bridge.js`; `simulator-ai.js` is the computer player, which judges attacks by playing them forward on forks of the chain.
+
+Refresh the struct catalogue with `python3 scripts/sync-simulator-types.py [LCD_URL]`: mechanics come from the chain's LCD (not genesis — upgrades rewrite the types), cheatsheet copy from the `structs-pg` migrations. Run `node scripts/harness-tests/simulator.test.mjs` for the rule checks, AI battles, the board integration and animation coverage.
 
 ## Quick Start
 

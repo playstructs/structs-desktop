@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Structs · Simulator</title>
+  <link rel="stylesheet" href="css/normalize.css">
+  <link rel="stylesheet" href="css/structicons.css">
+  <link rel="stylesheet" href="css/sui/sui.css">
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="simulator.css">
+</head>
+<body class="sui-theme-player sui-text-paragraph">
+  <header class="sui-page-header"><div><span class="sui-text-label">STRUCTS / TRAINING</span><h1 class="sui-text-display">Battle simulator</h1></div></header>
+
+  <div id="setup-screen">
+    <section id="brief" class="sui-text-paragraph"><strong>Destroy the enemy command ship.</strong></section>
+    <section id="configuration" aria-label="Battle configuration">
+      <label class="sui-form-element-label-group">Encounter<select id="preset"><option value="easy">Easy · first engagement</option><option value="difficult" selected>Difficult · matched fleets</option><option value="hard">Hard · outnumbered</option><option value="random">Random · seeded fleets</option></select></label>
+      <label class="sui-input-text seed-field"><span>Layout seed</span><input type="text" id="seed" value="spearpoint" maxlength="60"></label>
+      <button id="generate" class="sui-screen-btn sui-mod-secondary">Load layout</button><button id="randomize" class="sui-screen-btn sui-mod-secondary">Randomize</button>
+      <label class="sui-form-element-label-group">Computer<select id="difficulty"><option value="easy">Easy</option><option value="difficult" selected>Difficult</option><option value="hard">Hard</option></select></label>
+      <button id="start" class="sui-screen-btn sui-mod-primary">Start battle</button>
+      <details><summary>Save or load layout</summary><label class="sui-input-text layout-code-field"><span>Layout code</span><input type="text" id="layout-code"></label><button id="export" class="sui-screen-btn sui-mod-secondary">Get layout code</button><button id="import" class="sui-screen-btn sui-mod-secondary">Load layout code</button></details>
+    </section>
+    <main>
+      <section class="arena-wrap"><div class="fleet-head sui-text-label"><span>YOUR FLEET</span><span>COMPUTER</span></div><div id="arena" aria-label="Fleet setup"></div></section>
+      <aside><section class="sui-data-card"><div class="sui-data-card-header sui-text-header">Slot</div><div class="sui-data-card-body" id="inspector" aria-label="Selected slot"></div></section></aside>
+    </main>
+  </div>
+
+  <div id="battle-screen" class="hidden">
+    <div id="battle-bar"><span id="phase" class="sui-text-label"></span><time id="timer" class="sui-text-display">00:00</time>
+      <button id="pause" class="sui-screen-btn sui-mod-secondary">Pause</button><button id="restart" class="sui-screen-btn sui-mod-secondary">Rematch</button><button id="setup" class="sui-screen-btn sui-mod-secondary">New battle</button></div>
+    <div id="board-wrap"><iframe id="board" title="Battle map" src="about:blank"></iframe><div id="result" class="hidden" role="status"></div></div>
+  </div>
+
+  <div id="message" role="status" aria-live="polite"></div>
+  <script src="battle-art.js"></script><script src="simulator-types.js"></script><script src="simulator-chain.js"></script><script src="simulator-ai.js"></script><script src="simulator-host.js"></script><script src="simulator.js"></script>
+</body>
+</html>

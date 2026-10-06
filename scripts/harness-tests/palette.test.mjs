@@ -61,6 +61,18 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   check('…so nothing is listening either', (w.__HARNESS_LISTENERS__ ? Object.keys(w.__HARNESS_LISTENERS__) : []).length === 0,
     Object.keys(w.__HARNESS_LISTENERS__ || {}).join(', '));
 
+  {
+    const terminal = w.Board.Terminal;
+    check('Simulator appears in the empty palette', terminal.suggestFor('').some((r) => r.line === 'SIMULATOR'));
+    check('Simulator parses without requiring a player or fleet', terminal.parse('Simulator')?.kind === 'simulator');
+    check('Simulator rejects unexpected arguments', terminal.parse('Simulator 2-1') === null);
+    const layoutBefore = terminal.state.layout;
+    terminal.execute('Simulator');
+    await tick(30);
+    check('Simulator opens its own window from the palette', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'simulator_open'));
+    check('Simulator adds no workspace card', terminal.state.layout === layoutBefore);
+  }
+
   /* Escape reaches the framed palette only as a KEYUP (WKWebView swallows
    * the keydown when the frame's input has focus), so keyup closes it too
    * and tells the host. */
@@ -87,7 +99,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const T = w.Board.Terminal;
   check('the grammar is whole: every card, its groups and its completions',
     T.types().length > 20 && T.groups().length >= 6
-    && T.suggestFor('').filter((o) => o.group !== 'Comms' && o.group !== 'Charts').length === T.types().length
+    && T.suggestFor('').filter((o) => o.group !== 'Comms' && o.group !== 'Charts' && o.group !== 'Training').length === T.types().length
     && T.suggestFor('').filter((o) => o.group === 'Comms').length === 7,
     T.types().length + ' types, ' + T.suggestFor('').length + ' rows');
   /* Typing must not lose what the empty list showed: `COM` used to walk the
@@ -254,7 +266,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
    * one side without the other fails here rather than in the window. */
   const PALETTE_CALLS = ['open_terminal_card_new', 'log_ui_events', 'mcp_player_search', 'matrix_open', 'terminal_charts',
     // `MAP <id>` is the Raid View window; bare `MAP` reads the roster for your own planet.
-    'mcp_raid_view_open', 'mcp_roster'];
+    'mcp_raid_view_open', 'mcp_roster', 'simulator_open'];
   const cfgSrc = readFileSync(resolve(repo, 'frontend/structs-config.js'), 'utf8');
   const listed = (cfgSrc.match(/var FRAME_CMDS = \{([\s\S]*?)\};/) || ['', ''])[1].match(/\b[a-z_]+(?=: 1)/g) || [];
   check('the palette frame may invoke exactly what the palette page calls',

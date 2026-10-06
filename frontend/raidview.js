@@ -94,30 +94,8 @@
    * like. Cross-checked against `StructStillBuilder`'s argument order, hull
    * by hull.
    */
-  var ART = {
-    battleship:                 { dir: 'battleship' },
-    command_ship:               { dir: 'cmd-ship', top: ['top-weapon'] },
-    cruiser:                    { dir: 'cruiser', top: ['top-weapon-ballistic', 'top-weapon-smart'], bottom: ['bottom-ripples'] },
-    destroyer:                  { dir: 'destroyer', top: ['top-weapon'], bottom: ['bottom-ripples'] },
-    ore_extractor:              { dir: 'extractor', top: ['top-drill'] },
-    frigate:                    { dir: 'frigate', bottom: ['bottom-weapon'] },
-    field_generator:            { dir: 'generator', top: ['top-tube'] },
-    high_altitude_interceptor:  { dir: 'interceptor', bottom: ['bottom-weapon'] },
-    jamming_satellite:          { dir: 'jamming-sat', top: ['top-weapon'] },
-    mobile_artillery:           { dir: 'mobile-artillery', top: ['top-weapon'] },
-    orbital_shield_generator:   { dir: 'orb-shield', top: ['top-weapon'] },
-    ore_bunker:                 { dir: 'ore-bunker', top: ['top-weapon'] },
-    planetary_defense_cannon:   { dir: 'pdc', top: ['top-weapon'] },
-    pursuit_fighter:            { dir: 'pursuit-fighter', bottom: ['bottom-weapon'] },
-    ore_refinery:               { dir: 'refinery', top: ['top-bays'] },
-    starfighter:                { dir: 'starfighter', top: ['top-weapon-ballistic'], bottom: ['bottom-weapon-smart'] },
-    sam_launcher:               { dir: 'sam-launcher', top: ['top-weapon'] },
-    stealth_bomber:             { dir: 'stealth-bomber', bottom: ['bottom-weapon'] },
-    submersible:                { dir: 'submersible', top: ['top-weapon'], bottom: ['bottom-ripples'], hidden: true },
-    tank:                       { dir: 'tank', top: ['top-weapon'] },
-  };
-
-  function artPath(dir, suffix) { return 'img/structs/' + dir + '/' + dir + '-' + suffix + '.png'; }
+  var ART = window.BattleArt.ART;
+  var artPath = window.BattleArt.artPath;
 
   // ══════════════════════════════════════════════════════════════════════════
   // Animation dispatch — transcribed from factories/AnimationEventFactory.js
@@ -312,6 +290,9 @@
   // `embed=1`: this view is inside a Terminal card. The card owns the frame,
   // and the log and Comms rails are cards of their own — see raidview.html.
   if (params.embed === '1') document.documentElement.setAttribute('data-embed', '');
+  // `sim=1`: the Battle Simulator's board — two fleets away from home, served
+  // by simulator-host.js through bridge.js. No Comms, no planet resources.
+  if (params.sim === '1') document.documentElement.setAttribute('data-sim', '');
   // One rail only: the Terminal's `log` and `comms` cards are this page
   // showing a single rail, which is also what lets two of them coexist.
   if (params.only === 'log' || params.only === 'comms') document.documentElement.setAttribute('data-only', params.only);
@@ -452,9 +433,11 @@
    * MapTerrainComponent). A spectator belongs to neither side, and the planet
    * is the subject of the window, so showing it as its owner sees it is the
    * least confusing choice — defenders left, raiders right. */
-  function buildColumns(slots) {
+  function buildColumns(slots, noPlanet) {
     var counts = Object.assign({}, DEFAULT_COL_COUNTS);
-    counts[COL.DEF_PLAN] = planetaryColCount(slots);
+    // `noPlanet`: the simulator's two fleets meet away from both homes, so
+    // there is no planetary block between the left command column and fleet.
+    counts[COL.DEF_PLAN] = noPlanet ? 0 : planetaryColCount(slots);
     var cols = [];
     COL_ORDER.forEach(function (type) {
       for (var i = 0; i < counts[type]; i++) cols.push(type);
@@ -836,7 +819,7 @@
 
   /* Build the whole board for a snapshot. Returns the anchor map. */
   function buildGrid(snap) {
-    var cols = buildColumns(snap.slots);
+    var cols = buildColumns(snap.slots, !!snap.sim);
     var map = document.getElementById('rv-map');
     map.innerHTML = '';
     anchors = {};
@@ -854,7 +837,7 @@
     var ambits = AMBITS.filter(function (a) {
       // The game maps only ambits with slots; every current planet has all
       // four, but a zero-slot ambit must not draw an empty band.
-      return slotsFor(a) > 0;
+      return snap.sim || slotsFor(a) > 0;
     });
 
     ambits.forEach(function (ambit) {
@@ -1748,25 +1731,7 @@
      is itself information — it says what this Struct can do). */
 
   /** STRUCT_EQUIPMENT_ICON_MAP, verbatim from the game's StructConstants. */
-  var EQUIP_ICON = {
-    attackRun: 'icon-ballistic-weapon',
-    guidedWeaponry: 'icon-smart-weapon',
-    unguidedWeaponry: 'icon-ballistic-weapon',
-    advancedCounterAttack: 'icon-adv-counter',
-    counterAttack: 'icon-counter',
-    strongCounterAttack: 'icon-adv-counter',
-    armour: 'icon-armour',
-    defensiveManeuver: 'icon-kinetic-barrier',
-    indirectCombatModule: 'icon-indirect',
-    signalJamming: 'icon-signal-jam',
-    stealthMode: 'icon-stealth',
-    coordinatedReserveResponseTracker: 'icon-planetary-shield',
-    defensiveCannon: 'icon-counter',
-    lowOrbitBallisticInterceptorNetwork: 'icon-signal-jam',
-    monitoringStation: 'icon-planetary-shield',
-    oreBunker: 'icon-planetary-shield',
-    smallGenerator: 'icon-refine'
-  };
+  var EQUIP_ICON = window.BattleArt.EQUIP_ICON;
 
   /** MAP_TILE_TYPE_ICONS, for the empty-tile case the spec calls out. */
   var TILE_ICON = {
@@ -2406,6 +2371,11 @@
         pendingReconcile = null;
         fn();
       }
+      if (pendingBanner) {
+        var banner = pendingBanner;
+        pendingBanner = null;
+        banner();
+      }
       return;
     }
     var wasIdle = !playing;
@@ -2905,9 +2875,25 @@
     // `demilitarized` ends the raid without either side winning — no banner.
   };
   var bannerShownFor = null;
+  var pendingBanner = null;
 
-  function showBanner(status) {
+  /* The frame that ends a raid is emitted inside the transaction that
+   * decided it, ahead of that transaction's attack event — so it arrives
+   * before the volley that caused it has animated. Wait a moment for the
+   * attack to land, then hold the banner until the sequence has played. */
+  function requestBanner(status, fleetId) {
+    setTimeout(function () {
+      if (playing) pendingBanner = function () { showBanner(status, fleetId); };
+      else showBanner(status, fleetId);
+    }, 250);
+  }
+
+  function showBanner(status, fleetId) {
     var name = TERMINAL_BANNER[status];
+    // A beaten fleet that is the LEFT side's own (only possible when neither
+    // side is at home — the simulator) is that side's defeat.
+    var snap = state.snapshot || {};
+    if (status === 'attackerDefeated' && fleetId && snap.owner_fleet && fleetId === snap.owner_fleet) name = 'DEFEAT_BANNER';
     if (!name) {
       // A non-terminal status means a fresh raid is under way, so re-arm the
       // banner — the same planet gets raided repeatedly (32% recur within an
@@ -3209,6 +3195,7 @@
       // A new planet gets its own end-of-raid banner; without this reset the
       // window would refuse to show one after having shown it elsewhere.
       bannerShownFor = null;
+      pendingBanner = null;
     }
     var previous = state.structsById;
     state.structsById = {};
@@ -3289,13 +3276,17 @@
       // stream knows seconds before the next snapshot does. A terminal status
       // means the attacker is gone, so the fog should close again.
       var over = TERMINAL_RAID_STATUSES.indexOf(detail.status) >= 0;
-      state.raidingFleet = over ? null : (detail.fleet_id || state.raidingFleet);
+      // A status about ANOTHER fleet (one defeated while a different raider
+      // stays) leaves the current raider in place.
+      var aboutRaider = !detail.fleet_id || !state.raidingFleet || detail.fleet_id === state.raidingFleet;
+      if (over && aboutRaider) state.raidingFleet = null;
+      else if (!over) state.raidingFleet = detail.fleet_id || state.raidingFleet;
       renderHeader();
       // The fog spans the attacker half, so its presence changes with theirs.
       if (state.snapshot) buildGrid(state.snapshot);
       // The stream is the first to know a raid ended — several seconds ahead
       // of the next snapshot, which is when the banner should land.
-      if (detail.status) showBanner(detail.status);
+      if (detail.status) requestBanner(detail.status, detail.fleet_id);
     } else if (d.category === 'struct_health') {
       var id = detail.struct_id || detail.structId;
       var hp = numOf(detail.health);

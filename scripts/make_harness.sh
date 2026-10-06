@@ -453,6 +453,7 @@ cat > "$FIX" <<'EOF'
     mcp_raid_view_watch: { ok: true },
     mcp_raid_view_unwatch: { ok: true },
     mcp_raid_view_open: { ok: true },
+    simulator_open: null,
     terminal_workspace_windows_close: { closed: 0 },
     open_terminal_workspace: null,
     terminal_guild_banks: { at_ms: 0, height: 4200719, banks: [

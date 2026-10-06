@@ -46,11 +46,13 @@ pub(crate) fn require_trusted(window: &tauri::WebviewWindow) -> Result<(), Strin
 ///   * `main` — the game: the webapp plus everything the guild servers feed it
 ///   * `chat` / `chat-<player>` — Comms: text from federated strangers
 ///   * `raid-<location>` — the raid viewer: the enemy commander's own attrs
+///   * `simulator` — the Battle Simulator: layout codes other people paste
 pub(crate) fn is_untrusted_label(label: &str) -> bool {
     label == "main"
         || label == "chat"
         || label.starts_with("chat-")
         || label.starts_with(crate::mcp::raid_view::LABEL_PREFIX)
+        || label == crate::simulator::LABEL
 }
 
 #[cfg(test)]
@@ -69,7 +71,7 @@ mod gate_tests {
 
     #[test]
     fn windows_showing_other_players_are_not() {
-        for l in ["main", "chat", "chat-1-248", "raid-2-15361"] {
+        for l in ["main", "chat", "chat-1-248", "raid-2-15361", "simulator"] {
             assert!(is_untrusted_label(l), "{l} must be refused");
         }
     }

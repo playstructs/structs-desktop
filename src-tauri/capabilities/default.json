@@ -11,7 +11,8 @@
     "chat",
     "chat-*",
     "transfer",
-    "raid-*"
+    "raid-*",
+    "simulator"
   ],
   "permissions": [
     "core:default"

@@ -1507,7 +1507,7 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
 {
   const builder = readFileSync(resolve(repo, 'structs-webapp/src/js/builders/StructStillBuilder.js'), 'utf8');
   const artSet = readFileSync(resolve(repo, 'structs-webapp/src/js/builders/StructTypeArtSetBuilder.js'), 'utf8');
-  const ours = readFileSync(resolve(repo, 'frontend/raidview.js'), 'utf8');
+  const ours = readFileSync(resolve(repo, 'frontend/battle-art.js'), 'utf8');
 
   // The game: for each hull, which constructor slot each weapon lands in.
   //   args[2] topDetailLayer1  args[3] topDetailLayer2  args[6] bottomDetailLayer1

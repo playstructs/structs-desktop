@@ -30,7 +30,7 @@
      * spectator), bottom-left = defender, bottom-right = raider. */
     function renderHeader() {
       var snap = state().snapshot;
-      var where = target()
+      var where = snap && snap.sim ? 'BLOCK ' + (state().height || snap.height) : target()
         ? (target().kind === 'fleet'
             ? 'FLEET ' + target().id + (snap ? ' · AT PLANET ' + snap.planet_id : ' · IN TRANSIT')
             : 'PLANET ' + target().id)
@@ -104,13 +104,13 @@
         paintComposerIdentity();
       }
       renderSide('def', snap.owner, snap.owner_name, chargeOfPlayer(snap.owner, snap.owner_charge), snap.owner_pfp,
-        'Defender — planet owner');
+        snap.owner_label || 'Defender — planet owner');
       var raiding = snap.raiding_fleet || state().raidingFleet;
       var br = document.getElementById('rv-hud-br');
       if (br) br.classList.toggle('hidden', !raiding);
       if (raiding) {
         renderSide('atk', snap.raider_id || raiding, snap.raider_name, chargeOfPlayer(snap.raider_id, snap.raider_charge),
-          snap.raider_pfp, 'Raider — fleet ' + raiding);
+          snap.raider_pfp, snap.raider_label || 'Raider — fleet ' + raiding);
       }
     }
 
