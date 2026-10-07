@@ -43,6 +43,11 @@
     "windows": []
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["structs"]
+      }
+    },
     "updater": {
       "endpoints": [
         "https://github.com/playstructs/structs-desktop/releases/latest/download/latest.json"

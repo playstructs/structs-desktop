@@ -1558,6 +1558,9 @@
     DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
     BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
     PLAYER: ['player', 'id'], MAP: ['map', 'id'], PLANET: ['planet', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
+    // The structs.app link words (docs/links.md): an energy provider's offer and
+    // a reactor have no card of their own, so they open in the inspector.
+    PROVIDER: ['inspector', 'id'], REACTOR: ['inspector', 'id'],
     PRESET: ['preset'], PRESETS: ['preset'],
     ORE: ['ore'], HALT: ['halt'], BOOK: ['book', 'id'], ALERTS: ['alerts', 'rules'], ALERT: ['alerts', 'rules'],
     LOG: ['log', 'id'], BATTLE: ['log', 'id'],
@@ -1782,7 +1785,8 @@
      * (a bare fleet id, `FLEET 9-12`, a door) for people building a grid;
      * the WORD opens the viewer. With no id it is your own planet. */
     if (head === 'MAP') {
-      if (rest && !acceptsId('map', rest)) return null;
+      // A player id is that player's home planet (structs.app/map/1-61).
+      if (rest && !acceptsId('map', rest) && kindOf(rest) !== 1) return null;
       return { kind: 'map', id: rest || null };
     }
     var w = WORDS[head];
@@ -2355,7 +2359,16 @@
       return invoke('mcp_raid_view_open', t.indexOf('9-') === 0 ? { fleetId: t } : { planetId: t })
         .then(function () { tellHost('ran'); });
     };
-    var p = id ? open(id) : invoke('mcp_roster').then(function (snap) {
+    // A player's map is their home planet, read from the chain's player record.
+    var home = function (pid) {
+      return invoke('mcp_player_profile', { player: pid }).then(function (d) {
+        var e = (d && d.entity) || {};
+        var planet = e.planetId || e.planet_id || (d && d.planet_id);
+        if (!planet) throw new Error(pid + ' has no planet');
+        return open(planet);
+      });
+    };
+    var p = id && kindOf(id) === 1 ? home(id) : id ? open(id) : invoke('mcp_roster').then(function (snap) {
       var rows = (snap && snap.rows) || [];
       var me = rows.filter(function (r) { return r.role === 'primary'; })[0] || rows[0];
       var target = me && (me.planet_id || me.fleet_id);
@@ -4421,9 +4434,21 @@
       state.ws = param('ws') || state.active || 'main';
       if (state.workspaces.indexOf(state.ws) < 0) state.workspaces.push(state.ws);
       return load();
-    }).then(function () { listenForLayouts(); renderAll(); });
+    }).then(function () { listenForLayouts(); renderAll(); runFromUrl(); });
   }
   Terminal.enter = enter;
+
+  /* A structs:// link that opened this window carries its command as
+   * `?run=RECORD%201-61` — the line typing would run. Only a line the grammar
+   * parses is run, once, after the workspace is up. A window that is already
+   * open gets the line through Terminal.execute instead. */
+  function runFromUrl() {
+    var m = /[?&]run=([^&#]{1,300})/.exec(location.search || '');
+    if (!m) return;
+    var line;
+    try { line = decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch (e) { return; }
+    if (Terminal.parse(line)) Terminal.execute(line);
+  }
 
   Board.registerPage('terminal', { onEnter: enter });
   if (Board.current === 'terminal' && Board.T) enter();

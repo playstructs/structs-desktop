@@ -49,9 +49,9 @@
           <div id="charges" class="sim-charges"></div>
         </div>
         <div class="sim-field sim-field-rule">
-          <span class="sui-text-label sui-text-hint">Layout code</span>
+          <span class="sui-text-label sui-text-hint">Share</span>
           <div class="sim-pair">
-            <button id="export" type="button" class="sui-screen-btn">Copy</button>
+            <button id="export" type="button" class="sui-screen-btn">Copy link</button>
             <button id="import" type="button" class="sui-screen-btn">Paste</button>
           </div>
         </div>
@@ -136,7 +136,7 @@
             <button id="db-edit" type="button" class="sui-screen-btn sui-mod-secondary">Edit fleets</button>
             <button id="db-swap" type="button" class="sui-screen-btn sui-mod-secondary">Swap sides</button>
             <button id="db-harder" type="button" class="sui-screen-btn"></button>
-            <button id="db-code" type="button" class="sui-screen-btn"><i class="sui-icon-md icon-copy"></i>Code</button>
+            <button id="db-code" type="button" class="sui-screen-btn">Share</button>
           </div>
           <button id="db-new" type="button" class="sim-link sui-text-label">New encounter</button>
         </div>
@@ -157,16 +157,16 @@
 
   <div id="code-dialog" class="sim-overlay sim-fixed hidden" role="dialog" aria-labelledby="code-title">
     <div class="sim-card sim-code-card">
-      <div class="sim-card-h"><span id="code-title" class="sui-text-label">Layout code</span>
+      <div class="sim-card-h"><span id="code-title" class="sui-text-label">Share</span>
         <button id="code-close" type="button" class="sui-screen-btn sim-square" aria-label="Close"><i class="sui-icon-sm icon-close"></i></button></div>
       <div class="sim-card-b">
-        <textarea id="layout-code" class="sim-input" rows="6" spellcheck="false" aria-label="Layout code"></textarea>
+        <textarea id="layout-code" class="sim-input" rows="6" spellcheck="false" aria-label="Battle link"></textarea>
         <button id="code-load" type="button" class="sui-screen-btn sui-mod-primary">Load layout</button>
       </div>
     </div>
   </div>
 
   <div id="message" role="status" aria-live="polite"></div>
-  <script src="battle-art.js"></script><script src="simulator-types.js"></script><script src="simulator-chain.js"></script><script src="simulator-ai.js"></script><script src="simulator-host.js"></script><script src="simulator.js"></script>
+  <script src="battle-art.js"></script><script src="simulator-types.js"></script><script src="simulator-chain.js"></script><script src="simulator-ai.js"></script><script src="simulator-host.js"></script><script src="simcode.js"></script><script src="simulator.js"></script>
 </body>
 </html>

@@ -658,32 +658,66 @@
     });
   }
 
-  /* ── Layout codes ──────────────────────────────────────────────────────── */
+  /* ── Sharing ───────────────────────────────────────────────────────────── */
 
-  function layoutCode(config) {
-    return JSON.stringify({ version: 3, seed: config.seed, difficulty: config.difficulty, blockMs: config.blockMs, charge: config.charge, units: config.units });
+  /* A battle travels as https://structs.app/sim/<code> (simcode.js — the same
+   * encoding the site decodes). Pasting takes that link, a structs:// one, a
+   * bare code, or the older JSON layout codes. */
+  var SimCode = window.StructsSimCode;
+  function shareConfig(config) {
+    return { version: 3, seed: config.seed, difficulty: config.difficulty, blockMs: config.blockMs, charge: config.charge, units: config.units };
   }
-  function copyCode(config) {
-    var code = layoutCode(config);
-    var done = function () { message('Layout code copied.'); };
-    var fallback = function () { openCode(code); };
-    try { navigator.clipboard.writeText(code).then(done, fallback); } catch (e) { fallback(); }
+  function battleLink(config) { return SimCode.link(shareConfig(config)); }
+  function copyText(text, done, title) {
+    var fallback = function () { openCode(text, title); };
+    try { navigator.clipboard.writeText(text).then(function () { message(done); }, fallback); } catch (e) { fallback(); }
   }
-  function openCode(code) {
-    $('layout-code').value = code || '';
-    $('code-load').classList.toggle('hidden', !!code);
-    $('code-title').textContent = code ? 'Layout code' : 'Paste a layout code';
+  function copyLink(config) {
+    try { copyText(battleLink(config), 'Battle link copied.', 'Battle link'); } catch (e) { message('This battle cannot be shared: ' + e.message + '.'); }
+  }
+  /* The debrief's share: how it went, and the battle to try it yourself. */
+  function shareResult() {
+    if (!host || !host.finished || !initial) return;
+    var s = host.summary(), f = s.finished;
+    var verdict = f.winner === 'you' ? 'Victory' : f.winner === 'cpu' ? 'Defeat' : 'Draw';
+    var blocks = Math.max(0, f.height - startHeight);
+    var line = [verdict + ' vs ' + cap(initial.difficulty), format(s.elapsedMs), blocks + (blocks === 1 ? ' block' : ' blocks'),
+      'lost ' + s.lost[YOU.id] + ' of ' + s.fielded[YOU.id]].join(' · ');
+    try { copyText(line + ' — ' + battleLink(initial), 'Result copied.', 'Share result'); } catch (e) { message('This battle cannot be shared: ' + e.message + '.'); }
+  }
+  function openCode(text, title) {
+    $('layout-code').value = text || '';
+    $('code-load').classList.toggle('hidden', !!text);
+    $('code-title').textContent = title || (text ? 'Share' : 'Paste a battle link');
     $('code-dialog').classList.remove('hidden');
     $('layout-code').focus();
-    if (code) $('layout-code').select();
+    if (text) $('layout-code').select();
   }
   function closeCode() { $('code-dialog').classList.add('hidden'); }
+  /* Whatever was pasted → a version-3 config, or an error saying why not. */
+  function parsePasted(text) {
+    if (text.length > 20000) throw Error('That is too long to be a battle.');
+    var code = SimCode.codeFrom(text);
+    if (code) {
+      var d = SimCode.decode(code);
+      if (!d) throw Error('That link does not hold a battle.');
+      return d;
+    }
+    var c;
+    try { c = JSON.parse(text); } catch (e) { throw Error('Paste a structs.app/sim link.'); }
+    if ((c.version !== 2 && c.version !== 3) || typeof c.seed !== 'string' || c.seed.length > 60) throw Error('Invalid layout code.');
+    return c;
+  }
   function loadCode() {
     try {
-      var text = $('layout-code').value.trim();
-      if (text.length > 20000) throw Error('Layout code is too large.');
-      var c = JSON.parse(text);
-      if ((c.version !== 2 && c.version !== 3) || typeof c.seed !== 'string' || c.seed.length > 60 || !Ai.LEVELS[c.difficulty]) throw Error('Invalid layout code.');
+      applyConfig(parsePasted($('layout-code').value.trim()));
+      closeCode();
+      message('Battle loaded.');
+    } catch (e) { message(e.message); }
+  }
+  /* A config (decoded link or JSON) onto the setup board. Throws if illegal. */
+  function applyConfig(c) {
+      if (!Ai.LEVELS[c.difficulty]) throw Error('Invalid layout code.');
       var charge = c.version === 3 ? c.charge : { player: 9, computer: 9 };
       if (!charge || SIDES.some(function (s) { return !Number.isInteger(charge[s]) || charge[s] < 0 || charge[s] > MAX_CHARGE; })) throw Error('Invalid layout code.');
       var blockMs = c.version === 3 ? c.blockMs : Host.BLOCK_MS;
@@ -693,9 +727,22 @@
       $('seed').value = c.seed;
       settings.difficulty = c.difficulty; settings.blockMs = blockMs; settings.charge = { player: charge.player, computer: charge.computer };
       selectDefault(); renderRound(); renderSetup();
-      closeCode();
-      message('Layout loaded.');
-    } catch (e) { message(e instanceof SyntaxError ? 'Layout code is not valid JSON.' : e.message); }
+  }
+
+  /* A structs://sim/<code> link: the window opens with `?sim=<code>`, or, when
+   * it is already open, the app calls Simulator.openLink(code). Either way the
+   * battle lands on the setup board — a battle in progress is left for it. */
+  function openLink(code) {
+    var c = SimCode.decode(code);
+    if (!c) { message('That link does not hold a battle.'); return false; }
+    try {
+      if (host) { stopBattle(); $('board').src = 'about:blank'; }
+      picking = null; changing = false;
+      setScreen('setup');
+      applyConfig(c);
+      message('Battle loaded from a link.');
+      return true;
+    } catch (e) { message(e.message); return false; }
   }
 
   /* ── Wiring ────────────────────────────────────────────────────────────── */
@@ -726,7 +773,7 @@
     selectDefault(); renderRound(); renderSetup();
   });
   $('defend-cancel').addEventListener('click', function () { picking = null; renderSetup(); });
-  $('export').addEventListener('click', function () { copyCode(currentConfig()); });
+  $('export').addEventListener('click', function () { copyLink(currentConfig()); });
   $('import').addEventListener('click', function () { openCode(''); });
   $('code-close').addEventListener('click', closeCode);
   $('code-load').addEventListener('click', loadCode);
@@ -754,7 +801,7 @@
     var c = clone(initial); c.difficulty = next;
     start(c);
   });
-  $('db-code').addEventListener('click', function () { copyCode(initial); });
+  $('db-code').addEventListener('click', shareResult);
   $('db-new').addEventListener('click', function () { toSetup(true); });
   $('show-log').addEventListener('click', function () { setScreen('battle'); });
 
@@ -780,8 +827,10 @@
 
   window.Simulator = {
     getHost: function () { return host; }, getLayout: function () { return draft; }, getSettings: function () { return settings; },
-    layout: layout, validate: validate, readiness: readiness, start: start, toSetup: toSetup, showDebrief: showDebrief,
+    layout: layout, validate: validate, readiness: readiness, start: start, toSetup: toSetup, showDebrief: showDebrief, openLink: openLink,
   };
   setScreen('setup');
   loadLayout();
+  var linked = /[?&]sim=([A-Za-z0-9_-]{4,2000})/.exec(location.search || '');
+  if (linked) openLink(linked[1]);
 })();

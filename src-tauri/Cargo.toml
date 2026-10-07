@@ -51,6 +51,8 @@ uuid = { version = "1", features = ["v4"] }
 tower = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tauri-plugin-window-state = "2.4.1"
+# structs:// links (docs: structs-app/docs/links.md)
+tauri-plugin-deep-link = "2"
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 cosmrs = { version = "0.22", features = ["bip32"] }
 prost-reflect = { version = "0.16", features = ["serde"] }
@@ -70,6 +72,9 @@ block2 = "0.6"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 notify-rust = "4"
+# A structs:// link on Windows/Linux starts a second process; this hands the
+# URL to the running app and exits. macOS delivers links to the running app.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

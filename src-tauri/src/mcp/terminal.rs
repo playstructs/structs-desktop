@@ -434,11 +434,34 @@ fn spine(app: &tauri::AppHandle) {
 /// quit does not.
 #[tauri::command]
 pub fn open_terminal_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_terminal(&app, None)
+}
+
+/// Run one Terminal line from outside the window — a `structs://` link
+/// (deeplink.rs). An open Terminal runs it at once; a closed one opens with
+/// `?run=<line>`, which the page runs once its workspace is up. The line is
+/// handed over as JSON / URL-encoded, never spliced in raw.
+pub fn run_line(app: &tauri::AppHandle, line: &str) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(LABEL) {
+        let arg = serde_json::to_string(line).map_err(|e| e.to_string())?;
+        w.eval(&format!("window.Board && Board.Terminal && Board.Terminal.execute({arg});"))
+            .map_err(|e| e.to_string())?;
+        focus(&w);
+        return Ok(());
+    }
+    open_terminal(app, Some(line))
+}
+
+fn open_terminal(app: &tauri::AppHandle, run: Option<&str>) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(LABEL) {
         focus(&w);
         return Ok(());
     }
-    let w = build(&app, LABEL, "board.html?view=terminal", "Structs — Terminal", (1180.0, 860.0))?;
+    let url = match run {
+        Some(line) => format!("board.html?view=terminal&run={}", urlencode(line)),
+        None => "board.html?view=terminal".to_string(),
+    };
+    let w = build(app, LABEL, &url, "Structs — Terminal", (1180.0, 860.0))?;
     w.on_window_event(|event| {
         if matches!(event, tauri::WindowEvent::CloseRequested { .. }) && !APP_QUITTING.load(Ordering::SeqCst) {
             let mut ws = lock(&WINDOWS);
@@ -451,9 +474,18 @@ pub fn open_terminal_window(app: tauri::AppHandle) -> Result<(), String> {
         ws.open = true;
         save_windows(&ws);
     }
-    spine(&app);
+    spine(app);
     focus(&w);
     Ok(())
+}
+
+/// Percent-encode a Terminal line for a query string: unreserved characters
+/// pass, everything else (spaces included) becomes %XX.
+fn urlencode(s: &str) -> String {
+    s.bytes().map(|b| match b {
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+        _ => format!("%{b:02X}"),
+    }).collect()
 }
 
 /// A workspace as a window of its own — the framework is not one window.

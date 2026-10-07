@@ -36,6 +36,7 @@ const BUDGET = {
   'simulator-chain.js': [0, 0],
   'simulator-host.js': [0, 0],
   'simulator-types.js': [0, 0],
+  'simcode.js': [0, 0],
   'simulator.html': [0, 0],
   'simulator.js': [0, 0],
   // Raised 2026-10-06 with the setup → deploy → battle → debrief rebuild:

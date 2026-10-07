@@ -14,6 +14,7 @@ mod menu;
 mod notifications;
 mod remote_image;
 mod simulator;
+mod deeplink;
 mod updater;
 
 fn main() {
@@ -30,7 +31,23 @@ fn main() {
         "--disable-gpu --disable-gpu-compositing",
     );
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Windows/Linux: a clicked structs:// link launches a second copy. It must
+    // be the FIRST plugin so that copy hands its URL to the running app (the
+    // deep-link feature routes it into on_open_url below) and exits. macOS
+    // sends the link to the running app itself, and leaving this off there
+    // keeps `make dev` usable beside an installed Structs.app.
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        use tauri::Manager;
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+    }));
+    builder
+        // structs:// links (deeplink.rs; the grammar is structs-app's links.js).
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         // The sound designer's native file picker. Only Rust calls it
         // (mcp/sound.rs); no webview holds a dialog:* permission.
@@ -802,6 +819,28 @@ try {{
             );
             window.eval(&mcp_js).ok();
 
+            // structs:// links: those that arrive while the app runs, and the
+            // one that launched it (if any) — after the main window exists.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                // The bundle registers the scheme on macOS (Info.plist) and in
+                // the Windows/Linux installers; this covers dev runs there.
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                if let Err(e) = app.deep_link().register_all() {
+                    eprintln!("[deeplink] scheme not registered: {e}");
+                }
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        deeplink::handle(&handle, url.as_str());
+                    }
+                });
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    for url in urls {
+                        deeplink::handle(app.handle(), url.as_str());
+                    }
+                }
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
