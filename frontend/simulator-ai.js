@@ -14,19 +14,19 @@
     // for a better shot; guard/move/stealth: which tools it uses at all;
     // spread: picks among its top N moves instead of always the best.
     //
-    // Tuned 2026-10-06 against human stand-ins that act once every ~8 s
-    // (a person reading the board and clicking weapon then target), one with
-    // Difficult-quality choices and one that picks loosely. Win rate for the
-    // person, loose / sharp (60 battles each): Easy 72% / 80%, Difficult 42% / 65%,
-    // Hard 5% / 22% with most of the rest drawn. Reaction slowed again the same
-    // day ("the computer is too fast"): a decision every ~20 / 14 / 8 s.
-    // Before, Difficult decided almost every block and always took its best
-    // look-ahead result — 15% / 50%, and a person was 3 hulls down in a
-    // minute. Charge, not reaction time, sets how often anyone can fire, so
-    // the lever that made it humane was choosing like a person (spread, no
-    // holding charge for the perfect shot), not merely slowing it down.
-    easy: { reactionMs: 20000, samples: 1, wait: false, guard: false, move: false, stealth: false, noise: 2.5 },
-    difficult: { reactionMs: 14000, samples: 3, wait: false, guard: true, move: false, stealth: false, noise: 0.6, spread: 3 },
+    // Tuned 2026-10-07 for the land opening (Easy/Difficult Command Ships
+    // start on land), against human stand-ins acting once every ~8 s — one
+    // that picks loosely, one with sharp choices. Person wins, loose / sharp
+    // (100 battles each): Easy 73% / ~100%, Difficult 32% / 89%.
+    // Land is in reach of most weapons, so a game turns on who goes for the
+    // Command Ship first; that skill gap is the game's, and no setting closes
+    // it from both ends — slowing the computer helps the sharp player as much
+    // as the loose one, and moving its Command Ship (Hard's trick) beats both.
+    // Difficult is tuned so a casual player wins about a third of the time:
+    // best move (spread 1), holds charge for the better shot, six look-ahead
+    // samples, one decision every ~16 s.
+    easy: { reactionMs: 12000, samples: 1, wait: false, guard: false, move: false, stealth: false, noise: 2.5 },
+    difficult: { reactionMs: 16000, samples: 6, wait: true, guard: true, move: false, stealth: false, noise: 0.6, spread: 1 },
     hard: { reactionMs: 8000, samples: 6, wait: true, guard: true, move: true, stealth: true, noise: 0 },
   };
 

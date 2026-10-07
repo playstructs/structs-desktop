@@ -19,7 +19,7 @@
   var LEVELS = ['easy', 'difficult', 'hard'];
   var PRESETS = [
     { id: 'easy', name: 'Easy', enemy: 4 }, { id: 'difficult', name: 'Difficult', enemy: 8 },
-    { id: 'hard', name: 'Hard', enemy: 12 }, { id: 'random', name: 'Random', enemy: 8 },
+    { id: 'hard', name: 'Hard', enemy: 12 }, { id: 'random', name: 'Random', enemy: '6–16' },
   ];
   var BLOCK_TIMES = [{ ms: 2000, name: '2 s', note: 'training' }, { ms: 6000, name: '6 s', note: 'chain' }];
   var MAX_CHARGE = 30;
@@ -48,10 +48,43 @@
 
   /* ── Layouts ───────────────────────────────────────────────────────────── */
 
+  /* Random: each fleet its own size (6–16 structs, Command Ship included) in
+   * random slots of random ambits, and half to all of its other structs set to
+   * defend a random struct of their own fleet. */
+  var RANDOM_MIN = 6, RANDOM_MAX = 16;
+  function randomFleet(side, random) {
+    var pick = function (list) { return list[Math.floor(random() * list.length)]; };
+    var shuffle = function (list) {
+      for (var i = list.length - 1; i > 0; i--) { var j = Math.floor(random() * (i + 1)); var t = list[i]; list[i] = list[j]; list[j] = t; }
+      return list;
+    };
+    var cmd = { id: unitId(side, COMMAND_ID), side: side, type: COMMAND_ID, ambit: pick(AMBITS.filter(function (a) { return fits(TYPES[COMMAND_ID], a); })), slot: 0, protects: null };
+    var total = RANDOM_MIN + Math.floor(random() * (RANDOM_MAX - RANDOM_MIN + 1));
+    var cells = [];
+    AMBITS.forEach(function (ambit) { for (var i = 0; i < 4; i++) cells.push({ ambit: ambit, slot: i }); });
+    var units = shuffle(cells).slice(0, total - 1).map(function (c) {
+      var type = pick(Object.keys(TYPES).map(Number).filter(function (id) { return id !== COMMAND_ID && fits(TYPES[id], c.ambit); }));
+      return { id: unitId(side, type, c.ambit, c.slot), side: side, type: type, ambit: c.ambit, slot: c.slot, protects: null };
+    });
+    var fleet = [cmd].concat(units);
+    var guards = shuffle(units.filter(function (u) { return TYPES[u.type].canDefend; }));
+    var share = 0.5 + random() * 0.5;
+    guards.slice(0, Math.max(units.length ? 1 : 0, Math.round(units.length * share))).forEach(function (u) {
+      u.protects = pick(fleet.filter(function (v) { return v !== u; })).id;
+    });
+    return fleet;
+  }
+
   function layout(mode, seed) {
     var random = rng(seed), units = [];
+    if (mode === 'random') {
+      SIDES.forEach(function (side) { units = units.concat(randomFleet(side, random)); });
+      return units;
+    }
     SIDES.forEach(function (side) {
-      var cmdAmbit = mode === 'random' ? AMBITS[Math.floor(random() * 4)] : 'space';
+      // Easy and Difficult open with the Command Ships on land; Hard keeps
+      // them in space; Random draws one.
+      var cmdAmbit = mode === 'random' ? AMBITS[Math.floor(random() * 4)] : mode === 'hard' ? 'space' : 'land';
       units.push({ id: unitId(side, COMMAND_ID), side: side, type: COMMAND_ID, ambit: cmdAmbit, slot: 0, protects: null });
       AMBITS.forEach(function (ambit) {
         var types = Object.keys(TYPES).map(Number).filter(function (id) { return id !== COMMAND_ID && fits(TYPES[id], ambit); });
@@ -182,6 +215,8 @@
     var enc = $('encounters');
     enc.replaceChildren.apply(enc, choice(PRESETS, settings.preset, function (p) {
       settings.preset = p.id;
+      // Random rolls a fresh battle on every click, selected or not.
+      if (p.id === 'random') $('seed').value = Math.random().toString(36).slice(2, 10);
       if (p.id !== 'random') settings.difficulty = p.id;
       loadLayout();
     }, function (b, p) { b.appendChild(el('span', p.name, 'sui-text-label')); b.appendChild(el('span', String(p.enemy), 'sui-text-label sui-text-hint')); }));

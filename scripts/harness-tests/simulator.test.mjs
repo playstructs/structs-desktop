@@ -233,6 +233,36 @@ check('…with the production cheatsheet copy merged in', byName.Battleship.prim
   check('…sending only messages it can afford and that are legal', refused === 0, refused + ' of ' + sent + ' refused');
 }
 
+/* ── 2a. Defense loops and defender order (struct_defender.go) ──────────────
+ * MsgStructDefenseSet refuses only self-defense; A↔B loops are legal. Blocking
+ * is ONE level (resolveBlock → resolveVolleyDamageOn on the blocker): the
+ * blocker's own defenders never step in, so a loop resolves like any pair.
+ * Defenders come back from a KV prefix iterator — byte order of the defender
+ * id, so "5-1010" sorts before "5-999" — and the first same-ambit one blocks. */
+{
+  // A loop: Tank 5-11 guards Tank 5-12, and 5-12 guards 5-11.
+  const c = battle([S('5-1', 'Command Ship', '1-1', 'space'), S('5-11', 'Tank', '1-1', 'land', 0, '5-12'), S('5-12', 'Tank', '1-1', 'land', 1, '5-11'),
+    S('5-2', 'Command Ship', '1-2', 'space'), S('5-21', 'Mobile Artillery', '1-2', 'land')]);
+  check('a defense loop registers both ways, as the chain allows', c.get('5-11').protectedStructId === '5-12' && c.get('5-12').protectedStructId === '5-11');
+  const tx = run(c, '1-2', attack('5-21', '5-11'));
+  const shot = shotsOf(tx)[0];
+  check('…an attack on one of the pair is blocked by the other, and stops there', tx.ok && shot.blocked && shot.blockedByStructId === '5-12' && c.get('5-11').health === 3 && c.get('5-12').health < 3, JSON.stringify({ ok: tx.ok, b: shot.blockedByStructId, h11: c.get('5-11').health, h12: c.get('5-12').health }));
+
+  // Order: three same-ambit guards whose ids sort differently as text and as numbers.
+  const o = battle([S('5-1', 'Command Ship', '1-1', 'land'), S('5-999', 'Tank', '1-1', 'land', 0, '5-1'), S('5-1010', 'Tank', '1-1', 'land', 1, '5-1'), S('5-20', 'Tank', '1-1', 'land', 2, '5-1'),
+    S('5-2', 'Command Ship', '1-2', 'space'), S('5-21', 'Mobile Artillery', '1-2', 'land')]);
+  check('defenders list in the chain\'s byte order of id', o.defendersOf('5-1').join() === '5-1010,5-20,5-999', o.defendersOf('5-1').join());
+  const s2 = shotsOf(run(o, '1-2', attack('5-21', '5-1')))[0];
+  check('…so the first in that order blocks, not the first registered', s2.blockedByStructId === '5-1010', s2.blockedByStructId);
+
+  // Re-guarding moves the registration: a defender holds one ward at a time.
+  const r = battle([S('5-1', 'Command Ship', '1-1', 'land'), S('5-11', 'Tank', '1-1', 'land', 0, '5-1'), S('5-12', 'Tank', '1-1', 'land', 1), S('5-2', 'Command Ship', '1-2', 'space')]);
+  run(r, '1-1', { '@type': '/structs.structs.MsgStructDefenseSet', defenderStructId: '5-11', protectedStructId: '5-12' });
+  check('…and guarding a new ward drops the old one (SetStructDefender)', r.defendersOf('5-1').length === 0 && r.defendersOf('5-12').join() === '5-11');
+  const self = run(r, '1-1', { '@type': '/structs.structs.MsgStructDefenseSet', defenderStructId: '5-12', protectedStructId: '5-12' });
+  check('…while defending yourself is refused', !self.ok && /self/.test(self.error || ''), self.error);
+}
+
 /* ── 2b. Stalemates: the host calls a draw the chain never would ────────── */
 {
   ctx.window.addEventListener = () => {}; ctx.window.removeEventListener = () => {};
