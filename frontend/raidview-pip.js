@@ -20,6 +20,9 @@
   window.RaidPip = function (ctx) {
     var state = ctx.state, domId = ctx.domId, currentHealth = ctx.currentHealth, renderStill = ctx.renderStill;
     var stillFlags = ctx.stillFlags, flipsLayer = ctx.flipsLayer, lottiePath = ctx.lottiePath;
+    // Stacking order of simultaneous layers (impact over shake); optional so
+    // older callers keep document order.
+    var layerZ = typeof ctx.layerZ === 'function' ? ctx.layerZ : function () { return 1; };
     // Optional: the tile's struct-art swap, so the bubble's copy of a
     // template bundle shows the same hull the tile does.
     var injectStructArt = typeof ctx.injectStructArt === 'function' ? ctx.injectStructArt : null;
@@ -47,7 +50,11 @@
       });
     }
 
-    var pip = { structId: null, side: null, anim: null, swapTimer: null };
+    /* active: the bubble's own animation is still playing. pendingHide /
+     * pendingShow: what to do once it finishes — the game never cuts the
+     * bubble's animation short (MapPictureInPictureComponent: requestHide and
+     * a swap both wait for handleViewerAnimationsComplete). */
+    var pip = { structId: null, side: null, anims: [], swapTimer: null, active: false, pendingHide: false, pendingShow: null, gen: 0 };
 
     function pipEl() { return document.getElementById('rv-pip'); }
 
@@ -72,7 +79,10 @@
     }
 
     function pipDestroyAnim() {
-      if (pip.anim) { try { pip.anim.destroy(); } catch (e) {} pip.anim = null; }
+      pip.gen++;
+      pip.anims.forEach(function (a) { try { a.destroy(); } catch (e) {} });
+      pip.anims = [];
+      pip.active = false;
     }
 
     function pipClear() {
@@ -86,15 +96,58 @@
       }
       pip.structId = null;
       pip.side = null;
+      pip.pendingHide = false;
+      pip.pendingShow = null;
+    }
+
+    /* MapStructLottieAnimationSVG._preloadImage: decode the sprites a layer
+     * will draw BEFORE it plays, or its first frames paint with holes. Cached
+     * for the page's life, like the game's; a failure is evicted, not fatal. */
+    var imageCache = {};
+    function preloadImages(box) {
+      var imgs = box.querySelectorAll ? box.querySelectorAll('image') : [];
+      var waits = [];
+      for (var i = 0; i < imgs.length; i++) {
+        var src = imgs[i].getAttribute('href') || imgs[i].getAttribute('xlink:href');
+        if (!src || typeof Image === 'undefined') continue;
+        if (!imageCache[src]) {
+          var img = new Image();
+          img.src = src;
+          imageCache[src] = (typeof img.decode === 'function' ? img.decode()
+            : new Promise(function (res, rej) { img.onload = res; img.onerror = rej; }))
+            .catch(function (k) { return function () { delete imageCache[k]; }; }(src));
+        }
+        waits.push(imageCache[src]);
+      }
+      return Promise.all(waits);
+    }
+
+    /* The bubble's animation (every layer) played out: hand back to the still,
+     * then do whatever was waiting on it. */
+    function pipAnimationsDone(still) {
+      if (still) still.classList.remove('rv-invisible');
+      pip.active = false;
+      if (pip.pendingHide) { pip.pendingHide = false; doHide(); return; }
+      if (pip.pendingShow) { var next = pip.pendingShow; pip.pendingShow = null; next(); }
     }
 
     /* Fill the bubble for one struct: the tile's own terrain as the mask
      * background, the marker if the cell shows one, the still at the health the
-     * sequence has reached, and the animation the map is playing right now. */
-    function pipRender(s, cell, name, healthNow) {
+     * sequence has reached, and EVERY layer of the moment the map is playing.
+     *
+     * Follows the game's viewer (MapStructViewerComponent +
+     * MapStructLottieAnimationSVG): all of the event's names play together —
+     * an impact's SHAKE layer is what draws the struct, so playing only the
+     * first name showed an explosion over an empty tile — and each layer loads
+     * paused and hidden, gets this struct's art swapped in, waits for those
+     * sprites to decode, and only then shows and plays. Autoplaying while the
+     * art swapped underneath was why the bubble sometimes showed nothing. */
+    function pipRender(s, cell, names, healthNow) {
       var el = pipEl();
       var mount = document.getElementById('rv-pip-struct');
       if (!el || !mount) return false;
+      if (typeof names === 'string') names = [names];
+      names = (names || []).filter(Boolean);
 
       var mask = el.querySelector('.rv-pip-mask');
       if (mask && cell) {
@@ -117,48 +170,61 @@
       // The bubble obeys the same still-visibility rules as the tile: during an
       // attack/impact/destroy the bundle owns the sprite, and a visible still
       // would double it inside the bubble too.
-      if (name && !stillFlags([name]).during) still.classList.add('rv-invisible');
+      if (names.length && !stillFlags(names).during) still.classList.add('rv-invisible');
       mount.appendChild(still);
 
-      if (name && window.lottie) {
-        var animBox = el2('div', 'rv-anim' + (flipsLayer(name) ? ' rv-flip-layer' : ''));
-        mount.appendChild(animBox);
+      if (!names.length || !window.lottie) return true;
+      var gen = pip.gen, remaining = names.length;
+      pip.active = true;
+      var layerDone = function () {
+        if (gen !== pip.gen) return;
+        if (--remaining <= 0) pipAnimationsDone(still);
+      };
+      names.forEach(function (name) {
+        var box = el2('div', 'rv-anim' + (flipsLayer(name) ? ' rv-flip-layer' : ''));
+        box.style.visibility = 'hidden';
+        box.style.zIndex = String(400 + layerZ(name));   // .rv-anim's 400 keeps every layer over the still
+        mount.appendChild(box);
+        var anim, done = false;
+        var finishLayer = function () {
+          if (done) return;
+          done = true;
+          box.classList.add('rv-invisible');
+          layerDone();
+        };
         try {
-          pip.anim = window.lottie.loadAnimation({
-            container: animBox, renderer: 'svg', loop: false, autoplay: true,
+          anim = window.lottie.loadAnimation({
+            container: box, renderer: 'svg', loop: false, autoplay: false,
             path: lottiePath(name, s.type_slug),
           });
-          // The game's PIP is a full MapStructViewerComponent, which swaps
-          // the template's placeholder hull for the struct's own art. A raw
-          // bundle in the bubble showed a Destroyer for any water struct —
-          // the "wrong unit" beside a tile showing the right one.
-          if (injectStructArt && pip.anim && pip.anim.addEventListener) {
-            var box = animBox, who = s, hp = healthNow;
-            pip.anim.addEventListener('DOMLoaded', function () { injectStructArt(box, who, hp); });
-          }
-          // A bundle that has played out holds its last frame, and many end
-          // blank. The bubble stays up until the whole queue drains — often
-          // seconds of other structs' animations — so without this it showed
-          // the tile's terrain and nothing on it. Hand the bubble back to the
-          // still, as the tile does when its own animation ends.
-          if (pip.anim && pip.anim.addEventListener) {
-            var played = animBox;
-            pip.anim.addEventListener('complete', function () {
-              played.classList.add('rv-invisible');
-              still.classList.remove('rv-invisible');
-            });
-          }
-        } catch (e) { /* the still alone is still informative */ }
-      }
+        } catch (e) { finishLayer(); return; }
+        pip.anims.push(anim);
+        if (!anim || !anim.addEventListener) { finishLayer(); return; }
+        anim.addEventListener('DOMLoaded', function () {
+          // The game's PIP is a full MapStructViewerComponent, which swaps the
+          // template's placeholder hull for the struct's own art. A raw bundle
+          // showed a Destroyer for any water struct.
+          if (injectStructArt) injectStructArt(box, s, healthNow);
+          preloadImages(box).then(function () {
+            if (gen !== pip.gen) return;          // replaced or cleared meanwhile
+            box.style.visibility = 'visible';
+            if (anim.play) anim.play();
+          });
+        });
+        anim.addEventListener('complete', finishLayer);
+        anim.addEventListener('data_failed', finishLayer);
+        // Never let a bundle that stalls hold the bubble hostage.
+        setTimeout(finishLayer, 15000);
+      });
       return true;
     }
     function el2(tag, cls) { var n = document.createElement(tag); if (cls) n.className = cls; return n; }
 
     /* Show/refresh the bubble for the struct the queue is animating.
      * Same struct: refresh in place (counter-chains keep the bubble up).
-     * Different struct: slide out, swap contents and side off-screen, slide
-     * back in — the side-class jump is invisible while parked off-screen. */
-    function pipShow(ev, name) {
+     * Different struct: let the current animation finish, slide out, swap
+     * contents and side off-screen, slide back in. */
+    function pipShow(ev, names) {
       var s = state().structsById[ev.structId];
       if (!s) return;
       var cell = pipCellOf(ev.structId);
@@ -173,7 +239,7 @@
         pip.side = side;
         el.classList.remove('rv-side-left', 'rv-side-right');
         el.classList.add(side === 'right' ? 'rv-side-right' : 'rv-side-left');
-        if (pipRender(s, cell, name, healthNow)) {
+        if (pipRender(s, cell, names, healthNow)) {
           // Force a layout flush so the browser commits the off-screen anchor
           // before rv-vis lands — otherwise the slide-in transition is skipped.
           void el.offsetWidth;
@@ -183,16 +249,22 @@
         }
       };
 
-      if (pip.structId && pip.structId !== ev.structId && el.classList.contains('rv-vis')) {
-        el.classList.remove('rv-vis');
-        if (pip.swapTimer) clearTimeout(pip.swapTimer);
-        pip.swapTimer = setTimeout(function () { pip.swapTimer = null; apply(); }, 320);
+      pip.pendingHide = false;
+      if (pip.structId && pip.structId !== ev.structId) {
+        var swap = function () {
+          if (!el.classList.contains('rv-vis')) { apply(); return; }
+          el.classList.remove('rv-vis');
+          if (pip.swapTimer) clearTimeout(pip.swapTimer);
+          pip.swapTimer = setTimeout(function () { pip.swapTimer = null; apply(); }, 320);
+        };
+        if (pip.active) { pip.pendingShow = swap; return; }
+        swap();
       } else {
         apply();
       }
     }
 
-    function pipRequestHide() {
+    function doHide() {
       var el = pipEl();
       if (el) el.classList.remove('rv-vis');
       // Forget the struct NOW, not after the 320ms slide-out: a scroll/resize
@@ -205,20 +277,29 @@
       pip.swapTimer = setTimeout(function () { pip.swapTimer = null; pipClear(); }, 320);
     }
 
+    /* Hide — but, like the game's requestHide, not while the bubble's own
+     * animation is still playing: it finishes first, then slides out. */
+    function pipRequestHide() {
+      pip.pendingShow = null;
+      if (pip.active) { pip.pendingHide = true; return; }
+      doHide();
+    }
+
     /* Called from the queue as each animation starts, and from scroll/resize. */
     function pipOnAnimation(ev, name) {
-      if (!ev.names || !ev.names.length || !isAttackSequence(ev.names)) {
+      var names = ev.names && ev.names.length ? ev.names : (name ? [name] : []);
+      if (!names.length || !isAttackSequence(names)) {
         if (pip.structId) pipRequestHide();
         return;
       }
       var cell = pipCellOf(ev.structId);
       if (pipOffscreen(cell)) {
-        pipShow(ev, name);
+        pipShow(ev, names);
       } else if (pip.structId && pip.structId !== ev.structId) {
         // The fight moved to a tile in view: the map itself is the viewer
-        // now, and a bubble still showing the PREVIOUS struct is stale. Left
-        // up, it waited for the whole queue to drain — in a busy battle that
-        // is never — showing a finished fight beside the live one.
+        // now. The bubble finishes what it is showing, then retires — left
+        // up, it waited for the whole queue to drain, which in a busy battle
+        // is never.
         pipRequestHide();
       } else {
         // Tile visible: the map itself is the viewer.

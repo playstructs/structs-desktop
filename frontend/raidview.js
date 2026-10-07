@@ -187,6 +187,20 @@
     return n.indexOf('IMPACT_') === 0 || n.indexOf('DESTROY_') === 0;
   }
 
+  /* Stacking for layers that play together, from the game's own viewer
+   * (MapStructViewerComponent declares its layers in this order and z-index
+   * climbs with each): the still, then DESTROY, then SHAKE, then IMPACT on
+   * top — the explosion over the shaking hull. Appending layers in the
+   * event's name order put the SHAKE (which draws the struct) above the
+   * IMPACT, hiding the explosion behind the ship it hit. */
+  function layerZ(name) {
+    var n = String(name || '');
+    if (n.indexOf('IMPACT_') === 0) return 4;
+    if (n.indexOf('SHAKE_') === 0) return 3;
+    if (n.indexOf('DESTROY_') === 0) return 2;
+    return 1;
+  }
+
   /* The planet's one struct of a type — the game resolves the Jamming
    * Satellite and the Planetary Defense Cannon this way because the attack
    * detail never names them (getJammingSatelliteByKeyPlayer /
@@ -593,12 +607,17 @@
    * board, not a property of any one raid.
    */
   var FIT_KEY = 'rv-fit-mode';
+  // The simulator always opens on the whole board — a training battle is
+  // read as a position — and a zoom chosen mid-battle lasts that battle only.
+  var simFit = 'full';
   function fitMode() {
+    if (params.sim === '1') return simFit;
     try { return localStorage.getItem(FIT_KEY) === 'zoom' ? 'zoom' : 'full'; }
     catch (e) { return 'full'; }
   }
   function setFitMode(m) {
-    try { localStorage.setItem(FIT_KEY, m); } catch (e) {}
+    if (params.sim === '1') simFit = m;
+    else try { localStorage.setItem(FIT_KEY, m); } catch (e) {}
     syncFitToggle();
     setBoardScale({ keepCentre: true });
     // A new zoom can bring the bubble's tile into view (or take it out):
@@ -2360,7 +2379,7 @@
      offers it every sequence. */
   var pipModule = window.RaidPip({
     state: function () { return state; }, domId: domId, currentHealth: currentHealth, renderStill: renderStill,
-    stillFlags: stillFlags, flipsLayer: flipsLayer, lottiePath: lottiePath,
+    stillFlags: stillFlags, flipsLayer: flipsLayer, lottiePath: lottiePath, layerZ: layerZ,
     // The bubble plays the SAME template bundle as the tile; without the
     // swap it showed the template's baked hull (a Destroyer for every water
     // fight) while the tile showed the right struct.
@@ -2623,6 +2642,7 @@
     names.forEach(function (name) {
       var box = document.createElement('div');
       box.className = 'rv-anim-layer' + (flipsLayer(name) ? ' rv-flip-layer' : '');
+      box.style.zIndex = String(layerZ(name));
       mount.appendChild(box);
       var anim;
       try {

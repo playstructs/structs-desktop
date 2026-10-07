@@ -148,4 +148,35 @@ function boot() {
   assert.ok(!el().classList.contains('rv-vis') && pp.pip.structId === null, 'the stale bubble retracts');
 }
 
+// 9. Like the game's viewer: every layer of the moment plays (an impact's
+//    SHAKE is what draws the struct), each loads paused and hidden and plays
+//    only once its art is in, and a hide waits for the animation to finish.
+{
+  const { w, addStruct, el } = boot();
+  addStruct('5-1', 'defender', { top: 700, bottom: 828, left: 0, right: 128 });
+  addStruct('5-2', 'attacker', { top: 100, bottom: 228, left: 300, right: 428 });
+  const loads = [];
+  w.lottie = { loadAnimation: (o) => { const h = {}; const a = { o, played: false, addEventListener(n, f) { h[n] = f; }, play() { a.played = true; }, destroy() {}, h }; loads.push(a); return a; } };
+  w.setTimeout = (f, ms) => (ms && ms > 1000 ? 0 : f());
+  const pp4 = w.RaidPip({
+    state: () => ({ structsById: { '5-1': { id: '5-1', side: 'defender', type_slug: 'tank', max_health: 3 }, '5-2': { id: '5-2', side: 'attacker', type_slug: 'tank', max_health: 3 } } }),
+    domId: (kind, id) => kind + '-' + id, currentHealth: () => 2,
+    renderStill: (node) => { node.textContent = 'still'; }, stillFlags: () => ({ during: false, after: true }),
+    flipsLayer: () => false, lottiePath: (n) => n, injectStructArt: () => {},
+    layerZ: (n) => (n.startsWith('IMPACT_') ? 4 : n.startsWith('SHAKE_') ? 3 : 1),
+  });
+  pp4.pipOnAnimation({ structId: '5-1', names: ['IMPACT_LASER', 'SHAKE_LAND'], healthAfter: 1 }, 'IMPACT_LASER');
+  assert.equal(loads.length, 2, 'both layers of the moment load');
+  assert.ok(+loads[0].o.container.style.zIndex > +loads[1].o.container.style.zIndex, 'the explosion stacks over the shaking hull, as in the game');
+  assert.ok(loads.every((a) => a.o.autoplay === false && a.o.container.style.visibility === 'hidden'), 'paused and hidden until the art is in');
+  loads.forEach((a) => a.h.DOMLoaded());
+  await tick(0);
+  assert.ok(loads.every((a) => a.played && a.o.container.style.visibility === 'visible'), 'then shown and played');
+  assert.ok(pp4.pip.active, 'the bubble is mid-animation');
+  pp4.pipOnAnimation({ structId: '5-2', names: ['IMPACT_LASER'] }, 'IMPACT_LASER');
+  assert.ok(el().classList.contains('rv-vis') && pp4.pip.pendingHide, 'a hide waits for the animation');
+  loads.forEach((a) => a.h.complete());
+  assert.ok(!el().classList.contains('rv-vis') && !pp4.pip.active, 'and lands once it has played out');
+}
+
 console.log('raid-pip: all checks passed');
