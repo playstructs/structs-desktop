@@ -434,34 +434,27 @@ fn spine(app: &tauri::AppHandle) {
 /// quit does not.
 #[tauri::command]
 pub fn open_terminal_window(app: tauri::AppHandle) -> Result<(), String> {
-    open_terminal(&app, None)
+    open_terminal(&app)
 }
 
-/// Run one Terminal line from outside the window — a `structs://` link
-/// (deeplink.rs). An open Terminal runs it at once; a closed one opens with
-/// `?run=<line>`, which the page runs once its workspace is up. The line is
-/// handed over as JSON / URL-encoded, never spliced in raw.
-pub fn run_line(app: &tauri::AppHandle, line: &str) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window(LABEL) {
-        let arg = serde_json::to_string(line).map_err(|e| e.to_string())?;
-        w.eval(&format!("window.Board && Board.Terminal && Board.Terminal.execute({arg});"))
-            .map_err(|e| e.to_string())?;
-        focus(&w);
-        return Ok(());
-    }
-    open_terminal(app, Some(line))
+/// A `structs://` link's card (deeplink.rs), in a window of its own.
+///
+/// Never the main Terminal: a link is somebody else's door into your app, and
+/// it should not rearrange the workspace you built. Link cards live in their
+/// own `links` workspace, one window each; the same link twice raises the
+/// window it already opened (open_terminal_card_new's focus-or-open).
+pub fn open_link_card(app: &tauri::AppHandle, kind: &str, id: &str) -> Result<(), String> {
+    open_terminal_card_new(app.clone(), kind.to_string(), Some(json!({ "id": id })), Some(LINK_WORKSPACE.into())).map(|_| ())
 }
 
-fn open_terminal(app: &tauri::AppHandle, run: Option<&str>) -> Result<(), String> {
+const LINK_WORKSPACE: &str = "links";
+
+fn open_terminal(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(LABEL) {
         focus(&w);
         return Ok(());
     }
-    let url = match run {
-        Some(line) => format!("board.html?view=terminal&run={}", urlencode(line)),
-        None => "board.html?view=terminal".to_string(),
-    };
-    let w = build(app, LABEL, &url, "Structs — Terminal", (1180.0, 860.0))?;
+    let w = build(app, LABEL, "board.html?view=terminal", "Structs — Terminal", (1180.0, 860.0))?;
     w.on_window_event(|event| {
         if matches!(event, tauri::WindowEvent::CloseRequested { .. }) && !APP_QUITTING.load(Ordering::SeqCst) {
             let mut ws = lock(&WINDOWS);
@@ -477,15 +470,6 @@ fn open_terminal(app: &tauri::AppHandle, run: Option<&str>) -> Result<(), String
     spine(app);
     focus(&w);
     Ok(())
-}
-
-/// Percent-encode a Terminal line for a query string: unreserved characters
-/// pass, everything else (spaces included) becomes %XX.
-fn urlencode(s: &str) -> String {
-    s.bytes().map(|b| match b {
-        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-        _ => format!("%{b:02X}"),
-    }).collect()
 }
 
 /// A workspace as a window of its own — the framework is not one window.

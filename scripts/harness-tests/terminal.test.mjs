@@ -841,6 +841,9 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     check('MAP <planet> opens the Raid View window for it', opens().length === before + 1 && opens().slice(-1)[0].args.planetId === '2-29604', JSON.stringify(opens().slice(-1)[0]));
     run('MAP 9-61');
     check('MAP <fleet> opens the Raid View window following the fleet', opens().slice(-1)[0].args.fleetId === '9-61');
+    run('MAP 1-61');
+    const home = await until(() => opens().slice(-1)[0].args.planetId === '2-61' ? opens().slice(-1)[0] : null);
+    check('MAP <player> opens their home planet, read from the profile\'s Player record', home !== null, JSON.stringify(opens().slice(-1)[0]));
     check('…and neither added a card', T.state.layout.cards.length === cardsBefore);
     run('MAP');
     const roster = await w.__TAURI__.core.invoke('mcp_roster');
@@ -2157,20 +2160,6 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const css = read('frontend/board.html');
     check('a grown feed takes its height from the card, never a constant', /#board-layout \.tm-h-grow \.tm-lane-rows \{ max-height: none/.test(css));
   }
-}
-
-// ── A structs:// link that opened the Terminal: ?run=<line> ──────────────
-{
-  const count = (w, t) => [...w.document.querySelectorAll('#tm-grid .tm-card')].filter((c) => c.dataset.type === t).length;
-  const settle = async (w) => { await until(() => w.document.querySelectorAll('#tm-grid .tm-card').length >= 3); await tick(400); };
-  const run = (await load('?view=terminal&run=RECORD%201-61')).window;
-  await settle(run);
-  check('a link\'s ?run= line runs once the workspace is up (structs://record/1-61)', count(run, 'record') === 1);
-  const junk = (await load('?view=terminal&run=%3Cimg%20src%3Dx%3E')).window;
-  await settle(junk);
-  const plain = (await load('?view=terminal')).window;
-  await settle(plain);
-  check('…and a line the grammar does not parse runs nothing', junk.document.querySelectorAll('#tm-grid .tm-card').length === plain.document.querySelectorAll('#tm-grid .tm-card').length);
 }
 
 console.log(failures ? failures + ' failing check(s)' : 'all checks passed');

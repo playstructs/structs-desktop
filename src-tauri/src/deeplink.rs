@@ -7,8 +7,9 @@
 //!   structs://sim/<code>[/<result>]     the simulator, with that battle loaded
 //!   structs://map/<planet|fleet>        the map viewer on it
 //!   structs://map/<player>              the map viewer on their home planet
-//!   structs://<view>/<id>               the Terminal line `VIEW id` — PLAYER,
-//!                                       RECORD, TALLY, PROVIDER, REACTOR
+//!   structs://<view>/<id>               that Terminal card in a window of its
+//!                                       own — PLAYER, RECORD, TALLY, PROVIDER,
+//!                                       REACTOR — never in the main Terminal
 //!   structs://<id>                      the id's default view
 //!   structs://                          the main window
 //!
@@ -42,15 +43,16 @@ fn kind_of(id: &str) -> Option<&'static str> {
     })
 }
 
-/// view → the kinds it accepts and its Terminal word.
+/// view → the kinds it accepts and the Terminal card that shows it (the card
+/// typing `VIEW id` makes; PROVIDER and REACTOR both open the inspector).
 fn view_spec(view: &str) -> Option<(&'static str, &'static [&'static str], &'static str)> {
     Some(match view {
-        "player" => ("player", &["player"], "PLAYER"),
-        "map" => ("map", &["planet", "fleet", "player"], "MAP"),
-        "record" => ("record", &["player"], "RECORD"),
-        "tally" => ("tally", &["player"], "TALLY"),
-        "provider" => ("provider", &["provider"], "PROVIDER"),
-        "reactor" => ("reactor", &["reactor"], "REACTOR"),
+        "player" => ("player", &["player"], "player"),
+        "map" => ("map", &["planet", "fleet", "player"], "map"),
+        "record" => ("record", &["player"], "record"),
+        "tally" => ("tally", &["player"], "tally"),
+        "provider" => ("provider", &["provider"], "inspector"),
+        "reactor" => ("reactor", &["reactor"], "inspector"),
         _ => return None,
     })
 }
@@ -135,9 +137,9 @@ pub fn parse(input: &str) -> Option<Link> {
     Some(Link::View { view, id: id.to_string(), kind })
 }
 
-/// The Terminal line for a view link — what typing it would run.
-pub fn terminal_line(view: &str, id: &str) -> Option<String> {
-    view_spec(view).map(|(_, _, word)| format!("{word} {id}"))
+/// The Terminal card for a view link.
+pub fn card_for(view: &str) -> Option<&'static str> {
+    view_spec(view).map(|(_, _, card)| card)
 }
 
 /// Do what a link says — off the main thread.
@@ -167,9 +169,9 @@ fn dispatch(app: &tauri::AppHandle, url: &str) {
         }
         Link::Sim { code } => crate::simulator::open_battle(app, code),
         Link::View { view: "map", id, kind } => open_map(app, id, kind),
-        Link::View { view, id, .. } => match terminal_line(view, id) {
-            Some(line) => crate::mcp::terminal::run_line(app, &line),
-            None => Err(format!("no Terminal word for {view}")),
+        Link::View { view, id, .. } => match card_for(view) {
+            Some(card) => crate::mcp::terminal::open_link_card(app, card, id),
+            None => Err(format!("no Terminal card for {view}")),
         },
     };
     if let Err(e) = result {
@@ -188,19 +190,24 @@ fn open_map(app: &tauri::AppHandle, id: &str, kind: &str) -> Result<(), String> 
             let app = app.clone();
             let id = id.to_string();
             tauri::async_runtime::spawn(async move {
-                let planet = crate::mcp::tools::board_pages::mcp_player_profile(id.clone()).await.ok().and_then(|v| {
-                    let e = &v["entity"];
-                    e["planetId"].as_str().or_else(|| e["planet_id"].as_str()).or_else(|| v["planet_id"].as_str()).map(String::from)
-                });
-                let r = match planet.filter(|p| kind_of(p) == Some("planet")) {
-                    Some(p) => parse_target(Some(&p), None).and_then(|t| open_window(&app, &t).map(|_| ())),
-                    None => Err(format!("{id} has no planet")),
+                let profile = crate::mcp::tools::board_pages::mcp_player_profile(id.clone()).await;
+                let planet = profile.as_ref().ok().and_then(home_planet);
+                let r = match (planet, profile) {
+                    (Some(p), _) => parse_target(Some(&p), None).and_then(|t| open_window(&app, &t).map(|_| ())),
+                    (None, Err(e)) => Err(format!("profile read failed: {e}")),
+                    (None, Ok(_)) => Err(format!("{id} has no planet")),
                 };
                 if let Err(e) = r { eprintln!("[deeplink] map/{id}: {e}"); }
             });
             Ok(())
         }
     }
+}
+
+/// A player's home planet from `mcp_player_profile`: the chain's player record
+/// nests it under `entity.Player.planetId` (empty for a player with none).
+fn home_planet(profile: &serde_json::Value) -> Option<String> {
+    profile["entity"]["Player"]["planetId"].as_str().filter(|p| kind_of(p) == Some("planet")).map(String::from)
 }
 
 #[cfg(test)]
@@ -263,9 +270,20 @@ mod tests {
     }
 
     #[test]
-    fn terminal_lines_match_the_site() {
-        assert_eq!(terminal_line("record", "1-61").as_deref(), Some("RECORD 1-61"));
-        assert_eq!(terminal_line("provider", "10-1").as_deref(), Some("PROVIDER 10-1"));
-        assert_eq!(terminal_line("reactor", "3-1").as_deref(), Some("REACTOR 3-1"));
+    fn a_players_map_is_the_planet_in_their_chain_record() {
+        let v = serde_json::json!({ "player_id": "1-61", "entity": { "Player": { "planetId": "2-21740", "fleetId": "9-61" } } });
+        assert_eq!(home_planet(&v).as_deref(), Some("2-21740"));
+        assert_eq!(home_planet(&serde_json::json!({ "entity": { "Player": { "planetId": "" } } })), None);
+        assert_eq!(home_planet(&serde_json::json!({ "entity": { "planetId": "2-1" } })), None);
+    }
+
+    #[test]
+    fn views_open_the_cards_their_terminal_words_make() {
+        assert_eq!(card_for("player"), Some("player"));
+        assert_eq!(card_for("record"), Some("record"));
+        assert_eq!(card_for("tally"), Some("tally"));
+        assert_eq!(card_for("provider"), Some("inspector"));
+        assert_eq!(card_for("reactor"), Some("inspector"));
+        assert_eq!(card_for("nope"), None);
     }
 }

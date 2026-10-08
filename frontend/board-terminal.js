@@ -2362,8 +2362,9 @@
     // A player's map is their home planet, read from the chain's player record.
     var home = function (pid) {
       return invoke('mcp_player_profile', { player: pid }).then(function (d) {
-        var e = (d && d.entity) || {};
-        var planet = e.planetId || e.planet_id || (d && d.planet_id);
+        // The chain's player record nests identity under `Player`.
+        var e = (d && d.entity && d.entity.Player) || {};
+        var planet = e.planetId;
         if (!planet) throw new Error(pid + ' has no planet');
         return open(planet);
       });
@@ -4434,21 +4435,9 @@
       state.ws = param('ws') || state.active || 'main';
       if (state.workspaces.indexOf(state.ws) < 0) state.workspaces.push(state.ws);
       return load();
-    }).then(function () { listenForLayouts(); renderAll(); runFromUrl(); });
+    }).then(function () { listenForLayouts(); renderAll(); });
   }
   Terminal.enter = enter;
-
-  /* A structs:// link that opened this window carries its command as
-   * `?run=RECORD%201-61` — the line typing would run. Only a line the grammar
-   * parses is run, once, after the workspace is up. A window that is already
-   * open gets the line through Terminal.execute instead. */
-  function runFromUrl() {
-    var m = /[?&]run=([^&#]{1,300})/.exec(location.search || '');
-    if (!m) return;
-    var line;
-    try { line = decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch (e) { return; }
-    if (Terminal.parse(line)) Terminal.execute(line);
-  }
 
   Board.registerPage('terminal', { onEnter: enter });
   if (Board.current === 'terminal' && Board.T) enter();
