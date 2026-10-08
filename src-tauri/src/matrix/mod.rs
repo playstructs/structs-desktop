@@ -981,9 +981,11 @@ async fn sim_thread_view(
 
 // ── Live battles (sim.rs, Live) ─────────────────────────────────────────────
 
-/// Open a live battle: its match room, and the invite that names it — in a
-/// room (anyone there may take it, and anyone there may watch) or in a DM
-/// with one player. The simulator then waits in the match room.
+/// Open a live battle and post the invite that names where it plays. In a
+/// DM the battle plays in the DM itself: the two of them already have a
+/// room, and their match chat is just their conversation. In any other room
+/// it gets a match room of its own (anyone there may take it, and anyone
+/// there may watch), so the ticks stay out of a busy channel.
 #[tauri::command]
 pub async fn matrix_sim_live_open(
     guild_id: Option<String>,
@@ -998,11 +1000,13 @@ pub async fn matrix_sim_live_open(
     };
     let session = session_for(&guild_id)?;
     let b = sim::decode_battle(&battle).ok_or("that is not a battle")?;
-    // Live plays at the chain's pace: one tick per block has to fit the
-    // homeserver's send rate (Synapse's default: 0.2 a second, burst 10).
-    let block_ms = block_ms.unwrap_or(6000);
-    if block_ms != 6000 && block_ms != 2000 {
-        return Err("a live battle runs at 2 s or 6 s blocks".into());
+    // One tick per block, against the homeserver's send rate (Synapse's
+    // default: 0.2 a second, burst 10). Past that the host merges the blocks
+    // that wait behind a send into one tick (simulator-live.js), so a faster
+    // battle costs the guest a block of lag, never a growing queue.
+    let block_ms = block_ms.unwrap_or(4000);
+    if !sim::LIVE_BLOCK_MS.contains(&block_ms) {
+        return Err("a live battle runs at 2, 4 or 6 s blocks".into());
     }
     let mut guest: Option<(String, String)> = None; // (matrix id, name)
     let room_id = match (room_id.filter(|r| !r.is_empty()), to_player.as_deref().map(str::trim).filter(|p| !p.is_empty())) {
@@ -1017,8 +1021,27 @@ pub async fn matrix_sim_live_open(
         }
         (None, None) => return Err("post it where?".into()),
     };
-    let title = format!("Live · {}", sim::name_of(&b));
-    let match_room = client::create_match_room(&session, &title, &room_id, guest.as_ref().map(|g| g.0.as_str())).await?;
+    let match_room = match client::dm_peer(&guild_id, &room_id) {
+        Some((user, player)) => {
+            // Posted into a DM by room: it is for the one person there.
+            if guest.is_none() {
+                let user = match (user, player.as_deref()) {
+                    (Some(u), _) => Some(u),
+                    (None, Some(pid)) => directory::matrix_id_resolving(pid).await.ok(),
+                    (None, None) => None,
+                };
+                guest = user.map(|u| {
+                    let name = person_of(&u).0;
+                    (u, name)
+                });
+            }
+            room_id.clone()
+        }
+        None => {
+            let title = format!("Live · {}", sim::name_of(&b));
+            client::create_match_room(&session, &title, &room_id, guest.as_ref().map(|g| g.0.as_str())).await?
+        }
+    };
     let mut frame = json!({ "v": 1, "kind": "invite", "battle": battle, "match": match_room, "block_ms": block_ms });
     if let Some((u, _)) = guest.as_ref() {
         frame["to"] = json!([u]);
@@ -1063,9 +1086,49 @@ pub async fn matrix_sim_live_status(guild_id: String, room_id: String, invite_ev
     Ok(json!({ "event_id": id }))
 }
 
+/// Where two players' simulators can meet directly (simulator-rtc.js): the
+/// homeserver's TURN service, when it runs one. The credentials are short
+/// lived and the homeserver's to hand out. Empty when it has none — the
+/// battle then tries public STUN, and failing that stays on Matrix.
+#[tauri::command]
+pub async fn matrix_sim_ice(guild_id: String) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let turn = client::turn_server(&session).await.unwrap_or(Value::Null);
+    let uris: Vec<String> = turn
+        .get("uris")
+        .and_then(|u| u.as_array())
+        .map(|a| a.iter().filter_map(|u| u.as_str()).filter(|u| u.starts_with("turn:") || u.starts_with("turns:") || u.starts_with("stun:")).map(String::from).collect())
+        .unwrap_or_default();
+    if uris.is_empty() {
+        return Ok(json!({ "servers": [] }));
+    }
+    Ok(json!({ "servers": [{
+        "urls": uris,
+        "username": turn.get("username").and_then(|u| u.as_str()).unwrap_or(""),
+        "credential": turn.get("password").and_then(|u| u.as_str()).unwrap_or(""),
+    }] }))
+}
+
+/// Done with a live battle: leave its match room and forget it. Refused for
+/// any room that is not one — the simulator is an untrusted window, and this
+/// must never be a way to leave the player's DM or their guild's channels.
+#[tauri::command]
+pub async fn matrix_sim_live_close(guild_id: String, room_id: String) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    if !client::is_match_room(&guild_id, &room_id) {
+        return Ok(json!({ "left": false }));
+    }
+    client::leave_and_forget(&session, &room_id).await?;
+    Ok(json!({ "left": true }))
+}
+
 /// Join a match room to play or to watch. Through the host's server: the
-/// room may be one this homeserver has never seen.
-pub async fn live_join(guild_id: &str, match_room: &str, host: &str) -> Result<(), String> {
+/// room may be one this homeserver has never seen. A battle in a DM plays
+/// where the invite is, a room we are already in.
+pub async fn live_join(guild_id: &str, room_id: &str, match_room: &str, host: &str) -> Result<(), String> {
+    if match_room == room_id {
+        return Ok(());
+    }
     let session = session_for(guild_id)?;
     let server = host.split_once(':').map(|(_, s)| s).unwrap_or("");
     if server.is_empty() {

@@ -119,10 +119,10 @@ pub async fn sim_live_join_open(
     if role != "guest" && role != "watch" {
         return Err("play or watch?".into());
     }
-    if block_ms != 2000 && block_ms != 6000 {
-        return Err("a live battle runs at 2 s or 6 s blocks".into());
+    if !crate::matrix::sim::LIVE_BLOCK_MS.contains(&block_ms) {
+        return Err("a live battle runs at 2, 4 or 6 s blocks".into());
     }
-    crate::matrix::live_join(&guild_id, &match_room, &host).await?;
+    crate::matrix::live_join(&guild_id, &room_id, &match_room, &host).await?;
     let (host_name, host_pfp, _) = crate::matrix::person_of(&host);
     let me = crate::matrix::store::get(&guild_id).map(|s| s.user_id).unwrap_or_default();
     set_pending(serde_json::json!({

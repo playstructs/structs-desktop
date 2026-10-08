@@ -35,6 +35,12 @@ pub const RULES_REVISION: u8 = 1;
 
 const LEVELS: [&str; 3] = ["easy", "difficult", "hard"];
 const BLOCK_MS: [u32; 2] = [2000, 6000];
+/// A live battle's block times. 4 s is the default: one tick a block, and
+/// ticks merge while a send waits out the homeserver's rate limit.
+pub const LIVE_BLOCK_MS: [u64; 3] = [2000, 4000, 6000];
+/// The room type a live battle's own room is created with (`creation_content.type`):
+/// how every client of ours knows to keep it out of the list.
+pub const MATCH_ROOM_TYPE: &str = "structs.sim.match";
 const MAX_UNITS: usize = 34;
 const MAX_CHARGE: u8 = 30;
 /// How many people one challenge may be addressed to.
@@ -344,7 +350,7 @@ pub fn parse(frame: &Value) -> Option<Value> {
                 return None;
             }
             let block_ms = frame.get("block_ms").and_then(|b| b.as_u64())?;
-            if !BLOCK_MS.contains(&(block_ms as u32)) {
+            if !LIVE_BLOCK_MS.contains(&block_ms) {
                 return None;
             }
             out["match"] = json!(room);
@@ -442,7 +448,11 @@ fn is_room_id(s: &str) -> bool {
 // back as a `status` frame in the invite's thread, where the card reads it.
 
 /// The frames a match is made of.
-pub const LIVE_KINDS: [&str; 9] = ["hello", "ready", "start", "tick", "move", "end", "leave", "ping", "status"];
+pub const LIVE_KINDS: [&str; 10] = ["hello", "ready", "start", "tick", "move", "end", "leave", "ping", "status", "rtc"];
+/// An `rtc` frame's session description: the WebRTC offer or answer that
+/// lets the two players talk directly. SDP for one data channel is ~1-3 KB.
+const RTC_SDP_MAX: usize = 16_000;
+const RTC_CANDIDATE_MAX: usize = 512;
 /// What a tick may carry: the Map Viewer's own events, by name.
 const TICK_EVENTS: [&str; 6] = ["raid-block", "raid-delta", "raid-attacks", "raid-log", "raid-tx", "raid-snapshot"];
 /// Under the homeserver's 65,536-byte event cap, with room for the envelope.
@@ -486,6 +496,34 @@ pub fn parse_live(frame: &Value) -> Option<Value> {
         }
         "start" => {
             frame.get("battle").and_then(|b| b.as_str()).filter(|b| decode_battle(b).is_some())?;
+        }
+        // The handshake for a direct connection (simulator-rtc.js): one
+        // session description OR one ICE candidate, nothing else.
+        "rtc" => {
+            match (frame.get("desc"), frame.get("cand")) {
+                (Some(d), None) => {
+                    let t = d.get("type").and_then(|t| t.as_str())?;
+                    let sdp = d.get("sdp").and_then(|t| t.as_str())?;
+                    if !(t == "offer" || t == "answer") || sdp.len() > RTC_SDP_MAX {
+                        return None;
+                    }
+                }
+                (None, Some(c)) => {
+                    // `null` is the end of candidates.
+                    if !c.is_null() {
+                        let cand = c.get("candidate").and_then(|t| t.as_str())?;
+                        if cand.len() > RTC_CANDIDATE_MAX {
+                            return None;
+                        }
+                        if c.get("sdpMid").is_some_and(|m| !m.is_null() && !m.is_string())
+                            || c.get("sdpMLineIndex").is_some_and(|m| !m.is_null() && !m.is_u64())
+                        {
+                            return None;
+                        }
+                    }
+                }
+                _ => return None,
+            }
         }
         "status" => {
             let state = frame.get("state").and_then(|s| s.as_str())?;
@@ -756,10 +794,26 @@ mod tests {
     fn an_invite_names_its_match_room_and_a_chain_block_time() {
         let b = battle();
         let ok = json!({ "v": 1, "kind": "invite", "battle": b, "match": "!m:h", "block_ms": 6000 });
+        assert!(parse(&json!({ "v": 1, "kind": "invite", "battle": b, "match": "!m:h", "block_ms": 4000 })).is_some(), "4 s blocks");
+        assert!(parse(&json!({ "v": 1, "kind": "invite", "battle": b, "match": "!m:h", "block_ms": 5000 })).is_none(), "a live block time");
         assert_eq!(parse(&ok).unwrap()["match"], "!m:h");
         assert!(parse(&json!({ "v": 1, "kind": "invite", "battle": b, "match": "m:h", "block_ms": 6000 })).is_none(), "a room id");
         assert!(parse(&json!({ "v": 1, "kind": "invite", "battle": b, "match": "!m:h", "block_ms": 3000 })).is_none(), "2 s or 6 s");
         assert!(parse(&json!({ "v": 1, "kind": "invite", "battle": b, "match": "!m:h", "block_ms": 6000, "to": ["@a:h", "@b:h"] })).is_none(), "one guest");
+    }
+
+    #[test]
+    fn an_rtc_frame_is_one_description_or_one_candidate() {
+        let ok = |f: Value| parse_live(&f).is_some();
+        assert!(ok(json!({ "v": 1, "kind": "rtc", "desc": { "type": "offer", "sdp": "v=0\r\n" } })));
+        assert!(ok(json!({ "v": 1, "kind": "rtc", "desc": { "type": "answer", "sdp": "v=0\r\n" } })));
+        assert!(ok(json!({ "v": 1, "kind": "rtc", "cand": { "candidate": "candidate:1 1 udp 1 10.0.0.1 9 typ host", "sdpMid": "0", "sdpMLineIndex": 0 } })));
+        assert!(ok(json!({ "v": 1, "kind": "rtc", "cand": null })), "the end of candidates");
+        assert!(!ok(json!({ "v": 1, "kind": "rtc", "desc": { "type": "pranswer", "sdp": "v=0" } })), "offer or answer only");
+        assert!(!ok(json!({ "v": 1, "kind": "rtc", "desc": { "type": "offer", "sdp": "x".repeat(20_000) } })), "a description has a size");
+        assert!(!ok(json!({ "v": 1, "kind": "rtc", "desc": { "type": "offer", "sdp": "v=0" }, "cand": null })), "one thing per frame");
+        assert!(!ok(json!({ "v": 1, "kind": "rtc" })), "and not nothing");
+        assert!(!ok(json!({ "v": 1, "kind": "rtc", "cand": { "candidate": 7 } })));
     }
 
     #[test]

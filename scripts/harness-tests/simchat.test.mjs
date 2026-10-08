@@ -145,7 +145,7 @@ const entry = (rank, sender, name, o) => ({ rank, sender, name, player_id: sende
   check('…a thread whose root is not a battle (or not loaded) is left alone', !sim.folded(stray) && !sim.folded(root));
   const line = sim.simLine(best);
   check('the new best is one event line addressed to the one it beat', line && line.classList.contains('chat-event') && line.classList.contains('chl-mine')
-    && /T\.Xue beat your best on Spearpoint 02:41 · lost 1/.test(text(line)), text(line));
+    && /T\.Xue beat your best on Spearpoint · Victory 02:41 · lost 1/.test(text(line)), text(line));
   check('…and an ordinary run draws no line', sim.simLine(run) === null);
   const node = sim.simNode(root);
   check('a challenge message draws its row and asks Rust for the ladder once', node && node.querySelector('.chl-row') && asked.filter((a) => a[0] === 'matrix_sim_thread').length === 1);
@@ -206,7 +206,9 @@ async function simulator(context, answers = {}) {
   check('…with the battle, who posted it, where, its settings', /Spearpoint/.test(text($('challenge'))) && /JPEG/.test(text($('challenge'))) && /SN\.Corporation/.test(text($('challenge')))
     && /Difficult/.test(text($('challenge'))) && /Charge 9 · 9/.test(text($('challenge'))));
   check('…the ladder, you marked as You', $('challenge').querySelectorAll('.sim-run').length === 2 && /You/.test(text($('challenge').querySelector('.sim-run-me'))));
-  check('…and the thread with a reply box', /guard the command ship/.test(text($('challenge').querySelector('.sim-thread'))) && $('challenge').querySelector('.sim-reply input'));
+  check('…and the thread, in the rows Comms draws, with the game\'s own composer', /guard the command ship/.test(text($('challenge').querySelector('.sim-thread')))
+    && $('challenge').querySelectorAll('.sim-thread .chat-msg').length === 1
+    && $('challenge').querySelector('.sim-reply .chat-composer-panel textarea') && $('challenge').querySelector('.sim-reply .sui-panel-btn'));
   check('the fleets are locked: tagged, Mirror and Swap gone, empty slots dead', !$('locked-chip').classList.contains('hidden') && /Spearpoint fleets/.test(text($('locked-chip')))
     && $('mirror').classList.contains('hidden') && $('swap').classList.contains('hidden')
     && [...sw.document.querySelectorAll('#arena .slot')].filter((b) => !b.dataset.unit).every((b) => b.disabled));
@@ -214,10 +216,10 @@ async function simulator(context, answers = {}) {
   bs.click();
   check('…a struct can be looked at but not changed or removed', /Battleship/.test(text($('inspector'))) && !/Change|Remove/.test(text($('inspector'))) && $('inspector').querySelector('select').disabled);
 
-  const input = $('challenge').querySelector('.sim-reply input');
+  const input = $('challenge').querySelector('.sim-reply textarea');
   input.value = 'running it back';
   input.dispatchEvent(new sw.Event('input'));
-  $('challenge').querySelector('.sim-reply').dispatchEvent(new sw.Event('submit', { cancelable: true }));
+  $('challenge').querySelector('.sim-reply .sui-panel-btn').click();
   await tick(20);
   const reply = s.calls.filter((c) => c[0] === 'matrix_sim_reply')[0];
   check('a reply goes into this battle\'s thread and nowhere else', reply && reply[1].roomId === '!r:h' && reply[1].eventId === '$root' && reply[1].body === 'running it back');
@@ -293,7 +295,7 @@ async function simulator(context, answers = {}) {
   const { $ } = s;
   $('post-to').click();
   await tick(30);
-  check('the sheet lists the rooms, the first picked', $('post-rooms').querySelectorAll('.sim-room').length === 2 && /Post to SN\.Corporation/.test(text($('post-send'))));
+  check('the sheet lists the rooms, and picks none for you', $('post-rooms').querySelectorAll('.sim-room').length === 2 && $('post-send').disabled && !/Post to \S/.test(text($('post-send'))));
   $('post-find').value = 'jp';
   $('post-find').dispatchEvent(new s.sw.Event('input'));
   check('…typing narrows it', $('post-rooms').querySelectorAll('.sim-room').length === 1);
@@ -358,6 +360,29 @@ async function simulator(context, answers = {}) {
   guest.end(end);
   const sum = guest.summary();
   check('the host giving up is the guest\'s victory, in the guest\'s terms', guest.finished.winner === 'you' && guest.finished.forfeit && sum.fielded['1-1'] === 2);
+
+  /* A rate-limited homeserver: one send in flight, blocks merge behind it. */
+  {
+    const chain2 = new lw.SimulatorChain({ types: lw.SimulatorTypes.types, seed: 'slow', height: 500,
+      players: [{ id: '1-1', fleetId: '9-1', charge: 20 }, { id: '1-2', fleetId: '9-2', charge: 20 }],
+      structs: [S('5-1', 'Command Ship', '1-1', 'space'), S('5-3', 'Command Ship', '1-2', 'space')] });
+    const host2 = new lw.SimulatorHost({ chain: chain2, you: { id: '1-1', name: 'You' }, cpu: { id: '1-2', name: 'JPEG' }, label: 'sim', blockMs: 4000, ai: null, frame: () => null });
+    const out = [], waiting = [];
+    const settle = () => new Promise((r) => setTimeout(r, 0));
+    const link2 = lw.SimLive.HostLink(host2, (f) => { out.push(f); return new lw.Promise((res) => waiting.push(res)); });
+    host2.start();
+    host2.block(); host2.block(); host2.block();
+    check('while a tick waits on the homeserver, later blocks hold back', out.length === 1, out.length + ' sent');
+    link2.after({ v: 1, kind: 'end', winner: 'draw' });
+    waiting.shift()();
+    await settle();
+    const merged = out[1];
+    check('…then leave as ONE tick carrying every block they missed', out.length === 2 && merged.kind === 'tick' && merged.events.filter((e) => e[0] === 'raid-block').length === 3);
+    check('…and the end waits behind them', out.length === 2);
+    waiting.shift()();
+    await settle();
+    check('…going out last, once the ticks before it have', out.length === 3 && out[2].kind === 'end');
+  }
   const watcher = new lw.SimLive.RemoteHost({ role: 'watch', label: 'sim', types, initial: host.snapshot(), frame: () => null, players: { host: { name: 'Marklifer' }, guest: { name: 'JPEG' } }, send: () => { throw new Error('a watcher sends nothing'); } });
   watcher.end(end);
   let wrefused = null;
@@ -392,11 +417,92 @@ async function simulator(context, answers = {}) {
   await tick(30);
   check('the host\'s start begins the battle here, the board replaying its ticks', s.sw.document.body.dataset.screen === 'battle' && s.sw.Simulator.getHost() instanceof s.sw.SimLive.RemoteHost);
   check('…with the Live chip, and no pause for a battle between two', /Live/.test(text($('chips'))) && s.sw.getComputedStyle($('pause')).display === 'none');
+  {
+    const rh = s.sw.Simulator.getHost();
+    let ticks = 0;
+    const orig = rh.tick.bind(rh);
+    rh.tick = (f) => { ticks++; orig(f); };
+    const t7 = { v: 1, kind: 'tick', block: 501, events: [], sid: 'h1', seq: 7 };
+    fire(t7); fire(Object.assign({}, t7));
+    check('a tick that arrives both ways (direct and the room) is replayed once', ticks === 1, ticks + ' replays');
+    fire({ v: 1, kind: 'tick', block: 500, events: [], sid: 'h1', seq: 6 });
+    check('…and one older than the board shows is not replayed at all', ticks === 1);
+    check('every frame this side sends carries its session and sequence', frames.length > 0 && frames.every((f) => typeof f.sid === 'string' && typeof f.seq === 'number'));
+  }
   s.sw.Simulator.getHost().end({ v: 1, kind: 'end', winner: 'guest', summary: { stats: {}, lost: { '1-1': 4, '1-2': 1 }, fielded: { '1-1': 9, '1-2': 9 }, kills: [] } });
   await tick(2700);
   check('the host\'s end is the debrief: you beat them', s.sw.document.body.dataset.screen === 'debrief' && /You beat JPEG/.test(text($('db-post'))) && /JPEG/.test(text(s.sw.document.querySelector('.sim-tally-h .sim-cpu'))));
   check('…no rematch, edit or swap for a guest', $('db-rematch').classList.contains('hidden') && $('db-edit').classList.contains('hidden') && $('db-swap').classList.contains('hidden'));
   s.close();
+}
+
+/* ── The direct line: two SimRTC ends over a fake RTCPeerConnection ────── */
+{
+  console.log('\n— live: the direct line');
+  const rdom = new JSDOM('<!doctype html><body></body>', { runScripts: 'outside-only' });
+  const rw = rdom.window;
+  // An in-memory peer connection: an offer names its maker, the answer joins
+  // the two ends' channels. Enough to drive the handshake and the frames.
+  const made = {};
+  let n = 0;
+  class Chan {
+    constructor() { this.readyState = 'connecting'; this.peer = null; }
+    send(d) { const p = this.peer; setTimeout(() => p.onmessage && p.onmessage({ data: d }), 0); }
+    close() { this.readyState = 'closed'; if (this.onclose) this.onclose(); }
+    open() { this.readyState = 'open'; if (this.onopen) this.onopen(); }
+  }
+  class PC {
+    constructor(cfg) { this.cfg = cfg; this.id = ++n; this.iceGatheringState = 'complete'; this.signalingState = 'stable'; this.connectionState = 'new'; }
+    createDataChannel() { this.ch = new Chan(); return this.ch; }
+    createOffer() { return Promise.resolve({ type: 'offer', sdp: 'v=0 offer ' + this.id }); }
+    createAnswer() { return Promise.resolve({ type: 'answer', sdp: 'v=0 answer ' + this.id }); }
+    setLocalDescription(d) { this.localDescription = d; if (d.type === 'offer') { this.signalingState = 'have-local-offer'; made[d.sdp] = this; } return Promise.resolve(); }
+    setRemoteDescription(d) {
+      if (d.type === 'offer') { this.offerer = made[d.sdp]; this.offerer.answerer = this; }
+      else {
+        const mine = this.ch, theirs = new Chan();
+        mine.peer = theirs; theirs.peer = mine;
+        this.answerer.ondatachannel({ channel: theirs });
+        setTimeout(() => { mine.open(); theirs.open(); }, 0);
+      }
+      return Promise.resolve();
+    }
+    addEventListener() {}
+    addIceCandidate() { return Promise.resolve(); }
+    close() {}
+  }
+  rw.eval(read('frontend/simulator-rtc.js'));
+  const noRtc = rw.SimRTC({ signal: () => {}, onFrame: () => {} });
+  check('no RTCPeerConnection: unsupported, and every send says so (the room carries it)', !noRtc.supported() && noRtc.send({ v: 1, kind: 'ping' }) === false);
+  rw.RTCPeerConnection = PC;
+  const wire = [], gotHost = [], gotGuest = [], states = { host: [], guest: [] };
+  let host, guest;
+  host = rw.SimRTC({ iceServers: () => Promise.resolve([{ urls: ['turn:t.example'], username: 'u', credential: 'c' }]),
+    signal: (f) => { wire.push(f); guest.signal(f); }, onFrame: (f) => gotHost.push(f), onState: (st) => states.host.push(st) });
+  guest = rw.SimRTC({ iceServers: () => Promise.resolve([]),
+    signal: (f) => { wire.push(f); host.signal(f); }, onFrame: (f) => gotGuest.push(f), onState: (st) => states.guest.push(st) });
+  check('before the line opens, a send falls to the room', host.send({ v: 1, kind: 'ping' }) === false);
+  host.start();
+  await tick(30);
+  check('the handshake is two room frames: one offer, one answer, candidates inside', wire.length === 2 && wire[0].kind === 'rtc' && wire[0].desc.type === 'offer' && wire[1].desc.type === 'answer');
+  check('…and both ends open', host.state() === 'open' && guest.state() === 'open', states.host.join('>') + ' / ' + states.guest.join('>'));
+  check('…the homeserver\'s TURN when it has one, public STUN when it has none', made['v=0 offer 1'].cfg.iceServers[0].urls[0] === 'turn:t.example'
+    && made['v=0 offer 1'].answerer.cfg.iceServers[0].urls[0].startsWith('stun:'));
+  check('then frames go player to player', host.send({ v: 1, kind: 'tick', block: 9, events: [] }) && guest.send({ v: 1, kind: 'move', action: 'attack', args: {} }));
+  await tick(10);
+  check('…and arrive whole', gotGuest.length === 1 && gotGuest[0].kind === 'tick' && gotHost.length === 1 && gotHost[0].action === 'attack');
+  const chan = made['v=0 offer 1'].ch.peer;
+  chan.onmessage({ data: JSON.stringify({ v: 1, kind: 'rtc', desc: {} }) });
+  chan.onmessage({ data: JSON.stringify({ v: 2, kind: 'tick' }) });
+  chan.onmessage({ data: '{not json' });
+  chan.onmessage({ data: JSON.stringify({ v: 1, kind: 'ping', pad: 'x'.repeat(70000) }) });
+  check('what arrives is checked like a room frame: kind, version, size', gotGuest.length === 1);
+  guest.signal({ v: 1, kind: 'rtc', desc: { type: 'offer', sdp: 'v=0 offer 99' } });
+  check('a second offer is not a renegotiation: one line per battle', guest.state() === 'open');
+  made['v=0 offer 1'].ch.close();
+  check('a line that drops says so — lost — and sends fall to the room again', host.state() === 'lost' && host.send({ v: 1, kind: 'ping' }) === false);
+  guest.close();
+  check('closed is closed', guest.state() === 'closed' && guest.send({ v: 1, kind: 'ping' }) === false);
 }
 
 {
@@ -415,7 +521,7 @@ async function simulator(context, answers = {}) {
   check('addressed: Play JPEG live sits under Send', !$('live-to').classList.contains('hidden') && /Play JPEG live/.test(text($('live-to'))));
   $('live-to').click();
   await tick(30);
-  check('…which opens a match by code, for that player, at chain speed', opened.length === 1 && opened[0].toPlayer === '1-61' && opened[0].battle && opened[0].blockMs === 6000);
+  check('…which opens a match by code, for that player, at 4 s blocks', opened.length === 1 && opened[0].toPlayer === '1-61' && opened[0].battle && opened[0].blockMs === 4000);
   check('the host waits in the lobby for them', /Live battle/.test(text($('challenge'))) && /Waiting for JPEG/.test(text($('challenge'))));
   fire({ v: 1, kind: 'hello' }, '@1-99:h');
   check('…a stranger\'s hello is not the invited guest', /Waiting for JPEG/.test(text($('challenge'))));

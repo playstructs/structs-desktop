@@ -49,19 +49,39 @@
     var origStart = host.start.bind(host), origStop = host.stop.bind(host);
     host.start = function () { origStart(); flush(); };
     host.stop = function () { origStop(); flush(); };
-    function flush() {
-      if (!buf.length) return;
+    /* One send in flight. Blocks that pass while it waits — the homeserver
+     * rate limits a fast battle — go out together as one tick, so the guest
+     * runs a block behind at worst, never further and further behind. Frames
+     * queued with after() leave once every tick before them has. */
+    var inflight = false, tail = [];
+    function tickFrame() {
       var events = buf; buf = [];
       var frame = { v: 1, kind: 'tick', block: host.chain.height, events: events };
       // A tick has to fit one event. The board resynchronises from the next
-      // block's snapshot, so a snapshot is what gives way first.
+      // block's snapshot, so snapshots are what give way: the latest first
+      // stays, then it goes too.
       if (JSON.stringify(frame).length > 55000) {
-        frame.events = events.filter(function (e) { return e[0] !== 'raid-snapshot'; });
+        var snaps = events.filter(function (e) { return e[0] === 'raid-snapshot'; });
+        var last = snaps[snaps.length - 1];
+        frame.events = events.filter(function (e) { return e[0] !== 'raid-snapshot' || e === last; });
+        if (JSON.stringify(frame).length > 55000) frame.events = frame.events.filter(function (e) { return e !== last; });
       }
-      send(frame);
+      return frame;
     }
+    function flush() {
+      if (inflight) return;
+      var frame = buf.length ? tickFrame() : tail.shift();
+      if (!frame) return;
+      var p = send(frame);
+      if (p && typeof p.then === 'function') {
+        inflight = true;
+        p.then(sent, sent);
+      } else flush();
+    }
+    function sent() { inflight = false; flush(); }
     return {
       flush: flush,
+      after: function (frame) { tail.push(frame); flush(); },
       /* A guest's move, applied as the guest's own transaction. */
       move: function (frame) {
         try { host.actFor(GUEST_ID, frame.action, frame.args || {}); } catch (e) { buf.push(['raid-tx', { status: 'failed', code: 1, error: String(e.message || e), signer: GUEST_ID }]); }

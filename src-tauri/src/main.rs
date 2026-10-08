@@ -204,6 +204,8 @@ fn main() {
             matrix::matrix_sim_live_open,
             matrix::matrix_sim_live_send,
             matrix::matrix_sim_live_status,
+            matrix::matrix_sim_live_close,
+            matrix::matrix_sim_ice,
             matrix::matrix_person,
             matrix::matrix_mute,
             matrix::matrix_room_pin,

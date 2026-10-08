@@ -138,6 +138,14 @@
   }
 
   function emblem() { return C().emblem.art('Command Ship', 'sm'); }
+  function verdictReading(e) {
+    var o = e.outcome || {};
+    var won = o.winner === 'player';
+    // A reading without a glyph prints its title as a caption; every verdict has one.
+    var glyph = won ? 'icon-success' : o.winner === 'draw' ? 'icon-subtract' : 'icon-close';
+    return { value: o.time, icon: 'sui-icon-md ' + glyph, title: str(o.verdict) + ' · best · ' + str(e.name),
+      cls: won ? 'sc-ok' : o.winner === 'draw' ? 'sc-tone-warning' : 'sc-bad-text' };
+  }
 
   function playDoor(opts, title) {
     return opts.onPlay ? { icon: 'icon-raid', title: title || 'Play', onClick: function (ev, node) { opts.onPlay(ev, node); } } : null;
@@ -156,7 +164,9 @@
       badge: BADGE[s] || difficultyBadge(f),
       sub: subText(view), state: STRIPE[s],
       emblem: emblem(),
-      readings: shown ? [{ value: shown.outcome.time, icon: 'sui-icon-md icon-success', title: 'Best · ' + str(shown.name), cls: 'sc-ok' }] : [],
+      // The best run's time, in its verdict's colour: a defeat can lead a
+      // ladder nobody has won, and must not wear a tick.
+      readings: shown ? [verdictReading(shown)] : [],
     }, { doors: [playDoor(opts, 'Play ' + str(f.name)), moreDoor(opts)], onClick: opts.onOpen });
     node.classList.add('chl-row');
     return node;
@@ -211,7 +221,7 @@
     if (st === 'ended') sub = live.winner_name ? live.winner_name + ' won · ' + host + ' v ' + (guest || '…') : 'a draw · ' + host + ' v ' + (guest || '…');
     else if (st === 'live' || st === 'lobby') sub = host + ' v ' + (guest || '…') + ' · ' + (f.name || 'Battle');
     else if (st === 'waiting') sub = (f.to && f.to.length ? 'sent' : 'anyone may take it') + ' · ' + (f.name || 'Battle') + ' · ' + (f.block_ms / 1000) + ' s';
-    else sub = 'from ' + host + ' · ' + (f.name || 'Battle') + ' · ' + (f.block_ms / 1000) + ' s';
+    else sub = (view && view.author && view.author.self ? '' : 'from ' + host + ' · ') + (f.name || 'Battle') + ' · ' + (f.block_ms / 1000) + ' s';
     var doors = [];
     if ((st === 'for-you' || st === 'open') && opts.onAccept) doors.push({ icon: 'icon-raid', title: 'Accept', onClick: function (ev, n) { opts.onAccept(ev, n); } });
     if ((st === 'live' || st === 'lobby') && opts.onWatch) doors.push({ icon: 'icon-detected', title: 'Watch', onClick: function (ev, n) { opts.onWatch(ev, n); } });

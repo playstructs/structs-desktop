@@ -194,7 +194,11 @@
       a.textContent = m.sim.name || 'the battle';
       a.addEventListener('click', function () { ST.open[m.thread_root] = 1; jumpTo(m.thread_root); render(); });
       what.appendChild(a);
-      if (m.sim.outcome) what.appendChild(el('span', 'sc-ok', ' ' + m.sim.outcome.time + ' · lost ' + m.sim.outcome.lost));
+      var o = m.sim.outcome;
+      if (o) {
+        var tone = o.winner === 'player' ? 'sc-ok' : o.winner === 'draw' ? 'sc-tone-warning' : 'sc-bad-text';
+        what.appendChild(el('span', tone, ' · ' + o.verdict + ' ' + o.time + ' · lost ' + o.lost));
+      }
       return line;
     }
 

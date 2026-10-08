@@ -62,6 +62,8 @@
       return invoke('sim_take_context').then(function (c) { if (c) adopt(c); }).catch(function () {});
     }
     function adopt(c) {
+      closeMatch();
+      stopDirect();
       if (c.kind === 'challenge') {
         var cfg = Code.decode(c.battle);
         if (!cfg) { api.message('That challenge does not hold a battle.'); return; }
@@ -79,7 +81,18 @@
     function leave() {
       if (isLive() && live && live.phase !== 'over') sendFrame({ v: 1, kind: 'leave', forfeit: live.phase === 'battle' });
       if (isLive() && ctx.role === 'host' && live && live.phase === 'lobby') sendStatus({ state: 'cancelled' });
+      closeMatch();
+      stopDirect();
       ctx = null; view = null; left = false; post = null; live = null; api.renderAll();
+    }
+    /* Done with a live battle that had a room of its own: leave it and
+     * forget it, so it never sits in anyone's room list. A battle in a DM
+     * played where the conversation already was, and stays. Rust refuses any
+     * room that is not a match room; a window that closes without saying
+     * goodbye is swept at the next sign-in. */
+    function closeMatch() {
+      if (!isLive() || !ctx.match_room || ctx.match_room === ctx.room_id) return;
+      invoke('matrix_sim_live_close', { guildId: ctx.guild_id, roomId: ctx.match_room }).catch(function () {});
     }
     function unlock() { left = true; api.renderAll(); }
     function relock() {
@@ -123,11 +136,47 @@
     var live = null;   // { phase: 'lobby'|'battle'|'over', guest, ready, lastGuest, link, remote, chat, expectUser }
     var GUEST_GONE_MS = 30000, PING_MS = 10000;
     function liveCfg() { var c = Code.decode(ctx.battle); if (c) c.blockMs = ctx.block_ms || c.blockMs; return c; }
+    /* A frame to the other side: over the direct line when it is open
+     * (simulator-rtc.js), through the room when it is not — and through the
+     * room as well when someone else needs it. Each frame carries this
+     * window's session id and a sequence number, so one that arrives both
+     * ways is used once. */
+    var SID = Math.random().toString(36).slice(2, 10);
+    var seqOut = 0;
     function sendFrame(frame) {
       if (!isLive()) return Promise.resolve();
+      frame.sid = SID; frame.seq = ++seqOut;
+      var direct = !!(live && live.rtc && live.rtc.send(frame));
+      if (direct && !mustRelay(frame)) return Promise.resolve();
+      return relay(frame);
+    }
+    function relay(frame) {
       return invoke('matrix_sim_live_send', { guildId: ctx.guild_id, roomId: ctx.match_room, frame: frame })
         .catch(function (e) { api.message('Not sent — ' + errText(e)); });
     }
+    function mustRelay(f) {
+      // A battle's end is said both ways: it must not ride a line that may be
+      // the very thing that is failing.
+      if (f.kind === 'end' || f.kind === 'leave') return true;
+      // Watchers follow a room battle through the room; a DM has none.
+      return ctx.role === 'host' && ctx.match_room !== ctx.room_id && (f.kind === 'tick' || f.kind === 'start');
+    }
+    /* The direct line: the host offers once its guest is known, the guest
+     * answers. Until it opens, and if it never does, the room carries it all. */
+    function peer() { return ctx.role === 'host' ? (live.guest && live.guest.user) : ctx.host; }
+    function startDirect() {
+      if (!window.SimRTC || ctx.role === 'watch' || (live.rtc && live.rtc.state() !== 'closed')) return;
+      var asked = ctx;
+      live.rtc = window.SimRTC({
+        iceServers: function () { return invoke('matrix_sim_ice', { guildId: ctx.guild_id }).then(function (r) { return (r && r.servers) || []; }); },
+        signal: function (f) { if (ctx === asked) relay(f); },
+        onFrame: function (f) { if (ctx === asked && live) onFrame({ frame: f, sender: peer() }); },
+        onState: function () { if (ctx === asked) api.renderAll(); },
+      });
+      if (!live.rtc.supported()) { live.rtc = null; return; }
+      if (ctx.role === 'host') live.rtc.start();
+    }
+    function stopDirect() { if (live && live.rtc) { live.rtc.close(); live.rtc = null; } }
     function sendStatus(frame) {
       if (!isLive() || !ctx.invite_event) return;
       frame.v = 1; frame.kind = 'status';
@@ -140,17 +189,19 @@
       var cfg = Code.decode(c.battle);
       if (!cfg) { api.message('That live battle does not hold a battle.'); return; }
       ctx = c; left = false; view = null; viewError = null; post = null;
-      live = { phase: 'lobby', guest: null, ready: { host: false, guest: false }, lastGuest: Date.now(), chat: [], expectUser: c.expect ? c.expect.user_id : null };
+      live = { phase: 'lobby', guest: null, ready: { host: false, guest: false }, lastGuest: Date.now(), chat: [], seen: {}, rtc: null, expectUser: c.expect ? c.expect.user_id : null };
       if (c.role === 'guest') live.guest = { user: c.me, name: 'You' };
-      cfg.blockMs = c.block_ms || cfg.blockMs;
+      // The match's block time is the match's, not the layout's: it rides
+      // in at the start (liveCfg) and never touches the setup board, whose
+      // settings only know the battle code's own 2 s and 6 s.
       if (c.role === 'watch') {
         live.phase = 'battle';
-        api.startLive(cfg, liveOpts('watch'));
+        api.startLive(liveCfg(), liveOpts('watch'));
       } else {
         // A guest flies the other fleet: drawn on the left, as in the battle.
         api.loadChallenge(c.role === 'guest' ? api.swapped(cfg) : cfg);
       }
-      if (c.role === 'guest') sendFrame({ v: 1, kind: 'hello' });
+      if (c.role === 'guest') { startDirect(); sendFrame({ v: 1, kind: 'hello' }); }
       loadMatchChat();
       api.renderAll();
     }
@@ -159,7 +210,7 @@
       var code = codeOf(api.currentConfig());
       if (!code) { api.message('This battle cannot be played live.'); return; }
       api.message('Opening a live battle…');
-      invoke('matrix_sim_live_open', { guildId: target.guildId || null, roomId: target.roomId || null, toPlayer: target.toPlayer || null, battle: code, blockMs: 6000 })
+      invoke('matrix_sim_live_open', { guildId: target.guildId || null, roomId: target.roomId || null, toPlayer: target.toPlayer || null, battle: code, blockMs: 4000 })
         .then(function (r) {
           adopt({ kind: 'live', role: 'host', guild_id: r.guild_id, room_id: r.room_id, invite_event: r.invite_event, match_room: r.match_room,
             battle: code, block_ms: r.block_ms, host: r.me, me: r.me, host_name: 'You', expect: r.guest || null, target: target });
@@ -204,6 +255,20 @@
     function onFrame(p) {
       var f = p.frame || {}, from = p.sender;
       if (!from || from === ctx.me) return;   // our own, echoed back by sync
+      // The same frame by both paths: the first one counts. Only an exact
+      // repeat is dropped — while the line opens, a room frame can arrive
+      // after a newer direct one and still be news (a move, a ready). A tick
+      // older than one already shown is the exception: replaying it would
+      // wind the board back.
+      if (typeof f.sid === 'string' && typeof f.seq === 'number') {
+        var key = from + ' ' + f.sid;
+        var seen = live.seen[key] || (live.seen[key] = { ids: {}, tick: 0 });
+        if (seen.ids[f.seq]) return;
+        seen.ids[f.seq] = 1;
+        if (f.kind === 'tick') { if (f.seq < seen.tick) return; seen.tick = f.seq; }
+      }
+      // The direct line's handshake, from the one person it is with.
+      if (f.kind === 'rtc') { if (live.rtc && from === peer()) live.rtc.signal(f); return; }
       var now = Date.now();
       if (ctx.role === 'host') {
         if (f.kind === 'hello') {
@@ -216,6 +281,9 @@
             api.renderAll();
           });
           sendStatus({ state: 'lobby', guest: from });
+          // A guest that says hello again is a fresh window: a fresh line.
+          stopDirect();
+          startDirect();
           // Late joiner: tell them where we stand.
           if (live.ready.host) sendFrame({ v: 1, kind: 'ready', ready: true });
           api.renderAll();
@@ -244,6 +312,7 @@
     function guestLeft(f) {
       if (live.phase === 'lobby') {
         live.guest = null; live.ready.guest = false;
+        stopDirect();
         sendStatus({ state: 'lobby' });
         api.renderAll();
         return;
@@ -259,14 +328,18 @@
     /* How the other side is doing, for the battle bar. */
     function connection() {
       if (!isLive() || !live || live.phase !== 'battle') return null;
-      var blockMs = ctx.block_ms || 6000;
+      // Over is over: a host that stopped ticking after the end is not lagging.
+      if (live.remote && live.remote.finished) return null;
+      var blockMs = ctx.block_ms || 4000;
       if (ctx.role === 'host') {
         var quiet = Date.now() - live.lastGuest;
         return quiet > GUEST_GONE_MS * 0.5 ? { state: 'bad', text: 'Gone · forfeits in ' + Math.max(0, Math.ceil((GUEST_GONE_MS - quiet) / 1000)) + ' s' }
-          : quiet > PING_MS * 1.5 ? { state: 'warn', text: 'Lagging' } : { state: 'ok', text: 'Connected' };
+          : quiet > PING_MS * 1.5 ? { state: 'warn', text: 'Lagging' } : { state: 'ok', text: linkText() };
       }
       var lag = live.remote ? live.remote.lag(blockMs) : 0;
-      return lag >= 5 ? { state: 'bad', text: 'Host not answering' } : lag >= 2 ? { state: 'warn', text: 'Lagging · ' + lag + ' blocks' } : { state: 'ok', text: 'Connected' };
+      return lag >= 5 ? { state: 'bad', text: 'Host not answering' } : lag >= 2 ? { state: 'warn', text: 'Lagging · ' + lag + ' blocks' } : { state: 'ok', text: linkText() };
+    }
+    function linkText() { return live.rtc && live.rtc.state() === 'open' ? 'Direct' : 'Connected';
     }
     // The match room's own talk. Players hear each other; a watcher's lines
     // reach the players after the battle, so nobody is coached mid-fight.
@@ -279,7 +352,7 @@
     }
     function onMatchChat(list) {
       list.forEach(function (m) {
-        if (!m || (m.kind !== 'text' && m.kind !== 'emote')) return;
+        if (!m || m.sim || (m.kind !== 'text' && m.kind !== 'emote')) return;
         if (live.chat.some(function (x) { return x.event_id === m.event_id; })) return;
         live.chat.push({ event_id: m.event_id, sender: m.sender, name: m.sender_name, body: m.body, ts: m.ts, self: !!m.self });
       });
@@ -314,68 +387,92 @@
         // The time in the verdict's colour: won teal, drawn amber, lost red.
         row.appendChild(el('span', String(o.time || ''),
           'sui-text-label sim-run-time ' + (o.winner === 'player' ? 'sim-you' : o.winner === 'draw' ? 'sim-warn' : 'sim-cpu')));
-        row.title = [o.verdict, o.time, 'lost ' + o.lost + ' of ' + o.fielded, o.blocks + ' blocks'].join(' · ') + (o.current ? '' : ' · older rules');
+        row.title = [e.name, o.verdict, o.time, 'lost ' + o.lost + ' of ' + o.fielded, o.blocks + ' blocks'].join(' · ') + (o.current ? '' : ' · older rules');
         box.appendChild(row);
       });
       if (lad.length > max) box.appendChild(el('div', '+' + (lad.length - max) + ' more', 'sim-ladder-empty sui-text-hint'));
       return box;
     }
 
-    function threadNode(max) {
+    /* The talk, drawn as every window draws a conversation: chatrow.js rows
+     * (chat-rows.css), the same component the Comms window and the Map
+     * Viewer's rail use. Read-only here, as on the rail. */
+    function myId() { return (ctx && ctx.me) || (view && view.me) || null; }
+    function talkNode(title, count, list) {
       var box = el('div', null, 'sim-thread');
       var head = el('div', null, 'sim-thread-h');
-      head.appendChild(el('span', 'Thread', 'sui-text-label sui-text-hint'));
-      head.appendChild(el('span', String((view && view.reply_count) || 0), 'sui-text-label sui-text-hint'));
+      head.appendChild(el('span', title, 'sui-text-label sui-text-hint'));
+      if (count != null) head.appendChild(el('span', String(count), 'sui-text-label sui-text-hint'));
       box.appendChild(head);
-      ((view && view.replies) || []).slice(-max).forEach(function (r) {
-        var m = el('div', null, 'sim-said' + (r.self ? ' sim-said-me' : ''));
-        var who = el('div', null, 'sim-said-h');
-        who.appendChild(el('span', String(r.name || ''), 'sui-text-label'));
-        who.appendChild(el('span', clock(r.ts), 'sui-text-label sui-text-hint'));
-        m.appendChild(who);
-        m.appendChild(el('span', String(r.body || ''), 'sim-said-b'));
-        box.appendChild(m);
+      var R = window.StructsChatRow;
+      // `sui-text-tiny`, as on the Map Viewer's rail: the rows inherit it.
+      var rows = el('div', null, 'sim-talk sui-text-tiny');
+      var prev = null;
+      list.forEach(function (r) {
+        var m = { kind: 'text', event_id: r.event_id, sender: r.sender, sender_name: r.name, sender_tag: r.tag || null, player_id: r.player_id || null,
+          body: String(r.body || ''), ts: r.ts, self: !!r.self || (!!r.sender && r.sender === myId()) };
+        var node = R.render(m, prev, {});
+        var b = R.body(m, {});
+        if (b) node.appendChild(b);
+        rows.appendChild(node);
+        prev = m;
       });
+      box.appendChild(rows);
       return box;
     }
-    function clock(ts) {
-      var d = new Date(Number(ts) || 0);
-      return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    function threadNode(max) {
+      return talkNode('Thread', (view && view.reply_count) || 0, ((view && view.replies) || []).slice(-max));
     }
 
-    /* The reply box is built once per panel and kept across repaints, so a
-     * ladder that moves mid-sentence does not take the sentence with it. */
+    /* The composer is the game's own — StructsChatRow.composer(), the panel
+     * Comms and the Map Viewer's rail speak from: the message on an inset
+     * screen, the send as an action-bar button. Built
+     * once per panel and kept across repaints, so a ladder that moves
+     * mid-sentence does not take the sentence with it. */
     function composer(key) {
-      var form = el('form', null, 'sim-reply');
-      var input = el('input', null, 'sim-input');
-      input.type = 'text'; input.placeholder = 'Reply'; input.maxLength = 2000; input.autocomplete = 'off';
+      var c = window.StructsChatRow.composer({ placeholder: 'Reply', maxLength: 2000 });
+      var box = el('div', null, 'sim-reply sui-text-tiny');
+      box.appendChild(c.node);
+      var input = c.input;
       input.setAttribute('aria-label', 'Reply in the thread');
       input.value = drafts[key] || '';
       input.addEventListener('input', function () { drafts[key] = input.value; });
-      var send = button(null, 'sui-screen-btn sim-square');
-      send.type = 'submit'; send.setAttribute('aria-label', 'Send'); send.appendChild(icon('chevron-right', 'sm'));
-      form.append(input, send);
-      form.addEventListener('submit', function (ev) {
-        ev.preventDefault();
+      c.send.setAttribute('aria-label', 'Send'); c.send.title = 'Send';
+      function sendIt() {
         var text = input.value.trim();
-        if (!text || !(isChallenge() || isLive())) return;
+        if (!text || input.disabled || !(isChallenge() || isLive())) return;
         input.disabled = true;
         (isLive() ? invoke('matrix_send', { guildId: ctx.guild_id, roomId: ctx.match_room, body: text })
           : invoke('matrix_sim_reply', { guildId: ctx.guild_id, roomId: ctx.room_id, eventId: ctx.event_id, body: text }))
           .then(function () { input.value = ''; drafts[key] = ''; refresh(true); })
           .catch(function (e) { api.message('Not sent — ' + errText(e)); })
           .then(function () { input.disabled = false; input.focus(); });
+      }
+      c.send.addEventListener('click', sendIt);
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendIt(); }
       });
-      return form;
+      return box;
+    }
+
+    /* The battle's name, in the display face when it fits the column and a
+     * size down when it does not: a name is never cut to "SPEARPOI…". */
+    function titleNode() {
+      var t = el('span', battleName(), 'sui-text-display sim-title');
+      t.title = battleName();
+      requestAnimationFrame(function () {
+        if (t.isConnected && t.scrollWidth > t.clientWidth) t.classList.replace('sui-text-display', 'sui-text-label');
+      });
+      return t;
     }
 
     function liveBody(body, opts) {
       var top = el('div', null, 'sim-challenge-top');
-      top.appendChild(el('span', battleName(), 'sui-text-display'));
+      top.appendChild(titleNode());
       var c = Code.decode(ctx.battle);
       if (c && !opts.compact) {
         var chips = el('div', null, 'sim-chips');
-        [(ctx.block_ms || 6000) / 1000 + ' s', 'Charge ' + c.charge.player + ' · ' + c.charge.computer, 'Fleets fixed'].forEach(function (t) {
+        [(ctx.block_ms || 4000) / 1000 + ' s', 'Charge ' + c.charge.player + ' · ' + c.charge.computer, 'Fleets fixed'].forEach(function (t) {
           chips.appendChild(el('span', t, 'sim-chip sui-text-label'));
         });
         top.appendChild(chips);
@@ -396,21 +493,7 @@
       if (live.guest) seat(ctx.role === 'guest' ? 'You' : live.guest.name, live.guest.pfp_attrs, ctx.role === 'guest', ready(live.ready.guest), live.ready.guest || live.phase !== 'lobby' ? 'sim-you' : 'sui-text-hint');
       else who.appendChild(el('div', ctx.expect ? 'Waiting for ' + ctx.expect.name : 'Waiting for someone to accept', 'sim-ladder-empty sui-text-hint'));
       body.appendChild(who);
-      var conn = connection();
-      if (conn) body.appendChild(el('div', conn.text, 'sui-text-label sim-conn sim-conn-' + conn.state));
-      var talk = el('div', null, 'sim-thread');
-      var head = el('div', null, 'sim-thread-h');
-      head.appendChild(el('span', ctx.role === 'watch' ? 'Watchers and players' : 'Match chat', 'sui-text-label sui-text-hint'));
-      talk.appendChild(head);
-      live.chat.filter(audible).slice(opts.compact ? -4 : -8).forEach(function (r) {
-        var m = el('div', null, 'sim-said' + (r.self ? ' sim-said-me' : ''));
-        var hh = el('div', null, 'sim-said-h');
-        hh.appendChild(el('span', String(r.name || ''), 'sui-text-label'));
-        hh.appendChild(el('span', clock(r.ts), 'sui-text-label sui-text-hint'));
-        m.appendChild(hh);
-        m.appendChild(el('span', String(r.body || ''), 'sim-said-b'));
-        talk.appendChild(m);
-      });
+      var talk = talkNode(ctx.role === 'watch' ? 'Watchers and players' : 'Match chat', null, live.chat.filter(audible).slice(opts.compact ? -4 : -8));
       body.appendChild(talk);
     }
 
@@ -435,11 +518,13 @@
       var body = box.querySelector('.sim-challenge-b');
       body.replaceChildren();
       box.querySelector('.sim-panel-title').textContent = isLive() ? (ctx.role === 'watch' ? 'Watching' : 'Live battle') : 'Challenge';
-      var reply = box.querySelector('.sim-reply input');
-      if (reply) reply.placeholder = isLive() ? 'Message' : 'Reply';
+      var reply = box.querySelector('.sim-reply');
+      if (reply) {
+        reply.querySelector('textarea').placeholder = isLive() ? 'Message' : 'Reply';
+      }
       if (isLive()) { liveBody(body, opts); return; }
       var top = el('div', null, 'sim-challenge-top');
-      top.appendChild(el('span', battleName(), 'sui-text-display'));
+      top.appendChild(titleNode());
       if (view && view.author) {
         var by = el('span', null, 'sim-by');
         by.appendChild(portrait(view.author.pfp_attrs));
@@ -532,7 +617,8 @@
         if (ctx.role === 'host') {
           var f = api.summary().finished || {};
           var winner = f.winner === 'you' ? 'host' : f.winner === 'cpu' ? 'guest' : 'draw';
-          sendFrame({ v: 1, kind: 'end', winner: winner, forfeit: !!f.forfeit, stalemate: f.stalemate || null, gone: !!f.gone, summary: api.summary() });
+          var end = { v: 1, kind: 'end', winner: winner, forfeit: !!f.forfeit, stalemate: f.stalemate || null, gone: !!f.gone, summary: api.summary() };
+          if (live.link) live.link.after(end); else sendFrame(end);
           sendStatus({ state: 'ended', guest: live.guest && live.guest.user, winner: winner === 'host' ? ctx.host : winner === 'guest' ? live.guest && live.guest.user : null });
         }
         post = { state: 'live' };
@@ -658,7 +744,8 @@
         var to = addressed();
         postTo.pick = null;
         if (to) postTo.pick = (postTo.rooms.filter(function (x) { return x.player_id === to.player_id; })[0] || {}).room_id || null;
-        if (!postTo.pick && postTo.rooms.length) postTo.pick = postTo.rooms[0].room_id;
+        // Nothing is picked for you: one click must never post to whoever
+        // happens to be first in the list.
         roomList();
       }).catch(function (e) {
         $('post-rooms').replaceChildren(el('div', errText(e), 'sui-text-hint'));

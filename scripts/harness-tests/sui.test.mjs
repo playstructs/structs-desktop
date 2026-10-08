@@ -46,6 +46,7 @@ const BUDGET = {
   // Raised 2026-10-08 with challenges (+9): the thread rail's 340px, the
   // Post-to list's 320px cap and 600px card, and 2px focus/edge lines.
   'simulator-social.js': [0, 0],
+  'simulator-rtc.js': [0, 0],
   'simulator-live.js': [0, 0],
   // Comms: the challenge card (simcard.*) and its timeline wiring. The
   // miniature board's px are the simulator's band geometry at chat scale.

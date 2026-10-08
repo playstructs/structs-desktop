@@ -949,7 +949,7 @@
       if (host && !host.finished && !deploying) host.start();
     }
   });
-  window.addEventListener('beforeunload', function () { stopBattle(); });
+  window.addEventListener('beforeunload', function () { if (social.isLive()) social.leave(); stopBattle(); });
 
   window.Simulator = {
     getHost: function () { return host; }, getLayout: function () { return draft; }, getSettings: function () { return settings; },

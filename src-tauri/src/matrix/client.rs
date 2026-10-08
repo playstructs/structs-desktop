@@ -198,6 +198,15 @@ pub struct Room {
     /// nonces is not a conversation waiting for anyone.
     #[serde(default)]
     pub system: bool,
+    /// A live battle's own room (sim.rs, Live): created with the room type
+    /// `structs.sim.match`, reached through its invite card and never
+    /// browsed. Kept out of the list and the unread count, and left and
+    /// forgotten once the battle is done.
+    #[serde(default)]
+    pub sim_match: bool,
+    /// When the room was created, off its `m.room.create`, when sync said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_ts: Option<u64>,
     /// Event ids the room has pinned, newest last, as the room itself states
     /// them. Ids only — the events are fetched on demand.
     #[serde(default)]
@@ -1990,6 +1999,8 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         let mut pinned: Option<Vec<String>> = None;
         let mut encrypted = false;
         let mut replaced_by: Option<String> = None;
+        let mut sim_match = false;
+        let mut created_ts: Option<u64> = None;
 
         for ev in state_events.iter().chain(timeline_events.iter()) {
             let etype = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -2053,6 +2064,12 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 // needs: it explains why the room is unreadable.
                 "m.room.encryption" => {
                     encrypted = true;
+                }
+                // What KIND of room: a live battle's match room says so at
+                // creation, and only its creator could have said it.
+                "m.room.create" => {
+                    sim_match = content.and_then(|c| c.get("type")).and_then(|t| t.as_str()) == Some(super::sim::MATCH_ROOM_TYPE);
+                    created_ts = ev.get("origin_server_ts").and_then(|t| t.as_u64());
                 }
                 "m.room.tombstone" => {
                     replaced_by = content
@@ -2173,9 +2190,13 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
         // into it.
         let rank = if is_dm { None } else { home_rank_for(session, &room_id, final_alias.as_deref()) };
         let system = is_system_alias(final_alias.as_deref());
+        let sim_match = sim_match || existing.as_ref().is_some_and(|r| r.sim_match);
+        let created_ts = created_ts.or_else(|| existing.as_ref().and_then(|r| r.created_ts));
         let entry = Room {
             home_rank: rank,
             system,
+            sim_match,
+            created_ts,
             room_id: room_id.clone(),
             icon: if dm_peer.is_some() {
                 "icon-member"
@@ -2471,6 +2492,8 @@ fn apply_sync(guild_id: &str, session: &Session, v: &Value) -> SyncDelta {
                 room_id: room_id.clone(),
                 name: display,
                 system: is_system_alias(alias.as_deref()),
+                sim_match: false,
+                created_ts: None,
                 canonical_alias: alias.clone(),
                 topic,
                 members: 0,
@@ -2728,7 +2751,7 @@ fn sum_unread<'a>(rooms: impl Iterator<Item = &'a Room>) -> (u64, bool) {
     for room in rooms {
         // A room merely visible in the directory is not a message to anyone.
         // …and neither is an old room another has replaced at its alias.
-        if !room.joined || room.system || room.superseded {
+        if !room.joined || room.system || room.superseded || room.sim_match {
             continue;
         }
         count = count.saturating_add(room.unread);
@@ -3121,6 +3144,22 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     // makes a sender look like a person.
                     directory::resolve_many(&directory::senders_in(&v)).await;
                     let d = apply_sync(&guild_id, &session, &v);
+                    // The first sync of a session sees every room it is in:
+                    // the moment to leave match rooms whose battle is long
+                    // over and whose window never said goodbye.
+                    if since.is_none() {
+                        let stale = stale_match_rooms(&guild_id, now_ms(), MATCH_ROOM_STALE_MS);
+                        if !stale.is_empty() {
+                            let s2 = session.clone();
+                            tauri::async_runtime::spawn(async move {
+                                for room in stale {
+                                    if let Err(e) = leave_and_forget(&s2, &room).await {
+                                        eprintln!("[Comms] stale match room {room}: {e}");
+                                    }
+                                }
+                            });
+                        }
+                    }
                     // A live battle's frames, for the simulator playing or
                     // watching it (sim.rs, Live). Typed events render as no
                     // message, so they travel on their own event.
@@ -3360,7 +3399,9 @@ pub fn rooms_of(guild_id: &str) -> Vec<Room> {
     let Some(gs) = map.get(guild_id) else {
         return Vec::new();
     };
-    let mut rooms: Vec<Room> = gs.rooms.values().cloned().collect();
+    // A match room is reached through its invite card, never browsed: the
+    // list, the pickers and the counts are for conversations.
+    let mut rooms: Vec<Room> = gs.rooms.values().filter(|r| !r.sim_match).cloned().collect();
     // Joined first, then by section, then by name — a stable order so the list
     // does not reshuffle under the cursor on every sync.
     rooms.sort_by(|a, b| {
@@ -3436,6 +3477,8 @@ pub async fn refresh_directory(guild_id: &str, session: &Session) -> Result<(), 
             Room {
                 home_rank: rank,
                 system: is_system_alias(alias.as_deref()),
+                sim_match: false,
+                created_ts: None,
                 room_id: room_id.to_string(),
                 icon: icon_for(&name, alias.as_deref()),
                 name,
@@ -3560,6 +3603,8 @@ pub async fn browse(
         out.push(Room {
             home_rank: rank,
             system: is_system_alias(alias.as_deref()),
+            sim_match: false,
+            created_ts: None,
             room_id: room_id.to_string(),
             icon: icon_for(&name, alias.as_deref()),
             name,
@@ -3606,6 +3651,8 @@ pub async fn browse(
                 icon: icon_for(&s.name, Some(&s.alias)),
                 name: s.name,
                 system: is_system_alias(Some(&s.alias)),
+                sim_match: false,
+                created_ts: None,
                 canonical_alias: Some(s.alias.clone()),
                 topic: s.topic,
                 members: s.members,
@@ -4144,11 +4191,77 @@ pub async fn create_group(
         .ok_or_else(|| "the homeserver created no room".to_string())
 }
 
+/// Whether this room is a direct message, and with whom: the other party's
+/// Matrix id and player id, as far as either is known. `None` for a room
+/// that is not a DM.
+pub fn dm_peer(guild_id: &str, room_id: &str) -> Option<(Option<String>, Option<String>)> {
+    let map = STATE.read().ok()?;
+    let gs = map.get(guild_id)?;
+    let room = gs.rooms.get(room_id);
+    let user = gs.dm_with.get(room_id).cloned();
+    let player = gs.dm_player_id.get(room_id).cloned().or_else(|| room.and_then(|r| r.player_id.clone()));
+    let direct = user.is_some() || gs.dm_player_id.contains_key(room_id) || room.is_some_and(|r| r.section == SECTION_DIRECT);
+    direct.then_some((user, player))
+}
+
 /// A live battle's own room (sim.rs, Live): private, kept a day, joinable
 /// by anyone in the room the invite was posted in — so whoever can see the
 /// invite can watch — and the guest invited outright when it is for one
 /// player. A homeserver that will not make a restricted room still makes an
 /// invite-only one: the battle is then for the two of them.
+/// A match room older than this is a battle that is over, whatever its
+/// window did: a live battle runs minutes, and the room keeps a day.
+const MATCH_ROOM_STALE_MS: u64 = 6 * 60 * 60 * 1000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Joined match rooms created more than `age_ms` before `now`. Pure, so the
+/// rule is testable without a homeserver. A room whose creation time is not
+/// known is left alone: guessing wrong would leave a battle in progress.
+fn stale_match_rooms(guild_id: &str, now: u64, age_ms: u64) -> Vec<String> {
+    let map = STATE.read().unwrap();
+    let Some(gs) = map.get(guild_id) else { return Vec::new() };
+    gs.rooms
+        .values()
+        .filter(|r| r.sim_match && r.joined && r.created_ts.is_some_and(|t| now.saturating_sub(t) > age_ms))
+        .map(|r| r.room_id.clone())
+        .collect()
+}
+
+/// Whether this is a live battle's match room — the one kind of room a
+/// battle's window may leave on the player's behalf.
+pub fn is_match_room(guild_id: &str, room_id: &str) -> bool {
+    STATE
+        .read()
+        .ok()
+        .and_then(|m| m.get(guild_id).and_then(|gs| gs.rooms.get(room_id).map(|r| r.sim_match)))
+        .unwrap_or(false)
+}
+
+/// The homeserver's TURN credentials (`/voip/turnServer`), as it states
+/// them. A homeserver with no TURN service answers 200 with `{}`, or an
+/// error; both read as "none" to the caller.
+pub async fn turn_server(session: &Session) -> Result<Value, String> {
+    let url = format!("{}/voip/turnServer", base(session));
+    authed(session, move |c, s| c.get(&url).bearer_auth(&s.access_token)).await
+}
+
+/// Leave a room and forget it, so it leaves the account's room list for
+/// good — and, once everyone on the homeserver has forgotten it, the server
+/// may purge it (Synapse: `forgotten_room_retention_period`).
+pub async fn leave_and_forget(session: &Session, room_id: &str) -> Result<(), String> {
+    leave(session, room_id).await?;
+    let url = format!("{}/rooms/{}/forget", base(session), urlseg(room_id));
+    authed(session, move |c, s| c.post(&url).bearer_auth(&s.access_token).json(&json!({})))
+        .await
+        .map(|_| ())
+}
+
 pub async fn create_match_room(
     session: &Session,
     name: &str,
@@ -4162,6 +4275,7 @@ pub async fn create_match_room(
         "preset": "private_chat",
         "name": name,
         "room_version": "10",
+        "creation_content": { "type": super::sim::MATCH_ROOM_TYPE },
         "invite": invites,
         "initial_state": [
             { "type": "m.room.join_rules", "state_key": "", "content": {
@@ -4179,7 +4293,8 @@ pub async fn create_match_room(
         Ok(v) => v,
         Err(e) => {
             eprintln!("[Comms] restricted match room refused ({e}); making an invite-only one");
-            let plain = json!({ "preset": "private_chat", "name": name, "invite": invites, "initial_state": [retention] });
+            let plain = json!({ "preset": "private_chat", "name": name, "invite": invites, "initial_state": [retention],
+                "creation_content": { "type": super::sim::MATCH_ROOM_TYPE } });
             authed(session, move |c, s| c.post(&url).bearer_auth(&s.access_token).json(&plain)).await?
         }
     };
@@ -5449,6 +5564,8 @@ mod tests {
             joined, invited: false, invited_by: None, replaced_by: None, encrypted: false, muted: false,
             pinned: Vec::new(), unread: 0, mention: false, section: "direct", home_rank: None,
             system: false,
+            sim_match: false,
+            created_ts: None,
             icon: "icon-member", pfp_attrs: None, player_id: None,
         };
         let mut gs = GuildState::default();
@@ -6822,6 +6939,8 @@ mod tests {
             icon: "icon-guild".into(),
             section: "local".into(),
             system: false,
+            sim_match: false,
+            created_ts: None,
             home_rank: None,
             pfp_attrs: None,
             player_id: None,
@@ -7142,6 +7261,51 @@ mod tests {
         });
         apply_sync("test-named", &s, &v);
         assert_eq!(rooms_of("test-named")[0].name, "Kilgore Crabla — Guild Lobby");
+    }
+
+    #[test]
+    fn a_match_room_is_kept_out_of_the_list_and_swept_when_old() {
+        // A live battle's own room says what it is at creation. It is never
+        // browsed, never counted, and left once its battle is long over.
+        let s = session();
+        apply_sync(
+            "test-match",
+            &s,
+            &json!({ "next_batch": "1", "rooms": { "join": {
+                "!m:example.com": {
+                    "state": { "events": [
+                        { "type": "m.room.create", "origin_server_ts": 1_000u64, "content": { "type": "structs.sim.match", "room_version": "10" } },
+                        { "type": "m.room.name", "content": { "name": "Live · Spearpoint" } }
+                    ] },
+                    "timeline": { "events": [] },
+                    "unread_notifications": { "notification_count": 3 }
+                },
+                "!x:example.com": {
+                    "state": { "events": [
+                        { "type": "m.room.create", "origin_server_ts": 1_000u64, "content": { "room_version": "10" } },
+                        { "type": "m.room.name", "content": { "name": "X" } }
+                    ] },
+                    "timeline": { "events": [] }
+                }
+            } } }),
+        );
+        let listed: Vec<String> = rooms_of("test-match").into_iter().map(|r| r.room_id).collect();
+        assert_eq!(listed, vec!["!x:example.com".to_string()], "the match room is not listed");
+        assert!(is_match_room("test-match", "!m:example.com"));
+        assert!(!is_match_room("test-match", "!x:example.com"), "an ordinary room is never one");
+        {
+            let map = STATE.read().unwrap();
+            let (count, _) = sum_unread(map.get("test-match").unwrap().rooms.values());
+            assert_eq!(count, 0, "and its traffic is not unread");
+        }
+        let hour = 60 * 60 * 1000;
+        assert!(stale_match_rooms("test-match", 1_000 + hour, MATCH_ROOM_STALE_MS).is_empty(), "a fresh battle stays");
+        assert_eq!(stale_match_rooms("test-match", 1_000 + 7 * hour, MATCH_ROOM_STALE_MS), vec!["!m:example.com".to_string()],
+            "an old one is swept, and only it");
+        // A later sync without the create event keeps what the first one learned.
+        apply_sync("test-match", &s, &json!({ "next_batch": "2", "rooms": { "join": { "!m:example.com": {
+            "timeline": { "events": [{ "type": "m.room.message", "event_id": "$1", "sender": "@a:example.com", "origin_server_ts": 2_000u64, "content": { "msgtype": "m.text", "body": "gl" } }] } } } } }));
+        assert!(is_match_room("test-match", "!m:example.com"));
     }
 
     #[test]

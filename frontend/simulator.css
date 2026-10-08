@@ -53,6 +53,9 @@ body[data-screen="battle"] #sim-header { display: none; }
 .sim-field-rule { border-top: 2px solid var(--border-subtle); padding-top: var(--spacing-xl); }
 .sim-row { display: flex; align-items: center; gap: var(--spacing-md); }
 .sim-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--spacing-md); }
+/* One button left standing (a live debrief keeps only Share) spans the pair
+   rather than sitting in its left half. */
+.sim-pair:not(:has(> :not(.hidden) ~ :not(.hidden))) { grid-template-columns: minmax(0, 1fr); }
 #sim .sim-pair .sui-screen-btn { margin: 2px; padding: 0 var(--spacing-md); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .sim-input { height: var(--form-input-height-total); min-width: 0; flex: 1 1 auto; width: 0; padding: 0 var(--spacing-lg); background: var(--surface-neutral-body); border: 2px solid var(--border); color: var(--text-body); font: inherit; }
 textarea.sim-input { width: 100%; height: auto; padding: var(--spacing-md) var(--spacing-lg); resize: vertical; word-break: break-all; }
@@ -103,7 +106,9 @@ textarea.sim-input { width: 100%; height: auto; padding: var(--spacing-md) var(-
 }
 .sim-side { display: flex; flex-direction: column; min-width: 0; }
 .sim-side-cpu { align-items: flex-end; text-align: right; }
-.sim-head-tools { display: flex; justify-content: center; gap: var(--spacing-sm); }
+.sim-head-tools { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--spacing-sm); }
+/* A button's label is one line: the row wraps, the buttons never do. */
+.sim-head-tools > * { flex: 0 0 auto; white-space: nowrap; }
 #defend-banner { padding: var(--spacing-xs) var(--spacing-md) var(--spacing-xs) var(--spacing-lg); background: var(--surface-player-body); box-shadow: 0 0 0 2px var(--accent-primary); }
 #defend-banner #defend-text { margin-right: auto; }
 body.sim-picking #fleet-head { display: none; }
@@ -214,7 +219,7 @@ body.sim-deploying .sim-bar-tools { opacity: .4; pointer-events: none; }
 #challenge { grid-area: round; }
 .sim-challenge-b { display: flex; flex-direction: column; gap: var(--spacing-xl); padding: var(--spacing-xl) var(--spacing-xl) 0; min-width: 0; }
 .sim-challenge-top { display: flex; flex-direction: column; gap: var(--spacing-md); min-width: 0; }
-.sim-challenge-top > .sui-text-display { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sim-challenge-top > .sim-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-body); }
 .sim-by { display: flex; align-items: center; gap: var(--spacing-md); min-width: 0; }
 .sim-by > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sim-them { color: var(--accent-secondary); }
@@ -235,12 +240,26 @@ body.sim-deploying .sim-bar-tools { opacity: .4; pointer-events: none; }
 
 .sim-thread { display: flex; flex-direction: column; padding-top: var(--spacing-lg); border-top: 2px solid var(--border-subtle); }
 .sim-thread-h { display: flex; justify-content: space-between; padding-bottom: var(--spacing-sm); }
-.sim-said { display: flex; flex-direction: column; gap: var(--spacing-xs); padding: var(--spacing-md) 0; border-top: 1px solid var(--border-subtle); min-width: 0; }
-.sim-said-h { display: flex; justify-content: space-between; gap: var(--spacing-md); color: var(--accent-secondary); }
-.sim-said-me .sim-said-h { color: var(--text-player-primary); }
-.sim-said-b { overflow-wrap: anywhere; }
-.sim-reply { display: flex; gap: var(--spacing-md); align-items: center; padding: var(--spacing-md); margin-top: var(--spacing-lg); background: var(--page-background); box-shadow: 0 -2px 0 0 var(--border); }
-#sim .sim-reply .sim-square { margin: 0; }
+/* The talk is chatrow.js's rows (chat-rows.css) and the composer is
+   StructsChatRow.composer(): the Comms window's own panel, fitted to a narrow
+   column the way the Map Viewer's rail fits it (raidview.html #rv-chat-entry). */
+/* Both are drawn at the game's 1x and scaled the way every other window
+   scales them (the Comms window and the raid view transform by 2); the
+   simulator draws SUI at 2x by size, so only these two blocks are zoomed. */
+.sim-talk, .sim-reply { zoom: 2; }
+.sim-talk { display: flex; flex-direction: column; text-align: left; min-width: 0; }
+.sim-talk .chat-msg + .chat-msg { margin-top: var(--spacing-sm); }
+/* Inset as the rail insets it (#rv-chat-compose), so the panel never
+   touches the window's edge. */
+.sim-reply { padding: var(--spacing-sm) var(--spacing-md); border-top: 1px solid var(--border-subtle); text-align: left; }
+.sim-reply .sui-panel-wrapper-fit-content { display: block; width: 100%; }
+.sim-reply .sui-panel { width: 100%; }
+.sim-reply .sui-panel-chunk.sui-mod-grow { min-width: 0; }
+.sim-reply textarea { font: inherit; }
+/* No portrait well: the column is ~150 game pixels, and the face would
+   leave the message a sliver. The message screen and the action-bar send
+   are the composer; the ladder above already says which one is you. */
+.sim-reply .chat-composer-portrait, .sim-reply .chat-composer-portrait-join { display: none; }
 .sim-challenge-top .sim-chips { gap: var(--spacing-md); }
 /* Locked or not, a challenge's tools take their own row under the names. */
 #fleet-head.sim-head-stack { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "you cpu" "tools tools"; }
@@ -265,7 +284,7 @@ body.sim-deploying .sim-bar-tools { opacity: .4; pointer-events: none; }
 
 /* Debrief: the challenge beside the verdict, and what became of the run. */
 .sim-debrief-wrap { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--spacing-xxl); padding: 0 var(--spacing-xxxl) 0 var(--spacing-xxl); }
-.sim-debrief-wrap > #db-challenge { flex: 0 0 320px; min-width: 0; margin-top: var(--spacing-xxxl); }
+.sim-debrief-wrap > #db-challenge { flex: 0 0 360px; min-width: 0; margin-top: var(--spacing-xxxl); }
 .sim-debrief-wrap > .sim-debrief { flex: 999 1 640px; min-width: 0; margin: 0; }
 .sim-post { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-lg); padding: var(--spacing-lg) var(--spacing-lg) var(--spacing-lg) var(--spacing-xl); background: var(--surface-default); box-shadow: 0 0 0 2px var(--border-subtle); }
 .sim-post.sim-post-good { background: var(--surface-player-body); box-shadow: 0 0 0 2px var(--accent-primary); }
