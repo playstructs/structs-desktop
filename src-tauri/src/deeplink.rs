@@ -115,8 +115,10 @@ pub fn parse(input: &str) -> Option<Link> {
     if parts[0].eq_ignore_ascii_case("sim") {
         // /sim/<code>, and the proposed /sim/<code>/<result>: a result link
         // opens the battle it was played on.
-        let result_ok = |r: &str| (1..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        let ok = is_code(&parts[1]) && (parts.len() == 2 || (parts.len() == 3 && result_ok(&parts[2])));
+        // /sim/<code>, and /sim/<code>/<result>: a result link opens the
+        // battle it was played on, and a malformed result never loses the
+        // battle (structs-app links.js, same rule).
+        let ok = is_code(&parts[1]) && (parts.len() == 2 || parts.len() == 3);
         return ok.then(|| Link::Sim { code: parts[1].clone() });
     }
     if parts.len() > 2 { return None; }
@@ -138,8 +140,22 @@ pub fn terminal_line(view: &str, id: &str) -> Option<String> {
     view_spec(view).map(|(_, _, word)| format!("{word} {id}"))
 }
 
-/// Do what a link says.
+/// Do what a link says — off the main thread.
+///
+/// macOS delivers a link as an Apple Event, and the deep-link plugin calls
+/// back from INSIDE that event on the main thread. Building a window there
+/// waits on the main thread's own event loop, which is busy running this
+/// callback: the app froze for good (sampled 2026-10-08 — main thread parked
+/// in WebviewWindowBuilder::build under deeplink::handle). So the callback
+/// only queues the link; a background task opens the windows, and Tauri
+/// marshals each build onto the main thread once it is free again.
 pub fn handle(app: &tauri::AppHandle, url: &str) {
+    let app = app.clone();
+    let url = url.to_string();
+    tauri::async_runtime::spawn(async move { dispatch(&app, &url) });
+}
+
+fn dispatch(app: &tauri::AppHandle, url: &str) {
     let Some(link) = parse(url) else {
         eprintln!("[deeplink] not a Structs link: {url}");
         return;
@@ -240,6 +256,8 @@ mod tests {
         assert_eq!(parse("https://evil.example/record/1-61"), None);
         assert_eq!(parse("structs://sim/AQQJCQ"), Some(Link::Sim { code: "AQQJCQ".into() }));
         assert_eq!(parse("structs://sim/AQQJCQ/AQABAGEAwgIOEwMCBQQMCwEBBA"), Some(Link::Sim { code: "AQQJCQ".into() }));
+        assert_eq!(parse("structs://sim/AQQJCQ/not!a!result"), Some(Link::Sim { code: "AQQJCQ".into() }));
+        assert_eq!(parse("structs://sim/AQQJCQ/r/extra"), None);
         assert_eq!(parse("structs://sim/AQ'Q;JCQ"), None);
         assert_eq!(parse("structs://"), Some(Link::Home));
     }
